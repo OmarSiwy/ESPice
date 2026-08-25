@@ -440,7 +440,12 @@ Analyses: `name dc` alone is `.op`; with `dev=`, `param=` (a netlist
 parameter or `temp`), `start`/`stop` and `step`, `lin` (steps) or
 `values=[...]` it is `.dc`. `name ac start= stop=` with `dec`, `lin` or
 `values` is `.ac`. `name tran stop=` with `step`, `start`, `maxstep` is
-`.tran step stop start maxstep`, `step` defaulting to stop/50. `name (p n)
+`.tran step stop start maxstep`, `step` defaulting to stop/50;
+`skipdc=yes` adds `uic`, `method=` emits `.options method=...` before it
+(`euler` is `method=gear maxord=1`; a deck-wide option, so a second tran's
+method sets both), and `errpreset=moderate`, Spectre's default, maps to
+nothing. Every other tran parameter, `skipdc` mode, `errpreset` and
+`trapgear2` is refused by name. `name (p n)
 noise iprobe=src` with an AC sweep is `.noise v(p,n) src ...`. Every other
 analysis, `alter`, `altergroup`, `paramset`, `sweep` and `montecarlo` is
 refused by name, as is `include` until Spectre include expansion lands.

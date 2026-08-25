@@ -537,12 +537,30 @@ const X = struct {
         while (kids.next()) |d| if (x.kind(d) == x.r.instance or x.kind(d) == x.r.analysis) return error.Refused;
         const ps = try x.params(c);
         if (std.mem.eql(u8, k, "tran")) {
+            // stop, step, start and maxstep; method, skipdc=yes|no and
+            // errpreset=moderate map; any other parameter or value is refused.
+            for (ps) |p| {
+                const known = for ([_][]const u8{ "stop", "step", "start", "maxstep", "method", "skipdc", "errpreset" }) |w| {
+                    if (std.mem.eql(u8, p.key, w)) break true;
+                } else false;
+                if (!known) return error.Refused;
+            }
             const stop = try x.value(findParam(ps, "stop") orelse return error.Refused);
             const step = if (findParam(ps, "step")) |s| try x.value(s) else try std.fmt.allocPrint(x.arena, "\"({s}/50)\"", .{std.mem.trim(u8, stop, "\"")});
             const start = if (findParam(ps, "start")) |s| try x.value(s) else null;
-            if (findParam(ps, "maxstep")) |m| return x.line(".tran {s} {s} {s} {s}", .{ step, stop, start orelse "0", try x.value(m) });
-            if (start) |s| return x.line(".tran {s} {s} {s}", .{ step, stop, s });
-            return x.line(".tran {s} {s}", .{ step, stop });
+            if (findParam(ps, "method")) |m| {
+                const name = x.str(m);
+                const opt = if (std.mem.eql(u8, name, "euler")) "method=gear maxord=1" else if (std.mem.eql(u8, name, "trap") or std.mem.eql(u8, name, "traponly")) "method=trap" else if (std.mem.eql(u8, name, "gear2") or std.mem.eql(u8, name, "gear2only")) "method=gear" else return error.Refused;
+                try x.line(".options {s}", .{opt});
+            }
+            if (findParam(ps, "errpreset")) |e| if (!std.mem.eql(u8, x.str(e), "moderate")) return error.Refused;
+            var uic: []const u8 = "";
+            if (findParam(ps, "skipdc")) |d| {
+                if (std.mem.eql(u8, x.str(d), "yes")) uic = " uic" else if (!std.mem.eql(u8, x.str(d), "no")) return error.Refused;
+            }
+            if (findParam(ps, "maxstep")) |m| return x.line(".tran {s} {s} {s} {s}{s}", .{ step, stop, start orelse "0", try x.value(m), uic });
+            if (start) |s| return x.line(".tran {s} {s} {s}{s}", .{ step, stop, s, uic });
+            return x.line(".tran {s} {s}{s}", .{ step, stop, uic });
         }
         if (std.mem.eql(u8, k, "dc")) {
             const target = if (findParam(ps, "dev")) |d| x.str(d) else if (findParam(ps, "param")) |p| x.str(p) else {

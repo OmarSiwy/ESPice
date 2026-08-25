@@ -396,6 +396,21 @@ fn find(ps: []const Param, key: []const u8) ?[]const Tok {
     return null;
 }
 
+/// The `tran` parameters mapped; any other is refused by name.
+const tran_keys = std.StaticStringMap(void).initComptime(.{ .{"stop"}, .{"step"}, .{"start"}, .{"maxstep"}, .{"method"}, .{"skipdc"}, .{"errpreset"} });
+
+/// Spectre `tran method=` as the `.options` that select it; `trapgear2` has
+/// no ESPice equivalent and is refused.
+const tran_methods = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "euler", "method=gear maxord=1" }, .{ "trap", "method=trap" },  .{ "traponly", "method=trap" },
+    .{ "gear2", "method=gear" },          .{ "gear2only", "method=gear" },
+});
+
+/// A one-word value's text; "" for anything else, which no keyword matches.
+fn word(v: []const Tok) []const u8 {
+    return if (v.len == 1 and v[0].kind == .word) v[0].text else "";
+}
+
 /// Parameter names Spectre reserves (R11 p.361, R19 p.508).
 const reserved = std.StaticStringMap(void).initComptime(.{ .{"temp"}, .{"tnom"}, .{"scale"}, .{"scalem"}, .{"freq"}, .{"time"} });
 
@@ -928,13 +943,29 @@ const T = struct {
             }
         }.of;
         if (std.mem.eql(u8, kind, "tran")) {
+            for (ps) |p| if (!tran_keys.has(p.key)) {
+                if (!@import("builtin").is_test) std.log.err("spectre: tran parameter `{s}` is not supported", .{p.key});
+                return error.UnsupportedCard;
+            };
             const stop = try num(t.arena, ps, "stop") orelse return error.ParseError;
             const step = try num(t.arena, ps, "step") orelse try std.fmt.allocPrint(t.arena, "\"({s}/50)\"", .{std.mem.trim(u8, stop, "\"")});
             const start = try num(t.arena, ps, "start");
             const maxstep = try num(t.arena, ps, "maxstep");
-            if (maxstep) |m| return t.emit(".tran {s} {s} {s} {s}", .{ step, stop, start orelse "0", m });
-            if (start) |s| return t.emit(".tran {s} {s} {s}", .{ step, stop, s });
-            return t.emit(".tran {s} {s}", .{ step, stop });
+            // ponytail: `method` becomes the deck's `.options method`, so a
+            // second tran with another method sets both. Per-card methods
+            // when a deck needs two.
+            if (find(ps, "method")) |m| try t.emit(".options {s}", .{tran_methods.get(word(m)) orelse return error.UnsupportedCard});
+            // `moderate` is Spectre's default; the other presets retune
+            // reltol and the LTE together, which is not mapped.
+            if (find(ps, "errpreset")) |e| if (!std.mem.eql(u8, word(e), "moderate")) return error.UnsupportedCard;
+            // `skipdc=yes` starts from the `ic` statements, as `uic` does.
+            const uic = if (find(ps, "skipdc")) |d|
+                (if (std.mem.eql(u8, word(d), "yes")) " uic" else if (std.mem.eql(u8, word(d), "no")) "" else return error.UnsupportedCard)
+            else
+                "";
+            if (maxstep) |m| return t.emit(".tran {s} {s} {s} {s}{s}", .{ step, stop, start orelse "0", m, uic });
+            if (start) |s| return t.emit(".tran {s} {s} {s}{s}", .{ step, stop, s, uic });
+            return t.emit(".tran {s} {s}{s}", .{ step, stop, uic });
         }
         if (std.mem.eql(u8, kind, "dc")) {
             const target = if (find(ps, "dev")) |d| d[0].text else if (find(ps, "param")) |p| p[0].text else {

@@ -150,10 +150,15 @@ SPICE counterpart build the same circuit. It reads:
   includer's mode resumes after it;
 - `simulator lang=spice` ... `simulator lang=spectre`: SPICE cards with
   HSPICE's line rules;
-- the `tran`, `dc`, `ac` and `noise` analyses.
+- the `tran`, `dc`, `ac` and `noise` analyses. `tran` reads `stop`,
+  `step`, `start`, `maxstep`, `method` (`euler`, `trap`, `traponly`,
+  `gear2`, `gear2only`; it sets the deck's `.options method`, so it applies
+  to every transient), `skipdc=yes|no` (`yes` starts from the `ic`
+  statements, as SPICE's `uic`) and `errpreset=moderate` (the default).
 
 Refused with `UnsupportedCard`: the other analyses (`pss`, `hb`, `sweep`,
-`montecarlo`, ...), child statements in an analysis's `{ }`, `alter`,
+`montecarlo`, ...), any other `tran` parameter or value (named in the
+error, such as `errpreset=conservative` or `method=trapgear2`), child statements in an analysis's `{ }`, `alter`,
 `altergroup`, `paramset`, `atan2`, the bitwise operators, and an
 `inst:terminal` signal in `ic` or `nodeset`. `statistics` blocks are read
 and set aside with a warning; `info`, `set`, `shell`, `check`, `checklimit`,

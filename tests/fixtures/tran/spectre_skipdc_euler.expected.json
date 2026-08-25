@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Spectre tran method=euler skipdc=yes starts from the ic statement",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "skipdc=yes skips the DC point and starts from ic out=0.5: v(out)=0.5*exp(-t/1us). Backward Euler at maxstep 1n is within 0.1 % of it over 3 tau."
+  },
+  "tokenizer": "spectre",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              0.18393972058572117,
+              0.06766764161830635,
+              0.024893534183931972
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-06,
+            2e-06,
+            3e-06
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3df6158a544ab8563b96f9c184f006f03cd2c06022e2b98e1f758af98591ddcf"
+}

@@ -748,6 +748,10 @@ const spectre_cases = [_][]const u8{
     "t\nmodel q\\-1 bjt\nq1 (c b 0) q\\-1\n",
     "t\nsubckt cell (a)\nparameters k=2\nr1 (a 0) resistor r=k\nends\nx1 (n) cell\nr2 (n 0) resistor r=x1.k\n",
     "t\nv1 (a 0) vsource dc=1\nr1 (a 0) resistor r=1\nswp sweep param=temp values=[0, 50] {\nop1 dc\n}\n",
+    "t\nl1 (n 0) inductor l=1u\nc1 (n 0) capacitor c=1n\nic n=1\nt1 tran stop=2u maxstep=50n method=euler skipdc=yes errpreset=moderate\n",
+    "t\nr1 (a 0) resistor r=1\nt1 tran stop=1u method=gear2only skipdc=no\nt2 tran stop=1u start=0 method=traponly\n",
+    "t\nr1 (a 0) resistor r=1\nt1 tran stop=1u bogusparam=3\n",
+    "t\nr1 (a 0) resistor r=1\nt1 tran stop=1u errpreset=conservative\n",
     "t\nr1 (a 0) resistor r=1\nalt1 altergroup {\nr1 (a 0) resistor r=2\n}\nk1 alter param=temp value=27\nk2 assert\nk3 checklimit\nk4 check what=all\nk5 info what=oppoint\nk6 paramset\nk7 paramtest\nk8 set\nk9 shell\n",
 };
 

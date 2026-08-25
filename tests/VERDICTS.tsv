@@ -401,6 +401,7 @@ PASS	fixtures/invalid/pxf_zero_lo.sp
 PASS	fixtures/invalid/qpss_zero_second_frequency.sp
 PASS	fixtures/invalid/sens_unknown_node.sp
 PASS	fixtures/invalid/sp_zero_impedance.sp
+PASS	fixtures/invalid/spectre_tran_unknown_param.sp
 PASS	fixtures/invalid/temp_absolute_zero.sp
 PASS	fixtures/invalid/temp_below_absolute_zero.sp
 PASS	fixtures/invalid/temp_zero_step.sp
@@ -812,6 +813,7 @@ PASS	fixtures/tran/rc_pulse_history_trap.sp
 PASS	fixtures/tran/rc_sinusoidal_startup.sp
 PASS	fixtures/tran/sine.sp
 PASS	fixtures/tran/sine_offset_phase.sp
+PASS	fixtures/tran/spectre_skipdc_euler.sp
 PASS	fixtures/tran/trap_xmu_damping.sp
 PASS	fixtures/tran/txl_tran_long_run_past_2048.sp
 PASS	fixtures/tran/txl_tran_matched_step.sp
