@@ -390,6 +390,7 @@ PASS	fixtures/invalid/noise_missing_source.sp
 PASS	fixtures/invalid/noise_zero_frequency.sp
 PASS	fixtures/invalid/optimize_bisection.sp
 PASS	fixtures/invalid/options_negative_reltol.sp
+PASS	fixtures/invalid/options_reltol_zero.sp
 PASS	fixtures/invalid/pac_zero_lo.sp
 PASS	fixtures/invalid/pnoise_fractional_sidebands.sp
 PASS	fixtures/invalid/pnoise_negative_sidebands.sp
@@ -815,6 +816,8 @@ PASS	fixtures/tran/trap_xmu_damping.sp
 PASS	fixtures/tran/txl_tran_long_run_past_2048.sp
 PASS	fixtures/tran/txl_tran_matched_step.sp
 PASS	fixtures/tran/txl_tran_mismatched_load.sp
+PASS	fixtures/tran/zero_abstol_vntol.sp
+PASS	fixtures/tran/zero_vntol_chgtol.sp
 PASS	fixtures/tran_noise/hspice_samples.sp
 PASS	fixtures/tran_noise/hspice_sde_flicker.sp
 PASS	fixtures/tran_noise/hspice_sde_rc.sp

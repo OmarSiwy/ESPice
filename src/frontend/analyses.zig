@@ -462,6 +462,12 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
                     o.xmu = value;
                 },
                 .gshunt, .cshunt => if (value < 0) return error.InvalidAnalysisArguments,
+                // A zero reltol or trtol leaves no step a transient can take
+                // (ngspice aborts "timestep too small"), so the card fails here.
+                .reltol, .trtol => {
+                    if (!(value > 0)) return error.InvalidAnalysisArguments;
+                    if (option == .reltol) o.tol.reltol = value else o.tol.trtol = value;
+                },
                 inline else => |field| {
                     if (value < 0) return error.InvalidAnalysisArguments;
                     @field(o.tol, @tagName(field)) = value;

@@ -190,6 +190,9 @@ against each `.option search='dir'`. Includes nest up to 32 levels.
 | `em_recovery` | 1 | recovery factor for `.meas EM_AVG` |
 | `search` | | HSPICE: an include search directory |
 
+`reltol` and `trtol` must be positive; a zero or negative value fails at its
+card. `abstol`, `vntol` and `chgtol` may be 0, as in ngspice.
+
 Other names are ignored (the HSPICE dialect warns about each).
 
 ### Initial conditions

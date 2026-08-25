@@ -58,10 +58,13 @@ fn elements(factors: []const usize) !usize {
     return count;
 }
 
+/// reltol and trtol scale every acceptance test and step bound, so they must
+/// be positive. abstol, vntol and chgtol are absolute floors that ngspice
+/// accepts at 0, leaving the relative part alone.
 fn tolerance(t: @import("core").numerics.Tolerances) !void {
-    inline for (.{ "reltol", "abstol", "vntol", "residual_tol", "chgtol", "trtol" }) |field|
+    inline for (.{ "reltol", "residual_tol", "trtol" }) |field|
         try positive(@field(t, field));
-    if (t.gmin < 0 or t.gmin_start < 0 or t.itl1 == 0 or t.itl2 == 0 or t.itl4 == 0)
+    if (t.abstol < 0 or t.vntol < 0 or t.chgtol < 0 or t.gmin < 0 or t.gmin_start < 0 or t.itl1 == 0 or t.itl2 == 0 or t.itl4 == 0)
         return error.InvalidQueryOptions;
 }
 
