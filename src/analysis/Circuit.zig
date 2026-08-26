@@ -832,9 +832,22 @@ pub const Circuit = struct {
     /// that call runs, so for `applyLimits` it is the limited iterate. The
     /// GPU path then runs both on one host wait; the host path ignores it. A
     /// wrong promise costs one wasted device eval, never a wrong stamp: the
-    /// eval checks its x and t.
+    /// eval checks its x and its whole `SimState`. Without `charge` the eval
+    /// is the next Newton iterate, one `advanceIteration` on.
     pub fn evalFollows(self: *const Circuit, x: []const f64, t: f64, charge: bool) void {
-        if (self.gpuContext()) |g| g.evalFollows(x, t, charge);
+        var sim = self.sim;
+        sim.t = t;
+        if (!charge) sim.iteration +|= 1;
+        if (self.gpuContext()) |g| g.evalFollows(x, sim, charge);
+    }
+
+    /// `evalFollows` for the first iterate of the next solve, which
+    /// `beginSolve` numbers 1: the predictor's and a sweep's warm start.
+    pub fn evalFollowsFirst(self: *const Circuit, x: []const f64, t: f64) void {
+        var sim = self.sim;
+        sim.t = t;
+        sim.iteration = 1;
+        if (self.gpuContext()) |g| g.evalFollows(x, sim, false);
     }
 
     /// Limits the Newton update in place (pnjlim/fetlim). Returns true when any
@@ -908,11 +921,11 @@ pub const Circuit = struct {
         if (self.state_staged) _ = self.stateCtl(.revert);
         self.state_staged = true;
         if (self.display) |d| self.say(d, x);
-        // The transient reads q at the converged point next, so get it from
-        // the staging pass's core run. ponytail: serial; a ParEval `.accept`
-        // mode would keep it threaded when lanes are on.
-        const fuse = self.land_rejects and self.has_charge and self.gpuContext() == null and self.par_eval == null;
-        const tr = if (self.gpuContext()) |g| g.updateStates(x, self.sim) else if (fuse) self.acceptStates(x) else walk.updateBatches(self.batches, x);
+        // The transient reads q at the converged point next, and it must be
+        // the charge before `updateState` latches the `$prev` values `q`
+        // reads (the Meyer caps average against the last accepted point).
+        const accept = self.land_rejects and self.has_charge;
+        const tr = if (accept) self.acceptStates(x) else if (self.gpuContext()) |g| g.updateStates(x, self.sim) else walk.updateBatches(self.batches, x);
         if (!self.land_rejects) return tr;
         self.reject_at = tr;
         return null;
@@ -929,9 +942,18 @@ pub const Circuit = struct {
         }
     }
 
-    /// `updateBatches` plus `evalQ` at x and the published time: `accept_q`
-    /// where the batch has it, so its model core runs once for both.
+    /// `evalQ` at x and the published time, then `updateBatches`. Serially
+    /// through `accept_q` where the batch has it, so its model core runs
+    /// once for both.
+    // ponytail: the GPU and ParEval paths run two passes; a ParEval
+    // `.accept` mode would fuse them when lanes are on.
     fn acceptStates(self: *Circuit, x: []const f64) ?f64 {
+        if (self.gpuContext() != null or self.par_eval != null) {
+            self.evalQ(x, self.sim.t);
+            const tr = if (self.gpuContext()) |g| g.updateStates(x, self.sim) else walk.updateBatches(self.batches, x);
+            self.q_fresh = true;
+            return tr;
+        }
         self.lin.valid = false;
         self.clearPlanes(.charge);
         const pl = self.ownPlanes();

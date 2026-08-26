@@ -560,8 +560,11 @@ pub const GpuContext = struct {
 
     const Self = @This();
 
-    const Follow = struct { x: []const f64, t: f64, charge: bool };
-    const Pre = struct { t: f64, charge: bool };
+    /// `sim` is the analysis state the announced eval runs under: a
+    /// model that reads `$simparam("iteration")` stamps differently at the
+    /// next iterate (the Meyer caps at iteration 1).
+    const Follow = struct { x: []const f64, sim: SimState, charge: bool };
+    const Pre = struct { sim: SimState, charge: bool };
 
     /// Uploads every eligible batch and keeps it resident. The caller
     /// classifies a failure with `declineKind`.
@@ -608,6 +611,13 @@ pub const GpuContext = struct {
         errdefer for (batches[0..n_up]) |*bg| bg.deinit(gpa);
 
         for (host.batches) |b| {
+            // Host-only batches first: once every eligible batch is up,
+            // `batches[n_up]` is one past the end (#93).
+            if (b.hooks.gpu_payload == null) {
+                cpu_batches[n_cpu] = b;
+                n_cpu += 1;
+                continue;
+            }
             const bg = &batches[n_up];
             const up = try loadBatch(gpa, bg, b, explicit, report, knobs);
             if (!up) {
@@ -1199,14 +1209,14 @@ pub const GpuContext = struct {
         // The prefetch ran on the same device state with the same launches,
         // so its planes are bitwise what this eval would produce. Bytes, not
         // `==`: -0.0 and +0.0 compare equal but may stamp differently.
-        if (pre != null and pre.?.t == t and
+        if (pre != null and std.meta.eql(pre.?.sim, self.simAt(t)) and
             std.mem.eql(u8, std.mem.sliceAsBytes(x), std.mem.sliceAsBytes(self.pin_x[self.cur ^ 1][0..x.len])))
         {
             self.cur ^= 1;
             self.tape_buf = if (pre.?.charge) self.cur else null;
             self.prof.fused += 1;
         } else {
-            try self.enqueueEval(x, t, self.cur, charge);
+            try self.enqueueEval(x, self.simAt(t), self.cur, charge);
             self.prof.lap("enqueue");
             try self.sync();
             self.prof.lap("wait");
@@ -1238,7 +1248,7 @@ pub const GpuContext = struct {
     /// Enqueues the device half without waiting: upload x, clear the stage,
     /// launch every resident batch, reduce, download into the pinned planes.
     /// Separate so `evalCheck` can replay the same pass.
-    fn enqueueEval(self: *Self, x: []const f64, t: f64, buf: u1, charge: bool) !void {
+    fn enqueueEval(self: *Self, x: []const f64, sim_at: SimState, buf: u1, charge: bool) !void {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         @memcpy(self.pin_x[buf][0..x.len], x);
         try self.d_x[buf].uploadAtAsync(self.pin_x[buf].ptr, 0, x.len * @sizeOf(f64), &self.stream);
@@ -1253,7 +1263,7 @@ pub const GpuContext = struct {
             try syncSeededLim(bg);
             // Scalars are passed by pointer and must outlive the launch call.
             var count: u64 = bg.count;
-            var sim = self.simAt(t);
+            var sim = sim_at;
             var limiting: u64 = @intFromBool(bg.lim_active);
             try bg.launch(&bg.kernel, &self.stream, &.{
                 gompute.interface.arg(&count),
@@ -1283,7 +1293,7 @@ pub const GpuContext = struct {
         try self.phaseLap(3);
         // `pin_tape` is about to hold buffer `buf`'s tape, or stale bytes.
         self.tape_buf = null;
-        if (charge) try self.enqueueTape(buf, t);
+        if (charge) try self.enqueueTape(buf, sim_at);
     }
 
     /// Waits for this stream only: a context-wide sync would also wait on
@@ -1326,7 +1336,7 @@ pub const GpuContext = struct {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const first = self.pinnedBuf(self.cur)[0..self.n_cells];
         @memcpy(self.chk, first);
-        try self.enqueueEval(x, t, self.cur, false);
+        try self.enqueueEval(x, self.simAt(t), self.cur, false);
         try self.sync();
         var worst: f64 = 0;
         var where: usize = 0;
@@ -1382,7 +1392,7 @@ pub const GpuContext = struct {
         if (self.tape_fresh or self.pin_tape.len == 0) return;
         if (self.poisoned) return error.GpuStateReject;
         if (self.tape_buf != self.cur) {
-            try self.enqueueTape(self.cur, self.last_t);
+            try self.enqueueTape(self.cur, self.simAt(self.last_t));
             try self.sync();
         }
         var off: usize = 0;
@@ -1396,13 +1406,13 @@ pub const GpuContext = struct {
     /// Queues every tape kernel at `d_x[buf]` and the download into
     /// `pin_tape`, which then holds buffer `buf`'s tape once the stream
     /// drains.
-    fn enqueueTape(self: *Self, buf: u1, t: f64) !void {
+    fn enqueueTape(self: *Self, buf: u1, sim_at: SimState) !void {
         var off: usize = 0;
         for (self.batches) |*bg| {
             const k = if (bg.qtp_kernel) |*k| k else continue;
             if (bg.tape.len == 0) continue;
             var count: u64 = bg.count;
-            var sim = self.simAt(t);
+            var sim = sim_at;
             try bg.launch(k, &self.stream, &.{
                 gompute.interface.arg(&count),
                 gompute.interface.arg(&sim),
@@ -1524,18 +1534,18 @@ pub const GpuContext = struct {
         return any;
     }
 
-    /// Announces an eval at `x` and `t` right after the next `applyLimits`
-    /// or `stateCtl(.query)` (`Circuit.evalFollows`).
-    pub noinline fn evalFollows(self: *Self, x: []const f64, t: f64, charge: bool) void {
+    /// Announces an eval at `x` under `sim` right after the next
+    /// `applyLimits` or `stateCtl(.query)` (`Circuit.evalFollows`).
+    pub noinline fn evalFollows(self: *Self, x: []const f64, sim: SimState, charge: bool) void {
         if (!self.fuse) return;
-        self.follow = .{ .x = x, .t = t, .charge = charge };
+        self.follow = .{ .x = x, .sim = sim, .charge = charge };
     }
 
     /// Enqueues the eval `f` announced into the other plane buffer, behind
     /// whatever the stream holds; the caller's wait covers it.
     fn prefetch(self: *Self, f: Follow) !void {
-        try self.enqueueEval(f.x, f.t, self.cur ^ 1, f.charge);
-        self.pre = .{ .t = f.t, .charge = f.charge };
+        try self.enqueueEval(f.x, f.sim, self.cur ^ 1, f.charge);
+        self.pre = .{ .sim = f.sim, .charge = f.charge };
     }
 
     /// Runs the device limit pass fused with the path-latch staging, and the

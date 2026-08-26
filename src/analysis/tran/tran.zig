@@ -377,7 +377,7 @@ pub fn simulate(
         const xfact = dt / dt_prev;
         predict(trial, cur, prev, xfact);
         ckt.predictFirstIterate(trial, cur, prev, dt / dt_prev2);
-        ckt.evalFollows(trial, t + dt, false);
+        ckt.evalFollowsFirst(trial, t + dt);
         _ = ckt.applyLimits(trial, cur);
         // ngspice's transient Newton accepts on the per-row delta test alone
         // (niconv.c): a step that has converged in x but leaves a residual on
@@ -426,7 +426,7 @@ pub fn simulate(
         // A device state flipped inside this step (a switch crossed its
         // threshold): reject and shrink so the conductance step lands within
         // state_eps of the crossing instead of smeared across dt.
-        if (has_charge) ckt.evalFollows(trial, t + dt, true);
+        if (has_charge and !ckt.q_fresh) ckt.evalFollows(trial, t + dt, true);
         if (dt > state_eps and ckt.stateCtl(.query)) {
             st.rej_state += 1;
             _ = ckt.stateCtl(.revert);
