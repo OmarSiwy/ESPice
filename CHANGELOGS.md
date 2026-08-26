@@ -25,6 +25,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `bench-suites -Dsuite=cmcqa`: the HICUM and PSP noise tests, one `.noise` deck per bias point (#18).
 - `bench-suites -Dsuite=cmcqa`: the GF180 Rds, MOS CV, BJT, diode, MIM/MOS capacitor and resistor regressions, 2,234 more decks (#18).
 - `bench-suites -Dsuite=cmcqa`: PSP parameter cards keep their exponent signs (`NSUBO=3.0E+23` was read as `3.0E`) (#18).
+- `zig build test-gpu` runs one deck at a time; eight concurrent CUDA contexts ran latency-bound decks 9x slower and into the timeout (#15).
 - API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change
   global `.param` values on a live Problem without a re-parse: a sky130 sizing point 6 ms, was 87 (#101).
 - A binned MOSFET whose L/W reads a swept or set `.param` takes the bin each point selects, on its

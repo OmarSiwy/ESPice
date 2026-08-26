@@ -453,7 +453,11 @@ pub fn build(b: *std.Build) void {
     run_gpu_corpus.setCwd(b.path("."));
     run_gpu_corpus.addArtifactArg2(exe, .{});
     run_gpu_corpus.setEnvironmentVariable("ZIG", b.graph.zig_exe); // runtime .hdl builds
-    run_gpu_corpus.addArgs(&.{ "--backend", "cuda" });
+    // One deck at a time: the device path waits on the GPU every Newton
+    // iterate, and concurrent CUDA contexts time-slice one GPU, so two decks
+    // side by side each ran 4.8x slower than alone and eight ran 9.3x slower
+    // (#15, dev/devices/gpu-evaluation.md). A passthru `--jobs` overrides it.
+    run_gpu_corpus.addArgs(&.{ "--backend", "cuda", "--jobs", "1" });
     run_gpu_corpus.addPassthruArgs();
     b.step("test-gpu", "Run the numeric SPICE fixtures with --backend cuda").dependOn(&run_gpu_corpus.step);
 

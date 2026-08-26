@@ -180,16 +180,82 @@ over one host thread and 1.2-1.7x over eight.
 ## Checking the GPU path
 
 `zig build test-gpu` runs the numeric corpus with `--backend cuda` against
-the same expectations as `zig build test`. At `29ae485` plus this work it
-scores 599/616. The failing set is the CPU run's 13 known failures plus 4
-timeouts, and no deck that passes on the CPU fails on the GPU:
+the same expectations as `zig build test`, one deck at a time. At `29ae485`
+plus this work it scored 599/616: the CPU run's 13 known failures plus 4
+timeouts, and no deck that passes on the CPU failed on the GPU.
 
-- `dc/device_hisimhv` timed out on its 1001 s cold JIT and passes once the
-  driver cache holds the image.
-- `stress/vacask_graetz`, `vacask_mul` and `vacask_rc` have one to four
-  devices and a million transient steps. An explicit `--backend cuda` pays
-  ~50 µs of launch and wait per eval there, against microseconds on the host,
-  which is why `auto` keeps them on the CPU.
+Six decks timed out under the old 8 workers (#15): `dc/device_hisimhv`,
+`stress/vacask_{rc,mul,graetz}`, `tran/bench_ngspice_mosamp` and
+`tran/device_mesa_oscillator`. Alone, every one but hisimhv finishes in
+300 s, and `--backend auto` keeps all six on the CPU (it priced them at
+0-9 µs per eval on the host against 40-42 µs on the GPU). Wall seconds,
+RTX 4060 Laptop, `--backend cuda` alone against `cpu`:
+
+| deck | evals | cpu | cuda alone |
+|---|---|---|---|
+| stress/vacask_rc | 3.0M | 0.94 | 76 |
+| stress/vacask_mul | 1.5M | 2.3 | 94 |
+| stress/vacask_graetz | 3.0M | 2.9 | 184 |
+| tran/bench_ngspice_mosamp | 417k | 6.6 | 19 |
+| tran/device_mesa_oscillator | 350k | 3.5 | 65 |
+| dc/device_hisimhv | | 0.05 | 437 cold JIT, 13 warm |
+
+Where the time goes: every Newton iterate waits for one device round
+trip, eight dependent stream operations (x upload, stage clear, one launch
+per resident batch, two reduces, the download, the tape), about 25-60 µs
+however small the circuit. `ESPICE_GPU_STATS=phases` on a 20 ms graetz run
+splits it as upload+clear 14, eval 19 (three batches), reduces 13,
+download 4 µs. A million-step deck with four diodes is that floor times
+three million.
+
+Concurrency multiplied it. CUDA contexts from separate processes
+time-slice the GPU, and every wait pays the switch. mosamp cut to 2 µs of
+simulated time took 3.4 s alone, 16.3 s each with two copies running
+(4.8x) and 32.5 s each with four (9.6x); on a busier machine, 8.0 s alone
+and 75 s each with eight (9.3x). Parallel workers made these decks slower
+than running them in turn, and pushed them past the 300 s timeout. The harness now runs
+test-gpu with `--jobs 1`; a passthru `-- --jobs N` overrides it.
+At `d5be5fca` with one worker it scores 774 passed, 4 xfail and 54
+skipped (nothing eligible) of 834 in 56 minutes including the build; the
+five latency-bound decks pass, and the two failures are the cold hisimhv
+JIT and the hfet drift below.
+
+`dc/device_hisimhv` is different: the driver's cold JIT of its 18 MB of
+PTX took 437 s and 13 GB of RAM here (1001 s on a loaded machine), past
+the timeout, and a killed JIT caches nothing, so it failed on every run.
+Compile it once outside the harness, then it passes in 13 s:
+
+```sh
+(cd tests/fixtures/dc && ../../../zig-out/bin/espice --backend cuda -b -r /dev/null device_hisimhv.sp)
+```
+
+ponytail: the floor stays. A CUDA graph per eval would cut the enqueue
+(~20 µs of driver calls on mosamp) but not the per-iterate wait, which
+needs Newton on the device and is out of scope (every solve runs on the
+host).
+
+`tran/device_hfet_inverter` drifts 0.34% CUDA against CPU at `i(vin)[85]`
+(#15, still open). What is known, from hash traces of every eval, limit
+pass, state call and q-tape snapshot on both backends, and from replaying
+each device eval on the host with the device's lim plane and state:
+
+- The runs are bitwise equal until the second Newton iterate of the
+  operating point, the first with limiting armed. There `g`, `c` and `q`
+  match and three `rhs` cells differ by one ulp, with no voltage clamped
+  (the limiter returns its input). Every later difference follows from
+  that: the OP iterates part, the incremental Meyer charges (`q = q_prev +
+  C dv`, held state) inherit it, and the step grid splits on the 1 ns edge.
+- Every other device eval, the limit pass, the state latches and the q
+  tape are bitwise equal to the host at the same inputs. The hypothesis
+  that the limiting correction's `@reduce(.Add)` reorders: an explicit
+  lane-order fused sum changed neither backend's output by one bit, so it
+  is refuted.
+- Left: an arithmetic difference in the hfet1 model body at that one x.
+  VerA emits its proven units as `@setFloatMode(.optimized)`, which lets
+  x86 and NVPTX contract and reassociate differently; a rarely taken
+  branch would explain a difference at one point only. Next step: dump the
+  per-instance residuals at that eval, then build hfet1 with strict units
+  to confirm.
 
 Raw outputs of the whole corpus on both backends (CPU against CUDA):
 
