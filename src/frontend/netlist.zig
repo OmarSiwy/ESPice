@@ -860,11 +860,25 @@ const top_level = std.math.maxInt(u16);
 /// it becomes a B source.
 /// A `.option`/`.options` card (lowercased) that sets `seed=`.
 fn seedOption(line: []const u8) bool {
-    if (!std.mem.startsWith(u8, line, ".opt")) return false;
+    return std.mem.startsWith(u8, line, ".opt") and setsKey(line, "seed");
+}
+
+/// An analysis card (lowercased) with a `MONTE=` sweep.
+fn monteSweep(line: []const u8) bool {
+    if (line.len == 0 or line[0] != '.') return false;
+    // `cardOf` takes the head without its dot.
+    const head = line[1 .. std.mem.indexOfAny(u8, line, " \t") orelse line.len];
+    const card = cardOf(head) orelse return false;
+    return card == .analysis and setsKey(line, "monte");
+}
+
+/// Whether `line` (lowercased) holds `key=` with `key` a whole word.
+fn setsKey(line: []const u8, key: []const u8) bool {
+    std.debug.assert(key.len > 0);
     var at: usize = 0;
-    while (std.mem.indexOfPos(u8, line, at, "seed")) |k| : (at = k + 4) {
+    while (std.mem.indexOfPos(u8, line, at, key)) |k| : (at = k + key.len) {
         if (k > 0 and (std.ascii.isAlphanumeric(line[k - 1]) or line[k - 1] == '_')) continue;
-        const rest = std.mem.trimStart(u8, line[k + 4 ..], " \t");
+        const rest = std.mem.trimStart(u8, line[k + key.len ..], " \t");
         if (rest.len > 0 and rest[0] == '=') return true;
     }
     return false;
@@ -1046,6 +1060,13 @@ fn Reader(comptime S: type) type {
             var directive_lines: std.ArrayList(u32) = .empty;
             try r.declarations(&top_devices, &model_lines, &directive_lines);
             const top: Frame = .{ .scopes = &r.global_scopes };
+            // A MONTE sweep draws the distributions per trial, so the models
+            // read next (a PDK's shared bins) keep their sites: the analysis
+            // cards are read after them (#100).
+            for (directive_lines.items) |i| if (monteSweep(r.lines.items[i])) {
+                r.monte = true;
+                break;
+            };
             // ngspice draws agauss/gauss/unif/aunif on every run; a seed makes
             // that one reproducible sample, so the draws need their sites,
             // and the models read next (a PDK's shared bins) need them too.

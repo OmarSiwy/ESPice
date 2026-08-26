@@ -423,6 +423,7 @@ PASS	fixtures/matex/purely_algebraic.sp
 PASS	fixtures/matex/rc_ladder_stiff.sp
 PASS	fixtures/matex/sine.sp
 PASS	fixtures/mc/gaussian_source.sp
+PASS	fixtures/mc/sky130_mismatch_monte.sp
 PASS	fixtures/mc/zero_variation_1.sp
 PASS	fixtures/mc/zero_variation_100.sp
 PASS	fixtures/mc/zero_variation_2.sp

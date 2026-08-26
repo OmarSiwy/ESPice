@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "A MONTE sweep draws the AGAUSS mismatch calls inside sky130's binned model cards per trial (#100).",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice 45 (nixpkgs), same circuit and models with mc_mm_switch=1, 1000 runs of reset + op: Id mean 1.0545 uA, stddev 0.2805 uA. i(vd) is -Id."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "sample_moments",
+        "plot": "Monte Carlo",
+        "column": "i(vd)",
+        "row_count": 1000,
+        "mean_min": -1.13e-6,
+        "mean_max": -0.98e-6,
+        "stddev_min": 0.227e-6,
+        "stddev_max": 0.334e-6
+      },
+      {
+        "kind": "repeatability",
+        "same_netlist": true,
+        "comparison": "bitwise_numeric_results"
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "The generators differ, so only the statistics compare. Limits are about six combined standard errors of the two 1000-sample estimates. A nominal-only sweep has stddev 0 and fails."
+  ],
+  "netlist_sha256": "654d49ff09cc8c50ddc60b0c569b88d3673f39b33cea6aa46908d45f80e9c222"
+}

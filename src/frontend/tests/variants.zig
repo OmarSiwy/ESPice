@@ -171,6 +171,29 @@ test "a MONTE run whose trial numbers pass u32 is refused, not wrapped" {
     try t.expectError(error.UnsupportedCard, input.build(&lib, sa.allocator(), pa.allocator(), past));
 }
 
+test "a MONTE sweep draws a distribution written in a .model card per trial (#100)" {
+    var sa = std.heap.ArenaAllocator.init(t.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(t.allocator);
+    defer pa.deinit();
+    var lib = try device.Library.init(t.allocator);
+    defer lib.deinit();
+    const nl = try netlist.parse(pa.allocator(),
+        \\t
+        \\.model dm d is={1e-14+agauss(0,1e-15,1)}
+        \\i1 0 a 1m
+        \\d1 a 0 dm
+        \\.dc monte=2
+        \\.end
+    , .ngspice);
+    try t.expect(nl.live.site_keys.len != 0);
+    var prepared = try input.build(&lib, sa.allocator(), pa.allocator(), nl);
+    defer prepared.deinit();
+    const v = prepared.deck.variants;
+    try t.expectEqual(@as(u32, 2), v.count());
+    for (0..2) |k| try t.expect(v.writes(@intCast(k))[0].len != 0);
+}
+
 /// The first parameter called `name` in each rebuilt run of `prepared`.
 fn rebuilt(gpa: std.mem.Allocator, prepared: input.Prepared, name: []const u8) ![]const f64 {
     const out = try gpa.alloc(f64, prepared.runs.len);

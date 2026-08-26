@@ -104,6 +104,12 @@ is drawn for that element alone. That is the difference between global
 tolerances on `.model` parameters, and the `.variation` block, work too;
 see the [language reference](../using/reference.md#statistics).
 
+A distribution inside a `.model` card is drawn per trial as well, once per
+device that uses the model. That is how a PDK states mismatch: the sky130
+`tt_mm` section sets `mc_mm_switch=1`, and its binned nfet and pfet cards
+read `MC_MM_SWITCH*AGAUSS(0,1,1)*slope/sqrt(l*w*mult)`, so `MONTE=n` on a
+sky130 deck gives n mismatch samples.
+
 ## Mismatch without trials
 
 For the DC offset that mismatch causes, `.dcmatch v(out)` computes the
