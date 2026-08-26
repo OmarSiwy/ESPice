@@ -288,8 +288,9 @@ fn markWarm(image: []const u8, knobs: Knobs) void {
 /// One batch's resident working set and the kernels that consume it.
 const BatchGpu = struct {
     kernel: Raw,
-    /// `arp_lim_<model>`: the fused limit/state pass, when the device has one.
-    /// Fused into each limit pass, or once per converged solve when `held`.
+    /// `arp_lim_<model>`: the limit/state pass, when the device has one.
+    /// Both halves per limit pass, or when `held` the limit half per limit
+    /// pass and the state half once per converged solve.
     lim_kernel: ?Raw,
     /// `arp_ctl_<model>`: the accepted-step latch pass, when the device
     /// declares `stateCtl`.
@@ -321,11 +322,9 @@ const BatchGpu = struct {
     grid: gompute.Dim3,
     block: u32,
     has_lim: bool,
-    /// A state kernel without `limit`: its `updateState` writes held
-    /// variables, so `lim_kernel` runs once per converged solve from
-    /// `updateStatesOnGpu`, never per iterate. `gpuEligible` admits such a
-    /// device only without `limit`, so skipping the fused launch skips no
-    /// clamp.
+    /// `GpuPayload.held`: the state kernel's `updateState` writes held
+    /// variables, so its state half runs once per converged solve from
+    /// `updateStatesOnGpu`, never per iterate.
     held: bool,
     /// The host batch has `Hooks.status`: eval latches `vera_status__` in
     /// the resident Instance, which `syncStatus` brings home.
@@ -849,7 +848,7 @@ pub const GpuContext = struct {
             .grid = gompute.Dim3.linear(p.count, block),
             .block = block,
             .has_lim = p.lim_x.len > 0,
-            .held = lim_kernel != null and b.hooks.apply_limits == null,
+            .held = p.held,
             .has_status = b.hooks.status != null,
             .base = base,
         };
@@ -1482,7 +1481,8 @@ pub const GpuContext = struct {
         var launched = false;
         for (self.batches) |*bg| {
             const lk = if (bg.lim_kernel) |*k| k else continue;
-            if (bg.count == 0 or bg.held) continue;
+            // A held batch without `limit` has nothing to run per iterate.
+            if (bg.count == 0 or (bg.held and !bg.has_lim)) continue;
             if (!launched) {
                 // `x_old` explicitly: under JFNK the last eval was a
                 // finite-difference probe.
@@ -1495,6 +1495,7 @@ pub const GpuContext = struct {
             try syncSeededLim(bg);
             var count: u64 = bg.count;
             var lim_active: u64 = @intFromBool(bg.lim_active);
+            var halves: u64 = if (bg.held) device_ir.lim_pass_limit else device_ir.lim_pass_limit | device_ir.lim_pass_state;
             var sim = self.sim;
             try bg.launch(lk, &self.stream, &.{
                 gompute.interface.arg(&count),
@@ -1507,6 +1508,7 @@ pub const GpuContext = struct {
                 bg.d_lim.argPtr(),
                 bg.d_states.argPtr(),
                 gompute.interface.arg(&lim_active),
+                gompute.interface.arg(&halves),
                 self.d_flags.argPtr(),
                 gompute.interface.arg(&sim),
             });
@@ -1582,6 +1584,7 @@ pub const GpuContext = struct {
             }
             var count: u64 = bg.count;
             var lim_active: u64 = 0;
+            var halves: u64 = device_ir.lim_pass_state;
             var sim = self.sim;
             try bg.launch(lk, &self.stream, &.{
                 gompute.interface.arg(&count),
@@ -1594,6 +1597,7 @@ pub const GpuContext = struct {
                 bg.d_lim.argPtr(),
                 bg.d_states.argPtr(),
                 gompute.interface.arg(&lim_active),
+                gompute.interface.arg(&halves),
                 self.d_flags.argPtr(),
                 gompute.interface.arg(&sim),
             });

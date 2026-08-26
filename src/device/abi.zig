@@ -505,6 +505,11 @@ pub const PatternBuilder = struct {
     }
 };
 
+/// The halves of `arp_lim_<model>` one launch runs: bits of its `halves`
+/// argument.
+pub const lim_pass_limit: u64 = 1;
+pub const lim_pass_state: u64 = 2;
+
 /// One batch's GPU-resident working set, type-erased. Frozen for the solve:
 /// the launcher uploads it once and afterwards moves only x in and the value
 /// planes out per Newton iteration. `models`/`instances` change only when a
@@ -533,6 +538,10 @@ pub const GpuPayload = struct {
     slots: []const u32,
     /// `arp_lim_<model>`, or "" when the device has no state kernel.
     lim_kernel: []const u8,
+    /// The state kernel's `updateState` writes §5.10 held variables: run its
+    /// state half once per converged solve, never per Newton iterate, which
+    /// would latch an iterate. Its limit half still runs per iterate.
+    held: bool,
     /// `arp_ctl_<model>`, or "" when the device has no accepted-step latch.
     ctl_kernel: []const u8,
     /// `arp_reduce_<model>`, the segmented sum from staging cells to planes.
@@ -579,7 +588,10 @@ pub const GpuPayload = struct {
 //    (correlated rows contiguous) and `.table`.
 // 25: `DeviceVtable.unknown_names`.
 // 26: `Hooks.say`, VerA's display tasks.
-pub const abi_version: u32 = 26;
+// 27: `GpuPayload.held`; the state kernel takes `halves` after `lim_active`,
+//    so held-variable devices that limit (mos1/2/3/6/9, bsim4va,
+//    vbic13_4t) are resident.
+pub const abi_version: u32 = 27;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.

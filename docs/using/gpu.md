@@ -27,7 +27,7 @@ matrix on the GPU. `ESPICE_GPU_LU=1` forces that on under a GPU backend,
 `ESPICE_GPU_LU=0` keeps the factorization on the CPU.
 
 Not every device runs there. A device whose model keeps state the kernels
-cannot carry (VBIC's limiting, for one) is evaluated on the CPU and added
+cannot carry (a Verilog-A `$limit` function that keeps Newton history, for one) is evaluated on the CPU and added
 to the GPU's result, so a circuit can mix both. `auto` also estimates the
 cost: launching kernels and copying the solution vector each iteration has
 a fixed price, and a small circuit is faster on the CPU.

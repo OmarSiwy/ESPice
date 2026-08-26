@@ -807,6 +807,54 @@ test "analog initial reruns after a revert rolls its held results back" {
     try std.testing.expect(!fresh_typed.sim.analog_initial);
 }
 
+test "a held-variable device that limits is resident, its state half deferred to the converged solve" {
+    // vbic13_4t and bsim4va: §5.10 held variables plus `$limit`.
+    const D = struct {
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        pub const Instance = struct { v__held__: f64 = 0 };
+        pub const State = struct { committed: f64 = 0 };
+        pub fn initState(_: *const Model, _: *const Instance) State {
+            return .{};
+        }
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+        pub fn limit(comptime _: type, _: *const Model, _: *const Instance, cur: [2]f64, old: [2]f64, _: SimState) contract.LimitResult(2) {
+            return .{ .x = .{ @min(cur[0], old[0] + 1), cur[1] }, .converged = cur[0] <= old[0] + 1 };
+        }
+        pub fn updateState(comptime _: type, _: *const Model, inst: *Instance, x: [2]f64, _: *State, _: SimState) contract.UpdateResult {
+            inst.v__held__ = x[0] - x[1];
+            return .ok;
+        }
+        pub fn stateCtl(_: *const Model, inst: *Instance, st: *State, op: contract.StateCtlOp) bool {
+            switch (op) {
+                .commit => st.committed = inst.v__held__,
+                .revert => inst.v__held__ = st.committed,
+                .query => {},
+            }
+            return false;
+        }
+    };
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    try proto.append(.{}, .{}, .{ 1, 2 });
+    const batch = try ProtoStore(D).finalize(&proto, a, .{
+        .col_ptr = &.{ 0, 3, 6, 9 },
+        .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+        .n = 3,
+        .trash_slot = 9,
+    }).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const p = batch.hooks.gpu_payload.?(batch.ctx);
+    try std.testing.expect(p.held);
+    try std.testing.expect(p.lim_kernel.len > 0);
+    try std.testing.expect(p.lim_x.len > 0);
+}
+
 test "spicePwlBreak rounds from the request time as ngspice does" {
     const spicePwlBreak = impl.test_access.spicePwlBreak;
     const M = struct {

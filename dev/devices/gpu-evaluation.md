@@ -25,17 +25,39 @@ on top of the downloaded planes.
   hooks and `State` without `limit`, unless VerA declares that state `.path_latch` (the
   §5.6.1.2 latches alone: b3soidd, b3soifd, hicumL2, hisim2, kinduc, mes),
   which is what the state and control kernels carry. It admits
-  held-variable devices without `limit` (bsim4va, psp103; vbic13_4t
-  limits and stays on the host). Their state kernel runs once per
-  converged solve, from `GpuContext.updateStates`, never fused into
-  the per-iterate limit pass, and `stateCtl(.revert)` takes it back on a
-  rejected step.
+  held-variable devices (the Meyer MOS models mos1/2/3/6/9, bsim4va,
+  psp103, vbic13_4t), which the payload marks `held`. Their state kernel runs in halves (its `halves` argument,
+  device ABI 27): the limit half in every per-iterate limit pass, the
+  state half once per converged solve from `GpuContext.updateStates`, so
+  no Newton iterate is latched, the INITFIX pass stages nothing (it skips
+  `updateStates` on both backends), and `stateCtl(.revert)` takes it back
+  on a rejected step. The lim plane stays resident across both halves.
+  At an accepted transient point the charge eval runs before the state
+  half (`Circuit.acceptStates`), as the host's fused `accept_q` does: the
+  Meyer models average their caps against `$prev` values the state half
+  latches, so a charge read after it averages against the new point. The
+  ParEval path (lanes on, large decks) read charges in the same late
+  order and now takes the same one. No corpus deck separates the two
+  orders (the mos6 decks moved by under 1e-15 with it alone).
 - VerA ABI 5 passes `SimState` to every kernel by value (eval, state, charge
   tape), so the cores that read `analysis()` or `$abstime` are resident too:
   the Meyer MOS models (mos1/2/3/6/9) and jfet2.
 - `build.zig` emits images for every model up to 1 MB of source, so every
   model in `models/` gets one. The cold JIT costs and the reason for the
   limit are in the comment on `gpu_max_model_bytes`.
+
+Measured with bsim4va resident (#140, `chain_bsim4_10k` from
+`tests/benchmark/postlayout/gen.py`, `.tran 2p 500p`, RTX 4060 Laptop,
+load average 33 from other builds, so read the ratio, not the seconds):
+`--backend cpu` 38.7 and 39.0 s, `--backend cuda` 15.1 and 19.8 s. Both
+backends take the same 270 points, and every column agrees to 6e-9 of
+rtol 1e-3. Under `test-gpu` the corpus scores 809 passed, 4 xfail, 7
+failed: `device_hisimhv` (cold JIT), `device_hfet_inverter` (the drift
+below), the three `vacask_*` decks, and `bench_ngspice_mosamp` and
+`device_mesa_oscillator`, which pass alone (`--timeout 900`) but run
+10-17x slower than the CPU under an explicit `cuda`: a few devices, many
+steps, the same launch-cost case as `vacask_rc`. `auto` keeps them on
+the CPU.
 
 ## One eval
 
@@ -89,7 +111,12 @@ then queues that eval behind the limit (or query) kernels. When the host
 limiters are done with x, one wait covers both. The prefetched planes land
 in the second pinned buffer, because the converger still reads the current
 residual after the limit pass. `evalOnGpu` takes the prefetch only when the
-x bytes and t match. `stateCtl(.commit)` and `.revert` stay queued and
+x bytes and the whole `SimState` match. The announcement carries the
+iteration the eval will run at (the next one after a limit pass, 1 for a
+predictor or sweep warm start): a prefetch keyed on t alone ran the Meyer
+models' iteration-1 branch at the wrong iterate and put mos6's inverter
+decks 0.3-0.7% off, while `ESPICE_GPU_NOFUSE` matched the CPU to 1e-9.
+`stateCtl(.commit)` and `.revert` stay queued and
 unwaited, since every caller discards their result.
 
 The device runs the same launches in the same order, so outputs are bitwise

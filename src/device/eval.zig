@@ -2037,6 +2037,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 .rhs_idx = self.rhs_idx,
                 .slots = self.slots,
                 .lim_kernel = comptime if (hasStateKernel(D)) stateKernelName(D) else "",
+                .held = comptime hasStateKernel(D) and holdsOnlyHeld(D),
                 .ctl_kernel = comptime if (hasCtlKernel(D)) ctlKernelName(D) else "",
                 .reduce_kernel = comptime reduceKernelName(D),
                 .lim_x = if (comptime has_limit) self.lim_x else &.{},
@@ -2430,9 +2431,6 @@ fn isVera(comptime D: type) bool {
 ///   (`statusOnlyMutable`);
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
 ///   `limiter_previous` the host advances on its own Instance copy;
-/// - held variables (`holdsOnlyHeld`) together with `limit`: the launcher
-///   runs a held device's `StateKernel` once per converged solve, not fused
-///   into the per-iterate limit pass, which would latch Newton iterates;
 /// - otherwise, `State` without `limit` that VerA does not declare
 ///   `.path_latch` (sources and FSMs whose eval reads host-owned
 ///   per-attempt state).
@@ -2440,18 +2438,18 @@ fn isVera(comptime D: type) bool {
 /// what `StateKernel` and `CtlKernel` run on the device: `updateState`
 /// stages `wb__/wq__`, `stateCtl` commits them into the `pb__/pq__` latches
 /// eval reads. A held device's `State` is that latch plus its held
-/// variables, all in the resident Instance. `SimState` is a kernel
-/// argument, so a core that reads `analysis()` or `$abstime` (the Meyer MOS
-/// models, jfet2) runs resident too.
+/// variables, all in the resident Instance; its `StateKernel` runs the
+/// limit half per iterate and the state half once per converged solve
+/// (`GpuPayload.held`), so no Newton iterate is latched. `SimState` is a
+/// kernel argument, so a core that reads `analysis()` or `$abstime` (the
+/// Meyer MOS models, jfet2) runs resident too.
 // ponytail: the State-with-limit rule is decl correlation, not proof;
 // `StateKernel` flags any non-`.ok` `updateState` so a device that breaks it
 // falls back to the CPU instead of running wrong.
 fn gpuEligible(comptime D: type) bool {
     if (@hasDecl(D, "mutable_eval") and D.mutable_eval and !statusOnlyMutable(D)) return false;
     if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
-    // ponytail: vbic13_4t holds variables and limits, so it stays on the
-    // host; split `StateKernel` into its two halves to bring it over.
-    if (holdsOnlyHeld(D)) return !@hasDecl(D, "limit");
+    if (holdsOnlyHeld(D)) return true;
     return @hasDecl(D, "limit") or !@hasDecl(D, "State") or
         (@hasDecl(D, "state_class") and D.state_class == .path_latch);
 }
@@ -2681,8 +2679,11 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
 }
 
 /// GPU limit and state-latch kernel, one thread per instance: the device side
-/// of `applyLimits` followed by `updateState`, fused because the converger
-/// always runs the two back to back at the same x.
+/// of `applyLimits` followed by `updateState`. `halves` (`ir.lim_pass_*`
+/// bits) picks which run: both per Newton iterate, fused because the
+/// converger runs the two back to back at the same x, or for a held batch
+/// (`GpuPayload.held`) the limit per iterate and the state once per
+/// converged solve, as the host does.
 ///
 /// Sets bit 0 of `flags[0]` when a clamp reports not converged, and bit 1
 /// when an `updateState` returns anything but `.ok`, which the launcher
@@ -2704,6 +2705,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
             lim: gompute.GlobalPtr(f64),
             states: gompute.GlobalPtr(StateT),
             lim_active: u64,
+            halves: u64,
             flags: gompute.GlobalPtr(u32),
             sim: SimState,
         ) callconv(gompute.kernel_callconv) void {
@@ -2714,7 +2716,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
             var flag: u32 = 0;
             var cur: [n_u]f64 = undefined;
             inline for (0..n_u) |u| cur[u] = xs[gath[id * n_u + u]];
-            if (comptime has_limit) {
+            if (comptime has_limit) if (halves & ir.lim_pass_limit != 0) {
                 // Must use the same write set as `limitRange`: host and
                 // device share one `lim_x` plane.
                 const writes = comptime limitWritesOf(D);
@@ -2731,15 +2733,15 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
                 inline for (0..n_u) |u| if (comptime has(writes, u)) {
                     lim[id * LimMap(D).k + comptime LimMap(D).at(u)] = lm.x[u];
                 };
-            }
-            if (comptime has_state) {
+            };
+            if (comptime has_state) if (halves & ir.lim_pass_state != 0) {
                 const inst_m: *D.Instance = @addrSpaceCast(&instances[id]);
                 const st: *StateT = @addrSpaceCast(&states[id]);
                 switch (D.updateState(Real, model, inst_m, cur, st, sim)) {
                     .ok => {},
                     .request_reject_at => flag |= 2,
                 }
-            }
+            };
             if (flag != 0) _ = @atomicRmw(u32, &flags[0], .Or, flag, .monotonic);
         }
     };
