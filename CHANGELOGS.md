@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.meas tran_cont x find v(a) at=1n` (and DERIV) prints its one value instead of looping forever (#68).
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - `--backend cuda` evaluates BSIM4 (LEVEL 14/54, sky130), VBIC and MOS levels 1/2/3/6/9 on the GPU: held variables and limiting now live in device state; device ABI 27 (#140).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.

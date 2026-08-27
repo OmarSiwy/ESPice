@@ -337,10 +337,9 @@ fn evaluateCont(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
     var k: i32 = 0;
     // Ends when the events run out: `nth` is null past an AT clause, and
     // event k + 1 needs k + 1 crossings, so once k passes the sample count
-    // `when` finds none and `evaluate` fails OutOfInterval. A FIND or DERIV
-    // with AT= reads no event from `second`, so it never runs out: a known
-    // hang, not yet fixed.
+    // `when` finds none and `evaluate` fails OutOfInterval.
     while (true) : (k += 1) {
+        assert(@as(usize, @intCast(k)) <= w.len() + 1);
         var one = m;
         one.cont = false;
         one.name = std.fmt.bufPrint(&buf, "{s}[{d}]", .{ m.name, k + 1 }) catch m.name;
@@ -349,7 +348,12 @@ fn evaluateCont(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
                 one.first = nth(m.first, k) orelse break;
                 one.second = nth(m.second, k) orelse break;
             },
-            .find, .deriv => one.second = nth(m.second, k) orelse break,
+            // FIND or DERIV at a fixed AT= has the one event (#68).
+            .find, .deriv => if (m.first.at != core.measure_no_at) {
+                one.first = nth(m.first, k) orelse break;
+            } else {
+                one.second = nth(m.second, k) orelse break;
+            },
             .when => one.first = nth(m.first, k) orelse break,
             else => return evaluate(out, one, w), // else: a function without event vectors runs once
         }
@@ -1089,6 +1093,27 @@ test "measurements match ngspice on a sampled ramp" {
 
 /// v(a) = t and v(b) = 4 - t on t = 0..4, sampled every 1.
 const ramp: core.Result = .{ .plotname = "t", .varnames = &.{ "time", "v(a)", "v(b)" }, .is_complex = false, .npoints = 5, .data = &.{ 0, 0, 4, 1, 1, 3, 2, 2, 2, 3, 3, 1, 4, 4, 0 } };
+
+test "a _CONT FIND or DERIV at a fixed AT= has one event and prints one line" {
+    const cards = [_]core.Measure{
+        .{ .analysis = .tran, .name = "x", .func = .find, .cont = true, .first = .{ .vec = "v(a)", .at = 1.5 } },
+        .{ .analysis = .tran, .name = "d", .func = .deriv, .cont = true, .first = .{ .vec = "v(b)", .at = 1.5 } },
+    };
+    var values: [cards.len]f64 = undefined;
+    evaluateAll(&cards, .tran, ramp, &values);
+    try std.testing.expectEqualSlices(f64, &.{ 1.5, -1 }, &values);
+    var buf: [256]u8 = undefined;
+    var out: Writer = .fixed(&buf);
+    try print(&out, &out, &cards, .tran, ramp);
+    try std.testing.expectEqualStrings(
+        \\
+        \\  Measurements for Transient Analysis
+        \\
+        \\x[1]                =  1.500000e+00
+        \\d[1]                =  -1.000000e+00
+        \\
+    , out.buffered());
+}
 
 test "every function over a result with no samples reads NaN or zero, never panics" {
     const funcs = comptime std.enums.values(core.MeasureFunc);
