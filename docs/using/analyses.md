@@ -99,8 +99,12 @@ named like ngspice's (`v(r1)`, `v(vcc)`, `v(vin:acmag)`, ...).
 
 The 1-sigma DC output spread from device mismatch, from sensitivities
 rather than random trials. Sigmas come from the deck's `.variation` block
-when it has one, otherwise from the models' Pelgrom data, otherwise unit
-variance. Plot `DC Mismatch`: `total_3sigma` and one `<card>@<param>`
+when it has one. Without one, every `agauss`/`gauss`/`unif`/`aunif`/`limit`
+call in the models and parameters is one group, sized by a one-sigma draw
+at that call: this is how a PDK such as sky130 states mismatch, so set its
+mismatch switch (`.param mc_mm_switch=1`). With neither, each parameter
+takes the model's Pelgrom sigma, or unit variance, and a warning says so.
+Plot `DC Mismatch`: `total_3sigma` and one `<card>@<param>`
 column per contribution.
 
 ```text

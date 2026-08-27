@@ -113,7 +113,9 @@ sky130 deck gives n mismatch samples.
 ## Mismatch without trials
 
 For the DC offset that mismatch causes, `.dcmatch v(out)` computes the
-1-sigma spread directly from sensitivities, with no random trials. The
+1-sigma spread directly from sensitivities, with no random trials. On a
+PDK deck without a `.variation` block it reads the same `agauss` calls a
+`MONTE=` sweep draws, so the two agree to within the linearization. The
 [analyses reference](../using/analyses.md#dcmatch) covers it, with
 `.acmatch` and `.dcsens`.
 

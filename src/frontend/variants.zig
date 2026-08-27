@@ -590,6 +590,62 @@ pub const Planner = struct {
         return .{ .labels = labels.items, .starts = starts.items, .params = params.items, .sigmas = sigmas.items };
     }
 
+    /// The deck's own mismatch as groups, for a deck with no `.variation`
+    /// block: one group per distribution site the circuit reads, whose
+    /// members are the parameters a one-sigma draw there moves, each
+    /// scaled by its move (#100). This is how a PDK such as sky130 states
+    /// mismatch (`agauss` in its model cards). A site that moves no
+    /// parameter (sky130's `mc_mm_switch=0`) is no group, and no group at
+    /// all is an empty table, never the unit-variance fallback. The live
+    /// values are nominal again on return.
+    pub fn siteVariations(p: *Planner) !core.query.Variations {
+        const live = p.nl.live;
+        std.debug.assert(live.site_keys.len == live.site_ops.len);
+        var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        var labels: std.ArrayList([]const u8) = .empty;
+        var starts: std.ArrayList(u32) = .empty;
+        var params: std.ArrayList(u32) = .empty;
+        var steps: std.ArrayList(f64) = .empty;
+        try starts.append(p.sim, 0);
+        // The steps are taken from every draw at its nominal, which under
+        // `.option seed` is not the circuit's own state.
+        _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, null);
+        var base_arena = std.heap.ArenaAllocator.init(core.gpa);
+        defer base_arena.deinit();
+        var base_c = try circuitOf(p.lib, base_arena.allocator(), base_arena.allocator(), p.nl);
+        defer base_c.deinit();
+        const base_refs = try collect(base_arena.allocator(), &base_c);
+        // Only a site inside a live slot reaches a device; the others sit in
+        // model cards no instance binds (a PDK's unused bins).
+        for (live.ops) |span| for (live.site_ops, live.site_keys) |op, key| {
+            if (op < span.start or op >= span.start + span.len) continue;
+            if ((try seen.getOrPut(p.scratch, key)).found_existing) continue;
+            _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, OneSigma{ .site = key });
+            const first = params.items.len;
+            // ponytail: one rebuild per site. The probe's slot-to-parameter
+            // map would skip it, but refuses sky130's zero slots (#130).
+            var arena = std.heap.ArenaAllocator.init(core.gpa);
+            defer arena.deinit();
+            var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
+            defer c.deinit();
+            if (!sameTopology(p.nominal, &c)) return p.refuse("", "a one-sigma mismatch draw that changes the topology");
+            for (base_refs, try collect(arena.allocator(), &c), 0..) |x, y, ord| {
+                const step = y.get() - x.get();
+                if (step == 0) continue;
+                try params.append(p.sim, @intCast(ord));
+                try steps.append(p.sim, step);
+            }
+            if (params.items.len == first) continue;
+            const r = p.refs[params.items[first]];
+            const card = core.query.CardRef.lookup(p.cards, r.type, r.index) orelse "?";
+            try labels.append(p.sim, try std.fmt.allocPrint(p.sim, "{s}@{s}", .{ card, r.param_name }));
+            try starts.append(p.sim, @intCast(params.items.len));
+        };
+        _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, null);
+        std.debug.assert(starts.items.len == labels.items.len + 1);
+        return .{ .labels = labels.items, .starts = starts.items, .params = params.items, .sigmas = steps.items };
+    }
+
     /// The value parameter `ord` has in the open row.
     fn current(p: *Planner, ord: u32) f64 {
         const at = p.row_at[ord];
@@ -1090,6 +1146,30 @@ pub fn drawOnce(scratch: std.mem.Allocator, nl: *Netlist) !void {
     var stack: std.ArrayList(expr.Val) = .empty;
     _ = try nl.setLive(scratch, &stack, nl.live.nominal, TrialDraw{ .trial = .{ .sampler = &sampler, .trial = 1, .index = 0 } });
 }
+
+/// Holds every distribution call at its nominal except those at `site`,
+/// which sit one sigma above it: a uniform's half range over sqrt(3), a
+/// `limit`'s whole range (`Planner.siteVariations`).
+const OneSigma = struct {
+    site: u64,
+
+    /// Asserts that `args` holds at least the nominal value.
+    pub fn sample(self: OneSigma, site: u64, f: expr.Fn, args: []const f64) f64 {
+        std.debug.assert(args.len >= 1);
+        const nom = args[0];
+        if (site != self.site) return nom;
+        const width = if (args.len > 1) args[1] else 0;
+        const gaussian = f == .agauss or f == .gauss;
+        const sigmas = if (gaussian and args.len > 2 and args[2] != 0) args[2] else 1;
+        return nom + switch (f) {
+            .agauss => width / sigmas,
+            .gauss => nom * width / sigmas,
+            .aunif => width / @sqrt(3.0),
+            .unif => nom * width / @sqrt(3.0),
+            else => width, // else: `limit`; only distribution calls reach a sampler
+        };
+    }
+};
 
 /// One Monte Carlo trial of a sweep.
 pub const Trial = struct {

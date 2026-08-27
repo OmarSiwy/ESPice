@@ -253,12 +253,21 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
     var tuner: ?*variants.Tuner = null;
-    // Variation groups for the mismatch and sensitivity cards.
+    // Variation groups for the mismatch and sensitivity cards: the deck's
+    // `.variation` block, else the distribution calls in its models and
+    // parameters (a PDK's mismatch), else `dcmatch`'s Pelgrom-or-unit
+    // fallback, said aloud.
     var card_opts = deck_opts;
-    if (nl.deck.variations.len != 0) for (nl.deck.analyses) |a| switch (a.kind) {
+    for (nl.deck.analyses) |a| switch (a.kind) {
         .dcmatch, .acmatch, .dcsens => {
+            if (nl.deck.variations.len == 0 and nl.live.site_keys.len == 0) {
+                if (!@import("builtin").is_test) std.log.warn("variants: {s}: no .variation block and no agauss/gauss/unif/aunif/limit in a model or parameter, so each parameter takes its Pelgrom sigma, or unit variance without one", .{a.line});
+                break;
+            }
             var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, "");
-            card_opts.variations = try planner.variations();
+            card_opts.variations = if (nl.deck.variations.len != 0) try planner.variations() else try planner.siteVariations();
+            if (nl.deck.variations.len == 0 and card_opts.variations.labels.len == 0 and !@import("builtin").is_test)
+                std.log.warn("variants: {s}: no distribution call moves a device parameter (a PDK corner without its mismatch switch?), so the mismatch is zero", .{a.line});
             break;
         },
         else => {},

@@ -863,13 +863,13 @@ fn seedOption(line: []const u8) bool {
     return std.mem.startsWith(u8, line, ".opt") and setsKey(line, "seed");
 }
 
-/// An analysis card (lowercased) with a `MONTE=` sweep.
-fn monteSweep(line: []const u8) bool {
-    if (line.len == 0 or line[0] != '.') return false;
+/// The analysis a card (lowercased) runs; null for any other card.
+fn analysisOf(line: []const u8) ?Kind {
+    if (line.len == 0 or line[0] != '.') return null;
     // `cardOf` takes the head without its dot.
     const head = line[1 .. std.mem.indexOfAny(u8, line, " \t") orelse line.len];
-    const card = cardOf(head) orelse return false;
-    return card == .analysis and setsKey(line, "monte");
+    const card = cardOf(head) orelse return null;
+    return if (card == .analysis) card.analysis else null;
 }
 
 /// Whether `line` (lowercased) holds `key=` with `key` a whole word.
@@ -1063,7 +1063,7 @@ fn Reader(comptime S: type) type {
             // A MONTE sweep draws the distributions per trial, so the models
             // read next (a PDK's shared bins) keep their sites: the analysis
             // cards are read after them (#100).
-            for (directive_lines.items) |i| if (monteSweep(r.lines.items[i])) {
+            for (directive_lines.items) |i| if (analysisOf(r.lines.items[i]) != null and setsKey(r.lines.items[i], "monte")) {
                 r.monte = true;
                 break;
             };
@@ -1076,6 +1076,16 @@ fn Reader(comptime S: type) type {
                 if (seedOption(r.lines.items[i])) {
                     r.monte = true;
                     r.draw_seed = true;
+                    break;
+                }
+            };
+            // `.dcmatch`, `.acmatch` and `.dcsens` without a `.variation`
+            // block read the mismatch off the distribution calls
+            // (`variants.Planner.siteVariations`), so those keep sites too.
+            if (!r.monte) for (directive_lines.items) |i| {
+                const kind = analysisOf(r.lines.items[i]) orelse continue;
+                if (kind == .dcmatch or kind == .acmatch or kind == .dcsens) {
+                    r.monte = true;
                     break;
                 }
             };
