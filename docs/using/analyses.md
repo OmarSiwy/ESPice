@@ -104,7 +104,10 @@ call in the models and parameters is one group, sized by a one-sigma draw
 at that call: this is how a PDK such as sky130 states mismatch, so set its
 mismatch switch (`.param mc_mm_switch=1`). With neither, each parameter
 takes the model's Pelgrom sigma, or unit variance, and a warning says so.
-Plot `DC Mismatch`: `total_3sigma` and one `<card>@<param>`
+A `.variation` sigma may be an expression over global `.param`s and the
+device's own `w`, `l` and `m`, evaluated per device:
+`nmos nch vto='avt*1u/sqrt(w*l)'` is Pelgrom scaling (`'expr' %` makes it
+relative). Plot `DC Mismatch`: `total_3sigma` and one `<card>@<param>`
 column per contribution.
 
 ```text

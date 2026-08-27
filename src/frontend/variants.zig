@@ -519,7 +519,7 @@ pub const Planner = struct {
             for (targets.ords[targets.starts[i]..targets.starts[i + 1]], targets.keys[targets.starts[i]..targets.starts[i + 1]]) |ord, key| {
                 const base = p.current(ord);
                 const u = trial.uniform(key);
-                const spread = if (v.relative) v.value * base else v.value;
+                const spread = try p.spreadOf(v, ord, base);
                 const x = switch (v.dist) {
                     .gauss => base + spread * normalQuantile(u),
                     .unif => base + spread * (2 * u - 1),
@@ -574,7 +574,7 @@ pub const Planner = struct {
             if (ords.len == 0) continue;
             for (ords) |ord| {
                 const r = p.refs[ord];
-                const spread = if (v.relative) v.value * r.get() else v.value;
+                const spread = try p.spreadOf(v, ord, r.get());
                 try params.append(p.sim, ord);
                 try sigmas.append(p.sim, if (v.dist == .unif) spread / @sqrt(3.0) else spread);
                 if (!v.per_device) continue;
@@ -644,6 +644,29 @@ pub const Planner = struct {
         _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, null);
         std.debug.assert(starts.items.len == labels.items.len + 1);
         return .{ .labels = labels.items, .starts = starts.items, .params = params.items, .sigmas = steps.items };
+    }
+
+    /// Row `v`'s sigma (or half range) at parameter `ord` whose value is
+    /// `base`: its number, or its expression over the device's `w`, `l`
+    /// and `m`, times `base` when relative. `UnsupportedCard` when the
+    /// expression is not finite there (a `w` or `l` the device lacks).
+    fn spreadOf(p: *Planner, v: netlist.Variation, ord: u32, base: f64) !f64 {
+        var spread = v.value;
+        if (v.sigma.len != 0) {
+            const r = p.refs[ord];
+            var at: [netlist.Variation.sigma_names.len]f64 = undefined;
+            for (netlist.Variation.sigma_names, &at) |name, *x| x.* = p.instanceValue(r, name) orelse
+                if (name[0] == 'm') p.instanceValue(r, "mfactor") orelse 1 else std.math.nan(f64);
+            spread *= try expr.eval(p.scratch, &p.stack, p.nl.exprOps(v.sigma), p.nl.consts, &at, null);
+            if (!std.math.isFinite(spread)) return p.refuse(v.param, "a .variation sigma that is not a finite number at this device");
+        }
+        return if (v.relative) spread * base else spread;
+    }
+
+    /// Instance parameter `name` of the device that owns `r`, or null.
+    fn instanceValue(p: *Planner, r: ParamRef, name: []const u8) ?f64 {
+        const ord = p.paramRef(r.type, r.index, name) catch return null;
+        return p.refs[ord].get();
     }
 
     /// The value parameter `ord` has in the open row.

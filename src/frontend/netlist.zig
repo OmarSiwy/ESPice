@@ -154,6 +154,14 @@ pub const Variation = struct {
     /// nominal when `relative`.
     value: f64,
     relative: bool,
+    /// A `.variation` sigma written as an expression: its postfix in
+    /// `Netlist.ops`, evaluated per device with `live` = that device's
+    /// `w`, `l` and `m` (`sigma_names`), then times `value` (1, or 0.01
+    /// with `%`). Empty for a number, which `value` holds alone.
+    sigma: Span = .{},
+
+    /// The instance values a sigma expression reads, in `live` order.
+    pub const sigma_names = [_][]const u8{ "w", "l", "m" };
 
     /// Normal, uniform over ±value, or one of the two extremes.
     pub const Dist = enum(u8) { gauss, unif, limit };
@@ -2134,10 +2142,50 @@ fn Reader(comptime S: type) type {
                 if (element) letter = head[0] else model = f.next() orelse return r.failed(line, error.ParseError);
                 while (f.next()) |key| {
                     if (!F.isWord(key) or !f.takeEq()) return r.failed(line, error.ParseError);
-                    const v = try r.percentValue(&f) orelse return r.failed(line, error.ParseError);
-                    try r.variations.append(r.arena, .{ .per_device = local or element, .dist = .gauss, .model = model, .letter = letter, .param = key, .value = v.value, .relative = v.relative });
+                    const t = f.peek() orelse return r.failed(line, error.ParseError);
+                    const plain = F.isWord(t) and S.parseNum(if (t[t.len - 1] == '%') t[0 .. t.len - 1] else t) != null;
+                    var row: Variation = .{ .per_device = local or element, .dist = .gauss, .model = model, .letter = letter, .param = key, .value = 1, .relative = false };
+                    if (plain) {
+                        const v = try r.percentValue(&f) orelse return r.failed(line, error.ParseError);
+                        row.value = v.value;
+                        row.relative = v.relative;
+                    } else {
+                        row.sigma = try r.sigmaExpr(f.next().?, line);
+                        // `'expr' %`: the expression is a percentage.
+                        if (f.nextByte() == '%') {
+                            _ = f.next();
+                            row.value = 0.01;
+                            row.relative = true;
+                        }
+                    }
+                    try r.variations.append(r.arena, row);
                 }
             }
+        }
+
+        /// A `.variation` sigma written as `'expr'`, `{expr}` or a bare
+        /// name: its postfix over the global `.param`s at their nominal
+        /// values and the device's `w`, `l`, `m` (`Variation.sigma_names`,
+        /// `m` also as `mult`), kept as `.live` ops 0..2. Refuses a name it
+        /// cannot resolve and a distribution call.
+        fn sigmaExpr(r: *R, t: []const u8, line: []const u8) Error!Span {
+            const mark = r.scratch.mark();
+            defer r.scratch.reset(mark);
+            try expr.compileAll(S.parseNum, r.arena, &r.scratch, if (F.isWord(t)) t else F.body(t));
+            const slot = std.StaticStringMap(u32).initComptime(.{ .{ "w", 0 }, .{ "l", 1 }, .{ "m", 2 }, .{ "mult", 2 } });
+            for (r.scratch.ops.items[mark.ops..]) |*op| if (op.code == .ident) {
+                if (slot.get(r.scratch.names.items[op.a])) |k| op.* = .{ .code = .live, .a = k };
+            };
+            const start = r.ops.items.len;
+            const sites = r.site_ops.items.len;
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            try r.subst(mark.ops, r.scratch.ops.items.len, &top, &r.global_scopes, 0);
+            const ops = r.ops.items[start..];
+            const probe = try expr.fold(r.arena, &r.stack, ops, r.consts.items, false, &.{ 1, 1, 1 });
+            var drawn = r.site_ops.items.len != sites;
+            for (ops) |op| drawn = drawn or (op.code == .call and expr.isDistribution(@fromBackingInt(@intCast(op.a))));
+            if (!probe.known or drawn) return r.failed(line, error.ParseError);
+            return .{ .start = @intCast(start), .len = @intCast(ops.len) };
         }
 
         /// A number, optionally followed by (or ending in) `%`.

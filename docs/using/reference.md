@@ -259,7 +259,7 @@ are read as measurements too:
 |---|---|---|
 | `.step` | `.step [lin\|dec\|oct] [param] name start stop step`, or `... list v1 v2 ...` | reruns every analysis per point; `name` is a parameter, `temp` or a source/element |
 | `.data` / `.enddata` | `.data name p1 p2 ... v11 v12 ... .enddata` | HSPICE table for `SWEEP DATA=name` (also `MER`/`LAM` file forms) |
-| `.variation` / `.end_variation` | `.variation .local_variation .element_variation r r=5 % ...` | HSPICE variation block for Monte Carlo and mismatch |
+| `.variation` / `.end_variation` | `.variation .local_variation .element_variation r r=5 % ...` | HSPICE variation block for Monte Carlo and mismatch; a sigma may be `'expr'` over `.param`s and the device's `w`, `l`, `m` |
 | `.mc`, `.montecarlo` | `.mc N [sigma]` | see [analyses](analyses.md#mc) |
 
 On any analysis card, HSPICE's `SWEEP` tail runs the card once per point:

@@ -28,6 +28,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `bench-suites -Dsuite=cmcqa`: PSP parameter cards keep their exponent signs (`NSUBO=3.0E+23` was read as `3.0E`) (#18).
 - `zig build test-gpu` runs one deck at a time; eight concurrent CUDA contexts ran latency-bound decks 9x slower and into the timeout (#15).
 - `.dcmatch`, `.acmatch` and `.dcsens` without a `.variation` block read a PDK's mismatch from the `agauss`-style calls in its models; sky130 fell back to unit variance, now a warning when nothing else applies (#100).
+- A `.variation` sigma may be an expression over `.param`s and the device's `w`, `l` and `m`, for Pelgrom scaling per device (#100).
 - A `MONTE=` sweep draws the `agauss`/`gauss`/`unif`/`aunif` calls inside `.model` cards per trial; sky130's
   `*_mm` mismatch ran nominal in every trial (#100).
 - API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change

@@ -202,6 +202,7 @@ PASS	fixtures/dcmatch/divider_0_1000.sp
 PASS	fixtures/dcmatch/divider_10_1000.sp
 PASS	fixtures/dcmatch/divider_1_0p001.sp
 PASS	fixtures/dcmatch/high_resistance.sp
+PASS	fixtures/dcmatch/pelgrom_expression.sp
 PASS	fixtures/dcmatch/sky130_pdk_mismatch.sp
 PASS	fixtures/dcmatch/unit_source.sp
 PASS	fixtures/dcmatch/zero_source.sp
