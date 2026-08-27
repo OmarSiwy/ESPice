@@ -74,7 +74,8 @@ Values:
 per point; complex columns get an `(imag)` column after them. It is the
 format the [Learn SPICE](../learn/index.md) chapters show. `csv` writes
 one plot per file with a header row; a complex column `v(out)` becomes
-`v(out)_re` and `v(out)_im`:
+`v(out)_re` and `v(out)_im`. A name with a comma or a quote in it, such as
+`.lin`'s `S(1,1)`, is quoted as RFC 4180 asks (`"S(1,1)_re"`):
 
 ```text
 frequency_re,frequency_im,i(v1)_re,i(v1)_im,v(in)_re,v(in)_im,v(out)_re,v(out)_im
@@ -96,13 +97,15 @@ $ head -3 lc.s2p
 1e6 1.9921236660280783e-8 9.96883205564205e-7 9.99800389223915e-1 -1.9979532194577303e-2 9.99800389223915e-1 -1.9979532194577303e-2 1.9921236660280783e-8 9.96883205563849e-7
 ```
 
-CITIfile writes the frequency list and one real-imaginary `DATA` block per
-S-parameter.
+CITIfile declares `VAR FREQ` and one real-imaginary `DATA` line per
+S-parameter in its header, lists the frequencies, then holds one
+`BEGIN`...`END` block per `DATA`, in header order. scikit-rf reads it.
 
 ### PSF, FSDB and SST2
 
 `psf` is Cadence's PSF ASCII: a multi-point plot writes its first variable
-as the SWEEP and the rest as TRACEs. `fsdb` and `sst2` follow the record
+as the SWEEP and the rest as TRACEs. Quotes and backslashes in the title
+and names are escaped with a backslash. `fsdb` and `sst2` follow the record
 structure of those formats only. FSDB proper is a closed Synopsys format,
 so vendor tools that need `libfsdb` will not read ESPice's files; SST2
 holds at most 64 variables and is untested against HSPICE's readers.

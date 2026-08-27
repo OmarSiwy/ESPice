@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- CSV quotes headers such as `S(1,1)_re`, PSF escapes quotes and backslashes, and CITIfile declares `VAR FREQ` and every `DATA` up front with one `BEGIN`/`END` block each, so scikit-rf reads it (#61).
 - `.meas tran_cont x find v(a) at=1n` (and DERIV) prints its one value instead of looping forever (#68).
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - `--backend cuda` evaluates BSIM4 (LEVEL 14/54, sky130), VBIC and MOS levels 1/2/3/6/9 on the GPU: held variables and limiting now live in device state; device ABI 27 (#140).
