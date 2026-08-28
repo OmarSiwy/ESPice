@@ -145,11 +145,14 @@ pub const Session = struct {
         assert(self.stream != null);
         const s = self.stream.?;
         defer self.abortStream();
+        const want = @as(u64, npoints) * columns * @sizeOf(f64) * @as(u64, if (s.complex) 2 else 1);
+        // A pathless stream counts what it dropped (#88).
+        if (s.atomic == null and s.discard.fullCount() != want) return error.DataLengthMismatch;
         if (s.atomic) |*atomic| {
             errdefer self.state = .failed;
             const w = &s.file.interface;
             try w.flush();
-            if (s.file.logicalPos() - s.rows_at != @as(u64, npoints) * columns * @sizeOf(f64) * @as(u64, if (s.complex) 2 else 1)) return error.DataLengthMismatch;
+            if (s.file.logicalPos() - s.rows_at != want) return error.DataLengthMismatch;
             var digits: [count_width]u8 = undefined;
             try atomic.file.writePositionalAll(io, try std.fmt.bufPrint(&digits, "{d}", .{npoints}), s.count_at);
             try atomic.replace(io);
@@ -357,6 +360,17 @@ test "session: a stream without a path drops its rows and counts one plot" {
     try std.testing.expectEqual(@as(u32, 1), session.published);
     try std.testing.expectEqual(null, session.stream);
     try std.testing.expectEqual(null, try session.beginStream(std.testing.io, plot));
+}
+
+test "session: a stream without a path checks its row count too" {
+    var session = try Session.init(std.testing.allocator, .{});
+    defer session.deinit();
+    const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "Transient Analysis", .varnames = &.{ "time", "v(out)" }, .is_complex = false, .npoints = 0, .data = &.{} } };
+    const w = (try session.beginStream(std.testing.io, plot)).?;
+    try w.writeAll(std.mem.sliceAsBytes(&[_]f64{ 0, 1, 2 }));
+    try std.testing.expectError(error.DataLengthMismatch, session.endStream(std.testing.io, 2, 2));
+    try std.testing.expectEqual(@as(u32, 0), session.published);
+    try std.testing.expectEqual(null, session.stream);
 }
 
 test "session: an aborted stream leaves the destination as it was" {

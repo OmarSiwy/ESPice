@@ -164,8 +164,10 @@ fn optionValue(arg: []const u8, short: []const u8, long: []const u8, args: anyty
         const value = args.next() orelse return @as(?[]const u8, null);
         return if (value.len == 0) @as(?[]const u8, null) else value;
     }
-    if (std.mem.startsWith(u8, arg, long) and arg.len > long.len and arg[long.len] == '=')
-        return if (arg.len == long.len + 1) @as(?[]const u8, null) else arg[long.len + 1 ..];
+    for ([_][]const u8{ short, long }) |name| {
+        if (name.len != 0 and std.mem.startsWith(u8, arg, name) and arg.len > name.len and arg[name.len] == '=')
+            return if (arg.len == name.len + 1) @as(?[]const u8, null) else arg[name.len + 1 ..];
+    }
     return null;
 }
 
@@ -185,6 +187,8 @@ test "optionValue: separate, joined, missing and empty values" {
     try t.expect(optionValue("-r", "-r", "--rawfile", &empty).? == null);
     try t.expectEqualStrings("a=b", optionValue("--rawfile=a=b", "-r", "--rawfile", &args).?.?);
     try t.expect(optionValue("--rawfile=", "-r", "--rawfile", &args).? == null);
+    // The single-dash name takes the joined form too (#88).
+    try t.expectEqualStrings("hspice", optionValue("-tokenizer=hspice", "-tokenizer", "--tokenizer", &args).?.?);
     // Not this flag: a longer flag sharing the prefix, a bare value, and an
     // empty short name that must not match an empty argument.
     try t.expect(optionValue("--rawfilex", "-r", "--rawfile", &args) == null);
