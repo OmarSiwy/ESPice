@@ -18,7 +18,7 @@ const analyses = std.StaticStringMap(Kind).initComptime(.{
     .{ "tran", .tran },       .{ "ac", .ac },                .{ "dc", .dc },
     .{ "fft", .fft },         .{ "trannoise", .tran_noise }, .{ "dcmatch", .dcmatch },
     .{ "acmatch", .acmatch }, .{ "lstb", .lstb },            .{ "phasenoise", .phasenoise },
-    .{ "ptdnoise", .pnoise },
+    .{ "ptdnoise", .pnoise }, .{ "sp", .sp },
 });
 /// `.lstb`'s margins-plot columns, each a measure of its own:
 /// `.meas lstb pm phase_margin` [CR .MEASURE LSTB].
@@ -77,7 +77,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
             try trigTarg(arena, &m.second, analysis, rest[t + 1 ..], ctx);
             for ([_]Clause{ m.first, m.second }) |c| {
                 if (c.rise == core.measure_unset and c.fall == core.measure_unset and
-                    c.cross == core.measure_unset and c.at == core.measure_no_at) return error.ParseError;
+                    c.cross == core.measure_unset and !hasAt(c)) return error.ParseError;
             }
             // HSPICE: a TARG without TD inherits TRIG's [CR .MEASURE (Rise,
             // Fall, Delay, and Power Measurements)]. ngspice keeps it at 0.
@@ -110,7 +110,7 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
                 if (!std.mem.eql(u8, rest[1].lhs, "at") or rest[1].rhs == null) return error.ParseError;
                 try stdParams(arena, &m.first, analysis, rest[1..k], ctx);
             }
-            if (m.first.at == core.measure_no_at) {
+            if (!hasAt(m.first)) {
                 // A bare FIND reads a one-row plot (`.dcmatch`, `.lstb` margins).
                 if (k == rest.len) {
                     if (func != .find or (analysis != .dcmatch and analysis != .lstb)) return error.ParseError;
@@ -144,6 +144,11 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
 fn hasRef(c: Clause, field: core.MeasureRef.Field) bool {
     for (c.refs) |r| if (r.field == field) return true;
     return false;
+}
+
+/// Whether `c` has an AT=, a number or an earlier result's name.
+fn hasAt(c: Clause) bool {
+    return c.at != core.measure_no_at or hasRef(c, .at);
 }
 
 fn find(w: []const Word, key: []const u8) ?usize {
@@ -185,7 +190,7 @@ fn vector(arena: std.mem.Allocator, c: *Clause, analysis: Kind, name: []const u8
         c.vectype = lstb_types.get(name[5 .. name.len - 1]) orelse return error.ParseError;
         return "loop_gain";
     }
-    if ((analysis != .ac and analysis != .fft) or name.len < 2 or name[0] != 'v' or name[1] == '(') return name;
+    if ((analysis != .ac and analysis != .fft and analysis != .sp) or name.len < 2 or name[0] != 'v' or name[1] == '(') return name;
     const paren = std.mem.indexOfScalar(u8, name, '(') orelse return name;
     c.vectype = name[1];
     return std.mem.concat(arena, u8, &.{ "v", name[paren..] });
@@ -377,7 +382,10 @@ pub fn parseCheck(arena: std.mem.Allocator, card: []const u8, text: []const u8, 
         if (head.len > 0) try names.append(arena, head);
         // The first word is a node; values after it are thresholds.
         while (names.items.len > 1) {
-            const v = ctx.measureValue(names.items[names.items.len - 1]) catch break;
+            const v = ctx.measureValue(names.items[names.items.len - 1]) catch |e| {
+                if (e == error.OutOfMemory) return e;
+                break;
+            };
             try levels.insert(arena, 0, v);
             _ = names.pop();
         }
@@ -591,6 +599,14 @@ test "meas cards parse like ngspice's word lists" {
     try std.testing.expectEqual(core.measure_no_at, dm.first.at);
     try std.testing.expectError(error.ParseError, parse(a, "ac s find v(out)", Ctx{}, null, true));
     try std.testing.expectEqual(.pnoise, (try parse(a, "ptdnoise n find ptdnoise_density at=1e3", Ctx{}, null, true)).analysis);
+    // `.meas sp` reads the S-parameter plot, `vr(..)` its real part (#69).
+    const sp = try parse(a, "sp s11 find vr(s_1_1) at=1e6", Ctx{}, null, false);
+    try std.testing.expectEqual(.sp, sp.analysis);
+    try std.testing.expectEqualStrings("v(s_1_1)", sp.first.vec);
+    try std.testing.expectEqual('r', sp.first.vectype);
+    // HSPICE: AT= may name an earlier result, in FIND, DERIV and TRIG (#69).
+    for ([_][]const u8{ "tran v find v(a) at=t50", "tran v deriv v(a) at=t50", "tran d trig at=t50 targ v(b) val=1 rise=1" }) |text|
+        try std.testing.expectEqual(.at, (try parse(a, text, Ctx{}, null, true)).first.refs[0].field);
     // HSPICE .check: GLOBAL_LEVEL thresholds, one measure per node.
     var checks: std.ArrayList(core.Measure) = .empty;
     var global: ?Levels = null;
@@ -646,6 +662,16 @@ test "malformed measure cards are a ParseError, not a crash" {
         .{ "noise", "x" },
     }) |c| try std.testing.expectError(error.ParseError, parseCheck(a, c[0], c[1], Ctx{}, &global, 1, &out));
     try std.testing.expectEqual(0, out.items.len);
+    // An allocation failure is not a node name (#69).
+    const Oom = struct {
+        fn measureValue(_: @This(), _: []const u8) !f64 {
+            return error.OutOfMemory;
+        }
+        fn measureExpr(_: @This(), _: []const u8) ![]const core.MeasureOp {
+            return error.OutOfMemory;
+        }
+    };
+    try std.testing.expectError(error.OutOfMemory, parseCheck(a, "dout", "a 1 (1 1 1)", Oom{}, &global, 1, &out));
     // The forms around those that do parse.
     try parseCheck(a, "dout", "a (1 1)", Ctx{}, &global, 1, &out);
     try std.testing.expectEqual(core.Check{ .lo = 1.65, .hi = 1.65, .expect = out.items[0].check.expect }, out.items[0].check);

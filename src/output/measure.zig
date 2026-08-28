@@ -32,6 +32,7 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
                 .tran => "Transient",
                 .tran_noise => "Transient Noise",
                 .ac => "AC",
+                .sp => "SP",
                 .fft => "FFT",
                 .dcmatch => "DC Mismatch",
                 .acmatch => "AC Mismatch",
@@ -221,7 +222,7 @@ fn evaluate(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
         },
         .param => {
             const v = try defined(paramValue(m.expr, w.values));
-            try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 5) });
             return v;
         },
         .err, .err1, .err2, .err3 => {
@@ -330,8 +331,11 @@ fn resolve(c: Clause, values: []const f64) !Clause {
 
 /// A `_CONT` card: the event it names and every later one, printed as
 /// `name[k]`. Returns the first; OutOfInterval when there is none.
-fn evaluateCont(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
-    assert(m.cont);
+fn evaluateCont(out: *Writer, card: core.Measure, w: Wave) EvalError!f64 {
+    assert(card.cont);
+    var m = card;
+    m.first = try resolve(card.first, w.values);
+    m.second = try resolve(card.second, w.values);
     var first: f64 = nan;
     var buf: [96]u8 = undefined;
     var k: i32 = 0;
@@ -615,7 +619,7 @@ const Wave = struct {
             // A DC sweep may start anywhere: ngspice keeps its origin in td.
             if (dc and i == 0) td = xv;
             if ((w.analysis == .tran or w.analysis == .tran_noise) and xv < td) continue;
-            if (w.analysis == .ac and xv < 0) continue;
+            if ((w.analysis == .ac or w.analysis == .sp) and xv < 0) continue;
             if (dc) {
                 if (xv < c.from or xv > c.to) continue;
             } else {
@@ -1085,7 +1089,7 @@ test "measurements match ngspice on a sampled ramp" {
         \\mx                  =  3.000000e+00 at=  3.000000e+00
         \\s                   =  -1.000000e+00
         \\e                   =  9.166667e-01
-        \\p                   =  4.000000e+00
+        \\p                   =  4.00000e+00
         \\
     , out.buffered());
     try std.testing.expect(std.mem.indexOf(u8, err.buffered(), "gone") != null);
@@ -1113,6 +1117,19 @@ test "a _CONT FIND or DERIV at a fixed AT= has one event and prints one line" {
         \\d[1]                =  -1.000000e+00
         \\
     , out.buffered());
+}
+
+test "AT= naming an earlier result reads that result, _CONT too" {
+    const t50: []const core.MeasureOp = &.{.{ .measure = 0 }};
+    const at_t50: []const core.MeasureRef = &.{.{ .field = .at, .expr = t50 }};
+    const cards = [_]core.Measure{
+        .{ .analysis = .tran, .name = "t", .func = .when, .first = .{ .vec = "v(a)", .val = 2.5 } },
+        .{ .analysis = .tran, .name = "v", .func = .find, .first = .{ .vec = "v(b)", .refs = at_t50 } },
+        .{ .analysis = .tran, .name = "c", .func = .find, .cont = true, .first = .{ .vec = "v(b)", .refs = at_t50 } },
+    };
+    var values: [cards.len]f64 = undefined;
+    evaluateAll(&cards, .tran, ramp, &values);
+    try std.testing.expectEqualSlices(f64, &.{ 2.5, 1.5, 1.5 }, &values);
 }
 
 test "every function over a result with no samples reads NaN or zero, never panics" {

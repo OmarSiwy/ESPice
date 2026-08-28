@@ -220,14 +220,14 @@ Other names are ignored (the HSPICE dialect warns about each).
 teaches them.
 
 ```text
-.meas tran|ac|dc|fft|trannoise|dcmatch|acmatch|lstb|phasenoise|ptdnoise name FUNCTION ...
+.meas tran|ac|dc|sp|fft|trannoise|dcmatch|acmatch|lstb|phasenoise|ptdnoise name FUNCTION ...
 .meas tran_cont|ac_cont|dc_cont name ...
 ```
 
 | Function | Form |
 |---|---|
 | `TRIG` ... `TARG` (also `DELAY`) | `TRIG sig VAL= RISE\|FALL\|CROSS= [TD=] TARG sig VAL= ...` |
-| `FIND`, `WHEN` | `FIND sig AT=x`, `FIND sig WHEN sig2=v`, `WHEN sig=v` |
+| `FIND`, `WHEN` | `FIND sig AT=x`, `FIND sig WHEN sig2=v`, `WHEN sig=v`; `AT=` may name an earlier result |
 | `AVG`, `RMS`, `INTEG` (`INTEGRAL`), `MIN`, `MAX`, `PP`, `MIN_AT`, `MAX_AT` | `func sig [FROM= TO=]` |
 | `DERIV` (`DERIVATIVE`) | `DERIV sig AT=x` or `WHEN ...` |
 | `PARAM` | `PARAM='expr'` over earlier results and parameters |
