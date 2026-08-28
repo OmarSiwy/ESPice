@@ -6,6 +6,10 @@ const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
+/// The plot's name and scale column (`session.schemaOf` reports them).
+pub const plotname = "AC Analysis";
+pub const scale = "frequency";
+
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Ac;
 
@@ -40,7 +44,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const omegas = axis[n_points..];
     opts.sweep.fill(freqs, omegas);
 
-    const names = try root.probeNames(ctx, "frequency");
+    const names = try root.probeNames(ctx, scale);
     const row_len = names.len * 2;
     // A streamed run writes each row to `ctx.stream` and keeps only the one
     // being built, in scratch; otherwise the rows are the result.
@@ -63,7 +67,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     return .{
-        .plotname = "AC Analysis",
+        .plotname = plotname,
         .varnames = names,
         .is_complex = true,
         .npoints = n_points,

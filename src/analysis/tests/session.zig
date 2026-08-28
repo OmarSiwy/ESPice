@@ -266,3 +266,38 @@ test "a failed implicit OP's own error is the session failure, not DependencyFai
     const many: [*]requests.QueryId = &ids;
     try t.expectError(error.TooManyQueries, s.append(jobs[0..huge], many[0..huge]));
 }
+
+test "schemaOf names the plot and scale column a transient and an AC sweep publish" {
+    const t = std.testing;
+    const schemaOf = @import("../session.zig").schemaOf;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, GROUND });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    const deck = bareDeck(&.{vin}, &.{"v(vin)"});
+    var s = Session.init(t.allocator, t.io, &prepared, &deck, .{});
+    defer s.deinit();
+    const jobs = [_]requests.Query{
+        .{ .tran = .{ .t_stop = 1e-9 } },
+        .{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 1e3 } } },
+    };
+    var ids: [jobs.len]requests.QueryId = undefined;
+    _ = try s.append(&jobs, &ids);
+    for (jobs, ids) |job, id| {
+        var steps: u32 = 0;
+        while (!(try s.info(id)).status.terminal()) : (steps += 1) {
+            try t.expect(steps < 100_000);
+            _ = try s.advance(id);
+        }
+        const res = try s.result(id);
+        const schema = try schemaOf(t.allocator, &prepared, &deck, job);
+        try t.expectEqualStrings(res.plotname, schema.plotname);
+        try t.expectEqualStrings(res.varnames[0], schema.scale);
+    }
+    // A query that does not stream names no plot.
+    try t.expectEqual(0, (try schemaOf(t.allocator, &prepared, &deck, .{ .op = .{} })).plotname.len);
+}

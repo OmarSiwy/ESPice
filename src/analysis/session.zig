@@ -678,10 +678,19 @@ test copyValue {
     try std.testing.expectEqualSlices(f64, &.{ 2e3, 3e3 }, copy.hb.extra_tones);
     try std.testing.expectEqualSlices(u16, &.{ 2, 3 }, copy.hb.extra_harmonics);
     // An empty slice copies to an empty slice.
+    const tran = @import("tran/tran.zig");
+    const ac = @import("ac/ac.zig");
+    const streamable = switch (query) {
+        .tran => |o| !o.snapshot,
+        .ac => true,
+        else => false, // else: only a transient or AC sweep streams its rows
+    };
     const plain = try copyValue(arena.allocator(), requests.Query{ .hb = .{ .f0 = 1e3 } });
     try std.testing.expectEqual(@as(usize, 0), plain.hb.extra_tones.len);
 }
 
+        .plotname = if (!streamable) "" else if (query == .tran) tran.plotname else ac.plotname,
+        .scale = if (!streamable) "" else if (query == .tran) tran.scale else ac.scale,
 test prerequisite {
     try std.testing.expectEqual(null, prerequisite(.{ .op = .{} }));
     try std.testing.expectEqual(null, prerequisite(.{ .tran = .{ .t_stop = 1e-6, .uic = true } }));

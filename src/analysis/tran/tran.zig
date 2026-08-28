@@ -14,6 +14,10 @@ const W = std.simd.suggestVectorLength(f64) orelse 8;
 // Re-exported so the post-processors and tests import one file; each is
 // documented in types.zig.
 const tran_types = @import("types.zig");
+
+/// The swept plot's name and scale column (`session.schemaOf` reports them).
+pub const plotname = "Transient Analysis";
+pub const scale = "time";
 /// See types.zig `Method`.
 pub const Method = tran_types.Method;
 /// See types.zig `Options`.
@@ -696,9 +700,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         };
     }
 
-    const names = try root.probeNames(ctx, "time");
+    const names = try root.probeNames(ctx, scale);
     return .{
-        .plotname = "Transient Analysis",
+        .plotname = plotname,
         .varnames = names,
         .is_complex = false,
         .npoints = wf.len,

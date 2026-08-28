@@ -501,8 +501,8 @@ pub const Problem = struct {
     /// first and that nothing reads afterwards (no `.meas` over it, no
     /// `.save` or `.stim`, no optimization) writes its rows straight to a binary raw
     /// output, or drops them without one, instead of keeping them all in
-    /// memory. Its Result then has empty `data`. Plotname and columns are the
-    /// ones `tran.run` and `ac.run` publish; `endStream` checks the row count.
+    /// memory. Its Result then has empty `data`. Plotname and scale column
+    /// come from `analysis.schemaOf`; `endStream` checks the row count.
     fn openStream(self: *Problem) !void {
         const deck = &self.prepared.deck;
         if (!self.session.config.final_plan or self.next_output != 0 or self.streaming != null) return;
@@ -512,20 +512,17 @@ pub const Problem = struct {
         if ((try self.session.info(id)).status != .pending) return;
         const job = try self.session.query(id);
         for (deck.measures) |m| if (m.analysis == job) return;
-        const plotname, const scale = switch (job) {
-            .tran => |o| if (o.snapshot) return else .{ "Transient Analysis", "time" },
-            .ac => .{ "AC Analysis", "frequency" },
-            else => return,
-        };
+        const schema = try analysis.schemaOf(self.allocator, &self.prepared.circuit, deck, job);
+        if (schema.plotname.len == 0) return;
         switch (job) {
             inline else => |o| if (o.tol.temp_c != null or o.tol.variant != null) return,
         }
         const names = try self.allocator.alloc([]const u8, deck.probe_labels.len + 1);
         defer self.allocator.free(names);
-        names[0] = scale;
+        names[0] = schema.scale;
         @memcpy(names[1..], deck.probe_labels);
         const writer = try self.delivery.beginStream(self.io, .{ .title = deck.title, .result = .{
-            .plotname = plotname,
+            .plotname = schema.plotname,
             .varnames = names,
             .is_complex = job == .ac,
             .npoints = 0,

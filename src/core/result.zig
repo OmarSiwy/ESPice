@@ -9,6 +9,10 @@ pub const QuerySchema = struct {
     columns: usize,
     /// An `.sp` with no ports of its own and no deck source to drive it.
     portless: bool,
+    /// Plot name and scale column of a sweep whose rows can stream before
+    /// the run ends (a transient or AC sweep); empty for every other query.
+    plotname: []const u8 = "",
+    scale: []const u8 = "",
 };
 
 /// The column layout of a result, available before any samples exist.
