@@ -157,7 +157,7 @@ pub const Session = struct {
     pub fn append(self: *Session, jobs: []const requests.Query, ids: []QueryId) !usize {
         if (ids.len < jobs.len) return error.BufferTooSmall;
         if (jobs.len == 0) return 0;
-        const max_rows = std.math.add(usize, self.rows.len, try std.math.mul(usize, jobs.len, 2)) catch return error.TooManyQueries;
+        const max_rows = std.math.add(usize, self.rows.len, std.math.mul(usize, jobs.len, 2) catch return error.TooManyQueries) catch return error.TooManyQueries;
         if (max_rows >= std.math.maxInt(u32)) return error.TooManyQueries;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();

@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- API: queries appended through `Problem` or the C API are checked as the netlist checks them: node and branch rows in range for every analysis, temperatures above absolute zero, `xmu` in [0, 0.5], `0 <= tstart < tstop`; a batch past the row space is `TooManyQueries` (#55).
 - `.meas sp` measures the S-parameter plot, AT= may name an earlier result (`find v(a) at=t50`), PARAM prints six significant digits as ngspice does, and `.dout` reports running out of memory instead of a malformed card (#69).
 - CSV quotes headers such as `S(1,1)_re`, PSF escapes quotes and backslashes, and CITIfile declares `VAR FREQ` and every `DATA` up front with one `BEGIN`/`END` block each, so scikit-rf reads it (#61).
 - `.meas tran_cont x find v(a) at=1n` (and DERIV) prints its one value instead of looping forever (#68).

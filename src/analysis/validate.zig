@@ -66,6 +66,19 @@ fn tolerance(t: @import("core").numerics.Tolerances) !void {
         try positive(@field(t, field));
     if (t.abstol < 0 or t.vntol < 0 or t.chgtol < 0 or t.gmin < 0 or t.gmin_start < 0 or t.itl1 == 0 or t.itl2 == 0 or t.itl4 == 0)
         return error.InvalidQueryOptions;
+    if (t.temp_c) |c| try kelvin(c);
+}
+
+/// Refuses a temperature at or below absolute zero, as the frontend does.
+fn kelvin(celsius: f64) !void {
+    if (celsius <= -273.15) return error.InvalidQueryOptions;
+}
+
+/// Refuses a port whose rows are out of range or whose z0 is not positive.
+fn port(p: requests.Port, n: u32, net: bool) !void {
+    const branch_ok = p.branch < n or (net and p.branch == requests.Port.no_branch);
+    if (p.node >= n or p.neg >= n or !branch_ok or !(p.z0 > 0)) return error.InvalidQueryOptions;
+    if (p.balanced) |leg| if (leg.node >= n or leg.branch >= n or net) return error.InvalidQueryOptions;
 }
 
 /// Checks `query` against a circuit of `n` unknowns: finite options, valid
@@ -78,12 +91,15 @@ pub fn validate(query: requests.Query, n: u32) !void {
         inline else => |o| {
             if (!finite(o)) return error.InvalidQueryOptions;
             try tolerance(o.tol);
-            inline for (.{ "out_node", "out_neg", "osc_node", "output_node", "source_node", "ac_source_node", "probe_p", "probe_n", "input_branch", "in_branch", "drive_branch", "drive2_branch" }) |field| {
+            inline for (.{ "out_node", "out_neg", "out_pos", "osc_node", "output_node", "output_neg", "output_branch", "source_node", "ac_source_node", "probe_p", "probe_n", "probe_branch", "input_branch", "in_branch", "in_pos", "in_neg", "drive_branch", "drive2_branch", "local_gnd", "in_nodes", "input_nodes" }) |field| {
                 if (@hasField(@TypeOf(o), field)) {
-                    const node = @field(o, field);
-                    if (@typeInfo(@TypeOf(node)) == .optional) {
-                        if (node) |v| if (v >= n) return error.InvalidQueryOptions;
-                    } else if (node >= n) return error.InvalidQueryOptions;
+                    const value = @field(o, field);
+                    switch (@TypeOf(value)) {
+                        u32 => if (value >= n) return error.InvalidQueryOptions,
+                        ?u32 => if (value) |v| if (v >= n) return error.InvalidQueryOptions,
+                        ?[2]u32 => if (value) |v| for (v) |row| if (row >= n) return error.InvalidQueryOptions,
+                        else => comptime unreachable, // else: a new index field type needs its arm
+                    }
                 }
             }
             if (@hasField(@TypeOf(o), "sweep")) {
@@ -124,6 +140,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .temp => |o| {
             // The current temperature driver and numPoints are ascending only.
             if (o.t_step <= 0) return error.InvalidQueryOptions;
+            try kelvin(@min(o.t_start, o.t_stop));
             const count = try sweep(o.t_start, o.t_stop, o.t_step);
             _ = try elements(&.{ count, @as(usize, n) + 1 });
             try validate(.{ .dc = o.dc_options }, n);
@@ -135,6 +152,8 @@ pub fn validate(query: requests.Query, n: u32) !void {
         },
         .tran => |o| {
             if (o.dt_min > o.dt_init) return error.InvalidQueryOptions;
+            if (!(o.xmu >= 0) or o.xmu > 0.5) return error.InvalidQueryOptions;
+            if (!(o.t_start >= 0) or o.t_start >= o.t_stop) return error.InvalidQueryOptions;
             if (o.dt_max) |max| if (max <= 0 or max < o.dt_min) return error.InvalidQueryOptions;
             try timeStep(o.dt_min);
             try timeStep(o.dt_init);
@@ -160,11 +179,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
             try frequency(o.sweep.f_stop + @as(f64, @floatFromInt(o.n_harmonics)) * o.f_lo);
         },
         .sp => |o| {
-            for (o.ports) |port| {
-                const branch_ok = port.branch < n or (o.net and port.branch == requests.Port.no_branch);
-                if (port.node >= n or port.neg >= n or !branch_ok or port.z0 <= 0) return error.InvalidQueryOptions;
-                if (port.balanced) |leg| if (leg.node >= n or leg.branch >= n or o.net) return error.InvalidQueryOptions;
-            }
+            for (o.ports) |p| try port(p, n, o.net);
             const ports = @max(o.ports.len, 1);
             _ = try elements(&.{ o.sweep.count(), ports, ports, 2 });
         },
@@ -199,6 +214,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
             _ = try elements(&.{ o.pss_n_samples, n, n });
             try frequency(o.sweep.f_stop + @as(f64, @floatFromInt(o.n_sidebands)) * o.f_fundamental);
         },
+        .hblin => |o| for (o.ports) |p| try port(p, n, false),
         .hb => |o| {
             if (o.n_harmonics == 0 or o.subharms == 0) return error.InvalidQueryOptions;
             if (o.extra_tones.len != 0) {

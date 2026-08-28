@@ -40,6 +40,47 @@ test "query boundary checks derived frequencies, dimensions and nested controls"
     try validate(.{ .qpss = .{ .f1 = 1e3, .f2 = 1414 } }, 4);
 }
 
+test "validate: every node and branch row a driver indexes with is in range" {
+    const t = std.testing;
+    const sweep: requests.FreqSweep = .{ .f_start = 1, .f_stop = 1e3 };
+    const far = 4;
+    const ports = [_]requests.Port{ .{ .node = 1, .neg = far, .branch = 2 } };
+    const zero_z0 = [_]requests.Port{ .{ .node = 1, .neg = 0, .branch = 2, .z0 = 0 } };
+    const out_of_range = [_]requests.Query{
+        .{ .noise = .{ .out_node = 1, .sweep = sweep, .in_nodes = .{ 1, far } } },
+        .{ .tf = .{ .output_node = 1, .input_nodes = .{ far, 0 } } },
+        .{ .tf = .{ .output_node = 1, .output_neg = far } },
+        .{ .tf = .{ .output_node = 1, .output_branch = far } },
+        .{ .pz = .{ .in_pos = far } },
+        .{ .pz = .{ .in_neg = far } },
+        .{ .pz = .{ .out_pos = far } },
+        .{ .stb = .{ .sweep = sweep, .probe_p = 1, .probe_n = 2, .probe_branch = far } },
+        .{ .sens = .{ .output_node = 1, .output_neg = far } },
+        .{ .dcmatch = .{ .output_node = 1, .output_neg = far } },
+        .{ .acmatch = .{ .sweep = sweep, .output_node = 1, .output_neg = far } },
+        .{ .dcsens = .{ .output_node = 1, .output_neg = far } },
+        .{ .lstb = .{ .sweep = sweep, .probes = @splat(.{ .p = 1, .n = 2, .branch = 3 }), .local_gnd = far } },
+        .{ .hblin = .{ .f0 = 1e3, .sweep = sweep, .ports = &ports } },
+        .{ .hblin = .{ .f0 = 1e3, .sweep = sweep, .ports = &zero_z0 } },
+    };
+    for (out_of_range) |query| try t.expectError(error.InvalidQueryOptions, validate(query, far));
+    try validate(.{ .tf = .{ .output_node = 1, .input_nodes = .{ 1, 0 }, .output_branch = 3 } }, far);
+}
+
+test "validate: refuses what the frontend refuses" {
+    const t = std.testing;
+    const refused = [_]requests.Query{
+        .{ .op = .{ .tol = .{ .temp_c = -273.15 } } },
+        .{ .temp = .{ .t_start = -300, .t_stop = 0, .t_step = 1 } },
+        .{ .tran = .{ .t_stop = 1e-6, .xmu = 0.6 } },
+        .{ .tran = .{ .t_stop = 1e-6, .xmu = -0.1 } },
+        .{ .tran = .{ .t_stop = 1e-6, .t_start = -1e-9 } },
+        .{ .tran = .{ .t_stop = 1e-6, .t_start = 1e-6 } },
+    };
+    for (refused) |query| try t.expectError(error.InvalidQueryOptions, validate(query, 4));
+    try validate(.{ .tran = .{ .t_stop = 1e-6, .t_start = 5e-7, .xmu = 0, .tol = .{ .temp_c = -273 } } }, 4);
+}
+
 test "a dc sweep target resolves against the prepared card table, type included" {
     var deck: Deck = undefined;
     deck.cards = &.{
@@ -218,4 +259,10 @@ test "a failed implicit OP's own error is the session failure, not DependencyFai
     s.rows.items(.failure)[0] = error.OutOfMemory;
     try t.expectEqual(Status.dependency_failed, (try s.info(ids[0])).status);
     try t.expectEqual(error.OutOfMemory, s.failure().?);
+    // A batch past the u32 row space; only its length is read (#55).
+    const huge = std.math.maxInt(usize) / 2 + 1;
+    const one: requests.Query = .{ .op = .{} };
+    const jobs: [*]const requests.Query = @ptrCast(&one);
+    const many: [*]requests.QueryId = &ids;
+    try t.expectError(error.TooManyQueries, s.append(jobs[0..huge], many[0..huge]));
 }
