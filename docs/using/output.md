@@ -87,7 +87,9 @@ frequency_re,frequency_im,i(v1)_re,i(v1)_im,v(in)_re,v(in)_im,v(out)_re,v(out)_i
 These hold S-parameters only, so they accept only an `.sp` (or `.lin`,
 `.net`) result; anything else fails with `NotSParameterData`, and a deck
 with no ports with `NoPorts`. Touchstone needs the full S matrix, written
-in real-imaginary form at the ports' reference impedance:
+in real-imaginary form at the ports' reference impedance. Ports with
+different reference impedances write Touchstone 2.0, with each port's z0
+on the `[Reference]` line:
 
 ```text
 $ espice two_port.sp -r lc.s2p --format=touchstone

@@ -397,6 +397,25 @@ test "Problem: output validation rejects an entire append before publishing IDs"
     }
 }
 
+test "Problem: an .sp written as Touchstone records each port's reference impedance" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/ts.s2p", .{tmp.sub_path});
+    defer t.allocator.free(path);
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{
+            .data = "ports\nV1 p1 0 dc 0 ac 1 portnum 1 z0 50\nV2 p2 0 dc 0 ac 0 portnum 2 z0 75\nR1 p1 p2 60\n.sp lin 2 1meg 2meg\n.end\n",
+            .origin = "ts.sp",
+        } },
+        .output = .{ .format = .touchstone, .path = path },
+    });
+    defer p.deinit();
+    try p.run_all();
+    const written = try tmp.dir.readFileAlloc(t.io, "ts.s2p", t.allocator, .unlimited);
+    defer t.allocator.free(written);
+    try t.expect(std.mem.indexOf(u8, written, "[Reference] 50 75\n") != null);
+}
+
 test {
     _ = @import("analyses.zig");
 }

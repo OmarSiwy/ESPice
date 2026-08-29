@@ -798,10 +798,15 @@ pub const Problem = struct {
             const res = try session.result(id);
             var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
             defer timingLap(self.io, &lap, "output delivery");
-            try self.delivery.publish(self.io, .{ .title = deck_title, .result = res });
             const job = try session.query(id);
             if (job == .sp) if (job.sp.lin) |lin| if (lin.touchstone)
-                try self.writeTouchstone(lin.file, job.sp.ports, .{ .title = deck_title, .result = res });
+            // An `.sp` carries its ports' z0, which a Touchstone output records (#60).
+            var z0: std.ArrayList(f64) = .empty;
+            defer z0.deinit(self.allocator);
+            if (job == .sp) try modeZ0(self.allocator, job.sp.ports, &z0);
+            const plot: output.Plot = .{ .title = deck_title, .result = res, .z0 = z0.items };
+            try self.delivery.publish(self.io, plot);
+                try self.writeTouchstone(lin.file, plot);
         }
         return true;
     }
@@ -809,17 +814,9 @@ pub const Problem = struct {
     /// Writes a `.lin format=touchstone` result as `<file>.s<N>p` beside the
     /// deck, `file` defaulting to the deck's name without its extension
     /// (HSPICE names it after the netlist), against the ports' own z0.
-    fn writeTouchstone(self: *Problem, file: []const u8, ports: []const requests.Port, plot_in: output.Plot) !void {
-        var plot = plot_in;
-        // Mode impedances in sp.zig's `Basis` order: each port's first mode
-        // (a balanced one's differential, 2·z0), then the common modes (z0/2).
-        var z0: std.ArrayList(f64) = .empty;
-        defer z0.deinit(self.allocator);
-        for (ports) |p| try z0.append(self.allocator, if (p.balanced != null) 2 * p.z0 else p.z0);
-        for (ports) |p| if (p.balanced != null) try z0.append(self.allocator, p.z0 / 2);
-        plot.z0 = z0.items;
+    fn writeTouchstone(self: *Problem, file: []const u8, plot: output.Plot) !void {
         const stem = if (file.len > 0) file else std.fs.path.stem(self.origin);
-        const name = try std.fmt.allocPrint(self.allocator, "{s}.s{d}p", .{ stem, @max(z0.items.len, 1) });
+        const name = try std.fmt.allocPrint(self.allocator, "{s}.s{d}p", .{ stem, @max(plot.z0.len, 1) });
         defer self.allocator.free(name);
         const path = try std.fs.path.join(self.allocator, &.{ std.fs.path.dirname(self.origin) orelse ".", name });
         defer self.allocator.free(path);
@@ -827,6 +824,14 @@ pub const Problem = struct {
     }
 
     /// `allocator` behind a mutex, so parallel query arenas can share it
+    /// Appends the reference impedance of each of `ports`' modes to `z0`, in
+    /// sp.zig's `Basis` order: each port's first mode (a balanced one's
+    /// differential, 2·z0), then the common modes (z0/2).
+    fn modeZ0(gpa: std.mem.Allocator, ports: []const requests.Port, z0: *std.ArrayList(f64)) !void {
+        for (ports) |p| try z0.append(gpa, if (p.balanced != null) 2 * p.z0 else p.z0);
+        for (ports) |p| if (p.balanced != null) try z0.append(gpa, p.z0 / 2);
+    }
+
     /// without the caller having to supply a thread-safe allocator.
     fn workerAllocator(self: *Problem) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
