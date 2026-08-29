@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- C API: `espice_result_view` sets `*data` to NULL and `*len` to 0 on a NULL or stale handle too; `ESPICE_CANCELLED` is documented as reserved, since no C call cancels a query (#76).
 - `--format=touchstone` on an `.sp` whose ports have different z0 writes Touchstone 2.0 with each port's `[Reference]`, instead of `R 50` for all (#60).
 - CLI: `-tokenizer=hspice` (single dash, joined value) works as the docs say; a streamed transient or AC run without an output path checks its row count too (#88).
 - API: queries appended through `Problem` or the C API are checked as the netlist checks them: node and branch rows in range for every analysis, temperatures above absolute zero, `xmu` in [0, 0.5], `0 <= tstart < tstop`; a batch past the row space is `TooManyQueries` (#55).

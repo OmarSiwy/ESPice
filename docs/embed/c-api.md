@@ -74,7 +74,7 @@ one:
 |---|---|
 | `id` | 0 to count − 1; stable across appends |
 | `kind` | `ESPICE_OP`, `ESPICE_AC`, `ESPICE_TRAN`, ... (one per analysis) |
-| `status` | `ESPICE_PENDING`, `PAUSED`, `COMPLETE`, `QUERY_FAILED`, `DEPENDENCY_FAILED`, `CANCELLED` |
+| `status` | `ESPICE_PENDING`, `PAUSED`, `COMPLETE`, `QUERY_FAILED`, `DEPENDENCY_FAILED`; `CANCELLED` is reserved, as no C call cancels a query |
 | `dependency` | the query it waits on, or `ESPICE_NO_QUERY` |
 | `requested` | 1 for a card in the deck, 0 for an added prerequisite |
 | `component` | the connected component of the DAG it belongs to |
@@ -114,8 +114,9 @@ new values for the queries appended after it; see [Sizing loops](#sizing-loops).
 - `espice_get_result_info` gives `variable_count`, `point_count`,
   `is_complex` and `value_count`.
 - `espice_copy_result` copies the values; `espice_result_view` hands out a
-  read-only pointer to them, valid until `espice_destroy`. Data is
-  point-major: row `i` is `variable_count` values (twice that for complex
+  read-only pointer to them, valid until `espice_destroy`, and on any
+  failure, a bad handle included, sets the pointer to NULL and the length
+  to 0. Data is point-major: row `i` is `variable_count` values (twice that for complex
   results, as adjacent real and imaginary parts). Column 0 is the
   independent variable where the plot has one.
 - `espice_copy_result_name(p, id, v, ...)` gives column `v`'s name

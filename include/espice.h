@@ -43,7 +43,10 @@ enum {
     ESPICE_PSF = 4, ESPICE_FSDB = 5, ESPICE_SST2 = 6, ESPICE_CITI = 7,
     ESPICE_PRINT = 8
 };
-/* Query status (espice_query_info.status, espice_advance_event.status) */
+/* Query status (espice_query_info.status, espice_advance_event.status).
+ * ESPICE_CANCELLED is reserved: no C call cancels a query (destroy cancels
+ * paused workers, after which nothing reads their status), so it is never
+ * reported today. */
 enum {
     ESPICE_PENDING = 0, ESPICE_PAUSED = 1, ESPICE_COMPLETE = 2,
     ESPICE_QUERY_FAILED = 3, ESPICE_DEPENDENCY_FAILED = 4, ESPICE_CANCELLED = 5
@@ -172,7 +175,8 @@ espice_status espice_get_result_info(espice_problem *, uint32_t id, espice_resul
 espice_status espice_copy_result(espice_problem *, uint32_t id,
     double *values, size_t capacity, size_t *required);
 /* Zero-copy espice_copy_result: *data points at the *len result values, valid
- * until espice_destroy and read-only. On failure *data is NULL and *len 0. */
+ * until espice_destroy and read-only. On any failure, an invalid handle
+ * included, *data is NULL and *len 0. */
 espice_status espice_result_view(espice_problem *, uint32_t id,
     const double **data, size_t *len);
 /* variable == ESPICE_PLOT_TITLE selects the plot title; otherwise a column name. */

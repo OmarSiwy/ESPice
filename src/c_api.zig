@@ -428,10 +428,11 @@ export fn espice_copy_result(handle: ?*Token, id: u32, values: ?[*]f64, capacity
 }
 
 export fn espice_result_view(handle: ?*Token, id: u32, data: ?*?[*]const f64, len: ?*usize) u32 {
-    const h = handles.get(handle) catch |err| return status(err);
-    // The header promises *data NULL on any failure, a NULL len included.
+    // The header promises *data NULL and *len 0 on any failure, a NULL or
+    // stale handle included (#76).
     if (data) |view| view.* = null;
     if (len) |count| count.* = 0;
+    const h = handles.get(handle) catch |err| return status(err);
     const view = data orelse return h.fail(error.InvalidArgument);
     const count = len orelse return h.fail(error.InvalidArgument);
     const values = (h.problem.result(@fromBackingInt(@intCast(id))) catch |err| return h.fail(err)).data;

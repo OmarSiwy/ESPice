@@ -187,6 +187,13 @@ test "C entry points reject NULL handles and malformed options" {
     try t.expectEqual(invalid, c.espice_get_result_info(null, 0, null));
     try t.expectEqual(invalid, c.espice_copy_result(null, 0, null, 0, &n));
     try t.expectEqual(invalid, c.espice_result_view(null, 0, null, null));
+    // On any failure the view is NULL and 0, a NULL handle included (#76).
+    const dummy: f64 = 0;
+    var view: [*c]const f64 = &dummy;
+    n = 7;
+    try t.expectEqual(invalid, c.espice_result_view(null, 0, &view, &n));
+    try t.expect(view == null);
+    try t.expectEqual(@as(usize, 0), n);
     try t.expectEqual(invalid, c.espice_copy_result_name(null, 0, 0, null, 0, &n));
     try t.expectEqual(invalid, c.espice_print(null, null, null, 0, &n));
     try t.expectEqual(invalid, c.espice_error_message(null, null, 0, &n));
@@ -406,7 +413,12 @@ test "C calls on a destroyed handle, and a second destroy, return INVALID_HANDLE
     try t.expectEqual(stale_code, c.espice_set_params(handle, null, null, 0));
     try t.expectEqual(stale_code, c.espice_get_result_info(handle, 0, &result));
     try t.expectEqual(stale_code, c.espice_copy_result(handle, 0, null, 0, &n));
+    const dummy: f64 = 0;
+    view = &dummy;
+    n = 7;
     try t.expectEqual(stale_code, c.espice_result_view(handle, 0, &view, &n));
+    try t.expect(view == null);
+    try t.expectEqual(@as(usize, 0), n);
     try t.expectEqual(stale_code, c.espice_copy_result_name(handle, 0, 0, null, 0, &n));
     try t.expectEqual(stale_code, c.espice_print(handle, null, null, 0, &n));
     try t.expectEqual(stale_code, c.espice_error_message(handle, null, 0, &n));
