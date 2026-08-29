@@ -26,9 +26,7 @@ fn collectTyped(circuit: *const device.Circuit, gpa: std.mem.Allocator, refs: *s
 }
 
 fn prepare(io: std.Io, session: std.mem.Allocator, source: input.Source, dialect: input.Dialect) !netlist.Netlist {
-    var lib = try device.Library.init(std.testing.allocator);
-    defer lib.deinit();
-    return input.prepare(io, &lib, session, source, dialect, &.{});
+    return input.prepare(io, session, source, dialect, &.{});
 }
 const resolveQueries = input.resolveQueries;
 

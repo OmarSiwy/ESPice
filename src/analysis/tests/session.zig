@@ -298,6 +298,10 @@ test "schemaOf names the plot and scale column a transient and an AC sweep publi
         try t.expectEqualStrings(res.plotname, schema.plotname);
         try t.expectEqualStrings(res.varnames[0], schema.scale);
     }
+    // A query that has run cannot start streaming (#13).
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    try t.expect(!try s.streamTo(ids[0], &sink.writer));
+    try t.expectEqual(null, s.stream);
     // A query that does not stream names no plot.
     try t.expectEqual(0, (try schemaOf(t.allocator, &prepared, &deck, .{ .op = .{} })).plotname.len);
 }

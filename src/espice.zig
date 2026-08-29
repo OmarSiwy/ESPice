@@ -179,7 +179,8 @@ pub const Problem = struct {
         self.library = try frontend.Library.init(allocator);
         errdefer self.library.deinit();
         self.library.toolchain = try toolchainFromEnv(a, options.hdl_toolchain);
-        const ast = try frontend.prepare(io, &self.library, scratch, options.source, options.dialect, options.live_params);
+        const ast = try frontend.prepare(io, scratch, options.source, options.dialect, options.live_params);
+        try frontend.loadModels(io, &self.library, scratch, ast, self.origin);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
         self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
@@ -214,7 +215,7 @@ pub const Problem = struct {
         // instantiates the template.
         // `set_params` diffs later points against the template, so it is
         // never handed to a query to keep.
-        self.session.last_template_reader = self.prepared.tuning == null;
+        if (self.prepared.tuning == null) self.session.markLastTemplateReader();
         const jobs = if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
@@ -225,7 +226,7 @@ pub const Problem = struct {
         for (self.runs, self.prepared.runs, 0..) |*run, *prep, k| {
             errdefer for (self.runs[0..k]) |*done| done.session.deinit();
             run.* = .{ .session = analysis.session.Session.init(self.workerAllocator(), io, &prep.circuit, &prep.deck, execution) };
-            run.session.last_template_reader = true;
+            run.session.markLastTemplateReader();
             errdefer run.session.deinit();
             try self.checkOutput(prep, prep.deck.queries);
             _ = try run.session.append(prep.deck.queries, try scratch.alloc(QueryId, prep.deck.queries.len));
@@ -528,7 +529,7 @@ pub const Problem = struct {
             .npoints = 0,
             .data = &.{},
         } }) orelse return;
-        self.session.stream = .{ .id = id, .writer = writer };
+        if (!try self.session.streamTo(id, writer)) return self.delivery.abortStream();
         self.streaming = id;
     }
 
@@ -799,13 +800,13 @@ pub const Problem = struct {
             var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
             defer timingLap(self.io, &lap, "output delivery");
             const job = try session.query(id);
-            if (job == .sp) if (job.sp.lin) |lin| if (lin.touchstone)
             // An `.sp` carries its ports' z0, which a Touchstone output records (#60).
             var z0: std.ArrayList(f64) = .empty;
             defer z0.deinit(self.allocator);
             if (job == .sp) try modeZ0(self.allocator, job.sp.ports, &z0);
             const plot: output.Plot = .{ .title = deck_title, .result = res, .z0 = z0.items };
             try self.delivery.publish(self.io, plot);
+            if (job == .sp) if (job.sp.lin) |lin| if (lin.touchstone)
                 try self.writeTouchstone(lin.file, plot);
         }
         return true;
@@ -823,7 +824,6 @@ pub const Problem = struct {
         try output.write(self.io, path, .touchstone, plot);
     }
 
-    /// `allocator` behind a mutex, so parallel query arenas can share it
     /// Appends the reference impedance of each of `ports`' modes to `z0`, in
     /// sp.zig's `Basis` order: each port's first mode (a balanced one's
     /// differential, 2·z0), then the common modes (z0/2).
@@ -832,6 +832,7 @@ pub const Problem = struct {
         for (ports) |p| if (p.balanced != null) try z0.append(gpa, p.z0 / 2);
     }
 
+    /// `allocator` behind a mutex, so parallel query arenas can share it
     /// without the caller having to supply a thread-safe allocator.
     fn workerAllocator(self: *Problem) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };

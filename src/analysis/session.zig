@@ -114,21 +114,43 @@ pub const Session = struct {
     cursor: u32 = 0,
     /// No other session reads `topology`'s device state after this one, so
     /// under `config.final_plan` its last root query evaluates the template's
-    /// own batches instead of a copy (`Circuit.instantiateMove`).
+    /// own batches instead of a copy (`Circuit.instantiateMove`). Set by
+    /// `markLastTemplateReader`.
     last_template_reader: bool = false,
     /// Circuits with `topology`'s pattern that rows appended after
     /// `addTemplate` instantiate instead (a model bin that moved under
     /// `Problem.set_params`), oldest first; each must outlive the session.
     templates: std.ArrayList(*const Circuit) = .empty,
     /// A transient or AC query that writes its rows to `writer` as it records them
-    /// instead of keeping them; its Result has empty `data`. Set before the
-    /// query starts.
+    /// instead of keeping them; its Result has empty `data`. Set by `streamTo`.
     stream: ?struct { id: QueryId, writer: *std.Io.Writer } = null,
 
     /// An empty session. Allocates nothing; `topology` and `deck` must
     /// outlive it.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, config: execution.Config) Session {
         return .{ .allocator = allocator, .io = io, .topology = topology, .deck = deck, .config = config };
+    }
+
+    /// Marks this session as the last reader of `topology`'s device state
+    /// (`last_template_reader`). Asserts that nothing has been appended, so
+    /// every row sees the same answer (#13).
+    pub fn markLastTemplateReader(self: *Session) void {
+        std.debug.assert(self.rows.len == 0);
+        self.last_template_reader = true;
+    }
+
+    /// Makes transient or AC query `id` write its rows to `writer` as it
+    /// records them, its Result keeping empty `data`. False, and nothing
+    /// set, once `id` has started: its rows already went elsewhere (#13).
+    /// Asserts that no other query streams and that `id` is a tran or AC row.
+    pub fn streamTo(self: *Session, id: QueryId, writer: *std.Io.Writer) !bool {
+        const i = try self.index(id);
+        std.debug.assert(self.stream == null);
+        const job = self.rows.items(.job)[i];
+        std.debug.assert(job == .tran or job == .ac);
+        if (self.rows.items(.executor)[i] != null) return false;
+        self.stream = .{ .id = id, .writer = writer };
+        return true;
     }
 
     /// Cancels and joins every started query, then frees every row, result
@@ -656,10 +678,19 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         },
         else => deck.probes.len + 1,
     };
+    const tran = @import("tran/tran.zig");
+    const ac = @import("ac/ac.zig");
+    const streamable = switch (query) {
+        .tran => |o| !o.snapshot,
+        .ac => true,
+        else => false, // else: only a transient or AC sweep streams its rows
+    };
     return .{
         .kind = query,
         .columns = columns,
         .portless = query == .sp and query.sp.ports.len == 0 and deck.source_branch == 0,
+        .plotname = if (!streamable) "" else if (query == .tran) tran.plotname else ac.plotname,
+        .scale = if (!streamable) "" else if (query == .tran) tran.scale else ac.scale,
     };
 }
 
@@ -678,19 +709,10 @@ test copyValue {
     try std.testing.expectEqualSlices(f64, &.{ 2e3, 3e3 }, copy.hb.extra_tones);
     try std.testing.expectEqualSlices(u16, &.{ 2, 3 }, copy.hb.extra_harmonics);
     // An empty slice copies to an empty slice.
-    const tran = @import("tran/tran.zig");
-    const ac = @import("ac/ac.zig");
-    const streamable = switch (query) {
-        .tran => |o| !o.snapshot,
-        .ac => true,
-        else => false, // else: only a transient or AC sweep streams its rows
-    };
     const plain = try copyValue(arena.allocator(), requests.Query{ .hb = .{ .f0 = 1e3 } });
     try std.testing.expectEqual(@as(usize, 0), plain.hb.extra_tones.len);
 }
 
-        .plotname = if (!streamable) "" else if (query == .tran) tran.plotname else ac.plotname,
-        .scale = if (!streamable) "" else if (query == .tran) tran.scale else ac.scale,
 test prerequisite {
     try std.testing.expectEqual(null, prerequisite(.{ .op = .{} }));
     try std.testing.expectEqual(null, prerequisite(.{ .tran = .{ .t_stop = 1e-6, .uic = true } }));

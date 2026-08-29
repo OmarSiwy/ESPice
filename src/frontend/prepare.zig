@@ -66,16 +66,16 @@ pub fn parseDialect(name: []const u8) ?Dialect {
     }).get(name);
 }
 
-/// Reads, expands and flattens `input` into `session`, then loads its HDL
-/// models into `lib`. The global `.param` names in `live` stay live, so
-/// the built circuit takes new values for them without a re-parse
-/// (`Prepared.tuning`). The netlist borrows `session`; release it once
-/// `build` has returned, or with the Prepared when `live` is not empty.
-/// Spectre input expands its `include`s (`source.expandSpectre`). Fails with
-/// `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`),
-/// `UnknownParameter` for a `live` name no global `.param` defines, and
-/// with the file error of an unreadable deck, include or data file.
-pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect, live: []const []const u8) !netlist.Netlist {
+/// Reads, expands and flattens `input` into `session` and reads its data
+/// files; compiles nothing (`loadModels` does, #13). The global `.param`
+/// names in `live` stay live, so the built circuit takes new values for
+/// them without a re-parse (`Prepared.tuning`). The netlist borrows
+/// `session`; release it once `build` has returned, or with the Prepared
+/// when `live` is not empty. Spectre input expands its `include`s
+/// (`source.expandSpectre`). Fails with `UnknownParameter` for a `live`
+/// name no global `.param` defines, and with the file error of an
+/// unreadable deck, include or data file.
+pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect, live: []const []const u8) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
         .bytes => |bytes| bytes.origin,
@@ -85,16 +85,13 @@ pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, inp
         .bytes => |bytes| try session.dupe(u8, bytes.data),
     };
     if (dialect == .spectre) {
-        const nl = try netlist.parseLive(session, try netlist.source.expandSpectre(io, session, origin, raw), dialect, live);
-        try loadModels(io, lib, session, nl.deck.foreign, origin);
-        return nl;
+        return netlist.parseLive(session, try netlist.source.expandSpectre(io, session, origin, raw), dialect, live);
     }
     const runs = try netlist.source.splitAlters(session, raw);
     var nl = try netlist.parseLive(session, try netlist.source.expand(io, std.heap.page_allocator, session, origin, runs[0]), dialect, live);
     const alters = try session.alloc([]const u8, runs.len - 1);
     for (alters, runs[1..]) |*text, run| text.* = try netlist.source.expand(io, std.heap.page_allocator, session, origin, run);
     nl.deck.alters = alters;
-    try loadModels(io, lib, session, nl.deck.foreign, origin);
     nl.files = try loadData(io, session, nl.deck.foreign, origin);
     return nl;
 }
@@ -113,7 +110,12 @@ fn loadData(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.For
     return files.items;
 }
 
-fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, foreign: []const netlist.Foreign, origin: []const u8) !void {
+/// Compiles and loads into `lib` the HDL models `nl` (from `prepare` on a
+/// deck at `origin`) includes, paths relative to the deck's directory.
+/// Fails with `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`)
+/// and with the loader's error for a model that does not compile.
+pub fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, nl: netlist.Netlist, origin: []const u8) !void {
+    const foreign = nl.deck.foreign;
     var paths: std.ArrayList([]const u8) = .empty;
     for (foreign) |f| {
         const path = if (std.fs.path.isAbsolute(f.path))

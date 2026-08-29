@@ -4,6 +4,7 @@ const preparation = @import("prepare.zig");
 pub const Source = preparation.Source;
 pub const Dialect = preparation.Dialect;
 pub const prepare = preparation.prepare;
+pub const loadModels = preparation.loadModels;
 pub const parseDialect = preparation.parseDialect;
 pub const build = preparation.build;
 pub const Prepared = preparation.Prepared;
