@@ -25,7 +25,7 @@ pub const version_flag = "-h";
 /// it there, or a refused job naming the untranslatable card. Translation is
 /// not timed.
 pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []const u8, scratch: []const u8) common.Error!common.Job {
-    const spice = std.Io.Dir.cwd().readFileAlloc(io, netlist, a, .limited(1 << 26)) catch return error.DeckFailed;
+    const spice = std.Io.Dir.cwd().readFileAlloc(io, netlist, a, .unlimited) catch return error.DeckFailed;
     const sim = switch (try translate(a, spice)) {
         .sim => |text| text,
         .refused => |reason| return .{ .refused = reason },

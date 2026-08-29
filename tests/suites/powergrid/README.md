@@ -61,9 +61,10 @@ solution nodes to every printed digit. SRAM-PG warns that its own solutions
 Node counts are distinct node names other than ground, counted from the
 deck. ngspice times are wall clock for `ngspice -b -r` with `.options klu`
 added (ngspice-45 from nixpkgs), measured once each on an otherwise quiet
-32-thread machine on 2026-10-06. ngspice-45 defaults to SPARSE 1.3, and the
-bench runner keeps that default unless it gets `--ngspice-klu`. Pass that
-flag for this suite; SPARSE 1.3 times were not measured on a quiet machine.
+32-thread machine on 2026-10-06. ngspice-45 defaults to SPARSE 1.3, so
+fetch.sh writes `option klu` to the suite's `.spiceinit`, which the bench
+runner lets ngspice read; `--ngspice-klu` is not needed. SPARSE 1.3 times were
+not measured on a quiet machine.
 
 ### Default
 

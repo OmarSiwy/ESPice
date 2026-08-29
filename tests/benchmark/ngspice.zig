@@ -13,7 +13,7 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []con
     const source = std.Io.Dir.cwd().realPathFileAlloc(io, netlist, a) catch return error.DeckFailed;
     const raw_dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(raw_path) orelse ".", a) catch return error.ScratchFailed;
     const raw = try std.fmt.allocPrint(a, "{s}/{s}", .{ raw_dir, std.fs.path.basename(raw_path) });
-    const text = std.Io.Dir.cwd().readFileAlloc(io, source, a, .limited(1 << 27)) catch return error.DeckFailed;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, source, a, .unlimited) catch return error.DeckFailed;
     if (hasPsp(text)) return .{ .refused = "ngspice-45 has no PSP103 (LEVEL=1040)" };
     var deck: []const u8 = source;
     if (klu) {

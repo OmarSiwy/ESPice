@@ -14,6 +14,8 @@ set -euo pipefail
 D=$(mkdir -p "${1:?usage: fetch.sh DIR}" && cd "$1" && pwd)
 cd "$D"
 mkdir -p src
+# ngspice-45 defaults to SPARSE 1.3; the bench runner lets ngspice read this.
+echo "option klu" > .spiceinit
 
 IBM=https://web.ece.ucsb.edu/~lip/PGBenchmarks/ibmpg
 SRAM=https://media.githubusercontent.com/media/ShenShan123/SRAM-PG/62a95026696e8f669e9aab25dba574a9cd65b74d
