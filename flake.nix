@@ -1,5 +1,5 @@
 {
-  description = "ARPice";
+  description = "ESPice";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -130,7 +130,7 @@
         };
 
         packages.default = pkgs.stdenv.mkDerivation {
-          pname = "zpicey";
+          pname = "espice";
           version = "1.0.0";
           src = ./.;
 

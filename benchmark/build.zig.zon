@@ -1,7 +1,7 @@
 .{
-    .name = .arpice_bench,
+    .name = .espice_bench,
     .version = "0.1.0",
-    .fingerprint = 0xb22dd55d0310807b,
+    .fingerprint = 0x70a531e2b3adbe12,
     .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",

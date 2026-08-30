@@ -142,7 +142,7 @@ pub fn build(b: *std.Build) void {
     // =======================================================================
 
     const exe = b.addExecutable(.{
-        .name = "zpicey",
+        .name = "espice",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -197,7 +197,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    b.step("run", "Run ZPicey").dependOn(&run_cmd.step);
+    b.step("run", "Run ESPice").dependOn(&run_cmd.step);
 
     // The generator, on demand. One step now that one binary handles every HDL.
     const run_vera = b.addRunArtifact(vera_exe);
@@ -288,7 +288,7 @@ pub fn build(b: *std.Build) void {
     run_bench.step.dependOn(&b.addInstallArtifact(bench_dep.artifact("bench-runner"), .{}).step);
     run_bench.stdio = .inherit;
     run_bench.setCwd(b.path("."));
-    run_bench.addArgs(&.{ "zig-out/bin/zpicey", "benchmark/fixtures" });
+    run_bench.addArgs(&.{ "zig-out/bin/espice", "benchmark/fixtures" });
     if (b.args) |args| run_bench.addArgs(args);
     b.step("bench", "Run benchmarks").dependOn(&run_bench.step);
 }

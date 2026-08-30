@@ -16,7 +16,7 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
 
     try w.writeAll("HEADER\n");
     try w.writeAll("\"PSFversion\" \"1.00\"\n");
-    try w.writeAll("\"simulator\" \"zpicey\"\n");
+    try w.writeAll("\"simulator\" \"espice\"\n");
     try w.print("\"title\" \"{s}\"\n", .{plot.title});
     try w.print("\"plotname\" \"{s}\"\n", .{plot.plotname});
 

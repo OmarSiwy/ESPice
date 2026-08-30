@@ -150,14 +150,14 @@ pub const Simulation = struct {
         sim.results = try sim_arena.alloc(Result, @max(sim.n_jobs, 1));
         sim.n_results = 0;
 
-        // Parallel device eval. ponytail: OPT-IN via ZPICEY_THREADS=N for
+        // Parallel device eval. ponytail: OPT-IN via ESPICE_THREADS=N for
         // now — measured 2026-07-04, per-eval handoff + window zero/reduce
         // breaks even with eval work on the current fixture corpus, so
         // default-on would regress small/medium circuits. Auto-enable
         // (work-based threshold) is the Phase-5 tuning task.
         sim.par_eval = null;
         if (io) |io_val| enable_par: {
-            const s = std.c.getenv("ZPICEY_THREADS") orelse break :enable_par;
+            const s = std.c.getenv("ESPICE_THREADS") orelse break :enable_par;
             const lanes = std.fmt.parseInt(u32, std.mem.span(s), 10) catch break :enable_par;
             if (lanes < 2) break :enable_par;
             var total: u64 = 0;
@@ -204,7 +204,7 @@ pub const Simulation = struct {
                 // run does not look like a broken driver.
                 std.debug.print(
                     "note: --gpu declined; too little device work to beat the PCIe round trip " ++
-                        "(override with ZPICEY_GPU_MIN_WORK=<n>)\n",
+                        "(override with ESPICE_GPU_MIN_WORK=<n>)\n",
                     .{},
                 );
             } else {

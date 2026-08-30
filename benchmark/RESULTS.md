@@ -1,4 +1,4 @@
-# Benchmark results — zpicey vs ngspice vs xyce
+# Benchmark results — espice vs ngspice vs xyce
 
 Pass: per-variable RMS ≤ 1e-3, max ≤ 1e-2
 

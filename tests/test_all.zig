@@ -2,7 +2,7 @@
 //! contract surface — builder.Builder to construct, analysis.run(&ctx, job)
 //! to dispatch, uniform Result rows to check. Known-answer tests wherever the
 //! physics gives one; expected values and tolerances mirror the per-analysis
-//! tests in analyses.zig (ported from the old ZpiceyRE top-level suite).
+//! tests in analyses.zig (ported from the old ESPiceRE top-level suite).
 
 const std = @import("std");
 const testing = std.testing;

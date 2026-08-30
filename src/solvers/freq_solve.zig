@@ -303,6 +303,16 @@ pub fn FreqSolverT(comptime T: type) type {
                     continue;
                 };
 
+                // A chunk whose refactor tripped the growth monitor re-runs a
+                // FULL factor (direct.zig ladder), which repivots and can
+                // change the tape lengths — so the lane planes are re-sized
+                // when they no longer match, not just allocated once.
+                if (ll) |*l| {
+                    if (l.lx.len != lu.lx.items.len or l.ux.len != lu.ux.items.len) {
+                        l.deinit(gpa);
+                        ll = null;
+                    }
+                }
                 if (ll == null) ll = try LL.init(gpa, lu);
 
                 fillLanePlane(self.n, sp, omega_vec, vplane);

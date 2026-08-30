@@ -122,7 +122,7 @@ pub const Error = error{
 const default_min_work: u64 = 200_000;
 
 fn minWork() u64 {
-    const s = std.c.getenv("ZPICEY_GPU_MIN_WORK") orelse return default_min_work;
+    const s = std.c.getenv("ESPICE_GPU_MIN_WORK") orelse return default_min_work;
     return std.fmt.parseInt(u64, std.mem.span(s), 10) catch default_min_work;
 }
 

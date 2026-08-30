@@ -1,7 +1,7 @@
-//! Benchmark runner — wall-clock timing AND accuracy of zpicey vs ngspice.
+//! Benchmark runner — wall-clock timing AND accuracy of espice vs ngspice.
 //!
 //! Usage (via `zig build bench -- <flags>`):
-//!   bench-runner ZPICEY_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]]
+//!   bench-runner ESPICE_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]]
 //!               [--no-ngspice] [--list] [--out RESULTS.md] [--rtol 0.01]
 //!
 //! Every fixture is benchmark/fixtures/<cat>/<name>/circuit.sp.
@@ -126,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
         var res: Result = .{ .category = fx.category, .name = fx.name };
         const netlist = try std.fmt.allocPrint(fxa, "{s}/{s}/{s}/circuit.sp", .{ cfg.fixtures_dir, fx.category, fx.name });
 
-        // zpicey CPU
+        // espice CPU
         var zp_cpu_raw_path: []const u8 = "";
         if (engine_ok) {
             zp_cpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-cpu.raw", .{ out_dir, fx.category, fx.name });
@@ -143,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
             res.zp_cpu_skip = "engine not found";
         }
 
-        // zpicey GPU
+        // espice GPU
         var zp_gpu_raw_path: []const u8 = "";
         if (engine_ok) {
             zp_gpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-gpu.raw", .{ out_dir, fx.category, fx.name });
@@ -677,7 +677,7 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
 fn reportFooter(out: *Io.Writer) !void {
     try out.writeAll(
         \\
-        \\ratio = ngspice / zpicey (higher = zpicey faster).
+        \\ratio = ngspice / espice (higher = espice faster).
         \\accuracy: per-variable RMS/max relative error against ngspice.
         \\
     );
@@ -698,7 +698,7 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
     var aw: std.Io.Writer.Allocating = .init(gpa);
     const w = &aw.writer;
 
-    w.print("# Benchmark results — zpicey vs ngspice vs xyce\n\n", .{}) catch return;
+    w.print("# Benchmark results — espice vs ngspice vs xyce\n\n", .{}) catch return;
     w.print("Pass: per-variable RMS ≤ {e:.0}, max ≤ {e:.0}\n\n", .{ rtol, 10 * rtol }) catch return;
     w.print("| fixture | zp-cpu | zp-gpu | ngspice | xyce | cpu/ng | gpu/ng | zp-MB | ng-MB | xy-MB | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |\n", .{}) catch return;
     w.print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n", .{}) catch return;
@@ -791,7 +791,7 @@ fn fmtDur(buf: []u8, ns: u64) []const u8 {
 // ============================================================================
 
 fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Config {
-    const usage = "usage: bench-runner ZPICEY_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]] [--no-ngspice] [--no-xyce] [--timeout S] [--list] [--out PATH] [--rtol N]\n";
+    const usage = "usage: bench-runner ESPICE_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]] [--no-ngspice] [--no-xyce] [--timeout S] [--list] [--out PATH] [--rtol N]\n";
     var it = init.minimal.args.iterate();
     _ = it.skip();
     const engine_bin = it.next() orelse {

@@ -1,4 +1,4 @@
-# ARPice (zpicey) — SPICE circuit simulator in Zig
+# ESPice (espice) — SPICE circuit simulator in Zig
 
 Analog circuit simulator: SPICE netlists in, DC/AC/tran/PSS/noise/sweep
 analyses out. Devices are compiled from Verilog-A at build time (VerA),
@@ -123,6 +123,6 @@ shortcuts carry a `ponytail:` comment naming the ceiling and upgrade path.
 ## Git rules
 
 - **NEVER `git stash`.** For baselines use a worktree:
-  `git worktree add ../arpice-base <rev>` (relative-path deps require the
+  `git worktree add ../espice-base <rev>` (relative-path deps require the
   worktree to sit beside `../gompute`/`../VerA`, NOT in /tmp).
 - One step per commit; tests green at every commit.

@@ -20,7 +20,7 @@ const BbdInfo = @import("types.zig").BbdInfo;
 
 pub const Strategy = enum { newton, jfnk };
 
-/// `ZPICEY_SOLVER` — pin the strategy `run` would otherwise pick by itself.
+/// `ESPICE_SOLVER` — pin the strategy `run` would otherwise pick by itself.
 ///
 /// Exists because the three regimes differ by MORE than speed and which one
 /// wins is a property of the circuit, not of the hardware:
@@ -45,7 +45,7 @@ var solver_pin_cache: ?SolverPin = null;
 pub fn solverPin() SolverPin {
     if (solver_pin_cache) |p| return p;
     const p: SolverPin = blk: {
-        const s = std.c.getenv("ZPICEY_SOLVER") orelse break :blk .auto;
+        const s = std.c.getenv("ESPICE_SOLVER") orelse break :blk .auto;
         const v = std.mem.span(s);
         if (std.mem.eql(u8, v, "direct")) break :blk .direct;
         if (std.mem.eql(u8, v, "jfnk")) break :blk .jfnk;
@@ -469,7 +469,7 @@ pub fn run(
     // LU as the preconditioner, so a step costs a stamp, a factorization AND
     // the GMRES matvecs. It earns its place by taking fewer steps, and its
     // matvecs are residual evals, which is the part the device made cheap.
-    // `ZPICEY_SOLVER=jfnk-nolu` is the genuinely factorization-free variant.
+    // `ESPICE_SOLVER=jfnk-nolu` is the genuinely factorization-free variant.
     if (comptime @hasField(S, "gpu_active")) {
         if (sys.gpu_active) {
             const r = try jfnk(sys, ws, x, t, opts, hook);

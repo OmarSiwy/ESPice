@@ -4,7 +4,7 @@ Can FastVAF swallow real production Verilog-A? Tested 2026-07-11 against the
 OpenVAF integration-test models (github.com/pascalkuthe/OpenVAF,
 `integration_tests/`) plus VBIC 1.2 from designers-guide.org
 (`vbic_4T_et_cf.vla`). Harness: each model behind a `.hdl` card in a trivial
-netlist, run through `zpicey -b` — the exact runtime pipeline
+netlist, run through `espice -b` — the exact runtime pipeline
 (`src/vaload.zig` → `fastvaf.compileSource` → `va.codegen.generate` → zig
 build-lib → dlopen). Models with local `` `include `` files were pre-flattened
 (FastVAF replaces non-standard includes with a comment — see P0), so the

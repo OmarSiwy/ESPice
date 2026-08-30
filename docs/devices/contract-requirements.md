@@ -67,7 +67,7 @@ timestep/sample; **iter** = per Newton iteration (hot).
 | `nextBreakpoint` | **keep** | batch.zig:683 via tran.zig:393 |
 | `Value`/`Dual`/`fmath`/`limits`/`nU`/`uKinds`/`Entry`/`NoiseGen`/`UpdateResult`/`StateCtlOp`/`UnknownKind`/`evalValues`/`qValues` | **keep** (infrastructure) | devices, kernel_common.zig:12,199–201, dyn ABI, device unit tests |
 | `HistoryReq` | **dead — delete.** Grep: sole occurrence is its own definition (contract.zig:264); the history path uses `delays()` + `HistoryBuffer.init(gpa, D.n_hist_signals, 8192)` instead | none |
-| `zpicey_*` allowlist prefix | **keep** | dyn.zig plugin ABI exports |
+| `espice_*` allowlist prefix | **keep** | dyn.zig plugin ABI exports |
 | `Instance.temp` field | **keep as documented convention** (field, not decl) | batch.zig:278 `set_temp`, temp_sweep.zig:83 |
 
 ## 3. Additions required
@@ -210,7 +210,7 @@ pub const mc_param: []const u8;        // principal f32 param (MC, future evalp)
 
 // ---- field conventions (not decls) -----------------------------------------
 // Instance.temp: f32  → set_temp hook + recompute (temp sweep)
-// zpicey_* pub decls  → dyn plugin ABI, allowlisted by prefix
+// espice_* pub decls  → dyn plugin ABI, allowlisted by prefix
 ```
 
 Performance notes (unchanged invariants the surface must preserve):
