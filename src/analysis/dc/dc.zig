@@ -106,18 +106,16 @@ fn runBatchGpu(
     a: std.mem.Allocator,
     t: root.ParamRef,
     gh: root.GpuHook,
-    sb: *const fn (*anyopaque, [][]f64, f64, converger.Options, []converger.Result) anyerror!void,
+    sb: *const fn (*anyopaque, []f64, u32, f64, converger.Options, []converger.Result) anyerror!void,
     opts: Options,
     npoints: usize,
     ncols: usize,
     data: []f64,
 ) !void {
-    // Allocate per-lane x-vectors and result slots.
-    const x_lanes = try a.alloc([]f64, npoints);
-    defer {
-        for (x_lanes) |lane| a.free(lane);
-        a.free(x_lanes);
-    }
+    // Flat lane blob: lane pt is x_lanes[pt*n..][0..n]. One alloc, no table.
+    const n: usize = ckt.n;
+    const x_lanes = try a.alloc(f64, npoints * n);
+    defer a.free(x_lanes);
     const results = try a.alloc(converger.Result, npoints);
     defer a.free(results);
 
@@ -133,14 +131,12 @@ fn runBatchGpu(
         // Repack GPU payloads so the device sees the new swept param.
         if (gh.repack) |rp| try rp(gh.ctx);
 
-        const lane = try a.alloc(f64, ckt.n);
-        op.coldStart(ckt, lane);
-        x_lanes[pt] = lane;
+        op.coldStart(ckt, x_lanes[pt * n ..][0..n]);
     }
 
     var copts = opts.tol.newtonOpts(opts.tol.itl1);
     copts.gmin = opts.tol.gmin;
-    try sb(gh.ctx, x_lanes, 0, copts, results);
+    try sb(gh.ctx, x_lanes, @intCast(n), 0, copts, results);
 
     // Collect results into the output data table.
     for (0..npoints) |pt| {
@@ -148,7 +144,8 @@ fn runBatchGpu(
         const row = data[pt * ncols ..][0..ncols];
         row[0] = v;
         if (results[pt].converged) {
-            for (ctx.probes, row[1..]) |node, *out| out.* = x_lanes[pt][node];
+            const lane = x_lanes[pt * n ..][0..n];
+            for (ctx.probes, row[1..]) |node, *out| out.* = lane[node];
         } else {
             for (row[1..]) |*out| out.* = std.math.nan(f64);
         }

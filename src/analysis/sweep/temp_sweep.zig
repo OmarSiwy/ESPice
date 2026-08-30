@@ -154,8 +154,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| gpu_batch: {
             const repack_fn = gh.repack orelse break :gpu_batch;
 
-            // Allocate per-lane x-vectors and results
-            const x_lanes = a.alloc([]f64, max_points) catch break :gpu_batch;
+            // Flat lane blob: lane i is x_lanes[i*n..][0..n]. One alloc, no table.
+            const n: usize = ckt.n;
+            const x_lanes = a.alloc(f64, max_points * n) catch break :gpu_batch;
             defer a.free(x_lanes);
             const results = a.alloc(converger.Result, max_points) catch break :gpu_batch;
             defer a.free(results);
@@ -163,30 +164,24 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             defer a.free(temp_vals);
 
             var n_lanes: usize = 0;
-            errdefer for (x_lanes[0..n_lanes]) |lane| a.free(lane);
 
             const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
 
             // Prepare each lane: set temp, recompute, repack to GPU, seed x
             var temp = opts.t_start;
             while (temp <= opts.t_stop + opts.t_step * 0.5) : (temp += opts.t_step) {
-                const xl = a.alloc(f64, ckt.n) catch break :gpu_batch;
+                const xl = x_lanes[n_lanes * n ..][0..n];
                 ckt.setCircuitTemp(@floatCast(temp));
                 ckt.recompute();
-                repack_fn(gh.ctx) catch {
-                    a.free(xl);
-                    break :gpu_batch;
-                };
+                repack_fn(gh.ctx) catch break :gpu_batch;
                 root.zeroSimd(xl);
                 ckt.seedJunctions(xl);
                 temp_vals[n_lanes] = temp;
-                x_lanes[n_lanes] = xl;
                 n_lanes += 1;
             }
-            defer for (x_lanes[0..n_lanes]) |lane| a.free(lane);
 
             // Batch solve — on error, fall through to serial
-            sb(gh.ctx, x_lanes[0..n_lanes], 0, nopts, results[0..n_lanes]) catch break :gpu_batch;
+            sb(gh.ctx, x_lanes[0 .. n_lanes * n], @intCast(n), 0, nopts, results[0..n_lanes]) catch break :gpu_batch;
 
             // Restore circuit temp before formatting results
             ckt.setCircuitTemp(@floatCast(opts.t_nom));
@@ -202,8 +197,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
                 if (!results[i].converged) continue;
                 const row = data[pt * ncols ..][0..ncols];
                 row[0] = temp_vals[i];
+                const lane = x_lanes[i * n ..][0..n];
                 for (ctx.probes, 0..) |node, p| {
-                    row[1 + p] = x_lanes[i][node];
+                    row[1 + p] = lane[node];
                 }
                 pt += 1;
             }

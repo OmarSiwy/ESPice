@@ -78,7 +78,7 @@ pub fn sweep(
 
         // Batch adjoint dispatch — single GPU launch for all frequency points.
         const y_lanes = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, e_out, @intCast(n), true) orelse break :gpu;
-        defer root.freeFreqLanes(allocator, y_lanes);
+        defer allocator.free(y_lanes);
 
         // CPU-side PSD accumulation + trapezoidal integration.
         var integrated_noise: f64 = 0;
@@ -86,7 +86,7 @@ pub fn sweep(
         var prev_density: f64 = 0;
         for (0..n_points) |k| {
             const f = freqs[k];
-            const y = y_lanes[k];
+            const y = y_lanes[k * nn ..][0..nn];
 
             var total_density: f64 = 0;
             for (noise_sources) |src| {

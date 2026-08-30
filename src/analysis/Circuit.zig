@@ -69,13 +69,15 @@ pub const GpuHook = struct {
     solve_newton: *const fn (*anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result,
     simulate_tran: ?*const fn (*anyopaque, x: []f64, probes: []const u32, waveform: *tran.Waveform, options: tran.Options) anyerror!tran.SimResult = null,
     /// N independent Newton solves in one launch (MC/corners/temp/sens).
-    /// x_lanes[i] is overwritten with the converged solution for lane i.
-    solve_batch: ?*const fn (*anyopaque, x_lanes: [][]f64, t: f64, opts: converger.Options, results: []converger.Result) anyerror!void = null,
+    /// x_lanes is a flat blob: lane k is x_lanes[k*n..][0..n], overwritten with
+    /// the converged solution for that lane.
+    solve_batch: ?*const fn (*anyopaque, x_lanes: []f64, n: u32, t: f64, opts: converger.Options, results: []converger.Result) anyerror!void = null,
     /// N independent frequency-domain solves: (G + jωC)x = rhs.
-    /// omegas[k] is the angular frequency; solutions written to x_out[k].
-    freq_solve_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, x_out: [][]f64, n: u32) anyerror!void = null,
+    /// omegas[k] is the angular frequency; x_out is a flat blob, lane k written
+    /// to x_out[k*2n..][0..2n] (real‖imag).
+    freq_solve_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, x_out: []f64, n: u32) anyerror!void = null,
     /// Adjoint variant: (G + jωC)^H y = rhs per frequency.
-    freq_solve_adjoint_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, y_out: [][]f64, n: u32) anyerror!void = null,
+    freq_solve_adjoint_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, y_out: []f64, n: u32) anyerror!void = null,
     /// Stamp the planes on the device — the GPU half of `Circuit.eval` /
     /// `Circuit.evalNewton`, ground pin included.
     ///
@@ -550,26 +552,21 @@ pub const Circuit = struct {
         return try list.toOwnedSlice(gpa);
     }
 
-    /// Freq-sweep GPU dispatch: one lane of 2n f64 per point (flat backing +
-    /// slice table, so it's one alloc + table), solved via the gpu_hook's
-    /// freq_solve_batch (or adjoint) in a single launch. Returns null on ANY
-    /// failure (missing hook, alloc, kernel error) so callers `orelse` into
-    /// their serial path. Free the result with freeFreqLanes.
-    pub fn gpuFreqBatch(self: *Circuit, a: std.mem.Allocator, g: []const f64, c: []const f64, omegas: []const f64, rhs: []const f64, n: u32, adjoint: bool) ?[][]f64 {
+    /// Freq-sweep GPU dispatch: one flat blob of `omegas.len * 2n` f64 (lane k at
+    /// [k*2n..][0..2n], real‖imag), solved via the gpu_hook's freq_solve_batch
+    /// (or adjoint) in a single launch. Returns null on ANY failure (missing
+    /// hook, alloc, kernel error) so callers `orelse` into their serial path.
+    /// Caller frees the returned blob.
+    pub fn gpuFreqBatch(self: *Circuit, a: std.mem.Allocator, g: []const f64, c: []const f64, omegas: []const f64, rhs: []const f64, n: u32, adjoint: bool) ?[]f64 {
         const gh = self.gpu_hook orelse return null;
         const f = (if (adjoint) gh.freq_solve_adjoint_batch else gh.freq_solve_batch) orelse return null;
         const nn = 2 * @as(usize, n);
-        const backing = a.alloc(f64, omegas.len * nn) catch return null;
-        const lanes = a.alloc([]f64, omegas.len) catch {
-            a.free(backing);
+        const blob = a.alloc(f64, omegas.len * nn) catch return null;
+        f(gh.ctx, g, c, omegas, rhs, blob, n) catch {
+            a.free(blob);
             return null;
         };
-        for (lanes, 0..) |*lane, k| lane.* = backing[k * nn ..][0..nn];
-        f(gh.ctx, g, c, omegas, rhs, lanes, n) catch {
-            freeFreqLanes(a, lanes);
-            return null;
-        };
-        return lanes;
+        return blob;
     }
 
     pub fn nodeName(self: *const Circuit, node: u32) []const u8 {
@@ -595,12 +592,6 @@ pub const Circuit = struct {
         return self.n;
     }
 };
-
-/// Free a lane table from Circuit.gpuFreqBatch (flat backing + slice table).
-pub fn freeFreqLanes(a: std.mem.Allocator, lanes: [][]f64) void {
-    if (lanes.len != 0) a.free(lanes[0].ptr[0 .. lanes.len * lanes[0].len]);
-    a.free(lanes);
-}
 
 // ---------------------------------------------------------------------------
 // init (freeze): build union sparsity pattern, allocate planes, precompute
