@@ -3,7 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const no_llvm = b.option(bool, "no-llvm", "Use Zig's native backend instead of LLVM (default: true)") orelse true;
 
     const bench_runner = b.addExecutable(.{
         .name = "bench-runner",
@@ -13,9 +12,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    if (no_llvm) {
-        bench_runner.use_llvm = false;
-        bench_runner.use_lld = false;
-    }
+    bench_runner.use_llvm = false;
+    bench_runner.use_lld = false;
     b.installArtifact(bench_runner);
 }
