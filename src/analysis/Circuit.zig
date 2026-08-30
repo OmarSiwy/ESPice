@@ -705,23 +705,9 @@ pub fn probeNames(circuit: *const Circuit, probes: []const u32, allocator: std.m
 }
 
 // ---------------------------------------------------------------------------
-// zeroSimd / copySimd: SIMD-width fill and copy
+// zeroSimd / copySimd live in solvers/types.zig (the DAG leaf) so files
+// above and below Circuit share one copy. Re-exported for the 50+ callers.
 // ---------------------------------------------------------------------------
 
-pub fn zeroSimd(buf: []f64) void {
-    const W = vec_width;
-    const V = @Vector(W, f64);
-    const zero: V = @splat(0.0);
-    var i: usize = 0;
-    while (i + W <= buf.len) : (i += W) buf[i..][0..W].* = zero;
-    for (buf[i..]) |*v| v.* = 0;
-}
-
-/// SIMD copy: dst[0..n] = src[0..n].
-pub fn copySimd(dst: []f64, src: []const f64) void {
-    const W = vec_width;
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
+pub const zeroSimd = solvers.types.zeroSimd;
+pub const copySimd = solvers.types.copySimd;

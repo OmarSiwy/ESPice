@@ -4,6 +4,32 @@
 const std = @import("std");
 
 // ============================================================================
+// zeroSimd / copySimd — THE f64 SIMD fill/copy pair. One home, on the leaf
+// of the import DAG, so Circuit.zig, analysis/tran/types.zig and every
+// solver reach the same two loops instead of growing per-file clones.
+// ============================================================================
+
+const simd_w = std.simd.suggestVectorLength(f64) orelse 8;
+
+pub fn zeroSimd(buf: []f64) void {
+    const W = simd_w;
+    const V = @Vector(W, f64);
+    const zero: V = @splat(0.0);
+    var i: usize = 0;
+    while (i + W <= buf.len) : (i += W) buf[i..][0..W].* = zero;
+    for (buf[i..]) |*v| v.* = 0;
+}
+
+/// SIMD copy: dst[0..n] = src[0..n].
+pub fn copySimd(dst: []f64, src: []const f64) void {
+    const W = simd_w;
+    const n = @min(dst.len, src.len);
+    var i: usize = 0;
+    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
+}
+
+// ============================================================================
 // BBD partitioning (moved from root.zig so solver leaves import a leaf,
 // not the module root — keeps the intra-module import graph acyclic)
 // ============================================================================

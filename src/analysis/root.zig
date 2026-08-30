@@ -6,8 +6,8 @@ const contract = @import("contract.zig");
 // file — root.zig is the TOP of the analysis DAG (aggregation + dispatch),
 // re-exporting everything for src/ consumers (engine, builder, gpu_context).
 const shared = @import("types.zig");
-pub const solvers = shared.solvers;
-pub const devices = shared.devices;
+pub const solvers = @import("solvers");
+pub const devices = @import("devices");
 pub const converger = shared.converger;
 pub const types = shared.types;
 pub const freq = shared.freq;

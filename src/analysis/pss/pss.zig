@@ -29,7 +29,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const tran = @import("../tran/tran.zig");
 const converger = @import("solvers").converger;
-const dense_lu = root.solvers.dense_lu;
+const dense_lu = @import("solvers").dense_lu;
 const Gmres = @import("solvers").gmres.Gmres(f64);
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
