@@ -559,9 +559,10 @@ pub fn solve(
     };
     off += 3 * n + nnz;
 
-    // Path-specific workspace
-    const j_phi = if (!use_krylov) arena[off..][0 .. n * n] else &[_]f64{};
-    const neg_phi = if (use_krylov) arena[off..][0..n] else &[_]f64{};
+    // Path-specific workspace. Empty branch slices the arena (not a const
+    // literal) so both arms stay []f64 — the callees write through these.
+    const j_phi = if (!use_krylov) arena[off..][0 .. n * n] else arena[0..0];
+    const neg_phi = if (use_krylov) arena[off..][0..n] else arena[0..0];
 
     // GMRES instance for the Krylov path — allocated once, reused every
     // shooting iteration.
@@ -622,7 +623,7 @@ pub fn solve(
                 x0_pert,
                 x_end_pert,
                 dx0,
-                @constCast(neg_phi),
+                neg_phi,
                 &krylov.?,
                 options,
                 allocator,
@@ -638,7 +639,7 @@ pub fn solve(
                 x0_pert,
                 x_end_pert,
                 dx0,
-                @constCast(j_phi),
+                j_phi,
                 options,
                 allocator,
             );
