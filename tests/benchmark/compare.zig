@@ -117,7 +117,7 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
 fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
     if (scale_names.has(lower)) return lower;
     if (scale_aliases.get(lower)) |canonical| return canonical;
-    if (std.mem.startsWith(u8, lower, "v(") or std.mem.startsWith(u8, lower, "i(")) return lower;
+    for ([_][]const u8{ "v(", "i(", "pole(", "zero(" }) |kept| if (std.mem.startsWith(u8, lower, kept)) return lower;
     const branch = std.mem.indexOf(u8, lower, "#branch") orelse std.mem.indexOf(u8, lower, ":flow(");
     if (branch) |cut| return std.fmt.allocPrint(gpa, "i({s})", .{lower[0..cut]}) catch lower;
     return std.fmt.allocPrint(gpa, "v({s})", .{lower}) catch lower;
@@ -189,10 +189,15 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
     var columns: std.StringHashMapUnmanaged(usize) = .empty;
     defer columns.deinit(gpa);
     columns.ensureTotalCapacity(gpa, std.math.cast(u32, zp.varnames.len) orelse return null) catch return null;
-    for (zp.varnames, 0..) |name, i| {
-        const entry = columns.getOrPutAssumeCapacity(name);
-        if (!entry.found_existing) entry.value_ptr.* = i;
-    }
+    // A repeated name means its last column on both sides: ngspice writes
+    // every port current of a CPL/TXL line as one `i(p1)`, and espice's
+    // single `i(p1)` is the last of them.
+    for (zp.varnames, 0..) |name, i| columns.putAssumeCapacity(name, i);
+    var ng_last: std.StringHashMapUnmanaged(usize) = .empty;
+    defer ng_last.deinit(gpa);
+    ng_last.ensureTotalCapacity(gpa, std.math.cast(u32, ng.varnames.len) orelse return null) catch return null;
+    for (ng.varnames, 0..) |name, i| ng_last.putAssumeCapacity(name, i);
+    if (ng.is_complex and ng.npoints == 1 and zp.npoints == 1) matchRoots(gpa, ng, zp, &columns) catch return null;
 
     const ng_columns = gpa.alloc(f64, 2 * ng.npoints) catch return null;
     defer gpa.free(ng_columns);
@@ -216,6 +221,7 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
 
     for (ng.varnames, 0..) |ng_name, ni| {
         if (interpolate and scale_names.has(ng_name)) continue;
+        if (ng_last.get(ng_name).? != ni) continue;
         const zi = columns.get(ng_name) orelse {
             if (isInternalNode(ng_name)) continue;
             if (scale_names.has(ng_name)) continue;
@@ -279,6 +285,36 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
         .rms_rel = worst_rms,
         .pass = complete and worst_rms <= rtol and worst_max <= 10.0 * rtol,
     };
+}
+
+/// Points each reference `pole(k)`/`zero(k)` column at the nearest unclaimed
+/// candidate root of the same kind: simulators order roots differently, so
+/// the index says nothing. A root with no candidate left loses its column.
+fn matchRoots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, columns: *std.StringHashMapUnmanaged(usize)) error{OutOfMemory}!void {
+    const claimed = try gpa.alloc(bool, zp.varnames.len);
+    defer gpa.free(claimed);
+    @memset(claimed, false);
+    for ([_][]const u8{ "pole(", "zero(" }) |kind| {
+        // ponytail: greedy nearest in reference order, O(roots^2); roots that
+        // agree are far closer together than distinct roots are.
+        for (ng.varnames, 0..) |name, ni| {
+            if (!std.mem.startsWith(u8, name, kind)) continue;
+            var best: ?usize = null;
+            var best_d: f64 = std.math.inf(f64);
+            for (zp.varnames, claimed, 0..) |cand, taken, zi| {
+                if (taken or !std.mem.startsWith(u8, cand, kind)) continue;
+                const d = std.math.hypot(ng.data[2 * ni] - zp.data[2 * zi], ng.data[2 * ni + 1] - zp.data[2 * zi + 1]);
+                if (best == null or d < best_d) {
+                    best = zi;
+                    best_d = d;
+                }
+            }
+            if (best) |zi| {
+                claimed[zi] = true;
+                try columns.put(gpa, name, zi);
+            } else _ = columns.remove(name);
+        }
+    }
 }
 
 const scale_names = std.StaticStringMap(void).initComptime(.{
@@ -389,7 +425,7 @@ test "accuracy requires signals and complete real samples" {
     try std.testing.expect(comparePlots(a, reference, candidate, 1e-3) == null);
 }
 
-test "accuracy matches reordered signals and keeps the first duplicate" {
+test "accuracy matches reordered signals and keeps the last duplicate" {
     const reference: Plot = .{
         .plotname = "Operating Point",
         .varnames = &.{ "v(out)", "i(v1)", "v(in)" },
@@ -401,10 +437,56 @@ test "accuracy matches reordered signals and keeps the first duplicate" {
     var candidate = reference;
     candidate.varnames = &.{ "v(in)", "v(out)", "i(v1)", "v(out)" };
     candidate.nvars = 4;
-    candidate.data = &.{ 2, 1, -0.001, 9 };
-    try std.testing.expect(comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
     candidate.data = &.{ 2, 9, -0.001, 1 };
+    try std.testing.expect(comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
+    candidate.data = &.{ 2, 1, -0.001, 9 };
     try std.testing.expect(!comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
+    // ngspice names every port current of a CPL line `i(p1)`; espice's one
+    // `i(p1)` is the last of them, and only that one is scored.
+    const cpl: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{ "i(p1)", "i(p1)", "i(p1)" },
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 3,
+        .data = &.{ 5, -5, 0.25 },
+    };
+    var single = cpl;
+    single.varnames = &.{"i(p1)"};
+    single.nvars = 1;
+    single.data = &.{0.25};
+    try std.testing.expect(comparePlots(std.testing.allocator, cpl, single, 1e-3).?.pass);
+    single.data = &.{5};
+    try std.testing.expect(!comparePlots(std.testing.allocator, cpl, single, 1e-3).?.pass);
+}
+
+test "poles and zeros pair as sets, whatever order each simulator found them in" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = [_][]const u8{ "index", "pole(1)", "pole(2)", "pole(3)", "zero(1)" };
+    var normalized: [names.len][]const u8 = undefined;
+    for (names, &normalized) |n, *out| out.* = normalizeVarName(a, n);
+    try std.testing.expectEqualStrings("pole(1)", normalized[1]);
+    const reference: Plot = .{
+        .plotname = "Pole-Zero Analysis",
+        .varnames = &normalized,
+        .is_complex = true,
+        .npoints = 1,
+        .nvars = 5,
+        .data = &.{ 0, 0, -1e3, 0, -2e3, 5e2, -2e3, -5e2, -7e3, 0 },
+    };
+    var candidate = reference;
+    candidate.data = &.{ 0, 0, -2e3, -5e2, -1e3, 0, -2e3, 5e2, -7e3, 0 };
+    try std.testing.expect(comparePlots(a, reference, candidate, 1e-3).?.pass);
+    // A wrong root is still wrong: no permutation hides it.
+    candidate.data = &.{ 0, 0, -2e3, -5e2, -1.5e3, 0, -2e3, 5e2, -7e3, 0 };
+    try std.testing.expect(!comparePlots(a, reference, candidate, 1e-3).?.pass);
+    // A missing pole is a coverage gap.
+    candidate.varnames = &.{ normalized[0], normalized[1], normalized[2], normalized[4] };
+    candidate.nvars = 4;
+    candidate.data = &.{ 0, 0, -1e3, 0, -2e3, 5e2, -7e3, 0 };
+    try std.testing.expect(!comparePlots(a, reference, candidate, 1e-3).?.complete);
 }
 
 test "one signal spelling across four simulators" {
