@@ -585,24 +585,6 @@ pub const Circuit = struct {
         return "";
     }
 
-    /// Reverse map name→id. Cold: called at job-build time only (one lookup per
-    /// name-carrying directive), so a linear scan over the intern table beats
-    /// carrying a hashmap into the frozen struct. Empty slices (branch
-    /// unknowns) never match a non-empty query.
-    ///
-    /// ponytail: O(n) per lookup, and the ceiling is O(n · directives) — fine
-    /// while lookups are a handful per deck. If interactive or scripted use
-    /// ever queries names per step, build the hashmap once in the Builder and
-    /// hand it over at freeze; do NOT put one back on the frozen struct.
-    pub fn nodeIndex(self: *const Circuit, name: []const u8) ?u32 {
-        var i: u32 = 0;
-        while (i + 1 < self.intern_offs.len) : (i += 1) {
-            if (std.mem.eql(u8, self.intern_bytes[self.intern_offs[i]..self.intern_offs[i + 1]], name))
-                return i;
-        }
-        return null;
-    }
-
     pub fn voltageNodeCount(self: *const Circuit) u32 {
         return self.n;
     }
