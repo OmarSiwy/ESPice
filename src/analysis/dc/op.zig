@@ -2,7 +2,7 @@
 //! One Workspace for the whole continuation — the pattern is frozen, so
 //! ordering/symbolic work happens exactly once.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 
 pub const Method = enum { plain, gmin, source, jfnk };

@@ -4,6 +4,24 @@
 const std = @import("std");
 
 // ============================================================================
+// BBD partitioning (moved from root.zig so solver leaves import a leaf,
+// not the module root — keeps the intra-module import graph acyclic)
+// ============================================================================
+
+pub const BbdBlock = struct {
+    start: u32,
+    size: u32,
+    type_id: u16,
+    instance_id: u32,
+};
+
+pub const BbdInfo = struct {
+    blocks: []BbdBlock,
+    coupling_start: u32,
+    coupling_size: u32,
+};
+
+// ============================================================================
 // Complex number
 // ============================================================================
 

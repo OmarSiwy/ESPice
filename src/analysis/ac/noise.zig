@@ -6,7 +6,7 @@
 //!
 //! Supports thermal (4kTg), shot (2q|I|), and flicker (KF*|I|^AF/f) PSD.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const FreqSolver = root.solvers.freq_solve.FreqSolver;

@@ -2,7 +2,7 @@
 //! re-solve DC at each point. One Workspace serves every temperature — the
 //! pattern is frozen.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const dc = @import("../dc/dc.zig");
 const converger = @import("solvers").converger;
 

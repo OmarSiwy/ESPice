@@ -12,7 +12,7 @@
 //! Uses: supply/LO feedthrough images, conversion gain from every port at
 //! once, spur tables.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const fft_mod = root.solvers.fft;

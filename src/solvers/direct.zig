@@ -16,7 +16,7 @@ const sparse_lu = @import("sparse_lu.zig");
 const tridiag_mod = @import("tridiag.zig");
 const order_mod = @import("order.zig");
 const bbd_mod = @import("bbd.zig");
-const root = @import("root.zig");
+const root = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
 const NONE: u32 = std.math.maxInt(u32);

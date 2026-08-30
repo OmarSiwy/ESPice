@@ -7,7 +7,7 @@
 //! ponytail: nonlinear EPIRK path documented but not implemented; add when
 //! matrix_sig / const-Jacobian detection says linearization is needed.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const solvers = @import("solvers");
 const types = @import("solvers").types;

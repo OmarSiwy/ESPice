@@ -15,7 +15,7 @@
 //!      matrix that couples sidebands f_in + m*f_LO for m in [-M..+M].
 //!   5. Result: complex transfer (gain + phase) at each sideband frequency.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");

@@ -3,7 +3,7 @@
 //! Workspace serves every trial — the pattern is frozen. The RNG is a
 //! deterministic std.Random.DefaultPrng seeded from Options.seed.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const dc = @import("../dc/dc.zig");
 const converger = @import("solvers").converger;
 

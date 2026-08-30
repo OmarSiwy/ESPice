@@ -2,7 +2,7 @@
 //! then every frequency point is a fill + factor + solve. No circuit
 //! contact inside the sweep.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const FreqSolver = root.solvers.freq_solve.FreqSolver;

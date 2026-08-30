@@ -5,7 +5,7 @@
 //! off the analytic Jacobian (root.Circuit.collectNoiseSources) — devices
 //! carry builtin noise generators, this analysis never re-derives them.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 
 const k_boltzmann = 1.380649e-23; // J/K

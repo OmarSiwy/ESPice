@@ -14,18 +14,10 @@ pub const newton_core = @import("newton_core.zig");
 pub const types = @import("types.zig");
 
 // Types re-exported for analysis consumers (BbdBlock/BbdInfo used by analysis/root.zig).
-pub const BbdBlock = struct {
-    start: u32,
-    size: u32,
-    type_id: u16,
-    instance_id: u32,
-};
-
-pub const BbdInfo = struct {
-    blocks: []BbdBlock,
-    coupling_start: u32,
-    coupling_size: u32,
-};
+// Defined in types.zig so solver leaves (direct/bbd/converger) reach them
+// without importing this root — keeps the intra-module import graph acyclic.
+pub const BbdBlock = types.BbdBlock;
+pub const BbdInfo = types.BbdInfo;
 
 test {
     @import("std").testing.refAllDecls(@This());

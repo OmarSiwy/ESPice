@@ -13,7 +13,7 @@
 //! effect for switched networks). Inter-sideband correlation and true LPTV
 //! conversion matrices are the adjoint upgrade path.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const dense_lu = root.solvers.dense_lu;
 const types = @import("solvers").types;

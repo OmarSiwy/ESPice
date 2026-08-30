@@ -1,7 +1,7 @@
 //! DC: Newton on A = G. solve()/solveWarm() are the point primitives;
 //! run() sweeps the primary source through its ParamRef and records probes.
 const std = @import("std");
-const root = @import("../root.zig");
+const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const op = @import("op.zig");
 

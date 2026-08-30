@@ -1,4 +1,4 @@
-const root = @import("root.zig");
+const root = @import("types.zig");
 const converger = @import("solvers").converger;
 
 /// Comptime validation: every analysis module is one pure transformation,
