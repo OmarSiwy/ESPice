@@ -16,7 +16,11 @@ design constraints first, code-minimization last.
    narrowest type the stated range allows.
 2. `/simd-first` (local, `.claude/skills/simd-first`, reference in
    `ref/SIMD-Strategies/`). Scalar oracle first, then the vector kernel, then
-   read the asm. Every kernel adds a case to `ref/SIMD-Strategies/verify.zig`.
+   read the asm. Every kernel adds a differential case against its scalar
+   oracle: in `ref/SIMD-Strategies/verify.zig` when the kernel is
+   self-contained (that file runs standalone under `zig run`, so it can
+   import nothing from `src/`), otherwise in the kernel's own file with a
+   pointer to it from verify.zig — LaneLu is the worked example.
 3. `/ponytail`. After the data layout and kernel strategy are fixed, write the
    least code that satisfies them. YAGNI applies to everything except
    correctness at trust boundaries and the conformance gates.
@@ -86,7 +90,10 @@ FROZEN at the GPU boundary (ABI + layout_hash): scatter tapes
 - Cross-object references are u32 indices into tables, never stored
   pointers. Allowed pointers: fn-pointer dispatch tables (Batch vtable —
   O(device types) indirect calls per eval), slices into owned storage,
-  ParamRef.ptr (frozen-storage contract).
+  ParamRef.ptr (frozen-storage contract), and `Circuit.lin.x_ptr` — an
+  identity key, never dereferenced, comparing the arena slice x_op was
+  built from. Every plane or parameter writer clears it (`Circuit.eval`
+  included), so a freed-and-reused address cannot read as a cache hit.
 
 ## Zig idioms, mandatory
 
