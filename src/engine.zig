@@ -58,6 +58,11 @@ pub const Simulation = struct {
     n_jobs: u32,
     results: []Result,
     n_results: u32,
+    /// Output-lifetime memory: every Result's data/varnames/plotname is
+    /// allocated here (RunCtx.allocator). Lives until the writers finish;
+    /// main resets it per deck. Attached in run() for the same by-value
+    /// stability reason as par_eval — `.allocator()` captures `&self`.
+    results_arena: std.heap.ArenaAllocator,
     /// Parallel eval context (policy: created here, referenced by Circuit).
     par_eval: ?devices.par.ParEval,
     /// `--gpu`. Acted on in `run()`, not here: `fromNetlist` returns by value,
@@ -93,6 +98,10 @@ pub const Simulation = struct {
 
         var sim: Simulation = undefined;
         sim.arena = sim_arena;
+        // Backed by sim_arena: reset(retain_capacity) reclaims result memory
+        // between decks without tearing down the circuit. Only its .allocator()
+        // is deferred to run() (captures &self); the value itself is stable.
+        sim.results_arena = std.heap.ArenaAllocator.init(sim_arena);
         sim.circuit = try b.compile();
         compiled_ok = true;
 
@@ -166,6 +175,7 @@ pub const Simulation = struct {
         self.circuit.gpu_hook = null;
         if (self.gpu_ctx) |g| g.deinit();
         if (self.par_eval) |*p| p.deinit();
+        self.results_arena.deinit();
         self.circuit.deinit();
     }
 
@@ -207,7 +217,9 @@ pub const Simulation = struct {
             .probes = self.probes,
             .source_node = self.source_node,
             .source_branch = self.source_branch,
-            .allocator = self.arena,
+            // Results land in the output-lifetime arena. Stable now (self is
+            // pinned), so taking .allocator() no longer dangles.
+            .allocator = self.results_arena.allocator(),
         };
 
         // If no jobs queued, run an implicit OP
