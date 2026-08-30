@@ -42,7 +42,7 @@ point).
 
 ## 2. Flow explanation
 
-`modules/analysis/src/dc/dc.zig run()`:
+`src/analysis/dc/dc.zig run()`:
 
 1. **Locate the swept parameter**: `collectParams()` yields raw `ParamRef`
    f32 pointers; the sweep binds the `dc` parameter of the source at
@@ -121,11 +121,11 @@ fully independent (each outer point cold-starts anyway).
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Warm-point Newton (factor/refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `modules/solvers/src/direct.zig` via `converger.newton` |
+| Warm-point Newton (factor/refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `src/solvers/direct.zig` via `converger.newton` |
 | Refactor bypass on linear sweeps (same matrix per point at fixed sources) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig` / memcmp bypass) | `converger.Options.matrix_sig` |
-| Ladder fallback rungs | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `modules/analysis/src/dc/op.zig solveLadder` |
-| Convergence gates, JFNK rung | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `modules/analysis/src/helper/converger.zig` |
-| GPU lane batching | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) §4 (batched-solve discussion) | `modules/devices/src/kernel.zig` |
+| Ladder fallback rungs | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `src/analysis/dc/op.zig solveLadder` |
+| Convergence gates, JFNK rung | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/converger.zig` |
+| GPU lane batching | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) §4 (batched-solve discussion) | `src/devices/engine.zig` |
 
 ---
 
@@ -147,7 +147,7 @@ fully independent (each outer point cold-starts anyway).
 
 **Our implementation**
 
-- `modules/analysis/src/dc/dc.zig` — sweep + warm start + ladder fallback.
-- `modules/analysis/src/dc/op.zig` — ladder.
+- `src/analysis/dc/dc.zig` — sweep + warm start + ladder fallback.
+- `src/analysis/dc/op.zig` — ladder.
 - Bench fixtures: `benchmark/fixtures/dc_sweep/*`,
   `benchmark/fixtures/convergence/schmitt` (fold/hysteresis behavior).

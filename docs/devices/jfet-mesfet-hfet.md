@@ -196,5 +196,5 @@ channel-thermal gen — add when the hook lands.
 
 ## Our implementation
 
-- `modules/devices/src/{jfet,jfet2,mesfet,mesa,hfet1,hfet2}.zig`.
+- `src/devices/{jfet,jfet2,mesfet,mesa,hfet1,hfet2}.zig`.
 - Bench fixtures: `devices/jfet*`, `jfet2`, `mesfet*`, `mesa*` (mesa_inverter/oscillator FAIL), `hfet1*`, `hfet2*`, `hfet_id_vgs`, `hfet_inverter` (FAIL).

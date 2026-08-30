@@ -8,7 +8,7 @@ noise) only transport them. Design doc — no code changes here.
 
 ## 1. What exists today (source-verified)
 
-**Declaration** — `modules/devices/src/contract.zig:269`:
+**Declaration** — `../VerA/tools/contract.zig:269`:
 
 ```zig
 pub fn NoiseGen(comptime D: type) type {
@@ -25,7 +25,7 @@ thermal p–n), `mos1.zig:177` (rd/rs thermal + channel), `bjt.zig:282`
 (rc/rb/re thermal), `diode.zig:157` (shot + flicker on the junction,
 thermal on RS), `switch.zig` (thermal on G_eff).
 
-**Collection** — `modules/analysis/src/problem/batch.zig:736`
+**Collection** — `src/devices/engine.zig:736`
 (`collectNoise`, installed as the `collect_noise` hook at `:284` only
 when `noise_gens` exists): per instance, seeds the AD dual at the OP
 `x`, calls `D.eval`, and for each `thermal` generator reads the branch
@@ -39,11 +39,11 @@ const g = @abs(out[gen.row].d[gen.col]);   // g = |∂I_row/∂V_col| at x_op
 .shot, .flicker => {},                      // <- skipped today
 ```
 
-**Plumbing** — `modules/analysis/src/root.zig:669`
+**Plumbing** — `src/analysis/root.zig:669`
 `Circuit.collectNoiseSources` fans the hook over batches;
 `NoiseSource = {node_p, node_n, conductance}` (`root.zig:226`).
 
-**Consumption** — `modules/analysis/src/ac/noise.zig:66`: adjoint sweep,
+**Consumption** — `src/analysis/ac/noise.zig:66`: adjoint sweep,
 per source `psd = 4kT·conductance`, output density
 $\sum |H_{branch}|^2 \cdot 4kT g$. `pss/pnoise.zig:190` and
 `tran/tran_noise.zig` reuse the same collection.
@@ -75,7 +75,7 @@ coefficient), which `noise_gens` cannot express.
 ## 3. Target hook design — **LANDED in contract.zig (2026-07-12)**
 
 `PsdTerm` + the `noisePsd` validation now live in
-`modules/devices/src/contract.zig` (optional decl, requires `noise_gens`;
+`../VerA/tools/contract.zig` (optional decl, requires `noise_gens`;
 allowlisted). Landed form drops the draft's `gen: u8` field — return
 position k IS generator k. Device implementations + the collectNoise
 consumption path below are still pending.
@@ -172,7 +172,7 @@ treatment (e.g. no induced gate noise in MOS1–9), the delta is noted.
 
 ## Sources
 
-- `modules/devices/src/contract.zig` (NoiseGen, validation), `modules/analysis/src/problem/batch.zig` (collectNoise + ponytail marker), `modules/analysis/src/root.zig` (NoiseSource, collectNoiseSources), `modules/analysis/src/ac/noise.zig`, `pss/pnoise.zig`, `tran/tran_noise.zig` — all read in-tree (this repo).
+- `../VerA/tools/contract.zig` (NoiseGen, validation), `src/devices/engine.zig` (collectNoise + ponytail marker), `src/analysis/root.zig` (NoiseSource, collectNoiseSources), `src/analysis/ac/noise.zig`, `pss/pnoise.zig`, `tran/tran_noise.zig` — all read in-tree (this repo).
 - ngspice `NevalSrc` semantics (THERMNOISE = 4kT·g·|H|², SHOTNOISE = 2q·I·|H|², N_GAIN = |H|² for external 1/f multiply): from the fetched `*noise.c`/`*noi.c` files cited in the per-device docs.
 
 ## Verification status

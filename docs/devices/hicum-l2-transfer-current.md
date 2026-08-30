@@ -254,5 +254,5 @@ not read this pass.
 
 ## Our implementation
 
-- `modules/devices/src/hicum_l2.zig` (also `hicum_l0.zig` for L0).
+- `src/devices/models/hicumL2_va.va` (also `hicum_l0.zig` for L0).
 - Bench fixtures: `benchmark/fixtures/devices/hicum2`, `hicum2_gummel`, `hicum2_output`.

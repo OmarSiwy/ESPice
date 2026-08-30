@@ -225,13 +225,13 @@ re-fetched. §1 residual gate — our addition, not ngspice (documented as
 such in the code). §1 JFNK/GMRES math — derived, not source-verified
 (standard Saad/Kelley material; Kelley & Keyes paywalled). §2/§3 — verified
 against `converger.zig` directly. §4 — verified against
-`src/gpu_solver.zig` + `converger.run` dispatch; kernel internals
+`src/gpu_context.zig` + `converger.run` dispatch; kernel internals
 paraphrase our ABI (`analysis.gpu_abi`).
 
-**Our implementation:** `modules/analysis/src/helper/converger.zig`
+**Our implementation:** `src/solvers/converger.zig`
 (`newton`, `jfnk`, `finalizeStep`, `dampStep`, `updateAndNorm`,
-`Tolerances`); device limiting in `modules/devices/src/*.zig`
-(`ckt.applyLimits`); GPU driver `src/gpu_solver.zig` (`solveNewton`).
+`Tolerances`); device limiting in `src/devices/*.zig`
+(`ckt.applyLimits`); GPU driver `src/gpu_context.zig` (`solveNewton`).
 Fixtures: `benchmark/fixtures/convergence/{diode_bridge,schmitt,
 high_gain_fb}`, `benchmark/fixtures/op/`, scaling:
 `inverter_chain_{256,1k,4k}` (Newton per step),

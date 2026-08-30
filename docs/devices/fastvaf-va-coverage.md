@@ -5,7 +5,7 @@ OpenVAF integration-test models (github.com/pascalkuthe/OpenVAF,
 `integration_tests/`) plus VBIC 1.2 from designers-guide.org
 (`vbic_4T_et_cf.vla`). Harness: each model behind a `.hdl` card in a trivial
 netlist, run through `espice -b` — the exact runtime pipeline
-(`src/vaload.zig` → `fastvaf.compileSource` → `va.codegen.generate` → zig
+(`src/devices/loader.zig` → `fastvaf.compileSource` → `va.codegen.generate` → zig
 build-lib → dlopen). Models with local `` `include `` files were pre-flattened
 (FastVAF replaces non-standard includes with a comment — see P0), so the
 matrix reflects the model *body*, not the include gap.
@@ -89,7 +89,7 @@ production BJT when the source dodges every bug below.
 
 ## Blocker catalog (ALL FIXED 2026-07-12)
 
-Fix locations: P0–P3 `modules/FastVAF/src/va/frontend/Preprocessor.zig` (comment
+Fix locations: P0–P3 `../VerA/src/frontend/preprocessor.zig` (comment
 pre-strip, string-aware multi-line arg scan, two-phase substitution, real
 include resolution via `compileSourceOpts`); P4 `frontend/Parser.zig`
 (optional header semicolon); P5+P6 `backend/codegen.zig` (per-scope discards,
@@ -98,7 +98,7 @@ aliased-phi skip, loop-chain emission with join-once + entry phi init) and
 block lowering for loop-containing conditionals); P7 `ir/Lower.zig`
 (named/implicit branches, branch-current unknowns, switch-branch mode
 select); P8 `backend/codegen.zig` (constFold for defaults); P9
-`src/netlist.zig` + `modules/analysis/src/problem/dyn.zig` + `src/vaload.zig`
+`src/frontend/parser.zig` + `src/devices/engine.zig` + `src/devices/loader.zig`
 (card-kv into model blob, case-insensitive params and registry, `.model`
 kind indirection).
 
@@ -112,9 +112,9 @@ committed).
   device* with no diagnostic (fails later on `unused function parameter` in
   the generated Zig). `vaload.ensureLoaded` passes only source text, no
   directory, so there is nothing to resolve against.
-  Lands: `modules/FastVAF/src/va/frontend/Preprocessor.zig` (`handleInclude`) +
+  Lands: `../VerA/src/frontend/preprocessor.zig` (`handleInclude`) +
   an include-dir option threaded through `compileSource`
-  (`src/va/root.zig`) and `src/vaload.zig`. Effort: S.
+  (`../VerA/src/root.zig`) and `src/devices/loader.zig`. Effort: S.
 
 - **P1 — macro-arg scanner is not string-aware.**
   `Preprocessor.expandAndAppend` splits invocation args on `,`/`()` depth but
@@ -184,8 +184,8 @@ committed).
   card. (b) The ngspice tokenizer lowercases keys while generated Model
   fields keep VA case (`R`, `VOFF`), so `set_model_param` misses. Every
   parameterized use fails silently → NaN/defaults. Lands:
-  `src/netlist.zig:addDynDevices` (try model blob for card kv),
-  `modules/analysis/src/problem/dyn.zig:setParam` (case-insensitive match).
+  `src/frontend/parser.zig:addDynDevices` (try model blob for card kv),
+  `src/devices/engine.zig:setParam` (case-insensitive match).
   Effort: S.
 
 ## Priority to unlock PSP103 and BSIMSOI

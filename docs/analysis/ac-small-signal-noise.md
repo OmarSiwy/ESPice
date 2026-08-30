@@ -86,7 +86,7 @@ to tolerance here.
 
 ## 2. Flow explanation
 
-**AC** (`modules/analysis/src/ac/ac.zig`): one `eval()` at $x_{op}$
+**AC** (`src/analysis/ac/ac.zig`): one `eval()` at $x_{op}$
 linearizes the circuit — the analytic $G$ and $C$ planes *are* the
 linearization; the sweep never touches the circuit again. Phases: (1) build
 `FreqSolver` from the planes (stacked-real pattern, symbolic once);
@@ -99,7 +99,7 @@ whole sweep (no silent point skipping). Knobs: `f_start`, `f_stop`,
 **Noise — the in-device convention.** Every device model **owns its noise
 sources**; analyses only consume them (see the "Noise model (in-device)"
 sections and noise-coverage column in [docs/devices/](../devices/README.md)).
-The contract interface (`modules/devices/src/contract.zig`): a device
+The contract interface (`../VerA/tools/contract.zig`): a device
 declares comptime `noise_gens` metadata — `NoiseGen{row, col, kind}` with
 `kind ∈ {thermal, shot, flicker}`, `row/col` naming the local unknowns the
 generator sits across. The batch collector
@@ -191,7 +191,7 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Stacked-real $2n$ sweep — sparse path fills the KLU pattern per $\omega$ (streamed copy, no re-assembly), dense below `DENSE_THRESHOLD = 16` | [klu-pipeline.md](../solvers/klu-pipeline.md), [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `modules/solvers/src/freq_solve.zig` (`fromCircuit`/`setOmega`/`solve`) |
+| Stacked-real $2n$ sweep — sparse path fills the KLU pattern per $\omega$ (streamed copy, no re-assembly), dense below `DENSE_THRESHOLD = 16` | [klu-pipeline.md](../solvers/klu-pipeline.md), [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `src/solvers/freq_solve.zig` (`fromCircuit`/`setOmega`/`solve`) |
 | Noise adjoint: transposed solve on the same per-$\omega$ factors | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse `solveT`; dense fallback transposes per call) | `freq_solve.zig solveRhsT` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `helper/converger.zig` |
 
@@ -212,8 +212,8 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
 - §1 adjoint derivation: derived (textbook); consistent with the
   implementation's `solveRhsT` + per-source dot.
 - §2 in-device noise convention: verified against
-  `modules/devices/src/contract.zig` (`noise_gens`/`NoiseGen`) and
-  `modules/analysis/src/problem/batch.zig collectNoise` (AD-Jacobian
+  `../VerA/tools/contract.zig` (`noise_gens`/`NoiseGen`) and
+  `src/devices/engine.zig collectNoise` (AD-Jacobian
   conductance read; thermal-only gap marked in source).
 - §3: direct transcription. §4: extrapolation of the repo's batched-eval /
   JFNK GPU style to the frequency axis (frequency batching not yet
@@ -221,9 +221,9 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
 
 **Our implementation**
 
-- `modules/analysis/src/ac/ac.zig` — AC sweep.
-- `modules/analysis/src/ac/noise.zig` — adjoint noise.
-- `modules/solvers/src/freq_solve.zig` — stacked-real solver.
+- `src/analysis/ac/ac.zig` — AC sweep.
+- `src/analysis/ac/noise.zig` — adjoint noise.
+- `src/solvers/freq_solve.zig` — stacked-real solver.
 - Related: `ac/sp.zig`, `ac/stb.zig`, `dc/tf.zig`, `eigen/pz.zig`.
 - Bench fixtures: `benchmark/fixtures/ac/rc_lowpass`,
   `benchmark/fixtures/noise/{amp_noise,rc_noise,resistor_noise}`,

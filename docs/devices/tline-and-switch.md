@@ -218,5 +218,5 @@ it naturally).
 
 ## Our implementation
 
-- `modules/devices/src/tline.zig` (Bergeron + history), `switch.zig` (4-state FSM + accepted-state rollback via `stateCtl`), `cswitch.zig` (current-controlled twin).
+- `src/devices/models/tline.va` (Bergeron + history), `switch.zig` (4-state FSM + accepted-state rollback via `stateCtl`), `cswitch.zig` (current-controlled twin).
 - Bench fixtures: `benchmark/fixtures/tline/ideal_tline`, `delay_line`, `terminated`; `benchmark/fixtures/devices/tline`, `switch`, `switch_hysteresis`, `cswitch`.

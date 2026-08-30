@@ -260,5 +260,5 @@ straight-line on GPU. ngspice vs modern: no B-C correlation in VBIC
 
 ## Our implementation
 
-- `modules/devices/src/vbic.zig`.
+- `src/devices/models/vbic13_4t.va`.
 - Bench fixtures: `benchmark/fixtures/devices/vbic`, `vbic_gummel`, `vbic_forward_gummel`, `vbic_output`, `vbic_forced_output`, `vbic_ce_amp`, `vbic_diffamp`, `vbic_temp`, `vbic_noise_scale`.
