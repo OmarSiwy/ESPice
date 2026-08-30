@@ -111,7 +111,7 @@ shortcuts carry a `ponytail:` comment naming the ceiling and upgrade path.
 
 ## Verification
 
-- `zig build && zig build test` after every step. Known baseline: 296/298 —
+- `zig build && zig build test` after every step. Known baseline: 305/307 —
   the 2 `disto` HD2 failures (tests/analyses.zig:972,1070) pre-date the
   refactor (verified on clean HEAD 285e7e7 in a worktree).
 - New SIMD kernels: differential test vs the scalar oracle in
