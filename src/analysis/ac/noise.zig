@@ -59,79 +59,43 @@ pub fn sweep(
     const n_points = freqs.len;
     std.debug.assert(freqs.len == density.len);
 
-    // ponytail: GPU batch adjoint path — all freq solves in one dispatch,
-    // PSD accumulation stays CPU (cheap). Falls through on error or absence.
-    if (ckt.gpu_hook != null) gpu: {
-        // Fill G/C planes at operating point (same eval fromCircuit does).
-        ckt.linearize(x_op);
-
-        // Build omega + freq arrays.
-        const omegas = allocator.alloc(f64, n_points) catch break :gpu;
-        defer allocator.free(omegas);
-        types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
-
-        // RHS: unit excitation at out_node (stacked-real, length 2n).
-        const e_out = allocator.alloc(f64, nn) catch break :gpu;
-        defer allocator.free(e_out);
-        root.zeroSimd(e_out);
-        e_out[options.out_node] = 1.0;
-
-        // Batch adjoint dispatch — single GPU launch for all frequency points.
-        const y_lanes = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, e_out, @intCast(n), true) orelse break :gpu;
-        defer allocator.free(y_lanes);
-
-        // CPU-side PSD accumulation + trapezoidal integration.
-        var integrated_noise: f64 = 0;
-        var prev_freq: f64 = 0;
-        var prev_density: f64 = 0;
-        for (0..n_points) |k| {
-            const f = freqs[k];
-            const y = y_lanes[k * nn ..][0..nn];
-
-            var total_density: f64 = 0;
-            for (noise_sources) |src| {
-                const psd = sourcePsd(src, f, options.temp_k);
-                const yp_re: f64 = if (src.node_p != root.GROUND) y[src.node_p] else 0;
-                const yn_re: f64 = if (src.node_n != root.GROUND) y[src.node_n] else 0;
-                const yp_im: f64 = if (src.node_p != root.GROUND) y[n + src.node_p] else 0;
-                const yn_im: f64 = if (src.node_n != root.GROUND) y[n + src.node_n] else 0;
-                const h_re = yp_re - yn_re;
-                const h_im = yp_im - yn_im;
-                total_density += (h_re * h_re + h_im * h_im) * psd;
-            }
-
-            density[k] = total_density;
-            if (k > 0) integrated_noise += 0.5 * (prev_density + total_density) * (f - prev_freq);
-            prev_freq = f;
-            prev_density = total_density;
-        }
-
-        return @sqrt(integrated_noise);
-    }
-
-    // ── Serial CPU fallback ──────────────────────────────────────────────
+    // Adjoint: A^H y = e_out per omega (conjugate drops out of |H|^2, so the
+    // stacked-real transpose solve suffices). One shared rhs, lane = frequency:
+    // GPU batch adjoint dispatch orelse the CPU lane solveBatch(adjoint=true).
+    // PSD accumulation stays CPU (cheap).
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
     defer fs.deinit(allocator);
 
+    const omegas = try allocator.alloc(f64, n_points);
+    defer allocator.free(omegas);
+    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
+
+    // RHS: unit excitation at out_node (stacked-real, length 2n).
     const e_out = try allocator.alloc(f64, nn);
     defer allocator.free(e_out);
-    const y = try allocator.alloc(f64, nn);
-    defer allocator.free(y);
     root.zeroSimd(e_out);
     e_out[options.out_node] = 1.0;
+
+    // solveBatch takes a per-lane rhs blob; broadcast the one shared rhs.
+    const rhs_blob = try allocator.alloc(f64, n_points * nn);
+    defer allocator.free(rhs_blob);
+    for (0..n_points) |k| for (0..nn) |i| {
+        rhs_blob[k * nn + i] = e_out[i];
+    };
+
+    const y_lanes = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, e_out, @intCast(n), true) orelse blk: {
+        const cpu = try allocator.alloc(f64, n_points * nn);
+        try fs.solveBatch(allocator, omegas, rhs_blob, cpu, true);
+        break :blk cpu;
+    };
+    defer allocator.free(y_lanes);
 
     var integrated_noise: f64 = 0;
     var prev_freq: f64 = 0;
     var prev_density: f64 = 0;
-
-    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-    var k: usize = 0;
-    while (sw.next()) |f| : (k += 1) {
-        const omega = 2.0 * std.math.pi * f;
-        try fs.setOmega(omega);
-        // Adjoint: A^H y = e_out (the conjugate drops out of |H|^2,
-        // so stacked-real transpose solve suffices).
-        try fs.solveRhsT(e_out, y);
+    for (0..n_points) |k| {
+        const f = freqs[k];
+        const y = y_lanes[k * nn ..][0..nn];
 
         var total_density: f64 = 0;
         for (noise_sources) |src| {
@@ -145,9 +109,7 @@ pub fn sweep(
             total_density += (h_re * h_re + h_im * h_im) * psd;
         }
 
-        freqs[k] = f;
         density[k] = total_density;
-
         if (k > 0) integrated_noise += 0.5 * (prev_density + total_density) * (f - prev_freq);
         prev_freq = f;
         prev_density = total_density;
