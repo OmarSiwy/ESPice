@@ -63,7 +63,7 @@ pub fn sweep(
     // PSD accumulation stays CPU (cheap). Falls through on error or absence.
     if (ckt.gpu_hook != null) gpu: {
         // Fill G/C planes at operating point (same eval fromCircuit does).
-        ckt.eval(x_op, 0);
+        ckt.linearize(x_op);
 
         // Build omega + freq arrays.
         const omegas = allocator.alloc(f64, n_points) catch break :gpu;
