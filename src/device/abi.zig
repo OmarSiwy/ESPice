@@ -591,7 +591,8 @@ pub const GpuPayload = struct {
 // 27: `GpuPayload.held`; the state kernel takes `halves` after `lim_active`,
 //    so held-variable devices that limit (mos1/2/3/6/9, bsim4va,
 //    vbic13_4t) are resident.
-pub const abi_version: u32 = 27;
+// 28: `layoutHash` recurses into by-value struct fields; no layout moved.
+pub const abi_version: u32 = 28;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -663,7 +664,11 @@ fn hashType(h0: u64, comptime T: type) u64 {
     var h = mix(mix(h0, @sizeOf(T)), @alignOf(T));
     switch (@typeInfo(T)) {
         .@"struct" => |si| inline for (si.field_names, si.field_types, si.field_attrs) |name, FT, attrs| {
-            if (!attrs.@"comptime" and @sizeOf(FT) > 0) h = mix(h, @offsetOf(T, name));
+            if (attrs.@"comptime" or @sizeOf(FT) == 0) continue;
+            h = mix(h, @offsetOf(T, name));
+            // A by-value struct (`NoiseSource.table`) crosses with its
+            // parent; a pointer's target is hashed only if listed.
+            if (@typeInfo(FT) == .@"struct") h = hashType(h, FT);
         },
         else => {}, // else: a non-struct type hashes by size and alignment only
     }
@@ -672,6 +677,18 @@ fn hashType(h0: u64, comptime T: type) u64 {
 
 test {
     _ = bind;
+}
+
+test "hashType sees a field move inside a by-value nested struct" {
+    const Outer = struct {
+        fn of(comptime Inner: type) type {
+            return extern struct { x: u32, inner: Inner };
+        }
+    }.of;
+    const A = extern struct { a: u16, b: u8, c: u8 };
+    const B = extern struct { a: u8, b: u8, c: u16 };
+    comptime std.debug.assert(@sizeOf(A) == @sizeOf(B) and @alignOf(A) == @alignOf(B));
+    try std.testing.expect(hashType(0, Outer(A)) != hashType(0, Outer(B)));
 }
 
 test DeviceResult {
