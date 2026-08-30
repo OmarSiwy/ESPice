@@ -1,4 +1,4 @@
-# modules/solvers — Sparse & Dense Linear Algebra Engine
+# src/solvers — Sparse & Dense Linear Algebra Engine
 
 All solvers are comptime-generic over element type `T` (f64/f32), auto-vectorize
 via `std.simd.suggestVectorLength(T)` (AVX-512/AVX2/SSE/NEON), and allocate
@@ -299,7 +299,7 @@ const rt = types.riseTime(wf, .{ .lo = 0.1, .hi = 0.9 });
 ## Tests
 
 ```sh
-zig test modules/solvers/src/root.zig -fno-llvm -fno-lld
+zig build test-solvers
 ```
 
 123 tests covering correctness, determinism, edge cases, and solver-facade

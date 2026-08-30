@@ -91,7 +91,7 @@ networks).
 
 ## 2. Flow explanation
 
-`modules/analysis/src/pss/pnoise.zig`, three phases:
+`src/analysis/pss/pnoise.zig`, three phases:
 
 **Phase 1 — PSS.** A simplified shooting pass finds the periodic orbit:
 integrate one period with frozen-time quasi-static Newton solves at
@@ -205,7 +205,7 @@ Sequential remains: PSS orbit computation and the ordering of nothing else
 | Phase | Solver doc | Impl |
 |---|---|---|
 | PSS phase (frozen-time Newton per sample) | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md), [klu-pipeline.md](../solvers/klu-pipeline.md) | `converger.run` in `pnoise.runPSS` |
-| Per-(frequency × sideband × sample) admittance factor + per-source back-substitutions | none (dense stacked-real path) | `modules/solvers/src/dense_lu.zig` (`buildComplexAdmittance`, `factorize`, `solveFactored`) |
+| Per-(frequency × sideband × sample) admittance factor + per-source back-substitutions | none (dense stacked-real path) | `src/solvers/dense_lu.zig` (`buildComplexAdmittance`, `factorize`, `solveFactored`) |
 | Adjoint upgrade (one transposed solve per lane replaces the per-source RHS batch) | [klu-pipeline.md](../solvers/klu-pipeline.md) (`solveT` flavor) | target — same shape as `freq_solve.solveRhsT` |
 
 ---
@@ -231,8 +231,8 @@ Sequential remains: PSS orbit computation and the ordering of nothing else
 
 **Our implementation**
 
-- `modules/analysis/src/pss/pnoise.zig` — PSS + frozen-time LPTV sweep.
-- `modules/analysis/src/pss/pss.zig` — full shooting-Newton PSS.
-- `modules/analysis/src/ac/noise.zig` — the LTI limit it must reduce to.
+- `src/analysis/pss/pnoise.zig` — PSS + frozen-time LPTV sweep.
+- `src/analysis/pss/pss.zig` — full shooting-Newton PSS.
+- `src/analysis/ac/noise.zig` — the LTI limit it must reduce to.
 - Bench fixtures: `benchmark/fixtures/noise/*` (LTI reduction),
   `benchmark/fixtures/pss/*` (orbit correctness feeding pnoise).

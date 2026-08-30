@@ -274,6 +274,6 @@ derived, deferred.
 
 ## Our implementation
 
-- Today: `modules/devices/src/lossy_tline.zig` — lumped RLGC pi (header comment documents the divergence, TRIAGE C4); `coupled_tlines.zig` for CPL.
+- Today: `src/devices/models/lossy_tline.va` — lumped RLGC pi (header comment documents the divergence, TRIAGE C4); `coupled_tlines.zig` for CPL.
 - Upgrade target: recursive convolution per this doc, reusing `tline.zig`'s history-buffer infrastructure.
 - Bench fixtures: `benchmark/fixtures/devices/lossy_tline`, `benchmark/fixtures/tline/ltra1_1_line`, `ltra2_2_line` (rms ~2e-3 with Bergeron cascade today).

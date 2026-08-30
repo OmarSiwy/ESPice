@@ -110,7 +110,7 @@ Benchmarking against a specific tool is one field change.
 ## 2. Flow explanation
 
 There is exactly one tolerance struct
-(`modules/analysis/src/helper/converger.zig Tolerances`) and one place
+(`src/solvers/converger.zig Tolerances`) and one place
 convergence is decided (`finalizeStep`), used by both the direct-Newton and
 JFNK paths so they cannot drift; the GPU megakernel mirrors the same gates
 so CPU and GPU accept identical iterates. Analyses never construct raw
@@ -197,7 +197,7 @@ never loosens (or blocks) another's acceptance.
 | Phase | Solver doc | Impl |
 |---|---|---|
 | The acceptance gates themselves (reltol/vntol/abstol semantics, residual gate) | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `converger.finalizeStep` / `updateAndNorm` |
-| Solver-accuracy features the bundles lean on (pivot-growth monitor; condition estimation + iterative refinement documented-but-skipped) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `modules/solvers/src/direct.zig` |
+| Solver-accuracy features the bundles lean on (pivot-growth monitor; condition estimation + iterative refinement documented-but-skipped) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solvers/direct.zig` |
 | `gmin` floor as solver regularization | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | diagonal stamp in `converger.newton`/`jfnk` |
 
 ---
@@ -222,10 +222,10 @@ never loosens (or blocks) another's acceptance.
 
 **Our implementation**
 
-- `modules/analysis/src/helper/converger.zig` — `Tolerances`, profiles,
+- `src/solvers/converger.zig` — `Tolerances`, profiles,
   `newtonOpts`, `finalizeStep`, `updateAndNorm`.
-- `modules/analysis/src/tran/tran.zig` — `chgtol`/`trtol` consumers.
-- `modules/devices/src/kernel.zig` — on-device gate mirror.
+- `src/analysis/tran/tran.zig` — `chgtol`/`trtol` consumers.
+- `src/devices/engine.zig` — on-device gate mirror.
 - Bench fixtures: accuracy columns across `benchmark/RESULTS.md` are
   produced under `.ngspice`; `benchmark/fixtures/convergence/*` and
   `benchmark/fixtures/adversarial/*` stress the gates.

@@ -205,7 +205,7 @@ host: sum group results (superposition) at output grid
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| One-time factorization of $(C + \gamma G)$ (R-MATEX) or $G$ (I-MATEX) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `modules/solvers/src/direct.zig` (once-factored solves are the whole per-step cost) |
+| One-time factorization of $(C + \gamma G)$ (R-MATEX) or $G$ (I-MATEX) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/solvers/direct.zig` (once-factored solves are the whole per-step cost) |
 | Arnoldi triangular solves on GPU (level-scheduled or GMRES-replaced) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | requirement |
 | Linear-circuit eligibility detection | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`) | `converger.Options.matrix_sig` |
 
@@ -231,11 +231,11 @@ host: sum group results (superposition) at output grid
 **Our implementation**
 
 - Not implemented. Landing zone: linear-transient fast path beside
-  `modules/analysis/src/tran/tran.zig`, reusing
-  `modules/solvers/src/direct.zig` (once-factored solves),
+  `src/analysis/tran/tran.zig`, reusing
+  `src/solvers/direct.zig` (once-factored solves),
   the breakpoint list in `tran.zig` (= transition spots), and the
   `matrix_sig` linear-circuit detection in
-  `modules/analysis/src/helper/converger.zig`.
+  `src/solvers/converger.zig`.
 - Bench fixtures that would judge it: `benchmark/fixtures/scaling/*`
   (rc_ladder class), `benchmark/fixtures/power/*`,
   `benchmark/fixtures/basic/*` linear RC/RLC.

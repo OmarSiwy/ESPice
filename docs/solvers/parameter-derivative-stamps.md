@@ -197,21 +197,21 @@ kernel param_stamp_pass(blob, x, lambda):
   standard.
 - §1 contract analysis (S-generic physics, `AdScalar(N)` seeding,
   params-as-constants, `mc_param`, Model value-type enforcement, prep
-  rules): **verified against source** — `modules/devices/src/contract.zig`
+  rules): **verified against source** — `../VerA/tools/contract.zig`
   (module doc RULES, `Dual`, `validateMcParam`,
-  `validateDefaultedStruct`), `modules/analysis/src/problem/ad.zig`,
-  `modules/analysis/src/problem/batch.zig` (seed loop `d[u] = 1`, `gath`
+  `validateDefaultedStruct`), `src/devices/engine.zig`,
+  `src/devices/engine.zig` (seed loop `d[u] = 1`, `gath`
   tables, `localX`, noise-collector shape).
 - §2–§4: design spec (nothing implemented); FD-fallback rung verified
   feasible against existing `evalValues` helper in `contract.zig`.
 
 **Our implementation**
 
-- Exists (ingredients): `modules/devices/src/contract.zig` (S contract,
-  `Dual`, `mc_param`, `evalValues`), `modules/analysis/src/problem/ad.zig`
-  (`AdScalar`), `modules/analysis/src/problem/batch.zig` (SoA layout,
-  gathers), `modules/solvers/src/direct.zig solveT`,
-  `modules/solvers/src/freq_solve.zig solveRhsT`.
+- Exists (ingredients): `../VerA/tools/contract.zig` (S contract,
+  `Dual`, `mc_param`, `evalValues`), `src/devices/engine.zig`
+  (`AdScalar`), `src/devices/engine.zig` (SoA layout,
+  gathers), `src/solvers/direct.zig solveT`,
+  `src/solvers/freq_solve.zig solveRhsT`.
 - Consumers: [dcmatch](../analysis/dcmatch.md) (future — hard
   requirement), [sensitivity](../analysis/sensitivity.md) adjoint + AC
   upgrade, later optimization/tuning loops.

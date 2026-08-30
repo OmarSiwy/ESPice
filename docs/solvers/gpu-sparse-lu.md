@@ -151,7 +151,7 @@ levelize_relaxed(As):                   # GLU3.0 Algorithm 4, two loops
 ## 4. Pseudo-code, GPU parallel
 
 Aligned with our data layout (SoA CSC, u32, `NONE` sentinel, allocate-once;
-grid-sync = cooperative launch as in `src/gpu_solver.zig`):
+grid-sync = cooperative launch as in `src/gpu_context.zig`):
 
 ```
 # device residents (allocated once): col_ptr/row_idx of the FILLED pattern,
@@ -229,10 +229,10 @@ refactor-replay variant and batched-solve design are ours, not from a
 source.
 
 **Our implementation:** none yet on-device for LU — this doc is the port
-spec. Host pieces it would reuse: `modules/solvers/src/direct.zig` (frozen
+spec. Host pieces it would reuse: `src/solvers/direct.zig` (frozen
 pattern, `up/ui` topo order, `prow`, growth monitor),
-`src/gpu_solver.zig` (cooperative-launch driver, staged prefix,
-one-HtoD/one-DtoH protocol), `modules/analysis/src/helper/converger.zig`
+`src/gpu_context.zig` (cooperative-launch driver, staged prefix,
+one-HtoD/one-DtoH protocol), `src/solvers/converger.zig`
 (fallback ladder the GPU path must respect). Scaling fixtures:
 `benchmark/fixtures/scaling/resistor_grid_100x100`, `rc_mesh_10k` (wide
 DAGs — level-set friendly), `rc_ladder_100k` (adversarial: depth-n DAG,

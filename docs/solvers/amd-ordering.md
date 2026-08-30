@@ -186,9 +186,9 @@ the thesis describes these only at survey level). §2/§3 — verified against
 `order.zig` directly. §4 — derived, not source-verified (engineering
 judgment; no source parallelizes MD on GPU).
 
-**Our implementation:** `modules/solvers/src/order.zig` (`amd()`, `DegLists`,
+**Our implementation:** `src/solvers/order.zig` (`amd()`, `DegLists`,
 `Ws`, `wsSize`); consumed per BTF block by `order()` and by
-`modules/solvers/src/direct.zig` `Lu.init` (`Params.ordering = .amd`).
+`src/solvers/direct.zig` `Lu.init` (`Params.ordering = .amd`).
 Scaling fixtures: `benchmark/fixtures/scaling/rc_mesh_{1k,10k}` and
 `resistor_grid_{32x32,100x100}` (2-D patterns where ordering quality
 dominates fill), `rc_ladder_100k` (chain — near-zero fill sanity bound).

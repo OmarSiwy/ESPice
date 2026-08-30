@@ -70,7 +70,7 @@ grows (it drops $m$ Newton solves to $m$ dots).
 
 ## 2. Flow explanation
 
-`modules/analysis/src/sweep/sens.zig`:
+`src/analysis/sweep/sens.zig`:
 
 1. Collect all device parameters (`collectParams` → raw f32 pointers with
    device/param names). Nominal solve at ITL2 → $y_0$.
@@ -133,7 +133,7 @@ over frequency points on top (independent lanes, as in
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Nominal + perturbed Newton solves (refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `modules/solvers/src/direct.zig` via `converger.run` |
+| Nominal + perturbed Newton solves (refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` |
 | Workspace/pattern reuse across all solves | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()` |
 | Adjoint upgrade (transposed solve on existing factors) | [klu-pipeline.md](../solvers/klu-pipeline.md) (solve with $L^{\mathsf T}U^{\mathsf T}$ order swapped) | `direct.zig` solveT / `freq_solve.zig` `solveRhsT` (AC case) |
 
@@ -157,5 +157,5 @@ over frequency points on top (independent lanes, as in
 
 **Our implementation**
 
-- `modules/analysis/src/sweep/sens.zig` — brute-force DC sensitivity.
+- `src/analysis/sweep/sens.zig` — brute-force DC sensitivity.
 - Bench fixtures: `benchmark/fixtures/sens/*`.

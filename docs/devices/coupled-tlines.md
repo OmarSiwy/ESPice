@@ -184,5 +184,5 @@ worth it with a source demanding it (derived, no reference).
 
 ## Our implementation
 
-- `modules/devices/src/coupled_tlines.zig` (2-conductor even/odd cognate — see §1.5 for the ceiling), `src/netlist.zig` P-card mapping.
+- `src/devices/models/coupled_tlines.va` (2-conductor even/odd cognate — see §1.5 for the ceiling), `src/frontend/parser.zig` P-card mapping.
 - Bench fixtures: `benchmark/fixtures/devices/coupled_tlines` (FAIL 6.45e-1), `benchmark/fixtures/tline/cpl3_4_line` (7.5e34 blowup — N=3), `tline/cpl_ibm2`.

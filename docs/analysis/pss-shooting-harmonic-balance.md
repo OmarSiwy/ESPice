@@ -126,7 +126,7 @@ sharp edges).
 
 ## 2. Flow explanation
 
-**Shooting** (`modules/analysis/src/pss/pss.zig`): start $v_0$ from the DC
+**Shooting** (`src/analysis/pss/pss.zig`): start $v_0$ from the DC
 operating point. Each shooting iteration integrates one period with
 fixed-step trapezoidal ($n_{\text{samples}}$ steps, every buffer size known
 up front — one scratch arena, zero growth), computes
@@ -141,7 +141,7 @@ current implementation's scaling ceiling ($n{+}1$ period integrations per
 shooting iteration, $O(n^2)$ storage); the Krylov matrix-free path in §1 is
 the designed upgrade (RESEARCH.md checklist item 3).
 
-**HB** (`modules/analysis/src/pss/hb.zig`): real trigonometric basis
+**HB** (`src/analysis/pss/hb.zig`): real trigonometric basis
 $[\,dc, \cos_1, \sin_1, \dots, \cos_K, \sin_K\,]$, $2K{+}1$ time samples per
 period. Per Newton iteration: IDFT $\hat V \to$ samples; one `ckt.eval` per
 sample fills the residual **and** the analytic $G$ plane (sample 0 also
@@ -252,10 +252,10 @@ march inside shooting.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Inner fixed-step trap Newton (per timestep of every period integration) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `modules/solvers/src/direct.zig` via `converger.run` + `PeriodHook` |
-| Shooting Jacobian solve (dense $J_\Phi$) | none (dense path) | `modules/solvers/src/dense_lu.zig factorizeSolveNeg` |
+| Inner fixed-step trap Newton (per timestep of every period integration) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` + `PeriodHook` |
+| Shooting Jacobian solve (dense $J_\Phi$) | none (dense path) | `src/solvers/dense_lu.zig factorizeSolveNeg` |
 | Krylov-shooting upgrade: monodromy products via sensitivity replay on saved per-step factors, GMRES on $(\Phi-I)$, subspace recycling | [monodromy-krylov.md](../solvers/monodromy-krylov.md) — full spec | target — reuses `converger.jfnk` GMRES core + `direct.zig solve/solveT` |
-| HB spectral Jacobian solve (dense) | none (dense path); Krylov-HB upgrade = matrix-free block-Toeplitz apply per [lptv-block-solves.md](../solvers/lptv-block-solves.md) + block-circulant preconditioner per [structured-preconditioners.md](../solvers/structured-preconditioners.md) | `dense_lu.zig`; `modules/solvers/src/fft.zig` for the operator apply |
+| HB spectral Jacobian solve (dense) | none (dense path); Krylov-HB upgrade = matrix-free block-Toeplitz apply per [lptv-block-solves.md](../solvers/lptv-block-solves.md) + block-circulant preconditioner per [structured-preconditioners.md](../solvers/structured-preconditioners.md) | `dense_lu.zig`; `src/solvers/fft.zig` for the operator apply |
 | Upstream OP for the initial orbit guess | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
 ---
@@ -280,9 +280,9 @@ march inside shooting.
 
 **Our implementation**
 
-- `modules/analysis/src/pss/pss.zig` — shooting Newton (FD dense Jacobian).
-- `modules/analysis/src/pss/hb.zig` — harmonic balance (dense spectral
+- `src/analysis/pss/pss.zig` — shooting Newton (FD dense Jacobian).
+- `src/analysis/pss/hb.zig` — harmonic balance (dense spectral
   Jacobian).
-- `modules/analysis/src/pss/pac.zig` — periodic AC on the PSS orbit.
+- `src/analysis/pss/pac.zig` — periodic AC on the PSS orbit.
 - Bench fixtures: `benchmark/fixtures/pss/{diode_rect_driven,rc_driven,rlc_driven}`,
   `benchmark/fixtures/hb/{diode_clipper,rc_single_tone,tline_guard}`.

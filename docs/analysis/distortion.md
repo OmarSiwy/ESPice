@@ -72,7 +72,7 @@ difference).
 
 ## 2. Flow explanation
 
-`modules/analysis/src/post/disto.zig`:
+`src/analysis/post/disto.zig`:
 
 1. One `eval()` at $x_{op}$: dense $G$, $C$ copies.
 2. Kernel pass: $n$ perturbed `eval`s, differencing `denseG` snapshots into
@@ -137,7 +137,7 @@ kernel disto(lanes = freq points):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-frequency complex solves (stacked-real dense) | none (dense path) | `modules/solvers/src/dense_lu.zig` `buildComplexAdmittance` + `factorizeSolve` |
+| Per-frequency complex solves (stacked-real dense) | none (dense path) | `src/solvers/dense_lu.zig` `buildComplexAdmittance` + `factorizeSolve` |
 | Sparse upgrade for large n | [klu-pipeline.md](../solvers/klu-pipeline.md) via `freq_solve.zig` (same pattern at $\omega$ and $2\omega$) | upgrade path |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
@@ -161,5 +161,5 @@ kernel disto(lanes = freq points):
 
 **Our implementation**
 
-- `modules/analysis/src/post/disto.zig` — HD2 sweep.
+- `src/analysis/post/disto.zig` — HD2 sweep.
 - Bench fixtures: `benchmark/fixtures/disto/*`.

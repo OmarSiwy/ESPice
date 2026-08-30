@@ -73,5 +73,5 @@ ASM-ESD, b3soidd/fd — all have in-tree ports; VA exists for most
 New urgent item surfaced by the catalog sweep: **CPL N≥3**
 ([coupled-tlines.md](coupled-tlines.md)) — `cpl3_4_line` 7.5e34 blowup
 is a topology-mapping bug (3-line card forced through the 2-line
-even/odd cognate), fix in `src/netlist.zig` mapping before any device
+even/odd cognate), fix in `src/frontend/parser.zig` mapping before any device
 work.

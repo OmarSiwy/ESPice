@@ -115,8 +115,10 @@ shortcuts carry a `ponytail:` comment naming the ceiling and upgrade path.
   the 2 `disto` HD2 failures (tests/analyses.zig:972,1070) pre-date the
   refactor (verified on clean HEAD 285e7e7 in a worktree).
 - New SIMD kernels: differential test vs the scalar oracle in
-  `ref/SIMD-Strategies/verify.zig`, plus `-Dno-llvm=false` + `-femit-asm`
-  spot-check that the expected vector instruction is emitted.
+  `ref/SIMD-Strategies/verify.zig`, plus an asm spot-check that the expected
+  vector instruction is emitted. The build has no backend flag any more (the
+  native backend is always on), so read the asm off a direct invocation:
+  `zig build-obj -OReleaseFast -fllvm -femit-asm=/tmp/k.s src/solvers/direct.zig`.
 - GPU: default build compiles device kernels; `--backend cuda` on absent
   hardware must error naming what was detected.
 

@@ -166,9 +166,9 @@ workaround; a dedicated rung would reuse `TranHook` with SER dt control.
 ## 2. Flow explanation
 
 Every analysis converges through one module,
-`modules/analysis/src/helper/converger.zig`; the strategies differ only in a
+`src/solvers/converger.zig`; the strategies differ only in a
 comptime hook that decides what is assembled and which matrix plane is
-factored. The OP flow (`modules/analysis/src/dc/op.zig`) is a four-rung
+factored. The OP flow (`src/analysis/dc/op.zig`) is a four-rung
 ladder; each rung is attempted in full before falling to the next, and every
 rung restarts cold (zeroed $x$ plus SPICE `MODEINITJCT` junction seeds:
 iteration 1 linearizes at $v_{\text{crit}}$/vto instead of 0).
@@ -266,7 +266,7 @@ newton(ckt, x, gmin):
 
 ## 4. Pseudo-code, GPU parallel
 
-Repo flavor (`modules/devices/src/kernel.zig` +
+Repo flavor (`src/devices/engine.zig` +
 `converger.zig` jfnk path): the *entire* Newton/JFNK solve is one
 cooperative kernel launch — outer Newton loop, inner GMRES(m), device
 residual evals, and the exact same acceptance gates as the CPU (gate-for-gate
@@ -329,12 +329,12 @@ OP problems as independent blob instances (`benchmark/fixtures/ensemble/*`).
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Direct Newton factor/refactor (BTF + AMD + Gilbert-Peierls, frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `modules/solvers/src/direct.zig` |
-| Convergence gates, device limiting, JFNK/GMRES(m) + preconditioning | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `modules/analysis/src/helper/converger.zig` |
-| gmin/source ladder (Gillespie controllers, exact ngspice rules) | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `modules/analysis/src/dc/op.zig solveLadder` |
+| Direct Newton factor/refactor (BTF + AMD + Gilbert-Peierls, frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/solvers/direct.zig` |
+| Convergence gates, device limiting, JFNK/GMRES(m) + preconditioning | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/converger.zig` |
+| gmin/source ladder (Gillespie controllers, exact ngspice rules) | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `src/analysis/dc/op.zig solveLadder` |
 | Factor-once bypass on linear circuits | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig` / memcmp) | `converger.Options.matrix_sig` |
-| GPU whole-solve megakernel; level-set refactor alternative | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | `modules/devices/src/kernel.zig` |
-| BBD/diagonal right preconditioner for JFNK | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `direct.Solver` factors, `modules/solvers/src/bbd.zig` |
+| GPU whole-solve megakernel; level-set refactor alternative | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | `src/devices/engine.zig` |
+| BBD/diagonal right preconditioner for JFNK | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `direct.Solver` factors, `src/solvers/bbd.zig` |
 
 ---
 
@@ -355,9 +355,9 @@ OP problems as independent blob instances (`benchmark/fixtures/ensemble/*`).
 
 **Our implementation**
 
-- `modules/analysis/src/dc/op.zig` — ladder (`solveLadder`), cold start, junction seeding.
-- `modules/analysis/src/helper/converger.zig` — Newton, JFNK, gates, damping, `Tolerances`.
-- `modules/devices/src/kernel.zig` — GPU megakernel (assemble/limit/JFNK on device).
+- `src/analysis/dc/op.zig` — ladder (`solveLadder`), cold start, junction seeding.
+- `src/solvers/converger.zig` — Newton, JFNK, gates, damping, `Tolerances`.
+- `src/devices/engine.zig` — GPU megakernel (assemble/limit/JFNK on device).
 - Bench fixtures: `benchmark/fixtures/op/voltage_divider`,
   `benchmark/fixtures/convergence/{diode_bridge,high_gain_fb,schmitt}`,
   plus every fixture's implicit OP phase.

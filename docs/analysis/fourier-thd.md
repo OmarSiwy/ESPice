@@ -54,7 +54,7 @@ harmonic-table one.
 
 ## 2. Flow explanation
 
-`modules/analysis/src/post/four.zig`:
+`src/analysis/post/four.zig`:
 
 **Phases.** (1) Run (or receive) a transient: default window
 $5/f_0$ at 200 pts/period — `solve()` drives
@@ -115,8 +115,8 @@ kernel four_batched(lanes = probes x trials):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Transient producer | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) — via the transient stack | `modules/analysis/src/tran/tran.zig` |
-| FFT | none (analysis-support kernel, not a linear solver) | `modules/solvers/src/fft.zig` (radix-2, in-place) |
+| Transient producer | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) — via the transient stack | `src/analysis/tran/tran.zig` |
+| FFT | none (analysis-support kernel, not a linear solver) | `src/solvers/fft.zig` (radix-2, in-place) |
 
 ---
 
@@ -136,6 +136,6 @@ kernel four_batched(lanes = probes x trials):
 
 **Our implementation**
 
-- `modules/analysis/src/post/four.zig` — extraction + THD;
-  `modules/solvers/src/fft.zig`.
+- `src/analysis/post/four.zig` — extraction + THD;
+  `src/solvers/fft.zig`.
 - Bench fixtures: `benchmark/fixtures/fourier/*`.
