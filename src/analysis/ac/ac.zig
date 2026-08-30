@@ -45,47 +45,38 @@ pub fn sweep(
 
     const rhs = try allocator.alloc(f64, nn);
     defer allocator.free(rhs);
-    const x_work = try allocator.alloc(f64, nn);
-    defer allocator.free(x_work);
 
     root.zeroSimd(rhs);
     const phase_rad = ac_phase_deg * (std.math.pi / 180.0);
     rhs[ac_branch] = ac_mag * @cos(phase_rad);
     rhs[n + ac_branch] = ac_mag * @sin(phase_rad);
 
-    // ponytail: GPU batch path — all freq points are independent (G+jωC) solves.
-    // Falls through to serial on error or when hook is absent.
-    if (ckt.gpu_hook != null) gpu: {
-        const omegas = allocator.alloc(f64, n_points) catch break :gpu;
-        defer allocator.free(omegas);
-        types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
+    // All freq points are independent (G+jωC)x=rhs solves over one shared rhs:
+    // lane axis = frequency. GPU batch dispatch orelse the CPU lane solveBatch.
+    const omegas = try allocator.alloc(f64, n_points);
+    defer allocator.free(omegas);
+    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
 
-        const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
-        defer allocator.free(x_out);
+    // solveBatch takes a per-lane rhs blob; broadcast the one shared rhs.
+    const rhs_blob = try allocator.alloc(f64, n_points * nn);
+    defer allocator.free(rhs_blob);
+    for (0..n_points) |k| for (0..nn) |i| {
+        rhs_blob[k * nn + i] = rhs[i];
+    };
 
-        for (0..n_points) |k| {
-            const lane = x_out[k * nn ..][0..nn];
-            for (probes, 0..) |node, p| {
-                resp[p * n_points + k] = .{
-                    .re = lane[node],
-                    .im = lane[n + node],
-                };
-            }
-        }
-        return;
-    }
+    const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse blk: {
+        const cpu = try allocator.alloc(f64, n_points * nn);
+        try fs.solveBatch(allocator, omegas, rhs_blob, cpu, false);
+        break :blk cpu;
+    };
+    defer allocator.free(x_out);
 
-    // Serial fallback
-    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-    var k: usize = 0;
-    while (sw.next()) |f| : (k += 1) {
-        try fs.solve(2.0 * std.math.pi * f, rhs, x_work);
-
-        freqs[k] = f;
+    for (0..n_points) |k| {
+        const lane = x_out[k * nn ..][0..nn];
         for (probes, 0..) |node, p| {
             resp[p * n_points + k] = .{
-                .re = x_work[node],
-                .im = x_work[n + node],
+                .re = lane[node],
+                .im = lane[n + node],
             };
         }
     }
