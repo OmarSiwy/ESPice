@@ -20,6 +20,27 @@ pub const ngspice = @import("frontend/tokenizer.zig").ngspice;
 pub const hspice = @import("frontend/tokenizer.zig").hspice;
 pub const spectre = @import("frontend/tokenizer.zig").spectre;
 
+// `zig test` collects tests only from files the ROOT pulls in explicitly — an
+// ordinary `@import` used by runtime code is not enough. Same aggregator idiom
+// every root.zig in this tree uses; without it `zig build test-app` built a
+// binary that ran zero tests and reported success.
+test {
+    _ = @import("engine.zig");
+    _ = @import("gpu_context.zig");
+    _ = @import("frontend/parser.zig");
+    _ = @import("frontend/tokenizer.zig");
+    _ = @import("frontend/types.zig");
+    _ = @import("output/rawfile.zig");
+    _ = @import("output/ascii_raw.zig");
+    _ = @import("output/csv.zig");
+    _ = @import("output/spice_print.zig");
+    _ = @import("output/touchstone.zig");
+    _ = @import("output/citifile.zig");
+    _ = @import("output/psf.zig");
+    _ = @import("output/sst2.zig");
+    _ = @import("output/fsdb.zig");
+}
+
 const Mode = enum { batch, interactive, server, pipe };
 const Tokenizer = enum { ngspice, hspice, spectre };
 const Format = enum { binary, ascii, csv, touchstone, psf, fsdb, sst2, citi, print };

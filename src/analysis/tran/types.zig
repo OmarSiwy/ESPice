@@ -23,6 +23,11 @@ pub const Options = struct {
     dt_max: ?f64 = null,
     method: Method = .trapezoidal,
     max_steps: u32 = 1_000_000,
+    /// `.tran ... uic`: no operating point ran, so the starting `x` came from
+    /// the `.ic` cards (zero elsewhere) rather than from `op.solve`. The
+    /// transient then owes the setup op.solve normally performs — the
+    /// `initial_step` latch and the static state the charge seeding reads.
+    uic: bool = false,
     /// Invoked after each accepted step (envelope/pnoise/pac build on this).
     step_fn: ?*const fn (ctx: ?*anyopaque, t: f64, x: []const f64) void = null,
     step_ctx: ?*anyopaque = null,
