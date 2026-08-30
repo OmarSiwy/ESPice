@@ -1,44 +1,20 @@
 const std = @import("std");
-/// gompute's BUILD side (`emitKernels`), distinct from the `gompute` module the
-/// app imports. Owns the GPU arch probe and the device-artifact pipeline.
 const gompute_build = @import("gompute");
 
-/// Every source tree lives under `src/` and is built from THIS file — the
-/// per-directory `build.zig` / `build.zig.zon` pairs are gone. The import names
-/// (`devices`, `analysis`, `solvers`, `fastvaf`, `contract`, `models`)
-/// are unchanged, so no source file knows the difference. `fastvaf` is VerA's
-/// `vera` module (one engine root since the src/va + src/vf merge); the local
-/// import name is kept so `src/devices/loader.zig` does not move with it.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const no_llvm = b.option(bool, "no-llvm", "Use Zig's native backend instead of LLVM (default: true)") orelse true;
-    // Escape hatch only. GPU kernels are ON by default and auto-detected — a
-    // machine with no GPU emits nothing and stays green without this flag.
     const no_gpu = b.option(bool, "no-gpu", "Skip GPU kernel compilation for the device models") orelse false;
-    // Each model's generated Zig is compiled into the app anyway, so this is
-    // duplicated work — what it buys is ATTRIBUTION: `fastvaf --check` fails at
-    // the .va that produced bad code, instead of surfacing as an error inside a
-    // generated file in the build cache with nothing naming the source.
     const check_va = b.option(bool, "check-va", "Type-check each generated device at its .va (default: on)") orelse true;
-    // Mixed precision (docs/gpu-device-eval.md, "Mixed precision"). Comma-listed
-    // model stems get vera's `--jac-f32`, which emits `pub const jac_f32 = true`
-    // and nothing else; `engine.jacFloat` reads it and gives that device a
-    // `Dual` whose DERIVATIVE half is f32. The residual is f64 either way.
-    // Empty by default: this is opt-in per model because only the physics knows
-    // whether its unknowns fit in f32's ~7 digits.
     const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to build with an f32 Jacobian") orelse "";
+    const gpu_force_list = b.option([]const u8, "gpu-force", "Comma-separated model stems to emit GPU kernels for regardless of size") orelse "";
 
     const gompute = b.dependency("gompute", .{});
 
     const bopts = b.addOptions();
     bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
     const bopts_mod = bopts.createModule();
-    // Filled in below, once the vera dependency exists: the two module roots the
-    // runtime HDL loader passes to the compiler. They are OPTIONS rather than
-    // paths joined at runtime because `contract` now lives in another package —
-    // src/main.zig cannot spell that path, and the previous hand-joined
-    // `modules/devices/src/...` silently rotted when that directory was deleted.
 
     // =======================================================================
     // Leaf modules
@@ -49,36 +25,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    // VerA owns the HDL frontends and the `contract` they emit against; this
-    // tree consumes both. Two instances of the dependency on purpose: the
-    // MODULES follow the consumer's target/optimize because they ship inside the
-    // app, while the CLI below is a build tool that runs on the host.
     const vera = b.dependency("vera", .{ .target = target, .optimize = optimize });
     const contract_mod = vera.module("contract");
     const fastvaf_mod = vera.module("vera");
 
-    // The runtime loader compiles a netlist's HDL card against these two roots,
-    // and the orchestrator hashes them into `layout_hash` — so they must be the
-    // SAME roots the comptime builtins were compiled against, or every cached
-    // `.so` is rejected. `dyn` is engine.zig and stays here: it is simulator
-    // runtime, not compiler, and the `.so` cannot depend on the compiler.
     bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
     bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/devices/engine.zig"));
-
-    // =======================================================================
-    // Build-time HDL generator
-    //
-    // Host-targeted and ReleaseFast: the CLI runs once per model over up to
-    // 614 K lines of Verilog-A, and Debug is ~10x slower than it needs to be
-    // (VerA PERF.md, "Results"). The MODULES above stay on the consumer's
-    // target/optimize — this instance exists to make a build tool fast, not to
-    // change what ships. Not installed and not on the default step: an
-    // executable nothing references is never built, which is what keeps a tree
-    // with no digital models from needing verilator.
-    //
-    // ONE binary for every HDL. `vera` routes on the file extension itself, so
-    // the choice below is only about which FLAGS a given source accepts.
-    // =======================================================================
 
     const vera_exe = b.dependency("vera", .{
         .target = b.graph.host,
@@ -215,35 +167,11 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe);
 
-    // GPU side-by-side: the SAME generated devices, recompiled for the GPU as
-    // one raw kernel each (devices/kernels.zig loops the catalog).
-    //
-    // gompute's own build helper, NOT a hand-rolled copy. The copy that used to
-    // live here (arch probe, IR rewrite, `zig cc` PTX assembly, artifacts
-    // module) was written against gompute 0.1.0 and emitted
-    // `pub const cuda: []const u8`. The pinned 1.0.0 host loader reads
-    // `cuda_images`/`cuda_index`/`root_names` instead, so every device kernel
-    // was baked into the binary and NOTHING could look one up — naming a
-    // `RawKernel` was a compile error, which is why `--gpu` was still inert.
-    // Emission is the dependency's job; it moves with the dependency.
-    //
-    // Wired onto the shared `gompute` module, so the app, the devices tests and
-    // the runtime `.so` all resolve the same images.
-    //
-    // ONE ROOT PER DEVICE, not one root for the catalog. A root is the unit the
-    // CUDA driver JITs: `openModuleByName` loads the blob holding the kernel it
-    // was asked for and no other. With all 25 devices in one root that blob was
-    // 71 MB of PTX — every process that touched the GPU spent ~15 MINUTES
-    // JIT-compiling BSIM4, HiSIM and HICUM to solve an RC pair. Sliced per
-    // device, a netlist pays only for the models it instantiates.
-    //
-    // Same `kernels.zig` each time; only its `models` import differs, so the
-    // comptime catalog loop inside it has exactly one device to export.
     if (!no_gpu) {
         const roots = b.allocator.alloc(gompute_build.KernelRoot, models.len) catch @panic("OOM");
         var n_roots: usize = 0;
         for (models, one_models) |m, one_mod| {
-            if (m.size >= gpu_max_model_bytes) continue;
+            if (m.size >= gpu_max_model_bytes and !inCsv(gpu_force_list, m.name)) continue;
             const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
             dev_imports.* = .{ .models = one_mod, .contract = contract_mod };
             roots[n_roots] = .{
@@ -261,11 +189,6 @@ pub fn build(b: *std.Build) void {
             .kernel_roots = roots[0..n_roots],
             .heavy_lanes = 2,
             .target = target,
-            // Debug device code drags std.builtin's panic globals in and LLVM's
-            // NVPTX backend then emits invalid PTX types for them. ReleaseFast,
-            // NOT ReleaseSafe: ReleaseSafe keeps the panic machinery and merely
-            // optimizes it, and on these single-huge-eval-function models
-            // something in LLVM goes superlinear on the safety-check CFG —
             // measured 443s vs 13.6s for hisimhv_va.
             .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
         });
