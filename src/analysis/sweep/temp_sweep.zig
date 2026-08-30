@@ -4,6 +4,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const dc = @import("../dc/dc.zig");
+const lanes = @import("lanes.zig");
 const converger = @import("solvers").converger;
 
 
@@ -134,6 +135,26 @@ pub fn numPoints(options: Options) u32 {
     return @as(u32, @intFromFloat(@floor(span / options.t_step))) + 1;
 }
 
+/// solveLanes apply/restore state: lane k installs temperature
+/// t_start + k*t_step; restore returns the circuit to t_nom (+recompute).
+const LaneCtx = struct {
+    ckt: *root.Circuit,
+    t_start: f64,
+    t_step: f64,
+    t_nom: f64,
+
+    fn apply(ptr: *anyopaque, k: usize) void {
+        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+        self.ckt.setCircuitTemp(@floatCast(self.t_start + @as(f64, @floatFromInt(k)) * self.t_step));
+    }
+
+    fn restore(ptr: *anyopaque) void {
+        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+        self.ckt.setCircuitTemp(@floatCast(self.t_nom));
+        self.ckt.recompute();
+    }
+};
+
 /// Contract entry: device-internal temperature physics via setCircuitTemp —
 /// no external coefficients. Data layout: point-major (temp, probes...), one
 /// row per converged temperature. Temperature restored to t_nom afterwards so
@@ -144,90 +165,34 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const max_points: usize = numPoints(opts);
     const ncols = ctx.probes.len + 1;
 
-    // Both paths land here: point-major (temp, probes...) data table.
-    var data: []f64 = &.{};
+    // Structural sweep lanes: lane k is temperature t_start + k*t_step, batched
+    // on GPU or serial. No external coeffs on this path — device-internal temp
+    // physics only, installed via setCircuitTemp.
+    const n: usize = ckt.n;
+    const x_lanes = try a.alloc(f64, max_points * n);
+    defer a.free(x_lanes);
+    const results = try a.alloc(converger.Result, max_points);
+    defer a.free(results);
+
+    var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .t_nom = opts.t_nom };
+    const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
+    const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
+    try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
+
+    // Collect converged points, point-major (temp, probes...).
     var npoints: usize = 0;
-
-    fill: {
-        // -- GPU batch path: all temp points are independent Newton solves --
-        // ponytail: batch all temps in one GPU launch; serial fallback below
-        if (ckt.gpu_hook) |gh| if (gh.solve_batch) |sb| gpu_batch: {
-            const repack_fn = gh.repack orelse break :gpu_batch;
-
-            // Flat lane blob: lane i is x_lanes[i*n..][0..n]. One alloc, no table.
-            const n: usize = ckt.n;
-            const x_lanes = a.alloc(f64, max_points * n) catch break :gpu_batch;
-            defer a.free(x_lanes);
-            const results = a.alloc(converger.Result, max_points) catch break :gpu_batch;
-            defer a.free(results);
-            const temp_vals = a.alloc(f64, max_points) catch break :gpu_batch;
-            defer a.free(temp_vals);
-
-            var n_lanes: usize = 0;
-
-            const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
-
-            // Prepare each lane: set temp, recompute, repack to GPU, seed x
-            var temp = opts.t_start;
-            while (temp <= opts.t_stop + opts.t_step * 0.5) : (temp += opts.t_step) {
-                const xl = x_lanes[n_lanes * n ..][0..n];
-                ckt.setCircuitTemp(@floatCast(temp));
-                ckt.recompute();
-                repack_fn(gh.ctx) catch break :gpu_batch;
-                root.zeroSimd(xl);
-                ckt.seedJunctions(xl);
-                temp_vals[n_lanes] = temp;
-                n_lanes += 1;
-            }
-
-            // Batch solve — on error, fall through to serial
-            sb(gh.ctx, x_lanes[0 .. n_lanes * n], @intCast(n), 0, nopts, results[0..n_lanes]) catch break :gpu_batch;
-
-            // Restore circuit temp before formatting results
-            ckt.setCircuitTemp(@floatCast(opts.t_nom));
-            ckt.recompute();
-
-            // Collect converged results
-            for (results[0..n_lanes]) |r| {
-                if (r.converged) npoints += 1;
-            }
-            data = try a.alloc(f64, npoints * ncols);
-            var pt: usize = 0;
-            for (0..n_lanes) |i| {
-                if (!results[i].converged) continue;
-                const row = data[pt * ncols ..][0..ncols];
-                row[0] = temp_vals[i];
-                const lane = x_lanes[i * n ..][0..n];
-                for (ctx.probes, 0..) |node, p| {
-                    row[1 + p] = lane[node];
-                }
-                pt += 1;
-            }
-            break :fill;
-        };
-
-        // -- Serial CPU fallback --
-        const temps = try a.alloc(f64, max_points);
-        defer a.free(temps);
-        const values = try a.alloc(f64, ctx.probes.len * max_points);
-        defer a.free(values);
-        const x = try a.alloc(f64, ckt.n);
-        defer a.free(x);
-
-        // sweep() restores on success; this covers early-error paths too.
-        defer {
-            ckt.setCircuitTemp(@floatCast(opts.t_nom));
-            ckt.recompute();
-        }
-        const st = try sweep(ckt, x, ctx.probes, &.{}, temps, values, opts);
-
-        npoints = st.points;
-        data = try a.alloc(f64, npoints * ncols);
-        for (0..npoints) |i| {
-            const row = data[i * ncols ..][0..ncols];
-            row[0] = temps[i];
-            for (0..ctx.probes.len) |p| row[1 + p] = values[p * max_points + i];
-        }
+    for (results) |r| {
+        if (r.converged) npoints += 1;
+    }
+    const data = try a.alloc(f64, npoints * ncols);
+    var pt: usize = 0;
+    for (0..max_points) |k| {
+        if (!results[k].converged) continue;
+        const row = data[pt * ncols ..][0..ncols];
+        row[0] = opts.t_start + @as(f64, @floatFromInt(k)) * opts.t_step;
+        const lane = x_lanes[k * n ..][0..n];
+        for (ctx.probes, 0..) |node, p| row[1 + p] = lane[node];
+        pt += 1;
     }
 
     return .{
