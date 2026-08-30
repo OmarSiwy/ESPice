@@ -224,7 +224,7 @@ pub const Simulation = struct {
     }
 
     fn nodeIndex(self: *const Simulation, name: []const u8) !u32 {
-        return self.circuit.node_names.get(name) orelse error.UnknownNode;
+        return self.circuit.nodeIndex(name) orelse error.UnknownNode;
     }
 };
 
