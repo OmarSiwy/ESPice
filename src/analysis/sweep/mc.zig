@@ -5,6 +5,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const dc = @import("../dc/dc.zig");
+const lanes = @import("lanes.zig");
 const converger = @import("solvers").converger;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
@@ -240,6 +241,36 @@ pub fn analyze(
 /// value (skipping unset zeros), per-trial DC re-solve. Data layout:
 /// point-major (run, probes...), one row per converged trial. Parameters are
 /// restored so later jobs see the netlist-declared circuit.
+/// solveLanes apply/restore state: the perturbable params, plus a PRNG that
+/// reseeds on lane 0 so a GPU→serial fallthrough resamples the same draws.
+const LaneCtx = struct {
+    param_vars: []const ParamVar,
+    seed: u64,
+    prng: std.Random.DefaultPrng,
+
+    fn apply(ptr: *anyopaque, k: usize) void {
+        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+        if (k == 0) self.prng = std.Random.DefaultPrng.init(self.seed);
+        const rng = self.prng.random();
+        for (self.param_vars) |pv| {
+            const varied = switch (pv.dist) {
+                .uniform => blk: {
+                    const lo = pv.nominal * (1.0 - pv.rel_tol);
+                    const hi = pv.nominal * (1.0 + pv.rel_tol);
+                    break :blk lo + (hi - lo) * rng.float(f64);
+                },
+                .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
+            };
+            pv.param_ptr.set(varied);
+        }
+    }
+
+    fn restore(ptr: *anyopaque) void {
+        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+        for (self.param_vars) |pv| pv.param_ptr.set(pv.nominal);
+    }
+};
+
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
@@ -265,88 +296,34 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         ckt.recompute();
     }
 
-    // Both paths fill `samples` (probe-major, converged trials packed at the
-    // front) and `n_conv`, then fall into the shared formatting tail.
+    // Structural sweep lanes: one trial per lane, batched on GPU or serial.
+    // The per-lane apply reseeds on lane 0 so a GPU→serial fallthrough resamples
+    // identically (see lanes.LaneSetup contract).
     const stride: usize = opts.n_trials;
     const samples = try a.alloc(f64, ctx.probes.len * stride);
     defer a.free(samples);
     var n_conv: u32 = 0;
 
-    fill: {
-        // ====================================================================
-        // GPU path. The gate checks gh.solve_batch (a batch-capable GPU
-        // context exists), but the loop below runs per-trial solve_newton:
-        // each trial's parameter mutation repacks the shared device blob, so
-        // lanes can't carry different payloads yet (per-lane payloads are
-        // future work). ponytail: serial fallback below covers non-batch hooks
-        // ====================================================================
-        if (ckt.gpu_hook) |gh| if (gh.solve_batch) |_| gpu_batch: {
-            const nt: usize = opts.n_trials;
-            const n: usize = ckt.n;
-            const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
+    const nt: usize = opts.n_trials;
+    const n: usize = ckt.n;
+    const x_lanes = try a.alloc(f64, nt * n);
+    defer a.free(x_lanes);
+    const results = try a.alloc(converger.Result, nt);
+    defer a.free(results);
 
-            // Deterministic RNG matching serial path
-            var prng = std.Random.DefaultPrng.init(opts.seed);
-            const rng = prng.random();
+    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .seed = opts.seed, .prng = undefined };
+    const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
+    const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
+    try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
+    ckt.recompute();
 
-            // Allocate N x-vectors + results
-            const x_lanes = a.alloc([]f64, nt) catch break :gpu_batch;
-            defer a.free(x_lanes);
-            for (x_lanes, 0..) |*lane, li| {
-                lane.* = a.alloc(f64, n) catch {
-                    for (x_lanes[0..li]) |prev| a.free(prev);
-                    break :gpu_batch;
-                };
-            }
-            defer for (x_lanes) |lane| a.free(lane);
-
-            const results = a.alloc(converger.Result, nt) catch break :gpu_batch;
-            defer a.free(results);
-
-            // Per-trial: perturb → repack → seed → solve (GPU single) → collect.
-            for (0..nt) |t| {
-                for (param_vars) |pv| {
-                    const varied = switch (pv.dist) {
-                        .uniform => blk: {
-                            const lo = pv.nominal * (1.0 - pv.rel_tol);
-                            const hi = pv.nominal * (1.0 + pv.rel_tol);
-                            break :blk lo + (hi - lo) * rng.float(f64);
-                        },
-                        .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
-                    };
-                    pv.param_ptr.set(varied);
-                }
-                ckt.recompute();
-
-                root.zeroSimd(x_lanes[t]);
-                ckt.seedJunctions(x_lanes[t]);
-
-                // GPU single solve per trial (repack happens inside solveNewton)
-                results[t] = gh.solve_newton(gh.ctx, x_lanes[t], 0, nopts) catch
-                    converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
-            }
-
-            // Restore nominal params
-            for (param_vars) |pv| pv.param_ptr.set(pv.nominal);
-            ckt.recompute();
-
-            // Collect converged results
-            for (results, 0..) |r, t| {
-                if (!r.converged) continue;
-                for (ctx.probes, 0..) |node, p| {
-                    samples[p * stride + n_conv] = x_lanes[t][node];
-                }
-                n_conv += 1;
-            }
-            break :fill;
-        };
-
-        // ====================================================================
-        // Serial fallback (existing CPU path)
-        // ====================================================================
-        const stats_buf = try a.alloc(Stats, ctx.probes.len);
-        defer a.free(stats_buf);
-        n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats_buf, &.{}, opts, a);
+    // Pack converged trials contiguously at the front of each probe row.
+    for (results, 0..) |r, t| {
+        if (!r.converged) continue;
+        for (ctx.probes, 0..) |node, p| {
+            samples[p * stride + n_conv] = x_lanes[t * n + node];
+        }
+        n_conv += 1;
     }
 
     const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
