@@ -192,3 +192,35 @@ test "test_circuit: resistor divider OP" {
     try testing.expect(result.converged);
     try testing.expectApproxEqAbs(@as(f64, 5.0), x[2], 1e-6);
 }
+
+// The memo keys on x_op's POINTER, and x_op is one stable arena slice — so a
+// direct eval at a different x must clear it, or the next linearize(x_op)
+// false-hits on planes that hold someone else's operating point. disto,
+// matex, qpss, pss, pnoise, pac, pxf and tran_noise all eval directly.
+test "LinCache: a direct eval at another x invalidates the memo" {
+    var ckt = try build(testing.allocator, .{
+        .vsources = &.{.{ .p = 1, .n = 0, .dc = 10.0 }},
+        .resistors = &.{
+            .{ .p = 1, .n = 2, .r = 1000 },
+            .{ .p = 2, .n = 0, .r = 1000 },
+        },
+    });
+    defer ckt.deinit();
+
+    const x_op = try testing.allocator.alloc(f64, ckt.n + 1);
+    defer testing.allocator.free(x_op);
+    @memset(x_op, 0);
+
+    ckt.linearize(x_op);
+    try testing.expect(ckt.lin.valid);
+
+    const x_other = try testing.allocator.alloc(f64, ckt.n + 1);
+    defer testing.allocator.free(x_other);
+    @memset(x_other, 1.0);
+    ckt.eval(x_other, 0);
+    try testing.expect(!ckt.lin.valid);
+
+    // Same pointer as the first call: must re-evaluate, not hit the memo.
+    ckt.linearize(x_op);
+    try testing.expect(ckt.lin.valid);
+}
