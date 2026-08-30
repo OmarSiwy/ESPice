@@ -117,15 +117,31 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
 fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
     if (scale_names.has(lower)) return lower;
     if (scale_aliases.get(lower)) |canonical| return canonical;
+    if (subcircuitNet(gpa, lower)) |net| return net;
     for ([_][]const u8{ "v(", "i(", "pole(", "zero(" }) |kept| if (std.mem.startsWith(u8, lower, kept)) return lower;
     const branch = std.mem.indexOf(u8, lower, "#branch") orelse std.mem.indexOf(u8, lower, ":flow(");
     if (branch) |cut| return std.fmt.allocPrint(gpa, "i({s})", .{lower[0..cut]}) catch lower;
     return std.fmt.allocPrint(gpa, "v({s})", .{lower}) catch lower;
 }
 
+/// VACASK writes a net inside subcircuit instance `x1` as `x1:inner`, and a
+/// device-internal node as `d1:a_int`. A name whose every segment before the
+/// last is an `x` instance is a net: `v(x1.inner)`, as ngspice and espice
+/// spell it. Null for anything else.
+fn subcircuitNet(gpa: std.mem.Allocator, lower: []const u8) ?[]const u8 {
+    const last = std.mem.lastIndexOfScalar(u8, lower, ':') orelse return null;
+    var path = std.mem.splitScalar(u8, lower[0..last], ':');
+    while (path.next()) |inst| if (!std.mem.startsWith(u8, inst, "x")) return null;
+    const net = std.fmt.allocPrint(gpa, "v({s})", .{lower}) catch return null;
+    std.mem.replaceScalar(u8, net, ':', '.');
+    return net;
+}
+
 /// Scores candidate plots `zp` against reference plots `ng`. Plots pair by
-/// exact name first, then by `plot_classes` alias; a candidate-only plot is
-/// ignored. Null when nothing was comparable.
+/// exact name, then by `plot_classes` alias, each first among plots with the
+/// same point count so file order cannot decide (VACASK writes a `.dc` as an
+/// "Operating Point"); a candidate-only plot is ignored. Null when nothing was
+/// comparable.
 pub fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, rtol: f64) ?Accuracy {
     var worst: Accuracy = .{ .max_rel = 0, .rms_rel = 0, .pass = true };
     var scored: usize = 0;
@@ -134,13 +150,15 @@ pub fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, r
     @memset(taken, false);
     const pair = gpa.alloc(?usize, ng.len) catch return null;
     defer gpa.free(pair);
-    for (&[_]bool{ true, false }) |exact| {
+    @memset(pair, null);
+    for ([_][2]bool{ .{ true, true }, .{ false, true }, .{ true, false }, .{ false, false } }) |pass| {
+        const exact, const same_shape = pass;
         for (ng, pair) |ng_plot, *slot| {
-            if (exact) slot.* = null else if (slot.* != null) continue;
+            if (slot.* != null) continue;
             var ng_buf: [128]u8 = undefined;
             const ng_key = if (exact) plotLower(&ng_buf, ng_plot.plotname) else plotClass(&ng_buf, ng_plot.plotname);
             slot.* = for (zp, 0..) |zp_plot, i| {
-                if (taken[i]) continue;
+                if (taken[i] or (same_shape and zp_plot.npoints != ng_plot.npoints)) continue;
                 var zp_buf: [128]u8 = undefined;
                 const zp_key = if (exact) plotLower(&zp_buf, zp_plot.plotname) else plotClass(&zp_buf, zp_plot.plotname);
                 if (std.mem.eql(u8, ng_key, zp_key)) break i;
@@ -504,6 +522,8 @@ test "one signal spelling across four simulators" {
         .{ "vin#branch", "i(vin)" }, // ngspice branch current
         .{ "2", "v(2)" }, // VACASK node
         .{ "vs:flow(br)", "i(vs)" }, // VACASK branch current
+        .{ "x1:inner", "v(x1.inner)" }, // VACASK subcircuit net
+        .{ "x1:x2:n", "v(x1.x2.n)" },
         .{ "time", "time" }, // scales are never wrapped
         .{ "frequency", "frequency" },
     }) |case| try std.testing.expectEqualStrings(case[1], normalizeVarName(a, case[0]));
@@ -515,6 +535,9 @@ test "one signal spelling across four simulators" {
         "v(m1#drain)", // ngspice
         "v(d1:a_int)", // VACASK
     }) |internal| try std.testing.expect(isInternalNode(internal));
+    // VACASK spells both a subcircuit net and a device-internal node with
+    // `:`; only an all-`x` path is a net.
+    inline for (.{ "d1:a_int", "x1:d1:a_int" }) |internal| try std.testing.expect(isInternalNode(normalizeVarName(a, internal)));
     // A deck node is not internal just because a model node could share a
     // prefix or a suffix with it.
     inline for (.{ "v(out)", "i(v1)", "v(internal)", "v(_body)", "v(i2)" }) |named|
@@ -688,4 +711,31 @@ test "an exact plotname beats an aliased one, whatever the order" {
     var vc_dc = op;
     vc_dc.plotname = "DC transfer characteristic";
     try std.testing.expect(compareRaws(a, &.{op}, &.{vc_dc}, 1e-3).?.pass);
+}
+
+test "plots pair by point count before file order: VACASK's .dc is an Operating Point" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const op: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{"v(out)"},
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 1,
+        .data = &.{7},
+    };
+    const sweep: Plot = .{
+        .plotname = "DC transfer characteristic",
+        .varnames = &.{ "v(v-sweep)", "v(out)" },
+        .is_complex = false,
+        .npoints = 3,
+        .nvars = 2,
+        .data = &.{ 0, 0, 1, 0.5, 2, 1 },
+    };
+    var vc_sweep = sweep;
+    vc_sweep.plotname = "Operating Point";
+    // VACASK's files sort dc before op, so its sweep comes first.
+    try std.testing.expect(compareRaws(a, &.{ vc_sweep, op }, &.{ op, sweep }, 1e-3).?.pass);
+    try std.testing.expect(compareRaws(a, &.{ op, vc_sweep }, &.{ sweep, op }, 1e-3).?.pass);
 }
