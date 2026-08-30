@@ -122,59 +122,34 @@ pub fn solve(
     }
 
     // --- Frequency sweep ------------------------------------------------------
+    // All freq points are independent (G+jωC)x=rhs solves over one shared rhs
+    // (unit voltage on the probe branch): lane axis = frequency. GPU batch
+    // dispatch orelse the CPU lane solveBatch (dense strategy peels to the
+    // per-omega serial ladder inside solveBatch — same numeric path).
     const n_points = types.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
+    const nn = 2 * n_aug;
 
-    // --- GPU batch path: all freq points in one launch ----------------------
-    // ponytail: augmented dense G/C passed as flat arrays; GPU kernel treats
-    // them as n_aug×n_aug dense. Falls through to CPU on error or if absent.
-    if (ckt.gpu_hook != null) gpu: {
-        const rhs_gpu = try allocator.alloc(f64, 2 * n_aug);
-        defer allocator.free(rhs_gpu);
-        root.zeroSimd(rhs_gpu);
-        rhs_gpu[branch_idx] = 1.0; // unit voltage on probe branch
-
-        const omegas = try allocator.alloc(f64, n_points);
-        defer allocator.free(omegas);
-        types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, null, omegas);
-
-        const x_out = ckt.gpuFreqBatch(allocator, g_aug, c_aug, omegas, rhs_gpu, @intCast(n_aug), false) orelse break :gpu;
-        defer allocator.free(x_out);
-        const nn = 2 * n_aug;
-
-        // GPU owns nothing — free the augmented matrices ourselves.
-        allocator.free(g_aug);
-        allocator.free(c_aug);
-
-        var result = try SolveResult.init(allocator, n_points);
-        errdefer result.deinit(allocator);
-
-        var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
-        var k: usize = 0;
-        while (sw.next()) |f| : (k += 1) {
-            result.freqs[k] = f;
-            result.loop_gain[k] = .{
-                .re = -x_out[k * nn + branch_idx],
-                .im = -x_out[k * nn + n_aug + branch_idx],
-            };
-        }
-
-        computeMargins(&result);
-        return result;
-    }
-
-    // --- CPU fallback: FreqSolver on the augmented system --------------------
-    // initDense takes ownership of g_aug, c_aug.
+    // FreqSolver.initDense takes ownership of g_aug, c_aug; gpuFreqBatch only
+    // borrows them (read-only) so fs owning them is fine for both paths.
     var fs = try FreqSolver.initDense(allocator, @intCast(n_aug), g_aug, c_aug);
     defer fs.deinit(allocator);
 
-    const nn = 2 * n_aug;
-    const work = try allocator.alloc(f64, 2 * nn);
-    defer allocator.free(work);
-    const rhs = work[0..nn];
-    const x_work = work[nn..];
+    const omegas = try allocator.alloc(f64, n_points);
+    defer allocator.free(omegas);
+    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, null, omegas);
 
-    root.zeroSimd(rhs);
-    rhs[branch_idx] = 1.0; // unit voltage on probe branch
+    // One shared rhs broadcast into the per-lane blob solveBatch expects.
+    const rhs_blob = try allocator.alloc(f64, n_points * nn);
+    defer allocator.free(rhs_blob);
+    root.zeroSimd(rhs_blob);
+    for (0..n_points) |k| rhs_blob[k * nn + branch_idx] = 1.0;
+
+    const x_out = ckt.gpuFreqBatch(allocator, g_aug, c_aug, omegas, rhs_blob[0..nn], @intCast(n_aug), false) orelse blk: {
+        const cpu = try allocator.alloc(f64, n_points * nn);
+        try fs.solveBatch(allocator, omegas, rhs_blob, cpu, false);
+        break :blk cpu;
+    };
+    defer allocator.free(x_out);
 
     var result = try SolveResult.init(allocator, n_points);
     errdefer result.deinit(allocator);
@@ -182,13 +157,11 @@ pub fn solve(
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var k: usize = 0;
     while (sw.next()) |f| : (k += 1) {
-        try fs.solve(2.0 * std.math.pi * f, rhs, x_work);
-
         result.freqs[k] = f;
         // T(f) = −(x_re[branch] + j·x_im[branch])
         result.loop_gain[k] = .{
-            .re = -x_work[branch_idx],
-            .im = -x_work[n_aug + branch_idx],
+            .re = -x_out[k * nn + branch_idx],
+            .im = -x_out[k * nn + n_aug + branch_idx],
         };
     }
 
