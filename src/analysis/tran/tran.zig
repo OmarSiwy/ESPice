@@ -243,7 +243,6 @@ pub fn simulate(
     var q_snap: []f64 = &.{};
     var q_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
     defer if (has_charge) {
-        allocator.free(a_vals);
         allocator.free(i_prev);
         allocator.free(q_snap);
         for (q_hist) |q| allocator.free(q);
@@ -251,7 +250,7 @@ pub fn simulate(
     try ckt.computeBaseline();
 
     if (has_charge) {
-        a_vals = try allocator.alloc(f64, ckt.nnz);
+        a_vals = try ws.ensureAVals(ckt.nnz);
         i_prev = try allocator.alloc(f64, n);
         q_snap = try allocator.alloc(f64, n);
         simdZero(i_prev);

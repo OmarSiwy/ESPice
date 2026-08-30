@@ -548,6 +548,7 @@ pub const Workspace = struct {
     dx: []f64,
     x_old: []f64,
     gmres: []f64 = &.{},
+    a_vals: []f64 = &.{},
     factored_sig: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?BbdInfo) !Workspace {
@@ -573,11 +574,24 @@ pub const Workspace = struct {
         return self.gmres[0..total];
     }
 
+    /// Scratch for tran's combined G+alpha*C matrix values (length nnz).
+    /// Lifetime: per-circuit, reused across every tran run (pss/envelope/
+    /// tran_noise drive simulate repeatedly). Grows if too small, mirrors gmres.
+    pub fn ensureAVals(self: *Workspace, nnz: u32) ![]f64 {
+        if (self.a_vals.len < nnz) {
+            self.slv.gpa.free(self.a_vals);
+            self.a_vals = &.{};
+            self.a_vals = try self.slv.gpa.alloc(f64, nnz);
+        }
+        return self.a_vals[0..nnz];
+    }
+
     pub fn deinit(self: *Workspace, gpa: std.mem.Allocator) void {
         self.slv.deinit();
         gpa.free(self.dx);
         gpa.free(self.x_old);
         gpa.free(self.gmres);
+        gpa.free(self.a_vals);
         self.* = undefined;
     }
 };
