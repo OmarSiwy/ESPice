@@ -380,3 +380,142 @@ pub fn newtonSolve(
     }
     return .{ .converged = false, .iterations = res_iters, .max_dx = res_maxdx };
 }
+
+// ===========================================================================
+// Tests — a self-contained serial Env (no std, no libc, no LU) exercising the
+// full outer-Newton + GMRES(m) core on a known analytic system. This mirrors
+// the CPU CpuEnv contract in converger.zig but stays libc-free so it runs in
+// the solvers module suite. Jacobi preconditioner from the analytic diagonal.
+// ===========================================================================
+
+const std = @import("std");
+
+// Analytic 2x2 nonlinear system, root at (2, 1):
+//   F0 = x0 + x1 - 3
+//   F1 = x0^2 + x1^2 - 5
+// Diagonal of J for the Jacobi preconditioner: {1, 2*x1}.
+const TestEnv = struct {
+    const Self = @This();
+    n: u32,
+    x_cur: [*]f64, // outer x, for the preconditioner diagonal
+    rhs_buf: [8]f64 = @splat(0),
+    diag_buf: [8]f64 = @splat(0),
+    scal: [16]f64 = @splat(0),
+
+    pub const F64 = [*]f64;
+    pub const backtrack = false;
+    pub const exact_jv = true;
+
+    pub inline fn tid(_: *Self) u32 {
+        return 0;
+    }
+    pub inline fn stride(_: *Self) u32 {
+        return 1;
+    }
+    pub inline fn isLead(_: *Self) bool {
+        return true;
+    }
+    pub inline fn sync(_: *Self) void {}
+    pub inline fn reduceAdd(_: *Self, p: f64) f64 {
+        return p;
+    }
+    pub inline fn reduceMax(_: *Self, p: f64) f64 {
+        return p;
+    }
+    pub inline fn publish(self: *Self, slot: usize, val: f64) void {
+        self.scal[slot] = val;
+    }
+    pub inline fn read(self: *Self, slot: usize) f64 {
+        return self.scal[slot];
+    }
+    pub inline fn limiting(_: *Self) bool {
+        return false;
+    }
+
+    // Fill rhs with F(x_eval); the core adds nothing else on the CPU path.
+    pub fn assemble(self: *Self, comptime _: bool, x_eval: [*]f64, _: [*]f64, _: f64, _: bool) void {
+        self.rhs_buf[0] = x_eval[0] + x_eval[1] - 3.0;
+        self.rhs_buf[1] = x_eval[0] * x_eval[0] + x_eval[1] * x_eval[1] - 5.0;
+    }
+
+    // Jacobi diagonal from the current outer x: J = [[1,1],[2x0,2x1]] -> {1, 2x1}.
+    pub fn precondBuild(self: *Self) void {
+        const d0 = 1.0;
+        const d1 = 2.0 * self.x_cur[1];
+        self.diag_buf[0] = if (@abs(d0) > 1e-30) 1.0 / d0 else 1.0;
+        self.diag_buf[1] = if (@abs(d1) > 1e-30) 1.0 / d1 else 1.0;
+    }
+    pub fn precondApply(self: *Self, r: [*]f64) void {
+        r[0] *= self.diag_buf[0];
+        r[1] *= self.diag_buf[1];
+    }
+    pub fn postStep(_: *Self, _: [*]f64, _: [*]f64, _: bool) PostStep {
+        return .{ .limited = false, .flipped = false };
+    }
+    pub fn gateScale(self: *Self, i: u32) f64 {
+        // |J_ii| — the residual-gate row scale.
+        return if (i == 0) 1.0 else 2.0 * self.x_cur[1];
+    }
+    pub fn currentRow(_: *Self, _: u32) bool {
+        return true;
+    }
+};
+
+fn runTestSolve(x: *[2]f64, max_iter: u32) Result {
+    const n: u32 = 2;
+    const m: u32 = 2; // gmres restart = min(30, n)
+    var env = TestEnv{ .n = n, .x_cur = x };
+    // Vecs backing storage, sized for (n=2, m=2).
+    var v_basis: [(m + 1) * n]f64 = @splat(0);
+    var h: [(m + 1) * m]f64 = @splat(0);
+    var cs: [m]f64 = @splat(0);
+    var sn: [m]f64 = @splat(0);
+    var g_vec: [m + 1]f64 = @splat(0);
+    var y_vec: [m]f64 = @splat(0);
+    var r: [n]f64 = @splat(0);
+    var w: [n]f64 = @splat(0);
+    var x_pert: [n]f64 = @splat(0);
+    var f0: [n]f64 = @splat(0);
+    var x_old: [n]f64 = @splat(0);
+    const vecs: Vecs([*]f64) = .{
+        .v_basis = &v_basis,
+        .h = &h,
+        .cs = &cs,
+        .sn = &sn,
+        .g_vec = &g_vec,
+        .y_vec = &y_vec,
+        .r = &r,
+        .w = &w,
+        .x_pert = &x_pert,
+        .f0 = &f0,
+        .f0_shift = &f0, // aliased, unused with exact_jv
+        .diag = &env.diag_buf,
+        .x_old = &x_old,
+        .rhs = &env.rhs_buf,
+    };
+    const tol: Tol = .{
+        .reltol = 1e-3,
+        .abstol = 1e-12,
+        .vntol = 1e-6,
+        .residual_tol = 1e-9,
+        .gmin = 0,
+        .dx_clamp = inf_f64,
+        .max_iter = max_iter,
+        .gmres_m = m,
+    };
+    return newtonSolve(&env, vecs, x, 0, tol, n, m);
+}
+
+test "newton_core: JFNK converges to known root of analytic 2x2 system" {
+    var x = [2]f64{ 3.0, 3.0 };
+    const res = runTestSolve(&x, 100);
+    try std.testing.expect(res.converged);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), x[0], 1e-8);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), x[1], 1e-8);
+}
+
+test "newton_core: reports not-converged (not a wrong root) under a 1-iter cap" {
+    var x = [2]f64{ 3.0, 3.0 };
+    const res = runTestSolve(&x, 1);
+    try std.testing.expect(!res.converged);
+}
