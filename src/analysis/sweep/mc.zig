@@ -1,7 +1,10 @@
 //! Monte Carlo: perturb device parameters through raw ParamRef-style f32
-//! pointers, re-solve DC per trial, accumulate probe statistics. One
-//! Workspace serves every trial — the pattern is frozen. The RNG is a
-//! deterministic std.Random.DefaultPrng seeded from Options.seed.
+//! pointers, re-solve DC per trial, accumulate probe statistics. One trial
+//! per structural sweep lane (`lanes.solveLanes`, GPU batch orelse serial) —
+//! the pattern is frozen, so one Workspace serves every trial. The RNG is a
+//! deterministic std.Random.DefaultPrng seeded from Options.seed; `run` is
+//! `analyze` with param_vars collected from the netlist, so there is exactly
+//! one numeric path.
 const std = @import("std");
 const root = @import("../types.zig");
 const dc = @import("../dc/dc.zig");
@@ -74,6 +77,40 @@ pub const YieldSpec = struct {
 };
 
 // ============================================================================
+// Per-lane parameter draw — the ONE place the distributions are sampled
+// ============================================================================
+
+/// solveLanes apply/restore state: the perturbable params, plus a PRNG that
+/// reseeds on lane 0 so a GPU→serial fallthrough resamples the same draws.
+const LaneCtx = struct {
+    param_vars: []const ParamVar,
+    seed: u64,
+    prng: std.Random.DefaultPrng,
+
+    fn apply(ptr: *anyopaque, k: usize) void {
+        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+        if (k == 0) self.prng = std.Random.DefaultPrng.init(self.seed);
+        const rng = self.prng.random();
+        for (self.param_vars) |pv| {
+            const varied = switch (pv.dist) {
+                .uniform => blk: {
+                    const lo = pv.nominal * (1.0 - pv.rel_tol);
+                    const hi = pv.nominal * (1.0 + pv.rel_tol);
+                    break :blk lo + (hi - lo) * rng.float(f64);
+                },
+                .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
+            };
+            pv.param_ptr.set(varied);
+        }
+    }
+
+    fn restore(ptr: *anyopaque) void {
+        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+        for (self.param_vars) |pv| pv.param_ptr.set(pv.nominal);
+    }
+};
+
+// ============================================================================
 // Monte Carlo analysis entry point
 // ============================================================================
 
@@ -96,14 +133,20 @@ pub fn analyze(
     std.debug.assert(samples.len == probes.len * stride);
     std.debug.assert(stats.len == probes.len);
 
-    var prng = std.Random.DefaultPrng.init(options.seed);
-    const rng = prng.random();
+    // Structural sweep lanes: one trial per lane, batched on GPU or serial.
+    // The per-lane apply reseeds on lane 0 so a GPU→serial fallthrough resamples
+    // identically (see lanes.LaneSetup contract).
+    const n: usize = ckt.n;
+    const x_lanes = try allocator.alloc(f64, stride * n);
+    defer allocator.free(x_lanes);
+    const results = try allocator.alloc(converger.Result, stride);
+    defer allocator.free(results);
 
-    const x = try allocator.alloc(f64, ckt.n);
-    defer allocator.free(x);
-
-    const ws = try ckt.workspace();
+    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .seed = options.seed, .prng = undefined };
+    const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
     const nopts = options.dc_options.tol.newtonOpts(options.dc_options.tol.itl2);
+    try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
+    ckt.recompute();
 
     // Track yield counts per spec
     const yield_counts = try allocator.alloc(u32, yield_specs.len);
@@ -122,54 +165,23 @@ pub fn analyze(
         };
     }
 
+    // Pack converged trials contiguously at the front of each probe row.
     var n_conv: u32 = 0;
-    for (0..options.n_trials) |_| {
-        // Perturb parameters
-        for (param_vars) |pv| {
-            const varied = switch (pv.dist) {
-                .uniform => blk: {
-                    const lo = pv.nominal * (1.0 - pv.rel_tol);
-                    const hi = pv.nominal * (1.0 + pv.rel_tol);
-                    break :blk lo + (hi - lo) * rng.float(f64);
-                },
-                .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
-            };
-            pv.param_ptr.set(varied);
+    for (results, 0..) |r, t| {
+        if (!r.converged) continue;
+        const xl = x_lanes[t * n ..][0..n];
+        for (probes, 0..) |node, p| {
+            const val = xl[node];
+            samples[p * stride + n_conv] = val;
+            stats[p].min = @min(stats[p].min, val);
+            stats[p].max = @max(stats[p].max, val);
         }
-        ckt.recompute();
-
-        // Cold DC solve per trial (ITL2 iterations); any error => non-convergence
-        root.zeroSimd(x);
-        ckt.seedJunctions(x);
-        const converged = if (converger.run(ckt, ws, x, 0, nopts, root.EvalHook{})) |r|
-            r.converged
-        else |_|
-            false;
-
-        if (converged) {
-            // Pack converged samples contiguously, update running min/max
-            for (probes, 0..) |node, p| {
-                const val = x[node];
-                samples[p * stride + n_conv] = val;
-                stats[p].min = @min(stats[p].min, val);
-                stats[p].max = @max(stats[p].max, val);
-            }
-
-            // Yield checking
-            for (yield_specs, yield_counts) |ys, *count| {
-                const val = x[probes[ys.probe_idx]];
-                if (val >= ys.lo and val <= ys.hi) count.* += 1;
-            }
-
-            n_conv += 1;
+        for (yield_specs, yield_counts) |ys, *count| {
+            const val = xl[probes[ys.probe_idx]];
+            if (val >= ys.lo and val <= ys.hi) count.* += 1;
         }
-
-        // Restore nominal parameters for next iteration's perturbation base
-        for (param_vars) |pv| {
-            pv.param_ptr.set(pv.nominal);
-        }
+        n_conv += 1;
     }
-    ckt.recompute();
 
     // Compute final statistics
     for (stats, 0..) |*st, p| {
@@ -241,36 +253,6 @@ pub fn analyze(
 /// value (skipping unset zeros), per-trial DC re-solve. Data layout:
 /// point-major (run, probes...), one row per converged trial. Parameters are
 /// restored so later jobs see the netlist-declared circuit.
-/// solveLanes apply/restore state: the perturbable params, plus a PRNG that
-/// reseeds on lane 0 so a GPU→serial fallthrough resamples the same draws.
-const LaneCtx = struct {
-    param_vars: []const ParamVar,
-    seed: u64,
-    prng: std.Random.DefaultPrng,
-
-    fn apply(ptr: *anyopaque, k: usize) void {
-        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
-        if (k == 0) self.prng = std.Random.DefaultPrng.init(self.seed);
-        const rng = self.prng.random();
-        for (self.param_vars) |pv| {
-            const varied = switch (pv.dist) {
-                .uniform => blk: {
-                    const lo = pv.nominal * (1.0 - pv.rel_tol);
-                    const hi = pv.nominal * (1.0 + pv.rel_tol);
-                    break :blk lo + (hi - lo) * rng.float(f64);
-                },
-                .gaussian => pv.nominal + pv.nominal * pv.rel_tol * rng.floatNorm(f64),
-            };
-            pv.param_ptr.set(varied);
-        }
-    }
-
-    fn restore(ptr: *anyopaque) void {
-        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
-        for (self.param_vars) |pv| pv.param_ptr.set(pv.nominal);
-    }
-};
-
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
@@ -296,35 +278,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         ckt.recompute();
     }
 
-    // Structural sweep lanes: one trial per lane, batched on GPU or serial.
-    // The per-lane apply reseeds on lane 0 so a GPU→serial fallthrough resamples
-    // identically (see lanes.LaneSetup contract).
     const stride: usize = opts.n_trials;
     const samples = try a.alloc(f64, ctx.probes.len * stride);
     defer a.free(samples);
-    var n_conv: u32 = 0;
-
-    const nt: usize = opts.n_trials;
-    const n: usize = ckt.n;
-    const x_lanes = try a.alloc(f64, nt * n);
-    defer a.free(x_lanes);
-    const results = try a.alloc(converger.Result, nt);
-    defer a.free(results);
-
-    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .seed = opts.seed, .prng = undefined };
-    const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
-    const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
-    ckt.recompute();
-
-    // Pack converged trials contiguously at the front of each probe row.
-    for (results, 0..) |r, t| {
-        if (!r.converged) continue;
-        for (ctx.probes, 0..) |node, p| {
-            samples[p * stride + n_conv] = x_lanes[t * n + node];
-        }
-        n_conv += 1;
-    }
+    const stats = try a.alloc(Stats, ctx.probes.len);
+    defer a.free(stats);
+    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats, &.{}, opts, a);
 
     const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
     const names = try root.probeNames(ctx, "run");
