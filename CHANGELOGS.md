@@ -17,6 +17,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
 - The device layout hash covers structs held by value across the device boundary (`NoiseSource.table`); device ABI 28, so cached `.hdl` builds rebuild once (#32).
+- The `.hdl` build cache keys a `.va` and a `.v` source apart, so one can no longer be handed the other's cached device (#33).
+- The device layout hash covers structs held by value across the device boundary (`NoiseSource.table`); device ABI 27, so cached `.hdl` builds rebuild once (#32).
 - Bench: VACASK plots pair by point count before file order, and its subcircuit nets (`x1:inner`) are scored as `v(x1.inner)` (#109).
 - Bench: poles and zeros are scored as sets, and a repeated signal name (CPL/TXL port currents) is scored by its last column (#87).
 - Bench: the ngspice and VACASK adapters read decks of any size, and the power-grid suite's `.spiceinit` turns on KLU (#7).

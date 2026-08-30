@@ -217,6 +217,7 @@ const max_include_depth = 32;
 fn inputKey(io: std.Io, gpa: std.mem.Allocator, hdl: Hdl, path: []const u8, source: []const u8, paths: BuildPaths) !?[32]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update(@tagName(hdl));
+    h.update(&.{0}); // 'va' ++ 'ssign' is not 'v' ++ 'assign'
     const dir = std.fs.path.dirname(path) orelse ".";
     if (!try hashCode(io, gpa, &h, hdl, dir, path, source, 0)) return null;
     inline for (.{ "contract", "dyn", "gompute", "device_abi", "core", "stdpp", "zig" }) |f| {
@@ -608,6 +609,15 @@ test "normalizeCode: corner cases" {
     // `__LINE__` keeps blank lines, since they move it.
     try std.testing.expect(!try Norm.eql("`__LINE__\n\nx\n", "`__LINE__\nx\n"));
     try std.testing.expect(try Norm.eql("x\n\ny\n", "x\ny\n"));
+}
+
+test "inputKey keys a .va and a .v source apart" {
+    const g = std.testing.allocator;
+    const io = std.testing.io;
+    const paths: BuildPaths = .{ .work_dir = ".", .contract = "c", .dyn = "d", .gompute = "g", .device_abi = "a", .core = "k", .stdpp = "s" };
+    const va = (try inputKey(io, g, .va, "m.va", "ssign y;\n", paths)).?;
+    const v = (try inputKey(io, g, .v, "m.v", "assign y;\n", paths)).?;
+    try std.testing.expect(!std.mem.eql(u8, &va, &v));
 }
 
 test "hashCode: includes it cannot follow, and __FILE__" {
