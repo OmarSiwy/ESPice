@@ -83,7 +83,7 @@ pub fn FreqSolverT(comptime T: type) type {
 
         /// Linearize at x_op (one eval — the planes are G and C) and build.
         pub fn fromCircuit(allocator: Allocator, ckt: anytype, x_op: []const T) !Self {
-            ckt.eval(x_op, 0);
+            ckt.linearize(x_op);
             const n: u32 = @intCast(ckt.n);
 
             if (n <= DENSE_THRESHOLD) {
