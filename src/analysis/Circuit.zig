@@ -92,7 +92,15 @@ pub const GpuHook = struct {
 // Circuit struct
 // ---------------------------------------------------------------------------
 
+/// Hot block first: the pattern, the four value planes, the eval dispatch and
+/// the eval-driving flags are the only fields a solve streams. Cold metadata
+/// (baseline, intern table, memos, GPU/par/workspace handles) is parked below
+/// so it never shares a cache line with the hot path a per-eval pass walks.
 pub const Circuit = struct {
+    // =======================================================================
+    // HOT — touched every eval / solve
+    // =======================================================================
+
     // -- hot: pattern (read every solve) --
     col_ptr: []u32,
     row_idx: []u32,
@@ -114,17 +122,17 @@ pub const Circuit = struct {
     /// voltage (KCL row). Read by the converger's per-row tolerance.
     current_row: []bool,
 
-    // -- flags --
+    // -- hot: flags --
     has_charge: bool,
     has_history: bool,
     has_baseline: bool,
     /// Set by engine when --gpu is active and circuit is GPU-eligible.
     /// converger.run reads this to pick JFNK.
     gpu_active: bool,
-    /// Engine-owned persistent GPU context (mechanism in src/gpu_context.zig,
-    /// same ownership pattern as par_eval). Provides single-solve, batch
-    /// Newton, batch frequency, and transient dispatch. Null ⇒ CPU only.
-    gpu_hook: ?GpuHook = null,
+
+    // =======================================================================
+    // COLD — metadata, memos and handles; off the hot cache lines
+    // =======================================================================
 
     // -- cold: constant-Jacobian baseline --
     g_base: []f64,
@@ -143,6 +151,10 @@ pub const Circuit = struct {
     /// Reference to the engine-owned parallel eval context (mechanism lives
     /// in par.zig, ownership in src/engine.zig). Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
+    /// Engine-owned persistent GPU context (mechanism in src/gpu_context.zig,
+    /// same ownership pattern as par_eval). Provides single-solve, batch
+    /// Newton, batch frequency, and transient dispatch. Null ⇒ CPU only.
+    gpu_hook: ?GpuHook = null,
     gpa: std.mem.Allocator,
 
     // -- cold: linearization memo --
