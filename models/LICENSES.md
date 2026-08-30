@@ -12,7 +12,7 @@ carries its notice; this page is the index.
 | HiSIM licence (Hiroshima University, STARC) | `hisim2_va`, `hisimhv_va` |
 | HICUM licence (Michael Schroter): perpetual, royalty-free, notice must be kept | `hicumL2_va` |
 | BSIM-SOI licence (University of California): perpetual, royalty-free, notice must be kept | `bsimsoi_va` |
-| VBIC 1.3 | `vbic13_4t` |
+| Not stated in the file; upstream (Dietmar Warning's VA-Models, through VACASK) is mostly ECL-2.0, see below | `vbic13_4t` |
 | **CC-BY-NC 4.0** (Cogenda VA-BSIM48): **no commercial use** | `bsim4va` |
 
 ## Read before redistributing
@@ -22,10 +22,15 @@ carries its notice; this page is the index.
   swap it for a commercially licensed BSIM4 (Berkeley's BSIM4 Verilog-A is
   one). It serves `LEVEL=54`/`14` decks, the sky130 decks and the BSIM4
   post-layout benches.
-- `psp103_nqs` is derived from `psp103` but its file carries no notice; the
-  PSP licence requires one, so treat `psp103.va`'s header as covering it.
-- `vbic13_4t` carries no licence notice in the file. Check the upstream
-  VBIC 1.3 distribution terms before redistributing it separately.
+- `psp103_nqs` is `psp103` compiled with the NQS model; its file carries the
+  same CMC notice as `psp103.va`.
+- `vbic13_4t` carries no licence notice in the file. Its source is VACASK's
+  `devices/vbic/vbic_1p3.va`, which VACASK's README says comes from Dietmar
+  Warning's VA-Models (github.com/dwarning/VA-Models). That repository's
+  README puts most of its model code under ECL-2.0 (Educational Community
+  License 2.0), with copyright per model directory; its vbic directory has
+  no notice of its own, so the file's terms are stated nowhere closer than
+  that README. Keep this provenance with any copy.
 - The sky130 model slice under
   `tests/fixtures/regression/ota_buffer_large_step.assets/` is Apache-2.0
   (SkyWater PDK); its README there says so.
