@@ -448,6 +448,13 @@ pub const NetBuilder = struct {
     /// binder has to carry both ends, not just the branch index.
     v_nports: []u32,
     v_branches: []u32,
+    /// DC value of each V card, and whether an F/H/W card sensed it. A sensed
+    /// source is NOT stamped: the 4-port model carries its own `branch (cp,cn)
+    /// ctrl` and drives `V(ctrl) <+ vsense`, so leaving the original in place
+    /// put two sources across one node pair and the control current split
+    /// between them (`I/(1+N)` for N consumers). `v_dc` is what `vsense` gets.
+    v_dc: []f64,
+    v_sensed: []bool,
     n_v: u32,
 
     // Pre-allocated to bucket('i').size()
@@ -486,6 +493,8 @@ pub const NetBuilder = struct {
             .v_ports = try arena.alloc(u32, nv),
             .v_nports = try arena.alloc(u32, nv),
             .v_branches = try arena.alloc(u32, nv),
+            .v_dc = try arena.alloc(f64, nv),
+            .v_sensed = try arena.alloc(bool, nv),
             .n_v = 0,
             .i_names = try arena.alloc([]const u8, ni),
             .n_i = 0,
@@ -572,13 +581,26 @@ pub const NetBuilder = struct {
                 const bound = try self.bindSource(devices.vsource, dev);
                 const nodes = try deviceNodes(self.b, devices.vsource, dev);
                 const br = self.b.n;
-                try self.b.addDevice(devices.vsource, bound[0], bound[1], nodes);
+                // An F/H/W card SENSES this source's branch current, and the
+                // 4-port model does that by carrying its own `branch (cp,cn)
+                // ctrl` driven to `vsense`. Stamping the original alongside it
+                // put two voltage sources across one node pair, so the current
+                // divided between them — exactly `I/(1+N)` for N consumers,
+                // which is why cccs/ccvs read 0.5 and cswitch never tripped.
+                // The model header says it plainly: the netlist layer wires the
+                // sense branch IN PLACE OF that source.
+                const sensed = self.isSensedSource(dev.name);
+                if (!sensed) try self.b.addDevice(devices.vsource, bound[0], bound[1], nodes);
                 self.v_names[self.n_v] = dev.name;
                 self.v_ports[self.n_v] = nodes[0];
                 self.v_nports[self.n_v] = if (nodes.len > 1) nodes[1] else 0;
                 self.v_branches[self.n_v] = br;
+                self.v_dc[self.n_v] = bound[0].dc;
+                self.v_sensed[self.n_v] = sensed;
                 self.n_v += 1;
-                if (!self.have_source) {
+                // A replaced source stamps nothing, so it cannot be the
+                // reference the .op ladder anchors on.
+                if (!self.have_source and !sensed) {
                     self.have_source = true;
                     self.source_node = nodes[0];
                     self.source_branch = br;
@@ -766,6 +788,30 @@ pub const NetBuilder = struct {
         return null;
     }
 
+    /// DC value of a named V card, for the sensing model's `vsense`. The
+    /// replaced source keeps its own value: `V1 a b DC 5` + `F1 p n V1 2`
+    /// leaves 5 V across (a,b). It is a branch-current probe, not a forced-0V
+    /// ammeter.
+    fn findVDc(self: *const NetBuilder, name: []const u8) ?f64 {
+        for (self.v_names[0..self.n_v], self.v_dc[0..self.n_v]) |n, d| {
+            if (std.mem.eql(u8, n, name)) return d;
+        }
+        return null;
+    }
+
+    /// Does any F/H/W card sense this V card? Runs during the 'v' bucket, so
+    /// it reads the f/h/w buckets directly rather than any state built later.
+    fn isSensedSource(self: *const NetBuilder, name: []const u8) bool {
+        for ([_]u8{ 'f', 'h', 'w' }) |c| {
+            const bkt = self.nl.devices.bucket(c);
+            for (0..bkt.size()) |i| {
+                const ref = positionalName(bkt.get(i), 0) orelse continue;
+                if (std.ascii.eqlIgnoreCase(ref, name)) return true;
+            }
+        }
+        return false;
+    }
+
     /// CPL coupled lines: `P a1 a2 0 b1 b2 0 model` with vector model params
     /// `R=r11 r12 r22` — the parser stores the first number under the key and
     /// the rest ""-keyed. Two-conductor symmetric: self = [0], mutual = [1].
@@ -802,6 +848,10 @@ pub const NetBuilder = struct {
         var instance: D.Instance = .{};
         if (comptime default_gain) |dflt|
             _ = setParam(D, &model, &instance, "gain", positionalNumber(dev, 1) orelse kvNumber(dev.kv, "gain") orelse dflt);
+        // The sensed source is not stamped (see the 'v' case); this model's
+        // own `branch (cp,cn) ctrl` stands in for it, and `vsense` is what
+        // keeps its voltage. Without this the replaced source read as 0 V.
+        _ = setParam(D, &model, &instance, "vsense", self.findVDc(ctrl_name) orelse 0);
         try applyKv(&instance, dev.kv);
 
         // (p, n, cp, cn): the control port is the sensed source's own node
