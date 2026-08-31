@@ -25,7 +25,8 @@ pub fn parseRawFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ?[]const P
     return parseRawBlob(gpa, blob);
 }
 
-/// Every plot of a binary raw file, or null if any plot is malformed or
+/// Every plot of a raw file, binary or ASCII (`Values:`, as Spectre's
+/// `-format nutascii` writes), or null if any plot is malformed or
 /// truncated: a partial read would silently drop an analysis.
 pub fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?[]const Plot {
     var plots: std.ArrayList(Plot) = .empty;
@@ -49,6 +50,7 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
     var varnames: std.ArrayList([]const u8) = .empty;
     var in_vars = false;
     var binary_offset: ?usize = null;
+    var ascii = false;
 
     var pos: usize = 0;
     while (pos < blob.len) {
@@ -57,8 +59,9 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
         const line = std.mem.trim(u8, raw_line, " \t\r");
         pos = @min(nl + 1, blob.len);
 
-        if (std.mem.startsWith(u8, line, "Binary:")) {
+        if (std.mem.startsWith(u8, line, "Binary:") or std.mem.startsWith(u8, line, "Values:")) {
             binary_offset = pos;
+            ascii = line[0] == 'V';
             break;
         }
 
@@ -71,14 +74,14 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
             nvars = std.fmt.parseInt(usize, std.mem.trim(u8, line["No. Variables:".len..], " \t"), 10) catch return null;
         } else if (std.mem.startsWith(u8, lower, "no. points:")) {
             npoints = std.fmt.parseInt(usize, std.mem.trim(u8, line["No. Points:".len..], " \t"), 10) catch return null;
-        } else if (std.mem.startsWith(u8, lower, "variables:")) {
+        } else if (std.mem.startsWith(u8, lower, "variables:") or (in_vars and raw_line.len > 0 and (raw_line[0] == '\t' or std.ascii.isDigit(raw_line[0])))) {
+            // `INDEX NAME TYPE`; Spectre puts the first one on the
+            // `Variables:` line itself.
+            var fields = std.mem.tokenizeAny(u8, if (in_vars) line else line["Variables:".len..], " \t");
             in_vars = true;
-        } else if (in_vars and raw_line.len > 0 and (raw_line[0] == '\t' or std.ascii.isDigit(raw_line[0]))) {
-            var fields = std.mem.splitScalar(u8, raw_line, '\t');
-            _ = fields.next(); // empty before first tab (or index)
             _ = fields.next(); // index
             if (fields.next()) |name_field| {
-                const name = std.ascii.allocLowerString(gpa, std.mem.trim(u8, name_field, " \t")) catch return null;
+                const name = std.ascii.allocLowerString(gpa, name_field) catch return null;
                 varnames.append(gpa, normalizeVarName(gpa, name)) catch return null;
             }
         } else if (in_vars and line.len > 0 and raw_line.len > 0 and raw_line[0] != '\t' and !std.ascii.isDigit(raw_line[0])) {
@@ -93,23 +96,50 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
 
     const per: usize = if (is_complex) 2 else 1;
     const count = std.math.mul(usize, std.math.mul(usize, nvars, npoints) catch return null, per) catch return null;
+    var plot: Plot = .{ .plotname = plotname, .varnames = varnames.items, .is_complex = is_complex, .npoints = npoints, .nvars = nvars, .data = &.{} };
+    if (ascii) {
+        const values = parseValues(gpa, blob, boff, count, nvars, is_complex) catch return null;
+        plot.data = values.data;
+        return .{ .plot = plot, .consumed = values.consumed };
+    }
     const need = std.math.mul(usize, count, @sizeOf(f64)) catch return null;
     if (need > blob.len - boff) return null;
 
     const data = gpa.alloc(f64, count) catch return null;
     @memcpy(std.mem.sliceAsBytes(data), blob[boff .. boff + need]);
+    plot.data = data;
+    return .{ .plot = plot, .consumed = boff + need };
+}
 
-    return .{
-        .plot = .{
-            .plotname = plotname,
-            .varnames = varnames.items,
-            .is_complex = is_complex,
-            .npoints = npoints,
-            .nvars = nvars,
-            .data = data,
-        },
-        .consumed = boff + need,
-    };
+/// The `Values:` section: per point an index, then each variable as one
+/// number, or `re,im` when complex (a bare number is real). Stops after the
+/// last value, where the next plot's header starts.
+fn parseValues(gpa: std.mem.Allocator, blob: []const u8, start: usize, count: usize, nvars: usize, complex: bool) !struct { data: []f64, consumed: usize } {
+    const data = try gpa.alloc(f64, count);
+    var pos = start;
+    var filled: usize = 0;
+    var column: usize = 0;
+    while (filled < count) {
+        while (pos < blob.len and std.ascii.isWhitespace(blob[pos])) pos += 1;
+        const end = std.mem.indexOfAnyPos(u8, blob, pos, " \t\r\n") orelse blob.len;
+        if (end == pos) return error.Truncated;
+        const token = blob[pos..end];
+        pos = end;
+        if (column == 0) {
+            _ = try std.fmt.parseInt(usize, token, 10); // point index
+        } else {
+            const comma = std.mem.indexOfScalar(u8, token, ',');
+            if (comma != null and !complex) return error.Malformed;
+            data[filled] = try std.fmt.parseFloat(f64, token[0 .. comma orelse token.len]);
+            filled += 1;
+            if (complex) {
+                data[filled] = if (comma) |c| try std.fmt.parseFloat(f64, token[c + 1 ..]) else 0;
+                filled += 1;
+            }
+        }
+        column = (column + 1) % (nvars + 1);
+    }
+    return .{ .data = data, .consumed = pos };
 }
 
 /// Maps each simulator's signal spelling onto `v(node)`/`i(device)`; scales
@@ -611,6 +641,24 @@ test "the raw parser reads every plot, and still refuses a truncated one" {
     try std.testing.expect(parseRawBlob(a, raw[0 .. raw.len - 1]) == null);
     // A whole first plot does not excuse a truncated second one.
     try std.testing.expect(parseRawBlob(a, raw ++ raw[0 .. raw.len - 1]) == null);
+}
+
+test "the ASCII raw parser reads Spectre's nutascii plots" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Spectre puts the first variable on the `Variables:` line and writes a
+    // complex scale as one real number.
+    const raw = "Title: * rc\nPlotname: AC Analysis `frequencySweep'\nFlags: complex\nNo. Variables: 2\nNo. Points: 2\n" ++
+        "Variables:\t0\tfreq\tHz\n\t\t1\tout\tV plot=0 grid=0\nValues:\n 0\t1000\t0.5,-0.25\n 1\t2000\t0.25,-1e-3\n" ++
+        "Plotname: DC Analysis `opBegin'\nFlags: real\nNo. Variables: 2\nNo. Points: 1\n" ++
+        "Variables:\t0\tdummy\tdummy\n\t\t1\tv1:p\tA\nValues:\n 0\t0\n\t-1e-3\n";
+    const plots = parseRawBlob(a, raw).?;
+    try std.testing.expectEqual(@as(usize, 2), plots.len);
+    try std.testing.expectEqualStrings("v(out)", plots[0].varnames[1]);
+    try std.testing.expectEqualSlices(f64, &.{ 1000, 0, 0.5, -0.25, 2000, 0, 0.25, -1e-3 }, plots[0].data);
+    try std.testing.expectEqualSlices(f64, &.{ 0, -1e-3 }, plots[1].data);
+    try std.testing.expect(parseRawBlob(a, raw[0 .. std.mem.indexOf(u8, raw, "\t-1e-3").?]) == null);
 }
 
 test "a plot with no points parses: a pole-zero run that finds no poles" {

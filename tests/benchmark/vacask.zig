@@ -36,6 +36,7 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []con
     return .{
         .argv = try a.dupe([]const u8, &.{ bin, "-se", "-sp", "runme.sim" }),
         .cwd = .{ .path = scratch },
+        .reader = .vacask,
     };
 }
 
@@ -889,14 +890,14 @@ const Xlat = struct {
 
 /// One logical SPICE card: continuations joined, comments gone, lowercased, and
 /// split into whitespace-delimited fields.
-const Card = struct {
+pub const Card = struct {
     fields: []const []const u8,
 
     fn len(c: Card) usize {
         return c.fields.len;
     }
 
-    fn tok(c: Card, i: usize) ?[]const u8 {
+    pub fn tok(c: Card, i: usize) ?[]const u8 {
         return if (i < c.fields.len) c.fields[i] else null;
     }
 };
@@ -904,7 +905,7 @@ const Card = struct {
 /// SPICE line 1 is ALWAYS the title, never a card, even when it looks like one.
 /// After that: `*` opens a comment line, ` $ ` and `;` open an inline one, and
 /// `+` in column 1 continues the previous card.
-fn lex(gpa: std.mem.Allocator, spice: []const u8, title: *[]const u8, out: *std.ArrayList(Card)) error{OutOfMemory}!void {
+pub fn lex(gpa: std.mem.Allocator, spice: []const u8, title: *[]const u8, out: *std.ArrayList(Card)) error{OutOfMemory}!void {
     var joined: Buf = .empty;
     var lines = std.mem.splitScalar(u8, spice, '\n');
     var first = true;
@@ -997,7 +998,7 @@ fn isNumber(t: []const u8) bool {
     return parseNum(t) != null;
 }
 
-fn parseSpice(t: []const u8) ?f64 {
+pub fn parseSpice(t: []const u8) ?f64 {
     return if (parseNum(t)) |n| n.value else null;
 }
 
