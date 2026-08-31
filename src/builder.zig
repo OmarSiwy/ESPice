@@ -893,6 +893,40 @@ fn eqlAny(a: []const u8, candidates: []const []const u8) bool {
     return false;
 }
 
+/// Polarity comes from the model card KIND (`.model qp PNP`), not from a
+/// parameter, so `applyKv` never sees it and it has to be applied here.
+fn isPType(kind: []const u8) bool {
+    return eqlAny(kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" });
+}
+
+/// The polarity field, under each of the three names the models spell it.
+///
+/// This used to test `@hasField(D.Model, "type_")` — a name NO device has.
+/// Verilog-A `type` is a Zig primitive, so VerA's naming.zig marks it with a
+/// trailing `Z` (its escape marker, which keeps the encoding injective) and
+/// emits `typeZ`; a model that literally declares `type_` gets `typeZ5f`
+/// (`_` = 0x5f); mos3 calls its own parameter `dev_type`. `@hasField` on the
+/// wrong name is comptime-FALSE, which compiles clean and drops the branch —
+/// so every PMOS/PNP/PJF silently ran as its N-type twin, and a lone PMOS
+/// `.op` had no solution and returned NaN with exit 0. Do not "tidy" these
+/// names to something that reads better; they are codegen output.
+fn setPolarity(comptime D: type, model: *D.Model) !void {
+    if (comptime @hasField(D.Model, "typeZ")) {
+        model.typeZ = -1; // i64 on most, f64 on mos1/mos2 — `-1` coerces to both
+    } else if (comptime @hasField(D.Model, "typeZ5f")) {
+        model.typeZ5f = -1; // bsim2 declares `type_`
+    } else if (comptime @hasField(D.Model, "dev_type")) {
+        model.dev_type = -1; // mos3
+    } else {
+        // ponytail: mos6/mos9/jfet/jfet2/mes/mesa/vdmos/bsimsoi/hisim have no
+        // polarity parameter at ALL, so a P-type card on them cannot be honoured.
+        // Refusing is the point: running it N-type is what produced silent NaN.
+        // Upgrade path is model-side — give the .va a `type` parameter the way
+        // mos1 has one — not another branch here.
+        return error.UnsupportedDevice;
+    }
+}
+
 fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_models: []const types.Model) !void {
     if (comptime !isValueForm(D)) return error.UnsupportedDevice;
     var model: D.Model = .{};
@@ -905,13 +939,7 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
             if (comptime D == devices.lossy_tline) {
                 if (kvNumber(m.kv, "length")) |length| model.len = @floatCast(length);
             }
-            // Polarity comes from the model KIND (pmos/pnp/pjf/pmf), not a
-            // model card parameter — applyKv never sees it. Without this,
-            // every P-type device runs with N-type polarity.
-            if (comptime @hasField(D.Model, "type_")) {
-                if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" }))
-                    model.type_ = -1;
-            }
+            if (isPType(m.kind)) try setPolarity(D, &model);
         }
     }
     _ = setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
