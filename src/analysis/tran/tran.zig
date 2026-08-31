@@ -298,7 +298,10 @@ pub fn simulate(
     // per-device delays if mixed-td circuits still show edge smear.
     var echo_bps: [256]f64 = undefined;
     var n_echo: usize = 0;
-    const echo_td: ?f64 = if (ckt.has_history) ckt.minDelay() else null;
+    // Keyed on minDelay availability itself — `has_history` is the dead
+    // histInject channel and gated the whole echo machinery off for every
+    // generated line (VerA now emits `delays`, which is what minDelay reads).
+    const echo_td: ?f64 = ckt.minDelay();
     if (echo_td) |td_| {
         // t = 0 is itself a breakpoint (source edges often start there).
         echo_bps[0] = td_;
@@ -453,7 +456,13 @@ pub fn simulate(
                         use_be = true;
                         continue;
                     }
-                    dt *= 0.5;
+                    // ngspice retries at the LTE-suggested dt (dctran.c:966
+                    // `CKTdelta = newdelta`), not a halving ladder: one reject
+                    // lands the right dt, so the step phase through an edge
+                    // tracks ngspice's instead of drifting a half-octave
+                    // (digital/clamp's 0.48 ns final edge chord). The branch
+                    // guard makes del < 0.9*dt, so this shrinks every retry.
+                    dt = del;
                     if (dt < options.dt_min) return .{ .completed = false, .steps = steps, .t_final = t };
                     continue;
                 }

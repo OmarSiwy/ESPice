@@ -1052,7 +1052,11 @@ pub fn DeviceBatch(comptime D: type) type {
             .set_sim_state = if (has_sim_state) setSimState else null,
             .record_history = if (has_hist) recordHistory else null,
             .inject_history = if (has_hist) injectHistory else null,
-            .min_delay = if (has_hist) minDelay else null,
+            // Gated on the decl, not on the dead histInject channel: VerA now
+            // emits `delays` for absdelay devices (model-frame, like
+            // nextBreakpoint), which is what makes the transient's wavefront
+            // echo machinery and its dt_max <= td clamp actually live.
+            .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint")) nextBreakpointFn else null,
             .collect_params = collectParams,
             .collect_noise = if (@hasDecl(D, "noise_gens")) collectNoise else null,
