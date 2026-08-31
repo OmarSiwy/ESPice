@@ -132,6 +132,11 @@ const NoiseHook = struct {
         ckt.combineGC(self.alpha, self.a_vals);
         return self.a_vals;
     }
+    /// One diagonal, without materializing the whole combined plane —
+    /// see `Circuit.gcAt`. The residual gate calls this per unknown.
+    pub fn diagAt(self: NoiseHook, ckt: *root.Circuit, slot: u32) f64 {
+        return if (self.has_charge) ckt.gcAt(self.alpha, slot) else ckt.g_vals[slot];
+    }
 };
 
 pub fn simulate(
