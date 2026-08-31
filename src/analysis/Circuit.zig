@@ -495,6 +495,19 @@ pub const Circuit = struct {
         return min_reject;
     }
 
+    /// Accepted-step half of `updateStates`: the devices whose state is not
+    /// revertible (no `stateCtl`), so it must not be written speculatively.
+    /// The transient calls this exactly once per accepted point.
+    pub fn commitStates(self: *const Circuit, x: []const f64) ?f64 {
+        var min_reject: ?f64 = null;
+        for (self.batches) |b| {
+            if (b.hooks.commit_state) |f| if (f(b.ctx, x)) |tr| {
+                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
+            };
+        }
+        return min_reject;
+    }
+
     /// FSM accepted-state sync (switches). Returns true (for .query) when
     /// any device's working state differs from its last accepted state.
     pub fn stateCtl(self: *const Circuit, sop: StateCtlOp) bool {

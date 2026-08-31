@@ -529,6 +529,11 @@ pub fn simulate(
         }
 
         if (has_history) ckt.recordHistory(cur, t);
+        // §4.5.2 accepted-step bookkeeping for devices whose state is not
+        // revertible. Here — once per ACCEPTED point, beside the host's own
+        // history record — and not inside the Newton loop, which ran it per
+        // iteration including every rejected attempt. See `Hooks.commit_state`.
+        _ = ckt.commitStates(cur);
 
         try waveform.record(t, cur, probes);
         if (options.step_fn) |f| f(options.step_ctx, t, cur);
