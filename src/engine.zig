@@ -286,6 +286,17 @@ pub const Simulation = struct {
         }
 
         for (self.jobs[0..self.n_jobs]) |job| {
+            // Every job starts from a DEFINED device sim state; nothing may
+            // inherit its predecessor's. Two leaks otherwise: a deck whose op
+            // ran TRANOP-flavored left `.ic` behind, so a following .dc/.ac
+            // biased waveform sources at t = 0 instead of their DC value —
+            // and a job AFTER a transient inherited t = t_stop, biasing the
+            // next linearization at end-of-run waveform values. Transient-
+            // family jobs re-establish their own state internally.
+            self.circuit.setSimState(.{ .kind = switch (job) {
+                .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => .ic,
+                else => .dc,
+            } });
             const uic = switch (job) {
                 .tran => |o| o.uic,
                 else => false,
