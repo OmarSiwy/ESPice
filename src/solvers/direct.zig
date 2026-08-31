@@ -149,9 +149,21 @@ pub fn SolverT(comptime T: type) type {
 
         fn factorInner(self: *Self, vals: []const T) !void {
             if (self.tri) |*tri| {
-                try tri.factor(vals);
-                self.factored = true;
-                return;
+                if (tri.factor(vals)) |_| {
+                    self.factored = true;
+                    return;
+                } else |_| {
+                    // Thomas has no pivoting, and an MNA branch row's
+                    // structural ZERO diagonal lands here the moment nothing
+                    // pads it (the always-on diagonal gmin used to). Demote to
+                    // the pivoting LU permanently — the BBD fallback below.
+                    // ponytail: costs tridiag speed on vsource-bearing
+                    // ladders; a 2x2-block-pivot Thomas recovers it if the
+                    // bench says so.
+                    tri.deinit(self.gpa);
+                    self.tri = null;
+                    self.factored = false;
+                }
             }
             if (self.bbd_eng) |*eng| {
                 if (eng.factor(vals)) |_| {
