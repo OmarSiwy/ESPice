@@ -47,3 +47,4 @@ obj_dir/
 # MkDocs (the Pages workflow builds these)
 /site/
 /docs/wasm/
+
