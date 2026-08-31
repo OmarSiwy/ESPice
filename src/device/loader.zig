@@ -50,10 +50,14 @@ pub const Prepared = struct {
     }
 };
 
-/// The source languages the loader compiles, by file extension. Anything
-/// else, `.sv` included (VerA's E1104), is `UnsupportedHdlExtension`.
+/// The source languages the loader compiles, by file extension, ignoring
+/// case: every Verilog-A and Verilog extension the frontend routes here
+/// (`source.foreignKindForPath`). Anything else, `.sv` included (VerA's
+/// E1104), is `UnsupportedHdlExtension`.
 const Hdl = enum { va, v };
-const hdl_extensions = std.StaticStringMap(Hdl).initComptime(.{ .{ ".va", .va }, .{ ".v", .v } });
+const hdl_extensions = std.StaticStringMapWithEql(Hdl, std.static_string_map.eqlAsciiIgnoreCase).initComptime(.{
+    .{ ".va", .va }, .{ ".vams", .va }, .{ ".veriloga", .va }, .{ ".v", .v },
+});
 
 /// Compiles and opens one source. Reads `loaded` only, so several can run
 /// concurrently. Returns null when the module is already in `loaded`. A `.v`
@@ -407,7 +411,8 @@ fn recordInputs(io: std.Io, work_root: []const u8, key: [32]u8, module_name: []c
 
 /// Why one source did not load. The loader's own refusals:
 ///
-/// - `UnsupportedHdlExtension`: the file is not `.va` or `.v`.
+/// - `UnsupportedHdlExtension`: the file is not `.va`, `.vams`, `.veriloga`
+///   or `.v`, in any case.
 /// - `NameTooLong`: the module name is over 128 bytes.
 /// - `DigitalFailed`: VerA cannot make a device of the `.v` design (E1103);
 ///   its diagnostics are printed.
@@ -609,6 +614,12 @@ test "normalizeCode: corner cases" {
     // `__LINE__` keeps blank lines, since they move it.
     try std.testing.expect(!try Norm.eql("`__LINE__\n\nx\n", "`__LINE__\nx\n"));
     try std.testing.expect(try Norm.eql("x\n\ny\n", "x\ny\n"));
+}
+
+test "the loader takes every Verilog-A and Verilog extension the frontend routes to it" {
+    for ([_][]const u8{ "m.va", "m.VA", "m.Va", "m.vams", "m.veriloga" }) |p| try std.testing.expectEqual(Hdl.va, hdl_extensions.get(std.fs.path.extension(p)).?);
+    for ([_][]const u8{ "m.v", "m.V" }) |p| try std.testing.expectEqual(Hdl.v, hdl_extensions.get(std.fs.path.extension(p)).?);
+    try std.testing.expect(hdl_extensions.get(".sv") == null);
 }
 
 test "inputKey keys a .va and a .v source apart" {
