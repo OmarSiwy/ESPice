@@ -282,6 +282,15 @@ pub fn simulate(
     }
 
     if (has_history) ckt.recordHistory(x, 0);
+    // Seed absdelay rings with the operating point: commitStates drives the
+    // §4.5.7 zHistPush, whose first push fills the WHOLE ring with (0, v_op).
+    // Without it the first Newton solve queries an all-zero ring and every
+    // delay line reads 0 V for t < td — a false transient off the DC state.
+    // Must run under kind=.tran: the generated core only computes the delay
+    // operators' input expressions on the non-static branch (dt stays 0, so
+    // zAbsdelay itself is still the DC identity).
+    ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
+    _ = ckt.commitStates(x);
 
     // ngspice tmax default is (tstop-tstart)/50; explicit tmax replaces it.
     // Clamp to minimum delay for history-aware timestep control.
