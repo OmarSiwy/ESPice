@@ -117,15 +117,31 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
 fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
     if (scale_names.has(lower)) return lower;
     if (scale_aliases.get(lower)) |canonical| return canonical;
-    if (std.mem.startsWith(u8, lower, "v(") or std.mem.startsWith(u8, lower, "i(")) return lower;
+    if (subcircuitNet(gpa, lower)) |net| return net;
+    for ([_][]const u8{ "v(", "i(", "pole(", "zero(" }) |kept| if (std.mem.startsWith(u8, lower, kept)) return lower;
     const branch = std.mem.indexOf(u8, lower, "#branch") orelse std.mem.indexOf(u8, lower, ":flow(");
     if (branch) |cut| return std.fmt.allocPrint(gpa, "i({s})", .{lower[0..cut]}) catch lower;
     return std.fmt.allocPrint(gpa, "v({s})", .{lower}) catch lower;
 }
 
+/// VACASK writes a net inside subcircuit instance `x1` as `x1:inner`, and a
+/// device-internal node as `d1:a_int`. A name whose every segment before the
+/// last is an `x` instance is a net: `v(x1.inner)`, as ngspice and espice
+/// spell it. Null for anything else.
+fn subcircuitNet(gpa: std.mem.Allocator, lower: []const u8) ?[]const u8 {
+    const last = std.mem.lastIndexOfScalar(u8, lower, ':') orelse return null;
+    var path = std.mem.splitScalar(u8, lower[0..last], ':');
+    while (path.next()) |inst| if (!std.mem.startsWith(u8, inst, "x")) return null;
+    const net = std.fmt.allocPrint(gpa, "v({s})", .{lower}) catch return null;
+    std.mem.replaceScalar(u8, net, ':', '.');
+    return net;
+}
+
 /// Scores candidate plots `zp` against reference plots `ng`. Plots pair by
-/// exact name first, then by `plot_classes` alias; a candidate-only plot is
-/// ignored. Null when nothing was comparable.
+/// exact name, then by `plot_classes` alias, each first among plots with the
+/// same point count so file order cannot decide (VACASK writes a `.dc` as an
+/// "Operating Point"); a candidate-only plot is ignored. Null when nothing was
+/// comparable.
 pub fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, rtol: f64) ?Accuracy {
     var worst: Accuracy = .{ .max_rel = 0, .rms_rel = 0, .pass = true };
     var scored: usize = 0;
@@ -134,13 +150,15 @@ pub fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, r
     @memset(taken, false);
     const pair = gpa.alloc(?usize, ng.len) catch return null;
     defer gpa.free(pair);
-    for (&[_]bool{ true, false }) |exact| {
+    @memset(pair, null);
+    for ([_][2]bool{ .{ true, true }, .{ false, true }, .{ true, false }, .{ false, false } }) |pass| {
+        const exact, const same_shape = pass;
         for (ng, pair) |ng_plot, *slot| {
-            if (exact) slot.* = null else if (slot.* != null) continue;
+            if (slot.* != null) continue;
             var ng_buf: [128]u8 = undefined;
             const ng_key = if (exact) plotLower(&ng_buf, ng_plot.plotname) else plotClass(&ng_buf, ng_plot.plotname);
             slot.* = for (zp, 0..) |zp_plot, i| {
-                if (taken[i]) continue;
+                if (taken[i] or (same_shape and zp_plot.npoints != ng_plot.npoints)) continue;
                 var zp_buf: [128]u8 = undefined;
                 const zp_key = if (exact) plotLower(&zp_buf, zp_plot.plotname) else plotClass(&zp_buf, zp_plot.plotname);
                 if (std.mem.eql(u8, ng_key, zp_key)) break i;
@@ -189,10 +207,15 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
     var columns: std.StringHashMapUnmanaged(usize) = .empty;
     defer columns.deinit(gpa);
     columns.ensureTotalCapacity(gpa, std.math.cast(u32, zp.varnames.len) orelse return null) catch return null;
-    for (zp.varnames, 0..) |name, i| {
-        const entry = columns.getOrPutAssumeCapacity(name);
-        if (!entry.found_existing) entry.value_ptr.* = i;
-    }
+    // A repeated name means its last column on both sides: ngspice writes
+    // every port current of a CPL/TXL line as one `i(p1)`, and espice's
+    // single `i(p1)` is the last of them.
+    for (zp.varnames, 0..) |name, i| columns.putAssumeCapacity(name, i);
+    var ng_last: std.StringHashMapUnmanaged(usize) = .empty;
+    defer ng_last.deinit(gpa);
+    ng_last.ensureTotalCapacity(gpa, std.math.cast(u32, ng.varnames.len) orelse return null) catch return null;
+    for (ng.varnames, 0..) |name, i| ng_last.putAssumeCapacity(name, i);
+    if (ng.is_complex and ng.npoints == 1 and zp.npoints == 1) matchRoots(gpa, ng, zp, &columns) catch return null;
 
     const ng_columns = gpa.alloc(f64, 2 * ng.npoints) catch return null;
     defer gpa.free(ng_columns);
@@ -216,6 +239,7 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
 
     for (ng.varnames, 0..) |ng_name, ni| {
         if (interpolate and scale_names.has(ng_name)) continue;
+        if (ng_last.get(ng_name).? != ni) continue;
         const zi = columns.get(ng_name) orelse {
             if (isInternalNode(ng_name)) continue;
             if (scale_names.has(ng_name)) continue;
@@ -279,6 +303,36 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
         .rms_rel = worst_rms,
         .pass = complete and worst_rms <= rtol and worst_max <= 10.0 * rtol,
     };
+}
+
+/// Points each reference `pole(k)`/`zero(k)` column at the nearest unclaimed
+/// candidate root of the same kind: simulators order roots differently, so
+/// the index says nothing. A root with no candidate left loses its column.
+fn matchRoots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, columns: *std.StringHashMapUnmanaged(usize)) error{OutOfMemory}!void {
+    const claimed = try gpa.alloc(bool, zp.varnames.len);
+    defer gpa.free(claimed);
+    @memset(claimed, false);
+    for ([_][]const u8{ "pole(", "zero(" }) |kind| {
+        // ponytail: greedy nearest in reference order, O(roots^2); roots that
+        // agree are far closer together than distinct roots are.
+        for (ng.varnames, 0..) |name, ni| {
+            if (!std.mem.startsWith(u8, name, kind)) continue;
+            var best: ?usize = null;
+            var best_d: f64 = std.math.inf(f64);
+            for (zp.varnames, claimed, 0..) |cand, taken, zi| {
+                if (taken or !std.mem.startsWith(u8, cand, kind)) continue;
+                const d = std.math.hypot(ng.data[2 * ni] - zp.data[2 * zi], ng.data[2 * ni + 1] - zp.data[2 * zi + 1]);
+                if (best == null or d < best_d) {
+                    best = zi;
+                    best_d = d;
+                }
+            }
+            if (best) |zi| {
+                claimed[zi] = true;
+                try columns.put(gpa, name, zi);
+            } else _ = columns.remove(name);
+        }
+    }
 }
 
 const scale_names = std.StaticStringMap(void).initComptime(.{
@@ -389,7 +443,7 @@ test "accuracy requires signals and complete real samples" {
     try std.testing.expect(comparePlots(a, reference, candidate, 1e-3) == null);
 }
 
-test "accuracy matches reordered signals and keeps the first duplicate" {
+test "accuracy matches reordered signals and keeps the last duplicate" {
     const reference: Plot = .{
         .plotname = "Operating Point",
         .varnames = &.{ "v(out)", "i(v1)", "v(in)" },
@@ -401,10 +455,56 @@ test "accuracy matches reordered signals and keeps the first duplicate" {
     var candidate = reference;
     candidate.varnames = &.{ "v(in)", "v(out)", "i(v1)", "v(out)" };
     candidate.nvars = 4;
-    candidate.data = &.{ 2, 1, -0.001, 9 };
-    try std.testing.expect(comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
     candidate.data = &.{ 2, 9, -0.001, 1 };
+    try std.testing.expect(comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
+    candidate.data = &.{ 2, 1, -0.001, 9 };
     try std.testing.expect(!comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
+    // ngspice names every port current of a CPL line `i(p1)`; espice's one
+    // `i(p1)` is the last of them, and only that one is scored.
+    const cpl: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{ "i(p1)", "i(p1)", "i(p1)" },
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 3,
+        .data = &.{ 5, -5, 0.25 },
+    };
+    var single = cpl;
+    single.varnames = &.{"i(p1)"};
+    single.nvars = 1;
+    single.data = &.{0.25};
+    try std.testing.expect(comparePlots(std.testing.allocator, cpl, single, 1e-3).?.pass);
+    single.data = &.{5};
+    try std.testing.expect(!comparePlots(std.testing.allocator, cpl, single, 1e-3).?.pass);
+}
+
+test "poles and zeros pair as sets, whatever order each simulator found them in" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = [_][]const u8{ "index", "pole(1)", "pole(2)", "pole(3)", "zero(1)" };
+    var normalized: [names.len][]const u8 = undefined;
+    for (names, &normalized) |n, *out| out.* = normalizeVarName(a, n);
+    try std.testing.expectEqualStrings("pole(1)", normalized[1]);
+    const reference: Plot = .{
+        .plotname = "Pole-Zero Analysis",
+        .varnames = &normalized,
+        .is_complex = true,
+        .npoints = 1,
+        .nvars = 5,
+        .data = &.{ 0, 0, -1e3, 0, -2e3, 5e2, -2e3, -5e2, -7e3, 0 },
+    };
+    var candidate = reference;
+    candidate.data = &.{ 0, 0, -2e3, -5e2, -1e3, 0, -2e3, 5e2, -7e3, 0 };
+    try std.testing.expect(comparePlots(a, reference, candidate, 1e-3).?.pass);
+    // A wrong root is still wrong: no permutation hides it.
+    candidate.data = &.{ 0, 0, -2e3, -5e2, -1.5e3, 0, -2e3, 5e2, -7e3, 0 };
+    try std.testing.expect(!comparePlots(a, reference, candidate, 1e-3).?.pass);
+    // A missing pole is a coverage gap.
+    candidate.varnames = &.{ normalized[0], normalized[1], normalized[2], normalized[4] };
+    candidate.nvars = 4;
+    candidate.data = &.{ 0, 0, -1e3, 0, -2e3, 5e2, -7e3, 0 };
+    try std.testing.expect(!comparePlots(a, reference, candidate, 1e-3).?.complete);
 }
 
 test "one signal spelling across four simulators" {
@@ -422,6 +522,8 @@ test "one signal spelling across four simulators" {
         .{ "vin#branch", "i(vin)" }, // ngspice branch current
         .{ "2", "v(2)" }, // VACASK node
         .{ "vs:flow(br)", "i(vs)" }, // VACASK branch current
+        .{ "x1:inner", "v(x1.inner)" }, // VACASK subcircuit net
+        .{ "x1:x2:n", "v(x1.x2.n)" },
         .{ "time", "time" }, // scales are never wrapped
         .{ "frequency", "frequency" },
     }) |case| try std.testing.expectEqualStrings(case[1], normalizeVarName(a, case[0]));
@@ -433,6 +535,9 @@ test "one signal spelling across four simulators" {
         "v(m1#drain)", // ngspice
         "v(d1:a_int)", // VACASK
     }) |internal| try std.testing.expect(isInternalNode(internal));
+    // VACASK spells both a subcircuit net and a device-internal node with
+    // `:`; only an all-`x` path is a net.
+    inline for (.{ "d1:a_int", "x1:d1:a_int" }) |internal| try std.testing.expect(isInternalNode(normalizeVarName(a, internal)));
     // A deck node is not internal just because a model node could share a
     // prefix or a suffix with it.
     inline for (.{ "v(out)", "i(v1)", "v(internal)", "v(_body)", "v(i2)" }) |named|
@@ -606,4 +711,31 @@ test "an exact plotname beats an aliased one, whatever the order" {
     var vc_dc = op;
     vc_dc.plotname = "DC transfer characteristic";
     try std.testing.expect(compareRaws(a, &.{op}, &.{vc_dc}, 1e-3).?.pass);
+}
+
+test "plots pair by point count before file order: VACASK's .dc is an Operating Point" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const op: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{"v(out)"},
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 1,
+        .data = &.{7},
+    };
+    const sweep: Plot = .{
+        .plotname = "DC transfer characteristic",
+        .varnames = &.{ "v(v-sweep)", "v(out)" },
+        .is_complex = false,
+        .npoints = 3,
+        .nvars = 2,
+        .data = &.{ 0, 0, 1, 0.5, 2, 1 },
+    };
+    var vc_sweep = sweep;
+    vc_sweep.plotname = "Operating Point";
+    // VACASK's files sort dc before op, so its sweep comes first.
+    try std.testing.expect(compareRaws(a, &.{ vc_sweep, op }, &.{ op, sweep }, 1e-3).?.pass);
+    try std.testing.expect(compareRaws(a, &.{ op, vc_sweep }, &.{ sweep, op }, 1e-3).?.pass);
 }

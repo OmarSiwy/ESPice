@@ -6,12 +6,14 @@ const common = @import("job.zig");
 pub const version_flag = "--version";
 
 /// A batch job writing `raw_path`. With `klu`, a deck that lacks the option
-/// runs from a copy beside `raw_path` with `.options klu` inserted.
+/// runs from a copy beside `raw_path` with `.options klu` inserted. ngspice
+/// reads a `.spiceinit` beside the deck (a suite's `ngbehavior` or `option
+/// klu`); with none there, `-n` keeps the user's own from leaking in.
 pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []const u8, raw_path: []const u8, klu: bool) common.Error!common.Job {
     const source = std.Io.Dir.cwd().realPathFileAlloc(io, netlist, a) catch return error.DeckFailed;
     const raw_dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(raw_path) orelse ".", a) catch return error.ScratchFailed;
     const raw = try std.fmt.allocPrint(a, "{s}/{s}", .{ raw_dir, std.fs.path.basename(raw_path) });
-    const text = std.Io.Dir.cwd().readFileAlloc(io, source, a, .limited(1 << 27)) catch return error.DeckFailed;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, source, a, .unlimited) catch return error.DeckFailed;
     if (hasPsp(text)) return .{ .refused = "ngspice-45 has no PSP103 (LEVEL=1040)" };
     var deck: []const u8 = source;
     if (klu) {
@@ -21,9 +23,13 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []con
             std.Io.Dir.cwd().writeFile(io, .{ .sub_path = deck, .data = body }) catch return error.DeckFailed;
         }
     }
+    const dir = std.fs.path.dirname(source).?;
+    const init = try std.fs.path.join(a, &.{ dir, ".spiceinit" });
+    const has_init = if (std.Io.Dir.cwd().access(io, init, .{})) |_| true else |_| false;
+    const argv: []const []const u8 = if (has_init) &.{ bin, "-b", "-r", raw, deck } else &.{ bin, "-n", "-b", "-r", raw, deck };
     return .{
-        .argv = try a.dupe([]const u8, &.{ bin, "-n", "-b", "-r", raw, deck }),
-        .cwd = .{ .path = std.fs.path.dirname(source).? },
+        .argv = try a.dupe([]const u8, argv),
+        .cwd = .{ .path = dir },
         .raw = raw,
     };
 }
@@ -71,4 +77,20 @@ test "KLU preprocessing preserves the title and source body" {
     try std.testing.expect(deckHasKlu(body));
     try std.testing.expect(!deckHasKlu(".options klu\n.op\n.end"));
     try std.testing.expect(!deckHasKlu("title\n.optionsbogus klu\n.op\n.end"));
+}
+
+test "a .spiceinit beside the deck is read; with none, -n keeps the user's out" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.writeFile(io, .{ .sub_path = "deck.sp", .data = "t\nR1 a 0 1\n.op\n.end\n" });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const deck = try std.fmt.allocPrint(a, "{s}/deck.sp", .{dir});
+    const raw = try std.fmt.allocPrint(a, "{s}/out.raw", .{dir});
+    try std.testing.expectEqualStrings("-n", (try prepare(io, a, "ngspice", deck, raw, false)).argv[1]);
+    try tmp.dir.writeFile(io, .{ .sub_path = ".spiceinit", .data = "set ngbehavior=ltpsa\n" });
+    try std.testing.expectEqualStrings("-b", (try prepare(io, a, "ngspice", deck, raw, false)).argv[1]);
 }

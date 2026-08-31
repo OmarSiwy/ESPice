@@ -23,6 +23,15 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- The device layout hash covers structs held by value across the device boundary (`NoiseSource.table`); device ABI 28, so cached `.hdl` builds rebuild once (#32).
+- `.hdl`/`.include` load `.vams` and `.veriloga` files, and any HDL extension in upper or mixed case, as the frontend already routed them (#34).
+- `models/psp103_nqs.va` carries the PSP/CMC notice, and `models/LICENSES.md` records where `vbic13_4t` comes from (#17).
+- The `.hdl` build cache keys a `.va` and a `.v` source apart, so one can no longer be handed the other's cached device (#33).
+- The device layout hash covers structs held by value across the device boundary (`NoiseSource.table`); device ABI 27, so cached `.hdl` builds rebuild once (#32).
+- Bench: VACASK plots pair by point count before file order, and its subcircuit nets (`x1:inner`) are scored as `v(x1.inner)` (#109).
+- Bench: poles and zeros are scored as sets, and a repeated signal name (CPL/TXL port currents) is scored by its last column (#87).
+- Bench: the ngspice and VACASK adapters read decks of any size, and the power-grid suite's `.spiceinit` turns on KLU (#7).
+- Bench: ngspice reads a `.spiceinit` beside the deck instead of always running with `-n` (#6).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

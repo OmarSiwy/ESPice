@@ -1,3 +1,59 @@
+//
+// ======================================================================================
+// ======================================================================================
+//                       Silicon Integration Initiative (Si2)
+//                     Compact Model Coalition In-Code Statement
+//
+//   Software is distributed as is, completely without warranty or service support. The
+//   Commissariat a l'energie atomique et aux energies alternatives (CEA), NXP
+//   Semiconductors, and Delft University of Technology, along with their employees are
+//   not liable for the condition or performance of the software.
+//
+//   NXP Semiconductors, Delft University of Technology, and CEA own the copyright and
+//   grant users a perpetual, irrevocable, worldwide, non-exclusive, royalty-free license
+//   with respect to the software as set forth below.
+//
+//   NXP Semiconductors, Delft University of Technology, and CEA hereby disclaim all
+//   implied warranties.
+//
+//   NXP Semiconductors, Delft University of Technology, and CEA grant the users the right
+//   to modify, copy, and redistribute the software and documentation, both within the
+//   user's organization and externally, subject to the following restrictions:
+//
+//     1. The users agree not to charge for the NXP Semiconductors, Delft University of
+//        Technology, and CEA-developed code itself but may charge for additions,
+//        extensions, or support.
+//
+//     2. In any product based on the software, the users agree to acknowledge NXP
+//        Semiconductors, Delft University of Technology, and CEA that developed the
+//        software. This acknowledgement shall appear in the product documentation.
+//
+//     3. Redistributions to others of source code and documentation must retain the
+//        copyright notice, disclaimer, and list of conditions.
+//
+//     4. Redistributions to others in binary form must reproduce the copyright notice,
+//        disclaimer, and list of conditions in the documentation and/or other materials
+//        provided with the distribution.
+//
+//   CMC In-Code Statement Revision: 103.7.0 (PSP), 04/29/2019
+//                                   200.6.0 (JUNCAP),04/29/2019
+//
+// ======================================================================================
+// ======================================================================================
+//
+//   Authors: G.D.J. Smit, A.J. Scholten, and D.B.M. Klaassen (NXP Semiconductors)
+//            O. Rozeau, S. Martinie, T. Poiroux, J.C. Barbé (CEA-Leti)
+//
+//   Former contributers:
+//            G. Gildenblat, W. Yao, Z. Zhu, X. Li and W. Wu (Arizona State University)
+//            R. van Langevelde (Philips Research)
+//            R. van der Toorn (Delft University of Technology)
+//
+//   The most recent version of the model code, the documentation, and contact
+//   information can be found on:
+//
+//        http://www.cea.fr/cea-tech/leti/pspsupport
+//
 // PSP 103.7 with the NQS model compiled in: psp103.va (see its header for
 // the source, the edits and the CMC terms) with NQSmodel defined, as
 // upstream's psp103_nqs.va is PSP103_module.include with NQSmodel defined.
