@@ -265,6 +265,23 @@ pub fn main(init: std.process.Init) !u8 {
             const results = sim.getResults();
             if (opts.raw_path) |raw_path| {
                 for (results, 0..) |res, ri| {
+                    // ngspice appends every plot to ONE raw file; readers (the
+                    // benchmark runner included) parse the concatenation. The
+                    // old `{path}.{d}` side files left every analysis past the
+                    // first invisible to comparison — rtlinv's .tran was never
+                    // compared at all. Non-raw formats keep the suffix: they
+                    // have no multi-plot framing.
+                    if (opts.format == .binary and ri > 0) {
+                        rawfile.writeAppend(io, raw_path, .{
+                            .title = sim.title,
+                            .plotname = res.plotname,
+                            .varnames = res.varnames,
+                            .is_complex = res.is_complex,
+                            .npoints = res.npoints,
+                            .data = res.data,
+                        }) catch return skip(io, "write error");
+                        continue;
+                    }
                     const plot_path = if (ri == 0)
                         raw_path
                     else

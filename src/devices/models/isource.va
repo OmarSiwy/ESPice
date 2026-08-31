@@ -232,7 +232,13 @@ module isource(p, n);
 
         out = dc;
 
-        if (waveform == 1) begin
+        // Static analyses read `dc` unconditionally — the netlist layer fills
+        // it from the waveform's t = 0 value when the card gives none
+        // (builder dcFromWaveform), and a .dc sweep OVERRIDES it (vsource.va
+        // says why).
+        if (analysis("static")) begin
+            out = dc;
+        end else if (waveform == 1) begin
             // ---- PULSE ----------------------------------------------------
             // ngspice holds V1 until TD, then repeats the trapezoid with
             // period PER. PHASE is a fraction of the period, not of 2*pi.

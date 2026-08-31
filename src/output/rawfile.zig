@@ -27,16 +27,29 @@ pub fn varType(name: []const u8) []const u8 {
 
 /// Write an ngspice-compatible binary raw file to `path`.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
+    return writeInner(io, path, plot, false);
+}
+
+/// A multi-analysis deck produces one plot per directive; ngspice appends
+/// them all to ONE raw file, and consumers (the benchmark runner included)
+/// read the concatenation. Result 2+ goes through this.
+pub fn writeAppend(io: Io, path: []const u8, plot: Plot) !void {
+    return writeInner(io, path, plot, true);
+}
+
+fn writeInner(io: Io, path: []const u8, plot: Plot, append: bool) !void {
     const nvars = plot.varnames.len;
     const per: usize = if (plot.is_complex) 2 else 1;
     const expected_len = plot.npoints * nvars * per;
     if (plot.data.len != expected_len) return error.DataLengthMismatch;
 
-    const file = try Io.Dir.cwd().createFile(io, path, .{});
+    const file = try Io.Dir.cwd().createFile(io, path, .{ .truncate = !append });
     defer file.close(io);
+    const start_pos: u64 = if (append) try file.length(io) else 0;
 
     var buf: [4096]u8 = undefined;
     var fw = file.writer(io, &buf);
+    fw.pos = start_pos; // append lands after the previous plot
     const w = &fw.interface;
 
     // --- ASCII header ---
