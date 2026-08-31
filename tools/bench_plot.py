@@ -11,6 +11,7 @@ and zig-out/postlayout; groups are then family_model (chain_bsim4, ...).
 x is the device count after subcircuit expansion, y the median wall time;
 both axes log. The analysis comes from the deck's .expected.json, else
 its top-level directory.
+Reference-adapter columns are dropped unless `--vendor` is given.
 """
 import json, re, sys
 from collections import defaultdict
@@ -20,9 +21,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-report = Path(sys.argv[1] if len(sys.argv) > 1 else "zig-out/benchmark-results.md")
-fixtures = Path(sys.argv[2] if len(sys.argv) > 2 else "tests/fixtures")
-out = Path(sys.argv[3] if len(sys.argv) > 3 else "zig-out/bench-plots")
+vendor = "--vendor" in sys.argv
+argv = [a for a in sys.argv if a != "--vendor"]
+report = Path(argv[1] if len(argv) > 1 else "zig-out/benchmark-results.md")
+fixtures = Path(argv[2] if len(argv) > 2 else "tests/fixtures")
+out = Path(argv[3] if len(argv) > 3 else "zig-out/bench-plots")
 
 
 def devices(deck: Path) -> int:
@@ -84,6 +87,10 @@ for line in report.read_text().splitlines():
         verdicts[cells[0]] = dict(zip(verdict_cols, cells[1 + len(header) :]))
 if not rows:
     sys.exit(f"no rows in {report}")
+if not vendor:
+    keep = [i for i, h in enumerate(header) if not re.match(r"(HSPICE|Spectre)\b", h)]
+    header = [header[i] for i in keep]
+    rows = [(rel, [t[i] for i in keep]) for rel, t in rows]
 
 points = []  # (analysis, size, times)
 rows_used = []

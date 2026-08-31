@@ -279,6 +279,12 @@ fn arguments(a: Allocator, io: Io, init: std.process.Init) !Config {
         }
     }
     if (cfg.iters == 0 or cfg.timeout == 0 or cfg.rtol <= 0 or !std.math.isFinite(cfg.rtol)) return error.InvalidArgument;
+    // A reference that reports its own times writes only to a
+    // `vendor-*.md` file; keep those files out of the repository.
+    if (!privateReport(cfg)) {
+        std.debug.print("--hspice/--spectre write only to a vendor-*.md report: pass --out zig-out/vendor-NAME.md\n", .{});
+        return error.VendorReportNotPrivate;
+    }
     for (&cfg.refs.values) |*bin| if (std.mem.indexOfScalar(u8, bin.*, '/') != null) {
         bin.* = try Io.Dir.cwd().realPathFileAlloc(io, bin.*, a);
     };
@@ -300,6 +306,14 @@ fn parseVariant(a: Allocator, spec: []const u8) !Variant {
         try (if (is_env) &env else &flags).append(a, word);
     }
     return .{ .label = spec[0..eq], .env = env.items, .flags = flags.items };
+}
+
+/// Whether `cfg` keeps reference results private: no adapter column,
+/// or a report named `vendor-*.md`.
+fn privateReport(cfg: Config) bool {
+    const vendor = !std.mem.eql(u8, cfg.refs.get(.hspice), "none") or !std.mem.eql(u8, cfg.refs.get(.spectre), "none");
+    const name = std.fs.path.basename(cfg.report);
+    return !vendor or (std.mem.startsWith(u8, name, "vendor-") and std.mem.endsWith(u8, name, ".md"));
 }
 
 fn splitWords(a: Allocator, value: []const u8) ![]const []const u8 {
@@ -439,6 +453,17 @@ fn vacaskPlots(io: Io, a: Allocator, path: []const u8) ![]const compare.Plot {
     }
     if (plots.items.len == 0) return error.MissingRaw;
     return plots.toOwnedSlice(a);
+}
+
+test "a vendor run writes only a vendor-*.md report" {
+    var cfg: Config = .{ .espice = "espice", .fixtures = "tests/fixtures" };
+    try std.testing.expect(privateReport(cfg));
+    cfg.refs.set(.spectre, "spectre");
+    try std.testing.expect(!privateReport(cfg));
+    cfg.report = "zig-out/postlayout-results.md";
+    try std.testing.expect(!privateReport(cfg));
+    cfg.report = "zig-out/vendor-postlayout.md";
+    try std.testing.expect(privateReport(cfg));
 }
 
 test "an espice variant splits environment from flags" {
