@@ -555,11 +555,19 @@ pub const NetBuilder = struct {
         for (0..bkt.size()) |i| try self.addDevice(bkt.get(i));
     }
 
-    fn addDevice(self: *NetBuilder, dev: types.Device) !void {
+    fn addDevice(self: *NetBuilder, dev_in: types.Device) !void {
         // Runtime-loaded Verilog-A/Verilog device instance: handled
         // by addDynDevices after NetBuilder runs, regardless of card letter.
-        if (isDynDevice(dev, self.nl.models)) return;
-        const letter = dev.letter();
+        if (isDynDevice(dev_in, self.nl.models)) return;
+        const letter = dev_in.letter();
+        // Q cards carry 3-5 nodes against the parser's fixed 3, M cards 3-7
+        // against its fixed 4, so the model name lands on the wrong side of
+        // the node/positional split in both directions. Normalize BEFORE
+        // anything reads positionals — the guard below used to look up the
+        // substrate node as a model and reject every 4T vbic/hicum instance,
+        // and ate a 3-terminal VDMOS's model name as its bulk node.
+        var norm: BjtNormBufs = undefined;
+        const dev = if (letter == 'q' or letter == 'm') normalizeBjt(dev_in, self.nl.models, &norm) else dev_in;
         if (devices.letter_map.get(&.{letter}) == null) {
             if (inferDeviceFromModel(dev, self.nl.models) == null)
                 return error.UnsupportedDevice;
@@ -619,7 +627,9 @@ pub const NetBuilder = struct {
             },
             'b' => try addBsource(self.b, dev, self.nl.models),
             'p' => try self.addCpl(dev),
-            'o' => try self.addLossyLine(dev),
+            // TXL (y) is the same RLGC physics as LTRA (o); both take the
+            // Bergeron-section expansion when it applies.
+            'o', 'y' => try self.addLossyLine(dev),
             else => try self.addByLetter(letter, dev),
         }
     }
@@ -635,7 +645,12 @@ pub const NetBuilder = struct {
     fn addLossyLine(self: *NetBuilder, dev: types.Device) !void {
         var model: devices.lossy_tline.Model = .{};
         if (modelName(dev)) |name| {
-            if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
+            if (findModel(self.nl.models, name)) |m| {
+                try applyKv(&model, m.kv);
+                // TXL model cards spell the line length `length=`; the
+                // lossy_tline field is `len` (same alias addSingleDevice has).
+                if (kvNumber(m.kv, "length")) |length| model.len = @floatCast(length);
+            }
         }
         try applyKv(&model, dev.kv);
 
@@ -745,13 +760,10 @@ pub const NetBuilder = struct {
         return .{ model, instance };
     }
 
-    fn addByLetter(self: *NetBuilder, letter: u8, dev_in: types.Device) !void {
-        // BJT lines have 3-5 nodes: Qname c b e [s] [dt] model [area]. The
-        // parser fixes Q at 3 nodes, so extra nodes spill into positional and
-        // hide the model name. Rebuild nodes/positionals using the model table.
-        var norm: BjtNormBufs = undefined;
-        const dev = if (letter == 'q') normalizeBjt(dev_in, self.nl.models, &norm) else dev_in;
-        switch (resolveDeviceId(letter, dev, self.nl.models)) {
+    fn addByLetter(self: *NetBuilder, letter: u8, dev: types.Device) !void {
+        // Q cards arrive already normalized (addDevice), so the model name is
+        // positional[0] here for every terminal count.
+        switch (try resolveDeviceId(letter, dev, self.nl.models)) {
             inline else => |comptime_id| {
                 const D = devices.DeviceId.Type(comptime_id);
                 try addSingleDevice(self.b, D, dev, self.nl.models);
@@ -907,14 +919,21 @@ pub fn tagSubcircuitNodes(b: *Builder, dl: types.DeviceList) !void {
 // Device resolution
 // ---------------------------------------------------------------------------
 
-fn resolveDeviceId(letter: u8, dev: types.Device, spice_models: []const types.Model) devices.DeviceId {
+fn resolveDeviceId(letter: u8, dev: types.Device, spice_models: []const types.Model) !devices.DeviceId {
     const level = modelLevel(dev, spice_models);
     return switch (letter) {
-        'm' => devices.mosfetDeviceId(level),
-        'q' => devices.bjtDeviceId(level),
-        'd' => devices.diodeDeviceId(level),
-        'j' => devices.jfetDeviceId(level),
-        'z' => devices.mesDeviceId(level),
+        // `.model X VDMOS(...)` carries no LEVEL — the model KIND is the
+        // dispatch (ngspice inpdomod.c does the same for VDMOS).
+        'm' => blk: {
+            if (modelName(dev)) |name| if (findModel(spice_models, name)) |mm| {
+                if (std.ascii.eqlIgnoreCase(mm.kind, "vdmos")) break :blk .vdmos;
+            };
+            break :blk try devices.mosfetDeviceId(level);
+        },
+        'q' => try devices.bjtDeviceId(level),
+        'd' => try devices.diodeDeviceId(level),
+        'j' => try devices.jfetDeviceId(level),
+        'z' => try devices.mesDeviceId(level),
         else => devices.letter_map.get(&.{letter}) orelse
             inferDeviceFromModel(dev, spice_models) orelse .resistor,
     };
@@ -925,16 +944,18 @@ fn inferDeviceFromModel(dev: types.Device, spice_models: []const types.Model) ?d
     const m = findModel(spice_models, name) orelse return null;
     const level = kvNumber(m.kv, "level");
     const l: u16 = if (level) |lv| @intFromFloat(lv) else 1;
+    if (std.ascii.eqlIgnoreCase(m.kind, "vdmos"))
+        return .vdmos;
     if (eqlAny(m.kind, &.{ "nmos", "pmos" }))
-        return devices.mosfetDeviceId(l);
+        return devices.mosfetDeviceId(l) catch null;
     if (eqlAny(m.kind, &.{ "npn", "pnp" }))
-        return devices.bjtDeviceId(l);
+        return devices.bjtDeviceId(l) catch null;
     if (std.ascii.eqlIgnoreCase(m.kind, "d"))
-        return devices.diodeDeviceId(l);
+        return devices.diodeDeviceId(l) catch null;
     if (eqlAny(m.kind, &.{ "njf", "pjf" }))
-        return devices.jfetDeviceId(l);
+        return devices.jfetDeviceId(l) catch null;
     if (eqlAny(m.kind, &.{ "nmf", "pmf", "nhfet", "phfet" }))
-        return devices.mesDeviceId(l);
+        return devices.mesDeviceId(l) catch null;
     return null;
 }
 
@@ -1373,7 +1394,26 @@ const BjtNormBufs = struct {
 /// become nodes. The model name is the last positional matching a .model card;
 /// numeric positionals before it are node names (e.g. substrate "0").
 fn normalizeBjt(dev: types.Device, spice_models: []const types.Model, bufs: *BjtNormBufs) types.Device {
-    // Locate the model name among the positionals.
+    // DEFICIT direction first: a card with FEWER terminals than the parser's
+    // fixed count ate the model name as its last node (`M1 d g 0 VMOD` on the
+    // 4-node M slot). Shift it back to positional[0].
+    if (dev.nodes.len > 0 and (dev.positional.len == 0 or switch (dev.positional[0]) {
+        .name => |n| findModel(spice_models, n) == null,
+        else => true,
+    })) {
+        const last = dev.nodes[dev.nodes.len - 1];
+        if (findModel(spice_models, last) != null) {
+            var out = dev;
+            out.nodes = dev.nodes[0 .. dev.nodes.len - 1];
+            bufs.pos[0] = .{ .name = last };
+            const tail_len = @min(dev.positional.len, bufs.pos.len - 1);
+            @memcpy(bufs.pos[1 .. 1 + tail_len], dev.positional[0..tail_len]);
+            out.positional = bufs.pos[0 .. 1 + tail_len];
+            return out;
+        }
+    }
+    // SURPLUS direction: extra terminals spilled into positional and hide the
+    // model name. Locate it among the positionals.
     var model_idx: ?usize = null;
     for (dev.positional, 0..) |p, i| switch (p) {
         .name => |n| if (findModel(spice_models, n) != null) {
