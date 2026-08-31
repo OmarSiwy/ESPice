@@ -943,9 +943,22 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
         }
     }
     _ = setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
-    // Model-less cards (T line: "T1 a 0 b 0 Z0=50 TD=2n") carry their model
-    // parameters inline on the device card — route kv to the model too.
-    if (modelName(dev) == null) try applyKv(&model, dev.kv);
+    // Device-card `name=value` goes to BOTH structs, because which one holds a
+    // given parameter is VerA's choice, not a semantic distinction: it puts
+    // every Verilog-A `parameter` on Model, and mos1's Instance has no user
+    // fields at all. Routing the card only to Instance therefore dropped
+    // per-instance geometry outright — `M1 d g s b NMOS W=10u L=1u` produced
+    // byte-identical output for W=1u, W=10u and W=100u.
+    //
+    // This was gated on `modelName(dev) == null` for the model-less form
+    // (`T1 a 0 b 0 Z0=50 TD=2n`); that case is now just the one where there
+    // was no model card to override in the first place.
+    //
+    // Overriding Model per card is not shared state: `model` is a fresh
+    // `D.Model` per device and `addDevice` appends its own copy, so one
+    // instance's W/L cannot reach another. Order is model card, then device
+    // card — SPICE precedence.
+    try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
     try b.addDevice(D, model, instance, try deviceNodes(b, D, dev));
 }
