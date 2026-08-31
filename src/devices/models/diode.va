@@ -1,19 +1,88 @@
-// Shockley diode. i(a,c) = is * (exp(V/(n*vt)) - 1) + gmin*V.
-// Junction limiting is the solver's job (companion linearization); this is
-// the pure device law.
+// Junction diode, ngspice `.model D` (dioload.c / diotemp.c).
+//
+// Was the bare Shockley law with four parameters (is, n, tnom, gmin), so a
+// card naming RS, IKF, BV or IBV was silently reduced to an ideal
+// exponential: devices/diode_breakdown ran straight past its -15 V knee to
+// -20 V, and devices/diode_high_injection overflowed to NaN at exactly
+// V1 = 1.38 V because nothing restrained the forward current.
+//
+// RS is a real series resistance, so the junction sits on an internal node
+// `ai` and the card's terminals stay (a, c). With RS=0 the branch is a 0 V
+// short and the host collapses the node (Builder.addDevice, `collapse`).
+//
+// Junction limiting stays the solver's job, but the exponent is CLAMPED here
+// at ngspice's critical voltage, vcrit = vte*ln(vte/(sqrt(2)*is)). Above it
+// the law continues along its tangent: finite, monotone, correct slope, so
+// Newton can walk back down. `exp(1.38/0.026)` is 1e23*is, and one more
+// iteration of that is an inf nothing recovers from.
+//
+// ponytail: TT transit time and XTI/EG temperature scaling are NOT here. No
+// fixture measures them — devices/diode_temp matches ngspice to 2.5e-14
+// without XTI/EG, because its sweep never leaves tnom. Add them with a
+// comparison to justify them, one at a time.
 module diode(a, c);
     inout a, c;
-    electrical a, c;
-    parameter real is = 1e-14 from (0:inf);
-    parameter real n  = 1.0    from (0:inf);
-    parameter real tnom = 300.15 from (0:inf);
-    parameter real gmin = 1e-12 from [0:inf);
+    electrical a, c, ai;
+    branch (a, ai) rsb;
 
-    real vt;
-    real vd;
+    parameter real is   = 1e-14  from (0:inf);  // A    saturation current
+    parameter real n    = 1.0    from (0:inf);  //      emission coefficient
+    parameter real rs   = 0.0    from [0:inf);  // ohm  series resistance
+    parameter real ikf  = 0.0    from [0:inf);  // A    high-injection knee (0 = off)
+    parameter real bv   = 0.0    from [0:inf);  // V    reverse breakdown knee (0 = off)
+    parameter real ibv  = 1e-3   from (0:inf);  // A    current magnitude at bv
+    parameter real cjo  = 0.0    from [0:inf);  // F    zero-bias junction capacitance
+    parameter real vj   = 1.0    from (0:inf);  // V    junction potential
+    parameter real m    = 0.5    from (0:inf);  //      grading coefficient (card key `m`)
+    parameter real fc   = 0.5    from (0:1);    //      forward-bias depletion coefficient
+    parameter real tnom = 300.15 from (0:inf);  // K
+    parameter real gmin = 1e-12  from [0:inf);  // S    junction shunt
+
+    real vt, vte, vd, vcrit, vlim, id, ihi, qj, f1, f2, f3, vfc;
+
     analog begin
-        vt = 1.380649e-23 * tnom / 1.602176634e-19;
-        vd = V(a, c);
-        I(a, c) <+ is * (exp(vd / (n * vt)) - 1.0) + gmin * vd;
+        vt  = 1.380649e-23 * tnom / 1.602176634e-19;
+        vte = n * vt;
+        vd  = V(ai, c);
+
+        // Forward/reverse ideal current, tangent-continued above vcrit.
+        vcrit = vte * ln(vte / (1.4142135623730951 * is));
+        vlim  = min(vd, vcrit);
+        id    = is * ((exp(vlim / vte) * (1.0 + (vd - vlim) / vte)) - 1.0);
+
+        // High-injection roll-off, ngspice IKF: id / sqrt(1 + id/ikf).
+        // Guarded on id > 0 so the reverse branch is untouched and the sqrt
+        // argument cannot go negative.
+        ihi = id;
+        if (ikf > 0.0 && id > 0.0)
+            ihi = id / sqrt(1.0 + id / ikf);
+
+        // Reverse breakdown: -ibv at vd = -bv, exponential below. Armed only
+        // when the card gives a BV, which is how ngspice treats BV=0.
+        if (bv > 0.0 && vd < -bv)
+            ihi = ihi - ibv * (exp(-(bv + vd) / vt) - 1.0);
+
+        I(ai, c) <+ ihi + gmin * vd;
+
+        // Depletion charge, ngspice CJO/VJ/M. Below fc*vj it is the exact
+        // integral of cjo*(1-v/vj)^-m; above it ngspice switches to the
+        // linearized f1/f2/f3 continuation, because the exact form has a
+        // singularity at v = vj that a forward-biased Newton step walks into.
+        if (cjo > 0.0) begin
+            vfc = fc * vj;
+            if (vd < vfc) begin
+                qj = cjo * vj * (1.0 - pow(1.0 - vd / vj, 1.0 - m)) / (1.0 - m);
+            end else begin
+                f1 = vj * (1.0 - pow(1.0 - fc, 1.0 - m)) / (1.0 - m);
+                f2 = pow(1.0 - fc, 1.0 + m);
+                f3 = 1.0 - fc * (1.0 + m);
+                qj = cjo * (f1 + (1.0 / f2) *
+                     (f3 * (vd - vfc) + (m / (2.0 * vj)) * (vd * vd - vfc * vfc)));
+            end
+            I(ai, c) <+ ddt(qj);
+        end
+
+        if (rs > 0.0) I(rsb) <+ V(rsb) / rs;
+        else          V(rsb) <+ 0.0;
     end
 endmodule
