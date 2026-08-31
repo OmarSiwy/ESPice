@@ -501,9 +501,28 @@ pub fn run(
     // the gap widens with n rather than closing. There is no crossover to
     // find, so there is no size threshold to encode here.
     //
-    // JFNK stays reachable via ESPICE_SOLVER=jfnk / jfnk-nolu: the regimes
-    // differ by more than speed, and a circuit whose LU genuinely blows up is
-    // the case the pin exists for. It is opt-in and measured, not a default.
+    // JFNK stays reachable via ESPICE_SOLVER=jfnk / jfnk-nolu, and that is not
+    // decoration. CORRECTION to the commit that made this change: it claimed
+    // JFNK rescues nothing direct Newton cannot do. That is wrong.
+    // scaling/parallel_inverters_100 is a counterexample — direct Newton
+    // returns OpDidNotConverge in 10.0s, JFNK solves it in 14.3s. Neither
+    // solver is a superset of the other (convergence/diode_bridge goes the
+    // other way), so `auto` is a cost choice, not a capability one.
+    //
+    // It is deliberately NOT wired as an automatic fallback after a failed
+    // direct solve. Two measurements killed that:
+    //
+    //   - JFNK only rescues parallel_inverters_100 when it drives the WHOLE
+    //     op continuation ladder. Patching individual failed rungs follows a
+    //     different trajectory and still fails (184s, still ERR).
+    //   - `run` is called per continuation rung and per timestep, and a failed
+    //     rung is normal, so an unconditional retry charges a full JFNK solve
+    //     for something the ladder already handles: ensemble/pvt_corners
+    //     0.29s -> 2.90s, bjt/diff_amp 0.02s -> 0.71s.
+    //
+    // Doing it properly means restarting the whole op ladder under JFNK, at
+    // the dc/op level rather than here. Until someone needs that, the pin is
+    // the honest interface.
     //
     // `gpu_active` no longer selects it either. The GPU makes device eval
     // cheaper, which is JFNK's cost centre AND direct Newton's; it does not
