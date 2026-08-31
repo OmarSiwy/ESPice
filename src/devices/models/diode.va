@@ -38,15 +38,18 @@ module diode(a, c);
     parameter real tnom = 300.15 from (0:inf);  // K
     parameter real gmin = 1e-12  from [0:inf);  // S    junction shunt
 
-    real vt, vte, vd, vcrit, vlim, id, ihi, qj, f1, f2, f3, vfc;
+    real vt, vte, vd, vcrit, vlim, id, ihi, w, wlim, qj, f1, f2, f3, vfc;
 
     analog begin
         vt  = 1.380649e-23 * tnom / 1.602176634e-19;
         vte = n * vt;
-        vd  = V(ai, c);
+        // pnjlim first, exactly where dioload.c:66 runs it: Newton must not
+        // hand the exponential a rail voltage. The tangent continuation below
+        // stays as the guard for evals at unlimited x (LTE probes, sweeps).
+        vcrit = vte * ln(vte / (1.4142135623730951 * is));
+        vd  = $limit(V(ai, c), "pnjlim", vte, vcrit);
 
         // Forward/reverse ideal current, tangent-continued above vcrit.
-        vcrit = vte * ln(vte / (1.4142135623730951 * is));
         vlim  = min(vd, vcrit);
         id    = is * ((exp(vlim / vte) * (1.0 + (vd - vlim) / vte)) - 1.0);
 
@@ -59,8 +62,17 @@ module diode(a, c);
 
         // Reverse breakdown: -ibv at vd = -bv, exponential below. Armed only
         // when the card gives a BV, which is how ngspice treats BV=0.
-        if (bv > 0.0 && vd < -bv)
-            ihi = ihi - ibv * (exp(-(bv + vd) / vt) - 1.0);
+        // Tangent-continued past 80*vt of depth: ngspice instead runs a
+        // MIRRORED pnjlim in this region (dioload.c:59), which the probe-only
+        // $limit form cannot spell; the tangent keeps slope structure so
+        // Newton walks back instead of meeting inf.
+        // Ratio-space clamp (w/vt before min) so the finiteness prover sees
+        // exp's argument bounded by the literal 80.
+        if (bv > 0.0 && vd < -bv) begin
+            w    = -(bv + vd) / vt;
+            wlim = min(w, 80.0);
+            ihi  = ihi - ibv * (exp(wlim) * (1.0 + (w - wlim)) - 1.0);
+        end
 
         I(ai, c) <+ ihi + gmin * vd;
 

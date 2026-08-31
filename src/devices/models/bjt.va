@@ -93,13 +93,18 @@ module bjt(c, b, e, s);
     analog function real pnj;
         input v, isat, vtn;
         real v, isat, vtn;
-        real u;
+        real u, e;
         begin
-            // exponent clamped like ngspice's MAX_EXP_ARG: limiting is the
-            // solver's job, but a wild Newton iterate must not return +inf and
-            // poison the whole residual/Jacobian.
+            // Exponent TANGENT-CONTINUED above 80 (not flat-clamped): pnjlim
+            // still admits ~vold + vt·(2+ln(dv/vt)) ≈ 2–3 V against an e30
+            // iterate, which is past 80·vtn — and a flat clamp there has
+            // dI/dV = 0, no restoring force, so two stacked junctions ping
+            // their shared node between ±1e30 forever (bjt/cascode). The
+            // tangent keeps the slope, Newton walks back.
             if (v >= -3.0 * vtn) begin
-                pnj = isat * (exp(min(v / vtn, 80.0)) - 1.0);
+                u = min(v / vtn, 80.0);
+                e = exp(u);
+                pnj = isat * (e * (1.0 + (v / vtn - u)) - 1.0);
             end else begin
                 u = 3.0 * vtn / (2.718281828459045 * v);
                 pnj = -isat * (1.0 + u * u * u);
@@ -134,7 +139,7 @@ module bjt(c, b, e, s);
     real pbo, gold, gnew, tcap, pe_t, cje_t, pc_t, cjc_t, ps_t, cjs_t;
     real ai, abc, asb, vert, inv_vaf, inv_var, inv_ikf, inv_ikr;
     real rbtot, rbpr, rbpi, rbb, zc, tanz, xjrb, rc_t, re_t;
-    real vbe, vbc, vbx, vsub, cbe, cben, cbc, cbcn, cdsub;
+    real vbe, vbc, vbx, vsub, vcrit, cbe, cben, cbc, cbcn, cdsub;
     real q1, q2, qb, td, icc, ic, ib, argtf, tmp;
     real qbe, qbc, qbx, qsub, fourkt;
 
@@ -229,9 +234,22 @@ module bjt(c, b, e, s);
         rc_t = rc * (1.0 + trc1 * dt + trc2 * dt * dt) / ai;
         re_t = re * (1.0 + tre1 * dt + tre2 * dt * dt) / ai;
 
-        // ---- bias (§1.1) ---------------------------------------------------
-        vbe  = type * V(bi, ei);
-        vbc  = type * V(bi, ci);
+        // ---- bias (§1.1), pnjlim'd exactly where bjtload.c:105-113 does ----
+        // Without it a cold-start Newton step parks vbe at the supply rail,
+        // exp() saturates against its clamp, the Jacobian goes flat there,
+        // and the next step is astronomical (bjt/cascode: x reached 1.8e26).
+        //
+        // pnjlim assumes forward = positive; the trailing `type` argument is
+        // VerA's frame sign — the clamp runs on type·v, which is ngspice's
+        // habit of limiting `type*vbe` in the load routine. (`$limit` under
+        // `if (type > 0)` is DECLINED by the lowerer — the clamp list carries
+        // no control flow — and `$limit(type*V(…))` has no node pair to
+        // correct, hence the argument.)
+        vcrit = vt * ln(vt / (1.4142135623730951 * is_t * ai));
+        vbe = type * $limit(V(bi, ei), "pnjlim", vt, vcrit, type);
+        vbc = type * $limit(V(bi, ci), "pnjlim", vt, vcrit, type);
+        // vbx/vsub stay raw: bjtload limits neither; both feed clamped pnj()/
+        // depletion laws only.
         vbx  = type * V(b, ci);
         vsub = type * (vert * V(s, ci) + (1.0 - vert) * V(s, bi));
 
