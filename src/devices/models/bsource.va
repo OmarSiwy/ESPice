@@ -1,9 +1,14 @@
 // Arbitrary behavioral source (ngspice netlist letter B / ASRC), polynomial
 // subset over one control pair — docs/passives-and-sources.md §1.6, §3:
 //
-//     f = c0 + c1*vc + c2*vc^2,   vc = V(cp,cn)
+//     f = (c0 + c1*vc + c2*vc^2) * (th != 0 ? tanh(th*vc) : 1),
+//     vc = V(cp,cn)
 //     V mode (v={...}):  V(p,n) <+ factor*f   (branch-current unknown)
 //     I mode (i={...}):  I(p,n) <+ factor*f
+//
+// The tanh factor covers the MESFET "ungated load" idiom
+// Is*tanh(v/Is/R)*(1+lambda*v) (macspice examples); builder.zig
+// extractPolyCoeffs pulls it out of the expression tree.
 //
 // `factor` is ngspice's ASRC temperature multiplier, computed below from
 // tc1/tc2/temp/dtemp/reciproctc — it is not a card parameter.
@@ -18,6 +23,9 @@ module bsource(p, n, cp, cn);
     parameter real c0 = 0.0;
     parameter real c1 = 0.0;
     parameter real c2 = 0.0;
+    // Inner coefficient of a multiplicative tanh(th*vc) factor [1/V];
+    // 0 = no tanh factor.
+    parameter real th = 0.0;
     // ngspice's ASRC temperature multiplier is computed, not a card constant
     // (asrcload.c): factor = 1 + tc1*dT + tc2*dT^2 with
     // dT = (temp_inst + dtemp) - 300.15 K, and factor := 1/factor when
@@ -56,6 +64,8 @@ module bsource(p, n, cp, cn);
 
         vc = V(cp, cn);
         f = k0 + vc * (k1 + k2 * vc);
+        if (th != 0.0)
+            f = f * tanh(th * vc);
 
         if (imode != 0)
             I(p, n) <+ f;

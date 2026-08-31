@@ -406,6 +406,9 @@ fn aliasOf(comptime field: []const u8) ?[]const u8 {
         .{ "vt0", "vto" }, .{ "vto", "vt0" },
         .{ "vaf", "va" },  .{ "VAR", "vb" },
         .{ "ikf", "ik" },  .{ "cjs", "ccs" },
+        // mesa.va channel depth: ngspice's card key is `d`, which Verilog-A
+        // cannot use as a parameter name (drain port).
+        .{ "dch", "d" },
     };
     inline for (pairs) |p| {
         if (comptime std.mem.eql(u8, field, p[0])) return p[1];
@@ -533,6 +536,19 @@ pub const NetBuilder = struct {
     /// `bindSource`.
     fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
         if (comptime !@hasField(@TypeOf(target.*), "pulse_tr")) return;
+        // Only a real PULSE waveform gets the TRANinit fill (ngspice runs it
+        // per PULSE function, not per source). Filling a DC/SIN/PWL source's
+        // sentinels minted a phantom breakpoint at t = TSTEP (default TR)
+        // whose landing cut dt to 0.1·saveDelta and desynced the step ladder
+        // from ngspice's (digital/clamp). Pushing TD past any tstop parks
+        // every timer corner where it can never fire — the pulse branch of
+        // the .va only reads these fields when waveform == pulse.
+        if (comptime @hasField(@TypeOf(target.*), "waveform")) {
+            if (target.waveform != @intFromEnum(Wave.pulse)) {
+                target.pulse_td = 1e30;
+                return;
+            }
+        }
         var tstep: f64 = 1e-9;
         var tstop: f64 = 1e30;
         for (self.nl.directives) |dir| {
@@ -1072,12 +1088,12 @@ fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model)
     try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
 
-    var ctrl_node_name: ?[]const u8 = null;
+    var ctrl_probe: ?Probe = null;
     for (dev.kv) |item| switch (item.value) {
         .expr => |expr| {
             // Key selects output mode: i={...} = current source, v={...} = voltage source.
             if (item.key.len > 0 and item.key[0] == 'i') model.imode = 1;
-            ctrl_node_name = extractSingleVoltageProbe(expr);
+            ctrl_probe = extractVoltageProbe(expr);
             extractPolyCoeffs(expr, &model);
         },
         else => {},
@@ -1086,35 +1102,85 @@ fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model)
     const nodes = [4]u32{
         if (dev.nodes.len > 0) try b.internNode(dev.nodes[0]) else GROUND,
         if (dev.nodes.len > 1) try b.internNode(dev.nodes[1]) else GROUND,
-        if (ctrl_node_name) |cn| try b.internNode(cn) else GROUND,
-        GROUND,
+        if (ctrl_probe) |pr| try b.internNode(pr.p) else GROUND,
+        if (ctrl_probe) |pr| (if (pr.n) |n| try b.internNode(n) else GROUND) else GROUND,
     };
     try b.addDevice(devices.bsource, model, instance, nodes);
 }
 
-fn extractSingleVoltageProbe(expr: *const types.Expr) ?[]const u8 {
+/// The first V() probe in the expression: V(p) or differential V(p,n).
+/// The poly model assumes every probe names the same pair (§1.6 ceiling).
+const Probe = struct { p: []const u8, n: ?[]const u8 };
+
+fn extractVoltageProbe(expr: *const types.Expr) ?Probe {
     switch (expr.*) {
         .call => |c| {
-            if (std.mem.eql(u8, c.name, "v") and c.args.len >= 1)
-                return switch (c.args[0].*) {
+            if (std.mem.eql(u8, c.name, "v") and c.args.len >= 1) {
+                const p = switch (c.args[0].*) {
+                    .ident => |id| id,
+                    else => return null,
+                };
+                const n: ?[]const u8 = if (c.args.len >= 2) switch (c.args[1].*) {
                     .ident => |id| id,
                     else => null,
-                };
-            for (c.args) |arg| if (extractSingleVoltageProbe(arg)) |name| return name;
+                } else null;
+                return .{ .p = p, .n = n };
+            }
+            for (c.args) |arg| if (extractVoltageProbe(arg)) |pr| return pr;
             return null;
         },
-        .binop => |b| return extractSingleVoltageProbe(b.a) orelse extractSingleVoltageProbe(b.b),
-        .unop => |u| return extractSingleVoltageProbe(u.a),
+        .binop => |b| return extractVoltageProbe(b.a) orelse extractVoltageProbe(b.b),
+        .unop => |u| return extractVoltageProbe(u.a),
         .num, .ident => return null,
     }
 }
 
 fn extractPolyCoeffs(expr: *const types.Expr, model: *devices.bsource.Model) void {
     var c: [3]f64 = .{ 0, 0, 0 };
-    if (collectTerms(expr, 1.0, &c)) {
-        model.c0 = @floatCast(c[0]);
-        model.c1 = @floatCast(c[1]);
-        model.c2 = @floatCast(c[2]);
+    if (!collectTerms(expr, 1.0, &c)) return;
+    // A single multiplicative tanh(k*vc) factor rides along as model.th
+    // (the MESFET "ungated load" idiom, Is*tanh(v/Is/R)*(1+lambda*v)).
+    // collectTerms treated it as the constant 1, so it must be a factor of
+    // the whole expression, exactly once, with a linear argument — anything
+    // else stays outside the subset (all-zero coeffs = open circuit).
+    const n_tanh = countTanh(expr);
+    if (n_tanh > 1) return;
+    if (n_tanh == 1) {
+        const arg = tanhFactorArg(expr) orelse return;
+        if ((vDegree(arg) orelse return) != 1) return;
+        model.th = @floatCast(numericCoeff(arg));
+    }
+    model.c0 = @floatCast(c[0]);
+    model.c1 = @floatCast(c[1]);
+    model.c2 = @floatCast(c[2]);
+}
+
+fn countTanh(expr: *const types.Expr) u32 {
+    switch (expr.*) {
+        .call => |c| {
+            var n: u32 = if (std.mem.eql(u8, c.name, "tanh")) 1 else 0;
+            for (c.args) |arg| n += countTanh(arg);
+            return n;
+        },
+        .binop => |b| return countTanh(b.a) + countTanh(b.b),
+        .unop => |u| return countTanh(u.a),
+        .num, .ident => return 0,
+    }
+}
+
+/// The argument of a tanh() that is a multiplicative factor of the whole
+/// expression: descend only through products, constant divisors and unary
+/// signs. null if the (sole) tanh sits anywhere else, e.g. additively.
+fn tanhFactorArg(expr: *const types.Expr) ?*const types.Expr {
+    switch (expr.*) {
+        .call => |c| return if (std.mem.eql(u8, c.name, "tanh") and c.args.len == 1) c.args[0] else null,
+        .binop => |b| return switch (b.op) {
+            '*' => tanhFactorArg(b.a) orelse tanhFactorArg(b.b),
+            '/' => tanhFactorArg(b.a),
+            else => null,
+        },
+        .unop => |u| return tanhFactorArg(u.a),
+        .num, .ident => return null,
     }
 }
 
@@ -1129,17 +1195,35 @@ fn collectTerms(expr: *const types.Expr, scale: f64, c: *[3]f64) bool {
                 c[1] += scale;
                 return true;
             }
+            if (std.mem.eql(u8, call.name, "tanh")) {
+                // Placeholder constant 1; extractPolyCoeffs pulls the factor
+                // out into model.th and rejects non-multiplicative tanh.
+                c[0] += scale;
+                return true;
+            }
             return false;
         },
         .binop => |b| switch (b.op) {
             '+' => return collectTerms(b.a, scale, c) and collectTerms(b.b, scale, c),
             '-' => return collectTerms(b.a, scale, c) and collectTerms(b.b, -scale, c),
             '*' => {
-                const da = vDegree(b.a) orelse return false;
+                if (vDegree(b.a)) |da| {
+                    if (vDegree(b.b)) |db| {
+                        if (da + db > 2) return false;
+                        c[da + db] += scale * numericCoeff(b.a) * numericCoeff(b.b);
+                        return true;
+                    }
+                    // constant factor times a non-monomial: distribute
+                    if (da == 0) return collectTerms(b.b, scale * numericCoeff(b.a), c);
+                } else if (vDegree(b.b)) |db| {
+                    if (db == 0) return collectTerms(b.a, scale * numericCoeff(b.b), c);
+                }
+                return false;
+            },
+            '/' => {
                 const db = vDegree(b.b) orelse return false;
-                if (da + db > 2) return false;
-                c[da + db] += scale * numericCoeff(b.a) * numericCoeff(b.b);
-                return true;
+                if (db != 0) return false;
+                return collectTerms(b.a, scale / numericCoeff(b.b), c);
             },
             else => return false,
         },
@@ -1155,12 +1239,21 @@ fn collectTerms(expr: *const types.Expr, scale: f64, c: *[3]f64) bool {
 fn vDegree(expr: *const types.Expr) ?u8 {
     switch (expr.*) {
         .num => return 0,
-        .call => |c| return if (std.mem.eql(u8, c.name, "v")) 1 else null,
+        // tanh factors count as degree-0 (extracted separately into th)
+        .call => |c| return if (std.mem.eql(u8, c.name, "v"))
+            1
+        else if (std.mem.eql(u8, c.name, "tanh"))
+            0
+        else
+            null,
         .binop => |b| {
-            if (b.op != '*') return null;
             const da = vDegree(b.a) orelse return null;
             const db = vDegree(b.b) orelse return null;
-            return da + db;
+            switch (b.op) {
+                '*' => return da + db,
+                '/' => return if (db == 0) da else null,
+                else => return null,
+            }
         },
         .unop => |u| return if (u.op == '-' or u.op == '+') vDegree(u.a) else null,
         .ident => return null,
@@ -1171,7 +1264,11 @@ fn numericCoeff(expr: *const types.Expr) f64 {
     switch (expr.*) {
         .num => |n| return n,
         .call => return 1.0,
-        .binop => |b| return if (b.op == '*') numericCoeff(b.a) * numericCoeff(b.b) else 1.0,
+        .binop => |b| return switch (b.op) {
+            '*' => numericCoeff(b.a) * numericCoeff(b.b),
+            '/' => numericCoeff(b.a) / numericCoeff(b.b),
+            else => 1.0,
+        },
         .unop => |u| return if (u.op == '-') -numericCoeff(u.a) else numericCoeff(u.a),
         .ident => return 1.0,
     }
