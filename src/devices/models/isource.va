@@ -232,11 +232,11 @@ module isource(p, n);
 
         out = dc;
 
-        // Static analyses read `dc` unconditionally — the netlist layer fills
-        // it from the waveform's t = 0 value when the card gives none
-        // (builder dcFromWaveform), and a .dc sweep OVERRIDES it (vsource.va
-        // says why).
-        if (analysis("static")) begin
+        // ngspice's TRANOP/DCOP split (vsource.va says why): the transient's
+        // ic-phase op evaluates waveform(0); every other static analysis
+        // biases at `dc`, which bind fills from waveform(0) when absent and
+        // a .dc sweep overrides.
+        if (analysis("static") && !analysis("tran")) begin
             out = dc;
         end else if (waveform == 1) begin
             // ---- PULSE ----------------------------------------------------

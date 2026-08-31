@@ -55,6 +55,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
 
+    // DCOP flavor for the whole sweep, whatever the deck's shared op left
+    // behind: a deck with a .tran runs its op in the ic phase, where
+    // analysis("tran") is true and sources bias at waveform(0) — which made
+    // this sweep's dc override a no-op again (rtlinv). runSerial/the GPU
+    // lane path both inherit this.
+    ckt.setSimState(.{ .kind = .dc });
+
     // Locate the DC param pointer for the source at opts.source_index.
     const refs = try ckt.collectParams();
     var target: ?root.ParamRef = null;

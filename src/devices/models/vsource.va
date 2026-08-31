@@ -223,11 +223,16 @@ module vsource(p, n);
 
         out = dc;
 
-        // Static analyses read `dc` unconditionally — the netlist layer fills
-        // it from the waveform's t = 0 value when the card gives none
-        // (builder dcFromWaveform), and a .dc sweep OVERRIDES it. Evaluating
-        // the waveform here instead made sweeping a PULSE source a no-op.
-        if (analysis("static")) begin
+        // ngspice's TRANOP/DCOP split, in LRM spelling: the transient's own
+        // operating point (the "ic" phase, where analysis("tran") is ALSO
+        // true) evaluates the waveform at t = 0, while .op/.dc/.ac bias at
+        // the DC value — which the netlist layer fills from waveform(0) when
+        // the card gives none, and a .dc sweep OVERRIDES. Evaluating the
+        // waveform in every static analysis made sweeping a PULSE source a
+        // no-op; evaluating dc in every static analysis started a transient
+        // whose card gives BOTH from the wrong point (fourier/
+        // square_harmonics: DC 0 vs PULSE v1 = -1).
+        if (analysis("static") && !analysis("tran")) begin
             out = dc;
         end else if (waveform == 1) begin
             // ---- PULSE ----------------------------------------------------
