@@ -636,10 +636,39 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(lx[u], u);
 
-        const out = if (comptime @hasDecl(D, "evalFromPrep"))
-            D.evalFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
-        else
-            D.eval(S, xv, sink.model(id), sink.inst(id), t);
+        // `eval` and `q` each open their own call to the device's shared model
+        // core, so asking for both ran the whole model TWICE — measured at 2x
+        // the core entries per instance eval (158,556 for 79,278 on a 6-MOS
+        // transient), against device eval that is 92% of the run. `evalQ` is
+        // the same physics off ONE core call; VerA's generated testbench gates
+        // it against `eval`/`q` bit-for-bit, value and derivative.
+        //
+        // Not used with the prep variants: those pass a precomputed row VerA's
+        // fused entry point does not take.
+        const has_q = comptime @hasDecl(D, "q");
+        const fuse = comptime @hasDecl(D, "evalQ") and !@hasDecl(D, "evalFromPrep") and !@hasDecl(D, "qFromPrep");
+        const want_q = if (comptime has_q) sink.qActive() else false;
+
+        var out: [n_u]S = undefined;
+        var qo: if (has_q) [n_u]S else void = undefined;
+        if (comptime fuse) {
+            if (want_q) {
+                const both = D.evalQ(S, xv, sink.model(id), sink.inst(id), t);
+                out = both.res;
+                qo = both.q;
+            } else out = D.eval(S, xv, sink.model(id), sink.inst(id), t);
+        } else {
+            out = if (comptime @hasDecl(D, "evalFromPrep"))
+                D.evalFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
+            else
+                D.eval(S, xv, sink.model(id), sink.inst(id), t);
+            if (comptime has_q) {
+                if (want_q) qo = if (comptime @hasDecl(D, "qFromPrep"))
+                    D.qFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
+                else
+                    D.q(S, xv, sink.model(id), sink.inst(id), t);
+            }
+        }
 
         inline for (0..n_u) |ru| {
             const row = sink.rhsRow(id, ru);
@@ -657,12 +686,8 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         }
         if (comptime SinkT.dedup) sink.store(id, &out);
 
-        if (comptime @hasDecl(D, "q")) {
-            if (sink.qActive()) {
-                const qo = if (comptime @hasDecl(D, "qFromPrep"))
-                    D.qFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
-                else
-                    D.q(S, xv, sink.model(id), sink.inst(id), t);
+        if (comptime has_q) {
+            if (want_q) {
                 inline for (0..n_u) |ru| {
                     const row = sink.rhsRow(id, ru);
                     var qv = qo[ru].v;
