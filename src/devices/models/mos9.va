@@ -12,10 +12,10 @@
 // the channel-length-modulation block, which ngspice writes as a closed-form
 // expression (cdsat*(1-fdrain)/vdsc), so it is transcribed literally.
 //
-// Limiting (fetlim/limvds/pnjlim, §1.7) and MODEINITJCT seeding are the
-// solver's job — Verilog-A has no way to request them ($limit is not in this
-// frontend), so the device law here is the pure smooth composition, as in
-// models/diode.va.  The host must supply MOSFET limiting for cold start.
+// Limiting (fetlim/limvds/pnjlim, §1.7) and MODEINITJCT seeding are spelled
+// with $limit as in models/mos1.va: $limit stays the identity inside eval,
+// and VerA's contract `limit`/`seed` hooks hand the host the clamps to run
+// between the linear solve and the next eval.
 module mos9(d, g, s, b);
     inout d, g, s, b;
     electrical d, g, s, b;
@@ -96,16 +96,19 @@ module mos9(d, g, s, b);
         end
     endfunction
 
-    // Bulk junction current, mos9load.c:416-435 form: clamped forward exponential,
+    // Bulk junction current, mos9load.c:416-435 form: forward exponential
+    // tangent-continued above 80·vth (a flat clamp zeroes the restoring slope
+    // on evals at unlimited x — LTE probes, sweep warm starts; bjt.va pnj),
     // and the diode-style cubic (3*vt/(v*e))^3 reverse expansion below -3*vt.
     analog function real jcur;
         input v, isat, vth, gm;
         real v, isat, vth, gm;
-        real arg;
+        real arg, u;
         begin
-            if (v > -3.0 * vth)
-                jcur = isat * (exp(min(v / vth, 80.0)) - 1.0) + gm * v;
-            else begin
+            if (v > -3.0 * vth) begin
+                u = min(v / vth, 80.0);
+                jcur = isat * (exp(u) * (1.0 + (v / vth - u)) - 1.0) + gm * v;
+            end else begin
                 arg = 3.0 * vth / (v * 2.718281828459045);
                 jcur = -isat * (1.0 + arg * arg * arg) + gm * v;
             end
@@ -119,6 +122,7 @@ module mos9(d, g, s, b);
     real coxp, leff, weff, oxcap, beta0, alpha, xd, etac, narrow, csonco;
     real isatd, isats, czbd, czbdsw, czbs, czbssw, gdser, gsser;
     real kpeff, phinom, gammaeff, cgsov, cgdov, cgbov, gmch;
+    real ty, vcrits, vcritd;
     // bias dependent
     real vbs, vgs, vds, vbd, vgd, ibs, ibd;
     real mode, vbx, vgx, vdx, sqphbs, phibs, fshort, wponxj, wconxj;
@@ -213,12 +217,20 @@ module mos9(d, g, s, b);
         cgdov = cgdo * weff * m;
         cgbov = cgbo * leff * m;
 
-        // ---- bias, type-corrected to s' (§2 step 2) --------------------
-        vbs = mtype * V(b, si);
-        vgs = mtype * V(g, si);
-        vds = mtype * V(di, si);
-        vbd = vbs - vds;
+        // ---- bias, type-corrected to s' (§2 step 2), §1.7 limited ------
+        // mos1.va's ladder: fetlim on both gate legs, limvds on the channel,
+        // pnjlim on both bulk junctions. Trailing `ty` = VerA frame sign
+        // (PMOS limits mtype·v); ty is mtype as a real — integer $limit args
+        // are declined. Clamps land on the shared x in source order.
+        ty     = mtype;
+        vcrits = vt * ln(vt / (1.4142135623730951 * isats));
+        vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
+        vgs = ty * $limit(V(g, si), "fetlim", ty * (vtoeff + delvto), ty);
+        vgd = ty * $limit(V(g, di), "fetlim", ty * (vtoeff + delvto), ty);
+        vds = ty * $limit(V(di, si), "limvds", ty);
         vgd = vgs - vds;
+        vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
+        vbd = ty * $limit(V(b, di), "pnjlim", vt, vcritd, ty);
 
         // ---- §1.4 bulk diodes ------------------------------------------
         ibs = jcur(vbs, isats, vt, gmin);

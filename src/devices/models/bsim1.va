@@ -21,8 +21,10 @@
 //   * Model-level TEMP (degC) from the doc's Process Parameters table has no
 //     home here: Verilog-A cannot carry two `temp` parameters, and no equation
 //     consumes it -- the instance TEMP (K) that feeds Vt wins.
-//   * fetlim/limvds stay solver-side (same split as mos1.va); only pnjlim has a
-//     $limit spelling.
+//   * fetlim/limvds/pnjlim are spelled with $limit as in mos1.va, all with the
+//     trailing frame-sign argument — a $limit under `if (type > 0)` is silently
+//     declined (no CFG in the clamp list), which is exactly what the old
+//     per-polarity spelling was.
 module bsim1(d, g, s, b);
     inout d, g, s, b;
     electrical d, g, s, b;
@@ -102,8 +104,9 @@ module bsim1(d, g, s, b);
     real bz0, bzb, bvd, bvdb, bvdd_d, ugsp, ugsbp, udsp, udsbp, udsdp;
     real gdcond, gscond, adrain, asource, pdrain, psource, isd, iss, vtherm;
     real pbc, pbswc, czbs, czbssw, czbd, czbdsw, vsat_on, vcrits, vcritd;
+    real tyf, vtx;
     // bias
-    real vdst, vgst, vbst, vds, vdsneg, vgs, vbs, vbsj, vbdj, mode;
+    real vdst, vgst, vgdt, vbst, vds, vdsneg, vgs, vbs, vbsj, vbdj, mode, uj;
     real ibs, ibd, ugse, udsr, udss, etac, vpb, sqvpb, von, vgov;
     real gfac, afac, arg, beta0, beta, c1, c2, vc, kfac, vdsat;
     real vdse, argl1, argl2, idbase, vdsx, idmain, nsub, wds, wgs, iw0, ilim, isub, idchan;
@@ -172,6 +175,8 @@ module bsim1(d, g, s, b);
         vtherm  = 8.617333262145e-5 * temp;
         vcrits  = vtherm * ln(vtherm / (1.4142135623730951 * iss));
         vcritd  = vtherm * ln(vtherm / (1.4142135623730951 * isd));
+        tyf     = type;                     // $limit args must be real-typed
+        vtx     = vfbe + phie + k1e * sqrt(phie) - k2e * phie;  // zero-bias von
 
         // b1temp.c clamps both potentials at 0.1 (the doc table's 0.01 is wrong,
         // and a 0.01 floor blows up the czb*mj/pbc charge coefficients).
@@ -187,9 +192,13 @@ module bsim1(d, g, s, b);
         // ================= bias-dependent ==================================
         // type folding + source/drain swap: Vds is made positive, the gate and
         // bulk references move to the true source, and `mode` carries the sign
-        // back to the channel stamp.
-        vdst = V(di, si) * type;
-        vgst = V(g,  si) * type;
+        // back to the channel stamp. mos1.va's §1.7 ladder on the way in:
+        // fetlim both gate legs, limvds the channel; trailing tyf = VerA frame
+        // sign (PMOS limits type*v).
+        vgst = tyf * $limit(V(g, si), "fetlim", vtx, tyf);
+        vgdt = tyf * $limit(V(g, di), "fetlim", vtx, tyf);
+        vdst = tyf * $limit(V(di, si), "limvds", tyf);
+        vgdt = vgst - vdst;
         vbst = V(b,  si) * type;
 
         vds    = abs(vdst);
@@ -199,18 +208,19 @@ module bsim1(d, g, s, b);
         vbs    = vbst - vdsneg;
 
         // Bulk junctions: mode-free, on the TRUE junction voltages, Newton-limited
-        // with pnjlim (V_crit = Vt*ln(Vt/(sqrt(2)*Is)) per doc). The swapped vbs
-        // above stays for the channel block only -- feeding it here would stamp the
-        // source diode onto d' whenever V(di,si) < 0.
-        if (type > 0) begin
-            vbsj = $limit(V(b, si), "pnjlim", vtherm, vcrits);
-            vbdj = $limit(V(b, di), "pnjlim", vtherm, vcritd);
-        end else begin
-            vbsj = $limit(V(si, b), "pnjlim", vtherm, vcrits);
-            vbdj = $limit(V(di, b), "pnjlim", vtherm, vcritd);
-        end
-        ibs = iss * (exp(min(vbsj / vtherm, 80.0)) - 1.0) + 1e-12 * vbsj;
-        ibd = isd * (exp(min(vbdj / vtherm, 80.0)) - 1.0) + 1e-12 * vbdj;
+        // with pnjlim (V_crit = Vt*ln(Vt/(sqrt(2)*Is)) per doc); the trailing tyf
+        // = VerA frame sign, so PMOS limits type*v with no per-polarity if (a
+        // $limit under `if` is silently declined). The swapped vbs above stays
+        // for the channel block only -- feeding it here would stamp the source
+        // diode onto d' whenever V(di,si) < 0. Exponent tangent-continued above
+        // 80: a flat clamp zeroes the restoring slope on evals at unlimited x
+        // (LTE probes, sweep warm starts; see bjt.va pnj).
+        vbsj = tyf * $limit(V(b, si), "pnjlim", vtherm, vcrits, tyf);
+        vbdj = tyf * $limit(V(b, di), "pnjlim", vtherm, vcritd, tyf);
+        uj  = min(vbsj / vtherm, 80.0);
+        ibs = iss * (exp(uj) * (1.0 + (vbsj / vtherm - uj)) - 1.0) + 1e-12 * vbsj;
+        uj  = min(vbdj / vtherm, 80.0);
+        ibd = isd * (exp(uj) * (1.0 + (vbdj / vtherm - uj)) - 1.0) + 1e-12 * vbdj;
 
         // bias-dependent mobility / DIBL coefficients
         ugse = max(ugsp + ugsbp * vbs, 0.0);

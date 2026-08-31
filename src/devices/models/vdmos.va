@@ -19,11 +19,9 @@
 // parameters are still declared so cards carrying them bind.
 //
 // Junction / fetlim limiting and the MODEINITJCT seed (§2, diode.md §1.5/§1.6)
-// are NOT expressible here: FastVAF renders $limit as the identity
-// (FastVAF/src/codegen.zig:1696 — "the limiting ALGORITHM is a convergence aid
-// the host owns, contract `limit`") and emits neither `limit` nor `seed` for a
-// generated device, so pnjlim/fetlim/limvds and V_crit stay solver-side,
-// exactly as in models/diode.va and models/mos1.va.
+// are spelled with $limit as in models/diode.va and models/mos1.va: $limit
+// stays the identity inside eval, and VerA's contract `limit`/`seed` hooks
+// hand the host the clamps to run between the linear solve and the next eval.
 module vdmos(d, g, s);
     inout d, g, s;
     electrical d, g, s;
@@ -114,7 +112,7 @@ module vdmos(d, g, s);
     real vto_t, beta_t, ksub_t;
     real rd_t, rg_t, rs_t, rb_t;
     real is_t, vj_t, cjo_t, fcvj, f1, f2, f3, vte, vtebrk, cbv, xbv;
-    real cgdd;
+    real cgdd, tyf, vcritb;
     // bias-dependent
     real vgs, vds, vdsi, vgd, vgdi, msign, vdse, vgst, vgste, sarg, betaeff;
     real vknee, idch;
@@ -225,10 +223,16 @@ module vdmos(d, g, s);
         if (rs > 0.0) I(br_rs) <+ m * V(br_rs) / rs_t; else V(br_rs) <+ 0.0;
         if (rb > 0.0) I(br_rb) <+ m * V(br_rb) / rb_t; else V(br_rb) <+ 0.0;
 
-        // ---- channel, §3 ---------------------------------------------------
-        vgs  = ty * V(gp, sp);
+        // ---- channel, §3, §2 limited (mos1.va's ladder) --------------------
+        // fetlim on both channel gate legs, limvds on the channel Vds, pnjlim
+        // on the body diode below. vto_t is already the ty-frame threshold;
+        // trailing tyf = VerA frame sign (vdmosp limits ty·v), and tyf is ty
+        // as a real — integer $limit args are declined.
+        tyf  = ty;
+        vgs  = ty * $limit(V(gp, sp), "fetlim", vto_t, tyf);
+        vgdi = ty * $limit(V(gp, dq), "fetlim", vto_t, tyf);
+        vdsi = ty * $limit(V(dq, sp), "limvds", tyf);  // seen by the channel
         vds  = ty * V(dp, sp);                     // across the whole drain path
-        vdsi = ty * V(dq, sp);                     // seen by the channel
         vgd  = vgs - vds;
         vgdi = vgs - vdsi;
 
@@ -277,8 +281,11 @@ module vdmos(d, g, s);
         // diode.md §1.3, all three regions: Shockley forward, the smooth cubic
         // deep-reverse branch (C1 with the forward branch at -3*Vte, and its
         // conductance does not collapse to gmin while blocking), and the
-        // breakdown exponential below -x_bv.
-        vd = ty * V(sp, bp);
+        // breakdown exponential below -x_bv. pnjlim'd as in diode.va, with
+        // vcrit = vte*ln(vte/(sqrt(2)*Is)); limexp is already tangent-
+        // continued, so no flat-clamp hazard in either exponential.
+        vcritb = vte * ln(vte / (1.4142135623730951 * is_t));
+        vd = ty * $limit(V(sp, bp), "pnjlim", vte, vcritb, tyf);
         if (vd >= -3.0 * vte)
             ibd = is_t * (limexp(vd / vte) - 1.0);
         else if (bv <= 0.0 || vd >= -xbv) begin
