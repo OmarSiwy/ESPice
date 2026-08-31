@@ -521,6 +521,16 @@ pub const Circuit = struct {
         return if (min_td == std.math.inf(f64)) null else min_td;
     }
 
+    /// §9.17.2 tightest `$bound_step` any device asked for, or null when none
+    /// did. Only meaningful after an accepted step has run `updateStates`.
+    pub fn boundStep(self: *const Circuit) ?f64 {
+        var best = std.math.inf(f64);
+        for (self.batches) |b| if (b.hooks.bound_step) |f| {
+            best = @min(best, f(b.ctx));
+        };
+        return if (best == std.math.inf(f64)) null else best;
+    }
+
     pub fn nextBreakpoint(self: *const Circuit, t: f64) ?f64 {
         var best = std.math.inf(f64);
         for (self.batches) |b| if (b.hooks.next_breakpoint) |f| {

@@ -405,7 +405,20 @@ pub fn simulate(
             continue;
         }
 
+        // §9.17.2 `$bound_step`: read after the accepted step, applied to the
+        // NEXT one. Not folded into `effective_dt_max` above, because that is
+        // computed once before the loop and every device's bound is still at
+        // its `inf` default until an `updateState` has run.
+        //
+        // Nothing consumed this before. `min_delay` looks like the same
+        // channel but is not: it reads `D.delays`, a decl no VerA-generated
+        // device has, so it was null for every model here. tline's
+        // `$bound_step(0.25*td)` was computed and stored and read by nobody,
+        // which is why a TD=2 ns line responded at t=1.5 ns — the absdelay
+        // history is a fixed 32-entry ring, and a query older than the ring
+        // silently returns the newest sample instead of the delayed one.
         var dt_next = @min(dt * 2.0, effective_dt_max);
+        if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         if (has_charge) {
             simdCopy(q_hist[0], q_snap);

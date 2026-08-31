@@ -340,6 +340,17 @@ pub const Hooks = struct {
     record_history: ?*const fn (*anyopaque, []const f64, f64) void = null,
     inject_history: ?*const fn (*anyopaque, f64, []f64) void = null,
     min_delay: ?*const fn (*anyopaque) f64 = null,
+    /// §9.17.2 `$bound_step`: the tightest NEXT-step bound any instance of
+    /// this device type asked for, or `inf`. Written by the device's
+    /// `updateState`, so it is only meaningful after one has run — the
+    /// transient reads it per accepted step, which is what §9.17.2 says.
+    ///
+    /// Distinct from `min_delay`, which is a static property of the MODEL
+    /// (`D.delays`). A generated device has no `delays` decl at all, so
+    /// `min_delay` is null for every VerA model and the transmission lines
+    /// were running completely unbounded: tline's `$bound_step(0.25*td)` was
+    /// computed, stored, and read by nothing.
+    bound_step: ?*const fn (*anyopaque) f64 = null,
     next_breakpoint: ?*const fn (*anyopaque, f64) ?f64 = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
@@ -984,6 +995,8 @@ pub fn DeviceBatch(comptime D: type) type {
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
             .update_state = if (@hasDecl(D, "updateState")) updateState else null,
             .state_ctl = if (@hasDecl(D, "stateCtl")) stateCtl else null,
+            // Only devices with an accepted-step FSM can write it.
+            .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step")) boundStep else null,
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
             .set_sim_state = if (has_sim_state) setSimState else null,
             .record_history = if (has_hist) recordHistory else null,
@@ -1116,6 +1129,15 @@ pub fn DeviceBatch(comptime D: type) type {
                 }
             }
             return min_reject;
+        }
+
+        /// Tightest `$bound_step` across this batch's instances. Read after an
+        /// accepted step, so `updateState` has already refreshed every one.
+        fn boundStep(ctx: *anyopaque) f64 {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            var b = std.math.inf(f64);
+            for (self.instances[0..self.count]) |*inst| b = @min(b, inst.bound_step);
+            return b;
         }
 
         fn stateCtl(ctx: *anyopaque, op: StateCtlOp) bool {
