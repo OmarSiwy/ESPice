@@ -257,7 +257,7 @@ fn arguments(a: Allocator, io: Io, init: std.process.Init) !Config {
             .list => cfg.list = true,
             .klu => cfg.klu = true,
             .native_tol => cfg.match_tol = false,
-            else => {},
+            else => {}, // else: value flags, parsed below
         }
         if (flag == .list or flag == .klu or flag == .native_tol) continue;
         const value = args.next() orelse return error.MissingArgument;

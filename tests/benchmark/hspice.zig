@@ -231,7 +231,7 @@ fn modelRefusal(c: vacask.Card) ?[]const u8 {
     if (level_one) return if (level == 1) null else "a diode, BJT or JFET model past LEVEL 1, numbered differently there";
     if (eql(kind, "nmos") or eql(kind, "pmos")) return switch (@as(u32, @intFromFloat(@max(0, @min(level, 1e6))))) {
         1, 2, 3, 49, 54 => null,
-        else => "a MOSFET LEVEL other than 1, 2, 3, 49 (BSIM3) or 54 (BSIM4), numbered differently there",
+        else => "a MOSFET LEVEL other than 1, 2, 3, 49 (BSIM3) or 54 (BSIM4), numbered differently there", // else: every other LEVEL refuses
     };
     return "a .model type with no counterpart checked here";
 }
@@ -245,7 +245,7 @@ pub fn readPlots(io: std.Io, a: std.mem.Allocator, dir: []const u8, op: bool) ![
         const path = try std.fmt.allocPrint(a, "{s}/hspice.{s}", .{ dir, kind[0] });
         const blob = std.Io.Dir.cwd().readFileAlloc(io, path, a, .unlimited) catch |err| switch (err) {
             error.FileNotFound => continue,
-            else => return err,
+            else => return err, // else: any other read error fails the deck
         };
         try plots.append(a, try parseWaveform(a, blob, kind[1]));
     }
