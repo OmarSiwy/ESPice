@@ -323,9 +323,13 @@ pub fn simulate(
     var cur: []f64 = x;
     var trial: []f64 = x_try;
     var t: f64 = 0;
-    // spice3 dctran first step: min(tstep, tmax)/10, and never past the
-    // first breakpoint — a 1ns pulse edge at t~0 must not be skipped.
-    var dt: f64 = @min(options.dt_init, effective_dt_max) / 10.0;
+    // ngspice dctran first step: min(tstop/100, tstep)/10 at init, then /10
+    // again at the t = 0 breakpoint landing (`if (firsttime) CKTdelta /= 10`)
+    // — net /100. Matching it exactly makes the startup ladder (and every
+    // LTE-driven step after it) replay ngspice's grid on edge circuits.
+    // Never past the first breakpoint — a 1ns pulse edge at t~0 must not be
+    // skipped.
+    var dt: f64 = @min(@min(options.dt_init, effective_dt_max), options.t_stop / 100.0) / 100.0;
     if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| {
         if (bp0 < dt) dt = bp0 / 10.0;
     }

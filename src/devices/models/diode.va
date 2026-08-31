@@ -10,11 +10,13 @@
 // `ai` and the card's terminals stay (a, c). With RS=0 the branch is a 0 V
 // short and the host collapses the node (Builder.addDevice, `collapse`).
 //
-// Junction limiting stays the solver's job, but the exponent is CLAMPED here
-// at ngspice's critical voltage, vcrit = vte*ln(vte/(sqrt(2)*is)). Above it
-// the law continues along its tangent: finite, monotone, correct slope, so
-// Newton can walk back down. `exp(1.38/0.026)` is 1e23*is, and one more
-// iteration of that is an inf nothing recovers from.
+// Junction limiting stays the solver's job ($limit pnjlim below, with
+// ngspice's vcrit = vte*ln(vte/(sqrt(2)*is))). The exponent is additionally
+// tangent-continued past 80*vte — NOT at vcrit: vcrit is a step-limiting
+// threshold, and converged operating points sit above it (a 1N-style diode
+// at 50 mA runs vd ~ 0.64 V vs vcrit ~ 0.61 V; clamping there flattened
+// the I-V and cost power/rectifier 0.3 of waveform). 80*vte only guards
+// unlimited evals (LTE probes, sweeps): finite, monotone, correct slope.
 //
 // ponytail: TT transit time and XTI/EG temperature scaling are NOT here. No
 // fixture measures them — devices/diode_temp matches ngspice to 2.5e-14
@@ -38,7 +40,7 @@ module diode(a, c);
     parameter real tnom = 300.15 from (0:inf);  // K
     parameter real gmin = 1e-12  from [0:inf);  // S    junction shunt
 
-    real vt, vte, vd, vcrit, vlim, id, ihi, w, wlim, qj, f1, f2, f3, vfc;
+    real vt, vte, vd, vcrit, u, ulim, id, ihi, w, wlim, qj, f1, f2, f3, vfc;
 
     analog begin
         vt  = 1.380649e-23 * tnom / 1.602176634e-19;
@@ -49,9 +51,12 @@ module diode(a, c);
         vcrit = vte * ln(vte / (1.4142135623730951 * is));
         vd  = $limit(V(ai, c), "pnjlim", vte, vcrit);
 
-        // Forward/reverse ideal current, tangent-continued above vcrit.
-        vlim  = min(vd, vcrit);
-        id    = is * ((exp(vlim / vte) * (1.0 + (vd - vlim) / vte)) - 1.0);
+        // Forward/reverse ideal current, tangent-continued past 80*vte.
+        // Ratio-space clamp so the finiteness prover sees exp's argument
+        // bounded by the literal 80 (same pattern as breakdown below).
+        u     = vd / vte;
+        ulim  = min(u, 80.0);
+        id    = is * ((exp(ulim) * (1.0 + (u - ulim))) - 1.0);
 
         // High-injection roll-off, ngspice IKF: id / sqrt(1 + id/ikf).
         // Guarded on id > 0 so the reverse branch is untouched and the sqrt
