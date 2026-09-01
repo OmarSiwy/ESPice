@@ -466,7 +466,7 @@ PASS	fixtures/noise/differential_unbalanced.sp
 PASS	fixtures/noise/isrc_input_total.sp
 PASS	fixtures/noise/jfet_channel.sp
 PASS	fixtures/noise/ngspice_mos1_cs.sp
-XFAIL	fixtures/noise/ngspice_mos3_cs.sp
+PASS	fixtures/noise/ngspice_mos3_cs.sp
 PASS	fixtures/noise/noise_table_lin_clamp.sp
 PASS	fixtures/noise/noise_table_lin_interior.sp
 PASS	fixtures/noise/noise_table_log_clamp.sp

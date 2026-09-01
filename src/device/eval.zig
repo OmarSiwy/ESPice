@@ -757,6 +757,14 @@ pub inline fn mfactorOf(comptime D: type, inst: anytype) f64 {
     return if (comptime @hasField(D.Instance, "mfactor")) inst.mfactor else 1.0;
 }
 
+/// `noisePsd`'s family: `eval`'s wide basis, dense and in f64, so a `ddx` in
+/// a PSD argument (a channel noise's gm) reads its partial. `Real` would read
+/// it as 0 (#119).
+fn NoiseFamily(comptime D: type) type {
+    const lane = comptime basisOf(D, false).lane[0..contract.nU(D)].*;
+    return DualFor(f64, &lane, .{ .dense = true }, @hasDecl(D, "collapse"));
+}
+
 /// Evaluates instances `[first, end)` of D and stamps residual, charge and
 /// both Jacobians through `sink`. The one physics body: the host sink adds
 /// into the planes, the GPU sink writes per-contribution staging cells.
@@ -1105,12 +1113,7 @@ pub fn ProtoStore(comptime D: type) type {
         fn addPatternLocal(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             const pat = comptime jacPattern(D);
-            const nnz = comptime blk: {
-                var k: usize = 0;
-                for (pat) |m| k += @popCount(m & lowBits(n_u));
-                break :blk k;
-            };
-            try pb.reserve(gpa, self.nodes.items.len * nnz);
+            try pb.reserve(gpa, self.nodes.items.len * SlotMap(D).k);
             // Runtime loops: this runs once per batch, and unrolling n_u^2
             // for every device only costs comptime quota.
             for (self.nodes.items) |nd| {
@@ -2203,7 +2206,7 @@ pub fn DeviceBatch(comptime D: type) type {
             try list.ensureUnusedCapacity(gpa, self.count * D.noise_gens.len);
             for (0..self.count) |id| {
                 const base: u32 = @intCast(list.items.len);
-                const terms = D.noisePsd(Real, self.localX(x, id), self.model(id), &self.instances[id], self.sim);
+                const terms = D.noisePsd(NoiseFamily(D), self.localX(x, id), self.model(id), &self.instances[id], self.sim);
                 // m copies are m independent generators: m times the power.
                 // A table row's PSD is the table, so its amplitude takes sqrt(m).
                 const mf = mfactorOf(D, &self.instances[id]);
