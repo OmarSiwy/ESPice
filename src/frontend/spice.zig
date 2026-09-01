@@ -55,11 +55,35 @@ pub const DeviceId = enum {
     /// PSP 103 with the NQS model built in; the builder swaps it in for a
     /// psp103 card that sets SWNQS != 0.
     psp103_nqs,
+    psp103t,
+    psp104,
+    psp104_nqs,
+    psp104t,
+    bsimimg,
+    bsimcmg,
+    bsimbulk,
+    l_utsoi,
+    hisimsoi,
+    hisimsotb,
+    mosvar,
+    asmhemt,
+    mvsg,
     vdmos,
     // Q card levels.
     gummel_poon,
     vbic13_4t,
     hicumL2_va,
+    mextram,
+    mextram_t,
+    hicumL0,
+    // D card levels.
+    juncap200,
+    diode_cmc,
+    asmesd,
+    asmesd_dio,
+    // Resistors by `.model` module name.
+    r2_cmc,
+    r3_cmc,
     // J / Z card levels.
     jfet,
     jfet2,
@@ -213,6 +237,11 @@ const mos_levels = [_]Level{
     // ngspice-45 has no PSP LEVEL (PSP103 is OSDI only there); 1040 is the
     // number the VACASK-derived corpus decks use.
     .{ .level = 1040, .model = .psp103 },
+    // ngspice-45 has none of these built in; HSPICE's numbers.
+    .{ .level = 72, .model = .bsimcmg },
+    .{ .level = 76, .model = .l_utsoi },
+    .{ .level = 77, .model = .bsimbulk },
+    .{ .level = 78, .model = .bsimimg },
 };
 
 const bjt_levels = [_]Level{
@@ -221,12 +250,51 @@ const bjt_levels = [_]Level{
     .{ .level = 4, .model = .vbic13_4t },
     .{ .level = 9, .model = .vbic13_4t },
     .{ .level = 8, .model = .hicumL2_va },
+    // HSPICE's Mextram level.
+    .{ .level = 6, .model = .mextram },
 };
 
 const diode_levels = [_]Level{
     .{ .level = 1, .model = .diode },
     .{ .level = 3, .model = .diode },
+    // HSPICE's JUNCAP2 level.
+    .{ .level = 6, .model = .juncap200 },
 };
+
+/// `.model X <module>` on a card with no built-in letter: the Verilog-A
+/// module name an OSDI deck loads the model under (ngspice `pre_osdi`
+/// decks, IHP SG13G2's `psp103va`), lowercase.
+pub const module_map = std.StaticStringMap(DeviceId).initComptime(.{
+    .{ "psp103va", DeviceId.psp103 },
+    .{ "pspnqs103va", DeviceId.psp103_nqs },
+    .{ "psp103tva", DeviceId.psp103t },
+    .{ "psp104va", DeviceId.psp104 },
+    .{ "pspnqs104va", DeviceId.psp104_nqs },
+    .{ "psp104tva", DeviceId.psp104t },
+    .{ "juncap200", DeviceId.juncap200 },
+    .{ "bsimimg", DeviceId.bsimimg },
+    .{ "bsimcmg", DeviceId.bsimcmg },
+    .{ "bsimcmg_va", DeviceId.bsimcmg },
+    .{ "bsimbulk", DeviceId.bsimbulk },
+    .{ "l_utsoi", DeviceId.l_utsoi },
+    .{ "bjt505", DeviceId.mextram },
+    .{ "bjt505_va", DeviceId.mextram },
+    .{ "bjt505t", DeviceId.mextram_t },
+    .{ "bjt505t_va", DeviceId.mextram_t },
+    .{ "asmhemt", DeviceId.asmhemt },
+    .{ "hicuml2va", DeviceId.hicumL2_va },
+    .{ "hicuml0va", DeviceId.hicumL0 },
+    .{ "hisimhv_va", DeviceId.hisimhv_va },
+    .{ "hisimsoi_va", DeviceId.hisimsoi },
+    .{ "hisimsotb_va", DeviceId.hisimsotb },
+    .{ "mosvar", DeviceId.mosvar },
+    .{ "diode_cmc", DeviceId.diode_cmc },
+    .{ "r2_cmc", DeviceId.r2_cmc },
+    .{ "r3_cmc", DeviceId.r3_cmc },
+    .{ "mvsg_cmc", DeviceId.mvsg },
+    .{ "asmesd", DeviceId.asmesd },
+    .{ "asmesd_dio", DeviceId.asmesd_dio },
+});
 
 const jfet_levels = [_]Level{
     .{ .level = 1, .model = .jfet },

@@ -1,10 +1,16 @@
 # Devices and models
 
 Every device in ESPice, from the resistor to BSIM4, is a Verilog-A model.
-The sources live in
-[`models/`](https://github.com/OmarSiwy/ESPice/tree/main/models) and are
-compiled into the simulator at build time, so a built-in model and a model
-you load yourself run through the same code.
+ESPice's own sources live in
+[`models/`](https://github.com/OmarSiwy/ESPice/tree/main/models). Third-party
+compact models (PSP, JUNCAP2, BSIM-IMG, BSIM-CMG, BSIM-BULK, BSIM-SOI,
+L-UTSOI, HiSIM, HICUM, Mextram, ASM-HEMT, ASM-ESD, MVSG, DIODE_CMC, R2/R3_CMC,
+MOSVAR) are built from their upstream release exactly as published:
+`build.zig.zon` lists each release's download link and hash. Releases from
+si2's registration form, whose links expire, are mirrored byte for byte on
+[ESPice's `models-si2-2026-10` release](https://github.com/OmarSiwy/ESPice/releases/tag/models-si2-2026-10).
+Everything is compiled into the simulator at build time, so a built-in model
+and a model you load yourself run through the same code.
 
 ## Built-in devices
 
@@ -15,9 +21,11 @@ you load yourself run through the same code.
 | Switches | voltage- and current-controlled | `S`, `W` |
 | Transmission lines | lossless `T`, LTRA (`O`), TXL (`Y`), coupled CPL lines of 2 to 4 conductors (`P`), uniform RC (`U`) | `T`, `O`, `Y`, `P`, `U` |
 | HSPICE data elements | S-parameter blocks of 1 to 4 ports, W-element lines of 1 to 4 conductors | `S`, `W` in the HSPICE dialect |
-| Diode | junction diode | `D` |
-| BJT | Gummel-Poon, VBIC 1.3 (4 terminal), HICUM/L2 | `Q` |
-| MOSFET | MOS levels 1, 2, 3, 6, 9; BSIM1, BSIM2, BSIM3, BSIM4; BSIM-SOI, B3SOI-FD, B3SOI-DD; HiSIM2, HiSIM-HV; PSP 103; VDMOS | `M` |
+| Diode | junction diode, JUNCAP2 200.6.2, DIODE_CMC 3.0, ASM-ESD 101.1 | `D`, `N` |
+| BJT | Gummel-Poon, VBIC 1.3 (4 terminal), HICUM/L2 3.2.0, HICUM/L0 2.1.0, Mextram 505.6 (with and without self-heating) | `Q`, `N` |
+| MOSFET | MOS levels 1, 2, 3, 6, 9; BSIM1, BSIM2, BSIM3, BSIM4; BSIM-SOI 101.0, B3SOI-FD, B3SOI-DD; BSIM-IMG 103.1, BSIM-CMG 112.1, BSIM-BULK 107.2.1; L-UTSOI 102.9; HiSIM2, HiSIM_HV 2.5.1, HiSIM_SOI 1.5, HiSIM_SOTB 1.3; PSP 103.8.2 and 104.1 (QS, NQS and self-heating); MOSVAR 1.4; VDMOS | `M`, `N` |
+| HEMT | ASM-HEMT 101.6, MVSG_CMC 5.0 | `N` |
+| Resistor | R2_CMC 1.0.2, R3_CMC 1.1.2 | `N` |
 | Other FETs | JFET, JFET2, MESFET, MESA, HFET1, HFET2 | `J`, `Z` |
 
 The `O`, `Y` and `P` cards run exact transcriptions of ngspice's LTRA, TXL
@@ -48,19 +56,32 @@ out) choose the device. The tables follow ngspice's `inpdomod.c`.
 | 55 | B3SOI-FD |
 | 56 | B3SOI-DD |
 | 68 | HiSIM2 |
+| 72 | BSIM-CMG |
 | 73 | HiSIM-HV |
+| 76 | L-UTSOI |
+| 77 | BSIM-BULK |
+| 78 | BSIM-IMG |
 | 1040 | PSP 103 (ngspice has no PSP level; this is the number VACASK-derived decks use) |
 
-`.model name VDMOS(...)` selects VDMOS whatever the level, and
-`.model name psp103va(...)`, the name ngspice loads PSP 103 under as OSDI,
-selects the built-in PSP 103. A PSP card that sets `SWNQS` to a nonzero
-value runs the non-quasi-static build, which carries four times the
-unknowns per instance.
+ngspice has no built-in level for BSIM-CMG, L-UTSOI, BSIM-BULK or BSIM-IMG;
+those four are HSPICE's numbers.
+
+`.model name VDMOS(...)` selects VDMOS whatever the level. An `N` card whose
+`.model` type is a model's Verilog-A module name, the name ngspice loads it
+under as OSDI, selects the built-in model: `psp103va`, `pspnqs103va`,
+`psp103tva`, `psp104va`, `pspnqs104va`, `psp104tva`, `juncap200`, `bsimimg`,
+`bsimcmg`, `bsimbulk`, `l_utsoi`, `hisimhv_va`, `hisimsoi_va`,
+`hisimsotb_va`, `mosvar`, `hicuml2va`, `hicuml0va`, `bjt505`, `bjt505t`,
+`diode_cmc`, `asmesd`, `asmesd_dio`, `r2_cmc`, `r3_cmc`, `mvsg_cmc` and
+`asmhemt`. A PSP
+103 card that sets `SWNQS` to a nonzero value runs the non-quasi-static
+build, which carries four times the unknowns per instance.
 
 **BJTs** (`.model name NPN|PNP (LEVEL=n ...)`): 1 and 2 are Gummel-Poon, 4
-and 9 VBIC 1.3, 8 HICUM/L2.
+and 9 VBIC 1.3, 6 Mextram 505 (HSPICE's number), 8 HICUM/L2.
 
-**Diodes** (`.model name D`): levels 1 and 3, the SPICE junction diode.
+**Diodes** (`.model name D`): levels 1 and 3, the SPICE junction diode; 6
+JUNCAP2 (HSPICE's number).
 
 **JFETs** (`NJF`, `PJF`): 1 is JFET, 2 JFET2.
 

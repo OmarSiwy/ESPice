@@ -43,14 +43,17 @@ fn portBias(k: usize) f64 {
 }
 
 /// The bias of unknown `name`: a port by position; an internal node
-/// (`di`, `si`, `bx`, ...) at the port its name starts with, else 0.0313; a
-/// branch flow at 1 mA.
+/// (`di`, `si`, `bx`, ...) 1 mV per internal rank above the port its name
+/// starts with, else 0.0313; a branch flow at 1 mA. The offset keeps two
+/// internal nodes of one port apart: Mextram 505 switches its epilayer
+/// expression at |V(c1,c2)| < 1e-5 Vt (evaluate.inc:120), a branch a zero
+/// difference would sit on.
 fn bias(comptime D: type, u: usize, name: []const u8) f64 {
     const ports = @typeInfo(D.U).@"enum".field_names[0..D.num_ports];
     if (u < D.num_ports) return portBias(u);
     if (std.mem.startsWith(u8, name, "flow")) return 1e-3;
     for (ports, 0..) |p, k| {
-        if (std.ascii.toLower(p[0]) == std.ascii.toLower(name[0])) return portBias(k);
+        if (std.ascii.toLower(p[0]) == std.ascii.toLower(name[0])) return portBias(k) + 1e-3 * @as(f64, @floatFromInt(u - D.num_ports + 1));
     }
     return 0.0313;
 }

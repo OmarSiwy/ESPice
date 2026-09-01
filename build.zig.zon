@@ -16,6 +16,86 @@
             .url = "git+https://github.com/OmarSiwy/Gompute#4c158ef351af529c3fb71a6d9544948111afffe1",
             .hash = "gompute-1.0.0-YJVc1q7-BwCB519sKbZmapwJN82ncs_tjYv1C-HRKWw1",
         },
+        .psp_103 = .{
+            .url = "https://www.cea.fr/cea-tech/leti/pspsupport/Documents/Level%20103_8_2/PSP103.8.2_vacode.tar.gz",
+            .hash = "N-V-__8AAAx7IgCnrR8WqhMhrOw7AUceI4eWoXTa62ntqhaQ",
+        },
+        .bsim_img = .{
+            .url = "https://bsim.berkeley.edu/wp-content/uploads/BSIMIMG/BSIM-IMG_103.1.0_09102024.tar.gz",
+            .hash = "N-V-__8AAOIVgQAhFn99roGNsLnpJj3-vc-dxBfTAZPQFThQ",
+        },
+        .bsim_cmg = .{
+            .url = "https://bsim.berkeley.edu/wp-content/uploads/BSIMCMG/BSIM-CMG_112.1.0_04282026.tar.gz",
+            .hash = "N-V-__8AAGtAUQAyncwmoZ5MKmF2YJdY0xgLTCctd1hriJQC",
+        },
+        .bsim_bulk = .{
+            .url = "https://bsim.berkeley.edu/wp-content/uploads/BSIMBULK/BSIM-BULK107.2.1_02112025.tar.gz",
+            .hash = "N-V-__8AAFe-TwASGVYS1omHw21Ou0qVdQOu1zbe2TNAAMW9",
+        },
+        .psp_104 = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/PSP104.1.0_vacode.tar.gz",
+            .hash = "N-V-__8AAIy9KwDrJlx-ZTbtqLDGjPmCIXd1ZpWNuooqPY4q",
+        },
+        .mextram = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/505p6p0_va.tar.gz",
+            .hash = "N-V-__8AAD--DwCzPBz1pfw-e8zQS18lMZGC_b2NwEDTJIwf",
+        },
+        .l_utsoi = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/L_UTSOI_102.9.0_code_package.zip",
+            .hash = "N-V-__8AAO_3FQBZ10iukHUotDriwyDm3-nDTwYQPN-7NmOT",
+        },
+        .asm_hemt = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/ASM-HEMT101.6.0_05132026.zip",
+            .hash = "N-V-__8AAGnSMgCgPFiV1cljSa_dgNOR7PhCfFdbiQoBOL_k",
+        },
+        .bsim_soi = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/BSIM-SOI_101.0.0_09152026.tar.gz",
+            .hash = "N-V-__8AAAMf-wCi7x0GOxiG88V0qSm4C0FW7TGoR4TlVvGr",
+        },
+        .hicum_l2 = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/hicumL2_v320_files.zip",
+            .hash = "N-V-__8AABQVFQAMYVDLPNkuUnOP248DHz_WHXMj5A4sJ_Eo",
+        },
+        .hicum_l0 = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/hicumL0_v2p1p0_files.zip",
+            .hash = "N-V-__8AAB_xBQD8P0-rF1vqwVL3JDX6iHS3s6EuBH-9osvS",
+        },
+        .hisim_hv = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/HiSIM_HV_2.5.1_Release_20230209.zip",
+            .hash = "N-V-__8AACb_ZQCeRWyU5WDwjet8T7MZCnip0tYEBUMyXYvt",
+        },
+        .hisim_soi = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/HiSIM_SOI_1.5.0_Release_20211008.zip",
+            .hash = "N-V-__8AABTgOQCanITvzOhifdjAl6Ncv0lKRfhq840jQDrO",
+        },
+        .hisim_sotb = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/HiSIM_SOTB_1.3.0_Release_20211116.zip",
+            .hash = "N-V-__8AAH--JQCL7o1akuEgFwswNjUbG9ISk2WVSS8OhEtt",
+        },
+        .diode_cmc = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/diode_cmc_3.0_20250714.zip",
+            .hash = "N-V-__8AAE0cFwBndfKdWKtHomlrrEOqVeS4pvkfFqhctlmQ",
+        },
+        .r2_cmc = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/r2_cmc_v1.0.2.zip",
+            .hash = "N-V-__8AAHWsAAA9MDQ8JxQ4a0uw_NIFtTNJ3d1TlrQhPT3_",
+        },
+        .r3_cmc = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/r3_cmc_release1.1.2_2023Jun16.zip",
+            .hash = "N-V-__8AAAMUCAAbY3MF6oVkn16ochOwii6t2A_VTg_soCdx",
+        },
+        .mvsg = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/mvsg_cmc_v5.0.0_official.zip",
+            .hash = "N-V-__8AAOZwYwG8GdaoCut83TFRiQsF5-H2aekg4GgZep7Y",
+        },
+        .asm_esd = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/ASM-ESD101.1.0_04042025-2.zip",
+            .hash = "N-V-__8AAAdlFwBR5HJI514uyo_CYAV6-ZO6NqFxW5Sfa1Gj",
+        },
+        .mosvar = .{
+            .url = "https://github.com/OmarSiwy/ESPice/releases/download/models-si2-2026-10/MOSVAR140.zip",
+            .hash = "N-V-__8AAGEVEQDvCqKqsEeRdiMRKOGeZNjnQIdzikBfTkFF",
+        },
     },
     .paths = .{
         "build.zig",

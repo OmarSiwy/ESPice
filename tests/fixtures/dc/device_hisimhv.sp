@@ -1,3 +1,4 @@
+* KNOWN GAP: ngspice 45 runs its built-in HiSIM_HV 2.2 C model; ESPice runs the HiSIM_HV 2.5.1 release (si2) unmodified, a different model version
 * HiSIM_HV (Level 73) high-voltage NMOS output and transfer.
 * Expected results: device_hisimhv.expected.json
 * Origin: benchmark/fixtures/devices/hisimhv/circuit.sp

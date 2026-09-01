@@ -125,9 +125,10 @@ pub fn build(b: *std.Build) void {
     const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
-        // The catalog keys on the file stem, the generated type on the module
-        // name; vera fails on a mismatch.
-        run.addArg(b.fmt("--expect-module={s}", .{m.name}));
+        // The catalog keys on the stem (or the `upstream_models` name), the
+        // generated type on the module name; vera fails on a mismatch.
+        run.addArg(b.fmt("--expect-module={s}", .{m.module}));
+        if (m.std) |spec| run.addArg(b.fmt("--std={s}", .{spec}));
         // The digital frontend rejects these flags, so Verilog-A only.
         // `--check` type-checks the generated device, so a bad lowering names
         // the .va instead of a cache file.
@@ -154,9 +155,15 @@ pub fn build(b: *std.Build) void {
             run.addArgs(&.{ "-I", pathFromRoot(b, b, "models") });
             run.addFileInput(b.path(b.fmt("models/{s}", .{inc})));
         }
+        // A directory argument hashes the files under it, so a release's
+        // includes are inputs of the generate step too.
+        for (m.inc_dirs) |dir| {
+            run.addArg("-I");
+            run.addDirectoryArg(dir);
+        }
         run.addArg("-o");
         const gen_zig = run.addOutputFileArg2(b.fmt("{s}.zig", .{m.name}), .{});
-        run.addFileArg(b.path(b.fmt("models/{s}", .{m.file})));
+        run.addFileArg(m.src);
 
         dev_mods[i] = GPU.make(gen_zig, &.{.{ .name = "contract", .module = contract_mod }});
 
@@ -269,7 +276,7 @@ pub fn build(b: *std.Build) void {
         // `-Dgpu=false` still compiles one model: gompute panics on an empty
         // root list, and `--backend cuda` must keep erroring by name.
         if (!gpu_kernels and !std.mem.eql(u8, m.name, smallest_model)) continue;
-        if (m.size >= gpu_max_model_bytes) continue;
+        if (m.size >= gpu_max_model_bytes or gpu_host_only.has(m.name)) continue;
         const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
         dev_imports.* = .{ .models = one_mod, .contract = contract_mod, .device_abi = device_abi_mod };
         roots.append(b.allocator, .{
@@ -738,11 +745,19 @@ const HostTest = struct {
     }
 };
 
-/// One model source under models/.
+/// One model source: a file under models/, or an `upstream_models` release.
 const Model = struct {
-    /// File stem: the device catalog's key.
+    /// The device catalog's key: the file stem, or the `upstream_models` name.
     name: []const u8,
     file: []const u8,
+    src: std.Build.LazyPath,
+    /// The `module` the source declares; vera checks it.
+    module: []const u8,
+    /// The `begin_keywords default vera reads the source under, or null for
+    /// vera's own (VAMS-2023).
+    std: ?[]const u8 = null,
+    /// Include directories inside a release (`upstream_models`).
+    inc_dirs: []const std.Build.LazyPath = &.{},
     hdl: enum { verilog_a, digital },
     /// Source size in bytes, the configure-time stand-in for the size of the
     /// device's eval function. Only the two GPU thresholds read it. A
@@ -757,7 +772,6 @@ const Model = struct {
 /// models/ as an include directory for them, and the included file becomes
 /// an input of their generate step.
 const model_includes = [_]struct { name: []const u8, file: []const u8 }{
-    .{ .name = "psp103_nqs", .file = "psp103.va" },
     .{ .name = "bsource_i", .file = "bsource.va" },
     .{ .name = "bsource_q", .file = "bsource.va" },
     .{ .name = "vccs_laplace", .file = "vcvs_laplace.va" },
@@ -772,6 +786,93 @@ const model_includes = [_]struct { name: []const u8, file: []const u8 }{
     .{ .name = "coupled_ltra3", .file = "coupled_ltra.va" },
     .{ .name = "coupled_ltra4", .file = "coupled_ltra.va" },
 };
+
+/// Third-party Verilog-A models, built from their upstream release exactly as
+/// published and never edited: `dep` is the `build.zig.zon` dependency
+/// holding the release (its URL and hash), and a newer release is a new URL
+/// there. Only device policy lives here.
+const upstream_models = [_]struct {
+    /// The device catalog's key.
+    name: []const u8,
+    /// The `build.zig.zon` dependency holding the release.
+    dep: []const u8,
+    /// The model's source inside the release.
+    file: []const u8,
+    /// The `module` that source declares.
+    module: []const u8,
+    /// More include directories, as `.{ dep, dir }`, for a release that
+    /// `include`s a file it does not ship.
+    inc: []const [2][]const u8 = &.{},
+    /// `begin_keywords default for a release written before a keyword it
+    /// uses as a name.
+    std: ?[]const u8 = null,
+}{
+    // PSP 103.8.2 `include`s discipline.h without shipping it; PSP 104's
+    // release carries the same file.
+    .{ .name = "psp103", .dep = "psp_103", .file = "vacode/psp103.va", .module = "PSP103VA", .inc = &.{.{ "psp_104", "vacode" }} },
+    .{ .name = "psp103_nqs", .dep = "psp_103", .file = "vacode/psp103_nqs.va", .module = "PSPNQS103VA", .inc = &.{.{ "psp_104", "vacode" }} },
+    .{ .name = "psp103t", .dep = "psp_103", .file = "vacode/psp103t.va", .module = "PSP103TVA", .inc = &.{.{ "psp_104", "vacode" }} },
+    .{ .name = "juncap200", .dep = "psp_103", .file = "vacode/juncap200.va", .module = "JUNCAP200", .inc = &.{.{ "psp_104", "vacode" }} },
+    .{ .name = "psp104", .dep = "psp_104", .file = "vacode/psp104.va", .module = "PSP104VA" },
+    .{ .name = "psp104_nqs", .dep = "psp_104", .file = "vacode/psp104_nqs.va", .module = "PSPNQS104VA" },
+    .{ .name = "psp104t", .dep = "psp_104", .file = "vacode/psp104t.va", .module = "PSP104TVA" },
+    .{ .name = "bsimimg", .dep = "bsim_img", .file = "code/bsimimg.va", .module = "bsimimg" },
+    // BSIM-CMG defines its own `expm1`, a keyword since VAMS-2023 (annex G.7).
+    .{ .name = "bsimcmg", .dep = "bsim_cmg", .file = "code/bsimcmg.va", .module = "bsimcmg_va", .std = "VAMS-2.3" },
+    .{ .name = "bsimbulk", .dep = "bsim_bulk", .file = "code/bsimbulk.va", .module = "bsimbulk" },
+    .{ .name = "bsimsoi_va", .dep = "bsim_soi", .file = "code/bsimsoi.va", .module = "bsimsoi" },
+    .{ .name = "l_utsoi", .dep = "l_utsoi", .file = "vacode/L_UTSOI_102.va", .module = "l_utsoi" },
+    .{ .name = "hisimhv_va", .dep = "hisim_hv", .file = "HiSIM_HV_2.5.1_VA-Code/hisimhv_va/hisimhv.va", .module = "hisimhv_va" },
+    // The HiSIM_SOI and HiSIM_SOTB releases name VAMS-2023 keywords too.
+    .{ .name = "hisimsoi", .dep = "hisim_soi", .file = "HiSIM_SOI_1.5.0_VA-Code/hisimsoi_va/hisimsoi.va", .module = "hisimsoi_va", .std = "VAMS-2.3" },
+    .{ .name = "hisimsotb", .dep = "hisim_sotb", .file = "HiSIM_SOTB_1.3.0_VA-Code/hisimsotb_va/hisimsotb.va", .module = "hisimsotb_va", .std = "VAMS-2.3" },
+    .{ .name = "mosvar", .dep = "mosvar", .file = "mosvar.va", .module = "mosvar" },
+    .{ .name = "hicumL2_va", .dep = "hicum_l2", .file = "hicumL2_v320.va", .module = "hicumL2va" },
+    .{ .name = "hicumL0", .dep = "hicum_l0", .file = "hicumL0_v2p1p0.va", .module = "hicumL0va" },
+    .{ .name = "mextram", .dep = "mextram", .file = "bjt505.va", .module = "bjt505_va" },
+    .{ .name = "mextram_t", .dep = "mextram", .file = "bjt505t.va", .module = "bjt505t_va" },
+    .{ .name = "diode_cmc", .dep = "diode_cmc", .file = "vacode/diode_cmc.va", .module = "DIODE_CMC" },
+    .{ .name = "r2_cmc", .dep = "r2_cmc", .file = "r2_cmc.va", .module = "r2_cmc" },
+    .{ .name = "r3_cmc", .dep = "r3_cmc", .file = "r3_cmc_release1.1.2_2023Jun16/r3_cmc.va", .module = "r3_cmc" },
+    .{ .name = "asmhemt", .dep = "asm_hemt", .file = "vacode/asmhemt.va", .module = "asmhemt" },
+    .{ .name = "mvsg", .dep = "mvsg", .file = "vacode/mvsg_cmc_5.0.0.va", .module = "mvsg_cmc" },
+    .{ .name = "asmesd", .dep = "asm_esd", .file = "asmesd.va", .module = "asmesd" },
+    .{ .name = "asmesd_dio", .dep = "asm_esd", .file = "asmesd_dio.va", .module = "asmesd_dio" },
+};
+
+/// The `upstream_models` rows as `Model`s. A row's size is every file in its
+/// source's directory, the include files counted.
+// ponytail: a directory can hold sibling variants (bjt505t next to bjt505),
+// so the size overcounts; it only feeds the two GPU size thresholds.
+fn upstreamModels(b: *std.Build, out: *std.ArrayList(Model)) void {
+    const io = b.graph.io;
+    for (upstream_models) |u| {
+        const dep = b.dependency(u.dep, .{});
+        const dir_name = std.fs.path.dirname(u.file) orelse ".";
+        var size: u64 = 0;
+        var dir = dep.builder.root.openDir(io, dir_name, .{ .iterate = true }) catch
+            std.debug.panic("devices: {s}: release has no {s}/", .{ u.dep, dir_name });
+        defer dir.close(io);
+        var it = dir.iterate();
+        while (it.next(io) catch @panic("devices: release iterate failed")) |e| {
+            if (e.kind != .file) continue;
+            size += (dir.statFile(io, e.name, .{}) catch @panic("devices: release stat failed")).size;
+        }
+        const inc_dirs = b.allocator.alloc(std.Build.LazyPath, u.inc.len + 1) catch @panic("OOM");
+        inc_dirs[0] = dep.path(dir_name);
+        for (inc_dirs[1..], u.inc) |*d, i| d.* = b.dependency(i[0], .{}).path(i[1]);
+        out.append(b.allocator, .{
+            .name = u.name,
+            .file = u.file,
+            .src = dep.path(u.file),
+            .module = u.module,
+            .std = u.std,
+            .inc_dirs = inc_dirs,
+            .hdl = .verilog_a,
+            .size = size,
+        }) catch @panic("OOM");
+    }
+}
 
 /// Whether `name` is one of the comma-separated entries of `csv`.
 fn inCsv(csv: []const u8, name: []const u8) bool {
@@ -808,6 +909,13 @@ const heavy_model_bytes: u64 = 20 * 1024;
 /// held-variable models could be resident and before the fused reduce and
 /// the one-wait Newton iteration.
 const gpu_max_model_bytes: u64 = 1024 * 1024;
+
+/// Models whose GPU kernel needs a bigger stack frame than CUDA allows
+/// (262,136 B), so they run on the host only. Measured with sm_89 on
+/// 2026-10-17: asmhemt (ASM-HEMT 101.6.0) 363,656 B, bsimsoi_va (BSIM-SOI
+/// 101.0.0) 323,896 B. The source size does not predict it: both are under
+/// `gpu_max_model_bytes`.
+const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"} });
 
 /// Extension -> generator. Verilog-A goes to vera's analog frontend; the
 /// digital HDLs go to its Verilog frontend (.sv via sv2v, .vhd via ghdl).
@@ -848,11 +956,14 @@ fn discoverModels(b: *std.Build) []const Model {
         out.append(b.allocator, .{
             .name = b.dupe(name),
             .file = b.dupe(e.name),
+            .src = b.path(b.fmt("models/{s}", .{e.name})),
+            .module = b.dupe(name),
             .hdl = m.hdl,
             .size = st.size + inc_size,
             .include = include,
         }) catch @panic("OOM");
     }
+    upstreamModels(b, &out);
     std.mem.sort(Model, out.items, {}, struct {
         fn lt(_: void, a: Model, c: Model) bool {
             return std.mem.lessThan(u8, a.name, c.name);

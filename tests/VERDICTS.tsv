@@ -125,8 +125,8 @@ PASS	fixtures/dc/current_descending.sp
 PASS	fixtures/dc/descending.sp
 PASS	fixtures/dc/device_b3soidd_output.sp
 PASS	fixtures/dc/device_b3soifd_output.sp
-PASS	fixtures/dc/device_b3soipd_output.sp
-PASS	fixtures/dc/device_b4soi_output.sp
+XFAIL	fixtures/dc/device_b3soipd_output.sp
+XFAIL	fixtures/dc/device_b4soi_output.sp
 PASS	fixtures/dc/device_bjt_npn_early.sp
 PASS	fixtures/dc/device_bjt_npn_gummel.sp
 PASS	fixtures/dc/device_bjt_npn_high_injection.sp
@@ -156,7 +156,7 @@ PASS	fixtures/dc/device_hfet_id_vgs.sp
 PASS	fixtures/dc/device_hicum2_gummel.sp
 PASS	fixtures/dc/device_hicum2_output.sp
 PASS	fixtures/dc/device_hisim2.sp
-PASS	fixtures/dc/device_hisimhv.sp
+XFAIL	fixtures/dc/device_hisimhv.sp
 PASS	fixtures/dc/device_jfet2.sp
 PASS	fixtures/dc/device_jfet2_temp.sp
 PASS	fixtures/dc/device_jfet_output.sp
@@ -502,8 +502,8 @@ PASS	fixtures/op/current_injection.sp
 PASS	fixtures/op/current_withdrawal.sp
 PASS	fixtures/op/device_b3soidd.sp
 PASS	fixtures/op/device_b3soifd.sp
-PASS	fixtures/op/device_b3soipd.sp
-PASS	fixtures/op/device_b4soi.sp
+XFAIL	fixtures/op/device_b3soipd.sp
+XFAIL	fixtures/op/device_b4soi.sp
 PASS	fixtures/op/device_bjt_pnp.sp
 PASS	fixtures/op/device_bsim3.sp
 PASS	fixtures/op/device_bsim4.sp
