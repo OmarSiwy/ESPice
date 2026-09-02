@@ -42,9 +42,87 @@ on top of the downloaded planes.
 - VerA ABI 5 passes `SimState` to every kernel by value (eval, state, charge
   tape), so the cores that read `analysis()` or `$abstime` are resident too:
   the Meyer MOS models (mos1/2/3/6/9) and jfet2.
-- `build.zig` emits images for every model up to 1 MB of source, so every
-  model in `models/` gets one. The cold JIT costs and the reason for the
-  limit are in the comment on `gpu_max_model_bytes`.
+- `build.zig` emits an image for every model except `gpu_host_only`.
+
+## Inventory (#139)
+
+Owner decision (#139): on a GPU run every device model evaluates on the
+GPU. This is where each built-in stands, by the rule that keeps it on the
+host (#140 brought the held-variable models with `limit` over).
+`eval.gpuRefusal` names the rule, and the inventory test in
+`src/device/tests/eval.zig` pins the table, so a model that changes class
+fails the test until this page and the test agree.
+
+| Class | Models | On a GPU run | Owner |
+|---|---|---|---|
+| timer-only state | vsource, isource | device; their timer state never runs (`skipsTimerState`), breakpoints come from the model | done |
+| `.history` state | cswitch, vswitch, tline, lossy_tline, coupled_tlines, vcvs_delay, vccs_delay, vcvs_laplace, vccs_laplace, vcvs_pole, vccs_pole, sparam_1..4, wline_1..4, mosvar, r3_cmc | device eval, host-stepped (below) | done (#139) |
+| `mutable_eval` (refused) | ltra, coupled_ltra, coupled_ltra3, coupled_ltra4, txl | host: eval writes a `vera_timepoint` cache, and the lines convolve an inline history (ltra: five `[8192]f64` arrays, 328 KB an Instance) in one serial loop per instance. Tried host-stepped with a pull before each host walk (below): ltra_tran_long_run_past_8192 went from 27 s to 760 s on CUDA, bench_tline_ltra1_1_line from 0.44 s to 2.69 s, and coupled_ltra/3/4 and txl failed to launch (local depots 307,000 / 453,656 / 612,416 / 165,264 B) | #163 |
+
+Host-stepped (`eval.gpuHostStepped`, `BatchGpu.stepped`): eval, the
+per-iterate cost, runs on the device. `updateState`, `commit_state` and
+`stateCtl` stay host walks over the host Instance, where step control reads
+breakpoints and `$bound_step`, so there is no state or control kernel.
+`pullStepped` merges the device's Instance bytes into the host copy before
+`updateStates` walks it, for the batches whose eval can latch a status
+(mosvar, r3_cmc); eval writes nothing else in a stepped batch.
+`pushStepped` uploads a stepped batch whose host bytes moved since `base`,
+right after the walk (so the eval `stateCtl(.query)` prefetches reads the
+new rows) and again before each eval or tape launch (a revert,
+`commit_state`), and then drops a prefetched eval that read the old rows.
+Before #139 these batches ran their eval on the host, after the download.
+
+Rejected steps: a `.revert` rewrites the host Instance, and the next eval
+uploads it before the retried step's first iterate. The history decks
+reject plenty on the CPU (device_tline 664 rejected attempts,
+bench_tline_ideal_tline 758, device_switch_hysteresis 464, device_urc 320)
+and match their oracles under `--backend cuda`. In safe builds,
+`BatchGpu.launch` asserts that a stepped batch's host rows equal what was
+last pushed, so a launch path that skips `pushStepped` crashes instead of
+running on stale state.
+
+Follow-up for the refused lines (ltra, coupled_ltra*, txl): their history
+is inline in the Instance (ltra 5 x 8192 f64), and eval walks it serially
+in one thread. Being resident needs (1) the sparse derivative layout or a
+split eval, to bring the coupled_ltra and txl frames under the limit;
+(2) the history as device buffers sized at prepare and appended once per
+accepted step by a small kernel, rather than a 328 KB Instance round-trip;
+and (3) the convolution split across a warp per instance, since one GPU
+thread walking 8192 taps is the 27 s to 760 s above. Each of the three is
+a separate change, and none is in #139.
+
+Build and backend gates, which apply whatever the rule says:
+
+- The 1 MB source gate (`gpu_max_model_bytes`) is gone. It summed an
+  upstream model's whole release directory, so mosvar (35 KB of source),
+  hicumL2_va (76 KB), asmesd (10 KB) and asmesd_dio (6 KB) got no image.
+- `gpu_host_only` (asmhemt, bsimsoi_va) was set for eval-kernel stack frames
+  over CUDA's 262,136 B. Measured with standalone ptxas 13.4 (sm_89, the
+  driver is 595.71) on the dense ReleaseFast PTX, the eval kernels'
+  cumulative stack is:
+
+  | Model | Stack frame | ptxas wall | ptxas RSS |
+  |---|---|---|---|
+  | asmhemt | 29,168 B | 761 s | 12.4 GB |
+  | bsimsoi_va | 68,080 B | 829 s | 19.0 GB |
+  | bsimcmg (resident) | 83,184 B | 250 s | 9.8 GB |
+  | mvsg (resident) | 432,112 B | 1,188 s | 21.4 GB |
+
+  So asmhemt and bsimsoi_va fit at ReleaseFast. mvsg, which was admitted
+  and has no deck, does not, and joins `gpu_host_only`. The kernels
+  inherit `-Doptimize`, so a ReleaseSafe build is the likely source of the
+  larger figures above (not measured here). The sparse derivative layout (`.dense = false` in
+  `DeviceKernel`) brings mvsg to 46,320 B (ptxas 153 s, 5.7 GB) and
+  bsimcmg to 18,544 B (77 s, 2.3 GB). Making it the GPU default belongs to
+  the models-upstream work.
+- `auto` no longer demotes one batch whose heavy image the driver has not
+  compiled yet. It declines the GPU for the whole query
+  (`ImageNotCompiled`), so a GPU run never leaves a heavy model on one host
+  thread.
+- Runtime-loaded `.hdl` models get a GPU payload when eligible, but no
+  kernel image: images are embedded at build time, so they stay on the host
+  ("no kernel image in this build"). They would need a PTX compile at
+  load time.
 
 Measured with bsim4va resident (#140, `chain_bsim4_10k` from
 `tests/benchmark/postlayout/gen.py`, `.tran 2p 500p`, RTX 4060 Laptop,

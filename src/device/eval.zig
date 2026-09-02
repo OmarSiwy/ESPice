@@ -2434,9 +2434,9 @@ fn isVera(comptime D: type) bool {
 ///   (`statusOnlyMutable`);
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
 ///   `limiter_previous` the host advances on its own Instance copy;
-/// - otherwise, `State` without `limit` that VerA does not declare
-///   `.path_latch` (sources and FSMs whose eval reads host-owned
-///   per-attempt state).
+/// `State` without `limit` that VerA does not declare `.path_latch` (the
+/// `.history` class: switches, delay lines, Laplace and pole filters) is
+/// admitted host-stepped (`gpuHostStepped`).
 /// A path latch (`state_class == .path_latch`, or `State` with `limit`) is
 /// what `StateKernel` and `CtlKernel` run on the device: `updateState`
 /// stages `wb__/wq__`, `stateCtl` commits them into the `pb__/pq__` latches
@@ -2450,11 +2450,29 @@ fn isVera(comptime D: type) bool {
 // `StateKernel` flags any non-`.ok` `updateState` so a device that breaks it
 // falls back to the CPU instead of running wrong.
 fn gpuEligible(comptime D: type) bool {
-    if (@hasDecl(D, "mutable_eval") and D.mutable_eval and !statusOnlyMutable(D)) return false;
-    if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
-    if (holdsOnlyHeld(D)) return true;
-    return @hasDecl(D, "limit") or !@hasDecl(D, "State") or
-        (@hasDecl(D, "state_class") and D.state_class == .path_latch);
+    return gpuRefusal(D) == null;
+}
+
+/// Why `gpuEligible` turns D down, one tag per rule above in order. The
+/// inventory test in tests/eval.zig pins it per built-in model.
+const GpuRefusal = enum { mutable_eval, newton_history };
+
+fn gpuRefusal(comptime D: type) ?GpuRefusal {
+    if (@hasDecl(D, "mutable_eval") and D.mutable_eval and !statusOnlyMutable(D)) return .mutable_eval;
+    if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return .newton_history;
+    return null;
+}
+
+/// Whether D evaluates on the device but steps its state on the host: its
+/// `State` is `.history` (no `limit`, no held variables, not a path
+/// latch), so `updateState`, `commit_state` and `stateCtl` walk the host
+/// Instance, where step control reads breakpoints and `$bound_step`, and
+/// the GPU context uploads the rows they change before the next eval
+/// (`GpuContext.pushStepped`). No state or control kernel.
+fn gpuHostStepped(comptime D: type) bool {
+    if (!gpuEligible(D) or holdsOnlyHeld(D)) return false;
+    if (@hasDecl(D, "limit") or !@hasDecl(D, "State")) return false;
+    return !(@hasDecl(D, "state_class") and D.state_class == .path_latch);
 }
 
 /// Whether D is `mutable_eval` only for VerA's §9.7.3 status latch: eval
@@ -2468,7 +2486,7 @@ fn statusOnlyMutable(comptime D: type) bool {
 
 /// Whether D's GPU eval kernel is paired with a `StateKernel`.
 fn hasStateKernel(comptime D: type) bool {
-    return gpuEligible(D) and (@hasDecl(D, "limit") or @hasDecl(D, "State"));
+    return gpuEligible(D) and (@hasDecl(D, "limit") or @hasDecl(D, "State")) and !gpuHostStepped(D);
 }
 
 /// Whether D also needs a `CtlKernel`: `stateCtl` mutates the resident
@@ -3026,6 +3044,8 @@ comptime {
 /// not here: this file is a dependency module of every test root, and Zig
 /// runs only the root module's tests.
 pub const test_access = if (@import("builtin").is_test) .{
+    .gpuRefusal = gpuRefusal,
+    .GpuRefusal = GpuRefusal,
     .Real = Real,
     .Sparse = DualFor(f64, &.{ 0, 1 }, hostLayout(false), false),
     .SparseF32 = DualFor(f32, &.{ 0, 1 }, hostLayout(false), false),

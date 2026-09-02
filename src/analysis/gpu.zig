@@ -332,6 +332,10 @@ const BatchGpu = struct {
     /// The host batch has `Hooks.status`: eval latches `vera_status__` in
     /// the resident Instance, which `syncStatus` brings home.
     has_status: bool,
+    /// Host-stepped (`eval.gpuHostStepped`): state hooks but no state
+    /// kernel. The host walks step its Instance, and `pushStepped` uploads
+    /// the rows they changed before the next launch that reads them.
+    stepped: bool,
     /// The device lim plane holds live clamp state (after a seed upload or a
     /// limit launch). Mirrors the host batch's `lim_active`.
     lim_active: bool = false,
@@ -362,7 +366,11 @@ const BatchGpu = struct {
     }
 
     /// `launchOn` with this batch's grid.
+    /// Asserts that a host-stepped batch's host rows have been pushed
+    /// (`pushStepped`), checked in safe builds only (one memcmp).
     fn launch(self: *BatchGpu, k: *Raw, stream: *Stream, args: []const gompute.interface.Arg) !void {
+        if (std.debug.runtime_safety and self.stepped)
+            std.debug.assert(std.mem.eql(u8, self.payload(self.ctx).instances, self.base));
         try k.launchOn(stream, self.grid, .{ .x = self.block }, 0, args);
     }
 };
@@ -446,6 +454,9 @@ pub const GpuContext = struct {
     /// Everything else: whatever `eval.gpuEligible` turns down, plus eligible
     /// batches demoted for a missing or cold image. They stamp on the host.
     cpu_batches: []const device_ir.Batch,
+    /// The resident host-stepped batches (`BatchGpu.stepped`), which the
+    /// state walks visit beside `cpu_batches`. A view of `cpu_owned`'s tail.
+    stepped_batches: []const device_ir.Batch,
     /// Full-length allocations behind `batches` and `cpu_batches`. Demotions
     /// are only known after loading, so both are sized for the worst case and
     /// narrowed; `deinit` frees these, not the narrowed views.
@@ -612,6 +623,7 @@ pub const GpuContext = struct {
         var tape_len: usize = 0;
         errdefer for (batches[0..n_up]) |*bg| bg.deinit(gpa);
 
+        var n_stepped: usize = 0;
         for (host.batches) |b| {
             // Host-only batches first: once every eligible batch is up,
             // `batches[n_up]` is one past the end (#93).
@@ -620,12 +632,16 @@ pub const GpuContext = struct {
                 n_cpu += 1;
                 continue;
             }
-            const bg = &batches[n_up];
-            const up = try loadBatch(gpa, bg, b, explicit, report, knobs);
+            const up = try loadBatch(gpa, &batches[n_up], b, explicit, report, knobs);
             if (!up) {
                 cpu_batches[n_cpu] = b;
                 n_cpu += 1;
                 continue;
+            }
+            const bg = &batches[n_up];
+            if (bg.stepped) {
+                n_stepped += 1;
+                cpu_batches[cpu_batches.len - n_stepped] = b;
             }
             resident_charge = resident_charge or b.has_charge;
             if (b.hooks.q_tape != null and bg.qtp_kernel == null) tape_ok = false;
@@ -636,8 +652,8 @@ pub const GpuContext = struct {
         // Every eligible batch demoted; `batches[0]` below needs one.
         if (n_up == 0) return Error.CircuitNotEligible;
         if (statsOn(knobs)) std.debug.print(
-            "gpu-stats: resident batches={d} host batches={d} charge planes={s} lte tape={s}\n",
-            .{ n_up, n_cpu, if (resident_charge) "device" else "host-only", if (tape_ok) "device" else "row-plane" },
+            "gpu-stats: resident batches={d} (host-stepped {d}) host batches={d} charge planes={s} lte tape={s}\n",
+            .{ n_up, n_stepped, n_cpu, if (resident_charge) "device" else "host-only", if (tape_ok) "device" else "row-plane" },
         );
 
         // Every handle allocates from the same primary context, so buffers
@@ -720,6 +736,7 @@ pub const GpuContext = struct {
             .has_charge = host.has_charge,
             .batches = batches[0..n_up],
             .cpu_batches = cpu_batches[0..n_cpu],
+            .stepped_batches = cpu_batches[cpu_batches.len - n_stepped ..],
             .batches_owned = batches,
             .cpu_owned = cpu_batches,
             .host_planes = host.planes,
@@ -825,7 +842,11 @@ pub const GpuContext = struct {
         errdefer d_states.free();
         var d_tape = try kernel.alloc(@max(tape.len * @sizeOf(f64), 1));
         errdefer d_tape.free();
-        const writes_instances = b.hooks.status != null or lim_kernel != null or ctl_kernel != null;
+        // `eval.gpuHostStepped`: state hooks but no device state kernel.
+        const stepped = lim_kernel == null and
+            (b.hooks.update_state != null or b.hooks.commit_state != null or b.hooks.state_ctl != null);
+        // A stepped batch keeps `base` too: `pushStepped` diffs against it.
+        const writes_instances = b.hooks.status != null or lim_kernel != null or ctl_kernel != null or stepped;
         const base: []u8 = if (writes_instances) try gpa.dupe(u8, p.instances) else &.{};
 
         const block = evalBlock(knobs);
@@ -854,6 +875,7 @@ pub const GpuContext = struct {
             .has_lim = p.lim_x.len > 0,
             .held = p.held,
             .has_status = b.hooks.status != null,
+            .stepped = stepped,
             .base = base,
         };
         return true;
@@ -1209,10 +1231,13 @@ pub const GpuContext = struct {
 
         const pre = self.pre;
         self.pre = null;
+        // A host step since the prefetch (`commit_state`, a revert) leaves
+        // it reading old rows.
+        const pushed = try self.pushStepped();
         // The prefetch ran on the same device state with the same launches,
         // so its planes are bitwise what this eval would produce. Bytes, not
         // `==`: -0.0 and +0.0 compare equal but may stamp differently.
-        if (pre != null and std.meta.eql(pre.?.sim, self.simAt(t)) and
+        if (!pushed and pre != null and std.meta.eql(pre.?.sim, self.simAt(t)) and
             std.mem.eql(u8, std.mem.sliceAsBytes(x), std.mem.sliceAsBytes(self.pin_x[self.cur ^ 1][0..x.len])))
         {
             self.cur ^= 1;
@@ -1253,6 +1278,7 @@ pub const GpuContext = struct {
     /// Separate so `evalCheck` can replay the same pass.
     fn enqueueEval(self: *Self, x: []const f64, sim_at: SimState, buf: u1, charge: bool) !void {
         if (comptime backend == null) return Error.NoGpuArtifacts;
+        _ = try self.pushStepped();
         @memcpy(self.pin_x[buf][0..x.len], x);
         try self.d_x[buf].uploadAtAsync(self.pin_x[buf].ptr, 0, x.len * @sizeOf(f64), &self.stream);
         // Staging, not the planes: the reduction writes every plane cell, but
@@ -1410,6 +1436,7 @@ pub const GpuContext = struct {
     /// `pin_tape`, which then holds buffer `buf`'s tape once the stream
     /// drains.
     fn enqueueTape(self: *Self, buf: u1, sim_at: SimState) !void {
+        _ = try self.pushStepped();
         var off: usize = 0;
         for (self.batches) |*bg| {
             const k = if (bg.qtp_kernel) |*k| k else continue;
@@ -1618,7 +1645,13 @@ pub const GpuContext = struct {
                 return error.GpuStateReject;
             }
         }
-        return walk.updateBatches(self.cpu_batches, x);
+        const host = walk.updateBatches(self.cpu_batches, x);
+        try self.pullStepped();
+        const stepped = walk.updateBatches(self.stepped_batches, x);
+        // Now, so the eval `stateCtl(.query)` prefetches reads the new rows.
+        if (try self.pushStepped()) self.pre = null;
+        if (host == null) return stepped;
+        return if (stepped) |s| @min(host.?, s) else host;
     }
 
     /// Runs the resident held-variable batches' state pass and walks the
@@ -1686,6 +1719,7 @@ pub const GpuContext = struct {
         }
 
         var dirty = walk.stateCtlBatches(self.cpu_batches, op);
+        if (walk.stateCtlBatches(self.stepped_batches, op)) dirty = true;
         if (wait) {
             try self.sync();
             if (std.mem.readInt(u32, self.pin_flags[0..4], .little) != 0) dirty = true;
@@ -1712,6 +1746,54 @@ pub const GpuContext = struct {
         for (self.batches) |*bg| {
             if (bg.has_lim) bg.lim_dirty = true;
         }
+    }
+
+    /// Merges the device Instance bytes of each host-stepped batch whose eval
+    /// can latch a status into the host copy before a host walk reads them;
+    /// bytes the host wrote since `base` win. Eval writes nothing else in a
+    /// stepped batch, so the others need no download. One wait when any.
+    fn pullStepped(self: *Self) !void {
+        if (comptime backend == null) return;
+        var waited = false;
+        for (self.batches) |*bg| {
+            if (!bg.stepped or !bg.has_status) continue;
+            if (!waited) try self.sync();
+            waited = true;
+            const host: []u8 = @constCast(bg.payload(bg.ctx).instances);
+            const dev = try self.gpa.alloc(u8, host.len);
+            defer self.gpa.free(dev);
+            try bg.d_instances.download(dev.ptr, dev.len);
+            _ = mergeInstances(host, bg.base, dev);
+            @memcpy(bg.base, dev);
+        }
+    }
+
+    /// Uploads each host-stepped batch whose host Instance bytes moved since
+    /// `base` (an `updateState`, `commit_state` or revert on the host walk),
+    /// merging device latches first when eval can write one. True when it
+    /// uploaded anything. One memcmp per stepped batch when nothing moved.
+    fn pushStepped(self: *Self) !bool {
+        if (comptime backend == null) return false;
+        var pushed = false;
+        for (self.batches) |*bg| {
+            if (!bg.stepped) continue;
+            const host: []u8 = @constCast(bg.payload(bg.ctx).instances);
+            std.debug.assert(bg.base.len == host.len);
+            if (std.mem.eql(u8, host, bg.base)) continue;
+            if (bg.has_status) {
+                // Normally `pullStepped` already merged; this covers a host
+                // write outside `updateStates` (a revert, `commit_state`).
+                try self.sync();
+                const dev = try self.gpa.alloc(u8, host.len);
+                defer self.gpa.free(dev);
+                try bg.d_instances.download(dev.ptr, dev.len);
+                _ = mergeInstances(host, bg.base, dev);
+            }
+            try bg.d_instances.upload(host.ptr, host.len);
+            @memcpy(bg.base, host);
+            pushed = true;
+        }
+        return pushed;
     }
 
     /// Brings each resident batch's host and device Instance bytes to the

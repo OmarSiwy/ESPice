@@ -26,9 +26,13 @@ For large circuits (10,000 unknowns or more) ESPice may also factor the
 matrix on the GPU. `ESPICE_GPU_LU=1` forces that on under a GPU backend,
 `ESPICE_GPU_LU=0` keeps the factorization on the CPU.
 
-Not every device runs there. A device whose model keeps state the kernels
-cannot carry (a Verilog-A `$limit` function that keeps Newton history, for one) is evaluated on the CPU and added
-to the GPU's result, so a circuit can mix both. `auto` also estimates the
+Nearly every device evaluates on the GPU. The exceptions run on the CPU and
+are added to the GPU's result, so a circuit can mix both: the lossy
+transmission lines (`O` LTRA, `P` CPL, `Y` TXL), the MVSG, ASM-HEMT and
+BSIM-SOI models, and a Verilog-A `$limit` function that keeps Newton
+history. Devices with state across time points (switches, delay lines,
+Laplace and pole sources) evaluate on the GPU and update that state on the
+CPU once per accepted time point. `auto` also estimates the
 cost: launching kernels and copying the solution vector each iteration has
 a fixed price, and a small circuit is faster on the CPU.
 

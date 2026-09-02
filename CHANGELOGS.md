@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- On a GPU backend, sources, switches, transmission and delay lines, Laplace and pole filters, S-parameter and W elements, mosvar and r3_cmc evaluate on the GPU instead of the host (#139).
 - On a GPU backend, MVSG devices evaluate on the CPU: their kernel's stack frame (432 KB) is over CUDA's limit, so the launch failed (#139).
 - mosvar, hicumL2_va, asmesd and asmesd_dio get GPU kernels; a source-size gate that counted their whole upstream release left them out (#139).
 - `--backend auto` runs a deck whose large GPU kernel the driver has not compiled yet entirely on the CPU, instead of leaving that one model on the host (#139).
