@@ -142,6 +142,7 @@ pub fn build(b: *std.Build) void {
             // W0850 ($display in hisim-class devices). Re-proving the models
             // clears them.
             run.addArgs(&.{ "--allow=W0650", "--allow=W0651", "--allow=W0850", "--color=never", "--check" });
+            if (escape_models.has(m.name)) run.addArg("--allow=W0149");
             // No `say` for the built-ins: their display tasks are parameter
             // warnings that would print at every accepted point, and `say`
             // reruns the model core per instance. Runtime `.hdl` devices keep
@@ -916,6 +917,13 @@ const gpu_max_model_bytes: u64 = 1024 * 1024;
 /// 101.0.0) 323,896 B. The source size does not predict it: both are under
 /// `gpu_max_model_bytes`.
 const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"} });
+
+/// Models whose source has a string escape outside LRM Table 2-2 (W0149),
+/// allowed per file because the sources are not ours to edit. Both sit in
+/// `MPRnb` parameter descriptions, which reach hosts only as description text
+/// (`contract.DeclMeta`), never a value: hisim2_va.va:1045 `\p` and
+/// HiSIM_SOTB 1.3.0 hisimsotb.va:407 `\_`, which VerA decodes to "p" and "_".
+const escape_models = std.StaticStringMap(void).initComptime(.{ .{"hisim2_va"}, .{"hisimsotb"} });
 
 /// Extension -> generator. Verilog-A goes to vera's analog frontend; the
 /// digital HDLs go to its Verilog frontend (.sv via sv2v, .vhd via ghdl).

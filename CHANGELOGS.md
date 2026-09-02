@@ -23,6 +23,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - Device evaluation no longer copies a deduplicated model row onto itself, undefined behaviour in release builds (#122).
 - Third-party compact models are built from their upstream releases, unmodified, pinned by link and hash in `build.zig.zon`: PSP 103.8.2/104.1, JUNCAP2, BSIM-IMG, BSIM-CMG, BSIM-BULK, BSIM-SOI 101.0, L-UTSOI, HiSIM_HV/SOI/SOTB, HICUM/L2 3.2 and L0, Mextram 505.6, ASM-HEMT, ASM-ESD, MVSG, DIODE_CMC, R2/R3_CMC and MOSVAR; new LEVELs 72/76/77/78 (M), 6 (Q, D) and OSDI module names on `.model`.
 - `.noise` reads a `ddx()` inside a Verilog-A noise power (a channel noise's gm) instead of 0: MOS3, MOS9 and JFET2 channel noise now match ngspice (#119).
+- `.hdl` Verilog-A, VerA pin df3bd51d -> 7971b23e: a `$simparam` used as a parameter default answers per LRM 9.15 instead of reading 0 (VerA#51).
 - `.hdl` Verilog-A, VerA pin 53e61b89 -> df3bd51d: `ddx()` inside a noise power reads its partial in
   `noisePsd` (VerA#32), `$port_connected`/`$param_given` may control analog operators (VerA#33).
 - `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one
