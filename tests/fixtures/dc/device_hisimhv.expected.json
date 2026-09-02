@@ -6,7 +6,7 @@
     "kind": "ngspice-44.2",
     "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
     "command": "ngspice -n -b -r reference.raw circuit.sp",
-    "source_sha256": "789604792a07f08a72ad7953b1bf31d609fd0cfb7b166c64a649bedc368c6608"
+    "source_sha256": "5201568cf3eb0beb4632a9958f3cffa9b43dd673a2bb4dea6434e29b5bb423fd"
   },
   "origin": "benchmark/fixtures/devices/hisimhv/circuit.sp",
   "expect": {
@@ -1659,5 +1659,5 @@
   "notes": [
     "Invalid/ignored legacy model parameters or model-level selectors were corrected during migration; see MIGRATION.json. Reference results use the corrected deck."
   ],
-  "netlist_sha256": "3f95b975293558a9e6d78dea72e8c53d5ee73e26f19d747f22659c9d5655afc7"
+  "netlist_sha256": "5201568cf3eb0beb4632a9958f3cffa9b43dd673a2bb4dea6434e29b5bb423fd"
 }

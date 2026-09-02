@@ -1710,9 +1710,11 @@ fn inferDeviceFromModel(dev: Device) !?devices.DeviceId {
     const l = try modelLevel(dev);
     if (std.ascii.eqlIgnoreCase(m.kind, "vdmos"))
         return .vdmos;
-    // The OSDI module name ngspice loads PSP 103 under (IHP SG13G2 cards).
-    if (std.ascii.eqlIgnoreCase(m.kind, "psp103va"))
-        return .psp103;
+    // The Verilog-A module name an OSDI deck loads the model under.
+    var lower: [32]u8 = undefined;
+    if (m.kind.len <= lower.len) {
+        if (devices.module_map.get(std.ascii.lowerString(&lower, m.kind))) |id| return id;
+    }
     if (eqlAny(m.kind, &.{ "nmos", "pmos" }))
         return devices.mosfetDeviceId(l) catch null;
     if (eqlAny(m.kind, &.{ "npn", "pnp" }))

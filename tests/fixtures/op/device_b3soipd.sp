@@ -1,3 +1,4 @@
+* KNOWN GAP: ngspice 45 runs its built-in B4SOI 4.4 C model; ESPice runs Berkeley's BSIM-SOI 101.0.0 release unmodified, a different model version
 * BSIM3SOI-PD (Partial Depletion) NMOS operating point.
 * Expected results: device_b3soipd.expected.json
 * Origin: benchmark/fixtures/devices/b3soipd/circuit.sp

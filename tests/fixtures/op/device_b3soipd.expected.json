@@ -6,7 +6,7 @@
     "kind": "ngspice-44.2",
     "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
     "command": "ngspice -n -b -r reference.raw circuit.sp",
-    "source_sha256": "849f726ac278088945bb9d3daaa245c1735e05cab1b75a7536c8865b1eb5fba0"
+    "source_sha256": "8b72fba5270d4008b26c61ea10a319e92c9d0949f37c38003fdab87c7f2a481b"
   },
   "origin": "benchmark/fixtures/devices/b3soipd/circuit.sp",
   "expect": {
@@ -79,5 +79,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "6b545805a1d847b4471d2c81a412ba6362e38d04b366f9f586d7af6bbe810fc8"
+  "netlist_sha256": "8b72fba5270d4008b26c61ea10a319e92c9d0949f37c38003fdab87c7f2a481b"
 }

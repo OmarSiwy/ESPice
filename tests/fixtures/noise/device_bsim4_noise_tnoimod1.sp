@@ -1,4 +1,4 @@
-* KNOWN GAP: tnoiMod=1 needs Gm/Gds/Gmb at the noise point, which waits on ddx() in VerA noisePsd (#119)
+* KNOWN GAP: tnoiMod=1 needs Gm/Gds/Gmb at the noise point; bsim4va.va takes them from its own NOISE_DERIVATIVES path, which is commented out there, not from ddx()
 * BSIM4 tnoiMod=1 (holistic thermal noise), fnoiMod=0, with source/drain
 * resistance, against ngspice 45 (#80): b4noi.c clamps npart_theta to 0.9
 * (and 0.9*npart_beta) and multiplies gspr by (1 + theta^2*gspr/IdovVds);

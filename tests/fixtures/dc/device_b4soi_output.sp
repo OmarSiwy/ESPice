@@ -1,3 +1,4 @@
+* KNOWN GAP: ngspice 45 runs its built-in B4SOI 4.4 C model; ESPice runs Berkeley's BSIM-SOI 101.0.0 release unmodified, a different model version
 * BSIM4SOI output characteristics: Ids vs Vds at multiple Vgs.
 * Expected results: device_b4soi_output.expected.json
 * Origin: benchmark/fixtures/devices/b4soi_output/circuit.sp

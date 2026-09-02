@@ -6,7 +6,7 @@
   "kind": "ngspice-45",
   "derivation": "Independent ngspice-45 run of this deck. Stored binary raw doubles, selected by column name.",
   "command": "ngspice -n -b -r reference.raw circuit.sp",
-  "source_sha256": "16f32bb7b7a886ae8cb4337105a8263c80dbf60951268cdb48bdf089f3e5d6d4"
+  "source_sha256": "23428ce23a4d4811e26fca5dad504623ca3b62d6f6487e5cc026c6712e21b30a"
  },
  "origin": "tests/fixtures/noise/device_bsim4_noise_tnoimod1.sp",
  "expect": {
@@ -151,5 +151,5 @@
   "finite_values_required": true,
   "all_requested_analyses_must_complete": true
  },
- "netlist_sha256": "16f32bb7b7a886ae8cb4337105a8263c80dbf60951268cdb48bdf089f3e5d6d4"
+ "netlist_sha256": "23428ce23a4d4811e26fca5dad504623ca3b62d6f6487e5cc026c6712e21b30a"
 }

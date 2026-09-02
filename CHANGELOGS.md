@@ -12,6 +12,10 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.meas sp` measures the S-parameter plot, AT= may name an earlier result (`find v(a) at=t50`), PARAM prints six significant digits as ngspice does, and `.dout` reports running out of memory instead of a malformed card (#69).
 - CSV quotes headers such as `S(1,1)_re`, PSF escapes quotes and backslashes, and CITIfile declares `VAR FREQ` and every `DATA` up front with one `BEGIN`/`END` block each, so scikit-rf reads it (#61).
 - `.meas tran_cont x find v(a) at=1n` (and DERIV) prints its one value instead of looping forever (#68).
+- On a GPU backend, sources, switches, transmission and delay lines, Laplace and pole filters, S-parameter and W elements, mosvar and r3_cmc evaluate on the GPU instead of the host (#139).
+- On a GPU backend, MVSG devices evaluate on the CPU: their kernel's stack frame (432 KB) is over CUDA's limit, so the launch failed (#139).
+- mosvar, hicumL2_va, asmesd and asmesd_dio get GPU kernels; a source-size gate that counted their whole upstream release left them out (#139).
+- `--backend auto` runs a deck whose large GPU kernel the driver has not compiled yet entirely on the CPU, instead of leaving that one model on the host (#139).
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - `--backend cuda` evaluates BSIM4 (LEVEL 14/54, sky130), VBIC and MOS levels 1/2/3/6/9 on the GPU: held variables and limiting now live in device state; device ABI 27 (#140).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.
@@ -37,6 +41,11 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).
 - `.tran` with MATEX fails the step instead of hanging when the Krylov matrix overflows to inf (#125).
 - Device evaluation no longer copies a deduplicated model row onto itself, undefined behaviour in release builds (#122).
+- Third-party compact models are built from their upstream releases, unmodified, pinned by link and hash in `build.zig.zon`: PSP 103.8.2/104.1, JUNCAP2, BSIM-IMG, BSIM-CMG, BSIM-BULK, BSIM-SOI 101.0, L-UTSOI, HiSIM_HV/SOI/SOTB, HICUM/L2 3.2 and L0, Mextram 505.6, ASM-HEMT, ASM-ESD, MVSG, DIODE_CMC, R2/R3_CMC and MOSVAR; new LEVELs 72/76/77/78 (M), 6 (Q, D) and OSDI module names on `.model`.
+- `.noise` reads a `ddx()` inside a Verilog-A noise power (a channel noise's gm) instead of 0: MOS3, MOS9 and JFET2 channel noise now match ngspice (#119).
+- `.hdl` Verilog-A, VerA pin df3bd51d -> 7971b23e: a `$simparam` used as a parameter default answers per LRM 9.15 instead of reading 0 (VerA#51).
+- `.hdl` Verilog-A, VerA pin 53e61b89 -> df3bd51d: `ddx()` inside a noise power reads its partial in
+  `noisePsd` (VerA#32), `$port_connected`/`$param_given` may control analog operators (VerA#33).
 - `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one
   derivative lane per unknown) (#117).
 - `bench-suites -Dsuite=cmcqa`: the HICUM and PSP noise tests, one `.noise` deck per bias point (#18).

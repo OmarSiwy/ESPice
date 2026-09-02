@@ -9,6 +9,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const fastvaf = @import("fastvaf");
 const digital = @import("vera_sim").digital;
+/// `digital.emitDevice`'s result. VerA keeps the type itself private.
+const DeviceZig = @typeInfo(@typeInfo(@TypeOf(digital.emitDevice)).@"fn".return_type.?).error_union.payload;
 const ir = @import("device_abi");
 
 const DeviceVtable = ir.DeviceVtable;
@@ -83,7 +85,7 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     // §9.4 display tasks as `say` (`Hooks.say`, #102).
     var va: ?fastvaf.CompileResult = null;
     defer if (va) |*r| r.deinit();
-    var v: digital.DeviceZig = undefined;
+    var v: DeviceZig = undefined;
     const module_name = switch (hdl) {
         .va => blk: {
             const dir = std.fs.path.dirname(path) orelse ".";
@@ -126,10 +128,11 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
         .{ .name = "core", .root = paths.core, .deps = &.{"stdpp"} },
         .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
-        .{ .name = "sim", .root = try std.fs.path.join(arena, &.{ vera_root, "src/sim/root.zig" }), .deps = &.{ "contract", "diag", "frontend", "kernels" } },
+        .{ .name = "sim", .root = try std.fs.path.join(arena, &.{ vera_root, "src/sim/root.zig" }), .deps = &.{ "contract", "base", "diag", "frontend", "kernels" } },
+        .{ .name = "base", .root = try std.fs.path.join(arena, &.{ vera_root, "lib/base/root.zig" }) },
         .{ .name = "diag", .root = try std.fs.path.join(arena, &.{ vera_root, "lib/diag.zig" }) },
-        .{ .name = "frontend", .root = try std.fs.path.join(arena, &.{ vera_root, "lib/frontend/root.zig" }), .deps = &.{"diag"} },
-        .{ .name = "kernels", .root = try std.fs.path.join(arena, &.{ vera_root, "lib/backend/kernels.zig" }) },
+        .{ .name = "frontend", .root = try std.fs.path.join(arena, &.{ vera_root, "lib/frontend/root.zig" }), .deps = &.{ "base", "diag", "kernels" } },
+        .{ .name = "kernels", .root = try std.fs.path.join(arena, &.{ vera_root, "lib/kernels/root.zig" }), .deps = &.{"contract"} },
     };
     // The vtable crosses the dlopen boundary with Zig calling convention and
     // auto layout, so the library must match the host's backend and mode
@@ -153,10 +156,15 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(device.text);
     const host_layout = ir.layoutHash();
-    const module_layout = fastvaf.orchestrator.layoutHash(options);
     hash.update(std.mem.asBytes(&host_layout));
     hash.update(std.mem.asBytes(&ir.abi_version));
-    hash.update(std.mem.asBytes(&module_layout));
+    // The module set; mode and backend are the host's, in `host_layout`.
+    for (modules) |m| {
+        hash.update(m.name);
+        hash.update(&.{0});
+        hash.update(m.root);
+        hash.update(&.{0});
+    }
     const digest = hash.finalResult();
     const work_dir = try std.fs.path.join(gpa, &.{ paths.work_dir, &std.fmt.bytesToHex(digest, .lower) });
     defer gpa.free(work_dir);
@@ -513,7 +521,7 @@ fn has(list: []const []const u8, path: []const u8) bool {
 /// schedule (the CLI's default). Prints VerA's diagnostics, the W1155 1 s
 /// tick warning included, and fails with `DigitalFailed` on its E1103
 /// refusal.
-fn emitDigital(arena: std.mem.Allocator, path: []const u8, source: []const u8) !digital.DeviceZig {
+fn emitDigital(arena: std.mem.Allocator, path: []const u8, source: []const u8) !DeviceZig {
     var bag: fastvaf.diag.Bag = .init(arena);
     try bag.setSingleFile(path, source);
     const dev = digital.emitDevice(arena, source, .{ .file_name = path }, .static, &bag);

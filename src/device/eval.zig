@@ -757,6 +757,14 @@ pub inline fn mfactorOf(comptime D: type, inst: anytype) f64 {
     return if (comptime @hasField(D.Instance, "mfactor")) inst.mfactor else 1.0;
 }
 
+/// `noisePsd`'s family: `eval`'s wide basis, dense and in f64, so a `ddx` in
+/// a PSD argument (a channel noise's gm) reads its partial. `Real` would read
+/// it as 0 (#119).
+fn NoiseFamily(comptime D: type) type {
+    const lane = comptime basisOf(D, false).lane[0..contract.nU(D)].*;
+    return DualFor(f64, &lane, .{ .dense = true }, @hasDecl(D, "collapse"));
+}
+
 /// Evaluates instances `[first, end)` of D and stamps residual, charge and
 /// both Jacobians through `sink`. The one physics body: the host sink adds
 /// into the planes, the GPU sink writes per-contribution staging cells.
@@ -1105,12 +1113,7 @@ pub fn ProtoStore(comptime D: type) type {
         fn addPatternLocal(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             const pat = comptime jacPattern(D);
-            const nnz = comptime blk: {
-                var k: usize = 0;
-                for (pat) |m| k += @popCount(m & lowBits(n_u));
-                break :blk k;
-            };
-            try pb.reserve(gpa, self.nodes.items.len * nnz);
+            try pb.reserve(gpa, self.nodes.items.len * SlotMap(D).k);
             // Runtime loops: this runs once per batch, and unrolling n_u^2
             // for every device only costs comptime quota.
             for (self.nodes.items) |nd| {
@@ -2203,7 +2206,7 @@ pub fn DeviceBatch(comptime D: type) type {
             try list.ensureUnusedCapacity(gpa, self.count * D.noise_gens.len);
             for (0..self.count) |id| {
                 const base: u32 = @intCast(list.items.len);
-                const terms = D.noisePsd(Real, self.localX(x, id), self.model(id), &self.instances[id], self.sim);
+                const terms = D.noisePsd(NoiseFamily(D), self.localX(x, id), self.model(id), &self.instances[id], self.sim);
                 // m copies are m independent generators: m times the power.
                 // A table row's PSD is the table, so its amplitude takes sqrt(m).
                 const mf = mfactorOf(D, &self.instances[id]);
@@ -2431,9 +2434,9 @@ fn isVera(comptime D: type) bool {
 ///   (`statusOnlyMutable`);
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
 ///   `limiter_previous` the host advances on its own Instance copy;
-/// - otherwise, `State` without `limit` that VerA does not declare
-///   `.path_latch` (sources and FSMs whose eval reads host-owned
-///   per-attempt state).
+/// `State` without `limit` that VerA does not declare `.path_latch` (the
+/// `.history` class: switches, delay lines, Laplace and pole filters) is
+/// admitted host-stepped (`gpuHostStepped`).
 /// A path latch (`state_class == .path_latch`, or `State` with `limit`) is
 /// what `StateKernel` and `CtlKernel` run on the device: `updateState`
 /// stages `wb__/wq__`, `stateCtl` commits them into the `pb__/pq__` latches
@@ -2447,11 +2450,29 @@ fn isVera(comptime D: type) bool {
 // `StateKernel` flags any non-`.ok` `updateState` so a device that breaks it
 // falls back to the CPU instead of running wrong.
 fn gpuEligible(comptime D: type) bool {
-    if (@hasDecl(D, "mutable_eval") and D.mutable_eval and !statusOnlyMutable(D)) return false;
-    if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
-    if (holdsOnlyHeld(D)) return true;
-    return @hasDecl(D, "limit") or !@hasDecl(D, "State") or
-        (@hasDecl(D, "state_class") and D.state_class == .path_latch);
+    return gpuRefusal(D) == null;
+}
+
+/// Why `gpuEligible` turns D down, one tag per rule above in order. The
+/// inventory test in tests/eval.zig pins it per built-in model.
+const GpuRefusal = enum { mutable_eval, newton_history };
+
+fn gpuRefusal(comptime D: type) ?GpuRefusal {
+    if (@hasDecl(D, "mutable_eval") and D.mutable_eval and !statusOnlyMutable(D)) return .mutable_eval;
+    if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return .newton_history;
+    return null;
+}
+
+/// Whether D evaluates on the device but steps its state on the host: its
+/// `State` is `.history` (no `limit`, no held variables, not a path
+/// latch), so `updateState`, `commit_state` and `stateCtl` walk the host
+/// Instance, where step control reads breakpoints and `$bound_step`, and
+/// the GPU context uploads the rows they change before the next eval
+/// (`GpuContext.pushStepped`). No state or control kernel.
+fn gpuHostStepped(comptime D: type) bool {
+    if (!gpuEligible(D) or holdsOnlyHeld(D)) return false;
+    if (@hasDecl(D, "limit") or !@hasDecl(D, "State")) return false;
+    return !(@hasDecl(D, "state_class") and D.state_class == .path_latch);
 }
 
 /// Whether D is `mutable_eval` only for VerA's §9.7.3 status latch: eval
@@ -2465,7 +2486,7 @@ fn statusOnlyMutable(comptime D: type) bool {
 
 /// Whether D's GPU eval kernel is paired with a `StateKernel`.
 fn hasStateKernel(comptime D: type) bool {
-    return gpuEligible(D) and (@hasDecl(D, "limit") or @hasDecl(D, "State"));
+    return gpuEligible(D) and (@hasDecl(D, "limit") or @hasDecl(D, "State")) and !gpuHostStepped(D);
 }
 
 /// Whether D also needs a `CtlKernel`: `stateCtl` mutates the resident
@@ -2987,6 +3008,15 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
 
 fn placeholder(_: u64) callconv(gompute.kernel_callconv) void {}
 
+/// Models whose AMDGCN kernel LLVM cannot compile: the HIP image carries a
+/// placeholder for them, so a HIP run evaluates them on the host ("no kernel
+/// image in this build"); CUDA still builds them. l_utsoi (L-UTSOI 102.9.0):
+/// LLVM 21 segfaults in `zig build-obj -target amdgcn-amdhsa -mcpu
+/// gfx1100+trap_handler -Ofast` (2026-10-18).
+// ponytail: a name list until the LLVM amdgcn segfault on l_utsoi (#169) is fixed
+// upstream; drop the row then. No AMD hardware runs these kernels here.
+const hip_host_only = std.StaticStringMap(void).initComptime(.{.{"l_utsoi"}});
+
 // As the build root, export every model in `models`: its GPU kernels (or a
 // no-op placeholder when it is not GPU-eligible) in a device compilation, and
 // its `arp_device_<name>` vtable getter on the host.
@@ -2996,7 +3026,7 @@ comptime {
             const D = @field(@import("models"), decl_name);
             if (gompute.is_device) {
                 const block_size = ir.gpu_block_size;
-                if (gpuEligible(D)) {
+                if (gpuEligible(D) and !(builtin.cpu.arch == .amdgcn and hip_host_only.has(decl_name))) {
                     gompute.exportRaw(kernelName(D), &DeviceKernel(D, block_size).run);
                     if (hasStateKernel(D)) gompute.exportRaw(stateKernelName(D), &StateKernel(D, block_size).run);
                     if (hasCtlKernel(D)) gompute.exportRaw(ctlKernelName(D), &CtlKernel(D, block_size).run);
@@ -3023,6 +3053,8 @@ comptime {
 /// not here: this file is a dependency module of every test root, and Zig
 /// runs only the root module's tests.
 pub const test_access = if (@import("builtin").is_test) .{
+    .gpuRefusal = gpuRefusal,
+    .GpuRefusal = GpuRefusal,
     .Real = Real,
     .Sparse = DualFor(f64, &.{ 0, 1 }, hostLayout(false), false),
     .SparseF32 = DualFor(f32, &.{ 0, 1 }, hostLayout(false), false),

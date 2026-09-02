@@ -6,7 +6,7 @@
     "kind": "ngspice-44.2",
     "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
     "command": "ngspice -n -b -r reference.raw circuit.sp",
-    "source_sha256": "c6020ffc05db05a4ea4de52c5bfb12d237add0e356a7d1d2e38429ef56b16c12"
+    "source_sha256": "0d3e6049bf7b5cfa7cc36458001fb7d523d42fc3a06ece7668ad0cb613194348"
   },
   "origin": "benchmark/fixtures/devices/b4soi_output/circuit.sp",
   "expect": {
@@ -2165,5 +2165,5 @@
   "notes": [
     "Invalid/ignored legacy model parameters or model-level selectors were corrected during migration; see MIGRATION.json. Reference results use the corrected deck."
   ],
-  "netlist_sha256": "7f30c1fddc8d86e4a8e36a74833437c31d567411f28298ed1b220356f716a48e"
+  "netlist_sha256": "0d3e6049bf7b5cfa7cc36458001fb7d523d42fc3a06ece7668ad0cb613194348"
 }
