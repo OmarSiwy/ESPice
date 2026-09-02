@@ -60,6 +60,7 @@ The reason in parentheses is one of:
 | `CircuitNotEligible` | no device in the circuit has a GPU kernel in this binary |
 | `NoGpuArtifacts` | the binary was built with no device kernels at all |
 | `NotEnoughGpuWork` | the cost estimate says the CPU is faster (`auto` only) |
+| `ImageNotCompiled` | a device type's kernel (over 1 MB of PTX) has not been compiled by the driver yet, so the whole run stays on the CPU (`auto` only; one `--backend cuda` run compiles it) |
 | a driver error | the CUDA or HIP runtime refused |
 
 With `--gpu` the same deck falls back, because the machine has a GPU and

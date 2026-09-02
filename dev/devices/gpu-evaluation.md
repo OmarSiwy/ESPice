@@ -158,8 +158,9 @@ driver call:
   because `stress/scaling_rc_ladder_100k` (200,000 resistors and
   capacitors) runs slower per step on the GPU path than its eval times
   predict.
-- An image over 1 MB of PTX that the driver has not compiled yet stays on
-  the CPU, and a note says how to compile it.
+- An image over 1 MB of PTX that the driver has not compiled yet keeps the
+  whole query on the CPU (`ImageNotCompiled`), and a note says how to
+  compile it. Before #139 only that model stayed behind, on one host thread.
 
 The constants and their measurements are next to their definitions at the
 top of `gpu.zig`. The model is static. A deck whose step count the guess

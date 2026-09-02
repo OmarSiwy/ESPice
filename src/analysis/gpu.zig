@@ -55,7 +55,7 @@ pub const InitError = Error || std.mem.Allocator.Error || gompute.Error;
 /// allocation failure included, is `.machine`.
 pub fn declineKind(e: InitError) Decline {
     return switch (e) {
-        Error.NotEnoughGpuWork => .policy,
+        Error.NotEnoughGpuWork, Error.ImageNotCompiled => .policy,
         Error.CircuitNotEligible => .capability,
         else => .machine,
     };
@@ -115,6 +115,9 @@ pub const Error = error{
     CircuitNotEligible,
     /// The cost model priced the CPU faster.
     NotEnoughGpuWork,
+    /// `auto` met a heavy image the driver has not compiled yet. The whole
+    /// query runs on the CPU rather than leave that one model behind (#139).
+    ImageNotCompiled,
 };
 
 /// The price of the device path, measured on an RTX 4060 Laptop (sm_89,
@@ -755,8 +758,9 @@ pub const GpuContext = struct {
     }
 
     /// Loads batch `b`'s kernels and uploads its working set into `bg`.
-    /// False when it stays on the host: no GPU payload, no image in this
-    /// build, or (`auto`) an image the driver has not compiled yet.
+    /// False when it stays on the host: no GPU payload or no image in this
+    /// build. Under `auto`, an image the driver has not compiled yet fails
+    /// with `ImageNotCompiled`.
     fn loadBatch(gpa: std.mem.Allocator, bg: *BatchGpu, b: device_ir.Batch, explicit: bool, report: bool, knobs: Knobs) !bool {
         const get = b.hooks.gpu_payload orelse return false;
         const p = get(b.ctx);
@@ -767,10 +771,10 @@ pub const GpuContext = struct {
         const heavy = image.len >= heavy_image_bytes;
         if (heavy and !explicit and !imageWarm(image, knobs)) {
             std.debug.print(
-                "note: GPU kernel for '{s}' is not compiled yet ({d} MB of PTX); `--backend cuda` compiles it once per build\n",
+                "note: GPU kernel for '{s}' is not compiled yet ({d} MB of PTX), so this run stays on the CPU; `--backend cuda` compiles it once per build\n",
                 .{ b.type_name, image.len >> 20 },
             );
-            return false;
+            return Error.ImageNotCompiled;
         }
         if (heavy and report and !imageWarm(image, knobs)) std.debug.print(
             "note: compiling the GPU kernel for '{s}' ({d} MB of PTX); the driver caches it for later runs\n",
