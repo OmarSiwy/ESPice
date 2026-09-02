@@ -115,6 +115,9 @@ Build and backend gates, which apply whatever the rule says:
   `DeviceKernel`) brings mvsg to 46,320 B (ptxas 153 s, 5.7 GB) and
   bsimcmg to 18,544 B (77 s, 2.3 GB). Making it the GPU default belongs to
   the models-upstream work.
+- `eval.hip_host_only` (l_utsoi): LLVM 21 segfaults compiling its AMDGCN
+  kernel, so the HIP image has a placeholder and HIP runs evaluate it on the
+  host; CUDA is unaffected. Untested on hardware (no AMD GPU here).
 - `auto` no longer demotes one batch whose heavy image the driver has not
   compiled yet. It declines the GPU for the whole query
   (`ImageNotCompiled`), so a GPU run never leaves a heavy model on one host
