@@ -277,7 +277,7 @@ pub fn build(b: *std.Build) void {
         // `-Dgpu=false` still compiles one model: gompute panics on an empty
         // root list, and `--backend cuda` must keep erroring by name.
         if (!gpu_kernels and !std.mem.eql(u8, m.name, smallest_model)) continue;
-        if (m.size >= gpu_max_model_bytes or gpu_host_only.has(m.name)) continue;
+        if (gpu_host_only.has(m.name)) continue;
         const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
         dev_imports.* = .{ .models = one_mod, .contract = contract_mod, .device_abi = device_abi_mod };
         roots.append(b.allocator, .{
@@ -419,6 +419,7 @@ pub fn build(b: *std.Build) void {
             t.run(M.make(b.path("src/device/tests/eval.zig"), &.{
                 .{ .name = "device_eval", .module = device_eval_mod },
                 .{ .name = "contract", .module = contract_mod },
+                .{ .name = "models", .module = models_mod },
             }), &.{}, false),
             t.run(error_tests_mod, &.{}, false),
         } },
@@ -885,38 +886,26 @@ fn inCsv(csv: []const u8, name: []const u8) bool {
 }
 
 /// Source size from which a model's GPU compile runs on the chained
-/// `heavy_lanes` instead of alongside the others. Must stay below
-/// `gpu_max_model_bytes` to gate anything; 20 KB puts the largest admitted
-/// kernels (mos9, gummel_poon, mos2) on those lanes.
+/// `heavy_lanes` instead of alongside the others; 20 KB puts mos9,
+/// gummel_poon and mos2 on those lanes. An upstream model's size is its whole
+/// release directory, so this overcounts them.
 const heavy_model_bytes: u64 = 20 * 1024;
 
-/// Source size at or above which a model gets no GPU kernel. Every model in
-/// `models/` fits (hisimhv_va is the largest at 601 KB), so this only guards
-/// a future one. Measured on an RTX 4060 Laptop (sm_89) against an
-/// i9-14900HX, 2000 parallel inverters, per device eval:
-///
-///   model        source   PTX      cold JIT   GPU eval   one host core
-///   bsim4va      431 KB   3.6 MB     15 s       0.7 ms      7.3 ms
-///   psp103       397 KB   7.8 MB     35 s       1.1 ms      ~8 ms
-///   hisimhv_va   601 KB  29.3 MB   1001 s       6.3 ms     ~33 ms
-///
-/// The cold JIT happens once per build: the driver caches the result in
-/// ~/.nv/ComputeCache (raised to 4 GiB at run time, see analysis/gpu.zig),
-/// and `--backend auto` leaves an image over 1 MB of PTX on the CPU until an
-/// explicit `--backend cuda` run has compiled it. Admitting them costs the
-/// default build ~4 more minutes (7 min to 11-12 min on this machine).
-///
-/// The previous 80 KB limit assumed the kernels lose; that was before
-/// held-variable models could be resident and before the fused reduce and
-/// the one-wait Newton iteration.
-const gpu_max_model_bytes: u64 = 1024 * 1024;
+// Every model gets a GPU image (#139). The 1 MB source gate that stood here
+// summed an upstream model's whole release directory, which kept mosvar
+// (35 KB), hicumL2_va (76 KB), asmesd and asmesd_dio off the GPU. The cold
+// JIT costs it guarded against are in dev/devices/gpu-evaluation.md
+// ("Choosing the backend"): `auto` leaves a cold image over 1 MB of PTX on
+// the CPU until a `--backend cuda` run has compiled it.
 
 /// Models whose GPU kernel needs a bigger stack frame than CUDA allows
 /// (262,136 B), so they run on the host only. Measured with sm_89 on
 /// 2026-10-17: asmhemt (ASM-HEMT 101.6.0) 363,656 B, bsimsoi_va (BSIM-SOI
-/// 101.0.0) 323,896 B. The source size does not predict it: both are under
-/// `gpu_max_model_bytes`.
-const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"} });
+/// 101.0.0) 323,896 B. The source size does not predict it. mvsg (MVSG_CMC
+/// 5.0.0): 432,112 B at ReleaseFast by ptxas 13.4, sm_89 (2026-10-18); no
+/// deck exercised it, so it shipped resident. The sparse derivative layout
+/// takes it to 46,320 B (dev/devices/gpu-evaluation.md, Inventory).
+const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"}, .{"mvsg"} });
 
 /// Models whose source has a string escape outside LRM Table 2-2 (W0149),
 /// allowed per file because the sources are not ours to edit. Both sit in
