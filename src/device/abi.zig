@@ -147,6 +147,18 @@ comptime {
     std.debug.assert(@sizeOf(Planes) == 4 * @sizeOf([]f64));
 }
 
+/// Which planes a stamp writes. `.charge` is the transient's post-accept
+/// re-read: `q_vec` and the per-batch `q_tape` only.
+pub const StampMode = enum(u8) { full, newton, charge };
+
+/// A batch's scatter tapes, `count * k` slot entries (g and c) and `count *
+/// n_u` row entries (rhs and q), instance-major. Ground entries hold the
+/// trash slot or row.
+pub const ScatterTapes = struct {
+    slots: []const u32,
+    rows: []const u32,
+};
+
 /// One device type's frozen batch, made by `Proto.finalize`. `eval` and
 /// `eval_newton` stamp instances `[first, last)` into the given planes, so the
 /// same entry serves the serial path and a ParEval lane; `eval_newton` skips
@@ -231,10 +243,14 @@ pub const Hooks = struct {
     copy_state: *const fn (*anyopaque, *const anyopaque) void,
     /// Syncs the host limiting flag after GPU state is downloaded.
     set_limit_active: ?*const fn (*anyopaque, bool) void = null,
-    /// `{slot_lo, slot_hi, row_lo, row_hi}` touched by instances
-    /// `[first, last)`, the trash slot and row excluded. Asserts
-    /// `first <= last <= count`.
-    scatter_bounds: *const fn (*anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32,
+    /// Stamps instances `[first, last)` in `mode` with every stamp stored at
+    /// its own position, relative to the batch: g/c at its `slots` index,
+    /// rhs/q at `id * n_u + ru`. A position the pass does not stamp is left
+    /// alone. ParEval sums the positions into each plane cell in tape order,
+    /// which is the order the serial `eval` adds them in.
+    stage: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64, StampMode) void,
+    /// The batch's scatter tapes: plane cell of every staged position.
+    scatter_tapes: *const fn (*anyopaque) ScatterTapes,
     apply_limits: ?*const fn (*anyopaque, []f64, []const f64) bool = null,
     clear_limits: ?*const fn (*anyopaque) void = null,
     /// Advances Newton-history state between evaluated iterates, given the
@@ -591,7 +607,8 @@ pub const GpuPayload = struct {
 // 27: `GpuPayload.held`; the state kernel takes `halves` after `lim_active`,
 //    so held-variable devices that limit (mos1/2/3/6/9, bsim4va,
 //    vbic13_4t) are resident.
-// 28: `layoutHash` recurses into by-value struct fields; no layout moved.
+// 28: `Hooks.stage` and `Hooks.scatter_tapes` replace `scatter_bounds`;
+//     `layoutHash` recurses into by-value struct fields (no layout moved).
 pub const abi_version: u32 = 28;
 
 /// A device type's construction entry points, exported by each device object

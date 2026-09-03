@@ -864,9 +864,9 @@ fn runThreaded(path: []const u8, device_threads: u32, solver_threads: u8) ![]con
         .backend = .{ .device_threads = device_threads, .solver_threads = solver_threads },
     });
     defer p.deinit();
-    // device_threads > 1 always builds a ParEval; with four instances per
-    // lane, every lane stamps.
-    try t.expect(p.device_count() >= 4 * device_threads);
+    // device_threads > 1 always builds a ParEval; with an instance per
+    // lane at least, every lane can claim a chunk.
+    try t.expect(p.device_count() >= device_threads);
     try p.run_all();
     var bits: std.ArrayList(u64) = .empty;
     errdefer bits.deinit(t.allocator);
@@ -882,16 +882,19 @@ fn runThreaded(path: []const u8, device_threads: u32, solver_threads: u8) ![]con
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-test "same deck, same bytes: run twice, any solver_threads, any fixed device_threads" {
-    // MOS transients and an AC sweep, 200 to 512 devices. ESPICE_LU_PAR=1
+test "same deck, same bytes: run twice, any solver_threads, any device_threads" {
+    // MOS transients and an AC sweep, 18 to 512 devices. ESPICE_LU_PAR=1
     // forces the multicore refactor past its cost model; ESPICE_LU_PAR_STATS
-    // shows it admitted on all three. device_threads 1 against N is not
-    // byte-identical (ParEval regroups the stamp sums, up to 24554 ulp
-    // here, and a different point count on vacask_ring): #137.
+    // shows it admitted on the three stress decks. ParEval sums every stamp
+    // in the serial order, so device_threads N is the serial run byte for
+    // byte; before #137 it regrouped the sums (up to 24554 ulp on
+    // parallel_inverters_100) and vacask_ring's transient took 20717 /
+    // 20585 / 20318 points at 1 / 2 / 4 threads.
     const decks = [_][]const u8{
         "tests/fixtures/stress/scaling_parallel_inverters_100.sp",
         "tests/fixtures/stress/scaling_inverter_chain_256.sp",
         "tests/fixtures/stress/sweep_opamp_wl_200.sp",
+        "tests/fixtures/stress/vacask_ring.sp",
     };
     try t.expectEqual(@as(c_int, 0), setenv("ESPICE_LU_PAR", "1", 1));
     defer _ = unsetenv("ESPICE_LU_PAR");
@@ -903,10 +906,10 @@ test "same deck, same bytes: run twice, any solver_threads, any fixed device_thr
             defer t.allocator.free(again);
             try t.expectEqualSlices(u64, serial, again);
         }
-        const lanes = try runThreaded(deck_path, 4, 1);
-        defer t.allocator.free(lanes);
-        const lanes_again = try runThreaded(deck_path, 4, 1);
-        defer t.allocator.free(lanes_again);
-        try t.expectEqualSlices(u64, lanes, lanes_again);
+        for ([_]u32{ 2, 3, 4, 4 }) |device_threads| {
+            const lanes = try runThreaded(deck_path, device_threads, 1);
+            defer t.allocator.free(lanes);
+            try t.expectEqualSlices(u64, serial, lanes);
+        }
     }
 }

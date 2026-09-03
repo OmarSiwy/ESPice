@@ -1,25 +1,31 @@
-//! ParEval: the device stamp threaded over persistent worker lanes. Lane 0
-//! stamps the caller's planes; lanes 1.. stamp private slabs that are summed
-//! into them in a fixed lane order. Zero allocation and no mutex per pass.
+//! ParEval: the device stamp threaded over persistent worker lanes, bit for
+//! bit the serial stamp at any lane count (#137).
 //!
-//! Not bit-identical to the serial stamp: a plane cell becomes
-//! `((S0 + S1) + S2) + ...` over consecutive segments of the serial order.
-//! Lane cuts fall on instance boundaries, so one instance's cancelling
-//! `+g/-g` pair never straddles lanes, but two instances sharing a node can.
-//! Measured serial vs 2..16 lanes: at most 1 ulp (parallel_inverters,
-//! resistor_grid_100x100; rc_ladder_10k bit-identical), deterministic at a
-//! given lane count.
+//! A pass has two phases. Stamp: lanes claim chunks of instances and each
+//! instance stores every stamp at its own position in a staging array
+//! (`Hooks.stage`), so no two lanes write one cell. Reduce: lanes claim
+//! blocks of plane cells and sum each cell's positions in tape order onto
+//! its initial value (zero, or the constant baseline). Tape order is the
+//! order the serial stamp adds them in, so every cell rounds as it does
+//! serially, whatever the lane count or the chunk a lane happened to claim.
 //!
-//! ponytail: bit-identity would need a per-contribution staging tape and a
-//! segmented reduction (about 8x the plane footprint at mos1 geometry). Build
-//! it, copying the GPU's `Order`, only if a deck shows a thread-count-dependent
-//! trajectory (a point-count change is the tell).
+//! Claiming is dynamic, so a slow lane (an E-core beside P-cores) takes fewer
+//! chunks instead of holding up the pass. The previous design gave each lane
+//! a whole-plane slab and a static instance range: sums regrouped with the
+//! lane count (up to 24554 ulp), the slabs cost a plane copy per lane, and
+//! the reduce walked every lane's slot window, which a shared rail stretches
+//! to the whole plane (#138; dev/analysis/refactoring.md, "ParEval").
 
 const std = @import("std");
 const device_ir = @import("device").abi;
 
 const Batch = device_ir.Batch;
 const Planes = device_ir.Planes;
+
+/// Which planes a stamp writes; see `device_ir.StampMode`. `.charge` uses
+/// the same staging and reduce as `.full`, so its q plane is bit-for-bit
+/// what `.full` leaves.
+pub const Mode = device_ir.StampMode;
 
 /// Instances [first, last) of batch `batch`.
 const EvalTask = struct {
@@ -28,22 +34,8 @@ const EvalTask = struct {
     last: u32,
 };
 
-/// The plane and row index ranges one lane's tasks can write.
-const Window = struct {
-    slot_lo: u32,
-    slot_hi: u32, // exclusive
-    row_lo: u32,
-    row_hi: u32, // exclusive
-};
-
-/// Which planes a stamp writes. `.charge` is the transient's post-accept
-/// re-read: `q_vec` and the per-batch `q_tape` only. It uses the same tasks,
-/// lane cuts and reduce order as `.full`, so its q plane is bit-for-bit what
-/// `.full` leaves at the same lane count.
-pub const Mode = enum(u8) { full, newton, charge };
-
-/// Stamps instances [first, last) of one batch in `mode`. The one per-mode
-/// dispatch shared by the serial path and every lane.
+/// Stamps instances [first, last) of one batch in `mode`. The serial path's
+/// per-mode dispatch.
 pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime mode: Mode) void {
     switch (mode) {
         .full => b.eval(b.ctx, pl, first, last, x, t),
@@ -51,6 +43,45 @@ pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const
         .charge => if (b.hooks.eval_q) |f| f(b.ctx, pl, first, last, x, t),
     }
 }
+
+/// Cell -> its staging positions in tape order, for one index space (slots
+/// or rows). Cell i's positions are `src[seg[i]..seg[i + 1]]`; ground
+/// entries are in no cell.
+const Gather = struct {
+    seg: []u32,
+    src: []u32,
+
+    /// Counting sort of `tapes` (each batch's tape, its positions starting
+    /// at `base[b]`) by destination cell, stable, so each run keeps tape
+    /// order. `trash` (ground) entries are dropped.
+    fn build(gpa: std.mem.Allocator, tapes: []const []const u32, n_cells: usize, trash: u32) !Gather {
+        const seg = try gpa.alloc(u32, n_cells + 1);
+        errdefer gpa.free(seg);
+        @memset(seg, 0);
+        for (tapes) |tape| for (tape) |dest| {
+            if (dest != trash) seg[dest + 1] += 1;
+        };
+        for (1..seg.len) |i| seg[i] += seg[i - 1];
+        const src = try gpa.alloc(u32, seg[n_cells]);
+        errdefer gpa.free(src);
+        const cursor = try gpa.dupe(u32, seg[0..n_cells]);
+        defer gpa.free(cursor);
+        var pos: u32 = 0;
+        for (tapes) |tape| for (tape) |dest| {
+            if (dest != trash) {
+                src[cursor[dest]] = pos;
+                cursor[dest] += 1;
+            }
+            pos += 1;
+        };
+        return .{ .seg = seg, .src = src };
+    }
+
+    fn deinit(self: Gather, gpa: std.mem.Allocator) void {
+        gpa.free(self.seg);
+        gpa.free(self.src);
+    }
+};
 
 /// Persistent-worker threaded stamp. Owned by the executor for one query;
 /// the batch table it was built for must not change shape while it lives.
@@ -60,21 +91,29 @@ pub const ParEval = struct {
     io: std.Io,
     n_lanes: u32,
 
-    /// Private planes of lanes 1.., `n_lanes - 1` back-to-back copies each.
-    /// c/q are empty without charge.
-    g_slab: []f64,
-    c_slab: []f64,
-    rhs_slab: []f64,
-    q_slab: []f64,
+    /// Staged stamps, one position per tape entry: every batch's slot
+    /// entries back to back (g, c), and its row entries (rhs, q). Each
+    /// position holds -0.0 between passes, the additive identity, so one a
+    /// pass leaves unstamped adds nothing, not even a sign. c/q are empty
+    /// without charge.
+    g_stage: []f64,
+    c_stage: []f64,
+    rhs_stage: []f64,
+    q_stage: []f64,
+    /// Batch b's first slot and row position.
+    slot_base: []u32,
+    row_base: []u32,
+    slots: Gather,
+    rows: Gather,
 
-    /// Every lane's tasks, lane-major; lane l owns `tasks[task_off[l]..task_off[l+1]]`.
+    /// Stamp chunks, claimed in order through `next_task`.
     tasks: []EvalTask,
-    task_off: []u32,
-    /// Write window of lanes 1.., indexed `lane - 1`.
-    windows: []Window,
+    /// Reduce blocks over the cells `[0, nnz + n)`, slots then rows: block j
+    /// is `[cuts[j], cuts[j + 1])`, claimed through `next_block`.
+    cuts: []u32,
 
-    nnz1: usize,
-    n1: usize,
+    nnz: u32,
+    n: u32,
     has_charge: bool,
 
     threads: []std.Thread,
@@ -85,21 +124,32 @@ pub const ParEval = struct {
     /// Workers parked (or about to park) on `epoch`. `run` pays for the wake
     /// syscall only when this is nonzero.
     sleepers: std.atomic.Value(u32),
+    next_task: std.atomic.Value(u32),
+    next_block: std.atomic.Value(u32),
     /// Lanes, lane 0 included, finished stamping the current pass.
     stamped: std.atomic.Value(u32),
     /// Workers finished with the current pass, reduce included.
     done: std.atomic.Value(u32),
     /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
-    job_own_planes: Planes,
+    job_planes: Planes,
+    job_base: Base,
     job_x: []const f64,
     job_t: f64,
     job_mode: Mode,
 
-    /// Splits the batches into `n_lanes_req` (at least 1) lanes of roughly
-    /// equal `count * instanceWeight` work, cut at instance boundaries in
-    /// ascending order. Threads start lazily on the first `run`. `batches`
-    /// must outlive it; free it with `deinit`.
+    /// Initial g and c of every cell: the constant baseline, or empty for
+    /// zero.
+    pub const Base = struct {
+        g: []const f64 = &.{},
+        c: []const f64 = &.{},
+    };
+
+    /// Builds the staging for `batches` and splits the instances into
+    /// chunks of roughly equal `count * instanceWeight` work, about eight
+    /// per lane, so a fast lane can take a slow lane's share. Threads start
+    /// lazily on the first `run`. `batches` must outlive it; free it with
+    /// `deinit`.
     pub fn init(
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -110,117 +160,92 @@ pub const ParEval = struct {
         trash_slot: u32,
         n_lanes_req: u32,
     ) !ParEval {
+        std.debug.assert(trash_slot == nnz);
         const n_lanes = @max(n_lanes_req, 1);
-        const nnz1: usize = nnz + 1;
-        const n1: usize = n + 1;
-        const extra: usize = n_lanes - 1;
 
-        var w_total: u64 = 0;
-        for (batches) |b| w_total += @as(u64, b.count) * instanceWeight(b);
-        const target: u64 = (w_total + n_lanes - 1) / n_lanes;
-
-        var lane_tasks = try gpa.alloc(std.ArrayList(EvalTask), n_lanes);
-        defer {
-            for (lane_tasks) |*lt| lt.deinit(gpa);
-            gpa.free(lane_tasks);
+        const slot_base = try gpa.alloc(u32, batches.len);
+        errdefer gpa.free(slot_base);
+        const row_base = try gpa.alloc(u32, batches.len);
+        errdefer gpa.free(row_base);
+        const slot_tapes = try gpa.alloc([]const u32, batches.len);
+        defer gpa.free(slot_tapes);
+        const row_tapes = try gpa.alloc([]const u32, batches.len);
+        defer gpa.free(row_tapes);
+        var n_slot: u64 = 0;
+        var n_row: u64 = 0;
+        for (batches, slot_base, row_base, slot_tapes, row_tapes) |b, *sb, *rb, *st, *rt| {
+            const tapes = b.hooks.scatter_tapes(b.ctx);
+            std.debug.assert(tapes.rows.len == @as(usize, b.count) * b.n_u);
+            st.* = tapes.slots;
+            rt.* = tapes.rows;
+            sb.* = std.math.cast(u32, n_slot) orelse return error.OutOfMemory;
+            rb.* = std.math.cast(u32, n_row) orelse return error.OutOfMemory;
+            n_slot += tapes.slots.len;
+            n_row += tapes.rows.len;
         }
-        for (lane_tasks) |*lt| lt.* = .empty;
-        var loads = try gpa.alloc(u64, n_lanes);
-        defer gpa.free(loads);
-        @memset(loads, 0);
+        // Positions are u32, like the tapes; past that the staging alone
+        // would need 32 GB per plane.
+        if (n_slot > std.math.maxInt(u32) or n_row > std.math.maxInt(u32)) return error.OutOfMemory;
 
-        var cur: u32 = 0;
-        for (batches, 0..) |b, bi| {
-            if (b.count == 0) continue;
-            const w = instanceWeight(b);
-            var pos: u32 = 0;
-            while (pos < b.count) {
-                while (cur + 1 < n_lanes and loads[cur] >= target) cur += 1;
-                const cap = if (loads[cur] >= target) b.count - pos else blk: {
-                    const room = target - loads[cur];
-                    break :blk @as(u32, @intCast(@min(@as(u64, b.count - pos), (room + w - 1) / w)));
-                };
-                const take = @max(cap, 1);
-                try lane_tasks[cur].append(gpa, .{ .batch = @intCast(bi), .first = pos, .last = pos + take });
-                loads[cur] += @as(u64, take) * w;
-                pos += take;
-            }
-        }
+        const slots = try Gather.build(gpa, slot_tapes, nnz, trash_slot);
+        errdefer slots.deinit(gpa);
+        const rows = try Gather.build(gpa, row_tapes, n, n);
+        errdefer rows.deinit(gpa);
 
-        var tasks: std.ArrayList(EvalTask) = .empty;
-        errdefer tasks.deinit(gpa);
-        const task_off = try gpa.alloc(u32, n_lanes + 1);
-        errdefer gpa.free(task_off);
-        var off: u32 = 0;
-        for (lane_tasks, 0..) |lt, l| {
-            task_off[l] = off;
-            try tasks.appendSlice(gpa, lt.items);
-            off += @intCast(lt.items.len);
-        }
-        task_off[n_lanes] = off;
+        const g_stage = try gpa.alloc(f64, n_slot);
+        errdefer gpa.free(g_stage);
+        const rhs_stage = try gpa.alloc(f64, n_row);
+        errdefer gpa.free(rhs_stage);
+        const c_stage = try gpa.alloc(f64, if (has_charge) n_slot else 0);
+        errdefer gpa.free(c_stage);
+        const q_stage = try gpa.alloc(f64, if (has_charge) n_row else 0);
+        errdefer gpa.free(q_stage);
+        for ([_][]f64{ g_stage, rhs_stage, c_stage, q_stage }) |st| @memset(st, -0.0);
 
-        const windows = try gpa.alloc(Window, extra);
-        errdefer gpa.free(windows);
-        for (windows, 1..) |*win, l| {
-            win.* = .{ .slot_lo = @intCast(nnz1 - 1), .slot_hi = 0, .row_lo = @intCast(n1 - 1), .row_hi = 0 };
-            for (tasks.items[task_off[l]..task_off[l + 1]]) |task| {
-                const b = &batches[task.batch];
-                const bounds = b.hooks.scatter_bounds(b.ctx, task.first, task.last, trash_slot, n);
-                win.slot_lo = @min(win.slot_lo, bounds[0]);
-                win.slot_hi = @max(win.slot_hi, bounds[1]);
-                win.row_lo = @min(win.row_lo, bounds[2]);
-                win.row_hi = @max(win.row_hi, bounds[3]);
-            }
-            if (win.slot_lo > win.slot_hi) win.slot_lo = win.slot_hi;
-            if (win.row_lo > win.row_hi) win.row_lo = win.row_hi;
-        }
+        const tasks = try chunkTasks(gpa, batches, n_lanes);
+        errdefer gpa.free(tasks);
+        const cuts = try cutBlocks(gpa, slots.seg, rows.seg, n_lanes);
+        errdefer gpa.free(cuts);
 
-        const g_slab = try gpa.alloc(f64, extra * nnz1);
-        errdefer gpa.free(g_slab);
-        const rhs_slab = try gpa.alloc(f64, extra * n1);
-        errdefer gpa.free(rhs_slab);
-        const c_slab = try gpa.alloc(f64, if (has_charge) extra * nnz1 else 0);
-        errdefer gpa.free(c_slab);
-        const q_slab = try gpa.alloc(f64, if (has_charge) extra * n1 else 0);
-        errdefer gpa.free(q_slab);
-        @memset(g_slab, 0);
-        @memset(rhs_slab, 0);
-        @memset(c_slab, 0);
-        @memset(q_slab, 0);
-
-        const threads = try gpa.alloc(std.Thread, extra);
+        const threads = try gpa.alloc(std.Thread, n_lanes - 1);
         errdefer gpa.free(threads);
 
         return .{
             .gpa = gpa,
             .io = io,
             .n_lanes = n_lanes,
-            .g_slab = g_slab,
-            .c_slab = c_slab,
-            .rhs_slab = rhs_slab,
-            .q_slab = q_slab,
-            .tasks = try tasks.toOwnedSlice(gpa),
-            .task_off = task_off,
-            .windows = windows,
-            .nnz1 = nnz1,
-            .n1 = n1,
+            .g_stage = g_stage,
+            .c_stage = c_stage,
+            .rhs_stage = rhs_stage,
+            .q_stage = q_stage,
+            .slot_base = slot_base,
+            .row_base = row_base,
+            .slots = slots,
+            .rows = rows,
+            .tasks = tasks,
+            .cuts = cuts,
+            .nnz = nnz,
+            .n = n,
             .has_charge = has_charge,
             .threads = threads,
             .started = false,
             .quit = .init(false),
             .epoch = .init(0),
             .sleepers = .init(0),
+            .next_task = .init(0),
+            .next_block = .init(0),
             .stamped = .init(0),
             .done = .init(0),
             .job_batches = batches,
-            .job_own_planes = undefined,
+            .job_planes = undefined,
+            .job_base = .{},
             .job_x = &.{},
             .job_t = 0,
             .job_mode = .full,
         };
     }
 
-    /// Stops and joins the workers, then frees every slab.
+    /// Stops and joins the workers, then frees every table.
     pub fn deinit(self: *ParEval) void {
         if (self.started) {
             self.quit.store(true, .release);
@@ -230,56 +255,72 @@ pub const ParEval = struct {
         }
         const gpa = self.gpa;
         gpa.free(self.threads);
-        gpa.free(self.g_slab);
-        gpa.free(self.c_slab);
-        gpa.free(self.rhs_slab);
-        gpa.free(self.q_slab);
+        gpa.free(self.g_stage);
+        gpa.free(self.c_stage);
+        gpa.free(self.rhs_stage);
+        gpa.free(self.q_stage);
+        gpa.free(self.slot_base);
+        gpa.free(self.row_base);
+        self.slots.deinit(gpa);
+        self.rows.deinit(gpa);
         gpa.free(self.tasks);
-        gpa.free(self.task_off);
-        gpa.free(self.windows);
+        gpa.free(self.cuts);
         self.* = undefined;
     }
 
-    /// Stamps every batch into `own_planes` across the lanes and waits for all
-    /// of them. The caller has already cleared (or baseline-seeded) the planes
-    /// `mode` writes. Spawns the workers on first use; a failed spawn panics.
-    /// `.charge` on a circuit without charge is a no-op: there is no q plane.
-    pub fn run(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64, mode: Mode) void {
+    /// Sets every cell of the planes `mode` writes to its value in `base`
+    /// (`.newton` only; zero otherwise) plus every batch's stamps at `x`, and
+    /// waits for all lanes. `planes` need no clearing first. Spawns the
+    /// workers on first use; a failed spawn panics. `.charge` on a circuit
+    /// without charge is a no-op: there is no q plane.
+    pub fn run(self: *ParEval, batches: []const Batch, planes: Planes, base: Base, x: []const f64, t: f64, mode: Mode) void {
         if (mode == .charge and !self.has_charge) return;
-        if (self.n_lanes == 1) {
-            runLane(self, batches, own_planes, 0, x, t, mode);
-            return;
-        }
-        if (!self.started) self.startWorkers();
+        std.debug.assert(batches.len == self.slot_base.len);
+        std.debug.assert(mode == .newton or (base.g.len == 0 and base.c.len == 0));
         self.job_batches = batches;
-        self.job_own_planes = own_planes;
+        self.job_planes = planes;
+        self.job_base = base;
         self.job_x = x;
         self.job_t = t;
         self.job_mode = mode;
+        self.next_task.store(0, .monotonic);
+        self.next_block.store(0, .monotonic);
         self.stamped.store(0, .monotonic);
         self.done.store(0, .monotonic);
-        // seq_cst pairs with the worker's `sleepers` increment and epoch
-        // re-check: either it sees the new epoch or this sees it parking.
-        _ = self.epoch.fetchAdd(1, .seq_cst);
-        if (self.sleepers.load(.seq_cst) != 0)
-            self.io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
-        runLane(self, batches, own_planes, 0, x, t, mode);
-        _ = self.stamped.fetchAdd(1, .acq_rel);
-        waitCount(&self.stamped, self.n_lanes);
-        self.reduceChunk(own_planes, mode, 0);
+        if (self.n_lanes > 1) {
+            if (!self.started) self.startWorkers();
+            // seq_cst pairs with the worker's `sleepers` increment and epoch
+            // re-check: either it sees the new epoch or this sees it parking.
+            _ = self.epoch.fetchAdd(1, .seq_cst);
+            if (self.sleepers.load(.seq_cst) != 0)
+                self.io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
+        }
+        self.pass();
         waitCount(&self.done, self.n_lanes - 1);
+        // The trash cells take no stamps here; give them their initial value.
+        switch (mode) {
+            .charge => planes.q_vec[self.n] = 0,
+            inline else => |m| {
+                planes.g_vals[self.nnz] = if (m == .newton and base.g.len > 0) base.g[self.nnz] else 0;
+                planes.rhs[self.n] = 0;
+                if (self.has_charge) {
+                    planes.c_vals[self.nnz] = if (m == .newton and base.c.len > 0) base.c[self.nnz] else 0;
+                    planes.q_vec[self.n] = 0;
+                }
+            },
+        }
     }
 
     fn startWorkers(self: *ParEval) void {
         const epoch0 = self.epoch.load(.acquire);
-        for (self.threads, 1..) |*th, lane| {
-            th.* = std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, workerMain, .{ self, @as(u32, @intCast(lane)), epoch0 }) catch
+        for (self.threads) |*th| {
+            th.* = std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, workerMain, .{ self, epoch0 }) catch
                 @panic("ParEval: worker spawn failed");
         }
         self.started = true;
     }
 
-    fn workerMain(self: *ParEval, lane: u32, epoch0: u32) void {
+    fn workerMain(self: *ParEval, epoch0: u32) void {
         var last: u32 = epoch0;
         while (true) {
             var spins: u32 = 0;
@@ -304,95 +345,138 @@ pub const ParEval = struct {
             }
             last = e;
             if (self.quit.load(.acquire)) return;
-            runLane(self, self.job_batches, self.job_own_planes, lane, self.job_x, self.job_t, self.job_mode);
-            _ = self.stamped.fetchAdd(1, .acq_rel);
-            waitCount(&self.stamped, self.n_lanes);
-            self.reduceChunk(self.job_own_planes, self.job_mode, lane);
+            self.pass();
             _ = self.done.fetchAdd(1, .release);
         }
     }
 
-    fn lanePlanes(self: *ParEval, own_planes: Planes, lane: u32) Planes {
-        if (lane == 0) return own_planes;
-        const e: usize = lane - 1;
-        const g = self.g_slab[e * self.nnz1 ..][0..self.nnz1];
-        const r = self.rhs_slab[e * self.n1 ..][0..self.n1];
-        return .{
-            .g_vals = g,
-            .rhs = r,
-            .c_vals = if (self.has_charge) self.c_slab[e * self.nnz1 ..][0..self.nnz1] else g,
-            .q_vec = if (self.has_charge) self.q_slab[e * self.n1 ..][0..self.n1] else r,
-        };
-    }
-
-    fn runLane(self: *ParEval, batches: []const Batch, own_planes: Planes, lane: u32, x: []const f64, t: f64, mode: Mode) void {
-        const pl = self.lanePlanes(own_planes, lane);
-        if (lane != 0) {
-            // The window is already zero: `reduceChunk` clears what it
-            // consumes. The trash cells lie outside it.
-            pl.g_vals[self.nnz1 - 1] = 0;
-            pl.rhs[self.n1 - 1] = 0;
-            pl.c_vals[self.nnz1 - 1] = 0;
-            pl.q_vec[self.n1 - 1] = 0;
-        }
-        for (self.tasks[self.task_off[lane]..self.task_off[lane + 1]]) |task|
-            switch (mode) {
-                inline else => |m| stampRange(batches[task.batch], &pl, task.first, task.last, x, t, m),
+    /// One lane's share of a pass: claim stamp chunks until none are left,
+    /// wait for every lane to finish stamping, then claim reduce blocks.
+    fn pass(self: *ParEval) void {
+        const mode = self.job_mode;
+        while (true) {
+            const i = self.next_task.fetchAdd(1, .monotonic);
+            if (i >= self.tasks.len) break;
+            const task = self.tasks[i];
+            const b = self.job_batches[task.batch];
+            const sb = self.slot_base[task.batch];
+            const rb = self.row_base[task.batch];
+            const pl: Planes = .{
+                .g_vals = self.g_stage[sb..],
+                .c_vals = if (self.has_charge) self.c_stage[sb..] else &.{},
+                .rhs = self.rhs_stage[rb..],
+                .q_vec = if (self.has_charge) self.q_stage[rb..] else &.{},
             };
+            b.hooks.stage(b.ctx, &pl, task.first, task.last, self.job_x, self.job_t, mode);
+        }
+        _ = self.stamped.fetchAdd(1, .acq_rel);
+        waitCount(&self.stamped, self.n_lanes);
+        const n_blocks = self.cuts.len - 1;
+        while (true) {
+            const j = self.next_block.fetchAdd(1, .monotonic);
+            if (j >= n_blocks) break;
+            const lo = self.cuts[j];
+            const hi = self.cuts[j + 1];
+            switch (mode) {
+                inline else => |m| self.reduceBlock(lo, hi, m),
+            }
+        }
     }
 
-    /// Moves every lane's slab into lane `lane`'s share of `own_planes`:
-    /// adds, lanes in ascending order, so each cell sums in the order a
-    /// serial reduce would, and zeroes the slab cell for the next pass. The
-    /// shares split the slots and rows into cache-line aligned ranges; every
-    /// lane reduces one after all have stamped. Clearing here rather than
-    /// per lane before its stamp spreads that traffic evenly: the per-lane
-    /// clear cost each lane its whole window (chain_psp103_10k: 300k-660k
-    /// slots of 1.4M), and the widest window set the pass time.
-    fn reduceChunk(self: *ParEval, own_planes: Planes, mode: Mode, lane: u32) void {
-        const slots = share(self.nnz1, lane, self.n_lanes);
-        const rows = share(self.n1, lane, self.n_lanes);
-        var l: u32 = 1;
-        while (l < self.n_lanes) : (l += 1) {
-            const e: usize = l - 1;
-            const win = self.windows[e];
-            const s0 = @max(slots[0], win.slot_lo);
-            const s1 = @min(slots[1], win.slot_hi);
-            const r0 = @max(rows[0], win.row_lo);
-            const r1 = @min(rows[1], win.row_hi);
-            const go = e * self.nnz1;
-            const ro = e * self.n1;
-            if (mode != .charge and s0 < s1) {
-                moveSimd(vec_width, own_planes.g_vals[s0..s1], self.g_slab[go + s0 .. go + s1]);
-                if (self.has_charge) moveSimd(vec_width, own_planes.c_vals[s0..s1], self.c_slab[go + s0 .. go + s1]);
+    /// Reduces cells `[lo, hi)` of the combined slot-then-row index.
+    fn reduceBlock(self: *ParEval, lo: u32, hi: u32, comptime mode: Mode) void {
+        const pl = self.job_planes;
+        if (lo < self.nnz and mode != .charge) {
+            const end = @min(hi, self.nnz);
+            const bg: []const f64 = if (mode == .newton) self.job_base.g else &.{};
+            sumCells(self.slots, lo, end, pl.g_vals, self.g_stage, bg);
+            if (self.has_charge) {
+                const bc: []const f64 = if (mode == .newton) self.job_base.c else &.{};
+                sumCells(self.slots, lo, end, pl.c_vals, self.c_stage, bc);
             }
-            if (r0 < r1) {
-                if (mode != .charge) moveSimd(vec_width, own_planes.rhs[r0..r1], self.rhs_slab[ro + r0 .. ro + r1]);
-                if (self.has_charge) moveSimd(vec_width, own_planes.q_vec[r0..r1], self.q_slab[ro + r0 .. ro + r1]);
-            }
+        }
+        if (hi > self.nnz) {
+            const r0 = @max(lo, self.nnz) - self.nnz;
+            const r1 = hi - self.nnz;
+            if (mode != .charge) sumCells(self.rows, r0, r1, pl.rhs, self.rhs_stage, &.{});
+            if (self.has_charge) sumCells(self.rows, r0, r1, pl.q_vec, self.q_stage, &.{});
         }
     }
 };
 
+/// `plane[i] = base[i] + stage[p0] + stage[p1] + ...` over cell i's
+/// positions in tape order, left to right, for cells `[lo, hi)`; an empty
+/// `base` is zero. Resets each position read to -0.0 for the next pass.
+fn sumCells(gather: Gather, lo: u32, hi: u32, plane: []f64, stage: []f64, base: []const f64) void {
+    for (lo..hi) |i| {
+        var v: f64 = if (base.len > 0) base[i] else 0;
+        for (gather.src[gather.seg[i]..gather.seg[i + 1]]) |p| {
+            v += stage[p];
+            stage[p] = -0.0;
+        }
+        plane[i] = v;
+    }
+}
+
+/// Chunks of about `total / (8 * n_lanes)` instance weight, cut at instance
+/// boundaries in ascending order. Caller frees.
+fn chunkTasks(gpa: std.mem.Allocator, batches: []const Batch, n_lanes: u32) ![]EvalTask {
+    var w_total: u64 = 0;
+    for (batches) |b| w_total += @as(u64, b.count) * instanceWeight(b);
+    const target = @max(w_total / (@as(u64, chunks_per_lane) * n_lanes), 1);
+    var tasks: std.ArrayList(EvalTask) = .empty;
+    errdefer tasks.deinit(gpa);
+    for (batches, 0..) |b, bi| {
+        const w = instanceWeight(b);
+        const per: u32 = @intCast(@min(@max(target / w, 1), b.count));
+        var pos: u32 = 0;
+        while (pos < b.count) : (pos += per)
+            try tasks.append(gpa, .{ .batch = @intCast(bi), .first = pos, .last = @min(pos + per, b.count) });
+    }
+    return tasks.toOwnedSlice(gpa);
+}
+
+/// Cut points over the combined slot-then-row cells (`[0, nnz + n)`): blocks
+/// of about `total / (8 * n_lanes)` work, a cell weighing 1 plus its
+/// positions, cut on 16-cell (128-byte) boundaries so no two blocks write
+/// one cache line, with a cut at `nnz`. Caller frees.
+fn cutBlocks(gpa: std.mem.Allocator, slot_seg: []const u32, row_seg: []const u32, n_lanes: u32) ![]u32 {
+    const nnz: u32 = @intCast(slot_seg.len - 1);
+    const n: u32 = @intCast(row_seg.len - 1);
+    const total: u64 = @as(u64, nnz) + n + slot_seg[nnz] + row_seg[n];
+    const target = @max(total / (@as(u64, chunks_per_lane) * n_lanes), 1);
+    var cuts: std.ArrayList(u32) = .empty;
+    errdefer cuts.deinit(gpa);
+    try cuts.append(gpa, 0);
+    for ([_][]const u32{ slot_seg, row_seg }, [_]u32{ 0, nnz }) |seg, off| {
+        const len: u32 = @intCast(seg.len - 1);
+        var lo: u32 = 0;
+        while (lo < len) {
+            var hi = lo;
+            var w: u64 = 0;
+            while (hi < len and w < target) {
+                const step = @min(len - hi, block_align);
+                w += step + seg[hi + step] - seg[hi];
+                hi += step;
+            }
+            try cuts.append(gpa, off + hi);
+            lo = hi;
+        }
+    }
+    std.debug.assert(cuts.last() == nnz + n);
+    return cuts.toOwnedSlice(gpa);
+}
+
 /// An instance's eval cost estimate: its stamp count `n_u^2`, times 16 for
 /// a nonlinear model. With `n_u^2` alone, chain_psp103_10k's lane 0 got all
 /// 64,244 capacitors and 241 ms of an eval pass that took the PSP103 lanes
-/// 5-7 s: a PSP103 instance costs about 1,000 capacitors, not 36.
-/// ponytail: one static factor, so the lane cuts (and the reduce order)
-/// stay deterministic; per-type costs if a model family shows imbalance.
+/// 5-7 s: a PSP103 instance costs about 1,000 capacitors, not 36. Only the
+/// chunk sizes depend on it, never the results.
 fn instanceWeight(b: Batch) u64 {
-    // At least 1: the lane cut divides by it, and an instance with no
+    // At least 1: the chunking divides by it, and an instance with no
     // unknowns still costs a call.
     const stamps = @max(@as(u64, b.n_u) * b.n_u, 1);
     return if (b.has_const_jacobian) stamps else 16 * stamps;
-}
-
-/// Lane `lane`'s range of `[0, len)` when `lanes` split it, cut on 8-cell
-/// (64-byte) boundaries so no two lanes write one cache line.
-fn share(len: usize, lane: u32, lanes: u32) [2]usize {
-    const lo = (len * lane / lanes) & ~@as(usize, 7);
-    const hi = if (lane + 1 == lanes) len else (len * (lane + 1) / lanes) & ~@as(usize, 7);
-    return .{ lo, hi };
 }
 
 /// Spins, then yields, until `counter` reaches `target`. `pause` frees
@@ -407,73 +491,78 @@ fn waitCount(counter: *std.atomic.Value(u32), target: u32) void {
     }
 }
 
+/// Stamp chunks and reduce blocks per lane: enough that a lane on a core
+/// half as fast takes about half as many, few enough that claiming costs
+/// nothing next to an instance's eval.
+const chunks_per_lane = 8;
+/// Cells per reduce-block cut: 128 bytes of f64, `std.atomic.cache_line` on
+/// x86_64 (adjacent-line prefetch pairs 64-byte lines).
+const block_align = 16;
+
 /// Pause-loop iterations a worker spins on `epoch` before it parks: long
 /// enough to catch the next pass across a short solve, short enough that a
 /// long LU solve does not burn the cores.
 const park_spins: u32 = 4096;
 const park_yields: u32 = 64;
 
-const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
+test "Gather lists each cell's positions in tape order, ground dropped" {
+    const gpa = std.testing.allocator;
+    // Two batches over 3 cells, trash = 3.
+    const tapes = [_][]const u32{ &.{ 2, 0, 3, 2 }, &.{ 0, 2, 1 } };
+    const g = try Gather.build(gpa, &tapes, 3, 3);
+    defer g.deinit(gpa);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2, 3, 6 }, g.seg);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 4, 6, 0, 3, 5 }, g.src);
+}
 
-/// Adds `src` into `dst` elementwise, then zeroes `src`. Equal lengths.
-/// `W == 1` is the scalar oracle and the tail. One pass over `src`: stdpp's
-/// `writeInto` has one output, so it would need a second pass to clear it.
-fn moveSimd(comptime W: usize, dst: []f64, src: []f64) void {
-    std.debug.assert(dst.len == src.len);
-    const Vv = @Vector(W, f64);
-    var i: usize = 0;
-    while (i + W <= dst.len) : (i += W) {
-        const d: Vv = dst[i..][0..W].*;
-        const s: Vv = src[i..][0..W].*;
-        dst[i..][0..W].* = d + s;
-        src[i..][0..W].* = @splat(0);
+test "cutBlocks tiles every cell, 16-aligned, with a cut at nnz" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xb10c);
+    const rnd = prng.random();
+    for ([_]u32{ 0, 1, 15, 16, 17, 200 }) |nnz| for ([_]u32{ 0, 3, 40 }) |n| for ([_]u32{ 1, 3, 24 }) |lanes| {
+        const slot_seg = try gpa.alloc(u32, nnz + 1);
+        defer gpa.free(slot_seg);
+        const row_seg = try gpa.alloc(u32, n + 1);
+        defer gpa.free(row_seg);
+        for ([_][]u32{ slot_seg, row_seg }) |seg| {
+            seg[0] = 0;
+            for (1..seg.len) |i| seg[i] = seg[i - 1] + rnd.uintLessThan(u32, 50);
+        }
+        const cuts = try cutBlocks(gpa, slot_seg, row_seg, lanes);
+        defer gpa.free(cuts);
+        try std.testing.expectEqual(@as(u32, 0), cuts[0]);
+        try std.testing.expectEqual(nnz + n, cuts[cuts.len - 1]);
+        try std.testing.expect(std.mem.indexOfScalar(u32, cuts, nnz) != null);
+        for (cuts[0 .. cuts.len - 1], cuts[1..]) |a, b| {
+            try std.testing.expect(a < b);
+            if (b != nnz and b != nnz + n) try std.testing.expectEqual(@as(u32, 0), (if (b < nnz) b else b - nnz) % block_align);
+        }
+    };
+}
+
+test "chunkTasks covers every instance once, in order" {
+    const gpa = std.testing.allocator;
+    var bs: [3]Batch = undefined;
+    for (&bs, [_]u32{ 1000, 0, 7 }, [_]u32{ 2, 3, 12 }) |*b, count, n_u| {
+        b.count = count;
+        b.n_u = n_u;
+        b.has_const_jacobian = n_u == 2;
     }
-    if (comptime W > 1) moveSimd(1, dst[i..], src[i..]);
-}
-
-test share {
-    // The shares tile [0, len) in lane order, and every interior cut is on
-    // an 8-cell boundary.
-    for (0..200) |len| for (1..13) |lanes| {
-        var prev: usize = 0;
-        for (0..lanes) |lane| {
-            const r = share(len, @intCast(lane), @intCast(lanes));
-            try std.testing.expectEqual(prev, r[0]);
-            try std.testing.expect(r[1] >= r[0]);
-            if (lane + 1 < lanes) try std.testing.expectEqual(@as(usize, 0), r[1] % 8);
-            prev = r[1];
+    for ([_]u32{ 1, 2, 8, 24 }) |lanes| {
+        const tasks = try chunkTasks(gpa, &bs, lanes);
+        defer gpa.free(tasks);
+        var next = [_]u32{ 0, 0, 0 };
+        for (tasks) |task| {
+            try std.testing.expectEqual(next[task.batch], task.first);
+            try std.testing.expect(task.last > task.first);
+            next[task.batch] = task.last;
         }
-        try std.testing.expectEqual(len, prev);
-    };
-}
-
-test moveSimd {
-    // Exact at any width: one add per cell. Lengths cover every tail and
-    // offsets every misalignment.
-    var random = std.Random.DefaultPrng.init(0x6d6f7665);
-    const r = random.random();
-    var src0: [3 * vec_width + 4]f64 = undefined;
-    var dst0: [src0.len]f64 = undefined;
-    var src1: [src0.len]f64 = undefined;
-    var dst1: [src0.len]f64 = undefined;
-    for (0..4) |off| for (0..src0.len - off + 1) |len| {
-        for (&src0, &dst0) |*s, *d| {
-            s.* = r.float(f64) - 0.5;
-            d.* = r.float(f64) - 0.5;
-        }
-        src0[0] = std.math.inf(f64);
-        src1 = src0;
-        dst1 = dst0;
-        moveSimd(1, dst0[off..][0..len], src0[off..][0..len]);
-        moveSimd(vec_width, dst1[off..][0..len], src1[off..][0..len]);
-        try std.testing.expectEqualSlices(f64, &dst0, &dst1);
-        try std.testing.expectEqualSlices(f64, &src0, &src1);
-        for (src1[off..][0..len]) |v| try std.testing.expectEqual(@as(f64, 0), v);
-    };
+        try std.testing.expectEqualSlices(u32, &.{ 1000, 0, 7 }, &next);
+    }
 }
 
 test instanceWeight {
-    // A zero-unknown batch still weighs 1, so the lane cut never divides by 0.
+    // A zero-unknown batch still weighs 1, so the chunking never divides by 0.
     var b: Batch = undefined;
     b.n_u = 0;
     b.has_const_jacobian = true;

@@ -466,29 +466,6 @@ const PatternBuilder = ir.PatternBuilder;
 const GpuPayload = ir.GpuPayload;
 const DeviceVtable = ir.DeviceVtable;
 
-/// Returns `{slot_lo, slot_hi, row_lo, row_hi}`: the half-open slot and row
-/// ranges the tapes touch, ignoring the trash slot and row. Empty ranges come
-/// back as `lo == hi`.
-fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, trash_row: u32) [4]u32 {
-    var slot_lo: u32 = std.math.maxInt(u32);
-    var slot_hi: u32 = 0;
-    var row_lo: u32 = std.math.maxInt(u32);
-    var row_hi: u32 = 0;
-    for (slots) |s| {
-        if (s == trash_slot) continue;
-        slot_lo = @min(slot_lo, s);
-        slot_hi = @max(slot_hi, s + 1);
-    }
-    for (rhs_idx) |r| {
-        if (r == trash_row) continue;
-        row_lo = @min(row_lo, r);
-        row_hi = @max(row_hi, r + 1);
-    }
-    if (slot_lo > slot_hi) slot_lo = slot_hi;
-    if (row_lo > row_hi) row_lo = row_hi;
-    return .{ slot_lo, slot_hi, row_lo, row_hi };
-}
-
 /// The host's mask over `n` unknowns or lanes: u64, wider past 64 (#117).
 fn Mask(comptime n: usize) type {
     return @Int(.unsigned, @max(64, n));
@@ -1647,7 +1624,8 @@ pub fn DeviceBatch(comptime D: type) type {
             .snapshot = snapshot,
             .copy_state = copyState,
             .set_limit_active = if (has_limit) setLimitActive else null,
-            .scatter_bounds = scatterBounds,
+            .stage = stage,
+            .scatter_tapes = scatterTapes,
             .q_tape = if (has_q) qTape else null,
             .eval_q = if (has_q) evalQOnly else null,
             // Only where `update_state` is the hook that stages (not the
@@ -1694,7 +1672,7 @@ pub fn DeviceBatch(comptime D: type) type {
         };
 
         fn eval(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
-            evalInner(ctx, pl, first, last, x, t, false);
+            evalInner(ctx, pl, first, last, x, t, false, false);
         }
 
         /// Instance `id`'s Model.
@@ -1717,12 +1695,16 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn evalNewton(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
-            evalInner(ctx, pl, first, last, x, t, true);
+            evalInner(ctx, pl, first, last, x, t, true, false);
         }
 
         fn evalQOnly(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
+            evalQInner(ctx, pl, first, last, x, t, false);
+        }
+
+        fn evalQInner(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime staged: bool) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            var sink = Sink(D, false, false).host(self, pl, x, undefined);
+            var sink = Sink(D, false, false, staged).host(self, pl, x, undefined);
             // Without `always_inline` LLVM moves mos6's charge core out of
             // line, measured +0.9% on devices/mos6_inverter.
             @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, self.simAt(t), null });
@@ -1732,16 +1714,21 @@ pub fn DeviceBatch(comptime D: type) type {
         /// run per instance.
         fn acceptQOnly(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            var sink = Sink(D, false, false).host(self, pl, x, undefined);
+            var sink = Sink(D, false, false, false).host(self, pl, x, undefined);
             @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, self.sim, self });
         }
 
-        fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {
+        fn stage(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, mode: ir.StampMode) void {
+            switch (mode) {
+                .full => evalInner(ctx, pl, first, last, x, t, false, true),
+                .newton => evalInner(ctx, pl, first, last, x, t, true, true),
+                .charge => if (comptime has_q) evalQInner(ctx, pl, first, last, x, t, true),
+            }
+        }
+
+        fn scatterTapes(ctx: *anyopaque) ir.ScatterTapes {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            std.debug.assert(first <= last);
-            std.debug.assert(last <= self.count);
-            const k = SlotMap(D).k;
-            return tapeBounds(self.slots[first * k .. last * k], self.rhs_idx[first * n_u .. last * n_u], trash_slot, trash_row);
+            return .{ .slots = self.slots, .rows = self.rhs_idx };
         }
 
         fn qTape(ctx: *anyopaque) []const f64 {
@@ -1749,13 +1736,13 @@ pub fn DeviceBatch(comptime D: type) type {
             return self.q_tape;
         }
 
-        fn evalInner(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool) void {
+        fn evalInner(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime skip_const: bool, comptime staged: bool) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             // Once per batch call, outside the per-instance loop.
             std.debug.assert(first <= last);
             std.debug.assert(last <= self.count);
             const limiting = if (comptime has_limit) self.lim_active else false;
-            var sink = Sink(D, false, skip_const).host(self, pl, x, undefined);
+            var sink = Sink(D, false, skip_const, staged).host(self, pl, x, undefined);
             const F = jacFloat(D);
             const sim = self.simAt(t);
             if (comptime narrowable) {
@@ -1870,7 +1857,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // `limitRange` never touches the planes, but `host` reads their
             // pointers, and `undefined` would trap in Debug.
             const no_planes: Planes = .{ .g_vals = &.{}, .c_vals = &.{}, .rhs = &.{}, .q_vec = &.{} };
-            var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr);
+            var sink = Sink(D, false, false, false).host(self, &no_planes, x, x_old.ptr);
             const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active, self.sim);
             self.lim_active = true;
             return any != 0;
@@ -2535,7 +2522,13 @@ fn qTapeKernelName(comptime D: type) [:0]const u8 {
 /// `[*]T`), the GPU casts `.global` kernel arguments to the generic address
 /// space the contract's `eval` takes. Host-only state is `void` under
 /// `device`. `skip_const` drops stamps of a constant Jacobian half.
-fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type {
+/// `staged` (host only) stores each stamp at its own tape position instead
+/// of adding it into its plane cell: `rhs`/`q_vec` are indexed `id * n_u +
+/// ru` and `g_vals`/`c_vals` like `slots`, both relative to the batch, and a
+/// ground stamp lands on its own position too. ParEval then sums the
+/// positions into the planes in tape order (`Hooks.stage`).
+fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, comptime staged: bool) type {
+    if (device and staged) @compileError("staging is host only");
     const n_u: usize = comptime contract.nU(D);
     const const_g = @hasDecl(D, "constant") and D.constant.g;
     const const_c = @hasDecl(D, "constant") and D.constant.c;
@@ -2583,6 +2576,7 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
             return s.gath_[@as(usize, id) * n_u + u];
         }
         pub inline fn rhsRow(s: *const Sk, id: u32, ru: usize) u32 {
+            if (comptime staged) return @intCast(@as(usize, id) * n_u + ru);
             return s.rhs_idx_[@as(usize, id) * n_u + ru];
         }
         pub inline fn lim(s: *const Sk, id: u32, comptime u: usize) f64 {
@@ -2601,6 +2595,7 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
             return @addrSpaceCast(&s.instances_[id]);
         }
         inline fn slot(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize) u32 {
+            if (comptime staged) return @intCast(@as(usize, id) * SlotMap(D).k + comptime SlotMap(D).at(ru, cu));
             return s.slots_[@as(usize, id) * SlotMap(D).k + comptime SlotMap(D).at(ru, cu)];
         }
         // Plain `+=` on the GPU too. There the tape indexes a staging cell
@@ -2609,7 +2604,8 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type
         // the rounding, vary between runs. The staging is zeroed per pass,
         // so `0 + v` keeps signed zeros and NaNs as the host stamp does.
         inline fn add(p: gompute.GlobalPtr(f64), i: u32, v: f64) void {
-            p[i] += v;
+            // A staged position takes one stamp per pass.
+            if (comptime staged) p[i] = v else p[i] += v;
         }
         pub inline fn scatterRes(s: *const Sk, row: u32, val: f64) void {
             add(s.rhs, row, val);
@@ -2674,7 +2670,7 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
         ) callconv(gompute.kernel_callconv) void {
             const tid = gompute.globalIdX(block_size);
             if (tid >= count) return;
-            var sink = Sink(D, true, false){
+            var sink = Sink(D, true, false, false){
                 .xs = xs,
                 .gath_ = gath,
                 .rhs_idx_ = rhs_idx,

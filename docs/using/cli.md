@@ -133,7 +133,7 @@ A failed `.meas` card prints an error but does not change the exit status.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `ESPICE_THREADS` | 1 | worker threads for device evaluation |
+| `ESPICE_THREADS` | 1 | worker threads for device evaluation; results are byte-identical at any count |
 | `ESPICE_SOLVER_THREADS` | 1 | threads for the bordered-block-diagonal matrix factorization, at most 16 |
 | `ZIG` | `zig` on `PATH` | the Zig compiler `.hdl` uses to build Verilog-A models at run time |
 | `ESPICE_CACHE` | see below | cache directory for compiled `.hdl` models (`$ESPICE_CACHE/hdl`) |
