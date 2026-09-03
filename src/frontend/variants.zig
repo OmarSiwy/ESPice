@@ -180,12 +180,10 @@ pub const Planner = struct {
     by_name: std.StringHashMapUnmanaged(u32) = .empty,
     /// Each live slot's value in the nominal circuit.
     nominal_slots: []const f64 = &.{},
-    /// Each pool row's value when the planner opened (`Live.pool_rows`). A
+    /// What the nominal circuit holds that no parameter write reaches. A
     /// run rebuilt at a point opens with that point's values here, not the
     /// deck's, so its own row does not read as moved and rebuild again.
-    nominal_pool: []const f64 = &.{},
-    /// Each `Live.bins` card's model row in the nominal circuit.
-    nominal_bins: []const u32 = &.{},
+    kept: Kept = .{},
     fast: Fast = .untested,
     /// Rebuild every moved point; the differential test's oracle.
     force_rebuild: bool = false,
@@ -211,23 +209,8 @@ pub const Planner = struct {
         const nominal_slots = try scratch.alloc(f64, nl.live.slots.len);
         for (nominal_slots, nl.live.slots) |*v, slot| v.* = slot.num;
         p.nominal_slots = nominal_slots;
-        const nominal_pool = try scratch.alloc(f64, nl.live.pool_rows.len);
-        for (nominal_pool, nl.live.pool_rows) |*v, row| v.* = if (row == netlist.none) 0 else nl.consts[row];
-        p.nominal_pool = nominal_pool;
-        const nominal_bins = try scratch.alloc(u32, nl.live.bins.edges.len);
-        const model_of = nl.graph.edges.items(.model);
-        for (nominal_bins, nl.live.bins.edges) |*row, e| row.* = model_of[e];
-        p.nominal_bins = nominal_bins;
+        p.kept = try .of(scratch, nl);
         return p;
-    }
-
-    /// Whether a binned card's live geometry picked another bin than the
-    /// nominal circuit's: a change parameter writes cannot make, since the
-    /// bins differ in which model parameters they give.
-    fn binsMoved(p: *const Planner) bool {
-        const model_of = p.nl.graph.edges.items(.model);
-        for (p.nominal_bins, p.nl.live.bins.edges) |row, e| if (model_of[e] != row) return true;
-        return false;
     }
 
     fn count(p: *const Planner) u32 {
@@ -406,11 +389,8 @@ pub const Planner = struct {
             moved = moved or slot.num != nominal;
             crossed = crossed or crossesZero(nominal, slot.num);
         }
-        for (p.nl.live.pool_rows, pt.live, p.nominal_pool) |row, v, nominal| {
-            if (row != netlist.none) moved = moved or v != nominal;
-        }
+        if (!p.kept.holds(p.nl)) return .circuit;
         if (!moved) return .row;
-        if (p.nl.live.opaque_reads or p.binsMoved()) return .circuit;
         if (p.fast == .untested) p.fast = try p.probe(pt);
         // A value that reaches or leaves zero may collapse a node: only a
         // rebuild can tell.
@@ -732,6 +712,43 @@ pub const Planner = struct {
 fn crossesZero(a: f64, b: f64) bool {
     return (a == 0) != (b == 0) or (a < 0) != (b < 0);
 }
+
+/// What a circuit holds that no parameter write reaches, read off the
+/// netlist it was built from: each binned card's model row (bins differ in
+/// which model parameters they give) and each constant-pool row a kept
+/// expression reads (a B source's tape is not `ParamRef` storage). A point
+/// that moves any of them needs a circuit of its own.
+const Kept = struct {
+    bins: []const u32 = &.{},
+    /// `Live.pool_rows` then `Live.site_rows`, `none` rows read as 0.
+    pool: []const f64 = &.{},
+
+    /// The netlist's current values, allocated in `gpa`.
+    fn of(gpa: std.mem.Allocator, nl: *const Netlist) !Kept {
+        const live = nl.live;
+        const bins = try gpa.alloc(u32, live.bins.edges.len);
+        const model_of = nl.graph.edges.items(.model);
+        for (bins, live.bins.edges) |*row, e| row.* = model_of[e];
+        const pool = try gpa.alloc(f64, live.pool_rows.len + live.site_rows.len);
+        for (pool[0..live.pool_rows.len], live.pool_rows) |*v, row| v.* = if (row == netlist.none) 0 else nl.consts[row];
+        for (pool[live.pool_rows.len..], live.site_rows) |*v, row| v.* = nl.consts[row];
+        return .{ .bins = bins, .pool = pool };
+    }
+
+    /// Whether `nl` at its current values still holds `k` bit for bit.
+    fn holds(k: Kept, nl: *const Netlist) bool {
+        const live = nl.live;
+        std.debug.assert(k.bins.len == live.bins.edges.len);
+        std.debug.assert(k.pool.len == live.pool_rows.len + live.site_rows.len);
+        const model_of = nl.graph.edges.items(.model);
+        for (k.bins, live.bins.edges) |row, e| if (model_of[e] != row) return false;
+        // By value: a `0*agauss(...)` row is -0 or +0 by the draw's sign,
+        // the same number to the tape.
+        for (k.pool[0..live.pool_rows.len], live.pool_rows) |v, row| if (row != netlist.none and v != nl.consts[row]) return false;
+        for (k.pool[live.pool_rows.len..], live.site_rows) |v, row| if (v != nl.consts[row]) return false;
+        return true;
+    }
+};
 
 /// Turns optimizer points into variant rows (HSPICE `OPTIMIZE=`,
 /// dev/analysis/optimize.md): each point sets the optimized parameters'

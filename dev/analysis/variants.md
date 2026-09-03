@@ -106,12 +106,22 @@ parameter writes that turn the nominal circuit into that variant:
    parameters that differ. `force_rebuild` makes this the oracle of the
    fast path's differential test (`frontend/tests/variants.zig`).
 4. If the rebuilt circuit's pattern, node count or devices per type
-   differ, a B-source expression reads a live name (its tape is not
+   differ, a value a B-source expression reads moved (its tape is not
    `ParamRef` storage), or a binned M card's live L/W picks another bin
    (below), the point becomes its own `Prepared` run with its own session,
    published after the main one.
 5. Source/element targets, `.data` card columns and Monte Carlo
    `DEV`/`LOT`/`.variation` draws add their writes on top.
+
+A B-source expression keeps its postfix, so the values it reads sit in
+constant-pool rows the point rewrites: one per live name, and one per
+largest constant subtree that holds a distribution call (`0*agauss(...)`
+is one subtree, `agauss(...)*v(a)` gives the `agauss` call). Each trial
+redraws those subtrees from the ops left in place (`Live.site_rows`),
+with the same site keys as everywhere else, so a B source and a resistor
+reading one `.param` see one draw (#133). A trial that moves such a row
+takes its own run; a row that stays put (sky130's `rbody` at
+`MC_MM_SWITCH=0`) costs nothing.
 
 An `.alter` run is parsed from its own text. When it keeps the same cards
 on the same nets and the same analyses and options, and the deck has no
