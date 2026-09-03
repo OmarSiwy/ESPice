@@ -404,7 +404,7 @@ pub const Planner = struct {
         var crossed = false;
         for (p.nl.live.slots, p.nominal_slots) |slot, nominal| {
             moved = moved or slot.num != nominal;
-            crossed = crossed or (slot.num == 0) != (nominal == 0) or (slot.num < 0) != (nominal < 0);
+            crossed = crossed or crossesZero(nominal, slot.num);
         }
         for (p.nl.live.pool_rows, pt.live, p.nominal_pool) |row, v, nominal| {
             if (row != netlist.none) moved = moved or v != nominal;
@@ -453,9 +453,13 @@ pub const Planner = struct {
         var by_bits: std.AutoHashMapUnmanaged(u64, u32) = .empty;
         defer by_bits.deinit(p.scratch);
         for (probe_at, p.nominal_slots, 0..) |*x, nominal, k| {
-            // ponytail: a zero slot (sky130's mismatch terms) refuses the
-            // fast path for every point; perturb only the slots that move (#130).
-            if (nominal == 0 or !std.math.isFinite(nominal)) return .rebuild;
+            if (!std.math.isFinite(nominal)) return .rebuild;
+            // A zero slot stays put and maps nothing: a point that moves it
+            // crosses zero, which `load` rebuilds anyway (#130).
+            if (nominal == 0) {
+                x.* = 0;
+                continue;
+            }
             // A distinct nearby value per slot, far from any rounding tie.
             x.* = nominal * (1 + @as(f64, @floatFromInt(k + 1)) * 0x1.0p-24);
             const gop = try by_bits.getOrPut(p.scratch, @bitCast(x.*));
@@ -607,9 +611,12 @@ pub const Planner = struct {
         var params: std.ArrayList(u32) = .empty;
         var steps: std.ArrayList(f64) = .empty;
         try starts.append(p.sim, 0);
+        if (p.fast == .untested) p.fast = if (p.force_rebuild) .rebuild else try p.probeIdentity();
         // The steps are taken from every draw at its nominal, which under
         // `.option seed` is not the circuit's own state.
         _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, null);
+        const base_slots = try p.scratch.alloc(f64, live.slots.len);
+        for (base_slots, live.slots) |*x, slot| x.* = slot.num;
         var base_arena = std.heap.ArenaAllocator.init(core.gpa);
         defer base_arena.deinit();
         var base_c = try circuitOf(p.lib, base_arena.allocator(), base_arena.allocator(), p.nl);
@@ -622,18 +629,30 @@ pub const Planner = struct {
             if ((try seen.getOrPut(p.scratch, key)).found_existing) continue;
             _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, OneSigma{ .site = key });
             const first = params.items.len;
-            // ponytail: one rebuild per site. The probe's slot-to-parameter
-            // map would skip it, but refuses sky130's zero slots (#130).
-            var arena = std.heap.ArenaAllocator.init(core.gpa);
-            defer arena.deinit();
-            var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
-            defer c.deinit();
-            if (!sameTopology(p.nominal, &c)) return p.refuse("", "a one-sigma mismatch draw that changes the topology");
-            for (base_refs, try collect(arena.allocator(), &c), 0..) |x, y, ord| {
-                const step = y.get() - x.get();
-                if (step == 0) continue;
-                try params.append(p.sim, @intCast(ord));
-                try steps.append(p.sim, step);
+            const crossed = for (live.slots, base_slots) |slot, x| {
+                if (crossesZero(x, slot.num)) break true;
+            } else false;
+            // The probe's slot-to-parameter map gives the steps without a
+            // rebuild, unless the draw takes a slot across zero (#130).
+            if (p.fast == .identity and !crossed) {
+                for (p.fast_slots, p.fast_refs) |k, ord| {
+                    const step = live.slots[k].num - base_slots[k];
+                    if (step == 0) continue;
+                    try params.append(p.sim, ord);
+                    try steps.append(p.sim, step);
+                }
+            } else {
+                var arena = std.heap.ArenaAllocator.init(core.gpa);
+                defer arena.deinit();
+                var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
+                defer c.deinit();
+                if (!sameTopology(p.nominal, &c)) return p.refuse("", "a one-sigma mismatch draw that changes the topology");
+                for (base_refs, try collect(arena.allocator(), &c), 0..) |x, y, ord| {
+                    const step = y.get() - x.get();
+                    if (step == 0) continue;
+                    try params.append(p.sim, @intCast(ord));
+                    try steps.append(p.sim, step);
+                }
             }
             if (params.items.len == first) continue;
             const r = p.refs[params.items[first]];
@@ -707,6 +726,12 @@ pub const Planner = struct {
         return ord;
     }
 };
+
+/// Whether a slot that held `a` reaches, leaves or crosses zero at `b`,
+/// which may collapse a node: only a rebuild can tell.
+fn crossesZero(a: f64, b: f64) bool {
+    return (a == 0) != (b == 0) or (a < 0) != (b < 0);
+}
 
 /// Turns optimizer points into variant rows (HSPICE `OPTIMIZE=`,
 /// dev/analysis/optimize.md): each point sets the optimized parameters'

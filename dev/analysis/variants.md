@@ -96,9 +96,12 @@ parameter writes that turn the nominal circuit into that variant:
    (`collectParams` order). If every parameter that moved holds exactly
    one slot's probe value, and held that slot's nominal before, the map
    slot → parameters is recorded and every later point writes slot values
-   straight to those parameters. Nothing is rebuilt.
-3. **Rebuild path.** Otherwise (a derived parameter moved, a slot is zero,
-   or a point takes a value across zero, which may collapse a node), the
+   straight to those parameters. Nothing is rebuilt. A slot at zero keeps
+   its zero in the probe and maps nothing (#130): sky130's mismatch terms
+   (`MC_MM_SWITCH*AGAUSS(...)/sqrt(l*w*mult)`) read the live W but hold 0
+   at the nominal corner, and used to refuse the fast path for the deck.
+3. **Rebuild path.** Otherwise (a derived parameter moved, or a point
+   takes a slot across zero, which may collapse a node), the
    point rebinds the netlist into a scratch circuit and keeps the
    parameters that differ. `force_rebuild` makes this the oracle of the
    fast path's differential test (`frontend/tests/variants.zig`).
@@ -223,14 +226,11 @@ Over W = 0.55..0.6 um (two runs, load average 26) the loop measured
 Every point agrees with a fresh parse at that value to 2.4e-8 relative in
 v(xxdut.d1): the first point's `.op` runs second on the template and
 converges along another Newton path; points on a new template agree to
-1e-13. sky130's mismatch terms (`MC_MM_SWITCH*AGAUSS(...)`) are zero-valued
-slots, so the probe never maps the fast path there and each point that keeps
-its bins pays a rebuild diff.
+1e-13. These numbers predate #130: sky130's mismatch terms
+(`MC_MM_SWITCH*AGAUSS(...)`) were zero-valued slots the probe refused, so
+each point that kept its bins paid a rebuild diff. Not re-measured since.
 
 - `ponytail:` every template stays alive until `deinit`, and a point
   that needs one always builds a new one, so a loop oscillating across a
   bin edge grows by a circuit per crossing; reuse templates by bin
   selection or free them (#129).
-- `ponytail:` the probe refuses the fast path when any slot's nominal is
-  zero (sky130's mismatch terms); mapping only the slots that moved would
-  let a sizing point skip the rebuild (#130).

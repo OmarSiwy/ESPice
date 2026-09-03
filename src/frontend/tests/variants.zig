@@ -86,7 +86,21 @@ test "the live-value fast path writes what a rebuild would" {
         \\.op
         \\.end
     , true);
-    // A slot at zero cannot be probed: every point rebuilds.
+    // A slot that reads the swept name but holds zero (sky130's
+    // `MC_MM_SWITCH*AGAUSS(...)/sqrt(l*w*mult)` at the nominal corner) maps
+    // nothing and keeps the fast path for the others (#130).
+    try expectFastMatchesRebuild(
+        \\zero slot
+        \\.param rv=1k
+        \\v1 in 0 1
+        \\r1 in a {rv}
+        \\d1 a 0 dm
+        \\.model dm d is='1e-14+0*rv' tt='0*rv'
+        \\.step param rv list 1k 3k
+        \\.op
+        \\.end
+    , true);
+    // A point that takes a value across zero rebuilds.
     try expectFastMatchesRebuild(
         \\rebuild path
         \\.param g=0
@@ -252,4 +266,35 @@ test "points a B source reads rebuild as runs of their own, at their own values"
     try t.expectEqual(@as(usize, 0), rebuilt_all.deck.queries.len);
     try t.expectEqual(@as(usize, 2), rebuilt_all.runs.len);
     for (rebuilt_all.runs) |run| try t.expectEqual(@as(usize, 1), run.deck.queries.len);
+}
+
+test "mismatch groups from the probe's map match one rebuild per site, zero slots included (#130)" {
+    var sa = std.heap.ArenaAllocator.init(t.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(t.allocator);
+    defer pa.deinit();
+    var lib = try device.Library.init(t.allocator);
+    defer lib.deinit();
+    // `is` moves by the map; `tt` sits at zero, so its draw rebuilds.
+    var nl = try netlist.parse(pa.allocator(),
+        \\site groups
+        \\i1 0 a 1m
+        \\d1 a 0 dm
+        \\.model dm d is='1e-14*(1+agauss(0,0.1,1))' tt='agauss(0,1n,1)'
+        \\.dcmatch v(a)
+        \\.end
+    , .ngspice);
+    var prepared = try input.build(&lib, sa.allocator(), pa.allocator(), nl);
+    defer prepared.deinit();
+    var fast = try variants.Planner.init(&lib, sa.allocator(), pa.allocator(), &nl, &prepared.circuit, prepared.deck.cards, "");
+    const got = try fast.siteVariations();
+    try t.expect(fast.fast == .identity);
+    var slow = try variants.Planner.init(&lib, sa.allocator(), pa.allocator(), &nl, &prepared.circuit, prepared.deck.cards, "");
+    slow.force_rebuild = true;
+    const want = try slow.siteVariations();
+    try t.expectEqual(@as(usize, 2), got.labels.len);
+    for (want.labels, got.labels) |a, b| try t.expectEqualStrings(a, b);
+    try t.expectEqualSlices(u32, want.starts, got.starts);
+    try t.expectEqualSlices(u32, want.params, got.params);
+    try t.expectEqualSlices(u64, @ptrCast(want.sigmas), @ptrCast(got.sigmas));
 }
