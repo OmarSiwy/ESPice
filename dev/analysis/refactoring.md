@@ -31,26 +31,44 @@ on the serial path. `Circuit.combinePlanes(W, out, g, c, alpha)` forms
 $G + \alpha C$ in one pass (the transient Jacobian) and serves MATEX with the
 operands swapped ($C + \gamma G$). W = 1 is its scalar oracle and tail.
 
-**ParEval.** Lane 0 stamps the caller's planes; lanes 1 and up stamp private
-slabs that are summed into them in a fixed lane order, with no allocation and
-no mutex per pass. Lane cuts fall on instance boundaries, so one instance's
-cancelling `+g/-g` pair never straddles lanes, but two instances sharing a
-node can. The result is therefore not bit-identical to the serial stamp: a
-plane cell becomes `((S0 + S1) + S2) + ...` over consecutive segments of the
-serial order. Measured serial against 2 to 16 lanes: at most 1 ulp
-(`parallel_inverters`, `resistor_grid_100x100`; `rc_ladder_10k`
-bit-identical), and deterministic at a given lane count. It is off by
-default: `ESPICE_THREADS` sets the device thread count (default 1).
+**ParEval.** A pass has two phases. In the stamp phase, lanes claim chunks
+of instances from a shared counter (about eight per lane, cut by `count *
+n_u^2`, 16x for a nonlinear model), and each instance stores every stamp at
+its own position in a staging array through `Hooks.stage`: the sink indexes
+the batch-relative tape position instead of the plane cell the tape names.
+In the reduce phase, after a barrier, lanes claim blocks of plane cells
+(16-cell aligned) and set each cell to its initial value (zero, or the
+constant baseline for `.newton`) plus its positions in tape order, read
+through a counting-sorted gather table built once per query. Tape order is
+the order the serial stamp adds in, and every position holds -0.0 (the
+additive identity) when a pass leaves it unstamped, so every plane is the
+serial stamp bit for bit at any lane count and any claim order (#137; the
+analysis test checks every plane at 1 to 24 lanes, `tests/espice.zig` four
+decks byte for byte at 1 to 4 device threads). `.charge` reduces q only.
+Between passes a worker spins 4,096 pauses, yields 64 times, then sleeps on
+a futex, so the single-threaded LU does not share its core with seven
+spinning threads.
 
-Lanes are cut by `count * n_u^2`, times 16 for a nonlinear model, since a
-PSP103 instance costs about a thousand capacitors rather than 36. After a
-barrier every lane reduces an equal, cache-line aligned share of the slots
-and rows, adding the slabs in lane order (so the sum is the serial reduce's,
-bit for bit) and zeroing them for the next pass. The serial reduce it
-replaced took as long as the stamp on chain_psp103_10k, 8.4 ms a pass over
-windows of 300k-660k slots. Between passes a worker spins 4,096 pauses, yields
-64 times, then sleeps on a futex, so the single-threaded LU does not share
-its core with seven spinning threads.
+The design it replaced (to 2026-10-18) gave lane 0 the caller's planes and
+every other lane a whole private plane slab over a static instance range,
+summed in lane order. Diagnosed on bare PSP103 decks (#138, i9-14900HX,
+`perf`): at 10k instances one thread ran eval + update in 12.4 ms per
+Newton iteration, 2 lanes 6.6, 4 lanes 4.9, 8 P-core lanes 4.4 (2.8x), 16
+and 24 lanes slower than 8. Three causes, measured: (1) false sharing, 4.1M
+loads per run hit a line modified in another core
+(`mem_load_l3_hit_retired.xsnp_fwd`, 9 at one thread), 94% of them on the
+`+=` scatter: each slab's trash cell (every grounded terminal) shared a line
+with the next slab's first rows; (2) the reduce walked each lane's slot
+window, which a shared node or rail stretches to the whole plane, so its
+cost grew with the lane count (`moveSimd` 5.9% of cycles on bare_10k, 7.8%
+on chain_psp103_10k at 8 lanes, plus 4.5-5.3% in the barrier spin); (3) a
+static split leaves P-core lanes waiting on E-core lanes. The slabs also
+cost a plane copy per lane, the RSS that doubled at 24 threads. Sums also
+regrouped with the lane count (up to 24554 ulp, #137). Staging removes all
+three: lanes write disjoint per-instance positions, the reduce is O(stamps)
+whatever the lane count, and claiming is dynamic. Staging costs 8 bytes per
+tape entry per plane plus 4 per entry for the gather, independent of the
+lane count.
 
 **GPU.** Every eligible batch's models, instances and tapes are uploaded once
 and stay resident. Per Newton iteration the bus carries `x` up and the value

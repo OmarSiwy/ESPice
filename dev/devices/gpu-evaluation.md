@@ -538,7 +538,8 @@ Against E1's rules:
    thread count is not worth a default. The `8 P` cell on logic ran
    beside a build on the same cores. ParEval cuts by weight, not by
    measured lane speed; a work-stealing split is the fix if a deck's eval
-   ever dominates on a hybrid CPU.
+   ever dominates on a hybrid CPU. Since #138 lanes claim chunks
+   dynamically ([refactoring.md](../analysis/refactoring.md), "ParEval").
 
 ## Limits
 

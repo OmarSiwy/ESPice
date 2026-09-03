@@ -1028,23 +1028,6 @@ const dense3: impl.test_access.PatternView = .{
     .trash_slot = 9,
 };
 
-test "scatter_bounds: the slot and row ranges a slice touches, ground excluded" {
-    const a = std.testing.allocator;
-    var proto: ProtoStore(Conductance) = .{};
-    // Floating, half grounded, fully grounded.
-    for ([_][2]u32{ .{ 1, 2 }, .{ 2, 0 }, .{ 0, 0 } }) |nodes| try proto.append(.{}, .{}, nodes);
-    const batch = try ProtoStore(Conductance).finalize(&proto, a, dense3).unwrap();
-    defer batch.hooks.deinit(batch.ctx, a);
-    const bounds = batch.hooks.scatter_bounds;
-    // Slot of (r, c) in the dense pattern is 3c + r.
-    try std.testing.expectEqual([4]u32{ 4, 9, 1, 3 }, bounds(batch.ctx, 0, 1, 9, 3));
-    try std.testing.expectEqual([4]u32{ 8, 9, 2, 3 }, bounds(batch.ctx, 1, 2, 9, 3));
-    try std.testing.expectEqual([4]u32{ 4, 9, 1, 3 }, bounds(batch.ctx, 0, 3, 9, 3));
-    // Only trash, or nothing at all: empty ranges.
-    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0 }, bounds(batch.ctx, 2, 3, 9, 3));
-    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0 }, bounds(batch.ctx, 1, 1, 9, 3));
-}
-
 test "ac_dyn: every frequency once, ragged tails included" {
     const D = struct {
         pub const U = Conductance.U;

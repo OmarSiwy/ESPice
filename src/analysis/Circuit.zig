@@ -637,14 +637,18 @@ pub const Circuit = struct {
     }
 
     /// Host stamp: clear, run every batch serially or threaded, then add the
-    /// ground pin (which `.charge` does not touch).
+    /// ground pin (which `.charge` does not touch). ParEval sets every cell
+    /// itself, baseline included, so it skips the clear.
     fn stamp(self: *Circuit, x: []const f64, t: f64, comptime mode: par_eval.Mode) void {
-        self.clearPlanes(mode);
         const pl = self.ownPlanes();
-        if (self.par_eval) |p|
-            p.run(self.batches, pl, x, t, mode)
-        else for (self.batches) |b|
-            par_eval.stampRange(b, &pl, 0, b.count, x, t, mode);
+        if (self.par_eval) |p| {
+            self.q_fresh = false;
+            const base: ParEval.Base = if (mode == .newton) .{ .g = self.g_base, .c = if (self.has_charge) self.c_base else &.{} } else .{};
+            p.run(self.batches, pl, base, x, t, mode);
+        } else {
+            self.clearPlanes(mode);
+            for (self.batches) |b| par_eval.stampRange(b, &pl, 0, b.count, x, t, mode);
+        }
         if (mode != .charge) self.groundStamp(x);
     }
 

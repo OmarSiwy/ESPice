@@ -149,7 +149,7 @@ test "a Newton stamp seeded from the baseline equals a full stamp" {
     try expectClose(g, ckt.g_vals[0..nnz]);
 }
 
-test "threaded stamps match the serial stamp and repeat bit for bit" {
+test "threaded stamps equal the serial stamp bit for bit at every lane count" {
     var lib = try Library.init(t.allocator);
     defer lib.deinit();
     var prepared = try ladder(&lib, 6);
@@ -163,43 +163,54 @@ test "threaded stamps match the serial stamp and repeat bit for bit" {
     const nnz = ckt.nnz;
     const n = ckt.n;
 
+    // The serial planes, cell for cell; the trash cells hold no answer.
+    const Snap = struct { g: []f64, c: []f64, rhs: []f64, q: []f64 };
+    const take = struct {
+        fn f(c: *const types.Circuit) !Snap {
+            return .{
+                .g = try t.allocator.dupe(f64, c.g_vals[0..c.nnz]),
+                .c = try t.allocator.dupe(f64, c.c_vals[0..c.nnz]),
+                .rhs = try t.allocator.dupe(f64, c.rhs[0..c.n]),
+                .q = try t.allocator.dupe(f64, c.q_vec[0..c.n]),
+            };
+        }
+        fn free(s: Snap) void {
+            inline for (.{ s.g, s.c, s.rhs, s.q }) |p| t.allocator.free(p);
+        }
+        fn expectSame(want: Snap, c: *const types.Circuit) !void {
+            try t.expectEqualSlices(f64, want.g, c.g_vals[0..c.nnz]);
+            try t.expectEqualSlices(f64, want.c, c.c_vals[0..c.nnz]);
+            try t.expectEqualSlices(f64, want.rhs, c.rhs[0..c.n]);
+            try t.expectEqualSlices(f64, want.q, c.q_vec[0..c.n]);
+        }
+    };
     ckt.eval(x, 0);
-    const g = try t.allocator.dupe(f64, ckt.g_vals[0..nnz]);
-    defer t.allocator.free(g);
-    const rhs = try t.allocator.dupe(f64, ckt.rhs[0..n]);
-    defer t.allocator.free(rhs);
-    const q = try t.allocator.dupe(f64, ckt.q_vec[0..n]);
-    defer t.allocator.free(q);
+    const full = try take.f(&ckt);
+    defer take.free(full);
+    ckt.evalNewton(x, 0);
+    const newton = try take.f(&ckt);
+    defer take.free(newton);
     // Serial charge-only stamp: bit for bit what `eval` left.
     ckt.evalQ(x, 0);
-    try t.expectEqualSlices(f64, q, ckt.q_vec[0..n]);
-    ckt.evalNewton(x, 0);
-    const g_newton = try t.allocator.dupe(f64, ckt.g_vals[0..nnz]);
-    defer t.allocator.free(g_newton);
+    try t.expectEqualSlices(f64, full.q, ckt.q_vec[0..n]);
 
-    // 0 asks for one lane; 24 is more lanes than the 19 instances.
+    // 0 asks for one lane; 24 is more lanes than the 19 instances. Every
+    // pass twice, so a position left stale by the last pass would show.
     for ([_]u32{ 0, 1, 2, 3, 5, 8, 24 }) |lanes| {
         var par = try ParEval.init(t.allocator, t.io, ckt.batches, nnz, n, ckt.has_charge, ckt.trash_slot, lanes);
         defer par.deinit();
         ckt.attachParEval(&par);
         defer ckt.attachParEval(null);
-
-        ckt.eval(x, 0);
-        try expectClose(g, ckt.g_vals[0..nnz]);
-        try expectClose(rhs, ckt.rhs[0..n]);
-        try expectClose(q, ckt.q_vec[0..n]);
-        const g1 = try t.allocator.dupe(f64, ckt.g_vals);
-        defer t.allocator.free(g1);
-        const q1 = try t.allocator.dupe(f64, ckt.q_vec[0..n]);
-        defer t.allocator.free(q1);
-        // Deterministic at a fixed lane count, and the lane slabs come back
-        // clean: a second pass adds nothing stale.
-        ckt.eval(x, 0);
-        try t.expectEqualSlices(f64, g1, ckt.g_vals);
-        ckt.evalQ(x, 0);
-        try t.expectEqualSlices(f64, q1, ckt.q_vec[0..n]);
-        ckt.evalNewton(x, 0);
-        try expectClose(g_newton, ckt.g_vals[0..nnz]);
+        for (0..2) |_| {
+            ckt.eval(x, 0);
+            try take.expectSame(full, &ckt);
+            // The Newton pass skips the constant stamps the full pass made.
+            ckt.evalNewton(x, 0);
+            try take.expectSame(newton, &ckt);
+            @memset(ckt.q_vec, std.math.nan(f64));
+            ckt.evalQ(x, 0);
+            try t.expectEqualSlices(f64, full.q, ckt.q_vec[0..n]);
+        }
     }
 }
 
