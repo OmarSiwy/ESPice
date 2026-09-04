@@ -17,6 +17,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - mosvar, hicumL2_va, asmesd and asmesd_dio get GPU kernels; a source-size gate that counted their whole upstream release left them out (#139).
 - `--backend auto` runs a deck whose large GPU kernel the driver has not compiled yet entirely on the CPU, instead of leaving that one model on the host (#139).
 - `ESPICE_THREADS` > 1 gives the same bytes as one thread: threaded device evaluation sums every stamp in the serial order, and threads claim work dynamically instead of a fixed split; device ABI 28 (#137, #138).
+- `set_params` runs a point on an earlier call's circuit when it selects the same model bins, so a sizing loop that keeps crossing a bin edge holds two circuits instead of one per crossing (#129).
+- Monte Carlo: a B source reading a sampled `.param` takes each trial's draw, as a resistor reading it does; it kept the nominal value (#133).
+- `.step` and `set_params` points, and `.dcmatch` groups from a PDK's mismatch, keep the parameter-write path when a live value sits at zero (sky130's mismatch terms at the nominal corner) instead of rebuilding the circuit per point or per site (#130).
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - `--backend cuda` evaluates BSIM4 (LEVEL 14/54, sky130), VBIC and MOS levels 1/2/3/6/9 on the GPU: held variables and limiting now live in device state; device ABI 27 (#140).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.

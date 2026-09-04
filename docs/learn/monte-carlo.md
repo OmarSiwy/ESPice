@@ -98,7 +98,8 @@ The delay is R C ln 2, so a 3 % sigma on R gives a 3 % sigma on the delay:
 693 ns × 0.03 = 20.8 ns, and the 50 trials measure 21.1 ns.
 
 An `agauss` in a `.param` is drawn once per trial and shared by every
-element that uses the parameter; an `agauss` written directly on an element
+element that uses the parameter, a B source's expression included; an
+`agauss` written directly on an element
 is drawn for that element alone. That is the difference between global
 (process) and local (mismatch) variation. HSPICE-style `DEV` and `LOT`
 tolerances on `.model` parameters, and the `.variation` block, work too;

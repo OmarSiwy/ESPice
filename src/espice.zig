@@ -339,8 +339,8 @@ pub const Problem = struct {
     /// when the lengths differ or a value is not finite,
     /// `error.ModelBinNotFound` when no bin holds a new geometry, and
     /// `error.UnsupportedCard` when the values would flip a top-level `.if`
-    /// or change the topology. Each call keeps one row (and, after a bin
-    /// change, one circuit) until `deinit`.
+    /// or change the topology. Each call keeps one row until `deinit`, and
+    /// each distinct bin selection it reaches keeps one circuit.
     pub fn set_params(self: *Problem, names: []const []const u8, values: []const f64) !void {
         const tuning = self.prepared.tuning orelse return error.UnknownParameter;
         if (names.len != values.len) return error.InvalidArgument;
@@ -350,7 +350,9 @@ pub const Problem = struct {
         try self.age();
         try self.session.templates.ensureUnusedCapacity(self.session.allocator, 1);
         const change = try tuning.set(&self.prepared.circuit, self.prepared.deck.variants, names, values);
-        if (change.template) |c| self.session.addTemplate(c) catch unreachable;
+        if (change.built) |c| self.session.addTemplate(c) catch unreachable;
+        std.debug.assert(change.template <= self.session.templates.items.len);
+        self.session.template = change.template;
         self.prepared.deck.variants = change.variants;
         self.variant = change.variants.count() - 1;
     }

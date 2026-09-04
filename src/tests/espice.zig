@@ -716,6 +716,37 @@ test "an R reading v() is ngspice's B source: pow() takes |x|, tc divides, m mul
     try t.expectApproxEqRel(@as(f64, -0.5 * 2 / (1017.28 * 1.035178)), i, 1e-12);
 }
 
+test "Monte Carlo: a B source reads the trial's draw of a sampled .param, as a resistor does (#133)" {
+    // Analytic oracle from the deck itself: within a trial v(out) = g and
+    // v(c) = 1/(1+g), so v(out) = 1/v(c) - 1.
+    const body = "monte B\n.param g=agauss(1, 0.1, 1)\nv1 a 0 1\nbout out 0 v=g*v(a)\nrload out 0 1k\nr1 a c '1k*g'\nr2 c 0 1k\n{s}.end\n";
+    var buf: [256]u8 = undefined;
+    const p = try create(try std.fmt.bufPrint(&buf, body, .{".op sweep monte=3\n"}));
+    defer p.deinit();
+    try p.run_all();
+    var all: std.ArrayList(api.Result) = .empty;
+    defer all.deinit(t.allocator);
+    for (0..p.query_count()) |i| try all.append(t.allocator, try p.result(@fromBackingInt(@intCast(i))));
+    const runs = try p.run_results(t.allocator);
+    defer t.allocator.free(runs);
+    try all.appendSlice(t.allocator, runs);
+    var drawn: usize = 0;
+    for (all.items) |r| {
+        const g = try column(r, "v(out)");
+        try t.expectApproxEqRel(1 / try column(r, "v(c)") - 1, g, 1e-9);
+        if (@abs(g - 1) > 1e-6) drawn += 1;
+    }
+    try t.expectEqual(@as(usize, 4), all.items.len);
+    try t.expectEqual(@as(usize, 3), drawn);
+    // `.option seed` draws once, the same way.
+    const seeded = try create(try std.fmt.bufPrint(&buf, body, .{".options seed=3\n.op\n"}));
+    defer seeded.deinit();
+    try seeded.run_all();
+    const r = try seeded.result(@fromBackingInt(0));
+    try t.expect(@abs(try column(r, "v(out)") - 1) > 1e-6);
+    try t.expectApproxEqRel(1 / try column(r, "v(c)") - 1, try column(r, "v(out)"), 1e-9);
+}
+
 /// Column `name` of `r`'s first point.
 fn column(r: api.Result, name: []const u8) !f64 {
     for (r.varnames, 0..) |v, i| if (std.mem.eql(u8, v, name)) return r.data[i];
@@ -802,7 +833,9 @@ test "Problem.set_params: a binned MOSFET takes the bin its new W selects (#101,
         \\.end
         \\
     ;
-    try t.expectEqual(@as(usize, 2), try expectTunedAsParsed(global, "wn", &.{ 1e-6, 2e-6, 1.05e-6, 1e-6 }));
+    // A loop that keeps crossing the bin edge reuses the template of each
+    // side: one circuit beside the nominal one, however many crossings (#129).
+    try t.expectEqual(@as(usize, 1), try expectTunedAsParsed(global, "wn", &.{ 1e-6, 2e-6, 1.05e-6, 2.05e-6, 1e-6, 2e-6, 1.05e-6 }));
     // The same with sky130's layout: bins inside the subcircuit, a model
     // value read under each instance's parameters, and `.option scale`.
     const local =
@@ -821,7 +854,7 @@ test "Problem.set_params: a binned MOSFET takes the bin its new W selects (#101,
         \\.end
         \\
     ;
-    try t.expectEqual(@as(usize, 2), try expectTunedAsParsed(local, "wn", &.{ 1, 2, 1.05, 1 }));
+    try t.expectEqual(@as(usize, 1), try expectTunedAsParsed(local, "wn", &.{ 1, 2, 1.05, 2.05, 1 }));
     // The bins really differ: the drain current moves with them.
     var buf: [512]u8 = undefined;
     const narrow = try opValue(try std.fmt.bufPrint(&buf, global, .{1e-6}), "i(v1)");

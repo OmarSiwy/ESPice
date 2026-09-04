@@ -185,11 +185,14 @@ pub const Live = struct {
     site_ops: []const u32 = &.{},
     site_keys: []const u64 = &.{},
     /// Constant-pool row that stands in for each name inside expressions a
-    /// device keeps as postfix (a B source), or `none`.
+    /// device keeps as postfix (a B source), or `none`. A variant that moves
+    /// one changes storage `ParamRef` cannot reach and must be rebuilt.
     pool_rows: []const u32 = &.{},
-    /// Some kept expression reads a swept name, so a variant changes storage
-    /// `ParamRef` cannot reach and must be rebuilt.
-    opaque_reads: bool = false,
+    /// Constant-pool rows that stand in for each constant subtree holding a
+    /// distribution call inside such an expression (#133), and the subtree
+    /// each is re-evaluated from, parallel. Moving one rebuilds the same way.
+    site_rows: []const u32 = &.{},
+    site_spans: []const Span = &.{},
     /// Postfix of each top-level `.if`/`.elseif` condition the parse
     /// evaluated that reads a live name. A variant keeps the nominal
     /// branches only while each still has its nominal truth value.
@@ -455,6 +458,15 @@ pub const Netlist = struct {
                 try expr.eval(gpa, stack, ops, nl.consts, values, SiteDraw(@TypeOf(draw)){ .inner = draw, .base = span.start, .ops = live.site_ops, .keys = live.site_keys });
             changed = changed or slot.num != x;
             slot.* = .{ .num = x };
+        }
+        for (live.site_rows, live.site_spans) |row, span| {
+            const ops = nl.exprOps(span);
+            const x = if (@TypeOf(draw) == @TypeOf(null))
+                try expr.eval(gpa, stack, ops, nl.consts, values, null)
+            else
+                try expr.eval(gpa, stack, ops, nl.consts, values, SiteDraw(@TypeOf(draw)){ .inner = draw, .base = span.start, .ops = live.site_ops, .keys = live.site_keys });
+            changed = changed or pool[row] != x;
+            pool[row] = x;
         }
         // Each binned card with live geometry takes the bin its new L and W
         // select, read off the card as the slots above left them (scaled).
@@ -2236,48 +2248,102 @@ fn Reader(comptime S: type) type {
             var out: Live = .{ .names = r.live_names.keys(), .nominal = r.live_nominal.items };
             const pool_rows = try r.arena.alloc(u32, r.live_names.count());
             @memset(pool_rows, none);
-            for (r.values.items) |*v| try r.liveSlot(v, &slots, &spans, pool_rows, &out);
-            for (r.kvs.items) |*kv| try r.liveSlot(&kv.value, &slots, &spans, pool_rows, &out);
+            var sites: Sites = .{};
+            for (r.values.items) |*v| try r.liveSlot(v, &slots, &spans, pool_rows, &sites);
+            for (r.kvs.items) |*kv| try r.liveSlot(&kv.value, &slots, &spans, pool_rows, &sites);
             out.slots = slots.items;
             out.ops = spans.items;
             out.site_ops = r.site_ops.items;
             out.site_keys = r.site_keys.items;
             out.pool_rows = pool_rows;
+            out.site_rows = sites.rows.items;
+            out.site_spans = sites.spans.items;
             return out;
         }
 
-        fn liveSlot(r: *R, v: *Value, slots: *std.ArrayList(*Value), spans: *std.ArrayList(Span), pool_rows: []u32, out: *Live) Error!void {
+        /// Whether postfix `ops` reads the circuit (a probe, `time` or
+        /// `temper`): only a B-source tape does.
+        fn readsCircuit(ops: []const expr.Op) bool {
+            for (ops) |op| switch (op.code) {
+                .vprobe, .iprobe => return true,
+                .ident => if (op.a >= 2) return true,
+                else => {}, // else: no other op reads the circuit
+            };
+            return false;
+        }
+
+        /// `Live.site_rows` and `Live.site_spans` as `liveSlot` finds them.
+        const Sites = struct { rows: std.ArrayList(u32) = .empty, spans: std.ArrayList(Span) = .empty };
+
+        /// Whether one of the distribution calls the parse recorded sits in
+        /// ops `start..end` of the netlist.
+        fn holdsSite(r: *const R, start: usize, end: usize) bool {
+            const k = std.sort.lowerBound(u32, r.site_ops.items, @as(u32, @intCast(start)), orderU32);
+            return k < r.site_ops.items.len and r.site_ops.items[k] < end;
+        }
+
+        fn liveSlot(r: *R, v: *Value, slots: *std.ArrayList(*Value), spans: *std.ArrayList(Span), pool_rows: []u32, sites: *Sites) Error!void {
             switch (v.*) {
                 // `valueAt` built the arguments in the parse arena, mutable;
                 // `Group` types them const for every reader after the parse.
-                .group => |g| for (g.args) |*a| try r.liveSlot(@constCast(a), slots, spans, pool_rows, out),
+                .group => |g| for (g.args) |*a| try r.liveSlot(@constCast(a), slots, spans, pool_rows, sites),
                 .expr => |span| {
-                    const ops = r.ops.items[span.start..][0..span.len];
-                    const sited = blk: {
-                        const k = std.sort.lowerBound(u32, r.site_ops.items, span.start, orderU32);
-                        break :blk k < r.site_ops.items.len and r.site_ops.items[k] < span.start + span.len;
-                    };
+                    const sited = r.holdsSite(span.start, span.start + span.len);
                     var reads = false;
-                    for (ops) |op| reads = reads or op.code == .live;
+                    for (r.ops.items[span.start..][0..span.len]) |op| reads = reads or op.code == .live;
                     if (!reads and !sited) return;
-                    const folded = try expr.fold(r.arena, &r.stack, ops, r.consts.items, false, r.live_nominal.items);
+                    const folded = try expr.fold(r.arena, &r.stack, r.ops.items[span.start..][0..span.len], r.consts.items, false, r.live_nominal.items);
                     if (folded.known) {
                         try slots.append(r.arena, v);
                         try spans.append(r.arena, span);
                         v.* = .{ .num = folded.num };
                         return;
                     }
-                    for (ops) |*op| if (op.code == .live) {
+                    // A B source's tape reads its draws from pool rows. A model
+                    // value kept for its `l`/`w`/`mult` is read per instance
+                    // as a slot, so its shared copy keeps its calls (#100).
+                    const kept = if (sited and readsCircuit(r.ops.items[span.start..][0..span.len])) try r.siteRows(span, sites) else span;
+                    v.* = .{ .expr = kept };
+                    for (r.ops.items[kept.start..][0..kept.len]) |*op| if (op.code == .live) {
                         if (pool_rows[op.a] == none) {
                             try r.consts.append(r.arena, r.live_nominal.items[op.a]);
                             pool_rows[op.a] = @intCast(r.consts.items.len - 1);
                         }
                         op.* = .{ .code = .num, .a = pool_rows[op.a] };
-                        out.opaque_reads = true;
                     };
                 },
                 else => {},
             }
+        }
+
+        /// A copy of the kept expression at `span` with each largest constant
+        /// subtree holding a distribution call replaced by a pool row at its
+        /// nominal value, which `setLive` redraws from the subtree left in
+        /// place (#133). A subtree that also reads a probe stays as it is.
+        fn siteRows(r: *R, span: Span, sites: *Sites) Error!Span {
+            var rev: std.ArrayList(expr.Op) = .empty;
+            var i: usize = span.len;
+            while (i > 0) {
+                i -= 1;
+                const ops = r.ops.items[span.start..][0..span.len];
+                const s = expr.subtreeStart(ops, i);
+                const sub: Span = .{ .start = span.start + @as(u32, @intCast(s)), .len = @intCast(i + 1 - s) };
+                const v = if (r.holdsSite(sub.start, sub.start + sub.len)) try expr.fold(r.arena, &r.stack, ops[s .. i + 1], r.consts.items, false, r.live_nominal.items) else expr.Val{ .known = false };
+                if (!v.known) {
+                    try rev.append(r.arena, ops[i]);
+                    continue;
+                }
+                try r.consts.append(r.arena, v.num);
+                const row: u32 = @intCast(r.consts.items.len - 1);
+                try sites.rows.append(r.arena, row);
+                try sites.spans.append(r.arena, sub);
+                try rev.append(r.arena, .{ .code = .num, .a = row });
+                i = s;
+            }
+            std.mem.reverse(expr.Op, rev.items);
+            const start: u32 = @intCast(r.ops.items.len);
+            try r.ops.appendSlice(r.arena, rev.items);
+            return .{ .start = start, .len = @intCast(rev.items.len) };
         }
 
         /// Recompiles the top-level conditions walk 1 evaluated, now that the

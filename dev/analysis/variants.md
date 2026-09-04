@@ -96,19 +96,32 @@ parameter writes that turn the nominal circuit into that variant:
    (`collectParams` order). If every parameter that moved holds exactly
    one slot's probe value, and held that slot's nominal before, the map
    slot → parameters is recorded and every later point writes slot values
-   straight to those parameters. Nothing is rebuilt.
-3. **Rebuild path.** Otherwise (a derived parameter moved, a slot is zero,
-   or a point takes a value across zero, which may collapse a node), the
+   straight to those parameters. Nothing is rebuilt. A slot at zero keeps
+   its zero in the probe and maps nothing (#130): sky130's mismatch terms
+   (`MC_MM_SWITCH*AGAUSS(...)/sqrt(l*w*mult)`) read the live W but hold 0
+   at the nominal corner, and used to refuse the fast path for the deck.
+3. **Rebuild path.** Otherwise (a derived parameter moved, or a point
+   takes a slot across zero, which may collapse a node), the
    point rebinds the netlist into a scratch circuit and keeps the
    parameters that differ. `force_rebuild` makes this the oracle of the
    fast path's differential test (`frontend/tests/variants.zig`).
 4. If the rebuilt circuit's pattern, node count or devices per type
-   differ, a B-source expression reads a live name (its tape is not
+   differ, a value a B-source expression reads moved (its tape is not
    `ParamRef` storage), or a binned M card's live L/W picks another bin
    (below), the point becomes its own `Prepared` run with its own session,
    published after the main one.
 5. Source/element targets, `.data` card columns and Monte Carlo
    `DEV`/`LOT`/`.variation` draws add their writes on top.
+
+A B-source expression keeps its postfix, so the values it reads sit in
+constant-pool rows the point rewrites: one per live name, and one per
+largest constant subtree that holds a distribution call (`0*agauss(...)`
+is one subtree, `agauss(...)*v(a)` gives the `agauss` call). Each trial
+redraws those subtrees from the ops left in place (`Live.site_rows`),
+with the same site keys as everywhere else, so a B source and a resistor
+reading one `.param` see one draw (#133). A trial that moves such a row
+takes its own run; a row that stays put (sky130's `rbody` at
+`MC_MM_SWITCH=0`) costs nothing.
 
 An `.alter` run is parsed from its own text. When it keeps the same cards
 on the same nets and the same analyses and options, and the deck has no
@@ -193,14 +206,20 @@ refused. `Problem.set_params(names, values)` then runs
    goes through `Planner.load`, the same fast path or rebuild diff a
    `.step` point takes, against the current template.
 2. Where no writes can make the point (a bin moved, or a kept B-source
-   expression reads a moved value), the circuit built at it with
-   `circuitOf` becomes a new template, after a `sameTopology` check, and
-   the planner re-opens over it in its other arena (two, so a failed
-   re-open keeps the old one). Later points diff against it.
+   expression reads a moved value), an earlier template whose bins and
+   kept values the point matches (`Kept`) takes it: the planner re-opens
+   over it, at the live values it was built at, and the point diffs
+   against it (#129). Only when none matches does the circuit built at
+   the point with `circuitOf` become a new template, after a
+   `sameTopology` check. Re-opening builds the planner in its other arena
+   (two, so a failed re-open keeps the old one). Later points diff
+   against the template the last one ran on. The templates are bounded
+   by the distinct bin selections a loop visits: a sizing loop that keeps
+   crossing one bin edge holds two circuits, not one per crossing.
 3. The row is appended to `Deck.variants`. `Problem.append_queries` stamps
    that row on every later query without a variant of its own;
-   `Session.addTemplate` makes every later row instantiate the new
-   template (`Row.template`; OP dedup is per template).
+   `Session.template` makes every later row instantiate the template it
+   ran on (`Row.template`; OP dedup is per template).
 
 Earlier queries keep their row and template, so their results stay valid.
 The call is all-or-nothing: the table grows only once the row is whole.
@@ -223,14 +242,10 @@ Over W = 0.55..0.6 um (two runs, load average 26) the loop measured
 Every point agrees with a fresh parse at that value to 2.4e-8 relative in
 v(xxdut.d1): the first point's `.op` runs second on the template and
 converges along another Newton path; points on a new template agree to
-1e-13. sky130's mismatch terms (`MC_MM_SWITCH*AGAUSS(...)`) are zero-valued
-slots, so the probe never maps the fast path there and each point that keeps
-its bins pays a rebuild diff.
+1e-13. These numbers predate #130: sky130's mismatch terms
+(`MC_MM_SWITCH*AGAUSS(...)`) were zero-valued slots the probe refused, so
+each point that kept its bins paid a rebuild diff. Not re-measured since.
 
-- `ponytail:` every template stays alive until `deinit`, and a point
-  that needs one always builds a new one, so a loop oscillating across a
-  bin edge grows by a circuit per crossing; reuse templates by bin
-  selection or free them (#129).
-- `ponytail:` the probe refuses the fast path when any slot's nominal is
-  zero (sky130's mismatch terms); mapping only the slots that moved would
-  let a sizing point skip the rebuild (#130).
+- Templates stay alive until `deinit`, one per distinct bin selection
+  (and kept B-source value) a loop reached. Re-opening an earlier one
+  re-probes its fast path once.

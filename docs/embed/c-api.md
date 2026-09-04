@@ -174,8 +174,10 @@ the circuit's topology or flip a top-level `.if` (`UnsupportedCard`). A
 parameter an analysis card, `.meas`, `.ic` or `.options` reads cannot be
 live: `espice_create` refuses it with `UnsupportedCard`, as `.step` does.
 
-Each call keeps one variant row (and, after a bin change, one circuit)
-until `espice_destroy`.
+Each call keeps one variant row until `espice_destroy`. A circuit is
+rebuilt only for a bin selection no earlier call reached, and kept until
+`espice_destroy`: a loop that keeps crossing one bin edge holds two
+circuits, however many times it crosses.
 
 From Zig the same calls are `Options.live_params` and
 `Problem.set_params(names, values)`.
