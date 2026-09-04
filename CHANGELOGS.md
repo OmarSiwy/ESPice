@@ -16,6 +16,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- A transient whose operating point needs OPtran (a capacitor-only node) starts from an x that satisfies KCL at
+  t = 0, not from the 1 us settle's sources and timers (#53).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

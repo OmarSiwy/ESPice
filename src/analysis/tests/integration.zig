@@ -181,3 +181,33 @@ test "generated limiter: a cold OP converges where F(x) = 0, not at the limited 
     ckt.eval(x, 0);
     for (ckt.rhs[0..ckt.n]) |ri| try t.expect(@abs(ri) <= 1e-9 * @exp(2.0));
 }
+
+test "OPtran: the published x satisfies KCL at the device state the operating point leaves" {
+    // #53: transientOp published the x the 1 us settle reached and then
+    // restored the pre-transient device state, so the two disagreed. A PULSE
+    // that has fired by 1 us shows it: the source reads 0 V at t = 0.
+    const models = @import("models");
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const out = try b.addNode();
+    const fl = try b.addNode();
+    try b.addDevice(models.vsource, "", .{ .waveform = 1, .pulse_v2 = 1, .pulse_td = 1e-7 }, .{}, .{ out, analysis.GROUND });
+    try b.addDevice(models.resistor, "", .{ .r = 1e3 }, .{}, .{ out, analysis.GROUND });
+    // fl reaches only capacitors: the static rows are singular there.
+    try b.addDevice(models.capacitor, "", .{ .c = 1e-12 }, .{}, .{ fl, analysis.GROUND });
+    try b.addDevice(models.capacitor, "", .{ .c = 1e-12 }, .{}, .{ fl, out });
+    b.needs_tran_op = true;
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    var ckt = try analysis.Circuit.instantiate(&prepared, t.allocator);
+    defer ckt.deinit();
+    const x = try t.allocator.alloc(f64, ckt.n);
+    defer t.allocator.free(x);
+    const r = try @import("../dc/op.zig").solve(&ckt, x, .{ .tran_op = true }, &.{}, &.{});
+    try t.expect(r.converged);
+    try t.expectApproxEqAbs(@as(f64, 0), x[out], 1e-9);
+    ckt.clearLimits();
+    ckt.eval(x, 0);
+    for (ckt.rhs[0..ckt.n]) |ri| try t.expect(@abs(ri) <= 1e-9);
+}

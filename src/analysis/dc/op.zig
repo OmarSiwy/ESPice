@@ -291,8 +291,9 @@ pub fn solveLadder(
 /// capacitances do the conditioning the static rungs could not. The settled
 /// state only seeds a clean Newton, whose result is the answer; reporting the
 /// settled state itself would be a false success
-/// (stress/scaling_inverter_chain_4k). Under `needs_tran_op` the settled state
-/// is the answer. ngspice 44.2 runs this rung only when `optran` is given
+/// (stress/scaling_inverter_chain_4k). Under `needs_tran_op` the settled
+/// state supplies the capacitor-only nodes, which that Newton holds there
+/// (`floatingHolds`). ngspice 44.2 runs this rung only when `optran` is given
 /// (cktop.c:94-97). The transient commits device state at every step, so it
 /// runs between a save and a restore: only `x` leaves it, and no timer,
 /// event or delay history runs ahead of the operating point's t = 0.
@@ -328,15 +329,43 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     if (sim == null or !sim.?.completed) return failed;
     // Holds can pin the floating nodes, as they do in ngspice, so a held
     // solve tries the static rungs before settling.
-    if (ckt.needs_tran_op and hold.len == 0) {
-        // The static history at the answer, as a converged Newton leaves it.
-        _ = ckt.updateStates(x);
-        return .{ .converged = true, .iterations = 0, .max_dx = 0 };
-    }
-    return newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
+    // The settled x belongs to the device state at t = 1 us, not the
+    // restored one, so it is not the answer even where the static rows are
+    // singular: the rest is re-solved at the restored state (#53).
+    const floating = if (ckt.needs_tran_op and hold.len == 0) try floatingHolds(ckt, x, opa) else &.{};
+    defer opa.free(floating);
+    const held = if (floating.len > 0) floating else hold;
+    return newtonRun(ckt, ws, x, options.tol, held, 0.0, &.{}, null, false) catch |err| switch (err) {
         error.QueryCancelled, error.OutOfMemory => return err,
         else => failed, // else: a numerical failure fails this rung
     };
+}
+
+/// A hold at its value in `x` on every row whose static Jacobian at `x` is
+/// all zero (a capacitor-only node), so a static Newton is not singular
+/// there. Evaluates `ckt` at `x` and clears the limiters. Caller owns the
+/// result.
+fn floatingHolds(ckt: *root.Circuit, x: []const f64, gpa: std.mem.Allocator) ![]converger.Force {
+    std.debug.assert(x.len == ckt.n);
+    ckt.eval(x, 0);
+    ckt.clearLimits();
+    const live = try gpa.alloc(bool, ckt.n);
+    defer gpa.free(live);
+    @memset(live, false);
+    for (ckt.row_idx[0..ckt.nnz], ckt.g_vals[0..ckt.nnz]) |r, g| {
+        if (g != 0) live[r] = true;
+    }
+    var count: usize = 0;
+    for (live) |l| count += @intFromBool(!l);
+    const holds = try gpa.alloc(converger.Force, count);
+    var k: usize = 0;
+    for (live, 0..) |l, i| if (!l) {
+        holds[k] = .{ .slot = ckt.diag_slots[i], .row = @intCast(i), .value = x[i] };
+        k += 1;
+    };
+    std.debug.assert(k == count);
+    std.debug.assert(live[root.GROUND]);
+    return holds;
 }
 
 /// Contract entry: the executor's solved ctx.x_op, one point per probe.
