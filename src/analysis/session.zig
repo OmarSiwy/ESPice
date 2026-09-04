@@ -116,10 +116,13 @@ pub const Session = struct {
     /// under `config.final_plan` its last root query evaluates the template's
     /// own batches instead of a copy (`Circuit.instantiateMove`).
     last_template_reader: bool = false,
-    /// Circuits with `topology`'s pattern that rows appended after
-    /// `addTemplate` instantiate instead (a model bin that moved under
-    /// `Problem.set_params`), oldest first; each must outlive the session.
+    /// Circuits with `topology`'s pattern that rows can instantiate instead
+    /// (a model bin that moved under `Problem.set_params`), oldest first;
+    /// each must outlive the session.
     templates: std.ArrayList(*const Circuit) = .empty,
+    /// The circuit rows appended from now on instantiate: 0 for `topology`,
+    /// k for `templates[k - 1]`.
+    template: u32 = 0,
     /// A transient or AC query that writes its rows to `writer` as it records them
     /// instead of keeping them; its Result has empty `data`. Set before the
     /// query starts.
@@ -167,7 +170,8 @@ pub const Session = struct {
         try candidate.ensureTotalCapacity(self.allocator, max_rows);
         for (0..self.rows.len) |i| candidate.appendAssumeCapacity(self.rows.get(i));
         const new_ids = try a.alloc(QueryId, jobs.len);
-        const template: u32 = @intCast(self.templates.items.len);
+        const template = self.template;
+        std.debug.assert(template <= self.templates.items.len);
         for (jobs, new_ids) |job, *id| {
             try validateDeck(job, self.topology.n, self.deck);
             const owned = try copyValue(a, job);
@@ -214,13 +218,15 @@ pub const Session = struct {
         return jobs.len;
     }
 
-    /// Makes `circuit` the template of every row appended from now on.
+    /// Makes `circuit` the template of every row appended from now on
+    /// (`template`, which a caller may point back at an earlier one).
     /// Asserts that it has `topology`'s node count and pattern size; the
     /// caller keeps it alive for the session's lifetime.
     pub fn addTemplate(self: *Session, circuit: *const Circuit) !void {
         std.debug.assert(circuit.n == self.topology.n);
         std.debug.assert(circuit.nnz == self.topology.nnz);
         try self.templates.append(self.allocator, circuit);
+        self.template = @intCast(self.templates.items.len);
     }
 
     /// Returns the row count, implicit prerequisites included.

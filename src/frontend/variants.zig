@@ -858,25 +858,32 @@ pub const Tuner = struct {
 /// one more row of the deck's variant table over the current template:
 /// the probe-mapped writes or a rebuild's diff. When no writes can make the
 /// point (a model bin moved, or a kept expression reads a moved value) the
-/// circuit built at it becomes the template that row and later rows run
-/// on. Lives in the parse arena, with the netlist it re-evaluates.
+/// row and later rows run on an earlier template that holds the point's
+/// bins and kept values, or else on the circuit built at it, so the
+/// templates are bounded by the distinct bin selections visited (#129).
+/// Lives in the parse arena, with the netlist it re-evaluates.
 pub const Tuning = struct {
     gpa: std.mem.Allocator,
-    /// The planner's tables, in `arenas[current]`; a new template builds
-    /// its planner in the other one, so a failure keeps the old planner.
+    /// The planner's tables, in `arenas[current]`; a planner re-opened over
+    /// another template builds in the other one, so a failure keeps the old.
     arenas: [2]std.heap.ArenaAllocator,
     current: u1 = 0,
     planner: Planner,
+    /// The template the planner is open over; it differs from `template`
+    /// only after a call failed past re-opening it.
+    planned: u32 = 0,
     /// Every live name's value now, and the call's candidate values.
     values: []f64,
     next: []f64,
     /// The `.option seed` draw (trial 1), when the deck takes one, so a
     /// point keeps the nominal circuit's mismatch sample.
     trial: ?Trial,
-    /// Templates built where no writes could make the point, oldest first.
-    // ponytail: kept until deinit, so a loop that keeps crossing a bin edge
-    // grows by a circuit per crossing; reuse or free them (#129).
-    circuits: std.ArrayList(*device.Circuit) = .empty,
+    /// Template 0 (the nominal circuit, `circuit` null) and those built
+    /// where no writes could make the point, oldest first, all in `gpa`;
+    /// `Session.templates` numbers them the same way.
+    templates: std.ArrayList(Template) = .empty,
+    /// The template the last row runs on, and later rows diff against.
+    template: u32 = 0,
     /// The deck's variant table with each call's row appended, in the
     /// session arena (`Planner.sim`); seeded on the first call.
     seeded: bool = false,
@@ -888,8 +895,39 @@ pub const Tuning = struct {
     write_values: std.ArrayList(f64) = .empty,
 
     /// What one call changed: the whole variant table, whose last row is
-    /// the call's, and the template that row runs on when it is new.
-    pub const Change = struct { variants: core.Variants, template: ?*const device.Circuit };
+    /// the call's, the template that row runs on (0 for the nominal
+    /// circuit, k for the k-th built), and that template's circuit when
+    /// this call built it.
+    pub const Change = struct { variants: core.Variants, template: u32, built: ?*const device.Circuit };
+
+    /// A circuit rows can run on, the live values it was built at, and what
+    /// it holds that writes cannot reach, which a point must match to run
+    /// on it.
+    const Template = struct {
+        circuit: ?*device.Circuit,
+        values: []const f64,
+        kept: Kept,
+
+        /// The planner's nominal state over `circuit`, copied into `gpa`.
+        fn of(gpa: std.mem.Allocator, circuit: ?*device.Circuit, values: []const f64, kept: Kept) !Template {
+            const v = try gpa.dupe(f64, values);
+            errdefer gpa.free(v);
+            const bins = try gpa.dupe(u32, kept.bins);
+            errdefer gpa.free(bins);
+            return .{ .circuit = circuit, .values = v, .kept = .{ .bins = bins, .pool = try gpa.dupe(f64, kept.pool) } };
+        }
+
+        /// Frees the copies and the circuit, which `gpa` owns.
+        fn deinit(tm: Template, gpa: std.mem.Allocator) void {
+            if (tm.circuit) |c| {
+                c.deinit();
+                gpa.destroy(c);
+            }
+            gpa.free(tm.values);
+            gpa.free(tm.kept.bins);
+            gpa.free(tm.kept.pool);
+        }
+    };
 
     /// A tuning over `nl`, whose nominal circuit is `nominal` with card
     /// table `cards`. `scratch` (the parse arena) holds the result; `sim`
@@ -901,6 +939,9 @@ pub const Tuning = struct {
         t.* = .{ .gpa = gpa, .arenas = .{ .init(gpa), .init(gpa) }, .planner = undefined, .values = try scratch.dupe(f64, nl.live.nominal), .next = try scratch.dupe(f64, nl.live.nominal), .trial = null };
         errdefer for (&t.arenas) |*a| a.deinit();
         t.planner = try Planner.init(lib, sim, t.arenas[0].allocator(), nl, nominal, cards, "");
+        try t.templates.ensureTotalCapacity(gpa, 1);
+        errdefer t.templates.deinit(gpa);
+        t.templates.appendAssumeCapacity(try .of(gpa, null, nl.live.nominal, t.planner.kept));
         if (nl.deck.draw_seed) {
             const sampler = try scratch.create(Sampler);
             sampler.* = try Sampler.init(scratch, nl.deck.config, 1);
@@ -912,12 +953,24 @@ pub const Tuning = struct {
     /// Frees the templates and the planner. The variant table stays with
     /// the session arena.
     pub fn deinit(t: *Tuning) void {
-        for (t.circuits.items) |c| {
-            c.deinit();
-            t.gpa.destroy(c);
-        }
-        t.circuits.deinit(t.gpa);
+        for (t.templates.items) |tm| tm.deinit(t.gpa);
+        t.templates.deinit(t.gpa);
         for (&t.arenas) |*a| a.deinit();
+    }
+
+    /// Re-opens the planner over template `k`, with the netlist at the
+    /// values it was built at. `nominal` is template 0's circuit.
+    fn open(t: *Tuning, k: u32, nominal: *const device.Circuit) !void {
+        const p = &t.planner;
+        const tm = t.templates.items[k];
+        try setPoint(p.scratch, &p.stack, p.nl, .{ .label = "", .axis = 0, .live = tm.values, .trial = t.trial });
+        const next = &t.arenas[~t.current];
+        _ = next.reset(.free_all);
+        const planner = try Planner.init(p.lib, p.sim, next.allocator(), p.nl, tm.circuit orelse nominal, p.cards, "");
+        _ = t.arenas[t.current].reset(.free_all);
+        t.current = ~t.current;
+        p.* = planner;
+        t.planned = k;
     }
 
     /// Sets each live name in `names` to the matching value, keeping every
@@ -926,7 +979,7 @@ pub const Tuning = struct {
     /// is the deck's table, read on the first call only. Names compare as
     /// the dialect spells them (case-insensitively but in Spectre).
     ///
-    /// All-or-nothing: on failure the values, the table and the template
+    /// All-or-nothing: on failure the values, the table and the templates
     /// stay as they were. `UnknownParameter` for a name that is not live,
     /// `InvalidArgument` for a non-finite value, `ModelBinNotFound` when no
     /// bin holds a new L/W, `UnsupportedCard` when the point flips a
@@ -934,6 +987,7 @@ pub const Tuning = struct {
     /// `values` have the same length.
     pub fn set(t: *Tuning, nominal: *const device.Circuit, current: core.Variants, names: []const []const u8, values: []const f64) !Change {
         std.debug.assert(names.len == values.len);
+        std.debug.assert(t.template < t.templates.items.len);
         const p = &t.planner;
         const nl = p.nl;
         @memcpy(t.next, t.values);
@@ -947,15 +1001,17 @@ pub const Tuning = struct {
         }
         var label: std.ArrayList(u8) = .empty;
         for (nl.tunable, 0..) |k, i| try label.print(p.sim, "{s}{s}={d}", .{ if (i == 0) "" else ", ", nl.live.names[k], t.next[k] });
-        const template = if (t.circuits.items.len != 0) t.circuits.items[t.circuits.items.len - 1] else nominal;
-        p.nominal = template;
+        if (t.planned != t.template) try t.open(t.template, nominal);
+        // `nominal` is the Problem's own circuit; the one the planner opened
+        // over in `init` was moved into it since.
+        p.nominal = t.templates.items[t.planned].circuit orelse nominal;
         // The open row starts empty; a failed call may have left writes.
         for (p.write_refs.items) |r| p.row_at[r] = netlist.none;
         p.write_refs.clearRetainingCapacity();
         p.write_values.clearRetainingCapacity();
         const pt: Point = .{ .label = label.items, .axis = 0, .live = t.next, .trial = t.trial };
         // Room for the row and a template first, so nothing fails after
-        // the planner moves on.
+        // the template list grows.
         if (!t.seeded) {
             try t.labels.appendSlice(p.sim, current.labels);
             try t.temps.appendSlice(p.sim, current.temp_c);
@@ -969,38 +1025,48 @@ pub const Tuning = struct {
         try t.temps.ensureUnusedCapacity(p.sim, 1);
         try t.axes.ensureUnusedCapacity(p.sim, 1);
         try t.starts.ensureUnusedCapacity(p.sim, 1);
-        try t.circuits.ensureUnusedCapacity(t.gpa, 1);
+        try t.templates.ensureUnusedCapacity(t.gpa, 1);
         var built: ?*device.Circuit = null;
-        switch (try p.load(pt, label.items)) {
-            .row => try p.pointWrites(pt),
-            .circuit => {
+        errdefer if (built != null) {
+            // Not published: the next call re-opens the planner.
+            t.templates.pop().?.deinit(t.gpa);
+            t.planned = std.math.maxInt(u32);
+        };
+        if (try p.load(pt, label.items) == .circuit) {
+            // An earlier template that holds the point's bins and kept values
+            // takes it; otherwise the circuit built at it is a new template.
+            const reuse: ?u32 = for (t.templates.items, 0..) |tm, k| {
+                if (k != t.planned and tm.kept.holds(nl)) break @intCast(k);
+            } else null;
+            if (reuse) |k| {
+                try t.open(k, nominal);
+            } else {
                 const c = try t.gpa.create(device.Circuit);
-                errdefer t.gpa.destroy(c);
+                var owned = true;
+                errdefer if (owned) t.gpa.destroy(c);
                 var scratch = std.heap.ArenaAllocator.init(t.gpa);
                 defer scratch.deinit();
                 c.* = try circuitOf(p.lib, t.gpa, scratch.allocator(), nl);
-                errdefer c.deinit();
-                if (!sameTopology(template, c)) return p.refuse(label.items, "a parameter value that changes the topology");
-                // The point is the new template's nominal: later points
-                // diff against it.
-                const next = &t.arenas[~t.current];
-                _ = next.reset(.free_all);
-                const planner = try Planner.init(p.lib, p.sim, next.allocator(), nl, c, p.cards, "");
-                _ = t.arenas[t.current].reset(.free_all);
-                t.current = ~t.current;
-                p.* = planner;
+                errdefer if (owned) c.deinit();
+                if (!sameTopology(t.templates.items[t.planned].circuit orelse nominal, c)) return p.refuse(label.items, "a parameter value that changes the topology");
+                const kept: Kept = try .of(scratch.allocator(), nl);
+                t.templates.appendAssumeCapacity(try .of(t.gpa, c, t.next, kept));
+                owned = false;
                 built = c;
-            },
+                try t.open(@intCast(t.templates.items.len - 1), nominal);
+            }
+            if (try p.load(pt, label.items) != .row) return p.refuse(label.items, "a parameter value that changes the topology");
         }
+        try p.pointWrites(pt);
         try t.refs.appendSlice(p.sim, p.write_refs.items);
         try t.write_values.appendSlice(p.sim, p.write_values.items);
-        if (built) |c| t.circuits.appendAssumeCapacity(c);
+        t.template = t.planned;
         t.labels.appendAssumeCapacity(label.items);
         t.temps.appendAssumeCapacity(null);
         t.axes.appendAssumeCapacity(0);
         t.starts.appendAssumeCapacity(@intCast(t.refs.items.len));
         @memcpy(t.values, t.next);
-        return .{ .template = built, .variants = .{
+        return .{ .template = t.template, .built = built, .variants = .{
             .labels = t.labels.items,
             .temp_c = t.temps.items,
             .axis = t.axes.items,

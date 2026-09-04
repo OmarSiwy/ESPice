@@ -206,14 +206,20 @@ refused. `Problem.set_params(names, values)` then runs
    goes through `Planner.load`, the same fast path or rebuild diff a
    `.step` point takes, against the current template.
 2. Where no writes can make the point (a bin moved, or a kept B-source
-   expression reads a moved value), the circuit built at it with
-   `circuitOf` becomes a new template, after a `sameTopology` check, and
-   the planner re-opens over it in its other arena (two, so a failed
-   re-open keeps the old one). Later points diff against it.
+   expression reads a moved value), an earlier template whose bins and
+   kept values the point matches (`Kept`) takes it: the planner re-opens
+   over it, at the live values it was built at, and the point diffs
+   against it (#129). Only when none matches does the circuit built at
+   the point with `circuitOf` become a new template, after a
+   `sameTopology` check. Re-opening builds the planner in its other arena
+   (two, so a failed re-open keeps the old one). Later points diff
+   against the template the last one ran on. The templates are bounded
+   by the distinct bin selections a loop visits: a sizing loop that keeps
+   crossing one bin edge holds two circuits, not one per crossing.
 3. The row is appended to `Deck.variants`. `Problem.append_queries` stamps
    that row on every later query without a variant of its own;
-   `Session.addTemplate` makes every later row instantiate the new
-   template (`Row.template`; OP dedup is per template).
+   `Session.template` makes every later row instantiate the template it
+   ran on (`Row.template`; OP dedup is per template).
 
 Earlier queries keep their row and template, so their results stay valid.
 The call is all-or-nothing: the table grows only once the row is whole.
@@ -240,7 +246,6 @@ converges along another Newton path; points on a new template agree to
 (`MC_MM_SWITCH*AGAUSS(...)`) were zero-valued slots the probe refused, so
 each point that kept its bins paid a rebuild diff. Not re-measured since.
 
-- `ponytail:` every template stays alive until `deinit`, and a point
-  that needs one always builds a new one, so a loop oscillating across a
-  bin edge grows by a circuit per crossing; reuse templates by bin
-  selection or free them (#129).
+- Templates stay alive until `deinit`, one per distinct bin selection
+  (and kept B-source value) a loop reached. Re-opening an earlier one
+  re-probes its fast path once.

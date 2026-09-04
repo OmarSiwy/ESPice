@@ -814,7 +814,9 @@ test "Problem.set_params: a binned MOSFET takes the bin its new W selects (#101,
         \\.end
         \\
     ;
-    try t.expectEqual(@as(usize, 2), try expectTunedAsParsed(global, "wn", &.{ 1e-6, 2e-6, 1.05e-6, 1e-6 }));
+    // A loop that keeps crossing the bin edge reuses the template of each
+    // side: one circuit beside the nominal one, however many crossings (#129).
+    try t.expectEqual(@as(usize, 1), try expectTunedAsParsed(global, "wn", &.{ 1e-6, 2e-6, 1.05e-6, 2.05e-6, 1e-6, 2e-6, 1.05e-6 }));
     // The same with sky130's layout: bins inside the subcircuit, a model
     // value read under each instance's parameters, and `.option scale`.
     const local =
@@ -833,7 +835,7 @@ test "Problem.set_params: a binned MOSFET takes the bin its new W selects (#101,
         \\.end
         \\
     ;
-    try t.expectEqual(@as(usize, 2), try expectTunedAsParsed(local, "wn", &.{ 1, 2, 1.05, 1 }));
+    try t.expectEqual(@as(usize, 1), try expectTunedAsParsed(local, "wn", &.{ 1, 2, 1.05, 2.05, 1 }));
     // The bins really differ: the drain current moves with them.
     var buf: [512]u8 = undefined;
     const narrow = try opValue(try std.fmt.bufPrint(&buf, global, .{1e-6}), "i(v1)");

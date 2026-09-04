@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `set_params` runs a point on an earlier call's circuit when it selects the same model bins, so a sizing loop that keeps crossing a bin edge holds two circuits instead of one per crossing (#129).
 - Monte Carlo: a B source reading a sampled `.param` takes each trial's draw, as a resistor reading it does; it kept the nominal value (#133).
 - `.step` and `set_params` points, and `.dcmatch` groups from a PDK's mismatch, keep the parameter-write path when a live value sits at zero (sky130's mismatch terms at the nominal corner) instead of rebuilding the circuit per point or per site (#130).
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
