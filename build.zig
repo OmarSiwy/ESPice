@@ -42,6 +42,9 @@ pub fn build(b: *std.Build) void {
     const stdpp_dep = b.dependency("stdpp", .{ .target = target, .optimize = optimize });
     bopts.addOption([]const u8, "stdpp_path", pathFromRoot(b, stdpp_dep.builder, "src/root.zig"));
     bopts.addOption([]const u8, "gompute_path", pathFromRoot(b, gompute.builder, "src/root.zig"));
+    // The KCL certificate (src/analysis/certify.zig): off by default, and
+    // comptime-gated, so the default build carries none of it.
+    bopts.addOption(bool, "certify", b.option(bool, "certify", "Certify every converged Newton point against its KCL residual (corpus diagnostics)") orelse false);
 
     // Release strips DWARF: debug info was ~2/3 of LLVM time, superlinear in
     // function size, and 115 MB of the shipped binary. `-Ddebug-info` puts it
@@ -202,6 +205,7 @@ pub fn build(b: *std.Build) void {
         core_import,
         .{ .name = "device", .module = device_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
+        .{ .name = "build_options", .module = build_options_mod },
     });
     analysis_mod.linkSystemLibrary("c", .{});
 

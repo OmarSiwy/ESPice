@@ -295,6 +295,9 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
     // (no CPU fallback); under test-gpu that deck has nothing to compare.
     if (!equal(backend_name, "cpu") and std.mem.indexOf(u8, result.stderr, "(CircuitNotEligible)") != null) return error.NotEligible;
     try requireSuccess(result);
+    // A `-Dcertify` build reports its KCL record on stderr (src/analysis/certify.zig).
+    var lines = std.mem.splitScalar(u8, result.stderr, '\n');
+    while (lines.next()) |l| if (std.mem.startsWith(u8, l, "certify:")) std.debug.print("{s} {s}\n", .{ netlist, l });
     const bytes = try Io.Dir.cwd().readFileAlloc(io, output, a, .unlimited);
     const plots = try parseRaw(a, bytes);
     try compare(a, oracle.expect, plots);

@@ -6,9 +6,11 @@
 //! `sys` is a pointer with fields `n`, `nnz`, `diag_slots`, `rhs` and
 //! `current_row`, and optional methods beginSolve, advanceIteration,
 //! checkpoint, checkConvergence, applyLimits, updateStates, clearLimits and
-//! nodeName. `hook` provides assemble(sys, x, t), vals(sys) (the Jacobian in
-//! pattern order), diagAt(sys, slot), and optionally residual(sys, x, t) for
-//! a residual-only evaluation.
+//! nodeName, plus `certify: bool` with certifyPoint(hook, x, t, opts), which
+//! `newton` calls on every converged x when `certify` is true. `hook`
+//! provides assemble(sys, x, t), vals(sys) (the Jacobian in pattern order),
+//! diagAt(sys, slot), and optionally residual(sys, x, t) for a
+//! residual-only evaluation.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -180,21 +182,7 @@ pub fn newton(
         hook.assemble(sys, x, t);
         prof.lap(.eval);
         const v = hook.vals(sys);
-        if (opts.gmin > 0) {
-            if (opts.gmin_stamps.len > 0) {
-                for (opts.gmin_stamps) |g| {
-                    v[g.slot] += opts.gmin;
-                    sys.rhs[g.row] += opts.gmin * x[g.col];
-                }
-            } else for (0..sys.n) |i| {
-                v[sys.diag_slots[i]] += opts.gmin;
-                sys.rhs[i] += opts.gmin * x[i];
-            }
-        }
-        for (opts.force) |f| {
-            v[f.slot] += force_g;
-            sys.rhs[f.row] += force_g * (x[f.row] - f.value);
-        }
+        loadExtras(sys, v, x, opts);
         var norm_f: f64 = 0; // read only by the traces
         if (ws.knobs.newton_debug or ws.knobs.opdbg) {
             norm_f = num.normInf(sys.rhs[0..sys.n]);
@@ -246,10 +234,47 @@ pub fn newton(
             init_fix = false;
         } else if (st.converged) {
             @memcpy(x[0..sys.n], x_old[0..sys.n]);
+            if (comptime @hasDecl(S, "certify") and S.certify) sys.certifyPoint(hook, x[0..sys.n], t, opts);
             return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
         }
     }
     return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
+}
+
+/// Adds the loads `newton` stamps on top of `hook.assemble`: the diagonal
+/// (or `opts.gmin_stamps`) gmin and the `opts.force` holds, into `v` and
+/// `sys.rhs`. `v` is `hook.vals(sys)`.
+pub fn loadExtras(sys: anytype, v: []f64, x: []const f64, opts: Options) void {
+    std.debug.assert(x.len >= sys.n);
+    std.debug.assert(v.len >= sys.nnz);
+    if (opts.gmin > 0) {
+        if (opts.gmin_stamps.len > 0) {
+            for (opts.gmin_stamps) |g| {
+                v[g.slot] += opts.gmin;
+                sys.rhs[g.row] += opts.gmin * x[g.col];
+            }
+        } else for (0..sys.n) |i| {
+            v[sys.diag_slots[i]] += opts.gmin;
+            sys.rhs[i] += opts.gmin * x[i];
+        }
+    }
+    for (opts.force) |f| {
+        v[f.slot] += force_g;
+        sys.rhs[f.row] += force_g * (x[f.row] - f.value);
+    }
+}
+
+/// The row-scaled residual gate's tolerance on a row whose diagonal is
+/// `diag` and unknown `xi`: `newton` accepts only when every row with a
+/// nonzero diagonal has |F_i| at or below it. A zero `diag` returns inf.
+pub fn residualGate(opts: Options, diag: f64, xi: f64) f64 {
+    const scale = @abs(diag);
+    // A zero diagonal is a voltage-defined branch row (V/E/H source): its
+    // scale is the source gain, and an exact solution still leaves
+    // O(gain * eps) residual there (a 1e9-gain E source reads 2.7e-8).
+    // The delta test alone governs such rows, as in ngspice NIconvTest.
+    if (scale == 0) return inf;
+    return @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(xi) + opts.vntol));
 }
 
 fn sysNodeName(sys: anytype, idx: u32) []const u8 {
@@ -313,15 +338,9 @@ fn finalizeStep(
     if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
     if (!plausible(x[0..n])) return .{ .converged = false, .scaled = scaled, .why = .runaway };
     for (0..n) |i| {
-        const scale = @abs(vals[sys.diag_slots[i]]);
-        // A zero diagonal is a voltage-defined branch row (V/E/H source):
-        // its scale is the source gain, and an exact solution still leaves
-        // O(gain * eps) residual there (a 1e9-gain E source reads 2.7e-8).
-        // The delta test alone governs such rows, as in ngspice NIconvTest.
-        if (scale == 0) continue;
-        const tol = @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(x[i]) + opts.vntol));
         // Negated, so a NaN residual fails too.
-        if (!(@abs(residual[i]) <= tol)) return .{ .converged = false, .scaled = scaled, .why = .residual };
+        if (!(@abs(residual[i]) <= residualGate(opts, vals[sys.diag_slots[i]], x[i])))
+            return .{ .converged = false, .scaled = scaled, .why = .residual };
     }
     if (!load_ok) return .{ .converged = false, .scaled = scaled, .why = .device };
     if (comptime @hasDecl(S, "checkConvergence")) {
@@ -624,8 +643,7 @@ fn residualConverged(sys: anytype, hook: anytype, x: []const f64, residual: []co
     assert(x.len == sys.n);
     var ok = true;
     for (x, residual, 0..) |xi, ri, i| {
-        const scale = @abs(hook.diagAt(sys, sys.diag_slots[i]));
-        const rt = if (scale == 0) inf else @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(xi) + opts.vntol));
+        const rt = residualGate(opts, hook.diagAt(sys, sys.diag_slots[i]), xi);
         // Negated comparisons reject NaN too.
         if (!(@abs(ri) <= rt) or !(@abs(xi) <= x_plausible)) ok = false;
     }
