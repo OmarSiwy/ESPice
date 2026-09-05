@@ -7,10 +7,10 @@
 //! `current_row`, and optional methods beginSolve, advanceIteration,
 //! checkpoint, checkConvergence, applyLimits, updateStates, clearLimits and
 //! nodeName, plus `certify: bool` with certifyPoint(hook, x, t, opts), which
-//! `newton` calls on every converged x when `certify` is true. `hook`
-//! provides assemble(sys, x, t), vals(sys) (the Jacobian in pattern order),
-//! diagAt(sys, slot), and optionally residual(sys, x, t) for a
-//! residual-only evaluation.
+//! `newton` calls on every converged x, before staging, when `certify` is
+//! true. `hook` provides assemble(sys, x, t), vals(sys) (the Jacobian in
+//! pattern order), diagAt(sys, slot), and optionally residual(sys, x, t)
+//! for a residual-only evaluation.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -217,7 +217,7 @@ pub fn newton(
         // The INITFIX pass does not stage: its converged iterate is not the
         // answer, and staging there restarted a Newton-history limiter from a
         // stale value, so the extra pass solved F(lim(x)) = 0 (#53).
-        const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts, load_ok, !init_fix);
+        const st = finalizeStep(sys, hook, x, dx, x_old, sys.rhs, v, iter, t, opts, load_ok, !init_fix);
         prof.lap(.update);
         if (ws.knobs.opdbg) {
             var fi: usize = 0;
@@ -234,7 +234,6 @@ pub fn newton(
             init_fix = false;
         } else if (st.converged) {
             @memcpy(x[0..sys.n], x_old[0..sys.n]);
-            if (comptime @hasDecl(S, "certify") and S.certify) sys.certifyPoint(hook, x[0..sys.n], t, opts);
             return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
         }
     }
@@ -307,6 +306,7 @@ fn plausible(x: []const f64) bool {
 /// then state staging, skipped when `stage` is false.
 fn finalizeStep(
     sys: anytype,
+    hook: anytype,
     x: []f64,
     dx: []const f64,
     x_old: []f64,
@@ -351,6 +351,9 @@ fn finalizeStep(
     // scaling/parallel_inverters_100), and devices whose core reads the
     // staged latches (cswitch/vswitch hysteresis) saw F change mid-solve.
     // A device that flips here forces one more iterate.
+    // Before staging: a device whose eval reads its staged history (LTRA
+    // appends the point it stages) would see this x twice (#53).
+    if (comptime @hasDecl(S, "certify") and S.certify) if (stage) sys.certifyPoint(hook, x_old[0..n], t, opts);
     if (comptime @hasDecl(S, "updateStates")) if (stage) {
         if (sys.updateStates(x_old[0..n])) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
     };

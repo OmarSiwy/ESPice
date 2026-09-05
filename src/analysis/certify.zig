@@ -121,7 +121,9 @@ pub fn measure(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: conver
 
 /// `measure`, then panics when a row is over the converger's gate, and
 /// records the ratio in `ckt.cert`. `newton` calls it, through
-/// `Circuit.certifyPoint`, on every converged x under `-Dcertify`.
+/// `Circuit.certifyPoint`, on every converged x under `-Dcertify`, after
+/// every gate and before `updateStates` stages the point: a device whose
+/// eval reads its staged history would otherwise see x twice.
 pub fn check(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: converger.Options) void {
     comptime std.debug.assert(enabled);
     const tally = &ckt.cert;
