@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- Playground: espice.wasm gets a 16 MiB stack (the corpus peaks at 1.2 MiB, past the 1 MiB default), pole-zero runs with no poles and `.load`/`.vec`/`FILE=` decks report cleanly, and `zig build wasm-compare` checks it against the native espice over the corpus (#8).
 - On 32-bit targets (the wasm playground) `.tran` with MATEX and envelope runs no longer fail `InvalidQueryOptions`, and Monte Carlo draws match the 64-bit build; `-Dsingle-threaded` builds and tests the playground's code paths natively (#8).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).

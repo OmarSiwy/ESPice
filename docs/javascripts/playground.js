@@ -105,7 +105,7 @@
       const line = raw.trim().toLowerCase();
       const words = line.split(/\s+/);
       if (/^\.(hdl|osdi)\b/.test(line)) return `${words[0]}: Verilog-A is compiled with a Zig compiler at run time, which the browser does not have. The playground has the built-in models only.`;
-      if (/^\.(include|inc)\b/.test(line) || (words[0] === ".lib" && words.length >= 3)) return `${words[0]}: the browser has no file system, so a playground deck must be self-contained (paste the models in).`;
+      if (/^\.(include|inc|load|vec)\b/.test(line) || (words[0] === ".lib" && words.length >= 3) || /\bfile\s*=/.test(line)) return `${/\bfile\s*=/.test(line) ? "FILE=" : words[0]}: the browser has no file system, so a playground deck must be self-contained (paste the models in).`;
     }
     return null;
   }
@@ -157,7 +157,8 @@
         if (e.espice_result_view(problem, id, scratch + 32, scratch + 36) !== 0) continue;
         const ptr = dv().getUint32(scratch + 32, true);
         const len = dv().getUint32(scratch + 36, true);
-        const data = new Float64Array(state.memory.buffer, ptr, len);
+        // An empty view's pointer is not an address (pz with no poles).
+        const data = len ? new Float64Array(state.memory.buffer, ptr, len) : new Float64Array(0);
         const names = [];
         for (let v = 0; v < vars; v++) names.push(string((b, n, r) => e.espice_copy_result_name(problem, id, v, b, n, r)));
         // Point-major rows of `vars` values (pairs when complex) -> columns.

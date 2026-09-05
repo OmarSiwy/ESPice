@@ -631,7 +631,25 @@ pub fn build(b: *std.Build) void {
         wexe.entry = .disabled;
         wexe.rdynamic = true;
         wexe.wasi_exec_model = .reactor;
+        // Queries run on the main stack here, not on a 512 MiB worker
+        // thread. The corpus peaks at 1.2 MiB (bench_tline_cpl3_4_line),
+        // past the 1 MiB default; 16 MiB leaves 13x.
+        wexe.stack_size = 16 << 20;
         wasm_step.dependOn(&b.addInstallArtifact(wexe, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
+
+        // `zig build wasm-compare`: every corpus deck through espice.wasm
+        // under node (the page's own playground.js) and through the native
+        // espice, equal to 1e-9 relative. Needs node on PATH. Build with
+        // `-Dcpu=x86_64 -Dhip-arch=none -Dcuda-arch=none`: stdpp's reductions
+        // round by lane count, and SSE2 has simd128's two f64 lanes
+        // (dev/playground.md).
+        const cmp = b.addSystemCommand(&.{"node"});
+        cmp.addFileArg(b.path("tools/playground/compare.js"));
+        cmp.addDirectoryArg(wexe.getEmittedBin().dirname());
+        cmp.addArtifactArg(exe);
+        cmp.addDirectoryArg(b.path("tests/fixtures"));
+        cmp.addFileInput(b.path("docs/javascripts/playground.js"));
+        b.step("wasm-compare", "Check espice.wasm against the native espice over the corpus (node)").dependOn(&cmp.step);
 
         const ck = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--prefix" });
         const ck_out = ck.addOutputDirectoryArg("playground");
