@@ -53,6 +53,10 @@ pub fn build(b: *std.Build) void {
     // Compiling every model for NVPTX and AMDGCN is most of a full build.
     // `-Dgpu=false` is the CPU iteration build, not a shipping or bench one.
     const gpu_kernels = b.option(bool, "gpu", "Compile the GPU device kernels (default true)") orelse true;
+    // `-Dsingle-threaded` (with `-Dtarget=x86-linux-musl -Dcpu=pentium4` for
+    // a 32-bit usize on SSE2 floats): the wasm playground's code paths,
+    // built and tested natively.
+    const single_threaded = b.option(bool, "single-threaded", "Build without threads, as espice.wasm does");
     // Every module here is (root, target, optimize, strip) plus imports.
     // stdpp (vectorizing iterators) is a std extension: every host module
     // gets it. GPU device modules do not; eval.zig must not import it.
@@ -63,6 +67,7 @@ pub fn build(b: *std.Build) void {
         optimize: std.lang.Optimize,
         strip: bool,
         stdpp: ?*std.Build.Module,
+        single_threaded: ?bool = null,
         fn make(
             self: @This(),
             root: std.Build.LazyPath,
@@ -73,17 +78,18 @@ pub fn build(b: *std.Build) void {
                 .target = self.target,
                 .optimize = self.optimize,
                 .strip = self.strip,
+                .single_threaded = self.single_threaded,
                 .imports = imports,
             });
             if (self.stdpp) |sp| mod.addImport("stdpp", sp);
             return mod;
         }
-    }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .debug and !debug_info, .stdpp = stdpp_mod };
+    }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .debug and !debug_info, .stdpp = stdpp_mod, .single_threaded = single_threaded };
     // Strip pinned on, `-Ddebug-info` or not, for device code: DWARF over
     // generated models is superlinear and maps to cache files nobody reads,
     // and with DI on, the NVPTX backend and the host device objects SEGV'd
     // the compiler (mos2, vdmos). Symbols survive; only line tables go.
-    const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true, .stdpp = null };
+    const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true, .stdpp = null, .single_threaded = single_threaded };
 
     const build_options_mod = bopts.createModule();
 
@@ -447,11 +453,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_grammar.step);
 
     // The correctness and benchmark runners share one build-time fixture catalog.
+    // They enforce deadlines with threads, so `-Dsingle-threaded` stops at
+    // the espice they run.
+    const MH = blk: {
+        var m = M;
+        m.single_threaded = null;
+        break :blk m;
+    };
     const fixture_catalog = @import("tests/fixture_catalog.zig").create(b);
     const fixture_imports: []const std.Build.Module.Import = &.{.{ .name = "fixture_catalog", .module = fixture_catalog }};
     const correctness = b.addExecutable(.{
         .name = "test-correctness",
-        .root_module = M.make(b.path("tests/test_correctness.zig"), fixture_imports),
+        .root_module = MH.make(b.path("tests/test_correctness.zig"), fixture_imports),
     });
     const run_correctness = b.addRunArtifact(correctness);
     run_correctness.setCwd(b.path("."));
@@ -510,13 +523,13 @@ pub fn build(b: *std.Build) void {
     b.step("test-fitness", "Check file headers, root imports and catch-all arms against tests/FITNESS.tsv").dependOn(&run_fitness.step);
     test_step.dependOn(&run_fitness.step);
 
-    const run_harness_tests = t.run(M.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
+    const run_harness_tests = t.run(MH.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
     run_harness_tests.setCwd(b.path("."));
     run_correctness.step.dependOn(&run_harness_tests.step);
 
     const bench_runner = b.addExecutable(.{
         .name = "bench-runner",
-        .root_module = M.make(b.path("tests/benchmark/runner.zig"), &.{}),
+        .root_module = MH.make(b.path("tests/benchmark/runner.zig"), &.{}),
     });
     const run_bench = b.addRunArtifact(bench_runner);
     run_bench.stdio = .inherit;
@@ -557,7 +570,7 @@ pub fn build(b: *std.Build) void {
     run_suites.addPassthruArgs();
     run_suites.step.dependOn(&fetch_suites.step);
     b.step("bench-suites", "Fetch the external SPICE suites and time ESPice on them against ngspice and VACASK").dependOn(&run_suites.step);
-    const run_bench_tests = t.run(M.make(b.path("tests/benchmark/runner.zig"), &.{}), &.{}, false);
+    const run_bench_tests = t.run(MH.make(b.path("tests/benchmark/runner.zig"), &.{}), &.{}, false);
     b.step("test-benchmark", "Test reference adapters and benchmark comparison").dependOn(&run_bench_tests.step);
     test_step.dependOn(&run_bench_tests.step);
 
@@ -631,7 +644,25 @@ pub fn build(b: *std.Build) void {
         wexe.entry = .disabled;
         wexe.rdynamic = true;
         wexe.wasi_exec_model = .reactor;
+        // Queries run on the main stack here, not on a 512 MiB worker
+        // thread. The corpus peaks at 1.2 MiB (bench_tline_cpl3_4_line),
+        // past the 1 MiB default; 16 MiB leaves 13x.
+        wexe.stack_size = 16 << 20;
         wasm_step.dependOn(&b.addInstallArtifact(wexe, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
+
+        // `zig build wasm-compare`: every corpus deck through espice.wasm
+        // under node (the page's own playground.js) and through the native
+        // espice, equal to 1e-9 relative. Needs node on PATH. Build with
+        // `-Dcpu=x86_64 -Dhip-arch=none -Dcuda-arch=none`: stdpp's reductions
+        // round by lane count, and SSE2 has simd128's two f64 lanes
+        // (dev/playground.md).
+        const cmp = b.addSystemCommand(&.{"node"});
+        cmp.addFileArg(b.path("tools/playground/compare.js"));
+        cmp.addDirectoryArg(wexe.getEmittedBin().dirname());
+        cmp.addArtifactArg(exe);
+        cmp.addDirectoryArg(b.path("tests/fixtures"));
+        cmp.addFileInput(b.path("docs/javascripts/playground.js"));
+        b.step("wasm-compare", "Check espice.wasm against the native espice over the corpus (node)").dependOn(&cmp.step);
 
         const ck = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "--prefix" });
         const ck_out = ck.addOutputDirectoryArg("playground");
@@ -740,6 +771,7 @@ const HostTest = struct {
             .target = m.resolved_target,
             .optimize = m.optimize,
             .strip = m.strip,
+            .single_threaded = m.single_threaded,
             .link_libc = true,
         });
         var it = m.import_table.iterator();

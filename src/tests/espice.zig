@@ -160,7 +160,8 @@ test "Problem: stepped and parallel execution match run_all for AC and transient
         try t.expect(advances < 10000);
     }
     try stepped.run_all();
-    try t.expect(advances > 3);
+    // Single-threaded, a worker runs its query to completion per advance.
+    try t.expect(advances > 3 or @import("builtin").single_threaded);
     inline for (.{ api.requests.Kind.ac, api.requests.Kind.tran }) |kind| {
         const a = try serial.result(try find(serial, kind));
         const b = try stepped.result(try find(stepped, kind));

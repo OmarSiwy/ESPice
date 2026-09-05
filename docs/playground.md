@@ -57,8 +57,12 @@ M2 out in vdd vdd pch w=2.5u l=0.18u
   run time, and the browser has none. Every model built into ESPice is
   compiled in.
 - **No files.** There is no file system, so `.include`, `.lib` with a file,
-  and the `wrdata` and `.save` outputs are not available. Paste the models
-  into the deck instead.
+  `.load`, `.vec`, `.data` with `FILE=`, and the `wrdata` and `.save`
+  outputs are not available. Paste the models into the deck instead.
+- **No separate-circuit runs.** An `.alter` that adds or swaps elements, a
+  `.step` point that needs its own circuit, and the MOSRA degradation table
+  run, but the page doesn't show their results. The base deck's results
+  and every same-circuit `.step`, `.alter` and Monte Carlo point are shown.
 - **One thread, CPU only.** GitHub Pages can't send the headers that
   shared-memory threads need, so the analyses run one after another on one
   core, with no GPU. A simulation runs on the page's own thread, so a long

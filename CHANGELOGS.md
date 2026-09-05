@@ -42,6 +42,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - Bench: ngspice reads a `.spiceinit` beside the deck instead of always running with `-n` (#6).
 - A transient whose operating point needs OPtran (a capacitor-only node) starts from an x that satisfies KCL at
   t = 0, not from the 1 us settle's sources and timers (#53).
+- Playground: espice.wasm gets a 16 MiB stack (the corpus peaks at 1.2 MiB, past the 1 MiB default), pole-zero runs with no poles and `.load`/`.vec`/`FILE=` decks report cleanly, and `zig build wasm-compare` checks it against the native espice over the corpus (#8).
+- On 32-bit targets (the wasm playground) `.tran` with MATEX and envelope runs no longer fail `InvalidQueryOptions`, and Monte Carlo draws match the 64-bit build; `-Dsingle-threaded` builds and tests the playground's code paths natively (#8).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

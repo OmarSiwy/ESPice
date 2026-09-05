@@ -17,6 +17,7 @@
 //! to the whole plane (#138; dev/analysis/refactoring.md, "ParEval").
 
 const std = @import("std");
+const builtin = @import("builtin");
 const device_ir = @import("device").abi;
 
 const Batch = device_ir.Batch;
@@ -161,7 +162,8 @@ pub const ParEval = struct {
         n_lanes_req: u32,
     ) !ParEval {
         std.debug.assert(trash_slot == nnz);
-        const n_lanes = @max(n_lanes_req, 1);
+        // Single-threaded (wasm): one lane whatever `n_lanes_req` asks.
+        const n_lanes: u32 = if (builtin.single_threaded) 1 else @max(n_lanes_req, 1);
 
         const slot_base = try gpa.alloc(u32, batches.len);
         errdefer gpa.free(slot_base);
@@ -287,7 +289,8 @@ pub const ParEval = struct {
         self.next_block.store(0, .monotonic);
         self.stamped.store(0, .monotonic);
         self.done.store(0, .monotonic);
-        if (self.n_lanes > 1) {
+        // Comptime-false single-threaded, so `startWorkers` never compiles there.
+        if (!builtin.single_threaded and self.n_lanes > 1) {
             if (!self.started) self.startWorkers();
             // seq_cst pairs with the worker's `sleepers` increment and epoch
             // re-check: either it sees the new epoch or this sees it parking.
