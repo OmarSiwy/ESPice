@@ -20,7 +20,9 @@ pub const mosra = @import("post/mosra.zig");
 test {
     _ = @import("tests/ac.zig");
     _ = @import("tests/circuit.zig");
-    _ = @import("tests/executor.zig");
+    // Parking and resuming a worker needs its thread; single-threaded, a
+    // worker runs to completion on `start` (worker.zig).
+    if (!@import("builtin").single_threaded) _ = @import("tests/executor.zig");
     _ = @import("tests/four.zig");
     _ = @import("tests/gpu.zig");
     _ = @import("tests/periodic.zig");

@@ -2839,7 +2839,7 @@ const SparseTests = struct {
         for (0..n - 1) |j| {
             dense[j][j] = j != br;
             for (0..3) |_| {
-                const i = r.uintLessThan(usize, n - 1);
+                const i: usize = @intCast(r.uintLessThan(u64, n - 1)); // the same draw on 32-bit targets
                 dense[i][j] = true;
                 dense[j][i] = true;
             }

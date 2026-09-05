@@ -591,9 +591,12 @@ fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u32) 
     const extra = @min(@max(threads, 1) - 1, pool.len);
     // Returning on a failed spawn would free `b` under the running threads.
     var spawned: usize = 0;
-    for (pool[0..extra]) |*th| {
-        th.* = std.Thread.spawn(.{}, Worker.work, .{ t, b, stamp }) catch break;
-        spawned += 1;
+    // Single-threaded (wasm) never names `spawn`: one thread, the oracle.
+    if (!@import("builtin").single_threaded) {
+        for (pool[0..extra]) |*th| {
+            th.* = std.Thread.spawn(.{}, Worker.work, .{ t, b, stamp }) catch break;
+            spawned += 1;
+        }
     }
     Worker.work(t, b, stamp);
     for (pool[0..spawned]) |th| th.join();

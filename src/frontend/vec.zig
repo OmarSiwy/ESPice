@@ -256,7 +256,7 @@ fn timeUnit(args: []const []const u8) Error!f64 {
 /// The bits a VNAME entry covers: its `[hi:lo]` range's, else 1.
 fn busWidth(v: []const u8) Error!usize {
     const r = try range(v) orelse return 1;
-    return @abs(@as(i64, r.hi) - r.lo) + 1;
+    return std.math.cast(usize, @abs(@as(i64, r.hi) - r.lo) + 1) orelse error.InvalidVector;
 }
 
 const Range = struct { base: []const u8, open: []const u8, close: []const u8, hi: u32, lo: u32 };

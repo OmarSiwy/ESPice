@@ -16,6 +16,7 @@
 //! trajectory (a point-count change is the tell).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const device_ir = @import("device").abi;
 
 const Batch = device_ir.Batch;
@@ -99,7 +100,8 @@ pub const ParEval = struct {
     /// Splits the batches into `n_lanes_req` (at least 1) lanes of roughly
     /// equal `count * instanceWeight` work, cut at instance boundaries in
     /// ascending order. Threads start lazily on the first `run`. `batches`
-    /// must outlive it; free it with `deinit`.
+    /// must outlive it; free it with `deinit`. Single-threaded (wasm), one
+    /// lane whatever `n_lanes_req` asks.
     pub fn init(
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -110,7 +112,7 @@ pub const ParEval = struct {
         trash_slot: u32,
         n_lanes_req: u32,
     ) !ParEval {
-        const n_lanes = @max(n_lanes_req, 1);
+        const n_lanes: u32 = if (builtin.single_threaded) 1 else @max(n_lanes_req, 1);
         const nnz1: usize = nnz + 1;
         const n1: usize = n + 1;
         const extra: usize = n_lanes - 1;
@@ -246,7 +248,8 @@ pub const ParEval = struct {
     /// `.charge` on a circuit without charge is a no-op: there is no q plane.
     pub fn run(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64, mode: Mode) void {
         if (mode == .charge and !self.has_charge) return;
-        if (self.n_lanes == 1) {
+        // Comptime-true single-threaded, so `startWorkers` never compiles.
+        if (builtin.single_threaded or self.n_lanes == 1) {
             runLane(self, batches, own_planes, 0, x, t, mode);
             return;
         }

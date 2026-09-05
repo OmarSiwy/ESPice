@@ -3,6 +3,10 @@
 const std = @import("std");
 const requests = @import("core").query;
 const Deck = @import("core").Deck;
+// What the drivers allocate, not their caps: a cap times n can pass the
+// 64-plane ceiling on a 32-bit target (wasm) where the run never comes near it.
+const envelope = @import("tran/envelope.zig");
+const matex = @import("tran/matex.zig");
 
 /// True when every float reachable from `value` is finite.
 fn finite(value: anytype) bool {
@@ -245,14 +249,14 @@ pub fn validate(query: requests.Query, n: u32) !void {
                 return error.InvalidQueryOptions;
             try timeStep(o.t_carrier / @as(f64, @floatFromInt(o.carrier_steps_per_period)));
             try positive(o.t_carrier * @as(f64, @floatFromInt(o.max_periods_per_step)));
-            _ = try elements(&.{ @as(usize, o.max_outer_steps) + 2, 2 * @as(usize, n) + 1 });
+            _ = try elements(&.{ envelope.maxPoints(o), 2 * @as(usize, n) + 1 });
         },
         .matex => |o| {
             try timeStep(o.gamma orelse o.t_stop / 1000);
             try timeStep(o.h_output_cap orelse o.t_stop / 200);
             _ = try elements(&.{ @as(usize, o.m_max) + 1, @as(usize, o.m_max) + 1 });
             _ = try elements(&.{ @as(usize, o.m_max) + 1, n });
-            _ = try elements(&.{ o.max_points, @as(usize, n) + 1 });
+            _ = try elements(&.{ matex.estPoints(o), @as(usize, n) + 1 });
         },
         .tf, .pz => {
             _ = try elements(&.{ n, n });

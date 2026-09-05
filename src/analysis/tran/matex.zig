@@ -356,6 +356,13 @@ fn negGinvMul(slv_g: *Solver, v: []const f64, dest: []f64) void {
     num.scale(dest, -1.0, dest);
 }
 
+/// The waveform rows `run` reserves up front: two per output-capped step,
+/// at least 256, at most `max_points`. The waveform grows past it.
+pub fn estPoints(opts: Options) u32 {
+    const h_cap = opts.h_output_cap orelse opts.t_stop / 200.0;
+    return @intFromFloat(@min(@max(256, opts.t_stop / h_cap * 2.0), @as(f64, @floatFromInt(opts.max_points))));
+}
+
 /// Contract entry: march from ctx.x_op with the piecewise-linear source
 /// integral (MATEX eq. 5), stepping to each transition spot or h_output_cap.
 /// Point-major rows (time, probes...).
@@ -442,12 +449,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const pwl_tmp = try scratch.alloc(f64, n);
 
     const n_probes: u32 = @intCast(ctx.probes.len);
-    const est_points: u32 = @intFromFloat(@min(
-        @max(@as(f64, 256), opts.t_stop / h_cap * 2.0),
-        @as(f64, opts.max_points),
-    ));
     // Recorded straight into the results arena; the Result borrows it.
-    var wf = try Waveform.init(a, n_probes, est_points);
+    var wf = try Waveform.init(a, n_probes, estPoints(opts));
     errdefer wf.deinit();
 
     try wf.record(0, x, ctx.probes);

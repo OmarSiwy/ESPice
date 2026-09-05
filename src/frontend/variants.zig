@@ -1147,7 +1147,9 @@ pub const Sampler = struct {
         const perm = try s.arena.alloc(u32, s.n);
         for (perm, 0..) |*x, i| x.* = @intCast(i);
         var prng = std.Random.DefaultPrng.init(netlist.siteKey(s.seed, site));
-        prng.random().shuffle(u32, perm);
+        // A u64 index draws the same bits on every target; `shuffle`'s
+        // usize index permuted differently on wasm32.
+        prng.random().shuffleWithIndex(u32, perm, u64);
         gop.value_ptr.* = perm;
         return perm;
     }

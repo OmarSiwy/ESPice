@@ -110,7 +110,7 @@ fn lowerVec(a: std.mem.Allocator, g: peg.Grammar, t: peg.Tree) Error![]const u8 
                     from = std.fmt.parseInt(u32, t.text(t.child(grp, g.rule("From")).?), 10) catch return error.Refused;
                     to = std.fmt.parseInt(u32, t.text(t.child(grp, g.rule("To")).?), 10) catch return error.Refused;
                 }
-                const width: usize = if (l.is(k, "Bus")) @abs(@as(i64, from) - to) + 1 else 1;
+                const width: usize = if (l.is(k, "Bus")) std.math.cast(usize, @abs(@as(i64, from) - to) + 1) orelse return error.Refused else 1;
                 var have: usize = 0;
                 while (have < width) : (d += 1) {
                     if (d == digits.items.len) return error.Refused;
