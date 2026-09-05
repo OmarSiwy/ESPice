@@ -40,6 +40,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - Bench: poles and zeros are scored as sets, and a repeated signal name (CPL/TXL port currents) is scored by its last column (#87).
 - Bench: the ngspice and VACASK adapters read decks of any size, and the power-grid suite's `.spiceinit` turns on KLU (#7).
 - Bench: ngspice reads a `.spiceinit` beside the deck instead of always running with `-n` (#6).
+- A transient whose operating point needs OPtran (a capacitor-only node) starts from an x that satisfies KCL at
+  t = 0, not from the 1 us settle's sources and timers (#53).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

@@ -79,6 +79,44 @@ which publish v(2) = 5.005 V over a 5 V supply. Disabling the gate on
 needs its own full-corpus A/B; see
 [conformance-phase2.md](../conformance-phase2.md) group 8.
 
+**KCL certificate (#53).** `zig build -Dcertify` re-evaluates the devices
+at every point direct Newton accepts, with the limiters cleared and the same
+gmin and force loads (`src/analysis/certify.zig`, test
+`src/analysis/tests/certify.zig`). It runs after every gate and before
+`updateStates` stages the point. It asserts the solver's own promise, the
+per-row residual gate above (`converger.residualGate`): a row over it panics
+and fails the deck. Since the transient runs with `residual_tol = inf`, there
+it only catches a NaN. The current bound
+$\|F_{\text{kcl}}\|_\infty \le \texttt{abstol} + \texttt{reltol}\max|I|$
+(non-branch rows against the largest branch current) is reported, not
+asserted: each circuit prints its worst ratio on release, and the corpus
+runner echoes it.
+
+Corpus, 2026-10-18 (ReleaseSafe, CPU, 783 decks that reach a solve): no row
+over the gate. The first run tripped on 7 LTRA decks, with NaN at the first
+transient step (`device_lossy_tline`, `bench_tline_ltra1_1_line`,
+`bench_tline_ltra2_2_line` and four `ltra_tran_*`). That was the certificate
+itself: it re-evaluated after staging, and `models/ltra.va` appends the
+staged point to the history its eval reads, so the same t appeared twice and
+the interpolation divided by zero. No production path evaluates between
+staging and commit; the certificate now runs before staging. The current
+bound: 51 decks have a point over it (27 dc, 17 tran, 7 ic), median worst
+ratio 14.9, max 3.8e11. The worst are a nodeset hold under `abstol = 1e-14`,
+`reltol = 1e-6` (`convergence/diode_bad_nodeset_positive`, 3.8e11), a
+table-model OP (`hdl/veriloga_table_snapshot`, 4.9e8), Monte Carlo lots
+(`variants/monte_dev_lot`, 2.3e7, 3999 of 4000 points over) and inverter
+transients (`reference/cmos_inverter_tran`, 2.9e5, 525 of 6220 points),
+then `reference/cmos_inverter_dc` 698 and `tran/device_mos6_inverter` 431.
+
+This is the divergence above: ngspice bounds each device's linearized
+current by `reltol*max(|I_new|, |I_old|) + abstol` (`NIconvTest` through
+the device `convTest`s) and has no residual gate. Here the delta test plus a
+voltage tolerance turned into a current by the row's diagonal is the
+promise, so a deck can publish a point whose KCL error is far above
+`abstol` while every node sits inside `reltol*|v| + vntol`. Owner decision
+(#53): certify the gate the solver applies and report the current bound;
+tightening the gate is a global change that needs its own corpus A/B.
+
 The transient steps run without it (`residual_tol = inf` in `tran.zig`), as
 ngspice does. There it cost `bench_tline_txl2_3_line` a third iterate on the
 step landing on a PULSE corner (the Meyer caps leave 1.3e-7 A on a

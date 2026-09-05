@@ -225,8 +225,20 @@ $v_{\text{crit}}$/vto instead of 0).
 **Floating nodes.** When a node has no DC path to ground
 (`Circuit.needs_tran_op`, a capacitor-only island), the static operating
 point is not unique. Under a transient's own OP the ladder goes straight to
-OPtran and reports the settled state, as ngspice does under TRANOP. A
-standalone `.op`, `.ac` or `.pz` fails with `error.FloatingNode`.
+OPtran, and the settled state fixes the capacitor-only rows, as ngspice
+does under TRANOP. A standalone `.op`, `.ac` or `.pz` fails with
+`error.FloatingNode`.
+
+The settled `x` is not itself the answer. It satisfies KCL at the device
+state the 1 µs settle reached, and OPtran then restores the pre-transient
+state (timers unfired, sources at t = 0). Publishing it left the two
+disagreeing: on `hdl/veriloga_optran_timer` the `-Dcertify` re-evaluation
+found the published `x` off its own KCL (#53). Now every row whose static
+Jacobian at the settled `x` is all zero (a capacitor-only node) is held at
+its settled value by a $10^{10}$ S force, and a clean Newton solves the rest
+at the restored state (`floatingHolds` in `dc/op.zig`). The test is
+`OPtran: the published x satisfies KCL ...` in
+`src/analysis/tests/integration.zig`.
 
 **Rung 1: plain Newton** with no diagonal gmin and the ITL1 budget.
 ngspice's `NIiter` loads a diagonal gmin only during gmin stepping (junction

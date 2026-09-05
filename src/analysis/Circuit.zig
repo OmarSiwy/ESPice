@@ -12,6 +12,7 @@ const walk = @import("walk.zig");
 const gpu_mod = @import("gpu.zig");
 const GpuContext = gpu_mod.GpuContext;
 const GpuLu = @import("gpu_lu.zig").GpuLu;
+const kcl_cert = @import("certify.zig");
 const converger = @import("solver").converger;
 const freq_solve = @import("solver").freq_solve;
 const direct = @import("solver").direct;
@@ -188,6 +189,17 @@ pub const Circuit = struct {
     /// Parameters with a frequency-domain value, filled by the executor.
     /// Empty on every deck without one. Owned by the query work arena.
     ac_params: []AcParam = &.{},
+    /// The KCL certificate's record under `-Dcertify`; void otherwise.
+    cert: if (kcl_cert.enabled) kcl_cert.Tally else void = if (kcl_cert.enabled) .{} else {},
+
+    /// `newton` calls `certifyPoint` on every converged x when true.
+    pub const certify = kcl_cert.enabled;
+
+    /// Certifies the converged `x` (analysis/certify.zig). Only `newton`
+    /// calls it, and only under `-Dcertify`.
+    pub fn certifyPoint(self: *Circuit, hook: anytype, x: []const f64, t: f64, opts: converger.Options) void {
+        kcl_cert.check(self, hook, x, t, opts);
+    }
 
     /// `newton`'s device path: factors `vals` (when `need`) and solves
     /// dx = -A^-1 rhs on the device. Null without a device LU; see
@@ -447,6 +459,7 @@ pub const Circuit = struct {
     /// solve it afterwards.
     pub fn release(self: *Circuit) void {
         const gpa = self.gpa;
+        if (kcl_cert.enabled) self.cert.deinit(gpa, self.nodeName(self.cert.worst_row));
         if (self.ws) |*w| w.deinit(gpa);
         self.ws = null;
         if (self.load_check) |*lc| lc.deinit(gpa);

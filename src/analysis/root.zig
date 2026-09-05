@@ -30,6 +30,7 @@ test {
     _ = @import("tests/transient.zig");
     _ = @import("tests/integration.zig");
     _ = @import("tests/jacobian.zig");
+    _ = @import("tests/certify.zig");
     _ = @import("post/mosra.zig");
     _ = @import("par_eval.zig");
     _ = @import("session.zig");
