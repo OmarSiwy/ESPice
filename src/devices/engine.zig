@@ -2256,15 +2256,17 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
                     const p: *T = @ptrCast(@alignCast(dest));
                     inline for (@typeInfo(T).@"struct".fields) |field| {
                         switch (@typeInfo(field.type)) {
-                            .float => if (std.ascii.eqlIgnoreCase(param, field.name)) {
+                            .float => if (matches(param, field.name)) {
                                 @field(p, field.name) = @floatCast(value);
+                                markGiven(p, field.name);
                                 return true;
                             },
-                            .int => if (std.ascii.eqlIgnoreCase(param, field.name)) {
+                            .int => if (matches(param, field.name)) {
                                 @field(p, field.name) = @intFromFloat(value);
+                                markGiven(p, field.name);
                                 return true;
                             },
-                            .bool => if (std.ascii.eqlIgnoreCase(param, field.name)) {
+                            .bool => if (matches(param, field.name)) {
                                 @field(p, field.name) = value != 0;
                                 return true;
                             },
@@ -2272,6 +2274,26 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
                         }
                     }
                     return false;
+                }
+
+                /// A VA parameter whose name collides with a Zig primitive
+                /// (`u0`, `type`, ...) is emitted by VerA's naming.zig with a
+                /// trailing `Z` escape marker; the card key keeps the VA
+                /// spelling, so match it against the unescaped name too.
+                fn matches(param: []const u8, comptime field: []const u8) bool {
+                    if (std.ascii.eqlIgnoreCase(param, field)) return true;
+                    if (comptime field.len > 1 and field[field.len - 1] == 'Z')
+                        return std.ascii.eqlIgnoreCase(param, field[0 .. field.len - 1]);
+                    return false;
+                }
+
+                /// §9.19 `$param_given` companion (`<name>__given: bool`),
+                /// emitted by VerA only for queried parameters. Raise it with
+                /// the value or derived-default logic runs as if the card
+                /// said nothing.
+                fn markGiven(p: *T, comptime field: []const u8) void {
+                    if (comptime @hasField(T, field ++ "__given"))
+                        @field(p, field ++ "__given") = true;
                 }
             }.f;
         }
