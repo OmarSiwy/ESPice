@@ -12,6 +12,12 @@ lin N fstart fstop    N points in total
 poi N f1 f2 ... fN    the listed frequencies (HSPICE; ascending)
 ```
 
+As in ngspice, an `.ac dec` grid spanning a decade or more stretches its
+step so the last point is `fstop` (`.ac dec 3 10 730` is 6 points from 10
+to 730); `.noise` and `.sp` grids keep exactly N points per decade and stop
+at the last one not past `fstop`. A `lin` grid with `fstart = fstop` is one
+point.
+
 ESPice adds the prerequisites an analysis needs (an `.ac` needs an
 operating point) and shares them between analyses. `espice --plan deck.sp`
 shows the graph.

@@ -281,26 +281,35 @@ pub const FreqSweep = struct {
     /// The `poi` frequencies in Hz, ascending, `points` of them; `f_start`
     /// and `f_stop` are its ends. Unused by the other kinds.
     list: []const f64 = &.{},
+    /// ngspice `.ac` (acan.c:89-99): a `dec` grid spanning at least a
+    /// decade stretches its ratio so the last point lands on `f_stop`
+    /// (`.ac dec 3 10 730` is 6 points ending at 730). ngspice's noise and
+    /// sp grids keep the plain ratio, so only the `.ac` card sets it.
+    land_on_stop: bool = false,
 
     /// Number of grid points, at least 1 and at most maxInt(u32). A grid it
     /// cannot step (a non-positive, NaN or infinite span) is one point.
-    /// A geometric grid steps by a fixed ratio and stops at the last point
-    /// under `f_stop`, as ngspice ACan does: `.ac dec 3 10 730` is 6 points
-    /// ending at 464.16, not 7 ending at 730.
+    /// A geometric grid steps by a fixed ratio and keeps every point up to
+    /// `f_stop` plus ngspice's stop tolerance (acan.c:239): `dec 10 1 9.999`
+    /// is 11 points ending at 10.
     pub fn count(self: FreqSweep) u32 {
-        if (self.kind == .lin or self.kind == .poi) return @max(self.points, 1);
-        if (!(self.f_start > 0) or !(self.f_stop >= self.f_start)) return 1;
+        if (self.kind == .poi) return @max(self.points, 1);
+        // A `.dc` lin axis may descend; only an empty span is one point.
+        if (self.kind == .lin) return if (self.f_stop != self.f_start) @max(self.points, 1) else 1;
+        if (!(self.f_start > 0) or !(self.f_stop >= self.f_start) or self.points == 0) return 1;
+        const ln_step = @log(self.base()) / @as(f64, @floatFromInt(self.points));
         // The ratio keeps ngspice's rounding; a span whose ratio overflows
         // (1e-300 to 1e300) falls back to the log difference.
         const ratio = self.f_stop / self.f_start;
         const ln_span = if (std.math.isFinite(ratio)) @log(ratio) else @log(self.f_stop) - @log(self.f_start);
-        const decades = ln_span / @log(self.base());
-        const steps = decades * @as(f64, @floatFromInt(self.points));
+        // ngspice runs while freq <= f_stop + step * f_stop * reltol, at the
+        // default reltol. ponytail: the deck's reltol is not threaded here;
+        // it moves only a point within 0.1% of f_stop.
+        const steps = self.stretchedSteps() orelse (ln_span + std.math.log1p(@exp(ln_step) * 1e-3)) / ln_step;
         if (!std.math.isFinite(steps) or steps < 0) return 1;
-        // +1e-9: an exact integral span (oct 2 10 1280 = 14 steps) must not
-        // lose its last point to a 1-ulp shortfall. The cap keeps an absurd
-        // span (`dec 4294967295 1e-300 1e300`) inside u32 instead of trapping.
-        const capped = @min(@floor(steps + 1e-9), @as(f64, std.math.maxInt(u32) - 1));
+        // The cap keeps an absurd span (`dec 4294967295 1e-300 1e300`)
+        // inside u32 instead of trapping.
+        const capped = @min(@floor(steps), @as(f64, std.math.maxInt(u32) - 1));
         assert(capped >= 0);
         return @as(u32, @intFromFloat(capped)) + 1;
     }
@@ -312,16 +321,18 @@ pub const FreqSweep = struct {
             assert(k < self.list.len);
             return self.list[k];
         }
-        const n = self.count();
-        assert(k < n);
+        assert(k < self.count());
+        const kf: f64 = @floatFromInt(k);
         if (self.kind == .lin) {
+            const n = self.count();
             if (n <= 1) return self.f_start;
-            const frac = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n - 1));
+            const frac = kf / @as(f64, @floatFromInt(n - 1));
             return self.f_start + frac * (self.f_stop - self.f_start);
         }
         // pow, not a running product: the product drifts off the decade
         // boundaries the oracles are written on.
-        return self.f_start * std.math.pow(f64, self.base(), @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(@max(self.points, 1))));
+        if (self.stretchedSteps()) |steps| return self.f_start * std.math.pow(f64, self.f_stop / self.f_start, kf / steps);
+        return self.f_start * std.math.pow(f64, self.base(), kf / @as(f64, @floatFromInt(@max(self.points, 1))));
     }
 
     /// Writes each grid frequency (Hz) into `freqs`, when given, and its
@@ -357,6 +368,14 @@ pub const FreqSweep = struct {
             return self.sweep.at(self.k);
         }
     };
+
+    /// ngspice's stretched step count, floor(log10(stop/start) * points),
+    /// when `land_on_stop` applies; null for a plain grid.
+    fn stretchedSteps(self: FreqSweep) ?f64 {
+        if (!self.land_on_stop or self.kind != .dec or !(self.f_stop / 10.0 >= self.f_start)) return null;
+        const steps = @floor(std.math.log10(self.f_stop / self.f_start) * @as(f64, @floatFromInt(self.points)));
+        return if (steps >= 1 and std.math.isFinite(steps)) steps else null;
+    }
 
     fn base(self: FreqSweep) f64 {
         return if (self.kind == .oct) 2.0 else 10.0;
@@ -409,9 +428,29 @@ test "bulk buffers preserve bits, common prefixes and exact aliases" {
 
 test "FreqSweep matches the ngspice grids the oracles were taken on" {
     const t = std.testing;
-    const dec: FreqSweep = .{ .f_start = 10, .f_stop = 730, .points = 3, .kind = .dec };
+    // ngspice 45 `.ac`: the dec ratio stretches to land on f_stop.
+    const dec: FreqSweep = .{ .f_start = 10, .f_stop = 730, .points = 3, .kind = .dec, .land_on_stop = true };
     try t.expectEqual(@as(u32, 6), dec.count());
-    try t.expectApproxEqRel(@as(f64, 464.15888336128), dec.at(5), 1e-12);
+    try t.expectApproxEqRel(@as(f64, 23.58656), dec.at(1), 1e-6);
+    try t.expectApproxEqRel(@as(f64, 730), dec.at(5), 1e-12);
+    const short: FreqSweep = .{ .f_start = 1, .f_stop = 99.9, .points = 2, .kind = .dec, .land_on_stop = true };
+    try t.expectEqual(@as(u32, 4), short.count());
+    try t.expectApproxEqRel(@as(f64, 4.640041), short.at(1), 1e-6);
+    // Under a decade, and on the noise/sp grids, the ratio stays 10^(1/N);
+    // the stop tolerance keeps 10 past 9.999.
+    inline for (.{ true, false }) |land| {
+        const under: FreqSweep = .{ .f_start = 1, .f_stop = 9.999, .points = 10, .kind = .dec, .land_on_stop = land };
+        try t.expectEqual(@as(u32, 11), under.count());
+        try t.expectApproxEqRel(@as(f64, 10), under.at(10), 1e-12);
+    }
+    const plain: FreqSweep = .{ .f_start = 10, .f_stop = 730, .points = 3, .kind = .dec };
+    try t.expectEqual(@as(u32, 6), plain.count());
+    try t.expectApproxEqRel(@as(f64, 464.15888336128), plain.at(5), 1e-12);
+    const oct3: FreqSweep = .{ .f_start = 10, .f_stop = 100, .points = 3, .kind = .oct };
+    try t.expectEqual(@as(u32, 10), oct3.count());
+    try t.expectApproxEqRel(@as(f64, 80), oct3.at(9), 1e-12);
+    const flat: FreqSweep = .{ .f_start = 100, .f_stop = 100, .points = 5, .kind = .lin };
+    try t.expectEqual(@as(u32, 1), flat.count());
     const oct: FreqSweep = .{ .f_start = 10, .f_stop = 1280, .points = 2, .kind = .oct };
     try t.expectEqual(@as(u32, 15), oct.count());
     try t.expectApproxEqRel(@as(f64, 1280), oct.at(14), 1e-12);

@@ -61,7 +61,10 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     var fan: usize = 4;
     for (cards) |c| switch (c.kind) {
         .ac => if (ctx.ac == null) {
-            if (acGrid(arena, c.args, 0)) |g| ctx.ac = g.sweep else |_| {}
+            if (acGrid(arena, c.args, 0)) |g| {
+                ctx.ac = g.sweep;
+                ctx.ac.?.land_on_stop = true; // the grid the `.ac` card runs
+            } else |_| {}
         },
         .tran => if (ctx.tran == null) {
             if (buildJob(c, sources, card_refs, ctx)) |job| {
@@ -1267,7 +1270,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         .ac => {
             const grid = try acGrid(ctx.arena, args, 0);
             if (grid.end != args.len) return error.InvalidAnalysisArguments;
-            return .{ .ac = .{ .sweep = grid.sweep } };
+            var sweep = grid.sweep;
+            sweep.land_on_stop = true;
+            return .{ .ac = .{ .sweep = sweep } };
         },
         .disto => {
             try arity(args, 4, 5);
