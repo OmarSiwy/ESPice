@@ -130,6 +130,11 @@ pub const Circuit = struct {
     // -- hot: flags --
     has_charge: bool,
     has_history: bool,
+    /// Some charge-carrying batch advances device state at the ACCEPTED step
+    /// (freeze_grad latches, absdelay rings): the transient must re-read q
+    /// under the committed state before recording it as q_prev, or the next
+    /// step opens on a residual α·Δq that doubles as dt halves.
+    has_state_q: bool,
     has_baseline: bool,
     /// Set by engine when --gpu is active and circuit is GPU-eligible.
     /// converger.run reads this to pick JFNK.
@@ -655,6 +660,7 @@ pub fn init(
     ckt.intern_offs = intern_offs;
     ckt.has_charge = false;
     ckt.has_history = false;
+    ckt.has_state_q = false;
     ckt.has_baseline = false;
     ckt.gpu_active = false;
     ckt.g_base = &.{};
@@ -702,6 +708,9 @@ pub fn init(
         n_final = bi + 1;
         if (batches[bi].has_charge) ckt.has_charge = true;
         if (batches[bi].hooks.inject_history != null) ckt.has_history = true;
+        if (batches[bi].has_charge and
+            (batches[bi].hooks.update_state != null or batches[bi].hooks.commit_state != null))
+            ckt.has_state_q = true;
     }
     ckt.batches = batches;
 

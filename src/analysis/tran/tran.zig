@@ -591,6 +591,26 @@ pub fn simulate(
         // iteration including every rejected attempt. See `Hooks.commit_state`.
         _ = ckt.commitStates(cur);
 
+        // Accepted-state devices advanced their state above (freeze_grad
+        // latches, absdelay rings): the q this step recorded came from the
+        // LAST NEWTON ASSEMBLE, one state-update behind. Re-read q under the
+        // committed state so q_prev is what the NEXT step's residual will
+        // reproduce at x = cur — without this the next attempt opens on
+        // F = α·(q_committed − q_recorded), which DOUBLES every dt halving
+        // (mesa_oscillator wedged at t≈350 ps exactly this way). The i_prev
+        // correction is the same α·Δq for both methods.
+        if (has_charge and ckt.has_state_q) {
+            ckt.eval(cur, t);
+            var dbg_dq: f64 = 0;
+            for (0..n) |j2| {
+                const q_new = ckt.q_vec[j2];
+                if (stats_on) dbg_dq = @max(dbg_dq, @abs(q_new - q_hist[1][j2]));
+                i_prev[j2] += alpha_val * (q_new - q_hist[1][j2]);
+                q_hist[1][j2] = q_new;
+            }
+            if (stats_on and dbg_dq > 1e-15) std.debug.print("resnap t={e:.4} max|dq|={e:.3}\n", .{ t, dbg_dq });
+        }
+
         try waveform.record(t, cur, probes);
         if (options.step_fn) |f| f(options.step_ctx, t, cur);
 
