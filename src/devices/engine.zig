@@ -968,6 +968,11 @@ fn hasHistoryDecl(comptime D: type) bool {
 /// the host asks a question instead of pattern-matching an answer. Upgrade
 /// there; this predicate is the shim until then.
 fn hasAbsdelayState(comptime D: type) bool {
+    // Native engine devices say it outright (the upgrade path the comment
+    // above names); VerA-generated ones are detected from the Instance field
+    // naming ABI below, because the contract's allowed_pub_decls has no slot
+    // for a host-only marker.
+    if (@hasDecl(D, "unrevertible_state")) return D.unrevertible_state;
     if (!@hasDecl(D, "Instance")) return false;
     // hisim-class Instances carry hundreds of long field names; the substring
     // scan is comptime O(fields × name len) and blows the default 1000 quota.

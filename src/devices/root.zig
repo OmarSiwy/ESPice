@@ -29,6 +29,16 @@ pub const vaload = @import("loader.zig");
 /// The top-level build feeds this to gompute's `emitKernels`.
 pub const kernels = @import("kernels.zig");
 
+/// ngspice's LTRA recursive-convolution lossy line — hand-written against the
+/// contract (unbounded per-instance history has no Verilog-A spelling, see
+/// models/lossy_tline.va). NOT in `catalog` (that reflects generated models);
+/// the builder routes RLC/RC O-cards here directly.
+pub const ltra_native = @import("ltra_native.zig");
+
+comptime {
+    _ = ltra_native; // pull its tests into the devices test root
+}
+
 /// Every build-time-generated device, keyed by module name. `models.NAME` is
 /// the contract-shaped device type.
 pub const models = @import("models");
