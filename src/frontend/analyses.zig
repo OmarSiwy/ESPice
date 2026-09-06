@@ -339,8 +339,8 @@ pub const DeckOptions = struct {
 const runlvl_trtol = [6]f64{ 28, 14, 7, 3.5, 1.75, 0.875 };
 
 /// Option names outside this list are not simulated; the HSPICE dialect
-/// warns about each. `gshunt` and `cshunt` are read by the netlist.
-const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, xmu, gshunt, cshunt };
+/// warns about each. `gshunt`, `cshunt` and `rshunt` are read by the netlist.
+const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, xmu, gshunt, cshunt, rshunt };
 
 /// Folds the deck's `.options` and `.temp` cards; `InvalidAnalysisArguments`
 /// on a value out of range, logged with its card. The last `.temp` card
@@ -367,6 +367,7 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
         .{ "tnom", .tnom },     .{ "absv", .vntol },    .{ "relv", .reltol },
         .{ "absi", .abstol },   .{ "gmindc", .gmin },   .{ "delmax", .delmax },
         .{ "gshunt", .gshunt }, .{ "cshunt", .cshunt }, .{ "xmu", .xmu },
+        .{ "rshunt", .rshunt },
     });
     const methods = std.StaticStringMap(requests.Method).initComptime(.{
         .{ "gear", .gear_2 }, .{ "trap", .trapezoidal }, .{ "trapezoidal", .trapezoidal }, .{ "bdf", .gear_2 },
@@ -464,7 +465,7 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
                     if (!(value >= 0 and value <= 0.5)) return error.InvalidAnalysisArguments;
                     o.xmu = value;
                 },
-                .gshunt, .cshunt => if (value < 0) return error.InvalidAnalysisArguments,
+                .gshunt, .cshunt, .rshunt => if (value < 0) return error.InvalidAnalysisArguments,
                 // A zero reltol or trtol leaves no step a transient can take
                 // (ngspice aborts "timestep too small"), so the card fails here.
                 .reltol, .trtol => {

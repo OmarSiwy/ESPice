@@ -3542,14 +3542,15 @@ fn Reader(comptime S: type) type {
 
         // After the walk: shunts and model bins.
 
-        /// `.options gshunt=G cshunt=C` [CR Ch.3]: a conductance and a
-        /// capacitance from every net to ground, added as R and C cards
-        /// named `r.gshunt.<net>` and `c.cshunt.<net>`.
+        /// `.options gshunt=G cshunt=C` [CR Ch.3] and ngspice's `rshunt=R`:
+        /// a conductance, capacitance or resistance from every net to
+        /// ground, added as R and C cards named `r.gshunt.<net>`,
+        /// `c.cshunt.<net>` and `r.rshunt.<net>`.
         fn shunts(r: *R) Error!void {
             const nets = r.hg.vertices.len;
-            inline for (.{ .{ "gshunt", 'r' }, .{ "cshunt", 'c' } }) |s| if (r.option(s[0])) |v| if (v > 0) {
+            inline for (.{ .{ "gshunt", 'r' }, .{ "cshunt", 'c' }, .{ "rshunt", 'r' } }) |s| if (r.option(s[0])) |v| if (v > 0) {
                 for (1..nets) |net| {
-                    const value: Value = .{ .num = if (s[1] == 'r') 1 / v else v };
+                    const value: Value = .{ .num = if (comptime std.mem.eql(u8, s[0], "gshunt")) 1 / v else v };
                     const pins = [2]VertexId{ .from(net), ground };
                     const net_name = r.pool.str(r.hg.vertices.items(.name)[net]);
                     const name = try r.internName(try std.fmt.allocPrint(r.arena, "{c}.{s}.{s}", .{ s[1], s[0], net_name }));

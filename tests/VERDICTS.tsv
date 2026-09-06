@@ -529,6 +529,7 @@ PASS	fixtures/op/millivolt_supply.sp
 PASS	fixtures/op/mos_level_card_spellings.sp
 PASS	fixtures/op/negative_supply.sp
 PASS	fixtures/op/nodeset_latch.sp
+PASS	fixtures/op/option_rshunt_ngspice.sp
 PASS	fixtures/op/parallel_resistors.sp
 PASS	fixtures/op/ratio_million_to_one.sp
 PASS	fixtures/op/ratio_one_to_million.sp

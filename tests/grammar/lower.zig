@@ -211,26 +211,30 @@ const L = struct {
         try w.writeAll(l.ic_text);
     }
 
-    /// `.option gshunt=G cshunt=C`: an R of 1/G and a C from every net to
-    /// ground, named `r.gshunt.<net>` and `c.cshunt.<net>`, nets in the
-    /// order cards first name them (hspice-syntax.md, HSPICE dialect).
+    /// `.option gshunt=G cshunt=C` and ngspice's `rshunt=R`: an R of 1/G, a
+    /// C and an R of R from every net to ground, named `r.gshunt.<net>`,
+    /// `c.cshunt.<net>` and `r.rshunt.<net>`, nets in the order cards first
+    /// name them (hspice-syntax.md, HSPICE dialect; ngspice manual 11.1.1).
     fn shunts(l: *L) Error!void {
         var roots = l.t.children(null);
         var it = l.t.children(roots.next().?);
         var g: ?f64 = null;
         var c: ?f64 = null;
+        var rs: ?f64 = null;
         while (it.next()) |card| if (l.kind(card) == l.r.options) {
             const a = try l.cardArgs(card);
             for (a, 0..) |v, i| if (v == .name and i + 1 < a.len and a[i + 1] == .num) {
                 if (std.mem.eql(u8, v.name, "gshunt")) g = a[i + 1].num;
                 if (std.mem.eql(u8, v.name, "cshunt")) c = a[i + 1].num;
+                if (std.mem.eql(u8, v.name, "rshunt")) rs = a[i + 1].num;
             };
         };
         const w = &l.out.writer;
-        inline for (.{ .{ "gshunt", 'r', g }, .{ "cshunt", 'c', c } }) |sh| if (sh[2]) |v| if (v > 0) {
+        inline for (.{ .{ "gshunt", 'r', g }, .{ "cshunt", 'c', c }, .{ "rshunt", 'r', rs } }) |sh| if (sh[2]) |v| if (v > 0) {
             for (l.net_order.items) |n| {
                 if (netlist.isGroundName(n)) continue;
-                try w.print("dev {c} {c}.{s}.{s} ({s} 0) {e:.11}\n", .{ sh[1], sh[1], sh[0], n, n, if (sh[1] == 'r') 1 / v else v });
+                const value = if (comptime std.mem.eql(u8, sh[0], "gshunt")) 1 / v else v;
+                try w.print("dev {c} {c}.{s}.{s} ({s} 0) {e:.11}\n", .{ sh[1], sh[1], sh[0], n, n, value });
             }
         };
     }

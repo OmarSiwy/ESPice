@@ -181,7 +181,7 @@ against each `.option search='dir'`. Includes nest up to 32 levels.
 | `temp` | 27 | circuit temperature, °C |
 | `tnom` | 27 (HSPICE 25) | model reference temperature, °C |
 | `delmax` | | transient step cap when `.tran` gives none |
-| `gshunt`, `cshunt` | | R and C from every net to ground |
+| `gshunt`, `cshunt`, `rshunt` | | conductance, capacitance and (ngspice) resistance from every net to ground |
 | `scale` | 1 | geometry scale for model binning |
 | `wnflag` | 0 (HSPICE 1) | bin selection by per-finger W |
 | `seed` | 1 | Monte Carlo seed |
