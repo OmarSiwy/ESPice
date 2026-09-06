@@ -101,7 +101,7 @@ module bsim1(d, g, s, b);
     real vfbe, phie, k1e, k2e, etae, x2ee, x3ee;
     real x2mze, muse, x2mse, x3mse, u0e, x2u0e, u1e, x2u1e, x3u1e;
     real n0e, nbe, nde;
-    real bz0, bzb, bvd, bvdb, bvdd_d, ugsp, ugsbp, udsp, udsbp, udsdp;
+    real bz0, bzb, bvd, bvdb, bvdd_d;
     real gdcond, gscond, adrain, asource, pdrain, psource, isd, iss, vtherm;
     real pbc, pbswc, czbs, czbssw, czbd, czbdsw, vsat_on, vcrits, vcritd;
     real tyf, vtx;
@@ -146,17 +146,16 @@ module bsim1(d, g, s, b);
         nbe   = nb   + lnb   / lum + wnb   / wum;
         nde   = nd   + lnd   / lum + wnd   / wum;
 
-        bfac   = cox * (wum / lum) * 1e-4;
+        // CoxWoverL = Cox[F/cm^2] * Weff/Leff [um/um] — b1temp.c:81 has no
+        // further unit factor (mobility is cm^2/Vs, so muz*bfac is A/V^2),
+        // and only the five beta interpolation params are scaled by it
+        // (b1temp.c:134-138). The U0/U1 families stay raw 1/V (b1eval.c:159-173).
+        bfac   = cox * (wum / lum);
         bz0    = muz   * bfac;      // beta at Vds=0, Vbs=0
         bzb    = x2mze * bfac;
         bvd    = muse  * bfac;      // beta at Vds=Vdd
         bvdb   = x2mse * bfac;
         bvdd_d = x3mse * bfac;
-        ugsp   = u0e   * bfac;
-        ugsbp  = x2u0e * bfac;
-        udsp   = u1e   * bfac;
-        udsbp  = x2u1e * bfac;
-        udsdp  = x3u1e * bfac;
 
         // velocity-saturation CLM term is enabled only if U1 is really present.
         // Tested on the raw card values by magnitude (port's has_uds): a negative
@@ -223,8 +222,8 @@ module bsim1(d, g, s, b);
         ibd = isd * (exp(uj) * (1.0 + (vbdj / vtherm - uj)) - 1.0) + 1e-12 * vbdj;
 
         // bias-dependent mobility / DIBL coefficients
-        ugse = max(ugsp + ugsbp * vbs, 0.0);
-        udsr = udsp + udsbp * vbs + udsdp * (vds - vdd);
+        ugse = max(u0e + x2u0e * vbs, 0.0);
+        udsr = u1e + x2u1e * vbs + x3u1e * (vds - vdd);
         udss = max(udsr, 0.0) / lum;
         etac = min(max(etae + x2ee * vbs + x3ee * (vds - vdd), 0.0), 1.0);
 

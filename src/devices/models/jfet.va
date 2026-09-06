@@ -38,16 +38,18 @@ module jfet(d, g, s);
     parameter real fc     = 0.5 from [0:1);       // -   forward-bias cap coeff
     // --- Temperature (§1.5) ---
     parameter real tnom    = 27.0;                // degC nominal
-    // ponytail: $param_given reads 1.0 in this frontend, so "instance TEMP not
-    // given" is spelled as an impossible sentinel; any real card value wins,
-    // everything else follows the simulator's circuit temperature (ngspice:
-    // JFETtemp = CKTtemp + dtemp, instance TEMP is an absolute override).
+    // "Instance TEMP not given" is an impossible sentinel; any real card
+    // value wins, everything else follows the simulator's circuit temperature
+    // (ngspice: JFETtemp = CKTtemp + dtemp, instance TEMP is an absolute
+    // override).
     parameter real temp    = -273.15;             // degC absolute override
     parameter real dtemp   = 0.0;                 // degC instance offset
     parameter real eg      = 1.11 from (0:inf);   // eV  bandgap for IS(T)
     parameter real xti     = 3.0  from [0:inf);   // -   IS(T) exponent
     parameter real vtotc   = 0.0;                 // V/degC threshold drift
+    parameter real tcv     = 0.0;                 // V/degC threshold drift (minus sign)
     parameter real betatce = 0.0;                 // %/degC beta drift
+    parameter real bex     = 0.0;                 // -   beta(T) mobility exponent
     // --- Noise (jfetnoi.c) ---
     parameter real kf      = 0.0 from [0:inf);    // -   flicker coefficient
     parameter real af      = 1.0 from (0:inf);    // -   flicker exponent
@@ -87,9 +89,18 @@ module jfet(d, g, s);
         tj     = (temp > -273.0 ? temp + 273.15 : $temperature) + dtemp;
         vt     = 1.380649e-23 * tj / 1.602176634e-19;
         vtnom  = 1.380649e-23 * tnk / 1.602176634e-19;
-        ist    = is * exp((tj / tnk - 1.0) * eg / (n * vt) + (xti / n) * ln(tj / tnk));
-        vto_t  = vto + vtotc * (tj - tnk);
-        beta_t = beta * pow(1.01, betatce * (tj - tnk));
+        // IS(T), jfettemp.c:93-97: exp((T/tnom-1)*eg/(n*vt)), times
+        // (T/tnom)^XTI only when the card gives XTI — the exponent is NOT
+        // divided by n (a default card at 350 K was 1.59x high with ^(xti/n)
+        // applied unconditionally).
+        ist    = is * exp((tj / tnk - 1.0) * eg / (n * vt));
+        if ($param_given(xti)) ist = ist * pow(tj / tnk, xti);
+        // VTO(T)/BETA(T), jfettemp.c:116-125: VTOTC and BETATCE win when
+        // given; the defaults are the TCV (note the minus sign) and BEX forms.
+        if ($param_given(vtotc)) vto_t = vto + vtotc * (tj - tnk);
+        else                     vto_t = vto - tcv * (tj - tnk);
+        if ($param_given(betatce)) beta_t = beta * pow(1.01, betatce * (tj - tnk));
+        else                       beta_t = beta * pow(tj / tnk, bex);
         nvt    = n * vt;
         // pnjlim knee (§1.5 "Vcrit per gate junction"); max() keeps IS = 0
         // (gate diodes disabled) out of ln(0).

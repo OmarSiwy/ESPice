@@ -368,11 +368,12 @@ module mos2(d, g, s, b);
         end else if ((nsub > 0.0) && (lambda == 0.0)) begin
             xdv = xd/sqrt(neff);
             xlv = vmax*xdv/(2.0*ueff);
-            // Excess is the gate overdrive above Vdsat, not the drain excess
-            // (mos2load.c "evaluate effective channel length"): argv >= 0 by
-            // construction, so this shortening is present already in the
-            // linear region and is vds-independent.
-            xls = sqrt(xlv*xlv + max((vgsx - vbin)/eta - vdsat, 0.0));
+            // Excess is the DRAIN excess above Vdsat (mos2load.c:866-868:
+            // argv = lvds - vdsat, clamped at 0); the (vgsx-vbin)/eta - vdsat
+            // form at :852 feeds only vqchan/derivative bookkeeping. Gate
+            // overdrive here shortened the channel already in triode (+36%)
+            // and froze gds in saturation.
+            xls = sqrt(xlv*xlv + max(vds_f - vdsat, 0.0));
             dl  = xdv*(xls - xlv);
         end else begin
             dl = lambda*vds_f*leff;

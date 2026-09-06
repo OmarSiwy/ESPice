@@ -241,8 +241,8 @@ module mesa(d, g, s);
         // critical voltage — a host that ignores it gets the raw solution, which
         // is exactly today's behaviour.
         // ------------------------------------------------------------------
-        vgs = $limit(V(g1, s1), "pnjlim", vcrits, vtes);
-        vgd = $limit(V(g1, d1), "pnjlim", vcritd, vted);
+        vgs = $limit(V(g1, s1), "pnjlim", vtes, vcrits);
+        vgd = $limit(V(g1, d1), "pnjlim", vted, vcritd);
         vds = vgs - vgd;
 
         // Gate Schottky diodes: thermionic forward term + GGR reverse leakage.

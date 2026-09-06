@@ -31,6 +31,8 @@ module diode(a, c);
     parameter real n    = 1.0    from (0:inf);  //      emission coefficient
     parameter real rs   = 0.0    from [0:inf);  // ohm  series resistance
     parameter real ikf  = 0.0    from [0:inf);  // A    high-injection knee (0 = off)
+    parameter real isr  = 0.0    from [0:inf);  // A    recombination sat current (0 = off)
+    parameter real nr   = 2.0    from (0:inf);  //      recombination emission coefficient
     parameter real bv   = 0.0    from [0:inf);  // V    reverse breakdown knee (0 = off)
     parameter real ibv  = 1e-3   from (0:inf);  // A    current magnitude at bv
     parameter real cjo  = 0.0    from [0:inf);  // F    zero-bias junction capacitance
@@ -41,6 +43,7 @@ module diode(a, c);
     parameter real gmin = 1e-12  from [0:inf);  // S    junction shunt
 
     real vt, vte, vd, vcrit, u, ulim, id, ihi, w, wlim, qj, f1, f2, f3, vfc;
+    real vterec, ur, urlim, genfac, irec;
 
     analog begin
         vt  = 1.380649e-23 * tnom / 1.602176634e-19;
@@ -58,12 +61,26 @@ module diode(a, c);
         ulim  = min(u, 80.0);
         id    = is * ((exp(ulim) * (1.0 + (u - ulim))) - 1.0);
 
-        // High-injection roll-off, ngspice IKF: id / sqrt(1 + id/ikf).
-        // Guarded on id > 0 so the reverse branch is untouched and the sqrt
-        // argument cannot go negative.
-        ihi = id;
-        if (ikf > 0.0 && id > 0.0)
-            ihi = id / sqrt(1.0 + id / ikf);
+        // ISR/NR recombination current (dioload.c:311-317), forward region
+        // only (dioload's vd >= -3*vte branch): isr*(e^{vd/(nr*vt)}-1) times
+        // the depletion generation factor ((1-vd/vj)^2+0.005)^(m/2). NR
+        // multiplies the raw vt, not vte. Same tangent continuation past 80.
+        irec = 0.0;
+        if (isr > 0.0 && vd >= -3.0 * vte) begin
+            vterec = nr * vt;
+            ur     = vd / vterec;
+            urlim  = min(ur, 80.0);
+            genfac = pow((1.0 - vd / vj) * (1.0 - vd / vj) + 0.005, m / 2.0);
+            irec   = isr * ((exp(urlim) * (1.0 + (ur - urlim))) - 1.0) * genfac;
+        end
+
+        // High-injection roll-off, ngspice IKF (dioload.c:382-386):
+        // cd / (1 + sqrt(cd/ikf)) on the total forward current, recombination
+        // included. Guarded on itot > 0 so the reverse branch is untouched
+        // and the sqrt argument cannot go negative.
+        ihi = id + irec;
+        if (ikf > 0.0 && ihi > 0.0)
+            ihi = ihi / (1.0 + sqrt(ihi / ikf));
 
         // Reverse breakdown: -ibv at vd = -bv, exponential below. Armed only
         // when the card gives a BV, which is how ngspice treats BV=0.
