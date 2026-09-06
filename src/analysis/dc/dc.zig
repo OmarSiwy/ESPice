@@ -14,6 +14,18 @@ pub const Options = struct {
     step: f64 = 1,
     /// Batch-local index of the source to sweep (0 = first V or I source).
     source_index: u32 = 0,
+    /// ngspice's optional second sweep variable — the OUTER loop
+    /// (`.dc src1 ... src2 start2 stop2 incr2`). null second index with
+    /// `source2_is_temp` set sweeps the circuit temperature (`.dc ... temp ...`).
+    source2_index: ?u32 = null,
+    source2_is_temp: bool = false,
+    start2: f64 = 0,
+    stop2: f64 = 0,
+    step2: f64 = 1,
+
+    fn hasOuter(self: Options) bool {
+        return self.source2_index != null or self.source2_is_temp;
+    }
 };
 
 pub const SolveResult = converger.Result;
@@ -78,10 +90,43 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         ckt.recompute();
     }
 
-    const npoints = sweepCount(opts.start, opts.stop, opts.step);
+    const n_inner = sweepCount(opts.start, opts.stop, opts.step);
+    const n_outer: usize = if (opts.hasOuter()) sweepCount(opts.start2, opts.stop2, opts.step2) else 1;
+    const npoints = n_inner * n_outer;
     const ncols = ctx.probes.len + 1;
     const data = try a.alloc(f64, npoints * ncols);
     errdefer a.free(data);
+
+    // ngspice's second variable is the OUTER loop: for each src2 value the
+    // whole inner sweep replays, and the raw file concatenates the blocks
+    // (v-sweep restarts per block). The outer install is one ParamRef write
+    // (or a circuit temperature set) followed by the same serial march.
+    if (opts.hasOuter()) {
+        const t2: ?root.ParamRef = if (opts.source2_index) |idx2| blk: {
+            for (refs) |ref| {
+                if (std.mem.eql(u8, ref.param_name, "dc") and ref.index == idx2) break :blk ref;
+            }
+            return error.DcSweepSourceNotFound;
+        } else null;
+        const saved2: f64 = if (t2) |r| r.get() else 0;
+        defer if (t2) |r| {
+            r.set(saved2);
+            ckt.recompute();
+        };
+        for (0..n_outer) |po| {
+            const v2 = opts.start2 + @as(f64, @floatFromInt(po)) * opts.step2;
+            if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
+            const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
+            try runSerial(ctx, ckt, a, t, opts, n_inner, ncols, block);
+        }
+        return .{
+            .plotname = "DC transfer characteristic",
+            .varnames = try root.probeNames(ctx, "v-sweep"),
+            .is_complex = false,
+            .npoints = npoints,
+            .data = data,
+        };
+    }
 
     // -----------------------------------------------------------------------
     // GPU batch path: lane pt is sweep value start + pt*step, cold-started and

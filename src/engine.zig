@@ -429,12 +429,29 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) ?Job {
                 @intCast(i)
             else
                 break :blk null;
-            break :blk .{ .dc = .{
+            var job: analysis.dc.Options = .{
                 .start = directiveNumber(dir, 1) orelse 0,
                 .stop = directiveNumber(dir, 2) orelse 0,
                 .step = directiveNumber(dir, 3) orelse 1,
                 .source_index = src_idx,
-            } };
+            };
+            // Optional second variable = the OUTER loop
+            // (`.dc v1 0 1.8 0.05 v2 0 1.8 0.6`); ngspice also accepts TEMP.
+            if (directiveName(dir, 4)) |name2| {
+                if (std.ascii.eqlIgnoreCase(name2, "temp")) {
+                    job.source2_is_temp = true;
+                } else if (findNameIndex(sources.v_names, name2)) |i| {
+                    job.source2_index = @intCast(i);
+                } else if (findNameIndex(sources.i_names, name2)) |i| {
+                    job.source2_index = @intCast(i);
+                }
+                if (job.source2_index != null or job.source2_is_temp) {
+                    job.start2 = directiveNumber(dir, 5) orelse 0;
+                    job.stop2 = directiveNumber(dir, 6) orelse 0;
+                    job.step2 = directiveNumber(dir, 7) orelse 1;
+                }
+            }
+            break :blk .{ .dc = job };
         },
         .noise => .{ .noise = .{
             .out_node = if (node_id != NO_NODE) node_id else return null,
