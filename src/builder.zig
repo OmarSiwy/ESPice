@@ -1118,10 +1118,52 @@ pub const NetBuilder = struct {
         return false;
     }
 
-    /// CPL coupled lines: `P a1 a2 0 b1 b2 0 model` with vector model params
-    /// `R=r11 r12 r22` — the parser stores the first number under the key and
-    /// the rest ""-keyed. Two-conductor symmetric: self = [0], mutual = [1].
+    /// CPL coupled lines: `P n1..nN ref1 m1..mN ref2 model` with triangular
+    /// vector model params `R=r11 r12.. r22..` — the parser stores the first
+    /// number under the key and the rest ""-keyed. N-line lossy cards (G = 0,
+    /// N in coupled_ltra.supported_n) take the native modal-LTRA device;
+    /// anything else falls back to the 2-line even/odd VA cognate.
     fn addCpl(self: *NetBuilder, dev: types.Device) !void {
+        route: {
+            if (dev.nodes.len < 6 or dev.nodes.len % 2 != 0) break :route;
+            const n_lines = (dev.nodes.len - 2) / 2;
+            var rr: [36]f64 = @splat(0);
+            var ll: [36]f64 = @splat(0);
+            var cc: [36]f64 = @splat(0);
+            var gg: [36]f64 = @splat(0);
+            var length: f64 = 0;
+            var nr: usize = 0;
+            var nl_: usize = 0;
+            var nc: usize = 0;
+            var ng: usize = 0;
+            if (modelName(dev)) |name| {
+                if (findModel(self.nl.models, name)) |m| {
+                    nr = cplVector(m.kv, "r", &rr);
+                    nl_ = cplVector(m.kv, "l", &ll);
+                    nc = cplVector(m.kv, "c", &cc);
+                    ng = cplVector(m.kv, "g", &gg);
+                    if (kvNumber(m.kv, "length")) |v| length = v;
+                }
+            }
+            if (kvNumber(dev.kv, "length")) |v| length = v;
+            const tri = n_lines * (n_lines + 1) / 2;
+            if (nr != tri or nl_ != tri or nc != tri or length <= 0) break :route;
+            for (gg[0..ng]) |g| if (g != 0) break :route; // native path is G = 0
+            inline for (devices.coupled_ltra.supported_n) |N| {
+                if (n_lines == N) {
+                    const D = devices.coupled_ltra.CoupledLtra(N);
+                    var model: D.Model = .{ .length = length };
+                    @memcpy(&model.rr, rr[0..tri]);
+                    @memcpy(&model.ll, ll[0..tri]);
+                    @memcpy(&model.cc, cc[0..tri]);
+                    var nodes: [2 * N + 2]u32 = undefined;
+                    for (0..2 * N + 2) |i| nodes[i] = try self.b.internNode(dev.nodes[i]);
+                    return self.b.addDevice(D, model, .{}, nodes);
+                }
+            }
+        }
+        // Fallback: the 2-conductor even/odd cognate (docs/devices/
+        // coupled-tlines.md §1.5 names its ceiling).
         const D = devices.coupled_tlines;
         if (comptime !isValueForm(D)) return error.UnsupportedDevice;
         var model: D.Model = .{};
@@ -1782,6 +1824,30 @@ fn modelName(dev: types.Device) ?[]const u8 {
 fn findModel(spice_models: []const types.Model, name: []const u8) ?types.Model {
     for (spice_models) |model| if (std.mem.eql(u8, model.name, name)) return model;
     return null;
+}
+
+/// Collect a CPL vector parameter: the value stored under `key` plus its
+/// ""-keyed tail, in card order (upper triangle row-major). Returns the count.
+fn cplVector(kv: []const types.Kv, key: []const u8, out: []f64) usize {
+    var i: usize = 0;
+    while (i < kv.len) : (i += 1) {
+        if (!std.mem.eql(u8, kv[i].key, key)) continue;
+        var n: usize = 0;
+        if (valueNumber(kv[i].value)) |v| {
+            out[n] = v;
+            n += 1;
+        }
+        while (i + 1 < kv.len and kv[i + 1].key.len == 0) : (i += 1) {
+            if (valueNumber(kv[i + 1].value)) |v| {
+                if (n < out.len) {
+                    out[n] = v;
+                    n += 1;
+                }
+            }
+        }
+        return n;
+    }
+    return 0;
 }
 
 fn applyCplKv(model: *devices.coupled_tlines.Model, kv: []const types.Kv) void {
