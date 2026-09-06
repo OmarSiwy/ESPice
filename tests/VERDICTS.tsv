@@ -788,6 +788,7 @@ PASS	fixtures/tran/device_urc.sp
 PASS	fixtures/tran/device_vsource.sp
 PASS	fixtures/tran/finite_rise_negative.sp
 PASS	fixtures/tran/finite_rise_positive.sp
+PASS	fixtures/tran/gear_maxord6_ngspice.sp
 PASS	fixtures/tran/ic_large.sp
 PASS	fixtures/tran/ic_negative.sp
 PASS	fixtures/tran/ic_no_uic_op.sp
@@ -819,7 +820,9 @@ PASS	fixtures/tran/rc_sinusoidal_startup.sp
 PASS	fixtures/tran/sine.sp
 PASS	fixtures/tran/sine_offset_phase.sp
 PASS	fixtures/tran/spectre_skipdc_euler.sp
+PASS	fixtures/tran/trap_maxord1_ngspice.sp
 PASS	fixtures/tran/trap_xmu_damping.sp
+PASS	fixtures/tran/tstart_tmax_ngspice.sp
 PASS	fixtures/tran/txl_tran_long_run_past_2048.sp
 PASS	fixtures/tran/txl_tran_matched_step.sp
 PASS	fixtures/tran/txl_tran_mismatched_load.sp

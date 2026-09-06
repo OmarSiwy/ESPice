@@ -176,7 +176,7 @@ against each `.option search='dir'`. Includes nest up to 32 levels.
 | `itl1`, `itl2`, `itl4` | 100, 50, 10 | Newton iteration limits: operating point, DC sweep point, transient step |
 | `trtol` | 7 | transient truncation-error factor |
 | `method` | `trap` | `trap` (`trapezoidal`) or `gear` (`bdf`) |
-| `maxord` | | Gear order; `maxord=1` with `gear` is backward Euler |
+| `maxord` | 2 | integration order cap; `maxord=1` is backward Euler under `trap` or `gear`, and nothing runs above order 2 (as ngspice) |
 | `xmu` | 0.5 | trapezoidal damping, 0 to 0.5 (0 is backward Euler) |
 | `temp` | 27 | circuit temperature, °C |
 | `tnom` | 27 (HSPICE 25) | model reference temperature, °C |

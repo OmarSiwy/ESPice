@@ -260,7 +260,7 @@ pub fn simulate(
 
     // ngspice tmax defaults to (tstop - tstart)/50; the circuit's minimum
     // delay caps it further.
-    var effective_dt_max = options.dt_max orelse options.t_stop / 50.0;
+    var effective_dt_max = options.dt_max orelse (options.t_stop - options.t_start) / 50.0;
     if (ckt.minDelay()) |td_min| effective_dt_max = @min(effective_dt_max, td_min);
     // The analysis' own CKTminBreak: delmin = 1e-11*maxStep and minBreak =
     // 10*delmin (traninit.c:36, dctran.c:170). Breakpoints closer than this

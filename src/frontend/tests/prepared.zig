@@ -126,6 +126,16 @@ test "deck options reject invalid numeric conversions before construction" {
     const o = try analyses.deckOptions(nl.deck.config, .ngspice);
     try std.testing.expectEqual(@as(f64, 27), o.temp_c.?);
     try std.testing.expectEqual(requests.Method.backward_euler, o.method.?);
+    // ngspice never rises above order 2: maxord=1 is BE under trap too, and
+    // gear keeps Gear-2 at maxord 3..6 (dctran.c:900).
+    const trap1 = try analyses.deckOptions((try parse(arena.allocator(), "trap\n.options maxord=1\n.end\n")).deck.config, .ngspice);
+    try std.testing.expectEqual(requests.Method.backward_euler, trap1.method.?);
+    const gear6 = try analyses.deckOptions((try parse(arena.allocator(), "gear\n.options method=gear maxord=6\n.end\n")).deck.config, .ngspice);
+    try std.testing.expectEqual(requests.Method.gear_2, gear6.method.?);
+    // The default tmax is min(tstep, (tstop - tstart) / 50) (traninit.c:29).
+    var late: Job = .{ .tran = .{ .t_stop = 100e-6, .dt_init = 1e-6, .t_start = 90e-6 } };
+    analyses.applyDeckOptions(&late, o);
+    try std.testing.expectApproxEqRel(@as(f64, 0.2e-6), late.tran.dt_max.?, 1e-12);
     // HSPICE: DELMAX caps a .tran that sets no tmax; TNOM and TEMP default to 25.
     const h = try analyses.deckOptions((try parse(arena.allocator(), "delmax\n.options delmax=2n\n.end\n")).deck.config, .hspice);
     var tran: Job = .{ .tran = .{ .t_stop = 1e-6, .dt_init = 1e-8 } };

@@ -479,7 +479,10 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
             }
         }
     }
-    if (o.method == .gear_2 and maxord != null and maxord.? < 2) o.method = .backward_euler;
+    // ngspice raises the order only from 1 to 2 and only when maxord > 1
+    // (dctran.c:900), so maxord=1 is backward Euler under trap as under gear,
+    // and gear with maxord 3..6 stays Gear-2.
+    if (maxord != null and maxord.? < 2) o.method = .backward_euler;
     // ACCURATE lifts any level to at least 5; FAST is level 1 when no
     // RUNLVL is given; RUNLVL=0 turns the presets off.
     var level = runlvl orelse if (fast and !accurate) @as(f64, 1) else 0;
@@ -491,7 +494,7 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
 
 /// Copies the deck tolerances and integration method into `job`.
 /// A `.tran` keeps a `dt_max` it already has; otherwise it takes DELMAX, then
-/// ngspice's min(tstep, tstop / 50).
+/// ngspice's min(tstep, (tstop - tstart) / 50).
 pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
     switch (job.*) {
         inline else => |*opts| {
@@ -505,8 +508,9 @@ pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
         if (o.xmu) |x| t.xmu = x;
         // RUNLVL overrides TRTOL wherever it sits [CR .OPTION RUNLVL].
         if (o.trtol) |trtol| t.tol.trtol = trtol;
-        // ngspice's default tmax, min(tstep, tstop / 50).
-        t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, t.t_stop / 50);
+        // ngspice's default tmax, min(tstep, (tstop - tstart) / 50)
+        // (traninit.c:29-34).
+        t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, (t.t_stop - t.t_start) / 50);
     }
 }
 
