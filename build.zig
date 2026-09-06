@@ -36,10 +36,20 @@ pub fn build(b: *std.Build) void {
     bopts.addOption([]const u8, "gompute_path", gompute.builder.pathFromRoot("src/root.zig"));
 
     // Every module in this tree is (root file, target, optimize) plus imports.
+    //
+    // strip in Release: DWARF maintenance is ~2/3 of the LLVM compile
+    // (measured /tmp/audit-llvm-time.md: 737 s espice compile ≈ 490 s of
+    // O3-with-debug-info; the DI cost is SUPERLINEAR in function size —
+    // exponent 2.0 vs 1.2 stripped on the whale models — and the shipped
+    // binary carried 115 MB of DWARF, 96 MB of it .debug_loc). Debug keeps
+    // full DI on the fast self-hosted backend; `-Ddebug-info` forces it
+    // back on in Release when a symbolized profile is worth the wait.
+    const debug_info = b.option(bool, "debug-info", "Emit DWARF in Release builds (slow: ~3x LLVM time)") orelse false;
     const M = struct {
         b: *std.Build,
         target: std.Build.ResolvedTarget,
         optimize: std.builtin.OptimizeMode,
+        strip: bool,
         fn make(
             self: @This(),
             root: std.Build.LazyPath,
@@ -49,10 +59,11 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = root,
                 .target = self.target,
                 .optimize = self.optimize,
+                .strip = self.strip,
                 .imports = imports,
             });
         }
-    }{ .b = b, .target = target, .optimize = optimize };
+    }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .Debug and !debug_info };
 
     const solvers_mod = M.make(b.path("src/solvers/root.zig"), &.{});
 
@@ -316,7 +327,13 @@ fn inCsv(csv: []const u8, name: []const u8) bool {
 
 /// Source size past which a model's GPU compilation is `heavy` — chained into
 /// `heavy_lanes` rather than run alongside every other big one.
-const heavy_model_bytes: u64 = 100 * 1024;
+///
+/// MUST sit under `gpu_max_model_bytes` or it gates nothing: at the old
+/// 100 KB no admitted root could ever be heavy (everything ≥ 80 KB is
+/// excluded outright), so `heavy_lanes` and the memory-protection chaining
+/// silently never engaged. 20 KB puts the largest admitted kernels
+/// (mos9/bjt at 20 KB, mos2 at 24 KB) on the chained lanes.
+const heavy_model_bytes: u64 = 20 * 1024;
 
 /// Source size at or above which a model gets NO GPU kernel at all.
 ///

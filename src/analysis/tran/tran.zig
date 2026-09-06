@@ -421,7 +421,15 @@ pub fn simulate(
                 continue;
             }
             dt *= 0.5;
-            if (dt < options.dt_min) return .{ .completed = false, .steps = steps, .t_final = t };
+            if (dt < options.dt_min) {
+                // The most interesting exit — say where it died. (The stats
+                // block at the bottom is skipped by this return.)
+                if (stats_on) std.debug.print(
+                    "tran-stats: DT UNDERFLOW (newton) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
+                    .{ t, dt, steps, st_attempts, st_nr_iters },
+                );
+                return .{ .completed = false, .steps = steps, .t_final = t };
+            }
             continue;
         }
 
@@ -478,7 +486,13 @@ pub fn simulate(
                     // (digital/clamp's 0.48 ns final edge chord). The branch
                     // guard makes del < 0.9*dt, so this shrinks every retry.
                     dt = del;
-                    if (dt < options.dt_min) return .{ .completed = false, .steps = steps, .t_final = t };
+                    if (dt < options.dt_min) {
+                        if (stats_on) std.debug.print(
+                            "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
+                            .{ t, dt, steps, st_attempts, st_nr_iters },
+                        );
+                        return .{ .completed = false, .steps = steps, .t_final = t };
+                    }
                     continue;
                 }
                 // ngspice caps growth at 2x per accepted step — without it a
