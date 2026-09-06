@@ -406,6 +406,12 @@ fn aliasOf(comptime field: []const u8) ?[]const u8 {
         .{ "vt0", "vto" }, .{ "vto", "vt0" },
         .{ "vaf", "va" },  .{ "VAR", "vb" },
         .{ "ikf", "ik" },  .{ "cjs", "ccs" },
+        // BJT depletion-cap alternates (bjt.c IOPR): the schmitt canon deck
+        // spells cje/PE/ME, cjc/PC/MC — dropped aliases meant default
+        // junction potentials and wrong switching instants.
+        .{ "vje", "pe" },  .{ "mje", "me" },
+        .{ "vjc", "pc" },  .{ "mjc", "mc" },
+        .{ "vjs", "ps" },  .{ "mjs", "ms" },
         // mesa.va channel depth: ngspice's card key is `d`, which Verilog-A
         // cannot use as a parameter name (drain port).
         .{ "dch", "d" },
