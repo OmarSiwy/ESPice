@@ -555,6 +555,30 @@ test "uic: keyword is positional-independent and .ic on an unknown node is dropp
     try std.testing.expectApproxEqAbs(@as(f64, 0.25), v2_first, 1e-9);
 }
 
+test "urc: U card expands into a lump ladder whose series R telescopes to L*RPERL" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+
+    // r0 = L*RPERL = 1k against a 1k load: v(out) is 0.5 iff the geometric
+    // lump sizing (r1*K^i from both ends) sums back to exactly r0 and the
+    // two half-chains actually meet in the middle.
+    var sim = try runDeck(sa.allocator(), pa.allocator(),
+        \\urc ladder
+        \\v1 in 0 dc 1
+        \\u1 in out 0 umod l=1 n=4
+        \\rl out 0 1k
+        \\.model umod urc(rperl=1000 cperl=1u)
+        \\.op
+        \\.end
+    );
+    defer sim.deinit();
+
+    const vout = probeLast(sim.getResults()[0], "out") orelse return error.NoProbe;
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), vout, 1e-6);
+}
+
 /// Probe columns are named `v(<node>)` (Circuit.probeNames) and a transient's
 /// column 0 is "time". Result.data is ROW-major: data[point * ncols + col].
 fn probeColumn(r: Result, node: []const u8) ?usize {
