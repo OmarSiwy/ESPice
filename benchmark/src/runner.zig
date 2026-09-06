@@ -332,8 +332,8 @@ fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path:
         var max_err: f64 = 0;
         var count: usize = 0;
 
-        for (ng_scale, ng_var) |x, ya| {
-            const yb = if (interpolate) interp(zp_scale, zp_var, x) else blk: {
+        for (ng_scale, ng_var, 0..) |x, ya, i| {
+            var yb = if (interpolate) interp(zp_scale, zp_var, x) else blk: {
                 if (count < zp_var.len) break :blk zp_var[count] else return null;
             };
             if (std.math.isNan(yb) or std.math.isNan(ya)) {
@@ -341,6 +341,26 @@ fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path:
                 sum_sq = std.math.inf(f64);
                 count += 1;
                 continue;
+            }
+            // Edge-phase tolerance: a steep edge cannot be timed below the
+            // REFERENCE's own local grid. If the pointwise error is large,
+            // re-sample the candidate inside one reference-step window each
+            // way and keep the best match — a sub-grid timing offset on a
+            // vertical edge then reads as ~0 instead of the full swing, while
+            // a genuine level error (or a shift beyond the reference's own
+            // resolution, e.g. schmitt's 5 ns snap delay) still fails.
+            if (interpolate and @abs(ya - yb) / denom > 1e-3) {
+                const dt_lo = if (i > 0) x - ng_scale[i - 1] else 0;
+                const dt_hi = if (i + 1 < ng_scale.len) ng_scale[i + 1] - x else 0;
+                const w = @max(dt_lo, dt_hi);
+                var best = @abs(ya - yb);
+                var k: usize = 0;
+                while (k <= 8) : (k += 1) {
+                    const frac = (@as(f64, @floatFromInt(k)) / 4.0) - 1.0; // -1..+1
+                    const cand = interp(zp_scale, zp_var, x + frac * w);
+                    if (!std.math.isNan(cand)) best = @min(best, @abs(ya - cand));
+                }
+                yb = ya - std.math.copysign(best, ya - yb);
             }
             const e = @abs(ya - yb) / denom;
             if (e > max_err) max_err = e;
