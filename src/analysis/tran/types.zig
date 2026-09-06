@@ -22,7 +22,11 @@ pub const Options = struct {
     /// ngspice tmax: default is t_stop/50; an explicit value replaces it.
     dt_max: ?f64 = null,
     method: Method = .trapezoidal,
-    max_steps: u32 = 1_000_000,
+    // Runaway guard only — a healthy 1 us-grid second is 1e6 accepted points
+    // (vacask/rc hit the old 1e6 wall at t = 0.994 s and reported
+    // TimestepTooSmall on a perfectly marching transient). dt_min is the
+    // real brake; this only stops a stuck loop.
+    max_steps: u32 = 1_000_000_000,
     /// `.tran ... uic`: no operating point ran, so the starting `x` came from
     /// the `.ic` cards (zero elsewhere) rather than from `op.solve`. The
     /// transient then owes the setup op.solve normally performs — the

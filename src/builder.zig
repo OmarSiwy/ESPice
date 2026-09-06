@@ -1424,34 +1424,53 @@ fn applySourceWaveform(target: anytype, dev: types.Device) void {
     // Runs over both Model and Instance (see bindSource); the one that does not
     // declare the waveform set has nothing to do.
     if (comptime !@hasField(T, "waveform")) return;
-    for (dev.positional) |pos| {
-        const group = switch (pos) {
-            .group => |g| g,
-            else => continue,
-        };
-        var buf: [8]u8 = undefined;
-        if (group.name.len > buf.len) continue;
-        const kind = wave_map.get(std.ascii.lowerString(&buf, group.name)) orelse continue;
-        target.waveform = @intFromEnum(kind);
-        switch (kind) {
-            // `PWL(T1 V1 T2 V2 ...)`: (time, value) pairs into the flattened
-            // table. Non-numeric args (ngspice's `r=` / `td=` suffixes) leave
-            // their slot at the default; those two are card kv and land through
-            // applyKv on `pwl_repeat` / `pwl_td`.
-            .pwl => if (comptime @hasField(T, pwlSlot("pwl_times", 0))) {
-                const n_pts = @min(group.args.len / 2, comptime pwlCapacity(T));
-                inline for (0..comptime pwlCapacity(T)) |k| {
-                    if (k < n_pts) {
-                        if (valueNumber(group.args[2 * k])) |t|
-                            @field(target.*, pwlSlot("pwl_times", k)) = @floatCast(t);
-                        if (valueNumber(group.args[2 * k + 1])) |v|
-                            @field(target.*, pwlSlot("pwl_values", k)) = @floatCast(v);
-                    }
-                }
-                target.pwl_len = @intCast(n_pts);
+    var i: usize = 0;
+    while (i < dev.positional.len) : (i += 1) {
+        switch (dev.positional[i]) {
+            .group => |group| {
+                var buf: [8]u8 = undefined;
+                if (group.name.len > buf.len) continue;
+                const kind = wave_map.get(std.ascii.lowerString(&buf, group.name)) orelse continue;
+                applyWaveArgs(T, target, kind, group.args);
             },
-            inline else => |cw| applyGroupArgs(T, target, group.args, comptime fieldPairs(cw)),
+            // Parenless spelling (`vs a 0 dc=0 sin 0 50 100k`): the keyword is
+            // a bare positional name and its args are the numeric positionals
+            // that follow. Same table as the group form.
+            .name => |nm| {
+                var buf: [8]u8 = undefined;
+                if (nm.len > buf.len) continue;
+                const kind = wave_map.get(std.ascii.lowerString(&buf, nm)) orelse continue;
+                const start = i + 1;
+                var end = start;
+                while (end < dev.positional.len and dev.positional[end] == .num) end += 1;
+                applyWaveArgs(T, target, kind, dev.positional[start..end]);
+                i = end - 1;
+            },
+            else => {},
         }
+    }
+}
+
+fn applyWaveArgs(comptime T: type, target: anytype, kind: Wave, args: []const types.Value) void {
+    target.waveform = @intFromEnum(kind);
+    switch (kind) {
+        // `PWL(T1 V1 T2 V2 ...)`: (time, value) pairs into the flattened
+        // table. Non-numeric args (ngspice's `r=` / `td=` suffixes) leave
+        // their slot at the default; those two are card kv and land through
+        // applyKv on `pwl_repeat` / `pwl_td`.
+        .pwl => if (comptime @hasField(T, pwlSlot("pwl_times", 0))) {
+            const n_pts = @min(args.len / 2, comptime pwlCapacity(T));
+            inline for (0..comptime pwlCapacity(T)) |k| {
+                if (k < n_pts) {
+                    if (valueNumber(args[2 * k])) |t|
+                        @field(target.*, pwlSlot("pwl_times", k)) = @floatCast(t);
+                    if (valueNumber(args[2 * k + 1])) |v|
+                        @field(target.*, pwlSlot("pwl_values", k)) = @floatCast(v);
+                }
+            }
+            target.pwl_len = @intCast(n_pts);
+        },
+        inline else => |cw| applyGroupArgs(T, target, args, comptime fieldPairs(cw)),
     }
 }
 
