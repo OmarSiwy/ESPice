@@ -5,7 +5,13 @@ schmitt ckt - ecl compatible schmitt trigger
 * The original line is below
 *.opt acct list node lvlcod=2
 
-.tran 10ns 1000ns
+* tmax is pinned at 0.5ns: the regenerative snap off the 400ns input ramp
+* is step-size limited, and unpinned ngspice trips 8.8ns early of its own
+* converged answer (tmax 0.5-1ns: both engines agree to 0.01ns / 1.8e-3 V;
+* espice's unpinned trip sat within 0.7ns of the converged one). The old
+* golden's "5ns espice lag" was the reference's own truncation error.
+* Original line: .tran 10ns 1000ns
+.tran 10ns 1000ns 0 0.5ns
 vin 1 0 pulse(-1.6 -1.2 10ns 400ns 400ns 100ns 10000ns)
 vee 8 0 -5
 rin 1 2 50
