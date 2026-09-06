@@ -67,6 +67,10 @@ pub const Simulation = struct {
     n_directives: u32,
     /// `.ic` cards, node-resolved. Read only by a `uic` transient.
     ic: []const Ic,
+    /// `.options` tolerance overrides — the shared OP uses them too.
+    deck_tol: analysis.converger.Tolerances,
+    /// `.options temp=<C>`, applied once before the first job.
+    deck_temp: ?f64,
     jobs: []Job,
     n_jobs: u32,
     results: []Result,
@@ -191,11 +195,17 @@ pub const Simulation = struct {
         }
         sim.probes = probe_buf[0..n_probes];
 
-        // Jobs from directives: pre-allocate to directive count
+        // Jobs from directives: pre-allocate to directive count. `.options`
+        // overrides (tolerances, method, temp) apply to every job.
+        const deck_opts = parseDeckOptions(nl.directives);
+        sim.deck_tol = deck_opts.tol;
+        sim.deck_temp = deck_opts.temp_c;
         sim.jobs = try sim_arena.alloc(Job, nl.directives.len);
         sim.n_jobs = 0;
         for (nl.directives, dir_nodes) |dir, node_id| {
-            if (buildJob(dir, node_id, sources)) |job| {
+            if (buildJob(dir, node_id, sources)) |job0| {
+                var job = job0;
+                applyDeckOptions(&job, deck_opts);
                 sim.jobs[sim.n_jobs] = job;
                 sim.n_jobs += 1;
             }
@@ -266,6 +276,10 @@ pub const Simulation = struct {
                 std.debug.print("warning: --gpu unavailable ({s}); running on the CPU\n", .{@errorName(e)});
             }
         }
+        // `.options temp=<C>` — once, before any solve; device physics keys
+        // off Instance.temperature, which setCircuitTemp republishes.
+        if (self.deck_temp) |t| self.circuit.setCircuitTemp(@floatCast(t));
+
         var ctx = RunCtx{
             .circuit = &self.circuit,
             .x_op = null,
@@ -350,7 +364,7 @@ pub const Simulation = struct {
             .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => tran_op = true,
             else => {},
         };
-        const result = try analysis.AnalysisId.Module(.op).solve(&self.circuit, x, .{ .tran_op = tran_op });
+        const result = try analysis.AnalysisId.Module(.op).solve(&self.circuit, x, .{ .tol = self.deck_tol, .tran_op = tran_op });
         if (!result.converged) return error.OpDidNotConverge;
         return x;
     }
@@ -385,6 +399,64 @@ fn icNodeName(arena: std.mem.Allocator, value: types.Value) ?[]const u8 {
     };
 }
 
+/// Parsed `.options` overrides. One pass over the deck's directives; the
+/// parser already splits `key=value` into adjacent name/value args.
+const DeckOptions = struct {
+    tol: analysis.converger.Tolerances = .{},
+    method: ?analysis.tran.Method = null,
+    temp_c: ?f64 = null,
+};
+
+fn parseDeckOptions(directives: []const types.Directive) DeckOptions {
+    var o: DeckOptions = .{};
+    var maxord: ?f64 = null;
+    var gear = false;
+    for (directives) |dir| {
+        if (!std.ascii.eqlIgnoreCase(dir.kind, "options") and
+            !std.ascii.eqlIgnoreCase(dir.kind, "option") and
+            !std.ascii.eqlIgnoreCase(dir.kind, "opt") and
+            !std.ascii.eqlIgnoreCase(dir.kind, "opts")) continue;
+        var i: usize = 0;
+        while (i < dir.args.len) : (i += 1) {
+            const key = switch (dir.args[i]) {
+                .name => |n| n,
+                else => continue,
+            };
+            const num: ?f64 = if (i + 1 < dir.args.len) switch (dir.args[i + 1]) {
+                .num => |v| v,
+                else => null,
+            } else null;
+            const eq = std.ascii.eqlIgnoreCase;
+            if (eq(key, "method")) {
+                if (i + 1 < dir.args.len) switch (dir.args[i + 1]) {
+                    .name => |m| {
+                        if (eq(m, "gear")) gear = true;
+                        if (eq(m, "trap") or eq(m, "trapezoidal")) o.method = .trapezoidal;
+                        i += 1;
+                    },
+                    else => {},
+                };
+                continue;
+            }
+            const v = num orelse continue;
+            if (eq(key, "reltol")) o.tol.reltol = v;
+            if (eq(key, "abstol")) o.tol.abstol = v;
+            if (eq(key, "vntol")) o.tol.vntol = v;
+            if (eq(key, "gmin")) o.tol.gmin = v;
+            if (eq(key, "trtol")) o.tol.trtol = v;
+            if (eq(key, "chgtol")) o.tol.chgtol = v;
+            if (eq(key, "itl1")) o.tol.itl1 = @intFromFloat(v);
+            if (eq(key, "itl2")) o.tol.itl2 = @intFromFloat(v);
+            if (eq(key, "itl4")) o.tol.itl4 = @intFromFloat(v);
+            if (eq(key, "maxord")) maxord = v;
+            if (eq(key, "temp")) o.temp_c = v;
+            i += 1;
+        }
+    }
+    if (gear) o.method = if (maxord != null and maxord.? < 2) .backward_euler else .gear_2;
+    return o;
+}
+
 /// `uic` is a trailing KEYWORD, not a positional: `.tran 1n 100n uic` and
 /// `.tran 1n 100n 0 1n uic` are both legal, so scan rather than index.
 fn hasUic(dir: types.Directive) bool {
@@ -393,6 +465,18 @@ fn hasUic(dir: types.Directive) bool {
         else => {},
     };
     return false;
+}
+
+fn applyDeckOptions(job: *Job, o: DeckOptions) void {
+    switch (job.*) {
+        inline else => |*opts| {
+            if (comptime @hasField(@TypeOf(opts.*), "tol")) opts.tol = o.tol;
+        },
+    }
+    if (o.method) |m| switch (job.*) {
+        .tran => |*t| t.method = m,
+        else => {},
+    };
 }
 
 fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) ?Job {

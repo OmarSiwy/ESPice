@@ -29,6 +29,11 @@ pub fn build(b: *std.Build) void {
     bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
     bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
     bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/devices/engine.zig"));
+    // The runtime HDL loader rebuilds engine.zig as the .so's `dyn` module,
+    // and engine.zig imports gompute — without this root the generated
+    // device compiled against a moduleless import and every `.hdl` card
+    // died with GeneratedDeviceDoesNotCompile.
+    bopts.addOption([]const u8, "gompute_path", gompute.builder.pathFromRoot("src/root.zig"));
 
     // Every module in this tree is (root file, target, optimize) plus imports.
     const M = struct {
