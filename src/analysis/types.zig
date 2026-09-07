@@ -26,8 +26,29 @@ pub const BbdInfo = circuit_mod.BbdInfo;
 pub const GROUND = circuit_mod.GROUND;
 pub const zeroSimd = circuit_mod.zeroSimd;
 pub const copySimd = circuit_mod.copySimd;
+/// Column names for one Result: optional scale literal at [0], then one
+/// allocated name per probe. Engine-built ctxs carry a label per probe
+/// ("v(out)", "i(v1)"); hand-built ones (tests) may leave `probe_labels`
+/// empty and get the v(<node>) fallback off the circuit's intern table.
 pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
-    return circuit_mod.probeNames(ctx.circuit, ctx.probes, ctx.allocator, first);
+    const a = ctx.allocator;
+    const extra: usize = if (first == null) 0 else 1;
+    const names = try a.alloc([]const u8, ctx.probes.len + extra);
+    errdefer a.free(names);
+    if (first) |name| names[0] = name;
+    const labeled = ctx.probe_labels.len == ctx.probes.len;
+    var done: usize = 0;
+    errdefer for (names[extra..][0..done]) |s| a.free(s);
+    for (ctx.probes, names[extra..], 0..) |row, *out, i| {
+        out.* = if (labeled)
+            try a.dupe(u8, ctx.probe_labels[i])
+        else blk: {
+            const label = ctx.circuit.nodeName(row);
+            break :blk try std.fmt.allocPrint(a, "v({s})", .{if (label.len == 0) "?" else label});
+        };
+        done += 1;
+    }
+    return names;
 }
 
 // -- Re-exports for analysis modules + src/ consumers --
@@ -46,6 +67,8 @@ pub const RunCtx = struct {
     circuit: *Circuit,
     x_op: ?[]f64,
     probes: []const u32,
+    /// Raw column label per probe, parallel to `probes` (see probeNames).
+    probe_labels: []const []const u8 = &.{},
     source_node: u32,
     source_branch: u32,
     allocator: std.mem.Allocator,
