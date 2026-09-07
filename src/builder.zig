@@ -1181,7 +1181,6 @@ pub const NetBuilder = struct {
             if (kvNumber(dev.kv, "length")) |v| length = v;
             const tri = n_lines * (n_lines + 1) / 2;
             if (nr != tri or nl_ != tri or nc != tri or length <= 0) break :route;
-            for (gg[0..ng]) |g| if (g != 0) break :route; // native path is G = 0
             inline for (devices.coupled_ltra.supported_n) |N| {
                 if (n_lines == N) {
                     const D = devices.coupled_ltra.CoupledLtra(N);
@@ -1189,8 +1188,12 @@ pub const NetBuilder = struct {
                     @memcpy(&model.rr, rr[0..tri]);
                     @memcpy(&model.ll, ll[0..tri]);
                     @memcpy(&model.cc, cc[0..tri]);
-                    var nodes: [2 * N + 2]u32 = undefined;
-                    for (0..2 * N + 2) |i| nodes[i] = try self.b.internNode(dev.nodes[i]);
+                    @memcpy(&model.gg, gg[0..tri]);
+                    // ngspice binds pos/neg per conductor and ignores the
+                    // card's reference nodes (cplsetup.c) — same here.
+                    var nodes: [2 * N]u32 = undefined;
+                    for (0..N) |i| nodes[i] = try self.b.internNode(dev.nodes[i]);
+                    for (0..N) |i| nodes[N + i] = try self.b.internNode(dev.nodes[N + 1 + i]);
                     return self.b.addDevice(D, model, .{}, nodes);
                 }
             }
