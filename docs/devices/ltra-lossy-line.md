@@ -4,9 +4,12 @@ Reference: ngspice `ltra/ltraload.c`, `ltra/ltramisc.c`, `ltra/ltraset.c`,
 `ltra/ltradefs.h` (author: Jaijeet Roychowdhury; the code implements
 Roychowdhury & Pederson, "Efficient transient simulation of lossy
 interconnect", DAC 1991 — paper itself paywalled, not fetched; the
-ngspice comments/structure are the working spec). This is a **current
-want**: our `lossy_tline.zig` is a lumped pi cognate (rms ~2e-3 / max
-~4.5 on fast transients); exact match needs this convolution.
+ngspice comments/structure are the working spec). **Status: landed** as
+`src/devices/ltra_native.zig` (O card): `tline/ltra1_1_line` max 3.5e-3 /
+rms 3.7e-4, `ltra2_2_line` 1.0e-4 / 6.6e-6, `devices/lossy_tline` 5.8e-15
+against ngspice 44.2. The residual on ltra1 is tran grid-phase noise (see
+docs/analysis/transient-integration.md, per-row LTE note), not the
+convolution.
 
 ## 1. Mathematical specification
 
