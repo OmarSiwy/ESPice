@@ -315,8 +315,11 @@ fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path:
     var worst_rms: f64 = 0;
     var any = false;
 
+    // Any column BOTH engines emit, keyed by name — v(node) and i(source)
+    // alike. The old v( filter made every current-keyed fixture (gummel,
+    // transfer) pass vacuously: espice raws had no i(...) columns to find,
+    // so nothing was compared.
     for (ng.varnames, 0..) |ng_name, ni| {
-        if (!std.mem.startsWith(u8, ng_name, "v(")) continue;
         const zi = findVar(zp.varnames, ng_name) orelse continue;
 
         const ng_scale = extractCol(gpa, ng.data, ng.nvars, ng.npoints, 0) orelse continue;
