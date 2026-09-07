@@ -297,8 +297,24 @@ pub fn simulate(
     var effective_dt_max = options.dt_max orelse options.t_stop / 50.0;
     if (ckt.minDelay()) |td_min| effective_dt_max = @min(effective_dt_max, td_min);
     // ngspice CKTminBreak: breakpoints closer than this to the current time
-    // (or to each other) are merged/skipped.
-    const min_break = 5e-5 * effective_dt_max;
+    // (or to each other) are merged/skipped (dctran.c:636, cktsetbk.c:45).
+    //
+    // This read `5e-5 * effective_dt_max`, which is optran.c:419's constant —
+    // the OPERATING-POINT transient's rule, not the analysis's. The transient's
+    // own is traninit.c:36 + dctran.c:170: delmin = 1e-11·maxStep and
+    // CKTminBreak = 10·delmin, i.e. 500000x finer. Anything shorter than the
+    // wrong value was merged away, so a deck with 1 ns PULSE corners and
+    // tmax = 5 us (min_break 250 ps) dropped the corner at t = 1 ns entirely:
+    // the grid stepped 0.8 ns -> 1.6 ns straight OVER the edge where ngspice
+    // clamps and lands on it exactly. That is the whole "edge-phase" failure
+    // class — the comparator was reading espice's missing sample, not a model.
+    const delmin = 1e-11 * effective_dt_max;
+    const min_break = 10.0 * delmin;
+    // espice's own state-flip resolution floor — how sharply a switch crossing
+    // must land before the step is accepted. Deliberately NOT min_break: it is
+    // a Newton/FSM tolerance, has no ngspice counterpart, and the switch
+    // fixtures are tuned against this value.
+    const state_eps = 5e-5 * effective_dt_max;
 
     // Delayed breakpoint echoes: ngspice traload registers a breakpoint at
     // t + td whenever a transmission-line input has a sharp edge, so the
@@ -437,14 +453,14 @@ pub fn simulate(
 
         // Device state flip (switch crossed its threshold inside this step):
         // reject and shrink so the conductance discontinuity lands sharp at
-        // the crossing (within min_break) instead of smeared across dt.
+        // the crossing (within state_eps) instead of smeared across dt.
         // ngspice's raw output samples always straddle the true crossing, so
         // a sharp edge interpolates correctly onto its grid.
-        if (dt > min_break and ckt.stateCtl(.query)) {
+        if (dt > state_eps and ckt.stateCtl(.query)) {
             st_rej_state += 1;
             _ = ckt.stateCtl(.revert);
             use_be = true;
-            dt = @max(0.25 * dt, min_break);
+            dt = @max(0.25 * dt, state_eps);
             continue;
         }
 
@@ -667,16 +683,17 @@ pub fn simulate(
 /// waveform point-major: (time, probes...) per row.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    const scratch = ctx.scratch_allocator orelse a;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const x = try a.alloc(f64, x_op.len);
-    defer a.free(x);
+    const x = try scratch.alloc(f64, x_op.len);
+    defer scratch.free(x);
     simdCopy(x, x_op);
 
-    var wf = try Waveform.init(a, @intCast(ctx.probes.len), initialCapacity(opts));
-    errdefer wf.deinit();
+    var wf = try Waveform.init(scratch, @intCast(ctx.probes.len), initialCapacity(opts));
+    defer wf.deinit();
     // ngspice treats a truncated transient as a hard failure ("timestep too
     // small") — never return a silently-truncated waveform.
-    const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, a);
+    const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, scratch);
     if (!sim.completed) return error.TimestepTooSmall;
 
     const names = try root.probeNames(ctx, "time");
@@ -693,10 +710,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         row[0] = times[p];
         for (0..ctx.probes.len) |idx| row[idx + 1] = wf.probeValues(@intCast(idx))[p];
     }
-    // Free the probe-major copy BEFORE returning: waveform + point-major
-    // Result held together doubled the peak on wide circuits (100k probes).
-    wf.deinit();
-
     return .{
         .plotname = "Transient Analysis",
         .varnames = names,
