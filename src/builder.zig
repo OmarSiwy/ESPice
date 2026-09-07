@@ -41,6 +41,19 @@ pub const Builder = struct {
     // Populated by tagNodeInstance(); empty if no subcircuit structure.
     node_instance: std.ArrayList(u32) = .empty,
     node_type: std.ArrayList(u16) = .empty,
+    /// The BBD node permutation compile() applied (old id -> new id), kept so
+    /// the caller can remap every PRE-compile node/branch index it recorded
+    /// (NetBuilder's v_branches/v_ports, .ic nodes, directive nodes). This is
+    /// the mechanism behind subckt-deck branch probes reading a VOLTAGE:
+    /// device protos were permuted, the side tables were not — fourbitadder's
+    /// i(vin1a) column carried ~5 V. Null when no BBD structure exists.
+    perm: ?[]const u32 = null,
+
+    /// Old (pre-compile) node/unknown id -> frozen Circuit id.
+    pub fn mapNode(self: *const Builder, id: u32) u32 {
+        const p = self.perm orelse return id;
+        return if (id < p.len) p[id] else id;
+    }
 
     pub fn init(gpa: std.mem.Allocator) Builder {
         var labels: std.ArrayList([]const u8) = .empty;
@@ -280,8 +293,10 @@ pub const Builder = struct {
                 const new_i = if (i < perm.len) perm[i] else @as(u32, @intCast(i));
                 self.node_labels.items[new_i] = label;
             }
-            gpa.free(perm);
-            bbd.perm = null; // freed; disarm the errdefer
+            // KEPT (arena-owned), not freed: mapNode serves the caller's
+            // post-compile remap of recorded indices.
+            self.perm = perm;
+            bbd.perm = null; // ownership moved; disarm the errdefer
         }
 
         // Flatten node_labels into the frozen intern table: one byte blob +
