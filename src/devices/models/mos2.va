@@ -230,16 +230,19 @@ module mos2(d, g, s, b);
         cgbo_t = cgbo*leff*m;
 
         // ==================================================================
-        // 2. §1.7 limiting (mos1.va's ladder) + mode swap (docs 1.5).
-        //    fetlim on both gate legs, limvds on the channel, pnjlim on both
-        //    bulk junctions; trailing `type` = VerA frame sign (PMOS limits
-        //    type·v). Clamps land on the shared x in source order, so every
-        //    probe below — section 9's included — reads limited voltages.
+        // 2. §1.7 limiting (mos1.va's MODE ladder) + mode swap (docs 1.5).
+        //    "fetlimds" on both gate legs + "limvds" emits ngspice's swap:
+        //    fetlim only the leg controlling the channel in the sign of the
+        //    OLD vds, limvds, derive the other (mos2load.c:338-351). pnjlim
+        //    stays on both bulk junctions (see mos1.va); trailing `type` =
+        //    VerA frame sign (PMOS limits type·v). Clamps land on the shared
+        //    x, so every probe below — section 9's included — reads limited
+        //    voltages.
         // ==================================================================
         vcrits = vt*ln(vt/(1.4142135623730951*isat_s));
         vcritd = vt*ln(vt/(1.4142135623730951*isat_d));
-        vgs_r = type*$limit(V(g, si), "fetlim", type*vtox, type);
-        vgd_r = type*$limit(V(g, di), "fetlim", type*vtox, type);
+        vgs_r = type*$limit(V(g, si), "fetlimds", type*vtox, type);
+        vgd_r = type*$limit(V(g, di), "fetlimds", type*vtox, type);
         vds_x = type*$limit(V(di, si), "limvds", type);
         vgd_r = vgs_r - vds_x;
         vbs_j = type*$limit(V(b, si), "pnjlim", vt, vcrits, type);
