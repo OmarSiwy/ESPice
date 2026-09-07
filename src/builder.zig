@@ -41,19 +41,6 @@ pub const Builder = struct {
     // Populated by tagNodeInstance(); empty if no subcircuit structure.
     node_instance: std.ArrayList(u32) = .empty,
     node_type: std.ArrayList(u16) = .empty,
-    /// The BBD node permutation compile() applied (old id -> new id), kept so
-    /// the caller can remap every PRE-compile node/branch index it recorded
-    /// (NetBuilder's v_branches/v_ports, .ic nodes, directive nodes). This is
-    /// the mechanism behind subckt-deck branch probes reading a VOLTAGE:
-    /// device protos were permuted, the side tables were not — fourbitadder's
-    /// i(vin1a) column carried ~5 V. Null when no BBD structure exists.
-    perm: ?[]const u32 = null,
-
-    /// Old (pre-compile) node/unknown id -> frozen Circuit id.
-    pub fn mapNode(self: *const Builder, id: u32) u32 {
-        const p = self.perm orelse return id;
-        return if (id < p.len) p[id] else id;
-    }
 
     pub fn init(gpa: std.mem.Allocator) Builder {
         var labels: std.ArrayList([]const u8) = .empty;
@@ -273,8 +260,25 @@ pub const Builder = struct {
     /// to analysis.freeze() which builds the union sparsity pattern,
     /// allocates planes and precomputes every slot tape. The Builder is
     /// consumed.
+    /// `perm_out` receives the BBD node permutation (old id -> frozen id) this
+    /// applied, or null when no subckt structure forced one. The caller MUST
+    /// read it to remap any pre-compile index it recorded (source branches,
+    /// .ic nodes, directive nodes) — compile() undefines `self` on return, so
+    /// the permutation cannot be fetched from the Builder afterward, and the
+    /// device protos were already permuted through applyPerm while these
+    /// caller-side tables were not (subckt branch probes read a voltage
+    /// otherwise — fourbitadder i(vin1a) carried ~5 V).
+    /// Bare form for callers that never recorded a pre-compile index (tests,
+    /// embeddings). Discards the permutation; a subckt-BBD deck driven through
+    /// this loses nothing because there is nothing caller-side to remap.
     pub fn compile(self: *Builder) !Circuit {
+        var perm: ?[]const u32 = undefined;
+        return self.compilePerm(&perm);
+    }
+
+    pub fn compilePerm(self: *Builder, perm_out: *?[]const u32) !Circuit {
         const gpa = self.gpa;
+        perm_out.* = null;
         const n: usize = self.n;
 
         // BBD permutation: reorder nodes so subcircuit-internal nodes are
@@ -293,9 +297,10 @@ pub const Builder = struct {
                 const new_i = if (i < perm.len) perm[i] else @as(u32, @intCast(i));
                 self.node_labels.items[new_i] = label;
             }
-            // KEPT (arena-owned), not freed: mapNode serves the caller's
-            // post-compile remap of recorded indices.
-            self.perm = perm;
+            // Arena-owned, handed to the caller (not freed): it remaps the
+            // pre-compile indices compile() cannot reach after `self.* =
+            // undefined` below.
+            perm_out.* = perm;
             bbd.perm = null; // ownership moved; disarm the errdefer
         }
 

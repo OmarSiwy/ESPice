@@ -255,5 +255,10 @@ fn runSerial(
 
 fn sweepCount(start: f64, stop: f64, step: f64) usize {
     if (step == 0 or (stop - start) * std.math.sign(step) < 0) return 1;
-    return @as(usize, @intFromFloat(@floor((stop - start) / step))) + 1;
+    // The endpoint is inclusive (ngspice DCTsetup loops `v <= stop`). An
+    // exact-integer ratio arrives just under it in f64 — (0.95−0.3)/0.005 is
+    // 129.9999999 — and a bare floor drops the last point (hicum2_gummel 130
+    // vs ngspice's 131). Nudge by 1e-6 of a step: absorbs the ~1e-13 division
+    // error with room to spare, far below any fractional step a deck means.
+    return @as(usize, @intFromFloat(@floor((stop - start) / step + 1e-6))) + 1;
 }

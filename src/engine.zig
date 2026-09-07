@@ -171,27 +171,36 @@ pub const Simulation = struct {
         }
         sim.ic = ic_buf[0..n_ic_used];
 
-        sim.circuit = try b.compile();
+        // compile() may apply the BBD node permutation (subckt decks) and
+        // undefines the Builder on return, so the permutation comes back via
+        // this out-param, not off `b`. Every index recorded BEFORE compile —
+        // source branches/ports, inductor branches, `.ic` nodes, directive
+        // nodes — is in old coordinates; the device protos were permuted
+        // through applyPerm but these caller-side tables were not, which is
+        // how a subckt branch probe read a voltage (fourbitadder i(vin1a) at
+        // ~5 V). `mapNode` is the identity when perm is null (no BBD).
+        var perm: ?[]const u32 = null;
+        sim.circuit = try b.compilePerm(&perm);
         compiled_ok = true;
 
         errdefer sim.circuit.deinit();
 
-        // compile() may have applied the BBD node permutation (subckt decks):
-        // every index recorded BEFORE it — source branches/ports, inductor
-        // branches, `.ic` nodes, directive nodes — is in old coordinates.
-        // Devices were permuted through applyPerm; these tables were not,
-        // which is how a branch probe on fourbitadder read ~5 V (its old
-        // index now names a voltage unknown).
-        for (nb.v_branches[0..nb.n_v]) |*v| v.* = b.mapNode(v.*);
-        for (nb.v_ports[0..nb.n_v]) |*v| v.* = b.mapNode(v.*);
-        for (nb.v_nports[0..nb.n_v]) |*v| v.* = b.mapNode(v.*);
-        for (nb.l_branches[0..nb.n_l]) |*v| v.* = b.mapNode(v.*);
-        nb.source_node = b.mapNode(nb.source_node);
-        nb.source_branch = b.mapNode(nb.source_branch);
+        const mapNode = struct {
+            fn f(p: ?[]const u32, id: u32) u32 {
+                const pp = p orelse return id;
+                return if (id < pp.len) pp[id] else id;
+            }
+        }.f;
+        for (nb.v_branches[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
+        for (nb.v_ports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
+        for (nb.v_nports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
+        for (nb.l_branches[0..nb.n_l]) |*v| v.* = mapNode(perm, v.*);
+        nb.source_node = mapNode(perm, nb.source_node);
+        nb.source_branch = mapNode(perm, nb.source_branch);
         for (dir_nodes) |*v| {
-            if (v.* != NO_NODE) v.* = b.mapNode(v.*);
+            if (v.* != NO_NODE) v.* = mapNode(perm, v.*);
         }
-        for (ic_buf[0..n_ic_used]) |*e| e.node = b.mapNode(e.node);
+        for (ic_buf[0..n_ic_used]) |*e| e.node = mapNode(perm, e.node);
         sim.gpu_requested = config.gpu;
         sim.gpu_strict = config.gpu_strict;
         sim.gpu_ctx = null;
