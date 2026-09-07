@@ -84,6 +84,11 @@ pub fn SparseLu(comptime T: type) type {
         // prow[p] = pinv[row_idx[p]]: maps A's structural entries to permuted rows.
         prow: []u32,
 
+        /// Pivot steps that factored a STRUCTURALLY VOID unknown — see
+        /// `voidUnknown`. `refactor` must replay the fabricated unit pivot
+        /// instead of reading a zero out of `w` and reporting singularity.
+        void_col: []bool,
+
         // ---- hot workspace (length n each) ----
         w: []T, // dense accumulator (zero outside active column)
         y: []T, // solve workspace
@@ -119,6 +124,7 @@ pub fn SparseLu(comptime T: type) type {
                 .up = try gpa.alloc(u32, @as(usize, n) + 1),
                 .udiag = try gpa.alloc(T, n),
                 .prow = try gpa.alloc(u32, nnz),
+                .void_col = try gpa.alloc(bool, n),
                 .w = try gpa.alloc(T, n),
                 .y = try gpa.alloc(T, n),
                 .flag = try gpa.alloc(u32, n),
@@ -138,6 +144,7 @@ pub fn SparseLu(comptime T: type) type {
         pub fn deinit(self: *Self, gpa: Allocator) void {
             inline for (.{ self.pinv, self.lp, self.up, self.prow, self.flag, self.topo, self.stack, self.pstack }) |s|
                 gpa.free(s);
+            gpa.free(self.void_col);
             inline for (.{ self.udiag, self.w, self.y }) |s|
                 gpa.free(s);
             self.li.deinit(gpa);
@@ -165,6 +172,7 @@ pub fn SparseLu(comptime T: type) type {
             self.factored = false;
             simdFillU32(self.pinv, NONE);
             simdFillU32(self.flag, 0);
+            @memset(self.void_col, false);
             self.li.clearRetainingCapacity();
             self.lx.clearRetainingCapacity();
             self.ui.clearRetainingCapacity();
@@ -239,8 +247,38 @@ pub fn SparseLu(comptime T: type) type {
                         piv = r;
                     }
                 }
-                if (piv == NONE or amax == 0 or !std.math.isFinite(amax))
-                    return error.SingularMatrix;
+                if (piv == NONE or amax == 0 or !std.math.isFinite(amax)) {
+                    // A column with no nonzero unpivoted candidate is normally
+                    // a singular circuit — but not always. A compact model can
+                    // STRUCTURALLY DISABLE part of itself (HICUM's thermal tie
+                    // `V(br_sht) <+ 0` when flsh = 0, BSIM4/BSIMSOI/HiSIM do the
+                    // same for their self-heating nodes), and Verilog-A cannot
+                    // delete a node: the branch-flow unknown survives with an
+                    // all-zero row AND an all-zero column. Unknown x_c then
+                    // appears in no equation at all, which is not a singular
+                    // system, it is a system with one free variable — and the
+                    // ground row this simulator already pins with a unit
+                    // diagonal is the same situation.
+                    //
+                    // Fabricating A[c][c] = 1 is sound ONLY when row c is void
+                    // too, i.e. equation c reads 0 = b_c; then the unit pivot
+                    // means x_c = b_c, and a b_c that is not zero cannot pass
+                    // the Newton residual gate, so an inconsistent system still
+                    // reports as unconverged rather than silently solving.
+                    // `voidUnknown` costs O(nnz) and only runs on this path.
+                    //
+                    // Before this, devices/hicum2_output failed the plain
+                    // Newton factor at EVERY one of its 1809 DC points and paid
+                    // the whole gmin + source-stepping continuation ladder for
+                    // each: 68772 Newton iterations against ngspice's ~5000,
+                    // 0.93 s against 0.02 s.
+                    if (!self.voidUnknown(col_ptr, row_idx, vals, c)) return error.SingularMatrix;
+                    self.void_col[k] = true;
+                    self.udiag[k] = 1;
+                    self.pinv[c] = @intCast(k);
+                    for (self.topo[0..nt]) |r| self.w[r] = 0;
+                    continue;
+                }
                 if (self.pinv[c] == NONE and @abs(self.w[c]) >= pivot_tol * amax) piv = c;
                 const d = self.w[piv];
                 self.udiag[k] = d;
@@ -279,6 +317,32 @@ pub fn SparseLu(comptime T: type) type {
             self.factored = true;
         }
 
+        /// Does unknown `c` appear in NO equation and does equation `c` contain
+        /// no unknown? Both halves are required: a zero COLUMN alone says x_c is
+        /// free, but fabricating A[c][c] = 1 would corrupt equation c unless
+        /// that row is empty too. Structural entries carrying a zero value
+        /// count as absent — the host's pattern is the per-device dense block,
+        /// so a disabled branch keeps its slots and only its values vanish.
+        fn voidUnknown(
+            self: *const Self,
+            col_ptr: []const u32,
+            row_idx: []const u32,
+            vals: []const T,
+            c: u32,
+        ) bool {
+            if (self.pinv[c] != NONE) return false;
+            for (col_ptr[c]..col_ptr[c + 1]) |p| {
+                if (vals[p] != 0) return false;
+            }
+            for (0..self.n) |j| {
+                if (j == c) continue;
+                for (col_ptr[j]..col_ptr[j + 1]) |p| {
+                    if (row_idx[p] == c and vals[p] != 0) return false;
+                }
+            }
+            return true;
+        }
+
         // ====================================================================
         // refactor: numeric-only replay on frozen pattern + pivot sequence
         // ====================================================================
@@ -314,6 +378,15 @@ pub fn SparseLu(comptime T: type) type {
                     for (self.lp[i]..self.lp[i + 1]) |pl| self.w[li[pl]] -= lx[pl] * uki;
                 }
 
+                // Structurally void unknown: replay the unit pivot `factor`
+                // fabricated. The values that made it void are model structure
+                // (a disabled self-heating branch), not a bias-dependent
+                // quantity, so it cannot un-void between refactors.
+                if (self.void_col[k]) {
+                    self.udiag[k] = 1;
+                    for (self.lp[k]..self.lp[k + 1]) |p| lx[p] = 0;
+                    continue;
+                }
                 const d = self.w[k];
                 if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
                 self.udiag[k] = d;
@@ -590,6 +663,59 @@ test "refactor: same pattern, new values" {
 
 test "singular matrix detection" {
     const gpa = testing.allocator;
+    const a = [2][2]f64{ .{ 1, 1 }, .{ 1, 1 } };
+    const csc = DenseCsc(2).from(a);
+    var q = identity(2);
+    var lu = try SparseLu(f64).init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+    defer lu.deinit(gpa);
+    try testing.expectError(
+        error.SingularMatrix,
+        lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3),
+    );
+}
+
+test "structurally void unknown gets a unit pivot, not SingularMatrix" {
+    const gpa = testing.allocator;
+    // Row/col 1 is entirely zero — a compact model's disabled branch-flow
+    // unknown (HICUM `V(br_sht) <+ 0` at flsh = 0). The remaining 2x2 system
+    // [[2,1],[1,3]] x = [5,7] has the solution (8/5, 9/5); x1 must come back 0.
+    const a = [3][3]f64{
+        .{ 2, 0, 1 },
+        .{ 0, 0, 0 },
+        .{ 1, 0, 3 },
+    };
+    // DenseCsc drops exact zeros, so build the pattern by hand: the host always
+    // forces the diagonal, and the per-device dense block leaves row/col 1
+    // structurally present with zero values.
+    const col_ptr = [4]u32{ 0, 3, 6, 9 };
+    const row_idx = [9]u32{ 0, 1, 2, 0, 1, 2, 0, 1, 2 };
+    const vals = [9]f64{ 2, 0, 1, 0, 0, 0, 1, 0, 3 };
+    var q = identity(3);
+    var lu = try SparseLu(f64).init(gpa, 3, &col_ptr, &row_idx, &q);
+    defer lu.deinit(gpa);
+    try lu.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
+    try testing.expect(lu.void_col[1]);
+
+    var x: [3]f64 = undefined;
+    lu.solve(&[3]f64{ 5, 0, 7 }, &x);
+    try testing.expectApproxEqAbs(@as(f64, 8.0 / 5.0), x[0], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.0), x[1], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 9.0 / 5.0), x[2], 1e-12);
+
+    // refactor must replay the fabricated pivot, not rediscover a zero and fail.
+    const vals2 = [9]f64{ 4, 0, 1, 0, 0, 0, 1, 0, 5 };
+    try lu.refactor(&col_ptr, &vals2, 0);
+    lu.solve(&[3]f64{ 5, 0, 7 }, &x);
+    try testing.expectApproxEqAbs(@as(f64, 18.0 / 19.0), x[0], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.0), x[1], 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 23.0 / 19.0), x[2], 1e-12);
+    _ = a;
+}
+
+test "a genuinely singular matrix is still rejected" {
+    const gpa = testing.allocator;
+    // Duplicate columns: the second column's reach holds no unpivoted row, but
+    // its values are NOT zero — voidUnknown must refuse to rescue it.
     const a = [2][2]f64{ .{ 1, 1 }, .{ 1, 1 } };
     const csc = DenseCsc(2).from(a);
     var q = identity(2);
