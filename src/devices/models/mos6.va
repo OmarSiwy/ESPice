@@ -317,7 +317,9 @@ module mos6(d, g, s, b);
         // ==================================================================
         // Meyer intrinsic gate capacitances (mos1 S1.6, DEVqmeyer).
         // Values are the steady-state totals (2x the half-caps ngspice
-        // integrates per timestep).
+        // stores); the stamps average 0.5*(now + $prev(now)) — identical to
+        // ngspice's half_now + half_prev MODETRAN sum, with the steady-state
+        // total at OP/AC via $prev's commit at OP exit.
         // ==================================================================
         cgsm = 0.0;
         cgdm = 0.0;
@@ -387,9 +389,9 @@ module mos6(d, g, s, b);
         // O(100%) of cap in the depletion/weak-inversion bands and across the
         // whole vdsat split. Both plates are evaluated in the type-corrected
         // frame, where the two ty factors cancel.
-        I(g, si) <+ (cgso * weff * m + cgsb) * ddt(V(g, si));
-        I(g, di) <+ (cgdo * weff * m + cgdb) * ddt(V(g, di));
-        I(g, b)  <+ (cgbo * leff * m + cgbm) * ddt(V(g, b));
+        I(g, si) <+ (cgso * weff * m + 0.5 * (cgsb + $prev(cgsb))) * ddt(V(g, si));
+        I(g, di) <+ (cgdo * weff * m + 0.5 * (cgdb + $prev(cgdb))) * ddt(V(g, di));
+        I(g, b)  <+ (cgbo * leff * m + 0.5 * (cgbm + $prev(cgbm))) * ddt(V(g, b));
 
         // Channel noise (docs/mos-legacy.md noise table; mos1noi.c template).
         I(di, si) <+ white_noise(4.0 * 1.380649e-23 * temp * 2.0 / 3.0 * abs(gmch), "channel");
