@@ -79,7 +79,7 @@ module jfet2(d, g, s);
     parameter real cds = 0.0   from [0:inf);
     parameter real xc  = 0.0   from [0:1];     // XC = 1 => full cap reduction
     parameter real acgam = 0.0;
-    parameter real gmin  = 1.0e-12 from [0:inf); // S, tracks .options gmin
+    parameter real gmin  = $simparam("gmin") from [0:inf); // S, .options gmin unless the card sets it
     parameter real kf    = 0.0 from [0:inf);     // flicker coefficient
     parameter real af    = 1.0 from (0:inf);     // flicker exponent
 

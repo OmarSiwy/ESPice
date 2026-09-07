@@ -81,7 +81,7 @@ module mos9(d, g, s, b);
     parameter real    tnom   = $simparam("tnom");        // parameter extraction temp [degC]
     parameter real    temp   = 27.0;                 // instance temperature, overrides $temperature [degC]
     parameter real    dtemp  = 0.0;                  // instance offset from $temperature [K]
-    parameter real    gmin   = 1.0e-12 from [0:inf);     // junction conductance floor [S]
+    parameter real    gmin   = $simparam("gmin") from [0:inf);     // junction conductance floor [S]
 
     // ---- instance ---------------------------------------------------------
     parameter real    l   = 1.0e-4 from (0:inf);  // drawn channel length [m]

@@ -113,7 +113,7 @@ module mesa(dr, g, s);
     parameter real del   = 0.04;                     //       GGR shape
     parameter real xchi  = 0.033;                    // 1/K   GGR tempco
     parameter real n     = 1.0       from (0:inf);   //       emission coefficient
-    parameter real gmin  = 1.0e-12   from [0:inf);   // S     junction shunt
+    parameter real gmin  = $simparam("gmin")   from [0:inf);   // S     junction shunt
 
     // ---- parasitic resistances --------------------------------------------
     parameter real rd  = 0.0 from [0:inf);   // ohm  drain contact

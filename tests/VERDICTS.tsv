@@ -314,6 +314,7 @@ PASS	fixtures/hspice/dcvolt_uic.sp
 PASS	fixtures/hspice/fft_hann.sp
 PASS	fixtures/hspice/fft_meas.sp
 PASS	fixtures/hspice/fft_rect.sp
+PASS	fixtures/hspice/gmindc.sp
 PASS	fixtures/hspice/gshunt.sp
 PASS	fixtures/hspice/hblin_mixer.sp
 PASS	fixtures/hspice/hblin_noise.sp
@@ -529,6 +530,7 @@ PASS	fixtures/op/millivolt_supply.sp
 PASS	fixtures/op/mos_level_card_spellings.sp
 PASS	fixtures/op/negative_supply.sp
 PASS	fixtures/op/nodeset_latch.sp
+PASS	fixtures/op/option_gmin_ngspice.sp
 PASS	fixtures/op/option_rshunt_ngspice.sp
 PASS	fixtures/op/parallel_resistors.sp
 PASS	fixtures/op/ratio_million_to_one.sp

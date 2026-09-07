@@ -70,7 +70,7 @@ module gummel_poon(c, b, e, s);
     parameter real xti  = 3.0;                  //     is temperature exponent
     parameter real xtb  = 0.0;                  //     beta temperature exponent
     parameter real tnom = $simparam("tnom") + 273.15 from (0:inf);  // K   parameter extraction temperature
-    parameter real gmin = 1e-12 from [0:inf);   // S   leakage-branch conductance floor
+    parameter real gmin = $simparam("gmin") from [0:inf);   // S   leakage-branch conductance floor
     // Resistance/knee temperature maps: X(T) = X*(1 + t1*dt + t2*dt^2),
     // dt = T - Tnom (bjttemp.c)
     parameter real trb1  = 0.0;                 // 1/K rb linear tempco

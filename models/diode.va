@@ -47,7 +47,7 @@ module diode(a, c);
     parameter real vj   = 1.0    from (0:inf);  // V    junction potential
     parameter real m    = 0.5    from (0:inf);  //      grading coefficient (card key `m`)
     parameter real fc   = 0.5    from (0:1);    //      forward-bias depletion coefficient
-    parameter real gmin = 1e-12  from [0:inf);  // S    junction shunt
+    parameter real gmin = $simparam("gmin") from [0:inf); // S  junction shunt, .options gmin
     parameter real tt   = 0.0    from [0:inf);  // s    transit time (diffusion charge)
     parameter real ikr  = 0.0    from [0:inf);  // A    reverse knee (0 = off)
     aliasparam js = is;

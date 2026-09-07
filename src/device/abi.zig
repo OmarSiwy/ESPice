@@ -591,7 +591,9 @@ pub const GpuPayload = struct {
 // 27: `GpuPayload.held`; the state kernel takes `halves` after `lim_active`,
 //    so held-variable devices that limit (mos1/2/3/6/9, bsim4va,
 //    vbic13_4t) are resident.
-pub const abi_version: u32 = 27;
+// 28: the ngspice-port junction models' Model PODs gain `gmin__`, their gmin
+//    default being `$simparam("gmin")` (#78).
+pub const abi_version: u32 = 28;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
