@@ -600,14 +600,18 @@ pub fn simulate(
         // iteration including every rejected attempt. See `Hooks.commit_state`.
         _ = ckt.commitStates(cur);
 
-        // Accepted-state devices advanced their state above (freeze_grad
-        // latches, absdelay rings): the q this step recorded came from the
-        // LAST NEWTON ASSEMBLE, one state-update behind. Re-read q under the
-        // committed state so q_prev is what the NEXT step's residual will
-        // reproduce at x = cur — without this the next attempt opens on
-        // F = α·(q_committed − q_recorded), which DOUBLES every dt halving
-        // (mesa_oscillator wedged at t≈350 ps exactly this way). The i_prev
-        // correction is the same α·Δq for both methods.
+        // Safety net for stateful-charge devices: if a state advance above
+        // (stateCtl commit, commitStates) moved any device's reported q away
+        // from the last Newton assemble, re-read it so q_prev is what the
+        // NEXT step's residual reproduces at x = cur. Left open, that gap
+        // opens the next attempt on F = α·(q_committed − q_recorded), which
+        // DOUBLES every dt halving (mesa_oscillator wedged at t≈350 ps this
+        // way under the retired freeze_grad latch). VerA's path-integrated
+        // latches commit value-continuously — pq+wq in stateCtl equals the
+        // assemble's fadd(pq, D) bit for bit — so dq measures 0 today; the
+        // block is the tripwire that keeps the invariant honest for the next
+        // stateful-charge device. The i_prev correction is the same α·Δq for
+        // both methods.
         if (has_charge and ckt.has_state_q) {
             ckt.eval(cur, t);
             var dbg_dq: f64 = 0;
