@@ -18,10 +18,14 @@
 // the I-V and cost power/rectifier 0.3 of waveform). 80*vte only guards
 // unlimited evals (LTE probes, sweeps): finite, monotone, correct slope.
 //
-// ponytail: TT transit time and XTI/EG temperature scaling are NOT here. No
-// fixture measures them — devices/diode_temp matches ngspice to 2.5e-14
-// without XTI/EG, because its sweep never leaves tnom. Add them with a
-// comparison to justify them, one at a time.
+// ponytail: TT transit time and XTI/EG temperature scaling are NOT here.
+// devices/diode_temp DOES now exercise temperature (the `.dc … TEMP` outer
+// sweep and branch-current comparison both landed 2026-09) and shows the
+// gap — ~2e-2 on i(v1) across -40..125 C. A first inline IS(T)=IS·
+// (T/Tnom)^(XTI/N)·exp((EG/N·vt)(T/Tnom-1)) made it WORSE (4.7e-2): ngspice
+// diotemp.c also scales vj/cjo and uses a temperature-dependent egfet, so
+// the full port has to land together and be verified point-by-point
+// against diotemp.c — a focused task, not an inline guess.
 module diode(a, c);
     inout a, c;
     electrical a, c, ai;
