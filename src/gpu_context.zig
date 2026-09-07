@@ -129,6 +129,12 @@ fn minWork() u64 {
 /// One batch's resident working set plus the kernel that consumes it.
 const BatchGpu = struct {
     kernel: Raw,
+    /// `arp_lim_<model>` — the fused limit/state pass (`engine.StateKernel`),
+    /// present iff the device pairs one with its eval kernel.
+    lim_kernel: ?Raw,
+    /// `arp_ctl_<model>` — the accepted-step latch pass (`engine.CtlKernel`),
+    /// present iff the device declares `stateCtl`.
+    ctl_kernel: ?Raw,
     /// Resident for the life of the simulation. `models`/`instances` are the
     /// only two `repack` re-uploads; the tapes never change.
     d_models: Buffer,
@@ -136,11 +142,25 @@ const BatchGpu = struct {
     d_gath: Buffer,
     d_rhs_idx: Buffer,
     d_slots: Buffer,
+    /// Device lim plane (count * n_u f64) and `[]D.State`. 1-byte dummies
+    /// when the device carries neither — every kernel signature is uniform.
+    d_lim: Buffer,
+    d_states: Buffer,
     /// The batch this came from, so `repack` can re-read its parameter arrays.
     ctx: *anyopaque,
     payload: *const fn (*anyopaque) devices.batch.GpuPayload,
     count: u32,
+    n_u: u32,
     grid: gompute.Dim3,
+    has_lim: bool,
+    has_state: bool,
+    /// Device-era limiting flag: true once the device lim plane holds live
+    /// clamp state (seed upload or first StateKernel launch). Cleared by
+    /// `clearLimits`, mirroring the host batch's `lim_active`.
+    lim_active: bool = false,
+    /// A host-side `seedJunctions` wrote fresh seed voltages into the batch's
+    /// host lim plane; upload it before the next launch that reads it.
+    lim_dirty: bool = false,
 
     fn deinit(self: *BatchGpu) void {
         self.d_models.free();
@@ -148,6 +168,10 @@ const BatchGpu = struct {
         self.d_gath.free();
         self.d_rhs_idx.free();
         self.d_slots.free();
+        self.d_lim.free();
+        self.d_states.free();
+        if (self.lim_kernel) |*lk| lk.deinit();
+        if (self.ctl_kernel) |*ck| ck.deinit();
         self.kernel.deinit();
     }
 };
@@ -205,6 +229,22 @@ pub const GpuContext = struct {
     d_c: Buffer,
     d_rhs: Buffer,
     d_q: Buffer,
+    /// `applyLimits`-time state vectors: the NEW iterate goes to `d_x2`, the
+    /// previous one to `d_x` (uploaded explicitly — under JFNK the last eval
+    /// was an FD probe, so `d_x`'s residue is NOT x_old). Plus the 4-byte
+    /// limited/reject flag word the StateKernels OR into.
+    d_x2: Buffer,
+    d_flags: Buffer,
+    pin_x2: []f64,
+    pin_flags: []u8,
+    /// A StateKernel reported a `request_reject_at` the GPU path cannot
+    /// honour (`flags` bit 1) — the class assumption behind `gpuEligible`
+    /// broke. Every later call takes the CPU path, loudly.
+    poisoned: bool = false,
+    /// Host params mutated (`Circuit.markGpuDirty`); re-upload models and
+    /// instances before the next launch. Lazy so an applyAttempt/restore
+    /// pair costs one repack, not two.
+    params_dirty: bool = false,
 
     /// Every copy and every launch is ordered here, and NOTHING uses the NULL
     /// stream.
@@ -249,9 +289,23 @@ pub const GpuContext = struct {
         for (ckt.batches) |b| {
             const get = b.hooks.gpu_payload orelse continue;
             n_gpu += 1;
+            // Only NONLINEAR batches (a `limit`/`State` device: junction
+            // FETs, BJTs, diodes) count toward the gate. A linear stamp is
+            // ~10 f64 ops on the CPU, so offloading it trades a vectorized
+            // host loop for the same atomics plus the bus — measured on
+            // rc_ladder_100k, the largest all-linear fixture in the corpus
+            // (200k devices, 800k atomic-work): GPU 3276 ms vs CPU 2698 ms.
+            // Bigger only makes the planes' D2H larger. Linear batches still
+            // RIDE ALONG once nonlinear work engages the context; only the
+            // go/no-go decision ignores them.
+            //
+            // The x16 weight is the eval-cost ratio: a limit-class eval runs
+            // its model core in 8-16 wide dual arithmetic (hundreds of f64
+            // ops) against the ~n_u^2 atomics the proxy counts.
+            if (b.hooks.apply_limits == null and b.hooks.update_state == null) continue;
             // Host-side read of the batch's own slices. No driver contact.
             const p = get(b.ctx);
-            work += @as(u64, p.count) * p.n_u * p.n_u;
+            work += @as(u64, p.count) * p.n_u * p.n_u * 16;
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
         if (work < minWork()) return Error.NotEnoughGpuWork;
@@ -296,17 +350,59 @@ pub const GpuContext = struct {
             };
             errdefer kernel.deinit();
 
+            // The paired limit/state/ctl entry points live in the SAME image,
+            // so "eval found, one missing" can only mean a stale image —
+            // demote the batch whole rather than run it half-resident.
+            var lim_kernel: ?Raw = null;
+            if (p.lim_kernel.len > 0) {
+                lim_kernel = gompute.rawKernelByName(backend.?, p.lim_kernel, 0) catch |e| switch (e) {
+                    error.KernelNotFound => {
+                        kernel.deinit();
+                        cpu_batches[n_cpu] = b;
+                        n_cpu += 1;
+                        continue;
+                    },
+                    else => return e,
+                };
+            }
+            errdefer if (lim_kernel) |*lk| lk.deinit();
+
+            var ctl_kernel: ?Raw = null;
+            if (p.ctl_kernel.len > 0) {
+                ctl_kernel = gompute.rawKernelByName(backend.?, p.ctl_kernel, 0) catch |e| switch (e) {
+                    error.KernelNotFound => {
+                        kernel.deinit();
+                        if (lim_kernel) |*lk| lk.deinit();
+                        cpu_batches[n_cpu] = b;
+                        n_cpu += 1;
+                        continue;
+                    },
+                    else => return e,
+                };
+            }
+            errdefer if (ctl_kernel) |*ck| ck.deinit();
+
             bg.* = .{
                 .kernel = kernel,
+                .lim_kernel = lim_kernel,
+                .ctl_kernel = ctl_kernel,
                 .d_models = try uploadBytes(&kernel, p.models),
                 .d_instances = try uploadBytes(&kernel, p.instances),
                 .d_gath = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.gath)),
                 .d_rhs_idx = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.rhs_idx)),
                 .d_slots = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.slots)),
+                // The lim plane starts UNWRITTEN on purpose — reads are gated
+                // by `lim_active`, exactly like the host's `lim_x`. 1-byte
+                // dummy for limit-less devices (uniform kernel signature).
+                .d_lim = try kernel.alloc(if (p.lim_x.len > 0) @as(usize, p.count) * p.n_u * @sizeOf(f64) else 1),
+                .d_states = try uploadBytes(&kernel, p.states),
                 .ctx = b.ctx,
                 .payload = get,
                 .count = p.count,
+                .n_u = p.n_u,
                 .grid = gompute.Dim3.linear(p.count, block_size),
+                .has_lim = p.lim_x.len > 0,
+                .has_state = p.states.len > 0,
             };
             n_up += 1;
         }
@@ -335,11 +431,15 @@ pub const GpuContext = struct {
             .pin_c = if (ckt.has_charge) try pinnedF64(k0, ckt.c_vals.len) else &.{},
             .pin_q = if (ckt.has_charge) try pinnedF64(k0, ckt.q_vec.len) else &.{},
             .pin_x = try pinnedF64(k0, ckt.n + 1),
+            .pin_x2 = try pinnedF64(k0, ckt.n + 1),
+            .pin_flags = try k0.allocPinned(4),
             .d_x = try k0.alloc(x_bytes),
             .d_g = try k0.alloc(g_bytes),
             .d_c = try k0.alloc(g_bytes),
             .d_rhs = try k0.alloc(rhs_bytes),
             .d_q = try k0.alloc(rhs_bytes),
+            .d_x2 = try k0.alloc(x_bytes),
+            .d_flags = try k0.alloc(4),
             .stream = try k0.createStream(),
             .ws = try converger.Workspace.init(gpa, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd),
             .has_charge = ckt.has_charge,
@@ -360,15 +460,18 @@ pub const GpuContext = struct {
         // Pinned memory first, while batch 0's context handle is still alive —
         // it is what the driver frees these against.
         const k0 = &self.batches[0].kernel;
-        for ([_][]f64{ self.pin_g, self.pin_rhs, self.pin_c, self.pin_q, self.pin_x }) |p| {
+        for ([_][]f64{ self.pin_g, self.pin_rhs, self.pin_c, self.pin_q, self.pin_x, self.pin_x2 }) |p| {
             if (p.len > 0) k0.freePinned(std.mem.sliceAsBytes(p));
         }
+        k0.freePinned(self.pin_flags);
         self.stream.deinit();
         self.d_x.free();
         self.d_g.free();
         self.d_c.free();
         self.d_rhs.free();
         self.d_q.free();
+        self.d_x2.free();
+        self.d_flags.free();
         for (self.batches) |*bg| bg.deinit();
         self.gpa.free(self.batches_owned);
         self.gpa.free(self.cpu_owned);
@@ -388,13 +491,15 @@ pub const GpuContext = struct {
 
     /// One full device-eval pass: the GPU half of `Circuit.evalNewton`.
     ///
-    /// Always the plain `eval` form, never the constant-Jacobian baseline. That
-    /// is not a shortcut: `evalRange`'s `limiting` flag is dead for a device
-    /// with no `limit` decl, and `gpuEligible` excludes every device that has
-    /// one — so for an eligible circuit `eval` and `eval_newton` are the same
-    /// function, and the baseline is an optimization we trade for keeping the
-    /// planes on the device.
+    /// Always the zero-and-restamp form, never the constant-Jacobian baseline
+    /// (an optimization traded for keeping the planes on the device). Limit
+    /// devices eval against their device-resident lim plane exactly like the
+    /// host's `evalInner`: `limiting` mirrors the batch's `lim_active`, which
+    /// `StateKernel` launches arm and `clearLimits` disarms — so outside a
+    /// Newton solve this is the plain eval both ways.
     fn evalOnGpu(self: *Self, x: []const f64, t: f64) !void {
+        if (self.poisoned) return error.GpuStateReject;
+        try self.flushDirtyParams();
         const ckt = self.ckt;
         const g_bytes = ckt.g_vals.len * @sizeOf(f64);
         const rhs_bytes = ckt.rhs.len * @sizeOf(f64);
@@ -419,10 +524,12 @@ pub const GpuContext = struct {
 
         for (self.batches) |*bg| {
             if (bg.count == 0) continue;
+            try syncSeededLim(bg);
             // Scalars are passed by pointer-to-storage, so these must outlive
             // the launch call — hence locals in this scope, not a helper's.
             var count: u64 = bg.count;
             var time: f64 = t;
+            var limiting: u64 = @intFromBool(bg.lim_active);
             try bg.kernel.launchOn(&self.stream, bg.grid, .{ .x = block_size }, 0, &.{
                 gompute.interface.arg(&count),
                 gompute.interface.arg(&time),
@@ -436,6 +543,8 @@ pub const GpuContext = struct {
                 self.d_c.argPtr(),
                 self.d_rhs.argPtr(),
                 self.d_q.argPtr(),
+                bg.d_lim.argPtr(),
+                gompute.interface.arg(&limiting),
             });
         }
 
@@ -503,6 +612,199 @@ pub const GpuContext = struct {
         };
     }
 
+    /// Host `seedJunctions` left fresh seed voltages in this batch's host lim
+    /// plane — upload them (synchronous, so ordered ahead of whatever launch
+    /// reads them) and arm device-era limiting.
+    fn syncSeededLim(bg: *BatchGpu) !void {
+        if (!bg.lim_dirty) return;
+        bg.lim_dirty = false;
+        if (!bg.has_lim) return;
+        const p = bg.payload(bg.ctx);
+        if (!p.lim_active) return;
+        try bg.d_lim.upload(std.mem.sliceAsBytes(p.lim_x).ptr, p.lim_x.len * @sizeOf(f64));
+        bg.lim_active = true;
+    }
+
+    /// The GPU half of `Circuit.applyLimits`, fused with the `updateStates`
+    /// half (`StateKernel` does both; the converger always calls the two
+    /// back-to-back at the same x). Synchronous: `finalizeStep` consumes the
+    /// `limited` answer immediately.
+    fn applyLimitsOnGpu(self: *Self, x: []f64, x_old: []const f64) !bool {
+        if (self.poisoned) return error.GpuStateReject;
+        try self.flushDirtyParams();
+        const n = self.ckt.n;
+
+        // x -> d_x2, x_old -> d_x. Explicit x_old upload rather than trusting
+        // d_x's residue: under JFNK the last eval was an FD probe.
+        @memcpy(self.pin_x2[0..n], x[0..n]);
+        try self.d_x2.uploadAtAsync(self.pin_x2.ptr, 0, n * @sizeOf(f64), &self.stream);
+        @memcpy(self.pin_x[0..n], x_old[0..n]);
+        try self.d_x.uploadAtAsync(self.pin_x.ptr, 0, n * @sizeOf(f64), &self.stream);
+        try self.d_flags.fillAsync(0, 4, &self.stream);
+
+        var launched = false;
+        for (self.batches) |*bg| {
+            const lk = if (bg.lim_kernel) |*k| k else continue;
+            if (bg.count == 0) continue;
+            try syncSeededLim(bg);
+            var count: u64 = bg.count;
+            var lim_active: u64 = @intFromBool(bg.lim_active);
+            try lk.launchOn(&self.stream, bg.grid, .{ .x = block_size }, 0, &.{
+                gompute.interface.arg(&count),
+                self.d_x2.argPtr(),
+                self.d_x.argPtr(),
+                bg.d_gath.argPtr(),
+                bg.d_models.argPtr(),
+                bg.d_instances.argPtr(),
+                bg.d_lim.argPtr(),
+                bg.d_states.argPtr(),
+                gompute.interface.arg(&lim_active),
+                self.d_flags.argPtr(),
+            });
+            bg.lim_active = bg.lim_active or bg.has_lim;
+            launched = true;
+        }
+        if (launched)
+            try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
+
+        // The CPU-side batches run their host walk while the device works.
+        var any = false;
+        for (self.cpu_batches) |b| if (b.hooks.apply_limits) |f| {
+            if (f(b.ctx, x, x_old)) any = true;
+        };
+
+        if (launched) {
+            try self.stream.synchronize();
+            const flags = std.mem.readInt(u32, self.pin_flags[0..4], .little);
+            if (flags & 2 != 0) {
+                // A resident device asked for a step reject the GPU path
+                // cannot deliver — the gpuEligible class assumption broke.
+                self.poisoned = true;
+                return error.GpuStateReject;
+            }
+            if (flags & 1 != 0) any = true;
+        }
+        return any;
+    }
+
+    /// `Circuit.applyLimits` hook. A fault falls back to the full HOST walk —
+    /// including the resident batches, whose host lim/state go stale during
+    /// the device era but self-heal: `limitRange` restarts from x_old and
+    /// `updateState` recomputes its latches from the current x alone.
+    fn applyLimitsHook(ctx: *anyopaque, x: []f64, x_old: []const f64) bool {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.applyLimitsOnGpu(x, x_old) catch {
+            self.warnStateFallback();
+            var any = false;
+            for (self.ckt.batches) |b| if (b.hooks.apply_limits) |f| {
+                if (f(b.ctx, x, x_old)) any = true;
+            };
+            return any;
+        };
+    }
+
+    /// `Circuit.updateStates` hook: the device half already ran inside
+    /// `applyLimitsHook`'s fused launch, so only the CPU-side batches walk.
+    /// The admitted device class never returns a reject time (see
+    /// `StateKernel`), so the GPU half contributes null by construction.
+    fn updateStatesHook(ctx: *anyopaque, x: []const f64) ?f64 {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        const walk = if (self.poisoned) self.ckt.batches else self.cpu_batches;
+        var min_reject: ?f64 = null;
+        for (walk) |b| {
+            if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
+                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
+            };
+        }
+        return min_reject;
+    }
+
+    fn clearLimitsHook(ctx: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        for (self.batches) |*bg| {
+            bg.lim_active = false;
+            bg.lim_dirty = false;
+        }
+        const walk = if (self.poisoned) self.ckt.batches else self.cpu_batches;
+        for (walk) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
+    }
+
+    /// The GPU half of `Circuit.stateCtl`: the accepted-step latch (path
+    /// commit `pb <- wb, pq += wq`) mutates the device-resident Instance
+    /// blobs, so a host walk cannot stand in for a resident batch. All three
+    /// ops route here; the kernel ORs the real per-instance verdict into
+    /// `d_flags`, so `query` costs one launch + a 4-byte sync per accepted
+    /// step rather than a class assumption.
+    ///
+    /// Known gauge: a later `repack` (sweep/homotopy param mutation) resets
+    /// device pb__/pq__ to the host's stale copies. That is harmless where
+    /// repacks happen today — pre-tran op ladder and static sweeps, where the
+    /// path integral is either re-seeded or unused — and a mid-TRAN repack
+    /// does not exist (tran mutates no params). ponytail: if one ever does,
+    /// the fix is an instance download-back before repack.
+    fn stateCtlOnGpu(self: *Self, op: devices.batch.StateCtlOp) !bool {
+        if (self.poisoned) return error.GpuStateReject;
+        var launched = false;
+        for (self.batches) |*bg| {
+            const ck = if (bg.ctl_kernel) |*k| k else continue;
+            if (bg.count == 0) continue;
+            if (!launched) try self.d_flags.fillAsync(0, 4, &self.stream);
+            var count: u64 = bg.count;
+            var opv: u64 = @intFromEnum(op);
+            try ck.launchOn(&self.stream, bg.grid, .{ .x = block_size }, 0, &.{
+                gompute.interface.arg(&count),
+                bg.d_models.argPtr(),
+                bg.d_instances.argPtr(),
+                bg.d_states.argPtr(),
+                gompute.interface.arg(&opv),
+                self.d_flags.argPtr(),
+            });
+            launched = true;
+        }
+        var dirty = false;
+        for (self.cpu_batches) |b| if (b.hooks.state_ctl) |f| {
+            if (f(b.ctx, op)) dirty = true;
+        };
+        if (launched) {
+            try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
+            try self.stream.synchronize();
+            if (std.mem.readInt(u32, self.pin_flags[0..4], .little) != 0) dirty = true;
+        }
+        return dirty;
+    }
+
+    fn stateCtlHook(ctx: *anyopaque, op: devices.batch.StateCtlOp) bool {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.stateCtlOnGpu(op) catch {
+            self.warnStateFallback();
+            var dirty = false;
+            for (self.ckt.batches) |b| if (b.hooks.state_ctl) |f| {
+                if (f(b.ctx, op)) dirty = true;
+            };
+            return dirty;
+        };
+    }
+
+    /// `Circuit.seedJunctions` hook: the host walk runs for EVERY batch (the
+    /// seed writes x, which lives on the host), then each resident lim plane
+    /// is marked for upload at its next launch.
+    fn seedJunctionsHook(ctx: *anyopaque, x: []f64) void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        for (self.ckt.batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
+        for (self.batches) |*bg| {
+            if (bg.has_lim) bg.lim_dirty = true;
+        }
+    }
+
+    fn warnStateFallback(self: *Self) void {
+        if (self.warned_fallback) return;
+        self.warned_fallback = true;
+        std.debug.print(
+            "warning: GPU limit/state pass failed; falling back to the CPU walk\n",
+            .{},
+        );
+    }
+
     /// The converger's hook shape, with the GPU pass in place of `ckt.eval`.
     /// `assemble` cannot report failure, so a fault is parked on the context
     /// and re-raised by `solveNewton` once the loop is done.
@@ -544,6 +846,18 @@ pub const GpuContext = struct {
             if (p.models.len > 0) try bg.d_models.upload(p.models.ptr, p.models.len);
             if (p.instances.len > 0) try bg.d_instances.upload(p.instances.ptr, p.instances.len);
         }
+        self.params_dirty = false;
+    }
+
+    /// `Circuit.markGpuDirty` lands here: host params changed under us.
+    fn markDirty(ctx: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        self.params_dirty = true;
+    }
+
+    fn flushDirtyParams(self: *Self) !void {
+        if (!self.params_dirty) return;
+        try repack(self);
     }
 
     /// What `Circuit.gpu_hook` gets.
@@ -558,7 +872,13 @@ pub const GpuContext = struct {
             .ctx = self,
             .solve_newton = solveNewton,
             .eval_planes = evalPlanes,
+            .apply_limits = applyLimitsHook,
+            .update_states = updateStatesHook,
+            .clear_limits = clearLimitsHook,
+            .seed_junctions = seedJunctionsHook,
+            .state_ctl = stateCtlHook,
             .repack = repack,
+            .mark_dirty = markDirty,
         };
     }
 };
