@@ -219,15 +219,16 @@ module mos9(d, g, s, b);
         cgbov = cgbo * leff * m;
 
         // ---- bias, type-corrected to s' (§2 step 2), §1.7 limited ------
-        // mos1.va's ladder: fetlim on both gate legs, limvds on the channel,
-        // pnjlim on both bulk junctions. Trailing `ty` = VerA frame sign
+        // mos1.va's MODE ladder: "fetlimds" on both gate legs + "limvds"
+        // emits ngspice's old-vds swap (mos9load.c:351-364); pnjlim stays on
+        // both bulk junctions (see mos1.va). Trailing `ty` = VerA frame sign
         // (PMOS limits mtype·v); ty is mtype as a real — integer $limit args
-        // are declined. Clamps land on the shared x in source order.
+        // are declined.
         ty     = mtype;
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
-        vgs = ty * $limit(V(g, si), "fetlim", ty * (vtoeff + delvto), ty);
-        vgd = ty * $limit(V(g, di), "fetlim", ty * (vtoeff + delvto), ty);
+        vgs = ty * $limit(V(g, si), "fetlimds", ty * (vtoeff + delvto), ty);
+        vgd = ty * $limit(V(g, di), "fetlimds", ty * (vtoeff + delvto), ty);
         vds = ty * $limit(V(di, si), "limvds", ty);
         vgd = vgs - vds;
         vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
