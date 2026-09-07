@@ -1165,7 +1165,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // limitRange never scatters to the planes; an empty Planes keeps the
             // sink's plane .ptr reads valid (undefined would trap in Debug).
             const no_planes: Planes = .{ .g_vals = &.{}, .c_vals = &.{}, .rhs = &.{}, .q_vec = &.{} };
-            var sink = Sink(D, false, false).host(self, &no_planes, x, x_old, false, 0);
+            var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr, false, 0);
             const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active);
             self.lim_active = true;
             return any != 0;
@@ -1271,6 +1271,11 @@ pub fn DeviceBatch(comptime D: type) type {
                 .gath = self.gath,
                 .rhs_idx = self.rhs_idx,
                 .slots = self.slots,
+                .lim_kernel = comptime if (hasStateKernel(D)) stateKernelName(D) else "",
+                .ctl_kernel = comptime if (hasCtlKernel(D)) ctlKernelName(D) else "",
+                .lim_x = if (comptime has_limit) self.lim_x else &.{},
+                .states = if (comptime has_state) std.mem.sliceAsBytes(self.states) else &.{},
+                .lim_active = if (comptime has_limit) self.lim_active else false,
             };
         }
 
@@ -1438,11 +1443,45 @@ pub fn DeviceBatch(comptime D: type) type {
 // history / limiting); richer devices stay CPU until their GPU state is added.
 // ===========================================================================
 
-/// Devices eligible for a GPU kernel in this first cut. PrepCache/State/history/
-/// limiting each need extra device-side state not yet wired; those run CPU-only.
+/// Devices eligible for a GPU kernel. PrepCache and history still need
+/// device-side state not yet wired; those run CPU-only.
+///
+/// `limit` devices (the diode/FET/BJT class — the models that actually carry
+/// eval work) run with a device-resident `lim_x` plane maintained by
+/// `StateKernel`, which fuses the `applyLimits` clamp pass and the
+/// `updateState` latch refresh into one per-instance launch.
+///
+/// `State` is admitted ONLY alongside `limit`. For that class, State is the
+/// path-latch pattern: `updateState` stages `inst.wb__/wq__`, `stateCtl`
+/// commits them into the `pb__/pq__` latches eval reads (CtlKernel runs that
+/// on the device), and `updateState` returns `.ok` unconditionally. A
+/// State-WITHOUT-limit device is a waveform source or FSM (vsource,
+/// isource, vswitch, mes) whose eval reads host-owned per-attempt state the
+/// device copy would never see.
+///
+/// `core_reads_simstate` is the VerA-emitted decl for a core that reads a
+/// host-published sim-state Instance field (analysis()/$abstime/ddt-family
+/// dt). The host republishes those on the HOST blob only, so such a core
+/// (jfet2's analysis() gate today) evals stale device-resident — excluded.
+/// ponytail: for the rest it is decl-correlation, not proof — StateKernel
+/// still flags a non-.ok updateState result so a future model that breaks
+/// the assumption degrades loudly into the CPU fallback.
 pub fn gpuEligible(comptime D: type) bool {
-    return !@hasDecl(D, "PrepCache") and !@hasDecl(D, "State") and
-        !hasHistoryDecl(D) and !@hasDecl(D, "limit");
+    return !@hasDecl(D, "PrepCache") and !hasHistoryDecl(D) and
+        !@hasDecl(D, "core_reads_simstate") and
+        (@hasDecl(D, "limit") or !@hasDecl(D, "State"));
+}
+
+/// Does device D pair its eval kernel with a `StateKernel`?
+pub fn hasStateKernel(comptime D: type) bool {
+    return gpuEligible(D) and (@hasDecl(D, "limit") or @hasDecl(D, "State"));
+}
+
+/// Does device D also need a `CtlKernel`? Accepted-step latches (stateCtl's
+/// commit/revert) mutate the device-resident Instance/State blobs, so the
+/// host walk cannot stand in for it once the batch is resident.
+pub fn hasCtlKernel(comptime D: type) bool {
+    return hasStateKernel(D) and @hasDecl(D, "stateCtl");
 }
 
 /// The kernel symbol for device D — `arp_eval_<model>`.
@@ -1455,6 +1494,21 @@ pub fn kernelName(comptime D: type) [:0]const u8 {
     const full = @typeName(D);
     const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
     return "arp_eval_" ++ base;
+}
+
+/// The limit/state kernel symbol for device D — `arp_lim_<model>`. Same
+/// derive-from-the-type rule (and reason) as `kernelName`.
+pub fn stateKernelName(comptime D: type) [:0]const u8 {
+    const full = @typeName(D);
+    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
+    return "arp_lim_" ++ base;
+}
+
+/// The accepted-step latch kernel symbol — `arp_ctl_<model>`.
+pub fn ctlKernelName(comptime D: type) [:0]const u8 {
+    const full = @typeName(D);
+    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
+    return "arp_ctl_" ++ base;
 }
 
 /// One batch's device-resident working set, type-erased.
@@ -1481,6 +1535,21 @@ pub const GpuPayload = struct {
     rhs_idx: []const u32,
     /// count * n_u * n_u — CSC slot each Jacobian entry scatters to.
     slots: []const u32,
+    /// `arp_lim_<model>` when the device pairs a `StateKernel` with its eval
+    /// kernel (`hasStateKernel`), else "".
+    lim_kernel: []const u8,
+    /// `arp_ctl_<model>` when the device latches accepted-step state
+    /// (`hasCtlKernel`), else "".
+    ctl_kernel: []const u8,
+    /// Host lim plane (count * n_u), for the seed-era upload; empty when the
+    /// device has no `limit`. Once the device StateKernel runs, the resident
+    /// copy is authoritative and this is stale by design.
+    lim_x: []const f64,
+    /// `[]D.State` as bytes (POD), uploaded once; empty when no `State`.
+    states: []const u8,
+    /// Host-side lim_active at call time — only consulted until the device
+    /// takes the lim plane over (seed → first eval).
+    lim_active: bool,
 };
 
 /// The ONE sink `evalRange`/`limitRange` consume. `device` picks the two axes
@@ -1515,10 +1584,17 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         rhs: gompute.GlobalPtr(f64),
         q_vec: gompute.GlobalPtr(f64),
 
-        // Host-only: the dedup caches / limit tables live on the batch. Device
-        // dedup is compiled out, so none of this exists in a GPU compilation.
+        /// The lim plane (count * n_u) and x_old — device-resident buffers on
+        /// the GPU, the batch's own `lim_x` / the caller's x_old on the host.
+        /// One pointer type both ways so `evalRange`/`limitRange` compile for
+        /// either sink; `undefined` when the device has no `limit` (never
+        /// dereferenced — every access is behind `has_limit`).
+        lim_: gompute.GlobalPtr(f64),
+        xo: gompute.GlobalPtr(f64), // x_old (limit pass only)
+
+        // Host-only: the dedup caches live on the batch. Device dedup is
+        // compiled out, so none of this exists in a GPU compilation.
         b: if (device) void else *BatchT,
-        xo: if (device) void else []const f64, // x_old (limit pass only)
         dedup_on: if (device) void else bool,
         lane_off: if (device) void else usize,
         cur_group: if (device) void else usize = if (device) {} else 0,
@@ -1544,10 +1620,10 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
             return s.rhs_idx_[@as(usize, id) * n_u + ru];
         }
         pub inline fn lim(s: *const Sk, id: u32, u: usize) f64 {
-            return s.b.lim_x[@as(usize, id) * n_u + u];
+            return s.lim_[@as(usize, id) * n_u + u];
         }
         pub inline fn setLim(s: *const Sk, id: u32, u: usize, v: f64) void {
-            s.b.lim_x[@as(usize, id) * n_u + u] = v;
+            s.lim_[@as(usize, id) * n_u + u] = v;
         }
         // The contract's eval takes generic-addrspace pointers; on device the
         // `.global` param is cast here rather than copying the whole
@@ -1646,7 +1722,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         // (GlobalPtr(T) == [*]T here) so the shared body indexes them the same
         // way the device does. `has_limit` guards `xo`/lim state, unused off the
         // limit pass.
-        pub fn host(b: *BatchT, pl: *const Planes, xs: []const f64, xo: []const f64, dedup_on: bool, lane_off: usize) Sk {
+        pub fn host(b: *BatchT, pl: *const Planes, xs: []const f64, xo: [*]const f64, dedup_on: bool, lane_off: usize) Sk {
             return .{
                 .xs = @constCast(xs.ptr), // read-only here; GlobalPtr carries no const
                 .gath_ = b.gath.ptr,
@@ -1658,8 +1734,9 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
                 .c_vals = pl.c_vals.ptr,
                 .rhs = pl.rhs.ptr,
                 .q_vec = pl.q_vec.ptr,
+                .lim_ = if (comptime @hasDecl(D, "limit")) b.lim_x.ptr else undefined,
+                .xo = @constCast(xo),
                 .b = b,
-                .xo = xo,
                 .dedup_on = dedup_on,
                 .lane_off = lane_off,
             };
@@ -1686,6 +1763,8 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
             c_vals: gompute.GlobalPtr(f64),
             rhs: gompute.GlobalPtr(f64),
             q_vec: gompute.GlobalPtr(f64),
+            lim: gompute.GlobalPtr(f64),
+            limiting: u64,
         ) callconv(gompute.kernel_callconv) void {
             const tid = gompute.globalIdX(block_size);
             if (tid >= count) return;
@@ -1700,13 +1779,103 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
                 .c_vals = c_vals,
                 .rhs = rhs,
                 .q_vec = q_vec,
+                .lim_ = lim,
+                .xo = undefined, // limit pass only; never read in evalRange
                 .b = {},
-                .xo = {},
                 .dedup_on = {},
                 .lane_off = {},
             };
             const id: u32 = @intCast(tid);
-            evalRange(D, &sink, id, id + 1, t, false);
+            evalRange(D, &sink, id, id + 1, t, limiting != 0);
+        }
+    };
+}
+
+/// Per-instance limit + state-latch kernel — the device half of
+/// `Circuit.applyLimits`/`Circuit.updateStates` for a resident batch, fused
+/// into one launch (the converger always calls the two back-to-back at the
+/// same x, `finalizeStep`).
+///
+/// Bit 0 of `flags[0]`: some instance's clamp said "not converged" (pnjlim) —
+/// the host's `limited` answer. Bit 1: some `updateState` returned a
+/// non-`.ok` result the GPU path cannot honour (a `request_reject_at` time);
+/// the launcher treats that as a fault and falls back to the CPU, so the
+/// class assumption in `gpuEligible` degrades loudly, not silently.
+pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
+    const n_u = comptime uCount(D);
+    const has_limit = @hasDecl(D, "limit");
+    const has_state = @hasDecl(D, "State");
+    const StateT = if (has_state) D.State else u8;
+    return struct {
+        pub fn run(
+            count: u64,
+            xs: gompute.GlobalPtr(f64),
+            x_old: gompute.GlobalPtr(f64),
+            gath: gompute.GlobalPtr(u32),
+            models: gompute.GlobalPtr(D.Model),
+            instances: gompute.GlobalPtr(D.Instance),
+            lim: gompute.GlobalPtr(f64),
+            states: gompute.GlobalPtr(StateT),
+            lim_active: u64,
+            flags: gompute.GlobalPtr(u32),
+        ) callconv(gompute.kernel_callconv) void {
+            const tid = gompute.globalIdX(block_size);
+            if (tid >= count) return;
+            const id: usize = @intCast(tid);
+            const model: *const D.Model = @addrSpaceCast(&models[id]);
+            var flag: u32 = 0;
+            // Raw local x: `limit` clamps it, `updateState` latches at it.
+            var cur: [n_u]f64 = undefined;
+            inline for (0..n_u) |u| cur[u] = xs[gath[id * n_u + u]];
+            if (comptime has_limit) {
+                const inst_c: *const D.Instance = @addrSpaceCast(&instances[id]);
+                var old: [n_u]f64 = undefined;
+                inline for (0..n_u) |u|
+                    old[u] = if (lim_active != 0) lim[id * n_u + u] else x_old[gath[id * n_u + u]];
+                const lm = D.limit(model, inst_c, cur, old);
+                if (!lm.converged) flag |= 1;
+                inline for (0..n_u) |u| lim[id * n_u + u] = lm.x[u];
+            }
+            if (comptime has_state) {
+                const inst_m: *D.Instance = @addrSpaceCast(&instances[id]);
+                const st: *StateT = @addrSpaceCast(&states[id]);
+                switch (D.updateState(model, inst_m, cur, st)) {
+                    .ok => {},
+                    else => flag |= 2,
+                }
+            }
+            if (flag != 0) _ = @atomicRmw(u32, &flags[0], .Or, flag, .monotonic);
+        }
+    };
+}
+
+/// Accepted-step latch kernel — the device half of `Circuit.stateCtl` for a
+/// resident batch. For the admitted class this is the path-integration
+/// protocol: `commit` folds the staged `wb__/wq__` into the `pb__/pq__`
+/// latches eval reads, `revert` is a no-op, `query` answers false. All three
+/// ops route here anyway (no class assumption): the kernel ORs the real
+/// stateCtl verdict into `flags[0]`, so a future device with a live query
+/// answers honestly instead of by decree.
+pub fn CtlKernel(comptime D: type, comptime block_size: u32) type {
+    const StateT = if (@hasDecl(D, "State")) D.State else u8;
+    return struct {
+        pub fn run(
+            count: u64,
+            models: gompute.GlobalPtr(D.Model),
+            instances: gompute.GlobalPtr(D.Instance),
+            states: gompute.GlobalPtr(StateT),
+            op: u64,
+            flags: gompute.GlobalPtr(u32),
+        ) callconv(gompute.kernel_callconv) void {
+            const tid = gompute.globalIdX(block_size);
+            if (tid >= count) return;
+            const id: usize = @intCast(tid);
+            const model: *const D.Model = @addrSpaceCast(&models[id]);
+            const inst: *D.Instance = @addrSpaceCast(&instances[id]);
+            const st: *StateT = @addrSpaceCast(&states[id]);
+            const sop: StateCtlOp = @enumFromInt(@as(u8, @truncate(op)));
+            if (D.stateCtl(model, inst, st, sop))
+                _ = @atomicRmw(u32, &flags[0], .Or, 1, .monotonic);
         }
     };
 }

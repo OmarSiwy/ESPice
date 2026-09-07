@@ -232,10 +232,15 @@ pub fn main(init: std.process.Init) !u8 {
         }
 
         if (opts.mode == .batch) {
-            // Resolve the backend request to the engine's existing opt-in bool:
+            // Resolve the backend request to the engine's opt-in flags:
             // .cpu never touches the GPU; .auto/.cuda/.hip engage it. Strict
-            // cuda/hip that this binary cannot honour was already rejected above.
-            var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{ .gpu = opts.backend != .cpu }) catch |e| {
+            // cuda/hip that this BINARY cannot honour was already rejected
+            // above; gpu_strict makes a MACHINE that cannot honour it (absent
+            // device/driver) a hard error in run() instead of a CPU fallback.
+            var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{
+                .gpu = opts.backend != .cpu,
+                .gpu_strict = opts.backend == .cuda or opts.backend == .hip,
+            }) catch |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
                 return skip(io, @errorName(e));
             };
