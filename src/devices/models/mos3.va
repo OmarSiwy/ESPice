@@ -106,7 +106,7 @@ module mos3(d, g, s, b);
     real gammas, fbody, qbonco, vbix, vth, xn, von, vgsx;
     real onfg, fgate, avds, vdsc, vdsat, vdsx, cdo, ids, fdrain;
     real gdsat, emax, delxl, clfact, gmch;
-    real vbs, vbd, vgstm, vdsatm, cgsh, cgdh, cgbh, capgs, capgd, capgb;
+    real vbs, vbd, vgstm, vdsatm, cgsh, cgdh, cgbh, chgs, chgd, capgs, capgd, capgb;
 
     // Bulk junction current: MOS3's reverse branch is the (3Vt/(v*e))^3 form
     // (mos3load.c), not MOS1's flat -Isat; forward exp tangent-continued above
@@ -441,10 +441,12 @@ module mos3(d, g, s, b);
         // with the channel block's own von/vdsat -- not a private threshold --
         // and Vdsat' = max(Vdsat, MAGIC_VDS = 0.025), which is what bounds the
         // near-threshold split.  DEVqmeyer returns half the non-constant part
-        // and the load routine sums two timepoint halves, so 2*half + overlap
-        // is the OP-consistent total.  Meyer caps are capacitance-based
-        // (q advanced as C*dv), i.e. C(v)*ddt(V) here -- not charge conserving,
-        // matching ngspice.
+        // and the load routine sums two timepoint halves — spelled below as
+        // half + $prev(half) + overlap, ngspice's exact MODETRAN averaging
+        // (the OP/AC value is 2*half + overlap, which $prev's commit at OP
+        // exit reproduces).  Meyer caps are capacitance-based (q advanced as
+        // C*dv), i.e. C(v)*ddt(V) here -- not charge conserving, matching
+        // ngspice.
         vgstm  = vgsm - von;
         vdsatm = max(vdsat, 0.025);
         if (vgstm <= -phit) begin                   // accumulation
@@ -473,15 +475,19 @@ module mos3(d, g, s, b);
             cgsh = (cox * weff * leff * m / 3.0)
                    * (1.0 - arga * arga / (argb * argb));
         end
-        // Inverted mode: qmeyer ran swapped, so swap its cgs/cgd back.
+        // Inverted mode: qmeyer ran swapped, so swap its cgs/cgd back BEFORE
+        // averaging — ngspice's state slots are device-frame branches, so a
+        // mode flip between timepoints still averages gs with gs.
         if (mode > 0.0) begin
-            capgs = 2.0 * cgsh + cgsw;
-            capgd = 2.0 * cgdh + cgdw;
+            chgs = cgsh;
+            chgd = cgdh;
         end else begin
-            capgs = 2.0 * cgdh + cgsw;
-            capgd = 2.0 * cgsh + cgdw;
+            chgs = cgdh;
+            chgd = cgsh;
         end
-        capgb = 2.0 * cgbh + cgbl;
+        capgs = chgs + $prev(chgs) + cgsw;
+        capgd = chgd + $prev(chgd) + cgdw;
+        capgb = cgbh + $prev(cgbh) + cgbl;
 
         I(g, si) <+ capgs * ddt(V(g, si));
         I(g, di) <+ capgd * ddt(V(g, di));

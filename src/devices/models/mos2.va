@@ -425,8 +425,10 @@ module mos2(d, g, s, b);
         // ==================================================================
         // 10. Meyer gate capacitances (docs 1.6, DEVqmeyer).  DEVqmeyer
         //     returns half the non-constant part because ngspice averages two
-        //     timepoints; a single-evaluation model wants the whole thing, so
-        //     coxm = 2*Cox is fed to the same piecewise.
+        //     timepoints; coxm = 2*Cox feeds the same piecewise, so cg*_m are
+        //     FULL values and the stamps average 0.5*(now + $prev(now)) —
+        //     identical to ngspice's half_now + half_prev MODETRAN sum (the
+        //     OP/AC value 2*half falls out of $prev's commit at OP exit).
         //     ponytail: capacitance-based like ngspice's Meyer, i.e. C*ddt(V),
         //     not charge-conserving.  Swap to a Ward-Dutton partition only if
         //     charge conservation is ever required.
@@ -481,9 +483,9 @@ module mos2(d, g, s, b);
         I(b, di) <+ type*ibd;
         I(b, si) <+ type*ddt(qbs);
         I(b, di) <+ type*ddt(qbd);
-        I(g, si) <+ (cgso_t + cgs_m)*ddt(V(g, si));
-        I(g, di) <+ (cgdo_t + cgd_m)*ddt(V(g, di));
-        I(g, b)  <+ (cgbo_t + cgb_m)*ddt(V(g, b));
+        I(g, si) <+ (cgso_t + 0.5*(cgs_m + $prev(cgs_m)))*ddt(V(g, si));
+        I(g, di) <+ (cgdo_t + 0.5*(cgd_m + $prev(cgd_m)))*ddt(V(g, di));
+        I(g, b)  <+ (cgbo_t + 0.5*(cgb_m + $prev(cgb_m)))*ddt(V(g, b));
 
         // ---- noise (docs "Noise model", mos1noi.c template) --------------
         // RD/RS thermal generators are stamped with their branches above.

@@ -71,7 +71,7 @@ module mos1(d, g, s, b);
     // bias-dependent
     real vgs, vds, vbs, vbd, vgd, mode, vdsx, vgsx, vbx, vcrits, vcritd;
     real sbody, von, vgst, vdsat, bp, id, ibs, ibd, qbs, qbd;
-    real vdsp, vddif, vddif1, vddif2, cgsp, cgsh, cgdh, cgbh;
+    real vdsp, vddif, vddif1, vddif2, cgsp, cgsh, cgdh, cgbh, chgs, chgd;
     real capgs, capgd, capgb;
     real tmp;
 
@@ -295,9 +295,10 @@ module mos1(d, g, s, b);
         qbs = jchg(vbs, czbs, czbssw, pbt, mj, mjsw, fc, f2s, f3s, f4s);
 
         // ============ 1.6 MEYER gate capacitances =========================
-        // DEVqmeyer in the swapped frame (vgst/vdsx already swapped), halves
-        // doubled instead of averaged with the previous timepoint: Verilog-A
-        // has no per-instance history, and 2*half is exactly the doc's OP value.
+        // DEVqmeyer in the swapped frame (vgst/vdsx already swapped). The
+        // halves are averaged with the last ACCEPTED timepoint below ($prev),
+        // ngspice's exact MODETRAN form (mos1load.c capgs = state0 + state1
+        // + overlap).
         if (vdsat > 0.025) vdsp = vdsat; else vdsp = 0.025;
         if (vgst <= -phit) begin
             cgbh = 0.5 * cox;
@@ -331,14 +332,21 @@ module mos1(d, g, s, b);
                 cgsh = cgsp * (1.0 - vddif1 * vddif1 / vddif2);
             end
         end
-        if (mode > 0.0) begin                   // unswap gs/gd outputs
-            capgs = 2.0 * cgsh + cgso * w * m;
-            capgd = 2.0 * cgdh + cgdo * w * m;
+        if (mode > 0.0) begin                   // unswap gs/gd halves
+            chgs = cgsh;
+            chgd = cgdh;
         end else begin
-            capgs = 2.0 * cgdh + cgso * w * m;
-            capgd = 2.0 * cgsh + cgdo * w * m;
+            chgs = cgdh;
+            chgd = cgsh;
         end
-        capgb = 2.0 * cgbh + cgbo * leff * m;
+        // half_now + half_prev + overlap (mos1load.c MODETRAN). Unswap FIRST:
+        // ngspice's state slots are device-frame branches, so a mode flip
+        // between timepoints still averages gs with gs. $prev latches at OP
+        // exit and per accepted step, so AC and the first transient step read
+        // 2*half + overlap — the MODETRANOP/MODEINITSMSIG branch.
+        capgs = chgs + $prev(chgs) + cgso * w * m;
+        capgd = chgd + $prev(chgd) + cgdo * w * m;
+        capgb = cgbh + $prev(cgbh) + cgbo * leff * m;
 
         // ============ contributions (section 3 KCL) =======================
         I(di, si) <+ type * mode * id;
