@@ -188,6 +188,9 @@ pub const Lm = struct {
             },
             .trial => {
                 const rss = dot(residuals, residuals);
+                // A trial that cannot be evaluated fails the run, as `Status`
+                // says; the best point so far stays in `x` (#29).
+                if (std.math.isNan(rss)) return s.stop(.failed);
                 if (!(rss < s.rss)) {
                     s.lambda *= s.opts.cut;
                     if (s.lambda > s.opts.max) return s.stop(.max);
@@ -431,6 +434,21 @@ test "no residuals is already optimal; an unevaluable start fails" {
     try bad.feed(&.{std.math.nan(f64)});
     try std.testing.expectEqual(.failed, bad.status);
     try std.testing.expectEqual(@as(usize, 0), bad.history.rss.items.len);
+}
+
+test "a trial point that cannot be evaluated fails the run" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Measurable only at the start and its finite-difference neighbour.
+    const F = struct {
+        fn eval(_: @This(), x: []const f64, r: []f64) void {
+            r[0] = if (@abs(x[0] - 1) < 1e-2) x[0] - 3 else std.math.nan(f64);
+        }
+    };
+    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, 1, .{});
+    try solve(&lm, F{});
+    try std.testing.expectEqual(.failed, lm.status);
+    try std.testing.expectEqual(@as(f64, 1), lm.x[0]);
 }
 
 test "a step that never improves raises the Marquardt parameter past MAX" {

@@ -180,6 +180,9 @@ These are not checked against an HSPICE run.
 - **Bisection reports the last passing value** and its goal error. The
   RELOUT test reads the goal error, which is relative to max(|GOAL|,
   MINVAL); ABSOUT reads the same error in measure units.
+- **A trial point that cannot be evaluated fails the run** (#29), with the
+  best point so far as the result, as `Status` documents. Retrying it with
+  a larger Marquardt parameter was the alternative.
 
 ## 6. Not supported
 

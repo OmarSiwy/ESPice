@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- An LM optimization whose trial point cannot be simulated or measured fails, keeping the best point so far, instead of retrying it (#29).
 - BISECTION and PASSFAIL optimization over a window near the f64 range no longer test inf as the midpoint (#30).
 - A `.meas` TRIG or TARG without VAL never fires, as in ngspice (its level is 1e99, not 0) (#28).
 - `.matex` starts from the transient operating point, as `.tran` does, not the `.dc` one (#27).
