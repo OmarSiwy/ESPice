@@ -792,15 +792,48 @@ pub const NetBuilder = struct {
             },
             'b' => try addBsource(self.b, dev, self.nl.models),
             'p' => try self.addCpl(dev),
-            // TXL (y) is the same RLGC physics as LTRA (o); both take the
-            // Bergeron-section expansion when it applies.
-            'o', 'y' => try self.addLossyLine(dev),
+            'o' => try self.addLossyLine(dev),
+            'y' => try self.addTxl(dev),
             'u' => try self.addUrc(dev),
             else => try self.addByLetter(letter, dev),
         }
     }
 
-    /// LTRA (O card) / TXL (Y card). Routing per ngspice LTRAsetup §1.1:
+    /// TXL (Y card): `Yxxx n1 gnd n2 gnd model [len l]` — ngspice binds only
+    /// n1/n2 (inp2y.c discards the reference nodes) and runs the Hough Padé
+    /// device, NOT LTRA; matching the golden requires the same split. Cards
+    /// ngspice would not run through TXL (missing R/L/C/length, or the
+    /// r/l > 1.6e10 3-pi expansion) fall back to the LTRA-family route —
+    /// physics-exact where ngspice substitutes a lumped ladder.
+    fn addTxl(self: *NetBuilder, dev: types.Device) !void {
+        route: {
+            if (dev.nodes.len < 3) break :route;
+            var r: f64 = 0;
+            var l: f64 = 0;
+            var g: f64 = 0;
+            var c: f64 = 0;
+            var len: f64 = 0;
+            if (modelName(dev)) |name| {
+                if (findModel(self.nl.models, name)) |m| {
+                    r = kvNumber(m.kv, "r") orelse 0;
+                    l = kvNumber(m.kv, "l") orelse 0;
+                    g = kvNumber(m.kv, "g") orelse 0;
+                    c = kvNumber(m.kv, "c") orelse 0;
+                    len = kvNumber(m.kv, "length") orelse 0;
+                }
+            }
+            if (kvNumber(dev.kv, "len")) |v| len = v;
+            if (r <= 0 or l <= 0 or c <= 0 or len <= 0) break :route;
+            if (r / l > 1.6e10) break :route; // inp2y's 3-pi RC expansion case
+            const nm: devices.txl_native.Model = .{ .r = r, .l = l, .g = g, .c = c, .len = len };
+            const n1 = try self.b.internNode(dev.nodes[0]);
+            const n2 = try self.b.internNode(dev.nodes[2]);
+            return self.b.addDevice(devices.txl_native, nm, .{}, [2]u32{ n1, n2 });
+        }
+        return self.addLossyLine(dev);
+    }
+
+    /// LTRA (O card). Routing per ngspice LTRAsetup §1.1:
     ///   RLC (r,l,c > 0, g = 0) and RC (r,c > 0, l = g = 0) → the native
     ///     recursive-convolution device (devices.ltra_native, ngspice's real
     ///     h1'/h2/h3' method — history, coefficients, chop, step limit);
