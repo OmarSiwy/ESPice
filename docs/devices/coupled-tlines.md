@@ -1,10 +1,18 @@
 # CPL coupled transmission lines — modal decomposition (P element)
 
 Reference: ngspice `cpl/cplload.c`, `cpl/cplsetup.c` (Charles Hough,
-1992). **URGENT cognate gap**: our `coupled_tlines.zig` is a
-2-conductor even/odd special case; `tline/cpl3_4_line` (3 coupled
-lines) blows up to 7.5e34 and `devices/coupled_tlines` FAILs at 6.45e-1.
-This doc specifies the general N-line method ngspice actually runs.
+1992). **Status: closed** — `src/devices/coupled_ltra.zig` is a faithful
+port of the full pipeline below (P cards with N in `supported_n` route
+there; `tline/cpl3_4_line` matches ngspice to 4e-10, `devices/
+coupled_tlines` to 6e-12). The 2-conductor even/odd `coupled_tlines.va`
+cognate remains only as the fallback for unsupported N. Two retired
+experiments, both measurably wrong against the goldens because the
+reference's own approximation IS the spec: per-mode exact LTRA/Bessel
+convolution (1.5e-2 rms on cpl3_4) and per-mode analytic TXL Padé over a
+joint eigenbasis (2.5e-2) — the golden's per-entry constants come from
+polynomial interpolation THROUGH the eight 1/s samples, which neither
+analytic shortcut reproduces. This doc specifies the general N-line
+method ngspice actually runs.
 
 ## 1. Mathematical specification
 
