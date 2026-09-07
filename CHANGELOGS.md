@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- A `.meas` TRIG or TARG without VAL never fires, as in ngspice (its level is 1e99, not 0) (#28).
 - `.matex` starts from the transient operating point, as `.tran` does, not the `.dc` one (#27).
 - `.options gmin` (HSPICE `gmindc`) is the junction shunt of the diode, BJT, JFET, MESFET, HFET, VDMOS and MOS level 1/2/3/9 devices, as in ngspice; they kept 1e-12 S (#78).
 - `.tran` follows ngspice's step options: `maxord=1` is backward Euler under trap too, and the default tmax is min(tstep, (tstop - tstart)/50) (#56).

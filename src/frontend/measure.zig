@@ -164,7 +164,6 @@ fn when(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Word, c
     if (w.len == 0) return error.ParseError;
     const rhs = w[0].rhs orelse return error.ParseError;
     c.vec = try vector(arena, c, analysis, w[0].lhs, ctx);
-    c.val = 1e99;
     // A result variable is always `v(..)`/`i(..)`/`par(..)`: a `(` names one.
     if (std.mem.indexOfScalar(u8, rhs, '(') != null) {
         var other: Clause = .{};
