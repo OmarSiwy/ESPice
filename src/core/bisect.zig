@@ -35,7 +35,7 @@ pub const Bisect = struct {
     /// The window, narrowed to the last pass and the last fail.
     lo: f64,
     hi: f64,
-    /// The initial window's width, the RELIN reference.
+    /// Half the initial window's width, the RELIN reference.
     range: f64,
     /// Which limit passes, once both have been tested.
     pass_hi: bool = false,
@@ -69,7 +69,7 @@ pub const Bisect = struct {
     pub fn init(arena: std.mem.Allocator, method: Method, lo: f64, hi: f64, scale: f64, opts: Options) Bisect {
         assert(method != .lm);
         assert(lo <= hi);
-        return .{ .method = method, .opts = opts, .scale = scale, .lo = lo, .hi = hi, .range = hi - lo, .x = lo, .pts = .{ lo, hi }, .arena = arena };
+        return .{ .method = method, .opts = opts, .scale = scale, .lo = lo, .hi = hi, .range = halfWidth(lo, hi), .x = lo, .pts = .{ lo, hi }, .arena = arena };
     }
 
     /// The values to test next. Empty once `status` is no longer `running`.
@@ -112,8 +112,14 @@ pub const Bisect = struct {
         }
         assert(s.lo <= s.hi);
         assert(s.x == s.lo or s.x == s.hi);
-        s.pts[0] = s.lo + (s.hi - s.lo) / 2;
+        s.pts[0] = s.lo + halfWidth(s.lo, s.hi);
         s.pending = 1;
+    }
+
+    /// (hi - lo) / 2 without the overflow of hi - lo: [-1.5e308, 1.5e308]
+    /// has a finite midpoint.
+    fn halfWidth(lo: f64, hi: f64) f64 {
+        return hi / 2 - lo / 2;
     }
 
     /// BISECTION passes when the measure exceeds its goal; PASSFAIL when
@@ -131,12 +137,13 @@ pub const Bisect = struct {
     /// f64 makes it, so it meets every window tolerance; ABSIN, which also
     /// lifts ITROPT, would otherwise never stop below one ulp.
     fn converged(s: *const Bisect, r: f64) bool {
-        const step = s.hi - s.lo;
-        assert(step >= 0);
-        const mid = s.lo + step / 2;
+        // Half-widths throughout: hi - lo overflows near the f64 range.
+        const half = halfWidth(s.lo, s.hi);
+        assert(half >= 0);
+        const mid = s.lo + half;
         const resolved = mid == s.lo or mid == s.hi;
-        if (s.opts.absin > 0) return step <= s.opts.absin or resolved;
-        if (step > s.opts.relin * s.range and !resolved) return false;
+        if (s.opts.absin > 0) return half <= s.opts.absin / 2 or resolved;
+        if (half > s.opts.relin * s.range and !resolved) return false;
         if (s.method == .passfail) return true;
         return if (s.opts.absout > 0) @abs(r * s.scale) < s.opts.absout else @abs(r) < s.opts.relout;
     }
@@ -250,6 +257,17 @@ test "a BISECTION test that cannot be measured fails the search; equal limits do
     var point = Bisect.init(arena.allocator(), .bisection, 2, 2, 1, .{});
     try solve(&point, F{});
     try std.testing.expectEqual(.bounds, point.status);
+}
+
+test "the midpoint of a window near the f64 range stays inside the window" {
+    // hi - lo overflows here; the halves do not (#30).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s = Bisect.init(arena.allocator(), .bisection, -1.5e308, 1.5e308, 1, .{});
+    try s.feed(&.{ -1, 1 });
+    const mid = s.points()[0];
+    try std.testing.expect(std.math.isFinite(mid) and mid > -1.5e308 and mid < 1.5e308);
+    try std.testing.expect(std.math.isFinite(s.range));
 }
 
 test "ABSOUT holds the latest error in measure units, RELOUT the goal error itself" {
