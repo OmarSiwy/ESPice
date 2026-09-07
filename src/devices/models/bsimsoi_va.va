@@ -4911,14 +4911,33 @@ analog begin : the_module
             end
         end
 
-        vds  = B4SOItype * V(di,si);
-        vbs  = B4SOItype * V(b, si);
-        vgs  = B4SOItype * V(gi,si);
+        /* Newton step limiting. Gate/drain take the SPICE3 ladder
+           (bsim3.va / b3ld.c idiom); the body junctions take ngspice's own
+           B4SOI mechanism — B4SOIlimit's +-0.2 V absolute step (b4soild.c
+           :1019-1027), NOT pnjlim: pnjlim carries a vcrit cold-start seed,
+           and forward-seeding a FLOATING body parks Newton in the
+           high-current basin (.op read 1.6-3.3x ngspice's Id while .dc
+           continuation from below agreed to 1%). $limit shapes the Newton
+           path only — identity at convergence. Without any of it the .dc
+           sweeps walk the body into exp() overflow (Id ~ 1e12 A, NaN).
+
+           The body clamps come LAST and are probe-flipped so the BODY side
+           is the second-named net — the writer (cg_limit anchors the first
+           name). ngspice reconstructs `vb = type*vbs + vs` after
+           B4SOIlimit (b4soild.c:1022): the correction lands on the body
+           node, the channel reference stays. Spelled V(b,si) the writer is
+           si — a body excursion then rewrites the device's local vgs/vds
+           images and the .op walks into the wrong basin of the bistable
+           floating body (measured: Id 5.3% high on devices/b4soi). steplim
+           is symmetric, so the flip only picks the writer. */
+        vds  = B4SOItype * $limit(V(di,si), "limvds", B4SOItype);
+        vgs  = B4SOItype * $limit(V(gi,si), "fetlim", B4SOItype * here_B4SOIvth0, B4SOItype);
+        vbs  = -B4SOItype * $limit(V(si, b), "steplim", 0.2);
         ves  = B4SOItype * V(e, si);
         vbp  = B4SOItype * V(b, p);
         vgp  = B4SOItype * V(gi,p);
-        vsbs = B4SOItype * V(sb,si);
-        vdbd = B4SOItype * V(db,di);
+        vsbs = -B4SOItype * $limit(V(si, sb), "steplim", 0.2);
+        vdbd = -B4SOItype * $limit(V(di, db), "steplim", 0.2);
         vgms = B4SOItype * V(gm,si);
 
         /* determine DC current and derivatives */
@@ -8000,6 +8019,12 @@ analog begin : the_module
         I(si,b)  <+ B4SOIigisl;
         I(db,di) <+ B4SOItype * Ibd;
         I(sb,si) <+ B4SOItype * Ibs;
+        /* ngspice b4soild.c:10528 "Add Gmin since body node is floating":
+           CKTgmin*1e-6 between body and source-prime. Without it the body
+           KCL row is flat wherever every leakage saturates (vgs=1.8,
+           vds=0.06 probe: Newton "converged" with V(b) = -17 kV). 1e-18 S
+           is invisible in any measured current. */
+        I(b, si) <+ (1.0e-6 * $simparam("gmin", 1.0e-12)) * V(b, si);
         I(gi,di) <+ B4SOIIgd + B4SOIIgcd;
         I(gi,si) <+ B4SOIIgs + B4SOIIgcs;
         I(gi,b)  <+ B4SOIig;

@@ -1366,8 +1366,11 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
     } else if (comptime @hasField(D.Model, "mtype")) {
         model.mtype = -1; // mos6/mos9 spell polarity `mtype`
         markGiven(model, "mtype");
+    } else if (comptime @hasField(D.Model, "TYPE")) {
+        model.TYPE = -1; // bsimsoi/hisim2/hisimhv: `TYPE` +1=NMOS, -1=PMOS
+        markGiven(model, "TYPE");
     } else {
-        // ponytail: jfet/jfet2/mes/mesa/vdmos/bsimsoi/hisim have no polarity
+        // ponytail: jfet/jfet2/mes/mesa/vdmos have no polarity
         // parameter at ALL, so a P-type card on them cannot be honoured.
         // Refusing is the point: running it N-type is what produced silent NaN.
         // Upgrade path is model-side — give the .va a `type` parameter the way
@@ -1409,6 +1412,12 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
     // card — SPICE precedence.
     try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
+    // §6.3.4/§3.4.5: recompute parameters declared over other parameters
+    // (BSIMSOI `TOXM = TOX`, tline `td = nl/f`) and localparams, now that the
+    // last card value is written. Guarded per-field on `__given` inside, so an
+    // explicit card value always wins. The dlopen path (vt.derive) already
+    // did this; the comptime path silently never did.
+    if (comptime @hasDecl(D, "derive")) D.derive(&model);
     try b.addDevice(D, model, instance, try deviceNodes(b, D, dev));
 }
 
@@ -1991,10 +2000,23 @@ pub fn valueNumber(value: types.Value) ?f64 {
 
 fn applyKv(target: anytype, kv: []const types.Kv) !void {
     const T = @TypeOf(target.*);
-    @setEvalBranchQuota(10_000);
+    // BSIMSOI's Model has ~1600 fields and each now runs a comptime
+    // char-lowering loop on top of the aliasOf scan.
+    @setEvalBranchQuota(1_000_000);
     inline for (@typeInfo(T).@"struct".fields) |field| {
         if (comptime isScalarAssignable(field.type)) {
-            if (kvNumber(kv, field.name)) |num| {
+            // The whole netlist is lowercased at parse (parser.zig toLowerBuf),
+            // but VA models keep their spec spelling — BSIMSOI/HiSIM declare
+            // `VTH0`, `TOX`, `W` in caps. Exact-name lookup dropped EVERY such
+            // parameter silently (b4soi ran 100% baked defaults). Match on the
+            // comptime-lowercased field name instead; keys are already lower.
+            const key = comptime blk: {
+                var buf: [field.name.len]u8 = undefined;
+                for (field.name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+                const frozen = buf;
+                break :blk frozen;
+            };
+            if (kvNumber(kv, &key)) |num| {
                 @field(target.*, field.name) = castField(field.type, num);
                 markGiven(target, field.name);
             } else if (comptime aliasOf(field.name)) |alias| {
