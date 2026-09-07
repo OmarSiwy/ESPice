@@ -334,13 +334,15 @@ pub fn simulate(
     var cur: []f64 = x;
     var trial: []f64 = x_try;
     var t: f64 = 0;
-    // ngspice dctran first step: min(tstop/100, tstep)/10 at init, then /10
-    // again at the t = 0 breakpoint landing (`if (firsttime) CKTdelta /= 10`)
-    // — net /100. Matching it exactly makes the startup ladder (and every
-    // LTE-driven step after it) replay ngspice's grid on edge circuits.
-    // Never past the first breakpoint — a 1ns pulse edge at t~0 must not be
-    // skipped.
-    var dt: f64 = @min(@min(options.dt_init, effective_dt_max), options.t_stop / 100.0) / 100.0;
+    // ngspice dctran first step: min(tstop/100, tstep)/10 at init, clamped to
+    // tmax (OUTSIDE the min — dctran.c:134 + the resume-loop maxStep clamp),
+    // then /10 again at the t = 0 breakpoint landing (`firsttime` cut) — net
+    // /100. Operand order matters: folding tmax into the min shifts the whole
+    // accepted grid by a constant phase on every tmax < tstep deck (measured
+    // 1 ps vs ngspice on tline/txl1, ringing down the TXL slow pole for 18 ns
+    // after every wavefront). Never past the first breakpoint — a 1ns pulse
+    // edge at t~0 must not be skipped.
+    var dt: f64 = @min(@min(options.dt_init, options.t_stop / 100.0) / 10.0, effective_dt_max) / 10.0;
     if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| {
         if (bp0 < dt) dt = bp0 / 10.0;
     }
@@ -464,7 +466,13 @@ pub fn simulate(
         if (has_charge) {
             simdCopy(q_hist[0], q_snap);
 
-            {
+            // dctran.c firsttime: the first accepted point skips CKTtrunc
+            // entirely ("no check on first time point") — dt REPEATS, it
+            // neither grows nor rejects. Without this the accepted grid runs
+            // one first-dt ahead of ngspice's for the whole transient.
+            if (steps == 0) {
+                dt_next = dt;
+            } else {
                 const order2 = eff_method != .backward_euler;
                 const del = integrator.stepBound(
                     order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
@@ -502,8 +510,9 @@ pub fn simulate(
             }
 
             // Promote BE → configured method when LTE-based dt is stable.
-            // ngspice promotes when trap dt_next > 1.05 * current dt.
-            if (use_be) {
+            // ngspice promotes when trap dt_next > 1.05 * current dt (also
+            // skipped by the firsttime goto).
+            if (steps > 0 and use_be) {
                 const trial_order2 = options.method != .backward_euler;
                 const trial_del = integrator.stepBound(
                     trial_order2, q_hist[0], q_hist[1], q_hist[2], q_hist[3],
