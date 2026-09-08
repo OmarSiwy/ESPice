@@ -183,6 +183,9 @@ These are not checked against an HSPICE run.
 - **A trial point that cannot be evaluated fails the run** (#29), with the
   best point so far as the result, as `Status` documents. Retrying it with
   a larger Marquardt parameter was the alternative.
+- **PARMIN keeps HSPICE's default 0.1**, which sizes the first
+  finite-difference step of an SI-unit width or current far too large; the
+  docs tell sizing decks to lower it (#96).
 
 ## 6. Not supported
 

@@ -267,6 +267,15 @@ On any analysis card, HSPICE's `SWEEP` tail runs the card once per point:
 `SWEEP OPTIMIZE=name RESULTS=m1,m2 MODEL=optmod`. On `.dc`, `DATA=` and
 `MONTE=` work without the word `SWEEP`.
 
+The `OPT` model takes HSPICE's optimizer options with HSPICE's defaults.
+`PARMIN` (default 0.1) floors the parameter scale, so the finite-difference
+step is `DIFSIZ * max(|p|, PARMIN)`: a width or current in SI units (4 µm,
+10 µA) then steps by 100 µm on the first try and stalls. Size such
+parameters with `parmin=1e-7` or so, or give each its own step as the fourth
+argument of `opt1(init, lo, hi, dels)`. A start point that cannot be
+simulated or measured, or a later trial point that cannot, stops the run
+with `optimization failed`.
+
 Statistical functions in expressions: `agauss(nom, abs, sigmas)`,
 `gauss(nom, rel, sigmas)`, `aunif(nom, abs)`, `unif(nom, rel)`,
 `limit(nom, var)`. They return `nom` unless a Monte Carlo sweep or

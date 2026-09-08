@@ -164,10 +164,12 @@ pub const Lm = struct {
         s.evaluations += s.pending;
         switch (s.phase) {
             .start => {
+                // Kept before the check, so a failed start reports what it
+                // measured rather than unwritten memory (#96).
                 const rss = dot(residuals, residuals);
-                if (!std.math.isFinite(rss)) return s.stop(.failed);
                 @memcpy(s.r, residuals);
                 s.rss = rss;
+                if (!std.math.isFinite(rss)) return s.stop(.failed);
                 try s.record();
                 if (rss == 0) return s.stop(.relout);
                 s.jacobianPoints();
@@ -434,6 +436,8 @@ test "no residuals is already optimal; an unevaluable start fails" {
     try bad.feed(&.{std.math.nan(f64)});
     try std.testing.expectEqual(.failed, bad.status);
     try std.testing.expectEqual(@as(usize, 0), bad.history.rss.items.len);
+    // The summary prints `r`: it holds what the start measured (#96).
+    try std.testing.expect(std.math.isNan(bad.r[0]));
 }
 
 test "a trial point that cannot be evaluated fails the run" {
