@@ -217,6 +217,11 @@ pub const Deck = struct {
     /// `.nodeset` guesses: where the operating point's first solve holds
     /// each node.
     nodeset: []const Ic = &.{},
+    /// The first Newton iterate of every operating point, `n` values, in
+    /// place of the cold start (`query.Op.warm_start`); empty is cold. The
+    /// optimizer sets it on the decks of its point sessions
+    /// (dev/analysis/optimize.md).
+    op_guess: []const f64 = &.{},
     /// `.options` tolerances every query starts from.
     deck_tol: numerics.Tolerances,
     /// `.temp` or `.options temp`, in °C, when given.

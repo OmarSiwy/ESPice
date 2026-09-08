@@ -112,6 +112,29 @@ is below the round count's because a round waits for its slowest point:
 transient points of this fit take 2416 to 4494 Newton iterations, and
 three concurrent queries each run about 1.35x slower than one alone. At `--jobs=1` nothing changes.
 
+### Warm starts
+
+A Levenberg-Marquardt point's operating point starts from the one of
+the iterate its step left (`Deck.op_guess`, `op.Options.warm_start`)
+instead of the cold MODEINITJCT start. Each trial point and its
+Jacobian points take the operating point of the accepted iterate they
+step from; the start point and its Jacobian points start cold. The
+Jacobian points of an accepted trial do not take the trial's own
+operating point: under batching they run in the trial's round, before
+it exists, and this rule keeps `--jobs=1` on the same path. The guess
+is the facade's row 0 operating point of the round that accepted the
+iterate (`Session.operatingPoint`). Bisection points start cold.
+
+A warm Newton converges to the same solution within the Newton
+tolerances, so the change in output is intentional and at most at that
+level. Measured: no byte of the printed summary or the raw file moved on
+any `tests/fixtures/optimize/` deck, a 32-stage MOS1 chain delay fit or
+a two-parameter common-source DC fit, at `--jobs=1` and 3. Callgrind
+(ReleaseFast, `-Dcpu=x86_64_v3`, `--jobs=1`): the 32-stage chain fit
+4.257e9 to 4.104e9 instructions (-3.6%), the common-source DC fit
+1.0651e8 to 1.0617e8 (-0.3%: its operating point is a few iterations
+of a four-device circuit, and the sweep dominates).
+
 The points do not use the structural lanes of `sweep/lanes.zig`.
 Those lanes solve one operating point per lane and publish its probes.
 A RESULTS card needs the card's own result, such as a DC sweep, an AC

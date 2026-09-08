@@ -710,16 +710,36 @@ pub const Problem = struct {
 
     /// Feeds `solver` (`core.lm.Lm` or `core.bisect.Bisect`) the residuals
     /// of the points it asks for until it stops.
+    /// A Levenberg-Marquardt point's operating point starts from the one of
+    /// the iterate its step left (dev/analysis/optimize.md, "Warm starts"),
+    /// so the path does not depend on batching; the start's round and every
+    /// bisection point start cold.
     fn search(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, solver: anytype) !void {
         const n = t.spec.live.len;
         const m = t.results.len;
+        const lm = @TypeOf(solver) == *core.lm.Lm;
+        const gpa = self.allocator;
         var residuals: std.ArrayList(f64) = .empty;
-        defer residuals.deinit(self.allocator);
+        defer residuals.deinit(gpa);
+        // The operating points of the accepted iterate, of row 0 of the
+        // last round, and the one this round starts from.
+        var origin: std.ArrayList(f64) = .empty;
+        defer origin.deinit(gpa);
+        var first: std.ArrayList(f64) = .empty;
+        defer first.deinit(gpa);
+        var guess: std.ArrayList(f64) = .empty;
+        defer guess.deinit(gpa);
         while (solver.points().len != 0) {
             const points = solver.points();
-            try residuals.resize(self.allocator, points.len / n * m);
-            try self.evaluatePoints(t, template, base, points, residuals.items);
+            if (lm) if (solver.stepping()) {
+                guess.clearRetainingCapacity();
+                try guess.appendSlice(gpa, origin.items);
+            };
+            try residuals.resize(gpa, points.len / n * m);
+            try self.evaluatePoints(t, template, base, points, guess.items, residuals.items, &first);
+            const accepted = if (lm) solver.history.rss.items.len else 0;
             try solver.feed(residuals.items);
+            if (lm) if (solver.history.rss.items.len > accepted) std.mem.swap(std.ArrayList(f64), &origin, &first);
         }
     }
 
@@ -727,14 +747,17 @@ pub const Problem = struct {
     /// values, n per point, on top of `t.bases[base]`) into `out`, m per
     /// point: the RESULTS cards'
     /// goal errors over the `template` queries run at that point, NaN where
-    /// a query failed or a card found no value.
-    fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, points: []const f64, out: []f64) !void {
+    /// a query failed or a card found no value. Every operating point
+    /// starts from `guess` (cold when empty); `first` takes the one row 0's
+    /// first query solved, empty when it has none.
+    fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, points: []const f64, guess: []const f64, out: []f64, first: *std.ArrayList(f64)) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         const count = points.len / t.spec.live.len;
         var deck = self.prepared.deck;
         deck.variants = try t.rows(a, &self.prepared.circuit, points, base);
+        deck.op_guess = guess;
         const jobs = try a.alloc(Query, count * template.len);
         for (0..count) |p| for (template, jobs[p * template.len ..][0..template.len]) |job, *copy| {
             copy.* = job;
@@ -747,6 +770,8 @@ pub const Problem = struct {
         const ids = try a.alloc(QueryId, jobs.len);
         _ = try session.append(jobs, ids);
         try runSession(&session, self.limits.max_parallel);
+        first.clearRetainingCapacity();
+        if (try session.operatingPoint(ids[0])) |x| try first.appendSlice(self.allocator, x);
         const values = try a.alloc(f64, deck.measures.len);
         const m = t.results.len;
         @memset(out, std.math.nan(f64));

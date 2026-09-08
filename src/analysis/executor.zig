@@ -295,7 +295,13 @@ pub const Executor = struct {
         if (self.job == .op) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
             @memset(self.x.?, 0);
-            const solved = try op.solve(&self.circuit, self.x.?, self.job.op, self.deck.nodeset, self.deck.ic);
+            var options = self.job.op;
+            if (self.deck.op_guess.len != 0) {
+                std.debug.assert(self.deck.op_guess.len == self.circuit.n);
+                @memcpy(self.x.?, self.deck.op_guess);
+                options.warm_start = true;
+            }
+            const solved = try op.solve(&self.circuit, self.x.?, options, self.deck.nodeset, self.deck.ic);
             if (!solved.converged) return error.OpDidNotConverge;
             if (gpu_context) |g| try g.syncHostState();
             // The OP ladder publishes its own sim state (`initial_step`);
