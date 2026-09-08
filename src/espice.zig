@@ -662,7 +662,7 @@ pub const Problem = struct {
             };
             const x: []const f64 = if (t.method == .lm) blk: {
                 const lm = &self.optimization[base];
-                lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, t.spec.grid, @intCast(t.results.len), t.options);
+                lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, t.spec.grid, @intCast(t.results.len), t.options, self.limits.max_parallel > 1);
                 try self.search(t, template.items, base, lm);
                 break :blk lm.x;
             } else blk: {

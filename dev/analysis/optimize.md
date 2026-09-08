@@ -97,7 +97,22 @@ residual. The solver treats a NaN trial as a failed step and a NaN in
 the Jacobian as a failed optimization.
 
 The Jacobian's points are independent, so they run in parallel under
-`--jobs`. They do not use the structural lanes of `sweep/lanes.zig`.
+`--jobs`. Under `--jobs` above 1 the solver also batches (`Lm.batch`):
+the start point and every trial point go out with the n Jacobian points
+around them, so an accepted trial costs one round instead of two. A
+rejected trial's Jacobian points are thrown away and not counted, so the
+path, the evaluation counts and the printed summary are the same as with
+`--jobs=1`; the price is the CPU spent on those discarded points.
+
+Measured (ReleaseFast CPU build, hyperfine, `--jobs=3`, two parameters):
+a 128-stage MOS1 chain with two delay goals (21 evaluations, 5 of 10
+trials accepted) takes 12 rounds instead of 17, 1.81 s to 1.71 s wall for
+1.71x the CPU; `optimize/rc_delay_fit` 13.9 ms to 10.1 ms. The wall gain
+is below the round count's because a round waits for its slowest point:
+transient points of this fit take 2416 to 4494 Newton iterations, and
+three concurrent queries each run about 1.35x slower than one alone. At `--jobs=1` nothing changes.
+
+The points do not use the structural lanes of `sweep/lanes.zig`.
 Those lanes solve one operating point per lane and publish its probes.
 A RESULTS card needs the card's own result, such as a DC sweep, an AC
 sweep or a transient, so each point has to be a full query. The output

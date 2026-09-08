@@ -41,6 +41,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A `.variation` sigma may be an expression over `.param`s and the device's `w`, `l` and `m`, for Pelgrom scaling per device (#100).
 - A `MONTE=` sweep draws the `agauss`/`gauss`/`unif`/`aunif` calls inside `.model` cards per trial; sky130's
   `*_mm` mismatch ran nominal in every trial (#100).
+- `OPTIMIZE=` under `--jobs` above 1 runs each trial point with its Jacobian points in one round, same
+  output: a 128-stage chain fit 1.81 s to 1.71 s, `rc_delay_fit` 13.9 to 10.1 ms at `--jobs=3` (#97).
 - API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change
   global `.param` values on a live Problem without a re-parse: a sky130 sizing point 6 ms, was 87 (#101).
 - A binned MOSFET whose L/W reads a swept or set `.param` takes the bin each point selects, on its
