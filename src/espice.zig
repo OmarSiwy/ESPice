@@ -662,7 +662,7 @@ pub const Problem = struct {
             };
             const x: []const f64 = if (t.method == .lm) blk: {
                 const lm = &self.optimization[base];
-                lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, @intCast(t.results.len), t.options);
+                lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, t.spec.grid, @intCast(t.results.len), t.options);
                 try self.search(t, template.items, base, lm);
                 break :blk lm.x;
             } else blk: {
@@ -670,7 +670,7 @@ pub const Problem = struct {
                 const c = if (goal.first.goal != null) goal.first else goal.second;
                 const scale = @max(@abs(c.goal.?), c.minval) / c.weight;
                 const b = &self.bisection[base];
-                b.* = core.bisect.Bisect.init(a, t.method, t.spec.lo[0], t.spec.hi[0], scale, t.options);
+                b.* = core.bisect.Bisect.init(a, t.method, t.spec.lo[0], t.spec.hi[0], t.spec.grid[0], scale, t.options);
                 try self.search(t, template.items, base, b);
                 break :blk (&b.x)[0..1];
             };
@@ -943,8 +943,11 @@ fn printOptimization(out: *std.Io.Writer, lm: *const core.lm.Lm, t: *const front
         \\  optimized parameters {s} -- final values
         \\
     , .{ lm.rss, lm.gradientNorm(), lm.lambda, lm.evaluations, lm.iterations, t.spec.name });
-    for (t.names, lm.x, t.initial, lm.lo, lm.hi) |name, x, x0, lo, hi|
-        try out.print("  {s} = {e:.6} $ initial {e:.6}, range {e:.6} to {e:.6}\n", .{ name, x, x0, lo, hi });
+    for (t.names, lm.x, t.initial, lm.lo, lm.hi, lm.grid) |name, x, x0, lo, hi, g| {
+        try out.print("  {s} = {e:.6} $ initial {e:.6}, range {e:.6} to {e:.6}", .{ name, x, x0, lo, hi });
+        if (g > 0) try out.print(", grid {e:.6}", .{g});
+        try out.writeAll("\n");
+    }
     try out.writeAll("\n  goal errors at the optimum (weight * (result - goal) / max(|goal|, minval))\n");
     for (t.results, lm.r) |card, r| try out.print("  error({s}) = {e:.6}\n", .{ measures[card].name, r });
 }
@@ -975,9 +978,10 @@ fn printBisection(out: *std.Io.Writer, b: *const core.bisect.Bisect, t: *const f
         \\
         \\  optimized parameters {s} -- final values
         \\  {s} = {e:.6} $ last passing value, range {e:.6} to {e:.6}
-        \\  error({s}) = {e:.6}
         \\
-    , .{ b.evaluations, b.iterations, t.spec.name, t.names[0], b.x, t.spec.lo[0], t.spec.hi[0], measures[t.results[0]].name, b.r });
+    , .{ b.evaluations, b.iterations, t.spec.name, t.names[0], b.x, t.spec.lo[0], t.spec.hi[0] });
+    if (b.grid > 0) try out.print("  grid {e:.6}\n", .{b.grid});
+    try out.print("  error({s}) = {e:.6}\n", .{ measures[t.results[0]].name, b.r });
 }
 
 /// Prints the time since `start.*` under `label` and restarts the lap.

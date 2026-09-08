@@ -544,6 +544,7 @@ PASS	fixtures/op/zero_supply.sp
 PASS	fixtures/optimize/bisection_divider.sp
 PASS	fixtures/optimize/bisection_rc_max.sp
 PASS	fixtures/optimize/divider_goal.sp
+PASS	fixtures/optimize/grid_five_params.sp
 PASS	fixtures/optimize/inequality_goals.sp
 PASS	fixtures/optimize/passfail_level3.sp
 PASS	fixtures/optimize/rc_delay_fit.sp

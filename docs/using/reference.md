@@ -276,6 +276,16 @@ argument of `opt1(init, lo, hi, dels)`. A start point that cannot be
 simulated or measured, or a later trial point that cannot, stops the run
 with `optimization failed`.
 
+A fifth argument, `opt1(init, lo, hi, dels, grid)`, is an ESPice extension
+(HSPICE stops at `dels`): every value the optimizer simulates for that
+parameter is a multiple of `grid` inside `[lo, hi]` (the limits round
+inward), as for a W or L on a manufacturing grid. Each parameter has its
+own grid, and one without stays continuous. Levenberg-Marquardt steps at
+least one grid step for its derivatives, rounds each trial onto the grid,
+stops once a step rounds back to where it is, then tries one grid step
+either way per parameter. BISECTION and PASSFAIL halve the window in grid
+steps and stop at a one-step window. The summary prints each grid.
+
 Statistical functions in expressions: `agauss(nom, abs, sigmas)`,
 `gauss(nom, rel, sigmas)`, `aunif(nom, abs)`, `unif(nom, rel)`,
 `limit(nom, var)`. They return `nom` unless a Monte Carlo sweep or
