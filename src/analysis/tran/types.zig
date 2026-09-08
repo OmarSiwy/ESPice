@@ -52,7 +52,8 @@ pub const Column = struct {
         var hi = c.len;
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            if (c.at(mid) < v) lo = mid + 1 else hi = mid;
+            // !(x >= v), not x < v: no value is >= NaN, so NaN gives len (#52).
+            if (!(c.at(mid) >= v)) lo = mid + 1 else hi = mid;
         }
         return lo;
     }

@@ -608,7 +608,9 @@ pub const GpuPayload = struct {
 //    so held-variable devices that limit (mos1/2/3/6/9, bsim4va,
 //    vbic13_4t) are resident.
 // 28: `Hooks.stage` and `Hooks.scatter_tapes` replace `scatter_bounds`;
-//     `layoutHash` recurses into by-value struct fields (no layout moved).
+//     `layoutHash` recurses into by-value struct fields (no layout moved);
+//     the ngspice-port junction models' Model PODs gain `gmin__`, their gmin
+//     default being `$simparam("gmin")` (#78).
 pub const abi_version: u32 = 28;
 
 /// A device type's construction entry points, exported by each device object

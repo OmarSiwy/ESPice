@@ -30,7 +30,7 @@ module jfet(d, g, s);
     // ---- gate junctions ------------------------------------------------------
     parameter real is     = 1.0e-14 from [0:inf); // A    gate sat current
     parameter real n      = 1.0     from (0:inf); // -    emission coefficient
-    parameter real gmin   = 1.0e-12 from [0:inf); // S    junction shunt
+    parameter real gmin   = $simparam("gmin") from [0:inf); // S    junction shunt
     // ---- parasitics ----------------------------------------------------------
     parameter real rd     = 0.0 from [0:inf);     // ohm
     parameter real rs     = 0.0 from [0:inf);     // ohm

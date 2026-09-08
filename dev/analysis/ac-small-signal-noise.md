@@ -222,6 +222,17 @@ whole sweep (no silent point skipping). Knobs: the shared `sweep` grid
 (`f_start`/`f_stop`/`points`/`kind`, where `kind` is `dec`/`oct`/`lin`);
 tolerance bundle only affects the upstream OP.
 
+**The grid follows ngspice 45** (`FreqSweep` in `src/core/numerics.zig`,
+#26). `.ac dec` spanning at least a decade stretches its ratio to
+$(f_{stop}/f_{start})^{1/\lfloor N \log_{10}(f_{stop}/f_{start})\rfloor}$ so the
+last point is $f_{stop}$ (acan.c:97, flag `land_on_stop`); `.noise` and
+`.sp` keep the plain $10^{1/N}$ ratio, as noisean.c and span.c do. Every
+geometric grid keeps a point up to $f_{stop}(1 + r \cdot 10^{-3})$, ngspice's
+stop tolerance at the default reltol (the deck's reltol is not threaded
+through). One divergence: ngspice's `.ac lin 2` runs one point (acan.c:111
+treats `N - 1 > 1` as the multi-point case); ESPice runs both endpoints, as
+ngspice's own `.noise lin 2` does.
+
 **Noise: the in-device convention.** Every device model owns its noise
 sources; analyses only consume them. Model sources live in
 [models/](../../models/). A device declares comptime `noise_gens` metadata

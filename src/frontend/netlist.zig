@@ -129,6 +129,9 @@ pub const Optimize = struct {
     hi: []const f64,
     /// Finite-difference step; 0 when not given.
     dels: []const f64,
+    /// ESPice's fifth argument (#95): the grid each value stays on; 0 when
+    /// not given.
+    grid: []const f64,
 };
 
 /// An inline `.data` table: one target per column, `values` row-major.
@@ -1993,7 +1996,7 @@ fn Reader(comptime S: type) type {
         /// parameters `name(...)` or `OPTRANGE(...)` define, registered live
         /// at their initial values in deck order.
         fn readOptimize(r: *R, tail: []const Value) Error!Optimize {
-            var opt: Optimize = .{ .name = "", .results = &.{}, .model = "", .live = &.{}, .lo = &.{}, .hi = &.{}, .dels = &.{} };
+            var opt: Optimize = .{ .name = "", .results = &.{}, .model = "", .live = &.{}, .lo = &.{}, .hi = &.{}, .dels = &.{}, .grid = &.{} };
             var results: std.ArrayList([]const u8) = .empty;
             const Key = enum { none, optimize, results, result, model };
             var key: Key = .none;
@@ -2034,11 +2037,13 @@ fn Reader(comptime S: type) type {
             const lo = try r.arena.alloc(f64, n);
             const hi = try r.arena.alloc(f64, n);
             const dels = try r.arena.alloc(f64, n);
+            const grid = try r.arena.alloc(f64, n);
             const top: Frame = .{ .scopes = &r.global_scopes };
-            for (defs.items, live, lo, hi, dels) |d, *k, *l, *u, *h| {
-                // `(init, lo, hi[, dels])`, each a number or an expression.
+            for (defs.items, live, lo, hi, dels, grid) |d, *k, *l, *u, *h, *g| {
+                // `(init, lo, hi[, dels[, grid]])`, each a number or an
+                // expression; the grid is ESPice's, HSPICE stops at dels.
                 const close = std.mem.lastIndexOfScalar(u8, d.text, ')') orelse return error.ParseError;
-                var args: [4]f64 = @splat(0);
+                var args: [5]f64 = @splat(0);
                 var count: usize = 0;
                 var depth: u32 = 0;
                 var start: usize = 1;
@@ -2058,16 +2063,20 @@ fn Reader(comptime S: type) type {
                     start = i + 1;
                 }
                 if (count < 3 or !(args[1] <= args[0] and args[0] <= args[2] and args[1] < args[2])) return error.ParseError;
+                // A grid needs a multiple of itself inside [lo, hi].
+                if (!(args[4] >= 0) or (args[4] > 0 and !(@ceil(args[1] / args[4]) <= @floor(args[2] / args[4])))) return error.ParseError;
                 r.globals.getPtr(d.key).?.* = .{ .num = args[0] };
                 k.* = (try r.liveParam(d.key)).?;
                 l.* = args[1];
                 u.* = args[2];
                 h.* = args[3];
+                g.* = args[4];
             }
             opt.live = live;
             opt.lo = lo;
             opt.hi = hi;
             opt.dels = dels;
+            opt.grid = grid;
             return opt;
         }
 
@@ -3608,14 +3617,15 @@ fn Reader(comptime S: type) type {
 
         // After the walk: shunts and model bins.
 
-        /// `.options gshunt=G cshunt=C` [CR Ch.3]: a conductance and a
-        /// capacitance from every net to ground, added as R and C cards
-        /// named `r.gshunt.<net>` and `c.cshunt.<net>`.
+        /// `.options gshunt=G cshunt=C` [CR Ch.3] and ngspice's `rshunt=R`:
+        /// a conductance, capacitance or resistance from every net to
+        /// ground, added as R and C cards named `r.gshunt.<net>`,
+        /// `c.cshunt.<net>` and `r.rshunt.<net>`.
         fn shunts(r: *R) Error!void {
             const nets = r.hg.vertices.len;
-            inline for (.{ .{ "gshunt", 'r' }, .{ "cshunt", 'c' } }) |s| if (r.option(s[0])) |v| if (v > 0) {
+            inline for (.{ .{ "gshunt", 'r' }, .{ "cshunt", 'c' }, .{ "rshunt", 'r' } }) |s| if (r.option(s[0])) |v| if (v > 0) {
                 for (1..nets) |net| {
-                    const value: Value = .{ .num = if (s[1] == 'r') 1 / v else v };
+                    const value: Value = .{ .num = if (comptime std.mem.eql(u8, s[0], "gshunt")) 1 / v else v };
                     const pins = [2]VertexId{ .from(net), ground };
                     const net_name = r.pool.str(r.hg.vertices.items(.name)[net]);
                     const name = try r.internName(try std.fmt.allocPrint(r.arena, "{c}.{s}.{s}", .{ s[1], s[0], net_name }));

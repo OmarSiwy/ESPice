@@ -357,6 +357,7 @@ const TranTests = struct {
         try testing.expectEqual(@as(usize, 3), t.lowerBound(2));
         try testing.expectEqual(@as(usize, 4), t.lowerBound(4));
         try testing.expectEqual(@as(usize, 0), Column.of(&.{}).lowerBound(1));
+        try testing.expectEqual(@as(usize, 4), t.lowerBound(std.math.nan(f64)));
         const v: Column = .{ .base = rows[1..], .stride = 2, .len = 4 };
         try testing.expectEqual(@as(f64, 13), v.from(2).at(1));
         try testing.expectEqual(@as(usize, 0), v.from(4).len);

@@ -853,8 +853,8 @@ pub const Kind = enum(u8) {
     /// its devices in `.ic` rather than `.dc` state.
     pub fn transient(kind: Kind) bool {
         return switch (kind) {
-            .tran, .four, .fft, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
-            .ac, .dc, .dcmatch, .disto, .hb, .matex, .mc, .noise, .op, .pz, .sens, .sp, .stb, .temp, .tf, .hbac, .hbnoise, .hbxf, .phasenoise, .lstb, .acxf, .dcxf, .dcinc, .acmatch, .dcsens, .hblin => false,
+            .tran, .four, .fft, .tran_noise, .envelope, .matex, .pss, .qpss, .pnoise, .pac, .pxf => true,
+            .ac, .dc, .dcmatch, .disto, .hb, .mc, .noise, .op, .pz, .sens, .sp, .stb, .temp, .tf, .hbac, .hbnoise, .hbxf, .phasenoise, .lstb, .acxf, .dcxf, .dcinc, .acmatch, .dcsens, .hblin => false,
         };
     }
 };
@@ -948,4 +948,10 @@ test "the HB-orbit views carry the fields their solve reads" {
     const pn: PhaseNoise = .{ .f0 = 5e6, .osc_node = 4, .sweep = sweep, .n_harmonics = 3 };
     try t.expectEqual(@as(u32, 4), pn.hb().osc_node);
     try t.expectEqual(@as(u16, 3), pn.hb().n_harmonics);
+}
+
+test "every transient-family query runs off the transient operating point" {
+    // MATEX integrates in time like .tran, so it starts from MODETRANOP (#27).
+    inline for (.{ Kind.tran, Kind.matex, Kind.envelope, Kind.pss }) |k| try std.testing.expect(k.transient());
+    try std.testing.expect(!Kind.dc.transient());
 }

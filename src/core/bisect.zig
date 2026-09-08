@@ -35,8 +35,10 @@ pub const Bisect = struct {
     /// The window, narrowed to the last pass and the last fail.
     lo: f64,
     hi: f64,
-    /// The initial window's width, the RELIN reference.
+    /// Half the initial window's width, the RELIN reference.
     range: f64,
+    /// Every tested value is a multiple of `grid` (#95); 0 is continuous.
+    grid: f64,
     /// Which limit passes, once both have been tested.
     pass_hi: bool = false,
     /// The last passing value; `lo` until a limit passes.
@@ -63,13 +65,16 @@ pub const Bisect = struct {
         r: std.ArrayList(f64) = .empty,
     };
 
-    /// Searches [lo, hi]; the manual ignores the initial value. `scale`
-    /// converts a goal error to measure units for ABSOUT. Asserts that the
-    /// method is not `lm` and that lo <= hi.
-    pub fn init(arena: std.mem.Allocator, method: Method, lo: f64, hi: f64, scale: f64, opts: Options) Bisect {
+    /// Searches [lo, hi], rounded inward onto `grid` when it is positive;
+    /// the manual ignores the initial value. `scale` converts a goal error
+    /// to measure units for ABSOUT. Asserts that the method is not `lm` and
+    /// that a (grid) point lies inside lo <= hi.
+    pub fn init(arena: std.mem.Allocator, method: Method, lo_in: f64, hi_in: f64, grid: f64, scale: f64, opts: Options) Bisect {
+        const lo = if (grid > 0) @ceil(lo_in / grid) * grid else lo_in;
+        const hi = if (grid > 0) @floor(hi_in / grid) * grid else hi_in;
         assert(method != .lm);
         assert(lo <= hi);
-        return .{ .method = method, .opts = opts, .scale = scale, .lo = lo, .hi = hi, .range = hi - lo, .x = lo, .pts = .{ lo, hi }, .arena = arena };
+        return .{ .method = method, .opts = opts, .scale = scale, .lo = lo, .hi = hi, .range = halfWidth(lo, hi), .grid = grid, .x = lo, .pts = .{ lo, hi }, .arena = arena };
     }
 
     /// The values to test next. Empty once `status` is no longer `running`.
@@ -112,8 +117,23 @@ pub const Bisect = struct {
         }
         assert(s.lo <= s.hi);
         assert(s.x == s.lo or s.x == s.hi);
-        s.pts[0] = s.lo + (s.hi - s.lo) / 2;
+        s.pts[0] = s.mid();
         s.pending = 1;
+    }
+
+    /// The window's midpoint; on a grid, the grid point at or below the
+    /// middle grid index, so a one-step window's midpoint is `lo`.
+    fn mid(s: *const Bisect) f64 {
+        if (s.grid == 0) return s.lo + halfWidth(s.lo, s.hi);
+        const a = @round(s.lo / s.grid);
+        const b = @round(s.hi / s.grid);
+        return (a + @floor((b - a) / 2)) * s.grid;
+    }
+
+    /// (hi - lo) / 2 without the overflow of hi - lo: [-1.5e308, 1.5e308]
+    /// has a finite midpoint.
+    fn halfWidth(lo: f64, hi: f64) f64 {
+        return hi / 2 - lo / 2;
     }
 
     /// BISECTION passes when the measure exceeds its goal; PASSFAIL when
@@ -131,12 +151,15 @@ pub const Bisect = struct {
     /// f64 makes it, so it meets every window tolerance; ABSIN, which also
     /// lifts ITROPT, would otherwise never stop below one ulp.
     fn converged(s: *const Bisect, r: f64) bool {
-        const step = s.hi - s.lo;
-        assert(step >= 0);
-        const mid = s.lo + step / 2;
-        const resolved = mid == s.lo or mid == s.hi;
-        if (s.opts.absin > 0) return step <= s.opts.absin or resolved;
-        if (step > s.opts.relin * s.range and !resolved) return false;
+        // Half-widths throughout: hi - lo overflows near the f64 range.
+        const half = halfWidth(s.lo, s.hi);
+        assert(half >= 0);
+        const middle = s.mid();
+        const resolved = middle == s.lo or middle == s.hi;
+        // A one-step grid window cannot narrow further.
+        if (s.grid > 0 and resolved) return true;
+        if (s.opts.absin > 0) return half <= s.opts.absin / 2 or resolved;
+        if (half > s.opts.relin * s.range and !resolved) return false;
         if (s.method == .passfail) return true;
         return if (s.opts.absout > 0) @abs(r * s.scale) < s.opts.absout else @abs(r) < s.opts.relout;
     }
@@ -169,7 +192,7 @@ test "bisection finds a monotone goal crossing from the passing side" {
             return (5 * x / (1e3 + x) - 2) / 2;
         }
     };
-    var s = Bisect.init(arena.allocator(), .bisection, 100, 1e4, 1, .{ .relin = 1e-6, .relout = 1e-4, .itropt = 100 });
+    var s = Bisect.init(arena.allocator(), .bisection, 100, 1e4, 0, 1, .{ .relin = 1e-6, .relout = 1e-4, .itropt = 100 });
     try solve(&s, F{});
     try std.testing.expectEqual(.converged, s.status);
     try std.testing.expect(s.x >= 2e3 / 3.0 and s.x - 2e3 / 3.0 <= 1e-6 * 9900);
@@ -185,12 +208,12 @@ test "pass/fail keeps the last value with a result; bad limits are reported" {
             return if (x < 3) 1 else std.math.nan(f64);
         }
     };
-    var s = Bisect.init(arena.allocator(), .passfail, 0, 10, 1, .{});
+    var s = Bisect.init(arena.allocator(), .passfail, 0, 10, 0, 1, .{});
     try solve(&s, F{});
     try std.testing.expectEqual(.converged, s.status);
     try std.testing.expect(s.x < 3 and 3 - s.x <= 1e-3 * 10);
     try std.testing.expect(!s.pass_hi);
-    var both = Bisect.init(arena.allocator(), .passfail, 0, 2, 1, .{});
+    var both = Bisect.init(arena.allocator(), .passfail, 0, 2, 0, 1, .{});
     try solve(&both, F{});
     try std.testing.expectEqual(.bounds, both.status);
 }
@@ -204,7 +227,7 @@ test "an ABSIN below one ulp of the window still ends the search" {
         }
     };
     // 1e-300 is far below an ulp of 700, so only the f64 floor can stop it.
-    var s = Bisect.init(arena.allocator(), .bisection, 0, 1e3, 1, .{ .absin = 1e-300 });
+    var s = Bisect.init(arena.allocator(), .bisection, 0, 1e3, 0, 1, .{ .absin = 1e-300 });
     try solve(&s, F{});
     try std.testing.expectEqual(.converged, s.status);
     try std.testing.expect(s.iterations < 80);
@@ -220,13 +243,13 @@ test "ABSIN ends the window absolutely, and ITROPT caps a RELIN search" {
         }
     };
     // lo passes here, so the search narrows from below.
-    var abs = Bisect.init(arena.allocator(), .bisection, 0, 8, 1, .{ .absin = 0.5, .itropt = 1 });
+    var abs = Bisect.init(arena.allocator(), .bisection, 0, 8, 0, 1, .{ .absin = 0.5, .itropt = 1 });
     try solve(&abs, F{});
     try std.testing.expectEqual(.converged, abs.status);
     try std.testing.expect(!abs.pass_hi);
     try std.testing.expectEqual(@as(u32, 4), abs.iterations);
     try std.testing.expect(abs.hi - abs.lo <= 0.5 and abs.x <= 3);
-    var capped = Bisect.init(arena.allocator(), .bisection, 0, 8, 1, .{ .relin = 1e-9, .itropt = 3 });
+    var capped = Bisect.init(arena.allocator(), .bisection, 0, 8, 0, 1, .{ .relin = 1e-9, .itropt = 3 });
     try solve(&capped, F{});
     try std.testing.expectEqual(.itropt, capped.status);
     try std.testing.expectEqual(@as(u32, 3), capped.iterations);
@@ -243,13 +266,51 @@ test "a BISECTION test that cannot be measured fails the search; equal limits do
             return if (x > 5) std.math.nan(f64) else x - 1;
         }
     };
-    var s = Bisect.init(arena.allocator(), .bisection, 0, 10, 1, .{});
+    var s = Bisect.init(arena.allocator(), .bisection, 0, 10, 0, 1, .{});
     try solve(&s, F{});
     try std.testing.expectEqual(.failed, s.status);
     try std.testing.expectEqual(@as(usize, 0), s.points().len);
-    var point = Bisect.init(arena.allocator(), .bisection, 2, 2, 1, .{});
+    var point = Bisect.init(arena.allocator(), .bisection, 2, 2, 0, 1, .{});
     try solve(&point, F{});
     try std.testing.expectEqual(.bounds, point.status);
+}
+
+test "the midpoint of a window near the f64 range stays inside the window" {
+    // hi - lo overflows here; the halves do not (#30).
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s = Bisect.init(arena.allocator(), .bisection, -1.5e308, 1.5e308, 0, 1, .{});
+    try s.feed(&.{ -1, 1 });
+    const mid = s.points()[0];
+    try std.testing.expect(std.math.isFinite(mid) and mid > -1.5e308 and mid < 1.5e308);
+    try std.testing.expect(std.math.isFinite(s.range));
+}
+
+test "a gridded bisection tests only grid values and stops on a one-step window" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Passes above 666.67; on a 100 grid inside [150, 9999] the last passing
+    // value is 700 (#95).
+    const F = struct {
+        fn eval(_: @This(), x: f64) f64 {
+            return x - 2e3 / 3.0;
+        }
+    };
+    var s = Bisect.init(arena.allocator(), .bisection, 150, 9999, 100, 1, .{ .relin = 1e-9, .relout = 1e-12, .itropt = 100 });
+    try std.testing.expectEqual(@as(f64, 200), s.points()[0]);
+    try std.testing.expectEqual(@as(f64, 9900), s.points()[1]);
+    while (s.points().len != 0) {
+        const pts = s.points();
+        var r: [2]f64 = undefined;
+        for (pts, 0..) |x, k| {
+            try std.testing.expectEqual(@round(x / 100), x / 100);
+            r[k] = F.eval(.{}, x);
+        }
+        try s.feed(r[0..pts.len]);
+    }
+    try std.testing.expectEqual(.converged, s.status);
+    try std.testing.expectEqual(@as(f64, 700), s.x);
+    try std.testing.expectEqual(@as(f64, 100), s.hi - s.lo);
 }
 
 test "ABSOUT holds the latest error in measure units, RELOUT the goal error itself" {
@@ -262,12 +323,12 @@ test "ABSOUT holds the latest error in measure units, RELOUT the goal error itse
     };
     // `scale` 10 turns the goal error back into measure units, so ABSOUT
     // 0.01 needs a test within 1e-2 of 1.05, while RELOUT 0.01 accepts 1.
-    var abs = Bisect.init(arena.allocator(), .bisection, 0, 4, 10, .{ .relin = 1, .absout = 0.01, .itropt = 100 });
+    var abs = Bisect.init(arena.allocator(), .bisection, 0, 4, 0, 10, .{ .relin = 1, .absout = 0.01, .itropt = 100 });
     try solve(&abs, F{});
     try std.testing.expectEqual(.converged, abs.status);
     try std.testing.expectEqual(@as(u32, 8), abs.iterations);
     try std.testing.expect(@abs(abs.history.r.items[7] * 10) < 0.01);
-    var rel = Bisect.init(arena.allocator(), .bisection, 0, 4, 10, .{ .relin = 1, .relout = 0.01, .itropt = 100 });
+    var rel = Bisect.init(arena.allocator(), .bisection, 0, 4, 0, 10, .{ .relin = 1, .relout = 0.01, .itropt = 100 });
     try solve(&rel, F{});
     try std.testing.expectEqual(.converged, rel.status);
     try std.testing.expectEqual(@as(u32, 2), rel.iterations);

@@ -61,6 +61,10 @@ pub const Lm = struct {
     hi: []const f64,
     /// Per-parameter finite-difference step; 0 selects the DIFSIZ rule.
     dels: []const f64,
+    /// Per-parameter grid step (#95): every point has parameter j at an
+    /// integer multiple of grid[j], and `lo`/`hi` are rounded inward onto
+    /// it. 0 leaves the parameter continuous.
+    grid: []const f64,
     /// The accepted iterate, the result.
     x: []f64,
     /// Residuals at `x`; `rss` is their sum of squares.
@@ -89,10 +93,14 @@ pub const Lm = struct {
     /// Points evaluated, Jacobian points included.
     evaluations: u32 = 0,
     status: Status = .running,
+    /// The stop reason held while the ±1 grid-step polish runs.
+    final: Status = .running,
+    /// The next parameter the polish tries; n once it is done.
+    polish_j: u32 = 0,
     history: History = .{},
     arena: std.mem.Allocator,
 
-    const Phase = enum(u8) { start, jacobian, trial };
+    const Phase = enum(u8) { start, jacobian, trial, polish };
 
     /// Accepted iterates, SoA: row 0 is the starting point.
     pub const History = struct {
@@ -103,27 +111,37 @@ pub const Lm = struct {
         x: std.ArrayList(f64) = .empty,
     };
 
-    /// Starts at `x0` (clamped into [lo, hi]) with `m` residuals per point.
-    /// Slices are copied into `arena`. Asserts at least one parameter, equal
-    /// slice lengths, lo <= hi, CLOSE > 0 and CUT > 1 (anything less never
-    /// grows the Marquardt parameter past MAX, so a rejected step would
-    /// retry forever).
-    pub fn init(arena: std.mem.Allocator, x0: []const f64, lo: []const f64, hi: []const f64, dels: []const f64, m: u32, opts: Options) !Lm {
+    /// Starts at `x0` (clamped into [lo, hi], then snapped onto `grid`)
+    /// with `m` residuals per point. Slices are copied into `arena`. Asserts
+    /// at least one parameter, equal slice lengths, lo <= hi with a grid
+    /// point inside each gridded box, CLOSE > 0 and CUT > 1 (anything less
+    /// never grows the Marquardt parameter past MAX, so a rejected step
+    /// would retry forever).
+    pub fn init(arena: std.mem.Allocator, x0: []const f64, lo: []const f64, hi: []const f64, dels: []const f64, grid: []const f64, m: u32, opts: Options) !Lm {
         const n: u32 = @intCast(x0.len);
         assert(n > 0);
         assert(lo.len == n);
         assert(hi.len == n);
         assert(dels.len == n);
+        assert(grid.len == n);
         for (lo, hi) |l, u| assert(l <= u);
         assert(opts.close > 0);
         assert(opts.cut > 1);
+        const box_lo = try arena.dupe(f64, lo);
+        const box_hi = try arena.dupe(f64, hi);
+        for (box_lo, box_hi, grid) |*l, *u, g| if (g > 0) {
+            l.* = @ceil(l.* / g) * g;
+            u.* = @floor(u.* / g) * g;
+            assert(l.* <= u.*);
+        };
         var s: Lm = .{
             .n = n,
             .m = m,
             .opts = opts,
-            .lo = try arena.dupe(f64, lo),
-            .hi = try arena.dupe(f64, hi),
+            .lo = box_lo,
+            .hi = box_hi,
             .dels = try arena.dupe(f64, dels),
+            .grid = try arena.dupe(f64, grid),
             .x = try arena.alloc(f64, n),
             .r = try arena.alloc(f64, m),
             .jac = try arena.alloc(f64, @as(usize, m) * n),
@@ -131,12 +149,13 @@ pub const Lm = struct {
             .a = try arena.alloc(f64, @as(usize, n) * n),
             .delta = try arena.alloc(f64, n),
             .free = try arena.alloc(bool, n),
-            .pts = try arena.alloc(f64, @as(usize, n) * @max(n, 1)),
+            // n Jacobian points, at least the 2 polish points.
+            .pts = try arena.alloc(f64, @as(usize, n) * @max(n, 2)),
             .h = try arena.alloc(f64, n),
             .lambda = opts.close,
             .arena = arena,
         };
-        for (s.x, x0, lo, hi) |*x, v, l, u| x.* = std.math.clamp(v, l, u);
+        for (s.x, x0, s.lo, s.hi, s.grid) |*x, v, l, u, g| x.* = std.math.clamp(onGrid(g, v), l, u);
         @memcpy(s.pts[0..n], s.x);
         @memset(s.g, 0);
         @memset(s.free, true);
@@ -148,7 +167,7 @@ pub const Lm = struct {
     pub fn points(s: *const Lm) []const f64 {
         if (s.status != .running) return &.{};
         assert(s.pending >= 1);
-        assert(s.pending <= s.n);
+        assert(s.pending <= @max(s.n, 2)); // n Jacobian or 2 polish points
         return s.pts[0 .. @as(usize, s.pending) * s.n];
     }
 
@@ -164,10 +183,12 @@ pub const Lm = struct {
         s.evaluations += s.pending;
         switch (s.phase) {
             .start => {
+                // Kept before the check, so a failed start reports what it
+                // measured rather than unwritten memory (#96).
                 const rss = dot(residuals, residuals);
-                if (!std.math.isFinite(rss)) return s.stop(.failed);
                 @memcpy(s.r, residuals);
                 s.rss = rss;
+                if (!std.math.isFinite(rss)) return s.stop(.failed);
                 try s.record();
                 if (rss == 0) return s.stop(.relout);
                 s.jacobianPoints();
@@ -188,6 +209,9 @@ pub const Lm = struct {
             },
             .trial => {
                 const rss = dot(residuals, residuals);
+                // A trial that cannot be evaluated fails the run, as `Status`
+                // says; the best point so far stays in `x` (#29).
+                if (std.math.isNan(rss)) return s.stop(.failed);
                 if (!(rss < s.rss)) {
                     s.lambda *= s.opts.cut;
                     if (s.lambda > s.opts.max) return s.stop(.max);
@@ -206,6 +230,28 @@ pub const Lm = struct {
                 if (rss == 0 or rel_out < s.opts.relout) return s.stop(.relout);
                 if (s.iterations >= s.opts.itropt) return s.stop(.itropt);
                 s.jacobianPoints();
+            },
+            .polish => {
+                var best: ?usize = null;
+                var best_rss = s.rss;
+                for (0..s.pending) |p| {
+                    const rr = residuals[p * m ..][0..m];
+                    const v = dot(rr, rr);
+                    if (v < best_rss) {
+                        best = p;
+                        best_rss = v;
+                    }
+                }
+                if (best) |p| {
+                    @memcpy(s.x, s.pts[p * n ..][0..n]);
+                    @memcpy(s.r, residuals[p * m ..][0..m]);
+                    s.rss = best_rss;
+                    try s.record();
+                }
+                if (s.rss == 0 or !s.polishPoints()) {
+                    s.status = s.final;
+                    s.pending = 0;
+                }
             },
         }
     }
@@ -232,10 +278,41 @@ pub const Lm = struct {
         return @sqrt(norm);
     }
 
+    /// Ends the run, after one polish pass when a parameter is gridded.
     fn stop(s: *Lm, status: Status) void {
         assert(status != .running);
+        if (status != .failed and s.phase != .polish and s.rss > 0 and s.polishPoints()) {
+            s.final = status;
+            return;
+        }
         s.status = status;
         s.pending = 0;
+    }
+
+    /// Queues x ± one grid step of the next gridded parameter, inside the
+    /// box, one parameter at a time so each move builds on the last; false
+    /// once every parameter has had its turn.
+    fn polishPoints(s: *Lm) bool {
+        const n = s.n;
+        while (s.polish_j < n) {
+            const j = s.polish_j;
+            s.polish_j += 1;
+            if (s.grid[j] == 0) continue;
+            var k: u32 = 0;
+            for ([2]f64{ -1, 1 }) |dir| {
+                const v = onGrid(s.grid[j], s.x[j] + dir * s.grid[j]);
+                if (v < s.lo[j] or v > s.hi[j]) continue;
+                const p = s.pts[k * n ..][0..n];
+                @memcpy(p, s.x);
+                p[j] = v;
+                k += 1;
+            }
+            if (k == 0) continue;
+            s.pending = k;
+            s.phase = .polish;
+            return true;
+        }
+        return false;
     }
 
     fn record(s: *Lm) !void {
@@ -255,6 +332,8 @@ pub const Lm = struct {
         assert(s.status == .running);
         for (0..n) |j| {
             var h = if (s.dels[j] != 0) @abs(s.dels[j]) else s.opts.difsiz * @max(@abs(s.x[j]), s.opts.parmin);
+            // At least one grid step, a whole number of them.
+            if (s.grid[j] > 0) h = @max(@round(h / s.grid[j]), 1) * s.grid[j];
             if (s.x[j] + h > s.hi[j]) {
                 const up = s.hi[j] - s.x[j];
                 const down = s.x[j] - s.lo[j];
@@ -262,10 +341,10 @@ pub const Lm = struct {
             }
             // DIFSIZ and PARMIN are positive, so a zero step is a bug here.
             assert(h != 0);
-            s.h[j] = h;
             const p = s.pts[j * n ..][0..n];
             @memcpy(p, s.x);
-            p[j] += h;
+            p[j] = onGrid(s.grid[j], s.x[j] + h);
+            s.h[j] = p[j] - s.x[j];
         }
         s.pending = n;
         s.phase = .jacobian;
@@ -298,8 +377,9 @@ pub const Lm = struct {
         }
         const t = s.pts[0..n];
         var moved = false;
-        for (t, s.x, s.delta, s.lo, s.hi) |*p, x, d, l, u| {
-            p.* = std.math.clamp(x + d, l, u);
+        // A gridded step under half a grid step rounds back onto x: converged.
+        for (t, s.x, s.delta, s.lo, s.hi, s.grid) |*p, x, d, l, u, g| {
+            p.* = std.math.clamp(onGrid(g, x + d), l, u);
             moved = moved or p.* != x;
         }
         if (!moved) return s.stop(.relin);
@@ -307,6 +387,11 @@ pub const Lm = struct {
         s.phase = .trial;
     }
 };
+
+/// `v` rounded to the nearest multiple of `g`; `g == 0` is continuous.
+fn onGrid(g: f64, v: f64) f64 {
+    return if (g > 0) @round(v / g) * g else v;
+}
 
 /// Solves the symmetric positive definite `a` (n x n, row-major, destroyed)
 /// against `b` in place. False when `a` is not positive definite.
@@ -361,7 +446,7 @@ test "a divider sized to its target converges to the exact resistance" {
             r[0] = (5 * x[0] / (1e3 + x[0]) - 2) / 2;
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, 1, .{});
+    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, &.{0}, 1, .{});
     try solve(&lm, F{});
     try std.testing.expect(lm.status != .failed and lm.status != .max);
     try std.testing.expectApproxEqRel(2e3 / 3.0, lm.x[0], 1e-4);
@@ -376,7 +461,7 @@ test "Rosenbrock's valley: two parameters reach the known optimum" {
             r[1] = 1 - x[0];
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{ -1.2, 1 }, &.{ -5, -5 }, &.{ 5, 5 }, &.{ 0, 0 }, 2, .{ .itropt = 200, .relin = 1e-9, .relout = 1e-12, .grad = 1e-12, .difsiz = 1e-7 });
+    var lm = try Lm.init(arena.allocator(), &.{ -1.2, 1 }, &.{ -5, -5 }, &.{ 5, 5 }, &.{ 0, 0 }, &.{ 0, 0 }, 2, .{ .itropt = 200, .relin = 1e-9, .relout = 1e-12, .grad = 1e-12, .difsiz = 1e-7 });
     try solve(&lm, F{});
     try std.testing.expectApproxEqAbs(1, lm.x[0], 1e-4);
     try std.testing.expectApproxEqAbs(1, lm.x[1], 1e-4);
@@ -391,7 +476,7 @@ test "an unreachable goal stops on the limit" {
             r[0] = (5 * x[0] / (1e3 + x[0]) - 4.9) / 4.9;
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, 1, .{});
+    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, &.{0}, 1, .{});
     try solve(&lm, F{});
     try std.testing.expectEqual(1e4, lm.x[0]);
     try std.testing.expectEqual(1, lm.pinned(0));
@@ -403,7 +488,7 @@ test "every point asked for stays inside a box narrower than the step" {
     defer arena.deinit();
     // DELS = 1 on a box of width 1: neither x + 1 nor x - 1 fits, so the
     // step must shrink to the room the box has.
-    var lm = try Lm.init(arena.allocator(), &.{ 0.5, 0.9 }, &.{ 0, 0 }, &.{ 1, 1 }, &.{ 1, 1 }, 2, .{ .itropt = 50 });
+    var lm = try Lm.init(arena.allocator(), &.{ 0.5, 0.9 }, &.{ 0, 0 }, &.{ 1, 1 }, &.{ 1, 1 }, &.{ 0, 0 }, 2, .{ .itropt = 50 });
     var buf: [4]f64 = undefined;
     while (lm.points().len != 0) {
         const pts = lm.points();
@@ -423,14 +508,31 @@ test "every point asked for stays inside a box narrower than the step" {
 test "no residuals is already optimal; an unevaluable start fails" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var none = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, 0, .{});
+    var none = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, &.{0}, 0, .{});
     try none.feed(&.{});
     try std.testing.expectEqual(.relout, none.status);
     try std.testing.expectEqual(@as(usize, 0), none.points().len);
-    var bad = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, 1, .{});
+    var bad = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, &.{0}, 1, .{});
     try bad.feed(&.{std.math.nan(f64)});
     try std.testing.expectEqual(.failed, bad.status);
     try std.testing.expectEqual(@as(usize, 0), bad.history.rss.items.len);
+    // The summary prints `r`: it holds what the start measured (#96).
+    try std.testing.expect(std.math.isNan(bad.r[0]));
+}
+
+test "a trial point that cannot be evaluated fails the run" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Measurable only at the start and its finite-difference neighbour.
+    const F = struct {
+        fn eval(_: @This(), x: []const f64, r: []f64) void {
+            r[0] = if (@abs(x[0] - 1) < 1e-2) x[0] - 3 else std.math.nan(f64);
+        }
+    };
+    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, &.{0}, 1, .{});
+    try solve(&lm, F{});
+    try std.testing.expectEqual(.failed, lm.status);
+    try std.testing.expectEqual(@as(f64, 1), lm.x[0]);
 }
 
 test "a step that never improves raises the Marquardt parameter past MAX" {
@@ -442,11 +544,35 @@ test "a step that never improves raises the Marquardt parameter past MAX" {
             r[0] = if (x[0] == 1) 0.5 else 1;
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, 1, .{ .max = 1e3 });
+    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, &.{0}, 1, .{ .max = 1e3 });
     try solve(&lm, F{});
     try std.testing.expectEqual(.max, lm.status);
     try std.testing.expectEqual(@as(f64, 1), lm.x[0]);
     try std.testing.expect(lm.lambda > 1e3);
+}
+
+test "every point stays on each parameter's own grid, and the result is the nearest grid point" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // Separable goals between grid points: the best gridded point is the
+    // nearest multiple per parameter; the last one has no grid (#95).
+    const grid = [_]f64{ 0.5, 0.2, 1, 0.25, 0 };
+    const target = [_]f64{ 1.3, 0.73, 4.4, 2.1, 0.77 };
+    const want = [_]f64{ 1.5, 0.8, 4, 2, 0.77 };
+    var lm = try Lm.init(arena.allocator(), &.{ 0.1, 3.3, 9, 0.4, 2 }, &.{ 0.1, 0.1, 0, 0.1, 0 }, &.{ 9.9, 9.9, 9.9, 9.9, 9.9 }, &.{ 0, 0, 0, 0, 0 }, &grid, 5, .{ .itropt = 100 });
+    var buf: [10 * 5]f64 = undefined;
+    while (lm.points().len != 0) {
+        const pts = lm.points();
+        for (0..pts.len / 5) |p| for (0..5) |j| {
+            const v = pts[p * 5 + j];
+            if (grid[j] > 0) try std.testing.expectApproxEqAbs(@round(v / grid[j]), v / grid[j], 1e-9);
+            buf[p * 5 + j] = v - target[j];
+        };
+        try lm.feed(buf[0 .. pts.len / 5 * 5]);
+    }
+    try std.testing.expect(lm.status != .failed and lm.status != .max);
+    try std.testing.expectEqual(@as(u32, 5), lm.polish_j);
+    for (want, lm.x, grid) |w, x, g| try std.testing.expectApproxEqAbs(w, x, @as(f64, if (g > 0) 1e-12 else 1e-3));
 }
 
 test cholesky {

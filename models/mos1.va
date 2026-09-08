@@ -58,7 +58,7 @@ module mos1(d, g, s, b);
 
     // ---- temperature ---------------------------------------------------
     parameter real    tnom   = $simparam("tnom");    // parameter measurement temp [degC]
-    parameter real    gmin   = 1.0e-12;              // junction conductance floor [S]
+    parameter real    gmin   = $simparam("gmin");              // junction conductance floor [S]
 
     // ---- noise (mos1noi.c) ---------------------------------------------
     parameter real    kf     = 0.0 from [0:inf);     // flicker coefficient

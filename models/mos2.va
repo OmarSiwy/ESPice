@@ -102,7 +102,7 @@ module mos2(d, g, s, b);
     parameter real tnom = $simparam("tnom");     // parameter reference [degC]
     parameter real    temp   = 27.0;                 // instance temperature, overrides $temperature [degC]
     parameter real    dtemp  = 0.0;                  // instance offset from $temperature [K]
-    parameter real gmin = 1.0e-12 from [0:inf);  // junction shunt          [S]
+    parameter real gmin = $simparam("gmin") from [0:inf);  // junction shunt          [S]
 
     // bias-independent
     real tk, tnomk, vt, vtnom, fact1, fact2, egfet1, egfet, arg1, argt, ratio;

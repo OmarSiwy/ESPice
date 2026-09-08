@@ -180,6 +180,19 @@ These are not checked against an HSPICE run.
 - **Bisection reports the last passing value** and its goal error. The
   RELOUT test reads the goal error, which is relative to max(|GOAL|,
   MINVAL); ABSOUT reads the same error in measure units.
+- **The grid** (`name(init, lo, hi, dels, grid)`, #95) is an ESPice
+  extension for W and L on a manufacturing grid. Every simulated point is
+  on each parameter's own grid. LM rounds the Jacobian step up to whole
+  grid steps and each trial onto the grid, so a step under half a grid step
+  rounds back onto `x` and ends the run as RELIN; then it tries x ± one grid
+  step one parameter at a time, keeping each improvement (`Lm.polish_j`).
+  Bisection halves the window in grid indices and stops at one step.
+- **A trial point that cannot be evaluated fails the run** (#29), with the
+  best point so far as the result, as `Status` documents. Retrying it with
+  a larger Marquardt parameter was the alternative.
+- **PARMIN keeps HSPICE's default 0.1**, which sizes the first
+  finite-difference step of an SI-unit width or current far too large; the
+  docs tell sizing decks to lower it (#96).
 
 ## 6. Not supported
 

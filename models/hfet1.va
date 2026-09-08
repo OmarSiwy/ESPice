@@ -125,7 +125,7 @@ module hfet1(d, g, s);
                                                    // circuit temperature). FGDS/DELF
                                                    // are dead in hfetload.c, so tf
                                                    // is inert
-    parameter real gmin = 1e-12 from [0:inf);      // only inside the gate diodes
+    parameter real gmin = $simparam("gmin") from [0:inf);      // only inside the gate diodes
 
     // ---- diode(): ngspice hfetload.c:772-798, the exact large-argument
     //      continuation of the ideal diode in normalised form.  This is what

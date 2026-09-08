@@ -314,6 +314,7 @@ PASS	fixtures/hspice/dcvolt_uic.sp
 PASS	fixtures/hspice/fft_hann.sp
 PASS	fixtures/hspice/fft_meas.sp
 PASS	fixtures/hspice/fft_rect.sp
+PASS	fixtures/hspice/gmindc.sp
 PASS	fixtures/hspice/gshunt.sp
 PASS	fixtures/hspice/hblin_mixer.sp
 PASS	fixtures/hspice/hblin_noise.sp
@@ -529,6 +530,8 @@ PASS	fixtures/op/millivolt_supply.sp
 PASS	fixtures/op/mos_level_card_spellings.sp
 PASS	fixtures/op/negative_supply.sp
 PASS	fixtures/op/nodeset_latch.sp
+PASS	fixtures/op/option_gmin_ngspice.sp
+PASS	fixtures/op/option_rshunt_ngspice.sp
 PASS	fixtures/op/parallel_resistors.sp
 PASS	fixtures/op/ratio_million_to_one.sp
 PASS	fixtures/op/ratio_one_to_million.sp
@@ -541,6 +544,7 @@ PASS	fixtures/op/zero_supply.sp
 PASS	fixtures/optimize/bisection_divider.sp
 PASS	fixtures/optimize/bisection_rc_max.sp
 PASS	fixtures/optimize/divider_goal.sp
+PASS	fixtures/optimize/grid_five_params.sp
 PASS	fixtures/optimize/inequality_goals.sp
 PASS	fixtures/optimize/passfail_level3.sp
 PASS	fixtures/optimize/rc_delay_fit.sp
@@ -787,6 +791,7 @@ PASS	fixtures/tran/device_urc.sp
 PASS	fixtures/tran/device_vsource.sp
 PASS	fixtures/tran/finite_rise_negative.sp
 PASS	fixtures/tran/finite_rise_positive.sp
+PASS	fixtures/tran/gear_maxord6_ngspice.sp
 PASS	fixtures/tran/ic_large.sp
 PASS	fixtures/tran/ic_negative.sp
 PASS	fixtures/tran/ic_no_uic_op.sp
@@ -818,7 +823,9 @@ PASS	fixtures/tran/rc_sinusoidal_startup.sp
 PASS	fixtures/tran/sine.sp
 PASS	fixtures/tran/sine_offset_phase.sp
 PASS	fixtures/tran/spectre_skipdc_euler.sp
+PASS	fixtures/tran/trap_maxord1_ngspice.sp
 PASS	fixtures/tran/trap_xmu_damping.sp
+PASS	fixtures/tran/tstart_tmax_ngspice.sp
 PASS	fixtures/tran/txl_tran_long_run_past_2048.sp
 PASS	fixtures/tran/txl_tran_matched_step.sp
 PASS	fixtures/tran/txl_tran_mismatched_load.sp

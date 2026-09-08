@@ -176,12 +176,12 @@ against each `.option search='dir'`. Includes nest up to 32 levels.
 | `itl1`, `itl2`, `itl4` | 100, 50, 10 | Newton iteration limits: operating point, DC sweep point, transient step |
 | `trtol` | 7 | transient truncation-error factor |
 | `method` | `trap` | `trap` (`trapezoidal`) or `gear` (`bdf`) |
-| `maxord` | | Gear order; `maxord=1` with `gear` is backward Euler |
+| `maxord` | 2 | integration order cap; `maxord=1` is backward Euler under `trap` or `gear`, and nothing runs above order 2 (as ngspice) |
 | `xmu` | 0.5 | trapezoidal damping, 0 to 0.5 (0 is backward Euler) |
 | `temp` | 27 | circuit temperature, °C |
 | `tnom` | 27 (HSPICE 25) | model reference temperature, °C |
 | `delmax` | | transient step cap when `.tran` gives none |
-| `gshunt`, `cshunt` | | R and C from every net to ground |
+| `gshunt`, `cshunt`, `rshunt` | | conductance, capacitance and (ngspice) resistance from every net to ground |
 | `scale` | 1 | geometry scale for model binning |
 | `wnflag` | 0 (HSPICE 1) | bin selection by per-finger W |
 | `seed` | 1 | Monte Carlo seed |
@@ -266,6 +266,25 @@ On any analysis card, HSPICE's `SWEEP` tail runs the card once per point:
 `SWEEP DATA=name`, `SWEEP MONTE=n [FIRSTRUN=k]`, `SWEEP MONTE=list(10 20:30)`,
 `SWEEP OPTIMIZE=name RESULTS=m1,m2 MODEL=optmod`. On `.dc`, `DATA=` and
 `MONTE=` work without the word `SWEEP`.
+
+The `OPT` model takes HSPICE's optimizer options with HSPICE's defaults.
+`PARMIN` (default 0.1) floors the parameter scale, so the finite-difference
+step is `DIFSIZ * max(|p|, PARMIN)`: a width or current in SI units (4 µm,
+10 µA) then steps by 100 µm on the first try and stalls. Size such
+parameters with `parmin=1e-7` or so, or give each its own step as the fourth
+argument of `opt1(init, lo, hi, dels)`. A start point that cannot be
+simulated or measured, or a later trial point that cannot, stops the run
+with `optimization failed`.
+
+A fifth argument, `opt1(init, lo, hi, dels, grid)`, is an ESPice extension
+(HSPICE stops at `dels`): every value the optimizer simulates for that
+parameter is a multiple of `grid` inside `[lo, hi]` (the limits round
+inward), as for a W or L on a manufacturing grid. Each parameter has its
+own grid, and one without stays continuous. Levenberg-Marquardt steps at
+least one grid step for its derivatives, rounds each trial onto the grid,
+stops once a step rounds back to where it is, then tries one grid step
+either way per parameter. BISECTION and PASSFAIL halve the window in grid
+steps and stop at a one-step window. The summary prints each grid.
 
 Statistical functions in expressions: `agauss(nom, abs, sigmas)`,
 `gauss(nom, rel, sigmas)`, `aunif(nom, abs)`, `unif(nom, rel)`,

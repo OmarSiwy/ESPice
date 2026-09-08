@@ -78,7 +78,7 @@ module mos3(d, g, s, b);
     parameter real    cjsw = 0.0 from [0:inf);    // sidewall cap [F/m]
     parameter real    mj   = 0.5 from (0:1);      // bottom grading
     parameter real    mjsw = 0.33 from (0:1);     // sidewall grading
-    parameter real    gmin = 1e-12 from [0:inf);  // junction conductance floor [S]
+    parameter real    gmin = $simparam("gmin") from [0:inf);  // junction conductance floor [S]
 
     // ---- gate overlap capacitance --------------------------------------
     parameter real    cgso = 0.0 from [0:inf);  // gate-source overlap [F/m]

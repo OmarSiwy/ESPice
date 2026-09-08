@@ -317,7 +317,9 @@ pub const MeasureClause = struct {
     /// `vm(..)` and the like, `g` (degrees) from `lstb(p)`, 0 for the real
     /// part.
     vectype: u8 = 0,
-    val: f64 = 0,
+    /// The level to cross; ngspice's unset m_val is 1e99 (com_measure2.c:1389),
+    /// so a TRIG or TARG without VAL never fires.
+    val: f64 = 1e99,
     rise: i32 = measure_unset,
     fall: i32 = measure_unset,
     cross: i32 = measure_unset,
@@ -416,4 +418,10 @@ test "goalError weighs the miss against the goal, floored at MINVAL, and is zero
     try t.expectEqual(@as(?f64, null), m.goalError(1));
     m.second = .{ .goal = -4 };
     try t.expectEqual(@as(?f64, (1.0 + 4) / 4.0), m.goalError(1));
+}
+
+test "an unset measure level is ngspice's 1e99" {
+    // com_measure2.c:1389 m_val = 1e99: a TRIG without VAL never fires (#28).
+    const c: MeasureClause = .{};
+    try std.testing.expectEqual(@as(f64, 1e99), c.val);
 }

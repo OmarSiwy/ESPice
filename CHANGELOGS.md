@@ -44,6 +44,16 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
   t = 0, not from the 1 us settle's sources and timers (#53).
 - Playground: espice.wasm gets a 16 MiB stack (the corpus peaks at 1.2 MiB, past the 1 MiB default), pole-zero runs with no poles and `.load`/`.vec`/`FILE=` decks report cleanly, and `zig build wasm-compare` checks it against the native espice over the corpus (#8).
 - On 32-bit targets (the wasm playground) `.tran` with MATEX and envelope runs no longer fail `InvalidQueryOptions`, and Monte Carlo draws match the 64-bit build; `-Dsingle-threaded` builds and tests the playground's code paths natively (#8).
+- Optimized parameters can stay on a grid: `opt1(init, lo, hi, dels, grid)`, an ESPice extension, keeps every simulated value and the result on multiples of `grid` (#95).
+- An optimization whose start point fails prints the goal errors it measured, not uninitialized memory; the docs explain PARMIN for SI-unit sizing (#96).
+- An LM optimization whose trial point cannot be simulated or measured fails, keeping the best point so far, instead of retrying it (#29).
+- BISECTION and PASSFAIL optimization over a window near the f64 range no longer test inf as the midpoint (#30).
+- A `.meas` TRIG or TARG without VAL never fires, as in ngspice (its level is 1e99, not 0) (#28).
+- `.matex` starts from the transient operating point, as `.tran` does, not the `.dc` one (#27).
+- `.options gmin` (HSPICE `gmindc`) is the junction shunt of the diode, BJT, JFET, MESFET, HFET, VDMOS and MOS level 1/2/3/9 devices, as in ngspice; they kept 1e-12 S (#78).
+- `.tran` follows ngspice's step options: `maxord=1` is backward Euler under trap too, and the default tmax is min(tstep, (tstop - tstart)/50) (#56).
+- `.options rshunt=R` adds a resistor from every node to ground, as in ngspice (#11).
+- `.ac dec` ends on `fstop` as ngspice does (`.ac dec 3 10 730` ends at 730), and `lin N f f` is one point (#26).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

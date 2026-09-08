@@ -108,7 +108,7 @@ collides with an ngspice spelling:
 - **Runs and sweeps:** `.alter` blocks (cumulative, one run each, plots
   named `(alter=n)`); `.data` tables with `SWEEP DATA=name`; `SWEEP
   MONTE=n` and `MONTE=list(...)`; `SWEEP OPTIMIZE=` with `.param p =
-  name(init, lo, hi)` and `.meas ... GOAL=`.
+  name(init, lo, hi[, dels[, grid]])` (the grid is ESPice's) and `.meas ... GOAL=`.
 - **Analysis cards:** `.op t1 t2 ...` (operating points at times),
   `.dc ... POI`, `.ac POI`, `.four f v(a) v(b) ...`, `.fft`, `.lin`,
   `.net`, `.sn`/`.snac`/`.snxf`/`.snnoise`/`.snosc`, `.hb TONES= NHARMS=`,

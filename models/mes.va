@@ -41,7 +41,7 @@ module mes(d, g, s);
     parameter real af     = 1.0     from (0:inf);   // flicker noise exponent
     parameter real area   = 1.0     from (0:inf);   // instance area multiplier
     parameter real m      = 1.0     from (0:inf);   // instance parallel multiplier
-    parameter real gmin   = 1.0e-12 from [0:inf);   // shunt across each junction
+    parameter real gmin   = $simparam("gmin") from [0:inf);   // shunt across each junction
 
     real vt0, scale, fourkt;
     real vgs, vgd, vds, mode, vx, vdx, arg, igs, igd;

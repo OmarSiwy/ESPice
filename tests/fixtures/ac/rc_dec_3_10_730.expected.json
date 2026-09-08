@@ -4,7 +4,7 @@
   "purpose": "RC lowpass on dec frequency grid",
   "oracle": {
     "kind": "analytic",
-    "derivation": "H(f)=1/(1+j*2*pi*f*R*C). LIN includes both endpoints; DEC/OCT are points per decade/octave."
+    "derivation": "H(f)=1/(1+j*2*pi*f*R*C). LIN includes both endpoints; DEC/OCT are points per decade/octave. ngspice 45 .ac stretches the dec ratio to (fstop/fstart)^(1/floor(log10(fstop/fstart)*N)) so the grid ends on fstop (acan.c:97); 6 points 10..730, as ngspice 45 prints."
   },
   "expect": {
     "status": "success",
@@ -54,24 +54,24 @@
                 -0.062584778270572
               ],
               [
-                0.98200547803514,
-                -0.13293125721258
+                0.97850914133628,
+                -0.14501379816284
               ],
               [
-                0.92161339613117,
-                -0.26877898765108
+                0.89111863640548,
+                -0.31149030844686
               ],
               [
-                0.7169568003249,
-                -0.45047724336839
+                0.59532782125587,
+                -0.49082848989704
               ],
               [
-                0.35305425893427,
-                -0.4779193961147
+                0.20913474198486,
+                -0.40669079369933
               ],
               [
-                0.10520372067802,
-                -0.30681573922067
+                0.045376068078257,
+                -0.20812755830023
               ]
             ]
           }
@@ -80,11 +80,11 @@
           "name": "frequency",
           "values": [
             10.0,
-            21.544346900319,
-            46.415888336128,
-            100.0,
-            215.44346900319,
-            464.15888336128
+            23.586558182407,
+            55.632572689209,
+            131.2180912571,
+            309.49831440201,
+            730.0
           ],
           "rtol": 1e-09,
           "atol": 1e-15

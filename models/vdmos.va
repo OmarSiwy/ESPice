@@ -59,7 +59,7 @@ module vdmos(d, g, s);
     parameter real rs   = 0.0 from [0:inf);    // source resistance [ohm]
     parameter real rb   = 0.0 from [0:inf);    // body-diode series resistance [ohm]
     parameter real rds  = 0.0 from [0:inf);    // drain-source shunt [ohm]
-    parameter real gmin = 1e-12 from [0:inf);  // body-diode conductance floor [S]
+    parameter real gmin = $simparam("gmin") from [0:inf);  // body-diode conductance floor [S]
 
     // --- body diode (dioload.c laws) ---------------------------------------
     parameter real is  = 1e-14 from (0:inf);   // saturation current [A]

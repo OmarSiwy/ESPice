@@ -61,7 +61,10 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     var fan: usize = 4;
     for (cards) |c| switch (c.kind) {
         .ac => if (ctx.ac == null) {
-            if (acGrid(arena, c.args, 0)) |g| ctx.ac = g.sweep else |_| {}
+            if (acGrid(arena, c.args, 0)) |g| {
+                ctx.ac = g.sweep;
+                ctx.ac.?.land_on_stop = true; // the grid the `.ac` card runs
+            } else |_| {}
         },
         .tran => if (ctx.tran == null) {
             if (buildJob(c, sources, card_refs, ctx)) |job| {
@@ -336,8 +339,8 @@ pub const DeckOptions = struct {
 const runlvl_trtol = [6]f64{ 28, 14, 7, 3.5, 1.75, 0.875 };
 
 /// Option names outside this list are not simulated; the HSPICE dialect
-/// warns about each. `gshunt` and `cshunt` are read by the netlist.
-const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, xmu, gshunt, cshunt };
+/// warns about each. `gshunt`, `cshunt` and `rshunt` are read by the netlist.
+const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, xmu, gshunt, cshunt, rshunt };
 
 /// Folds the deck's `.options` and `.temp` cards; `InvalidAnalysisArguments`
 /// on a value out of range, logged with its card. The last `.temp` card
@@ -364,6 +367,7 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
         .{ "tnom", .tnom },     .{ "absv", .vntol },    .{ "relv", .reltol },
         .{ "absi", .abstol },   .{ "gmindc", .gmin },   .{ "delmax", .delmax },
         .{ "gshunt", .gshunt }, .{ "cshunt", .cshunt }, .{ "xmu", .xmu },
+        .{ "rshunt", .rshunt },
     });
     const methods = std.StaticStringMap(requests.Method).initComptime(.{
         .{ "gear", .gear_2 }, .{ "trap", .trapezoidal }, .{ "trapezoidal", .trapezoidal }, .{ "bdf", .gear_2 },
@@ -461,7 +465,7 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
                     if (!(value >= 0 and value <= 0.5)) return error.InvalidAnalysisArguments;
                     o.xmu = value;
                 },
-                .gshunt, .cshunt => if (value < 0) return error.InvalidAnalysisArguments,
+                .gshunt, .cshunt, .rshunt => if (value < 0) return error.InvalidAnalysisArguments,
                 // A zero reltol or trtol leaves no step a transient can take
                 // (ngspice aborts "timestep too small"), so the card fails here.
                 .reltol, .trtol => {
@@ -475,7 +479,10 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
             }
         }
     }
-    if (o.method == .gear_2 and maxord != null and maxord.? < 2) o.method = .backward_euler;
+    // ngspice raises the order only from 1 to 2 and only when maxord > 1
+    // (dctran.c:900), so maxord=1 is backward Euler under trap as under gear,
+    // and gear with maxord 3..6 stays Gear-2.
+    if (maxord != null and maxord.? < 2) o.method = .backward_euler;
     // ACCURATE lifts any level to at least 5; FAST is level 1 when no
     // RUNLVL is given; RUNLVL=0 turns the presets off.
     var level = runlvl orelse if (fast and !accurate) @as(f64, 1) else 0;
@@ -487,7 +494,7 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
 
 /// Copies the deck tolerances and integration method into `job`.
 /// A `.tran` keeps a `dt_max` it already has; otherwise it takes DELMAX, then
-/// ngspice's min(tstep, tstop / 50).
+/// ngspice's min(tstep, (tstop - tstart) / 50).
 pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
     switch (job.*) {
         inline else => |*opts| {
@@ -501,8 +508,9 @@ pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
         if (o.xmu) |x| t.xmu = x;
         // RUNLVL overrides TRTOL wherever it sits [CR .OPTION RUNLVL].
         if (o.trtol) |trtol| t.tol.trtol = trtol;
-        // ngspice's default tmax, min(tstep, tstop / 50).
-        t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, t.t_stop / 50);
+        // ngspice's default tmax, min(tstep, (tstop - tstart) / 50)
+        // (traninit.c:29-34).
+        t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, (t.t_stop - t.t_start) / 50);
     }
 }
 
@@ -1267,7 +1275,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         .ac => {
             const grid = try acGrid(ctx.arena, args, 0);
             if (grid.end != args.len) return error.InvalidAnalysisArguments;
-            return .{ .ac = .{ .sweep = grid.sweep } };
+            var sweep = grid.sweep;
+            sweep.land_on_stop = true;
+            return .{ .ac = .{ .sweep = sweep } };
         },
         .disto => {
             try arity(args, 4, 5);
