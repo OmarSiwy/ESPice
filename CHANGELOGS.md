@@ -21,6 +21,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).
 - `.tran` with MATEX fails the step instead of hanging when the Krylov matrix overflows to inf (#125).
 - Device evaluation no longer copies a deduplicated model row onto itself, undefined behaviour in release builds (#122).
+- `.hdl` Verilog-A, VerA pin 53e61b89 -> df3bd51d: `ddx()` inside a noise power reads its partial in
+  `noisePsd` (VerA#32), `$port_connected`/`$param_given` may control analog operators (VerA#33).
 - `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one
   derivative lane per unknown) (#117).
 - `bench-suites -Dsuite=cmcqa`: the HICUM and PSP noise tests, one `.noise` deck per bias point (#18).
