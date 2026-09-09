@@ -11,7 +11,8 @@ const op = @import("op.zig");
 pub const Options = @import("core").query.Dc;
 
 /// Contract entry: real, point-major (sweep value, probes...), outer blocks
-/// concatenated. A point that does not converge records NaN probes. The swept
+/// concatenated, then one more such block per `opts.tangents` row. A point
+/// that does not converge records NaN probes, in every block. The swept
 /// values are restored afterwards so the cached operating point stays valid
 /// for later jobs. Returns error.DcSweepSourceNotFound when a target names no
 /// parameter.
@@ -50,7 +51,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_outer: usize = if (!opts.hasOuter()) 1 else if (opts.points2.len > 0) opts.points2.len else sweepCount(opts.start2, opts.stop2, opts.step2);
     const npoints = n_inner * n_outer;
     const ncols = ctx.probes.len + 1;
-    const data = try a.alloc(f64, npoints * ncols);
+    const data = try a.alloc(f64, npoints * ncols * (1 + opts.tangents.len));
     errdefer a.free(data);
     // The last two points, for the predictor, carried across outer blocks as
     // ngspice's state rotation is (dctrcurv.c:290). The analysis' first
@@ -84,18 +85,17 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             if (po != 0) v2 += opts.step2;
             if (opts.points2.len > 0) v2 = opts.points2[po];
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
-            const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
-            try runSerial(ctx, ckt, hist, force, t, opts, n_inner, ncols, block, po == 0);
+            try runSerial(ctx, ckt, hist, force, t, opts, po * n_inner, n_inner, ncols, data, po == 0);
         }
     } else {
-        try runSerial(ctx, ckt, hist, force, t, opts, npoints, ncols, data, true);
+        try runSerial(ctx, ckt, hist, force, t, opts, 0, npoints, ncols, data, true);
     }
 
     return .{
         .plotname = "DC transfer characteristic",
         .varnames = try root.probeNames(ctx, sweepColumn(opts.target)),
         .is_complex = false,
-        .npoints = npoints,
+        .npoints = npoints * (1 + opts.tangents.len),
         .data = data,
     };
 }
@@ -127,8 +127,9 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget.Param) ?roo
     return null;
 }
 
-/// Sweeps `t` over `npoints` values into `data` (row-major, `ncols` wide);
-/// a null `t` sweeps the circuit temperature.
+/// Sweeps `t` over `npoints` values into rows `first..` of `data` (`run`'s
+/// layout, `ncols` wide), tangent blocks included; a null `t` sweeps the
+/// circuit temperature.
 /// Each point warm-starts from the previous solution; the first point, and
 /// any point whose warm Newton fails, cold-starts through the `.nodeset`
 /// step (`nodeset`) and the full OP ladder, as dctrcurv.c's CKTop calls do.
@@ -142,12 +143,15 @@ fn runSerial(
     nodeset: []const converger.Force,
     t: ?root.ParamRef,
     opts: Options,
+    first: usize,
     npoints: usize,
     ncols: usize,
     data: []f64,
     first_block: bool,
 ) !void {
     const x = hist[0..ckt.n];
+    // Rows in one block: every point of every outer level.
+    const block = data.len / ncols / (1 + opts.tangents.len);
     const x_prev = hist[ckt.n..];
 
     // The pattern is frozen, so one workspace (one symbolic factorization)
@@ -202,21 +206,88 @@ fn runSerial(
             converged = lr.converged;
         }
 
-        const row = data[pt * ncols ..][0..ncols];
+        const row = data[(first + pt) * ncols ..][0..ncols];
         row[0] = v;
+        for (0..opts.tangents.len) |k| data[((k + 1) * block + first + pt) * ncols] = v;
         if (converged) {
             // Each sweep point is an accepted point for device state.
             _ = ckt.stateCtl(.commit);
             for (ctx.probes, row[1..]) |node, *out| out.* = x[node];
+            if (opts.tangents.len != 0) try tangentRows(ctx, ckt, ws, x, opts.tangents, data[(block + first + pt) * ncols ..], block * ncols, ncols);
             cold = false;
             // ngspice copies state0 into state1 after the first point
             // (dctrcurv.c:457-462), so the second point's MODEINITPRED
             // extrapolation holds the first point instead of doubling it.
             if (first_block and pt == 0) @memcpy(x_prev, x);
         } else {
-            @memset(row[1..], std.math.nan(f64));
+            for (0..1 + opts.tangents.len) |k| @memset(data[(k * block + first + pt) * ncols ..][1..ncols], std.math.nan(f64));
             cold = true;
         }
+    }
+}
+
+/// The probes of each `tangents` row at the solution `x`, to first order:
+/// x - J⁻¹ (F(x, row) - F(x)), F with every parameter as the row writes it
+/// and J factored at `x`, so one solve per row replaces the Newton solve of
+/// a sweep at that row. Row k's probes go to `out[k * stride + 1 ..]`; NaN
+/// when J at `x` is singular. Leaves every parameter as it found it.
+fn tangentRows(ctx: *const root.RunCtx, ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, tangents: []const u32, out: []f64, stride: usize, ncols: usize) !void {
+    const n = ckt.n;
+    const params = try ckt.collectParams();
+    const scratch = ctx.scratch_allocator;
+    const buf = try scratch.alloc(f64, 2 * n);
+    defer scratch.free(buf);
+    const rhs = buf[0..n];
+    const dx = buf[n..];
+    // A full stamp: the baseline would hold the const-Jacobian devices
+    // (resistors) at their nominal values, as in sens.zig.
+    ckt.eval(x, 0);
+    @memcpy(rhs, ckt.rhs[0..n]);
+    const factored = if (ws.slv.factor(ckt.g_vals, ckt.solver_execution)) true else |e| switch (e) {
+        error.SingularMatrix => false,
+        else => return e, // else: only a singular J has an answer (NaN rows)
+    };
+    for (tangents, 0..) |row, k| {
+        const probes = out[k * stride + 1 ..][0 .. ncols - 1];
+        if (!factored) {
+            @memset(probes, std.math.nan(f64));
+            continue;
+        }
+        const refs, const values = ctx.variants.writes(row);
+        const saved = try scratch.alloc(f64, refs.len);
+        defer scratch.free(saved);
+        for (refs, values, saved) |r, value, *old| {
+            old.* = params[r].get();
+            params[r].set(value);
+        }
+        // The rows only move device parameters, so re-deriving their own
+        // types is the whole recompute (Circuit.recomputeType). A row that
+        // re-wires a device has no first-order answer on this pattern.
+        const rewired = if (recomputeTypes(ckt, params, refs)) false else |e| switch (e) {
+            error.TopologyChanged => true,
+        };
+        if (!rewired) {
+            ckt.eval(x, 0);
+            for (dx, ckt.rhs[0..n], rhs) |*d, f, f0| d.* = f - f0;
+        }
+        for (refs, saved) |r, old| params[r].set(old);
+        recomputeTypes(ckt, params, refs) catch unreachable; // restores the values it was built at
+        if (rewired) {
+            @memset(probes, std.math.nan(f64));
+            continue;
+        }
+        ws.slv.solveNeg(dx, dx);
+        for (ctx.probes, probes) |node, *p| p.* = x[node] + dx[node];
+    }
+}
+
+/// `Circuit.recomputeType` once for each device type `refs` writes.
+fn recomputeTypes(ckt: *root.Circuit, params: []const root.ParamRef, refs: []const u32) error{TopologyChanged}!void {
+    for (refs, 0..) |r, i| {
+        const t = params[r].type;
+        for (refs[0..i]) |earlier| {
+            if (params[earlier].type == t) break;
+        } else try ckt.recomputeType(t);
     }
 }
 

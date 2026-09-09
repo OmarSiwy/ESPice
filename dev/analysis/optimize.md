@@ -135,6 +135,45 @@ a two-parameter common-source DC fit, at `--jobs=1` and 3. Callgrind
 1.0651e8 to 1.0617e8 (-0.3%: its operating point is a few iterations
 of a four-device circuit, and the sweep dominates).
 
+### Direct sensitivities
+
+When every query of the optimized card is a `.dc` sweep, the Jacobian
+comes from the trial point's own sweep instead of n more sweeps. The
+solver always batches then, and the facade runs only row 0, with the n
+Jacobian rows as `Dc.tangents`. At each converged sweep point `dc.zig`
+evaluates F(x) on a full stamp (the baseline would hold the resistors at
+their nominal values, as in `sens.zig`), factors J at x, and for each
+row writes its parameter values, re-derives only the device types they
+touch, evaluates F(x, row), restores the values and solves
+dx = -J⁻¹ (F(x, row) - F(x)). The row's block of the result holds the
+probes at x + dx: the first-order prediction of that row's sweep. The
+facade measures each block as it would measure the row's own result, so
+the RESULTS cards, `Lm` and its forward difference stay as they are; the
+Jacobian becomes the derivative at x rather than a secant over DIFSIZ.
+The perturbation of F is the same parameter step the finite difference
+takes, so no new step size appears. A singular J, or a row that would
+re-wire a device, gives NaN probes, which the solver reads as a failed
+Jacobian.
+
+The grid polish points (#95) are not a Jacobian, so they run as full
+sweeps. The printed evaluation count still counts each Jacobian point, though it
+costs a few evaluations and one back substitution per sweep point
+instead of a sweep. Transient and AC goals keep the finite-difference
+points: a transient tangent needs the sensitivity integrated along the
+trajectory, and that is not built.
+
+Measured (callgrind, ReleaseFast, `-Dcpu=x86_64_v3`, `--jobs=1`): a
+two-parameter common-source DC fit (two goals on a 181-point sweep)
+1.0617e8 to 4.229e7 instructions, 2.5x fewer, in 7 iterations and 22
+evaluations instead of 16 and 60; the finite-difference Jacobian's
+noise had cost it six rejected-step iterations near the optimum. Its
+optimum moves along the fit's valley of equal goal errors (W 4.4536u to
+4.4709u, R 11.227k to 11.183k, both goal errors below 3e-7): the two
+goals do not fix W and R apart. On every `.dc` deck of
+`tests/fixtures/optimize/` the printed optimum, stop reason and
+evaluation count are unchanged; the per-iteration table moves in its
+fourth digit on the first steps.
+
 The points do not use the structural lanes of `sweep/lanes.zig`.
 Those lanes solve one operating point per lane and publish its probes.
 A RESULTS card needs the card's own result, such as a DC sweep, an AC

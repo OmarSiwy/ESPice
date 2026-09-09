@@ -661,9 +661,14 @@ pub const Problem = struct {
                 inline else => |o| if (o.tol.variant == @as(u32, @intCast(base))) try template.append(a, job),
             };
             const x: []const f64 = if (t.method == .lm) blk: {
+                // DC goals take their Jacobian from the trial point's own
+                // sweep (`Dc.tangents`), so every round is batched.
+                const direct = for (template.items) |job| {
+                    if (job != .dc) break false;
+                } else true;
                 const lm = &self.optimization[base];
-                lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, t.spec.grid, @intCast(t.results.len), t.options, self.limits.max_parallel > 1);
-                try self.search(t, template.items, base, lm);
+                lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, t.spec.grid, @intCast(t.results.len), t.options, direct or self.limits.max_parallel > 1);
+                try self.search(t, template.items, base, lm, direct);
                 break :blk lm.x;
             } else blk: {
                 const goal = deck.measures[t.results[0]];
@@ -671,7 +676,7 @@ pub const Problem = struct {
                 const scale = @max(@abs(c.goal.?), c.minval) / c.weight;
                 const b = &self.bisection[base];
                 b.* = core.bisect.Bisect.init(a, t.method, t.spec.lo[0], t.spec.hi[0], t.spec.grid[0], scale, t.options);
-                try self.search(t, template.items, base, b);
+                try self.search(t, template.items, base, b, false);
                 break :blk (&b.x)[0..1];
             };
             row.* = try t.rows(a, &self.prepared.circuit, x, base);
@@ -713,8 +718,8 @@ pub const Problem = struct {
     /// A Levenberg-Marquardt point's operating point starts from the one of
     /// the iterate its step left (dev/analysis/optimize.md, "Warm starts"),
     /// so the path does not depend on batching; the start's round and every
-    /// bisection point start cold.
-    fn search(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, solver: anytype) !void {
+    /// bisection point start cold. `direct` as `evaluatePoints` says.
+    fn search(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, solver: anytype, direct: bool) !void {
         const n = t.spec.live.len;
         const m = t.results.len;
         const lm = @TypeOf(solver) == *core.lm.Lm;
@@ -736,7 +741,7 @@ pub const Problem = struct {
                 try guess.appendSlice(gpa, origin.items);
             };
             try residuals.resize(gpa, points.len / n * m);
-            try self.evaluatePoints(t, template, base, points, guess.items, residuals.items, &first);
+            try self.evaluatePoints(t, template, base, points, if (lm) direct and solver.batched() else false, guess.items, residuals.items, &first);
             const accepted = if (lm) solver.history.rss.items.len else 0;
             try solver.feed(residuals.items);
             if (lm) if (solver.history.rss.items.len > accepted) std.mem.swap(std.ArrayList(f64), &origin, &first);
@@ -749,21 +754,29 @@ pub const Problem = struct {
     /// goal errors over the `template` queries run at that point, NaN where
     /// a query failed or a card found no value. Every operating point
     /// starts from `guess` (cold when empty); `first` takes the one row 0's
-    /// first query solved, empty when it has none.
-    fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, points: []const f64, guess: []const f64, out: []f64, first: *std.ArrayList(f64)) !void {
+    /// first query solved, empty when it has none. With `direct` (a
+    /// batched round of `.dc` queries) only row 0 runs, and the other
+    /// points' results are its sweeps' first-order predictions of them
+    /// (`Dc.tangents`, dev/analysis/optimize.md "Direct sensitivities").
+    fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, points: []const f64, direct: bool, guess: []const f64, out: []f64, first: *std.ArrayList(f64)) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
         const count = points.len / t.spec.live.len;
+        std.debug.assert(!direct or count == t.spec.live.len + 1);
         var deck = self.prepared.deck;
         deck.variants = try t.rows(a, &self.prepared.circuit, points, base);
         deck.op_guess = guess;
-        const jobs = try a.alloc(Query, count * template.len);
-        for (0..count) |p| for (template, jobs[p * template.len ..][0..template.len]) |job, *copy| {
+        const runs = if (direct) 1 else count;
+        const tangents = try a.alloc(u32, if (direct) count - 1 else 0);
+        for (tangents, 1..) |*row, p| row.* = @intCast(p);
+        const jobs = try a.alloc(Query, runs * template.len);
+        for (0..runs) |p| for (template, jobs[p * template.len ..][0..template.len]) |job, *copy| {
             copy.* = job;
             switch (copy.*) {
                 inline else => |*o| o.tol.variant = @intCast(p),
             }
+            if (direct) copy.dc.tangents = tangents;
         };
         var session = analysis.session.Session.init(self.workerAllocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
         defer session.deinit();
@@ -775,10 +788,16 @@ pub const Problem = struct {
         const values = try a.alloc(f64, deck.measures.len);
         const m = t.results.len;
         @memset(out, std.math.nan(f64));
-        for (0..count) |p| for (ids[p * template.len ..][0..template.len]) |id| {
+        for (0..count) |p| for (ids[(if (direct) 0 else p) * template.len ..][0..template.len]) |id| {
             const info = try session.info(id);
             if (info.status != .complete) continue;
-            output.measureValues(deck.measures, info.kind, try session.result(id), values);
+            var res = try session.result(id);
+            if (direct) {
+                // Block p of the sweep: its own points, or row p's prediction.
+                res.npoints /= count;
+                res.data = res.data[p * res.npoints * res.varnames.len ..][0 .. res.npoints * res.varnames.len];
+            }
+            output.measureValues(deck.measures, info.kind, res, values);
             for (t.results, out[p * m ..][0..m]) |card, *r| {
                 const measure = deck.measures[card];
                 // Never null: Tuner.init refuses a RESULTS card without GOAL=

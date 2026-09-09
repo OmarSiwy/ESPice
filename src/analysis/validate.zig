@@ -119,7 +119,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .dc => |o| {
             const inner = if (o.points.len > 0) o.points.len else try sweep(o.start, o.stop, o.step);
             const outer = if (!o.hasOuter()) 1 else if (o.points2.len > 0) o.points2.len else try sweep(o.start2, o.stop2, o.step2);
-            _ = try elements(&.{ inner, outer, @as(usize, n) + 1 });
+            _ = try elements(&.{ inner, outer, o.tangents.len + 1, @as(usize, n) + 1 });
         },
         .temp => |o| {
             // The current temperature driver and numPoints are ascending only.
@@ -298,6 +298,7 @@ pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
     if (query == .dc) {
         try dcTargetExists(query.dc.target, deck);
         if (query.dc.target2) |t2| try dcTargetExists(t2, deck);
+        for (query.dc.tangents) |row| if (row >= deck.variants.count()) return error.InvalidQueryOptions;
     }
 }
 

@@ -43,6 +43,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
   `*_mm` mismatch ran nominal in every trial (#100).
 - `OPTIMIZE=` under `--jobs` above 1 runs each trial point with its Jacobian points in one round, same
   output: a 128-stage chain fit 1.81 s to 1.71 s, `rc_delay_fit` 13.9 to 10.1 ms at `--jobs=3` (#97).
+- `OPTIMIZE=` on a `.dc` card takes its Jacobian from direct sensitivities of the trial point's own sweep, not one sweep per parameter: a two-parameter common-source fit 2.5x fewer instructions, 7 iterations instead of 16 (#97).
 - `OPTIMIZE=` starts each point's operating point from the one of the iterate its step left: a 32-stage chain fit 3.6% fewer instructions (#97).
 - API: `Options.live_params` + `Problem.set_params`, and C `live_params` + `espice_set_params`, change
   global `.param` values on a live Problem without a re-parse: a sky130 sizing point 6 ms, was 87 (#101).
