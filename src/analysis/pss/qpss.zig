@@ -64,6 +64,8 @@
 
 const std = @import("std");
 const root = @import("../types.zig");
+const simdZero = root.zeroSimd;
+const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 const solvers = @import("solvers");
 const types = solvers.types;
@@ -191,18 +193,6 @@ const OperatorCtx = struct {
 // SIMD helpers
 // ============================================================================
 
-inline fn simdZero(buf: []f64) void {
-    root.zeroSimd(buf);
-}
-
-inline fn simdCopy(dst: []f64, src: []const f64) void {
-    var i: usize = 0;
-    while (i + W <= dst.len) : (i += W) {
-        dst[i..][0..W].* = src[i..][0..W].*;
-    }
-    while (i < dst.len) : (i += 1) dst[i] = src[i];
-}
-
 inline fn simdAxpy(out: []f64, a: f64, x: []const f64) void {
     const av: V = @splat(a);
     var i: usize = 0;
@@ -256,7 +246,7 @@ fn buildBasis2D(grid: MixGrid, basis_cos: []f64, basis_sin: []f64) void {
             const s2 = samp / nf1;
             const angle = 2.0 * std.math.pi *
                 (k_f * @as(f64, @floatFromInt(s1)) / @as(f64, @floatFromInt(nf1)) +
-                l_f * @as(f64, @floatFromInt(s2)) / @as(f64, @floatFromInt(nf2)));
+                    l_f * @as(f64, @floatFromInt(s2)) / @as(f64, @floatFromInt(nf2)));
             basis_cos[freq * nf + samp] = @cos(angle);
             basis_sin[freq * nf + samp] = @sin(angle);
         }
@@ -831,11 +821,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const spectra_im = try a.alloc(f64, ctx.probes.len * nf);
     defer a.free(spectra_im);
 
-    const st = try solve(ctx.circuit, ctx.source_node, opts.source_mag, ctx.probes,
-        spectra_re, spectra_im, opts, a);
+    const st = try solve(ctx.circuit, ctx.source_node, opts.source_mag, ctx.probes, spectra_re, spectra_im, opts, a);
 
-    if (!st.converged)
-        std.debug.print("Warning: qpss: did not converge (residual {e})\n", .{st.residual_norm});
+    if (!st.converged) return error.QpssDidNotConverge;
 
     const names = try root.probeNames(ctx, "frequency");
     errdefer {

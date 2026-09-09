@@ -3,16 +3,15 @@
 
 const std = @import("std");
 
-// ============================================================================
-// zeroSimd / copySimd — THE f64 SIMD fill/copy pair. One home, on the leaf
-// of the import DAG, so Circuit.zig, analysis/tran/types.zig and every
-// solver reach the same two loops instead of growing per-file clones.
-// ============================================================================
+/// Caller-owned scheduler; both fields are read together at a solver dispatch.
+pub const Execution = struct {
+    io: ?std.Io = null,
+    threads: u8 = 1,
+};
 
-const simd_w = std.simd.suggestVectorLength(f64) orelse 8;
-
+/// Temporal vector stores keep immediately consumed numeric planes hot.
 pub fn zeroSimd(buf: []f64) void {
-    const W = simd_w;
+    const W = std.simd.suggestVectorLength(f64) orelse 8;
     const V = @Vector(W, f64);
     const zero: V = @splat(0.0);
     var i: usize = 0;
@@ -20,13 +19,23 @@ pub fn zeroSimd(buf: []f64) void {
     for (buf[i..]) |*v| v.* = 0;
 }
 
-/// SIMD copy: dst[0..n] = src[0..n].
+/// Copy the common prefix; exact aliasing is a no-op.
 pub fn copySimd(dst: []f64, src: []const f64) void {
-    const W = simd_w;
     const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
+    if (dst.ptr != src.ptr) @memcpy(dst[0..n], src[0..n]);
+}
+
+test "bulk buffers preserve bits, common prefixes and exact aliases" {
+    const src = [_]f64{ -0.0, @bitCast(@as(u64, 0x7ff8000000000042)), 3 };
+    var dst = [_]f64{ 7, 7, 7, 7 };
+    copySimd(&dst, &src);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&src), std.mem.sliceAsBytes(dst[0..3]));
+    try std.testing.expectEqual(@as(f64, 7), dst[3]);
+    copySimd(dst[0..2], &src);
+    copySimd(&dst, &dst);
+    copySimd(dst[0..0], &src);
+    zeroSimd(&dst);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0, 0 }, @as([]const u64, @ptrCast(&dst)));
 }
 
 // ============================================================================

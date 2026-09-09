@@ -107,7 +107,13 @@ module mos6(d, g, s, b);
         begin
             k1 = cz * pj / (1.0 - mg);
             v0 = fcc * pj;
-            if (v < v0) begin
+            // mos6load.c:581,640's own guard (`if (Cbs != 0 || Cbssw != 0)`).
+            // Every term below carries `cz`, so with no junction capacitance
+            // the charge is exactly zero — reached, without this, through two
+            // `pow` per junction per Newton iteration. Same guard mos2/mos3
+            // already carry.
+            if (cz == 0.0) jqdep = 0.0;
+            else if (v < v0) begin
                 jqdep = k1 * (1.0 - pow(1.0 - v / pj, 1.0 - mg));
             end else begin
                 c0 = cz * pow(1.0 - fcc, -mg);

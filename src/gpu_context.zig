@@ -55,8 +55,8 @@ else
 /// can name it when a `--backend cuda|hip` request cannot be honoured.
 pub const detected: ?gompute.Backend = backend;
 
-/// What `--backend` can ask for. `auto` is the opt-in that preserves the old
-/// `--gpu` semantics: try the device, fall back to the CPU. `cuda`/`hip` are
+/// What `--backend` can ask for. `auto` tries the device when work warrants it
+/// and falls back to the CPU. `--gpu` bypasses the work gate. `cuda`/`hip` are
 /// strict — a request this binary cannot honour is a hard error, not a
 /// silent CPU run.
 pub const Request = enum { cpu, auto, cuda, hip };
@@ -275,13 +275,13 @@ pub const GpuContext = struct {
 
     /// Upload every eligible batch and keep it resident. Fails (and the caller
     /// falls back to the CPU) when NOTHING in the circuit has a kernel, or when
-    /// what does have one is too small to pay for the bus.
+    /// what does have one is too small to pay for the bus, unless forced.
     ///
     /// Both refusals happen BEFORE the first `gompute` call, which is what makes
     /// `cuInit` lazy: on this machine the driver charges 113.7 ms for `cuInit`
     /// and 80.7 ms to retain the primary context, and a netlist that was never
     /// going to the GPU used to pay all of it just for passing `--gpu`.
-    pub fn init(gpa: std.mem.Allocator, ckt: *Circuit) !*Self {
+    pub fn init(gpa: std.mem.Allocator, ckt: *Circuit, force: bool) !*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
 
         var n_gpu: usize = 0;
@@ -308,7 +308,7 @@ pub const GpuContext = struct {
             work += @as(u64, p.count) * p.n_u * p.n_u * 16;
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
-        if (work < minWork()) return Error.NotEnoughGpuWork;
+        if (!force and work < minWork()) return Error.NotEnoughGpuWork;
 
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
@@ -444,6 +444,7 @@ pub const GpuContext = struct {
             .ws = try converger.Workspace.init(gpa, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd),
             .has_charge = ckt.has_charge,
         };
+        self.ws.slv.params.execution = ckt.solver_execution;
 
         return self;
     }

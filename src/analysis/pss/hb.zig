@@ -15,6 +15,7 @@
 //!     solve dense J dX = -F;  X += dX
 const std = @import("std");
 const root = @import("../types.zig");
+const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");
@@ -44,14 +45,6 @@ pub fn magnitude(spectrum: []const f64, k: u16) f64 {
     const c = spectrum[2 * @as(usize, k) - 1];
     const s = spectrum[2 * @as(usize, k)];
     return @sqrt(c * c + s * s);
-}
-
-/// SIMD copy: dst[0..n] = src[0..n]
-inline fn simdCopy(dst: []f64, src: []const f64) void {
-    const n = dst.len;
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
 }
 
 /// Harmonic Balance solve. Excitation is a cosine current source of
@@ -436,8 +429,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const spectra = try a.alloc(f64, ctx.probes.len * nf);
     defer a.free(spectra);
     const st = try solve(ctx.circuit, ctx.source_node, 1.0, ctx.probes, spectra, opts, a);
-    if (!st.converged)
-        std.debug.print("Warning: hb: did not converge (residual {e})\n", .{st.residual_norm});
+    if (!st.converged) return error.HbDidNotConverge;
 
     const names = try root.probeNames(ctx, "frequency");
     errdefer {

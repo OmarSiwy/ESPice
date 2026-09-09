@@ -45,7 +45,7 @@ pub const Options = struct {
 /// 16 buffers of slack: preallocation was most of the 2.8 GB peak.
 pub fn initialCapacity(options: Options) u32 {
     const est = 2.0 * options.t_stop / options.dt_init;
-    return @intFromFloat(@min(@max(1024.0, est), @as(f64, 1 << 22)));
+    return @intFromFloat(@min(@max(64.0, est), @as(f64, 1 << 22)));
 }
 
 /// SIMD copy — the shared pair lives on the solvers leaf (one copy per repo).

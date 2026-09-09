@@ -13,8 +13,8 @@
 //! arena (blocks are small — dense LU with partial pivoting beats sparse GP
 //! at that size, and the fixed layout is a future GPU batched-LU substrate).
 //! Per block i: A_i (s×s row-major), W_i (s×m_i COLUMN-major; holds E_i,
-//! then A_i^-1 E_i in place after factor), F_i (m_i×s row-major), U_i
-//! (m_i×m_i Schur scratch). m_i is the block's LOCAL border footprint —
+//! then A_i^-1 E_i in place after factor), F_i (m_i×s row-major).
+//! m_i is the block's LOCAL border footprint —
 //! the set of border nodes it actually couples to — mapped by loc_i.
 //!
 //! Border set = {ground row 0} ∪ [coupling_start, n): row/col 0 is OUTSIDE
@@ -24,10 +24,10 @@
 //!
 //! factor(vals): scatter flat CSC vals via a precomputed tape (src→dst
 //! index pairs built once at init, the batch.zig `slots` idiom); per block
-//! dense-LU A_i, solve W_i in place, U_i = F_i·W_i; serial fixed-order
-//! Schur reduce into s_dense; dense-LU s_dense. No refactor/pivot replay:
+//! dense-LU A_i, solve W_i in place, reduce F_i·W_i directly into s_dense
+//! in fixed block order; dense-LU s_dense. No refactor/pivot replay:
 //! dense re-factor per Newton iteration is trivially cheap at these sizes.
-//! Everything is fixed-order serial → byte-identical re-factors.
+//! Independent block factors may run through std.Io; reductions stay fixed-order.
 //!
 //! init returns error.NotApplicable unless the structure is profitable AND
 //! provably clean (every CSC nnz classifiable as block-interior / E / F /
@@ -69,14 +69,13 @@ pub fn Bbd(comptime T: type) type {
         blk_a_off: []usize, // A_i offset in arena: s×s row-major
         blk_w_off: []usize, // W_i offset: s×m col-major (E, then A^-1 E)
         blk_f_off: []usize, // F_i offset: m×s row-major
-        blk_u_off: []usize, // U_i offset: m×m Schur scratch
         blk_piv_off: []usize, // offset into piv slab, s entries
         blk_loc_off: []usize, // offset into loc slab, m entries
 
         n: u32,
         b: u32, // border size (>= 1: ground)
         nb: u32, // number of blocks
-        arena: []T, // [A_i|W_i|F_i|U_i]* ++ s_dense
+        arena: []T, // [A_i|W_i|F_i]* ++ s_dense
         s_off: usize, // s_dense (b×b row-major) offset in arena
         piv: []u32, // per-block pivot rows (contiguous slab)
         s_piv: []u32, // border pivot rows (b)
@@ -103,7 +102,7 @@ pub fn Bbd(comptime T: type) type {
             // ---- node classification: block id / border position ----
             const node_block = try gpa.alloc(u32, n);
             defer gpa.free(node_block);
-            simdFillU32(node_block, NONE);
+            @memset(node_block, NONE);
             for (info.blocks, 0..) |blk, bi| {
                 if (blk.size == 0 or blk.size > limits.max_block) return error.NotApplicable;
                 if (blk.start == 0 or blk.start + blk.size > info.coupling_start) return error.NotApplicable;
@@ -114,7 +113,7 @@ pub fn Bbd(comptime T: type) type {
             }
             const border_pos = try gpa.alloc(u32, n);
             defer gpa.free(border_pos);
-            simdFillU32(border_pos, NONE);
+            @memset(border_pos, NONE);
             border_pos[0] = 0;
             for (0..info.coupling_size) |j| border_pos[info.coupling_start + j] = @intCast(j + 1);
             for (0..n) |i| {
@@ -157,8 +156,6 @@ pub fn Bbd(comptime T: type) type {
             errdefer gpa.free(blk_w_off);
             const blk_f_off = try gpa.alloc(usize, nb);
             errdefer gpa.free(blk_f_off);
-            const blk_u_off = try gpa.alloc(usize, nb);
-            errdefer gpa.free(blk_u_off);
             const blk_piv_off = try gpa.alloc(usize, nb);
             errdefer gpa.free(blk_piv_off);
             const blk_loc_off = try gpa.alloc(usize, nb);
@@ -176,10 +173,9 @@ pub fn Bbd(comptime T: type) type {
                 blk_a_off[bi] = arena_len;
                 blk_w_off[bi] = arena_len + sz * sz;
                 blk_f_off[bi] = arena_len + sz * sz + sz * m;
-                blk_u_off[bi] = arena_len + sz * sz + 2 * sz * m;
                 blk_piv_off[bi] = piv_len;
                 blk_loc_off[bi] = loc_len;
-                arena_len += sz * sz + 2 * sz * m + m * m;
+                arena_len += sz * sz + 2 * sz * m;
                 piv_len += sz;
                 loc_len += m;
             }
@@ -205,7 +201,7 @@ pub fn Bbd(comptime T: type) type {
 
             border_node[0] = 0;
             for (0..info.coupling_size) |j| border_node[j + 1] = info.coupling_start + @as(u32, @intCast(j));
-            for (0..nb) |bi| simdCopyU32(loc[blk_loc_off[bi]..][0..blk_m[bi]], sets[bi].items);
+            for (0..nb) |bi| @memcpy(loc[blk_loc_off[bi]..][0..blk_m[bi]], sets[bi].items);
 
             // ---- pass 2: scatter tape ----
             for (0..n) |c| {
@@ -247,7 +243,6 @@ pub fn Bbd(comptime T: type) type {
                 .blk_a_off = blk_a_off,
                 .blk_w_off = blk_w_off,
                 .blk_f_off = blk_f_off,
-                .blk_u_off = blk_u_off,
                 .blk_piv_off = blk_piv_off,
                 .blk_loc_off = blk_loc_off,
                 .n = n,
@@ -273,7 +268,6 @@ pub fn Bbd(comptime T: type) type {
             gpa.free(self.blk_a_off);
             gpa.free(self.blk_w_off);
             gpa.free(self.blk_f_off);
-            gpa.free(self.blk_u_off);
             gpa.free(self.blk_piv_off);
             gpa.free(self.blk_loc_off);
             gpa.free(self.arena);
@@ -290,50 +284,77 @@ pub fn Bbd(comptime T: type) type {
         /// newton.zig and flows through the tape. Serial fixed order —
         /// two factors of the same values are byte-identical.
         pub fn factor(self: *Self, vals: []const T) error{SingularMatrix}!void {
+            return self.factorWithExecution(vals, .{});
+        }
+
+        pub fn factorWithExecution(self: *Self, vals: []const T, execution: root.Execution) error{SingularMatrix}!void {
             // Scatter: zero arena, then accumulate through tape.
             simdZero(self.arena);
             for (vals, self.dst) |v, d| self.arena[d] += v;
 
+            const tasks = self.taskCount(execution);
+            if (tasks > 1) try self.factorBlocksScheduled(execution.io.?, tasks);
             const nblocks = self.nb;
-            // Per-block: factorize A_i, solve W columns, compute U = F·W.
-            for (0..nblocks) |bi| {
-                const s: usize = self.blk_s[bi];
-                const m: usize = self.blk_m[bi];
-                const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
-                const pv = self.piv[self.blk_piv_off[bi]..][0..s];
-                Dense.factorize(s, a, pv) catch return error.SingularMatrix;
-
-                // W_j = A^-1 E_j in place (column-major: each col contiguous)
-                const w = self.arena[self.blk_w_off[bi]..][0 .. s * m];
-                for (0..m) |j| {
-                    const col = w[j * s ..][0..s];
-                    Dense.solveFactored(s, a, pv, col, col);
-                }
-
-                // U = F·W: dot of F row r (contiguous s) with W col c (contiguous s)
-                const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
-                const u = self.arena[self.blk_u_off[bi]..][0 .. m * m];
-                for (0..m) |r| {
-                    for (0..m) |c| {
-                        u[r * m + c] = dotSimd(f[r * s ..][0..s], w[c * s ..][0..s]);
-                    }
-                }
-            }
-
-            // Serial fixed-order Schur reduce: S -= Σ U_i
             const bsz: usize = self.b;
             const sd = self.arena[self.s_off..][0 .. bsz * bsz];
+            // Reduce S -= F·W in block order after all independent work joins.
             for (0..nblocks) |bi| {
+                // Keep freshly factored W hot for its reduction on the serial path.
+                if (tasks == 1) try self.factorBlock(bi);
+                const s: usize = self.blk_s[bi];
                 const m: usize = self.blk_m[bi];
+                const w = self.arena[self.blk_w_off[bi]..][0 .. s * m];
+
+                // Fixed-order Schur reduction; each dot product is consumed once.
+                const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
                 const lo = self.loc[self.blk_loc_off[bi]..][0..m];
-                const u = self.arena[self.blk_u_off[bi]..][0 .. m * m];
                 for (lo, 0..) |gr, r| {
                     for (lo, 0..) |gc, c| {
-                        sd[@as(usize, gr) * bsz + gc] -= u[r * m + c];
+                        sd[@as(usize, gr) * bsz + gc] -= dotSimd(f[r * s ..][0..s], w[c * s ..][0..s]);
                     }
                 }
             }
             Dense.factorize(bsz, sd, self.s_piv) catch return error.SingularMatrix;
+        }
+
+        inline fn factorBlock(self: *const Self, bi: usize) error{SingularMatrix}!void {
+            const s: usize = self.blk_s[bi];
+            const m: usize = self.blk_m[bi];
+            const a = self.arena[self.blk_a_off[bi]..][0 .. s * s];
+            const pv = self.piv[self.blk_piv_off[bi]..][0..s];
+            Dense.factorize(s, a, pv) catch return error.SingularMatrix;
+            const w = self.arena[self.blk_w_off[bi]..][0 .. s * m];
+            for (0..m) |j| {
+                const col = w[j * s ..][0..s];
+                Dense.solveFactored(s, a, pv, col, col);
+            }
+        }
+
+        fn factorBlocks(self: *const Self, start: usize, end: usize) error{SingularMatrix}!void {
+            for (start..end) |bi| try self.factorBlock(bi);
+        }
+
+        fn taskCount(self: *const Self, execution: root.Execution) usize {
+            if (execution.io == null or execution.threads < 2) return 1;
+            var work: u64 = 0;
+            for (self.blk_s, self.blk_m) |s, m| work += @as(u64, s) * s * (s + 3 * @as(u64, m));
+            return @intCast(@max(1, @min(execution.threads, 16, self.nb, work / 131_072)));
+        }
+
+        fn factorBlocksScheduled(self: *const Self, io: std.Io, tasks: usize) error{SingularMatrix}!void {
+            // ponytail: at most 16 equal block ranges; use weighted ranges if
+            // mixed block sizes make measured worker imbalance significant.
+            var futures: [16]std.Io.Future(error{SingularMatrix}!void) = undefined;
+            for (0..tasks) |i| {
+                futures[i] = io.async(factorBlocks, .{ self, self.nb * i / tasks, self.nb * (i + 1) / tasks });
+            }
+            // All tasks must finish before a failure permits the caller to
+            // release these slabs and switch to the scalar pivoting ladder.
+            var result: error{SingularMatrix}!void = {};
+            for (futures[0..tasks]) |*future| future.await(io) catch |err| {
+                result = err;
+            };
+            return result;
         }
 
         /// x := A^-1 x. Block back-solves touch disjoint x slices; the
@@ -429,10 +450,7 @@ pub fn Bbd(comptime T: type) type {
 
         // ---- SIMD kernels ----
 
-        const W32 = std.simd.suggestVectorLength(u32) orelse 1;
-        const V32 = @Vector(W32, u32);
-
-        /// SIMD zero-fill a contiguous T buffer.
+        // Hot arena: vector stores beat builtin memset here; see the skills audit.
         inline fn simdZero(buf: []T) void {
             const zero: Vec = @splat(0);
             var i: usize = 0;
@@ -440,25 +458,6 @@ pub fn Bbd(comptime T: type) type {
                 buf[i..][0..VecLen].* = zero;
             }
             for (buf[i..]) |*v| v.* = 0;
-        }
-
-        /// SIMD fill u32 buffer with a constant value.
-        fn simdFillU32(buf: []u32, val: u32) void {
-            const fill: V32 = @splat(val);
-            var i: usize = 0;
-            while (i + W32 <= buf.len) : (i += W32) {
-                buf[i..][0..W32].* = fill;
-            }
-            for (buf[i..]) |*v| v.* = val;
-        }
-
-        /// SIMD copy u32 buffer.
-        fn simdCopyU32(dst: []u32, src: []const u32) void {
-            var i: usize = 0;
-            while (i + W32 <= dst.len) : (i += W32) {
-                dst[i..][0..W32].* = src[i..][0..W32].*;
-            }
-            for (dst[i..], src[i..]) |*d, s| d.* = s;
         }
 
         /// SIMD dot product of two contiguous slices of equal length.
@@ -709,9 +708,9 @@ test "bbd: production limits reject small block counts" {
     );
 }
 
-test "bbd: determinism -- two factors of the same values are byte-identical" {
+test "bbd: std.Io block factors, failures and recovery match serial bitwise" {
     const gpa = testing.allocator;
-    var sy = try Synth.build(gpa, 3, 4, 3, 23, .{});
+    var sy = try Synth.build(gpa, 17, 32, 3, 23, .{});
     defer sy.free(gpa);
     var eng = try Bbd(f64).init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info, relaxed);
     defer eng.deinit();
@@ -724,10 +723,42 @@ test "bbd: determinism -- two factors of the same values are byte-identical" {
     const snap_spiv = try gpa.dupe(u32, eng.s_piv);
     defer gpa.free(snap_spiv);
 
-    try eng.factor(sy.vals);
-    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(snap_arena), std.mem.sliceAsBytes(eng.arena));
-    try testing.expectEqualSlices(u32, snap_piv, eng.piv);
-    try testing.expectEqualSlices(u32, snap_spiv, eng.s_piv);
+    const rhs = try sy.rhs(gpa);
+    defer gpa.free(rhs);
+    const expected = try gpa.dupe(f64, rhs);
+    defer gpa.free(expected);
+    const actual = try gpa.dupe(f64, rhs);
+    defer gpa.free(actual);
+    const bad = try gpa.dupe(f64, sy.vals);
+    defer gpa.free(bad);
+    for ([_]std.Io.Limit{ .nothing, .limited(4) }) |limit| {
+        var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = limit });
+        defer threaded.deinit();
+        const execution: root.Execution = .{ .io = threaded.io(), .threads = 16 };
+        try eng.factorWithExecution(sy.vals, execution);
+        try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(snap_arena), std.mem.sliceAsBytes(eng.arena));
+        try testing.expectEqualSlices(u32, snap_piv, eng.piv);
+        try testing.expectEqualSlices(u32, snap_spiv, eng.s_piv);
+        inline for (.{ false, true }) |transpose| {
+            @memcpy(expected, rhs);
+            @memcpy(actual, rhs);
+            if (transpose) eng.solveTInPlace(actual) else eng.solveInPlace(actual);
+            try eng.factor(sy.vals);
+            if (transpose) eng.solveTInPlace(expected) else eng.solveInPlace(expected);
+            try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(expected), std.mem.sliceAsBytes(actual));
+            try eng.factorWithExecution(sy.vals, execution);
+        }
+        for ([_]usize{ 0, 16 }) |bi| {
+            @memcpy(bad, sy.vals);
+            const off = eng.blk_a_off[bi];
+            for (bad, eng.dst) |*v, d| if (d >= off and d < off + 32 * 32) {
+                v.* = 0;
+            };
+            try testing.expectError(error.SingularMatrix, eng.factorWithExecution(bad, execution));
+            try eng.factorWithExecution(sy.vals, execution);
+            try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(snap_arena), std.mem.sliceAsBytes(eng.arena));
+        }
+    }
 }
 
 test "bbd: facade activates BBD at >= 8 blocks and matches flat" {

@@ -74,6 +74,11 @@ pub fn sweep(
     options: Options,
 ) !Status {
     std.debug.assert(values.len == probes.len * temps.len);
+    errdefer {
+        ckt.setCircuitTemp(@floatCast(options.t_nom));
+        for (temp_coeffs) |*tc| tc.restore();
+        ckt.recompute() catch {}; // preserve the original failure; no further solve follows
+    }
     var points: u32 = 0;
     var failed: u32 = 0;
 
@@ -90,7 +95,7 @@ pub fn sweep(
         for (temp_coeffs) |*tc| {
             tc.apply(temp);
         }
-        ckt.recompute();
+        try ckt.recompute();
 
         // Cold DC solve at this temperature — zero + seed junctions
         root.zeroSimd(x);
@@ -118,7 +123,7 @@ pub fn sweep(
     for (temp_coeffs) |*tc| {
         tc.restore();
     }
-    ckt.recompute();
+    try ckt.recompute();
 
     return .{
         .completed = failed == 0,
@@ -136,7 +141,7 @@ pub fn numPoints(options: Options) u32 {
 }
 
 /// solveLanes apply/restore state: lane k installs temperature
-/// t_start + k*t_step; restore returns the circuit to t_nom (+recompute).
+/// t_start + k*t_step; the lane driver recomputes after restoring t_nom.
 const LaneCtx = struct {
     ckt: *root.Circuit,
     t_start: f64,
@@ -151,7 +156,6 @@ const LaneCtx = struct {
     fn restore(ptr: *anyopaque) void {
         const self: *LaneCtx = @ptrCast(@alignCast(ptr));
         self.ckt.setCircuitTemp(@floatCast(self.t_nom));
-        self.ckt.recompute();
     }
 };
 

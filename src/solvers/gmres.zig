@@ -131,7 +131,7 @@ pub fn Gmres(comptime T: type) type {
             const b_norm = vecNorm(b[0..n]);
             // ponytail: zero RHS => x=0 is exact; skip iteration
             if (b_norm == 0) {
-                simdZero(x[0..n]);
+                @memset(x[0..n], 0);
                 return .{ .iterations = 0, .residual = 0, .converged = true };
             }
             const abs_tol = tol * b_norm;
@@ -153,11 +153,11 @@ pub fn Gmres(comptime T: type) type {
                 vecScale(self.r[0..n], 1.0 / beta, v0);
 
                 // g = beta * e_1
-                simdZero(self.g[0 .. m + 1]);
+                @memset(self.g[0 .. m + 1], 0);
                 self.g[0] = beta;
 
                 // Zero the Hessenberg matrix for this cycle.
-                simdZero(self.h[0 .. (m + 1) * m]);
+                @memset(self.h[0 .. (m + 1) * m], 0);
 
                 var j: u32 = 0;
                 while (j < m) : (j += 1) {
@@ -169,7 +169,7 @@ pub fn Gmres(comptime T: type) type {
                     // Right preconditioning: w = M^{-1} v_j, then z = A*w.
                     // Without precond: z = A*v_j.
                     if (precond) |pc| {
-                        simdCopy(self.w[0..n], vj);
+                        @memcpy(self.w[0..n], vj);
                         pc(self.w[0..n], precond_ctx.?);
                         matvec(self.w[0..n], self.r[0..n], ctx);
                     } else {
@@ -280,7 +280,7 @@ pub fn Gmres(comptime T: type) type {
         fn solveUpperTriangular(self: *Self, k: u32) void {
             const m: usize = self.m;
             const ku: usize = k;
-            simdCopy(self.y[0..ku], self.g[0..ku]);
+            @memcpy(self.y[0..ku], self.g[0..ku]);
             var i: usize = ku;
             while (i > 0) {
                 i -= 1;
@@ -309,7 +309,7 @@ pub fn Gmres(comptime T: type) type {
             const n: usize = self.n;
             if (precond) |pc| {
                 // Accumulate V_k * y into w, then apply M^{-1}, then add to x.
-                simdZero(self.w[0..n]);
+                @memset(self.w[0..n], 0);
                 for (0..k) |j| {
                     const vj = self.getV(@intCast(j));
                     vecAxpy(self.w[0..n], self.y[j], vj);
@@ -361,25 +361,6 @@ pub fn Gmres(comptime T: type) type {
                 p.* = @as(Vec, p.*) + va * vb;
             }
             while (i < n) : (i += 1) a[i] += alpha * b[i];
-        }
-
-        /// SIMD zero-fill a contiguous T buffer.
-        inline fn simdZero(buf: []T) void {
-            const zero: Vec = @splat(0);
-            var i: usize = 0;
-            while (i + W <= buf.len) : (i += W) {
-                buf[i..][0..W].* = zero;
-            }
-            for (buf[i..]) |*v| v.* = 0;
-        }
-
-        /// SIMD copy contiguous T buffers.
-        inline fn simdCopy(dst: []T, src: []const T) void {
-            var i: usize = 0;
-            while (i + W <= dst.len) : (i += W) {
-                dst[i..][0..W].* = src[i..][0..W].*;
-            }
-            for (dst[i..], src[i..]) |*d, s| d.* = s;
         }
 
         /// dst[i] = alpha * src[i]

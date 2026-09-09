@@ -275,18 +275,21 @@ module bjt(c, b, e, s);
         // ddt() carry the history instead of a hand-rolled state.
         //   node xf1: V(xf2) - u + d(td*V(xf1))/dt = 0
         //   node xf2: V(xf2) - V(xf1) + d(td/3*V(xf2))/dt = 0  ->  V(xf2) = H*u
-        // ponytail: nodes are unconditional (Verilog-A cannot create them per
-        // bias); td = 0 collapses the pair to V(xf2) = u, i.e. no phase shift,
-        // which is also ngspice's DC/OP behaviour.
+        // At td = 0, transport is algebraic. The unused filter nodes short
+        // onto the substrate port so setup can remove them from the matrix.
         td = ptf * 0.017453292519943295 * tf;   // deg -> rad, bjttemp.c:80
-        I(xf1) <+ V(xf2) - cbe / qb;
-        I(xf1) <+ ddt(td * V(xf1));
-        I(xf2) <+ V(xf2) - V(xf1);
-        I(xf2) <+ ddt(td * V(xf2) / 3.0);
+        if (td == 0.0) begin
+            icc = cbe / qb - cbc / qb;
+        end else begin
+            I(xf1) <+ V(xf2) - cbe / qb;
+            I(xf1) <+ ddt(td * V(xf1));
+            I(xf2) <+ V(xf2) - V(xf1);
+            I(xf2) <+ ddt(td * V(xf2) / 3.0);
+            icc = V(xf2) - cbc / qb;
+        end
 
         // ---- §1.4 transport current, split per branch so node KCL matches
         // ic = icc - cbc/br - cbcn and ib = cbe/bf + cben + cbc/br + cbcn ----
-        icc = V(xf2) - cbc / qb;
         ib  = cbe / bf_t + cben + cbc / br_t + cbcn;
         ic  = icc - cbc / br_t - cbcn;
 
@@ -360,6 +363,12 @@ module bjt(c, b, e, s);
             I(e, ei) <+ white_noise(fourkt / re_t, "re");
         end else begin
             V(e, ei) <+ 0.0;
+        end
+        // ponytail: keep shorts last until VerA proves parameter-only
+        // retention through the later bias-dependent phis.
+        if (td == 0.0) begin
+            V(xf1, s) <+ 0.0;
+            V(xf2, s) <+ 0.0;
         end
     end
 endmodule

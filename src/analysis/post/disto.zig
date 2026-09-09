@@ -7,6 +7,8 @@
 //! stamps are the scalable upgrade for large n.
 const std = @import("std");
 const root = @import("../types.zig");
+const simdZero = root.zeroSimd;
+const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
 const solvers = @import("solvers");
@@ -29,19 +31,8 @@ pub const Options = struct {
 };
 
 // -------------------------------------------------------------------------
-// SIMD helpers (mandatory convention: no @memset, no @memcpy, no std.mem.*)
+// SIMD arithmetic helpers
 // -------------------------------------------------------------------------
-
-inline fn simdZero(buf: []f64) void {
-    root.zeroSimd(buf);
-}
-
-inline fn simdCopy(dst: []f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
 
 /// Distortion analysis via simplified Volterra series.
 ///

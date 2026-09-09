@@ -71,6 +71,7 @@ pub fn solveLadder(
     x: []f64,
     options: Options,
 ) !SolveResult {
+    if (ckt.needs_tran_op) return transientOp(ckt, ws, x, options);
     // Rung 1: plain Newton. NO diagonal gmin: ngspice's NIiter never loads
     // one outside gmin stepping — junction gmin lives in the device models.
     // The always-on 1e-12 shunt this used to carry pinned every solution a
@@ -225,6 +226,12 @@ pub fn solveLadder(
             return .{ .converged = true, .iterations = total_iter, .max_dx = jr.max_dx, .method_used = .jfnk };
     }
 
+    var result = try transientOp(ckt, ws, x, options);
+    result.iterations +|= total_iter;
+    return result;
+}
+
+fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options) !SolveResult {
     // Rung 5: ngspice OPtran (optran.c) — when every static strategy fails,
     // the operating point is the SETTLED STATE of a real transient with full
     // sources: dt 10 ns, run to 1 µs, no ramp, no extra regularization —
@@ -250,14 +257,14 @@ pub fn solveLadder(
         ckt.has_baseline = false;
         try ckt.computeBaseline();
         if (sim != null and sim.?.completed) {
+            if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0, .method_used = .optran };
             const fin = newtonRun(ckt, ws, x, options.tol, 0.0) catch
                 converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
-            total_iter +|= fin.iterations;
-            return .{ .converged = true, .iterations = total_iter, .max_dx = fin.max_dx, .method_used = .optran };
+            return .{ .converged = true, .iterations = fin.iterations, .max_dx = fin.max_dx, .method_used = .optran };
         }
     }
 
-    return .{ .converged = false, .iterations = total_iter, .max_dx = 0, .method_used = .source };
+    return .{ .converged = false, .iterations = 0, .max_dx = 0, .method_used = .source };
 }
 
 /// Contract entry: solve (or reuse ctx.x_op) and format one point per probe.

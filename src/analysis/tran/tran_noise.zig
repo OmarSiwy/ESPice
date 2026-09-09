@@ -6,6 +6,7 @@
 //! carry builtin noise generators, this analysis never re-derives them.
 const std = @import("std");
 const root = @import("../types.zig");
+const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 
 const k_boltzmann = 1.380649e-23; // J/K
@@ -42,15 +43,8 @@ pub const SimResult = struct {
 };
 
 // ============================================================================
-// SIMD copy (mandatory convention — no @memcpy)
+// Noise source sampling
 // ============================================================================
-
-inline fn simdCopy(dst: []f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
 
 // ============================================================================
 // Xorshift64 PRNG

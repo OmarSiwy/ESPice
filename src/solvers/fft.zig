@@ -26,16 +26,6 @@ pub fn Fft(comptime T: type) type {
         const W = std.simd.suggestVectorLength(T) orelse 1;
         const V = @Vector(W, T);
 
-        /// SIMD zero-fill a contiguous T buffer.
-        inline fn simdZero(buf: []T) void {
-            const zero: V = @splat(0);
-            var i: usize = 0;
-            while (i + W <= buf.len) : (i += W) {
-                buf[i..][0..W].* = zero;
-            }
-            for (buf[i..]) |*v| v.* = 0;
-        }
-
         // ----------------------------------------------------------------
         // Public API
         // ----------------------------------------------------------------
@@ -160,10 +150,10 @@ pub fn Fft(comptime T: type) type {
             // Step 1: build chirp b[k], compute a[k] = x[k]·b*[k] into scratch,
             // stash b*[k] into (re, im) for final multiply (x is consumed here).
             // Angles use k² mod 2N to keep argument small.
-            simdZero(chirp_re[0..m]);
-            simdZero(chirp_im[0..m]);
-            simdZero(scratch_re[0..m]);
-            simdZero(scratch_im[0..m]);
+            @memset(chirp_re[0..m], 0);
+            @memset(chirp_im[0..m], 0);
+            @memset(scratch_re[0..m], 0);
+            @memset(scratch_im[0..m], 0);
 
             for (0..n) |k| {
                 const kk = (k * k) % (2 * n);

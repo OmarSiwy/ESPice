@@ -45,6 +45,10 @@ pub fn build(b: *std.Build) void {
     // full DI on the fast self-hosted backend; `-Ddebug-info` forces it
     // back on in Release when a symbolized profile is worth the wait.
     const debug_info = b.option(bool, "debug-info", "Emit DWARF in Release builds (slow: ~3x LLVM time)") orelse false;
+    // Compiling 38 device models for NVPTX and AMDGCN is most of a full build.
+    // `-Dgpu=false` is the CPU-measurement/iteration build; it is NOT a shipping
+    // configuration and not what `zig build bench` should run.
+    const gpu_kernels = b.option(bool, "gpu", "Compile the GPU device kernels (default true)") orelse true;
     const M = struct {
         b: *std.Build,
         target: std.Build.ResolvedTarget,
@@ -64,6 +68,9 @@ pub fn build(b: *std.Build) void {
             });
         }
     }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .Debug and !debug_info };
+    // Same maker, strip PINNED on: for modules that also cross into the
+    // NVPTX/AMDGCN kernel builds. See gpu_dev_mod below.
+    const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true };
 
     const solvers_mod = M.make(b.path("src/solvers/root.zig"), &.{});
 
@@ -113,12 +120,22 @@ pub fn build(b: *std.Build) void {
         const gen_zig = run.addOutputFileArg(b.fmt("{s}.zig", .{m.name}));
         run.addFileArg(b.path(b.fmt("src/devices/models/{s}", .{m.file})));
 
-        dev_mods[i] = M.make(gen_zig, &.{.{ .name = "contract", .module = contract_mod }});
+        // ALWAYS stripped, `-Ddebug-info` included. DWARF over generated code
+        // maps to a cache file nobody reads, and the DI cost is superlinear in
+        // function size (build.zig's strip header) — the whale models ARE the
+        // superlinear tail, which made `-Ddebug-info=true` a ~1 h build for a
+        // profile whose interesting frames are all in src/. The device symbol
+        // still names itself; only its line table goes.
+        dev_mods[i] = GPU.make(gen_zig, &.{.{ .name = "contract", .module = contract_mod }});
 
         const one_line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
         agg_src.appendSlice(b.allocator, one_line) catch @panic("OOM");
 
-        one_models[i] = M.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), one_line), &.{});
+        // Also `GPU.make`: this one crosses into the NVPTX/AMDGCN builds, and
+        // -Ddebug-info=true crashed `zig build-obj -target nvptx64-cuda` (SEGV
+        // in DWARF emission for mos2/vdmos), so the one build mode the
+        // profiling doc names was unusable.
+        one_models[i] = GPU.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), one_line), &.{});
         one_models[i].addImport(m.name, dev_mods[i]);
     }
 
@@ -174,8 +191,22 @@ pub fn build(b: *std.Build) void {
     // decides, and a machine with no device emits nothing and stays green. This
     // is also what makes `gompute_kernels` always exist for gpu_context.zig.
     // Emission sits below the executable because `emitKernels` takes it.
+    const smallest_model = blk: {
+        var best = models[0];
+        for (models) |m| if (m.size < best.size) {
+            best = m;
+        };
+        break :blk best.name;
+    };
     var roots: std.ArrayList(gompute_build.KernelRoot) = .empty;
     for (models, one_models) |m, one_mod| {
+        // `-Dgpu=false` compiles ONE model for the GPU instead of all 38, which
+        // is the bulk of a full build. Not zero: gompute panics on an empty
+        // root list, and `gompute_kernels` has to exist for gpu_context.zig to
+        // compile and for `--backend cuda` to keep erroring by name. This is
+        // the CPU-iteration build — not a shipping one, and not what
+        // `zig build bench` should run.
+        if (!gpu_kernels and !std.mem.eql(u8, m.name, smallest_model)) continue;
         if (m.size >= gpu_max_model_bytes) continue;
         const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
         dev_imports.* = .{ .models = one_mod, .contract = contract_mod };
@@ -244,8 +275,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "devices", .module = devices_mod },
         }) },
     }) });
-    app_tests.use_llvm = false;
-    app_tests.use_lld = false;
+    // Match production: Zig 0.16's native backend miscompiles reused FP comparisons.
+    app_tests.use_llvm = exe.use_llvm;
+    app_tests.use_lld = exe.use_lld;
     test_step.dependOn(&b.addRunArtifact(app_tests).step);
 
     // The app layer, as its own test root. tests/test_all.zig cannot reach it:
@@ -263,8 +295,8 @@ pub fn build(b: *std.Build) void {
     // over the same files needs the same import or it will not compile.
     if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
         exe_tests.root_module.addImport("gompute_kernels", artifacts);
-    exe_tests.use_llvm = false;
-    exe_tests.use_lld = false;
+    exe_tests.use_llvm = exe.use_llvm;
+    exe_tests.use_lld = exe.use_lld;
     const run_exe_tests = b.addRunArtifact(exe_tests);
     b.step("test-app", "Run the executable's own tests").dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_exe_tests.step);
@@ -295,9 +327,16 @@ pub fn build(b: *std.Build) void {
     run_bench.step.dependOn(&b.addInstallArtifact(bench_runner, .{}).step);
     run_bench.stdio = .inherit;
     run_bench.setCwd(b.path("."));
-    run_bench.addArgs(&.{ "zig-out/bin/espice", "benchmark/fixtures" });
+    run_bench.addArtifactArg(exe);
+    run_bench.addArg("benchmark/fixtures");
     if (b.args) |args| run_bench.addArgs(args);
     b.step("bench", "Run benchmarks").dependOn(&run_bench.step);
+
+    const fixtures = b.addSystemCommand(&.{ "python3", "benchmark/check_fixtures.py", "--engine" });
+    fixtures.setCwd(b.path("."));
+    fixtures.addArtifactArg(exe);
+    if (b.args) |args| fixtures.addArgs(args);
+    b.step("test-fixtures", "Validate analysis or generated SKY130 fixtures").dependOn(&fixtures.step);
 }
 
 // ===========================================================================

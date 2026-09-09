@@ -38,19 +38,6 @@ pub fn TriDiag(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        // ponytail: SIMD lane width for bulk u32 fill — replaces @memset
-        const W32 = std.simd.suggestVectorLength(u32) orelse 1;
-        const V32 = @Vector(W32, u32);
-
-        inline fn simdFillU32(buf: []u32, val: u32) void {
-            const fill: V32 = @splat(val);
-            var i: usize = 0;
-            while (i + W32 <= buf.len) : (i += W32) {
-                buf[i..][0..W32].* = fill;
-            }
-            for (buf[i..]) |*v| v.* = val;
-        }
-
         n: u32,
         // CSC slot positions (SoA): sub-diagonal, diagonal, super-diagonal.
         // a_pos[i] = slot for A[i, i-1], b_pos[i] = slot for A[i, i],
@@ -93,9 +80,9 @@ pub fn TriDiag(comptime T: type) type {
                 .cv = try gpa.alloc(T, n),
             };
 
-            simdFillU32(self.a_pos, NONE);
-            simdFillU32(self.b_pos, NONE);
-            simdFillU32(self.c_pos, NONE);
+            @memset(self.a_pos, NONE);
+            @memset(self.b_pos, NONE);
+            @memset(self.c_pos, NONE);
 
             for (0..n) |j| {
                 for (col_ptr[j]..col_ptr[j + 1]) |p| {

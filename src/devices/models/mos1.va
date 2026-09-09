@@ -98,7 +98,17 @@ module mos1(d, g, s, b);
         real v, cz, czsw, pbx, mjx, mjswx, fcx, f2, f3, f4;
         real a;
         begin
-            if (v < fcx * pbx) begin
+            // No junction capacitance, no junction charge — and f2/f3/f4 are
+            // built from cz/czsw, so the else-arm below is identically zero
+            // too. This is mos1load.c:567,628's own guard
+            // (`if (Cbs != 0 || Cbssw != 0)`), and it is not cosmetic: a
+            // layout netlist leaves CJ/CJSW/CBD/CBS and AD/AS/PD/PS at their
+            // zero defaults, so without it every instance pays two `pow` per
+            // junction per Newton iteration to compute zero. Measured on
+            // scaling/parallel_inverters_100: 4 of the 6 pow calls per MOS1
+            // evaluation.
+            if (cz == 0.0 && czsw == 0.0) jchg = 0.0;
+            else if (v < fcx * pbx) begin
                 a = 1.0 - v / pbx;
                 jchg = pbx * (cz * (1.0 - pow(a, 1.0 - mjx)) / (1.0 - mjx)
                             + czsw * (1.0 - pow(a, 1.0 - mjswx)) / (1.0 - mjswx));

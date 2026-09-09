@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const root = @import("../types.zig");
+const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 
 // ponytail: SIMD width for all vectorized loops
@@ -79,16 +80,8 @@ fn newtonAt(
 }
 
 // ============================================================================
-// SIMD helpers — no @memcpy / @memset per contract
+// SIMD arithmetic helpers
 // ============================================================================
-
-/// SIMD copy: dst[0..n] = src[0..n].
-inline fn simdCopy(dst: []f64, src: []const f64) void {
-    const n = @min(dst.len, src.len);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
-    while (i < n) : (i += 1) dst[i] = src[i];
-}
 
 // ============================================================================
 // Core simulation

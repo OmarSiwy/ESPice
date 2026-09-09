@@ -84,7 +84,13 @@ module mos9(d, g, s, b);
         real f1, f2, f3, fcpb;
         begin
             fcpb = fcv * pj;
-            if (v < fcpb)
+            // mos9load.c:918,977's own guard (`if (Cbs != 0 || Cbssw != 0)`):
+            // both arms below are `cz * <something finite>`, so with no
+            // junction capacitance the charge is exactly zero and the two
+            // `pow` per junction per Newton iteration compute it the long way.
+            // A layout netlist leaves CJ/CJSW and AD/AS/PD/PS at zero.
+            if (cz == 0.0) depq = 0.0;
+            else if (v < fcpb)
                 depq = pj * cz * (1.0 - pow(1.0 - v / pj, 1.0 - mgrad)) / (1.0 - mgrad);
             else begin
                 f1 = pj * (1.0 - pow(1.0 - fcv, 1.0 - mgrad)) / (1.0 - mgrad);

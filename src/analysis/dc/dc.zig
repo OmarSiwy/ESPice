@@ -87,7 +87,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const saved = t.get();
     defer {
         t.set(saved);
-        ckt.recompute();
+        ckt.recompute() catch unreachable; // restores the checked original source value
     }
 
     const n_inner = sweepCount(opts.start, opts.stop, opts.step);
@@ -111,7 +111,21 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const saved2: f64 = if (t2) |r| r.get() else 0;
         defer if (t2) |r| {
             r.set(saved2);
-            ckt.recompute();
+        };
+        var temperatures: std.ArrayList(f64) = .empty;
+        defer temperatures.deinit(a);
+        if (opts.source2_is_temp) for (refs) |ref| {
+            if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature"))
+                try temperatures.append(a, ref.get());
+        };
+        defer if (opts.source2_is_temp) {
+            var i: usize = 0;
+            for (refs) |ref| {
+                if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature")) {
+                    ref.set(temperatures.items[i]);
+                    i += 1;
+                }
+            }
         };
         for (0..n_outer) |po| {
             const v2 = opts.start2 + @as(f64, @floatFromInt(po)) * opts.step2;
@@ -147,7 +161,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             var lane_ctx: LaneCtx = .{ .source = t, .start = opts.start, .step = opts.step };
             const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
             const copts = opts.tol.newtonOpts(opts.tol.itl1);
-            if (lanes.solveLanesGpu(ckt, setup, x_lanes, results, copts)) {
+            if (try lanes.solveLanesGpu(ckt, setup, x_lanes, results, copts)) {
                 for (0..npoints) |pt| {
                     const row = data[pt * ncols ..][0..ncols];
                     row[0] = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
@@ -217,8 +231,7 @@ fn runSerial(
         t.set(v);
         // Per-point: invalidate baseline and recompute device params so
         // constant-Jacobian stamps reflect the new swept value.
-        ckt.has_baseline = false;
-        ckt.recompute();
+        try ckt.recompute();
         try ckt.computeBaseline();
 
         var converged = false;

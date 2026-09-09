@@ -18,14 +18,22 @@
 // the I-V and cost power/rectifier 0.3 of waveform). 80*vte only guards
 // unlimited evals (LTE probes, sweeps): finite, monotone, correct slope.
 //
-// ponytail: TT transit time and XTI/EG temperature scaling are NOT here.
-// devices/diode_temp DOES now exercise temperature (the `.dc … TEMP` outer
-// sweep and branch-current comparison both landed 2026-09) and shows the
-// gap — ~2e-2 on i(v1) across -40..125 C. A first inline IS(T)=IS·
-// (T/Tnom)^(XTI/N)·exp((EG/N·vt)(T/Tnom-1)) made it WORSE (4.7e-2): ngspice
-// diotemp.c also scales vj/cjo and uses a temperature-dependent egfet, so
-// the full port has to land together and be verified point-by-point
-// against diotemp.c — a focused task, not an inline guess.
+// TEMPERATURE (diotemp.c, ported 2026-09). The whole map is bias-independent
+// prep at the top of the analog block, and it is an EXACT no-op at
+// T == Tnom: pbfact(Tnom) == pbfact1 by construction (1.1150877 is egfet at
+// 300.15 K), ratio == 1, dtk == 0. Two facts earn their own line because
+// getting either wrong is what a previous attempt did:
+//   * every vte/vtr/vtebrk is k*T/q at the OPERATING temperature. Scaling
+//     IS(T) while leaving vte at Tnom made devices/diode_temp WORSE (4.7e-2
+//     vs 2.3e-2) — the prefactor grows and the exponential does not flatten.
+//   * IS(T) uses the FLAT EG parameter (TLEV 0/1); the pbfact construction
+//     that moves VJ and CJO uses the temperature-dependent silicon bandgap
+//     1.16 - 7.02e-4*T^2/(T+1108). They are different bandgaps in the same
+//     function. Same split as models/vdmos.va and models/mos1.va.
+//
+// ponytail: no sidewall (JSW/NS/CJP/PHP/MJSW/FCS/CTP/TPHP), no tunnel
+// (JTUN/NTUN/XTITUN/KEG), no TT transit time — diode.va has no such branch
+// to scale, and no fixture asks. Add when one does.
 module diode(a, c);
     inout a, c;
     electrical a, c, ai;
@@ -43,19 +51,124 @@ module diode(a, c);
     parameter real vj   = 1.0    from (0:inf);  // V    junction potential
     parameter real m    = 0.5    from (0:inf);  //      grading coefficient (card key `m`)
     parameter real fc   = 0.5    from (0:1);    //      forward-bias depletion coefficient
-    parameter real tnom = 300.15 from (0:inf);  // K
     parameter real gmin = 1e-12  from [0:inf);  // S    junction shunt
+
+    // --- temperature (diotemp.c / diosetup.c defaults) ---------------------
+    // tnom is DEGREES CELSIUS, like the ngspice TNOM/TREF card
+    // (diompar.c:35 `DIOnomTemp = value->rValue + CONSTCtoK`) and like
+    // models/vdmos.va / mos1.va / mos3.va. 27 degC == the old 300.15 K
+    // default, so an unset card is unchanged.
+    parameter real tnom = 27.0;                  // degC .model TNOM / TREF
+    parameter integer tlev  = 0 from [0:2];      // IS / EG equation selector
+    parameter integer tlevc = 0 from [0:1];      // VJ / CJO equation selector
+    parameter real eg   = 1.11;                  // eV   activation energy (1.16 when TLEV=2)
+    parameter real gap1 = 7.02e-4;               // eV/K first bandgap correction (TLEV=2)
+    parameter real gap2 = 1108.0 from (0:inf);   // K    second bandgap correction (TLEV=2)
+    parameter real xti  = 3.0    from [0:inf);   //      IS temperature exponent
+    parameter real nbv  = 1.0    from (0:inf);   //      breakdown emission coeff (default N)
+    parameter real tcv  = 0.0;                   //      BV temperature coefficient
+    parameter real tm1  = 0.0;                   // 1/K   M linear temp coeff
+    parameter real tm2  = 0.0;                   // 1/K^2 M quadratic temp coeff
+    parameter real cta  = 0.0;                   // 1/K   CJO linear temp coeff (TLEVC=1)
+    parameter real tpb  = 0.0;                   // V/K   VJ linear temp coeff (TLEVC=1)
+    parameter real trs  = 0.0;                   // 1/K   RS linear temp coeff
+    parameter real trs2 = 0.0;                   // 1/K^2 RS quadratic temp coeff
 
     real vt, vte, vd, vcrit, u, ulim, id, ihi, w, wlim, qj, f1, f2, f3, vfc;
     real vterec, ur, urlim, genfac, irec;
+    // bias-independent temperature prep (diotemp.c)
+    real tk, tnomk, ratio, dtk, vtnom, egp, nbvx, vtebrk;
+    real egfet, egfet1, fact1, fact2, arg1, argt, pbfact, pbfact1;
+    real pbo, gmaold, gmanew, mt, vj_t, cjo_t, is_t, isr_t, bv_t, rs_t;
 
     analog begin
-        vt  = 1.380649e-23 * tnom / 1.602176634e-19;
-        vte = n * vt;
-        // pnjlim first, exactly where dioload.c:66 runs it: Newton must not
+        // ==== diotemp.c: bias-independent temperature map ===================
+        tk    = $temperature;              // §9.10, kelvin
+        tnomk = tnom + 273.15;
+        ratio = tk / tnomk;                // diotemp.c Temp/DIOnomTemp
+        dtk   = tk - tnomk;                // diotemp.c:48 `dt`
+        vt    = 1.380649e-23 * tk    / 1.602176634e-19;
+        vtnom = 1.380649e-23 * tnomk / 1.602176634e-19;
+        vte   = n * vt;                    // diotemp.c:39, OPERATING temp
+
+        // diosetup.c:129-135 — EG's default depends on TLEV, so it needs the
+        // given-flag; XTI/VJ/CJO/CTA/TPB/TCV/TM1/TM2 are plain defaults.
+        if ($param_given(eg)) egp = eg;
+        else if (tlev == 2)   egp = 1.16;
+        else                  egp = 1.11;
+        // diosetup.c:120-122 — NBV defaults to N.
+        if ($param_given(nbv)) nbvx = nbv; else nbvx = n;
+        vtebrk = nbvx * vt;
+
+        // diotemp.c:58-71. TLEV 0/1 take the hardcoded silicon curve; TLEV=2
+        // takes EG/GAP1/GAP2. This egfet feeds pbfact (VJ/CJO) always, and
+        // feeds IS(T) only on the TLEV=2 arm.
+        if (tlev == 2) begin
+            egfet  = egp - (gap1 * tk * tk)       / (tk + gap2);
+            egfet1 = egp - (gap1 * tnomk * tnomk) / (tnomk + gap2);
+        end else begin
+            egfet  = 1.16 - (7.02e-4 * tk * tk)       / (tk + 1108.0);
+            egfet1 = 1.16 - (7.02e-4 * tnomk * tnomk) / (tnomk + 1108.0);
+        end
+
+        // diotemp.c:52-54 — M(T), TM1/TM2.
+        mt = m * (1.0 + tm1 * dtk + tm2 * dtk * dtk);
+
+        // diotemp.c:72-79 — REFTEMP is 300.15 K, and 1.1150877 is egfet at
+        // REFTEMP, which is why pbfact(Tnom) == pbfact1 exactly.
+        fact1 = tnomk / 300.15;
+        fact2 = tk    / 300.15;
+        arg1  = -egfet1 / (2.0 * 1.380649e-23 * tnomk)
+              +  1.1150877 / (2.0 * 1.380649e-23 * 300.15);
+        argt  = -egfet  / (2.0 * 1.380649e-23 * tk)
+              +  1.1150877 / (2.0 * 1.380649e-23 * 300.15);
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.602176634e-19 * arg1);
+        pbfact  = -2.0 * vt    * (1.5 * ln(fact2) + 1.602176634e-19 * argt);
+
+        // diotemp.c:81-95 — VJ(T), CJO(T). The two-step form in the C
+        // (divide by the Tnom bracket, multiply by the T bracket) written as
+        // one ratio; identical, and identically 1 at T == Tnom.
+        if (tlevc == 1) begin
+            vj_t  = vj  - tpb * (tk - 300.15);
+            cjo_t = cjo * (1.0 + cta * (tk - 300.15));
+        end else begin
+            pbo    = (vj - pbfact1) / fact1;
+            gmaold = (vj - pbo) / pbo;
+            vj_t   = pbfact + fact2 * pbo;
+            gmanew = (vj_t - pbo) / pbo;
+            cjo_t  = cjo * (1.0 + mt * (400e-6 * (tk    - 300.15) - gmanew))
+                         / (1.0 + mt * (400e-6 * (tnomk - 300.15) - gmaold));
+        end
+
+        // diotemp.c:113-119 (TLEV 0/1) and :149-155 (TLEV 2). Note vte, not
+        // vtnom, in the EG term — that is ngspice, and it is the half of this
+        // port that a prefactor-only IS(T) gets wrong.
+        if (tlev == 2)
+            is_t = is * exp(egfet1 / (n * vtnom) - egfet / vte + (xti / n) * ln(ratio));
+        else
+            is_t = is * exp((ratio - 1.0) * egp / vte + (xti / n) * ln(ratio));
+
+        // diotemp.c:141-147 / :176-182 — ISR(T) rides NR, and reuses XTI.
+        vterec = nr * vt;
+        if (tlev == 2)
+            isr_t = isr * exp(egfet1 / (nr * vtnom) - egfet / vterec + (xti / nr) * ln(ratio));
+        else
+            isr_t = isr * exp((ratio - 1.0) * egp / vterec + (xti / nr) * ln(ratio));
+
+        // diotemp.c:204-208 — BV(T); TLEV 0 is subtractive, TLEV 1/2 scaling.
+        if (tlev == 0) bv_t = bv - tcv * dtk;
+        else           bv_t = bv * (1.0 - tcv * dtk);
+
+        // diotemp.c:248-254 — RS(T). Floored like models/vdmos.va's rtemp():
+        // the quadratic can be driven <= 0 and the stamp below divides by it.
+        rs_t = rs * (1.0 + trs * dtk + trs2 * dtk * dtk);
+        if (rs_t < 1.0e-9) rs_t = 1.0e-9;
+
+        // ==== bias-dependent ================================================
+        // pnjlim first, exactly where dioload.c:228 runs it: Newton must not
         // hand the exponential a rail voltage. The tangent continuation below
         // stays as the guard for evals at unlimited x (LTE probes, sweeps).
-        vcrit = vte * ln(vte / (1.4142135623730951 * is));
+        vcrit = vte * ln(vte / (1.4142135623730951 * is_t));   // diotemp.c:199
         vd  = $limit(V(ai, c), "pnjlim", vte, vcrit);
 
         // Forward/reverse ideal current, tangent-continued past 80*vte.
@@ -63,64 +176,70 @@ module diode(a, c);
         // bounded by the literal 80 (same pattern as breakdown below).
         u     = vd / vte;
         ulim  = min(u, 80.0);
-        id    = is * ((exp(ulim) * (1.0 + (u - ulim))) - 1.0);
+        id    = is_t * ((exp(ulim) * (1.0 + (u - ulim))) - 1.0);
 
-        // ISR/NR recombination current (dioload.c:311-317), forward region
-        // only (dioload's vd >= -3*vte branch): isr*(e^{vd/(nr*vt)}-1) times
-        // the depletion generation factor ((1-vd/vj)^2+0.005)^(m/2). NR
-        // multiplies the raw vt, not vte. Same tangent continuation past 80.
+        // ISR/NR recombination current (dioload.c:311-327), forward region
+        // only (dioload's vd >= -3*vte branch): isr(T)*(e^{vd/(nr*vt)}-1)
+        // times the depletion generation factor ((1-vd/vj(T))^2+0.005)^(M(T)/2).
+        // NR multiplies the raw vt, not vte. Same tangent continuation past 80.
         irec = 0.0;
         if (isr > 0.0 && vd >= -3.0 * vte) begin
-            vterec = nr * vt;
             ur     = vd / vterec;
             urlim  = min(ur, 80.0);
-            genfac = pow((1.0 - vd / vj) * (1.0 - vd / vj) + 0.005, m / 2.0);
-            irec   = isr * ((exp(urlim) * (1.0 + (ur - urlim))) - 1.0) * genfac;
+            genfac = pow((1.0 - vd / vj_t) * (1.0 - vd / vj_t) + 0.005, mt / 2.0);
+            irec   = isr_t * ((exp(urlim) * (1.0 + (ur - urlim))) - 1.0) * genfac;
         end
 
         // High-injection roll-off, ngspice IKF (dioload.c:382-386):
         // cd / (1 + sqrt(cd/ikf)) on the total forward current, recombination
         // included. Guarded on itot > 0 so the reverse branch is untouched
-        // and the sqrt argument cannot go negative.
+        // and the sqrt argument cannot go negative. IKF carries no
+        // temperature coefficient in diotemp.c.
         ihi = id + irec;
         if (ikf > 0.0 && ihi > 0.0)
             ihi = ihi / (1.0 + sqrt(ihi / ikf));
 
-        // Reverse breakdown: -ibv at vd = -bv, exponential below. Armed only
-        // when the card gives a BV, which is how ngspice treats BV=0.
-        // Tangent-continued past 80*vt of depth: ngspice instead runs a
-        // MIRRORED pnjlim in this region (dioload.c:59), which the probe-only
-        // $limit form cannot spell; the tangent keeps slope structure so
-        // Newton walks back instead of meeting inf.
-        // Ratio-space clamp (w/vt before min) so the finiteness prover sees
-        // exp's argument bounded by the literal 80.
-        if (bv > 0.0 && vd < -bv) begin
-            w    = -(bv + vd) / vt;
+        // Reverse breakdown: -ibv at vd = -bv(T), exponential below, on
+        // vtebrk = NBV*vt (dioload.c:104). Armed off the RAW bv, which is how
+        // ngspice treats DIObreakdownVoltageGiven, and how the knee stays a
+        // card decision rather than a temperature one.
+        // Tangent-continued past 80*vtebrk of depth: ngspice instead runs a
+        // MIRRORED pnjlim in this region (dioload.c:219-226), which the
+        // probe-only $limit form cannot spell; the tangent keeps slope
+        // structure so Newton walks back instead of meeting inf.
+        // Ratio-space clamp (w/vtebrk before min) so the finiteness prover
+        // sees exp's argument bounded by the literal 80.
+        if (bv > 0.0 && vd < -bv_t) begin
+            w    = -(bv_t + vd) / vtebrk;
             wlim = min(w, 80.0);
             ihi  = ihi - ibv * (exp(wlim) * (1.0 + (w - wlim)) - 1.0);
         end
 
         I(ai, c) <+ ihi + gmin * vd;
 
-        // Depletion charge, ngspice CJO/VJ/M. Below fc*vj it is the exact
-        // integral of cjo*(1-v/vj)^-m; above it ngspice switches to the
-        // linearized f1/f2/f3 continuation, because the exact form has a
-        // singularity at v = vj that a forward-biased Newton step walks into.
+        // Depletion charge, ngspice CJO(T)/VJ(T)/M(T). Below fc*vj(T) it is
+        // the exact integral of cjo(T)*(1-v/vj(T))^-M(T); above it ngspice
+        // switches to the linearized f1/f2/f3 continuation (diotemp.c:190-197,
+        // :256-261), because the exact form has a singularity at v = vj that a
+        // forward-biased Newton step walks into.
         if (cjo > 0.0) begin
-            vfc = fc * vj;
+            vfc = fc * vj_t;
             if (vd < vfc) begin
-                qj = cjo * vj * (1.0 - pow(1.0 - vd / vj, 1.0 - m)) / (1.0 - m);
+                qj = cjo_t * vj_t * (1.0 - pow(1.0 - vd / vj_t, 1.0 - mt)) / (1.0 - mt);
             end else begin
-                f1 = vj * (1.0 - pow(1.0 - fc, 1.0 - m)) / (1.0 - m);
-                f2 = pow(1.0 - fc, 1.0 + m);
-                f3 = 1.0 - fc * (1.0 + m);
-                qj = cjo * (f1 + (1.0 / f2) *
-                     (f3 * (vd - vfc) + (m / (2.0 * vj)) * (vd * vd - vfc * vfc)));
+                f1 = vj_t * (1.0 - pow(1.0 - fc, 1.0 - mt)) / (1.0 - mt);
+                f2 = pow(1.0 - fc, 1.0 + mt);
+                f3 = 1.0 - fc * (1.0 + mt);
+                qj = cjo_t * (f1 + (1.0 / f2) *
+                     (f3 * (vd - vfc) + (mt / (2.0 * vj_t)) * (vd * vd - vfc * vfc)));
             end
             I(ai, c) <+ ddt(qj);
         end
 
-        if (rs > 0.0) I(rsb) <+ V(rsb) / rs;
+        // Guard on the RAW rs: node collapse is a topology decision and must
+        // not depend on temperature (models/vdmos.va says the same). rs_t is
+        // floored above, so the divisor is never <= 0.
+        if (rs > 0.0) I(rsb) <+ V(rsb) / rs_t;
         else          V(rsb) <+ 0.0;
     end
 endmodule

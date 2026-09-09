@@ -28,6 +28,8 @@ test {
     _ = @import("engine.zig");
     _ = @import("gpu_context.zig");
     _ = @import("frontend/parser.zig");
+    _ = @import("frontend/parameter_tests.zig");
+    _ = @import("frontend/source.zig");
     _ = @import("frontend/tokenizer.zig");
     _ = @import("frontend/types.zig");
     _ = @import("output/rawfile.zig");
@@ -73,6 +75,7 @@ const Options = struct {
     no_spiceinit: bool = false,
     autorun: bool = false,
     backend: gpu_context.Request = .cpu,
+    gpu_force: bool = false,
     defines: [16]?Define = .{null} ** 16,
     n_defines: usize = 0,
     deck_paths: [16]?[]const u8 = .{null} ** 16,
@@ -108,13 +111,15 @@ pub fn main(init: std.process.Init) !u8 {
             } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--no-spiceinit")) {
                 opts.no_spiceinit = true;
             } else if (std.mem.eql(u8, arg, "--gpu")) {
-                opts.backend = .auto; // deprecated alias for --backend auto
+                opts.backend = .auto;
+                opts.gpu_force = true;
             } else if (optionValue(arg, "", "--backend", &it)) |oa| {
                 const val = valueOrUsage(oa, io) orelse return 2;
                 opts.backend = parseBackend(val) orelse {
                     std.debug.print("Error: unknown backend '{s}' (want auto|cpu|cuda|hip)\n", .{val});
                     return 2;
                 };
+                opts.gpu_force = false;
             } else if (optionValue(arg, "-r", "--rawfile", &it)) |oa| {
                 opts.raw_path = valueOrUsage(oa, io) orelse return 2;
             } else if (optionValue(arg, "-o", "--output", &it)) |oa| {
@@ -183,8 +188,11 @@ pub fn main(init: std.process.Init) !u8 {
     var any_ran = false;
     for (opts.deck_paths[0..opts.n_decks]) |maybe_path| {
         const path = maybe_path orelse continue;
-        const src = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch {
-            std.debug.print("Error: can't open input file '{s}'\n", .{path});
+        const src = (if (opts.tokenizer == .spectre)
+            std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited)
+        else
+            @import("frontend/source.zig").load(io, arena, path)) catch |err| {
+            std.debug.print("Error: can't load input file '{s}': {s}\n", .{ path, @errorName(err) });
             continue;
         };
 
@@ -225,7 +233,8 @@ pub fn main(init: std.process.Init) !u8 {
                 .dyn = build_options.dyn_path,
                 .gompute = build_options.gompute_path,
             };
-            vaload.ensureAllLoaded(arena, io, hdl_paths.items, hdl_build_paths) catch |e| {
+            // Registry keys outlive every deck; compile scratch is freed individually.
+            vaload.ensureAllLoaded(std.heap.smp_allocator, io, hdl_paths.items, hdl_build_paths) catch |e| {
                 std.debug.print("Error: runtime HDL load failed: {s}\n", .{@errorName(e)});
                 return skip(io, "hdl load error");
             };
@@ -239,6 +248,7 @@ pub fn main(init: std.process.Init) !u8 {
             // device/driver) a hard error in run() instead of a CPU fallback.
             var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{
                 .gpu = opts.backend != .cpu,
+                .gpu_force = opts.gpu_force,
                 .gpu_strict = opts.backend == .cuda or opts.backend == .hip,
             }) catch |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
@@ -246,22 +256,51 @@ pub fn main(init: std.process.Init) !u8 {
             };
             defer sim.deinit();
 
+            // fromNetlist owns every surviving value; release parse scratch now.
+            _ = parse_arena_state.reset(.free_all);
+
             // Big runtime-VA models (PSP103: ~24k dual-number locals) need
             // multi-MB eval frames; the default 8 MB main stack overflows.
             // ponytail: run the solve on a fat-stack thread; a stackless
             // eval would need codegen-level local reuse.
+            // ponytail: single binary transient only; other job/format combinations
+            // retain Results until a whole-deck streaming contract is needed.
+            var stream_path = if (opts.format == .binary and sim.n_jobs == 1 and
+                std.meta.activeTag(sim.jobs[0]) == .tran) opts.raw_path else null;
+            if (stream_path) |p| if (!(rawfile.canStream(io, p) catch return skip(io, "write error"))) {
+                stream_path = null;
+            };
             const Runner = struct {
-                fn run(sm: *engine.Simulation, out: *?anyerror) void {
-                    sm.run() catch |e| {
+                fn run(sm: *engine.Simulation, run_io: std.Io, output_path: ?[]const u8, points: *?usize, out: *?anyerror) void {
+                    if (output_path) |p| {
+                        points.* = stream(sm, run_io, p) catch |e| {
+                            out.* = e;
+                            return;
+                        };
+                    } else sm.run() catch |e| {
                         out.* = e;
                     };
                 }
+
+                fn stream(sm: *engine.Simulation, run_io: std.Io, output_path: []const u8) !usize {
+                    const a = std.heap.smp_allocator;
+                    const names = try a.alloc([]const u8, sm.probe_labels.len + 1);
+                    defer a.free(names);
+                    names[0] = "time";
+                    @memcpy(names[1..], sm.probe_labels);
+                    var output = try rawfile.Stream.init(run_io, a, output_path, sm.title, names);
+                    defer output.deinit();
+                    _ = try sm.runTransient(&output);
+                    try output.finish();
+                    return output.npoints;
+                }
             };
             var run_err: ?anyerror = null;
-            if (std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, Runner.run, .{ &sim, &run_err })) |th| {
+            var streamed_points: ?usize = null;
+            if (std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, Runner.run, .{ &sim, io, stream_path, &streamed_points, &run_err })) |th| {
                 th.join();
             } else |_| {
-                Runner.run(&sim, &run_err);
+                Runner.run(&sim, io, stream_path, &streamed_points, &run_err);
             }
             if (run_err) |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
@@ -312,6 +351,9 @@ pub fn main(init: std.process.Init) !u8 {
                     res.plotname, res.npoints, res.varnames.len,
                 });
             }
+            if (streamed_points) |n| std.debug.print("Analysis:   Transient Analysis ({d} points, {d} variables)\n", .{
+                n, sim.probes.len + 1,
+            });
             if (opts.raw_path) |rp| std.debug.print("Raw file:   {s}\n", .{rp});
         }
 
@@ -436,6 +478,7 @@ fn printHelp(io: std.Io) void {
         \\  -a, --autorun              Run the loaded netlist at once
         \\  -b, --batch                Process FILE in batch mode
         \\      --backend=BE           Compute backend (auto|cpu|cuda|hip, default cpu; auto probes the GPU)
+        \\      --gpu                  Use GPU regardless of device count or work threshold
         \\  -D, --define=var[=val]     Define a variable
         \\      --format=FMT            Output format (binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print)
         \\  -h, --help                 Display this help and exit
@@ -450,4 +493,3 @@ fn printHelp(io: std.Io) void {
         \\
     , .{});
 }
-
