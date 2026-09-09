@@ -289,8 +289,8 @@ fn markWarm(image: []const u8, knobs: Knobs) void {
 const BatchGpu = struct {
     kernel: Raw,
     /// `arp_lim_<model>`: the limit/state pass, when the device has one.
-    /// Both halves per limit pass, or when `held` the limit half per limit
-    /// pass and the state half once per converged solve.
+    /// The limit half per limit pass, the state half once per converged
+    /// solve, at the x the converger stages (`updateStatesOnGpu`).
     lim_kernel: ?Raw,
     /// `arp_ctl_<model>`: the accepted-step latch pass, when the device
     /// declares `stateCtl`.
@@ -323,8 +323,7 @@ const BatchGpu = struct {
     block: u32,
     has_lim: bool,
     /// `GpuPayload.held`: the state kernel's `updateState` writes held
-    /// variables, so its state half runs once per converged solve from
-    /// `updateStatesOnGpu`, never per iterate.
+    /// variables (`syncInstances` merges them).
     held: bool,
     /// The host batch has `Hooks.status`: eval latches `vera_status__` in
     /// the resident Instance, which `syncStatus` brings home.
@@ -1453,10 +1452,10 @@ pub const GpuContext = struct {
         bg.lim_active = true;
     }
 
-    /// Limits and state-latches the resident batches in one fused launch (the
-    /// converger calls `applyLimits` and `updateStates` back to back at the
-    /// same x), walking the host batches meanwhile. Synchronous, because the
-    /// converger reads the answer at once.
+    /// Limits the resident batches in one launch, walking the host batches
+    /// meanwhile. Synchronous, because the converger reads the answer at
+    /// once. No state half: the host stages state only at the converged
+    /// iterate, and so does `updateStatesOnGpu`.
     ///
     /// After `eval_follows`, the eval at the limited x goes on the stream
     /// behind the limit pass, once the host limiters have finished with x,
@@ -1481,8 +1480,8 @@ pub const GpuContext = struct {
         var launched = false;
         for (self.batches) |*bg| {
             const lk = if (bg.lim_kernel) |*k| k else continue;
-            // A held batch without `limit` has nothing to run per iterate.
-            if (bg.count == 0 or (bg.held and !bg.has_lim)) continue;
+            // A state-only batch has nothing to run per iterate.
+            if (bg.count == 0 or !bg.has_lim) continue;
             if (!launched) {
                 // `x_old` explicitly: under JFNK the last eval was a
                 // finite-difference probe.
@@ -1495,7 +1494,7 @@ pub const GpuContext = struct {
             try syncSeededLim(bg);
             var count: u64 = bg.count;
             var lim_active: u64 = @intFromBool(bg.lim_active);
-            var halves: u64 = if (bg.held) device_ir.lim_pass_limit else device_ir.lim_pass_limit | device_ir.lim_pass_state;
+            var halves: u64 = device_ir.lim_pass_limit;
             var sim = self.sim;
             try bg.launch(lk, &self.stream, &.{
                 gompute.interface.arg(&count),
@@ -1550,9 +1549,9 @@ pub const GpuContext = struct {
         self.pre = .{ .sim = f.sim, .charge = f.charge };
     }
 
-    /// Runs the device limit pass fused with the path-latch staging, and the
-    /// host walk on the rest. A fault falls back to the host walk over every
-    /// batch; the resident batches' stale host lim/state self-heal, since
+    /// Runs the device limit pass and the host walk on the rest. A fault
+    /// falls back to the host walk over every batch; the resident batches'
+    /// stale host lim/state self-heal, since
     /// limiting restarts from x_old and the latches recompute from x alone.
     pub noinline fn applyLimits(self: *Self, x: []f64, x_old: []const f64, sim: SimState) bool {
         self.sim = sim;
@@ -1562,10 +1561,13 @@ pub const GpuContext = struct {
         };
     }
 
-    /// Runs the held batches' state kernel at the converged `x` and the host
-    /// walk on the rest; the other resident batches staged in the fused
-    /// limit launch. A resident batch cannot ask for a step reject: the
-    /// kernel flags any non-`.ok` `updateState` as a fault instead.
+    /// Runs every resident batch's state half at the converged `x` and the
+    /// host walk on the rest. The converger stages at x_k, the iterate
+    /// `newton` publishes, after its last limit pass ran at x_k+1; staging
+    /// in that pass committed state one iterate ahead of the CPU and drifted
+    /// tran/device_hfet_inverter's incremental Meyer charges 0.34% (#15). A
+    /// resident batch cannot ask for a step reject: the kernel flags any
+    /// non-`.ok` `updateState` as a fault instead.
     fn updateStatesOnGpu(self: *Self, x: []const f64) !?f64 {
         if (comptime backend == null) return walk.updateBatches(self.cpu_batches, x);
         if (self.poisoned) return error.GpuStateReject;
@@ -1573,9 +1575,9 @@ pub const GpuContext = struct {
         var launched = false;
         for (self.batches) |*bg| {
             const lk = if (bg.lim_kernel) |*k| k else continue;
-            if (bg.count == 0 or !bg.held) continue;
+            if (bg.count == 0) continue;
             if (!launched) {
-                // A prefetched eval read the held values this launch rewrites.
+                // A prefetched eval read the state this launch rewrites.
                 self.pre = null;
                 if (self.params_dirty) try self.repack();
                 @memcpy(self.pin_x2[0..n], x[0..n]);
@@ -1617,8 +1619,7 @@ pub const GpuContext = struct {
         return walk.updateBatches(self.cpu_batches, x);
     }
 
-    /// Runs the resident held-variable batches' state pass and walks the
-    /// host ones; the fused limit launch already staged the rest. Every
+    /// Runs the resident batches' state pass and walks the host ones. Every
     /// batch walks on the host once poisoned.
     pub noinline fn updateStates(self: *Self, x: []const f64, sim: SimState) ?f64 {
         self.sim = sim;
