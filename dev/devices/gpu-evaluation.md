@@ -26,9 +26,10 @@ on top of the downloaded planes.
   §5.6.1.2 latches alone: b3soidd, b3soifd, hicumL2, hisim2, kinduc, mes),
   which is what the state and control kernels carry. It admits
   held-variable devices (the Meyer MOS models mos1/2/3/6/9, bsim4va,
-  psp103, vbic13_4t), which the payload marks `held`. Their state kernel runs in halves (its `halves` argument,
+  psp103, vbic13_4t), which the payload marks `held`. Every state kernel runs in halves (its `halves` argument,
   device ABI 27): the limit half in every per-iterate limit pass, the
-  state half once per converged solve from `GpuContext.updateStates`, so
+  state half once per converged solve from `GpuContext.updateStates`
+  (held or not since #15), so
   no Newton iterate is latched, the INITFIX pass stages nothing (it skips
   `updateStates` on both backends), and `stateCtl(.revert)` takes it back
   on a rejected step. The lim plane stays resident across both halves.
@@ -343,28 +344,35 @@ ponytail: the floor stays. A CUDA graph per eval would cut the enqueue
 needs Newton on the device and is out of scope (every solve runs on the
 host).
 
-`tran/device_hfet_inverter` drifts 0.34% CUDA against CPU at `i(vin)[85]`
-(#15, still open). What is known, from hash traces of every eval, limit
-pass, state call and q-tape snapshot on both backends, and from replaying
-each device eval on the host with the device's lim plane and state:
+`tran/device_hfet_inverter` drifted 0.34% CUDA against CPU at
+`i(vin)[85]` (#15). Hash traces of every eval, limit pass, state call and
+q-tape snapshot on both backends, and per-instance replays of each device
+eval on the host at the device's lim plane and state, found two
+differences:
 
-- The runs are bitwise equal until the second Newton iterate of the
-  operating point, the first with limiting armed. There `g`, `c` and `q`
-  match and three `rhs` cells differ by one ulp, with no voltage clamped
-  (the limiter returns its input). Every later difference follows from
-  that: the OP iterates part, the incremental Meyer charges (`q = q_prev +
-  C dv`, held state) inherit it, and the step grid splits on the 1 ns edge.
-- Every other device eval, the limit pass, the state latches and the q
-  tape are bitwise equal to the host at the same inputs. The hypothesis
-  that the limiting correction's `@reduce(.Add)` reorders: an explicit
-  lane-order fused sum changed neither backend's output by one bit, so it
-  is refuted.
-- Left: an arithmetic difference in the hfet1 model body at that one x.
-  VerA emits its proven units as `@setFloatMode(.optimized)`, which lets
-  x86 and NVPTX contract and reassociate differently; a rarely taken
-  branch would explain a difference at one point only. Next step: dump the
-  per-instance residuals at that eval, then build hfet1 with strict units
-  to confirm.
+- A one-ulp `rhs` gap at the second operating-point iterate, the first
+  with the seeded lim plane making the limiting correction live. The
+  device rounds `val + g * corr` as one FMA: `evalRange` is `.optimized`,
+  so LLVM emits plain `mul.f64`/`add.f64` (not `.rn`) and ptxas fuses them,
+  while x86 keeps the products in a vector and rounds twice. Inst 2, row
+  21: host -1.4757283789180896e-9, device -1.4757283789180898e-9, both
+  reproduced exactly from the dumped operands. Harmless here: the OP
+  iterates re-merge bitwise two iterates later, and forcing an FMA on both
+  sides changed neither backend's output.
+- The cause of the drift, from the trace and the code (a GPU run has not
+  confirmed it yet): the state latch ran one iterate ahead. The
+  converger stages state at x_k, the iterate `newton` publishes, after its
+  last limit pass ran at x_k+1, but the device ran `updateState` inside
+  every limit pass (the limit and state halves together) for every batch
+  but the held ones, and `updateStates` launched nothing for them. hfet1's
+  incremental Meyer charges (`q = q_prev + C dv`) committed that state,
+  so the first eval after the operating point's commit already read a
+  different `q` at a bitwise-equal x, and the step grid split on the 1 ns
+  edge. The limit pass now runs only the limit half, and `updateStates`
+  runs the state half of every resident batch at the converged x, as the
+  host does. Not yet measured: the corpus run under `test-gpu`, and the
+  cost of the extra launch and wait per converged solve on the
+  latency-bound decks.
 
 Raw outputs of the whole corpus on both backends (CPU against CUDA):
 
