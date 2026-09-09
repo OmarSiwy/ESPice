@@ -1,4 +1,3 @@
-* KNOWN GAP: mos3.va reads gm through ddx(), which is 0 inside VerA noisePsd (#119)
 * MOS level 3 common-source noise against ngspice 45 (#84): RD/RS thermal,
 * channel thermal (NLEV=2 default: 4kT*(2/3)|gm|) and flicker
 * KF*gm^2/(m*f^AF*W*Leff*Cox'), plus the 10k load. M1 runs saturated,
