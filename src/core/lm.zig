@@ -5,6 +5,11 @@
 //! parallel. The Jacobian is forward differences; bounds are handled by
 //! clamping each step into the box and holding a parameter fixed while it
 //! sits on a limit its gradient pushes it past.
+//!
+//! With `batch` set, every start or trial point comes with the n Jacobian
+//! points around it, so an accepted trial costs one round of evaluations
+//! instead of two. The points a rejected trial brought along are dropped
+//! uncounted, so the path and every reported figure match the unbatched run.
 const std = @import("std");
 const assert = std.debug.assert;
 const dot = @import("numerics.zig").dot;
@@ -80,8 +85,11 @@ pub const Lm = struct {
     delta: []f64,
     /// Parameters not held on a limit at the last Jacobian.
     free: []bool,
-    /// Pending points, n values each; `pending` of them.
+    /// Pending points, n values each; `pending` of them. Under `batch` a
+    /// start or trial point is row 0 and its Jacobian points rows 1..n.
     pts: []f64,
+    /// Queue each start or trial point's Jacobian points with it.
+    batch: bool,
     /// Finite-difference step of each Jacobian point.
     h: []f64,
     pending: u32 = 1,
@@ -116,8 +124,8 @@ pub const Lm = struct {
     /// at least one parameter, equal slice lengths, lo <= hi with a grid
     /// point inside each gridded box, CLOSE > 0 and CUT > 1 (anything less
     /// never grows the Marquardt parameter past MAX, so a rejected step
-    /// would retry forever).
-    pub fn init(arena: std.mem.Allocator, x0: []const f64, lo: []const f64, hi: []const f64, dels: []const f64, grid: []const f64, m: u32, opts: Options) !Lm {
+    /// would retry forever). `batch` as the field says.
+    pub fn init(arena: std.mem.Allocator, x0: []const f64, lo: []const f64, hi: []const f64, dels: []const f64, grid: []const f64, m: u32, opts: Options, batch: bool) !Lm {
         const n: u32 = @intCast(x0.len);
         assert(n > 0);
         assert(lo.len == n);
@@ -149,8 +157,9 @@ pub const Lm = struct {
             .a = try arena.alloc(f64, @as(usize, n) * n),
             .delta = try arena.alloc(f64, n),
             .free = try arena.alloc(bool, n),
-            // n Jacobian points, at least the 2 polish points.
-            .pts = try arena.alloc(f64, @as(usize, n) * @max(n, 2)),
+            // A point and its n Jacobian points, at least the 2 polish points.
+            .pts = try arena.alloc(f64, @as(usize, n) * @max(n + 1, 2)),
+            .batch = batch,
             .h = try arena.alloc(f64, n),
             .lambda = opts.close,
             .arena = arena,
@@ -159,6 +168,7 @@ pub const Lm = struct {
         @memcpy(s.pts[0..n], s.x);
         @memset(s.g, 0);
         @memset(s.free, true);
+        s.speculate();
         return s;
     }
 
@@ -167,20 +177,36 @@ pub const Lm = struct {
     pub fn points(s: *const Lm) []const f64 {
         if (s.status != .running) return &.{};
         assert(s.pending >= 1);
-        assert(s.pending <= @max(s.n, 2)); // n Jacobian or 2 polish points
+        assert(s.pending <= @max(s.n + 1, 2)); // a point and its Jacobian, or 2 polish points
         return s.pts[0 .. @as(usize, s.pending) * s.n];
+    }
+
+    /// Whether row 0 of `points()` is the start point or a trial point,
+    /// rather than a Jacobian or polish point.
+    pub fn stepping(s: *const Lm) bool {
+        return s.phase == .start or s.phase == .trial;
+    }
+
+    /// Whether `points()` is a start or trial point followed by its n
+    /// Jacobian points (`batch`).
+    pub fn batched(s: *const Lm) bool {
+        return s.batch and s.stepping();
     }
 
     /// Takes the residuals of `points()`, `m` per point in the same order;
     /// a NaN marks a point that could not be evaluated. Fails only when the
     /// arena cannot grow `history`. Asserts that the run is still going and
     /// that there is one residual vector per point.
-    pub fn feed(s: *Lm, residuals: []const f64) !void {
+    pub fn feed(s: *Lm, residuals_all: []const f64) std.mem.Allocator.Error!void {
         const n = s.n;
         const m = s.m;
         assert(s.status == .running);
-        assert(residuals.len == @as(usize, s.pending) * m);
-        s.evaluations += s.pending;
+        assert(residuals_all.len == @as(usize, s.pending) * m);
+        // A start or trial point counts alone; its batched Jacobian points
+        // count when the Jacobian phase consumes them.
+        const anchored = s.phase == .start or s.phase == .trial;
+        const residuals = if (anchored) residuals_all[0..m] else residuals_all;
+        s.evaluations += if (anchored) 1 else s.pending;
         switch (s.phase) {
             .start => {
                 // Kept before the check, so a failed start reports what it
@@ -191,7 +217,7 @@ pub const Lm = struct {
                 if (!std.math.isFinite(rss)) return s.stop(.failed);
                 try s.record();
                 if (rss == 0) return s.stop(.relout);
-                s.jacobianPoints();
+                return s.jacobian(residuals_all[m..]);
             },
             .jacobian => {
                 for (0..n) |j| for (0..m) |i| {
@@ -229,7 +255,7 @@ pub const Lm = struct {
                 if (rel_in < s.opts.relin) return s.stop(.relin);
                 if (rss == 0 or rel_out < s.opts.relout) return s.stop(.relout);
                 if (s.iterations >= s.opts.itropt) return s.stop(.itropt);
-                s.jacobianPoints();
+                return s.jacobian(residuals_all[m..]);
             },
             .polish => {
                 var best: ?usize = null;
@@ -323,31 +349,53 @@ pub const Lm = struct {
         assert(s.history.x.items.len == s.history.rss.items.len * s.n);
     }
 
-    /// One point per parameter, stepped forward, or backward from an upper
-    /// limit so the point stays in the box. A box narrower than the step
-    /// gets the wider side's whole room instead; only a box of zero width
-    /// (lo == hi) steps outside it.
-    fn jacobianPoints(s: *Lm) void {
+    /// Enters the Jacobian phase at the accepted `x`: feeds it `rows`,
+    /// the residuals of the Jacobian points queued with `x` (empty unless
+    /// `batch`), or else queues those points.
+    fn jacobian(s: *Lm, rows: []const f64) std.mem.Allocator.Error!void {
+        const n = s.n;
+        assert(rows.len == if (s.batch) @as(usize, n) * s.m else 0);
+        s.phase = .jacobian;
+        s.pending = n;
+        if (s.batch) return s.feed(rows);
+        s.jacobianPoints(s.x, s.pts[0 .. @as(usize, n) * n]);
+    }
+
+    /// Under `batch`, queues the Jacobian points of the start or trial
+    /// point in row 0 behind it.
+    fn speculate(s: *Lm) void {
+        if (!s.batch) return;
+        const n = s.n;
+        s.jacobianPoints(s.pts[0..n], s.pts[n..][0 .. @as(usize, n) * n]);
+        s.pending = n + 1;
+    }
+
+    /// Writes into `out` one point per parameter around `x`, stepped
+    /// forward, or backward from an upper limit so the point stays in the
+    /// box, and each step into `h`. A box narrower than the step gets the
+    /// wider side's whole room instead; only a box of zero width (lo == hi)
+    /// steps outside it.
+    fn jacobianPoints(s: *Lm, x: []const f64, out: []f64) void {
         const n = s.n;
         assert(s.status == .running);
+        assert(x.len == n);
+        assert(out.len == @as(usize, n) * n);
         for (0..n) |j| {
-            var h = if (s.dels[j] != 0) @abs(s.dels[j]) else s.opts.difsiz * @max(@abs(s.x[j]), s.opts.parmin);
+            var h = if (s.dels[j] != 0) @abs(s.dels[j]) else s.opts.difsiz * @max(@abs(x[j]), s.opts.parmin);
             // At least one grid step, a whole number of them.
             if (s.grid[j] > 0) h = @max(@round(h / s.grid[j]), 1) * s.grid[j];
-            if (s.x[j] + h > s.hi[j]) {
-                const up = s.hi[j] - s.x[j];
-                const down = s.x[j] - s.lo[j];
+            if (x[j] + h > s.hi[j]) {
+                const up = s.hi[j] - x[j];
+                const down = x[j] - s.lo[j];
                 if (down >= h) h = -h else if (up >= down and up > 0) h = up else if (down > 0) h = -down;
             }
             // DIFSIZ and PARMIN are positive, so a zero step is a bug here.
             assert(h != 0);
-            const p = s.pts[j * n ..][0..n];
-            @memcpy(p, s.x);
-            p[j] = onGrid(s.grid[j], s.x[j] + h);
-            s.h[j] = p[j] - s.x[j];
+            const p = out[j * n ..][0..n];
+            @memcpy(p, x);
+            p[j] = onGrid(s.grid[j], x[j] + h);
+            s.h[j] = p[j] - x[j];
         }
-        s.pending = n;
-        s.phase = .jacobian;
     }
 
     /// Solves (JᵀJ + λ D) δ = -g/2 over the free parameters, D the diagonal
@@ -385,6 +433,7 @@ pub const Lm = struct {
         if (!moved) return s.stop(.relin);
         s.pending = 1;
         s.phase = .trial;
+        s.speculate();
     }
 };
 
@@ -446,7 +495,7 @@ test "a divider sized to its target converges to the exact resistance" {
             r[0] = (5 * x[0] / (1e3 + x[0]) - 2) / 2;
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, &.{0}, 1, .{});
+    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, &.{0}, 1, .{}, false);
     try solve(&lm, F{});
     try std.testing.expect(lm.status != .failed and lm.status != .max);
     try std.testing.expectApproxEqRel(2e3 / 3.0, lm.x[0], 1e-4);
@@ -461,7 +510,7 @@ test "Rosenbrock's valley: two parameters reach the known optimum" {
             r[1] = 1 - x[0];
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{ -1.2, 1 }, &.{ -5, -5 }, &.{ 5, 5 }, &.{ 0, 0 }, &.{ 0, 0 }, 2, .{ .itropt = 200, .relin = 1e-9, .relout = 1e-12, .grad = 1e-12, .difsiz = 1e-7 });
+    var lm = try Lm.init(arena.allocator(), &.{ -1.2, 1 }, &.{ -5, -5 }, &.{ 5, 5 }, &.{ 0, 0 }, &.{ 0, 0 }, 2, .{ .itropt = 200, .relin = 1e-9, .relout = 1e-12, .grad = 1e-12, .difsiz = 1e-7 }, false);
     try solve(&lm, F{});
     try std.testing.expectApproxEqAbs(1, lm.x[0], 1e-4);
     try std.testing.expectApproxEqAbs(1, lm.x[1], 1e-4);
@@ -476,7 +525,7 @@ test "an unreachable goal stops on the limit" {
             r[0] = (5 * x[0] / (1e3 + x[0]) - 4.9) / 4.9;
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, &.{0}, 1, .{});
+    var lm = try Lm.init(arena.allocator(), &.{1e3}, &.{100}, &.{1e4}, &.{0}, &.{0}, 1, .{}, false);
     try solve(&lm, F{});
     try std.testing.expectEqual(1e4, lm.x[0]);
     try std.testing.expectEqual(1, lm.pinned(0));
@@ -488,7 +537,7 @@ test "every point asked for stays inside a box narrower than the step" {
     defer arena.deinit();
     // DELS = 1 on a box of width 1: neither x + 1 nor x - 1 fits, so the
     // step must shrink to the room the box has.
-    var lm = try Lm.init(arena.allocator(), &.{ 0.5, 0.9 }, &.{ 0, 0 }, &.{ 1, 1 }, &.{ 1, 1 }, &.{ 0, 0 }, 2, .{ .itropt = 50 });
+    var lm = try Lm.init(arena.allocator(), &.{ 0.5, 0.9 }, &.{ 0, 0 }, &.{ 1, 1 }, &.{ 1, 1 }, &.{ 0, 0 }, 2, .{ .itropt = 50 }, false);
     var buf: [4]f64 = undefined;
     while (lm.points().len != 0) {
         const pts = lm.points();
@@ -508,11 +557,11 @@ test "every point asked for stays inside a box narrower than the step" {
 test "no residuals is already optimal; an unevaluable start fails" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    var none = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, &.{0}, 0, .{});
+    var none = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, &.{0}, 0, .{}, false);
     try none.feed(&.{});
     try std.testing.expectEqual(.relout, none.status);
     try std.testing.expectEqual(@as(usize, 0), none.points().len);
-    var bad = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, &.{0}, 1, .{});
+    var bad = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{2}, &.{0}, &.{0}, 1, .{}, false);
     try bad.feed(&.{std.math.nan(f64)});
     try std.testing.expectEqual(.failed, bad.status);
     try std.testing.expectEqual(@as(usize, 0), bad.history.rss.items.len);
@@ -529,10 +578,36 @@ test "a trial point that cannot be evaluated fails the run" {
             r[0] = if (@abs(x[0] - 1) < 1e-2) x[0] - 3 else std.math.nan(f64);
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, &.{0}, 1, .{});
+    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, &.{0}, 1, .{}, false);
     try solve(&lm, F{});
     try std.testing.expectEqual(.failed, lm.status);
     try std.testing.expectEqual(@as(f64, 1), lm.x[0]);
+}
+
+test "batching each point with its Jacobian points changes nothing reported" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const F = struct {
+        fn eval(_: @This(), x: []const f64, r: []f64) void {
+            r[0] = 10 * (x[1] - x[0] * x[0]);
+            r[1] = 1 - x[0];
+        }
+    };
+    var runs: [2]Lm = undefined;
+    for (&runs, [_]bool{ false, true }) |*lm, batch| {
+        lm.* = try Lm.init(arena.allocator(), &.{ -1.2, 1 }, &.{ -5, -5 }, &.{ 5, 5 }, &.{ 0, 0 }, &.{ 0, 0 }, 2, .{ .itropt = 200, .relin = 1e-9, .relout = 1e-12, .grad = 1e-12, .difsiz = 1e-7 }, batch);
+        try solve(lm, F{});
+    }
+    try std.testing.expectEqual(runs[0].status, runs[1].status);
+    try std.testing.expectEqual(runs[0].evaluations, runs[1].evaluations);
+    try std.testing.expectEqual(runs[0].iterations, runs[1].iterations);
+    try std.testing.expectEqualSlices(f64, runs[0].x, runs[1].x);
+    try std.testing.expectEqualSlices(f64, runs[0].history.rss.items, runs[1].history.rss.items);
+    try std.testing.expectEqualSlices(f64, runs[0].history.lambda.items, runs[1].history.lambda.items);
+    try std.testing.expectEqualSlices(u32, runs[0].history.evaluations.items, runs[1].history.evaluations.items);
+    try std.testing.expectEqualSlices(f64, runs[0].history.x.items, runs[1].history.x.items);
+    // Rejected trials happened, so batching did run points it dropped.
+    try std.testing.expect(runs[0].evaluations > 1 + 3 * runs[0].iterations);
 }
 
 test "a step that never improves raises the Marquardt parameter past MAX" {
@@ -544,7 +619,7 @@ test "a step that never improves raises the Marquardt parameter past MAX" {
             r[0] = if (x[0] == 1) 0.5 else 1;
         }
     };
-    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, &.{0}, 1, .{ .max = 1e3 });
+    var lm = try Lm.init(arena.allocator(), &.{1}, &.{0}, &.{10}, &.{0}, &.{0}, 1, .{ .max = 1e3 }, false);
     try solve(&lm, F{});
     try std.testing.expectEqual(.max, lm.status);
     try std.testing.expectEqual(@as(f64, 1), lm.x[0]);
@@ -559,20 +634,23 @@ test "every point stays on each parameter's own grid, and the result is the near
     const grid = [_]f64{ 0.5, 0.2, 1, 0.25, 0 };
     const target = [_]f64{ 1.3, 0.73, 4.4, 2.1, 0.77 };
     const want = [_]f64{ 1.5, 0.8, 4, 2, 0.77 };
-    var lm = try Lm.init(arena.allocator(), &.{ 0.1, 3.3, 9, 0.4, 2 }, &.{ 0.1, 0.1, 0, 0.1, 0 }, &.{ 9.9, 9.9, 9.9, 9.9, 9.9 }, &.{ 0, 0, 0, 0, 0 }, &grid, 5, .{ .itropt = 100 });
-    var buf: [10 * 5]f64 = undefined;
-    while (lm.points().len != 0) {
-        const pts = lm.points();
-        for (0..pts.len / 5) |p| for (0..5) |j| {
-            const v = pts[p * 5 + j];
-            if (grid[j] > 0) try std.testing.expectApproxEqAbs(@round(v / grid[j]), v / grid[j], 1e-9);
-            buf[p * 5 + j] = v - target[j];
-        };
-        try lm.feed(buf[0 .. pts.len / 5 * 5]);
+    // Batched, the same points come in fewer rounds.
+    for ([_]bool{ false, true }) |batch| {
+        var lm = try Lm.init(arena.allocator(), &.{ 0.1, 3.3, 9, 0.4, 2 }, &.{ 0.1, 0.1, 0, 0.1, 0 }, &.{ 9.9, 9.9, 9.9, 9.9, 9.9 }, &.{ 0, 0, 0, 0, 0 }, &grid, 5, .{ .itropt = 100 }, batch);
+        var buf: [6 * 5]f64 = undefined;
+        while (lm.points().len != 0) {
+            const pts = lm.points();
+            for (0..pts.len / 5) |p| for (0..5) |j| {
+                const v = pts[p * 5 + j];
+                if (grid[j] > 0) try std.testing.expectApproxEqAbs(@round(v / grid[j]), v / grid[j], 1e-9);
+                buf[p * 5 + j] = v - target[j];
+            };
+            try lm.feed(buf[0 .. pts.len / 5 * 5]);
+        }
+        try std.testing.expect(lm.status != .failed and lm.status != .max);
+        try std.testing.expectEqual(@as(u32, 5), lm.polish_j);
+        for (want, lm.x, grid) |w, x, g| try std.testing.expectApproxEqAbs(w, x, @as(f64, if (g > 0) 1e-12 else 1e-3));
     }
-    try std.testing.expect(lm.status != .failed and lm.status != .max);
-    try std.testing.expectEqual(@as(u32, 5), lm.polish_j);
-    for (want, lm.x, grid) |w, x, g| try std.testing.expectApproxEqAbs(w, x, @as(f64, if (g > 0) 1e-12 else 1e-3));
 }
 
 test cholesky {

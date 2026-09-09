@@ -97,7 +97,84 @@ residual. The solver treats a NaN trial as a failed step and a NaN in
 the Jacobian as a failed optimization.
 
 The Jacobian's points are independent, so they run in parallel under
-`--jobs`. They do not use the structural lanes of `sweep/lanes.zig`.
+`--jobs`. Under `--jobs` above 1 the solver also batches (`Lm.batch`):
+the start point and every trial point go out with the n Jacobian points
+around them, so an accepted trial costs one round instead of two. A
+rejected trial's Jacobian points are thrown away and not counted, so the
+path, the evaluation counts and the printed summary are the same as with
+`--jobs=1`; the price is the CPU spent on those discarded points.
+
+Measured (ReleaseFast CPU build, hyperfine, `--jobs=3`, two parameters):
+a 128-stage MOS1 chain with two delay goals (21 evaluations, 5 of 10
+trials accepted) takes 12 rounds instead of 17, 1.81 s to 1.71 s wall for
+1.71x the CPU; `optimize/rc_delay_fit` 13.9 ms to 10.1 ms. The wall gain
+is below the round count's because a round waits for its slowest point:
+transient points of this fit take 2416 to 4494 Newton iterations, and
+three concurrent queries each run about 1.35x slower than one alone. At `--jobs=1` nothing changes.
+
+### Warm starts
+
+A Levenberg-Marquardt point's operating point starts from the one of
+the iterate its step left (`Deck.op_guess`, `op.Options.warm_start`)
+instead of the cold MODEINITJCT start. Each trial point and its
+Jacobian points take the operating point of the accepted iterate they
+step from; the start point and its Jacobian points start cold. The
+Jacobian points of an accepted trial do not take the trial's own
+operating point: under batching they run in the trial's round, before
+it exists, and this rule keeps `--jobs=1` on the same path. The guess
+is the facade's row 0 operating point of the round that accepted the
+iterate (`Session.operatingPoint`). Bisection points start cold.
+
+A warm Newton converges to the same solution within the Newton
+tolerances, so the change in output is intentional and at most at that
+level. Measured: no byte of the printed summary or the raw file moved on
+any `tests/fixtures/optimize/` deck, a 32-stage MOS1 chain delay fit or
+a two-parameter common-source DC fit, at `--jobs=1` and 3. Callgrind
+(ReleaseFast, `-Dcpu=x86_64_v3`, `--jobs=1`): the 32-stage chain fit
+4.257e9 to 4.104e9 instructions (-3.6%), the common-source DC fit
+1.0651e8 to 1.0617e8 (-0.3%: its operating point is a few iterations
+of a four-device circuit, and the sweep dominates).
+
+### Direct sensitivities
+
+When every query of the optimized card is a `.dc` sweep, the Jacobian
+comes from the trial point's own sweep instead of n more sweeps. The
+solver always batches then, and the facade runs only row 0, with the n
+Jacobian rows as `Dc.tangents`. At each converged sweep point `dc.zig`
+evaluates F(x) on a full stamp (the baseline would hold the resistors at
+their nominal values, as in `sens.zig`), factors J at x, and for each
+row writes its parameter values, re-derives only the device types they
+touch, evaluates F(x, row), restores the values and solves
+dx = -J⁻¹ (F(x, row) - F(x)). The row's block of the result holds the
+probes at x + dx: the first-order prediction of that row's sweep. The
+facade measures each block as it would measure the row's own result, so
+the RESULTS cards, `Lm` and its forward difference stay as they are; the
+Jacobian becomes the derivative at x rather than a secant over DIFSIZ.
+The perturbation of F is the same parameter step the finite difference
+takes, so no new step size appears. A singular J, or a row that would
+re-wire a device, gives NaN probes, which the solver reads as a failed
+Jacobian.
+
+The grid polish points (#95) are not a Jacobian, so they run as full
+sweeps. The printed evaluation count still counts each Jacobian point, though it
+costs a few evaluations and one back substitution per sweep point
+instead of a sweep. Transient and AC goals keep the finite-difference
+points: a transient tangent needs the sensitivity integrated along the
+trajectory, and that is not built.
+
+Measured (callgrind, ReleaseFast, `-Dcpu=x86_64_v3`, `--jobs=1`): a
+two-parameter common-source DC fit (two goals on a 181-point sweep)
+1.0617e8 to 4.229e7 instructions, 2.5x fewer, in 7 iterations and 22
+evaluations instead of 16 and 60; the finite-difference Jacobian's
+noise had cost it six rejected-step iterations near the optimum. Its
+optimum moves along the fit's valley of equal goal errors (W 4.4536u to
+4.4709u, R 11.227k to 11.183k, both goal errors below 3e-7): the two
+goals do not fix W and R apart. On every `.dc` deck of
+`tests/fixtures/optimize/` the printed optimum, stop reason and
+evaluation count are unchanged; the per-iteration table moves in its
+fourth digit on the first steps.
+
+The points do not use the structural lanes of `sweep/lanes.zig`.
 Those lanes solve one operating point per lane and publish its probes.
 A RESULTS card needs the card's own result, such as a DC sweep, an AC
 sweep or a transient, so each point has to be a full query. The output

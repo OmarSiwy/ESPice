@@ -947,3 +947,34 @@ test "same deck, same bytes: run twice, any solver_threads, any device_threads" 
         }
     }
 }
+
+test "Problem: an optimization takes the same path one point at a time and batched" {
+    const fit =
+        \\* common-source stage: fit the width and load to two points of the transfer curve
+        \\.model nch NMOS(level=1 VTO=0.7 KP=110u GAMMA=0.4 LAMBDA=0.04 PHI=0.65)
+        \\.param w1=optrange(2u, 0.5u, 20u) rv=optrange(5k, 1k, 50k)
+        \\vdd vdd 0 1.8
+        \\vin in 0 0.8
+        \\m1 out in 0 0 nch W=w1 L=1u
+        \\r1 vdd out rv
+        \\.model optmod opt itropt=40 relin=1e-6 relout=1e-10
+        \\.dc vin 0 1.8 0.01 sweep optimize=opt2 results=v1,v2 model=optmod
+        \\.meas dc v1 find v(out) at=0.9 goal=1.682597
+        \\.meas dc v2 find v(out) at=1.2 goal=1.082725
+        \\.end
+        \\
+    ;
+    var runs: [2]*api.Problem = undefined;
+    for (&runs, [_]u16{ 1, 3 }, 0..) |*p, jobs, i| {
+        errdefer for (runs[0..i]) |q| q.deinit();
+        p.* = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = fit, .origin = "fit.sp" } }, .dialect = .hspice, .max_parallel = jobs });
+    }
+    defer for (runs) |p| p.deinit();
+    for (runs) |p| try p.run_all();
+    const a = runs[0].optimization[0];
+    const b = runs[1].optimization[0];
+    try t.expect(a.iterations > 1);
+    try t.expectEqual(a.evaluations, b.evaluations);
+    try t.expectEqualSlices(f64, a.history.x.items, b.history.x.items);
+    try t.expectEqualSlices(f64, a.history.rss.items, b.history.rss.items);
+}

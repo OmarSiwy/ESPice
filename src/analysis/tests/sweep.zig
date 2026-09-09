@@ -578,6 +578,55 @@ const DividerTests = struct {
         for ([_]f64{ 0, 0, 5, 2.5, 10, 5, 0, 0, 5, 3.75, 10, 7.5 }, nested.data) |want, got| try t.expectApproxEqAbs(want, got, 1e-9);
         try expectNominals(&ckt);
 
+        // Tangent rows: row 1 sets R2 to 3.3k, row 2 sets R1 to 1.1k. Each
+        // block is v(out) + dv with dv = -(F(row) - F) / (g1 + g2), F the
+        // out row's current g1 (v(out) - vin) + g2 v(out): the input node is
+        // held by V1, so only v(out) moves.
+        var tctx = ctx;
+        const ri = try paramIndex(refs, "r", 1000);
+        const ro = try paramIndex(refs, "r", 3000);
+        tctx.variants = .{ .labels = &.{ "", "", "" }, .temp_c = &.{ null, null, null }, .axis = &.{ 0, 0, 0 }, .starts = &.{ 0, 0, 1, 2 }, .refs = &.{ ro, ri }, .values = &.{ 3300, 1100 } };
+        const Tangent = struct {
+            fn predict(vs: f64, ra: f64, rb: f64, ra_row: f64, rb_row: f64) f64 {
+                const g1 = 1 / ra;
+                const g2 = 1 / rb;
+                const vo = vs * rb / (ra + rb);
+                const df = (1 / ra_row - g1) * (vo - vs) + (1 / rb_row - g2) * vo;
+                return vo - df / (g1 + g2);
+            }
+        };
+        const tangents = try dc.run(&tctx, .{ .start = 0, .stop = 10, .step = 5, .target = source, .tangents = &.{ 1, 2 } });
+        try t.expectEqual(@as(usize, 9), tangents.npoints);
+        for (0..3) |k| for (0..3) |p| {
+            const vs: f64 = 5 * @as(f64, @floatFromInt(p));
+            const want = switch (k) {
+                0 => vs * 0.75,
+                1 => Tangent.predict(vs, 1000, 3000, 1000, 3300),
+                else => Tangent.predict(vs, 1000, 3000, 1100, 3000), // else: k is 0..2
+            };
+            try t.expectEqual(vs, tangents.data[(3 * k + p) * 2]);
+            try t.expectApproxEqRel(want, tangents.data[(3 * k + p) * 2 + 1], 1e-12);
+        };
+        try expectNominals(&ckt);
+        // Under an outer sweep the tangent block follows every outer level.
+        const nested_tangent = try dc.run(&tctx, .{
+            .start = 0,
+            .stop = 10,
+            .step = 5,
+            .target = source,
+            .target2 = .{ .device = .{ .type = r2.type, .index = r2.index, .param_name = "r" } },
+            .points2 = &.{ 1000, 3000 },
+            .tangents = &.{2},
+        });
+        try t.expectEqual(@as(usize, 12), nested_tangent.npoints);
+        for (0..2) |po| for (0..3) |p| {
+            const vs: f64 = 5 * @as(f64, @floatFromInt(p));
+            const r2v: f64 = if (po == 0) 1000 else 3000;
+            const row = (6 + 3 * po + p) * 2;
+            try t.expectApproxEqRel(Tangent.predict(vs, 1000, r2v, 1100, r2v), nested_tangent.data[row + 1], 1e-12);
+        };
+        try expectNominals(&ckt);
+
         const temp_c = ckt.temp_c;
         const temps = try dc.run(&ctx, .{ .start = 0, .stop = 50, .step = 25, .target = .temp });
         try t.expectEqualStrings("temp-sweep", temps.varnames[0]);

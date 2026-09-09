@@ -252,6 +252,12 @@ pub const Dc = struct {
     /// replaces `start`/`stop`/`step` (`points2` the outer ones).
     points: []const f64 = &.{},
     points2: []const f64 = &.{},
+    /// `Deck.variants` rows the sweep also predicts to first order from its
+    /// own solutions, for the optimizer's Jacobian (dev/analysis/optimize.md,
+    /// "Direct sensitivities"). Each adds a block of the same points after
+    /// the sweep's own: the probes moved by -J⁻¹ (F(x, row) - F(x)) at each
+    /// point, on the factorization at that point's solution.
+    tangents: []const u32 = &.{},
 
     /// The device parameter, or the temperature, a `.dc` sweep drives.
     pub const SweepTarget = union(enum) {

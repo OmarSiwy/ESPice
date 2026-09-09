@@ -505,6 +505,16 @@ pub const Session = struct {
         return self.rows.items(.executor)[i].?.result() orelse error.ResultUnavailable;
     }
 
+    /// The solved operating point query `id` started from: its
+    /// prerequisite's, or its own for an `.op`. Null when there is none or
+    /// it has not completed. Valid until `deinit`.
+    pub fn operatingPoint(self: *const Session, id: QueryId) !?[]const f64 {
+        const i = try self.index(id);
+        const dep = self.rows.items(.dependency)[i];
+        const worker = self.rows.items(.executor)[if (dep == none) i else @backingInt(dep)] orelse return null;
+        return worker.operatingPoint();
+    }
+
     /// Writes the query tree for `options.scope`, marking what the chosen
     /// preview would run next. Runs nothing; uses the same readiness order and
     /// validation as advancement.
