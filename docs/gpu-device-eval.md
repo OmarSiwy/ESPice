@@ -580,13 +580,36 @@ stands, and at n=15 007 the dense-complex subset does not apply).
   PTX steps run parallel to it) — the "minutes off cold builds" claim
   predates the cap, when the whales were emitted.
 
-`--backend cuda|hip` by name is now strict end to end: artifacts missing
-in the binary reject at the CLI, and a machine-level init failure (absent
-device/driver) errors out of `run()` naming what was detected, instead of
-warning and silently running on the CPU. `--gpu`/`auto` keep the
-fall-back for unavailable hardware/kernels. `--gpu` overrides the work gate;
-`--backend auto|cuda|hip` still use it. `ESPICE_GPU_MIN_WORK` tunes the gate
-for those backend requests.
+### Backend policy (revised 2026-09): `--gpu` is an override, not a hint
+
+`auto` is now the ONLY heuristic mode. Every other GPU request is EXPLICIT —
+`--gpu`, `--backend cuda`, `--backend hip` — and an explicit request either runs
+on the device or says why not. `gpu_context.Decline` splits the refusals into
+the three kinds a caller can act on:
+
+| kind | example | explicit request | `auto` |
+|---|---|---|---|
+| **policy** | `NotEnoughGpuWork` (the `min_work` gate) | never reached — the gate is off | declines, prints a note |
+| **capability** | no device type has a kernel; every eligible model was excluded by `gpu_max_model_bytes` | falls back, prints WHICH batch demoted and why | same |
+| **machine** | absent device, dead driver, out of memory, no artifacts in this binary | **hard error** naming what was detected | warns, falls back |
+
+The bug this fixed: `--backend cuda` set `gpu_force = false`, and the engine
+matched `NotEnoughGpuWork` *before* it checked strictness — so a named `cuda`
+request on a small circuit printed "note: --gpu declined" and ran the whole
+simulation on the CPU. A performance heuristic was overruling a direct
+instruction. `gpu_force` and `gpu_strict` are now one `gpu_explicit`, because
+they were always the same predicate and keeping two let them disagree.
+
+Capability demotions are no longer silent either: a batch that loses its kernel
+image names its model and instance count under an explicit request, or under
+`ESPICE_GPU_STATS` for `auto`. `ESPICE_GPU_STATS` also prints the residency
+decision (eligible batches, measured work, gate, resident vs host split,
+whether the charge planes are device-side). `ESPICE_GPU_MIN_WORK` still tunes
+the gate for `auto`.
+
+`ESPICE_GPU_EVAL_CHECK=1` replays the device half at the same x and reports the
+worst plane entry that moved — the probe for the atomic-scatter
+non-reproducibility in `todo.md`'s open regression.
 
 Override validation: a three-device resistor divider and a single-diode circuit
 both ran with `--gpu` and `ESPICE_GPU_MIN_WORK=18446744073709551615`.

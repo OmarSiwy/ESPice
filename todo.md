@@ -45,6 +45,32 @@ Stable at 100 and 500 instances; fan-in dependent. This pass only changed which
 way the chaos falls (comptime stamp count -> NVPTX regalloc/FMA contraction);
 CPU output is bit-identical and matrix nnz is unchanged at 10,011 both ways.
 
+**2026-09 follow-up: reproduced directly, and the failure chain is closed.**
+`ESPICE_GPU_EVAL_CHECK=1` (`gpu_context.evalCheck`) replays the device half at
+the SAME x and diffs the planes. Eval reads the lim plane and never writes it,
+so the two replays have byte-identical inputs and the only variable is atomic
+order. Measured worst gap, by fan-in into one plane cell:
+
+| fixture | contributors per row | worst \|Δplane\| |
+|---|---|---|
+| `scaling/rc_ladder_10k` | 2-3 | none — reproducible |
+| `scaling/parallel_inverters_100` | 200 | 1.0e-12 on `g[1]`=3.05e-2 |
+| `scaling/parallel_inverters_2000` | 4000 | 3.6e-10 on `g[1]`/`rhs[1]` |
+
+The chain from there: `|F|` at the `vdd` node floors at 1e-11..1e-10 (CPU floors
+at 2e-16, and 8-thread ParEval — a different summation order — also floors at
+1e-20, so it is reproducibility and not accuracy that differs). The LU maps that
+row 1:1 onto the Vdd BRANCH-CURRENT unknown, whose value at that instant is
+~2.5e-9 A, so `finalizeStep`'s delta gate allows `reltol*2.5e-9 + abstol` =
+1.25e-12 and sees 1e-11..1e-10: `why=delta`, `scaled=10..80`, every iterate,
+forever. Ten Newton rejects, dt halves ~30 times, `TimestepTooSmall`. A branch
+current is the worst possible place for this to land — its tolerance is set by
+its own nanoamp magnitude, not by the 0.26 A the rail actually carries.
+
+Note the gap is ~2 orders LARGER than a naive `N*eps*max_partial` bound on the
+same values predicts, which is worth a look when the fix below is written: pure
+reordering of these magnitudes should not reach 3.6e-10.
+
 - [ ] **Deterministic GPU scatter.** Replace atomic accumulation with a
       fixed-order segmented reduction. The scatter tape is frozen at setup, so
       its transpose is: build CSR `(destination -> contribution list)` once at
@@ -257,10 +283,15 @@ mapped through `objdump`. Full derivation: `docs/device-eval-vs-ngspice-2026-09.
       spread where a live cache would show ~99% hits. Either make it reachable
       or delete `tryCached`/`store`/`storeQ`/`eval_cache_*` (~120 lines and
       three allocations that never run).
-- [ ] **Small-circuit `--gpu` no-decline** — devices/fourbitadder under `--gpu`
-      is 449 ms (CPU 130 ms): the nonlinear work-gate passes it but the
-      resident path loses on a tiny circuit. Cosmetic (default CPU unaffected);
-      bump the decline threshold or weight. `src/gpu_context.zig`.
+- [x] **Small-circuit `--gpu` no-decline** — DONE (2026-09). Cause was not the
+      resident path: fourbitadder's whole GPU run is 0.36 s against a 0.04 s
+      circuit, i.e. ~all of it is the fixed ~340 ms driver setup (cuInit +
+      primary context + module JIT), which no per-iteration `work` proxy can
+      see. The gate was also stale — the nonlinear x16 weight was added to
+      `work` without moving the threshold, so it had been admitting circuits
+      16x smaller than the number it was derived from. `default_min_work`
+      200_000 -> 3_200_000, with the wall-clock table in `gpu_context.zig`.
+      Explicit `--gpu`/`--backend cuda|hip` bypass the gate entirely now.
 - [ ] **Per-model LLVM objects** — `buildsplit` branch (unmerged,
       bit-identical): caching granularity so a one-model edit doesn't
       re-optimize all 38. Strip already took the headline build-time win
@@ -269,6 +300,15 @@ mapped through `objdump`. Full derivation: `docs/device-eval-vs-ngspice-2026-09.
       compiles NVPTX 70–110× faster with 26–68 MB PTX vs 1.2 GB; currently
       moot at the 80 KB `gpu_max_model_bytes` cap. Raising the cap + outlining
       the whales is the path to GPU-evaluating bsim4-class layouts.
+      **Do not do this on the current hardware.** `--outline-chunk` fixes BUILD
+      time, and build time is not what the cap is defending against: the cap's
+      own measurement is that bsim4's PTX carries 142_990 f64 ops at ~16%
+      occupancy on a part whose f64 rate is 1/64 of its f32 rate — 152.7
+      GFLOP/s against the CPU's 1449. Re-admitted, those kernels lose at RUN
+      time however fast they compile. The prerequisite is the §9 mixed-precision
+      work (which needs VerA to reach `.optimized` float mode), or an FP64 part.
+      UNMEASURED here: the direction follows from `docs/gpu-device-eval.md`'s
+      existing numbers, not from a new re-admission run.
 
 ## Parser / frontend / models not yet ported
 
