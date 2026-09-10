@@ -135,7 +135,22 @@ pub fn main(init: std.process.Init) !void {
             const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "cpu", "-r", zp_cpu_raw_path, netlist };
             const cap = runCapture(io, fxa, zp_cpu_argv, cfg.timeout);
             if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_cpu_median_ns = try timedMedian(io, fxa, zp_cpu_argv, cfg.timeout, cfg.iters, .cpu);
+                // A FIXTURE THAT FAILS MID-TIMING IS A SKIPPED FIXTURE, NOT A
+                // DEAD RUN. `timedMedian` returns `error.BenchRunFailed` if any
+                // ONE of `iters` repeats fails, and a hard `try` here propagated
+                // that out of the fixture loop and killed the whole benchmark —
+                // throwing away every result gathered so far and never writing
+                // RESULTS.md. The preflight above already passed, so this only
+                // fires on a LATER repeat: a `timeout` kill under machine load,
+                // or one of the paths we know is not yet deterministic. Both are
+                // flaky by nature, which is why the crash looked random and why
+                // it hit hardest exactly when the machine was busy. The GPU arm
+                // below has always handled its own failure; the other three arms
+                // simply never learned to.
+                res.zp_cpu_median_ns = timedMedian(io, fxa, zp_cpu_argv, cfg.timeout, cfg.iters, .cpu) catch |err| blk: {
+                    res.zp_cpu_skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
+                    break :blk null;
+                };
             } else if (skipReason(cap.text)) |reason| {
                 res.zp_cpu_skip = reason;
             } else {
@@ -154,12 +169,15 @@ pub fn main(init: std.process.Init) !void {
             if (gpuSkipReason(cap.stderr)) |reason| {
                 res.zp_gpu_skip = reason;
             } else if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_gpu_median_ns = timedMedian(io, fxa, zp_gpu_argv, cfg.timeout, cfg.iters, .gpu) catch |err| switch (err) {
-                    error.GpuFallback => blk: {
-                        res.zp_gpu_skip = "GPU fell back during timing";
-                        break :blk null;
-                    },
-                    else => return err,
+                res.zp_gpu_median_ns = timedMedian(io, fxa, zp_gpu_argv, cfg.timeout, cfg.iters, .gpu) catch |err| blk: {
+                    // `else => return err` was the same run-killer as the CPU arm,
+                    // one branch further in: only GpuFallback was survivable.
+                    res.zp_gpu_skip = switch (err) {
+                        error.GpuFallback => "GPU fell back during timing",
+                        error.BenchRunFailed => "unstable under timing",
+                        else => @errorName(err),
+                    };
+                    break :blk null;
                 };
             } else if (skipReason(cap.text)) |reason| {
                 res.zp_gpu_skip = reason;
@@ -176,7 +194,10 @@ pub fn main(init: std.process.Init) !void {
             ng_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.ng.raw", .{ out_dir, fx.category, fx.name });
             const ng_argv: []const []const u8 = &.{ "ngspice", "-b", "-r", ng_raw_path, netlist };
             if (runOk(io, ng_argv, cfg.timeout)) {
-                res.ng_median_ns = try timedMedian(io, fxa, ng_argv, cfg.timeout, cfg.iters, .quiet);
+                res.ng_median_ns = timedMedian(io, fxa, ng_argv, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
+                    res.ng_skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
+                    break :blk null;
+                };
             } else {
                 res.ng_skip = "preflight failed";
             }
@@ -186,7 +207,10 @@ pub fn main(init: std.process.Init) !void {
         if (xyce_ok) {
             const xyce_argv: []const []const u8 = &.{ "xyce", "-b", netlist };
             if (runOk(io, xyce_argv, cfg.timeout)) {
-                res.xyce_median_ns = try timedMedian(io, fxa, xyce_argv, cfg.timeout, cfg.iters, .quiet);
+                res.xyce_median_ns = timedMedian(io, fxa, xyce_argv, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
+                    res.xyce_skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
+                    break :blk null;
+                };
             } else {
                 res.xyce_skip = "preflight failed";
             }
@@ -503,15 +527,24 @@ fn discoverFixtures(io: Io, gpa: std.mem.Allocator, fixtures_dir: []const u8) ![
     };
     defer root.close(io);
 
+    // An iteration error is NOT end-of-directory. `catch null` ends the loop,
+    // so a transient readdir failure silently truncated the fixture list and
+    // the run looked complete while quietly benchmarking a prefix of the suite.
     var cit = root.iterate();
-    while (cit.next(io) catch null) |ce| {
+    while (cit.next(io) catch |e| lbl: {
+        std.debug.print("error: reading '{s}': {s}; fixture list is TRUNCATED\n", .{ fixtures_dir, @errorName(e) });
+        break :lbl null;
+    }) |ce| {
         if (ce.kind != .directory) continue;
         const category = try gpa.dupe(u8, ce.name);
 
         var cat_dir = root.openDir(io, category, .{ .iterate = true }) catch continue;
         defer cat_dir.close(io);
         var fit = cat_dir.iterate();
-        while (fit.next(io) catch null) |fe| {
+        while (fit.next(io) catch |e| lbl: {
+            std.debug.print("error: reading '{s}': {s}; category is TRUNCATED\n", .{ category, @errorName(e) });
+            break :lbl null;
+        }) |fe| {
             if (fe.kind != .directory) continue;
             const sp_path = try std.fmt.allocPrint(gpa, "{s}/circuit.sp", .{fe.name});
             cat_dir.access(io, sp_path, .{}) catch continue;
@@ -1032,4 +1065,19 @@ test "timing discards large external output and preserves espice diagnostics" {
     _ = try timedMedian(io, a, &.{ "head", "-c", "2097152", "/dev/zero" }, "5", 1, .quiet);
     try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "printf '%s' '{\"skip\":\"test\"}'" }, "5", 1, .cpu));
     try std.testing.expectError(error.GpuFallback, timedMedian(io, a, &.{ "sh", "-c", "printf '%s' 'warning: falling back to the CPU' >&2" }, "5", 1, .gpu));
+}
+
+test "a repeat that fails only AFTER the preflight is BenchRunFailed, not a dead run" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    // The shape that used to kill the whole benchmark: a fixture preflights
+    // clean, then one repeat out of `iters` dies. Every call site maps
+    // BenchRunFailed onto a per-fixture skip, so this error VALUE is what keeps
+    // 280 fixtures' worth of results from being thrown away by one flake.
+    // The load-induced cause is the timeout kill, so test that spelling too.
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "exit 1" }, "5", 3, .quiet));
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "sleep 5" }, "1", 1, .quiet));
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "sleep 5" }, "1", 1, .cpu));
 }
