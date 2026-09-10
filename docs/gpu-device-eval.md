@@ -365,13 +365,12 @@ is per **device**, not per host, because whether a model's unknowns fit in f32's
 ### 9.2 What widens back, and where
 
 `ckt.g_vals` is `[]f64` and feeds the sparse LU, so the partials widen at
-exactly four points, all in `engine.zig`:
+exactly three points, all in `engine.zig`:
 
 | site | why |
 |---|---|
 | `evalRange` scatter — `out[ru].grad()` | into `g_vals`/`c_vals` (host `+=`, GPU `atom.global.add.f64`) |
 | `evalRange` limiting correction | `J·(x − x_lim)` lands on the **residual**, so it is widened before the dot product |
-| `HostSink.store`/`storeQ` | the dedup cache is `[n_u][n_u]f64` |
 | `collectNoise` | thermal conductance via `ddxAt` |
 
 `.d` is never read directly any more; `grad()` and `ddxAt()` are the only ways

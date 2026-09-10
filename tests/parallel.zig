@@ -1,5 +1,5 @@
 //! Parallel device eval (analysis.par) vs serial: plane equivalence,
-//! determinism, baseline path, dedup path.
+//! determinism, baseline path.
 //!
 //! Contract (par.zig doc): MT at fixed n_lanes is bit-identical run-to-run;
 //! MT vs serial differs only by reassociation across lanes. Worst-case
@@ -152,28 +152,6 @@ test "par: baseline (const-Jacobian) evalNewton path" {
     try testing.expect(ckt.has_baseline);
 
     try serialVsParallel(&ckt, arena, true);
-}
-
-test "par: dedup cache (PrepCache device, one prep group) MT == serial" {
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    // 5000 byte-identical Dp diodes fanned out from one rail: single prep
-    // group, per-lane caches must not corrupt each other.
-    var b = Builder.init(testing.allocator);
-    errdefer b.deinit();
-    const rail = b.addNode();
-    try b.addDevice(td.V, .{ .dc = 0.6 }, .{}, .{ rail, GROUND });
-    for (0..5000) |_| {
-        const leaf = b.addNode();
-        try b.addDevice(td.R, .{ .r = 50 }, .{}, .{ rail, leaf });
-        try b.addDevice(td.Dp, .{ .is = 1e-14 }, .{}, .{ leaf, GROUND });
-    }
-    var ckt = try b.compile();
-    defer ckt.deinit();
-
-    try serialVsParallel(&ckt, arena, false);
 }
 
 test "par: lane count 1 falls through cleanly" {

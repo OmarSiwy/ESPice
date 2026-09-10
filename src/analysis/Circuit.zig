@@ -319,7 +319,7 @@ pub const Circuit = struct {
         }
         @memset(self.rhs, 0);
         const pl = self.ownPlanes();
-        for (self.batches) |b| b.eval(b.ctx, &pl, 0, 0, b.count, x, t);
+        for (self.batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
         self.groundStamp(x);
     }
 
@@ -383,7 +383,7 @@ pub const Circuit = struct {
                 @memset(self.q_vec, 0);
             }
             @memset(self.rhs, 0);
-            for (self.batches) |b| b.eval_newton(b.ctx, &pl, 0, 0, b.count, x, t);
+            for (self.batches) |b| b.eval_newton(b.ctx, &pl, 0, b.count, x, t);
         } else {
             zeroSimd(self.g_vals);
             if (self.has_charge) {
@@ -391,7 +391,7 @@ pub const Circuit = struct {
                 @memset(self.q_vec, 0);
             }
             @memset(self.rhs, 0);
-            for (self.batches) |b| b.eval(b.ctx, &pl, 0, 0, b.count, x, t);
+            for (self.batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
         }
         self.groundStamp(x);
     }
@@ -423,7 +423,7 @@ pub const Circuit = struct {
         if (self.has_charge) @memset(self.q_vec, 0);
         const pl: Planes = .{ .g_vals = self.g_base, .c_vals = self.c_base, .rhs = self.rhs, .q_vec = self.q_vec };
         for (self.batches) |b| {
-            if (b.has_const_jacobian) b.eval(b.ctx, &pl, 0, 0, b.count, x_zero, 0);
+            if (b.has_const_jacobian) b.eval(b.ctx, &pl, 0, b.count, x_zero, 0);
         }
         self.g_base[self.diag_slots[0]] += 1.0;
         self.has_baseline = true;
