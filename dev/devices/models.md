@@ -178,6 +178,7 @@ current deck status is what `zig build test` reports.
 | hfet1, hfet2 | Gate-charge Jacobian is ag0 * C (`vera_nodiff` on capgs/capgd), so Newton converges linearly as ngspice's does and takes its NR failures | hfetload.c:360-369, hfet2load.c:251-258 |
 | hfet1 | The first transient iterate extrapolates its internal nodes over dt/dt_prev2 (`Hooks.predict_first_iterate`), and Newton does not converge while a current into gp/sp/dp misses its linear prediction from the previous iterate by more than reltol * (branch flow) + abstol (`Circuit.loadCheck`). `tran/device_hfet_inverter` 5615x -> 0.30x | hfetload.c:129, 389-396 |
 | mos6 | KC keeps its 5e-5 default unless TOX is given; only then is it derived as 0.5 * U0 * Cox' * 1e-4. Before, a card with neither KC nor TOX got KC = 0 and never conducted (#158, `op/mos6_default_kc`, ngspice 45) | mos6set.c:48, mos6temp.c:60-70 |
+| bsim2 | RSH * NRD = 0 (and RSH * NRS = 0) collapses the drain (source) node instead of a 1e12 * m stand-in short. The short rounded every drain conductance to ulp(1e12) = 1.2e-4 S in the AC and .tf Jacobian, so with the default RSH = 0 a 10k-loaded stage gave gain -0.392 instead of -0.942 while DC still converged (#157, `ac/bsim2_cs_gain`, ngspice 45, 2e-8 apart) | b2set.c:486-510, b2temp.c:250-258 |
 
 Known open differences: VBIC puts the RBP thermal noise on bp-cx where
 ngspice puts it between emitEI and emit (0.9% at 100 MHz), and the VBIC

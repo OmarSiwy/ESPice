@@ -385,9 +385,11 @@ module bsim2(d, g, s, b);
         omjsw = max(1.0 - mjsw, 0.01);
 
         // ============ series resistance ===================================
-        // g = m/(RSH*squares); RSH = 0 is a 1e12*m short, not a node collapse.
-        gdrain  = rsh > 0.0 ? m / (rsh * max(nrd, 1.0e-6)) : 1.0e12 * m;
-        gsource = rsh > 0.0 ? m / (rsh * max(nrs, 1.0e-6)) : 1.0e12 * m;
+        // g = m/(RSH*squares); RSH*squares = 0 collapses the node (b2set.c:486,
+        // b2temp.c:250). A 1e12 stand-in short rounds gds to ulp(1e12) =
+        // 1.2e-4 S in the AC Jacobian (#157).
+        gdrain  = (rsh > 0.0 && nrd > 0.0) ? m / (rsh * nrd) : 0.0;
+        gsource = (rsh > 0.0 && nrs > 0.0) ? m / (rsh * nrs) : 0.0;
 
         // ============ bias and limiting (b2ld.c) ==========================
         // mos1.va's ladder, which b2ld.c shares: "fetlimds" on both gate legs +
@@ -573,10 +575,14 @@ module bsim2(d, g, s, b);
         I(di, si) <+ idst;
 
         // Series resistances with their thermal noise (mos1noi.c).
-        I(d, di) <+ gdrain * V(d, di)
-                  + white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
-        I(s, si) <+ gsource * V(s, si)
-                  + white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
+        if (gdrain > 0.0)
+            I(d, di) <+ gdrain * V(d, di)
+                      + white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
+        else V(d, di) <+ 0.0;
+        if (gsource > 0.0)
+            I(s, si) <+ gsource * V(s, si)
+                      + white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
+        else V(s, si) <+ 0.0;
 
         // ============ noise (mos1noi.c form) ==============================
         // The flicker denominator is Weff*Leff*Cox'^2.
