@@ -248,6 +248,133 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
     };
 }
 
+/// `Dual` with the derivative half deleted: the same S protocol, so the same
+/// `D.eval`/`D.q` body compiles against it, and every method here is the `.v`
+/// line of the matching `Dual` method VERBATIM — `div`'s reciprocal-multiply,
+/// `abs`'s sign test (not `@abs`, which differs at -0), `min`/`max`'s tie rule.
+/// That is the whole contract of this type: value-for-value identical to a Dual
+/// pass, so a caller that only reads `.v` may substitute it freely.
+///
+/// For `evalQRange`, the transient's post-accept charge re-read: it throws both
+/// Jacobians away, and computing the 8-lane gradient of a mos1 core to discard
+/// it is the bulk of what that pass costs.
+///
+/// VerA emits an equivalent `R` inside every stateful device (codegen.zig
+/// `rscalar_txt`) for `updateState`/`limit`/`collapse`, but the contract keeps
+/// it private, so a host that wants one declares its own.
+fn RealFor(comptime collapsed: bool) type {
+    return struct {
+        v: f64,
+
+        const Self = @This();
+        pub const collapse_applied = collapsed;
+
+        pub fn seed(value: f64, comptime _: usize) Self {
+            return .{ .v = value };
+        }
+        pub fn con(c: f64) Self {
+            return .{ .v = c };
+        }
+        pub fn val(a: Self) f64 {
+            return a.v;
+        }
+        /// A value-only pass has no derivative; the contract still requires the
+        /// accessor. Same answer VerA's `R` gives.
+        pub fn ddxAt(_: Self, _: usize) f64 {
+            return 0.0;
+        }
+        pub fn add(a: Self, b: Self) Self {
+            return .{ .v = a.v + b.v };
+        }
+        pub fn sub(a: Self, b: Self) Self {
+            return .{ .v = a.v - b.v };
+        }
+        pub fn neg(a: Self) Self {
+            return .{ .v = -a.v };
+        }
+        pub fn mul(a: Self, b: Self) Self {
+            return .{ .v = a.v * b.v };
+        }
+        /// `Dual.div` computes `a.v * (1/b.v)`, not `a.v / b.v`, because it
+        /// needs the reciprocal for the derivative anyway. The two differ in
+        /// the last bit; this pass has to match the Dual one, so it keeps the
+        /// reciprocal.
+        pub fn div(a: Self, b: Self) Self {
+            return .{ .v = a.v * (1.0 / b.v) };
+        }
+        pub fn scale(a: Self, c: f64) Self {
+            return .{ .v = a.v * c };
+        }
+        pub fn addC(a: Self, c: f64) Self {
+            return .{ .v = a.v + c };
+        }
+        pub fn exp(a: Self) Self {
+            return .{ .v = dmath.exp(a.v) };
+        }
+        pub fn log(a: Self) Self {
+            return .{ .v = dmath.log(a.v) };
+        }
+        pub fn expm1(a: Self) Self {
+            return .{ .v = std.math.expm1(a.v) };
+        }
+        pub fn log1p(a: Self) Self {
+            return .{ .v = std.math.log1p(a.v) };
+        }
+        pub fn sqrt(a: Self) Self {
+            return .{ .v = @sqrt(a.v) };
+        }
+        pub fn sin(a: Self) Self {
+            return .{ .v = dmath.sin(a.v) };
+        }
+        pub fn cos(a: Self) Self {
+            return .{ .v = dmath.cos(a.v) };
+        }
+        pub fn tanh(a: Self) Self {
+            return .{ .v = dmath.tanh(a.v) };
+        }
+        pub fn sinh(a: Self) Self {
+            return .{ .v = dmath.sinh(a.v) };
+        }
+        pub fn cosh(a: Self) Self {
+            return .{ .v = dmath.cosh(a.v) };
+        }
+        pub fn atan(a: Self) Self {
+            return .{ .v = std.math.atan(a.v) };
+        }
+        /// NOT `@abs`: `Dual.abs` is a sign test, which returns -0 unchanged.
+        pub fn abs(a: Self) Self {
+            return if (a.v < 0) a.neg() else a;
+        }
+        pub fn minC(a: Self, c: f64) Self {
+            return if (a.v > c) con(c) else a;
+        }
+        pub fn maxC(a: Self, c: f64) Self {
+            return if (a.v < c) con(c) else a;
+        }
+        pub fn pow(a: Self, c: f64) Self {
+            return .{ .v = dmath.pow(a.v, c) };
+        }
+        pub fn max(a: Self, b: Self) Self {
+            return if (a.v >= b.v) a else b;
+        }
+        pub fn min(a: Self, b: Self) Self {
+            return if (a.v <= b.v) a else b;
+        }
+        pub fn lt(a: Self, b: Self) Self {
+            return con(@floatFromInt(@intFromBool(a.v < b.v)));
+        }
+        pub fn le(a: Self, b: Self) Self {
+            return con(@floatFromInt(@intFromBool(a.v <= b.v)));
+        }
+        pub fn eq(a: Self, b: Self) Self {
+            return con(@floatFromInt(@intFromBool(a.v == b.v)));
+        }
+        pub fn sel(c: Self, a: Self, b: Self) Self {
+            return if (c.v != 0.0) a else b;
+        }
+    };
+}
+
 // ===========================================================================
 // Constants + contract re-exports
 // ===========================================================================
@@ -263,8 +390,6 @@ pub fn jacFloat(comptime D: type) type {
 pub const GROUND: u32 = 0;
 
 pub const StateCtlOp = contract.StateCtlOp;
-pub const UpdateResult = contract.UpdateResult;
-pub const AnalysisKind = contract.AnalysisKind;
 pub const SimState = contract.SimState;
 pub const LimitResult = contract.LimitResult;
 pub const Constant = contract.Constant;
@@ -430,6 +555,10 @@ pub const Hooks = struct {
     /// pattern, the Model/Instance PODs and `DeviceKernel.run`'s parameter
     /// list are all unchanged.
     q_tape: ?*const fn (*anyopaque) []const f64 = null,
+    /// Charges only, whole batch: restamp `q_vec` + `q_tape` at `x` and leave
+    /// g/c/rhs alone. Null when the device declares no `q`. See `evalQRange` —
+    /// this is the transient's post-accept re-read, not a second eval path.
+    eval_q: ?*const fn (*anyopaque, *const Planes, []const f64, f64) void = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) anyerror!void,
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) anyerror!void = null,
     recompute: ?*const fn (*anyopaque) error{TopologyChanged}!void = null,
@@ -474,12 +603,8 @@ pub const PatternView = struct {
 pub const PatternBuilder = struct {
     keys: std.ArrayList(u64) = .empty,
 
-    fn key(row: u32, col: u32) u64 {
-        return (@as(u64, col) << 32) | row; // col-major sort order
-    }
-
     pub fn add(self: *PatternBuilder, gpa: std.mem.Allocator, row: u32, col: u32) !void {
-        try self.keys.append(gpa, key(row, col));
+        try self.keys.append(gpa, (@as(u64, col) << 32) | row); // col-major sort order
     }
 
     pub fn reserve(self: *PatternBuilder, gpa: std.mem.Allocator, extra: usize) !void {
@@ -609,7 +734,7 @@ pub fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternV
 /// declares neither gets all ones, which is the dense behaviour every host had
 /// before the declaration existed — runtime `.so` devices built by an older
 /// generator included.
-fn jacPattern(comptime D: type) [uCount(D)]u64 {
+fn jacPattern(comptime D: type) [contract.nU(D)]u64 {
     var out = rowPattern(D, "jac_pattern");
     // A device with no reactive residual has no charge columns to reserve;
     // asking `rowPattern` for the missing half would answer "dense" and undo
@@ -624,100 +749,10 @@ fn jacPattern(comptime D: type) [uCount(D)]u64 {
 /// One half of it. An undeclared half is all ones — the dense behaviour every
 /// host had before the declaration existed, which is also what a runtime `.so`
 /// device from an older generator gets.
-fn rowPattern(comptime D: type, comptime name: []const u8) [uCount(D)]u64 {
+fn rowPattern(comptime D: type, comptime name: []const u8) [contract.nU(D)]u64 {
     if (!@hasDecl(D, name)) return @splat(std.math.maxInt(u64));
     return @field(D, name);
 }
-
-// ---------------------------------------------------------------------------
-// HistoryBuffer: ring buffer for delay/transmission-line devices
-// ---------------------------------------------------------------------------
-
-pub const HistoryBuffer = struct {
-    times: []f64,
-    values: []f64, // values[sample_idx * n_signals + signal_idx]
-    n_signals: u32,
-    capacity: u32,
-    head: u32,
-    len: u32,
-
-    pub fn init(allocator: std.mem.Allocator, n_signals: u32, capacity: u32) !HistoryBuffer {
-        const cap = @max(capacity, 4);
-        const times = try allocator.alloc(f64, cap);
-        errdefer allocator.free(times);
-        return .{
-            .times = times,
-            .values = try allocator.alloc(f64, @as(usize, cap) * n_signals),
-            .n_signals = n_signals,
-            .capacity = cap,
-            .head = 0,
-            .len = 0,
-        };
-    }
-
-    pub fn record(self: *HistoryBuffer, t: f64, vals: []const f64) void {
-        std.debug.assert(vals.len == self.n_signals);
-        const slot = self.head;
-        self.times[slot] = t;
-        const base = @as(usize, slot) * self.n_signals;
-        @memcpy(self.values[base..][0..self.n_signals], vals);
-        self.head = (slot + 1) % self.capacity;
-        if (self.len < self.capacity) self.len += 1;
-    }
-
-    /// Look up signal `sig` at `t_query`. 3-point Lagrange through the two
-    /// samples at/before and the one after; linear when only two bracket.
-    pub fn lookup(self: *const HistoryBuffer, t_query: f64, sig: u32) f64 {
-        if (self.len == 0) return 0.0;
-        const oldest = if (self.len < self.capacity) 0 else self.head;
-
-        var lo: u32 = 0;
-        var hi: u32 = self.len;
-        while (lo < hi) {
-            const mid = (lo + hi) / 2;
-            if (self.times[(oldest + mid) % self.capacity] < t_query) lo = mid + 1 else hi = mid;
-        }
-
-        if (lo == 0) return self.valueAt(oldest, sig);
-        if (lo == self.len) return self.valueAt((oldest + self.len - 1) % self.capacity, sig);
-
-        const s1 = (oldest + lo - 1) % self.capacity;
-        const s2 = (oldest + lo) % self.capacity;
-        const t1 = self.times[s1];
-        const t2 = self.times[s2];
-        const v1 = self.valueAt(s1, sig);
-        const v2 = self.valueAt(s2, sig);
-
-        if (lo >= 2) {
-            const s0 = (oldest + lo - 2) % self.capacity;
-            const t0 = self.times[s0];
-            const d01 = t0 - t1;
-            const d02 = t0 - t2;
-            const d12 = t1 - t2;
-            if (d01 != 0.0 and d02 != 0.0 and d12 != 0.0) {
-                const f0 = (t_query - t1) * (t_query - t2) / (d01 * d02);
-                const f1 = (t_query - t0) * (t_query - t2) / (-d01 * d12);
-                const f2 = (t_query - t0) * (t_query - t1) / (d02 * d12);
-                return f0 * self.valueAt(s0, sig) + f1 * v1 + f2 * v2;
-            }
-        }
-
-        const alpha = (t_query - t1) / (t2 - t1);
-        return v1 + alpha * (v2 - v1);
-    }
-
-    inline fn valueAt(self: *const HistoryBuffer, slot: u32, sig: u32) f64 {
-        return self.values[@as(usize, slot) * self.n_signals + sig];
-    }
-};
-
-/// Handed to a history device's histInject: interpolated signal lookup.
-pub const HistLookup = struct {
-    buf: *const HistoryBuffer,
-    pub fn at(self: HistLookup, t: f64, signal: usize) f64 {
-        return self.buf.lookup(t, @intCast(signal));
-    }
-};
 
 // ===========================================================================
 // Sink-parameterized eval — the ONE physics body. `sink` (comptime-known)
@@ -846,11 +881,11 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
             if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
                 const g = out[ru].grad();
                 inline for (0..n_u) |cu| if (comptime (jac_pat[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
-                    sink.scatterJac(id, ru, cu, row, g[cu]);
+                    sink.scatterJac(id, ru, cu, g[cu]);
                 };
             }
         };
-        if (comptime SinkT.dedup) sink.store(id, &out);
+        if (comptime SinkT.dedup) sink.store(&out);
 
         if (comptime has_q) {
             inline for (0..n_u) |ru| {
@@ -891,13 +926,53 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                     if (!mask_ground or active[ru]) {
                         const gq = qo[ru].grad();
                         inline for (0..n_u) |cu| if (comptime (q_pat[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
-                            sink.scatterQJac(id, ru, cu, row, gq[cu]);
+                            sink.scatterQJac(id, ru, cu, gq[cu]);
                         };
                     }
                 }
             }
-            if (comptime SinkT.dedup) sink.storeQ(id, &qo);
+            if (comptime SinkT.dedup) sink.storeQ(&qo);
         }
+    }
+}
+
+/// `evalRange`'s REACTIVE half, alone — same seed, same `D.q`, same `scatterQ`,
+/// and an `S` whose value arithmetic is `Dual`'s verbatim, so `q_vec` and
+/// `q_tape` come out bit-for-bit what a full eval would leave there. Host only.
+///
+/// `S` is a PARAMETER because the caller passes `RealFor`, and this pass reads
+/// only `.v`. Measured: LLVM dead-codes `Dual`'s gradient here for a small core
+/// (mos1/parallel_inverters_100 is a wash, +0.01%) and does NOT for a larger one
+/// (mos6_inverter 204.14M -> 199.43M Ir, -2.3%), so the value-only `S` is what
+/// makes "computes no derivatives" a property of the type instead of a property
+/// of the optimizer — which is the half of it that scales to bsim4/hicum.
+///
+/// The transient re-reads the charges once per ACCEPTED step, because `newton()`
+/// returns on the iterate it converged without reassembling: the planes hold
+/// q(x_k) while the accepted point is x_k+1 (tran.zig, post-accept block). It
+/// used a whole `Circuit.eval` for that — 595 extra full device passes on
+/// scaling/parallel_inverters_100, 16% of the program — and threw g/c/rhs away,
+/// since the next step's first assemble restamps all three.
+///
+/// Everything `evalRange` does that this drops is dead at that call site:
+/// `D.eval`'s residual and both Jacobians (restamped), the limiting correction
+/// (`converger` clears limits before it returns, so `corr` is identically zero),
+/// and the dedup cache (it only ever replays values this recomputes, within one
+/// pass). What survives is the charge, which is exactly what the caller reads.
+fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, t: f64) void {
+    @setEvalBranchQuota(1_000_000);
+    @setFloatMode(.optimized);
+    const n_u = comptime contract.nU(D);
+    var id: u32 = first;
+    while (id < end) : (id += 1) {
+        var xv: [n_u]S = undefined;
+        inline for (0..n_u) |u| xv[u] = S.seed(sink.x(sink.gath(id, u)), u);
+        const qo = if (comptime @hasDecl(D, "qFromPrep"))
+            D.qFromPrep(S, xv, sink.prep(id), sink.model(id), sink.inst(id), t)
+        else
+            D.q(S, xv, sink.model(id), sink.inst(id), t);
+        // EVERY charge row, cleared pattern included — see `evalRange`'s note.
+        inline for (0..n_u) |ru| sink.scatterQ(id, ru, sink.rhsRow(id, ru), qo[ru].v);
     }
 }
 
@@ -932,12 +1007,9 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
 // SoA batch with the AD eval hot loop and cold Hooks vtable.
 // ===========================================================================
 
-fn uCount(comptime D: type) usize {
-    return @typeInfo(D.U).@"enum".fields.len;
-}
-
 pub fn ProtoStore(comptime D: type) type {
-    const n_u = comptime uCount(D);
+    // ponytail: the contract owns unknown counting; retain usize for tape offsets.
+    const n_u: usize = comptime contract.nU(D);
     return struct {
         models: std.ArrayList(D.Model) = .empty,
         instances: std.ArrayList(D.Instance) = .empty,
@@ -990,7 +1062,6 @@ pub fn ProtoStore(comptime D: type) type {
             if (comptime has_attempt_decl) store.saved_models = &.{};
             if (comptime @hasDecl(D, "limit")) store.lim_x = &.{};
             if (comptime @hasDecl(D, "State")) store.states = &.{};
-            if (comptime hasHistoryDecl(D)) store.history_bufs = &.{};
             if (comptime has_prep_cache) {
                 store.prep_cache = &.{};
                 store.prep_group = &.{};
@@ -1035,14 +1106,6 @@ pub fn ProtoStore(comptime D: type) type {
                 store.states = try gpa.alloc(D.State, count);
                 for (0..count) |i| store.states[i] = D.initState(&store.models[i], &store.instances[i]);
             }
-            if (comptime hasHistoryDecl(D)) {
-                store.history_bufs = try gpa.alloc(HistoryBuffer, count);
-                for (store.history_bufs) |*b|
-                    b.* = .{ .times = &.{}, .values = &.{}, .n_signals = 0, .capacity = 0, .head = 0, .len = 0 };
-                for (0..count) |i|
-                    store.history_bufs[i] = try HistoryBuffer.init(gpa, D.n_hist_signals, 8192);
-            }
-
             if (comptime @hasDecl(D, "precompute")) {
                 for (0..count) |i| D.precompute(&store.instances[i], &store.models[i]);
             }
@@ -1117,27 +1180,6 @@ pub fn ProtoStore(comptime D: type) type {
     };
 }
 
-// ponytail: the two predicates below are PROVABLY FALSE for every device the
-// contract now admits — `histInject` and `PrepCache` were deleted from
-// `contract.allowed_pub_decls`, so a device declaring either fails validation
-// as a stray pub decl. Everything they gate (HistoryBuffer/HistLookup, the
-// prep-cache dedup, the per-lane eval cache, `gpuEligible`'s first and third
-// terms) is therefore comptime-dead and compiles to nothing.
-//
-// Kept rather than deleted on purpose: it is ~270 lines threaded through the
-// hot eval loop and the ParEval lane machinery, the deletion has zero
-// behavioural payoff, and the risk sits in the one file where a mistake is
-// silent and fast. See VerA/TODO.md "Dead code in the consumer" — delete it
-// with the history-subsystem landing that also touches Circuit/tran/pss, not
-// piecemeal.
-//
-// FastVAF owns delay history now: `absdelay` lowers to a private ring in
-// `Instance` advanced by `updateState`, not to a host callback.
-
-fn hasHistoryDecl(comptime D: type) bool {
-    return @hasDecl(D, "histInject");
-}
-
 /// Does this device carry §4.5 `absdelay` state — a ring buffer its
 /// `updateState` pushes into and CANNOT take back?
 ///
@@ -1167,7 +1209,7 @@ fn hasAbsdelayState(comptime D: type) bool {
 }
 
 fn canDedup(comptime D: type) bool {
-    return @hasDecl(D, "PrepCache") and !@hasDecl(D, "State") and !hasHistoryDecl(D);
+    return @hasDecl(D, "PrepCache") and !@hasDecl(D, "State") and !@hasDecl(D, "histInject");
 }
 
 fn canDedupQ(comptime D: type) bool {
@@ -1175,11 +1217,10 @@ fn canDedupQ(comptime D: type) bool {
 }
 
 pub fn DeviceBatch(comptime D: type) type {
-    const n_u = comptime uCount(D);
+    const n_u: usize = comptime contract.nU(D);
     const S = DualFor(n_u, jacFloat(D), @hasDecl(D, "collapse"));
     const has_state = @hasDecl(D, "State");
     const has_q = @hasDecl(D, "q");
-    const has_hist = hasHistoryDecl(D);
     const has_prep_cache = @hasDecl(D, "PrepCache");
     const can_dedup = canDedup(D);
     const can_dedup_q = canDedupQ(D);
@@ -1203,7 +1244,6 @@ pub fn DeviceBatch(comptime D: type) type {
         lim_active: if (has_limit) bool else void,
         instances: []D.Instance,
         states: if (has_state) []D.State else void,
-        history_bufs: if (has_hist) []HistoryBuffer else void,
         gath: []u32,
         rhs_idx: []u32,
         slots: []u32,
@@ -1229,6 +1269,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .set_lanes = if (can_dedup) setLanes else null,
             .scatter_bounds = scatterBounds,
             .q_tape = if (has_q) qTape else null,
+            .eval_q = if (has_q) evalQOnly else null,
             .apply_limits = if (has_limit) applyLimits else null,
             .clear_limits = if (has_limit) clearLimits else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
@@ -1245,8 +1286,6 @@ pub fn DeviceBatch(comptime D: type) type {
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step")) boundStep else null,
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
             .set_sim_state = if (has_sim_state) setSimState else null,
-            .record_history = if (has_hist) recordHistory else null,
-            .inject_history = if (has_hist) injectHistory else null,
             // Gated on the decl, not on the dead histInject channel: VerA now
             // emits `delays` for absdelay devices (model-frame, like
             // nextBreakpoint), which is what makes the transient's wavefront
@@ -1268,6 +1307,12 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn evalNewton(ctx: *anyopaque, pl: *const Planes, lane: u32, first: u32, last: u32, x: []const f64, t: f64) void {
             evalInner(ctx, pl, lane, first, last, x, t, true);
+        }
+
+        fn evalQOnly(ctx: *anyopaque, pl: *const Planes, x: []const f64, t: f64) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            var sink = Sink(D, false, false).host(self, pl, x, undefined, false, 0);
+            evalQRange(D, RealFor(@hasDecl(D, "collapse")), &sink, 0, @intCast(self.count), t);
         }
 
         fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {
@@ -1475,6 +1520,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 .slots = self.slots,
                 .lim_kernel = comptime if (hasStateKernel(D)) stateKernelName(D) else "",
                 .ctl_kernel = comptime if (hasCtlKernel(D)) ctlKernelName(D) else "",
+                .reduce_kernel = comptime reduceKernelName(D),
                 .lim_x = if (comptime has_limit) self.lim_x else &.{},
                 .states = if (comptime has_state) std.mem.sliceAsBytes(self.states) else &.{},
                 .lim_active = if (comptime has_limit) self.lim_active else false,
@@ -1512,22 +1558,6 @@ pub fn DeviceBatch(comptime D: type) type {
                         next += 1;
                     }
                 }
-            }
-        }
-
-        fn recordHistory(ctx: *anyopaque, x: []const f64, t: f64) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            for (0..self.count) |id| {
-                const signals = D.gatherHistSignals(self.localX(x, id));
-                self.history_bufs[id].record(t, &signals);
-            }
-        }
-
-        fn injectHistory(ctx: *anyopaque, t: f64, rhs: []f64) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            for (0..self.count) |id| {
-                const adds = D.histInject(&self.models[id], HistLookup{ .buf = &self.history_bufs[id] }, t);
-                inline for (0..n_u) |u| rhs[self.rhs_idx[id * n_u + u]] += adds[u];
             }
         }
 
@@ -1636,13 +1666,6 @@ pub fn DeviceBatch(comptime D: type) type {
                 gpa.free(self.prep_group);
             }
             if (comptime has_state) gpa.free(self.states);
-            if (comptime has_hist) {
-                for (self.history_bufs) |buf| {
-                    gpa.free(buf.times);
-                    gpa.free(buf.values);
-                }
-                gpa.free(self.history_bufs);
-            }
             if (comptime can_dedup) {
                 gpa.free(self.eval_cache_hash);
                 gpa.free(self.eval_cache_rhs);
@@ -1694,7 +1717,7 @@ pub fn DeviceBatch(comptime D: type) type {
 /// still flags a non-.ok updateState result so a future model that breaks
 /// the assumption degrades loudly into the CPU fallback.
 pub fn gpuEligible(comptime D: type) bool {
-    return !@hasDecl(D, "PrepCache") and !hasHistoryDecl(D) and
+    return !@hasDecl(D, "PrepCache") and !@hasDecl(D, "histInject") and
         !@hasDecl(D, "core_reads_simstate") and
         (@hasDecl(D, "limit") or !@hasDecl(D, "State"));
 }
@@ -1738,6 +1761,19 @@ pub fn ctlKernelName(comptime D: type) [:0]const u8 {
     return "arp_ctl_" ++ base;
 }
 
+/// The segmented-reduction symbol — `arp_reduce_<model>`.
+///
+/// The BODY is device-independent (see `ReduceKernel`), but the symbol is keyed
+/// on D anyway: `kernels.zig` compiles one root per device and gompute requires
+/// kernel names to be unique across roots, so a single shared `arp_reduce` would
+/// collide once per catalog entry. The launcher uses whichever resident batch's
+/// copy it finds first — they are the same code.
+pub fn reduceKernelName(comptime D: type) [:0]const u8 {
+    const full = @typeName(D);
+    const base = if (std.mem.lastIndexOfScalar(u8, full, '.')) |dot| full[dot + 1 ..] else full;
+    return "arp_reduce_" ++ base;
+}
+
 /// One batch's device-resident working set, type-erased.
 ///
 /// Everything here is written by the builder and then FROZEN for the life of
@@ -1768,6 +1804,10 @@ pub const GpuPayload = struct {
     /// `arp_ctl_<model>` when the device latches accepted-step state
     /// (`hasCtlKernel`), else "".
     ctl_kernel: []const u8,
+    /// `arp_reduce_<model>` — the segmented sum that turns this pass's staging
+    /// cells back into plane values. Device-independent body; see
+    /// `reduceKernelName` for why it carries a per-device symbol anyway.
+    reduce_kernel: []const u8,
     /// Host lim plane (count * n_u), for the seed-era upload; empty when the
     /// device has no `limit`. Once the device StateKernel runs, the resident
     /// copy is authoritative and this is stale by design.
@@ -1793,7 +1833,7 @@ pub const GpuPayload = struct {
 /// backends. Host-only dedup/limit state hangs off `b: *DeviceBatch(D)` and is
 /// `void` under `device`, so a device compilation never sees it.
 pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type {
-    const n_u = comptime uCount(D);
+    const n_u: usize = comptime contract.nU(D);
     const const_g = @hasDecl(D, "constant") and D.constant.g;
     const const_c = @hasDecl(D, "constant") and D.constant.c;
     const can_dedup = comptime canDedup(D);
@@ -1871,24 +1911,31 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
             return s.slots_[(@as(usize, id) * n_u + ru) * n_u + cu];
         }
+        /// PLAIN, NON-ATOMIC, on the device too — and that is a contract with
+        /// the launcher, not a shortcut. On the device the tape does not index
+        /// the plane, it indexes a per-contribution STAGING cell that exactly
+        /// one thread ever touches; `gpu_context` builds that permutation and
+        /// then sums each plane cell's run of staging cells in tape order.
+        ///
+        /// An `@atomicRmw(.Add)` here would hand the summation order back to the
+        /// hardware, which does not promise to repeat it. That was the defect:
+        /// on `parallel_inverters_2000` the Vdd row takes 8000 contributions of
+        /// ±1.8 that cancel to 3.6e-9, so two replays of the SAME pass differed
+        /// by 2.1e-10 — reordering, not a race (a lost update would move the sum
+        /// by 1.8) — but the LU maps that row 1:1 onto the Vdd BRANCH CURRENT
+        /// and Newton's delta gate there is 1.25e-12. Every iterate rejected.
+        /// `GpuContext.reduce` carries the measurement.
+        ///
+        /// Still `+=` and not `=`: the staging is zeroed per pass, so this is
+        /// `0 + v`, which is what keeps signed zero and NaN quieting identical
+        /// to the host stamp (tests/devices.zig pins that).
         inline fn add(p: gompute.GlobalPtr(f64), i: u32, v: f64) void {
-            if (comptime device) {
-                // Avoid a contended atomic only when adding zero preserves bits.
-                // The strict sum retains signed zero and NaN quieting behavior.
-                if (v == 0) {
-                    const old = @atomicLoad(f64, &p[i], .monotonic);
-                    if (@as(u64, @bitCast(old + v)) == @as(u64, @bitCast(old))) return;
-                }
-                _ = @atomicRmw(f64, &p[i], .Add, v, .monotonic);
-            } else {
-                p[i] += v;
-            }
+            p[i] += v;
         }
         pub inline fn scatterRes(s: *const Sk, row: u32, val: f64) void {
             add(s.rhs, row, val);
         }
-        pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
-            _ = row;
+        pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
             add(s.g_vals, s.slot(id, ru, cu), val);
         }
         /// Scatter one charge contribution. Two destinations, one value: the
@@ -1902,8 +1949,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
             if (comptime !device and @hasDecl(D, "q"))
                 s.b.q_tape[@as(usize, id) * n_u + ru] = qv;
         }
-        pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, row: u32, val: f64) void {
-            _ = row;
+        pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
             add(s.c_vals, s.slot(id, ru, cu), val);
         }
 
@@ -1944,8 +1990,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
             return true;
         }
 
-        pub inline fn store(s: *Sk, id: u32, out: anytype) void {
-            _ = id;
+        pub inline fn store(s: *Sk, out: anytype) void {
             if (comptime skip_g) return;
             if (!s.dedup_on) return;
             s.b.eval_cache_hash[s.cur_group] = s.cur_hash;
@@ -1954,8 +1999,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
                 s.b.eval_cache_jac[s.cur_group][ru] = out[ru].grad();
             }
         }
-        pub inline fn storeQ(s: *Sk, id: u32, qo: anytype) void {
-            _ = id;
+        pub inline fn storeQ(s: *Sk, qo: anytype) void {
             if (comptime !(can_dedup_q and !skip_c)) return;
             if (!s.dedup_on) return;
             inline for (0..n_u) |ru| {
@@ -2048,7 +2092,7 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
 /// the launcher treats that as a fault and falls back to the CPU, so the
 /// class assumption in `gpuEligible` degrades loudly, not silently.
 pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
-    const n_u = comptime uCount(D);
+    const n_u: usize = comptime contract.nU(D);
     const has_limit = @hasDecl(D, "limit");
     const has_state = @hasDecl(D, "State");
     const StateT = if (has_state) D.State else u8;
@@ -2095,6 +2139,54 @@ pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
     };
 }
 
+/// Segmented sum: one plane cell per thread, `plane[i] = sum(stage[seg[i]..seg[i+1]])`.
+///
+/// This is the second half of the deterministic scatter. `Sink.add` on the
+/// device writes each contribution to its OWN staging cell, and gpu_context
+/// ordered those cells so that a plane cell's contributors sit contiguously and
+/// in tape order — so this loop reduces them in the SAME order the serial CPU
+/// stamp accumulates them, every launch, forever. (Exactly, for a segment the
+/// launcher did not have to cut; see `Order.chunk`.) Left-to-right and strict
+/// on purpose: no `@setFloatMode(.optimized)` here, because `reassoc` is
+/// exactly the freedom being taken away.
+///
+/// The plane is WRITTEN, not accumulated, so the launcher no longer clears it.
+///
+/// ONE accumulator, not several. Interleaved chains would be deterministic too,
+/// but not in the order that matters: the tape emits a device's rows in `ru`
+/// order, so an `l`-lane interleave hands lane `l` every instance's row `l` —
+/// on `parallel_inverters_2000` that is one lane taking every +1.8 and another
+/// taking every -1.8, and the partial sums grow to `chunk/n_u * 1.8` instead of
+/// staying at 1.8. Measured on that row's 8000 contributions: tape order errs
+/// 1.6e-17 against the exactly-rounded sum, an order that separates the
+/// cancelling pair by W errs 4.0e-12 (W=32) to 1.6e-11 (W=1024). The whole
+/// point of this kernel is not to do that.
+///
+/// The launcher keeps the chain short instead (two levels, this kernel twice),
+/// so no thread walks more than `Order.chunk` before the f64 latency is hidden
+/// by other threads. Measured on this card, lanes 4 -> 1 is free:
+/// parallel_inverters_2000 --gpu 0.78/0.80/0.92 s -> 0.78/0.79/0.80 s,
+/// parallel_inverters_500 0.55/0.57/0.58 s -> 0.55/0.56/0.57 s.
+pub fn ReduceKernel(comptime _: type, comptime block_size: u32) type {
+    return struct {
+        pub fn run(
+            n_cells: u64,
+            seg: gompute.GlobalPtr(u32),
+            stage: gompute.GlobalPtr(f64),
+            plane: gompute.GlobalPtr(f64),
+        ) callconv(gompute.kernel_callconv) void {
+            const tid = gompute.globalIdX(block_size);
+            if (tid >= n_cells) return;
+            const i: u32 = @intCast(tid);
+            var sum: f64 = 0;
+            var k = seg[i];
+            const end = seg[i + 1];
+            while (k < end) : (k += 1) sum += stage[k];
+            plane[i] = sum;
+        }
+    };
+}
+
 /// Accepted-step latch kernel — the device half of `Circuit.stateCtl` for a
 /// resident batch. For the admitted class this is the path-integration
 /// protocol: `commit` folds the staged `wb__/wq__` into the `pb__/pq__`
@@ -2130,6 +2222,25 @@ pub fn CtlKernel(comptime D: type, comptime block_size: u32) type {
 // ParEval — persistent-worker CPU threading. Lane 0 stamps into the caller's
 // planes; lanes 1.. stamp private slabs, SIMD-reduced in fixed order (bit-
 // identical run-to-run at a given n_lanes). Zero-alloc, no-mutex hot path.
+//
+// NOT bit-identical to the serial path, and that is a bounded reassociation,
+// not the GPU's unbounded one. `reduce` walks lanes 1..n in a fixed order, so
+// a cell's sum is `((S0 + S1) + S2) + ...` over CONSECUTIVE segments of the
+// serial sequence — `init` cuts the lane ranges at INSTANCE boundaries and
+// hands them out in ascending order, so no instance's contributions ever
+// straddle a lane. That is the property that matters: the cancelling pair that
+// makes a high-fan-in cell ill-conditioned (see `GpuContext.reduce`) stays
+// inside one lane, every lane partial is as well-conditioned as tape order,
+// and the fold adds n_lanes already-cancelled values. Measured serial vs
+// n_lanes in {2,4,8,16}, same point count everywhere: parallel_inverters_500
+// and _2000 max 1.1e-16..1.9e-16, resistor_grid_100x100 4.4e-16, rc_ladder_10k
+// bit-identical. One ulp, against a benchmark tolerance of 1e-2.
+//
+// ponytail: bit-identity would need a per-contribution staging tape on the host
+// and a segmented reduction over it — ~8x the plane footprint at mos1 geometry
+// and the same memory traffic twice, to move 1 ulp. Build it only if a deck
+// ever shows a threading-dependent trajectory (a point-count change is the
+// tell); the GPU's `Order` is the design to copy.
 // ===========================================================================
 
 pub const EvalTask = struct {
@@ -2150,7 +2261,6 @@ pub const default_min_instances: u32 = 1024;
 const Mode = enum(u8) { full, newton };
 
 pub const ParEval = struct {
-    io: std.Io,
     gpa: std.mem.Allocator,
     n_lanes: u32,
 
@@ -2181,7 +2291,7 @@ pub const ParEval = struct {
 
     pub fn init(
         gpa: std.mem.Allocator,
-        io: std.Io,
+        _: std.Io,
         batches: []const Batch,
         nnz: u32,
         n: u32,
@@ -2280,7 +2390,6 @@ pub const ParEval = struct {
         errdefer gpa.free(threads);
 
         return .{
-            .io = io,
             .gpa = gpa,
             .n_lanes = n_lanes,
             .g_slab = g_slab,
@@ -2355,13 +2464,8 @@ pub const ParEval = struct {
             @memset(own_planes.rhs, 0);
             self.forkJoin(batches, own_planes, has_charge, x, t, .newton);
         } else {
-            @memset(own_planes.g_vals, 0);
-            if (has_charge) {
-                @memset(own_planes.c_vals, 0);
-                @memset(own_planes.q_vec, 0);
-            }
-            @memset(own_planes.rhs, 0);
-            self.forkJoin(batches, own_planes, has_charge, x, t, .full);
+            // ponytail: full eval already owns plane clearing and worker dispatch.
+            self.eval(batches, own_planes, has_charge, x, t);
         }
     }
 
@@ -2382,6 +2486,10 @@ pub const ParEval = struct {
         runLane(self, batches, own_planes, has_charge, 0, x, t, mode);
         var spins: u32 = 0;
         while (self.done.load(.acquire) < self.n_lanes - 1) {
+            // Same `pause` the loader's SpinLock uses. A busy waiter should not
+            // hold issue slots its SMT sibling needs to FINISH the job we are
+            // waiting on. Acquire/release and the 4096-spin yield are unchanged.
+            std.atomic.spinLoopHint();
             spins +%= 1;
             if (spins > 4096) std.Thread.yield() catch {};
         }
@@ -2403,6 +2511,7 @@ pub const ParEval = struct {
             var spins: u32 = 0;
             var e = self.epoch.load(.acquire);
             while (e == last) {
+                std.atomic.spinLoopHint();
                 spins +%= 1;
                 if (spins > 4096) std.Thread.yield() catch {};
                 e = self.epoch.load(.acquire);
@@ -2631,7 +2740,7 @@ pub fn deviceVtable(comptime D: type, comptime device_name: []const u8) *const D
 fn Impl(comptime D: type, comptime device_name: []const u8) type {
     return struct {
         const Store = ProtoStore(D);
-        const n_u = @typeInfo(D.U).@"enum".fields.len;
+        const n_u: usize = contract.nU(D);
 
         fn abiVersion() callconv(.c) u32 {
             return abi_version;
@@ -2754,31 +2863,22 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
     };
 }
 
-pub const LoadedDevice = struct {
-    lib: std.DynLib,
-    vt: *const DeviceVtable,
+/// Open a process-lifetime library; its mapping owns the returned vtable.
+pub fn loadDevice(path: []const u8) !*const DeviceVtable {
+    var lib = try std.DynLib.open(path);
+    errdefer lib.close();
 
-    pub fn open(path: []const u8) !LoadedDevice {
-        var lib = try std.DynLib.open(path);
-        errdefer lib.close();
+    const u32_fn = *const fn () callconv(.c) u32;
+    const u64_fn = *const fn () callconv(.c) u64;
+    const ver = lib.lookup(u32_fn, "arp_abi_version") orelse return error.NotArpDevice;
+    if (ver() != abi_version) return error.WrongAbiVersion;
+    const lh = lib.lookup(u64_fn, "arp_layout_hash") orelse return error.NotArpDevice;
+    if (lh() != layoutHash()) return error.LayoutMismatch;
 
-        const u32_fn = *const fn () callconv(.c) u32;
-        const u64_fn = *const fn () callconv(.c) u64;
-        const ver = lib.lookup(u32_fn, "arp_abi_version") orelse return error.NotArpDevice;
-        if (ver() != abi_version) return error.WrongAbiVersion;
-        const lh = lib.lookup(u64_fn, "arp_layout_hash") orelse return error.NotArpDevice;
-        if (lh() != layoutHash()) return error.LayoutMismatch;
-
-        const get_vt = lib.lookup(*const fn () callconv(.c) *const DeviceVtable, "arp_device") orelse
-            return error.NotArpDevice;
-        return .{ .lib = lib, .vt = get_vt() };
-    }
-
-    pub fn close(self: *LoadedDevice) void {
-        self.lib.close();
-        self.* = undefined;
-    }
-};
+    const get_vt = lib.lookup(*const fn () callconv(.c) *const DeviceVtable, "arp_device") orelse
+        return error.NotArpDevice;
+    return get_vt();
+}
 
 test "Dual: expm1 and log1p retain finite range and IEEE endpoints" {
     const S = Dual(1, f64);
@@ -2826,6 +2926,42 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
         try std.testing.expectEqual(a.val(), b.val());
         // …and the Jacobian degrades to f32 precision, and only to that.
         for (0..2) |c| try std.testing.expectApproxEqRel(a.ddxAt(c), b.ddxAt(c), 1e-6);
+    }
+}
+
+test "RealFor: every primitive is Dual's value half, bit for bit" {
+    // The invariant `evalQRange` rests on. Not a tolerance: the post-accept
+    // charge re-read must reproduce the Dual pass EXACTLY, because `q_hist`/
+    // `i_prev`/`q_tape` feed the next step's residual and `stepBound`'s LTE, so
+    // one ulp here walks the timestep sequence off. If a `Dual` value expression
+    // is ever changed (`div`'s reciprocal-multiply and `abs`'s sign test are the
+    // two that do not read as the obvious thing), this fails instead of silently
+    // perturbing every transient.
+    const core = struct {
+        fn f(comptime S: type, a: f64, b: f64) S {
+            const x = S.seed(a, 0);
+            const y = S.seed(b, 1);
+            // One chain per primitive, so a desync anywhere lands in the result.
+            var r = x.add(y).sub(y).neg().mul(x).div(y.addC(3.0)).scale(-0.5);
+            r = r.abs().minC(4.0).maxC(-4.0);
+            r = r.add(x.exp().log().expm1().log1p());
+            r = r.add(y.addC(9.0).sqrt().pow(1.5));
+            r = r.add(x.sin().cos().tanh().sinh().cosh().atan());
+            r = r.add(S.sel(x.lt(y), x.max(y), x.min(y)));
+            return r.add(S.sel(x.le(y).add(x.eq(y)), x, y));
+        }
+    }.f;
+    for (0..13) |i| {
+        for (0..13) |j| {
+            // Spans both signs and crosses zero exactly, which is where `abs`,
+            // `min`/`max` ties and `sel`'s 0/1 mask differ if they differ.
+            const a = @as(f64, @floatFromInt(i)) * 0.25 - 1.5;
+            const b = @as(f64, @floatFromInt(j)) * 0.25 - 1.5;
+            try std.testing.expectEqual(
+                core(DualFor(2, f64, false), a, b).val(),
+                core(RealFor(false), a, b).val(),
+            );
+        }
     }
 }
 
