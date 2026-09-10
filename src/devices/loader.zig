@@ -12,7 +12,6 @@ const std = @import("std");
 const fastvaf = @import("fastvaf");
 const engine = @import("engine.zig");
 
-const LoadedDevice = engine.LoadedDevice;
 const DeviceVtable = engine.DeviceVtable;
 
 /// Registry guard.
@@ -38,15 +37,14 @@ const SpinLock = struct {
 };
 
 var reg_mutex: SpinLock = .{};
-var registry: std.StringHashMapUnmanaged(LoadedDevice) = .empty;
+var registry: std.StringHashMapUnmanaged(*const DeviceVtable) = .empty;
 
 pub fn get(name: []const u8) ?*const DeviceVtable {
     var buf: [128]u8 = undefined;
     if (name.len > buf.len) return null;
     reg_mutex.lock();
     defer reg_mutex.unlock();
-    const dev = registry.get(std.ascii.lowerString(&buf, name)) orelse return null;
-    return dev.vt;
+    return registry.get(std.ascii.lowerString(&buf, name));
 }
 
 pub fn isEmpty() bool {
@@ -75,7 +73,7 @@ pub const BuildPaths = struct {
     gompute: []const u8,
 };
 
-const PreparedDevice = struct { loaded: LoadedDevice, owned_name: []const u8 };
+const PreparedDevice = struct { loaded: *const DeviceVtable, owned_name: []const u8 };
 
 /// Codegen + compile + dlopen for one file. No registry access — safe to run
 /// concurrently. Returns null if the device was already registered when checked.
@@ -92,7 +90,6 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     // a built-in model are byte-identical devices by construction.
     var result = try fastvaf.compileSource(gpa, source, .release_fast);
     defer result.deinit();
-    const zig_source = try result.generateDevice();
 
     var lower_buf: [128]u8 = undefined;
     if (result.mir.name.len > lower_buf.len) return error.NameTooLong;
@@ -101,7 +98,13 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     reg_mutex.lock();
     const already = registry.contains(lower_name);
     reg_mutex.unlock();
+    // Registered already ⇒ nothing below is wanted, INCLUDING generateDevice.
+    // compileSource still has to run: the registry key is the module name and
+    // only the MIR knows it. Deliberate diagnostic change: a second card for an
+    // already-loaded model no longer reports codegen failures for it, because
+    // the model it would emit is one we are throwing away.
     if (already) return null;
+    const zig_source = try result.generateDevice();
 
     // generation = generated-source hash XOR the host's dyn-ABI layout/version. Same
     // device + same ABI ⇒ same generation, so FastVAF's per-generation build
@@ -144,14 +147,14 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
             return error.GeneratedDeviceDoesNotCompile;
         },
     };
-    // The real ABI gate lives in LoadedDevice.open: it reads the .so's own
+    // The real ABI gate lives in engine.loadDevice: it reads the .so's own
     // exported `arp_layout_hash` (engine.layoutHash compiled INTO the .so)
     // and compares against ours. The old pre-dlopen check here compared
     // `art.layout_hash` — the ORCHESTRATOR's cache key (compiler version +
     // module list) — against the engine's TYPE-layout hash: two unrelated
     // formulas that can never agree, which is why every `.hdl` card died
     // with DeviceAbiMismatch.
-    const loaded = try LoadedDevice.open(art.so_path);
+    const loaded = try engine.loadDevice(art.so_path);
     const owned_name = try gpa.dupe(u8, lower_name);
     return .{ .loaded = loaded, .owned_name = owned_name };
 }
@@ -166,23 +169,18 @@ fn registerPrepared(gpa: std.mem.Allocator, r: PreparedDevice) !void {
     }
 }
 
-/// Compile (or fetch from cache) one `.va`/`.v`/`.sv` file and register its
-/// device. Idempotent per model name.
-pub fn ensureLoaded(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: BuildPaths) !void {
-    if (try prepareOne(gpa, io, path, paths)) |r| try registerPrepared(gpa, r);
-}
-
 /// Load multiple HDL files in parallel — codegen + zig-build run concurrently,
 /// then results register sequentially into the process-lifetime registry.
 pub fn ensureAllLoaded(gpa: std.mem.Allocator, io: std.Io, files: []const []const u8, paths: BuildPaths) !void {
     if (files.len <= 1) {
-        for (files) |p| try ensureLoaded(gpa, io, p, paths);
+        for (files) |p| {
+            if (try prepareOne(gpa, io, p, paths)) |r| try registerPrepared(gpa, r);
+        }
         return;
     }
     const Result = ?PreparedDevice;
     const results = try gpa.alloc(Result, files.len);
     defer gpa.free(results);
-    @memset(results, null);
 
     var group: std.Io.Group = .init;
     for (files, results) |path, *slot| {

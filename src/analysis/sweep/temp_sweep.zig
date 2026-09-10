@@ -41,19 +41,11 @@ pub const TempCoeff = struct {
         self.param.set(self.base_value * (1.0 + self.tc1 * dt + self.tc2 * dt * dt));
     }
 
-    /// Restore the parameter to its nominal (base) value.
     pub fn restore(self: *const TempCoeff) void {
         self.param.set(self.base_value);
     }
 };
 
-/// Temperature sweep analysis.
-///
-/// Sweeps temperature from t_start to t_stop in steps of t_step.
-/// At each temperature point, applies temperature coefficients to all
-/// registered parameters via the TempCoeff descriptors, then re-solves
-/// the DC operating point.
-///
 /// Caller owns the outputs: temps[numPoints(options)] and the flat
 /// values[probes.len * temps.len], probe-major with stride temps.len —
 /// values[p * temps.len + i] is probe p at recorded point i. Only the
@@ -97,7 +89,6 @@ pub fn sweep(
         }
         try ckt.recompute();
 
-        // Cold DC solve at this temperature — zero + seed junctions
         root.zeroSimd(x);
         ckt.seedJunctions(x);
 
@@ -118,7 +109,6 @@ pub fn sweep(
         }
     }
 
-    // Restore all parameters to nominal values
     ckt.setCircuitTemp(@floatCast(options.t_nom));
     for (temp_coeffs) |*tc| {
         tc.restore();
@@ -132,7 +122,6 @@ pub fn sweep(
     };
 }
 
-/// Convenience: compute the number of temperature points in a sweep.
 pub fn numPoints(options: Options) u32 {
     if (options.t_step <= 0) return 1;
     const span = options.t_stop - options.t_start;

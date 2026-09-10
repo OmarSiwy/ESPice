@@ -1,4 +1,5 @@
 const std = @import("std");
+const modules = @This();
 
 const contract = @import("contract.zig");
 
@@ -8,21 +9,17 @@ const contract = @import("contract.zig");
 const shared = @import("types.zig");
 pub const solvers = @import("solvers");
 pub const devices = @import("devices");
-pub const converger = shared.converger;
-pub const types = shared.types;
-pub const freq = shared.freq;
+pub const converger = solvers.converger;
+pub const types = solvers.types;
+pub const freq = types;
 pub const Circuit = shared.Circuit;
 pub const EvalHook = shared.EvalHook;
 pub const GpuHook = shared.GpuHook;
 pub const BbdBlock = shared.BbdBlock;
 pub const BbdInfo = shared.BbdInfo;
 pub const GROUND = shared.GROUND;
-pub const zeroSimd = shared.zeroSimd;
-pub const copySimd = shared.copySimd;
-pub const probeNames = shared.probeNames;
 pub const ParamRef = shared.ParamRef;
 pub const NoiseSource = shared.NoiseSource;
-pub const NoiseGenKind = shared.NoiseGenKind;
 pub const NoiseGen = shared.NoiseGen;
 pub const freeze = shared.freeze;
 pub const RunCtx = shared.RunCtx;
@@ -97,32 +94,7 @@ pub const AnalysisId = enum {
     tran_noise,
 
     pub fn Module(comptime self: AnalysisId) type {
-        return switch (self) {
-            .ac => ac,
-            .dc => dc,
-            .dcmatch => dcmatch,
-            .disto => disto,
-            .envelope => envelope,
-            .four => four,
-            .hb => hb,
-            .matex => matex,
-            .mc => mc,
-            .noise => noise,
-            .op => op,
-            .pac => pac,
-            .pnoise => pnoise,
-            .pss => pss,
-            .pxf => pxf,
-            .pz => pz,
-            .qpss => qpss,
-            .sens => sens,
-            .sp => sp,
-            .stb => stb,
-            .temp => temp_sweep,
-            .tf => tf,
-            .tran => tran,
-            .tran_noise => tran_noise,
-        };
+        return @field(modules, if (self == .temp) "temp_sweep" else @tagName(self));
     }
 };
 

@@ -120,7 +120,8 @@ pub fn LaneLu(comptime W: usize) type {
                 var d = self.w[k];
                 // Per-lane singular / non-finite: mask, then substitute 1.0 so
                 // the surviving lanes' divisions stay finite and exact.
-                const dead_diag = (d == zero) | isNotFinite(d);
+                const inf: V = @splat(std.math.inf(f64));
+                const dead_diag = (d == zero) | !(@abs(d) < inf);
                 bad |= maskBits(dead_diag);
                 d = @select(f64, dead_diag, one, d);
                 self.udiag[k] = d;
@@ -203,13 +204,6 @@ pub fn LaneLu(comptime W: usize) type {
             for (0..self.n) |r| x[r] = self.y[b.pinv[r]];
         }
 
-        /// Per-lane non-finite test (NaN or +/-inf) -> bool vector.
-        /// x != x catches NaN; !(|x| < inf) catches infinities (and NaN again).
-        inline fn isNotFinite(x: V) @Vector(W, bool) {
-            const inf: V = @splat(std.math.inf(f64));
-            return !(@abs(x) < inf);
-        }
-
         /// Bool vector -> per-lane bitmask (lane l -> bit l). Lane 0 = low bit.
         inline fn maskBits(m: @Vector(W, bool)) u64 {
             const bits: std.meta.Int(.unsigned, W) = @bitCast(m);
@@ -250,39 +244,9 @@ pub fn broadcast(comptime W: usize, src: []const f64, out: []@Vector(W, f64)) vo
 
 const testing = std.testing;
 
-fn DenseCsc(comptime n: usize) type {
-    return struct {
-        col_ptr: [n + 1]u32,
-        row_idx: [n * n]u32,
-        vals: [n * n]f64,
+const DenseCsc = sparse_lu.DenseCsc;
 
-        fn from(a: [n][n]f64) @This() {
-            var s: @This() = undefined;
-            var m: u32 = 0;
-            s.col_ptr[0] = 0;
-            for (0..n) |j| {
-                for (0..n) |i| {
-                    if (a[i][j] != 0) {
-                        s.row_idx[m] = @intCast(i);
-                        s.vals[m] = a[i][j];
-                        m += 1;
-                    }
-                }
-                s.col_ptr[j + 1] = m;
-            }
-            return s;
-        }
-        fn nnz(s: *const @This()) u32 {
-            return s.col_ptr[n];
-        }
-    };
-}
-
-fn identity(comptime n: usize) [n]u32 {
-    var q: [n]u32 = undefined;
-    for (0..n) |i| q[i] = @intCast(i);
-    return q;
-}
+const identity = sparse_lu.identity;
 
 test "LaneLu construction releases storage on every allocation failure" {
     const gpa = testing.allocator;

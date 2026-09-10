@@ -65,7 +65,7 @@ pub const LineFit = struct {
     h3_x: [6]f64 = @splat(0),
 };
 
-fn eval2(a: f64, b: f64, c: f64, x: f64) f64 {
+pub fn eval2(a: f64, b: f64, c: f64, x: f64) f64 {
     return a * x * x + b * x + c;
 }
 
@@ -90,7 +90,7 @@ fn mac(a: f64, b: f64) [5]f64 {
 
 /// In-place 3x4 Gauss with partial pivot (Gaussian_Elimination1/2; the two
 /// differ only in the give-up epsilon). Returns false on pivot collapse.
-fn gauss3(a: *[3][4]f64, epsilon: f64) bool {
+pub fn gauss3(a: *[3][4]f64, epsilon: f64) bool {
     for (0..3) |i| {
         var imax = i;
         var max = @abs(a[i][i]);
@@ -175,7 +175,7 @@ fn findRoots(a1_in: f64, a2_in: f64, a3_in: f64, comptime allow_img: bool, compt
 }
 
 /// txlsetup get_c: residue of the [3/3] fit at the complex pole a + j·b.
-fn getC(eq1: f64, eq2: f64, eq3: f64, ep1: f64, ep2: f64, a: f64, b: f64) [2]f64 {
+pub fn getC(eq1: f64, eq2: f64, eq3: f64, ep1: f64, ep2: f64, a: f64, b: f64) [2]f64 {
     var d = (3.0 * (a * a - b * b) + 2.0 * ep1 * a + ep2) * (3.0 * (a * a - b * b) + 2.0 * ep1 * a + ep2);
     d += (6.0 * a * b + 2.0 * ep1 * b) * (6.0 * a * b + 2.0 * ep1 * b);
     var n = -(eq1 * (a * a - b * b) + eq2 * a + eq3) * (6.0 * a * b + 2.0 * ep1 * b);
@@ -439,21 +439,28 @@ pub fn rebuildLine(fit: *const LineFit, st: *LineState, h: f64, t2_ps: f64, hi: 
         ff = fit.h3_aten * del.v2_o + fit.h2_aten * del.i2_o;
         gg = fit.h3_aten * del.v2_i + fit.h2_aten * del.i2_i;
     } else if (fit.if_img) {
-        // h3: 4 real terms + one complex pair in slots 4,5.
+        // h3: 4 real terms + one complex pair in slots 4,5. get_h3 sets
+        // h3_x = h1_x ++ h2_x (poles copied, never rescaled — only the _c
+        // coefficients are), so slots 0..2 are the h1 exponentials already in
+        // st.h1e and slots 3..5 ARE the h2 poles: e3 and the er/ei pair below
+        // serve the h2 block too. Same bits in, same bits out.
+        const e3 = @exp(fit.h3_x[3] * h);
         for (0..4) |i| {
-            const e = @exp(fit.h3_x[i] * h);
+            const e = if (i < 3) st.h1e[i] else e3;
             st.p3_i[i] = st.cnv3_i[i] * e + h1 * fit.h3_c[i] * (del.v1_i * e + del.v2_i);
             st.p3_o[i] = st.cnv3_o[i] * e + h1 * fit.h3_c[i] * (del.v1_o * e + del.v2_o);
         }
-        const er = @exp(fit.h3_x[4] * h) * @cos(fit.h3_x[5] * h);
-        const ei = @exp(fit.h3_x[4] * h) * @sin(fit.h3_x[5] * h);
+        const epair = @exp(fit.h3_x[4] * h);
+        const er = epair * @cos(fit.h3_x[5] * h);
+        const ei = epair * @sin(fit.h3_x[5] * h);
         const a2 = h1 * fit.h3_c[4];
         const b2 = h1 * fit.h3_c[5];
+        // ponytail: both ends use the existing field-name convention.
         inline for (.{ "i", "o" }) |side| {
-            const cnv = if (comptime std.mem.eql(u8, side, "i")) &st.cnv3_i else &st.cnv3_o;
-            const p = if (comptime std.mem.eql(u8, side, "i")) &st.p3_i else &st.p3_o;
-            const v1 = if (comptime std.mem.eql(u8, side, "i")) del.v1_i else del.v1_o;
-            const v2 = if (comptime std.mem.eql(u8, side, "i")) del.v2_i else del.v2_o;
+            const cnv = &@field(st, "cnv3_" ++ side);
+            const p = &@field(st, "p3_" ++ side);
+            const v1 = @field(del, "v1_" ++ side);
+            const v2 = @field(del, "v2_" ++ side);
             const ar = cnv[4] * er - cnv[5] * ei;
             const ai = cnv[4] * ei + cnv[5] * er;
             const a1r = a2 * (v1 * er + v2) - b2 * (v1 * ei);
@@ -470,33 +477,36 @@ pub fn rebuildLine(fit: *const LineFit, st: *LineState, h: f64, t2_ps: f64, hi: 
         ff += 2.0 * st.p3_o[4];
         gg += 2.0 * st.p3_i[4];
 
-        // h2: 1 real term + one complex pair in slots 1,2.
+        // h2: 1 real term + one complex pair in slots 1,2 — h2_x[0..2] is
+        // h3_x[3..5], so e3/er/ei above are already this block's exponentials.
         {
-            const e = @exp(fit.h2_x[0] * h);
-            st.p2_i[0] = st.cnv2_i[0] * e + h1 * fit.h2_c[0] * (del.i1_i * e + del.i2_i);
-            st.p2_o[0] = st.cnv2_o[0] * e + h1 * fit.h2_c[0] * (del.i1_o * e + del.i2_o);
+            st.p2_i[0] = st.cnv2_i[0] * e3 + h1 * fit.h2_c[0] * (del.i1_i * e3 + del.i2_i);
+            st.p2_o[0] = st.cnv2_o[0] * e3 + h1 * fit.h2_c[0] * (del.i1_o * e3 + del.i2_o);
         }
-        const er2 = @exp(fit.h2_x[1] * h) * @cos(fit.h2_x[2] * h);
-        const ei2 = @exp(fit.h2_x[1] * h) * @sin(fit.h2_x[2] * h);
         const c2 = h1 * fit.h2_c[1];
         const d2 = h1 * fit.h2_c[2];
         inline for (.{ "i", "o" }) |side| {
-            const cnv = if (comptime std.mem.eql(u8, side, "i")) &st.cnv2_i else &st.cnv2_o;
-            const p = if (comptime std.mem.eql(u8, side, "i")) &st.p2_i else &st.p2_o;
-            const di1 = if (comptime std.mem.eql(u8, side, "i")) del.i1_i else del.i1_o;
-            const di2 = if (comptime std.mem.eql(u8, side, "i")) del.i2_i else del.i2_o;
-            const ar = cnv[1] * er2 - cnv[2] * ei2;
-            const ai = cnv[1] * ei2 + cnv[2] * er2;
-            const a1r = c2 * (di1 * er2 + di2) - d2 * (di1 * ei2);
-            const a1i = c2 * (di1 * ei2) + d2 * (di1 * er2 + di2);
+            const cnv = &@field(st, "cnv2_" ++ side);
+            const p = &@field(st, "p2_" ++ side);
+            const di1 = @field(del, "i1_" ++ side);
+            const di2 = @field(del, "i2_" ++ side);
+            const ar = cnv[1] * er - cnv[2] * ei;
+            const ai = cnv[1] * ei + cnv[2] * er;
+            const a1r = c2 * (di1 * er + di2) - d2 * (di1 * ei);
+            const a1i = c2 * (di1 * ei) + d2 * (di1 * er + di2);
             p[1] = ar + a1r;
             p[2] = ai + a1i;
         }
         ff += fit.h2_aten * del.i2_o + st.p2_o[0] + 2.0 * st.p2_o[1];
         gg += fit.h2_aten * del.i2_i + st.p2_i[0] + 2.0 * st.p2_i[1];
     } else {
+        // Six h3 poles, but h3_x = h1_x ++ h2_x (see the if_img note): three of
+        // them are st.h1e and the other three are the h2 block's. Six @exp per
+        // rebuild, not twelve.
+        var h2e: [3]f64 = undefined;
+        for (0..3) |i| h2e[i] = @exp(fit.h2_x[i] * h);
         for (0..6) |i| {
-            const e = @exp(fit.h3_x[i] * h);
+            const e = if (i < 3) st.h1e[i] else h2e[i - 3];
             st.p3_i[i] = st.cnv3_i[i] * e + h1 * fit.h3_c[i] * (del.v1_i * e + del.v2_i);
             st.p3_o[i] = st.cnv3_o[i] * e + h1 * fit.h3_c[i] * (del.v1_o * e + del.v2_o);
         }
@@ -507,7 +517,7 @@ pub fn rebuildLine(fit: *const LineFit, st: *LineState, h: f64, t2_ps: f64, hi: 
             gg += st.p3_i[i];
         }
         for (0..3) |i| {
-            const e = @exp(fit.h2_x[i] * h);
+            const e = h2e[i];
             st.p2_i[i] = st.cnv2_i[i] * e + h1 * fit.h2_c[i] * (del.i1_i * e + del.i2_i);
             st.p2_o[i] = st.cnv2_o[i] * e + h1 * fit.h2_c[i] * (del.i1_o * e + del.i2_o);
         }
@@ -828,17 +838,11 @@ test "matched TXL line: delayed replica and DC settle" {
     const TS = struct {
         v: f64,
         const T = @This();
-        pub fn con(c: f64) T {
-            return .{ .v = c };
-        }
         pub fn add(a: T, b: T) T {
             return .{ .v = a.v + b.v };
         }
         pub fn sub(a: T, b: T) T {
             return .{ .v = a.v - b.v };
-        }
-        pub fn neg(a: T) T {
-            return .{ .v = -a.v };
         }
         pub fn scale(a: T, c: f64) T {
             return .{ .v = a.v * c };

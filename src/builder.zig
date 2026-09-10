@@ -16,10 +16,6 @@ const GROUND = analysis.GROUND;
 const Circuit = analysis.Circuit;
 const Proto = batch.Proto;
 
-fn uCount(comptime D: type) usize {
-    return @typeInfo(D.U).@"enum".fields.len;
-}
-
 fn isGroundName(name: []const u8) bool {
     return std.mem.eql(u8, name, "0") or
         std.ascii.eqlIgnoreCase(name, "gnd") or
@@ -59,6 +55,10 @@ pub const Builder = struct {
     /// Only for a Builder that was never compiled.
     pub fn deinit(self: *Builder) void {
         for (self.protos.items) |p| p.destroy(p.ctx, self.gpa);
+        self.deinitStorage();
+    }
+
+    inline fn deinitStorage(self: *Builder) void {
         self.protos.deinit(self.gpa);
         for (self.node_labels.items) |label| {
             if (!std.mem.eql(u8, label, "0")) self.gpa.free(label);
@@ -103,21 +103,25 @@ pub const Builder = struct {
         const ni = self.node_instance.items;
         const nt = self.node_type.items;
 
-        // Collect unique (instance_id, type_id) pairs for internal nodes.
-        // instance_id 0 or MULTI_INSTANCE means coupling.
-        var instance_list: std.ArrayList(struct { inst: u32, typ: u16 }) = .empty;
+        // Collect unique (instance_id, type_id) pairs for internal nodes in
+        // first-seen node order. instance_id 0 or MULTI_INSTANCE means coupling.
+        // `at` counts the block's nodes here and becomes its write cursor below.
+        var instance_list: std.ArrayList(struct { inst: u32, typ: u16, at: u32 }) = .empty;
         defer instance_list.deinit(gpa);
-        for (1..@min(n, @as(u32, @intCast(ni.len)))) |i| {
+        // inst -> block index. Replaces the linear first-seen rescan, which was
+        // O(nodes * instances) on a deck with many subcircuit instances.
+        var index: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+        defer index.deinit(gpa);
+        const tagged = @min(n, @as(u32, @intCast(ni.len)));
+        for (1..tagged) |i| {
             const inst = ni[i];
             if (inst == 0 or inst == MULTI_INSTANCE) continue;
-            var found = false;
-            for (instance_list.items) |e| {
-                if (e.inst == inst) {
-                    found = true;
-                    break;
-                }
+            const gop = try index.getOrPut(gpa, inst);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = @intCast(instance_list.items.len);
+                try instance_list.append(gpa, .{ .inst = inst, .typ = if (i < nt.len) nt[i] else 0, .at = 0 });
             }
-            if (!found) try instance_list.append(gpa, .{ .inst = inst, .typ = if (i < nt.len) nt[i] else 0 });
+            instance_list.items[gop.value_ptr.*].at += 1;
         }
 
         if (instance_list.items.len < 2)
@@ -129,21 +133,24 @@ pub const Builder = struct {
         perm[0] = 0; // ground stays at 0
         var pos: u32 = 1;
 
+        // Prefix-sum the counts into block starts, then scatter every tagged
+        // node in one ascending pass — same order the per-block rescan produced.
         const blocks = try gpa.alloc(analysis.BbdBlock, instance_list.items.len);
-        for (instance_list.items, 0..) |entry, bi| {
-            const start = pos;
-            for (1..@min(n, @as(u32, @intCast(ni.len)))) |i| {
-                if (ni[i] == entry.inst) {
-                    perm[i] = pos;
-                    pos += 1;
-                }
-            }
-            blocks[bi] = .{
-                .start = start,
-                .size = pos - start,
+        for (instance_list.items, blocks) |*entry, *blk| {
+            blk.* = .{
+                .start = pos,
+                .size = entry.at,
                 .type_id = entry.typ,
                 .instance_id = entry.inst,
             };
+            entry.at = pos;
+            pos += blk.size;
+        }
+        for (1..tagged) |i| {
+            const bi = index.get(ni[i]) orelse continue;
+            const cursor = &instance_list.items[bi].at;
+            perm[i] = cursor.*;
+            cursor.* += 1;
         }
 
         const coupling_start = pos;
@@ -204,7 +211,7 @@ pub const Builder = struct {
         instance: D.Instance,
         nodes: anytype,
     ) !void {
-        const n_u = comptime uCount(D);
+        const n_u = comptime std.meta.fields(D.U).len;
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
         // Zero-parasitic internal nodes collapse onto their port (ngspice
@@ -327,15 +334,7 @@ pub const Builder = struct {
         ckt.needs_tran_op = self.needs_tran_op;
 
         // Protos consumed by freeze(); free the Builder shell (labels + map).
-        self.protos.deinit(gpa);
-        for (self.node_labels.items) |label| {
-            if (!std.mem.eql(u8, label, "0")) gpa.free(label);
-        }
-        self.node_labels.deinit(gpa);
-        self.node_names.deinit(gpa);
-        self.node_instance.deinit(gpa);
-        self.node_type.deinit(gpa);
-        self.* = undefined;
+        self.deinitStorage();
         return ckt;
     }
 };
@@ -354,11 +353,8 @@ pub const Builder = struct {
 /// A .model card whose kind is a loaded module counts too
 /// (`.model psp103n psp103va ...`).
 fn isDynDevice(dev: types.Device, models: []const types.Model) bool {
-    if (vaload.isEmpty() or dev.positional.len == 0) return false;
-    const model_name = switch (dev.positional[0]) {
-        .name => |nm| nm,
-        else => return false,
-    };
+    if (vaload.isEmpty()) return false;
+    const model_name = positionalName(dev, 0) orelse return false;
     if (vaload.get(model_name) != null) return true;
     if (findModel(models, model_name)) |m| return vaload.get(m.kind) != null;
     return false;
@@ -489,10 +485,6 @@ fn applyKvDyn(set: *const fn ([*]u8, []const u8, f64) bool, dest: [*]u8, kv: []c
 // NetBuilder — netlist → Builder wiring (no ArrayList, bucket-sized arrays)
 // ---------------------------------------------------------------------------
 
-fn isValueForm(comptime D: type) bool {
-    return @hasDecl(D, "eval");
-}
-
 /// Write a POSITIONAL card value (`R1 a b 1k`, `F1 … 2.0`) to the named
 /// parameter on whichever of Model/Instance declares it. `applyKv` covers the
 /// `name=value` spellings; this covers the ones that arrive by position and so
@@ -555,7 +547,6 @@ pub const NetBuilder = struct {
 
     source_node: u32,
     source_branch: u32,
-    have_source: bool,
 
     // -- Topology diagnosis (ngspice CKTsetup-class checks) --------------
     // Per netlist-NAMED node: what touched it. Internal expansion nodes
@@ -608,7 +599,6 @@ pub const NetBuilder = struct {
             .n_deferred = 0,
             .source_node = GROUND,
             .source_branch = GROUND,
-            .have_source = false,
         };
     }
 
@@ -794,7 +784,7 @@ pub const NetBuilder = struct {
                 self.n_l += 1;
             },
             'v' => {
-                if (comptime !isValueForm(devices.vsource)) return error.UnsupportedDevice;
+                if (comptime !@hasDecl(devices.vsource, "eval")) return error.UnsupportedDevice;
                 const bound = try self.bindSource(devices.vsource, dev);
                 const nodes = try deviceNodes(self.b, devices.vsource, dev);
                 const br = self.b.n;
@@ -817,14 +807,13 @@ pub const NetBuilder = struct {
                 self.n_v += 1;
                 // A replaced source stamps nothing, so it cannot be the
                 // reference the .op ladder anchors on.
-                if (!self.have_source and !sensed) {
-                    self.have_source = true;
+                if (self.source_branch == GROUND and !sensed) {
                     self.source_node = nodes[0];
                     self.source_branch = br;
                 }
             },
             'i' => {
-                if (comptime !isValueForm(devices.isource)) return error.UnsupportedDevice;
+                if (comptime !@hasDecl(devices.isource, "eval")) return error.UnsupportedDevice;
                 const bound = try self.bindSource(devices.isource, dev);
                 try self.b.addDevice(devices.isource, bound[0], bound[1], try deviceNodes(self.b, devices.isource, dev));
                 self.i_names[self.n_i] = dev.name;
@@ -857,7 +846,7 @@ pub const NetBuilder = struct {
             var g: f64 = 0;
             var c: f64 = 0;
             var len: f64 = 0;
-            if (modelName(dev)) |name| {
+            if (positionalName(dev, 0)) |name| {
                 if (findModel(self.nl.models, name)) |m| {
                     r = kvNumber(m.kv, "r") orelse 0;
                     l = kvNumber(m.kv, "l") orelse 0;
@@ -885,7 +874,7 @@ pub const NetBuilder = struct {
     ///   RG and rejects → lossy_tline.va (exact hyperbolic two-port / $error).
     fn addLossyLine(self: *NetBuilder, dev: types.Device) !void {
         var model: devices.lossy_tline.Model = .{};
-        if (modelName(dev)) |name| {
+        if (positionalName(dev, 0)) |name| {
             if (findModel(self.nl.models, name)) |m| {
                 try applyKv(&model, m.kv);
                 // TXL model cards spell the line length `length=`; the
@@ -950,7 +939,7 @@ pub const NetBuilder = struct {
         var cperl: f64 = 1e-12;
         var isperl: f64 = 0;
         var rsperl: f64 = 0;
-        if (modelName(dev)) |name| {
+        if (positionalName(dev, 0)) |name| {
             if (findModel(self.nl.models, name)) |m| {
                 k = kvNumber(m.kv, "k") orelse k;
                 fmax = kvNumber(m.kv, "fmax") orelse fmax;
@@ -1011,7 +1000,7 @@ pub const NetBuilder = struct {
             try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r) }, .{}, [2]u32{ hil, hir });
             if (use_diodes) {
                 const Diode = devices.DeviceId.Type(.diode);
-                if (comptime !isValueForm(Diode)) return error.UnsupportedDevice;
+                if (comptime !@hasDecl(Diode, "eval")) return error.UnsupportedDevice;
                 // ngspice shares one diode model (is=i1, cjo=c1, rs=rd) and
                 // scales per lump with area=prop; diode.va has no area, so
                 // the area scaling is folded into per-lump model values.
@@ -1049,7 +1038,7 @@ pub const NetBuilder = struct {
         comptime value_field: []const u8,
         comptime alias: []const u8,
     ) !u32 {
-        if (comptime !isValueForm(D)) return error.UnsupportedDevice;
+        if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
         if (comptime !@hasField(D.Model, value_field) and !@hasField(D.Instance, value_field))
             @compileError(@typeName(D) ++ ": no parameter `" ++ value_field ++ "` on Model or Instance");
         var model: D.Model = .{};
@@ -1060,7 +1049,7 @@ pub const NetBuilder = struct {
             // defaulting to the model's DEFW. A zero/negative effective
             // width is ngspice's silent divide — the device reads as open.
             if (comptime D == devices.resistor) {
-                if (modelName(dev)) |mn| if (findModel(self.nl.models, mn)) |m| {
+                if (positionalName(dev, 0)) |mn| if (findModel(self.nl.models, mn)) |m| {
                     const rsh = kvNumber(m.kv, "rsh") orelse 0;
                     const l = kvNumber(dev.kv, "l") orelse 0;
                     const w = kvNumber(dev.kv, "w") orelse kvNumber(m.kv, "defw") orelse 10e-6;
@@ -1154,34 +1143,6 @@ pub const NetBuilder = struct {
         }
     }
 
-    // ponytail: linear scan over v_names/l_names — O(n_v) per lookup,
-    // fine for typical SPICE circuits (< 100 sources). HashMap if profiled.
-    fn findVBranch(self: *const NetBuilder, name: []const u8) ?u32 {
-        for (self.v_names[0..self.n_v], self.v_branches[0..self.n_v]) |n, br| {
-            if (std.mem.eql(u8, n, name)) return br;
-        }
-        return null;
-    }
-
-    /// Node pair of a named V card — what a 4-port F/H/W control port binds to.
-    fn findVNodes(self: *const NetBuilder, name: []const u8) ?[2]u32 {
-        for (self.v_names[0..self.n_v], self.v_ports[0..self.n_v], self.v_nports[0..self.n_v]) |n, p, m| {
-            if (std.mem.eql(u8, n, name)) return .{ p, m };
-        }
-        return null;
-    }
-
-    /// DC value of a named V card, for the sensing model's `vsense`. The
-    /// replaced source keeps its own value: `V1 a b DC 5` + `F1 p n V1 2`
-    /// leaves 5 V across (a,b). It is a branch-current probe, not a forced-0V
-    /// ammeter.
-    fn findVDc(self: *const NetBuilder, name: []const u8) ?f64 {
-        for (self.v_names[0..self.n_v], self.v_dc[0..self.n_v]) |n, d| {
-            if (std.mem.eql(u8, n, name)) return d;
-        }
-        return null;
-    }
-
     /// Does any F/H/W card sense this V card? Runs during the 'v' bucket, so
     /// it reads the f/h/w buckets directly rather than any state built later.
     fn isSensedSource(self: *const NetBuilder, name: []const u8) bool {
@@ -1204,21 +1165,20 @@ pub const NetBuilder = struct {
         route: {
             if (dev.nodes.len < 6 or dev.nodes.len % 2 != 0) break :route;
             const n_lines = (dev.nodes.len - 2) / 2;
-            var rr: [36]f64 = @splat(0);
-            var ll: [36]f64 = @splat(0);
-            var cc: [36]f64 = @splat(0);
+            var rr: [36]f64 = undefined;
+            var ll: [36]f64 = undefined;
+            var cc: [36]f64 = undefined;
             var gg: [36]f64 = @splat(0);
             var length: f64 = 0;
             var nr: usize = 0;
             var nl_: usize = 0;
             var nc: usize = 0;
-            var ng: usize = 0;
-            if (modelName(dev)) |name| {
+            if (positionalName(dev, 0)) |name| {
                 if (findModel(self.nl.models, name)) |m| {
                     nr = cplVector(m.kv, "r", &rr);
                     nl_ = cplVector(m.kv, "l", &ll);
                     nc = cplVector(m.kv, "c", &cc);
-                    ng = cplVector(m.kv, "g", &gg);
+                    _ = cplVector(m.kv, "g", &gg);
                     if (kvNumber(m.kv, "length")) |v| length = v;
                 }
             }
@@ -1245,32 +1205,26 @@ pub const NetBuilder = struct {
         // Fallback: the 2-conductor even/odd cognate (docs/devices/
         // coupled-tlines.md §1.5 names its ceiling).
         const D = devices.coupled_tlines;
-        if (comptime !isValueForm(D)) return error.UnsupportedDevice;
+        if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
         var model: D.Model = .{};
-        if (modelName(dev)) |name| {
+        if (positionalName(dev, 0)) |name| {
             if (findModel(self.nl.models, name)) |m| applyCplKv(&model, m.kv);
         }
         applyCplKv(&model, dev.kv);
         try self.b.addDevice(D, model, .{}, try deviceNodes(self.b, D, dev));
     }
 
-    fn findLIndex(self: *const NetBuilder, name: []const u8) ?usize {
-        for (self.l_names[0..self.n_l], 0..) |n, i| {
-            if (std.mem.eql(u8, n, name)) return i;
-        }
-        return null;
-    }
-
     fn addBranchRef(self: *NetBuilder, comptime D: type, dev: types.Device, comptime default_gain: ?f64) !void {
-        if (comptime !isValueForm(D)) return error.UnsupportedDevice;
+        if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
         const ctrl_name = positionalName(dev, 0) orelse return error.MissingControlSource;
-        const ctrl_nodes = self.findVNodes(ctrl_name) orelse return error.UnknownControlSource;
+        // ponytail: one O(n_v) name lookup for all control fields; index names if profiled.
+        const ctrl = findNameIndex(self.v_names[0..self.n_v], ctrl_name) orelse return error.UnknownControlSource;
 
         var model: D.Model = .{};
         // W card: `W n+ n- Vctrl model` — model is positional[1] (positional[0]
         // is the control source). F/H put a number there, so the orelse falls
         // back to the plain model-name slot.
-        if (positionalName(dev, 1) orelse modelName(dev)) |name| {
+        if (positionalName(dev, 1) orelse positionalName(dev, 0)) |name| {
             if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
         }
         var instance: D.Instance = .{};
@@ -1279,7 +1233,7 @@ pub const NetBuilder = struct {
         // The sensed source is not stamped (see the 'v' case); this model's
         // own `branch (cp,cn) ctrl` stands in for it, and `vsense` is what
         // keeps its voltage. Without this the replaced source read as 0 V.
-        _ = setParam(D, &model, &instance, "vsense", self.findVDc(ctrl_name) orelse 0);
+        _ = setParam(D, &model, &instance, "vsense", self.v_dc[ctrl]);
         try applyKv(&instance, dev.kv);
 
         // (p, n, cp, cn): the control port is the sensed source's own node
@@ -1288,23 +1242,23 @@ pub const NetBuilder = struct {
         const nodes = [4]u32{
             if (dev.nodes.len > 0) try self.b.internNode(dev.nodes[0]) else GROUND,
             if (dev.nodes.len > 1) try self.b.internNode(dev.nodes[1]) else GROUND,
-            ctrl_nodes[0],
-            ctrl_nodes[1],
+            self.v_ports[ctrl],
+            self.v_nports[ctrl],
         };
         try self.b.addDevice(D, model, instance, nodes);
     }
 
     fn addKinduc(self: *NetBuilder, dev: types.Device) !void {
-        if (comptime !isValueForm(devices.kinduc)) return error.UnsupportedDevice;
+        if (comptime !@hasDecl(devices.kinduc, "eval")) return error.UnsupportedDevice;
         const l1_name = positionalName(dev, 0) orelse return error.KinducMissingInductor;
         const l2_name = positionalName(dev, 1) orelse return error.KinducMissingInductor;
-        const li1 = self.findLIndex(l1_name) orelse return error.KinducUnknownInductor;
-        const li2 = self.findLIndex(l2_name) orelse return error.KinducUnknownInductor;
+        const li1 = findNameIndex(self.l_names[0..self.n_l], l1_name) orelse return error.KinducUnknownInductor;
+        const li2 = findNameIndex(self.l_names[0..self.n_l], l2_name) orelse return error.KinducUnknownInductor;
         const ibr1 = self.l_branches[li1];
         const ibr2 = self.l_branches[li2];
         var model: devices.kinduc.Model = .{};
         if (positionalNumber(dev, 2)) |k| model.k = castField(f32, k);
-        if (modelName(dev)) |name| {
+        if (positionalName(dev, 0)) |name| {
             if (findModel(self.nl.models, name)) |m| try applyKv(&model, m.kv);
         }
         try applyKv(&model, dev.kv);
@@ -1341,7 +1295,7 @@ fn resolveDeviceId(letter: u8, dev: types.Device, spice_models: []const types.Mo
         // `.model X VDMOS(...)` carries no LEVEL — the model KIND is the
         // dispatch (ngspice inpdomod.c does the same for VDMOS).
         'm' => blk: {
-            if (modelName(dev)) |name| if (findModel(spice_models, name)) |mm| {
+            if (positionalName(dev, 0)) |name| if (findModel(spice_models, name)) |mm| {
                 if (std.ascii.eqlIgnoreCase(mm.kind, "vdmos")) break :blk .vdmos;
             };
             break :blk try devices.mosfetDeviceId(level);
@@ -1356,7 +1310,7 @@ fn resolveDeviceId(letter: u8, dev: types.Device, spice_models: []const types.Mo
 }
 
 fn inferDeviceFromModel(dev: types.Device, spice_models: []const types.Model) ?devices.DeviceId {
-    const name = modelName(dev) orelse return null;
+    const name = positionalName(dev, 0) orelse return null;
     const m = findModel(spice_models, name) orelse return null;
     const level = kvNumber(m.kv, "level");
     const l: u16 = if (level) |lv| @intFromFloat(lv) else 1;
@@ -1378,12 +1332,6 @@ fn inferDeviceFromModel(dev: types.Device, spice_models: []const types.Model) ?d
 fn eqlAny(a: []const u8, candidates: []const []const u8) bool {
     for (candidates) |c| if (std.ascii.eqlIgnoreCase(a, c)) return true;
     return false;
-}
-
-/// Polarity comes from the model card KIND (`.model qp PNP`), not from a
-/// parameter, so `applyKv` never sees it and it has to be applied here.
-fn isPType(kind: []const u8) bool {
-    return eqlAny(kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" });
 }
 
 /// The polarity field, under each of the three names the models spell it.
@@ -1424,10 +1372,10 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
 }
 
 fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_models: []const types.Model) !void {
-    if (comptime !isValueForm(D)) return error.UnsupportedDevice;
+    if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
     var model: D.Model = .{};
     var instance: D.Instance = .{};
-    if (modelName(dev)) |name| {
+    if (positionalName(dev, 0)) |name| {
         if (findModel(spice_models, name)) |m| {
             try applyKv(&model, m.kv);
             // TXL (y-card) model cards spell the line length `length=`;
@@ -1435,7 +1383,8 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
             if (comptime D == devices.lossy_tline) {
                 if (kvNumber(m.kv, "length")) |length| model.len = @floatCast(length);
             }
-            if (isPType(m.kind)) try setPolarity(D, &model);
+            // Polarity comes from the model card kind, outside applyKv.
+            if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" })) try setPolarity(D, &model);
         }
     }
     _ = setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
@@ -1446,7 +1395,7 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
     // per-instance geometry outright — `M1 d g s b NMOS W=10u L=1u` produced
     // byte-identical output for W=1u, W=10u and W=100u.
     //
-    // This was gated on `modelName(dev) == null` for the model-less form
+    // This was gated on `positionalName(dev, 0) == null` for the model-less form
     // (`T1 a 0 b 0 Z0=50 TD=2n`); that case is now just the one where there
     // was no model card to override in the first place.
     //
@@ -1470,10 +1419,10 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
 // ---------------------------------------------------------------------------
 
 fn addBsource(b: *Builder, dev: types.Device, spice_models: []const types.Model) !void {
-    if (comptime !isValueForm(devices.bsource)) return error.UnsupportedDevice;
+    if (comptime !@hasDecl(devices.bsource, "eval")) return error.UnsupportedDevice;
     var model: devices.bsource.Model = .{};
     var instance: devices.bsource.Instance = .{};
-    if (modelName(dev)) |name| {
+    if (positionalName(dev, 0)) |name| {
         if (findModel(spice_models, name)) |m| try applyKv(&model, m.kv);
     }
     try applyKv(&model, dev.kv);
@@ -1790,7 +1739,6 @@ fn applyGroupArgs(comptime T: type, target: anytype, args: []const types.Value, 
     }
 }
 
-// ponytail: fieldPairs lives on Wave — same table, moved inline
 fn fieldPairs(comptime w: Wave) []const []const u8 {
     return switch (w) {
         .pulse => &.{ "pulse_v1", "pulse_i1", "pulse_v2", "pulse_i2", "pulse_td", "pulse_td", "pulse_tr", "pulse_tr", "pulse_tf", "pulse_tf", "pulse_pw", "pulse_pw", "pulse_per", "pulse_per", "pulse_phase", "pulse_phase" },
@@ -1815,7 +1763,7 @@ fn deviceNodes(b: *Builder, comptime D: type, dev: types.Device) ![D.num_ports]u
 }
 
 fn modelLevel(dev: types.Device, spice_models: []const types.Model) u16 {
-    if (modelName(dev)) |name| {
+    if (positionalName(dev, 0)) |name| {
         if (findModel(spice_models, name)) |m| {
             if (kvNumber(m.kv, "level")) |l| return @intFromFloat(l);
         }
@@ -1900,14 +1848,6 @@ fn sourceDc(dev: types.Device) ?f64 {
         else => {},
     };
     return null;
-}
-
-fn modelName(dev: types.Device) ?[]const u8 {
-    if (dev.positional.len == 0) return null;
-    return switch (dev.positional[0]) {
-        .name => |name| name,
-        else => null,
-    };
 }
 
 fn findModel(spice_models: []const types.Model, name: []const u8) ?types.Model {
@@ -2027,11 +1967,10 @@ fn normalizeBjt(dev: types.Device, spice_models: []const types.Model, bufs: *Bjt
     // positional = positional[mi..] (model name first, then e.g. area)
     const tail = dev.positional[mi..];
     if (tail.len > bufs.pos.len) return dev;
-    @memcpy(bufs.pos[0..tail.len], tail);
 
     var out = dev;
     out.nodes = bufs.nodes[0..n_nodes];
-    out.positional = bufs.pos[0..tail.len];
+    out.positional = tail;
     return out;
 }
 

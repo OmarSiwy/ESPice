@@ -14,7 +14,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     var fw = file.writer(io, &buf);
     const w = &fw.interface;
 
-    // Header
     try w.print("{s}: {s}\n", .{ plot.plotname, plot.title });
     try w.writeAll("Index");
     for (plot.varnames) |name| {
@@ -26,7 +25,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     }
     try w.writeByte('\n');
 
-    // Separator
     try w.writeAll("-----");
     for (0..nvars) |_| {
         try w.writeAll("\t---------------");
@@ -34,7 +32,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     }
     try w.writeByte('\n');
 
-    // Data
     for (0..plot.npoints) |pt| {
         try w.print("{d}", .{pt});
         for (0..nvars) |v| {

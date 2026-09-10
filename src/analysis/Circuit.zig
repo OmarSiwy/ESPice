@@ -1,8 +1,5 @@
 //! Circuit: frozen, analysis-facing representation.
 //!
-//! Consolidates the Circuit struct (root.zig), freeze logic (problem.zig),
-//! and GPU packing (gpu.zig) into one self-contained file.
-//!
 //!   pattern:  col_ptr / row_idx  (CSC, frozen at compile)
 //!   planes:   g_vals (dI/dx), c_vals (dQ/dx), rhs (I residual), q_vec (Q)
 //!   eval():   one pass fills all four
@@ -18,7 +15,6 @@ const solvers = @import("solvers");
 const tran = @import("tran/types.zig");
 
 const Batch = devices.batch.Batch;
-const Hooks = devices.batch.Hooks;
 const Planes = devices.batch.Planes;
 const ParamRef = devices.batch.ParamRef;
 const NoiseSource = devices.batch.NoiseSource;
@@ -207,38 +203,6 @@ pub const Circuit = struct {
     /// instance storage, stable until deinit. No invalidation needed.
     param_refs: ?[]ParamRef = null,
 
-    /// Total bytes consumed by this circuit's frozen representation.
-    /// Used for GPU memory budgeting — the shared prefix of the device
-    /// blob is approximately this size minus the metadata overhead.
-    pub const MemoryFootprint = struct {
-        pattern_bytes: usize, // col_ptr + row_idx
-        planes_bytes: usize, // g_vals + c_vals + rhs + q_vec
-        baseline_bytes: usize, // g_base + c_base (0 if no baseline)
-        batch_bytes: usize, // Batch[] array
-        metadata_bytes: usize, // diag_slots + current_row + intern table
-        total_bytes: usize,
-    };
-
-    pub fn memoryFootprint(self: *const Circuit) MemoryFootprint {
-        const n: usize = self.n;
-        const nnz: usize = self.nnz;
-        const pattern = (n + 1) * @sizeOf(u32) + nnz * @sizeOf(u32);
-        const planes = 4 * (nnz + 1) * @sizeOf(f64); // g, c, rhs(n+1), q(n+1) — rhs/q are n+1
-        const baseline: usize = if (self.has_baseline) 2 * (nnz + 1) * @sizeOf(f64) else 0;
-        const batch = self.batches.len * @sizeOf(Batch);
-        const meta = n * @sizeOf(u32) + n * @sizeOf(bool) +
-            self.intern_bytes.len + self.intern_offs.len * @sizeOf(u32);
-        const total = pattern + planes + baseline + batch + meta;
-        return .{
-            .pattern_bytes = pattern,
-            .planes_bytes = planes,
-            .baseline_bytes = baseline,
-            .batch_bytes = batch,
-            .metadata_bytes = meta,
-            .total_bytes = total,
-        };
-    }
-
     /// Shared Newton/JFNK workspace, built on first use. Pattern is frozen,
     /// so the symbolic LU stays valid for the circuit's lifetime.
     pub fn workspace(self: *Circuit) !*converger.Workspace {
@@ -342,21 +306,6 @@ pub const Circuit = struct {
             ev(gh.ctx, x, t);
             return;
         };
-        self.evalCpu(x, t);
-    }
-
-    /// Ensure the four planes hold the linearization at `x_op`, reusing them if
-    /// they already do. The AC-family analyses (freq_solve/noise/sp/pz/stb) each
-    /// linearize at the same engine op point; without this memo an op+ac+noise+pz
-    /// deck runs four identical full device evals. Cache-miss path is
-    /// `eval(x_op, 0)` — byte-identical to the direct call it replaces.
-    pub fn linearize(self: *Circuit, x_op: []const f64) void {
-        if (self.lin.valid and self.lin.x_ptr == x_op.ptr and self.lin.len == x_op.len) return;
-        self.eval(x_op, 0);
-        self.lin = .{ .x_ptr = x_op.ptr, .len = @intCast(x_op.len), .valid = true };
-    }
-
-    pub fn evalCpu(self: *Circuit, x: []const f64, t: f64) void {
         if (self.par_eval) |p| {
             p.eval(self.batches, self.ownPlanes(), self.has_charge, x, t);
             self.groundStamp(x);
@@ -371,6 +320,35 @@ pub const Circuit = struct {
         const pl = self.ownPlanes();
         for (self.batches) |b| b.eval(b.ctx, &pl, 0, 0, b.count, x, t);
         self.groundStamp(x);
+    }
+
+    /// Charges only at `x`: `q_vec` and every batch's `q_tape`, bit-for-bit what
+    /// `eval` would leave there, with g_vals/c_vals/rhs untouched.
+    ///
+    /// For the transient's post-accept re-read (tran.zig), which consumes the
+    /// charges and nothing else — the next step's first `evalNewton` restamps
+    /// the other three planes. Falls back to the full pass on the two paths
+    /// whose accumulation this cannot reproduce bit-for-bit: the GPU (one fused
+    /// kernel, no charge-only entry) and ParEval (per-lane slabs reduced in lane
+    /// order). ponytail: both stay correct, just not faster; give ParEval a
+    /// `.charge` Mode if a threaded run ever leans on this.
+    pub fn evalQ(self: *Circuit, x: []const f64, t: f64) void {
+        if (self.gpu_hook != null or self.par_eval != null) return self.eval(x, t);
+        self.lin.valid = false; // q_vec is one of the four memoized planes
+        @memset(self.q_vec, 0);
+        const pl = self.ownPlanes();
+        for (self.batches) |b| if (b.hooks.eval_q) |f| f(b.ctx, &pl, x, t);
+    }
+
+    /// Ensure the four planes hold the linearization at `x_op`, reusing them if
+    /// they already do. The AC-family analyses (freq_solve/noise/sp/pz/stb) each
+    /// linearize at the same engine op point; without this memo an op+ac+noise+pz
+    /// deck runs four identical full device evals. Cache-miss path is
+    /// `eval(x_op, 0)` — byte-identical to the direct call it replaces.
+    pub fn linearize(self: *Circuit, x_op: []const f64) void {
+        if (self.lin.valid and self.lin.x_ptr == x_op.ptr and self.lin.len == x_op.len) return;
+        self.eval(x_op, 0);
+        self.lin = .{ .x_ptr = x_op.ptr, .len = @intCast(x_op.len), .valid = true };
     }
 
     pub fn evalNewton(self: *Circuit, x: []const f64, t: f64) void {
@@ -450,11 +428,7 @@ pub const Circuit = struct {
         self.has_baseline = true;
     }
 
-    pub fn combineGC(self: *const Circuit, alpha: f64, out: []f64) void {
-        self.combineGCInner(alpha, out, false);
-    }
-
-    /// ONE combined `G + alpha*C` entry. Same expression as `combineGCInner`'s
+    /// ONE combined `G + alpha*C` entry. Same expression as `combineGC`'s
     /// scalar tail, so it agrees with the full pass entry-for-entry.
     ///
     /// Exists because the Newton residual gate reads a single diagonal per
@@ -466,19 +440,11 @@ pub const Circuit = struct {
         return self.g_vals[slot] + alpha * self.c_vals[slot];
     }
 
-    pub fn combineGCAndClear(self: *Circuit, alpha: f64, out: []f64) void {
-        self.combineGCInner(alpha, out, true);
-    }
-
-    // *const is honest for both paths: the clear branch writes plane
-    // CONTENTS through the g/c slices (separately-owned storage), never the
-    // struct itself.
-    fn combineGCInner(self: *const Circuit, alpha: f64, out: []f64, comptime clear: bool) void {
+    pub fn combineGC(self: *const Circuit, alpha: f64, out: []f64) void {
         std.debug.assert(out.len >= self.nnz);
         const W = vec_width;
         const V = @Vector(W, f64);
         const av: V = @splat(alpha);
-        const zero: V = @splat(0.0);
         const g = self.g_vals;
         const c = self.c_vals;
         var i: usize = 0;
@@ -486,17 +452,9 @@ pub const Circuit = struct {
             const gv: V = g[i..][0..W].*;
             const cv: V = c[i..][0..W].*;
             out[i..][0..W].* = gv + av * cv;
-            if (clear) {
-                g[i..][0..W].* = zero;
-                c[i..][0..W].* = zero;
-            }
         }
         while (i < self.nnz) : (i += 1) {
             out[i] = g[i] + alpha * c[i];
-            if (clear) {
-                g[i] = 0;
-                c[i] = 0;
-            }
         }
     }
 
@@ -519,14 +477,14 @@ pub const Circuit = struct {
     }
 
     pub fn findSlot(self: *const Circuit, row: u32, col: u32) ?u32 {
-        var lo = self.col_ptr[col];
-        var hi = self.col_ptr[col + 1];
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            if (self.row_idx[mid] < row) lo = mid + 1 else hi = mid;
-        }
-        if (lo < self.col_ptr[col + 1] and self.row_idx[lo] == row) return lo;
-        return null;
+        // ponytail: reuse the frozen-pattern lookup used by device scatter tapes.
+        const pattern: PatternView = .{
+            .col_ptr = self.col_ptr,
+            .row_idx = self.row_idx,
+            .n = self.n,
+            .trash_slot = self.trash_slot,
+        };
+        return pattern.findSlot(row, col);
     }
 
     pub fn applyLimits(self: *const Circuit, x: []f64, x_old: []const f64) bool {
@@ -706,9 +664,6 @@ pub const Circuit = struct {
         return "";
     }
 
-    pub fn voltageNodeCount(self: *const Circuit) u32 {
-        return self.n;
-    }
 };
 
 // ---------------------------------------------------------------------------

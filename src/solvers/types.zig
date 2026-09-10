@@ -67,7 +67,8 @@ pub const Complex = struct {
     pub const zero = Complex{ .re = 0, .im = 0 };
 
     pub inline fn mag(self: Complex) f64 {
-        return @sqrt(self.re * self.re + self.im * self.im);
+        // ponytail: reuse magSq without changing the squared-magnitude arithmetic.
+        return @sqrt(self.magSq());
     }
 
     pub inline fn magSq(self: Complex) f64 {
@@ -112,10 +113,6 @@ pub const Complex = struct {
 
     pub inline fn scale(self: Complex, s: f64) Complex {
         return .{ .re = self.re * s, .im = self.im * s };
-    }
-
-    pub inline fn neg(self: Complex) Complex {
-        return .{ .re = -self.re, .im = -self.im };
     }
 
     pub inline fn conj(self: Complex) Complex {
@@ -179,22 +176,6 @@ pub const Waveform = struct {
     }
 };
 
-pub const MeasType = enum {
-    max,
-    min,
-    pp,
-    avg,
-    rms,
-    rise_time,
-    fall_time,
-    frequency,
-};
-
-pub const ThresholdOpts = struct {
-    lo: f64 = 0.1,
-    hi: f64 = 0.9,
-};
-
 pub fn wfMax(wf: Waveform) f64 {
     const n = wf.len();
     if (n == 0) return 0;
@@ -243,40 +224,6 @@ pub fn wfRms(wf: Waveform) f64 {
     return @sqrt(integral / t_span);
 }
 
-pub fn riseTime(wf: Waveform, opts: ThresholdOpts) f64 {
-    const n = wf.len();
-    if (n < 2) return 0;
-    const v_min = wfMin(wf);
-    const v_max = wfMax(wf);
-    const swing = v_max - v_min;
-    if (swing == 0) return 0;
-    const lo_thresh = v_min + opts.lo * swing;
-    const hi_thresh = v_min + opts.hi * swing;
-    const t_lo = findCrossing(wf, lo_thresh, .rising) orelse return 0;
-    const t_hi = findCrossingAfter(wf, hi_thresh, .rising, t_lo) orelse return 0;
-    return t_hi - t_lo;
-}
-
-pub fn fallTime(wf: Waveform, opts: ThresholdOpts) f64 {
-    const n = wf.len();
-    if (n < 2) return 0;
-    const v_min = wfMin(wf);
-    const v_max = wfMax(wf);
-    const swing = v_max - v_min;
-    if (swing == 0) return 0;
-    const hi_thresh = v_min + opts.hi * swing;
-    const lo_thresh = v_min + opts.lo * swing;
-    const t_hi = findCrossing(wf, hi_thresh, .falling) orelse return 0;
-    const t_lo = findCrossingAfter(wf, lo_thresh, .falling, t_hi) orelse return 0;
-    return t_lo - t_hi;
-}
-
-pub fn wfDelay(wf1: Waveform, wf2: Waveform, threshold: f64) f64 {
-    const t1 = findCrossing(wf1, threshold, .rising) orelse return 0;
-    const t2 = findCrossing(wf2, threshold, .rising) orelse return 0;
-    return @abs(t2 - t1);
-}
-
 pub fn wfFrequency(wf: Waveform) f64 {
     const n = wf.len();
     if (n < 3) return 0;
@@ -297,62 +244,6 @@ pub fn wfFrequency(wf: Waveform) f64 {
     const total_time = last_crossing.? - first_crossing.?;
     if (total_time <= 0) return 0;
     return @as(f64, @floatFromInt(crossing_count - 1)) / total_time;
-}
-
-pub fn measure(wf: Waveform, mtype: MeasType, opts: ThresholdOpts) f64 {
-    return switch (mtype) {
-        .max => wfMax(wf),
-        .min => wfMin(wf),
-        .pp => wfPp(wf),
-        .avg => wfAvg(wf),
-        .rms => wfRms(wf),
-        .rise_time => riseTime(wf, opts),
-        .fall_time => fallTime(wf, opts),
-        .frequency => wfFrequency(wf),
-    };
-}
-
-// ============================================================================
-// Internal
-// ============================================================================
-
-const CrossingDir = enum { rising, falling };
-
-fn findCrossing(wf: Waveform, threshold: f64, dir: CrossingDir) ?f64 {
-    const n = wf.len();
-    if (n < 2) return null;
-    for (1..n) |k| {
-        const cross = switch (dir) {
-            .rising => wf.values[k - 1] < threshold and wf.values[k] >= threshold,
-            .falling => wf.values[k - 1] > threshold and wf.values[k] <= threshold,
-        };
-        if (cross) {
-            const dv = wf.values[k] - wf.values[k - 1];
-            if (@abs(dv) < 1e-30) return wf.times[k];
-            const frac = (threshold - wf.values[k - 1]) / dv;
-            return wf.times[k - 1] + frac * (wf.times[k] - wf.times[k - 1]);
-        }
-    }
-    return null;
-}
-
-fn findCrossingAfter(wf: Waveform, threshold: f64, dir: CrossingDir, t_after: f64) ?f64 {
-    const n = wf.len();
-    if (n < 2) return null;
-    for (1..n) |k| {
-        if (wf.times[k] <= t_after) continue;
-        const cross = switch (dir) {
-            .rising => wf.values[k - 1] < threshold and wf.values[k] >= threshold,
-            .falling => wf.values[k - 1] > threshold and wf.values[k] <= threshold,
-        };
-        if (cross) {
-            const dv = wf.values[k] - wf.values[k - 1];
-            if (@abs(dv) < 1e-30) return wf.times[k];
-            const frac = (threshold - wf.values[k - 1]) / dv;
-            return wf.times[k - 1] + frac * (wf.times[k] - wf.times[k - 1]);
-        }
-    }
-    return null;
 }
 
 // ============================================================================

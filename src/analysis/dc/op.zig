@@ -215,8 +215,7 @@ pub fn solveLadder(
     // than direct Newton and catch circuits where the factored step wedges.
     {
         coldStart(ckt, x);
-        var copts = options.tol.newtonOpts(null);
-        copts.gmin = 0.0;
+        const copts = options.tol.newtonOpts(null);
         // converger.run clears device limiting state on exit; a direct jfnk
         // call must do the same so post-solve evals see clean state.
         defer ckt.clearLimits();

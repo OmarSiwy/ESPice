@@ -1,6 +1,7 @@
 //! SPICE includes and selected .lib sections; paths stay relative to their file.
 const std = @import("std");
 const Io = std.Io;
+const ir = @import("types.zig");
 const Tokens = @import("tokenizer.zig").GenTokens(.{ .quotes = "\"'" });
 const Directive = enum { include, lib, endl };
 const directives = std.StaticStringMap(Directive).initComptime(.{
@@ -86,20 +87,15 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
                 continue;
             }
             if (!selected) continue;
+            const resolved = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", file_or_section });
+            defer gpa.free(resolved);
             // HDL includes are consumed later by the existing runtime loader.
-            const ext = std.fs.path.extension(file_or_section);
-            if (std.ascii.eqlIgnoreCase(ext, ".va") or std.ascii.eqlIgnoreCase(ext, ".vams") or
-                std.ascii.eqlIgnoreCase(ext, ".veriloga") or std.ascii.eqlIgnoreCase(ext, ".v") or std.ascii.eqlIgnoreCase(ext, ".sv"))
-            {
-                const resolved = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", file_or_section });
-                defer gpa.free(resolved);
+            if (ir.foreignKindForPath(file_or_section) != null) {
                 try out.appendSlice(gpa, ".include \"");
                 try out.appendSlice(gpa, resolved);
                 try out.appendSlice(gpa, "\"\n");
                 continue;
             }
-            const resolved = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", file_or_section });
-            defer gpa.free(resolved);
             try appendFile(io, resolved, corner, depth + 1, out);
         } else if (selected) {
             try out.appendSlice(gpa, line);

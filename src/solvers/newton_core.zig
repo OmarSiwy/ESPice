@@ -209,9 +209,6 @@ pub fn newtonSolve(
             v.g_vec[0] = beta;
             var k: u32 = 1;
             while (k < m + 1) : (k += 1) v.g_vec[k] = 0;
-            var kh: usize = 0;
-            const hn = @as(usize, m + 1) * m;
-            while (kh < hn) : (kh += 1) v.h[kh] = 0;
             env.publish(5, 0); // jj
         }
         env.sync();

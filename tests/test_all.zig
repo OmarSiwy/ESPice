@@ -16,7 +16,6 @@ const td = @import("testdev.zig");
 const k_boltzmann = 1.380649e-23;
 
 test {
-    _ = @import("builder"); // src/builder.zig's own netlist-binding tests
     _ = @import("builder.zig");
     _ = @import("devices.zig");
     _ = @import("hfet2_temperature.zig");
@@ -39,34 +38,8 @@ test {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-const Divider = struct {
-    ckt: analysis.Circuit,
-    n1: u32,
-    n2: u32,
-    vbranch: u32,
-};
-
-/// V(dc)—R1—(n2)—R2—gnd. vbranch is the source's branch-current unknown.
-fn buildDivider(gpa: std.mem.Allocator, vdc: f32, r1: f32, r2: f32) !Divider {
-    var b = Builder.init(gpa);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n; // branch unknown assigned by the next addDevice
-    try b.addDevice(td.V, .{ .dc = vdc }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = r1 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = r2 }, .{}, .{ n2, GROUND });
-    const ckt = try b.compile();
-    return .{ .ckt = ckt, .n1 = n1, .n2 = n2, .vbranch = vbranch };
-}
-
-/// Operating point into arena-owned x (the fine-grained primitive engine.zig
-/// warm-starts every analysis through).
-fn solveOp(ckt: *analysis.Circuit, arena: std.mem.Allocator) ![]f64 {
-    const x = try arena.alloc(f64, ckt.n);
-    const r = try analysis.op.solve(ckt, x, .{});
-    try testing.expect(r.converged);
-    return x;
-}
+const buildSeries = @import("analyses.zig").buildSeries;
+const solveOp = @import("leak.zig").solveOp;
 
 fn runCtx(ckt: *analysis.Circuit, x_op: ?[]f64, probes: []const u32, src_node: u32, src_branch: u32, arena: std.mem.Allocator) analysis.RunCtx {
     return .{
@@ -79,14 +52,6 @@ fn runCtx(ckt: *analysis.Circuit, x_op: ?[]f64, probes: []const u32, src_node: u
     };
 }
 
-/// Result varname lookup: column index or fail.
-fn colOf(res: analysis.Result, name: []const u8) usize {
-    for (res.varnames, 0..) |n, i| {
-        if (std.mem.eql(u8, n, name)) return i;
-    }
-    unreachable;
-}
-
 // ---------------------------------------------------------------------------
 // dc
 // ---------------------------------------------------------------------------
@@ -96,7 +61,7 @@ test "run dc: 10V / 1k / 3k divider -> 7.5V" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 10, 1000, 3000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 10 }, 1000, .{ .r = 3000 });
     defer d.ckt.deinit();
 
     const probes = [_]u32{ d.n1, d.n2 };
@@ -121,7 +86,7 @@ test "run op: divider operating point at every probe" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const probes = [_]u32{ d.n1, d.n2 };
@@ -180,20 +145,13 @@ test "run ac: RC lowpass |H| = 1/sqrt(1+(wRC)^2) across the sweep" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var b = Builder.init(testing.allocator);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
     // V—R(1k)—C(1µ): fc = 1/(2πRC) ≈ 159 Hz
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 1.0 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.C, .{ .c = 1e-6 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
+    var setup = try buildSeries(testing.allocator, td.C, .{ .dc = 1.0 }, 1000, .{ .c = 1e-6 });
+    defer setup.ckt.deinit();
 
-    const x = try solveOp(&ckt, arena);
-    const probes = [_]u32{n2};
-    const ctx = runCtx(&ckt, x, &probes, n1, vbranch, arena);
+    const x = try solveOp(&setup.ckt, arena);
+    const probes = [_]u32{setup.n2};
+    const ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
     const res = try analysis.run(&ctx, .{ .ac = .{
         .f_start = 1e-1,
         .f_stop = 1e6,
@@ -222,7 +180,7 @@ test "run noise: divider thermal density = 4kT*(R1||R2), flat" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const x = try solveOp(&d.ckt, arena);
@@ -256,7 +214,7 @@ test "run sens: divider dVout/dR1, dVout/dR2, dVout/dV analytic" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const probes = [_]u32{d.n2};
@@ -265,9 +223,10 @@ test "run sens: divider dVout/dR1, dVout/dR2, dVout/dV analytic" {
 
     try testing.expectEqual(@as(usize, 1), res.npoints);
     // dVout/dR2 = V*R1/(R1+R2)^2, dVout/dR1 = -V*R2/(R1+R2)^2, dVout/dV = R2/(R1+R2)
-    try testing.expectApproxEqAbs(5.0 * 1000.0 / 9e6, res.data[colOf(res, "R#1.r")], 1e-6);
-    try testing.expectApproxEqAbs(-5.0 * 2000.0 / 9e6, res.data[colOf(res, "R#0.r")], 1e-6);
-    try testing.expectApproxEqAbs(2.0 / 3.0, res.data[colOf(res, "V#0.dc")], 1e-6);
+    // ponytail: reuse the builder's exact-name lookup; missing columns still fail.
+    try testing.expectApproxEqAbs(5.0 * 1000.0 / 9e6, res.data[builder.findNameIndex(res.varnames, "R#1.r") orelse unreachable], 1e-6);
+    try testing.expectApproxEqAbs(-5.0 * 2000.0 / 9e6, res.data[builder.findNameIndex(res.varnames, "R#0.r") orelse unreachable], 1e-6);
+    try testing.expectApproxEqAbs(2.0 / 3.0, res.data[builder.findNameIndex(res.varnames, "V#0.dc") orelse unreachable], 1e-6);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +240,7 @@ test "run mc: divider — every trial converges to the divider point" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const probes = [_]u32{d.n2};
@@ -307,7 +266,7 @@ test "run temp: divider without tempcos is flat over the sweep" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const probes = [_]u32{d.n2};
@@ -336,7 +295,7 @@ test "run tf: divider gain 2/3, Rin 3k, Rout R1||R2" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const x = try solveOp(&d.ckt, arena);
@@ -362,20 +321,13 @@ test "run pz: RC lowpass — single pole at -1/RC rad/s" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var b = Builder.init(testing.allocator);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
     // R=1k, C=1µ → pole at −1000 rad/s
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 5.0 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.C, .{ .c = 1e-6 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
+    var setup = try buildSeries(testing.allocator, td.C, .{ .dc = 5.0 }, 1000, .{ .c = 1e-6 });
+    defer setup.ckt.deinit();
 
-    const x = try solveOp(&ckt, arena);
-    const probes = [_]u32{n2};
-    const ctx = runCtx(&ckt, x, &probes, n1, vbranch, arena);
+    const x = try solveOp(&setup.ckt, arena);
+    const probes = [_]u32{setup.n2};
+    const ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
     const res = try analysis.run(&ctx, .{ .pz = .{} });
 
     // rows: (index re, index im, pole re, pole im)
@@ -433,7 +385,7 @@ test "run stb: resistive divider probe — loop gain stays below 10 dB" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const probes = [_]u32{d.n2};
@@ -464,7 +416,7 @@ test "run disto: linear divider has zero HD2" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const x = try solveOp(&d.ckt, arena);
@@ -495,24 +447,17 @@ test "run four: tran of sine through divider — fundamental 2/3, DC 0" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var b = Builder.init(testing.allocator);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
     // 1 kHz, 1V-amplitude sine into a 1k/2k divider: v(n2) = (2/3)sin(2*pi*f*t)
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 0, .amp = 1.0, .freq = 1e3 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = 2000 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
+    var setup = try buildSeries(testing.allocator, td.R, .{ .dc = 0, .amp = 1.0, .freq = 1e3 }, 1000, .{ .r = 2000 });
+    defer setup.ckt.deinit();
 
-    const x = try solveOp(&ckt, arena);
-    const probes = [_]u32{n2};
-    const ctx = runCtx(&ckt, x, &probes, n1, vbranch, arena);
+    const x = try solveOp(&setup.ckt, arena);
+    const probes = [_]u32{setup.n2};
+    const ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
     const res = try analysis.run(&ctx, .{
         .four = .{
             .f_fundamental = 1e3,
-            .output_node = n2,
+            .output_node = setup.n2,
             .tran_opts = .{
                 .t_stop = 3e-3, // 3 fundamental periods
                 .dt_init = 1e-7,
@@ -577,21 +522,14 @@ test "run pss: DC-driven RC converges — period solution matches settle" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var b = Builder.init(testing.allocator);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
     // tau = RC = 0.1 ms, period T = 1 ms = 10*tau
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 5.0 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.C, .{ .c = 1e-7 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
+    var setup = try buildSeries(testing.allocator, td.C, .{ .dc = 5.0 }, 1000, .{ .c = 1e-7 });
+    defer setup.ckt.deinit();
 
-    const x = try solveOp(&ckt, arena);
+    const x = try solveOp(&setup.ckt, arena);
     const T: f64 = 1e-3;
-    const probes = [_]u32{ n1, n2 };
-    const ctx = runCtx(&ckt, x, &probes, n1, vbranch, arena);
+    const probes = [_]u32{ setup.n1, setup.n2 };
+    const ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
     const res = try analysis.run(&ctx, .{ .pss = .{
         .period = T,
         .max_shooting_iter = 20,
@@ -620,7 +558,7 @@ test "run pac: LTI divider — direct sideband dominates, no conversion" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const x = try solveOp(&d.ckt, arena);
@@ -661,7 +599,7 @@ test "run pnoise: LTI divider — flat 4kT*(R1||R2) per sideband" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var d = try buildDivider(testing.allocator, 5, 1000, 2000);
+    var d = try buildSeries(testing.allocator, td.R, .{ .dc = 5 }, 1000, .{ .r = 2000 });
     defer d.ckt.deinit();
 
     const x = try solveOp(&d.ckt, arena);
@@ -700,19 +638,12 @@ test "run envelope: sine carrier through equal divider — peak amp/2, rms peak/
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var b = Builder.init(testing.allocator);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 0.0, .amp = 2.0, .freq = 1e6 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
+    var setup = try buildSeries(testing.allocator, td.R, .{ .dc = 0.0, .amp = 2.0, .freq = 1e6 }, 1000, .{ .r = 1000 });
+    defer setup.ckt.deinit();
 
-    const x = try solveOp(&ckt, arena);
-    const probes = [_]u32{n2};
-    const ctx = runCtx(&ckt, x, &probes, n1, vbranch, arena);
+    const x = try solveOp(&setup.ckt, arena);
+    const probes = [_]u32{setup.n2};
+    const ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
     const res = try analysis.run(&ctx, .{ .envelope = .{
         .t_carrier = 1e-6,
         .t_stop = 8e-6,
@@ -741,26 +672,19 @@ test "run trannoise: divider thermal noise power matches 4kT*(R||R)*BW" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var b = Builder.init(testing.allocator);
-    const n1 = b.addNode();
-    const n2 = b.addNode();
     const r_val: f64 = 1000.0;
-    const vbranch = b.n;
-    try b.addDevice(td.V, .{ .dc = 0.0 }, .{}, .{ n1, GROUND });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n1, n2 });
-    try b.addDevice(td.R, .{ .r = 1000 }, .{}, .{ n2, GROUND });
-    var ckt = try b.compile();
-    defer ckt.deinit();
+    var setup = try buildSeries(testing.allocator, td.R, .{ .dc = 0.0 }, 1000, .{ .r = 1000 });
+    defer setup.ckt.deinit();
 
-    const x = try solveOp(&ckt, arena);
+    const x = try solveOp(&setup.ckt, arena);
     // Power-of-two dt: exact time accumulation, no shrunken final step.
     const temp_k: f64 = 27.0 + 273.15;
     const dt: f64 = 0x1p-30; // ~0.93 ns
     const n_steps: u32 = 20_000;
     const bandwidth = 1.0 / (2.0 * dt);
 
-    const probes = [_]u32{n2};
-    const ctx = runCtx(&ckt, x, &probes, n1, vbranch, arena);
+    const probes = [_]u32{setup.n2};
+    const ctx = runCtx(&setup.ckt, x, &probes, setup.n1, setup.vbranch, arena);
     // The contract collects BOTH resistor generators off the Jacobian.
     const res = try analysis.run(&ctx, .{ .tran_noise = .{
         .t_stop = dt * @as(f64, @floatFromInt(n_steps)),

@@ -1,29 +1,108 @@
-//! Benchmark runner — wall-clock timing AND accuracy of espice vs ngspice.
+//! Benchmark runner — wall-clock timing AND accuracy of espice vs three
+//! reference simulators: ngspice, Xyce and VACASK.
 //!
 //! Usage (via `zig build bench -- <flags>`):
 //!   bench-runner ESPICE_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]]
-//!               [--no-ngspice] [--list] [--out RESULTS.md] [--rtol 0.01]
+//!               [--ngspice PATH] [--xyce PATH] [--vacask PATH] [--ngspice-klu]
+//!               [--no-ngspice] [--no-xyce] [--no-vacask]
+//!               [--list] [--out RESULTS.md] [--rtol 0.01]
 //!
 //! Every fixture is benchmark/fixtures/<cat>/<name>/circuit.sp.
 //! No metadata files — if circuit.sp exists, it runs.
 //!
 //! For each fixture:
-//!   1. Preflight both simulators (untimed)
+//!   1. Preflight every simulator (untimed)
 //!   2. N timed iterations -> median wall-clock
-//!   3. Parse both ngspice-format raw files
+//!   3. Parse each spice3 raw file
 //!   4. Compare voltages and currents: max/RMS normalized error
 //!   5. Combined timing + accuracy table on stdout + RESULTS.md
 
 const std = @import("std");
 const Io = std.Io;
 
+// Reference binaries are PINNED to nix store paths. Two ngspice 44.2 builds on
+// this machine differ by 8.5% in instruction count on
+// scaling/parallel_inverters_100 (557M via ~/.nix-profile vs 513M from source),
+// so a runner that resolves `ngspice` through $PATH silently reports a
+// different speedup depending on what the shell happened to hand it. Pin the
+// exact store path, fall back to $PATH with a loud note, and PRINT the binary
+// and version each column used — a benchmark that cannot name its reference is
+// not reproducible. Override any of them with --ngspice/--xyce/--vacask.
+//
+// These three paths are kept alive by GC roots in ~/.local/state/espice-refs;
+// without one, `nix build --no-link` output is collected out from under the
+// benchmark and a whole column silently turns into "DISABLED". Rebuild with:
+//   nix build --out-link ~/.local/state/espice-refs/xyce nixpkgs#xyce
+//   nix build --impure --out-link ~/.local/state/espice-refs/vacask \
+//     --expr 'import ./nix/vacask.nix { ... }'
+// ngspice stays on 44.2 on purpose: nixpkgs has moved to 45, and every number
+// recorded in RESULTS.md so far was measured against 44.2.
+const default_bin = std.enums.EnumArray(RefId, []const u8).init(.{
+    .ngspice = "/nix/store/bywwgg84ccx0544z9qrfm4zc4ls30ghd-ngspice-44.2/bin/ngspice",
+    .xyce = "/nix/store/7glhfffprbvfz11bi9pd1fr5np8nw5df-xyce-7.10.0/bin/Xyce",
+    .vacask = "/nix/store/g5ial84gcp2da9h7y63r4c6dc1iqip57-vacask-unstable-2026/bin/vacask",
+});
+
+// PATH fallback names, used only when the pinned store path is absent.
+const path_bin = std.enums.EnumArray(RefId, []const u8).init(.{
+    .ngspice = "ngspice",
+    .xyce = "Xyce",
+    .vacask = "vacask",
+});
+
+const RefId = enum { ngspice, xyce, vacask };
+
+/// A reference simulator, resolved and version-stamped at startup.
+const Ref = struct {
+    bin: []const u8,
+    /// Column label; ngspice's changes to "ngspice+klu" under --ngspice-klu.
+    label: []const u8,
+    /// First line of the binary's own version banner. Empty means DISABLED —
+    /// either --no-<ref> or the probe failed.
+    version: []const u8 = "",
+
+    fn on(self: Ref) bool {
+        return self.version.len > 0;
+    }
+};
+
+/// One reference's outcome on one fixture.
+const RefRun = struct {
+    median_ns: ?u64 = null,
+    skip: []const u8 = "",
+    rss_kb: u64 = 0,
+    /// Raw file to compare against; empty when the run produced none.
+    raw: []const u8 = "",
+};
+
+/// argv plus the working directory it must run in. VACASK writes its result
+/// file into the CWD under the analysis's own name and offers no output-path
+/// flag, so every VACASK run needs a private scratch directory or fixtures
+/// would overwrite each other's raws in the repo root.
+const Job = struct {
+    argv: []const []const u8,
+    cwd: std.process.Child.Cwd = .inherit,
+    /// Raw file this run will write. Empty when the simulator names the file
+    /// itself (VACASK uses the analysis name), in which case the CWD is scanned
+    /// afterwards instead.
+    raw: []const u8 = "",
+};
+
 const Config = struct {
     engine_bin: []const u8,
     fixtures_dir: []const u8,
     iters: u32 = 10,
     filters: std.ArrayList([]const u8) = .empty,
-    use_ngspice: bool = true,
-    use_xyce: bool = true,
+    bins: std.enums.EnumArray(RefId, ?[]const u8) = .initFill(null),
+    use: std.enums.EnumArray(RefId, bool) = .initFill(true),
+    /// ngspice selects KLU with a `.options klu` CARD, not a CLI flag, so this
+    /// makes the runner emit a rewritten deck per fixture. Measured on this
+    /// suite KLU is slower on every deck (pi100 513M -> 555M Ir, mos6_inverter
+    /// 149M -> 163M, rc_ladder_10k 2.60G -> 3.98G): KLU's ordering and BTF
+    /// analysis are built for 1e5+ unknowns and are pure overhead on a 105x105
+    /// matrix. ngspice's DEFAULT solver is therefore its strongest showing
+    /// here, which is exactly why the default must stay default.
+    ngspice_klu: bool = false,
     list_only: bool = false,
     out_path: []const u8 = "benchmark/RESULTS.md",
     rtol: f64 = 1e-3,
@@ -51,14 +130,14 @@ const Result = struct {
     zp_cpu_rss_kb: u64 = 0,
     zp_gpu_median_ns: ?u64 = null,
     zp_gpu_skip: []const u8 = "",
-    ng_median_ns: ?u64 = null,
-    ng_skip: []const u8 = "",
-    ng_rss_kb: u64 = 0,
-    xyce_median_ns: ?u64 = null,
-    xyce_skip: []const u8 = "",
-    xyce_rss_kb: u64 = 0,
-    cpu_accuracy: ?Accuracy = null,
+    refs: std.enums.EnumArray(RefId, RefRun) = .initFill(.{}),
+    /// espice-CPU against each reference; ngspice is the headline pair.
+    cpu_accuracy: std.enums.EnumArray(RefId, ?Accuracy) = .initFill(null),
     gpu_accuracy: ?Accuracy = null,
+
+    fn ng(self: *const Result) RefRun {
+        return self.refs.get(.ngspice);
+    }
 };
 
 // ============================================================================
@@ -103,15 +182,10 @@ pub fn main(init: std.process.Init) !void {
     if (!engine_ok)
         try out.print("note: engine '{s}' not found — engine column disabled\n\n", .{cfg.engine_bin});
 
-    const ngspice_ok = cfg.use_ngspice and probeNgspice(io);
-    if (cfg.use_ngspice and !ngspice_ok)
-        try out.writeAll("note: ngspice not found — comparison disabled\n\n");
+    const refs = resolveRefs(io, gpa, &cfg);
+    try reportRefs(out, &refs);
 
-    const xyce_ok = cfg.use_xyce and probeXyce(io);
-    if (cfg.use_xyce and !xyce_ok)
-        try out.writeAll("note: xyce not found — comparison disabled\n\n");
-
-    try reportHeader(out);
+    try reportHeader(out, &refs);
     try out.flush();
 
     var prev_cat: []const u8 = "";
@@ -133,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
         if (engine_ok) {
             zp_cpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-cpu.raw", .{ out_dir, fx.category, fx.name });
             const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "cpu", "-r", zp_cpu_raw_path, netlist };
-            const cap = runCapture(io, fxa, zp_cpu_argv, cfg.timeout);
+            const cap = runCapture(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout);
             if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
                 // A FIXTURE THAT FAILS MID-TIMING IS A SKIPPED FIXTURE, NOT A
                 // DEAD RUN. `timedMedian` returns `error.BenchRunFailed` if any
@@ -147,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
                 // it hit hardest exactly when the machine was busy. The GPU arm
                 // below has always handled its own failure; the other three arms
                 // simply never learned to.
-                res.zp_cpu_median_ns = timedMedian(io, fxa, zp_cpu_argv, cfg.timeout, cfg.iters, .cpu) catch |err| blk: {
+                res.zp_cpu_median_ns = timedMedian(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout, cfg.iters, .cpu) catch |err| blk: {
                     res.zp_cpu_skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
                     break :blk null;
                 };
@@ -165,11 +239,11 @@ pub fn main(init: std.process.Init) !void {
         if (engine_ok) {
             zp_gpu_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.zp-gpu.raw", .{ out_dir, fx.category, fx.name });
             const zp_gpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "auto", "-r", zp_gpu_raw_path, netlist };
-            const cap = runCapture(io, fxa, zp_gpu_argv, cfg.timeout);
+            const cap = runCapture(io, fxa, .{ .argv = zp_gpu_argv }, cfg.timeout);
             if (gpuSkipReason(cap.stderr)) |reason| {
                 res.zp_gpu_skip = reason;
             } else if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_gpu_median_ns = timedMedian(io, fxa, zp_gpu_argv, cfg.timeout, cfg.iters, .gpu) catch |err| blk: {
+                res.zp_gpu_median_ns = timedMedian(io, fxa, .{ .argv = zp_gpu_argv }, cfg.timeout, cfg.iters, .gpu) catch |err| blk: {
                     // `else => return err` was the same run-killer as the CPU arm,
                     // one branch further in: only GpuFallback was survivable.
                     res.zp_gpu_skip = switch (err) {
@@ -188,58 +262,56 @@ pub fn main(init: std.process.Init) !void {
             res.zp_gpu_skip = "engine not found";
         }
 
-        // ngspice
-        var ng_raw_path: []const u8 = "";
-        if (ngspice_ok) {
-            ng_raw_path = try std.fmt.allocPrint(fxa, "{s}/{s}--{s}.ng.raw", .{ out_dir, fx.category, fx.name });
-            const ng_argv: []const []const u8 = &.{ "ngspice", "-b", "-r", ng_raw_path, netlist };
-            if (runOk(io, ng_argv, cfg.timeout)) {
-                res.ng_median_ns = timedMedian(io, fxa, ng_argv, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
-                    res.ng_skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
-                    break :blk null;
-                };
-            } else {
-                res.ng_skip = "preflight failed";
-            }
-        }
+        // reference simulators
+        for (std.enums.values(RefId)) |id| {
+            const ref = refs.get(id);
+            if (!ref.on()) continue;
+            const run = res.refs.getPtr(id);
 
-        // xyce
-        if (xyce_ok) {
-            const xyce_argv: []const []const u8 = &.{ "xyce", "-b", netlist };
-            if (runOk(io, xyce_argv, cfg.timeout)) {
-                res.xyce_median_ns = timedMedian(io, fxa, xyce_argv, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
-                    res.xyce_skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
-                    break :blk null;
-                };
-            } else {
-                res.xyce_skip = "preflight failed";
+            // A reference that cannot READ this deck is a per-fixture skip with
+            // a reason, never a dead run: VACASK speaks its own netlist
+            // language, so 275 of 280 fixtures legitimately have nothing for it
+            // to run.
+            const job = buildJob(io, fxa, ref, id, &cfg, out_dir, fx, netlist) catch |err| {
+                run.skip = jobSkipReason(err);
+                continue;
+            };
+            if (!runOk(io, job, cfg.timeout)) {
+                run.skip = "preflight failed";
+                continue;
             }
+            run.median_ns = timedMedian(io, fxa, job, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
+                run.skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
+                break :blk null;
+            };
+            if (run.median_ns == null) continue;
+            run.rss_kb = measurePeakRss(io, fxa, job, cfg.timeout);
+            run.raw = if (job.raw.len > 0) job.raw else findRaw(io, fxa, job.cwd);
         }
 
         // peak RSS (one extra run each, only for fixtures that succeeded)
         if (res.zp_cpu_median_ns != null) {
             const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "cpu", "-r", zp_cpu_raw_path, netlist };
-            res.zp_cpu_rss_kb = measurePeakRss(io, fxa, zp_cpu_argv, cfg.timeout);
-        }
-        if (res.ng_median_ns != null) {
-            const ng_argv: []const []const u8 = &.{ "ngspice", "-b", "-r", ng_raw_path, netlist };
-            res.ng_rss_kb = measurePeakRss(io, fxa, ng_argv, cfg.timeout);
-        }
-        if (res.xyce_median_ns != null) {
-            const xyce_argv: []const []const u8 = &.{ "xyce", "-b", netlist };
-            res.xyce_rss_kb = measurePeakRss(io, fxa, xyce_argv, cfg.timeout);
+            res.zp_cpu_rss_kb = measurePeakRss(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout);
         }
 
-        if (res.zp_cpu_median_ns != null and res.ng_median_ns != null) {
-            res.cpu_accuracy = compareRawFiles(io, fxa, ng_raw_path, zp_cpu_raw_path, cfg.rtol);
+        for (std.enums.values(RefId)) |id| {
+            const raw = res.refs.get(id).raw;
+            if (raw.len == 0 or res.zp_cpu_median_ns == null) continue;
+            res.cpu_accuracy.set(id, compareRawFiles(io, fxa, raw, zp_cpu_raw_path, cfg.rtol));
         }
-        if (res.zp_gpu_median_ns != null and res.ng_median_ns != null) {
-            res.gpu_accuracy = compareRawFiles(io, fxa, ng_raw_path, zp_gpu_raw_path, cfg.rtol);
+        if (res.zp_gpu_median_ns != null and res.ng().raw.len > 0) {
+            res.gpu_accuracy = compareRawFiles(io, fxa, res.ng().raw, zp_gpu_raw_path, cfg.rtol);
         }
 
         // skip strings may slice fixture-arena memory; dupe survivors
         if (res.zp_cpu_skip.len > 0) res.zp_cpu_skip = try gpa.dupe(u8, res.zp_cpu_skip);
         if (res.zp_gpu_skip.len > 0) res.zp_gpu_skip = try gpa.dupe(u8, res.zp_gpu_skip);
+        for (std.enums.values(RefId)) |id| {
+            const run = res.refs.getPtr(id);
+            if (run.skip.len > 0) run.skip = try gpa.dupe(u8, run.skip);
+            run.raw = "";
+        }
 
         try reportRow(out, res, &prev_cat);
         try out.flush();
@@ -249,7 +321,7 @@ pub fn main(init: std.process.Init) !void {
     try reportFooter(out);
     try out.flush();
 
-    writeResultsMd(io, gpa, cfg.out_path, results.items, cfg.rtol);
+    writeResultsMd(io, gpa, cfg.out_path, results.items, cfg.rtol, &refs);
 }
 
 // ============================================================================
@@ -310,7 +382,7 @@ fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?Plot {
             _ = fields.next(); // index
             if (fields.next()) |name_field| {
                 const name = std.ascii.allocLowerString(gpa, std.mem.trim(u8, name_field, " \t")) catch return null;
-                varnames.append(gpa, name) catch return null;
+                varnames.append(gpa, normalizeVarName(gpa, name)) catch return null;
             }
         } else if (in_vars and line.len > 0 and raw_line.len > 0 and raw_line[0] != '\t' and !std.ascii.isDigit(raw_line[0])) {
             in_vars = false;
@@ -338,6 +410,19 @@ fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?Plot {
         .nvars = nvars,
         .data = data,
     };
+}
+
+/// One spelling for a signal across four simulators. The same node is `v(out)`
+/// to ngspice and espice, `OUT` (or `V(1)`) to Xyce and `2` to VACASK; the same
+/// branch current is `i(vin)`, `VIN#branch` and `vs:flow(br)`. Without this,
+/// every reference except ngspice matches zero columns and reports a vacuous
+/// N/A while looking like it validated something.
+fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
+    if (scale_names.has(lower)) return lower;
+    if (std.mem.startsWith(u8, lower, "v(") or std.mem.startsWith(u8, lower, "i(")) return lower;
+    const branch = std.mem.indexOf(u8, lower, "#branch") orelse std.mem.indexOf(u8, lower, ":flow(");
+    if (branch) |cut| return std.fmt.allocPrint(gpa, "i({s})", .{lower[0..cut]}) catch lower;
+    return std.fmt.allocPrint(gpa, "v({s})", .{lower}) catch lower;
 }
 
 // ============================================================================
@@ -394,8 +479,12 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
         // Transient time grids differ; other scales still participate in error.
         if (interpolate and scale_names.has(ng_name)) continue;
         const zi = columns.get(ng_name) orelse {
-            // Internal device nodes differ across model implementations.
-            if (std.mem.indexOfScalar(u8, ng_name, '#') != null) continue;
+            // Internal device nodes differ across model implementations, and
+            // each simulator spells them differently: ngspice/Xyce use
+            // `m1#drain`, VACASK uses `d1:a_int`. Only `#` was exempt, so every
+            // VACASK deck with a non-ideal diode or MOSFET reported N/A on
+            // coverage grounds while its real nodes matched perfectly.
+            if (std.mem.indexOfAny(u8, ng_name, "#:") != null) continue;
             complete = false;
             continue;
         };
@@ -566,16 +655,195 @@ fn lessThanFixture(_: void, a: Fixture, b: Fixture) bool {
 }
 
 // ============================================================================
+// Reference simulators
+// ============================================================================
+
+/// Resolve each reference's binary and stamp it with its own version banner.
+/// A reference with no banner is DISABLED — that is the single gate for both
+/// "--no-xyce" and "the binary is not installed".
+fn resolveRefs(io: Io, gpa: std.mem.Allocator, cfg: *const Config) std.enums.EnumArray(RefId, Ref) {
+    var refs: std.enums.EnumArray(RefId, Ref) = .initFill(.{ .bin = "", .label = "" });
+    for (std.enums.values(RefId)) |id| {
+        var ref: Ref = .{ .bin = cfg.bins.get(id) orelse pinnedOrPath(io, id), .label = refLabel(id, cfg) };
+        if (cfg.use.get(id)) ref.version = probeVersion(io, gpa, id, ref.bin);
+        refs.set(id, ref);
+    }
+    return refs;
+}
+
+/// Prefer the pinned store path; fall back to $PATH only when it is gone
+/// (nix GC, or a non-NixOS host). `reportRefs` prints whichever won.
+fn pinnedOrPath(io: Io, id: RefId) []const u8 {
+    const pinned = default_bin.get(id);
+    Io.Dir.cwd().access(io, pinned, .{}) catch return path_bin.get(id);
+    return pinned;
+}
+
+fn refLabel(id: RefId, cfg: *const Config) []const u8 {
+    return switch (id) {
+        .ngspice => if (cfg.ngspice_klu) "ng+klu" else "ngspice",
+        .xyce => "xyce",
+        .vacask => "vacask",
+    };
+}
+
+/// The flag each simulator answers a version query on. VACASK has no --version
+/// at all: `-h` is the only thing that prints its banner and it exits NON-ZERO
+/// doing so, which is why the banner text — not the exit status — is the probe.
+fn versionFlag(id: RefId) []const u8 {
+    return switch (id) {
+        .ngspice => "--version",
+        .xyce => "-v",
+        .vacask => "-h",
+    };
+}
+
+fn probeVersion(io: Io, gpa: std.mem.Allocator, id: RefId, bin: []const u8) []const u8 {
+    return firstBannerLine(runCapture(io, gpa, .{ .argv = &.{ bin, versionFlag(id) } }, "30").text);
+}
+
+/// First line carrying an actual word: ngspice opens its banner with a row of
+/// `******`, which names nothing.
+fn firstBannerLine(text: []const u8) []const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r*");
+        for (line) |c| if (std.ascii.isAlphabetic(c)) return line;
+    }
+    return "";
+}
+
+const JobError = error{ NoDeck, DeckFailed, ScratchFailed, OutOfMemory };
+
+fn jobSkipReason(err: JobError) []const u8 {
+    return switch (err) {
+        error.NoDeck => "no native vacask/ deck",
+        error.DeckFailed => "deck rewrite failed",
+        error.ScratchFailed => "scratch dir failed",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+/// Everything one reference needs to run one fixture. Returning an error here
+/// is a PER-FIXTURE skip with a reason, never a dead run — VACASK legitimately
+/// has nothing to run on the 275 fixtures that ship no vacask.sim.
+fn buildJob(
+    io: Io,
+    gpa: std.mem.Allocator,
+    ref: Ref,
+    id: RefId,
+    cfg: *const Config,
+    out_dir: []const u8,
+    fx: Fixture,
+    netlist: []const u8,
+) JobError!Job {
+    switch (id) {
+        // ngspice and Xyce both read SPICE and both write a spice3 binary raw
+        // under -r, so they share an argv shape exactly.
+        .ngspice, .xyce => {
+            const raw = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.{s}.raw", .{ out_dir, fx.category, fx.name, @tagName(id) });
+            const deck = if (id == .ngspice and cfg.ngspice_klu)
+                try kluDeck(io, gpa, out_dir, fx, netlist)
+            else
+                netlist;
+            return .{ .argv = try gpa.dupe([]const u8, &.{ ref.bin, "-b", "-r", raw, deck }), .raw = raw };
+        },
+        // VACASK speaks its own netlist language, not SPICE, so it runs only
+        // where a native deck exists at <fixture>/vacask/runme.sim. Its own
+        // subdirectory, byte-identical to upstream's benchmark layout, keeps
+        // `models.inc`/`multiplier.inc` from colliding with the SPICE-syntax
+        // files of the same name that already sit in the fixture.
+        //
+        // VACASK also has NO output-path flag — it drops <analysis>.raw into
+        // the CWD — so the deck is staged into a private scratch dir. That
+        // keeps deck-relative `include` resolving and stops fixtures from
+        // overwriting each other's raws in the repo root.
+        .vacask => {
+            const deck_dir = try std.fmt.allocPrint(gpa, "{s}/{s}/{s}/vacask", .{ cfg.fixtures_dir, fx.category, fx.name });
+            Io.Dir.cwd().access(io, deck_dir, .{}) catch return error.NoDeck;
+            const scratch = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.vacask", .{ out_dir, fx.category, fx.name });
+            stageDir(io, deck_dir, scratch) catch return error.ScratchFailed;
+            return .{
+                .argv = try gpa.dupe([]const u8, &.{ ref.bin, "-se", "-sp", "runme.sim" }),
+                .cwd = .{ .path = scratch },
+            };
+        },
+    }
+}
+
+/// Fresh copy of a fixture's files (deck plus whatever it includes) into a
+/// scratch dir, so every timed repeat starts from the same state.
+fn stageDir(io: Io, src: []const u8, dst: []const u8) !void {
+    Io.Dir.cwd().deleteTree(io, dst) catch {};
+    try Io.Dir.cwd().createDirPath(io, dst);
+    var sd = try Io.Dir.cwd().openDir(io, src, .{ .iterate = true });
+    defer sd.close(io);
+    var dd = try Io.Dir.cwd().openDir(io, dst, .{});
+    defer dd.close(io);
+    var it = sd.iterate();
+    while (try it.next(io)) |e| {
+        if (e.kind != .file) continue;
+        try sd.copyFile(e.name, dd, e.name, io, .{});
+    }
+}
+
+/// VACASK names its result file after the analysis (tran1.raw, tranmul.raw),
+/// so the scratch dir is scanned rather than guessed. `stageDir` wipes it
+/// before every run, so any .raw found there belongs to this fixture.
+fn findRaw(io: Io, gpa: std.mem.Allocator, cwd: std.process.Child.Cwd) []const u8 {
+    const dir_path = switch (cwd) {
+        .path => |p| p,
+        else => return "",
+    };
+    var dir = Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return "";
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch null) |e| {
+        if (e.kind != .file or !std.mem.endsWith(u8, e.name, ".raw")) continue;
+        return std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir_path, e.name }) catch "";
+    }
+    return "";
+}
+
+/// ngspice picks its solver from a CARD, not a CLI flag, so KLU mode means
+/// writing a copy of the deck with `.options klu` spliced in after the title
+/// (SPICE always treats line 1 as the title, never as a card). Decks that
+/// already carry the option are used untouched — the five imported from
+/// VACASK's own benchmark suite do, which also means their DEFAULT ngspice
+/// column has been KLU all along.
+fn kluDeck(io: Io, gpa: std.mem.Allocator, out_dir: []const u8, fx: Fixture, netlist: []const u8) JobError![]const u8 {
+    const text = Io.Dir.cwd().readFileAlloc(io, netlist, gpa, .limited(1 << 26)) catch return error.DeckFailed;
+    if (deckHasKlu(text)) return netlist;
+    const nl = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const path = try std.fmt.allocPrint(gpa, "{s}/{s}--{s}.klu.sp", .{ out_dir, fx.category, fx.name });
+    const body = try std.fmt.allocPrint(gpa, "{s}\n.options klu\n{s}", .{ text[0..nl], text[@min(nl + 1, text.len)..] });
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = body }) catch return error.DeckFailed;
+    return path;
+}
+
+fn deckHasKlu(text: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        var words = std.mem.tokenizeAny(u8, std.mem.trim(u8, raw, " \t\r"), " \t");
+        const card = words.next() orelse continue;
+        if (!std.ascii.startsWithIgnoreCase(card, ".option")) continue;
+        while (words.next()) |w| if (std.ascii.eqlIgnoreCase(w, "klu")) return true;
+    }
+    return false;
+}
+
+// ============================================================================
 // Child process
 // ============================================================================
 
-fn spawnQuiet(io: Io, argv: []const []const u8, timeout: []const u8, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
+fn spawnQuiet(io: Io, job: Job, timeout: []const u8, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
     var buf: [64][]const u8 = undefined;
     buf[0] = "timeout";
     buf[1] = timeout;
-    @memcpy(buf[2..][0..argv.len], argv);
+    @memcpy(buf[2..][0..job.argv.len], job.argv);
     return std.process.spawn(io, .{
-        .argv = buf[0 .. argv.len + 2],
+        .argv = buf[0 .. job.argv.len + 2],
+        .cwd = job.cwd,
         .stdin = .ignore,
         .stdout = stdout,
         .stderr = .ignore,
@@ -592,13 +860,14 @@ fn waitOk(child: *std.process.Child, io: Io) bool {
 
 const Capture = struct { ok: bool, text: []const u8, stderr: []const u8 };
 
-fn runCapture(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8) Capture {
+fn runCapture(io: Io, gpa: std.mem.Allocator, job: Job, timeout: []const u8) Capture {
     var buf: [64][]const u8 = undefined;
     buf[0] = "timeout";
     buf[1] = timeout;
-    @memcpy(buf[2..][0..argv.len], argv);
+    @memcpy(buf[2..][0..job.argv.len], job.argv);
     const result = std.process.run(gpa, io, .{
-        .argv = buf[0 .. argv.len + 2],
+        .argv = buf[0 .. job.argv.len + 2],
+        .cwd = job.cwd,
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
     }) catch return .{ .ok = false, .text = "", .stderr = "capture failed" };
@@ -630,26 +899,18 @@ fn skipReason(text: []const u8) ?[]const u8 {
     return rest[0..end];
 }
 
-fn runOk(io: Io, argv: []const []const u8, timeout: []const u8) bool {
-    var child = spawnQuiet(io, argv, timeout, .ignore) catch return false;
+fn runOk(io: Io, job: Job, timeout: []const u8) bool {
+    var child = spawnQuiet(io, job, timeout, .ignore) catch return false;
     return waitOk(&child, io);
 }
 
-fn probeNgspice(io: Io) bool {
-    return runOk(io, &.{ "ngspice", "--version" }, "30");
-}
-
-fn probeXyce(io: Io) bool {
-    return runOk(io, &.{ "xyce", "--version" }, "30");
-}
-
-fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8, iters: u32, mode: enum { quiet, cpu, gpu }) !u64 {
+fn timedMedian(io: Io, gpa: std.mem.Allocator, job: Job, timeout: []const u8, iters: u32, mode: enum { quiet, cpu, gpu }) !u64 {
     const samples = try gpa.alloc(u64, iters);
     for (samples) |*s| {
         const t0 = Io.Timestamp.now(io, .awake);
         // External simulators print large tables; their exit status is the gate.
-        const ok = if (mode == .quiet) runOk(io, argv, timeout) else blk: {
-            const cap = runCapture(io, gpa, argv, timeout);
+        const ok = if (mode == .quiet) runOk(io, job, timeout) else blk: {
+            const cap = runCapture(io, gpa, job, timeout);
             if (mode == .gpu and gpuSkipReason(cap.stderr) != null) return error.GpuFallback;
             break :blk cap.ok and skipReason(cap.text) == null;
         };
@@ -662,16 +923,17 @@ fn timedMedian(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout
 }
 
 // GNU time peak RSS in KiB — returns 0 if unavailable or the run failed.
-fn measurePeakRss(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, timeout: []const u8) u64 {
+fn measurePeakRss(io: Io, gpa: std.mem.Allocator, job: Job, timeout: []const u8) u64 {
     // Resolve GNU time through PATH (Nix has no /usr/bin/time).
     var buf: [70][]const u8 = undefined;
     buf[0] = "time";
     buf[1] = "-v";
     buf[2] = "timeout";
     buf[3] = timeout;
-    @memcpy(buf[4..][0..argv.len], argv);
+    @memcpy(buf[4..][0..job.argv.len], job.argv);
     var child = std.process.spawn(io, .{
-        .argv = buf[0 .. argv.len + 4],
+        .argv = buf[0 .. job.argv.len + 4],
+        .cwd = job.cwd,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .pipe,
@@ -700,13 +962,56 @@ fn measurePeakRss(io: Io, gpa: std.mem.Allocator, argv: []const []const u8, time
 // Reporting
 // ============================================================================
 
-fn reportHeader(out: *Io.Writer) !void {
-    try out.print("{s:<34} {s:>12} {s:>12} {s:>12} {s:>12} {s:>7} {s:>7}  {s:>8} {s:>8} {s:>8}  {s:>10} {s:>10} {s:>5}  {s:>10} {s:>10} {s:>5}\n", .{
-        "fixture", "zp-cpu", "zp-gpu", "ngspice", "xyce", "cpu/ng", "gpu/ng", "zp-MB", "ng-MB", "xy-MB", "cpu-max", "cpu-rms", "cpu", "gpu-max", "gpu-rms", "gpu",
-    });
-    try out.print("{s:-<34} {s:->12} {s:->12} {s:->12} {s:->12} {s:->7} {s:->7}  {s:->8} {s:->8} {s:->8}  {s:->10} {s:->10} {s:->5}  {s:->10} {s:->10} {s:->5}\n", .{
-        "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-    });
+/// The reference the headline ratio and the PASS/FAIL gate are taken against.
+const primary_ref: RefId = .ngspice;
+
+const ref_mb_label = std.enums.EnumArray(RefId, []const u8).init(.{ .ngspice = "ng-MB", .xyce = "xy-MB", .vacask = "vc-MB" });
+const ref_acc_label = std.enums.EnumArray(RefId, []const u8).init(.{ .ngspice = "ng", .xyce = "xy", .vacask = "vc" });
+
+/// Name the binary and version behind every column, on stdout and in
+/// RESULTS.md. Ratios quoted against an unnamed "ngspice" are not reproducible:
+/// two 44.2 builds on this host differ by 8.5% in instruction count.
+fn reportRefs(out: *Io.Writer, refs: *const std.enums.EnumArray(RefId, Ref)) !void {
+    try out.writeAll("reference simulators:\n");
+    for (std.enums.values(RefId)) |id| {
+        const ref = refs.get(id);
+        if (!ref.on()) {
+            try out.print("  {s:<8} DISABLED ({s})\n", .{ ref.label, if (ref.bin.len > 0) ref.bin else "not selected" });
+            continue;
+        }
+        // Say so out loud when the pin was not what ran. A silently-substituted
+        // reference is the exact failure this pinning exists to prevent.
+        const pinned = std.mem.eql(u8, ref.bin, default_bin.get(id));
+        try out.print("  {s:<8} {s}\n           {s}{s}\n", .{
+            ref.label, ref.version, ref.bin,
+            @as([]const u8, if (pinned) "" else "   <- NOT the pinned build (pinned path missing)"),
+        });
+    }
+    try out.writeAll("\n");
+}
+
+fn reportHeader(out: *Io.Writer, refs: *const std.enums.EnumArray(RefId, Ref)) !void {
+    try out.print("{s:<34} {s:>12} {s:>12}", .{ "fixture", "zp-cpu", "zp-gpu" });
+    for (std.enums.values(RefId)) |id| try out.print(" {s:>12}", .{refs.get(id).label});
+    try out.print(" {s:>7} {s:>7}  {s:>8}", .{ "cpu/ng", "gpu/ng", "zp-MB" });
+    for (std.enums.values(RefId)) |id| try out.print(" {s:>8}", .{ref_mb_label.get(id)});
+    try out.print("  {s:>10} {s:>10} {s:>5}  {s:>10} {s:>10} {s:>5}", .{ "cpu-max", "cpu-rms", "cpu", "gpu-max", "gpu-rms", "gpu" });
+    for (std.enums.values(RefId)) |id| {
+        if (id == primary_ref) continue;
+        try out.print(" {s:>6}", .{ref_acc_label.get(id)});
+    }
+    try out.writeAll("\n");
+
+    try out.print("{s:-<34} {s:->12} {s:->12}", .{ "", "", "" });
+    for (std.enums.values(RefId)) |_| try out.print(" {s:->12}", .{""});
+    try out.print(" {s:->7} {s:->7}  {s:->8}", .{ "", "", "" });
+    for (std.enums.values(RefId)) |_| try out.print(" {s:->8}", .{""});
+    try out.print("  {s:->10} {s:->10} {s:->5}  {s:->10} {s:->10} {s:->5}", .{ "", "", "", "", "", "" });
+    for (std.enums.values(RefId)) |id| {
+        if (id == primary_ref) continue;
+        try out.print(" {s:->6}", .{""});
+    }
+    try out.writeAll("\n");
 }
 
 fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
@@ -733,30 +1038,27 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
     }
     try out.writeAll(" ");
 
-    if (r.ng_median_ns) |ns| {
-        try printDur(out, ns);
-    } else {
-        try out.print("{s:>12}", .{if (r.ng_skip.len > 0) "skip" else "-"});
+    for (std.enums.values(RefId)) |id| {
+        const run = r.refs.get(id);
+        if (run.median_ns) |ns| {
+            try printDur(out, ns);
+        } else {
+            try out.print("{s:>12}", .{if (run.skip.len > 0) "skip" else "-"});
+        }
+        try out.writeAll(" ");
     }
-    try out.writeAll(" ");
 
-    if (r.xyce_median_ns) |ns| {
-        try printDur(out, ns);
-    } else {
-        try out.print("{s:>12}", .{if (r.xyce_skip.len > 0) "skip" else "-"});
-    }
-    try out.writeAll(" ");
-
-    if (r.zp_cpu_median_ns != null and r.ng_median_ns != null) {
-        const ratio = @as(f64, @floatFromInt(r.ng_median_ns.?)) / @as(f64, @floatFromInt(r.zp_cpu_median_ns.?));
+    const ng_ns = r.ng().median_ns;
+    if (r.zp_cpu_median_ns != null and ng_ns != null) {
+        const ratio = @as(f64, @floatFromInt(ng_ns.?)) / @as(f64, @floatFromInt(r.zp_cpu_median_ns.?));
         try out.print("{d:>6.1}x", .{ratio});
     } else {
         try out.print("{s:>7}", .{"-"});
     }
     try out.writeAll(" ");
 
-    if (r.zp_gpu_median_ns != null and r.ng_median_ns != null) {
-        const ratio = @as(f64, @floatFromInt(r.ng_median_ns.?)) / @as(f64, @floatFromInt(r.zp_gpu_median_ns.?));
+    if (r.zp_gpu_median_ns != null and ng_ns != null) {
+        const ratio = @as(f64, @floatFromInt(ng_ns.?)) / @as(f64, @floatFromInt(r.zp_gpu_median_ns.?));
         try out.print("{d:>6.1}x", .{ratio});
     } else {
         try out.print("{s:>7}", .{"-"});
@@ -770,25 +1072,23 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
         try out.print("{s:>8}", .{"-"});
     }
     try out.writeAll(" ");
-    if (r.ng_rss_kb > 0) {
-        try out.print("{d:>7.1}", .{@as(f64, @floatFromInt(r.ng_rss_kb)) / 1024.0});
-    } else {
-        try out.print("{s:>8}", .{"-"});
+    for (std.enums.values(RefId)) |id| {
+        const rss = r.refs.get(id).rss_kb;
+        if (rss > 0) {
+            try out.print("{d:>7.1}", .{@as(f64, @floatFromInt(rss)) / 1024.0});
+        } else {
+            try out.print("{s:>8}", .{"-"});
+        }
+        try out.writeAll(" ");
     }
     try out.writeAll(" ");
-    if (r.xyce_rss_kb > 0) {
-        try out.print("{d:>7.1}", .{@as(f64, @floatFromInt(r.xyce_rss_kb)) / 1024.0});
-    } else {
-        try out.print("{s:>8}", .{"-"});
-    }
-    try out.writeAll("  ");
 
-    if (r.cpu_accuracy) |acc| {
+    if (r.cpu_accuracy.get(primary_ref)) |acc| {
         try out.print("{e:>10.2} {e:>10.2} {s:>5}", .{
             acc.max_rel, acc.rms_rel, accuracyStatus(acc),
         });
     } else {
-        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", @as([]const u8, if (r.ng_median_ns != null and r.zp_cpu_median_ns != null) "N/A" else "-") });
+        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", refAccuracyStatus(r, primary_ref) });
     }
     try out.writeAll("  ");
 
@@ -797,7 +1097,14 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
             acc.max_rel, acc.rms_rel, accuracyStatus(acc),
         });
     } else {
-        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", @as([]const u8, if (r.ng_median_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-") });
+        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", @as([]const u8, if (ng_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-") });
+    }
+
+    // espice-CPU against each NON-primary reference, condensed to a verdict:
+    // the max/RMS pair is only worth a column for the reference the gate uses.
+    for (std.enums.values(RefId)) |id| {
+        if (id == primary_ref) continue;
+        try out.print(" {s:>6}", .{refAccuracyStatus(r, id)});
     }
     try out.writeAll("\n");
 
@@ -805,10 +1112,24 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
         try out.print("    zp-cpu: {s}\n", .{r.zp_cpu_skip});
     if (r.zp_gpu_skip.len > 0)
         try out.print("    zp-gpu: {s}\n", .{r.zp_gpu_skip});
+    for (std.enums.values(RefId)) |id| {
+        const run = r.refs.get(id);
+        if (run.skip.len > 0) try out.print("    {s}: {s}\n", .{ ref_acc_label.get(id), run.skip });
+    }
 }
 
 fn accuracyStatus(acc: Accuracy) []const u8 {
     return if (!acc.complete) "N/A" else if (acc.pass) "PASS" else "FAIL";
+}
+
+/// espice-CPU vs one reference. "SKIP" means the reference never ran this
+/// fixture, "N/A" means it ran but its output could not be compared — never
+/// silently blank, so an unvalidated column cannot read as a passing one.
+fn refAccuracyStatus(r: Result, id: RefId) []const u8 {
+    if (r.cpu_accuracy.get(id)) |acc| return accuracyStatus(acc);
+    if (r.zp_cpu_median_ns == null) return "-";
+    if (r.refs.get(id).median_ns == null) return if (r.refs.get(id).skip.len > 0) "SKIP" else "-";
+    return "N/A";
 }
 
 fn reportFooter(out: *Io.Writer) !void {
@@ -816,7 +1137,9 @@ fn reportFooter(out: *Io.Writer) !void {
         \\
         \\ratio = ngspice / espice (higher = espice faster).
         \\accuracy: per-variable RMS/max error normalized by max(peak, span, 1).
+        \\ng/xy/vc columns are espice-CPU vs that reference; PASS/FAIL/N/A/SKIP.
         \\N/A = unvalidated (unsupported complex/multiple plots, missing signals, or incomplete samples).
+        \\SKIP = the reference did not run this fixture (see the per-row reason).
         \\GPU timings exclude reported CPU fallback, including work below the offload threshold.
         \\
     );
@@ -833,78 +1156,42 @@ fn printDur(out: *Io.Writer, ns: u64) !void {
     }
 }
 
-fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []const Result, rtol: f64) void {
+/// One markdown cell, printed straight out — the old version built every cell
+/// into its own stack buffer first, which does not survive adding references.
+fn mdDur(w: *Io.Writer, ns: ?u64) !void {
+    var buf: [32]u8 = undefined;
+    try w.print(" {s} |", .{if (ns) |v| fmtDur(&buf, v) else "skip"});
+}
+
+fn mdRatio(w: *Io.Writer, ref_ns: ?u64, zp_ns: ?u64) !void {
+    if (ref_ns == null or zp_ns == null) return w.writeAll(" - |");
+    try w.print(" {d:.1}x |", .{@as(f64, @floatFromInt(ref_ns.?)) / @as(f64, @floatFromInt(zp_ns.?))});
+}
+
+fn mdMb(w: *Io.Writer, kb: u64) !void {
+    if (kb == 0) return w.writeAll(" - |");
+    try w.print(" {d:.1} |", .{@as(f64, @floatFromInt(kb)) / 1024.0});
+}
+
+fn mdAccuracy(w: *Io.Writer, acc: ?Accuracy, status: []const u8) !void {
+    if (acc) |a| {
+        try w.print(" {e:.2} | {e:.2} | {s} |", .{ a.max_rel, a.rms_rel, accuracyStatus(a) });
+    } else {
+        try w.print(" - | - | {s} |", .{status});
+    }
+}
+
+fn writeResultsMd(
+    io: Io,
+    gpa: std.mem.Allocator,
+    path: []const u8,
+    results: []const Result,
+    rtol: f64,
+    refs: *const std.enums.EnumArray(RefId, Ref),
+) void {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     const w = &aw.writer;
-
-    w.print("# Benchmark results — espice vs ngspice vs xyce\n\n", .{}) catch return;
-    w.print("Pass: per-variable RMS ≤ {e:.0}, max ≤ {e:.0}; error normalized by max(peak, span, 1).\n", .{ rtol, 10 * rtol }) catch return;
-    w.writeAll("N/A: unvalidated (unsupported complex/multiple plots, missing signals, or incomplete samples).\nGPU timings exclude reported CPU fallback.\n\n") catch return;
-    w.print("| fixture | zp-cpu | zp-gpu | ngspice | xyce | cpu/ng | gpu/ng | zp-MB | ng-MB | xy-MB | cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |\n", .{}) catch return;
-    w.print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n", .{}) catch return;
-
-    for (results) |r| {
-        var namebuf: [64]u8 = undefined;
-        const label = std.fmt.bufPrint(&namebuf, "{s}/{s}", .{ r.category, r.name }) catch r.name;
-
-        var zp_cpu_buf: [32]u8 = undefined;
-        const zp_cpu_str = if (r.zp_cpu_median_ns) |ns| fmtDur(&zp_cpu_buf, ns) else "skip";
-
-        var zp_gpu_buf: [32]u8 = undefined;
-        const zp_gpu_str = if (r.zp_gpu_median_ns) |ns| fmtDur(&zp_gpu_buf, ns) else "skip";
-
-        var ng_buf: [32]u8 = undefined;
-        const ng_str = if (r.ng_median_ns) |ns| fmtDur(&ng_buf, ns) else "skip";
-
-        var xyce_buf: [32]u8 = undefined;
-        const xyce_str = if (r.xyce_median_ns) |ns| fmtDur(&xyce_buf, ns) else "skip";
-
-        var cpu_ratio_buf: [16]u8 = undefined;
-        const cpu_ratio_str = if (r.zp_cpu_median_ns != null and r.ng_median_ns != null)
-            std.fmt.bufPrint(&cpu_ratio_buf, "{d:.1}x", .{@as(f64, @floatFromInt(r.ng_median_ns.?)) / @as(f64, @floatFromInt(r.zp_cpu_median_ns.?))}) catch "-"
-        else
-            "-";
-
-        var gpu_ratio_buf: [16]u8 = undefined;
-        const gpu_ratio_str = if (r.zp_gpu_median_ns != null and r.ng_median_ns != null)
-            std.fmt.bufPrint(&gpu_ratio_buf, "{d:.1}x", .{@as(f64, @floatFromInt(r.ng_median_ns.?)) / @as(f64, @floatFromInt(r.zp_gpu_median_ns.?))}) catch "-"
-        else
-            "-";
-
-        var zp_mb_buf: [16]u8 = undefined;
-        const zp_mb_str = if (r.zp_cpu_rss_kb > 0)
-            std.fmt.bufPrint(&zp_mb_buf, "{d:.1}", .{@as(f64, @floatFromInt(r.zp_cpu_rss_kb)) / 1024.0}) catch "-"
-        else
-            "-";
-        var ng_mb_buf: [16]u8 = undefined;
-        const ng_mb_str = if (r.ng_rss_kb > 0)
-            std.fmt.bufPrint(&ng_mb_buf, "{d:.1}", .{@as(f64, @floatFromInt(r.ng_rss_kb)) / 1024.0}) catch "-"
-        else
-            "-";
-        var xy_mb_buf: [16]u8 = undefined;
-        const xy_mb_str = if (r.xyce_rss_kb > 0)
-            std.fmt.bufPrint(&xy_mb_buf, "{d:.1}", .{@as(f64, @floatFromInt(r.xyce_rss_kb)) / 1024.0}) catch "-"
-        else
-            "-";
-
-        var cpu_mx_buf: [16]u8 = undefined;
-        var cpu_rms_buf: [16]u8 = undefined;
-        const cpu_mx_str = if (r.cpu_accuracy) |a| std.fmt.bufPrint(&cpu_mx_buf, "{e:.2}", .{a.max_rel}) catch "-" else "-";
-        const cpu_rms_str = if (r.cpu_accuracy) |a| std.fmt.bufPrint(&cpu_rms_buf, "{e:.2}", .{a.rms_rel}) catch "-" else "-";
-        const cpu_status: []const u8 = if (r.cpu_accuracy) |a| accuracyStatus(a) else if (r.zp_cpu_skip.len > 0) "SKIP" else if (r.ng_median_ns != null and r.zp_cpu_median_ns != null) "N/A" else "-";
-
-        var gpu_mx_buf: [16]u8 = undefined;
-        var gpu_rms_buf: [16]u8 = undefined;
-        const gpu_mx_str = if (r.gpu_accuracy) |a| std.fmt.bufPrint(&gpu_mx_buf, "{e:.2}", .{a.max_rel}) catch "-" else "-";
-        const gpu_rms_str = if (r.gpu_accuracy) |a| std.fmt.bufPrint(&gpu_rms_buf, "{e:.2}", .{a.rms_rel}) catch "-" else "-";
-        const gpu_status: []const u8 = if (r.gpu_accuracy) |a| accuracyStatus(a) else if (r.zp_gpu_skip.len > 0) "SKIP" else if (r.ng_median_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-";
-
-        w.print("| {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} | {s} |\n", .{
-            label,       zp_cpu_str, zp_gpu_str, ng_str,     xyce_str,    cpu_ratio_str, gpu_ratio_str,
-            zp_mb_str,   ng_mb_str,  xy_mb_str,  cpu_mx_str, cpu_rms_str, cpu_status,    gpu_mx_str,
-            gpu_rms_str, gpu_status,
-        }) catch return;
-    }
+    writeResultsBody(w, results, rtol, refs) catch return;
 
     const text = aw.toOwnedSlice() catch return;
     const file = Io.Dir.cwd().createFile(io, path, .{}) catch return;
@@ -913,6 +1200,87 @@ fn writeResultsMd(io: Io, gpa: std.mem.Allocator, path: []const u8, results: []c
     var fw = file.writer(io, &fbuf);
     fw.interface.writeAll(text) catch {};
     fw.interface.flush() catch {};
+}
+
+fn writeResultsBody(
+    w: *Io.Writer,
+    results: []const Result,
+    rtol: f64,
+    refs: *const std.enums.EnumArray(RefId, Ref),
+) !void {
+    try w.writeAll("# Benchmark results — espice vs ngspice, Xyce and VACASK\n\n");
+
+    // Which binary produced each column, verbatim. Ratios against an unnamed
+    // "ngspice" are not reproducible — two 44.2 builds on the dev host differ
+    // by 8.5% in instruction count on scaling/parallel_inverters_100.
+    try w.writeAll("## Reference simulators\n\n| column | version | binary |\n|---|---|---|\n");
+    for (std.enums.values(RefId)) |id| {
+        const ref = refs.get(id);
+        if (ref.on()) {
+            try w.print("| {s} | {s} | `{s}` |\n", .{ ref.label, ref.version, ref.bin });
+        } else {
+            try w.print("| {s} | _disabled_ | - |\n", .{ref.label});
+        }
+    }
+    try w.writeAll(
+        \\
+        \\ngspice runs its DEFAULT solver unless `--ngspice-klu` is passed. That is
+        \\deliberate and measured: KLU is slower on every deck in this suite
+        \\(parallel_inverters_100 513M -> 555M Ir, mos6_inverter 149M -> 163M,
+        \\rc_ladder_10k 2.60G -> 3.98G). KLU's ordering and BTF analysis pay off at
+        \\1e5+ unknowns, not on a 105x105 matrix, so the default is ngspice's
+        \\STRONGEST configuration here and the reference is not a strawman.
+        \\
+        \\
+    );
+
+    try w.print("Pass: per-variable RMS ≤ {e:.0}, max ≤ {e:.0}; error normalized by max(peak, span, 1).\n", .{ rtol, 10 * rtol });
+    try w.writeAll(
+        \\N/A: unvalidated (unsupported complex/multiple plots, missing signals, or incomplete samples).
+        \\SKIP: that reference did not run the fixture (VACASK only runs where a `vacask.sim` deck exists).
+        \\GPU timings exclude reported CPU fallback.
+        \\
+        \\
+    );
+
+    try w.writeAll("| fixture | zp-cpu | zp-gpu |");
+    for (std.enums.values(RefId)) |id| try w.print(" {s} |", .{refs.get(id).label});
+    try w.writeAll(" cpu/ng | gpu/ng | zp-MB |");
+    for (std.enums.values(RefId)) |id| try w.print(" {s} |", .{ref_mb_label.get(id)});
+    try w.writeAll(" cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |");
+    for (std.enums.values(RefId)) |id| {
+        if (id == primary_ref) continue;
+        try w.print(" {s} |", .{ref_acc_label.get(id)});
+    }
+    try w.writeAll("\n|---|---|---|");
+    for (std.enums.values(RefId)) |_| try w.writeAll("---|");
+    try w.writeAll("---|---|---|");
+    for (std.enums.values(RefId)) |_| try w.writeAll("---|");
+    try w.writeAll("---|---|---|---|---|---|");
+    for (std.enums.values(RefId)) |id| {
+        if (id == primary_ref) continue;
+        try w.writeAll("---|");
+    }
+    try w.writeAll("\n");
+
+    for (results) |r| {
+        try w.print("| {s}/{s} |", .{ r.category, r.name });
+        try mdDur(w, r.zp_cpu_median_ns);
+        try mdDur(w, r.zp_gpu_median_ns);
+        for (std.enums.values(RefId)) |id| try mdDur(w, r.refs.get(id).median_ns);
+        try mdRatio(w, r.ng().median_ns, r.zp_cpu_median_ns);
+        try mdRatio(w, r.ng().median_ns, r.zp_gpu_median_ns);
+        try mdMb(w, r.zp_cpu_rss_kb);
+        for (std.enums.values(RefId)) |id| try mdMb(w, r.refs.get(id).rss_kb);
+        try mdAccuracy(w, r.cpu_accuracy.get(primary_ref), refAccuracyStatus(r, primary_ref));
+        const gpu_status: []const u8 = if (r.zp_gpu_skip.len > 0) "SKIP" else if (r.ng().median_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-";
+        try mdAccuracy(w, r.gpu_accuracy, gpu_status);
+        for (std.enums.values(RefId)) |id| {
+            if (id == primary_ref) continue;
+            try w.print(" {s} |", .{refAccuracyStatus(r, id)});
+        }
+        try w.writeAll("\n");
+    }
 }
 
 fn fmtDur(buf: []u8, ns: u64) []const u8 {
@@ -931,7 +1299,13 @@ fn fmtDur(buf: []u8, ns: u64) []const u8 {
 // ============================================================================
 
 fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Config {
-    const usage = "usage: bench-runner ESPICE_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]] [--no-ngspice] [--no-xyce] [--timeout S] [--list] [--out PATH] [--rtol N]\n";
+    const usage =
+        \\usage: bench-runner ESPICE_BIN FIXTURES_DIR [--iters N] [--filter CAT[/NAME]]
+        \\       [--ngspice PATH] [--xyce PATH] [--vacask PATH] [--ngspice-klu]
+        \\       [--no-ngspice] [--no-xyce] [--no-vacask]
+        \\       [--timeout S] [--list] [--out PATH] [--rtol N]
+        \\
+    ;
     var it = init.minimal.args.iterate();
     _ = it.skip();
     const engine_bin = it.next() orelse {
@@ -950,10 +1324,12 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Config {
             if (cfg.iters == 0) return error.BadUsage;
         } else if (std.mem.eql(u8, arg, "--filter")) {
             try cfg.filters.append(gpa, it.next() orelse return error.BadUsage);
-        } else if (std.mem.eql(u8, arg, "--no-ngspice")) {
-            cfg.use_ngspice = false;
-        } else if (std.mem.eql(u8, arg, "--no-xyce")) {
-            cfg.use_xyce = false;
+        } else if (std.mem.eql(u8, arg, "--ngspice-klu")) {
+            cfg.ngspice_klu = true;
+        } else if (refFlag(arg, "--")) |id| {
+            cfg.bins.set(id, it.next() orelse return error.BadUsage);
+        } else if (refFlag(arg, "--no-")) |id| {
+            cfg.use.set(id, false);
         } else if (std.mem.eql(u8, arg, "--timeout")) {
             cfg.timeout = it.next() orelse return error.BadUsage;
         } else if (std.mem.eql(u8, arg, "--list")) {
@@ -969,6 +1345,13 @@ fn parseArgs(gpa: std.mem.Allocator, init: std.process.Init) !Config {
         }
     }
     return cfg;
+}
+
+/// `--ngspice`/`--xyce`/`--vacask` and their `--no-` twins, matched off the
+/// enum so a new reference needs no new flag-parsing branch.
+fn refFlag(arg: []const u8, prefix: []const u8) ?RefId {
+    if (!std.mem.startsWith(u8, arg, prefix)) return null;
+    return std.meta.stringToEnum(RefId, arg[prefix.len..]);
 }
 
 fn matchesFilter(cfg: *const Config, category: []const u8, name: []const u8) bool {
@@ -1037,6 +1420,81 @@ test "accuracy matches reordered signals and keeps the first duplicate" {
     try std.testing.expect(!comparePlots(std.testing.allocator, reference, candidate, 1e-3).?.pass);
 }
 
+test "one signal spelling across four simulators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Left column is what each simulator writes (already lowercased by the raw
+    // parser); right column is the single spelling everything must collapse to.
+    // Get this wrong and Xyce/VACASK match zero columns, then report a vacuous
+    // N/A that reads like "validated".
+    inline for (.{
+        .{ "v(out)", "v(out)" }, // ngspice / espice
+        .{ "i(vin)", "i(vin)" },
+        .{ "out", "v(out)" }, // Xyce named node
+        .{ "v(1)", "v(1)" }, // Xyce numeric node
+        .{ "vin#branch", "i(vin)" }, // Xyce branch current
+        .{ "2", "v(2)" }, // VACASK node
+        .{ "vs:flow(br)", "i(vs)" }, // VACASK branch current
+        .{ "time", "time" }, // scales are never wrapped
+        .{ "frequency", "frequency" },
+    }) |case| try std.testing.expectEqualStrings(case[1], normalizeVarName(a, case[0]));
+
+    // Xyce internal device nodes keep their '#'; comparePlots drops those by
+    // name, and wrapping them as currents would silently invent a signal.
+    try std.testing.expectEqualStrings("v(m1#drain)", normalizeVarName(a, "m1#drain"));
+}
+
+test "KLU is a deck rewrite, and an already-KLU deck is left alone" {
+    // ngspice has no --klu flag, so the runner must SEE the card to avoid
+    // duplicating it. The five fixtures imported from VACASK's benchmark suite
+    // already carry one, which is also why their DEFAULT ngspice column has
+    // been running KLU all along.
+    try std.testing.expect(deckHasKlu("* title\n.options klu\n.end\n"));
+    try std.testing.expect(deckHasKlu("* t\n.OPTIONS KLU method=gear maxord=2\n"));
+    try std.testing.expect(deckHasKlu("* t\n  .option  reltol=1e-3  klu\n"));
+    try std.testing.expect(!deckHasKlu("* t\n.options reltol=1e-3\n.end\n"));
+    // "klu" inside a name or on a non-options card is not the solver.
+    try std.testing.expect(!deckHasKlu("* t\nrklu 1 2 1k\n"));
+    try std.testing.expect(!deckHasKlu("* klu is great\n.tran 1u 1m\n"));
+}
+
+test "reference flags come off the enum, not a hand-written list" {
+    try std.testing.expectEqual(RefId.ngspice, refFlag("--ngspice", "--").?);
+    try std.testing.expectEqual(RefId.vacask, refFlag("--vacask", "--").?);
+    try std.testing.expectEqual(RefId.xyce, refFlag("--no-xyce", "--no-").?);
+    try std.testing.expect(refFlag("--no-xyce", "--") == null);
+    try std.testing.expect(refFlag("--iters", "--") == null);
+    // --ngspice-klu is its own flag and must NOT read as a binary override.
+    try std.testing.expect(refFlag("--ngspice-klu", "--") == null);
+
+    // ngspice opens its banner with a row of '*' that names nothing.
+    try std.testing.expectEqualStrings(
+        "ngspice-44.2 : Circuit level simulation program",
+        firstBannerLine("******\n** ngspice-44.2 : Circuit level simulation program\n"),
+    );
+    try std.testing.expectEqualStrings("Xyce Release 7.10.0-opensource", firstBannerLine("Xyce Release 7.10.0-opensource\n"));
+    try std.testing.expectEqualStrings("", firstBannerLine(""));
+}
+
+test "an unrun reference reads as SKIP, never as blank" {
+    var r: Result = .{ .category = "tran", .name = "rc_pulse", .zp_cpu_median_ns = 1000 };
+    // Never ran this fixture -> SKIP, with the reason printed under the row.
+    r.refs.set(.vacask, .{ .skip = "no native vacask/ deck" });
+    try std.testing.expectEqualStrings("SKIP", refAccuracyStatus(r, .vacask));
+    // Ran, but its output could not be compared -> N/A, not a pass.
+    r.refs.set(.xyce, .{ .median_ns = 2000 });
+    try std.testing.expectEqualStrings("N/A", refAccuracyStatus(r, .xyce));
+    r.cpu_accuracy.set(.xyce, .{ .max_rel = 0, .rms_rel = 0, .pass = true });
+    try std.testing.expectEqualStrings("PASS", refAccuracyStatus(r, .xyce));
+    // espice itself did not run, so no comparison was even attempted. An
+    // accuracy value cannot coexist with this, since it is only computed when
+    // espice produced a raw.
+    r.zp_cpu_median_ns = null;
+    r.cpu_accuracy.set(.xyce, null);
+    try std.testing.expectEqualStrings("-", refAccuracyStatus(r, .xyce));
+}
+
 test "raw parser does not validate only the first plot" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1062,9 +1520,9 @@ test "timing discards large external output and preserves espice diagnostics" {
     defer arena.deinit();
     const a = arena.allocator();
     const io = std.testing.io;
-    _ = try timedMedian(io, a, &.{ "head", "-c", "2097152", "/dev/zero" }, "5", 1, .quiet);
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "printf '%s' '{\"skip\":\"test\"}'" }, "5", 1, .cpu));
-    try std.testing.expectError(error.GpuFallback, timedMedian(io, a, &.{ "sh", "-c", "printf '%s' 'warning: falling back to the CPU' >&2" }, "5", 1, .gpu));
+    _ = try timedMedian(io, a, .{ .argv = &.{ "head", "-c", "2097152", "/dev/zero" } }, "5", 1, .quiet);
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' '{\"skip\":\"test\"}'" } }, "5", 1, .cpu));
+    try std.testing.expectError(error.GpuFallback, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' 'warning: falling back to the CPU' >&2" } }, "5", 1, .gpu));
 }
 
 test "a repeat that fails only AFTER the preflight is BenchRunFailed, not a dead run" {
@@ -1077,7 +1535,7 @@ test "a repeat that fails only AFTER the preflight is BenchRunFailed, not a dead
     // BenchRunFailed onto a per-fixture skip, so this error VALUE is what keeps
     // 280 fixtures' worth of results from being thrown away by one flake.
     // The load-induced cause is the timeout kill, so test that spelling too.
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "exit 1" }, "5", 3, .quiet));
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "sleep 5" }, "1", 1, .quiet));
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, &.{ "sh", "-c", "sleep 5" }, "1", 1, .cpu));
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "exit 1" } }, "5", 3, .quiet));
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "sleep 5" } }, "1", 1, .quiet));
+    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "sleep 5" } }, "1", 1, .cpu));
 }

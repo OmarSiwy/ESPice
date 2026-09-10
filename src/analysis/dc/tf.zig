@@ -7,8 +7,6 @@ const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const dense_lu = @import("solvers").dense_lu;
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-
 pub const Options = struct {
     tol: converger.Tolerances = .{},
     /// Branch-current unknown of the input vsource (its row is v_p - v_n - V = 0).
@@ -36,7 +34,6 @@ pub fn solve(
 ) !Values {
     const n: usize = ckt.n;
 
-    // Linearize: one eval fills the G plane (ground equation row included).
     ckt.eval(x_op, 0);
 
     // ponytail: one bulk alloc — n*n (jac) + n (piv as u32, rounded) + 2*n (rhs + solution)
@@ -52,7 +49,6 @@ pub fn solve(
 
     ckt.denseG(jac);
 
-    // Factorize once: PA = LU
     try dense_lu.factorize(n, jac, piv);
 
     // Forward solve: J * v = e[input_branch] -> gain + Rin

@@ -16,16 +16,13 @@
 //! p = -M..M), length = 2*(2M+1)*n, laid out as
 //!   [re(x_{-M}), re(x_{-M+1}), ..., re(x_M), im(x_{-M}), ..., im(x_M)]
 //! where each re/im block has length n.
-//!
-//! Imports from this module: direct.zig (sparse LU), fft.zig (unused here but
-//! referenced by the doc — the preconditioner operates in the DFT basis
-//! natively, no transform needed in apply).
+//! The preconditioner operates in the DFT basis; apply needs no transform.
 
 const std = @import("std");
 const direct = @import("direct.zig");
+const buildStackedRealPattern = @import("freq_solve.zig").buildStackedRealPattern;
 
 const Allocator = std.mem.Allocator;
-const NONE: u32 = std.math.maxInt(u32);
 
 /// Structured HB/LPTV preconditioner, monomorphized per element type.
 pub fn Preconditioner(comptime T: type) type {
@@ -56,8 +53,6 @@ pub fn Preconditioner(comptime T: type) type {
         solvers: []direct.SolverT(T),
         /// Scratch for stacked-real values fill (length = sr nnz).
         sr_vals: []T,
-        /// Whether each sideband's solver is factored at current G/C.
-        factored: []bool,
 
         // --- Block-banded: extra off-diagonal coupling data ---
         // ponytail: block_banded stores G_±1 Fourier coefficients for
@@ -73,7 +68,6 @@ pub fn Preconditioner(comptime T: type) type {
         // Source pattern (borrowed, for stacked-real fill).
         src_col_ptr: []const u32,
         src_row_idx: []const u32,
-        src_nnz: u32,
 
         /// Build preconditioner from period-sampled Jacobians.
         ///
@@ -141,10 +135,6 @@ pub fn Preconditioner(comptime T: type) type {
             const sr_vals = try gpa.alloc(T, sr_nnz);
             errdefer gpa.free(sr_vals);
 
-            const factored_flags = try gpa.alloc(bool, num_sidebands);
-            errdefer gpa.free(factored_flags);
-            for (factored_flags) |*f| f.* = false;
-
             // --- Block-banded: compute G_±1 Fourier coefficients ---
             var g_plus1: ?[]T = null;
             var g_minus1: ?[]T = null;
@@ -186,7 +176,6 @@ pub fn Preconditioner(comptime T: type) type {
                 .sr_row_idx = sr_row_idx,
                 .solvers = solvers,
                 .sr_vals = sr_vals,
-                .factored = factored_flags,
                 .g_plus1 = g_plus1,
                 .g_minus1 = g_minus1,
                 .c_plus1 = c_plus1,
@@ -194,7 +183,6 @@ pub fn Preconditioner(comptime T: type) type {
                 .banded_scratch = banded_scratch,
                 .src_col_ptr = col_ptr,
                 .src_row_idx = row_idx,
-                .src_nnz = nnz,
             };
 
             // Pre-factor all sidebands eagerly. Typical M is small (3–15),
@@ -210,7 +198,6 @@ pub fn Preconditioner(comptime T: type) type {
             gpa.free(self.sr_col_ptr);
             gpa.free(self.sr_row_idx);
             gpa.free(self.sr_vals);
-            gpa.free(self.factored);
             gpa.free(self.g_bar);
             gpa.free(self.c_bar);
             if (self.g_plus1) |p| gpa.free(p);
@@ -270,7 +257,6 @@ pub fn Preconditioner(comptime T: type) type {
                 omega,
             );
             try self.solvers[idx].factor(self.sr_vals);
-            self.factored[idx] = true;
         }
 
         /// Block-diagonal apply: per-sideband independent solves.
@@ -330,8 +316,7 @@ pub fn Preconditioner(comptime T: type) type {
             // where D_p is the diagonal block solver (already applied above).
             // Since we just solved D_p * x_p = b_p, the residual from off-diag
             // coupling is the dominant error. One sweep captures first-order coupling.
-            if (self.banded_scratch == null) return;
-            const scratch = self.banded_scratch.?;
+            const scratch = self.banded_scratch orelse return;
             const n: usize = self.n;
             const ns = self.num_sidebands;
             const nn = 2 * n;
@@ -354,10 +339,7 @@ pub fn Preconditioner(comptime T: type) type {
                         self.c_minus1.?,
                         self.src_col_ptr,
                         self.src_row_idx,
-                        self.n,
-                        self.omega0,
                         @as(i32, @intCast(pi)) - @as(i32, @intCast((ns - 1) / 2)),
-                        transpose,
                     );
                 }
                 if (pi + 1 < ns) {
@@ -372,10 +354,7 @@ pub fn Preconditioner(comptime T: type) type {
                         self.c_plus1.?,
                         self.src_col_ptr,
                         self.src_row_idx,
-                        self.n,
-                        self.omega0,
                         @as(i32, @intCast(pi)) - @as(i32, @intCast((ns - 1) / 2)),
-                        transpose,
                     );
                 }
             }
@@ -448,52 +427,6 @@ fn computeFourierCoeff(
     for (out_im[0..nnz]) |*v| v.* *= inv_n;
 }
 
-/// Build the stacked-real 2n×2n CSC pattern from the n×n circuit pattern.
-/// Column j (j < n): G-rows then C-rows+n.
-/// Column j+n: -wC-rows then G-rows+n.
-/// Mirrors freq_solve.zig's pattern construction.
-fn buildStackedRealPattern(
-    n: u32,
-    col_ptr: []const u32,
-    row_idx: []const u32,
-    sr_col_ptr: []u32,
-    sr_row_idx: []u32,
-) void {
-    const nu: usize = n;
-    var p: u32 = 0;
-    sr_col_ptr[0] = 0;
-
-    // First n columns: [G-block rows; wC-block rows + n]
-    for (0..nu) |j| {
-        const s = col_ptr[j];
-        const e = col_ptr[j + 1];
-        for (row_idx[s..e]) |r| {
-            sr_row_idx[p] = r;
-            p += 1;
-        }
-        for (row_idx[s..e]) |r| {
-            sr_row_idx[p] = r + n;
-            p += 1;
-        }
-        sr_col_ptr[j + 1] = p;
-    }
-
-    // Next n columns: [-wC-block rows; G-block rows + n]
-    for (0..nu) |j| {
-        const s = col_ptr[j];
-        const e = col_ptr[j + 1];
-        for (row_idx[s..e]) |r| {
-            sr_row_idx[p] = r;
-            p += 1;
-        }
-        for (row_idx[s..e]) |r| {
-            sr_row_idx[p] = r + n;
-            p += 1;
-        }
-        sr_col_ptr[nu + j + 1] = p;
-    }
-}
-
 /// Fill stacked-real values for a given omega:
 ///   Column j (< n): [G_vals; +omega * C_vals]
 ///   Column j+n:     [-omega * C_vals; G_vals]
@@ -549,14 +482,9 @@ fn accumulateCoupling(
     g_fourier_im: []const T,
     col_ptr: []const u32,
     row_idx: []const u32,
-    n_u32: u32,
-    omega0: T,
     p_signed: i32,
-    transpose: bool,
 ) void {
-    _ = omega0;
     _ = p_signed;
-    _ = transpose;
 
     // Extract neighbor's re/im blocks
     const nb_re_off = neighbor_idx * n;
@@ -566,8 +494,7 @@ fn accumulateCoupling(
     // Re(result) += G_re * x_re - G_im * x_im
     // Im(result) += G_re * x_im + G_im * x_re
     // Done via CSC column-wise scatter (same pattern as circuit SpMV).
-    const nu: usize = n_u32;
-    for (0..nu) |j| {
+    for (0..n) |j| {
         const cs = col_ptr[j];
         const ce = col_ptr[j + 1];
         const xr = rhs[nb_re_off + j];

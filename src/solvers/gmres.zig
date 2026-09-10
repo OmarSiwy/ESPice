@@ -156,9 +156,6 @@ pub fn Gmres(comptime T: type) type {
                 @memset(self.g[0 .. m + 1], 0);
                 self.g[0] = beta;
 
-                // Zero the Hessenberg matrix for this cycle.
-                @memset(self.h[0 .. (m + 1) * m], 0);
-
                 var j: u32 = 0;
                 while (j < m) : (j += 1) {
                     const ju: usize = j;
@@ -229,15 +226,8 @@ pub fn Gmres(comptime T: type) type {
                     self.updateSolution(x[0..n], k, precond, precond_ctx);
                 }
 
-                // Check if converged (the |g_{j+1}| test above already broke).
+                // ponytail: one residual gate covers both early exit and a full restart window.
                 const res_norm = @abs(self.g[k]);
-                if (k < m) {
-                    // Converged or breakdown within the cycle.
-                    if (res_norm <= abs_tol) {
-                        return .{ .iterations = total_iters, .residual = res_norm / b_norm, .converged = true };
-                    }
-                }
-                // If k == m, we exhausted the restart window; check before restarting.
                 if (res_norm <= abs_tol) {
                     return .{ .iterations = total_iters, .residual = res_norm / b_norm, .converged = true };
                 }

@@ -1,4 +1,4 @@
-//! Structural sweep lanes: one driver for mc/temp/sens/dcmatch's "N
+//! Structural sweep lanes: one driver for "N
 //! independent cold DC solves, one param install per lane" shape. Route is
 //! GPU batch (`gpu_hook.solve_batch`, one launch) orelse a serial Newton loop
 //! — the same flat lane blob both ways (lane k at x_lanes[k*n..][0..n]),

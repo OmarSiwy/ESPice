@@ -5,9 +5,6 @@
 const std = @import("std");
 const converger = @import("solvers").converger;
 
-// ponytail: platform SIMD width — not hardcoded
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-
 pub const Method = enum {
     backward_euler,
     trapezoidal,
@@ -49,6 +46,7 @@ pub fn initialCapacity(options: Options) u32 {
 }
 
 /// SIMD copy — the shared pair lives on the solvers leaf (one copy per repo).
+/// ponytail: the shared kernel owns the vector width; this leaf only records.
 pub const simdCopy = @import("solvers").types.copySimd;
 
 /// Recorded transient waveform. Flat preallocated storage, probe-major:
@@ -85,22 +83,43 @@ pub const Waveform = struct {
         self.len += 1;
     }
 
-    /// Record one point from already-gathered probe values (GPU waveform
-    /// drain — the device ships probe values, not the full x vector).
-    pub fn recordValues(self: *Waveform, t: f64, vals: []const f64) !void {
-        if (self.len == self.capacity) try self.grow();
-        self.times[self.len] = t;
-        const cap: usize = self.capacity;
-        for (vals, 0..) |v, k| self.values[k * cap + self.len] = v;
-        self.len += 1;
-    }
-
     pub fn timeSlice(self: *const Waveform) []const f64 {
         return self.times[0..self.len];
     }
 
     pub fn probeValues(self: *const Waveform, k: u32) []const f64 {
         return self.values[@as(usize, k) * self.capacity ..][0..self.len];
+    }
+
+    /// Caller owns the point-major (time, probes...) result allocation.
+    ///
+    /// 32x32 point/probe tiles. The point-at-a-time version read one element
+    /// of every probe slice per row, and consecutive probes are `capacity`
+    /// f64 apart, so on rc_ladder_100k (100k probes, 320 MB waveform) every
+    /// read was a fresh line and a fresh page. A tile keeps 8 KB of source
+    /// and 8 KB of destination resident, so each 64-byte line is consumed
+    /// whole on both sides. Values, row order, and partial tiles unchanged.
+    /// ponytail: 32x32 measured 1.85 s vs 1.97 s on rc_ladder_100k, and both
+    /// tile dimensions matter — 32 points x ALL probes is *slower* than no
+    /// tiling at all (25 MB of destination in flight). Retune together.
+    pub fn toRows(self: *const Waveform, allocator: std.mem.Allocator, ncols: usize) ![]f64 {
+        const data = try allocator.alloc(f64, @as(usize, self.len) * ncols);
+        const times = self.timeSlice();
+        const tile = 32;
+        var p0: usize = 0;
+        while (p0 < self.len) : (p0 += tile) {
+            const p1 = @min(p0 + tile, self.len);
+            for (p0..p1) |p| data[p * ncols] = times[p];
+            var k0: usize = 0;
+            while (k0 < self.n_probes) : (k0 += tile) {
+                const k1 = @min(k0 + tile, self.n_probes);
+                for (k0..k1) |idx| {
+                    const src = self.probeValues(@intCast(idx))[p0..p1];
+                    for (src, p0..) |v, p| data[p * ncols + idx + 1] = v;
+                }
+            }
+        }
+        return data;
     }
 
     // ponytail: doubling fallback, capacity heuristic covers normal runs

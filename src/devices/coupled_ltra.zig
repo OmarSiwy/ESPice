@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const contract = @import("contract");
+const txl = @import("txl_native.zig");
 
 const inf = std.math.inf(f64);
 
@@ -39,9 +40,7 @@ const DEG = 7; // Left_deg: 8 samples, degree-7 fits
 
 const MAXN = 4;
 
-fn eval2(a: f64, b: f64, c: f64, x: f64) f64 {
-    return a * x * x + b * x + c;
-}
+const eval2 = txl.eval2;
 
 fn divC(ar: f64, ai: f64, br: f64, bi: f64) [2]f64 {
     const t = br * br + bi * bi;
@@ -50,7 +49,9 @@ fn divC(ar: f64, ai: f64, br: f64, bi: f64) [2]f64 {
 
 /// Numerical Recipes polint (degree n−1 through n points), 1-based arrays
 /// spelled 0-based.
-fn polint(xa: []const f64, ya: []const f64, n: usize, x: f64) f64 {
+fn polint(xa: []const f64, ya: []const f64, x: f64) f64 {
+    // ponytail: matchFit supplies the complete sample slices; no separate count.
+    const n = xa.len;
     var c: [DEG + 1]f64 = undefined;
     var d: [DEG + 1]f64 = undefined;
     var ns: usize = 0;
@@ -91,7 +92,7 @@ fn matchFit(cof: *[DEG + 1]f64, xa: [DEG + 1]f64, ya: [DEG + 1]f64) void {
     var x = xa;
     var y = ya;
     for (0..DEG + 1) |j| {
-        cof[j] = polint(x[0 .. DEG + 1 - j], y[0 .. DEG + 1 - j], DEG + 1 - j, 0.0);
+        cof[j] = polint(x[0 .. DEG + 1 - j], y[0 .. DEG + 1 - j], 0.0);
         var xmin: f64 = 1.0e38;
         var k: usize = 0;
         for (0..DEG + 1 - j) |i| {
@@ -168,16 +169,7 @@ fn findRoots(a1_in: f64, a2_in: f64, a3_in: f64, x1: *f64, x2: *f64, x3: *f64) b
     return false;
 }
 
-fn getC(q1: f64, q2: f64, q3: f64, p1: f64, p2: f64, a: f64, b: f64) [2]f64 {
-    var d = (3.0 * (a * a - b * b) + 2.0 * p1 * a + p2) * (3.0 * (a * a - b * b) + 2.0 * p1 * a + p2);
-    d += (6.0 * a * b + 2.0 * p1 * b) * (6.0 * a * b + 2.0 * p1 * b);
-    var n = -(q1 * (a * a - b * b) + q2 * a + q3) * (6.0 * a * b + 2.0 * p1 * b);
-    n += (2.0 * q1 * a * b + q2 * b) * (3.0 * (a * a - b * b) + 2.0 * p1 * a + p2);
-    const ci = n / d;
-    n = (3.0 * (a * a - b * b) + 2.0 * p1 * a + p2) * (q1 * (a * a - b * b) + q2 * a + q3);
-    n += (6.0 * a * b + 2.0 * p1 * b) * (2.0 * q1 * a * b + q2 * b);
-    return .{ n / d, ci };
-}
+const getC = txl.getC;
 
 /// One TMS entry: three exponential terms (or one real + complex pair).
 pub const Tms = struct {
@@ -194,28 +186,7 @@ fn padeApx(a_b: f64, b: *const [DEG + 1]f64, tms: *Tms) bool {
         .{ b[1], b[2], b[3], -b[4] },
         .{ b[2], b[3], b[4], -b[5] },
     };
-    // Gaussian_Elimination(3) with epsi_mult
-    for (0..3) |i| {
-        var imax = i;
-        var max = @abs(at[i][i]);
-        for (i + 1..3) |j| {
-            if (@abs(at[j][i]) > max) {
-                imax = j;
-                max = @abs(at[j][i]);
-            }
-        }
-        if (max < 1e-28) return false;
-        if (imax != i) std.mem.swap([4]f64, &at[i], &at[imax]);
-        const f = 1.0 / at[i][i];
-        at[i][i] = 1.0;
-        for (i + 1..4) |j| at[i][j] *= f;
-        for (0..3) |j| {
-            if (i == j) continue;
-            const f2 = at[j][i];
-            at[j][i] = 0.0;
-            for (i + 1..4) |k| at[j][k] -= f2 * at[i][k];
-        }
-    }
+    if (!@call(.always_inline, txl.gauss3, .{ &at, 1e-28 })) return false;
     const p3 = at[0][3];
     const p2 = at[1][3];
     const p1 = at[2][3];
@@ -291,15 +262,7 @@ const Setup = struct {
         var rows: [MAXN]struct { row: usize, col: usize, value: f64 } = undefined;
         var nrows: usize = 0;
         for (0..n - 1) |i| {
-            var m = i + 1;
-            var mv = @abs(self.zy[i][m]);
-            for (m + 1..n) |j| {
-                if (@as(i64, @intFromFloat(@abs(self.zy[i][j]) * 1e7)) > @as(i64, @intFromFloat(1e7 * mv))) {
-                    mv = @abs(self.zy[i][j]);
-                    m = j;
-                }
-            }
-            insertSorted(&rows, &nrows, i, m, mv);
+            self.insertLargest(&rows, &nrows, i);
         }
         while (nrows > 0 and rows[0].value > 1.0e-8) {
             const p = rows[0].row;
@@ -307,32 +270,24 @@ const Setup = struct {
             self.rotate(p, q);
             // reordering(p, q)
             removeRow(&rows, &nrows, p);
-            var m = p + 1;
-            var mv = @abs(self.zy[p][m]);
-            for (m + 1..n) |j| {
-                if (@as(i64, @intFromFloat(@abs(self.zy[p][j]) * 1e7)) > @as(i64, @intFromFloat(1e7 * mv))) {
-                    mv = @abs(self.zy[p][j]);
-                    m = j;
-                }
-            }
-            insertSorted(&rows, &nrows, p, m, mv);
+            self.insertLargest(&rows, &nrows, p);
             if (q + 1 != n) {
                 removeRow(&rows, &nrows, q);
-                m = q + 1;
-                mv = @abs(self.zy[q][m]);
-                for (m + 1..n) |j| {
-                    if (@as(i64, @intFromFloat(@abs(self.zy[q][j]) * 1e7)) > @as(i64, @intFromFloat(1e7 * mv))) {
-                        mv = @abs(self.zy[q][j]);
-                        m = j;
-                    }
-                }
-                insertSorted(&rows, &nrows, q, m, mv);
+                self.insertLargest(&rows, &nrows, q);
             }
         }
         for (0..n) |i| self.d[i] = self.zy[i][i] / scale;
     }
 
-    fn insertSorted(rows: anytype, nrows: *usize, r: usize, c: usize, v: f64) void {
+    inline fn insertLargest(self: *Setup, rows: anytype, nrows: *usize, r: usize) void {
+        var c = r + 1;
+        var v = @abs(self.zy[r][c]);
+        for (c + 1..self.n) |j| {
+            if (@as(i64, @intFromFloat(@abs(self.zy[r][j]) * 1e7)) > @as(i64, @intFromFloat(1e7 * v))) {
+                v = @abs(self.zy[r][j]);
+                c = j;
+            }
+        }
         // descending by value, stable insertion mirroring the linked sort()
         var i: usize = 0;
         while (i < nrows.* and rows[i].value >= v) i += 1;
@@ -369,11 +324,9 @@ const Setup = struct {
             }
         }
         for (q + 1..n) |j| {
-            if (j == p) continue;
             self.zy[q][j] = t_[j] * si_ + self.zy[q][j] * co;
         }
         for (0..p) |j| {
-            if (j == q) continue;
             self.zy[j][p] = t_[j] * co - self.zy[j][q] * si_;
         }
         for (0..q) |j| {
@@ -483,7 +436,7 @@ const Setup = struct {
             for (n..2 * n) |j| a[i][j] = 0.0;
             a[i][i + n] = 1.0;
         }
-        _ = gauss2(&a, n);
+        gauss2(&a, n);
         for (0..n) |i| {
             for (0..n) |j| self.si[i][j] = a[i][j + n];
         }
@@ -493,7 +446,7 @@ const Setup = struct {
     /// reference does (its j loop runs to `dim` = 2n — rows beyond n do not
     /// exist, but j < 2n only ever matters when n... transcribed with the
     /// row-bound j < n, which is what the memory layout makes it do).
-    fn gauss2(a: *[MAXN][2 * MAXN]f64, n: usize) bool {
+    fn gauss2(a: *[MAXN][2 * MAXN]f64, n: usize) void {
         for (0..n) |i| {
             var imax = i;
             var max = @abs(a[i][i]);
@@ -503,7 +456,7 @@ const Setup = struct {
                     max = @abs(a[j][i]);
                 }
             }
-            if (max < 1.0e-88) return false;
+            if (max < 1.0e-88) return;
             if (imax != i) std.mem.swap([2 * MAXN]f64, &a[i], &a[imax]);
             const f = 1.0 / a[i][i];
             a[i][i] = 1.0;
@@ -519,7 +472,6 @@ const Setup = struct {
                 }
             }
         }
-        return true;
     }
 
     fn approxMode(self: *Setup, x: *[DEG + 1]f64) f64 {
@@ -553,7 +505,8 @@ const Setup = struct {
     }
 
     fn multP(p1: []const f64, p2: []const f64, p3: *[DEG + 1]f64) void {
-        for (0..DEG + 1) |i| p3[i] = 0.0;
+        // ponytail: builtin zero-fill; keep the reference's accumulation order below.
+        @memset(p3, 0.0);
         for (0..DEG + 1) |i| {
             var j = i;
             var k: usize = 0;
@@ -590,9 +543,6 @@ pub fn CoupledLtra(comptime N: usize) type {
         pub const num_ports: usize = 2 * N;
         const n_u = NU;
 
-        inline fn p1(k: usize) usize {
-            return k;
-        }
         inline fn p2(k: usize) usize {
             return N + k;
         }
@@ -708,8 +658,6 @@ pub fn CoupledLtra(comptime N: usize) type {
 
             if (model.length <= 0) return;
             // coupled():
-            s.scaling_f = 1;
-            s.scaling_f2 = 1;
             s.loopZY(0.0);
             {
                 var minv = s.d[0];
@@ -945,85 +893,48 @@ pub fn CoupledLtra(comptime N: usize) type {
             const del = getPvs(inst, model, t1, t2_ps);
 
             for (0..N) |j| {
-                for (0..N) |k| {
-                    for (0..N) |l| {
-                        const tms = &model.h3t[j][k][l];
-                        if (tms.aten == 0) continue;
-                        const v1i = del.v1_i[l][k];
-                        const v2i = del.v2_i[l][k];
-                        const v1o = del.v1_o[l][k];
-                        const v2o = del.v2_o[l][k];
-                        const cm = &inst.cnv3[j][k][l];
-                        const pd = &inst.p3c[j][k][l];
-                        if (tms.if_img) {
-                            const er = @exp(tms.x[1] * h) * @cos(tms.x[2] * h);
-                            const ei = @exp(tms.x[1] * h) * @sin(tms.x[2] * h);
-                            const a2 = h1 * tms.c[1];
-                            const b2 = h1 * tms.c[2];
-                            var ar = cm.i[1] * er - cm.i[2] * ei;
-                            var ai_ = cm.i[1] * ei + cm.i[2] * er;
-                            pd.i[1] = ar + a2 * (v1i * er + v2i) - b2 * (v1i * ei);
-                            pd.i[2] = ai_ + a2 * (v1i * ei) + b2 * (v1i * er + v2i);
-                            ar = cm.o[1] * er - cm.o[2] * ei;
-                            ai_ = cm.o[1] * ei + cm.o[2] * er;
-                            pd.o[1] = ar + a2 * (v1o * er + v2o) - b2 * (v1o * ei);
-                            pd.o[2] = ai_ + a2 * (v1o * ei) + b2 * (v1o * er + v2o);
-                            const e = @exp(tms.x[0] * h);
-                            pd.i[0] = cm.i[0] * e + h1 * tms.c[0] * (v1i * e + v2i);
-                            pd.o[0] = cm.o[0] * e + h1 * tms.c[0] * (v1o * e + v2o);
-                            ff[j] += tms.aten * v2o + pd.o[0] + 2.0 * pd.o[1];
-                            gg[j] += tms.aten * v2i + pd.i[0] + 2.0 * pd.i[1];
-                        } else {
-                            for (0..3) |i| {
-                                const e = @exp(tms.x[i] * h);
-                                pd.i[i] = cm.i[i] * e + h1 * tms.c[i] * (v1i * e + v2i);
-                                pd.o[i] = cm.o[i] * e + h1 * tms.c[i] * (v1o * e + v2o);
-                                ff[j] += pd.o[i];
-                                gg[j] += pd.i[i];
+                // Preserve h3 then h2 accumulation for each output row.
+                inline for (.{ "3", "2" }) |kind| {
+                    const signal = if (comptime std.mem.eql(u8, kind, "3")) "v" else "i";
+                    for (0..N) |k| {
+                        for (0..N) |l| {
+                            const tms = &@field(model, "h" ++ kind ++ "t")[j][k][l];
+                            if (tms.aten == 0) continue;
+                            const v1i = @field(del, signal ++ "1_i")[l][k];
+                            const v2i = @field(del, signal ++ "2_i")[l][k];
+                            const v1o = @field(del, signal ++ "1_o")[l][k];
+                            const v2o = @field(del, signal ++ "2_o")[l][k];
+                            const cm = &@field(inst, "cnv" ++ kind)[j][k][l];
+                            const pd = &@field(inst, "p" ++ kind ++ "c")[j][k][l];
+                            if (tms.if_img) {
+                                const er = @exp(tms.x[1] * h) * @cos(tms.x[2] * h);
+                                const ei = @exp(tms.x[1] * h) * @sin(tms.x[2] * h);
+                                const a2 = h1 * tms.c[1];
+                                const b2 = h1 * tms.c[2];
+                                var ar = cm.i[1] * er - cm.i[2] * ei;
+                                var ai_ = cm.i[1] * ei + cm.i[2] * er;
+                                pd.i[1] = ar + a2 * (v1i * er + v2i) - b2 * (v1i * ei);
+                                pd.i[2] = ai_ + a2 * (v1i * ei) + b2 * (v1i * er + v2i);
+                                ar = cm.o[1] * er - cm.o[2] * ei;
+                                ai_ = cm.o[1] * ei + cm.o[2] * er;
+                                pd.o[1] = ar + a2 * (v1o * er + v2o) - b2 * (v1o * ei);
+                                pd.o[2] = ai_ + a2 * (v1o * ei) + b2 * (v1o * er + v2o);
+                                const e = @exp(tms.x[0] * h);
+                                pd.i[0] = cm.i[0] * e + h1 * tms.c[0] * (v1i * e + v2i);
+                                pd.o[0] = cm.o[0] * e + h1 * tms.c[0] * (v1o * e + v2o);
+                                ff[j] += tms.aten * v2o + pd.o[0] + 2.0 * pd.o[1];
+                                gg[j] += tms.aten * v2i + pd.i[0] + 2.0 * pd.i[1];
+                            } else {
+                                for (0..3) |i| {
+                                    const e = @exp(tms.x[i] * h);
+                                    pd.i[i] = cm.i[i] * e + h1 * tms.c[i] * (v1i * e + v2i);
+                                    pd.o[i] = cm.o[i] * e + h1 * tms.c[i] * (v1o * e + v2o);
+                                    ff[j] += pd.o[i];
+                                    gg[j] += pd.i[i];
+                                }
+                                ff[j] += tms.aten * v2o;
+                                gg[j] += tms.aten * v2i;
                             }
-                            ff[j] += tms.aten * v2o;
-                            gg[j] += tms.aten * v2i;
-                        }
-                    }
-                }
-                for (0..N) |k| {
-                    for (0..N) |l| {
-                        const tms = &model.h2t[j][k][l];
-                        if (tms.aten == 0) continue;
-                        const i1i = del.i1_i[l][k];
-                        const i2i = del.i2_i[l][k];
-                        const i1o = del.i1_o[l][k];
-                        const i2o = del.i2_o[l][k];
-                        const cm = &inst.cnv2[j][k][l];
-                        const pd = &inst.p2c[j][k][l];
-                        if (tms.if_img) {
-                            const er = @exp(tms.x[1] * h) * @cos(tms.x[2] * h);
-                            const ei = @exp(tms.x[1] * h) * @sin(tms.x[2] * h);
-                            const a2 = h1 * tms.c[1];
-                            const b2 = h1 * tms.c[2];
-                            var ar = cm.i[1] * er - cm.i[2] * ei;
-                            var ai_ = cm.i[1] * ei + cm.i[2] * er;
-                            pd.i[1] = ar + a2 * (i1i * er + i2i) - b2 * (i1i * ei);
-                            pd.i[2] = ai_ + a2 * (i1i * ei) + b2 * (i1i * er + i2i);
-                            ar = cm.o[1] * er - cm.o[2] * ei;
-                            ai_ = cm.o[1] * ei + cm.o[2] * er;
-                            pd.o[1] = ar + a2 * (i1o * er + i2o) - b2 * (i1o * ei);
-                            pd.o[2] = ai_ + a2 * (i1o * ei) + b2 * (i1o * er + i2o);
-                            const e = @exp(tms.x[0] * h);
-                            pd.i[0] = cm.i[0] * e + h1 * tms.c[0] * (i1i * e + i2i);
-                            pd.o[0] = cm.o[0] * e + h1 * tms.c[0] * (i1o * e + i2o);
-                            ff[j] += tms.aten * i2o + pd.o[0] + 2.0 * pd.o[1];
-                            gg[j] += tms.aten * i2i + pd.i[0] + 2.0 * pd.i[1];
-                        } else {
-                            for (0..3) |i| {
-                                const e = @exp(tms.x[i] * h);
-                                pd.i[i] = cm.i[i] * e + h1 * tms.c[i] * (i1i * e + i2i);
-                                pd.o[i] = cm.o[i] * e + h1 * tms.c[i] * (i1o * e + i2o);
-                                ff[j] += pd.o[i];
-                                gg[j] += pd.i[i];
-                            }
-                            ff[j] += tms.aten * i2o;
-                            gg[j] += tms.aten * i2i;
                         }
                     }
                 }
@@ -1033,9 +944,9 @@ pub fn CoupledLtra(comptime N: usize) type {
         }
 
         pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {
-            var res = [_]S{S.con(0.0)} ** n_u;
+            var res: [n_u]S = undefined;
             for (0..N) |k| {
-                res[p1(k)] = x[br1(k)];
+                res[k] = x[br1(k)];
                 res[p2(k)] = x[br2(k)];
             }
 
@@ -1045,7 +956,7 @@ pub fn CoupledLtra(comptime N: usize) type {
                 // reference's resindex walk stamps).
                 for (0..N) |m| {
                     res[br1(m)] = x[br1(m)].add(x[br2(m)]);
-                    res[br2(m)] = x[p1(m)].sub(x[p2(m)]).sub(x[br1(m)].scale(model.rdiag[m]));
+                    res[br2(m)] = x[m].sub(x[p2(m)]).sub(x[br1(m)].scale(model.rdiag[m]));
                 }
                 return res;
             }
@@ -1062,7 +973,7 @@ pub fn CoupledLtra(comptime N: usize) type {
                 var row2 = x[br2(m)].neg().addC(-ii.in2[m]);
                 for (0..N) |p| {
                     const yc = model.h1t[m][p].aten + h1 * model.h1c[m][p];
-                    row1 = row1.add(x[p1(p)].scale(yc));
+                    row1 = row1.add(x[p].scale(yc));
                     row2 = row2.add(x[p2(p)].scale(yc));
                 }
                 res[br1(m)] = row1;
@@ -1086,7 +997,7 @@ pub fn CoupledLtra(comptime N: usize) type {
                 inst.n_hist = 1;
                 inst.hist_t[0] = 0;
                 for (0..N) |k| {
-                    const v1 = x[p1(k)];
+                    const v1 = x[k];
                     const v2 = x[p2(k)];
                     inst.dc1[k] = v1;
                     inst.dc2[k] = v2;
@@ -1124,7 +1035,7 @@ pub fn CoupledLtra(comptime N: usize) type {
             inst.cnv3 = inst.p3c;
             const delta = t_ps - tail;
             for (0..N) |k| {
-                const v1 = x[p1(k)];
+                const v1 = x[k];
                 const v2 = x[p2(k)];
                 inst.dv_i[k] = (v1 - inst.vprev_i[k]) / delta;
                 inst.dv_o[k] = (v2 - inst.vprev_o[k]) / delta;
@@ -1201,7 +1112,7 @@ pub fn CoupledLtra(comptime N: usize) type {
             const j = inst.n_hist;
             inst.hist_t[j] = t_ps;
             for (0..N) |k| {
-                inst.hist_vi[k][j] = x[p1(k)];
+                inst.hist_vi[k][j] = x[k];
                 inst.hist_vo[k][j] = x[p2(k)];
                 inst.hist_ii[k][j] = x[br1(k)];
                 inst.hist_io[k][j] = x[br2(k)];

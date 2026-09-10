@@ -310,6 +310,66 @@ pub const GpuContext = struct {
     d_c: Buffer,
     d_rhs: Buffer,
     d_q: Buffer,
+
+    /// THE DETERMINISTIC SCATTER. The device kernels no longer accumulate into
+    /// the planes: each contribution gets its own staging cell (`d_stage_*`),
+    /// and `arp_reduce_*` sums each plane cell's run of them into the plane.
+    ///
+    /// Why: `@atomicRmw(.Add)` reduces in whatever order the hardware schedules,
+    /// and it does not promise to repeat the order at the same x. On
+    /// `parallel_inverters_2000`, `rhs[1]` (the Vdd node) takes 8000
+    /// contributions — four per pmos, `{+1.8, 8.2e-21, -1.8, 0}` — that cancel
+    /// to 3.6e-9. Two replays of the SAME pass differed by 2.1e-10, and
+    /// `finalizeStep` rejected every iterate: the LU maps that row 1:1 onto the
+    /// Vdd BRANCH CURRENT, whose delta tolerance comes from its own nanoamp
+    /// magnitude (1.25e-12) rather than from the 0.26 A the rail carries. dt
+    /// halved ~30 times and the run died in `TimestepTooSmall`.
+    ///
+    /// That is REORDERING, not a race, and the distinction was measured rather
+    /// than assumed. A lost or doubled update moves the sum by a contribution,
+    /// i.e. by 1.8 — nine orders off what was seen. The reordering ceiling is
+    /// `N*eps*max|partial|`, and `max|partial|` is the trap: in TAPE order each
+    /// instance's +1.8 is cancelled by its own -1.8 two entries later, so the
+    /// running sum never leaves 1.8 and the sum is exact to 1.6e-17. Any order
+    /// that separates the pair by W lets the partials reach `W*1.8`: measured
+    /// on that row's own values, a random permutation errs 8.4e-12, and the
+    /// SIMT emission order — a warp issuing its `ru=0` atomic on all W lanes
+    /// before `ru=1` — errs 4.0e-12 at W=32 and 1.6e-11 at W=1024, with the
+    /// whole 8-block grid resident it reaches the 2.1e-10 observed.
+    ///
+    /// The order is the CPU's: contributions are keyed (batch, id, ru, cu) and
+    /// sorted stably by destination, which is exactly the sequence
+    /// `evalRange`'s serial `+=` visits. So this is not merely repeatable, it
+    /// is the CPU's own sum — bit-for-bit for any cell whose run fits one
+    /// level-1 piece, and for a deeper one a fold of in-order pieces that keeps
+    /// the partials where tape order puts them. Measured end to end on
+    /// `parallel_inverters_2000`: the GPU transient agrees with the CPU one to
+    /// 6.0e-16 max / 3.3e-17 rms over 596 points x 2005 variables.
+    ///
+    /// Built here, BESIDE the frozen tapes, never through them: `d_slots` and
+    /// `d_rhs_idx` keep their `[id][ru][cu]` u32 layout and their length, and
+    /// only the VALUES change from "plane index" to "staging index".
+    reduce: Raw,
+    d_seg1_slot: Buffer,
+    d_seg1_row: Buffer,
+    d_seg2_slot: Buffer,
+    d_seg2_row: Buffer,
+    d_stage_g: Buffer,
+    d_stage_c: Buffer,
+    d_stage_rhs: Buffer,
+    d_stage_q: Buffer,
+    /// Level-1 output. SHARED between g and c (and between rhs and q): the four
+    /// reductions are enqueued on one stream, so each pair's level 2 has
+    /// consumed this before the next pair's level 1 writes it.
+    d_mid_slot: Buffer,
+    d_mid_row: Buffer,
+    /// Contribution counts summed over the resident batches — g/c are indexed
+    /// by the slots tape, rhs/q by the rhs_idx tape — and the level-1 piece
+    /// counts derived from them.
+    n_slot: usize,
+    n_row: usize,
+    n_vslot: usize,
+    n_vrow: usize,
     /// `applyLimits`-time state vectors: the NEW iterate goes to `d_x2`, the
     /// previous one to `d_x` (uploaded explicitly — under JFNK the last eval
     /// was an FD probe, so `d_x`'s residue is NOT x_old). Plus the 4-byte
@@ -540,6 +600,14 @@ pub const GpuContext = struct {
         const rhs_bytes = ckt.rhs.len * @sizeOf(f64);
         const x_bytes = (ckt.n + 1) * @sizeOf(f64);
 
+        const order = try scatterOrder(gpa, batches[0..n_up], ckt);
+        defer order.deinit(gpa);
+        // In the SAME image as the eval kernel, so a miss here means a stale
+        // build, not a model the emitter skipped — fatal, like `lim`/`ctl`.
+        var reduce = try gompute.rawKernelByName(backend.?, batches[0].payload(batches[0].ctx).reduce_kernel, 0);
+        errdefer reduce.deinit();
+        try order.upload(batches[0..n_up]);
+
         self.* = .{
             .gpa = gpa,
             .ckt = ckt,
@@ -561,6 +629,21 @@ pub const GpuContext = struct {
             .d_q = try k0.alloc(rhs_bytes),
             .d_x2 = try k0.alloc(x_bytes),
             .d_flags = try k0.alloc(4),
+            .reduce = reduce,
+            .d_seg1_slot = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg1_slot)),
+            .d_seg1_row = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg1_row)),
+            .d_seg2_slot = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg2_slot)),
+            .d_seg2_row = try uploadBytes(k0, std.mem.sliceAsBytes(order.seg2_row)),
+            .d_stage_g = try k0.alloc(@max(order.n_slot, 1) * @sizeOf(f64)),
+            .d_stage_c = try k0.alloc(@max(order.n_slot, 1) * @sizeOf(f64)),
+            .d_stage_rhs = try k0.alloc(@max(order.n_row, 1) * @sizeOf(f64)),
+            .d_stage_q = try k0.alloc(@max(order.n_row, 1) * @sizeOf(f64)),
+            .d_mid_slot = try k0.alloc(@max(order.n_vslot, 1) * @sizeOf(f64)),
+            .d_mid_row = try k0.alloc(@max(order.n_vrow, 1) * @sizeOf(f64)),
+            .n_slot = order.n_slot,
+            .n_row = order.n_row,
+            .n_vslot = order.n_vslot,
+            .n_vrow = order.n_vrow,
             .stream = try k0.createStream(),
             .ws = try converger.Workspace.init(gpa, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd),
             .has_charge = ckt.has_charge,
@@ -573,6 +656,183 @@ pub const GpuContext = struct {
         self.ws.slv.params.execution = ckt.solver_execution;
 
         return self;
+    }
+
+    /// The permutation and segment table behind the deterministic scatter.
+    ///
+    /// A "contribution" is one tape entry: `(batch, id, ru, cu)` for the g/c
+    /// planes, `(batch, id, ru)` for rhs/q. Number them in that order — which is
+    /// the order the serial CPU `evalRange` stamps them — and counting-sort them
+    /// STABLY by destination plane cell. `perm[k]` is then k's staging cell, and
+    /// `seg[cell..cell+1]` is that cell's contiguous, ascending-k run.
+    ///
+    /// Two tables, not four: g and c are both indexed by `slots`, rhs and q both
+    /// by `rhs_idx`, so each pair shares a permutation and a segment table.
+    ///
+    /// The segments come out in TWO levels, because one thread per plane cell
+    /// puts the whole Vdd row (thousands of contributions) on one lane of a card
+    /// whose f64 rate is 1/64: measured, a single-level reduction cost
+    /// `parallel_inverters_500 --gpu` 0.61 s -> 1.38 s, ALL of it in the
+    /// reduction. Level 1 cuts every run into `chunk`-sized pieces (so a long
+    /// row becomes many threads), level 2 sums a cell's pieces. Same kernel
+    /// both times — this is not a second algorithm, it is one launched twice.
+    /// A run of `chunk` or less becomes a single piece, so short rows are
+    /// summed exactly as the serial CPU stamp sums them.
+    const Order = struct {
+        perm_slot: []u32,
+        perm_row: []u32,
+        /// Piece -> staging range. Length `n_vslot + 1` / `n_vrow + 1`.
+        seg1_slot: []u32,
+        seg1_row: []u32,
+        /// Plane cell -> piece range. Length `g_vals.len + 1` / `rhs.len + 1`.
+        seg2_slot: []u32,
+        seg2_row: []u32,
+        n_slot: usize,
+        n_row: usize,
+        n_vslot: usize,
+        n_vrow: usize,
+
+        /// Contributions per level-1 piece. Balances the two chains: a
+        /// 8000-deep row becomes 125 threads of 64 and then one thread of 125,
+        /// instead of one thread of 8000.
+        const chunk: u32 = 64;
+
+        fn deinit(self: Order, gpa: std.mem.Allocator) void {
+            gpa.free(self.perm_slot);
+            gpa.free(self.perm_row);
+            gpa.free(self.seg1_slot);
+            gpa.free(self.seg1_row);
+            gpa.free(self.seg2_slot);
+            gpa.free(self.seg2_row);
+        }
+
+        /// Overwrite each batch's resident tapes with its slice of the
+        /// permutation. Same buffers, same length, same `[id][ru][cu]` layout —
+        /// only the meaning of the u32 moves from "plane cell" to "staging
+        /// cell", which is what keeps the frozen boundary frozen.
+        fn upload(self: Order, batches: []BatchGpu) !void {
+            var off_s: usize = 0;
+            var off_r: usize = 0;
+            for (batches) |*bg| {
+                const p = bg.payload(bg.ctx);
+                if (p.slots.len > 0)
+                    try bg.d_slots.upload(self.perm_slot[off_s..].ptr, p.slots.len * @sizeOf(u32));
+                if (p.rhs_idx.len > 0)
+                    try bg.d_rhs_idx.upload(self.perm_row[off_r..].ptr, p.rhs_idx.len * @sizeOf(u32));
+                off_s += p.slots.len;
+                off_r += p.rhs_idx.len;
+            }
+        }
+    };
+
+    fn scatterOrder(gpa: std.mem.Allocator, batches: []BatchGpu, ckt: *const Circuit) !Order {
+        const n_g = ckt.g_vals.len;
+        const n_rhs = ckt.rhs.len;
+        var n_slot: usize = 0;
+        var n_row: usize = 0;
+        for (batches) |*bg| {
+            const p = bg.payload(bg.ctx);
+            n_slot += p.slots.len;
+            n_row += p.rhs_idx.len;
+        }
+        // The tapes are u32 and now index the staging arrays, which are longer
+        // than the planes. A circuit past that would need ~32 GB of staging, so
+        // this is a bound the hardware enforces first — but say so rather than
+        // truncate, and let the caller fall back to the CPU.
+        if (n_slot > std.math.maxInt(u32) or n_row > std.math.maxInt(u32))
+            return Error.CircuitNotEligible;
+
+        var out: Order = .{
+            .perm_slot = try gpa.alloc(u32, n_slot),
+            .perm_row = try gpa.alloc(u32, n_row),
+            .seg1_slot = &.{},
+            .seg1_row = &.{},
+            .seg2_slot = try gpa.alloc(u32, n_g + 1),
+            .seg2_row = try gpa.alloc(u32, n_rhs + 1),
+            .n_slot = n_slot,
+            .n_row = n_row,
+            .n_vslot = 0,
+            .n_vrow = 0,
+        };
+        errdefer out.deinit(gpa);
+
+        // Cell -> staging range, before it is cut into level-1 pieces. Doubles
+        // as the per-cell write cursor of the counting sort.
+        const seg_all = try gpa.alloc(u32, @max(n_g, n_rhs) + 1);
+        defer gpa.free(seg_all);
+        const cursor = try gpa.alloc(u32, @max(n_g, n_rhs) + 1);
+        defer gpa.free(cursor);
+
+        for ([_]bool{ true, false }) |slots_pass| {
+            const n_cells = if (slots_pass) n_g else n_rhs;
+            const seg = seg_all[0 .. n_cells + 1];
+            const perm = if (slots_pass) out.perm_slot else out.perm_row;
+            // The TRASH cell is left out of the count, so its run comes out
+            // empty and the reduction writes it a 0 without walking it. That is
+            // not tidiness: `buildTapes` sends every ground row/column AND every
+            // structurally dead (row, col) there, which on a 4000-instance mos1
+            // batch is ~40k of the 64k slot entries — one thread would chew the
+            // whole thing while its neighbours idled. Nothing reads the cell.
+            const trash: u32 = if (slots_pass) ckt.trash_slot else ckt.n;
+            @memset(seg, 0);
+            for (batches) |*bg| {
+                const p = bg.payload(bg.ctx);
+                for (if (slots_pass) p.slots else p.rhs_idx) |dest| {
+                    if (dest != trash) seg[dest + 1] += 1;
+                }
+            }
+            var run: u32 = 0;
+            for (seg) |*s| {
+                run += s.*;
+                s.* = run;
+            }
+            @memcpy(cursor[0..seg.len], seg);
+            // Trash contributions still need a distinct, in-bounds cell each —
+            // the kernel stores through the tape unconditionally. They get the
+            // tail of the staging array, which no segment covers.
+            var tail: u32 = run;
+            var k: usize = 0;
+            for (batches) |*bg| {
+                const p = bg.payload(bg.ctx);
+                for (if (slots_pass) p.slots else p.rhs_idx) |dest| {
+                    if (dest == trash) {
+                        perm[k] = tail;
+                        tail += 1;
+                    } else {
+                        perm[k] = cursor[dest];
+                        cursor[dest] += 1;
+                    }
+                    k += 1;
+                }
+            }
+
+            // Cut each cell's run into pieces of at most `chunk`. `seg2[i]` is
+            // where cell i's pieces start, `seg1[j]` where piece j's staging
+            // starts — both ascending, so the two sums stay a fixed order.
+            var n_v: usize = 0;
+            for (0..n_cells) |i| n_v += (seg[i + 1] - seg[i] + Order.chunk - 1) / Order.chunk;
+            const seg1 = try gpa.alloc(u32, n_v + 1);
+            const seg2 = if (slots_pass) out.seg2_slot else out.seg2_row;
+            var j: usize = 0;
+            for (0..n_cells) |i| {
+                seg2[i] = @intCast(j);
+                var at = seg[i];
+                while (at < seg[i + 1]) : (at += Order.chunk) {
+                    seg1[j] = at;
+                    j += 1;
+                }
+            }
+            seg2[n_cells] = @intCast(j);
+            seg1[n_v] = seg[n_cells];
+            if (slots_pass) {
+                out.seg1_slot = seg1;
+                out.n_vslot = n_v;
+            } else {
+                out.seg1_row = seg1;
+                out.n_vrow = n_v;
+            }
+        }
+        return out;
     }
 
     /// Page-locked `[]f64` from the driver. Not the Zig allocator's memory, so
@@ -599,6 +859,17 @@ pub const GpuContext = struct {
         self.d_q.free();
         self.d_x2.free();
         self.d_flags.free();
+        self.d_seg1_slot.free();
+        self.d_seg1_row.free();
+        self.d_seg2_slot.free();
+        self.d_seg2_row.free();
+        self.d_stage_g.free();
+        self.d_stage_c.free();
+        self.d_stage_rhs.free();
+        self.d_stage_q.free();
+        self.d_mid_slot.free();
+        self.d_mid_row.free();
+        self.reduce.deinit();
         for (self.batches) |*bg| bg.deinit();
         if (self.chk.len > 0) self.gpa.free(self.chk);
         self.gpa.free(self.batches_owned);
@@ -662,9 +933,9 @@ pub const GpuContext = struct {
         ckt.rhs[0] += x[0];
     }
 
-    /// The device half alone: upload x, clear the planes, launch every resident
-    /// batch, queue the downloads. Enqueue-only — nothing is waited on, which is
-    /// what lets the caller run the host batches underneath it.
+    /// The device half alone: upload x, clear the staging, launch every resident
+    /// batch, reduce, queue the downloads. Enqueue-only — nothing is waited on,
+    /// which is what lets the caller run the host batches underneath it.
     ///
     /// Split out of `evalOnGpu` so `evalCheck` can replay the SAME pass at the
     /// same x. Everything below is enqueued on one stream and the ORDER is the
@@ -678,14 +949,18 @@ pub const GpuContext = struct {
         @memcpy(self.pin_x[0..x.len], x);
         try self.d_x.uploadAtAsync(self.pin_x.ptr, 0, x.len * @sizeOf(f64), &self.stream);
 
+        // The STAGING is cleared, not the planes: `arp_reduce_*` writes every
+        // plane cell below. A contribution the structural pattern or the ground
+        // mask skips is never stored, so its cell has to read back as 0.
+        //
         // Zeroed by the memory controller, not by moving a resident block of
         // zeros across it. The old D2D copy cost real device bandwidth (~3.8 us
         // for a 400 KB `g` plane, ~1.9 us for `rhs`) and blocked besides.
-        try self.d_g.fillAsync(0, g_bytes, &self.stream);
-        try self.d_rhs.fillAsync(0, rhs_bytes, &self.stream);
+        try self.d_stage_g.fillAsync(0, self.n_slot * @sizeOf(f64), &self.stream);
+        try self.d_stage_rhs.fillAsync(0, self.n_row * @sizeOf(f64), &self.stream);
         if (self.resident_charge) {
-            try self.d_c.fillAsync(0, g_bytes, &self.stream);
-            try self.d_q.fillAsync(0, rhs_bytes, &self.stream);
+            try self.d_stage_c.fillAsync(0, self.n_slot * @sizeOf(f64), &self.stream);
+            try self.d_stage_q.fillAsync(0, self.n_row * @sizeOf(f64), &self.stream);
         }
 
         for (self.batches) |*bg| {
@@ -705,13 +980,23 @@ pub const GpuContext = struct {
                 bg.d_slots.argPtr(),
                 bg.d_models.argPtr(),
                 bg.d_instances.argPtr(),
-                self.d_g.argPtr(),
-                self.d_c.argPtr(),
-                self.d_rhs.argPtr(),
-                self.d_q.argPtr(),
+                self.d_stage_g.argPtr(),
+                self.d_stage_c.argPtr(),
+                self.d_stage_rhs.argPtr(),
+                self.d_stage_q.argPtr(),
                 bg.d_lim.argPtr(),
                 gompute.interface.arg(&limiting),
             });
+        }
+
+        // Every batch has emitted its contributions; fold each plane cell's run
+        // into the plane, in tape order. One launch per plane, ordered on the
+        // same stream, so the sum is a deterministic function of x.
+        try self.reducePlane(true, &self.d_stage_g, &self.d_g, ckt.g_vals.len);
+        try self.reducePlane(false, &self.d_stage_rhs, &self.d_rhs, ckt.rhs.len);
+        if (self.resident_charge) {
+            try self.reducePlane(true, &self.d_stage_c, &self.d_c, ckt.c_vals.len);
+            try self.reducePlane(false, &self.d_stage_q, &self.d_q, ckt.q_vec.len);
         }
 
         // Queued behind the launches and ahead of the host work below. Into
@@ -725,16 +1010,49 @@ pub const GpuContext = struct {
         }
     }
 
+    /// One plane's staging -> plane, in two fixed-order passes of the SAME
+    /// kernel: pieces first (parallel over a long row), then the pieces of each
+    /// cell. `slot_space` picks which of the two index spaces the plane lives in
+    /// — g/c are indexed by the slots tape, rhs/q by the rhs_idx tape.
+    fn reducePlane(self: *Self, slot_space: bool, stage: *Buffer, plane: *Buffer, cells: usize) !void {
+        const mid = if (slot_space) &self.d_mid_slot else &self.d_mid_row;
+        const seg1 = if (slot_space) &self.d_seg1_slot else &self.d_seg1_row;
+        const seg2 = if (slot_space) &self.d_seg2_slot else &self.d_seg2_row;
+        const n_v = if (slot_space) self.n_vslot else self.n_vrow;
+        try self.launchReduce(seg1, stage, mid, n_v);
+        try self.launchReduce(seg2, mid, plane, cells);
+    }
+
+    /// One `arp_reduce_*` launch: `out[i] = sum(in[seg[i]..seg[i+1]])`.
+    /// `n_cells` is a local because gompute passes scalars by pointer, and
+    /// `cuLaunchKernel` copies them before it returns.
+    fn launchReduce(self: *Self, seg: *Buffer, stage: *Buffer, plane: *Buffer, cells: usize) !void {
+        if (cells == 0) return;
+        var n_cells: u64 = cells;
+        try self.reduce.launchOn(
+            &self.stream,
+            gompute.Dim3.linear(cells, block_size),
+            .{ .x = block_size },
+            0,
+            &.{ gompute.interface.arg(&n_cells), seg.argPtr(), stage.argPtr(), plane.argPtr() },
+        );
+    }
+
     /// `ESPICE_GPU_EVAL_CHECK=1` — is the device half a FUNCTION of x?
     ///
     /// Newton needs one. `converger.finalizeStep` accepts an iterate by
     /// comparing it to the previous one, so a stamp that moves while x stands
     /// still can never converge: dx floors at the wobble and the transient
-    /// halves dt until it underflows. The atomic scatter reduces in whatever
-    /// order the hardware schedules, which it does not promise to repeat, so
-    /// this replays the launches at the same x and reports the worst plane
-    /// entry that moved. The first pass's values are restored afterwards, so a
-    /// checked run stamps exactly what an unchecked one would.
+    /// halves dt until it underflows. This replays the launches at the same x
+    /// and reports the worst plane entry that moved. The first pass's values are
+    /// restored afterwards, so a checked run stamps exactly what an unchecked
+    /// one would.
+    ///
+    /// It is SILENT now, and staying silent is the point: this is the regression
+    /// guard on the deterministic scatter. Anything that hands a summation order
+    /// back to the hardware — an atomic accumulate, a second stream, a
+    /// permutation that lets two threads share a staging cell — shows up here as
+    /// a printed gap on the highest-fan-in row in the circuit.
     fn evalCheck(self: *Self, x: []const f64, t: f64) !void {
         const ng = self.pin_g.len;
         const chk_g = self.chk[0..ng];

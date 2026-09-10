@@ -181,16 +181,14 @@ fn eigenvaluesQR(n: usize, a: []f64, out: []Complex, options: Options) Eigs {
         }
 
         // Check for 2x2 deflation at bottom.
-        if (nn > 2) {
-            const sub2 = @abs(a[(nn - 2) * n + (nn - 3)]);
-            const diag_sum2 = @abs(a[(nn - 2) * n + (nn - 2)]) + @abs(a[(nn - 3) * n + (nn - 3)]);
-            if (sub2 <= options.qr_tol * @max(diag_sum2, 1e-30)) {
-                extract2x2(a, n, nn - 2, out[count..][0..2]);
-                count += 2;
-                nn -= 2;
-                iter = 0;
-                continue;
-            }
+        const sub2 = @abs(a[(nn - 2) * n + (nn - 3)]);
+        const diag_sum2 = @abs(a[(nn - 2) * n + (nn - 2)]) + @abs(a[(nn - 3) * n + (nn - 3)]);
+        if (sub2 <= options.qr_tol * @max(diag_sum2, 1e-30)) {
+            extract2x2(a, n, nn - 2, out[count..][0..2]);
+            count += 2;
+            nn -= 2;
+            iter = 0;
+            continue;
         }
 
         francisStep(n, a, nn);
@@ -238,9 +236,6 @@ fn hessenbergReduce(n: usize, a: []f64) void {
     if (n <= 2) return;
 
     for (0..n - 2) |k| {
-        const len = n - k - 1;
-        if (len == 0) continue;
-
         // Compute norm of sub-column a[k+1..n, k].
         var sigma: f64 = 0;
         for (k + 1..n) |row| {
@@ -339,7 +334,7 @@ fn francisStep(n: usize, a: []f64, nn: usize) void {
     // First column of the implicit double-shift polynomial (H - sigma*I)(H - conj(sigma)*I).
     var x = a[0] * a[0] + a[0 * n + 1] * a[1 * n + 0] - s * a[0] + t;
     var y = a[1 * n + 0] * (a[0] + a[1 * n + 1] - s);
-    var z: f64 = if (nn > 2) a[2 * n + 0] * a[1 * n + 0] else 0;
+    var z: f64 = a[2 * n + 0] * a[1 * n + 0];
 
     for (0..nn - 1) |k| {
         const nr = @sqrt(x * x + y * y + z * z);
@@ -352,9 +347,7 @@ fn francisStep(n: usize, a: []f64, nn: usize) void {
             continue;
         }
 
-        const p = if (k + 2 < nn) @as(usize, 3) else @as(usize, 2);
-
-        if (p == 3) {
+        if (k + 2 < nn) {
             applyReflector3(n, a, nn, k, x, y, z, nr);
         } else {
             applyReflector2(n, a, nn, k, x, y);
@@ -362,7 +355,7 @@ fn francisStep(n: usize, a: []f64, nn: usize) void {
 
         if (k + 1 < nn - 1) {
             x = a[(k + 1) * n + k];
-            y = if (k + 2 < nn) a[(k + 2) * n + k] else 0;
+            y = a[(k + 2) * n + k];
             z = if (k + 3 < nn) a[(k + 3) * n + k] else 0;
         }
     }

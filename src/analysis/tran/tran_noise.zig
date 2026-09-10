@@ -6,13 +6,11 @@
 //! carry builtin noise generators, this analysis never re-derives them.
 const std = @import("std");
 const root = @import("../types.zig");
+// ponytail: the shared copy owns SIMD setup; seeded noise sampling stays scalar.
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 
 const k_boltzmann = 1.380649e-23; // J/K
-
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
 
 pub const NoiseSource = root.NoiseSource;
 
@@ -36,15 +34,9 @@ pub const Options = struct {
 /// (time, v(probe0), v(probe1), ...) per row — already Result data layout.
 pub const SimResult = struct {
     completed: bool,
-    steps: u32,
-    t_final: f64,
     npoints: u32,
     rows: []f64,
 };
-
-// ============================================================================
-// Noise source sampling
-// ============================================================================
 
 // ============================================================================
 // Xorshift64 PRNG
@@ -110,7 +102,10 @@ const NoiseHook = struct {
     q_prev: []const f64,
     a_vals: []f64,
     has_charge: bool,
-    noise_sources: []const NoiseSource,
+    /// Injection endpoints only, interleaved (p0, n0, p1, n1, ...) in source
+    /// order — the shared `NoiseSource` is 48 bytes and this loop wants 8 of
+    /// them. Same order, same per-source add-then-subtract.
+    inj_nodes: []const u32,
     noise_currents: []const f64,
 
     pub fn assemble(self: NoiseHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
@@ -119,9 +114,11 @@ const NoiseHook = struct {
             for (0..ckt.n) |i|
                 ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]);
         }
-        for (self.noise_sources, self.noise_currents) |src, i_n| {
-            if (src.node_p != root.GROUND) ckt.rhs[src.node_p] += i_n;
-            if (src.node_n != root.GROUND) ckt.rhs[src.node_n] -= i_n;
+        for (self.noise_currents, 0..) |i_n, s| {
+            const node_p = self.inj_nodes[2 * s];
+            const node_n = self.inj_nodes[2 * s + 1];
+            if (node_p != root.GROUND) ckt.rhs[node_p] += i_n;
+            if (node_n != root.GROUND) ckt.rhs[node_n] -= i_n;
         }
     }
 
@@ -156,6 +153,22 @@ pub fn simulate(
     const noise_currents = try allocator.alloc(f64, noise_sources.len);
     defer allocator.free(noise_currents);
 
+    // Simulation-lifetime split of the shared NoiseSource table: sampling
+    // streams only the thermal prefix, injection only the endpoints. The
+    // prefix is the invariant head of sigma = sqrt(4kT*G*BW) with the exact
+    // left-to-right grouping the per-step expression used, so the draws are
+    // bit-identical. Requires source data and temperature to be immutable
+    // over the run, which they are — collectNoiseSources runs once on x_op.
+    const noise_prefix = try allocator.alloc(f64, noise_sources.len);
+    defer allocator.free(noise_prefix);
+    const inj_nodes = try allocator.alloc(u32, 2 * noise_sources.len);
+    defer allocator.free(inj_nodes);
+    for (noise_sources, 0..) |src, s| {
+        noise_prefix[s] = 4.0 * k_boltzmann * options.temp_k * src.conductance;
+        inj_nodes[2 * s] = src.node_p;
+        inj_nodes[2 * s + 1] = src.node_n;
+    }
+
     // Backward-Euler charge state (no LTE control here: noise dominates the
     // local error, so the step only shrinks on Newton failure).
     var a_vals: []f64 = &.{};
@@ -173,10 +186,13 @@ pub fn simulate(
 
     var rng = Xorshift64.init(options.seed);
 
-    // ponytail: waveform capacity heuristic — expected rows ~ steps at dt_init
-    // with growth headroom (16x), clamped to [1024, 1<<22]; doubling fallback
-    // in Recorder.record covers dt collapse below dt_init.
-    const est_rows = 16.0 * options.t_stop / options.dt_init;
+    // ponytail: waveform capacity heuristic. dt starts at dt_init and only
+    // grows (x1.5 up to dt_max) on an accepted step, so a run with no Newton
+    // failures records at most t_stop/dt_init + 1 rows — the old 16x
+    // prefactor reserved 16 buffers of slack (with many probes that is the
+    // peak). 2x keeps headroom for the dt_min tail; only repeated Newton
+    // failure drives dt below dt_init, and Recorder.record doubles for that.
+    const est_rows = 2.0 * options.t_stop / options.dt_init;
     const cap_rows: usize = @intFromFloat(@min(@max(1024.0, est_rows), @as(f64, 1 << 22)));
     const ncols = probes.len + 1;
     var rec = Recorder{
@@ -197,8 +213,8 @@ pub fn simulate(
         const bandwidth = 1.0 / (2.0 * dt);
 
         // Thermal noise sample: i_rms = sqrt(4 * k * T * G * BW)
-        for (noise_sources, noise_currents) |src, *i_n| {
-            const sigma = @sqrt(4.0 * k_boltzmann * options.temp_k * src.conductance * bandwidth);
+        for (noise_prefix, noise_currents) |pfx, *i_n| {
+            const sigma = @sqrt(pfx * bandwidth);
             i_n.* = sigma * rng.randn();
         }
 
@@ -207,7 +223,7 @@ pub fn simulate(
             .q_prev = q_prev,
             .a_vals = a_vals,
             .has_charge = has_charge,
-            .noise_sources = noise_sources,
+            .inj_nodes = inj_nodes,
             .noise_currents = noise_currents,
         };
 
@@ -223,7 +239,7 @@ pub fn simulate(
         if (!nr.converged) {
             dt *= 0.5;
             if (dt < options.dt_min) {
-                return .{ .completed = false, .steps = steps, .t_final = t, .npoints = @intCast(rec.n_rows), .rows = rec.rows };
+                return .{ .completed = false, .npoints = @intCast(rec.n_rows), .rows = rec.rows };
             }
             continue;
         }
@@ -246,8 +262,6 @@ pub fn simulate(
 
     return .{
         .completed = t >= options.t_stop,
-        .steps = steps,
-        .t_final = t,
         .npoints = @intCast(rec.n_rows),
         .rows = rec.rows,
     };

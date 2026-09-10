@@ -1,4 +1,4 @@
-//! DC: Newton on A = G. solve()/solveWarm() are the point primitives;
+//! DC: Newton on A = G. solve() is the point primitive;
 //! run() sweeps the primary source through its ParamRef and records probes.
 const std = @import("std");
 const root = @import("../types.zig");
@@ -36,17 +36,6 @@ pub fn solve(
     options: Options,
 ) !SolveResult {
     op.coldStart(ckt, x);
-    return solveWarm(ckt, x, options, 0);
-}
-
-/// Warm variant: keeps x as the initial guess; gmin_extra raises the
-/// regularization floor (op's gmin stepping).
-pub fn solveWarm(
-    ckt: *root.Circuit,
-    x: []f64,
-    options: Options,
-    gmin_extra: f64,
-) !SolveResult {
     // §4.6.1 `analysis("dc")`, §9.10 `$abstime` = 0. Every DC point is a static
     // solve; `initial_step` stays with op.solve, which is what actually runs
     // first in a job. ponytail: a standalone `.dc` sweep with no preceding OP
@@ -55,8 +44,7 @@ pub fn solveWarm(
     ckt.setSimState(.{ .kind = .dc });
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
-    var copts = options.tol.newtonOpts(options.tol.itl2);
-    copts.gmin = gmin_extra; // 0 in the normal sweep; op's ladder raises it
+    const copts = options.tol.newtonOpts(options.tol.itl2);
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }
 
@@ -133,24 +121,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
             try runSerial(ctx, ckt, a, t, opts, n_inner, ncols, block);
         }
-        return .{
-            .plotname = "DC transfer characteristic",
-            .varnames = try root.probeNames(ctx, "v(v-sweep)"),
-            .is_complex = false,
-            .npoints = npoints,
-            .data = data,
-        };
-    }
-
-    // -----------------------------------------------------------------------
-    // GPU batch path: lane pt is sweep value start + pt*step, cold-started and
-    // solved in one launch by sweep/lanes.zig. Only the GPU half is shared —
-    // lanes' serial route is cold-start-only, and dc's is warm-started by
-    // design (that is the point of a sweep), so runSerial below stays dc's own.
-    // ponytail: cold-start-only batch; chunked warm-start is future work —
-    // add when profiling shows serial warm-march dominates a large sweep.
-    // -----------------------------------------------------------------------
-    fill: {
+    } else fill: {
+        // -----------------------------------------------------------------------
+        // GPU batch path: lane pt is sweep value start + pt*step, cold-started and
+        // solved in one launch by sweep/lanes.zig. Only the GPU half is shared —
+        // lanes' serial route is cold-start-only, and dc's is warm-started by
+        // design (that is the point of a sweep), so runSerial below stays dc's own.
+        // ponytail: cold-start-only batch; chunked warm-start is future work —
+        // add when profiling shows serial warm-march dominates a large sweep.
+        // -----------------------------------------------------------------------
         if (ckt.gpu_hook) |gh| if (gh.solve_batch != null) {
             const n: usize = ckt.n;
             const x_lanes = try a.alloc(f64, npoints * n);
@@ -215,7 +194,6 @@ fn runSerial(
 ) !void {
     const x = try a.alloc(f64, ckt.n);
     defer a.free(x);
-    root.zeroSimd(x);
 
     // One workspace serves every point — sparsity pattern is frozen, so
     // symbolic ordering/factorization happens exactly once for the sweep.
