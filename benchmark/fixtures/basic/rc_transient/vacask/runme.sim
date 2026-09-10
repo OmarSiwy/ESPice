@@ -1,0 +1,31 @@
+RC transient
+
+// Hand translation of ../circuit.sp, line for line:
+//
+//   V1 1 0 5       ->  v1 (1 0) v dc=5
+//   R1 1 2 1k      ->  r1 (1 2) r r=1k
+//   C1 2 0 1n      ->  c1 (2 0) c c=1n
+//   R2 2 0 1meg    ->  r2 (2 0) r r=1meg
+//   .TRAN 1n 10n   ->  analysis tran1 tran step=1n stop=10n
+//
+// No `icmode`: SPICE's `.tran` without UIC starts from the operating point and
+// so does VACASK's default, which is the whole point of comparing them.
+
+ground 0
+
+load "resistor.osdi"
+load "capacitor.osdi"
+
+model r resistor
+model c capacitor
+model v vsource
+
+v1 (1 0) v dc=5
+r1 (1 2) r r=1k
+c1 (2 0) c c=1n
+r2 (2 0) r r=1meg
+
+control
+  options rawfile="binary"
+  analysis tran1 tran step=1n stop=10n
+endc
