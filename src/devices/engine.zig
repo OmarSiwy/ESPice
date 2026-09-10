@@ -600,6 +600,17 @@ pub const PatternView = struct {
     }
 };
 
+/// Union sparsity accumulator: one `(col << 32 | row)` key per stamp site
+/// BEFORE dedup, sorted and uniqued into CSC by `toCsc`.
+///
+/// The `gpa` its methods take is build-time SCRATCH, not the circuit's owner:
+/// `keys` and the radix ping-pong buffer die inside `Circuit.init`, and only
+/// `col_ptr`/`row_idx` — which `toCsc` takes a separate allocator for —
+/// outlive it. Passing the sim arena here left the pre-dedup key array and the
+/// sort scratch resident for the whole run (measured 14.6 MB on
+/// `sweep/opamp_wl_5000`, where 650,017 keys dedup to 115,017 nonzeros),
+/// because `ArenaAllocator.free` is a no-op for anything but its most recent
+/// allocation.
 pub const PatternBuilder = struct {
     keys: std.ArrayList(u64) = .empty,
 
@@ -655,9 +666,11 @@ pub const PatternBuilder = struct {
         if (src.ptr != sort_keys.ptr) @memcpy(sort_keys, src);
     }
 
-    pub fn toCsc(self: *PatternBuilder, gpa: std.mem.Allocator, n: u32, col_ptr_out: *[]u32, row_idx_out: *[]u32) !u32 {
+    /// `gpa` owns the returned CSC; `scratch` owns the radix ping-pong buffer
+    /// and dies with the caller's frame.
+    pub fn toCsc(self: *PatternBuilder, gpa: std.mem.Allocator, scratch: std.mem.Allocator, n: u32, col_ptr_out: *[]u32, row_idx_out: *[]u32) !u32 {
         const all = self.keys.items;
-        try radixSort(gpa, all);
+        try radixSort(scratch, all);
         var m: usize = 0;
         for (all) |k| {
             if (m == 0 or all[m - 1] != k) {
@@ -1023,6 +1036,23 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
 // SoA batch with the AD eval hot loop and cold Hooks vtable.
 // ===========================================================================
 
+/// Build-time staging for the three per-instance columns, before `finalize`
+/// freezes them into the batch. Deliberately NOT the caller's `gpa`.
+///
+/// `gpa` here is the SIM ARENA. `ArenaAllocator.free` and shrink-`resize` are
+/// silent no-ops for anything but the most recent allocation, so an ArrayList
+/// growing 1.5x at a time leaves every abandoned capacity resident for the
+/// whole run — about 2x the final column size, and the three columns grow
+/// interleaved so none of them is ever the arena's most recent allocation.
+/// Measured on `sweep/opamp_wl_5000` (25,000 MOS1): 109.5 MB requested for
+/// 36.5 MB of live columns, i.e. 73 MB — half the deck's entire `.op`
+/// footprint — of dead ArrayList capacity that nothing could ever reclaim.
+///
+/// A real allocator hands the intermediates back as they are abandoned;
+/// `finalize` then makes ONE exact-size copy into `gpa`, which is what the
+/// frozen ABI owns and what `hooks.deinit` frees.
+const staging_gpa = std.heap.smp_allocator;
+
 pub fn ProtoStore(comptime D: type) type {
     // ponytail: the contract owns unknown counting; retain usize for tape offsets.
     const n_u: usize = comptime contract.nU(D);
@@ -1032,6 +1062,15 @@ pub fn ProtoStore(comptime D: type) type {
         nodes: std.ArrayList([n_u]u32) = .empty,
 
         const Self = @This();
+
+        /// The three columns move in lockstep — one row per device instance —
+        /// so they are appended together and on ONE allocator. See
+        /// `staging_gpa` for why that allocator is not the caller's.
+        pub fn append(self: *Self, model: D.Model, instance: D.Instance, nodes: [n_u]u32) !void {
+            try self.models.append(staging_gpa, model);
+            try self.instances.append(staging_gpa, instance);
+            try self.nodes.append(staging_gpa, nodes);
+        }
 
         pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) anyerror!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
@@ -1093,7 +1132,12 @@ pub fn ProtoStore(comptime D: type) type {
             }
             errdefer DeviceBatch(D).hooks.deinit(store, gpa);
 
-            store.models = try self.models.toOwnedSlice(gpa);
+            // Exact-size copy out of staging, then the staged column goes back
+            // to `staging_gpa` at once: the peak carries one type's columns
+            // twice, never every type's dead capacity forever.
+            store.models = try gpa.dupe(D.Model, self.models.items);
+            self.models.deinit(staging_gpa);
+            self.models = .empty;
             if (comptime has_attempt_decl) {
                 store.saved_models = try gpa.alloc(D.Model, count);
                 store.attempt_saved = false;
@@ -1102,7 +1146,9 @@ pub fn ProtoStore(comptime D: type) type {
                 store.lim_x = try gpa.alloc(f64, count * n_u);
                 store.lim_active = false;
             }
-            store.instances = try self.instances.toOwnedSlice(gpa);
+            store.instances = try gpa.dupe(D.Instance, self.instances.items);
+            self.instances.deinit(staging_gpa);
+            self.instances = .empty;
 
             store.gath = try gpa.alloc(u32, count * n_u);
             store.rhs_idx = try gpa.alloc(u32, count * n_u);
@@ -1115,7 +1161,7 @@ pub fn ProtoStore(comptime D: type) type {
                 store.q_tape = try gpa.alloc(f64, count * n_u);
                 @memset(store.q_tape, 0);
             }
-            self.nodes.deinit(gpa);
+            self.nodes.deinit(staging_gpa);
             self.nodes = .empty;
 
             if (comptime @hasDecl(D, "State")) {
@@ -1188,9 +1234,9 @@ pub fn ProtoStore(comptime D: type) type {
 
         pub fn destroy(ctx: *anyopaque, gpa: std.mem.Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            self.models.deinit(gpa);
-            self.instances.deinit(gpa);
-            self.nodes.deinit(gpa);
+            self.models.deinit(staging_gpa);
+            self.instances.deinit(staging_gpa);
+            self.nodes.deinit(staging_gpa);
             gpa.destroy(self);
         }
     };
@@ -2898,12 +2944,14 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
         }
 
         fn protoAdd(ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) anyerror!void {
+            // `gpa` stays in the ABI signature (this is the dlopen'd device's
+            // entry point) but the staged columns own their own allocator —
+            // see `staging_gpa`.
+            _ = gpa;
             const store: *Store = @ptrCast(@alignCast(ctx));
             const m: *const D.Model = @ptrCast(@alignCast(model));
             const i: *const D.Instance = @ptrCast(@alignCast(instance));
-            try store.models.append(gpa, m.*);
-            try store.instances.append(gpa, i.*);
-            try store.nodes.append(gpa, nodes[0..n_u].*);
+            try store.append(m.*, i.*, nodes[0..n_u].*);
         }
     };
 }
