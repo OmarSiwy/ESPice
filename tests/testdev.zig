@@ -85,6 +85,52 @@ pub const C = struct {
     }
 };
 
+/// Independent DC current source, and the WRITTEN-ROW trap in device form.
+///
+/// Its residual depends on no unknown, so its structural Jacobian is empty —
+/// exactly what VerA emits for `isource.va` (`jac_pattern = {0, 0}`) — while
+/// `eval` writes both rows. A host that read "no live columns" as "row is
+/// identically zero" would delete the current and leave the node at 0 V. Only
+/// `jac_rows` may gate the stamp; see engine.zig `writtenRows`.
+pub const I = struct {
+    pub const U = enum(u8) { p, n };
+    pub const num_ports: usize = 2;
+    pub const Model = struct { dc: f32 = 0 };
+    pub const Instance = struct {};
+    pub const jac_pattern = [2]u64{ 0, 0 };
+    pub const jac_rows: u64 = 0b11;
+    pub fn eval(comptime S: type, _: [2]S, m: *const Model, _: *const Instance, _: f64) [2]S {
+        return .{ S.con(@as(f64, m.dc)), S.con(-@as(f64, m.dc)) };
+    }
+};
+
+/// The same trap on the REACTIVE half: `q` is a function of TIME and of no
+/// unknown, so `q_pattern` is empty while both charge rows are live. Physically
+/// `ddt(k*t^2)` — a current ramp `2*k*t` out of p — and `t^2` rather than `t` so
+/// the charge has a nonzero second difference and `stepBound`'s LTE bound on
+/// this state is real. Reading a clear `q_pattern` row as dead would freeze the
+/// per-state `q_tape` entry at 0 and drop that bound with no diagnostic.
+///
+/// `eval` writes nothing at all, which is the other side of the predicate:
+/// `jac_rows = 0` means the host skips both resistive rows outright.
+pub const Qt = struct {
+    pub const U = enum(u8) { p, n };
+    pub const num_ports: usize = 2;
+    pub const Model = struct { k: f32 = 0 };
+    pub const Instance = struct {};
+    pub const jac_pattern = [2]u64{ 0, 0 };
+    pub const jac_rows: u64 = 0;
+    pub const q_pattern = [2]u64{ 0, 0 };
+    pub const q_rows: u64 = 0b11;
+    pub fn eval(comptime S: type, _: [2]S, _: *const Model, _: *const Instance, _: f64) [2]S {
+        return .{ S.con(0), S.con(0) };
+    }
+    pub fn q(comptime S: type, _: [2]S, m: *const Model, _: *const Instance, t: f64) [2]S {
+        const qv = @as(f64, m.k) * t * t;
+        return .{ S.con(qv), S.con(-qv) };
+    }
+};
+
 /// Exponential diode, p -> n. i = is*(exp(v/vt)-1), vt = 25.85mV.
 /// The minC clamp keeps exp finite far from the solution; its derivative
 /// goes flat past the clamp, which is exactly the damping NR wants there.
