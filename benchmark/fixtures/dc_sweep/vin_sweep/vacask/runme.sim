@@ -1,0 +1,34 @@
+Linear DC sweep of source voltage across a divider
+
+// Hand translation of ../circuit.sp, line for line:
+//
+//   V1 in 0 DC 0     ->  v1 (in 0) v dc=0
+//   R1 in out 1k     ->  r1 (in out) r r=1k
+//   R2 out 0 3k      ->  r2 (out 0) r r=3k
+//   .dc V1 0 10 0.5  ->  sweep ... from=0 to=10 points=20 + analysis op
+//
+// VACASK has no `.dc`: a DC sweep is a `sweep` block around an operating
+// point. Its `points` counts INTERVALS, so `.dc`'s 21 points (0 to 10 step
+// 0.5) is points=20 — off by one here and every sample lands between two of
+// ngspice's and the whole column reads as a phantom error.
+//
+// The sweep variable is named `vsweep` because VACASK identifiers cannot
+// contain `-`: it is the same scale ngspice and espice call `v(v-sweep)`, and
+// the runner's scale_aliases maps the one spelling onto the other.
+
+ground 0
+
+load "resistor.osdi"
+
+model r resistor
+model v vsource
+
+v1 (in 0) v dc=0
+r1 (in out) r r=1k
+r2 (out 0) r r=3k
+
+control
+  options rawfile="binary"
+  sweep vsweep instance="v1" parameter="dc" from=0 to=10 mode="lin" points=20
+    analysis dc1 op
+endc
