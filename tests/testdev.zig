@@ -38,26 +38,6 @@ pub const Rc = struct {
     }
 };
 
-/// Diode with a PrepCache: exercises the eval-dedup cache (canDedup) path —
-/// identical models collapse to one prep group, cache keyed on voltages.
-pub const Dp = struct {
-    pub const U = enum(u8) { p, n };
-    pub const num_ports: usize = 2;
-    pub const Model = struct { is: f32 = 1e-14 };
-    pub const Instance = struct {};
-    pub const PrepCache = struct { is: f64, inv_vt: f64 };
-    pub fn computePrep(m: *const Model, _: *const Instance) PrepCache {
-        return .{ .is = @as(f64, m.is), .inv_vt = 1.0 / 0.02585 };
-    }
-    pub fn evalFromPrep(comptime S: type, x: [2]S, pc: *const PrepCache, _: *const Model, _: *const Instance, _: f64) [2]S {
-        const id = x[0].sub(x[1]).minC(0.9).scale(pc.inv_vt).exp().addC(-1.0).scale(pc.is);
-        return .{ id, id.neg() };
-    }
-    pub fn limit(_: *const Model, _: *const Instance, cur: [2]f64, old: [2]f64) Lim2 {
-        return D.limit(undefined, undefined, cur, old);
-    }
-};
-
 /// Voltage source with branch current unknown. dc + amp*sin(2*pi*freq*t).
 pub const V = struct {
     pub const U = enum(u8) { p, n, branch };
