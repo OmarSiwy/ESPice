@@ -121,7 +121,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
 
-    var res = try solve(ctx.circuit, x_op, opts, a);
+    // `res` owns a dense n x n eigen workspace and is deinit-ed here, so it is
+    // scratch; `a` is a results arena whose free() is a no-op. See
+    // RunCtx.scratch_allocator.
+    var res = try solve(ctx.circuit, x_op, opts, ctx.scratch_allocator orelse a);
     defer res.deinit();
 
     const n = res.poles.len;

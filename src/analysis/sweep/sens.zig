@@ -174,25 +174,29 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         break :blk ctx.probes[ctx.probes.len - 1];
     };
 
+    // `defer`-freed == scratch; `a` is a results arena. The per-column names
+    // built from `res` below stay on `a` — they ARE the Result. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
     const refs = try ctx.circuit.collectParams();
-    const params = try a.alloc(SensParam, refs.len);
-    defer a.free(params);
+    const params = try scratch.alloc(SensParam, refs.len);
+    defer scratch.free(params);
 
     // Track formatted names so we can free on mid-loop failure.
     var n_named: usize = 0;
-    defer for (params[0..n_named]) |p| a.free(p.device_name);
+    defer for (params[0..n_named]) |p| scratch.free(p.device_name);
 
     for (refs, params) |ref, *p| {
         p.* = .{
             .ptr = ref,
-            .device_name = try std.fmt.allocPrint(a, "{s}#{d}", .{ ref.device_type, ref.index }),
+            .device_name = try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ref.device_type, ref.index }),
             .param_name = ref.param_name,
         };
         n_named += 1;
     }
 
-    var res = try solve(ctx.circuit, params, output_node, opts.tol, a);
-    defer res.deinit(a);
+    var res = try solve(ctx.circuit, params, output_node, opts.tol, scratch);
+    defer res.deinit(scratch);
 
     const names = try a.alloc([]const u8, res.entries.len);
     errdefer a.free(names);

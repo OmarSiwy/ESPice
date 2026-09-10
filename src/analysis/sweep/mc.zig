@@ -250,13 +250,17 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
 
+    // `defer`-freed below == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+
     const refs = try ckt.collectParams();
     var n_vars: usize = 0;
     for (refs) |ref| {
         if (ref.primary and ref.get() != 0) n_vars += 1;
     }
-    const param_vars = try a.alloc(ParamVar, n_vars);
-    defer a.free(param_vars);
+    const param_vars = try scratch.alloc(ParamVar, n_vars);
+    defer scratch.free(param_vars);
     var i: usize = 0;
     for (refs) |ref| {
         if (!ref.primary or ref.get() == 0) continue;
@@ -270,11 +274,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     const stride: usize = opts.n_trials;
-    const samples = try a.alloc(f64, ctx.probes.len * stride);
-    defer a.free(samples);
-    const stats = try a.alloc(Stats, ctx.probes.len);
-    defer a.free(stats);
-    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats, &.{}, opts, a);
+    const samples = try scratch.alloc(f64, ctx.probes.len * stride);
+    defer scratch.free(samples);
+    const stats = try scratch.alloc(Stats, ctx.probes.len);
+    defer scratch.free(stats);
+    const n_conv = try analyze(ckt, param_vars, ctx.probes, samples, stats, &.{}, opts, scratch);
 
     const npoints: usize = if (ctx.probes.len > 0) n_conv else 0;
     const names = try root.probeNames(ctx, "run");

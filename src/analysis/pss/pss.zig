@@ -633,7 +633,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, npoints * ncols);
     errdefer a.free(data);
 
-    const res = try solve(ctx.circuit, x_op, ctx.probes, data, opts, a);
+    // `solve` writes the caller's `data` and frees everything else it takes;
+    // `a` is a results arena that cannot reclaim it. See
+    // RunCtx.scratch_allocator.
+    const res = try solve(ctx.circuit, x_op, ctx.probes, data, opts, ctx.scratch_allocator orelse a);
     if (!res.converged)
         std.debug.print("Warning: pss: shooting did not converge (residual {e})\n", .{res.residual_norm});
 

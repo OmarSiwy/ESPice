@@ -158,8 +158,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const probe_p = opts.probe_p orelse ctx.source_node;
 
-    var res = try solve(ctx.circuit, probe_p, opts.probe_n, opts, ctx.x_op, a);
-    defer res.deinit(a);
+    // `res` is deinit-ed here, so it is scratch, and `a` is a results arena
+    // whose free() is a no-op. See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    var res = try solve(ctx.circuit, probe_p, opts.probe_n, opts, ctx.x_op, scratch);
+    defer res.deinit(scratch);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "loop_gain" });
     errdefer a.free(names); // entries are literals
