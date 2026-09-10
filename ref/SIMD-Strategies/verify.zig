@@ -336,6 +336,16 @@ pub fn main() void {
     // ZP_LU_DUMP capture (differential-checks every variant vs lu.refactor,
     // bit-identical, before racing them). Full evidence:
     // docs/solvers/refactor-tape-2026-09.md.
+    //
+    // What DID pay there was the opposite of widening: `SparseLu.scatterAxpy`
+    // steps the gather-modify-scatter TWO at a time by hand because the trip
+    // count is a circuit column length and those are 1..3, never more —
+    // measured, 205x len-1 + 200x len-2 on scaling/parallel_inverters_100,
+    // 47/32/72 at len 1/2/3 on devices/mos6_inverter. LLVM runtime-unrolls the
+    // plain loop by 4, so the wide body it builds never runs and each call
+    // still pays the guard chain. Differential case against the one-at-a-time
+    // oracle over lengths 0..8: src/solvers/sparse_lu.zig test blocks (same
+    // standalone-import reason as LaneLu above).
 
     std.debug.print("ok — zig {f}, ssse3={}, pclmul={}\n", .{
         builtin.zig_version, has_ssse3, has_pclmul,
