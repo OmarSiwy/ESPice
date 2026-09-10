@@ -271,11 +271,33 @@ mapped through `objdump`. Full derivation: `docs/device-eval-vs-ngspice-2026-09.
       Wants either a param-only REGION hoist (phi with param-only incoming and
       param-only controlling conditions) or if-conversion before the hoist,
       since `pcClass` already handles `.select`.
-- [ ] **`-Djac-f32` for the MOS family, unevaluated.** Halves the derivative
-      vector width and the spill traffic. Newton converges to the accuracy of
-      the RESIDUAL, which stays f64, so the cost is iteration count and not the
-      answer — but that has never been measured on CPU, only argued for the GPU
-      (`docs/gpu-device-eval.md` §1).
+- [ ] **`-Djac-f32=mos1,mos6` — MEASURED 2026-09-10, a win, not yet a default.**
+      Full numbers and method in `docs/perf/jac-f32-2026-09-10.md` (two real
+      builds, callgrind Ir, `ZP_TRAN_STATS`/`ZP_OPDBG` iteration counts).
+      `parallel_inverters_100` **466.4M -> 436.6M (0.936)** with the iteration
+      count FLAT (1352 -> 1349 NR, 613 -> 613 attempts, 595 -> 595 points);
+      `parallel_inverters_500` reproduces it at 0.935. mos1 `evalQ` 955 -> 865
+      Ir per MOSFET per iterate (0.904); `devices/mos6_inverter` 0.949 whole
+      run, 1059 -> 954 per eval. The "cost is iteration count, not the answer"
+      claim HOLDS: 60 mos1/mos6/bsim4/diode fixtures all pass the suite rule
+      (22 bit-identical, worst RMS 2.9e-4), and no PASS/FAIL verdict moves
+      against ngspice on any of 196 fixtures.
+      The win is `n_u`, not model size: `n_u=8` (mos1/mos6) is the only width
+      where `@Vector(n,f32)` saves a register. **`diode` (n_u=4) is 4-5% SLOWER
+      in the kernel and `bsim4va` (n_u=18) is exactly 0.0%** — three decks,
+      -0.04% on the kernel — so §11's "mixed precision is the prerequisite for
+      re-admitting bsim4-class models" has no CPU half.
+      Blocker on making it default: **`ngspice/mosmem` is +13.7%**. The f32
+      Jacobian makes plain Newton fail on that latch's operating point
+      (`ladder: plain conv=true` -> `false`), forcing the whole gmin ladder —
+      OP 50 -> 144 NR iterates. Answer still fine, time is not. Prerequisite is
+      a stiff-MOS corpus: there is no MOSFET deck under `convergence/` or
+      `adversarial/` at all, so the only counter-example was found by accident.
+      No interaction with `direct.zig`'s `iter_refine_steps`: the Jacobian
+      widens back to f64 at `ddxAt`/`grad` before the scatter, `Solver` is
+      `SolverT(f64)` everywhere, refinement is 0 outside one unit test, and
+      refining an inexact-Newton step converges harder onto the perturbed
+      Jacobian anyway.
 - [ ] **`canDedup` is dead for every built-in.** It requires `PrepCache` and no
       `State`; no generated built-in exposes `PrepCache` and mos1 has `State`
       (the `$prev` Meyer average). Measured, not read: 100 identical instances
