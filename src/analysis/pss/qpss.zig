@@ -735,12 +735,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const grid = MixGrid.init(opts.k1, opts.k2);
     const nf = grid.nf;
 
-    const spectra_re = try a.alloc(f64, ctx.probes.len * nf);
-    defer a.free(spectra_re);
-    const spectra_im = try a.alloc(f64, ctx.probes.len * nf);
-    defer a.free(spectra_im);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const spectra_re = try scratch.alloc(f64, ctx.probes.len * nf);
+    defer scratch.free(spectra_re);
+    const spectra_im = try scratch.alloc(f64, ctx.probes.len * nf);
+    defer scratch.free(spectra_im);
 
-    const st = try solve(ctx.circuit, ctx.source_node, opts.source_mag, ctx.probes, spectra_re, spectra_im, opts, a);
+    const st = try solve(ctx.circuit, ctx.source_node, opts.source_mag, ctx.probes, spectra_re, spectra_im, opts, scratch);
 
     if (!st.converged) return error.QpssDidNotConverge;
 

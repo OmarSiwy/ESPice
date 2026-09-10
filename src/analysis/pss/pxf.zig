@@ -121,12 +121,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     const n_transfers = n_sb * n; // per frequency point
 
-    const freqs_buf = try a.alloc(f64, n_freqs);
-    defer a.free(freqs_buf);
-    const transfer = try a.alloc(Complex, n_freqs * n_transfers);
-    defer a.free(transfer);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const freqs_buf = try scratch.alloc(f64, n_freqs);
+    defer scratch.free(freqs_buf);
+    const transfer = try scratch.alloc(Complex, n_freqs * n_transfers);
+    defer scratch.free(transfer);
 
-    try analyze(ctx.circuit, x_op, probe, freqs_buf, transfer, opts, a);
+    try analyze(ctx.circuit, x_op, probe, freqs_buf, transfer, opts, scratch);
 
     // Build varnames: "frequency", then "pxf_h{m}(node_label)" for each sideband × node.
     const ncols = 1 + n_transfers;

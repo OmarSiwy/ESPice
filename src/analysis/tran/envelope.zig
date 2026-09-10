@@ -294,14 +294,17 @@ pub fn extractRMS(values: []const f64) f64 {
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const x = try a.alloc(f64, x_op.len);
-    defer a.free(x);
+    // `defer`-freed == scratch; `a` is a results arena. `data` stays on `a`:
+    // it IS the Result. See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const x = try scratch.alloc(f64, x_op.len);
+    defer scratch.free(x);
     simdCopy(x, x_op);
 
     const ncols = 1 + 2 * ctx.probes.len;
     const data = try a.alloc(f64, @as(usize, maxPoints(opts)) * ncols);
     errdefer a.free(data);
-    const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, a);
+    const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
     if (!st.completed)
         std.debug.print("Warning: envelope stopped early at t={e}\n", .{st.t_final});
 

@@ -553,6 +553,11 @@ fn approxAinvMul(
 
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    // Everything `defer`-freed below — the factorization, the Krylov basis,
+    // the recorded waveform — is scratch, and `a` is a results arena whose
+    // free() is a no-op. Only `names` and `data` at the bottom are the Result.
+    // See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
     const ckt = ctx.circuit;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
     const n: usize = ckt.n;
@@ -561,8 +566,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (n == 0) return error.EmptyCircuit;
 
     // --- DC operating point as initial condition ---
-    const x = try a.alloc(f64, n);
-    defer a.free(x);
+    const x = try scratch.alloc(f64, n);
+    defer scratch.free(x);
     simdCopy(x, x_op);
 
     const gamma = opts.gamma orelse opts.t_stop / 1000.0;
@@ -578,8 +583,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     ckt.eval(x, 0);
 
     // --- Build (C + γG) combined values and factor ---
-    const combined_vals = try a.alloc(f64, ckt.nnz + 1);
-    defer a.free(combined_vals);
+    const combined_vals = try scratch.alloc(f64, ckt.nnz + 1);
+    defer scratch.free(combined_vals);
 
     if (ckt.has_charge) {
         buildCombinedVals(ckt.nnz, ckt.g_vals, ckt.c_vals, gamma, combined_vals);
@@ -597,19 +602,19 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (ckt.nnz < combined_vals.len) combined_vals[ckt.nnz] = 0;
 
     // Factor (C + γG) — ONE factorization for the entire simulation
-    var slv = try Solver.init(a, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
+    var slv = try Solver.init(scratch, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer slv.deinit();
     try slv.factor(combined_vals);
 
     // --- Collect transition spots ---
-    var ts = try collectTransitionSpots(a, ckt, opts.t_stop);
-    defer ts.deinit(a);
+    var ts = try collectTransitionSpots(scratch, ckt, opts.t_stop);
+    defer ts.deinit(scratch);
 
     // --- Allocate Krylov workspace ---
     // V_basis: n * (m_max+1) column-major
     const v_basis_size = n * (m_max_usize + 1);
-    const V_basis = try a.alloc(f64, v_basis_size);
-    defer a.free(V_basis);
+    const V_basis = try scratch.alloc(f64, v_basis_size);
+    defer scratch.free(V_basis);
 
     // H: m_max * m_max row-major, plus one subdiagonal row. The final
     // non-breakdown Arnoldi iteration (j == m_max-1) writes the subdiagonal
@@ -617,48 +622,48 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // m_max*m_max allocation; nothing reads it, but the store has to land
     // somewhere we own.
     const h_size = m_max_usize * m_max_usize;
-    const H_mat = try a.alloc(f64, h_size + m_max_usize);
-    defer a.free(H_mat);
+    const H_mat = try scratch.alloc(f64, h_size + m_max_usize);
+    defer scratch.free(H_mat);
 
     // Scratch for Arnoldi: 2*n
-    const arnoldi_tmp1 = try a.alloc(f64, n);
-    defer a.free(arnoldi_tmp1);
-    const arnoldi_tmp2 = try a.alloc(f64, n);
-    defer a.free(arnoldi_tmp2);
+    const arnoldi_tmp1 = try scratch.alloc(f64, n);
+    defer scratch.free(arnoldi_tmp1);
+    const arnoldi_tmp2 = try scratch.alloc(f64, n);
+    defer scratch.free(arnoldi_tmp2);
 
     // Padé(6) needs 5*m*m scratch; H_copy and expm_out are separate below.
-    const expm_scratch = try a.alloc(f64, @max(5 * h_size, 1));
-    defer a.free(expm_scratch);
+    const expm_scratch = try scratch.alloc(f64, @max(5 * h_size, 1));
+    defer scratch.free(expm_scratch);
 
     // Small expm output: m_max * m_max
-    const expm_out = try a.alloc(f64, h_size);
-    defer a.free(expm_out);
+    const expm_out = try scratch.alloc(f64, h_size);
+    defer scratch.free(expm_out);
 
     // Small H copy for expm
-    const H_copy = try a.alloc(f64, h_size);
-    defer a.free(H_copy);
+    const H_copy = try scratch.alloc(f64, h_size);
+    defer scratch.free(H_copy);
 
     // Temporary vectors for the step update
-    const b_t = try a.alloc(f64, n); // b(t) = source RHS at time t
-    defer a.free(b_t);
-    const b_th = try a.alloc(f64, n); // b(t+h) = source RHS at time t+h
-    defer a.free(b_th);
-    const v_vec = try a.alloc(f64, n); // the vector to exponentiate
-    defer a.free(v_vec);
-    const x_new = try a.alloc(f64, n); // next state
-    defer a.free(x_new);
+    const b_t = try scratch.alloc(f64, n); // b(t) = source RHS at time t
+    defer scratch.free(b_t);
+    const b_th = try scratch.alloc(f64, n); // b(t+h) = source RHS at time t+h
+    defer scratch.free(b_th);
+    const v_vec = try scratch.alloc(f64, n); // the vector to exponentiate
+    defer scratch.free(v_vec);
+    const x_new = try scratch.alloc(f64, n); // next state
+    defer scratch.free(x_new);
 
     // PWL integral scratch vectors
-    const ainv_bt = try a.alloc(f64, n); // A⁻¹·b(t)
-    defer a.free(ainv_bt);
-    const ainv_bth = try a.alloc(f64, n); // A⁻¹·b(t+h)
-    defer a.free(ainv_bth);
-    const ainv2_db = try a.alloc(f64, n); // A⁻²·(b(t+h)-b(t))/h
-    defer a.free(ainv2_db);
-    const db_vec = try a.alloc(f64, n); // (b(t+h)-b(t))/h
-    defer a.free(db_vec);
-    const pwl_tmp = try a.alloc(f64, n); // scratch for approxAinvMul
-    defer a.free(pwl_tmp);
+    const ainv_bt = try scratch.alloc(f64, n); // A⁻¹·b(t)
+    defer scratch.free(ainv_bt);
+    const ainv_bth = try scratch.alloc(f64, n); // A⁻¹·b(t+h)
+    defer scratch.free(ainv_bth);
+    const ainv2_db = try scratch.alloc(f64, n); // A⁻²·(b(t+h)-b(t))/h
+    defer scratch.free(ainv2_db);
+    const db_vec = try scratch.alloc(f64, n); // (b(t+h)-b(t))/h
+    defer scratch.free(db_vec);
+    const pwl_tmp = try scratch.alloc(f64, n); // scratch for approxAinvMul
+    defer scratch.free(pwl_tmp);
 
     // --- Waveform recording ---
     const n_probes: u32 = @intCast(ctx.probes.len);
@@ -667,7 +672,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         @as(f64, opts.max_points),
     ));
     // ponytail: waveform storage needs only the data leaf, not the tran driver.
-    var wf = try @import("types.zig").Waveform.init(a, n_probes, est_points);
+    var wf = try @import("types.zig").Waveform.init(scratch, n_probes, est_points);
     defer wf.deinit();
 
     try wf.record(0, x, ctx.probes);
@@ -678,8 +683,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var steps: u32 = 0;
 
     // Save C values for matvec in Arnoldi (they get overwritten by eval)
-    const c_vals_saved = try a.alloc(f64, ckt.nnz + 1);
-    defer a.free(c_vals_saved);
+    const c_vals_saved = try scratch.alloc(f64, ckt.nnz + 1);
+    defer scratch.free(c_vals_saved);
     if (ckt.has_charge) {
         simdCopy(c_vals_saved[0..ckt.nnz], ckt.c_vals[0..ckt.nnz]);
     } else {

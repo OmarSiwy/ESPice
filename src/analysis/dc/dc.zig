@@ -54,6 +54,9 @@ pub fn solve(
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
+    // `defer`-freed below == scratch; `a` is a results arena that cannot
+    // reclaim it. See RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
 
     // DCOP flavor for the whole sweep, whatever the deck's shared op left
     // behind: a deck with a .tran runs its op in the ic phase, where
@@ -132,10 +135,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         // -----------------------------------------------------------------------
         if (ckt.gpu_hook) |gh| if (gh.solve_batch != null) {
             const n: usize = ckt.n;
-            const x_lanes = try a.alloc(f64, npoints * n);
-            defer a.free(x_lanes);
-            const results = try a.alloc(converger.Result, npoints);
-            defer a.free(results);
+            const x_lanes = try scratch.alloc(f64, npoints * n);
+            defer scratch.free(x_lanes);
+            const results = try scratch.alloc(converger.Result, npoints);
+            defer scratch.free(results);
 
             var lane_ctx: LaneCtx = .{ .source = t, .start = opts.start, .step = opts.step };
             const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
@@ -151,7 +154,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
                 break :fill;
             }
         };
-        try runSerial(ctx, ckt, a, t, opts, npoints, ncols, data);
+        try runSerial(ctx, ckt, scratch, t, opts, npoints, ncols, data);
     }
 
     return .{

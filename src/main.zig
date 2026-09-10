@@ -2,6 +2,7 @@ const std = @import("std");
 const engine = @import("engine.zig");
 const gpu_context = @import("gpu_context.zig");
 const vaload = @import("devices").vaload;
+const memstats = @import("memstats");
 const build_options = @import("build_options");
 const rawfile = @import("output/rawfile.zig");
 const ascii_raw = @import("output/ascii_raw.zig");
@@ -67,11 +68,14 @@ pub fn main(init: std.process.Init) !u8 {
     // jobs, results — lives per-deck until the writers finish.
     var parse_arena_state = std.heap.ArenaAllocator.init(init.gpa);
     defer parse_arena_state.deinit();
-    const arena = parse_arena_state.allocator();
+    // Both arenas are wrapped so ZP_MEM_STATS can charge every table to the
+    // phase that asked for it; `track` is the identity when the variable is
+    // unset. See src/mem_stats.zig for what the columns mean on an arena.
+    const arena = memstats.track(parse_arena_state.allocator());
 
     var sim_arena_state = std.heap.ArenaAllocator.init(init.gpa);
     defer sim_arena_state.deinit();
-    const sim_arena = sim_arena_state.allocator();
+    const sim_arena = memstats.track(sim_arena_state.allocator());
 
     var it = init.minimal.args.iterate();
     _ = it.skip();
@@ -189,6 +193,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     var any_ran = false;
     for (opts.deck_paths[0..opts.n_decks]) |path| {
+        // The parse arena is live until `fromNetlist` returns (see the reset
+        // below), so this row and the setup rows overlap in RSS by design.
+        const parse_row = memstats.enter("parse: source + AST");
         const src = (if (opts.tokenizer == .spectre)
             std.Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited)
         else
@@ -202,6 +209,8 @@ pub fn main(init: std.process.Init) !u8 {
             .hspice => Parser(hspice).parse(arena, src),
             .spectre => Parser(spectre).parse(arena, src),
         } catch return skip(io, "parse error");
+        memstats.scaleBy("parse: source + AST", nl.devices.len());
+        memstats.leave(parse_row);
 
         // Foreign HDL (.hdl cards): compile + dlopen at runtime (cached by
         // content hash — first load pays a model compile, never again).
@@ -247,6 +256,7 @@ pub fn main(init: std.process.Init) !u8 {
             // cuda/hip this BINARY cannot honour was already rejected above;
             // gpu_explicit makes a MACHINE that cannot honour it (absent
             // device/driver) a hard error in run(), and turns the work gate off.
+            const setup_row = memstats.enter("setup: engine + jobs");
             var sim = engine.Simulation.fromNetlist(sim_arena, arena, nl, io, .{
                 .gpu = opts.backend != .cpu,
                 .gpu_explicit = opts.gpu_explicit,
@@ -255,6 +265,7 @@ pub fn main(init: std.process.Init) !u8 {
                 return skip(io, @errorName(e));
             };
             defer sim.deinit();
+            memstats.leave(setup_row);
 
             // fromNetlist owns every surviving value; release parse scratch now.
             _ = parse_arena_state.reset(.free_all);
@@ -297,11 +308,14 @@ pub fn main(init: std.process.Init) !u8 {
             };
             var run_err: ?anyerror = null;
             var streamed_points: ?usize = null;
+            const run_row = memstats.enter("run: solve + results");
             if (std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, Runner.run, .{ &sim, io, stream_path, &streamed_points, &run_err })) |th| {
                 th.join();
             } else |_| {
                 Runner.run(&sim, io, stream_path, &streamed_points, &run_err);
             }
+            memstats.leave(run_row);
+            memstats.report();
             if (run_err) |e| {
                 std.debug.print("Engine error: {s}\n", .{@errorName(e)});
                 return skip(io, @errorName(e));
