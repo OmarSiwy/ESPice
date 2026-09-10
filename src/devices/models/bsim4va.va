@@ -41,7 +41,12 @@ Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)
 // [flatten] annex D `include "disciplines.vams" — supplied by FastVAF
 // [flatten] annex D `include "constants.vams" — supplied by FastVAF
 
-`define DEFAULT_TNOM 25
+// SPICE's `.options tnom` default is 27 degC (ngspice b4set.c:1950 assigns
+// CKTnomTemp when the card omits TNOM), and every other model here already
+// spells 27. The upstream Cogenda file said 25, which put the whole BSIM4
+// parameter set 2 K off nominal: phi/vth0 shifted +1.5 mV and u0 picked up a
+// (T/Tnom)^ute factor, costing ~4.9% of the subthreshold current.
+`define DEFAULT_TNOM 27
 `define N_MINLOG 1.0e-38
 
     `define INITIAL_INSTANCE
