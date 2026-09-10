@@ -65,6 +65,14 @@ pub const RunCtx = struct {
     probe_labels: []const []const u8 = &.{},
     source_node: u32,
     source_branch: u32,
+    /// Composite AC excitation over the circuit unknowns, stacked real:
+    /// `[re(0..n), im(0..n)]`, length `2 * circuit.n`. Every source card
+    /// carrying an `AC mag [phase]` contributes to it (builder.zig
+    /// `acExcitation`), so an .ac sweep is one solve per frequency against the
+    /// whole deck's drive — the SPICE semantics, not a unit poke at one branch.
+    /// Empty (hand-built contexts) reads as "no source named AC", which is a
+    /// zero response — the same answer ngspice gives such a deck.
+    ac_drive: []const f64 = &.{},
     allocator: std.mem.Allocator,
     /// Reclaimable work storage when allocator retains the final results in an arena.
     scratch_allocator: ?std.mem.Allocator = null,

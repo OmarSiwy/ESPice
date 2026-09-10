@@ -17,18 +17,20 @@ pub const Options = struct {
     points_per_decade: u16 = 10,
 };
 
-/// AC small-signal sweep. Excitation goes on the source vsource's BRANCH row
-/// (its branch equation is v_p - v_n - V = 0, so rhs[branch] = V_ac); driving
-/// the clamped node row instead yields identically zero response.
+/// AC small-signal sweep against `exc`, the whole deck's excitation: a
+/// stacked-real `[re(0..n), im(0..n)]` vector over the circuit unknowns, built
+/// once from every source card carrying an `AC` spec (builder.zig
+/// `acExcitation`). A V card lands on its BRANCH row — its branch equation is
+/// v_p - v_n - V = 0, so rhs[branch] = V_ac, and driving the clamped node row
+/// instead yields identically zero response — an I card on its two node rows.
+/// An empty `exc` is a deck with no AC source: zero excitation, zero response.
 ///
 /// Caller owns the output: freqs[n_points], resp[probes.len * n_points]
 /// flat, probe-major (resp[p * n_points + k]). No per-point allocation.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
-    ac_branch: u32,
-    ac_mag: f64,
-    ac_phase_deg: f64,
+    exc: []const f64,
     probes: []const u32,
     freqs: []f64,
     resp: []Complex,
@@ -39,6 +41,7 @@ pub fn sweep(
     const nn = 2 * n;
     const n_points = freqs.len;
     std.debug.assert(resp.len == probes.len * n_points);
+    std.debug.assert(exc.len == nn or exc.len == 0);
 
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
     defer fs.deinit(allocator);
@@ -47,9 +50,7 @@ pub fn sweep(
     defer allocator.free(rhs);
 
     root.zeroSimd(rhs);
-    const phase_rad = ac_phase_deg * (std.math.pi / 180.0);
-    rhs[ac_branch] = ac_mag * @cos(phase_rad);
-    rhs[n + ac_branch] = ac_mag * @sin(phase_rad);
+    if (exc.len == nn) @memcpy(rhs, exc);
 
     // All freq points are independent (G+jωC)x=rhs solves over one shared rhs:
     // lane axis = frequency. GPU batch dispatch orelse the CPU lane solveBatch.
@@ -75,9 +76,9 @@ pub fn sweep(
     }
 }
 
-/// Contract entry: unit excitation on the first source branch, complex
-/// response at every probe. Data layout: point-major (freq, probes...) with
-/// (re, im) per variable.
+/// Contract entry: the deck's own excitation (every `AC`-carrying source at
+/// its own magnitude and phase), complex response at every probe. Data layout:
+/// point-major (freq, probes...) with (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     // Everything `defer`-freed here is scratch by construction, and
@@ -94,7 +95,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const resp = try scratch.alloc(Complex, ctx.probes.len * n_points);
     defer scratch.free(resp);
 
-    try sweep(ctx.circuit, x_op, ctx.source_branch, 1.0, 0.0, ctx.probes, freqs, resp, opts, scratch);
+    try sweep(ctx.circuit, x_op, ctx.ac_drive, ctx.probes, freqs, resp, opts, scratch);
 
     const names = try root.probeNames(ctx, "frequency");
     errdefer {

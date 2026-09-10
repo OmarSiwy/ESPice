@@ -73,6 +73,8 @@ pub const Simulation = struct {
     probe_labels: []const []const u8,
     source_node: u32,
     source_branch: u32,
+    /// Composite AC excitation over the circuit unknowns — see RunCtx.ac_drive.
+    ac_drive: []const f64,
     /// Duped into sim_arena: read at output time, after the parse arena is gone.
     title: []const u8,
     n_devices: u32,
@@ -207,6 +209,8 @@ pub const Simulation = struct {
         }.f;
         for (nb.v_branches[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
         for (nb.l_branches[0..nb.n_l]) |*v| v.* = mapNode(perm, v.*);
+        for (nb.ac_pos[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
+        for (nb.ac_neg[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
         nb.source_node = mapNode(perm, nb.source_node);
         nb.source_branch = mapNode(perm, nb.source_branch);
         for (dir_nodes) |*v| {
@@ -226,6 +230,10 @@ pub const Simulation = struct {
 
         sim.source_node = nb.source_node;
         sim.source_branch = nb.source_branch;
+        // Every `AC`-carrying source collapsed into ONE excitation vector, in
+        // post-permutation coordinates. Built here rather than per analysis
+        // because it is deck data, not analysis data.
+        sim.ac_drive = try nb.acExcitation(sim_arena, sim.circuit.n);
 
         // Sources are parse-arena scratch; resolved into job indices below and
         // never stored on `sim`.
@@ -384,6 +392,7 @@ pub const Simulation = struct {
             .probe_labels = self.probe_labels,
             .source_node = self.source_node,
             .source_branch = self.source_branch,
+            .ac_drive = self.ac_drive,
             // Results land in the output-lifetime arena. Stable now (self is
             // pinned), so taking .allocator() no longer dangles.
             .allocator = self.results_arena.allocator(),
