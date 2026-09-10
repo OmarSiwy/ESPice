@@ -782,6 +782,7 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
     const has_limit = comptime @hasDecl(D, "limit");
     const S = DualFor(n_u, jacFloat(D), @hasDecl(D, "collapse"));
     const use_lim = if (comptime has_limit) limiting else false;
+    const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
     const jac_pat = comptime rowPattern(D, "jac_pattern");
     const q_pat = comptime rowPattern(D, "q_pattern");
     // BRANCHLESS GROUND on the host. A ground row/column already resolves to
@@ -808,7 +809,12 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
             active[u] = gi != GROUND;
             const xg = sink.x(gi);
             lx[u] = xg;
-            if (use_lim) {
+            // ONLY the unknowns `limit` can write have a limited image. The
+            // rest were never corrected, so `lim_x` held a copy of `x` and
+            // `corr` a structural zero — read `x` and leave the lane at the
+            // `@splat(0)` it was born with, which also shrinks both reductions
+            // below to the live lanes.
+            if (use_lim and comptime (lim_writes >> u) & 1 != 0) {
                 const l = sink.lim(id, u);
                 lx[u] = l;
                 corr[u] = xg - l;
@@ -969,25 +975,58 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
     }
 }
 
-/// SPICE-style limiting pass: cur = local(x); old = lim (once engaged) else
-/// local(x_old); lim = D.limit(cur, old). Returns 1.0 if any instance reported
-/// `converged = false` — the DEVICE decides whether its clamp was significant
-/// enough to force another Newton iteration (pnjlim says yes, a cosmetic
-/// fetlim/limvds clamp says no). This replaces the old `limit_flag_unknowns`
-/// table, which could only answer that positionally and so could not tell a
-/// large clamp from a small one on the same unknown.
+/// SPICE-style limiting pass: cur = local(x); old = lim (on the unknowns the
+/// device corrects, once engaged) else local(x_old); lim = D.limit(cur, old).
+/// Returns 1.0 if any instance reported `converged = false` — the DEVICE
+/// decides whether its clamp was significant enough to force another Newton
+/// iteration (pnjlim says yes, a cosmetic fetlim/limvds clamp says no). This
+/// replaces the old `limit_flag_unknowns` table, which could only answer that
+/// positionally and so could not tell a large clamp from a small one on the
+/// same unknown.
+///
+/// THE ONE PLACE THIS IS NOT BIT-NEUTRAL, stated rather than buried: an
+/// unknown the device READS but never WRITES now takes its previous value from
+/// `x_old` instead of from the copy `lim_x` used to carry. Those are the same
+/// number on every path where `postStep` runs once per `x_old` update — every
+/// CPU path, because `finalizeStep` latches `x_old = x` immediately before
+/// `x += dx`. `newton_core`'s monotone-residual retreat calls `postStep` a
+/// SECOND time against the same `x_old`, so there the two differ; it is
+/// `backtrack = true`, which both CPU envs set false (converger.zig:351,
+/// newton_core.zig:417) and only a GPU solve turns on.
 fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) f64 {
     const n_u = comptime contract.nU(D);
+    // The device's own live sets. A MOS ladder reads four of eight unknowns
+    // and writes two: `d`, `s` and the two branch-flow unknowns are gathered,
+    // copied through `limit`'s frame and stored back into `lim_x` to arrive at
+    // the value they already had. ngspice keeps its limiter memory as the
+    // three BRANCH voltages in `CKTstate0` and has no such traffic; these two
+    // masks are how a `[n_u]f64` ABI gets the same result. Absent (a
+    // hand-written device), both read as ALL and the walk is the old one.
+    const reads = comptime contract.limitReads(D);
+    const writes = comptime contract.limitWrites(D);
     var flag: f64 = 0;
     var id: u32 = first;
     while (id < end) : (id += 1) {
+        // Lanes outside `reads` stay undefined and that is sound, not sloppy:
+        // `limit` does not read them by the mask's construction, and the only
+        // thing they can reach is `lm.x[u]` for a `u` outside `writes`, which
+        // the scatter below drops. Nothing undefined reaches a stored value.
         var cur: [n_u]f64 = undefined;
         var old: [n_u]f64 = undefined;
-        inline for (0..n_u) |u| {
+        inline for (0..n_u) |u| if (comptime (reads >> u) & 1 != 0) {
             const gi = sink.gath(id, u);
             cur[u] = sink.x(gi);
-            old[u] = if (lim_active) sink.lim(id, u) else sink.xOld(gi);
-        }
+            // `lim_x` only ever held a limited value on `writes`. Elsewhere it
+            // held this pass's own copy of `x` from the PREVIOUS iterate —
+            // which is `x_old` now, bit for bit: `finalizeStep` takes
+            // `x_old = x` before it applies `dx`, so the x this pass saw last
+            // time is the x_old it is handed this time. So read it from there
+            // and stop maintaining a second copy.
+            old[u] = if (lim_active and comptime (writes >> u) & 1 != 0)
+                sink.lim(id, u)
+            else
+                sink.xOld(gi);
+        };
         // NOT `@call(.always_inline, ...)`, and that is measured, not an
         // oversight. `limit`'s contract signature is `[n_u]f64` BY VALUE twice
         // in and a `LimitResult(n_u)` out, so a real call boundary here would
@@ -1006,7 +1045,9 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         // Inlining questions need two builds.
         const lm = D.limit(sink.model(id), sink.inst(id), cur, old);
         if (!lm.converged) flag = 1;
-        inline for (0..n_u) |u| sink.setLim(id, u, lm.x[u]);
+        inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
+            sink.setLim(id, u, lm.x[u]);
+        };
     }
     return flag;
 }
@@ -1109,7 +1150,14 @@ pub fn ProtoStore(comptime D: type) type {
                 store.attempt_saved = false;
             }
             if (comptime @hasDecl(D, "limit")) {
+                // ZEROED, and the layout stays full width. Only the
+                // `limit_writes` slots are ever written or read now, but
+                // gpu_context uploads the whole plane, and uploading bytes
+                // nothing ever wrote is how a clean run grows a valgrind
+                // report. Keeping the stride at n_u keeps the scatter-tape
+                // ABI and `layout_hash` untouched.
                 store.lim_x = try gpa.alloc(f64, count * n_u);
+                @memset(store.lim_x, 0);
                 store.lim_active = false;
             }
             store.instances = try gpa.dupe(D.Instance, self.instances.items);
@@ -1309,11 +1357,14 @@ pub fn DeviceBatch(comptime D: type) type {
         fn seedFn(ctx: *anyopaque, x: []f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             if (comptime has_limit) {
+                // Same live set `limitRange` maintains — a slot outside it is
+                // never read back, so seeding it would only go stale.
+                const writes = comptime contract.limitWrites(D);
                 for (0..self.count) |id| {
                     const sv = D.seed(&self.models[id], &self.instances[id]);
-                    const xn = self.localX(x, id);
-                    inline for (0..n_u) |u|
-                        self.lim_x[id * n_u + u] = sv[u] orelse xn[u];
+                    inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
+                        self.lim_x[id * n_u + u] = sv[u] orelse x[self.gath[id * n_u + u]];
+                    };
                 }
                 self.lim_active = true;
             }
@@ -1987,13 +2038,22 @@ pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
             var cur: [n_u]f64 = undefined;
             inline for (0..n_u) |u| cur[u] = xs[gath[id * n_u + u]];
             if (comptime has_limit) {
+                // Same live sets as `limitRange`, and they have to be: host
+                // and device share ONE `lim_x` plane, so a slot one side
+                // stopped maintaining is one the other must stop reading.
+                const writes = comptime contract.limitWrites(D);
                 const inst_c: *const D.Instance = @addrSpaceCast(&instances[id]);
                 var old: [n_u]f64 = undefined;
-                inline for (0..n_u) |u|
+                inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
                     old[u] = if (lim_active != 0) lim[id * n_u + u] else x_old[gath[id * n_u + u]];
+                } else {
+                    old[u] = x_old[gath[id * n_u + u]];
+                };
                 const lm = D.limit(model, inst_c, cur, old);
                 if (!lm.converged) flag |= 1;
-                inline for (0..n_u) |u| lim[id * n_u + u] = lm.x[u];
+                inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
+                    lim[id * n_u + u] = lm.x[u];
+                };
             }
             if (comptime has_state) {
                 const inst_m: *D.Instance = @addrSpaceCast(&instances[id]);

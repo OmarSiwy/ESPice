@@ -38,6 +38,13 @@ previously recorded — it is slower by a deck-dependent **8.8% (pi100), 12.5%
 flatters us by more on exactly the decks where the margin is thin. mos6 against
 ngspice's fastest build is the only remaining loss and it is **4.0%**.
 
+**Since**, on the `limit-body` branch (item 2 below): pi100 **433,940,840**
+(ratio 0.779 PATH / 0.846 from-source), mos6 **146,039,892** (0.878 / 0.981) —
+so mos6 is no longer a loss against ngspice's fastest build either. Both
+measured on 446268a + VerA a19b6fb as the baseline, which reads 466,358,459 /
+153,736,881 for the same decks (446268a adds a checkpoint commit over the
+6e55e74 the table above was taken on).
+
 Session arc on pi100: 754.9M → 466.4M (−38.2%).
 
 Two espice rows moved since these were last written and it is not measurement
@@ -270,31 +277,34 @@ Live sub-items:
   junction diode (~2x the flops, deliberately — the tangent continuation).
   Transcendental count and cost are at parity.
 
-### 2. Limiting — 207 Ir per instance per iterate, on both decks
+### 2. Limiting — DONE. `docs/perf/limiting-2026-09-10.md`
 
-ngspice's whole limiter ladder is 52. Re-measured 2026-09-10: the whole pass is
-56.17M / 12.04% on pi100 and 15.48M / 10.07% on mos6, and it costs the same 207
-Ir per MOSFET per Newton iterate on both — the pass is model-independent, which
-says the cost is scaffolding, not the clamp. The clamp leaf itself (branch-free
-FP, no calls, `zPnjlim`/`zFetlim`/`zLimvds` fast paths) is 18.8 Ir on pi100 and
-17.4 on mos6, i.e. **9% of the pass**; the other 188 Ir is the generated
-`limit()` scaffolding and the per-unknown gather/write.
+Was 291 Ir per instance per iterate against ngspice's 52. Itemised there
+against ngspice's own `mos1load` ladder compiled in the same rig, and three
+fixes landed (ARPice `limit-body` + VerA `limit-body-vera` 248c0c6): the
+limiter kernels are now `inline` transparent-test wrappers over `noinline`
+clamp ladders (`zFetlim` had been too big for LLVM to inline AT ALL — a real
+`call` with six caller-saved spills), `cg_limit` hoists the frame sign, and
+VerA exports `limit_reads` / `limit_writes` so the host gathers and stores only
+the unknowns the device actually corrects (mos1: four of eight read, two of
+eight written). **pi100 466.4M → 433.9M (−6.95%), mos6 153.7M → 146.0M
+(−5.01%), NR iterations unchanged at 1352 / 884, 248 of 248 fixture raws
+byte-identical.**
 
-The old probe split below was taken when the whole pass was 269 Ir/instance/
-iterate, so its ratios no longer apply to today's 207 — the mechanism does.
-Probe passes isolated it then: an extra gather cost 2.13%, an extra `D.limit`
-cost **14.64%** — the body was ~79% of limiting, the gather was not the problem,
-and the second read in `evalRange` is under 1% because `corr_live` already needs
-those loads.
+The pass cost the same 207 Ir per MOSFET per Newton iterate on BOTH decks
+before this landed, which is what identified the target: a model-independent
+cost is scaffolding, not physics. The clamp leaf itself — branch-free FP, no
+calls — was 18.8 Ir on pi100 and 17.4 on mos6, i.e. **9% of the pass**.
 
-`zPnjlim` (7dd74a0) and `zFetlim`/`zLimvds` (baccc5a) now have host fast paths.
-What remains is the generated `limit()` scaffolding and the per-unknown
-gather/write around it.
+Left there deliberately: we run TWO `pnjlim` calls where ngspice runs one and
+derives the other by subtraction (≈22 Ir — but it changes which iterates Newton
+accepts, so it is a convergence change, not an optimisation), and `limit` still
+returns `[n_u]f64`.
 
+Retired experiments, still retired:
 **Fusing the two walks is worth 2.1% and is not separable from clamp ordering**
 — with `lim_active` true, `old` is read from `lim_x`, which the pass itself
 writes. Doubling the pass changes the raw output; that is the hazard, concretely.
-
 `@call(.always_inline, D.limit, ...)` is a **regression**: +0.28% pi100,
 +0.20% mos6, verified with two builds.
 
