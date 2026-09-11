@@ -920,6 +920,44 @@ The 2- and 4-thread rows ran at a load of 130-215 and are noisy; the
 150 the columns form a chain and every step is a handoff; the admission
 bar of 300 sits between the last loss and the first win.
 
+Re-measured for #141 on the post-layout PSP103 chains (`gen.py chain
+psp103`, `.tran` cut to 100 ps at 10k and 50 ps `uic` above), 8 threads
+forced on with `ESPICE_LU_PAR=1` against the serial refactor, at a load
+of 13-25 on the 32-thread i9-14900HX (19-40 for the 10k row), factor time summed over the
+transient:
+
+| deck | n | F | F/n | serial | 8 thr | ratio | RSS serial / 8 thr |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| chain_psp103_10k | 125k | 4.5M | 36 | 1.88-2.45 s | 4.34-4.63 s | 0.43-0.53x | |
+| chain_psp103_100k | 1.25M | 107M | 85 | 33.6 s | 42.0 s | 0.80x | 1.9 / 3.6 GB |
+| chain_psp103_300k | 3.74M | 734M | 196 | 124.5 s | 137.9 s | 0.90x | 5.6 / 14.4 GB |
+
+The same pass on the 1k-10k decks reproduced the table above
+(logic_bsim4_1k 1.8x, sram_bsim4_10k 2.6x, logic_psp103_1k 1.03x,
+ring_bsim4_10k 0.80x, chain_bsim4_10k 0.53x). The ratio climbs with F/n
+and crosses 1 between 152 and 445, so the bar of 300 stays; no post-layout
+chain reaches it, and the 300k one would also need its 2.9 GB of tables
+on top of a 5.6 GB run. Two reshapes were tried and retired:
+
+- **Runs instead of steps.** A ticket took a run of consecutive pivot steps
+  of equal cost (64 to 16k runs), so a chain inside a run never hands off
+  between threads. Bitwise the same, and it lost everywhere it was tried:
+  chain_psp103_10k 2.62-3.55 s (serial 1.43-1.76 s at that load), sram_bsim4_10k
+  43.8 s against 14.3 s, logic_bsim4_1k 3.6 s against 1.9 s. Only the
+  thinnest chains gained (chain_bsim4_10k 4.87 against 5.26 s), still
+  below serial (2.65-2.92 s).
+- **Critical-path admission.** The longest dependency chain in the column
+  DAG (each step charged its flops, slots and 16), against the total, does
+  not predict the winners: the decks where 8 threads win have the least
+  column parallelism by that measure (sram_bsim4_10k 1.5, logic_bsim4_1k
+  1.3) and the chains the most (chain_psp103_10k 7.2, 100k 3.2). The
+  stepped kernel overlaps a column with its sources (its poll window), so
+  the column DAG is not its span; F/n stays the test.
+
+What is left for these decks is inside a column: the 100k chain's
+longest column chain carries 31% of its refactor cost, and host threads have
+no cheap way to split one column's updates.
+
 E3 for the host path is below ("E3, host").
 
 E2 also measures the launch strategy, and this part needs no LU kernel:
