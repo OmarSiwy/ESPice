@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- `.ac`, `.noise` and `.tf` on a small circuit with a disabled device branch (HICUM/L2 with RBX, RE and RCX at 0) run instead of failing `Singular` (#160).
 - MOS level 3 and 9 report channel thermal noise; with RD/RS absent only the load resistor's noise was reported (#155).
 - MOS level 2 takes NLEV (default 2) and GDSNOI, so its flicker noise matches ngspice 45 instead of the spice3 form, 670x high on a 10 um device (#156).
 - BSIM2 (LEVEL=5) with RSH = 0 gives the right `.ac`, `.tf` and `.sens` gain; a 1e12 S stand-in short had rounded gds to 1.2e-4 S (#157).

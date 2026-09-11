@@ -187,6 +187,17 @@ ngspice puts it between emitEI and emit (0.9% at 100 MHz), and the VBIC
 physical constants differ from ngspice's (about 1e-6 relative at one zero
 crossing). Both are described under group 5.
 
+HICUM/L2 with RBX = RE = RCX = 0 and tnode left off the card (#160): the
+disabled thermal branch (`Temp(br_sht) <+ 0` at flsh = 0) leaves a void
+unknown, an all-zero row and column. The sparse LU pins it
+(`SparseLu.voidUnknown`); the dense path that AC, noise and `.tf` take at
+n <= 16 now does the same (`dense_lu.pinVoid`, called by `freq_solve.zig`
+and `dc/tf.zig`, not by the BBD blocks, where a zero block row can still
+couple through the border). On `ac/hicum2_collapsed_resistors` ngspice 45's
+.ac gain is -102.174, 2% off its own DC slope (-104.3266, central
+difference at reltol 1e-9); ESPice's AC gives -104.3332, so the deck pins
+the DC slope.
+
 hfet1's own test has a quirk the row test cannot reproduce: its cdhat
 leaves out the -ggdpp*delvgdpp term that its cd carries (hfetload.c:211-216
 against 358-366), a first-order miss on every gate-drain swing that makes

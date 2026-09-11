@@ -42,6 +42,7 @@ pub fn solve(
     defer allocator.free(piv);
 
     ckt.denseG(jac);
+    dense_lu.pinVoid(n, jac);
     try dense_lu.factorize(n, jac, piv);
 
     // A V card drives its own branch row. An I card has no branch row, so the
