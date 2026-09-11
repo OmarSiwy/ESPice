@@ -178,8 +178,10 @@ module mos6(d, g, s, b);
                 end
             end
         end
-        // KC from TOX/U0: note the extra 0.5 relative to MOS1's KP rule.
-        if ($param_given(kc)) kcx = kc;
+        // KC from TOX/U0 (note the extra 0.5 relative to MOS1's KP rule), only
+        // when TOX is given: without it KC keeps its 5e-5 default
+        // (mos6set.c:48, mos6temp.c:60-70, #158).
+        if ($param_given(kc) || coxp == 0.0) kcx = kc;
         else kcx = 0.5 * u0 * coxp * 1e-4;
 
         // ============ temperature scaling (mos1temp.c) =====================

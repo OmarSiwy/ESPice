@@ -97,6 +97,8 @@ module mos2(d, g, s, b);
     // ---- noise ---------------------------------------------------------
     parameter real kf   = 0.0 from [0:inf);      // flicker coefficient
     parameter real af   = 1.0 from (0:inf);      // flicker exponent
+    parameter integer nlev = 2 from [0:3];       // noise model selection
+    parameter real gdsnoi = 1.0 from [0:inf);    // channel shot noise coefficient (NLEV=3)
 
     // ---- temperature ---------------------------------------------------
     parameter real tnom = $simparam("tnom");     // parameter reference [degC]
@@ -110,6 +112,7 @@ module mos2(d, g, s, b);
     real gmaold, gmanew, cfb, cfsw;
     real phix, vtox, fermis, fermig, wkfng, wkfngs, vfb;
     real coxp, cox, kpt, gammax, nsub_si, xd, leff, weff, beta0;
+    real sid, alphan, fln;
     real factor, eta, ucrit_term, gdrain, gsource, isats, isatd;
     real czbd, czbs, czbdsw, czbssw, cgsov, cgdov, cgbov;
     // bias-dependent
@@ -418,11 +421,8 @@ module mos2(d, g, s, b);
             bargd = sqphit/(1.0 + 0.5*(vbx - vdson)/phit);
         body = bargd*bargd*bargd - sarg3;
         id   = beta*((vgseff - vbin - eta*vdson*0.5)*vdson - gamasd*body/1.5);
-        if ((nfs > 0.0) && (vgsx < von)) begin
+        if ((nfs > 0.0) && (vgsx < von))
             id = id*exp(max((vgsx - von)/(vt*xn), -80.0));
-            gm = id/(vt*xn);                // weak inversion: d/dvgs of the exp
-        end else
-            gm = beta*vdson;                // strong inversion: d(id)/dvgseff
 
         // ============ junction and gate charges ===========================
         qbs = qdep(vbs, czbs, pbt, mj, fc) + qdep(vbs, czbssw, pbt, mjsw, fc);
@@ -537,11 +537,31 @@ module mos2(d, g, s, b);
         else V(s, si) <+ 0.0;
 
         // ============ noise (mos2noi.c) ===================================
-        // A collapsed RD/RS is a short and has no thermal noise.
+        // A collapsed RD/RS is a short and has no thermal noise. Channel
+        // Sid = (2/3)|gm| (NLEV < 3) or the gdsnoi form (NLEV = 3); flicker
+        // per NLEV (mos2noi.c:102-173, #156). gm and id carry m, as MOS2gm and
+        // MOS2cd do. The KF*|id|^AF/(W L Cox'^2) form was ngspice's compat-s3
+        // branch only.
         if (gdrain > 0.0) I(d, di) <+ white_noise(4.0*kb*tk*gdrain, "rd");
         if (gsource > 0.0) I(s, si) <+ white_noise(4.0*kb*tk*gsource, "rs");
-        I(di, si) <+ white_noise(4.0*kb*tk*(2.0/3.0)*abs(gm), "channel");
-        I(di, si) <+ flicker_noise(kf*pow(abs(id), af)
-                                   /(weff*m*leff*coxp*coxp), 1.0, "flicker");
+        // gm from the same AD as the Jacobian (noisePsd runs on eval's
+        // family, #119). The old beta*vdson left out ufact's and vbin's
+        // slope: the thermal floor sat 0.25% off ngspice's.
+        gm = abs(ddx(id, V(g)));
+        if (nlev < 3) sid = 2.0/3.0*gm;
+        else if (vgst > 0.0) begin
+            if (vgst <= vdsx) alphan = 0.0;
+            else alphan = 1.0 - vdsx/vdsat;
+            sid = 2.0/3.0*beta0*vgst*(1.0 + alphan + alphan*alphan)/(1.0 + alphan)*gdsnoi;
+        end else sid = 0.0;
+        I(di, si) <+ white_noise(4.0*kb*tk*sid, "channel");
+        if (nlev == 0)
+            fln = kf*m*pow(abs(id)/m, af)/(leff*leff*coxp);
+        else if (nlev == 1)
+            fln = kf*m*pow(abs(id)/m, af)/(weff*leff*coxp);
+        else
+            fln = kf*gm*gm/(m*weff*leff*coxp);
+        // NLEV 0/1: 1/f; NLEV 2/3: 1/f^AF.
+        I(di, si) <+ flicker_noise(fln, (nlev < 2) ? 1.0 : af, "flicker");
     end
 endmodule

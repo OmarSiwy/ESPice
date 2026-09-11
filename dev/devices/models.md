@@ -177,11 +177,26 @@ current deck status is what `zig build test` reports.
 | bsim4va | DEVfetlim/DEVlimvds/DEVpnjlim on vgs, vds and the vbs/vbd rung (bsim3.va's `$limit` ladder), MODEINITJCT seeds vgs = type*vth0 + 0.1, vds = 0.1, vbs = 0, and BSIM4vcrit. Upstream VA had no limiting: at reltol=1e-4 the sky130 OTA buffer's operating point (`regression/ota_buffer_large_step*`) converged on a spurious equilibrium at V(out) = -17.6 V (x86_64-linux-gnu build) or -22.7 V (native), where the zero-area junctions conduct only gmin. Ceiling: fetlim's threshold is the zero-bias vth0, not the previous load's von, and the rbodyMod/rgateMod/rdsMod limits are not ported | b4ld.c MODEINITJCT and limiting block, b4temp.c BSIM4vcrit |
 | hfet1, hfet2 | Gate-charge Jacobian is ag0 * C (`vera_nodiff` on capgs/capgd), so Newton converges linearly as ngspice's does and takes its NR failures | hfetload.c:360-369, hfet2load.c:251-258 |
 | hfet1 | The first transient iterate extrapolates its internal nodes over dt/dt_prev2 (`Hooks.predict_first_iterate`), and Newton does not converge while a current into gp/sp/dp misses its linear prediction from the previous iterate by more than reltol * (branch flow) + abstol (`Circuit.loadCheck`). `tran/device_hfet_inverter` 5615x -> 0.30x | hfetload.c:129, 389-396 |
+| mos6 | KC keeps its 5e-5 default unless TOX is given; only then is it derived as 0.5 * U0 * Cox' * 1e-4. Before, a card with neither KC nor TOX got KC = 0 and never conducted (#158, `op/mos6_default_kc`, ngspice 45) | mos6set.c:48, mos6temp.c:60-70 |
+| bsim2 | RSH * NRD = 0 (and RSH * NRS = 0) collapses the drain (source) node instead of a 1e12 * m stand-in short. The short rounded every drain conductance to ulp(1e12) = 1.2e-4 S in the AC and .tf Jacobian, so with the default RSH = 0 a 10k-loaded stage gave gain -0.392 instead of -0.942 while DC still converged (#157, `ac/bsim2_cs_gain`, ngspice 45, 2e-8 apart) | b2set.c:486-510, b2temp.c:250-258 |
+| mos2 | NLEV (default 2) and GDSNOI as in ngspice 45: flicker KF*gm^2/(m*f^AF*W*Leff*Cox') at NLEV 2/3, KF*m*(Id/m)^AF/(f*Leff^2*Cox') at 0 and /(f*W*Leff*Cox') at 1; channel thermal (2/3)gm, or the GDSNOI form at NLEV 3, with gm = ddx(id, V(g)). The old KF*Id^AF/(f*W*L*Cox'^2) was ngspice's compat-s3 branch: 670x high on the issue's deck (#156, `noise/ngspice_mos2_cs`, 1e-8 from ngspice 45) | mos2noi.c:102-173, mos2set.c:119-124 |
+| mos3, mos9 | Channel thermal noise (2/3)gm with gm = ddx(id, V(g)) inside the noise power, which read 0 until noisePsd ran on eval's family (fed669d1, #119). With RD/RS collapsed only the load was heard: onoise 1.26e-8 against 2.06e-8 (#155, `noise/ngspice_mos3_mos9_channel`). Residual: ngspice's .ac gain on these decks is 0.1% below its own DC finite difference (mos3load.c's hand gm/gds); ESPice's AD gain matches the difference to 1e-6, so input-referred noise sits 0.1% apart | mos3noi.c:102-127, mos9noi.c |
 
 Known open differences: VBIC puts the RBP thermal noise on bp-cx where
 ngspice puts it between emitEI and emit (0.9% at 100 MHz), and the VBIC
 physical constants differ from ngspice's (about 1e-6 relative at one zero
 crossing). Both are described under group 5.
+
+HICUM/L2 with RBX = RE = RCX = 0 and tnode left off the card (#160): the
+disabled thermal branch (`Temp(br_sht) <+ 0` at flsh = 0) leaves a void
+unknown, an all-zero row and column. The sparse LU pins it
+(`SparseLu.voidUnknown`); the dense path that AC, noise and `.tf` take at
+n <= 16 now does the same (`dense_lu.pinVoid`, called by `freq_solve.zig`
+and `dc/tf.zig`, not by the BBD blocks, where a zero block row can still
+couple through the border). On `ac/hicum2_collapsed_resistors` ngspice 45's
+.ac gain is -102.174, 2% off its own DC slope (-104.3266, central
+difference at reltol 1e-9); ESPice's AC gives -104.3332, so the deck pins
+the DC slope.
 
 hfet1's own test has a quirk the row test cannot reproduce: its cdhat
 leaves out the -ggdpp*delvgdpp term that its cd carries (hfetload.c:211-216

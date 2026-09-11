@@ -181,6 +181,20 @@ inline fn subtractColumnDot(n: usize, lu: []const f64, x: []const f64, i: usize,
     return sum;
 }
 
+/// Gives every structurally void unknown (row i and column i all zero) a
+/// unit pivot, as `SparseLu.voidUnknown` does: a compact model's disabled
+/// branch flow (HICUM's `Temp(br_sht) <+ 0` with tnode grounded) is a free
+/// variable, not a singular system, and solves to x_i = b_i (#160). Only
+/// for a whole circuit matrix: a zero row inside a BBD block can still
+/// couple through the border. O(n^2) against the O(n^3) factorization.
+pub fn pinVoid(n: usize, a: []f64) void {
+    outer: for (0..n) |i| {
+        for (a[i * n ..][0..n]) |v| if (v != 0) continue :outer;
+        for (0..n) |r| if (a[r * n + i] != 0) continue :outer;
+        a[i * n + i] = 1;
+    }
+}
+
 /// Carries x through the elimination instead of recording pivots.
 fn factorizeSolveImpl(n: usize, a: []f64, b: []const f64, x: []f64, comptime negate: bool) Error!void {
     assert(a.len >= n * n);
@@ -460,5 +474,44 @@ test "every entry point solves random systems, blocked and unblocked, and agrees
         try testing.expectError(error.Singular, factorize(n, a, piv));
         @memset(a, 0);
         try testing.expectError(error.Singular, factorizeSolve(n, a, b, x));
+    }
+}
+
+test "a void unknown solves to x_i = b_i, blocked and unblocked (#160)" {
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x160);
+    const r = prng.random();
+    for ([_]usize{ 3, 2 * blocked_min + 1 }) |n| {
+        const buf = try gpa.alloc(f64, 2 * n * n + 3 * n);
+        defer gpa.free(buf);
+        const a0 = buf[0 .. n * n];
+        const a = buf[n * n .. 2 * n * n];
+        const b = buf[2 * n * n ..][0..n];
+        const x = buf[2 * n * n + n ..][0..n];
+        const x2 = buf[2 * n * n + 2 * n ..][0..n];
+        const piv = try gpa.alloc(u32, n);
+        defer gpa.free(piv);
+        for (a0, 0..) |*v, k| v.* = if (k / n == k % n) @as(f64, @floatFromInt(n)) else 2 * r.float(f64) - 1;
+        for (b) |*v| v.* = 2 * r.float(f64) - 1;
+        // Unknown 1 appears in no equation and equation 1 holds no unknown.
+        for (0..n) |k| {
+            a0[n + k] = 0;
+            a0[k * n + 1] = 0;
+        }
+        @memcpy(a, a0);
+        try testing.expectError(error.Singular, factorize(n, a, piv));
+        @memcpy(a, a0);
+        pinVoid(n, a);
+        try factorize(n, a, piv);
+        solveFactored(n, a, piv, b, x);
+        @memcpy(a, a0);
+        pinVoid(n, a);
+        try factorizeSolve(n, a, b, x2);
+        try testing.expectEqual(b[1], x[1]);
+        try testing.expectEqual(b[1], x2[1]);
+        // The other equations hold: A x = b with x_1 free.
+        a0[n + 1] = 1;
+        try testing.expect(scaledResidual(n, a0, x, b, false) <= 1e4);
+        try testing.expect(scaledResidual(n, a0, x2, b, false) <= 1e4);
     }
 }

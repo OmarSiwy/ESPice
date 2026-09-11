@@ -55,6 +55,11 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.tran` follows ngspice's step options: `maxord=1` is backward Euler under trap too, and the default tmax is min(tstep, (tstop - tstart)/50) (#56).
 - `.options rshunt=R` adds a resistor from every node to ground, as in ngspice (#11).
 - `.ac dec` ends on `fstop` as ngspice does (`.ac dec 3 10 730` ends at 730), and `lin N f f` is one point (#26).
+- `.ac`, `.noise` and `.tf` on a small circuit with a disabled device branch (HICUM/L2 with RBX, RE and RCX at 0) run instead of failing `Singular` (#160).
+- MOS level 3 and 9 report channel thermal noise; with RD/RS absent only the load resistor's noise was reported (#155).
+- MOS level 2 takes NLEV (default 2) and GDSNOI, so its flicker noise matches ngspice 45 instead of the spice3 form, 670x high on a 10 um device (#156).
+- BSIM2 (LEVEL=5) with RSH = 0 gives the right `.ac`, `.tf` and `.sens` gain; a 1e12 S stand-in short had rounded gds to 1.2e-4 S (#157).
+- A MOS level 6 card with neither KC nor TOX keeps KC = 5e-5 and conducts, as in ngspice (#158).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).
@@ -63,6 +68,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - Third-party compact models are built from their upstream releases, unmodified, pinned by link and hash in `build.zig.zon`: PSP 103.8.2/104.1, JUNCAP2, BSIM-IMG, BSIM-CMG, BSIM-BULK, BSIM-SOI 101.0, L-UTSOI, HiSIM_HV/SOI/SOTB, HICUM/L2 3.2 and L0, Mextram 505.6, ASM-HEMT, ASM-ESD, MVSG, DIODE_CMC, R2/R3_CMC and MOSVAR; new LEVELs 72/76/77/78 (M), 6 (Q, D) and OSDI module names on `.model`.
 - `.noise` reads a `ddx()` inside a Verilog-A noise power (a channel noise's gm) instead of 0: MOS3, MOS9 and JFET2 channel noise now match ngspice (#119).
 - `.hdl` Verilog-A, VerA pin df3bd51d -> 7971b23e: a `$simparam` used as a parameter default answers per LRM 9.15 instead of reading 0 (VerA#51).
+- `.noise` reads a `ddx()` inside a Verilog-A noise power (a channel noise's gm) instead of 0: MOS3, MOS9 and JFET2 channel noise now match ngspice (#119).
 - `.hdl` Verilog-A, VerA pin 53e61b89 -> df3bd51d: `ddx()` inside a noise power reads its partial in
   `noisePsd` (VerA#32), `$port_connected`/`$param_given` may control analog operators (VerA#33).
 - `.hdl` Verilog-A devices with more than 64 unknowns compile and run (dense Jacobian, one

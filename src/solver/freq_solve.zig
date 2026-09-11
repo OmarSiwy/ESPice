@@ -471,6 +471,7 @@ pub const FreqSolver = struct {
                 for (omegas, 0..) |omega, k| {
                     const a = d.held[k * nn * nn ..][0 .. nn * nn];
                     dense_lu.buildComplexAdmittance(self.n, self.nn, d.g_dense, d.c_mat, omega, a);
+                    dense_lu.pinVoid(nn, a);
                     dense_lu.factorize(nn, a, d.held_piv[k * nn ..][0..nn]) catch
                         try self.held_id.append(allocator, @intCast(k));
                 }
@@ -652,6 +653,7 @@ pub const FreqSolver = struct {
             const t = dyn.at(e, k);
             addDense(n, nn, d.a_lu, d.src_row_idx[slot], slotCol(d.src_col_ptr, slot), t.re, t.im);
         }
+        dense_lu.pinVoid(nn, d.a_lu);
         try dense_lu.factorize(nn, d.a_lu, d.piv);
     }
 
