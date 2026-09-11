@@ -9,9 +9,11 @@
 //! ticket in pivot order, waiting on the done stamps of the columns it
 //! reads (release stores, acquire loads). The only read-modify-writes are
 //! the relaxed ticket and the fail word's max, whose result does not depend
-//! on order. The solves run in one block: level by level over rows (a
-//! gather per row) for the sparse head, then a column sweep over the dense
-//! tail, where one row per level would leave every lane but one idle.
+//! on order. The solves' sparse head is sync-free the same way: one block
+//! per run of at most `solve_block` rows of one level, by ticket in level
+//! order, each lane gathering one row after the done stamps of the rows it
+//! reads. The dense tail is a column sweep in one block, where one row per
+//! level would leave every lane but one idle.
 //! std only: the kernel root compiles this file for NVPTX and AMDGCN.
 
 const std = @import("std");
@@ -25,7 +27,8 @@ pub const refactor_block = 64;
 /// bytes a slot); wider columns work in `val`. A 2048-slot scratch (fewer
 /// resident blocks) measured slower in the same E2 runs.
 pub const col_max = 256;
-/// Lanes of the one solve block on the device.
+/// Lanes of a device solve block: the tail sweep's one block, and each
+/// head block's rows.
 pub const solve_block = 256;
 /// Longest solve tail: its y lives in the block's shared memory
 /// (`SolveShared`, 40 KB of the 48 KB a block may declare).
@@ -37,9 +40,9 @@ pub const void_bit: u32 = 1;
 /// (`SparseLu.scaled_pivot`), so the growth monitor skips it.
 pub const scaled_bit: u32 = 2;
 /// u32 words ahead of the done stamps in the sync buffer: the refactor
-/// ticket and the fail word, `n - k` for the lowest failing pivot step k,
-/// 0 when every step passed.
-pub const sync_header = 2;
+/// ticket, the fail word (`n - k` for the lowest failing pivot step k, 0
+/// when every step passed), and the forward and back solves' head tickets.
+pub const sync_header = 4;
 comptime {
     // The column-max reduction halves the lane count down to one.
     assert(std.math.isPowerOfTwo(refactor_block));
@@ -96,10 +99,16 @@ pub const Tab = extern struct {
     /// v (tail rows too, for their head part), `u_rows`/`u_lev` the head
     /// rows of the back solve. Row r's head L entries (k < t0, ascending)
     /// are `l_col`/`l_slot` over `l_ptr[r]..`; its U entries (k
-    /// descending) `u_col`/`u_slot`.
+    /// descending) `u_col`/`u_slot`. A head block takes the rows
+    /// `l_rows[l_chunk[c]..l_chunk[c+1]]` (`u_rows`/`u_chunk` going back):
+    /// at most `solve_block` of them, all of one level.
     t0: u32,
     l_levels: u32,
     u_levels: u32,
+    l_chunks: u32,
+    u_chunks: u32,
+    l_chunk: u32,
+    u_chunk: u32,
     li: u32,
     t_lb: u32,
     t_ub: u32,
@@ -121,15 +130,16 @@ pub const Tab = extern struct {
     /// Length of the index buffer.
     n_idx: u32,
 
-    /// u32 words in the sync buffer: header plus one done stamp per
-    /// column. Zero it once per table upload.
+    /// u32 words in the sync buffer: header plus three done stamps per
+    /// pivot step (refactor, forward row, back row). Zero it once per
+    /// table upload.
     pub fn syncLen(t: Tab) u32 {
-        return sync_header + t.n;
+        return sync_header + 3 * t.n;
     }
 };
 comptime {
     // Passed to every kernel by value: the layout is the device ABI.
-    assert(@sizeOf(Tab) == 168);
+    assert(@sizeOf(Tab) == 184);
 }
 
 /// The kernel bodies over the pointer type `Sy.P` (a global pointer on the
@@ -147,8 +157,8 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
         /// the column's working slots (plus a discard slot) when it has at
         /// most `cap`.
         pub const Shared = struct { k: u32, first: [2]u32, red: [lanes]f64, w: [cap + 1]f64 };
-        /// Solve block scratch: the tail's y.
-        pub const SolveShared = struct { y: [tail_max]f64 };
+        /// Solve block scratch: a head block's ticket, the tail's y.
+        pub const SolveShared = struct { k: u32, y: [tail_max]f64 };
 
         inline fn wait(p: anytype, stamp: u32) void {
             // Ends: the awaited column belongs to an earlier ticket, and a
@@ -357,21 +367,40 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
             return bad;
         }
 
-        /// Forward solve, the whole of it in one block: y = L^-1 P (-rhs),
-        /// each row's subtractions in ascending k, skipping y[k] == 0 as
-        /// `SparseLu.solve` does. `sh` is a `*SolveShared`. Does nothing
-        /// when the refactor failed.
-        pub fn lsolve(t: Tab, x: P(u32), val: P(f64), rhs: P(f64), y: P(f64), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
-            if (sy[1] != 0) return;
-            var v: u32 = 0;
-            while (v < t.l_levels) : (v += 1) {
-                var j = x[t.l_lev + v] + tid;
-                while (j < x[t.l_lev + v + 1]) : (j += nt) {
-                    const r = x[t.l_rows + j];
-                    y[r] = gather(-rhs[x[t.perm_in + r]], x, val, y, t.l_col, t.l_slot, x[t.l_ptr + r], x[t.l_ptr + r + 1]);
-                }
-                Sy.barrier();
+        /// Forward solve: y = L^-1 P (-rhs), each row's subtractions in
+        /// ascending k, skipping y[k] == 0 as `SparseLu.solve` does. The
+        /// host form: every head ticket, then the tail. `sh` is a
+        /// `*SolveShared`. Does nothing when the refactor failed.
+        pub fn lsolve(t: Tab, x: P(u32), val: P(f64), rhs: P(f64), y: P(f64), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32) void {
+            while (lhead(t, x, val, rhs, y, sy, stamp, sh, tid, nt)) {}
+            ltail(t, x, val, y, sy, sh, tid, nt);
+        }
+
+        /// The forward head for the run its ticket names: each lane its
+        /// rows' head entries (k < t0), after their rows' done stamps,
+        /// then its own stamp. Returns false once the tickets run out, so
+        /// a host thread loops on it and a device block calls it once.
+        pub fn lhead(t: Tab, x: P(u32), val: P(f64), rhs: P(f64), y: P(f64), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32) bool {
+            const c = takeTicket(sy, 2, sh, tid);
+            if (c >= t.l_chunks) return false;
+            if (sy[1] != 0) return true;
+            const done = sy + sync_header + t.n;
+            var j = x[t.l_chunk + c] + tid;
+            while (j < x[t.l_chunk + c + 1]) : (j += nt) {
+                const r = x[t.l_rows + j];
+                const e0 = x[t.l_ptr + r];
+                const e1 = x[t.l_ptr + r + 1];
+                var e = e0;
+                while (e < e1) : (e += 1) wait(&done[x[t.l_col + e]], stamp);
+                y[r] = gather(-rhs[x[t.perm_in + r]], x, val, y, t.l_col, t.l_slot, e0, e1);
+                Sy.release(&done[r], stamp);
             }
+            return true;
+        }
+
+        /// The forward tail sweep, in one block after every head row.
+        pub fn ltail(t: Tab, x: P(u32), val: P(f64), y: P(f64), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
+            if (sy[1] != 0) return;
             // The tail sweep, software-pipelined: column c's entries were
             // loaded during step c - 1, its extent during step c - 2, so a
             // step waits on shared memory and the barrier only.
@@ -395,11 +424,18 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
             while (j < tn) : (j += nt) y[t.t0 + j] = sh.y[j];
         }
 
-        /// Back solve in one block: z = U^-1 y, each row's subtractions in
-        /// descending k, and dx[q[i]] = z[i]; y ends holding z. The tail
-        /// sweeps its own rows in shared memory; head rows gather their tail
-        /// entries afterwards, which is still the host's descending order.
-        pub fn usolve(t: Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
+        /// Back solve: z = U^-1 y, each row's subtractions in descending
+        /// k, and dx[q[i]] = z[i]; y ends holding z. The tail sweeps its own
+        /// rows in shared memory; head rows gather their tail entries
+        /// afterwards, which is still the host's descending order. The host
+        /// form: the tail, then every head ticket.
+        pub fn usolve(t: Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32) void {
+            utail(t, x, val, y, dx, sy, sh, tid, nt);
+            while (uhead(t, x, val, y, dx, sy, stamp, sh, tid, nt)) {}
+        }
+
+        /// The back tail sweep, in one block before any head row.
+        pub fn utail(t: Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32), sh: anytype, tid: u32, nt: u32) void {
             if (sy[1] != 0) return;
             // Pipelined like the forward sweep; one lane divides (a strict
             // divide is dozens of instructions on a narrow unit) and
@@ -432,19 +468,32 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
             }
             var j = tid;
             while (j < tn) : (j += nt) y[t.t0 + j] = sh.y[j];
-            Sy.barrier();
-            var v: u32 = 0;
-            while (v < t.u_levels) : (v += 1) {
-                j = x[t.u_lev + v] + tid;
-                while (j < x[t.u_lev + v + 1]) : (j += nt) {
-                    const i = x[t.u_rows + j];
-                    const acc = gather(y[i], x, val, y, t.u_col, t.u_slot, x[t.u_ptr + i], x[t.u_ptr + i + 1]);
-                    const z = acc / val[x[t.coff + i] + x[t.up + i + 1] - x[t.up + i]];
-                    y[i] = z;
-                    dx[x[t.q + i]] = z;
+        }
+
+        /// The back head for the run its ticket names, as `lhead`: a head
+        /// row waits only on head rows; the tail is final before it runs.
+        pub fn uhead(t: Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32) bool {
+            const c = takeTicket(sy, 3, sh, tid);
+            if (c >= t.u_chunks) return false;
+            if (sy[1] != 0) return true;
+            const done = sy + sync_header + 2 * t.n;
+            var j = x[t.u_chunk + c] + tid;
+            while (j < x[t.u_chunk + c + 1]) : (j += nt) {
+                const i = x[t.u_rows + j];
+                const e0 = x[t.u_ptr + i];
+                const e1 = x[t.u_ptr + i + 1];
+                var e = e0;
+                while (e < e1) : (e += 1) {
+                    const k = x[t.u_col + e];
+                    if (k < t.t0) wait(&done[k], stamp);
                 }
-                Sy.barrier();
+                const acc = gather(y[i], x, val, y, t.u_col, t.u_slot, e0, e1);
+                const z = acc / val[x[t.coff + i] + x[t.up + i + 1] - x[t.up + i]];
+                y[i] = z;
+                dx[x[t.q + i]] = z;
+                Sy.release(&done[i], stamp);
             }
+            return true;
         }
 
         /// Copies the tail's y into the block's scratch.
@@ -599,8 +648,8 @@ fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u32) 
     for (pool[0..spawned]) |th| th.join();
     const ssh = try std.heap.page_allocator.create(H.SolveShared);
     defer std.heap.page_allocator.destroy(ssh);
-    H.lsolve(t, x, b.val.ptr, @constCast(b.rhs.ptr), b.y.ptr, b.sync.ptr, ssh, 0, 1);
-    H.usolve(t, x, b.val.ptr, b.y.ptr, b.dx.ptr, b.sync.ptr, ssh, 0, 1);
+    H.lsolve(t, x, b.val.ptr, @constCast(b.rhs.ptr), b.y.ptr, b.sync.ptr, stamp, ssh, 0, 1);
+    H.usolve(t, x, b.val.ptr, b.y.ptr, b.dx.ptr, b.sync.ptr, stamp, ssh, 0, 1);
     const f = b.sync[1];
     assert(f <= t.n);
     return if (f == 0) null else t.n - f;
@@ -881,6 +930,8 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     const l_sched = try bucket(ar, level[0..n], l_levels);
     const u_levels = headLevels(lu, t0, true, level, len);
     const u_sched = try bucket(ar, level[0..t0], u_levels);
+    const l_chunk = try runs(ar, l_sched.lev);
+    const u_chunk = try runs(ar, u_sched.lev);
     // L rows keep their head entries only (k < t0); the sweep does the rest.
     const nl_head = lp[t0];
     const l_ptr = try ar.alloc(u32, n + 1);
@@ -921,6 +972,7 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
         .{ "l_ptr", l_ptr },         .{ "l_col", l_col },           .{ "l_slot", l_slot },
         .{ "perm_in", perm_in },     .{ "u_lev", u_sched.lev },     .{ "u_rows", u_sched.rows },
         .{ "u_ptr", u_ptr },         .{ "u_col", u_col },           .{ "u_slot", u_slot },
+        .{ "l_chunk", l_chunk },     .{ "u_chunk", u_chunk },
     };
     var tab: Tab = undefined;
     tab.n = n;
@@ -929,6 +981,8 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     tab.t0 = t0;
     tab.l_levels = l_levels;
     tab.u_levels = u_levels;
+    tab.l_chunks = @intCast(l_chunk.len - 1);
+    tab.u_chunks = @intCast(u_chunk.len - 1);
     tab.n_val = n_val;
     var total: usize = 0;
     inline for (parts) |part| {
@@ -1005,6 +1059,20 @@ fn solveCost(lu: *const SparseLu, t0: u32, level: []u32, len: []u32, scratch: []
         }
     }
     return cost;
+}
+
+/// Head block runs over level-grouped rows: each level cut every
+/// `solve_block` rows, so a run's rows never read each other.
+fn runs(ar: std.mem.Allocator, lev: []const u32) ![]u32 {
+    var out: std.ArrayList(u32) = .empty;
+    for (lev[0 .. lev.len - 1], lev[1..]) |a, b| {
+        var s = a;
+        while (s < b) : (s += solve_block) try out.append(ar, s);
+    }
+    try out.append(ar, lev[lev.len - 1]);
+    assert(out.items[0] == 0);
+    assert(out.items.len >= lev.len);
+    return out.items;
 }
 
 /// Rows grouped by level: `rows[lev[v]..lev[v+1]]` is level v.

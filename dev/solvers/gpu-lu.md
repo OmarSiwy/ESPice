@@ -851,8 +851,9 @@ Why, on this card:
   to the next column: about 3.5 µs, times the S_r of §4.2.
 - Bitwise order forbids splitting a long row's sum. c7552's supply row is a
   49k-term chain in the refactor and in both solves.
-- The solves are one block. On the 100k decks their wide head levels
-  (hundreds of thousands of rows) run on one SM, latency-bound.
+- The solves were one block. On the 100k decks their wide head levels
+  (hundreds of thousands of rows) ran on one SM, latency-bound (fixed by
+  the sync-free heads below).
 - The host kernel bodies on one thread are 1.2-2.6x slower than
   `SparseLu` (indirection and tickets), so "8 threads" beats one host
   thread only where F is large (logic 3.6x, SRAM 2.8x) and loses elsewhere.
@@ -887,8 +888,35 @@ logic_bsim4_10k and chain_bsim4_10k (device ms, refactor/solves):
 - `ESPICE_GPU_LU_TAIL=m` and `ESPICE_GPU_LU_NOGATHER` override the cut and
   the gather form for calibration.
 
-Next, if this is picked up again: multi-block head levels for the 100k
-solves, and the Markstein division.
+**Sync-free solve heads (#141).** The 100k chain's solves took 80 ms
+against 16 ms on the host: 347 head levels of about 3,600 rows each, on
+one SM. The heads now run sync-free across the grid like the refactor
+(`lhead`/`uhead`): one block per run of at most 256 rows of one level,
+taken by ticket in level order, each lane waiting on the done stamps
+(`syncLen` is now 3n: refactor, forward row, back row) of the rows its row
+reads, then gathering in the same order. Runs never span levels, so no
+lane waits on a lane of its own block (a wavefront has no independent
+thread scheduling). The dense tail keeps its one-block sweep, now its own
+launch (`ltail`/`utail`); the old attempt that lost (145 ms above) walked
+the tail rows serially too. Bitwise unchanged: the 100k run's raw output
+is byte-identical, and `ESPICE_GPU_LU_CHECK` on chain_psp103_10k finds no
+mismatch. Device ms per call, `ESPICE_GPU_LU_BENCH` medians, before ->
+after:
+
+| deck | solves | of which L | device call wall |
+|---|---:|---:|---:|
+| chain_psp103_100k | 80.4 -> 20.9 | 38.7 -> 11.3 | 148.9 -> 90.4 |
+| logic_bsim4_10k | 8.97 -> 7.04 | 3.91 -> 2.83 | |
+| chain_bsim4_10k | 4.71 -> 2.16 | 2.37 -> 1.02 | |
+
+End to end on chain_psp103_100k (`cuda`, `ESPICE_GPU_LU=1`, 8 threads,
+load 10-11), the transient's solve time (every device LU call) fell from
+24.9 s to 16.0-18.5 s, against 29.7 s of factor plus solve with the host
+LU, so the device LU now wins there. `solveCost` still picks the best tail
+cut: at 100k 4096 beats 2048 (65 ms) and 1024 (93 ms), at 10k 1024 beats 0,
+512 and 2048.
+
+Next, if this is picked up again: the Markstein division.
 
 **Multicore host refactor (option 3).** `lu_kernels.HostRefactor` runs the
 refactor body on the caller plus `lu_threads - 1` tasks of the query's

@@ -36,8 +36,10 @@ pub const GpuLu = struct {
     n: u32,
     nnz: u32,
     k_ref: Raw,
-    k_ls: Raw,
-    k_us: Raw,
+    k_lh: Raw,
+    k_lt: Raw,
+    k_ut: Raw,
+    k_uh: Raw,
     stream: Stream,
     pin_a: []f64,
     pin_rhs: []f64,
@@ -72,7 +74,7 @@ pub const GpuLu = struct {
     bench: ?*Bench = null,
     st: struct { calls: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0 } = .{},
 
-    /// Loads the three kernels and allocates the per-iteration buffers for an
+    /// Loads the five kernels and allocates the per-iteration buffers for an
     /// n-unknown, nnz-entry pattern. Fails with `error.NoGpuArtifacts` in a
     /// build without kernel images, or with the driver's error. Every solver
     /// it later serves must be n by n with nnz entries. Caller owns the
@@ -82,10 +84,14 @@ pub const GpuLu = struct {
         const be = backend.?;
         var k_ref = try gompute.rawKernelByName(be, "arp_lu_refactor", 0);
         errdefer k_ref.deinit();
-        var k_ls = try gompute.rawKernelByName(be, "arp_lu_lsolve", 0);
-        errdefer k_ls.deinit();
-        var k_us = try gompute.rawKernelByName(be, "arp_lu_usolve", 0);
-        errdefer k_us.deinit();
+        var k_lh = try gompute.rawKernelByName(be, "arp_lu_lhead", 0);
+        errdefer k_lh.deinit();
+        var k_lt = try gompute.rawKernelByName(be, "arp_lu_ltail", 0);
+        errdefer k_lt.deinit();
+        var k_ut = try gompute.rawKernelByName(be, "arp_lu_utail", 0);
+        errdefer k_ut.deinit();
+        var k_uh = try gompute.rawKernelByName(be, "arp_lu_uhead", 0);
+        errdefer k_uh.deinit();
         const pin_a = try pinnedF64(&k_ref, nnz);
         errdefer k_ref.freePinned(std.mem.sliceAsBytes(pin_a));
         const pin_rhs = try pinnedF64(&k_ref, n);
@@ -110,8 +116,10 @@ pub const GpuLu = struct {
             .n = n,
             .nnz = nnz,
             .k_ref = k_ref,
-            .k_ls = k_ls,
-            .k_us = k_us,
+            .k_lh = k_lh,
+            .k_lt = k_lt,
+            .k_ut = k_ut,
+            .k_uh = k_uh,
             .stream = stream,
             .pin_a = pin_a,
             .pin_rhs = pin_rhs,
@@ -149,8 +157,10 @@ pub const GpuLu = struct {
         k.freePinned(self.pin_fail);
         for ([_]*Buffer{ &self.d_a, &self.d_rhs, &self.d_y, &self.d_dx }) |b| b.free();
         self.stream.deinit();
-        self.k_us.deinit();
-        self.k_ls.deinit();
+        self.k_uh.deinit();
+        self.k_ut.deinit();
+        self.k_lt.deinit();
+        self.k_lh.deinit();
         self.k_ref.deinit();
         self.gpa.destroy(self);
     }
@@ -215,12 +225,19 @@ pub const GpuLu = struct {
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_a.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
         });
         if (self.bench) |b| try b.ev[1].record(&self.stream);
-        try self.k_ls.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
-            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_rhs.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(),
+        // Heads: one block per run (an empty grid is not a launch).
+        if (tab.l_chunks > 0) try self.k_lh.launchOn(&self.stream, .{ .x = tab.l_chunks }, .{ .x = K.solve_block }, 0, &.{
+            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_rhs.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
+        });
+        try self.k_lt.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
+            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(),
         });
         if (self.bench) |b| try b.ev[2].record(&self.stream);
-        try self.k_us.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
+        try self.k_ut.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_dx.argPtr(), self.d_sync.argPtr(),
+        });
+        if (tab.u_chunks > 0) try self.k_uh.launchOn(&self.stream, .{ .x = tab.u_chunks }, .{ .x = K.solve_block }, 0, &.{
+            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_dx.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
         });
         if (self.bench) |b| try b.ev[3].record(&self.stream);
         try self.d_dx.downloadAtAsync(self.pin_dx.ptr, 0, n * 8, &self.stream);
