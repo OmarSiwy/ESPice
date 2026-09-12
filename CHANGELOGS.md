@@ -60,6 +60,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - MOS level 2 takes NLEV (default 2) and GDSNOI, so its flicker noise matches ngspice 45 instead of the spice3 form, 670x high on a 10 um device (#156).
 - BSIM2 (LEVEL=5) with RSH = 0 gives the right `.ac`, `.tf` and `.sens` gain; a 1e12 S stand-in short had rounded gds to 1.2e-4 S (#157).
 - A MOS level 6 card with neither KC nor TOX keeps KC = 5e-5 and conducts, as in ngspice (#158).
+- Under a GPU backend, refactors of 50M multiply-adds or more (100k-transistor post-layout netlists) use the device LU by default (#141).
+- The device LU has no 400M multiply-add cap; an epoch whose tables do not fit in host or device memory stays on the host LU (#141).
+- The device LU's triangular solves run across the whole GPU: 4x faster on a 100k-transistor post-layout chain, where the device LU now beats the host LU (#141).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

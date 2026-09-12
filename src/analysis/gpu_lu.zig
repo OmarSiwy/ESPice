@@ -36,8 +36,10 @@ pub const GpuLu = struct {
     n: u32,
     nnz: u32,
     k_ref: Raw,
-    k_ls: Raw,
-    k_us: Raw,
+    k_lh: Raw,
+    k_lt: Raw,
+    k_ut: Raw,
+    k_uh: Raw,
     stream: Stream,
     pin_a: []f64,
     pin_rhs: []f64,
@@ -72,7 +74,7 @@ pub const GpuLu = struct {
     bench: ?*Bench = null,
     st: struct { calls: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0 } = .{},
 
-    /// Loads the three kernels and allocates the per-iteration buffers for an
+    /// Loads the five kernels and allocates the per-iteration buffers for an
     /// n-unknown, nnz-entry pattern. Fails with `error.NoGpuArtifacts` in a
     /// build without kernel images, or with the driver's error. Every solver
     /// it later serves must be n by n with nnz entries. Caller owns the
@@ -82,10 +84,14 @@ pub const GpuLu = struct {
         const be = backend.?;
         var k_ref = try gompute.rawKernelByName(be, "arp_lu_refactor", 0);
         errdefer k_ref.deinit();
-        var k_ls = try gompute.rawKernelByName(be, "arp_lu_lsolve", 0);
-        errdefer k_ls.deinit();
-        var k_us = try gompute.rawKernelByName(be, "arp_lu_usolve", 0);
-        errdefer k_us.deinit();
+        var k_lh = try gompute.rawKernelByName(be, "arp_lu_lhead", 0);
+        errdefer k_lh.deinit();
+        var k_lt = try gompute.rawKernelByName(be, "arp_lu_ltail", 0);
+        errdefer k_lt.deinit();
+        var k_ut = try gompute.rawKernelByName(be, "arp_lu_utail", 0);
+        errdefer k_ut.deinit();
+        var k_uh = try gompute.rawKernelByName(be, "arp_lu_uhead", 0);
+        errdefer k_uh.deinit();
         const pin_a = try pinnedF64(&k_ref, nnz);
         errdefer k_ref.freePinned(std.mem.sliceAsBytes(pin_a));
         const pin_rhs = try pinnedF64(&k_ref, n);
@@ -110,8 +116,10 @@ pub const GpuLu = struct {
             .n = n,
             .nnz = nnz,
             .k_ref = k_ref,
-            .k_ls = k_ls,
-            .k_us = k_us,
+            .k_lh = k_lh,
+            .k_lt = k_lt,
+            .k_ut = k_ut,
+            .k_uh = k_uh,
             .stream = stream,
             .pin_a = pin_a,
             .pin_rhs = pin_rhs,
@@ -149,8 +157,10 @@ pub const GpuLu = struct {
         k.freePinned(self.pin_fail);
         for ([_]*Buffer{ &self.d_a, &self.d_rhs, &self.d_y, &self.d_dx }) |b| b.free();
         self.stream.deinit();
-        self.k_us.deinit();
-        self.k_ls.deinit();
+        self.k_uh.deinit();
+        self.k_ut.deinit();
+        self.k_lt.deinit();
+        self.k_lh.deinit();
         self.k_ref.deinit();
         self.gpa.destroy(self);
     }
@@ -215,12 +225,19 @@ pub const GpuLu = struct {
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_a.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
         });
         if (self.bench) |b| try b.ev[1].record(&self.stream);
-        try self.k_ls.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
-            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_rhs.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(),
+        // Heads: one block per run (an empty grid is not a launch).
+        if (tab.l_chunks > 0) try self.k_lh.launchOn(&self.stream, .{ .x = tab.l_chunks }, .{ .x = K.solve_block }, 0, &.{
+            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_rhs.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
+        });
+        try self.k_lt.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
+            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(),
         });
         if (self.bench) |b| try b.ev[2].record(&self.stream);
-        try self.k_us.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
+        try self.k_ut.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_dx.argPtr(), self.d_sync.argPtr(),
+        });
+        if (tab.u_chunks > 0) try self.k_uh.launchOn(&self.stream, .{ .x = tab.u_chunks }, .{ .x = K.solve_block }, 0, &.{
+            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_dx.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
         });
         if (self.bench) |b| try b.ev[3].record(&self.stream);
         try self.d_dx.downloadAtAsync(self.pin_dx.ptr, 0, n * 8, &self.stream);
@@ -250,8 +267,9 @@ pub const GpuLu = struct {
     }
 
     /// Builds and uploads the tables of `slv`'s current pivot epoch, or
-    /// declines it (`declined`) past `max_flops` or, unless `forced`, under
-    /// `min_per_col` flops per column.
+    /// declines it (`declined`) when they do not fit in host or device
+    /// memory (or u32 offsets) or, unless `forced`, under both
+    /// `min_per_col` flops per column and `min_flops`.
     fn load(self: *Self, slv: *direct.Solver) !void {
         const lu = slv.sparse().?;
         self.dropTables();
@@ -263,6 +281,18 @@ pub const GpuLu = struct {
         self.flops = flops;
         // The buffers and every copy are sized by `self.n`.
         if (lu.n != self.n or !admits(flops, lu.n, self.forced)) return;
+        self.upload(slv) catch |e| switch (e) {
+            // The device LU is an accelerator: the host LU keeps the epoch.
+            error.OutOfMemory, error.AllocFailed => return,
+            else => return e, // else: a driver failure poisons the query, as before
+        };
+        self.declined = false;
+        self.st.epochs += 1;
+    }
+
+    /// `load`'s table build and upload; frees what it made on failure.
+    fn upload(self: *Self, slv: *direct.Solver) !void {
+        const lu = slv.sparse().?;
         // E2 calibration knobs: ESPICE_GPU_LU_TAIL=m fixes the solves' tail
         // at m steps, ESPICE_GPU_LU_NOGATHER keeps every column in stored
         // order.
@@ -281,21 +311,16 @@ pub const GpuLu = struct {
         try self.d_sync.fillAsync(0, @as(usize, tb.tab.syncLen()) * 4, &self.stream);
         self.stamp = 0;
         if (self.bench != null) self.idx = try self.gpa.dupe(u32, tb.idx);
-        self.declined = false;
-        self.st.epochs += 1;
     }
 
     /// Whether an epoch of `flops` over `n` columns goes to the device. An
     /// empty matrix never does: its refactor grid would have no blocks.
+    /// There is no size cap: tables (4 bytes per flop, built in place on
+    /// the host) that do not fit decline in `load`.
     fn admits(flops: u64, n: u32, forced: bool) bool {
-        if (n == 0 or flops > max_flops) return false;
-        return forced or flops >= min_per_col * @as(u64, n);
+        if (n == 0) return false;
+        return forced or flops >= min_per_col * @as(u64, n) or flops >= min_flops;
     }
-
-    /// The epoch's tables cost 4 bytes per flop on both sides of the bus.
-    /// ponytail: a fixed 1.6 GB of `dmap`; price it against free device
-    /// memory if a deck between that and the card's size shows up.
-    const max_flops = 400_000_000;
 
     /// Below this F/n the columns form a chain and every handoff is a
     /// device-wide wait. Wall time on an RTX 4060 Laptop (FP64 1/64),
@@ -308,6 +333,16 @@ pub const GpuLu = struct {
     /// ponytail: no deck measured between 166 and 1,600; refit the bar if
     /// one lands there.
     const min_per_col = 500;
+
+    /// At this many flops the device LU wins whatever F/n, since its solve
+    /// heads run across the grid (#141). LU time over the transient, host
+    /// against device, RTX 4060 Laptop: chain_bsim4_100k (F 74M, F/n 63)
+    /// 33.0 against 16.4 s, ring_bsim4_100k (69M) 61.4 against 32.2 s,
+    /// chain_psp103_100k (107M) 29.7 against 16.0-18.5 s,
+    /// chain_psp103_300k (734M) 134.7 against 98.9 s. The 10k chains and
+    /// rings (F 3-5M) still lose or tie. ponytail: nothing measured between
+    /// 5M and 69M; the bar sits low in that gap.
+    const min_flops = 50_000_000;
 
     /// `ESPICE_GPU_LU_CHECK`: refactors and solves on the host from the same
     /// values and compares the factors and dx bitwise, printing the first
@@ -472,9 +507,13 @@ test "GpuLu.admits: the flop bars and the empty matrix" {
     const n: u32 = 1000;
     try std.testing.expect(admits(GpuLu.min_per_col * n, n, false));
     try std.testing.expect(!admits(GpuLu.min_per_col * n - 1, n, false));
-    // `ESPICE_GPU_LU=1` lifts the per-column bar, never the size cap.
+    // A big enough refactor goes whatever its F/n.
+    const wide: u32 = 1_000_000;
+    try std.testing.expect(GpuLu.min_flops < GpuLu.min_per_col * @as(u64, wide));
+    try std.testing.expect(admits(GpuLu.min_flops, wide, false));
+    try std.testing.expect(!admits(GpuLu.min_flops - 1, wide, false));
+    // `ESPICE_GPU_LU=1` lifts the per-column bar.
     try std.testing.expect(admits(0, n, true));
-    try std.testing.expect(admits(GpuLu.max_flops, n, false));
-    try std.testing.expect(!admits(GpuLu.max_flops + 1, n, true));
+    try std.testing.expect(admits(1 << 40, n, false));
     try std.testing.expect(!admits(0, 0, true));
 }

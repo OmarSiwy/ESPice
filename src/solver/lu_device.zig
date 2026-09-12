@@ -1,8 +1,9 @@
 //! GPU kernel root for the device LU (dev/solvers/gpu-lu.md): exports
 //! `arp_lu_refactor` (one block per pivot step, any grid size: blocks take
 //! their step by ticket, so a block that starts late never holds a step an
-//! earlier one waits on) and `arp_lu_lsolve`/`arp_lu_usolve` (one block of
-//! `solve_block` lanes each). The bodies are `lu_kernels.zig`'s, shared with the host threads.
+//! earlier one waits on), the solves' heads `arp_lu_lhead`/`arp_lu_uhead`
+//! (one block per run of rows, by ticket the same way) and their tails
+//! `arp_lu_ltail`/`arp_lu_utail` (one block of `solve_block` lanes each). The bodies are `lu_kernels.zig`'s, shared with the host threads.
 
 const gompute = @import("gompute");
 const lu = @import("lu_kernels.zig");
@@ -35,18 +36,28 @@ fn refactor(t: lu.Tab, x: P(u32), val: P(f64), a: P(f64), sy: P(u32), stamp: u32
     _ = K.refactor(t, x, val, a, sy, stamp, &sh, gompute.builtins.localIdX(), lu.refactor_block);
 }
 
-fn lsolve(t: lu.Tab, x: P(u32), val: P(f64), rhs: P(f64), y: P(f64), sy: P(u32)) callconv(gompute.kernel_callconv) void {
-    Solve.lsolve(t, x, val, rhs, y, sy, &ssh, gompute.builtins.localIdX(), lu.solve_block);
+fn lhead(t: lu.Tab, x: P(u32), val: P(f64), rhs: P(f64), y: P(f64), sy: P(u32), stamp: u32) callconv(gompute.kernel_callconv) void {
+    _ = Solve.lhead(t, x, val, rhs, y, sy, stamp, &ssh, gompute.builtins.localIdX(), lu.solve_block);
 }
 
-fn usolve(t: lu.Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32)) callconv(gompute.kernel_callconv) void {
-    Solve.usolve(t, x, val, y, dx, sy, &ssh, gompute.builtins.localIdX(), lu.solve_block);
+fn ltail(t: lu.Tab, x: P(u32), val: P(f64), y: P(f64), sy: P(u32)) callconv(gompute.kernel_callconv) void {
+    Solve.ltail(t, x, val, y, sy, &ssh, gompute.builtins.localIdX(), lu.solve_block);
+}
+
+fn utail(t: lu.Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32)) callconv(gompute.kernel_callconv) void {
+    Solve.utail(t, x, val, y, dx, sy, &ssh, gompute.builtins.localIdX(), lu.solve_block);
+}
+
+fn uhead(t: lu.Tab, x: P(u32), val: P(f64), y: P(f64), dx: P(f64), sy: P(u32), stamp: u32) callconv(gompute.kernel_callconv) void {
+    _ = Solve.uhead(t, x, val, y, dx, sy, stamp, &ssh, gompute.builtins.localIdX(), lu.solve_block);
 }
 
 comptime {
     if (gompute.is_device) {
         gompute.exportRaw("arp_lu_refactor", &refactor);
-        gompute.exportRaw("arp_lu_lsolve", &lsolve);
-        gompute.exportRaw("arp_lu_usolve", &usolve);
+        gompute.exportRaw("arp_lu_lhead", &lhead);
+        gompute.exportRaw("arp_lu_ltail", &ltail);
+        gompute.exportRaw("arp_lu_utail", &utail);
+        gompute.exportRaw("arp_lu_uhead", &uhead);
     }
 }

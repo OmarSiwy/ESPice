@@ -851,8 +851,9 @@ Why, on this card:
   to the next column: about 3.5 µs, times the S_r of §4.2.
 - Bitwise order forbids splitting a long row's sum. c7552's supply row is a
   49k-term chain in the refactor and in both solves.
-- The solves are one block. On the 100k decks their wide head levels
-  (hundreds of thousands of rows) run on one SM, latency-bound.
+- The solves were one block. On the 100k decks their wide head levels
+  (hundreds of thousands of rows) ran on one SM, latency-bound (fixed by
+  the sync-free heads below).
 - The host kernel bodies on one thread are 1.2-2.6x slower than
   `SparseLu` (indirection and tickets), so "8 threads" beats one host
   thread only where F is large (logic 3.6x, SRAM 2.8x) and loses elsewhere.
@@ -887,8 +888,48 @@ logic_bsim4_10k and chain_bsim4_10k (device ms, refactor/solves):
 - `ESPICE_GPU_LU_TAIL=m` and `ESPICE_GPU_LU_NOGATHER` override the cut and
   the gather form for calibration.
 
-Next, if this is picked up again: multi-block head levels for the 100k
-solves, and the Markstein division.
+**Sync-free solve heads (#141).** The 100k chain's solves took 80 ms
+against 16 ms on the host: 347 head levels of about 3,600 rows each, on
+one SM. The heads now run sync-free across the grid like the refactor
+(`lhead`/`uhead`): one block per run of at most 256 rows of one level,
+taken by ticket in level order, each lane waiting on the done stamps
+(`syncLen` is now 3n: refactor, forward row, back row) of the rows its row
+reads, then gathering in the same order. Runs never span levels, so no
+lane waits on a lane of its own block (a wavefront has no independent
+thread scheduling). The dense tail keeps its one-block sweep, now its own
+launch (`ltail`/`utail`); the old attempt that lost (145 ms above) walked
+the tail rows serially too. Bitwise unchanged: the 100k run's raw output
+is byte-identical, and `ESPICE_GPU_LU_CHECK` on chain_psp103_10k finds no
+mismatch. Device ms per call, `ESPICE_GPU_LU_BENCH` medians, before ->
+after:
+
+| deck | solves | of which L | device call wall |
+|---|---:|---:|---:|
+| chain_psp103_100k | 80.4 -> 20.9 | 38.7 -> 11.3 | 148.9 -> 90.4 |
+| logic_bsim4_10k | 8.97 -> 7.04 | 3.91 -> 2.83 | |
+| chain_bsim4_10k | 4.71 -> 2.16 | 2.37 -> 1.02 | |
+
+End to end on chain_psp103_100k (`cuda`, `ESPICE_GPU_LU=1`, 8 threads,
+load 10-11), the transient's solve time (every device LU call) fell from
+24.9 s to 16.0-18.5 s, against 29.7 s of factor plus solve with the host
+LU, so the device LU now wins there. `solveCost` still picks the best tail
+cut: at 100k 4096 beats 2048 (65 ms) and 1024 (93 ms), at 10k 1024 beats 0,
+512 and 2048.
+
+**No size cap (#141).** The device LU used to decline any epoch above
+400M multiply-adds, a fixed 1.6 GB of `dmap`, which shut out the 300k
+chain (734M). The cap is gone: an epoch whose tables do not fit (host
+`OutOfMemory`, device `AllocFailed`, or u32 offsets) declines and the host
+LU keeps it, instead of poisoning the query. `build` reserves `dmap` at F
+words at offset 0 of the index buffer and appends the other tables behind
+it, so the host no longer holds `dmap` twice (arena list plus the
+concatenated copy): peak RSS of the 100k chain with the device LU 4.02 ->
+3.39 GB, byte-identical output. The 300k chain (`cuda`, forced on, load
+11): LU time 134.7 s (host factor plus solve) -> 98.9 s, wall 190.9 ->
+151.3 s, byte-identical output, peak RSS 6.4 -> 11.8 GB (the host LU's
+factors, the 2.9 GB of tables until they upload, and the build's scratch).
+
+Next, if this is picked up again: the Markstein division.
 
 **Multicore host refactor (option 3).** `lu_kernels.HostRefactor` runs the
 refactor body on the caller plus `lu_threads - 1` tasks of the query's
@@ -919,6 +960,44 @@ The 2- and 4-thread rows ran at a load of 130-215 and are noisy; the
 8-thread rows at 10-50 except where two runs are given. Below F/n of about
 150 the columns form a chain and every step is a handoff; the admission
 bar of 300 sits between the last loss and the first win.
+
+Re-measured for #141 on the post-layout PSP103 chains (`gen.py chain
+psp103`, `.tran` cut to 100 ps at 10k and 50 ps `uic` above), 8 threads
+forced on with `ESPICE_LU_PAR=1` against the serial refactor, at a load
+of 13-25 on the 32-thread i9-14900HX (19-40 for the 10k row), factor time summed over the
+transient:
+
+| deck | n | F | F/n | serial | 8 thr | ratio | RSS serial / 8 thr |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| chain_psp103_10k | 125k | 4.5M | 36 | 1.88-2.45 s | 4.34-4.63 s | 0.43-0.53x | |
+| chain_psp103_100k | 1.25M | 107M | 85 | 33.6 s | 42.0 s | 0.80x | 1.9 / 3.6 GB |
+| chain_psp103_300k | 3.74M | 734M | 196 | 124.5 s | 137.9 s | 0.90x | 5.6 / 14.4 GB |
+
+The same pass on the 1k-10k decks reproduced the table above
+(logic_bsim4_1k 1.8x, sram_bsim4_10k 2.6x, logic_psp103_1k 1.03x,
+ring_bsim4_10k 0.80x, chain_bsim4_10k 0.53x). The ratio climbs with F/n
+and crosses 1 between 152 and 445, so the bar of 300 stays; no post-layout
+chain reaches it, and the 300k one would also need its 2.9 GB of tables
+on top of a 5.6 GB run. Two reshapes were tried and retired:
+
+- **Runs instead of steps.** A ticket took a run of consecutive pivot steps
+  of equal cost (64 to 16k runs), so a chain inside a run never hands off
+  between threads. Bitwise the same, and it lost everywhere it was tried:
+  chain_psp103_10k 2.62-3.55 s (serial 1.43-1.76 s at that load), sram_bsim4_10k
+  43.8 s against 14.3 s, logic_bsim4_1k 3.6 s against 1.9 s. Only the
+  thinnest chains gained (chain_bsim4_10k 4.87 against 5.26 s), still
+  below serial (2.65-2.92 s).
+- **Critical-path admission.** The longest dependency chain in the column
+  DAG (each step charged its flops, slots and 16), against the total, does
+  not predict the winners: the decks where 8 threads win have the least
+  column parallelism by that measure (sram_bsim4_10k 1.5, logic_bsim4_1k
+  1.3) and the chains the most (chain_psp103_10k 7.2, 100k 3.2). The
+  stepped kernel overlaps a column with its sources (its poll window), so
+  the column DAG is not its span; F/n stays the test.
+
+What is left for these decks is inside a column: the 100k chain's
+longest column chain carries 31% of its refactor cost, and host threads have
+no cheap way to split one column's updates.
 
 E3 for the host path is below ("E3, host").
 

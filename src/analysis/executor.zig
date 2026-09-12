@@ -358,7 +358,7 @@ pub const Executor = struct {
     /// The device LU: `Knobs.gpu_lu` (`ESPICE_GPU_LU=1`) forces it on under a
     /// GPU backend, any other value off; otherwise it runs where the matrix is big enough to be
     /// worth asking the driver, on every pivot epoch with enough flops per
-    /// column (`GpuLu.min_per_col`), whatever the card's FP64 rate. A
+    /// column or in all (`GpuLu.admits`), whatever the card's FP64 rate. A
     /// driver that refuses leaves the host LU.
     fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
         if (self.config.backend == .cpu) return null;

@@ -23,7 +23,9 @@ Newton update, convergence checks and transient step control run on the
 CPU.
 
 For large circuits (10,000 unknowns or more) ESPice may also factor the
-matrix on the GPU. `ESPICE_GPU_LU=1` forces that on under a GPU backend,
+matrix on the GPU: when the factorization is dense enough per column, or
+large overall (about 50 million multiply-adds, which post-layout netlists
+reach near 100,000 transistors). `ESPICE_GPU_LU=1` forces that on under a GPU backend,
 `ESPICE_GPU_LU=0` keeps the factorization on the CPU.
 
 Nearly every device evaluates on the GPU. The exceptions run on the CPU and
