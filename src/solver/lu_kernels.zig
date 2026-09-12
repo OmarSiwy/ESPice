@@ -834,7 +834,13 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     const amap = try ar.alloc(u32, nnz);
     const dcol = try ar.alloc(u32, n + 1);
     const wlev = try ar.alloc(u32, n + 1);
+    // `dmap` is most of the tables (4 bytes per flop), so it is built in
+    // place at offset 0 of `idx`, never copied: reserved at F, its bound.
+    var flops: usize = 0;
+    for (ulen) |l| flops += l;
     var dmap: std.ArrayList(u32) = .empty;
+    errdefer dmap.deinit(gpa);
+    try dmap.ensureTotalCapacityPrecise(gpa, flops);
     var lev_ptr: std.ArrayList(u32) = .empty;
     try lev_ptr.append(ar, 0);
     var g_slot: std.ArrayList(u32) = .empty;
@@ -871,7 +877,7 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
 
         const gathered = opt.gather and nuk >= gather_min_u and try gatherColumn(ar, lu, k, base, coff[k + 1] - base, pos, lvl, cnt, pseq, &lev_ptr, &g_slot, &g_cptr, &g_l, &g_u);
         if (!gathered) {
-            try dmap.ensureUnusedCapacity(ar, std.math.cast(usize, col_flops) orelse return error.OutOfMemory);
+            assert(dmap.unusedCapacitySlice().len >= col_flops);
             for (up[k]..up[k + 1]) |p| {
                 const i = ui[p];
                 for (lp[i]..lp[i + 1]) |q| {
@@ -961,18 +967,15 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
 
     // Concatenate, each table at the Tab field of its name.
     const parts = .{
-        .{ "coff", coff },           .{ "up", up },                 .{ "lp", lp },
-        .{ "ui", ui },               .{ "ul0", ul0 },               .{ "ulen", ulen },
-        .{ "flags", flags },         .{ "q", lu.q },                .{ "col_ptr", col_ptr[0 .. n + 1] },
-        .{ "amap", amap },           .{ "dcol", dcol },             .{ "dmap", dmap.items },
-        .{ "wlev", wlev },           .{ "lev_ptr", lev_ptr.items }, .{ "g_slot", g_slot.items },
-        .{ "g_cptr", g_cptr.items }, .{ "g_l", g_l.items },         .{ "g_u", g_u.items },
-        .{ "li", li },               .{ "t_lb", t_lb },             .{ "t_ub", t_ub },
-        .{ "t_diag", t_diag },       .{ "l_lev", l_sched.lev },     .{ "l_rows", l_sched.rows },
-        .{ "l_ptr", l_ptr },         .{ "l_col", l_col },           .{ "l_slot", l_slot },
-        .{ "perm_in", perm_in },     .{ "u_lev", u_sched.lev },     .{ "u_rows", u_sched.rows },
-        .{ "u_ptr", u_ptr },         .{ "u_col", u_col },           .{ "u_slot", u_slot },
-        .{ "l_chunk", l_chunk },     .{ "u_chunk", u_chunk },
+        .{ "dmap", dmap.items },   .{ "coff", coff },                   .{ "up", up },               .{ "lp", lp },
+        .{ "ui", ui },             .{ "ul0", ul0 },                     .{ "ulen", ulen },           .{ "flags", flags },
+        .{ "q", lu.q },            .{ "col_ptr", col_ptr[0 .. n + 1] }, .{ "amap", amap },           .{ "dcol", dcol },
+        .{ "wlev", wlev },         .{ "lev_ptr", lev_ptr.items },       .{ "g_slot", g_slot.items }, .{ "g_cptr", g_cptr.items },
+        .{ "g_l", g_l.items },     .{ "g_u", g_u.items },               .{ "li", li },               .{ "t_lb", t_lb },
+        .{ "t_ub", t_ub },         .{ "t_diag", t_diag },               .{ "l_lev", l_sched.lev },   .{ "l_rows", l_sched.rows },
+        .{ "l_ptr", l_ptr },       .{ "l_col", l_col },                 .{ "l_slot", l_slot },       .{ "perm_in", perm_in },
+        .{ "u_lev", u_sched.lev }, .{ "u_rows", u_sched.rows },         .{ "u_ptr", u_ptr },         .{ "u_col", u_col },
+        .{ "u_slot", u_slot },     .{ "l_chunk", l_chunk },             .{ "u_chunk", u_chunk },
     };
     var tab: Tab = undefined;
     tab.n = n;
@@ -990,9 +993,16 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
         total += part[1].len;
     }
     tab.n_idx = std.math.cast(u32, total) orelse return error.OutOfMemory;
-    const idx = try gpa.alloc(u32, total);
-    inline for (parts) |part| @memcpy(idx[@field(tab, part[0])..][0..part[1].len], part[1]);
+    assert(tab.dmap == 0);
+    const nd = dmap.items.len;
+    try dmap.ensureTotalCapacityPrecise(gpa, total);
+    dmap.items.len = total;
+    inline for (parts, 0..) |part, i| {
+        if (i != 0) @memcpy(dmap.items[@field(tab, part[0])..][0..part[1].len], part[1]);
+    }
+    const idx = try dmap.toOwnedSlice(gpa);
     assert(idx.len == tab.n_idx);
+    assert(tab.coff == nd);
     return .{ .idx = idx, .tab = tab };
 }
 

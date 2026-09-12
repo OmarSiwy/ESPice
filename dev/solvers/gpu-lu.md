@@ -916,6 +916,19 @@ LU, so the device LU now wins there. `solveCost` still picks the best tail
 cut: at 100k 4096 beats 2048 (65 ms) and 1024 (93 ms), at 10k 1024 beats 0,
 512 and 2048.
 
+**No size cap (#141).** The device LU used to decline any epoch above
+400M multiply-adds, a fixed 1.6 GB of `dmap`, which shut out the 300k
+chain (734M). The cap is gone: an epoch whose tables do not fit (host
+`OutOfMemory`, device `AllocFailed`, or u32 offsets) declines and the host
+LU keeps it, instead of poisoning the query. `build` reserves `dmap` at F
+words at offset 0 of the index buffer and appends the other tables behind
+it, so the host no longer holds `dmap` twice (arena list plus the
+concatenated copy): peak RSS of the 100k chain with the device LU 4.02 ->
+3.39 GB, byte-identical output. The 300k chain (`cuda`, forced on, load
+11): LU time 134.7 s (host factor plus solve) -> 98.9 s, wall 190.9 ->
+151.3 s, byte-identical output, peak RSS 6.4 -> 11.8 GB (the host LU's
+factors, the 2.9 GB of tables until they upload, and the build's scratch).
+
 Next, if this is picked up again: the Markstein division.
 
 **Multicore host refactor (option 3).** `lu_kernels.HostRefactor` runs the

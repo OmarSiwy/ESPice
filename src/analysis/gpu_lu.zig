@@ -267,8 +267,9 @@ pub const GpuLu = struct {
     }
 
     /// Builds and uploads the tables of `slv`'s current pivot epoch, or
-    /// declines it (`declined`) past `max_flops` or, unless `forced`, under
-    /// `min_per_col` flops per column.
+    /// declines it (`declined`) when they do not fit in host or device
+    /// memory (or u32 offsets) or, unless `forced`, under `min_per_col`
+    /// flops per column.
     fn load(self: *Self, slv: *direct.Solver) !void {
         const lu = slv.sparse().?;
         self.dropTables();
@@ -280,6 +281,18 @@ pub const GpuLu = struct {
         self.flops = flops;
         // The buffers and every copy are sized by `self.n`.
         if (lu.n != self.n or !admits(flops, lu.n, self.forced)) return;
+        self.upload(slv) catch |e| switch (e) {
+            // The device LU is an accelerator: the host LU keeps the epoch.
+            error.OutOfMemory, error.AllocFailed => return,
+            else => return e, // else: a driver failure poisons the query, as before
+        };
+        self.declined = false;
+        self.st.epochs += 1;
+    }
+
+    /// `load`'s table build and upload; frees what it made on failure.
+    fn upload(self: *Self, slv: *direct.Solver) !void {
+        const lu = slv.sparse().?;
         // E2 calibration knobs: ESPICE_GPU_LU_TAIL=m fixes the solves' tail
         // at m steps, ESPICE_GPU_LU_NOGATHER keeps every column in stored
         // order.
@@ -298,21 +311,16 @@ pub const GpuLu = struct {
         try self.d_sync.fillAsync(0, @as(usize, tb.tab.syncLen()) * 4, &self.stream);
         self.stamp = 0;
         if (self.bench != null) self.idx = try self.gpa.dupe(u32, tb.idx);
-        self.declined = false;
-        self.st.epochs += 1;
     }
 
     /// Whether an epoch of `flops` over `n` columns goes to the device. An
     /// empty matrix never does: its refactor grid would have no blocks.
+    /// There is no size cap: tables (4 bytes per flop, built in place on
+    /// the host) that do not fit decline in `load`.
     fn admits(flops: u64, n: u32, forced: bool) bool {
-        if (n == 0 or flops > max_flops) return false;
+        if (n == 0) return false;
         return forced or flops >= min_per_col * @as(u64, n);
     }
-
-    /// The epoch's tables cost 4 bytes per flop on both sides of the bus.
-    /// ponytail: a fixed 1.6 GB of `dmap`; price it against free device
-    /// memory if a deck between that and the card's size shows up.
-    const max_flops = 400_000_000;
 
     /// Below this F/n the columns form a chain and every handoff is a
     /// device-wide wait. Wall time on an RTX 4060 Laptop (FP64 1/64),
@@ -489,9 +497,8 @@ test "GpuLu.admits: the flop bars and the empty matrix" {
     const n: u32 = 1000;
     try std.testing.expect(admits(GpuLu.min_per_col * n, n, false));
     try std.testing.expect(!admits(GpuLu.min_per_col * n - 1, n, false));
-    // `ESPICE_GPU_LU=1` lifts the per-column bar, never the size cap.
+    // `ESPICE_GPU_LU=1` lifts the per-column bar.
     try std.testing.expect(admits(0, n, true));
-    try std.testing.expect(admits(GpuLu.max_flops, n, false));
-    try std.testing.expect(!admits(GpuLu.max_flops + 1, n, true));
+    try std.testing.expect(admits(1 << 40, n, false));
     try std.testing.expect(!admits(0, 0, true));
 }
