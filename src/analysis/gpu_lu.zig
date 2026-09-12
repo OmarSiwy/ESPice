@@ -268,8 +268,8 @@ pub const GpuLu = struct {
 
     /// Builds and uploads the tables of `slv`'s current pivot epoch, or
     /// declines it (`declined`) when they do not fit in host or device
-    /// memory (or u32 offsets) or, unless `forced`, under `min_per_col`
-    /// flops per column.
+    /// memory (or u32 offsets) or, unless `forced`, under both
+    /// `min_per_col` flops per column and `min_flops`.
     fn load(self: *Self, slv: *direct.Solver) !void {
         const lu = slv.sparse().?;
         self.dropTables();
@@ -319,7 +319,7 @@ pub const GpuLu = struct {
     /// the host) that do not fit decline in `load`.
     fn admits(flops: u64, n: u32, forced: bool) bool {
         if (n == 0) return false;
-        return forced or flops >= min_per_col * @as(u64, n);
+        return forced or flops >= min_per_col * @as(u64, n) or flops >= min_flops;
     }
 
     /// Below this F/n the columns form a chain and every handoff is a
@@ -333,6 +333,16 @@ pub const GpuLu = struct {
     /// ponytail: no deck measured between 166 and 1,600; refit the bar if
     /// one lands there.
     const min_per_col = 500;
+
+    /// At this many flops the device LU wins whatever F/n, since its solve
+    /// heads run across the grid (#141). LU time over the transient, host
+    /// against device, RTX 4060 Laptop: chain_bsim4_100k (F 74M, F/n 63)
+    /// 33.0 against 16.4 s, ring_bsim4_100k (69M) 61.4 against 32.2 s,
+    /// chain_psp103_100k (107M) 29.7 against 16.0-18.5 s,
+    /// chain_psp103_300k (734M) 134.7 against 98.9 s. The 10k chains and
+    /// rings (F 3-5M) still lose or tie. ponytail: nothing measured between
+    /// 5M and 69M; the bar sits low in that gap.
+    const min_flops = 50_000_000;
 
     /// `ESPICE_GPU_LU_CHECK`: refactors and solves on the host from the same
     /// values and compares the factors and dx bitwise, printing the first
@@ -497,6 +507,11 @@ test "GpuLu.admits: the flop bars and the empty matrix" {
     const n: u32 = 1000;
     try std.testing.expect(admits(GpuLu.min_per_col * n, n, false));
     try std.testing.expect(!admits(GpuLu.min_per_col * n - 1, n, false));
+    // A big enough refactor goes whatever its F/n.
+    const wide: u32 = 1_000_000;
+    try std.testing.expect(GpuLu.min_flops < GpuLu.min_per_col * @as(u64, wide));
+    try std.testing.expect(admits(GpuLu.min_flops, wide, false));
+    try std.testing.expect(!admits(GpuLu.min_flops - 1, wide, false));
     // `ESPICE_GPU_LU=1` lifts the per-column bar.
     try std.testing.expect(admits(0, n, true));
     try std.testing.expect(admits(1 << 40, n, false));
