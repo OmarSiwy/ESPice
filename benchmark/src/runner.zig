@@ -66,9 +66,32 @@ const Ref = struct {
     }
 };
 
+/// One timed batch, reduced two ways from the same samples.
+///
+/// `min_ns` is the headline. A simulator run is a deterministic amount of work
+/// plus whatever the scheduler, the page cache and the other 31 cores did to
+/// it; that contamination is one-sided, so the minimum is the sample that saw
+/// the least of it and the median is not "typical", it is "typical for the load
+/// that happened to be on the box". A `--iters 3` median on a busy machine
+/// produced seven decks reported as espice regressions that three independent
+/// methods later overturned (docs/perf/slow-decks-2026-09-10.md). `p50_ns` is
+/// kept beside it so the difference between the two methods is a number in the
+/// table rather than an argument.
+const Timing = struct {
+    min_ns: u64,
+    p50_ns: u64,
+
+    /// How far the median sits above the minimum: this batch's own contention
+    /// noise, in its own units. Used as the resolution limit below which a
+    /// floor-corrected time cannot be ranked.
+    fn jitter(self: Timing) u64 {
+        return self.p50_ns - self.min_ns;
+    }
+};
+
 /// One reference's outcome on one fixture.
 const RefRun = struct {
-    median_ns: ?u64 = null,
+    time: ?Timing = null,
     skip: []const u8 = "",
     rss_kb: u64 = 0,
     /// Raw file to compare against; empty when the run produced none.
@@ -125,10 +148,10 @@ const Accuracy = struct {
 const Result = struct {
     category: []const u8,
     name: []const u8,
-    zp_cpu_median_ns: ?u64 = null,
+    zp_cpu: ?Timing = null,
     zp_cpu_skip: []const u8 = "",
     zp_cpu_rss_kb: u64 = 0,
-    zp_gpu_median_ns: ?u64 = null,
+    zp_gpu: ?Timing = null,
     zp_gpu_skip: []const u8 = "",
     refs: std.enums.EnumArray(RefId, RefRun) = .initFill(.{}),
     /// espice-CPU against each reference; ngspice is the headline pair.
@@ -139,6 +162,118 @@ const Result = struct {
         return self.refs.get(.ngspice);
     }
 };
+
+/// What each timed binary costs before it has simulated anything: process
+/// start, dynamic linking, parser bring-up, raw-file open and close.
+///
+/// This is not a detail. ngspice pays a fixed **10,229,999 Ir** of
+/// dynamic-linker work (`do_lookup_x`, `_dl_lookup_symbol_x`,
+/// `_dl_relocate_object`) on every single run — identical to the instruction
+/// across four separate decks — where a statically linked espice pays ~0.87M.
+/// On a 4 ms deck that difference IS the reported speedup, so a raw wall-clock
+/// ratio on a small deck measures the linker, not the simulator. Correcting
+/// only the reference would be the same sin in the other direction, so every
+/// column carries its own floor, measured the same way in the same run.
+const Floors = struct {
+    zp_cpu: ?Timing = null,
+    zp_gpu: ?Timing = null,
+    refs: std.enums.EnumArray(RefId, ?Timing) = .initFill(null),
+};
+
+/// The smallest deck every SPICE-syntax simulator accepts: two devices, one
+/// operating point. Two devices on purpose — it is the same shape the 0.83M Ir
+/// espice floor in docs/perf/slow-decks-2026-09-10.md was measured on.
+const floor_deck =
+    \\* espice benchmark process floor — two devices, one operating point
+    \\v1 1 0 dc 1
+    \\r1 1 0 1k
+    \\.op
+    \\.end
+    \\
+;
+
+/// What RESULTS.md has always printed: reference wall clock over candidate wall
+/// clock, floors included. Kept beside the corrected column on purpose — the
+/// difference between the two IS the finding, and deleting the old number would
+/// make it unauditable.
+fn rawRatio(ref: ?Timing, zp: ?Timing) ?f64 {
+    const r = ref orelse return null;
+    const z = zp orelse return null;
+    if (z.min_ns == 0) return null;
+    return @as(f64, @floatFromInt(r.min_ns)) / @as(f64, @floatFromInt(z.min_ns));
+}
+
+/// A deck is ranked only when the work left after subtracting BOTH floors is
+/// bigger than the floor measurement's own run-to-run noise. Below that the
+/// ratio is a measurement of the scheduler.
+fn correctedRatio(ref: ?Timing, ref_floor: ?Timing, zp: ?Timing, zp_floor: ?Timing) ?f64 {
+    const rt = ref orelse return null;
+    const rf = ref_floor orelse return null;
+    const zt = zp orelse return null;
+    const zf = zp_floor orelse return null;
+    const ref_work = rt.min_ns -| rf.min_ns;
+    const zp_work = zt.min_ns -| zf.min_ns;
+    if (ref_work <= rf.jitter() or zp_work <= zf.jitter()) return null;
+    if (zp_work == 0) return null;
+    return @as(f64, @floatFromInt(ref_work)) / @as(f64, @floatFromInt(zp_work));
+}
+
+/// The speed headline, derived from the same run that printed the table rather
+/// than from a hand count afterwards. Both reductions over the same fixtures,
+/// so the raw and corrected numbers are directly comparable.
+///
+/// Geometric mean, not arithmetic: these are ratios, and an arithmetic mean of
+/// ratios is not symmetric under swapping which engine is the numerator — a
+/// deck we win 4x and a deck we lose 4x average to 2.1x, which reads as a win.
+const Summary = struct {
+    raw_ranked: usize = 0,
+    raw_wins: usize = 0,
+    raw_log_sum: f64 = 0,
+    raw_sum: f64 = 0,
+    corr_ranked: usize = 0,
+    corr_wins: usize = 0,
+    corr_log_sum: f64 = 0,
+    corr_sum: f64 = 0,
+    /// Ranked raw, but the floor correction refuses to rank: what is left after
+    /// subtracting both process floors is inside the floors' own jitter.
+    below_floor: usize = 0,
+    /// Decks whose win/lose verdict flips between min-of-N and median-of-N on
+    /// the RAW ratio. Each one is a coin toss that a median-only table used to
+    /// print as a fact; `docs/perf/slow-decks-2026-09-10.md` found seven.
+    p50_flips: usize = 0,
+
+    fn geo(n: usize, log_sum: f64) f64 {
+        if (n == 0) return 0;
+        return @exp(log_sum / @as(f64, @floatFromInt(n)));
+    }
+
+    fn mean(n: usize, sum: f64) f64 {
+        if (n == 0) return 0;
+        return sum / @as(f64, @floatFromInt(n));
+    }
+};
+
+fn summarize(results: []const Result, floors: *const Floors) Summary {
+    var s: Summary = .{};
+    for (results) |r| {
+        const ng = r.ng().time;
+        if (rawRatio(ng, r.zp_cpu)) |ratio| {
+            s.raw_ranked += 1;
+            s.raw_wins += @intFromBool(ratio > 1.0);
+            s.raw_log_sum += @log(ratio);
+            s.raw_sum += ratio;
+            const p50 = @as(f64, @floatFromInt(ng.?.p50_ns)) / @as(f64, @floatFromInt(r.zp_cpu.?.p50_ns));
+            s.p50_flips += @intFromBool((ratio > 1.0) != (p50 > 1.0));
+            if (correctedRatio(ng, floors.refs.get(.ngspice), r.zp_cpu, floors.zp_cpu)) |corr| {
+                s.corr_ranked += 1;
+                s.corr_wins += @intFromBool(corr > 1.0);
+                s.corr_log_sum += @log(corr);
+                s.corr_sum += corr;
+            } else s.below_floor += 1;
+        }
+    }
+    return s;
+}
 
 // ============================================================================
 // Entry
@@ -185,6 +320,9 @@ pub fn main(init: std.process.Init) !void {
     const refs = resolveRefs(io, gpa, &cfg);
     try reportRefs(out, &refs);
 
+    const floors = measureFloors(io, gpa, &cfg, &refs, out_dir, engine_ok);
+    try reportFloors(out, &floors, &refs);
+
     try reportHeader(out, &refs);
     try out.flush();
 
@@ -210,7 +348,7 @@ pub fn main(init: std.process.Init) !void {
             const cap = runCapture(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout);
             if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
                 // A FIXTURE THAT FAILS MID-TIMING IS A SKIPPED FIXTURE, NOT A
-                // DEAD RUN. `timedMedian` returns `error.BenchRunFailed` if any
+                // DEAD RUN. `timed` returns `error.BenchRunFailed` if any
                 // ONE of `iters` repeats fails, and a hard `try` here propagated
                 // that out of the fixture loop and killed the whole benchmark —
                 // throwing away every result gathered so far and never writing
@@ -221,7 +359,7 @@ pub fn main(init: std.process.Init) !void {
                 // it hit hardest exactly when the machine was busy. The GPU arm
                 // below has always handled its own failure; the other three arms
                 // simply never learned to.
-                res.zp_cpu_median_ns = timedMedian(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout, cfg.iters, .cpu) catch |err| blk: {
+                res.zp_cpu = timed(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout, cfg.iters, .cpu) catch |err| blk: {
                     res.zp_cpu_skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
                     break :blk null;
                 };
@@ -243,7 +381,7 @@ pub fn main(init: std.process.Init) !void {
             if (gpuSkipReason(cap.stderr)) |reason| {
                 res.zp_gpu_skip = reason;
             } else if (cap.ok and !std.mem.startsWith(u8, cap.text, "{\"skip\"")) {
-                res.zp_gpu_median_ns = timedMedian(io, fxa, .{ .argv = zp_gpu_argv }, cfg.timeout, cfg.iters, .gpu) catch |err| blk: {
+                res.zp_gpu = timed(io, fxa, .{ .argv = zp_gpu_argv }, cfg.timeout, cfg.iters, .gpu) catch |err| blk: {
                     // `else => return err` was the same run-killer as the CPU arm,
                     // one branch further in: only GpuFallback was survivable.
                     res.zp_gpu_skip = switch (err) {
@@ -290,11 +428,11 @@ pub fn main(init: std.process.Init) !void {
                 run.skip = refSkipReason(fxa, runCapture(io, fxa, job, cfg.timeout));
                 continue;
             }
-            run.median_ns = timedMedian(io, fxa, job, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
+            run.time = timed(io, fxa, job, cfg.timeout, cfg.iters, .quiet) catch |err| blk: {
                 run.skip = if (err == error.BenchRunFailed) "unstable under timing" else @errorName(err);
                 break :blk null;
             };
-            if (run.median_ns == null) continue;
+            if (run.time == null) continue;
             run.rss_kb = measurePeakRss(io, fxa, job, cfg.timeout);
             run.raw = if (job.raw.len > 0) job.raw else findRaw(io, fxa, job.cwd);
             // Exit 0 is not evidence that anything was WRITTEN. ngspice 44.2
@@ -310,17 +448,17 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // peak RSS (one extra run each, only for fixtures that succeeded)
-        if (res.zp_cpu_median_ns != null) {
+        if (res.zp_cpu != null) {
             const zp_cpu_argv: []const []const u8 = &.{ cfg.engine_bin, "-b", "--backend", "cpu", "-r", zp_cpu_raw_path, netlist };
             res.zp_cpu_rss_kb = measurePeakRss(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout);
         }
 
         for (std.enums.values(RefId)) |id| {
             const raw = res.refs.get(id).raw;
-            if (raw.len == 0 or res.zp_cpu_median_ns == null) continue;
+            if (raw.len == 0 or res.zp_cpu == null) continue;
             res.cpu_accuracy.set(id, compareRawFiles(io, fxa, raw, zp_cpu_raw_path, cfg.rtol));
         }
-        if (res.zp_gpu_median_ns != null and res.ng().raw.len > 0) {
+        if (res.zp_gpu != null and res.ng().raw.len > 0) {
             res.gpu_accuracy = compareRawFiles(io, fxa, res.ng().raw, zp_gpu_raw_path, cfg.rtol);
         }
 
@@ -333,15 +471,24 @@ pub fn main(init: std.process.Init) !void {
             run.raw = "";
         }
 
-        try reportRow(out, res, &prev_cat);
+        try reportRow(out, res, &floors, &prev_cat);
         try out.flush();
         try results.append(gpa, res);
     }
 
-    try reportFooter(out);
+    // The floor again, after the sweep, on the same decks with the same
+    // statistic. It is NOT used to correct anything — every `*` column above
+    // was already printed against the opening floor, and a table whose rows
+    // were computed against a number that changed underneath them is worse than
+    // a slightly stale one. What it is for is the error bar: re-deriving the
+    // headline against this second draw says how much of the corrected number
+    // is the correction and how much is the half hour that passed.
+    const closing = measureFloors(io, gpa, &cfg, &refs, out_dir, engine_ok);
+
+    try reportFooter(out, summarize(results.items, &floors), summarize(results.items, &closing));
     try out.flush();
 
-    writeResultsMd(io, gpa, cfg.out_path, results.items, cfg.rtol, &refs);
+    writeResultsMd(io, gpa, cfg.out_path, results.items, cfg.rtol, &refs, &floors, &closing);
 }
 
 // ============================================================================
@@ -357,12 +504,30 @@ const Plot = struct {
     data: []const f64,
 };
 
-fn parseRawFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ?Plot {
+fn parseRawFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ?[]const Plot {
     const blob = Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch return null;
     return parseRawBlob(gpa, blob);
 }
 
-fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?Plot {
+/// Every plot in the raw, in file order. A `.tran`+`.ac` deck writes two, and
+/// the two engines do not agree on the order (espice writes Operating Point
+/// first, ngspice writes AC first), so the caller matches by NAME — see
+/// `compareRawFiles`. Returns null only when the file is unparseable; a raw
+/// whose first plot parses and whose tail does not is null too, because a
+/// partially-read raw silently drops analyses.
+fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?[]const Plot {
+    var plots: std.ArrayList(Plot) = .empty;
+    var rest = blob;
+    while (std.mem.trim(u8, rest, " \t\r\n").len != 0) {
+        const parsed = parseOnePlot(gpa, rest) orelse return null;
+        plots.append(gpa, parsed.plot) catch return null;
+        rest = rest[parsed.consumed..];
+    }
+    if (plots.items.len == 0) return null;
+    return plots.items;
+}
+
+fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, consumed: usize } {
     if (blob.len == 0) return null;
 
     var plotname: []const u8 = "";
@@ -416,19 +581,20 @@ fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?Plot {
     const count = std.math.mul(usize, std.math.mul(usize, nvars, npoints) catch return null, per) catch return null;
     const need = std.math.mul(usize, count, @sizeOf(f64)) catch return null;
     if (need > blob.len - boff) return null;
-    // ponytail: one real plot only; add plot matching before validating multi-analysis decks.
-    if (std.mem.trim(u8, blob[boff + need ..], " \t\r\n").len != 0) return null;
 
     const data = gpa.alloc(f64, count) catch return null;
     @memcpy(std.mem.sliceAsBytes(data), blob[boff .. boff + need]);
 
     return .{
-        .plotname = plotname,
-        .varnames = varnames.items,
-        .is_complex = is_complex,
-        .npoints = npoints,
-        .nvars = nvars,
-        .data = data,
+        .plot = .{
+            .plotname = plotname,
+            .varnames = varnames.items,
+            .is_complex = is_complex,
+            .npoints = npoints,
+            .nvars = nvars,
+            .data = data,
+        },
+        .consumed = boff + need,
     };
 }
 
@@ -453,11 +619,64 @@ fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
 fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path: []const u8, rtol: f64) ?Accuracy {
     const ng = parseRawFile(io, gpa, ng_path) orelse return null;
     const zp = parseRawFile(io, gpa, zp_path) orelse return null;
-    return comparePlots(gpa, ng, zp, rtol);
+    return compareRaws(gpa, ng, zp, rtol);
+}
+
+/// Every reference plot against the candidate plot of the same analysis CLASS,
+/// worst pair wins. Matching is by name, never by index: on every multi-analysis
+/// deck the two engines write the plots in different orders (espice puts
+/// Operating Point first, ngspice puts AC first), so index-matching would score
+/// an AC sweep against an operating point and call it a failure.
+///
+/// A reference plot with no candidate counterpart is a coverage gap
+/// (`complete = false` -> N/A), never a pass. A CANDIDATE-only plot is not: for
+/// `.four` espice writes a `Fourier Analysis` plot into the raw where ngspice
+/// prints its table to stdout, and an extra analysis nobody asked to compare is
+/// not evidence of anything.
+fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, rtol: f64) ?Accuracy {
+    var worst: Accuracy = .{ .max_rel = 0, .rms_rel = 0, .pass = true };
+    var scored: usize = 0;
+    // Each candidate plot answers for at most one reference plot, so a deck with
+    // two `.dc` legs cannot score both against the same candidate.
+    const taken = gpa.alloc(bool, zp.len) catch return null;
+    defer gpa.free(taken);
+    @memset(taken, false);
+
+    for (ng) |ng_plot| {
+        var ng_buf: [128]u8 = undefined;
+        const ng_class = plotClass(&ng_buf, ng_plot.plotname);
+        const zi = for (zp, 0..) |zp_plot, i| {
+            if (taken[i]) continue;
+            var zp_buf: [128]u8 = undefined;
+            if (std.mem.eql(u8, ng_class, plotClass(&zp_buf, zp_plot.plotname))) break i;
+        } else {
+            worst.complete = false;
+            continue;
+        };
+        taken[zi] = true;
+        const acc = comparePlots(gpa, ng_plot, zp[zi], rtol) orelse {
+            worst.complete = false;
+            continue;
+        };
+        scored += 1;
+        worst.complete = worst.complete and acc.complete;
+        worst.pass = worst.pass and acc.pass;
+        worst.max_rel = @max(worst.max_rel, acc.max_rel);
+        worst.rms_rel = @max(worst.rms_rel, acc.rms_rel);
+    }
+    if (scored == 0) return null;
+    // Same rule `comparePlots` applies within one plot: an incomplete comparison
+    // cannot be a pass. Without this a deck whose `.ac` leg matched and whose
+    // `.tran` leg had no counterpart at all carries `pass = true` into any caller
+    // that reads the field instead of `accuracyStatus`.
+    worst.pass = worst.pass and worst.complete;
+    return worst;
 }
 
 fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy {
-    if (ng.is_complex or zp.is_complex) return null;
+    // A complex plot against a real one is not a comparison — one of the two
+    // engines ran a different analysis.
+    if (ng.is_complex != zp.is_complex) return null;
     var ng_name_buf: [128]u8 = undefined;
     var zp_name_buf: [128]u8 = undefined;
     const ng_class = plotClass(&ng_name_buf, ng.plotname);
@@ -484,8 +703,12 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
     const zp_scale = zp_columns[0..zp.npoints];
     const ng_var = ng_columns[ng.npoints..];
     const zp_var = zp_columns[zp.npoints..];
-    extractCol(ng.data, ng.nvars, 0, ng_scale);
-    extractCol(zp.data, zp.nvars, 0, zp_scale);
+    // An `.ac`/`.sp`/`.pz` raw stores each entry as an (re, im) pair, so every
+    // column is TWO real series and the scale lives in the real half. Both sides
+    // agree on `is_complex` by the guard above.
+    const parts: usize = if (ng.is_complex) 2 else 1;
+    extractCol(ng.data, ng.nvars, 0, parts, 0, ng_scale);
+    extractCol(zp.data, zp.nvars, 0, parts, 0, zp_scale);
     if (interpolate) {
         if (zp_scale[0] > ng_scale[0] or zp_scale[zp_scale.len - 1] < ng_scale[ng_scale.len - 1]) return null;
     } else if (ng.npoints != zp.npoints) return null;
@@ -514,66 +737,71 @@ fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy
             complete = false;
             continue;
         };
-        extractCol(ng.data, ng.nvars, ni, ng_var);
-        extractCol(zp.data, zp.nvars, zi, zp_var);
+        // Real and imaginary are scored SEPARATELY and the worse one is kept.
+        // Collapsing to magnitude first would let a phase-convention error read
+        // as a pass, which is the one thing an AC comparison exists to catch.
+        for (0..parts) |part| {
+            extractCol(ng.data, ng.nvars, ni, parts, part, ng_var);
+            extractCol(zp.data, zp.nvars, zi, parts, part, zp_var);
 
-        const peak = colPeak(ng_var);
-        const ptp = colPtp(ng_var);
-        const denom = @max(peak, ptp, 1.0);
-        if (!std.math.isFinite(denom)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
+            const peak = colPeak(ng_var);
+            const ptp = colPtp(ng_var);
+            const denom = @max(peak, ptp, 1.0);
+            if (!std.math.isFinite(denom)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
 
-        var sum_sq: f64 = 0;
-        var max_err: f64 = 0;
-        var count: usize = 0;
+            var sum_sq: f64 = 0;
+            var max_err: f64 = 0;
+            var count: usize = 0;
 
-        // Candidate-side bracket for the edge window below. Hoisted: x walks
-        // ng_scale in increasing order, so this only ever moves forward.
-        var j: usize = 0;
+            // Candidate-side bracket for the edge window below. Hoisted: x walks
+            // ng_scale in increasing order, so this only ever moves forward.
+            var j: usize = 0;
 
-        for (ng_scale, ng_var, 0..) |x, ya, i| {
-            var yb = if (interpolate) interp(zp_scale, zp_var, x) else blk: {
-                if (count < zp_var.len) break :blk zp_var[count] else return null;
-            };
-            if (!std.math.isFinite(yb)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
-            // Edge-phase tolerance: a steep edge cannot be timed below the
-            // REFERENCE's own local grid. If the pointwise error is large,
-            // re-sample the candidate inside one reference-step window each
-            // way and keep the best match — a sub-grid timing offset on a
-            // vertical edge then reads as ~0 instead of the full swing, while
-            // a genuine level error (or a shift beyond the reference's own
-            // resolution, e.g. schmitt's 5 ns snap delay) still fails.
-            if (interpolate and @abs(ya - yb) / denom > 1e-3) {
-                const dt_lo = if (i > 0) x - ng_scale[i - 1] else 0;
-                const dt_hi = if (i + 1 < ng_scale.len) ng_scale[i + 1] - x else 0;
-                // A steep edge also cannot be timed below the CANDIDATE's own
-                // local grid. Right after a source breakpoint ngspice emits a
-                // sub-picosecond sample; interpolating our (2 ps) step across a
-                // genuine time-discontinuity there reads as the full jump.
-                // ponytail: local bracket only, no bisect — the scan is monotone.
-                while (j + 1 < zp_scale.len and zp_scale[j + 1] < x) j += 1;
-                const dt_cand = zp_scale[@min(j + 1, zp_scale.len - 1)] - zp_scale[j];
-                const w = @max(dt_lo, dt_hi, dt_cand);
-                var best = @abs(ya - yb);
-                var k: usize = 0;
-                while (k <= 8) : (k += 1) {
-                    const frac = (@as(f64, @floatFromInt(k)) / 4.0) - 1.0; // -1..+1
-                    const cand = interp(zp_scale, zp_var, x + frac * w);
-                    if (!std.math.isNan(cand)) best = @min(best, @abs(ya - cand));
+            for (ng_scale, ng_var, 0..) |x, ya, i| {
+                var yb = if (interpolate) interp(zp_scale, zp_var, x) else blk: {
+                    if (count < zp_var.len) break :blk zp_var[count] else return null;
+                };
+                if (!std.math.isFinite(yb)) return .{ .max_rel = std.math.inf(f64), .rms_rel = std.math.inf(f64), .pass = false };
+                // Edge-phase tolerance: a steep edge cannot be timed below the
+                // REFERENCE's own local grid. If the pointwise error is large,
+                // re-sample the candidate inside one reference-step window each
+                // way and keep the best match — a sub-grid timing offset on a
+                // vertical edge then reads as ~0 instead of the full swing, while
+                // a genuine level error (or a shift beyond the reference's own
+                // resolution, e.g. schmitt's 5 ns snap delay) still fails.
+                if (interpolate and @abs(ya - yb) / denom > 1e-3) {
+                    const dt_lo = if (i > 0) x - ng_scale[i - 1] else 0;
+                    const dt_hi = if (i + 1 < ng_scale.len) ng_scale[i + 1] - x else 0;
+                    // A steep edge also cannot be timed below the CANDIDATE's own
+                    // local grid. Right after a source breakpoint ngspice emits a
+                    // sub-picosecond sample; interpolating our (2 ps) step across a
+                    // genuine time-discontinuity there reads as the full jump.
+                    // ponytail: local bracket only, no bisect — the scan is monotone.
+                    while (j + 1 < zp_scale.len and zp_scale[j + 1] < x) j += 1;
+                    const dt_cand = zp_scale[@min(j + 1, zp_scale.len - 1)] - zp_scale[j];
+                    const w = @max(dt_lo, dt_hi, dt_cand);
+                    var best = @abs(ya - yb);
+                    var k: usize = 0;
+                    while (k <= 8) : (k += 1) {
+                        const frac = (@as(f64, @floatFromInt(k)) / 4.0) - 1.0; // -1..+1
+                        const cand = interp(zp_scale, zp_var, x + frac * w);
+                        if (!std.math.isNan(cand)) best = @min(best, @abs(ya - cand));
+                    }
+                    yb = ya - std.math.copysign(best, ya - yb);
                 }
-                yb = ya - std.math.copysign(best, ya - yb);
+                const e = @abs(ya - yb) / denom;
+                if (e > max_err) max_err = e;
+                sum_sq += e * e;
+                count += 1;
             }
-            const e = @abs(ya - yb) / denom;
-            if (e > max_err) max_err = e;
-            sum_sq += e * e;
-            count += 1;
-        }
 
-        if (count > 0) {
-            const rms = @sqrt(sum_sq / @as(f64, @floatFromInt(count)));
-            if (max_err > worst_max) worst_max = max_err;
-            if (rms > worst_rms) worst_rms = rms;
-            // Scale agreement alone proves nothing about circuit behavior.
-            any = any or !scale_names.has(ng_name);
+            if (count > 0) {
+                const rms = @sqrt(sum_sq / @as(f64, @floatFromInt(count)));
+                if (max_err > worst_max) worst_max = max_err;
+                if (rms > worst_rms) worst_rms = rms;
+                // Scale agreement alone proves nothing about circuit behavior.
+                any = any or !scale_names.has(ng_name);
+            }
         }
     }
 
@@ -657,8 +885,10 @@ fn isInternalNode(name: []const u8) bool {
     return cut > 0 and xyce_internal_nodes.has(inner[cut + 1 ..]);
 }
 
-fn extractCol(data: []const f64, nvars: usize, col: usize, out: []f64) void {
-    for (out, 0..) |*value, p| value.* = data[p * nvars + col];
+/// One real series out of the interleaved raw blob. `parts` is 1 for a real
+/// plot and 2 for a complex one, where `part` selects re (0) or im (1).
+fn extractCol(data: []const f64, nvars: usize, col: usize, parts: usize, part: usize, out: []f64) void {
+    for (out, 0..) |*value, p| value.* = data[(p * nvars + col) * parts + part];
 }
 
 fn colPeak(col: []const f64) f64 {
@@ -1131,7 +1361,9 @@ fn runOk(io: Io, job: Job, timeout: []const u8) bool {
     return waitOk(&child, io);
 }
 
-fn timedMedian(io: Io, gpa: std.mem.Allocator, job: Job, timeout: []const u8, iters: u32, mode: enum { quiet, cpu, gpu }) !u64 {
+const TimingMode = enum { quiet, cpu, gpu };
+
+fn timed(io: Io, gpa: std.mem.Allocator, job: Job, timeout: []const u8, iters: u32, mode: TimingMode) !Timing {
     const samples = try gpa.alloc(u64, iters);
     for (samples) |*s| {
         const t0 = Io.Timestamp.now(io, .awake);
@@ -1146,7 +1378,55 @@ fn timedMedian(io: Io, gpa: std.mem.Allocator, job: Job, timeout: []const u8, it
         s.* = @intCast(t0.durationTo(t1).nanoseconds);
     }
     std.mem.sort(u64, samples, {}, std.sort.asc(u64));
-    return samples[samples.len / 2];
+    return .{ .min_ns = samples[0], .p50_ns = samples[samples.len / 2] };
+}
+
+/// One floor per timed binary, in the same run, with the same statistic, on the
+/// same deck. Measured BEFORE the fixtures so it is not sitting inside whatever
+/// page-cache state a 280-deck sweep leaves behind.
+///
+/// `timedMode` for the espice GPU column is `.cpu`, not `.gpu`, on purpose: the
+/// null deck has no device work at all, so `--backend auto` declines the GPU and
+/// says so, and treating that as a fallback error would leave the gpu column
+/// with no floor. What we want here is the cost of STARTING `--backend auto`,
+/// hardware probe included, which is exactly what this measures.
+fn measureFloors(
+    io: Io,
+    gpa: std.mem.Allocator,
+    cfg: *const Config,
+    refs: *const std.enums.EnumArray(RefId, Ref),
+    out_dir: []const u8,
+    engine_ok: bool,
+) Floors {
+    var floors: Floors = .{};
+    const deck = std.fmt.allocPrint(gpa, "{s}/floor.sp", .{out_dir}) catch return floors;
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = deck, .data = floor_deck }) catch return floors;
+    const raw = std.fmt.allocPrint(gpa, "{s}/floor.raw", .{out_dir}) catch return floors;
+    const fx: Fixture = .{ .category = "_floor", .name = "null" };
+    // The floor is ONE number reused by every row, so it is worth far more
+    // repeats than any single fixture gets — and a min-of-N converges from
+    // ABOVE, so an under-sampled floor is systematically too HIGH, which
+    // over-subtracts from both sides and refuses decks it should have ranked.
+    // At 5-11 ms a run, 40 repeats of one two-device deck costs under a second.
+    const iters = @max(cfg.iters, 40);
+
+    if (engine_ok) {
+        for ([_][]const u8{ "cpu", "auto" }, [_]*?Timing{ &floors.zp_cpu, &floors.zp_gpu }) |backend, slot| {
+            const job: Job = .{ .argv = &.{ cfg.engine_bin, "-b", "--backend", backend, "-r", raw, deck } };
+            if (!runOk(io, job, cfg.timeout)) continue;
+            slot.* = timed(io, gpa, job, cfg.timeout, iters, .cpu) catch null;
+        }
+    }
+    for (std.enums.values(RefId)) |id| {
+        const ref = refs.get(id);
+        if (!ref.on()) continue;
+        // VACASK does not read SPICE, so it has no floor here and no
+        // floor-corrected column; it also feeds no ratio.
+        const job = buildJob(io, gpa, ref, id, cfg, out_dir, fx, deck) catch continue;
+        if (!runOk(io, job, cfg.timeout)) continue;
+        floors.refs.set(id, timed(io, gpa, job, cfg.timeout, iters, .quiet) catch null);
+    }
+    return floors;
 }
 
 // GNU time peak RSS in KiB — returns 0 if unavailable or the run failed.
@@ -1217,10 +1497,38 @@ fn reportRefs(out: *Io.Writer, refs: *const std.enums.EnumArray(RefId, Ref)) !vo
     try out.writeAll("\n");
 }
 
+/// The per-binary process floor, printed before the table so every ratio below
+/// it can be re-derived by hand. A floor that failed to measure prints `-`, and
+/// that column then has no corrected ratio at all rather than a silently
+/// uncorrected one.
+fn reportFloors(out: *Io.Writer, floors: *const Floors, refs: *const std.enums.EnumArray(RefId, Ref)) !void {
+    try out.writeAll("process floor (two devices, one .op — subtracted from every corrected ratio):\n");
+    try printFloor(out, "zp-cpu", floors.zp_cpu);
+    try printFloor(out, "zp-gpu", floors.zp_gpu);
+    for (std.enums.values(RefId)) |id| {
+        if (!refs.get(id).on()) continue;
+        try printFloor(out, refs.get(id).label, floors.refs.get(id));
+    }
+    try out.writeAll("\n");
+}
+
+fn printFloor(out: *Io.Writer, label: []const u8, t: ?Timing) !void {
+    try out.print("  {s:<8} ", .{label});
+    if (t) |v| {
+        try printDur(out, v);
+        try out.print("  (median {d:.2} ms, jitter {d:.2} ms)\n", .{
+            @as(f64, @floatFromInt(v.p50_ns)) / 1e6,
+            @as(f64, @floatFromInt(v.jitter())) / 1e6,
+        });
+    } else {
+        try out.writeAll("not measured — no corrected ratio for this column\n");
+    }
+}
+
 fn reportHeader(out: *Io.Writer, refs: *const std.enums.EnumArray(RefId, Ref)) !void {
     try out.print("{s:<34} {s:>12} {s:>12}", .{ "fixture", "zp-cpu", "zp-gpu" });
     for (std.enums.values(RefId)) |id| try out.print(" {s:>12}", .{refs.get(id).label});
-    try out.print(" {s:>7} {s:>7}  {s:>8}", .{ "cpu/ng", "gpu/ng", "zp-MB" });
+    try out.print(" {s:>7} {s:>7} {s:>7} {s:>7}  {s:>8}", .{ "cpu/ng", "cpu/ng*", "gpu/ng", "gpu/ng*", "zp-MB" });
     for (std.enums.values(RefId)) |id| try out.print(" {s:>8}", .{ref_mb_label.get(id)});
     try out.print("  {s:>10} {s:>10} {s:>5}  {s:>10} {s:>10} {s:>5}", .{ "cpu-max", "cpu-rms", "cpu", "gpu-max", "gpu-rms", "gpu" });
     for (std.enums.values(RefId)) |id| {
@@ -1231,7 +1539,7 @@ fn reportHeader(out: *Io.Writer, refs: *const std.enums.EnumArray(RefId, Ref)) !
 
     try out.print("{s:-<34} {s:->12} {s:->12}", .{ "", "", "" });
     for (std.enums.values(RefId)) |_| try out.print(" {s:->12}", .{""});
-    try out.print(" {s:->7} {s:->7}  {s:->8}", .{ "", "", "" });
+    try out.print(" {s:->7} {s:->7} {s:->7} {s:->7}  {s:->8}", .{ "", "", "", "", "" });
     for (std.enums.values(RefId)) |_| try out.print(" {s:->8}", .{""});
     try out.print("  {s:->10} {s:->10} {s:->5}  {s:->10} {s:->10} {s:->5}", .{ "", "", "", "", "", "" });
     for (std.enums.values(RefId)) |id| {
@@ -1241,7 +1549,7 @@ fn reportHeader(out: *Io.Writer, refs: *const std.enums.EnumArray(RefId, Ref)) !
     try out.writeAll("\n");
 }
 
-fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
+fn reportRow(out: *Io.Writer, r: Result, floors: *const Floors, prev_cat: *[]const u8) !void {
     if (!std.mem.eql(u8, prev_cat.*, r.category)) {
         if (prev_cat.*.len > 0) try out.writeAll("\n");
         prev_cat.* = r.category;
@@ -1251,14 +1559,14 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
 
     try out.print("{s:<34} ", .{label});
 
-    if (r.zp_cpu_median_ns) |ns| {
+    if (r.zp_cpu) |ns| {
         try printDur(out, ns);
     } else {
         try out.print("{s:>12}", .{"skip"});
     }
     try out.writeAll(" ");
 
-    if (r.zp_gpu_median_ns) |ns| {
+    if (r.zp_gpu) |ns| {
         try printDur(out, ns);
     } else {
         try out.print("{s:>12}", .{"skip"});
@@ -1267,7 +1575,7 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
 
     for (std.enums.values(RefId)) |id| {
         const run = r.refs.get(id);
-        if (run.median_ns) |ns| {
+        if (run.time) |ns| {
             try printDur(out, ns);
         } else {
             try out.print("{s:>12}", .{if (run.skip.len > 0) "skip" else "-"});
@@ -1275,21 +1583,15 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
         try out.writeAll(" ");
     }
 
-    const ng_ns = r.ng().median_ns;
-    if (r.zp_cpu_median_ns != null and ng_ns != null) {
-        const ratio = @as(f64, @floatFromInt(ng_ns.?)) / @as(f64, @floatFromInt(r.zp_cpu_median_ns.?));
-        try out.print("{d:>6.1}x", .{ratio});
-    } else {
-        try out.print("{s:>7}", .{"-"});
-    }
+    const ng_ns = r.ng().time;
+    const ng_floor = floors.refs.get(.ngspice);
+    try printRatio(out, rawRatio(ng_ns, r.zp_cpu));
     try out.writeAll(" ");
-
-    if (r.zp_gpu_median_ns != null and ng_ns != null) {
-        const ratio = @as(f64, @floatFromInt(ng_ns.?)) / @as(f64, @floatFromInt(r.zp_gpu_median_ns.?));
-        try out.print("{d:>6.1}x", .{ratio});
-    } else {
-        try out.print("{s:>7}", .{"-"});
-    }
+    try printRatio(out, correctedRatio(ng_ns, ng_floor, r.zp_cpu, floors.zp_cpu));
+    try out.writeAll(" ");
+    try printRatio(out, rawRatio(ng_ns, r.zp_gpu));
+    try out.writeAll(" ");
+    try printRatio(out, correctedRatio(ng_ns, ng_floor, r.zp_gpu, floors.zp_gpu));
     try out.writeAll("  ");
 
     // memory columns
@@ -1324,7 +1626,7 @@ fn reportRow(out: *Io.Writer, r: Result, prev_cat: *[]const u8) !void {
             acc.max_rel, acc.rms_rel, accuracyStatus(acc),
         });
     } else {
-        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", @as([]const u8, if (ng_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-") });
+        try out.print("{s:>10} {s:>10} {s:>5}", .{ "-", "-", @as([]const u8, if (ng_ns != null and r.zp_gpu != null) "N/A" else "-") });
     }
 
     // espice-CPU against each NON-primary reference, condensed to a verdict:
@@ -1354,29 +1656,54 @@ fn accuracyStatus(acc: Accuracy) []const u8 {
 /// silently blank, so an unvalidated column cannot read as a passing one.
 fn refAccuracyStatus(r: Result, id: RefId) []const u8 {
     if (r.cpu_accuracy.get(id)) |acc| return accuracyStatus(acc);
-    if (r.zp_cpu_median_ns == null) return "-";
+    if (r.zp_cpu == null) return "-";
     // Skip first: a reference can TIME a fixture and still have nothing to
     // compare (exit 0, no raw written), and that is a skip with a reason, not
     // an unexplained N/A.
     if (r.refs.get(id).skip.len > 0) return "SKIP";
-    if (r.refs.get(id).median_ns == null) return "-";
+    if (r.refs.get(id).time == null) return "-";
     return "N/A";
 }
 
-fn reportFooter(out: *Io.Writer) !void {
+fn reportFooter(out: *Io.Writer, s: Summary, closing: Summary) !void {
     try out.writeAll(
         \\
-        \\ratio = ngspice / espice (higher = espice faster).
+        \\ratio = ngspice / espice (higher = espice faster). Timings are MIN of N.
+        \\cpu/ng, gpu/ng = raw wall clock. cpu/ng*, gpu/ng* = both sides' process
+        \\floor subtracted first; blank where what remains is inside the floor's noise.
         \\accuracy: per-variable RMS/max error normalized by max(peak, span, 1).
         \\ng/xy/vc columns are espice-CPU vs that reference; PASS/FAIL/N/A/SKIP.
-        \\N/A = unvalidated (unsupported complex/multiple plots, missing signals, or incomplete samples).
+        \\N/A = unvalidated (missing signals, mismatched point counts, or an unmatched plot).
         \\SKIP = the reference did not run this fixture (see the per-row reason).
         \\GPU timings exclude reported CPU fallback, including work below the offload threshold.
         \\
+        \\
     );
+    try out.print("espice vs ngspice, {d} ranked decks:\n", .{s.raw_ranked});
+    try out.print("  raw wall clock   {d:>4} faster, geomean {d:.2}x, mean {d:.2}x\n", .{
+        s.raw_wins, Summary.geo(s.raw_ranked, s.raw_log_sum), Summary.mean(s.raw_ranked, s.raw_sum),
+    });
+    try out.print("  floor-corrected  {d:>4} faster of {d} rankable, geomean {d:.2}x, mean {d:.2}x\n", .{
+        s.corr_wins, s.corr_ranked, Summary.geo(s.corr_ranked, s.corr_log_sum), Summary.mean(s.corr_ranked, s.corr_sum),
+    });
+    try out.print("  {d} decks too small to rank after floor subtraction; {d} flip winner between min-of-N and median-of-N.\n", .{
+        s.below_floor, s.p50_flips,
+    });
+    try out.print("  same decks against the CLOSING floor: {d} faster of {d}, geomean {d:.2}x  <- the error bar\n", .{
+        closing.corr_wins, closing.corr_ranked, Summary.geo(closing.corr_ranked, closing.corr_log_sum),
+    });
 }
 
-fn printDur(out: *Io.Writer, ns: u64) !void {
+/// `-` where a corrected ratio exists but was refused: the deck is too small
+/// for the floor subtraction to leave anything above the floors' own noise.
+/// A blank is honest there; a number would not be.
+fn printRatio(out: *Io.Writer, ratio: ?f64) !void {
+    if (ratio) |v| try out.print("{d:>6.1}x", .{v}) else try out.print("{s:>7}", .{"-"});
+}
+
+/// Minimum of N, not median. See `Timing`.
+fn printDur(out: *Io.Writer, t: Timing) !void {
+    const ns = t.min_ns;
     const f = @as(f64, @floatFromInt(ns));
     if (ns < 1_000_000) {
         try out.print("{d:>9.1} us", .{f / 1e3});
@@ -1389,14 +1716,13 @@ fn printDur(out: *Io.Writer, ns: u64) !void {
 
 /// One markdown cell, printed straight out — the old version built every cell
 /// into its own stack buffer first, which does not survive adding references.
-fn mdDur(w: *Io.Writer, ns: ?u64) !void {
+fn mdDur(w: *Io.Writer, t: ?Timing) !void {
     var buf: [32]u8 = undefined;
-    try w.print(" {s} |", .{if (ns) |v| fmtDur(&buf, v) else "skip"});
+    try w.print(" {s} |", .{if (t) |v| fmtDur(&buf, v.min_ns) else "skip"});
 }
 
-fn mdRatio(w: *Io.Writer, ref_ns: ?u64, zp_ns: ?u64) !void {
-    if (ref_ns == null or zp_ns == null) return w.writeAll(" - |");
-    try w.print(" {d:.1}x |", .{@as(f64, @floatFromInt(ref_ns.?)) / @as(f64, @floatFromInt(zp_ns.?))});
+fn mdRatio(w: *Io.Writer, ratio: ?f64) !void {
+    if (ratio) |v| try w.print(" {d:.1}x |", .{v}) else try w.writeAll(" - |");
 }
 
 fn mdMb(w: *Io.Writer, kb: u64) !void {
@@ -1419,10 +1745,12 @@ fn writeResultsMd(
     results: []const Result,
     rtol: f64,
     refs: *const std.enums.EnumArray(RefId, Ref),
+    floors: *const Floors,
+    closing: *const Floors,
 ) void {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     const w = &aw.writer;
-    writeResultsBody(w, results, rtol, refs) catch return;
+    writeResultsBody(w, results, rtol, refs, floors, closing) catch return;
 
     const text = aw.toOwnedSlice() catch return;
     const file = Io.Dir.cwd().createFile(io, path, .{}) catch return;
@@ -1433,13 +1761,112 @@ fn writeResultsMd(
     fw.interface.flush() catch {};
 }
 
+/// The speed claim, stated twice with its method attached, because the two
+/// numbers differ by more than anyone would guess and only one of them is about
+/// the simulator.
+///
+/// `cpu/ng` is wall clock over wall clock, which is what a user feels and what
+/// this file has always printed. `cpu/ng*` subtracts each binary's own measured
+/// process floor from both sides first. ngspice is dynamically linked and pays a
+/// fixed ~10.2M instructions of `do_lookup_x`/`_dl_relocate_object` before main;
+/// espice is statically linked and pays ~0.87M. On a 4 ms deck that gap is the
+/// entire reported speedup, and a raw ratio there measures ld.so.
+///
+/// Neither column is the "real" one. The raw column overstates the SIMULATOR and
+/// the corrected column understates the PROGRAM. Quote whichever question is
+/// being asked, and say which.
+fn writeHeadline(
+    w: *Io.Writer,
+    s: Summary,
+    closing: Summary,
+    floors: *const Floors,
+    closing_floors: *const Floors,
+    refs: *const std.enums.EnumArray(RefId, Ref),
+) !void {
+    try w.writeAll("## Speed headline\n\n| statistic | raw wall clock | floor-corrected |\n|---|---|---|\n");
+    try w.print("| decks ranked | {d} | {d} |\n", .{ s.raw_ranked, s.corr_ranked });
+    try w.print("| espice faster | {d} | {d} |\n", .{ s.raw_wins, s.corr_wins });
+    try w.print("| geometric mean | {d:.2}x | {d:.2}x |\n", .{
+        Summary.geo(s.raw_ranked, s.raw_log_sum), Summary.geo(s.corr_ranked, s.corr_log_sum),
+    });
+    try w.print("| arithmetic mean | {d:.2}x | {d:.2}x |\n\n", .{
+        Summary.mean(s.raw_ranked, s.raw_sum), Summary.mean(s.corr_ranked, s.corr_sum),
+    });
+    try w.print(
+        \\{d} of the {d} ranked decks have no corrected ratio: after subtracting both
+        \\process floors, what is left is smaller than the floor measurement's own
+        \\min-to-median spread, so any ordering of the two engines there is a
+        \\measurement of the scheduler. They are blank, not ranked. Timings are
+        \\**minimum of N**, not median — see the note below.
+        \\
+        \\
+    , .{ s.below_floor, s.raw_ranked });
+    try w.print(
+        \\{d} decks change winner between min-of-N and median-of-N on the raw ratio.
+        \\That is the size of the effect that put seven false "espice is slower" rows
+        \\into `docs/perf/baseline-446268a.md`: the minimum is the sample least
+        \\contaminated by other load, the median is whatever the box was doing.
+        \\
+        \\
+    , .{s.p50_flips});
+
+    try w.print(
+        \\### Uncertainty
+        \\
+        \\The floor was measured twice on the same deck with the same statistic:
+        \\once before the sweep (used for every `*` column above) and once after it.
+        \\Re-deriving the corrected headline against the CLOSING floor gives
+        \\**{d:.2}x over {d} decks** against **{d:.2}x over {d}**. That spread is the
+        \\error bar on the corrected number, and it is not small: a wall-clock floor
+        \\on a shared machine is a measurement, not a constant.
+        \\
+        \\
+    , .{
+        Summary.geo(closing.corr_ranked, closing.corr_log_sum), closing.corr_ranked,
+        Summary.geo(s.corr_ranked, s.corr_log_sum),             s.corr_ranked,
+    });
+
+    try w.writeAll("Measured process floor (two devices, one `.op`), subtracted from every `*` column:\n\n");
+    try w.writeAll("| binary | opening min | opening median | closing min | closing median |\n|---|---|---|---|---|\n");
+    try mdFloor(w, "zp-cpu", floors.zp_cpu, closing_floors.zp_cpu);
+    try mdFloor(w, "zp-gpu", floors.zp_gpu, closing_floors.zp_gpu);
+    for (std.enums.values(RefId)) |id| {
+        if (!refs.get(id).on()) continue;
+        try mdFloor(w, refs.get(id).label, floors.refs.get(id), closing_floors.refs.get(id));
+    }
+    try w.writeAll(
+        \\
+        \\The floor is wall clock, so it carries fork/exec, page-in and the runner's
+        \\own `timeout` wrapper as well as the simulator's startup — and it carries
+        \\them on BOTH sides, including the pipe-drain the runner puts on espice and
+        \\not on the references. Everything constant per process therefore cancels in
+        \\the subtraction, which is the point.
+        \\
+        \\
+    );
+}
+
+fn mdFloor(w: *Io.Writer, label: []const u8, open: ?Timing, close: ?Timing) !void {
+    var buf: [4][32]u8 = undefined;
+    const cells: [4][]const u8 = .{
+        if (open) |v| fmtDur(&buf[0], v.min_ns) else "-",
+        if (open) |v| fmtDur(&buf[1], v.p50_ns) else "-",
+        if (close) |v| fmtDur(&buf[2], v.min_ns) else "-",
+        if (close) |v| fmtDur(&buf[3], v.p50_ns) else "-",
+    };
+    try w.print("| {s} | {s} | {s} | {s} | {s} |\n", .{ label, cells[0], cells[1], cells[2], cells[3] });
+}
+
 fn writeResultsBody(
     w: *Io.Writer,
     results: []const Result,
     rtol: f64,
     refs: *const std.enums.EnumArray(RefId, Ref),
+    floors: *const Floors,
+    closing: *const Floors,
 ) !void {
     try w.writeAll("# Benchmark results — espice vs ngspice, Xyce and VACASK\n\n");
+    try writeHeadline(w, summarize(results, floors), summarize(results, closing), floors, closing, refs);
 
     // Which binary produced each column, verbatim. Ratios against an unnamed
     // "ngspice" are not reproducible — two 44.2 builds on the dev host differ
@@ -1467,16 +1894,21 @@ fn writeResultsBody(
 
     try w.print("Pass: per-variable RMS ≤ {e:.0}, max ≤ {e:.0}; error normalized by max(peak, span, 1).\n", .{ rtol, 10 * rtol });
     try w.writeAll(
-        \\N/A: unvalidated (unsupported complex/multiple plots, missing signals, or incomplete samples).
+        \\N/A: unvalidated (missing signals, mismatched point counts, or a reference plot with no counterpart).
         \\SKIP: that reference did not run the fixture (VACASK only runs where a `vacask.sim` deck exists).
         \\GPU timings exclude reported CPU fallback.
+        \\
+        \\Every timing column is the **minimum** of N repeats, not the median.
+        \\`cpu/ng` and `gpu/ng` are raw wall clock; `cpu/ng*` and `gpu/ng*` subtract
+        \\each binary's own process floor from both sides first, and are blank where
+        \\what remains is inside the floor's own noise.
         \\
         \\
     );
 
     try w.writeAll("| fixture | zp-cpu | zp-gpu |");
     for (std.enums.values(RefId)) |id| try w.print(" {s} |", .{refs.get(id).label});
-    try w.writeAll(" cpu/ng | gpu/ng | zp-MB |");
+    try w.writeAll(" cpu/ng | cpu/ng* | gpu/ng | gpu/ng* | zp-MB |");
     for (std.enums.values(RefId)) |id| try w.print(" {s} |", .{ref_mb_label.get(id)});
     try w.writeAll(" cpu-max | cpu-rms | cpu | gpu-max | gpu-rms | gpu |");
     // The non-primary references carry their max/RMS here and only a verdict on
@@ -1489,7 +1921,7 @@ fn writeResultsBody(
     }
     try w.writeAll("\n|---|---|---|");
     for (std.enums.values(RefId)) |_| try w.writeAll("---|");
-    try w.writeAll("---|---|---|");
+    try w.writeAll("---|---|---|---|---|");
     for (std.enums.values(RefId)) |_| try w.writeAll("---|");
     try w.writeAll("---|---|---|---|---|---|");
     for (std.enums.values(RefId)) |id| {
@@ -1500,15 +1932,18 @@ fn writeResultsBody(
 
     for (results) |r| {
         try w.print("| {s}/{s} |", .{ r.category, r.name });
-        try mdDur(w, r.zp_cpu_median_ns);
-        try mdDur(w, r.zp_gpu_median_ns);
-        for (std.enums.values(RefId)) |id| try mdDur(w, r.refs.get(id).median_ns);
-        try mdRatio(w, r.ng().median_ns, r.zp_cpu_median_ns);
-        try mdRatio(w, r.ng().median_ns, r.zp_gpu_median_ns);
+        try mdDur(w, r.zp_cpu);
+        try mdDur(w, r.zp_gpu);
+        for (std.enums.values(RefId)) |id| try mdDur(w, r.refs.get(id).time);
+        const ng_floor = floors.refs.get(.ngspice);
+        try mdRatio(w, rawRatio(r.ng().time, r.zp_cpu));
+        try mdRatio(w, correctedRatio(r.ng().time, ng_floor, r.zp_cpu, floors.zp_cpu));
+        try mdRatio(w, rawRatio(r.ng().time, r.zp_gpu));
+        try mdRatio(w, correctedRatio(r.ng().time, ng_floor, r.zp_gpu, floors.zp_gpu));
         try mdMb(w, r.zp_cpu_rss_kb);
         for (std.enums.values(RefId)) |id| try mdMb(w, r.refs.get(id).rss_kb);
         try mdAccuracy(w, r.cpu_accuracy.get(primary_ref), refAccuracyStatus(r, primary_ref));
-        const gpu_status: []const u8 = if (r.zp_gpu_skip.len > 0) "SKIP" else if (r.ng().median_ns != null and r.zp_gpu_median_ns != null) "N/A" else "-";
+        const gpu_status: []const u8 = if (r.zp_gpu_skip.len > 0) "SKIP" else if (r.ng().time != null and r.zp_gpu != null) "N/A" else "-";
         try mdAccuracy(w, r.gpu_accuracy, gpu_status);
         for (std.enums.values(RefId)) |id| {
             if (id == primary_ref) continue;
@@ -1807,31 +2242,156 @@ test "a reference that refuses a deck says why" {
 }
 
 test "an unrun reference reads as SKIP, never as blank" {
-    var r: Result = .{ .category = "tran", .name = "rc_pulse", .zp_cpu_median_ns = 1000 };
+    var r: Result = .{ .category = "tran", .name = "rc_pulse", .zp_cpu = .{ .min_ns = 1000, .p50_ns = 1000 } };
     // Never ran this fixture -> SKIP, with the reason printed under the row.
     r.refs.set(.vacask, .{ .skip = "no native vacask/ deck" });
     try std.testing.expectEqualStrings("SKIP", refAccuracyStatus(r, .vacask));
     // Ran, but its output could not be compared -> N/A, not a pass.
-    r.refs.set(.xyce, .{ .median_ns = 2000 });
+    r.refs.set(.xyce, .{ .time = .{ .min_ns = 2000, .p50_ns = 2000 } });
     try std.testing.expectEqualStrings("N/A", refAccuracyStatus(r, .xyce));
     r.cpu_accuracy.set(.xyce, .{ .max_rel = 0, .rms_rel = 0, .pass = true });
     try std.testing.expectEqualStrings("PASS", refAccuracyStatus(r, .xyce));
     // espice itself did not run, so no comparison was even attempted. An
     // accuracy value cannot coexist with this, since it is only computed when
     // espice produced a raw.
-    r.zp_cpu_median_ns = null;
+    r.zp_cpu = null;
     r.cpu_accuracy.set(.xyce, null);
     try std.testing.expectEqualStrings("-", refAccuracyStatus(r, .xyce));
 }
 
-test "raw parser does not validate only the first plot" {
+test "the raw parser reads every plot, and still refuses a truncated one" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const raw = "Plotname: Operating Point\nNo. Variables: 1\nNo. Points: 1\nVariables:\n\t0\tv(out)\tvoltage\nBinary:\n" ++ "\x00" ** 8;
-    try std.testing.expect(parseRawBlob(a, raw) != null);
-    try std.testing.expect(parseRawBlob(a, raw ++ raw) == null);
+    try std.testing.expectEqual(@as(usize, 1), parseRawBlob(a, raw).?.len);
+    // Used to be `== null`: a second plot meant the whole raw was thrown away,
+    // which is branch P5 and 19 of the 64 N/A fixtures.
+    try std.testing.expectEqual(@as(usize, 2), parseRawBlob(a, raw ++ raw).?.len);
     try std.testing.expect(parseRawBlob(a, raw[0 .. raw.len - 1]) == null);
+    // A raw whose FIRST plot is whole and whose second is truncated is still
+    // null: a partially-read raw silently drops an analysis.
+    try std.testing.expect(parseRawBlob(a, raw ++ raw[0 .. raw.len - 1]) == null);
+}
+
+test "a complex plot is scored re and im separately, not as a magnitude" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (re, im) interleaved per entry: freq=1 v(out)=3+4j, freq=2 v(out)=5+6j.
+    const reference: Plot = .{
+        .plotname = "AC Analysis",
+        .varnames = &.{ "frequency", "v(out)" },
+        .is_complex = true,
+        .npoints = 2,
+        .nvars = 2,
+        .data = &.{ 1, 0, 3, 4, 2, 0, 5, 6 },
+    };
+    try std.testing.expect(comparePlots(a, reference, reference, 1e-3).?.pass);
+    // Same magnitude at every point, re and im swapped — a phase-convention
+    // error. Collapsing to |z| first would call this a PASS, which is the one
+    // thing an AC comparison exists to catch.
+    var swapped = reference;
+    swapped.data = &.{ 1, 0, 4, 3, 2, 0, 6, 5 };
+    try std.testing.expect(!comparePlots(a, reference, swapped, 1e-3).?.pass);
+}
+
+test "multi-analysis plots are matched by name, never by index" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ac: Plot = .{
+        .plotname = "AC Analysis",
+        .varnames = &.{ "frequency", "v(out)" },
+        .is_complex = true,
+        .npoints = 1,
+        .nvars = 2,
+        .data = &.{ 1, 0, 3, 4 },
+    };
+    const op: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{"v(out)"},
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 1,
+        .data = &.{7},
+    };
+    // ngspice writes AC first, espice writes Operating Point first, on every
+    // multi-analysis deck. Index matching would score the AC sweep against the
+    // operating point and report a failure.
+    try std.testing.expect(compareRaws(a, &.{ ac, op }, &.{ op, ac }, 1e-3).?.pass);
+    // A CANDIDATE-only plot is not evidence of anything: espice writes a
+    // `Fourier Analysis` plot where ngspice prints `.four` to stdout.
+    var four = op;
+    four.plotname = "Fourier Analysis";
+    try std.testing.expect(compareRaws(a, &.{ac}, &.{ four, ac }, 1e-3).?.pass);
+    // A REFERENCE plot with no counterpart is a coverage gap -> N/A, not a pass.
+    const gap = compareRaws(a, &.{ ac, op }, &.{ac}, 1e-3).?;
+    try std.testing.expect(!gap.complete and !gap.pass);
+    try std.testing.expectEqualStrings("N/A", accuracyStatus(gap));
+    // One bad plot out of two loses the whole fixture: worst pair wins.
+    var wrong_op = op;
+    wrong_op.data = &.{9};
+    try std.testing.expect(!compareRaws(a, &.{ ac, op }, &.{ wrong_op, ac }, 1e-3).?.pass);
+    // Nothing comparable at all is null, so the row reads N/A rather than PASS.
+    try std.testing.expect(compareRaws(a, &.{ac}, &.{op}, 1e-3) == null);
+}
+
+test "the process floor is subtracted from both sides, and small decks go unranked" {
+    const ms = 1_000_000;
+    const ng_floor: Timing = .{ .min_ns = 10 * ms, .p50_ns = 10 * ms + ms / 10 };
+    const zp_floor: Timing = .{ .min_ns = 1 * ms, .p50_ns = 1 * ms + ms / 20 };
+    // 20 ms vs 5 ms reads as 4.0x raw. Ten of ngspice's twenty milliseconds are
+    // ld.so, one of espice's five is its own startup: the simulators are 2.5x
+    // apart, not 4x.
+    const ng: Timing = .{ .min_ns = 20 * ms, .p50_ns = 21 * ms };
+    const zp: Timing = .{ .min_ns = 5 * ms, .p50_ns = 5 * ms + ms / 5 };
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), rawRatio(ng, zp).?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), correctedRatio(ng, ng_floor, zp, zp_floor).?, 1e-9);
+    // A deck whose work, after both floors come off, is inside the floor's own
+    // min-to-median spread is not ranked at all. It still has a raw ratio, and
+    // that raw ratio is 10.05/1.04 = 9.7x of pure process startup.
+    const tiny_ng: Timing = .{ .min_ns = 10 * ms + ms / 20, .p50_ns = 11 * ms };
+    const tiny_zp: Timing = .{ .min_ns = 1 * ms + ms / 25, .p50_ns = 1 * ms + ms / 10 };
+    try std.testing.expect(rawRatio(tiny_ng, tiny_zp).? > 9.0);
+    try std.testing.expect(correctedRatio(tiny_ng, ng_floor, tiny_zp, zp_floor) == null);
+    // No floor measured for a column -> no corrected ratio for it, rather than
+    // an uncorrected one wearing the corrected column's label.
+    try std.testing.expect(correctedRatio(ng, null, zp, zp_floor) == null);
+    try std.testing.expect(correctedRatio(ng, ng_floor, zp, null) == null);
+}
+
+test "the headline is a geometric mean, and counts what it could not rank" {
+    var results: [3]Result = .{
+        .{ .category = "t", .name = "fast" },
+        .{ .category = "t", .name = "slow" },
+        .{ .category = "t", .name = "tiny" },
+    };
+    const ms = 1_000_000;
+    var floors: Floors = .{ .zp_cpu = .{ .min_ns = ms, .p50_ns = ms + ms / 20 } };
+    floors.refs.set(.ngspice, .{ .min_ns = 10 * ms, .p50_ns = 10 * ms + ms / 10 });
+
+    // 4x raw / 2.5x corrected.
+    results[0].zp_cpu = .{ .min_ns = 5 * ms, .p50_ns = 5 * ms };
+    results[0].refs.set(.ngspice, .{ .time = .{ .min_ns = 20 * ms, .p50_ns = 20 * ms } });
+    // 0.75x raw, 0.26x corrected — and it FLIPS to a win on median-of-N, which
+    // is the shape of the seven false regressions in `baseline-446268a.md`.
+    results[1].zp_cpu = .{ .min_ns = 20 * ms, .p50_ns = 20 * ms };
+    results[1].refs.set(.ngspice, .{ .time = .{ .min_ns = 15 * ms, .p50_ns = 30 * ms } });
+    // Below the floor: raw-ranked, not corrected-ranked.
+    results[2].zp_cpu = .{ .min_ns = ms + ms / 25, .p50_ns = ms + ms / 10 };
+    results[2].refs.set(.ngspice, .{ .time = .{ .min_ns = 10 * ms + ms / 20, .p50_ns = 11 * ms } });
+
+    const s = summarize(&results, &floors);
+    try std.testing.expectEqual(@as(usize, 3), s.raw_ranked);
+    try std.testing.expectEqual(@as(usize, 2), s.raw_wins);
+    try std.testing.expectEqual(@as(usize, 2), s.corr_ranked);
+    try std.testing.expectEqual(@as(usize, 1), s.corr_wins);
+    try std.testing.expectEqual(@as(usize, 1), s.below_floor);
+    // A deck won 4x and a deck lost 4x is parity, not a 2.1x win: geometric.
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), Summary.geo(2, @log(4.0) + @log(0.25)), 1e-12);
+    // Deck 1 is espice-slower on min-of-N and espice-faster on median-of-N.
+    try std.testing.expectEqual(@as(usize, 1), s.p50_flips);
 }
 
 test "GPU fallback diagnostics cannot become GPU timings" {
@@ -1863,11 +2423,11 @@ test "timing discards large external output and preserves espice diagnostics" {
     defer arena.deinit();
     const a = arena.allocator();
     const io = std.testing.io;
-    _ = try timedMedian(io, a, .{ .argv = &.{ "head", "-c", "2097152", "/dev/zero" } }, "5", 1, .quiet);
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' '{\"skip\":\"test\"}'" } }, "5", 1, .cpu));
+    _ = try timed(io, a, .{ .argv = &.{ "head", "-c", "2097152", "/dev/zero" } }, "5", 1, .quiet);
+    try std.testing.expectError(error.BenchRunFailed, timed(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' '{\"skip\":\"test\"}'" } }, "5", 1, .cpu));
     // Verbatim `gpu_context.evalPlanes`, for the same reason as the matcher's
     // own test: a paraphrased fixture is what let the old needles rot unnoticed.
-    try std.testing.expectError(error.GpuFallback, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' 'warning: GPU device eval failed (LaunchFailed); falling back to the CPU stamp' >&2" } }, "5", 1, .gpu));
+    try std.testing.expectError(error.GpuFallback, timed(io, a, .{ .argv = &.{ "sh", "-c", "printf '%s' 'warning: GPU device eval failed (LaunchFailed); falling back to the CPU stamp' >&2" } }, "5", 1, .gpu));
 }
 
 test "a repeat that fails only AFTER the preflight is BenchRunFailed, not a dead run" {
@@ -1880,7 +2440,7 @@ test "a repeat that fails only AFTER the preflight is BenchRunFailed, not a dead
     // BenchRunFailed onto a per-fixture skip, so this error VALUE is what keeps
     // 280 fixtures' worth of results from being thrown away by one flake.
     // The load-induced cause is the timeout kill, so test that spelling too.
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "exit 1" } }, "5", 3, .quiet));
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "sleep 5" } }, "1", 1, .quiet));
-    try std.testing.expectError(error.BenchRunFailed, timedMedian(io, a, .{ .argv = &.{ "sh", "-c", "sleep 5" } }, "1", 1, .cpu));
+    try std.testing.expectError(error.BenchRunFailed, timed(io, a, .{ .argv = &.{ "sh", "-c", "exit 1" } }, "5", 3, .quiet));
+    try std.testing.expectError(error.BenchRunFailed, timed(io, a, .{ .argv = &.{ "sh", "-c", "sleep 5" } }, "1", 1, .quiet));
+    try std.testing.expectError(error.BenchRunFailed, timed(io, a, .{ .argv = &.{ "sh", "-c", "sleep 5" } }, "1", 1, .cpu));
 }
