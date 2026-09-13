@@ -1880,6 +1880,34 @@ const GmresTests = struct {
         var x = [2]f64{ 0, 0 };
         const result = gmres.solve(&mv, &.{ std.math.nan(f64), 1 }, &x, 1e-10, 2);
         try testing.expect(!result.converged);
+        x = .{ 0, 0 };
+        const inf_result = gmres.solve(&mv, &.{ std.math.inf(f64), 1 }, &x, 1e-10, 2);
+        try testing.expect(!inf_result.converged);
+    }
+
+    test "GMRES: right-hand sides near 1e300 and 1e-200 solve like unit ones (#40)" {
+        // A = [2 1; 0 3], x = s [1; 1]: the unscaled sum of squares
+        // overflows at s = 1e300 and underflows at s = 1e-200.
+        const gpa = testing.allocator;
+        var mv = DenseMatvec{ .a = &.{ 2, 1, 0, 3 }, .n = 2 };
+        var gmres = try Gmres.init(gpa, 2, 2);
+        defer gmres.deinit(gpa);
+        for ([_]f64{ 1, 1e300, 1e-200 }) |s| {
+            var x = [2]f64{ 0, 0 };
+            const result = gmres.solve(&mv, &.{ 3 * s, 3 * s }, &x, 1e-12, 2);
+            try testing.expect(result.converged);
+            for (x) |xi| try testing.expectApproxEqRel(s, xi, 1e-12);
+        }
+    }
+
+    test "GMRES: max_restarts at the top of its u32 range runs and stops when it converges" {
+        const gpa = testing.allocator;
+        var mv = DenseMatvec{ .a = &.{ 2, 1, 0, 3 }, .n = 2 };
+        var gmres = try Gmres.init(gpa, 2, 2);
+        defer gmres.deinit(gpa);
+        var x = [2]f64{ 0, 0 };
+        const result = gmres.solve(&mv, &.{ 3, 3 }, &x, 1e-12, std.math.maxInt(u32));
+        try testing.expect(result.converged);
     }
 
     test "GMRES: n = 1, an exact initial guess and an exact preconditioner" {
