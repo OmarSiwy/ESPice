@@ -2219,6 +2219,106 @@ test "V card: PWL table lands in the flattened Model slots" {
     try std.testing.expect(pwlCapacity(devices.vsource.Model) >= 3);
 }
 
+// The PWL lookup in vsource.va/isource.va BISECTS the table (their PWL blocks
+// are character-identical bar V/I naming, so testing vsource tests both). This
+// is the linear scan it replaced, transcribed, as the oracle: the two have to
+// agree at every boundary a bisection can get wrong — before the first point,
+// exactly on a knot, inside a segment, on a REPEATED knot (a vertical step),
+// past the last point, and all of it again through `td=` and the `r=` replay.
+fn pwlScan(pts: []const [2]f64, repeat: f64, td: f64, t: f64) f64 {
+    if (pts.len == 0) return 0;
+    var te = t - td;
+    const t_first = pts[0][0];
+    const v_first = pts[0][1];
+    const t_last = pts[pts.len - 1][0];
+    const v_last = pts[pts.len - 1][1];
+    if (repeat > 0 and pts.len > 1 and te > t_last and t_last > repeat) {
+        const span = t_last - repeat;
+        if (span > 0) {
+            const excess = te - repeat;
+            te = repeat + (excess - @floor(excess / span) * span);
+        }
+    }
+    if (te < 0 or te <= t_first) return v_first;
+    if (te >= t_last) return v_last;
+    var tp = t_first;
+    var vp = v_first;
+    var out = v_last;
+    for (pts[1..]) |p| {
+        if (te >= tp and te < p[0])
+            out = vp + (p[1] - vp) * (te - tp) / @max(p[0] - tp, 1e-15);
+        tp = p[0];
+        vp = p[1];
+    }
+    return out;
+}
+
+/// The device's own answer. `eval` leaves `res[flow] = v(p) - v(n) - source`,
+/// so at `x = 0` it is the negated source value.
+fn pwlEval(pts: []const [2]f64, repeat: f64, td: f64, t: f64) f64 {
+    const V = devices.vsource;
+    const n_u = @typeInfo(V.U).@"enum".fields.len;
+    const S = devices.engine.Dual(n_u, f64);
+    var model: V.Model = .{
+        .waveform = @intFromEnum(Wave.pwl),
+        .pwl_len = @intCast(pts.len),
+        .pwl_repeat = repeat,
+        .pwl_td = td,
+    };
+    inline for (0..comptime pwlCapacity(V.Model)) |k| {
+        if (k < pts.len) {
+            @field(model, pwlSlot("pwl_times", k)) = pts[k][0];
+            @field(model, pwlSlot("pwl_values", k)) = pts[k][1];
+        }
+    }
+    var inst: V.Instance = .{ .abstime = t, .analysis_kind = .tran };
+    V.precompute(&inst, &model);
+    const res = V.eval(S, [_]S{S.con(0)} ** n_u, &model, &inst, 0);
+    return -res[V.num_ports].val();
+}
+
+test "V/I cards: the PWL bisection agrees with a linear scan at every boundary" {
+    const tables = [_][]const [2]f64{
+        // a repeated knot at 3 ns (a vertical step), plateau at the end
+        &.{ .{ 1e-9, 1 }, .{ 2e-9, 2 }, .{ 3e-9, 3 }, .{ 3e-9, 7 }, .{ 4e-9, 8 }, .{ 5e-9, 8 } },
+        // the repeat is the SECOND point, so the step is the first segment
+        &.{ .{ 1e-9, 1 }, .{ 2e-9, 2 }, .{ 2e-9, 5 }, .{ 3e-9, 6 } },
+        // the degenerate lengths, where the bisection window is empty
+        &.{.{ 2e-9, -1 }},
+        &.{ .{ 0, 0 }, .{ 1e-9, 1 } },
+        // benchmark/fixtures/bypass/burst_clock's own table
+        &.{ .{ 0, 0 }, .{ 0.1e-6, 5 }, .{ 1e-6, 5 }, .{ 1.1e-6, 0 }, .{ 2e-6, 0 }, .{ 2.1e-6, 5 }, .{ 3e-6, 5 }, .{ 3.1e-6, 0 }, .{ 100e-6, 0 } },
+    };
+    var ts: std.ArrayList(f64) = .empty;
+    defer ts.deinit(std.testing.allocator);
+    for (tables) |pts| {
+        // Probe times: outside both ends, then every knot, its two neighbours
+        // one ulp away, and every segment midpoint.
+        ts.clearRetainingCapacity();
+        try ts.appendSlice(std.testing.allocator, &.{ -1e-9, 0, 1e-12, 1e-3 });
+        for (pts, 0..) |p, i| {
+            const bits: u64 = @bitCast(p[0]);
+            try ts.appendSlice(std.testing.allocator, &.{
+                p[0],
+                @bitCast(bits +% 1),
+                if (p[0] > 0) @as(f64, @bitCast(bits -% 1)) else -1e-18,
+            });
+            if (i + 1 < pts.len) try ts.append(std.testing.allocator, 0.5 * (p[0] + pts[i + 1][0]));
+        }
+        // Bare, delayed, replayed, and both.
+        for ([_][2]f64{ .{ 0, 0 }, .{ 0, 1.5e-9 }, .{ 1e-9, 0 }, .{ 1e-9, 1.5e-9 } }) |mod| {
+            for (ts.items) |t| {
+                const want = pwlScan(pts, mod[0], mod[1], t);
+                const got = pwlEval(pts, mod[0], mod[1], t);
+                std.testing.expectApproxEqAbs(want, got, 1e-12) catch |e| {
+                    std.debug.print("pwl len={d} r={e} td={e} t={e}: want {e} got {e}\n", .{ pts.len, mod[0], mod[1], t, want, got });
+                    return e;
+                };
+            }
+        }
+    }
+}
+
 test "V/I cards: unspecified PULSE edges stay at the -1 sentinel" {
     // PULSE(0 5) — no TR/TF/PW/PER. resolvePulseDefaults fills these from the
     // .tran card; until it runs they must still read as "unset".
