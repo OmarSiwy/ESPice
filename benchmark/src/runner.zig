@@ -622,11 +622,21 @@ fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path:
     return compareRaws(gpa, ng, zp, rtol);
 }
 
-/// Every reference plot against the candidate plot of the same analysis CLASS,
-/// worst pair wins. Matching is by name, never by index: on every multi-analysis
-/// deck the two engines write the plots in different orders (espice puts
-/// Operating Point first, ngspice puts AC first), so index-matching would score
-/// an AC sweep against an operating point and call it a failure.
+/// Every reference plot against its counterpart in the candidate raw, worst pair
+/// wins. Matching is by NAME, never by index: on every multi-analysis deck the
+/// two engines write the plots in a different order (espice puts Operating Point
+/// first, ngspice puts AC first), so index matching would score an AC sweep
+/// against an operating point and call it a failure.
+///
+/// Two passes, and the order matters. The first pass demands the plotnames match
+/// EXACTLY; only leftovers fall back to `plotClass`. The class map exists so
+/// Xyce's "DC transfer characteristic" can answer for ngspice's "Operating
+/// Point", but that alias also makes those two names interchangeable — so on a
+/// deck where ngspice writes BOTH (a `.dc` leg and an `.op`), a single
+/// class-matching pass can pair the sweep with the operating point and the
+/// operating point with the sweep. Both pairs then have mismatched point counts,
+/// both are refused, and a fixture that agrees to 3e-6 reads N/A.
+/// `devices/jfet_vds_vgs` is exactly that deck.
 ///
 /// A reference plot with no candidate counterpart is a coverage gap
 /// (`complete = false` -> N/A), never a pass. A CANDIDATE-only plot is not: for
@@ -641,19 +651,30 @@ fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, rtol:
     const taken = gpa.alloc(bool, zp.len) catch return null;
     defer gpa.free(taken);
     @memset(taken, false);
+    // Pairing is resolved for ALL reference plots before any is scored, so the
+    // exact-name pass cannot lose a partner to the class pass.
+    const pair = gpa.alloc(?usize, ng.len) catch return null;
+    defer gpa.free(pair);
+    for (&[_]bool{ true, false }) |exact| {
+        for (ng, pair) |ng_plot, *slot| {
+            if (exact) slot.* = null else if (slot.* != null) continue;
+            var ng_buf: [128]u8 = undefined;
+            const ng_key = if (exact) plotLower(&ng_buf, ng_plot.plotname) else plotClass(&ng_buf, ng_plot.plotname);
+            slot.* = for (zp, 0..) |zp_plot, i| {
+                if (taken[i]) continue;
+                var zp_buf: [128]u8 = undefined;
+                const zp_key = if (exact) plotLower(&zp_buf, zp_plot.plotname) else plotClass(&zp_buf, zp_plot.plotname);
+                if (std.mem.eql(u8, ng_key, zp_key)) break i;
+            } else null;
+            if (slot.*) |i| taken[i] = true;
+        }
+    }
 
-    for (ng) |ng_plot| {
-        var ng_buf: [128]u8 = undefined;
-        const ng_class = plotClass(&ng_buf, ng_plot.plotname);
-        const zi = for (zp, 0..) |zp_plot, i| {
-            if (taken[i]) continue;
-            var zp_buf: [128]u8 = undefined;
-            if (std.mem.eql(u8, ng_class, plotClass(&zp_buf, zp_plot.plotname))) break i;
-        } else {
+    for (ng, pair) |ng_plot, matched| {
+        const zi = matched orelse {
             worst.complete = false;
             continue;
         };
-        taken[zi] = true;
         const acc = comparePlots(gpa, ng_plot, zp[zi], rtol) orelse {
             worst.complete = false;
             continue;
@@ -848,9 +869,15 @@ const plot_classes = std.StaticStringMap([]const u8).initComptime(.{
 /// falls back to itself, so an unusually long name degrades to the old
 /// exact-match rule rather than to a silent refusal to compare.
 fn plotClass(buf: []u8, plotname: []const u8) []const u8 {
+    return plot_classes.get(plotLower(buf, plotname)) orelse plotLower(buf, plotname);
+}
+
+/// `buf` must outlive the result. Used for the exact-name matching pass, which
+/// runs before `plotClass` so that two plots the class map deliberately aliases
+/// together still pair with their own namesake first.
+fn plotLower(buf: []u8, plotname: []const u8) []const u8 {
     if (plotname.len > buf.len) return plotname;
-    const lower = std.ascii.lowerString(buf[0..plotname.len], plotname);
-    return plot_classes.get(lower) orelse lower;
+    return std.ascii.lowerString(buf[0..plotname.len], plotname);
 }
 
 /// The tail Xyce gives a node its MODEL created rather than the deck. ngspice
@@ -2335,6 +2362,40 @@ test "multi-analysis plots are matched by name, never by index" {
     try std.testing.expect(!compareRaws(a, &.{ ac, op }, &.{ wrong_op, ac }, 1e-3).?.pass);
     // Nothing comparable at all is null, so the row reads N/A rather than PASS.
     try std.testing.expect(compareRaws(a, &.{ac}, &.{op}, 1e-3) == null);
+}
+
+test "an exact plotname beats an aliased one, whatever the order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // `plot_classes` aliases both of these to "dc" so that Xyce's one-point DC
+    // sweep can answer for an ngspice `.op`. That alias also makes them
+    // interchangeable, so a deck carrying BOTH — `devices/jfet_vds_vgs` — must
+    // still pair each with its namesake or the point counts collide and a
+    // fixture that agrees to 3e-6 reads N/A.
+    const sweep: Plot = .{
+        .plotname = "DC transfer characteristic",
+        .varnames = &.{ "v(v-sweep)", "v(out)" },
+        .is_complex = false,
+        .npoints = 2,
+        .nvars = 2,
+        .data = &.{ 0, 1, 1, 2 },
+    };
+    const op: Plot = .{
+        .plotname = "Operating Point",
+        .varnames = &.{"v(out)"},
+        .is_complex = false,
+        .npoints = 1,
+        .nvars = 1,
+        .data = &.{7},
+    };
+    try std.testing.expect(compareRaws(a, &.{ sweep, op }, &.{ op, sweep }, 1e-3).?.pass);
+    try std.testing.expect(compareRaws(a, &.{ op, sweep }, &.{ sweep, op }, 1e-3).?.pass);
+    // The alias still does its job when there IS no namesake: Xyce spells an
+    // operating point as a one-point DC sweep and must still match.
+    var xyce_op = op;
+    xyce_op.plotname = "DC transfer characteristic";
+    try std.testing.expect(compareRaws(a, &.{op}, &.{xyce_op}, 1e-3).?.pass);
 }
 
 test "the process floor is subtracted from both sides, and small decks go unranked" {
