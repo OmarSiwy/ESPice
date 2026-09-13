@@ -53,6 +53,18 @@ const fixed_growth: std.mem.Allocator = .{ .ptr = undefined, .vtable = &.{
     }.free,
 } };
 
+test "Problem: .hdl display-task lines go to Options.display (#127)" {
+    var sink: std.Io.Writer.Allocating = .init(t.allocator);
+    defer sink.deinit();
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .file = "tests/fixtures/hdl/veriloga_strobe.sp" },
+        .display = &sink.writer,
+    });
+    defer p.deinit();
+    try p.run_all();
+    try t.expectEqualStrings("n1 vdrop = 0.35\n", sink.written());
+}
+
 test "Problem: .hdl builds with the embedder's toolchain paths (#13)" {
     const source = "hdl toolchain\n.hdl \"m.va\"\nN1 1 0 m\nR1 1 0 1k\n.op\n.end\n";
     // The share path is used as given, never swapped for the build tree: one
@@ -95,7 +107,7 @@ fn constructAndRun(allocator: std.mem.Allocator) !void {
 
 test "Problem: construction and a full run release everything at every allocation failure" {
     try constructAndRun(t.allocator);
-    try t.checkAllAllocationFailures(t.allocator, constructAndRun, .{});
+    try t.checkAllAllocationFailures(fixed_growth, constructAndRun, .{});
 }
 
 test "Problem: compiled device callbacks preserve allocation errors" {

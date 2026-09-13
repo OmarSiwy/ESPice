@@ -65,6 +65,12 @@ pub const Options = struct {
     /// card, `.meas`, `.ic` or `.options` reads is `error.UnsupportedCard`,
     /// and one no `.param` defines is `error.UnknownParameter`.
     live_params: []const []const u8 = &.{},
+    /// Where `.hdl` display-task lines (`$strobe`, `$display`, ...) go; null
+    /// prints them on stdout. Each accepted point's lines arrive in one
+    /// `writeAll` from the thread running its query; with `max_parallel`
+    /// above 1 that is several threads at once, so the writer must
+    /// serialize them. It must outlive the Problem.
+    display: ?*std.Io.Writer = null,
 };
 
 /// Why publication stopped (`Problem.output_error`): an encoder or file
@@ -209,6 +215,7 @@ pub const Problem = struct {
         self.gpu_driver = .{};
         execution.gpu_driver = &self.gpu_driver;
         if (analysis.gpu_available and execution.backend != .cpu) raiseJitCache();
+        execution.display = options.display;
         self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
         // An optimization's sessions run before this one; nothing after it

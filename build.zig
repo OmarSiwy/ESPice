@@ -369,6 +369,9 @@ pub fn build(b: *std.Build) void {
     // c_api.zig's in-file tests (the allocation-failure sweep); its module
     // already carries the device objects.
     const run_c_api_unit_tests = t.run(c_api_mod, &.{}, false);
+    run_c_api_tests.setEnvironmentVariable("ZIG", b.graph.zig_exe); // runtime .hdl builds
+    const run_espice_tests = t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true);
+    run_espice_tests.setEnvironmentVariable("ZIG", b.graph.zig_exe);
 
     // analysis_mod predates emitKernels, so its `gompute_kernels` import is wired here.
     if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
@@ -396,7 +399,7 @@ pub fn build(b: *std.Build) void {
         .{
             "test-espice", "Run Problem facade, analysis contract, C ABI and CLI tests",
             &.{
-                t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true),
+                run_espice_tests,
                 run_c_api_tests,
                 run_c_api_unit_tests,
                 // The CLI's own tests; the exe's module already carries the device objects.

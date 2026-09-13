@@ -63,6 +63,11 @@ pub const Bbd = struct {
     dst: []u32, // CSC entry p -> arena index it accumulates into
     bg: []f64, // border scratch, b entries
     gpa: Allocator,
+    /// The last factor's Schur growth, max(|S|, max_i |F_i| |A_i^-1 E_i|)
+    /// over max |A|, entrywise maxima. The block elimination never pivots
+    /// across the border, so a large value flags a solve that may not be
+    /// backward stable (#136); `direct` then probes and refines.
+    growth: f64 = 0,
 
     /// Classifies the pattern against `info` and lays out the arena.
     /// Borrows nothing; `col_ptr`/`row_idx` may be freed afterwards. Keeps
@@ -276,6 +281,8 @@ pub const Bbd = struct {
         assert(vals.len == self.dst.len);
         simdZero(self.arena);
         for (vals, self.dst) |v, d| self.arena[d] += v;
+        const amax = num.normInf(self.arena);
+        var fw: f64 = 0;
 
         const tasks = self.taskCount(execution);
         if (tasks > 1) assert(execution.io != null);
@@ -297,7 +304,9 @@ pub const Bbd = struct {
                     sd[@as(usize, gr) * bsz + gc] -= dotSimd(f[r * s ..][0..s], w[c * s ..][0..s]);
                 }
             }
+            fw = @max(fw, num.normInf(f) * num.normInf(w));
         }
+        self.growth = @max(fw, num.normInf(sd)) / amax;
         dense_lu.factorize(bsz, sd, self.s_piv) catch return error.SingularMatrix;
     }
 

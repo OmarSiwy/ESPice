@@ -17,6 +17,8 @@ pub const lm = @import("lm.zig");
 pub const bisect = @import("bisect.zig");
 /// Dense real eigenvalues (balance, Hessenberg, Francis QR).
 pub const eigen = @import("eigen.zig");
+/// Test support: the allocator every allocation-failure sweep runs over.
+pub const testing = @import("testing.zig");
 pub const QueryId = query.QueryId;
 
 const deck = @import("deck.zig");

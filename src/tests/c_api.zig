@@ -258,6 +258,42 @@ test "C creation hands the toolchain paths to .hdl loading (#13)" {
     try std.testing.expectEqualStrings("HdlShareNotFound", std.mem.sliceTo(&diagnostic, 0));
 }
 
+test "C creation routes .hdl display-task lines to the display callback (#127)" {
+    const t = std.testing;
+    const path = "tests/fixtures/hdl/veriloga_strobe.sp";
+    const Sink = struct {
+        buf: [256]u8 = undefined,
+        len: usize = 0,
+        fn put(text: [*c]const u8, len: usize, user: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user.?));
+            @memcpy(self.buf[self.len..][0..len], text[0..len]);
+            self.len += len;
+        }
+    };
+    var sink: Sink = .{};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_FILE;
+    options.source = .{ .data = path.ptr, .len = path.len };
+    options.display = Sink.put;
+    options.display_user = &sink;
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&options, &handle, null, 0));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(handle));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_destroy(handle));
+    try t.expectEqualStrings("n1 vdrop = 0.35\n", sink.buf[0..sink.len]);
+
+    // A caller built before the display fields: they are never read.
+    const deck = "C old display\nV1 1 0 1\nR1 1 0 1k\n.op\n.end\n";
+    var old = options;
+    old.source_kind = c.ESPICE_BYTES;
+    old.source = .{ .data = deck.ptr, .len = deck.len };
+    old.struct_size = @offsetOf(c.espice_create_options, "display");
+    old.display = @ptrFromInt(8);
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&old, &handle, null, 0));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_destroy(handle));
+}
+
 test "C calls on a live handle validate every pointer, scope and preview" {
     const t = std.testing;
     const deck = "C arguments\nV1 in 0 1\nR1 in 0 1k\n.op\n.end\n";

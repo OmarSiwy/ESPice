@@ -55,7 +55,8 @@ them in its own bundle passes their paths in `zig_path` and `share_path`
 (`Options.hdl_toolchain` from Zig) instead of relying on `$ZIG` and the
 executable's location; from Zig, `hdl_toolchain.cache_dir` also replaces
 the `$ESPICE_CACHE` build cache. Their display-task lines print on the process's
-standard output; no option redirects them yet (#127).
+standard output unless you pass a `display` callback (`Options.display`,
+a `*std.Io.Writer`, from Zig); see [Conventions](c-api.md#conventions).
 
 ## As a Nix flake input
 

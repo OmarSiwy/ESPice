@@ -120,7 +120,7 @@ test "the empty name interns like any other" {
 }
 
 test "a failed intern leaves the pool as it was" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+    try std.testing.checkAllAllocationFailures(@import("testing.zig").fixed_growth, struct {
         fn run(gpa: Allocator) !void {
             var p: InternPool = .{};
             defer p.deinit(gpa);

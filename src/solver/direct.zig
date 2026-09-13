@@ -1,7 +1,8 @@
 //! Fixed-pattern sparse direct solver: the facade every Newton caller uses.
 //! Picks an engine from the pattern (tridiagonal, bordered block diagonal or
 //! general sparse LU), skips refactoring when the values did not change, and
-//! demotes to the general LU when a structured engine meets a singular pivot.
+//! demotes to the general LU when a structured engine meets a singular pivot
+//! (or, for BBD, a Schur reduction too unstable to refine).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -26,7 +27,20 @@ pub const Params = struct {
     /// A re-pivot whose L plus U outgrows this multiple of the fresh
     /// factor's restarts on the previous pivots (`SparseLu.fill_cap`).
     repivot_fill_cap: f64 = 3,
+    /// A BBD factor whose `Bbd.growth` exceeds this is probed: one refined
+    /// solve whose scaled residual misses `probe_ratio_max` demotes it to
+    /// the general LU, else every solve on it is refined (#136). Below it
+    /// the certificate's ratio stayed under 0.04 (`residual_tests.zig`).
+    bbd_refine_growth: f64 = 1e3,
 };
+
+/// Refinement steps after a BBD solve at most (LAPACK dgerfs' ITMAX).
+const refine_max = 5;
+/// The probe's bar on ||b - A x|| / (||A|| ||x|| n eps): LAWN 41's 30
+/// over 30, since one right-hand side only samples the error. On the
+/// certificate's BBD family a probe at 27.7 let a solve through at 67;
+/// refined solves that keep BBD probe at 0.2 or less (#136).
+const probe_ratio_max = 1;
 
 /// Developer switches. The facade reads them from the environment once
 /// (`espice.zig`); the solver reads no environment.
@@ -82,6 +96,10 @@ pub const Solver = struct {
     /// A device factored `vcopy` and the LU still holds older values. The
     /// next host use refactors from `vcopy` first (bitwise the device's).
     host_stale: bool = false,
+    /// BBD refinement scratch: the right-hand side, the residual,
+    /// |A||x| + |b| and the probe's solution, n entries each. Empty on the
+    /// other engines.
+    refine_buf: []f64 = &.{},
 
     /// Chooses the engine from the pattern alone: tridiagonal, then BBD
     /// when `bbd` describes a profitable split, else sparse LU (whose AMD
@@ -103,6 +121,7 @@ pub const Solver = struct {
         }
         errdefer self.deinit();
         self.vcopy = try gpa.alloc(f64, col_ptr[n]);
+        if (self.engine == .bbd) self.refine_buf = try gpa.alloc(f64, 4 * @as(usize, n));
         assert(!self.factored);
         return self;
     }
@@ -165,6 +184,7 @@ pub const Solver = struct {
         }
         self.gpa.free(self.q);
         self.gpa.free(self.vcopy);
+        self.gpa.free(self.refine_buf);
         self.* = undefined;
     }
 
@@ -176,9 +196,10 @@ pub const Solver = struct {
     /// `dropBypass` ran. `execution` schedules the BBD block factors and the
     /// multicore refactor; `.{}` runs serially. A structured engine that
     /// meets a singular pivot is freed for good and the call retries on the
-    /// general LU. `SingularMatrix` leaves no usable factorization: solve
-    /// only after a successful `factor`. Asserts that `vals` holds the
-    /// pattern's nnz entries.
+    /// general LU, as is a BBD factor that fails its refinement probe
+    /// (`Params.bbd_refine_growth`). `SingularMatrix` leaves no usable
+    /// factorization: solve only after a successful `factor`. Asserts that
+    /// `vals` holds the pattern's nnz entries.
     pub fn factor(self: *Self, vals: []const f64, execution: num.Execution) !void {
         assert(vals.len >= self.col_ptr[self.n]);
         const nnz = self.vcopy.len;
@@ -225,10 +246,13 @@ pub const Solver = struct {
                 self.factored = true;
                 return;
             } else |_| try self.demote(),
-            // A singular block.
+            // A singular block, or a Schur reduction too unstable to refine.
             .bbd => |*eng| if (eng.factorWithExecution(vals, execution)) |_| {
-                self.factored = true;
-                return;
+                if (!(eng.growth > self.params.bbd_refine_growth) or self.probeBbd(eng, vals)) {
+                    self.factored = true;
+                    return;
+                }
+                try self.demote();
             } else |_| try self.demote(),
         }
         const lu = &self.engine.lu;
@@ -270,7 +294,88 @@ pub const Solver = struct {
         switch (self.engine) {
             .lu => |*lu| lu.solve(x[0..self.n], x[0..self.n]),
             .tri => |*tri| tri.solve(x[0..self.n]),
-            .bbd => |*eng| eng.solveInPlace(x[0..self.n]),
+            .bbd => |*eng| self.solveBbd(eng, false, x[0..self.n]),
+        }
+    }
+
+    /// The BBD solve, refined against `vcopy` when the factor's Schur
+    /// growth says it may not be backward stable (#136).
+    fn solveBbd(self: *Self, eng: *BbdEng, comptime transpose: bool, x: []f64) void {
+        if (!(eng.growth > self.params.bbd_refine_growth) or self.vcopy.len == 0) {
+            if (transpose) eng.solveTInPlace(x) else eng.solveInPlace(x);
+            return;
+        }
+        const b = self.refine_buf[0..self.n];
+        num.copySimd(b, x);
+        if (transpose) eng.solveTInPlace(x) else eng.solveInPlace(x);
+        self.refine(eng, transpose, self.vcopy, b, x);
+    }
+
+    /// Solves a fixed pseudo-random right-hand side on the fresh factor of
+    /// `vals`, both ways, refines each, and reports whether both scaled
+    /// residuals meet `probe_ratio_max`. Refinement in working precision
+    /// cannot recover a Schur reduction whose error outgrows the solution,
+    /// which this catches before any caller solves.
+    fn probeBbd(self: *Self, eng: *BbdEng, vals: []const f64) bool {
+        return self.probeOne(eng, false, vals) and self.probeOne(eng, true, vals);
+    }
+
+    fn probeOne(self: *Self, eng: *BbdEng, comptime transpose: bool, vals: []const f64) bool {
+        const n = self.n;
+        const b = self.refine_buf[0..n];
+        const r = self.refine_buf[n..][0..n];
+        const s = self.refine_buf[2 * n ..][0..n];
+        const x = self.refine_buf[3 * n ..][0..n];
+        for (b, 0..) |*bi, i| {
+            const h = (@as(u64, i) +% 1) *% 0x9E3779B97F4A7C15;
+            bi.* = @as(f64, @floatFromInt(h >> 11)) / 0x1p53 * 2 - 1;
+        }
+        num.copySimd(x, b);
+        if (transpose) eng.solveTInPlace(x) else eng.solveInPlace(x);
+        self.refine(eng, transpose, vals, b, x);
+        // r = b - op(A) x and s = the row sums of |op(A)|.
+        num.copySimd(r, b);
+        @memset(s, 0);
+        for (0..n) |j| for (self.col_ptr[j]..self.col_ptr[j + 1]) |p| {
+            const i = self.row_idx[p];
+            const row = if (transpose) j else i;
+            r[row] -= vals[p] * x[if (transpose) i else j];
+            s[row] += @abs(vals[p]);
+        };
+        const nf: f64 = @floatFromInt(n);
+        const ratio = num.normInf(r) / (num.normInf(s) * num.normInf(x) * nf * std.math.floatEps(f64));
+        return ratio <= probe_ratio_max;
+    }
+
+    /// Fixed-precision iterative refinement of `x` against `vals`, as
+    /// LAPACK's dgerfs: stop once the componentwise backward error
+    /// max |r_i| / (|A||x| + |b|)_i reaches eps or stops halving.
+    fn refine(self: *Self, eng: *BbdEng, comptime transpose: bool, vals: []const f64, b: []const f64, x: []f64) void {
+        const n = self.n;
+        const r = self.refine_buf[n..][0..n];
+        const s = self.refine_buf[2 * n ..][0..n];
+        assert(self.refine_buf.len == 4 * @as(usize, n));
+        var last: f64 = 3;
+        for (0..refine_max) |_| {
+            num.copySimd(r, b);
+            // ponytail: plain loops on a path only a high-growth BBD factor
+            // takes; the sparse walk could not vectorize anyway.
+            for (s, b) |*si, bi| si.* = @abs(bi);
+            for (0..n) |j| for (self.col_ptr[j]..self.col_ptr[j + 1]) |p| {
+                const i = self.row_idx[p];
+                const ax = vals[p] * x[if (transpose) i else j];
+                const row = if (transpose) j else i;
+                r[row] -= ax;
+                s[row] += @abs(ax);
+            };
+            var berr: f64 = 0;
+            for (r, s) |ri, si| if (si > 0) {
+                berr = @max(berr, @abs(ri) / si);
+            };
+            if (!(berr > std.math.floatEps(f64) and 2 * berr <= last)) break;
+            last = berr;
+            if (transpose) eng.solveTInPlace(r) else eng.solveInPlace(r);
+            num.axpy(x, 1, r);
         }
     }
 
@@ -302,7 +407,7 @@ pub const Solver = struct {
         switch (self.engine) {
             .lu => |*lu| lu.solveT(x[0..self.n], x[0..self.n]),
             .tri => |*tri| tri.solveT(x[0..self.n]),
-            .bbd => |*eng| eng.solveTInPlace(x[0..self.n]),
+            .bbd => |*eng| self.solveBbd(eng, true, x[0..self.n]),
         }
     }
 };

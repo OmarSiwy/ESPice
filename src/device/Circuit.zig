@@ -278,7 +278,7 @@ fn freezeCase(gpa: std.mem.Allocator) !void {
 
 test freeze {
     try freezeCase(std.testing.allocator);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, freezeCase, .{});
+    try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, freezeCase, .{});
 }
 
 test "freeze rejects inconsistent tables before touching a proto" {

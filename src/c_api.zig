@@ -80,7 +80,11 @@ const CreateOptions = extern struct {
     /// Added after the toolchain fields, read under the same rule.
     live_params: ?[*]const Bytes,
     live_param_count: usize,
+    /// Added after `live_params`, read under the same rule.
+    display: ?*const DisplayFn,
+    display_user: ?*anyopaque,
 };
+const DisplayFn = fn (text: [*]const u8, len: usize, user: ?*anyopaque) callconv(.c) void;
 comptime {
     if (@sizeOf(CreateOptions) != @sizeOf(header.espice_create_options)) @compileError("espice_create_options drifted from CreateOptions");
 }
@@ -216,10 +220,28 @@ const Handle = struct {
     problem: *api.Problem,
     /// Read by `espice_error_message`; set by every failing call.
     last_error: ?anyerror = null,
+    /// `Options.display` when the caller set a display callback.
+    /// Unbuffered, so concurrent queries never touch its state.
+    display: std.Io.Writer,
+    display_fn: ?*const DisplayFn,
+    display_user: ?*anyopaque,
 
     fn fail(self: *Handle, err: anyerror) u32 {
         self.last_error = err;
         return status(err);
+    }
+
+    fn drainDisplay(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *Handle = @alignCast(@fieldParentPtr("display", w));
+        const f = self.display_fn.?;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| {
+            if (d.len != 0) f(d.ptr, d.len, self.display_user);
+            n += d.len;
+        }
+        const last = data[data.len - 1];
+        if (last.len != 0) for (0..splat) |_| f(last.ptr, last.len, self.display_user);
+        return n + last.len * splat;
     }
 };
 
@@ -259,7 +281,8 @@ fn create(gpa: std.mem.Allocator, options: *const CreateOptions) !*Token {
     // `output_path`; the fields past its size are never read.
     if (options.abi_version != abi_version or options.struct_size < @offsetOf(CreateOptions, "zig_path")) return error.AbiMismatch;
     const toolchain = options.struct_size >= @offsetOf(CreateOptions, "live_params");
-    const live = options.struct_size >= @sizeOf(CreateOptions);
+    const live = options.struct_size >= @offsetOf(CreateOptions, "display");
+    const display = options.struct_size >= @sizeOf(CreateOptions);
     const source = try constSlice(u8, options.source.data, options.source.len);
     const origin = try constSlice(u8, options.origin.data, options.origin.len);
     const path = try constSlice(u8, options.output_path.data, options.output_path.len);
@@ -270,7 +293,7 @@ fn create(gpa: std.mem.Allocator, options: *const CreateOptions) !*Token {
     defer gpa.free(live_params);
     for (live_bytes, live_params) |b, *name| name.* = try constSlice(u8, b.data, b.len);
     if (source.len == 0 or options.explicit_gpu > 1) return error.InvalidArgument;
-    const config: api.Options = .{
+    var config: api.Options = .{
         .source = switch (options.source_kind) {
             0 => .{ .file = source },
             1 => .{ .bytes = .{ .data = source, .origin = origin } },
@@ -300,7 +323,19 @@ fn create(gpa: std.mem.Allocator, options: *const CreateOptions) !*Token {
     handle.gpa = gpa;
     handle.threaded = .init_single_threaded;
     errdefer handle.threaded.deinit();
+    // Spawning a `.hdl` build allocates its argv and hands the child an
+    // environment (the compiler finds its cache through HOME); the static
+    // instance has neither.
+    handle.threaded.allocator = gpa;
+    const environ = try copyEnviron(gpa);
+    errdefer environ.deinit(gpa);
+    handle.threaded.environ = .{ .process_environ = .{ .block = environ } };
+    handle.threaded.environ_initialized = false;
     handle.last_error = null;
+    handle.display = .{ .vtable = &.{ .drain = Handle.drainDisplay }, .buffer = &.{} };
+    handle.display_fn = if (display) options.display else null;
+    handle.display_user = if (display) options.display_user else null;
+    if (handle.display_fn != null) config.display = &handle.display;
     handle.problem = try api.Problem.init(gpa, handle.threaded.io(), config);
     errdefer handle.problem.deinit();
     return handles.insert(handle);
@@ -310,9 +345,30 @@ export fn espice_destroy(handle: ?*Token) u32 {
     // NULL is a no-op, as for free().
     const h = handles.remove(handle orelse return 0) catch |err| return status(err);
     h.problem.deinit();
+    const environ = h.threaded.environ.process_environ.block;
     h.threaded.deinit();
+    environ.deinit(h.gpa);
     h.gpa.destroy(h);
     return 0;
+}
+
+/// A copy of the process environment at create time: libc's `environ`
+/// can move under a later `setenv`.
+fn copyEnviron(gpa: std.mem.Allocator) !std.process.Environ.Block {
+    const Environ = std.process.Environ;
+    if (comptime Environ.Block != Environ.PosixBlock) return .global;
+    const env = std.mem.span(std.c.environ);
+    const block = try gpa.allocSentinel(?[*:0]const u8, env.len, null);
+    var copied: usize = 0;
+    errdefer {
+        for (block[0..copied]) |entry| gpa.free(std.mem.span(entry.?));
+        gpa.free(block);
+    }
+    for (env, block) |entry, *dst| {
+        dst.* = (try gpa.dupeSentinel(u8, std.mem.span(entry.?), 0)).ptr;
+        copied += 1;
+    }
+    return .{ .slice = block };
 }
 
 export fn espice_query_count(handle: ?*Token, out: ?*u32) u32 {

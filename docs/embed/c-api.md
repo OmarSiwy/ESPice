@@ -59,6 +59,7 @@ Set what you need, then call `espice_create`:
 | `max_parallel` | queries that may run at once, as `--jobs` |
 | `zig_path`, `share_path` | for decks that load `.hdl` models: the Zig compiler, and the `share/espice` directory of evaluator sources, inside your own bundle. Empty keeps `$ZIG` (else `zig` on `PATH`) and the `share/espice` beside the executable. A `share_path` without `device/eval.zig` fails with `HdlShareNotFound` |
 | `live_params`, `live_param_count` | the global `.param` names `espice_set_params` may change later (see [Sizing loops](#sizing-loops)). A name no `.param` defines fails with `UnknownParameter` |
+| `display`, `display_user` | a callback `void (*)(const char *text, size_t len, void *user)` that receives `.hdl` display-task text instead of stdout (see **Output** below); NULL prints on stdout |
 
 `espice_create` parses the deck, builds the circuit and plans the queries.
 On failure it returns a status, leaves `*out` NULL and writes the error
@@ -221,8 +222,11 @@ happen to match a live handle's. Parallelism happens inside
 
 **Output.** A `.hdl` model's display-task lines (`$strobe`, `$display`
 and the rest; see [Verilog-A](../using/devices.md#your-own-verilog-a))
-go to the process's standard output, unbuffered, from the thread running
-the query. There is no way yet to capture or silence them (#127).
+go to the process's standard output, unbuffered, unless you set the
+`display` callback. It gets each accepted point's lines in one call
+(`text` is not NUL-terminated) from the thread running the query, so with
+`max_parallel` above 1 calls can overlap. It must not call back into the
+same handle. From Zig, `Options.display` takes a `*std.Io.Writer`.
 
 **ABI.** `ESPICE_ABI_VERSION` (1) must match `espice_abi_version()` and
 the `abi_version` in the options; a mismatch is `ESPICE_ABI_MISMATCH`.

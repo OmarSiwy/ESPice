@@ -1040,7 +1040,7 @@ const TranNoiseTests = struct {
                 fl.deinit(a);
             }
         }.run;
-        try testing.checkAllAllocationFailures(gpa, initFree, .{@as([]const NoiseSource, &sources)});
+        try testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, initFree, .{@as([]const NoiseSource, &sources)});
     }
 
     test "covariance: stampVec stamps v j j^T, transpose is an involution" {

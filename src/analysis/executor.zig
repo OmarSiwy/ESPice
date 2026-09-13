@@ -51,6 +51,10 @@ pub const Config = struct {
     /// The facade's record of whether the GPU driver is up, shared by every
     /// query of the Problem; null prices the driver setup in every query.
     gpu_driver: ?*gpu.Driver = null,
+    /// Where `.hdl` display-task lines go; null is the process's stdout.
+    /// Each accepted point's lines arrive in one `writeAll` from the thread
+    /// running the query, so concurrent queries write concurrently.
+    display: ?*std.Io.Writer = null,
 };
 
 /// Fails with `error.GpuBackendUnavailable` for a backend this binary has no
@@ -271,10 +275,11 @@ pub const Executor = struct {
             self.circuit.attachLu(null);
             if (lu_context) |l| l.deinit();
         }
-        // §9.4 display tasks print to stdout, unbuffered, so each accepted
-        // point's lines land in order with the rest of the run's output.
+        // §9.4 display tasks print to stdout by default, unbuffered, so each
+        // accepted point's lines land in order with the rest of the run's output.
         var stdout: std.Io.File.Writer = .initStreaming(.stdout(), self.io, &.{});
-        var display: types.Display = .{ .names = try self.sayNames(), .staged = .init(self.allocator), .out = &stdout.interface };
+        const out = self.config.display orelse &stdout.interface;
+        var display: types.Display = .{ .names = try self.sayNames(), .staged = .init(self.allocator), .out = out };
         defer display.staged.deinit();
         if (display.names.len != 0) self.circuit.attachDisplay(&display);
         defer self.circuit.attachDisplay(null);

@@ -92,6 +92,14 @@ typedef struct {
      * that ends at share_path and declare none. */
     const espice_bytes *live_params;
     size_t live_param_count;
+    /* Receives .hdl display-task text ($strobe, $display, ...) instead of
+     * stdout: each accepted point's lines, from the thread running its
+     * query, so with max_parallel > 1 calls can overlap. text is not
+     * NUL-terminated. It must not call back into the same handle. NULL
+     * prints on stdout. Callers built before these fields pass a
+     * struct_size that ends at live_param_count. */
+    void (*display)(const char *text, size_t len, void *user);
+    void *display_user;
 } espice_create_options;
 typedef struct { uint32_t kind, id; } espice_scope;
 typedef struct {
