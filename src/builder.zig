@@ -529,6 +529,11 @@ pub const NetBuilder = struct {
     /// between them (`I/(1+N)` for N consumers). `v_dc` is what `vsense` gets.
     v_dc: []f64,
     v_sensed: []bool,
+    /// `DISTOF1 [mag [phase]]` off each V card — `.disto`'s F1 drive, and the
+    /// ONLY thing that selects which source it lands on (ngspice
+    /// cktdisto.c:100-117). `{0, 0}` means the card never named it, which is
+    /// also ngspice's no-op. Degrees, like the AC phase.
+    v_distof1: [][2]f64,
     n_v: u32,
 
     // Pre-allocated to bucket('i').size()
@@ -588,6 +593,7 @@ pub const NetBuilder = struct {
             .v_branches = try arena.alloc(u32, nv),
             .v_dc = try arena.alloc(f64, nv),
             .v_sensed = try arena.alloc(bool, nv),
+            .v_distof1 = try arena.alloc([2]f64, nv),
             .n_v = 0,
             .i_names = try arena.alloc([]const u8, ni),
             .n_i = 0,
@@ -804,6 +810,7 @@ pub const NetBuilder = struct {
                 self.v_branches[self.n_v] = br;
                 self.v_dc[self.n_v] = bound[0].dc;
                 self.v_sensed[self.n_v] = sensed;
+                self.v_distof1[self.n_v] = sourceDistoF1(dev);
                 self.n_v += 1;
                 // A replaced source stamps nothing, so it cannot be the
                 // reference the .op ladder anchors on.
@@ -1824,7 +1831,8 @@ fn kvNumber(kv: []const types.Kv, key: []const u8) ?f64 {
 
 fn sourceDc(dev: types.Device) ?f64 {
     if (kvNumber(dev.kv, "dc")) |dc| return dc;
-    var skip: usize = 0; // numbers owed to a preceding AC keyword (mag [phase])
+    // numbers owed to a preceding AC/DISTOF keyword (mag [phase])
+    var skip: usize = 0;
     for (dev.positional, 0..) |pos, idx| switch (pos) {
         .num => |n| {
             if (skip > 0) {
@@ -1840,14 +1848,32 @@ fn sourceDc(dev: types.Device) ?f64 {
         .name => |name| {
             if (std.mem.eql(u8, name, "dc")) {
                 if (positionalNumber(dev, idx + 1)) |dc| return dc;
-            } else if (std.mem.eql(u8, name, "ac")) {
-                // "AC mag [phase]": those numbers are not the DC value.
+            } else if (std.mem.eql(u8, name, "ac") or
+                std.mem.eql(u8, name, "distof1") or std.mem.eql(u8, name, "distof2"))
+            {
+                // "AC mag [phase]" / "DISTOF1 mag [phase]": not the DC value.
                 skip = 2;
             }
         },
         else => {},
     };
     return null;
+}
+
+/// `DISTOF1 [mag [phase]]` on a source card, ngspice vsrcpar.c:180-193: the
+/// bare keyword is mag 1 / phase 0, one number sets the magnitude, two set
+/// both. `{0, 0}` = the card never named it — no F1 drive, ngspice's own
+/// `VSRCdF1given` false.
+fn sourceDistoF1(dev: types.Device) [2]f64 {
+    if (kvNumber(dev.kv, "distof1")) |mag| return .{ mag, 0 };
+    for (dev.positional, 0..) |pos, idx| switch (pos) {
+        .name => |name| if (std.mem.eql(u8, name, "distof1")) return .{
+            positionalNumber(dev, idx + 1) orelse 1.0,
+            positionalNumber(dev, idx + 2) orelse 0.0,
+        },
+        else => {},
+    };
+    return .{ 0, 0 };
 }
 
 fn findModel(spice_models: []const types.Model, name: []const u8) ?types.Model {
