@@ -45,6 +45,25 @@ measured on 446268a + VerA a19b6fb as the baseline, which reads 466,358,459 /
 153,736,881 for the same decks (446268a adds a checkpoint commit over the
 6e55e74 the table above was taken on).
 
+**Composed, at the integration tip** (limiting + `jac_rows`/`q_rows` + PWL +
+the memory and AC work, all merged; `-Djac-f32` NOT enabled):
+
+| deck | 446268a | tip | | vs from-source |
+|---|---:|---:|---:|---|
+| `scaling/parallel_inverters_100` | 466,358,473 | **418,377,157** | −10.29% | 0.911 → **0.817** |
+| `devices/mos6_inverter` | 153,737,019 | **142,571,564** | −7.26% | 1.040 → **0.964** |
+| `bypass/burst_clock` | 120,161,484 | **20,535,242** | −82.91% | — |
+
+**mos6 was the last deck losing to ngspice's fastest build and it no longer
+does** — a 4.0% loss became a 3.6% win, without `jac_f32`.
+
+The per-deck wins compose slightly BETTER than additive: pi100's −6.95%
+(limiting) and −2.94% (`jac_rows`) predict −9.89% and measure −10.29%; mos6's
+−5.01% and −1.54% predict −6.55% and measure −7.26%. That is consistent with
+`jac-rows`' own observation that shortening the stamp loop relieves register
+pressure in the kernel — the same pressure that killed both §7 reshapes, which
+are therefore worth re-pricing.
+
 Session arc on pi100: 754.9M → 466.4M (−38.2%).
 
 Two espice rows moved since these were last written and it is not measurement
