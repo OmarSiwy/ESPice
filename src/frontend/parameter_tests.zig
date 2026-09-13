@@ -78,7 +78,7 @@ test "parameters: global definitions keep their scope under nested overrides" {
         \\rtop top 0 {base}
         \\.end
     );
-    for ([_][]const u8{ "rtop", "rlocal.xone", "rglobal.xone", "rinner.xnested.xone" }, [_]f64{ 2, 18, 6, 19 }) |name, expected| {
+    for ([_][]const u8{ "rtop", "r.xone.rlocal", "r.xone.rglobal", "r.xone.xnested.rinner" }, [_]f64{ 2, 18, 6, 19 }) |name, expected| {
         try std.testing.expectEqual(expected, try numeric((try device(nl, name)).positional[0]));
     }
     try std.testing.expectEqual(@as(usize, 2), nl.params.len);
@@ -103,7 +103,7 @@ test "parameters: sibling subcircuits do not leak local parameters" {
         \\rtop c 0 {r}
         \\.end
     );
-    for ([_][]const u8{ "r1.x1", "r1.x2", "rtop" }, [_]f64{ 2, 3, 1 }) |name, expected| {
+    for ([_][]const u8{ "r.x1.r1", "r.x2.r1", "rtop" }, [_]f64{ 2, 3, 1 }) |name, expected| {
         try std.testing.expectEqual(expected, try numeric((try device(nl, name)).positional[0]));
     }
 }
@@ -201,7 +201,7 @@ test "model bins: source order and exact names take precedence" {
         \\.end
     );
     // ngspice prepends model declarations (inpmkmod.c): last matching bin wins.
-    try std.testing.expectEqualStrings("nm.1", (try device(nl, "m1.x1")).positional[0].name);
+    try std.testing.expectEqualStrings("nm.1", (try device(nl, "m.x1.m1")).positional[0].name);
     try std.testing.expectEqualStrings("exact", (try device(nl, "m2")).positional[0].name);
     try std.testing.expectEqualStrings("nm.1", (try device(nl, "m3")).positional[0].name);
 }
