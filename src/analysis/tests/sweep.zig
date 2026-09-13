@@ -236,8 +236,8 @@ const GroupsTests = struct {
     }
 
     test "Groups: init frees everything on every allocation failure" {
-        try t.checkAllAllocationFailures(t.allocator, initAndFree, .{ refs[0..], Variations{} });
-        try t.checkAllAllocationFailures(t.allocator, initAndFree, .{ refs[0..], grouped });
+        try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, initAndFree, .{ refs[0..], Variations{} });
+        try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, initAndFree, .{ refs[0..], grouped });
     }
 };
 
@@ -328,8 +328,8 @@ const XfTests = struct {
     }
 
     test "xf: names frees everything on every allocation failure" {
-        try t.checkAllAllocationFailures(t.allocator, namesAndFree, .{false});
-        try t.checkAllAllocationFailures(t.allocator, namesAndFree, .{true});
+        try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, namesAndFree, .{false});
+        try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, namesAndFree, .{true});
     }
 };
 

@@ -751,7 +751,7 @@ fn toCscCase(gpa: std.mem.Allocator) !void {
 
 test "PatternBuilder.toCsc dedups, sorts rows and keeps empty columns" {
     try toCscCase(std.testing.allocator);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, toCscCase, .{});
+    try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, toCscCase, .{});
 }
 
 test "PatternBuilder.toCsc of no keys is all-empty columns" {

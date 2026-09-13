@@ -258,5 +258,5 @@ fn registerCase(gpa: std.mem.Allocator) !void {
 }
 
 test "init and register free everything when an allocation fails" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, registerCase, .{});
+    try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, registerCase, .{});
 }

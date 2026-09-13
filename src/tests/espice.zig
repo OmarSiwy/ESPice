@@ -107,7 +107,7 @@ fn constructAndRun(allocator: std.mem.Allocator) !void {
 
 test "Problem: construction and a full run release everything at every allocation failure" {
     try constructAndRun(t.allocator);
-    try t.checkAllAllocationFailures(t.allocator, constructAndRun, .{});
+    try t.checkAllAllocationFailures(fixed_growth, constructAndRun, .{});
 }
 
 test "Problem: compiled device callbacks preserve allocation errors" {

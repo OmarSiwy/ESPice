@@ -140,24 +140,6 @@ test "source: nested relative includes select only requested case-insensitive co
     try std.testing.expectEqualStrings(plain, unchanged);
 }
 
-/// `std.testing.allocator` that never grows or shrinks a block in place, so
-/// the allocation count of a run cannot depend on where earlier blocks
-/// landed, which `checkAllAllocationFailures` needs.
-const no_remap: std.mem.Allocator = .{ .ptr = undefined, .vtable = &.{
-    .alloc = struct {
-        fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
-            return std.testing.allocator.rawAlloc(len, alignment, ra);
-        }
-    }.alloc,
-    .resize = std.mem.Allocator.noResize,
-    .remap = std.mem.Allocator.noRemap,
-    .free = struct {
-        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
-            std.testing.allocator.rawFree(memory, alignment, ra);
-        }
-    }.free,
-} };
-
 fn expandAll(gpa: std.mem.Allocator, io: std.Io, path: []const u8, src: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -195,7 +177,7 @@ test "source.expand: every allocation failure surfaces as OutOfMemory" {
         \\.end
         \\
     ;
-    try std.testing.checkAllAllocationFailures(no_remap, expandAll, .{ io, path, src });
+    try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, expandAll, .{ io, path, src });
 }
 
 test "parameters: unsigned and signed exponents preserve following operators" {
@@ -925,5 +907,5 @@ fn parseAll(gpa: std.mem.Allocator) !void {
 }
 
 test "every allocation failure surfaces as OutOfMemory" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseAll, .{});
+    try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, parseAll, .{});
 }

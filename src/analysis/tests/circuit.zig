@@ -379,7 +379,7 @@ test "every allocation in circuit setup can fail without a leak" {
     defer lib.deinit();
     var prepared = try ladder(&lib, 2);
     defer prepared.deinit();
-    try t.checkAllAllocationFailures(t.allocator, setUpEverything, .{&prepared});
+    try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, setUpEverything, .{&prepared});
 }
 
 test "probeNames borrows labels and names unlabeled rows" {

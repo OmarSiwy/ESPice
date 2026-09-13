@@ -753,7 +753,7 @@ const ConvergerTests = struct {
     }
 
     test "Workspace: init, growing ensureAVals and deinit leak nothing under any allocation failure" {
-        try testing.checkAllAllocationFailures(testing.allocator, workspaceLifecycle, .{});
+        try testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, workspaceLifecycle, .{});
     }
 };
 
@@ -1029,7 +1029,7 @@ const DirectTests = struct {
     const sparse_lu = @import("sparse_lu.zig");
 
     test "solver construction releases storage on every allocation failure" {
-        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, struct {
             fn run(gpa: Allocator) !void {
                 var solver = try Solver.init(gpa, 4, &.{ 0, 2, 3, 4, 6 }, &.{ 0, 3, 1, 2, 0, 3 }, null, .{});
                 defer solver.deinit();
@@ -1968,7 +1968,7 @@ const LaneLuTests = struct {
         defer base.deinit(gpa);
         try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
 
-        try testing.checkAllAllocationFailures(gpa, struct {
+        try testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, struct {
             fn run(allocator: Allocator, factored: *const sparse_lu.SparseLu) !void {
                 var lanes = try LaneLu(4).init(allocator, factored);
                 defer lanes.deinit(allocator);
@@ -3035,7 +3035,7 @@ const SparseTests = struct {
     }
 
     test "SparseLu construction releases storage on every allocation failure" {
-        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, struct {
             fn run(gpa: Allocator) !void {
                 var lu = try SparseLu.init(gpa, 3, &.{ 0, 3, 6, 9 }, &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 }, &.{ 0, 1, 2 });
                 defer lu.deinit(gpa);
