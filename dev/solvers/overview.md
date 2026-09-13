@@ -33,6 +33,39 @@ when `bbd` describes a profitable split, else sparse LU on a BTF + AMD
 ordering. A structured engine that meets a singular pivot is demoted to the
 sparse LU for the rest of the solver's life.
 
+BBD eliminates each block with pivoting inside the block only, so an
+ill-conditioned block can grow the Schur complement and lose backward
+stability (#136). `Bbd.growth` reports max(|S|, max_i |F_i||A_i^-1 E_i|) /
+max|A| per factor. A factor above `bbd_refine_growth` (1e3) is probed: one
+pseudo-random right-hand side, solved both ways and refined, must reach a
+scaled residual ratio of 1 (LAWN 41's 30, over 30 since one right-hand side
+only samples the error), or the factor demotes to the sparse LU. A factor
+that passes has every solve refined against the unfactored values
+(dgerfs: componentwise backward error down to eps or until it stops
+halving, at most 5 steps).
+
+Measured on the certificate's BBD family (`residual_tests.zig`, seed
+0xbbd5eed, 16 systems per block κ, bar 30):
+
+| block κ | unrefined (single-pass family of 6ec59c8e) | now, kept on BBD | now, demoted |
+|---|---|---|---|
+| 1 | 0.021 | 0.027 (16) | none |
+| 1e4 | 0.021 | 0.037 (16) | none |
+| 1e8 | 16 | 0.023 (16) | none |
+| 1e12 | 2.5e4 | 0.016 (16) | none |
+| 1e15 | 2.9e5 | 0.39 (9) | 1.3 (7) |
+
+Refinement alone fixed every system up to growth 1.1e10 and failed from
+2.5e12, which a growth threshold cannot separate on badly scaled systems
+(their growth reaches 1e22 with a ratio of 1e-9): the probe measures the
+thing itself. Growth under 1e3 never exceeded a ratio of 0.04. A probe at
+27.7 once let a solve through at 67, hence the bar of 1; kept systems probe
+at 0.2 or less. A demoted system's LU replay on perturbed values reached
+1.5e6 in `solveT` on one κ 1e15 system, a sparse LU replay limit the
+certificate leaves to the general-sparse family. No corpus deck takes the
+BBD engine (`ZP_LU_STATS`: 16 decks emit a BbdInfo, all declined), so the
+corpus cannot move.
+
 ```zig
 var slv = try solver.direct.Solver.init(gpa, n, col_ptr, row_idx, bbd_info); // bbd_info: ?BbdInfo
 defer slv.deinit();
@@ -54,8 +87,9 @@ re-pivoting factor when the replay fails the growth monitor.
 | `execution` | serial | scheduler for the BBD block factors |
 | `pivot_tol` | 1e-3 | threshold partial pivoting keeps the diagonal while \|diag\| >= pivot_tol * column max |
 | `refactor_growth_limit` | 1e-12 | a replayed pivot below this fraction of its column max forces a full factor; 0 disables |
+| `bbd_refine_growth` | 1e3 | a BBD factor with more Schur growth is probed (demoting on failure) and refines every solve |
 
-There is no iterative refinement and no choice of ordering: the ordering is
+Only BBD solves refine, and there is no choice of ordering: the ordering is
 always BTF + AMD.
 
 ## Frequency-domain solver

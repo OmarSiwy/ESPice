@@ -189,8 +189,9 @@ fn permuteRows(r: std.Random, sys: System, groups: []const [2]u32) void {
 /// SPD ladder at κ 1e4 measured 105; Thomas has no growth check) and is
 /// skipped. Returns the worst ratio of all passes. `null` when the solver reports a matrix singular, which the
 /// caller allows only past κ = 1/eps. Fails unless `engine` picked the
-/// pattern and solved both passes without a demotion.
-fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engine: std.meta.Tag(direct.Engine)) !?f64 {
+/// pattern and solved both passes on it, or, when `demoted` is given, on
+/// the general LU it demoted to, which sets `demoted` and ends the passes.
+fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engine: std.meta.Tag(direct.Engine), demoted: ?*bool) !?f64 {
     var solver = try direct.Solver.init(gpa, sys.n, sys.col_ptr, sys.row_idx, info, .{});
     defer solver.deinit();
     var b: [n_max]f64 = undefined;
@@ -203,7 +204,8 @@ fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engin
             if (err == error.SingularMatrix) return null;
             return err;
         };
-        try testing.expectEqual(engine, std.meta.activeTag(solver.engine));
+        const live = std.meta.activeTag(solver.engine);
+        if (demoted != null and live == .lu) demoted.?.* = true else try testing.expectEqual(engine, live);
         for (0..2) |_| {
             for (b[0..sys.n]) |*v| v.* = 2 * r.float(f64) - 1;
             solver.solve(b[0..sys.n], x[0..sys.n]);
@@ -211,6 +213,9 @@ fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engin
             solver.solveT(b[0..sys.n], x[0..sys.n]);
             worst = @max(worst, sys.ratio(&x, &b, true));
         }
+        // A demoted system's fresh LU factor is certified here; its replay
+        // belongs to the general-sparse family.
+        if (live != engine) break;
     }
     assert(worst >= 0);
     return worst;
@@ -243,7 +248,7 @@ test "scaled residual: general sparse, controlled κ, pivoting, bad scaling" {
         if (t % 2 == 1) permuteRows(r, sys, &whole);
         if (t % 3 == 2) scaleBadly(r, sys, 6);
         try sys.freeze(gpa);
-        const got = try certify(gpa, r, sys, null, .lu) orelse {
+        const got = try certify(gpa, r, sys, null, .lu, null) orelse {
             try testing.expect(kappa >= 1e15);
             continue;
         };
@@ -277,7 +282,7 @@ test "scaled residual: tridiagonal Thomas on SPD ladders of exact κ" {
         }
         if (t % 2 == 1) scaleBadly(r, sys, 6);
         try sys.freeze(gpa);
-        const got = try certify(gpa, r, sys, null, .tri) orelse {
+        const got = try certify(gpa, r, sys, null, .tri, null) orelse {
             try testing.expect(kappa >= 1e15);
             continue;
         };
@@ -290,14 +295,17 @@ test "scaled residual: bordered block diagonal, block κ controlled" {
     // Eight blocks (the production `min_blocks`) of exact κ each, a
     // well-conditioned border and E/F couplings; the global κ is near the
     // blocks' but not exact. Rows permute inside blocks only, which keeps
-    // the BBD pattern. Block κ stops at 1e4: at 1e8 the Schur reduction
-    // grows S by 1e5 and the ratio reaches 20 (flat LU: 0.14), at 1e15 it
-    // reaches 1.4e5 (#136).
+    // the BBD pattern. Unrefined, the Schur reduction's ratio reached 16 at
+    // block κ 1e8, 2.5e4 at 1e12 and 2.9e5 at 1e15 (flat LU <= 0.18); the
+    // solver's refinement and growth demotion bring it under the bar (#136).
+    // Up to block κ 1e8 BBD must stay the engine, except on a badly scaled
+    // system: `Bbd.growth` compares entries, so scaling alone can raise it.
     const gpa = testing.allocator;
     var prng = std.Random.DefaultPrng.init(0xbbd5eed);
     const r = prng.random();
     var worst: f64 = 0;
-    for (kappas[0..2]) |kappa| for (0..16) |t| {
+    var worst_lu: f64 = 0;
+    for (kappas) |kappa| for (0..16) |t| {
         const nb = 8;
         const s = r.intRangeAtMost(u32, 2, 6);
         const ncpl = r.intRangeAtMost(u32, 1, 4);
@@ -324,11 +332,15 @@ test "scaled residual: bordered block diagonal, block κ controlled" {
         if (t % 4 == 3) scaleBadly(r, sys, 6);
         try sys.freeze(gpa);
         const info: num.BbdInfo = .{ .blocks = &blocks, .coupling_start = cs, .coupling_size = ncpl };
-        const got = try certify(gpa, r, sys, info, .bbd) orelse {
+        var demoted = false;
+        const may_demote = kappa > 1e8 or t % 4 == 3;
+        const got = try certify(gpa, r, sys, info, .bbd, if (may_demote) &demoted else null) orelse {
             try testing.expect(kappa >= 1e15);
             continue;
         };
-        worst = @max(worst, got);
+        // A demoted system is the threshold-pivoting LU's, held to its bar.
+        if (demoted) worst_lu = @max(worst_lu, got) else worst = @max(worst, got);
     };
     try testing.expect(worst <= ratio_max);
+    try testing.expect(worst_lu <= ratio_max_pivoting);
 }
