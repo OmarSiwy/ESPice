@@ -35,6 +35,24 @@ const integrator = struct {
         };
     }
 
+    /// LTE divided-difference coefficient — ngspice `CKTterr`
+    /// (spicelib/analysis/cktterr.c:24-34, selected at :58-67 by
+    /// `CKTintegrateMethod`, indexed `[CKTorder-1]`):
+    ///   gearCoeff = {.5, .2222222222, .1363636364, .096, .0729927, .0583090}
+    ///   trapCoeff = {.5, .08333333333}
+    /// espice's order is fixed by the method (BE = 1, trap/gear_2 = 2), so the
+    /// coefficient is a function of the method alone. Order 1 is `.5` in both
+    /// tables, which is why BE reads the same either way — and why the order-2
+    /// GEAR entry (2/9) was the only one that could be, and was, wrong: it had
+    /// been sharing `trapCoeff[1]`, a 1.63x looser bound than GEAR asks for.
+    fn lteCoeff(method: Method) f64 {
+        return switch (method) {
+            .backward_euler => 0.5, // gearCoeff[0] == trapCoeff[0]
+            .trapezoidal => 1.0 / 12.0, // trapCoeff[1]
+            .gear_2 => 2.0 / 9.0, // gearCoeff[1]
+        };
+    }
+
     /// Dynamic-current recurrence, in place — ngspice `NIintegrate`
     /// (maths/ni/niinteg.c) writing `CKTstate0[qcap+1]`:
     ///   BE / gear : i_j <- alpha*(q0_j - q1_j)
@@ -69,12 +87,11 @@ const integrator = struct {
     ///   dd_j        = divided difference over order+2 charge points
     ///   del_j       = trtol·tol_j / max(abstol, coeff·|dd_j|)
     ///   order 2:      del_j = sqrt(del_j)
-    /// coeff: 1/2 at order 1, 1/12 at order 2 (trap; gear_2 shares the
-    /// order-2 path — ngspice's gear coefficient differs slightly, deferred).
+    /// coeff = `lteCoeff(method)`; order = 2 for everything but BE.
     /// Returns min del over all states; the caller accepts the step iff
     /// del > 0.9·dt and uses del as the next dt (dctran.c:872-913).
     fn stepBound(
-        order2: bool,
+        method: Method,
         q_cur: []const f64,
         q_prev: []const f64,
         q_prev2: []const f64,
@@ -90,6 +107,8 @@ const integrator = struct {
         chgtol: f64,
         trtol: f64,
     ) f64 {
+        const order2 = method != .backward_euler;
+        const c = lteCoeff(method);
         const V = @Vector(W, f64);
         const inv_dt: V = @splat(1.0 / dt);
         const inv_dt1: V = @splat(1.0 / dt1);
@@ -99,7 +118,7 @@ const integrator = struct {
         const v_reltol: V = @splat(reltol);
         const v_chgtol: V = @splat(chgtol);
         const v_trtol: V = @splat(trtol);
-        const coeff: V = @splat(if (order2) 1.0 / 12.0 else 0.5);
+        const coeff: V = @splat(c);
         var vmin: V = @splat(std.math.inf(f64));
         var i: usize = 0;
 
@@ -145,7 +164,6 @@ const integrator = struct {
                 const f123 = (f12 - f23) / (dt1 + dt2);
                 dd = (f012 - f123) / (dt + dt1 + dt2);
             }
-            const c: f64 = if (order2) 1.0 / 12.0 else 0.5;
             const del = trtol * tol / @max(abstol, c * @abs(dd));
             min_del = @min(min_del, del);
         }
@@ -568,9 +586,8 @@ pub fn simulateInto(
             if (steps == 0) {
                 dt_next = dt;
             } else {
-                const order2 = eff_method != .backward_euler;
                 const del = integrator.stepBound(
-                    order2, lq0, lq1, lq2, lq3,
+                    eff_method, lq0, lq1, lq2, lq3,
                     lip, alpha_val, use_trap, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
@@ -613,9 +630,8 @@ pub fn simulateInto(
             // (ltra1_1_line: 37 ps grid-phase offset by 32.3 ns, 1.02e-2 on
             // the delayed wavefront at 33.04 ns).
             if (steps > 0 and use_be) {
-                const trial_order2 = options.method != .backward_euler;
                 const trial_del = integrator.stepBound(
-                    trial_order2, lq0, lq1, lq2, lq3,
+                    options.method, lq0, lq1, lq2, lq3,
                     lip, alpha_val, use_trap, dt, dt_prev, dt_prev2,
                     options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
                 );
@@ -878,6 +894,22 @@ test "alpha: BE 1/dt, trap 2/dt" {
     try std.testing.expectApproxEqRel(@as(f64, 2e9), integrator.alpha(.trapezoidal, 1e-9), 1e-12);
 }
 
+// cktterr.c:24-34 verbatim. gear_2 used to read trapCoeff[1] (1/12), which is
+// 8/3 smaller and — through the sqrt at order 2 — a 1.63x LOOSER dt bound than
+// GEAR's own error control asks for. Pin all three against the C tables.
+test "lteCoeff: ngspice gearCoeff/trapCoeff tables" {
+    try testing.expectEqual(@as(f64, 0.5), integrator.lteCoeff(.backward_euler));
+    try testing.expectApproxEqRel(@as(f64, 0.08333333333), integrator.lteCoeff(.trapezoidal), 1e-10);
+    try testing.expectApproxEqRel(@as(f64, 0.2222222222), integrator.lteCoeff(.gear_2), 1e-10);
+    // The bound is trtol*tol/(coeff*|dd|) under a sqrt, so the ratio a gear
+    // deck's dt moves by is sqrt(trapCoeff[1]/gearCoeff[1]) = 0.6124.
+    try testing.expectApproxEqRel(
+        @as(f64, 0.61237243569),
+        @sqrt(integrator.lteCoeff(.trapezoidal) / integrator.lteCoeff(.gear_2)),
+        1e-9,
+    );
+}
+
 // The whole point of per-device-state LTE, as a pure function. Two charge
 // contributions that cancel EXACTLY on their shared row: each swings 2 pC over
 // the step, the row sums to a flat zero. ngspice's CKTterr sees each state and
@@ -907,11 +939,11 @@ test "stepBound: per-state min survives what the summed row cancels" {
     const row: [W + 1]f64 = @splat(0);
 
     const del_state = integrator.stepBound(
-        false, &s_cur, &s_prev, &s_zero, &s_zero, &s_zero,
+        .backward_euler, &s_cur, &s_prev, &s_zero, &s_zero, &s_zero,
         1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     const del_row = integrator.stepBound(
-        false, &row, &row, &row, &row, &row,
+        .backward_euler, &row, &row, &row, &row, &row,
         1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
 
@@ -941,11 +973,11 @@ test "stepBound: per-state min survives what the summed row cancels" {
     const mirrored_p = [_]f64{ 1e-12, -1e-12 };
     const pair_zero = [_]f64{ 0, 0 };
     const del_one = integrator.stepBound(
-        false, &one_sided, &one_sided_p, &pair_zero, &pair_zero, &pair_zero,
+        .backward_euler, &one_sided, &one_sided_p, &pair_zero, &pair_zero, &pair_zero,
         1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     const del_mirror = integrator.stepBound(
-        false, &mirrored, &mirrored_p, &pair_zero, &pair_zero, &pair_zero,
+        .backward_euler, &mirrored, &mirrored_p, &pair_zero, &pair_zero, &pair_zero,
         1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     try testing.expectEqual(del_one, del_mirror);
@@ -964,7 +996,7 @@ test "stepBound: per-state min survives what the summed row cancels" {
     const big: [2]f64 = .{ s_cur[0] * 1e3, 0 };
     const big_p: [2]f64 = .{ s_prev[0] * 1e3, 0 };
     const del_big = integrator.stepBound(
-        false, &big, &big_p, &pair_zero, &pair_zero, &pair_zero,
+        .backward_euler, &big, &big_p, &pair_zero, &pair_zero, &pair_zero,
         1.0 / dt, false, dt, dt, dt, reltol, abstol, chgtol, trtol,
     );
     try testing.expectApproxEqRel(del_one, del_big, 1e-9);
