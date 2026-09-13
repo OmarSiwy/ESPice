@@ -629,6 +629,85 @@ const ConvergerTests = struct {
         try testing.expect(!capped.converged);
     }
 
+    test "jfnk: a residual past 1e154 still takes its Newton step (#31)" {
+        // F = 2x - 6 from x = 1e300: ||F||^2 overflows an unscaled norm.
+        const a = std.testing.allocator;
+        inline for (.{ newton, jfnk }) |solve| {
+            var rhs = [_]f64{0};
+            var sys: IterationSystem = .{ .target = 3, .slope = 2, .rhs = &rhs };
+            var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null, .{}, .{});
+            defer ws.deinit(a);
+            var x = [_]f64{1e300};
+            const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 32 }, IterationSystem.Hook{});
+            try testing.expect(r.converged);
+            try testing.expectApproxEqAbs(@as(f64, 3), x[0], 1e-8);
+        }
+    }
+
+    /// F = A x - b, A = [2 1; 1 3], b = [3; 4], on a full 2x2 pattern
+    /// (CSC slots (0,0), (1,0), (0,1), (1,1)). `load_ok` is what its
+    /// device load test answers.
+    const LinearSystem = struct {
+        n: u32 = 2,
+        nnz: u32 = 4,
+        diag_slots: [2]u32 = .{ 0, 3 },
+        current_row: []const bool = &.{ false, false },
+        rhs: []f64,
+        g_vals: [4]f64 = @splat(0),
+        load_ok: bool = true,
+
+        pub fn loadCheck(self: *@This(), _: []const f64, _: []const f64, _: []const f64, _: f64, _: f64) bool {
+            return self.load_ok;
+        }
+
+        const Hook = struct {
+            pub fn assemble(_: @This(), sys: *LinearSystem, x: []const f64, _: f64) void {
+                sys.rhs[0] = 2 * x[0] + x[1] - 3;
+                sys.rhs[1] = x[0] + 3 * x[1] - 4;
+                sys.g_vals = .{ 2, 1, 1, 3 };
+            }
+            pub fn vals(_: @This(), sys: *LinearSystem) []f64 {
+                return &sys.g_vals;
+            }
+            pub fn diagAt(_: @This(), sys: *LinearSystem, slot: u32) f64 {
+                return sys.g_vals[slot];
+            }
+        };
+    };
+
+    test "jfnk: an iterate the device load test refuses is not accepted, as under newton (#31)" {
+        const a = std.testing.allocator;
+        inline for (.{ newton, jfnk }) |solve| {
+            for ([_]bool{ true, false }) |load_ok| {
+                var rhs = [_]f64{ 0, 0 };
+                var sys: LinearSystem = .{ .rhs = &rhs, .load_ok = load_ok };
+                var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null, .{}, .{});
+                defer ws.deinit(a);
+                var x = [_]f64{ 0, 0 };
+                const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 8 }, LinearSystem.Hook{});
+                try testing.expectEqual(load_ok, r.converged);
+            }
+        }
+    }
+
+    test "gmin_stamps: jfnk loads gmin only at each stamp's (row, col), as newton does (#31)" {
+        // gmin = 1 at (0,0) and (0,1): (A + [1 1; 0 0]) x = b gives
+        // x = (1/7, 9/7); a gmin on every diagonal would give (1/3, 1).
+        const a = std.testing.allocator;
+        const stamps = [_]impl.GminStamp{ .{ .slot = 0, .row = 0, .col = 0 }, .{ .slot = 2, .row = 0, .col = 1 } };
+        inline for (.{ newton, jfnk }) |solve| {
+            var rhs = [_]f64{ 0, 0 };
+            var sys: LinearSystem = .{ .rhs = &rhs };
+            var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null, .{}, .{});
+            defer ws.deinit(a);
+            var x = [_]f64{ 0, 0 };
+            const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 1, .gmin_stamps = &stamps, .max_iter = 8 }, LinearSystem.Hook{});
+            try testing.expect(r.converged);
+            try testing.expectApproxEqAbs(@as(f64, 1.0 / 7.0), x[0], 1e-9);
+            try testing.expectApproxEqAbs(@as(f64, 9.0 / 7.0), x[1], 1e-9);
+        }
+    }
+
     test "residual gate: a branch row with no diagonal is not gated on an absolute floor" {
         const a = std.testing.allocator;
         const exact = GainRowSystem.gain * GainRowSystem.vin / (1.0 + GainRowSystem.gain);

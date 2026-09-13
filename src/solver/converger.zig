@@ -180,17 +180,7 @@ pub fn newton(
         hook.assemble(sys, x, t);
         prof.lap(.eval);
         const v = hook.vals(sys);
-        if (opts.gmin > 0) {
-            if (opts.gmin_stamps.len > 0) {
-                for (opts.gmin_stamps) |g| {
-                    v[g.slot] += opts.gmin;
-                    sys.rhs[g.row] += opts.gmin * x[g.col];
-                }
-            } else for (0..sys.n) |i| {
-                v[sys.diag_slots[i]] += opts.gmin;
-                sys.rhs[i] += opts.gmin * x[i];
-            }
-        }
+        loadGmin(sys, v, sys.rhs[0..sys.n], x, opts);
         for (opts.force) |f| {
             v[f.slot] += force_g;
             sys.rhs[f.row] += force_g * (x[f.row] - f.value);
@@ -403,25 +393,23 @@ pub fn jfnk(
 
         assembleShifted(sys, x, t, opts, hook);
         @memcpy(f0, sys.rhs[0..n]);
-        buildDiagPreconditioner(sys, hook, opts, diag);
-        if (slv) |s| {
-            const v = hook.vals(sys);
-            if (opts.gmin > 0) {
-                for (0..n) |i| v[sys.diag_slots[i]] += opts.gmin;
-            }
-            s.factor(v, executionOf(sys)) catch {};
-        }
+        const v = hook.vals(sys);
+        loadGmin(sys, v, null, x, opts);
+        // Before the factor, which may overwrite `v`.
+        const load_ok = if (comptime @hasDecl(S, "loadCheck")) sys.loadCheck(x, v, f0, opts.reltol, opts.abstol) else true;
+        buildDiagPreconditioner(sys, v, diag);
+        if (slv) |s| s.factor(v, executionOf(sys)) catch {};
 
         // r = -M^-1 f0, beta = ||r||.
         num.scale(r, -1, f0);
         applyPreconditioner(r, diag, slv);
-        const beta = @sqrt(num.dot(r, r));
+        const beta = num.norm2(r);
 
         if (beta < opts.abstol and residualConverged(sys, hook, x, f0, opts)) {
             @memset(r, 0);
             @memcpy(x_old, x);
             const limited = applyLimits(sys, x, x_old);
-            if (iter > 0 and !limited and acceptStep(sys, x))
+            if (iter > 0 and !limited and load_ok and acceptStep(sys, x))
                 return .{ .converged = true, .iterations = iter + 1, .max_dx = 0 };
             continue;
         }
@@ -431,12 +419,12 @@ pub fn jfnk(
         @memset(g[1 .. m + 1], 0);
 
         // eps_j = sqrt(eps_mach) * max(||x||, 1) / ||v_j||.
-        const x_norm = @max(@sqrt(num.dot(x, x)), 1.0);
+        const x_norm = @max(num.norm2(x), 1.0);
 
         var jj: usize = 0; // Arnoldi steps completed
         for (0..m) |j| {
             const vj = v_basis[j * n ..][0..n];
-            const v_norm = @sqrt(num.dot(vj, vj));
+            const v_norm = num.norm2(vj);
             const eps = if (v_norm > 1e-30) sqrt_eps * x_norm / v_norm else sqrt_eps;
 
             // w = M^-1 (F(x + eps v_j) - f0) / eps.
@@ -455,7 +443,7 @@ pub fn jfnk(
                 h[mi * m + j] = hij;
                 num.axpy(w, -hij, vi);
             }
-            const h_jp1 = @sqrt(num.dot(w, w));
+            const h_jp1 = num.norm2(w);
             h[(j + 1) * m + j] = h_jp1;
             if (h_jp1 > 1e-30) {
                 num.scale(v_basis[(j + 1) * n ..][0..n], 1 / h_jp1, w);
@@ -520,7 +508,7 @@ pub fn jfnk(
         const residual_ok = residualConverged(sys, hook, x, f0, opts);
         // Publishes x_k+1: JFNK is not ngspice's iteration, and its inexact
         // steps leave x_k further out than a direct solve does.
-        if (iter > 0 and scaled < 1.0 and residual_ok and !limited and acceptStep(sys, x))
+        if (iter > 0 and scaled < 1.0 and residual_ok and !limited and load_ok and acceptStep(sys, x))
             return .{ .converged = true, .iterations = iter + 1, .max_dx = scaled };
     }
     return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
@@ -567,24 +555,37 @@ pub fn run(
     return newton(sys, ws, x, t, opts, hook);
 }
 
-/// Residual at x plus gmin * x into `sys.rhs`.
+/// Loads `opts.gmin` as `Options` documents: at each of `gmin_stamps`, or
+/// on every diagonal when there are none. Adds it to `vals` when non-null
+/// and its residual form, gmin * x[col], to `rhs` when non-null.
+fn loadGmin(sys: anytype, vals: ?[]f64, rhs: ?[]f64, x: []const f64, opts: Options) void {
+    if (!(opts.gmin > 0)) return;
+    if (opts.gmin_stamps.len > 0) {
+        for (opts.gmin_stamps) |g| {
+            if (vals) |v| v[g.slot] += opts.gmin;
+            if (rhs) |r| r[g.row] += opts.gmin * x[g.col];
+        }
+    } else for (0..sys.n) |i| {
+        if (vals) |v| v[sys.diag_slots[i]] += opts.gmin;
+        if (rhs) |r| r[i] += opts.gmin * x[i];
+    }
+}
+
+/// Residual at x plus the gmin load into `sys.rhs`.
 fn assembleShifted(sys: anytype, x: []const f64, t: f64, opts: Options, hook: anytype) void {
     assert(x.len == sys.n);
     if (@hasDecl(@TypeOf(hook), "residual"))
         hook.residual(sys, x, t)
     else
         hook.assemble(sys, x, t);
-    if (opts.gmin > 0) {
-        num.axpy(sys.rhs[0..x.len], opts.gmin, x);
-    }
+    loadGmin(sys, null, sys.rhs[0..x.len], x, opts);
 }
 
-fn buildDiagPreconditioner(sys: anytype, hook: anytype, opts: Options, diag: []f64) void {
+/// Inverse diagonal of `vals`, which already carries the gmin load.
+fn buildDiagPreconditioner(sys: anytype, vals: []const f64, diag: []f64) void {
     assert(diag.len >= sys.n);
-    const v = hook.vals(sys);
     for (0..sys.n) |i| {
-        var d = v[sys.diag_slots[i]];
-        if (opts.gmin > 0) d += opts.gmin;
+        const d = vals[sys.diag_slots[i]];
         diag[i] = if (@abs(d) > 1e-30) 1.0 / d else 1.0;
     }
 }
