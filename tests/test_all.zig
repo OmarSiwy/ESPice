@@ -175,7 +175,7 @@ test "run ac: RC lowpass |H| = 1/sqrt(1+(wRC)^2) across the sweep" {
 // noise
 // ---------------------------------------------------------------------------
 
-test "run noise: divider thermal density = 4kT*(R1||R2), flat" {
+test "run noise: divider spectrum = sqrt(4kT*(R1||R2)) in V/sqrt(Hz), flat" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -188,21 +188,48 @@ test "run noise: divider thermal density = 4kT*(R1||R2), flat" {
     const ctx = runCtx(&d.ckt, x, &probes, d.n1, d.vbranch, arena);
     const res = try analysis.run(&ctx, .{ .noise = .{
         .out_node = d.n2,
+        .in_branch = d.vbranch,
         .f_start = 1.0,
         .f_stop = 1e6,
         .points_per_decade = 10,
     } });
 
     try testing.expect(res.npoints > 0);
-    // rows: (frequency, onoise_density)
+    // ngspice noisean.c:318-325 + cktnoise.c:56-64: the plot is
+    // "Noise Spectral Density Curves" over (frequency, onoise_spectrum,
+    // inoise_spectrum), and cktnoise.c:110-113 square-roots every onoise*
+    // / inoise* column unless `set sqrnoise` — so the raw unit is V/sqrt(Hz),
+    // not V^2/Hz. The old expectation here was espice's own squared column.
+    try testing.expectEqualStrings("Noise Spectral Density Curves", res.plotname);
+    try testing.expectEqualStrings("onoise_spectrum", res.varnames[1]);
+    try testing.expectEqualStrings("inoise_spectrum", res.varnames[2]);
+
     const first = res.data[1];
-    const last = res.data[(res.npoints - 1) * 2 + 1];
+    const last = res.data[(res.npoints - 1) * 3 + 1];
     try testing.expectApproxEqRel(first, last, 1e-6); // flat (resistive)
 
     const temp_k = 27.0 + 273.15;
     const r_parallel = 1000.0 * 2000.0 / (1000.0 + 2000.0);
     const expected_density = 4.0 * k_boltzmann * temp_k * r_parallel;
-    try testing.expectApproxEqRel(expected_density, first, 1e-3);
+    try testing.expectApproxEqRel(@sqrt(expected_density), first, 1e-3);
+
+    // inoise = onoise / |H|, and this divider's V-source-to-n2 gain is
+    // R2/(R1+R2) = 2/3 (noisean.c:424-430).
+    try testing.expectApproxEqRel(first / (2.0 / 3.0), res.data[2], 1e-6);
+
+    // Second plot: the band integral, one point, no scale (noisean.c:516-522).
+    const tot = try analysis.run(&ctx, .{ .noise = .{
+        .out_node = d.n2,
+        .in_branch = d.vbranch,
+        .f_start = 1.0,
+        .f_stop = 1e6,
+        .points_per_decade = 10,
+        .integrated = true,
+    } });
+    try testing.expectEqualStrings("Integrated Noise", tot.plotname);
+    try testing.expectEqual(@as(usize, 1), tot.npoints);
+    try testing.expectApproxEqRel(@sqrt(expected_density * (1e6 - 1.0)), tot.data[0], 1e-3);
+    try testing.expectApproxEqRel(tot.data[0] / (2.0 / 3.0), tot.data[1], 1e-6);
 }
 
 // ---------------------------------------------------------------------------

@@ -72,12 +72,35 @@ drops out of $|H_s|^2$, so the stacked-real transpose solve suffices.
 This is Rohrer's adjoint-network noise analysis (interreciprocity: the
 transposed MNA system *is* the adjoint network).
 
+The input-referred spectrum divides by the power gain of the `.noise` card's
+own input source, $S_{v,i} = S_{v,o} / \max(|H_{in}|^2, 10^{-20})$, with
+$H_{in}$ the ordinary AC response at $o$ driven from that source's branch
+(ngspice `noisean.c:423-430`; the floor is `N_MINGAIN`).
+
 Total integrated noise over the sweep band $[f_1, f_2]$:
 
 $$
-v_{n,\text{tot}} = \sqrt{\int_{f_1}^{f_2} S_{v,o}(f)\, df}
-\quad\text{(trapezoidal over the log-swept points)}.
+v_{n,\text{tot}} = \sqrt{\int_{f_1}^{f_2} S_{v,o}(f)\, df}.
 $$
+
+Not a trapezoid, and **per source**: between two adjacent sweep points each
+generator's own density is fitted as $a f^{p}$ in log-log and integrated
+exactly, because the sum of a flat thermal and a $1/f$ flicker term is not
+itself a power law (ngspice `ninteg.c:27-45`, applied per generator at
+`resnoise.c:141-161`). $|p| < 10^{-10}$ degenerates to the rectangle rule and
+$|p+1| < 10^{-10}$ to $a\ln(f_2/f_1)$. The first sweep point only seeds the
+history ($\Delta f = 0$, `noisean.c:376`).
+
+**Output contract** — ngspice's, exactly. One `.noise` card produces two
+plots: `Noise Spectral Density Curves` over
+(`frequency`, `onoise_spectrum`, `inoise_spectrum`), and — only when
+$f_1 \neq f_2$ (`noisean.c:495`) — `Integrated Noise`, one point, no scale,
+over (`v(onoise_total)`, `v(inoise_total)`). Every `onoise*`/`inoise*` column
+is **square-rooted on the way out** unless `set sqrnoise`
+(`cktnoise.c:110-113`, `:123-126`), so the shipped units are
+$\mathrm{V}/\sqrt{\mathrm{Hz}}$ and $\mathrm{V}$ rms, not
+$\mathrm{V^2/Hz}$. Everything inside `noise.sweep` is squared, like ngspice's
+`Ndata`; `noise.run` takes the root at the same boundary ngspice does.
 
 Error criteria: AC/noise are direct linear solves — accuracy is set by the
 operating-point accuracy (all of [tolerance-system.md](tolerance-system.md)
@@ -111,12 +134,29 @@ magnitude comes from the device's own physics at its own bias, never from
 an analysis-side source table or netlist re-derivation.
 
 Per frequency the analysis then does: one transposed solve
-$A^{\mathsf H} y = e_o$, a 2-element dot per source, PSD weighting,
-trapezoidal accumulation. Current coverage gap, flagged: the collector
-maps only `kind = thermal` ($S = 4kTg$); `shot`/`flicker` generators are
-declared by devices but skipped pending a device-side `noisePsd` hook (contract surface landed 2026-07-12)
-(shot needs the branch current, flicker needs KF/AF — both device-owned
-data; the in-source `ponytail:` comment marks exactly this upgrade).
+$A^{\mathsf H} y = e_o$ for the adjoint, one ordinary solve driven from the
+input source for $H_{in}$, a 2-element dot per source, PSD weighting, and the
+per-source log-log band integral above.
+
+A model that declares no generator is **silent, not zero-noise**: `collect_noise`
+is installed only for devices with a `noise_gens` decl
+(`devices/engine.zig` `Hooks.collect_noise`), so an omitted declaration removes
+the device from the analysis entirely. That is what made a resistor-only
+`.noise` deck return exactly 0 until 2026-09-13.
+
+Current coverage gap, flagged and measured: the collector maps only
+`kind = thermal` ($S = 4kTg$); `shot` and `flicker` generators are declared by
+16 models and **silently dropped** (`devices/engine.zig collectNoise`,
+`.shot, .flicker => {}`). VerA compounds it — every `white_noise` call is
+tagged `.thermal` regardless of what its argument computes
+(`../VerA/src/ir/lower.zig` `noiseSrcsOf`), so a shot generator written
+`white_noise(2q|I|)` is evaluated as $4kTg_d = 4q|I|/N$, i.e. $\sqrt 2$ high in
+amplitude. Cost on the fixtures: `noise/amp_noise` +19.5%,
+`devices/vbic_noise_scale` −62% at 1 kHz where ngspice's flicker term
+dominates. The fix is the device-side `noisePsd` hook (contract surface landed
+2026-07-12, `../VerA/tools/contract.zig PsdTerm`) plus VerA codegen emitting a
+scalar noise-expression variant; the two land together. See
+[docs/perf/zero-analyses-2026-09-10.md](../perf/zero-analyses-2026-09-10.md).
 
 Related small-signal analyses share the machinery: `ac/sp.zig`
 (S-parameters), `ac/stb.zig` (stability/loop gain), `dc/tf.zig` (DC transfer

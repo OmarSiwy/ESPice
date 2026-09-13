@@ -30,7 +30,10 @@ const literal_names = std.StaticStringMap(void).initComptime(.{
     .{ "transfer_function", {} },
     .{ "input_resistance", {} },
     .{ "output_resistance", {} },
-    .{ "onoise_density", {} },
+    .{ "onoise_spectrum", {} },
+    .{ "inoise_spectrum", {} },
+    .{ "v(onoise_total)", {} },
+    .{ "v(inoise_total)", {} },
     .{ "loop_gain", {} },
     .{ "pnoise_density", {} },
 });
@@ -81,6 +84,8 @@ test "leak: ac" {
 }
 test "leak: noise" {
     try checkDivider(.{ .noise = .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 5, .out_node = 2 } }, true);
+    // Both plots: the integrated one allocates a different shape.
+    try checkDivider(.{ .noise = .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 5, .out_node = 2, .integrated = true } }, true);
 }
 test "leak: sens" {
     try checkDivider(.{ .sens = .{ .output_node = 2 } }, false);
