@@ -163,11 +163,21 @@ item at the bottom of this section.
       vtable. Planes, u32 tapes, CSC pattern, Model/Instance PODs and
       `DeviceKernel.run`'s signature are byte-identical; the `layoutHash()`
       bump re-keys the FastVAF `.so` cache once, which is that hash's job.
-- [ ] **per-`ddt` LTE states** — the residual of the above. VerA emits `D.q`
-      per device UNKNOWN, so caps/inductors/diodes match ngspice's state set
-      exactly but a MOSFET's `qgs+qgd+qgb` arrive pre-summed on the gate where
-      `MOS1trunc` terrs them separately. Needs VerA to emit per-`ddt` charges —
-      that one IS a device-ABI event.
+- [x] ~~**per-`ddt` LTE states**~~ — MEASURED AND DECLINED 2026-09-10,
+      `docs/perf/lte-2026-09-10.md`. The description was right (VerA emits
+      `D.q` per device UNKNOWN, so a MOSFET's `qgs+qgd+qgb` arrive pre-summed
+      on the gate where `MOS1trunc` terrs them separately); the VALUE was not.
+      Refining the index space is a step-count knob, not an accuracy-per-step
+      knob: `ZP_NO_QTAPE`'s per-row and the default per-state trace the SAME
+      accuracy-vs-steps frontier on both mosamp and mos6_inverter (trtol swept
+      7 → 0.02, scored against grid-converged references), so the next
+      refinement has no reason to behave differently. And the "11x steps" is
+      ngspice's cost, not correctness's — on mosamp espice's frontier
+      DOMINATES ngspice's by 4-9x steps at equal rms. The one place ngspice is
+      genuinely ahead (mos6_inverter, ~2.5x steps) ends in an ngspice error
+      floor at 3e-4 rms that espice goes through. Not worth a device-ABI
+      event; `ngspice/mosamp` and `devices/mos6_inverter` stay FAIL as a
+      stated trade.
 - [ ] **devices/kinduc over-split** (1.53e-8 -> 2.75e-4, PASS, 36x margin) —
       espice gives a `K` card its own charge states on the inductors' branch
       rows; ngspice folds the mutual flux into the single `INDflux`
