@@ -322,7 +322,13 @@ by construction, so a working dedup would collapse 4000 evaluations per Newton
 iteration to ~2. Nobody has measured what fraction of real decks have repeated
 bias points. Decide deliberately: implement, or delete the dead code.
 
-### 4. `jac_rows` / `q_rows` — which residual rows are ever WRITTEN
+### 4. `jac_rows` / `q_rows` — which residual rows are ever WRITTEN — **DONE**
+
+**Landed on `jac-rows` / `jac-rows-vera`; see `docs/perf/jac-rows-2026-09-10.md`.**
+pi100 −2.94%, mos6_inverter −1.54%, rc_chain_500 −2.01%, output bit-identical on
+all 248 raw-producing fixtures. The estimate below was low: measured **32.7 Ir
+per mos1 per Newton iterate**, 17% of the stamp. The rest of this section is the
+invariant, which is still exactly right and worth reading before touching it.
 
 ~22 Ir/instance (14 reactive + 8 resistive). A patch was drafted
 (`/tmp/vera-rows.patch`, likely lost to the `/tmp` wipe — regenerate it).
@@ -423,6 +429,13 @@ LTE-rejected attempts), so it is real per-solve cost, not waste.
 
 The charge side is 32 of the 61 and `q_pattern` says only 4 rows and 16 columns
 are live, so item 4 is the lever here, not a different loop shape.
+
+**Item 4 has since landed and took the mos1 stamp from 61 scattered RMWs to 52**
+(`docs/perf/jac-rows-2026-09-10.md`): −1 `rhs`, −4 `q_vec`, −4 `q_tape`, and the
+capacitor's whole resistive half. Whatever is attempted next here starts from 52,
+not 61 — and note that pi100 saved 36% more than a per-row cost model predicts,
+i.e. shortening this loop measurably relieves the register pressure that killed
+both reshapes above.
 
 ### 8. Instance-axis SIMD — NO-GO, recorded so it is not re-proposed
 
