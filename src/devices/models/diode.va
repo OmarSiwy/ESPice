@@ -217,6 +217,27 @@ module diode(a, c);
 
         I(ai, c) <+ ihi + gmin * vd;
 
+        // §4.6.4 noise, ngspice dionoise.c. Two generators, both hung off the
+        // INTERNAL junction node so a non-zero RS splits them the way ngspice
+        // does; the RS one is in the series-resistance branch below.
+        //   dionoise.c:94-96  shot noise of the junction current, 2q|Id|,
+        //                     across (DIOposPrimeNode, DIOnegNode) = (ai, c).
+        // The third generator, flicker (dionoise.c:98-104), is gated on the
+        // model's KF, which ngspice defaults to 0 and diode.va does not carry.
+        //
+        // KNOWN CEILING, not a typo. The host derives every generator's PSD
+        // from the Jacobian as 4kT*g (devices/engine.zig collectNoise), which
+        // is EXACT for a resistor and 2x high in POWER for a junction:
+        // 4kT*gd = 4q*Id against the true 2q*Id. Verilog-A has one
+        // `white_noise` and VerA tags every call `.thermal`
+        // (VerA src/ir/lower.zig:4828), so a shot generator cannot announce
+        // itself; the fix is the `noisePsd` hook tools/contract.zig already
+        // specifies. Every model in the tree with shot noise carries the same
+        // sqrt(2) (bjt.va:333-334, jfet.va, mos*.va), and declaring it is
+        // still strictly better than omitting it — without this line a diode
+        // contributes exactly zero noise.
+        I(ai, c) <+ white_noise(2.0 * 1.602176634e-19 * abs(ihi), "id");
+
         // Depletion charge, ngspice CJO(T)/VJ(T)/M(T). Below fc*vj(T) it is
         // the exact integral of cjo(T)*(1-v/vj(T))^-M(T); above it ngspice
         // switches to the linearized f1/f2/f3 continuation (diotemp.c:190-197,
@@ -239,7 +260,14 @@ module diode(a, c);
         // Guard on the RAW rs: node collapse is a topology decision and must
         // not depend on temperature (models/vdmos.va says the same). rs_t is
         // floored above, so the divisor is never <= 0.
-        if (rs > 0.0) I(rsb) <+ V(rsb) / rs_t;
-        else          V(rsb) <+ 0.0;
+        // dionoise.c:90-92 — RS thermal noise, 4kT/rs(T), across
+        // (DIOposPrimeNode, DIOposNode), which is this branch. With rs == 0
+        // the node is collapsed and the generator's two ends are one row, so
+        // its adjoint gain is 0: a shorted RS contributes no noise, which is
+        // also ngspice's answer (DIOtConductance is only stamped when RS > 0).
+        if (rs > 0.0) begin
+            I(rsb) <+ V(rsb) / rs_t;
+            I(rsb) <+ white_noise(4.0 * 1.380649e-23 * tk / rs_t, "rs");
+        end else V(rsb) <+ 0.0;
     end
 endmodule

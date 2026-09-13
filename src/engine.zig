@@ -35,6 +35,9 @@ const Sources = struct {
     v_names: []const []const u8,
     i_names: []const []const u8,
     v_branches: []const u32,
+    /// `{mag, phase deg}` of each V card's `DISTOF1`; `{0, _}` = absent.
+    /// `.disto` picks its drive by this, never by card order.
+    v_distof1: []const [2]f64,
 };
 
 pub const SimConfig = struct {
@@ -241,6 +244,7 @@ pub const Simulation = struct {
             .v_names = nb.v_names[0..nb.n_v],
             .i_names = nb.i_names[0..nb.n_i],
             .v_branches = nb.v_branches[0..nb.n_v],
+            .v_distof1 = nb.v_distof1[0..nb.n_v],
         };
 
         // Probes: branch currents first, then every named node. ngspice raws
@@ -281,12 +285,14 @@ pub const Simulation = struct {
         sim.probes = probe_buf[0..n_probes];
         sim.probe_labels = label_buf[0..n_probes];
 
-        // Jobs from directives: pre-allocate to directive count. `.options`
-        // overrides (tolerances, method, temp) apply to every job.
+        // Jobs from directives. TWO per directive: a swept `.noise` card is
+        // two ngspice plots, the spectral density curves and the band
+        // integral (noisean.c:318-325 and :516-522), and one Result is one
+        // plot. Every other card takes one slot and leaves the other.
         const deck_opts = parseDeckOptions(nl.directives);
         sim.deck_tol = deck_opts.tol;
         sim.deck_temp = deck_opts.temp_c;
-        sim.jobs = try sim_arena.alloc(Job, nl.directives.len);
+        sim.jobs = try sim_arena.alloc(Job, nl.directives.len * 2);
         sim.n_jobs = 0;
         for (nl.directives, dir_nodes) |dir, node_id| {
             if (try buildJob(dir, node_id, sources)) |job0| {
@@ -294,6 +300,13 @@ pub const Simulation = struct {
                 applyDeckOptions(&job, deck_opts);
                 sim.jobs[sim.n_jobs] = job;
                 sim.n_jobs += 1;
+                // noisean.c:495 — no "Integrated Noise" plot for a degenerate
+                // band, because there is nothing to integrate over.
+                if (job == .noise and job.noise.f_start != job.noise.f_stop) {
+                    job.noise.integrated = true;
+                    sim.jobs[sim.n_jobs] = job;
+                    sim.n_jobs += 1;
+                }
             }
         }
 
@@ -704,7 +717,22 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
         .ac, .disto => {
             try arity(dir, 4, 4);
             if (id == .ac) return .{ .ac = try frequencyOptions(analysis.ac.Options, dir, 0) };
-            return .{ .disto = try frequencyOptions(analysis.disto.Options, dir, 0) };
+            var opts = try frequencyOptions(analysis.disto.Options, dir, 0);
+            // ngspice cktdisto.c:100-117: the F1 drive is whichever card
+            // carries DISTOF1 — never "the first source" — and it lands on
+            // that card's BRANCH row. `disto/bjt_ce` is the proof: its first V
+            // card is the supply Vcc and the DISTOF1 is on Vin.
+            // ponytail: first such card only. ngspice sums every DISTOF1
+            // source into one RHS; no fixture has two, and the loop is the
+            // upgrade when one does.
+            for (sources.v_branches, sources.v_distof1) |br, d| {
+                if (d[0] == 0) continue;
+                opts.drive_branch = br;
+                opts.ac_magnitude = d[0];
+                opts.ac_phase = d[1];
+                break;
+            }
+            return .{ .disto = opts };
         },
         .dc => {
             if (dir.args.len != 4 and dir.args.len != 8) return error.InvalidAnalysisArguments;
@@ -722,10 +750,14 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
         },
         .noise, .pnoise => {
             try arity(dir, if (id == .noise) 6 else 7, if (id == .noise) 6 else 8);
-            _ = try voltageSource(dir, 1, sources);
+            // The card's second argument names the INPUT source, and ngspice
+            // keys the input-referred spectrum on it (noisean.c:89, :416-430).
+            // Resolving it and dropping it is what left `inoise_spectrum`
+            // with nothing to divide by.
+            const in_branch = sources.v_branches[try voltageSource(dir, 1, sources)];
             const sweep = try frequencyOptions(analysis.ac.Options, dir, 2);
             const node = try outputNode(node_id);
-            if (id == .noise) return .{ .noise = .{ .out_node = node, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade } };
+            if (id == .noise) return .{ .noise = .{ .out_node = node, .in_branch = in_branch, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade } };
             const sidebands = if (dir.args.len == 8) try number(dir, 7) else 7;
             if (sidebands < 0 or sidebands != @trunc(sidebands) or sidebands > 31) return error.InvalidAnalysisArguments;
             return .{ .pnoise = .{ .out_node = node, .f_start = sweep.f_start, .f_stop = sweep.f_stop, .points_per_decade = sweep.points_per_decade, .f_fundamental = try positive(dir, 6), .n_sidebands = @intFromFloat(sidebands) } };
@@ -1058,7 +1090,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const sources: Sources = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2} };
+    const sources: Sources = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_distof1 = &.{.{ 0, 0 }} };
     const directives = [_][]const u8{
         ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
         ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
