@@ -66,7 +66,7 @@ pub fn sweep(
     // ponytail: P batch calls of N_freq each; packing all P*N into one call
     // would need per-solve RHS, add when freq_solve_batch gains rhs-per-lane.
     if (ckt.gpu_hook != null) gpu: {
-        ckt.linearize(x_op);
+        try ckt.linearizeAc(x_op);
 
         // Stamp port z0 onto the sparse G diagonal (analysis-side mod).
         // Save originals so we can restore after the batch calls.
@@ -109,7 +109,7 @@ pub fn sweep(
         return; // GPU path done — skip CPU fallback.
     }
 
-    ckt.linearize(x_op);
+    try ckt.linearizeAc(x_op);
     const g = try allocator.alloc(f64, n * n);
     ckt.denseG(g);
     const c = allocator.alloc(f64, n * n) catch |err| {
@@ -207,7 +207,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const names = try a.alloc([]const u8, 1 + n_s);
     names[0] = "frequency";
     for (0..n_ports) |i| for (0..n_ports) |j| {
-        names[1 + i * n_ports + j] = try std.fmt.allocPrint(a, "S{d}{d}", .{ i + 1, j + 1 });
+        // ngspice span.c:544-551 names the S-matrix columns `S_<row>_<col>`
+        // (1-based) as UID_OTHER, and its raw writer types every non-current
+        // UID as a voltage — so the column lands in the file spelled
+        // `v(S_1_1)`. That spelling IS the addressable name; anything else is
+        // a column no reader of an ngspice .sp raw will find.
+        names[1 + i * n_ports + j] = try std.fmt.allocPrint(a, "v(S_{d}_{d})", .{ i + 1, j + 1 });
     };
     const ncols = names.len;
     const data = try a.alloc(f64, n_points * ncols * 2);
@@ -222,7 +227,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     return .{
-        .plotname = "S-Parameter Analysis",
+        // ngspice span.c:599-601 opens the plot under the job name, which is
+        // "SP Analysis" in the raw.
+        .plotname = "SP Analysis",
         .varnames = names,
         .is_complex = true,
         .npoints = n_points,

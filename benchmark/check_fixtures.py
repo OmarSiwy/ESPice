@@ -18,7 +18,10 @@ PLOTS = dict(zip(
      "Envelope Analysis", "Fourier Analysis", "Harmonic Balance", "MATEX Transient Analysis",
      "Monte Carlo", "Noise Analysis", "Operating Point", "Periodic AC Analysis",
      "Periodic Noise Analysis", "Periodic Steady State", "Periodic Transfer Function Analysis",
-     "Pole-Zero Analysis", "Quasi-Periodic Steady State", "DC Sensitivity", "S-Parameter Analysis",
+     "Pole-Zero Analysis", "Quasi-Periodic Steady State",
+     "Sensitivity Analysis",  # ngspice's own newAnalysis string, inp2dot.c:461
+     "SP Analysis",  # ngspice's own newAnalysis string, inp2dot.c:710
+
      "Stability Analysis", "Temperature Sweep", "Transfer Function", "Transient Analysis",
      "Transient Noise Analysis"]))
 
@@ -77,7 +80,11 @@ def analytical(name, columns):
     elif name == "temp":
         for out in columns["v(out)"]:
             close(out, 7.5)
-    elif name in ("sens", "dcmatch"):
+    elif name == "sens":
+        # Named after the CARD now, as ngspice does (cktsens.c:224-238). Same values.
+        close(columns["v(r1)"][0], -0.001875)
+        close(columns["v(r2)"][0], 0.000625)
+    elif name == "dcmatch":
         close(columns["resistor#0.r"][0], -0.001875)
         close(columns["resistor#1.r"][0], 0.000625)
     elif name == "tf":
