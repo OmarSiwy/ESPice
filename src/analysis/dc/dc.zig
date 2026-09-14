@@ -6,7 +6,6 @@ const converger = @import("solvers").converger;
 const op = @import("op.zig");
 const lanes = @import("../sweep/lanes.zig");
 
-
 pub const Options = struct {
     tol: converger.Tolerances = .{},
     start: f64 = 0,
@@ -212,7 +211,15 @@ fn runSerial(
         t.set(v);
         // Per-point: invalidate baseline and recompute device params so
         // constant-Jacobian stamps reflect the new swept value.
-        try ckt.recompute();
+        //
+        // Only `t`'s device type moved, so every other batch would re-derive
+        // to the value it already holds — measured at 1,811 BJT preamble runs
+        // on a one-instance deck. But that is only true while temperature has
+        // not moved, and the FIRST point of this sweep is exactly where an
+        // outer `.dc ... temp` loop may just have changed it, possibly
+        // re-wiring a device (see `Circuit.recomputeType`). So point 0 takes
+        // the full walk and the rest narrow.
+        if (pt == 0) try ckt.recompute() else try ckt.recomputeType(t.device_type);
         try ckt.computeBaseline();
 
         var converged = false;
