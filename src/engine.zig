@@ -273,6 +273,17 @@ pub const Simulation = struct {
             .cards = cards,
         };
 
+        // `ac=` overrides, card name -> (type, ordinal) -> ParamRef. Resolvable
+        // only here: the ordinals come from the card table and the pointers
+        // from the frozen batch storage, so neither exists before this point.
+        if (nb.n_ac_res > 0) sim.circuit.ac_params = try acParams(
+            sim_arena,
+            &sim.circuit,
+            cards,
+            nb.ac_res_names[0..nb.n_ac_res],
+            nb.ac_res_values[0..nb.n_ac_res],
+        );
+
         // Probes: branch currents first, then every named node. The rule is
         // ngspice's and it is structural, not a list of letters: every MNA
         // branch-current unknown gets a `CKTmkCur` row and `CKTnames` turns
@@ -707,6 +718,29 @@ fn arity(dir: types.Directive, min: usize, max: usize) !void {
 fn outputNode(node: u32) !u32 {
     if (node == NO_NODE or node == GROUND) return error.AnalysisNodeNotFound;
     return node;
+}
+
+/// Resolve `<card> ac=<value>` to the ParamRef of that card's resistance.
+/// One linear pass per override; decks spell a handful of these at most.
+fn acParams(
+    arena: std.mem.Allocator,
+    ckt: *analysis.Circuit,
+    cards: []const analysis.CardRef,
+    names: []const []const u8,
+    values: []const f64,
+) ![]analysis.AcParam {
+    const refs = try ckt.collectParams();
+    var out: std.ArrayList(analysis.AcParam) = .empty;
+    for (names, values) |name, value| {
+        for (refs) |ref| {
+            if (!std.mem.eql(u8, ref.param_name, "r")) continue;
+            const card = analysis.CardRef.lookup(cards, ref) orelse continue;
+            if (!std.mem.eql(u8, card, name)) continue;
+            try out.append(arena, .{ .ptr = ref, .ac_value = value });
+            break;
+        }
+    }
+    return out.toOwnedSlice(arena);
 }
 
 fn voltageSource(dir: types.Directive, i: usize, sources: Sources) !usize {

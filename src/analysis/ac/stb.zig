@@ -76,7 +76,7 @@ pub fn solve(
     };
 
     // --- Linearize at the operating point ------------------------------------
-    ckt.linearize(x_op);
+    try ckt.linearizeAc(x_op);
 
     // --- Augment to (n+1)² with probe branch ---------------------------------
     // FreqSolver.initDense takes ownership of both arrays.

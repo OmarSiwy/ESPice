@@ -46,7 +46,7 @@ pub fn solve(
     const n: usize = ckt.n;
 
     // Linearize: one eval fills the G and C planes (ground row included).
-    ckt.linearize(x_op);
+    try ckt.linearizeAc(x_op);
 
     // ponytail: one bulk alloc for all f64 work buffers
     const f64_total = 3 * n * n + 2 * n;

@@ -18,6 +18,19 @@ const tran = @import("tran/types.zig");
 const Batch = devices.batch.Batch;
 const Planes = devices.batch.Planes;
 const ParamRef = devices.batch.ParamRef;
+
+/// A parameter that takes a DIFFERENT value in the frequency domain.
+/// ngspice keeps a parallel value per device for exactly this (`RESacResist` /
+/// `RESacConduct`, resdefs.h:48-49) and stamps it from `RESacload`
+/// (resload.c:60-62) while `RESload` keeps using the DC one — so `ac=` moves
+/// .ac/.sp/.noise/.pz and leaves .op/.dc/.tran alone.
+pub const AcParam = struct {
+    ptr: ParamRef,
+    ac_value: f64,
+    /// Scratch: the DC value, saved across one AC linearization.
+    saved: f64 = 0,
+};
+
 const NoiseSource = devices.batch.NoiseSource;
 const StateCtlOp = devices.batch.StateCtlOp;
 const PatternBuilder = devices.batch.PatternBuilder;
@@ -203,6 +216,11 @@ pub const Circuit = struct {
     /// Memoized collectParams — ParamRef.ptr point into frozen batch
     /// instance storage, stable until deinit. No invalidation needed.
     param_refs: ?[]ParamRef = null,
+    /// Parameters that take a different value in the frequency domain (a
+    /// resistor's `ac=`). Filled by the engine after freeze; empty on every
+    /// deck that does not spell one, which is the no-op fast path in
+    /// `linearizeAc`. Storage is the sim arena, not `gpa`.
+    ac_params: []AcParam = &.{},
 
     /// Shared Newton/JFNK workspace, built on first use. Pattern is frozen,
     /// so the symbolic LU stays valid for the circuit's lifetime.
@@ -356,6 +374,31 @@ pub const Circuit = struct {
         if (self.lin.valid and self.lin.x_ptr == x_op.ptr and self.lin.len == x_op.len) return;
         self.eval(x_op, 0);
         self.lin = .{ .x_ptr = x_op.ptr, .len = @intCast(x_op.len), .valid = true };
+    }
+
+    /// `linearize` for a FREQUENCY-domain analysis: ngspice's CKTacLoad rather
+    /// than CKTload. A handful of card parameters take a different value there
+    /// — today only a resistor's `ac=` (resload.c:60-62 stamps RESacConduct
+    /// where resload's DC twin stamps RESconduct) — so the planes are filled
+    /// with those swapped in and the DC values put straight back.
+    ///
+    /// The memo is deliberately left INVALID on the way out: the planes now
+    /// hold the AC linearization, which a later DC/transient eval must not
+    /// mistake for its own.
+    pub fn linearizeAc(self: *Circuit, x_op: []const f64) !void {
+        if (self.ac_params.len == 0) return self.linearize(x_op);
+        for (self.ac_params) |*p| {
+            p.saved = p.ptr.get();
+            p.ptr.set(p.ac_value);
+        }
+        defer {
+            for (self.ac_params) |*p| p.ptr.set(p.saved);
+            self.recompute() catch {};
+            self.lin.valid = false;
+        }
+        try self.recompute();
+        self.lin.valid = false;
+        self.eval(x_op, 0);
     }
 
     pub fn evalNewton(self: *Circuit, x: []const f64, t: f64) void {
@@ -759,6 +802,9 @@ pub fn init(
     ckt.par_eval = null;
     ckt.ws = null;
     ckt.param_refs = null;
+    // `undefined` above means struct defaults do NOT apply — every field is
+    // assigned here or it is garbage.
+    ckt.ac_params = &.{};
     ckt.gpu_hook = null;
 
     const csc_row = memstats.enter("circuit: CSC + planes");
