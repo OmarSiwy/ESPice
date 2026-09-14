@@ -22,6 +22,11 @@ pub const Params = struct {
     pivot_tol: f64 = 1e-3,
     /// A refactor whose reused pivot falls below this fraction of its column
     /// max fails, forcing a full re-pivoting factor. 0 disables the monitor.
+    /// Permissive for Newton, whose residual gate absorbs an inexact step
+    /// and whose diverging iterates (values to 1e60) would otherwise
+    /// re-pivot and fill every iteration; `FreqSolver`, whose solves are
+    /// final, raises it to `pivot_tol` (#44). dev/solvers/gilbert-peierls-lu.md,
+    /// "Two replay thresholds".
     refactor_growth_limit: f64 = 1e-12,
     /// A re-pivot whose L plus U outgrows this multiple of the fresh
     /// factor's restarts on the previous pivots (`SparseLu.fill_cap`).

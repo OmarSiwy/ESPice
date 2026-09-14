@@ -237,6 +237,35 @@ Corpus: 18 decks change bytes from re-chosen pivots, all by roundoff in
 err/tol (largest: stress/vacask_ring 0.2563 to 0.2564); no deck changes
 pass or fail.
 
+### Two replay thresholds: Newton and frequency (#44, #45)
+
+The refactor's growth monitor (`Params.refactor_growth_limit`) has two
+values, one per kind of caller:
+
+- **Newton, 1e-12.** A Newton solve is a step, not an answer. The residual
+  gate and the convergence test check F(x) itself, so a step from a factor
+  with a 1e-9 pivot (backward error near eps / 1e-9) only costs iterations.
+  Raising the limit to the full factor's 1e-3 would reject, every
+  iteration, the old pivots that the fill-capped re-pivot keeps on purpose:
+  on the chain_bsim4 diverging steps those fail the threshold by 1e-3 to
+  1e-40. Each rejection would then be a full re-pivot past the cap, the
+  regime that measured 56.3G instructions against 44.0G on chain_bsim4_10k
+  and did not finish in 45 minutes against 210 s on chain_bsim4_100k
+  (above). The capped re-pivot keeps an old pivot only while it passes
+  this same limit (`SparseLu.keep_min`), so the factor it lays down is
+  one a refactor could have produced. So the Newton refactor still
+  accepts a 1e-9 pivot, by design.
+- **Frequency, `pivot_tol` (1e-3).** `FreqSolver`'s solves are final: an AC,
+  noise or S-parameter point is what the user reads. Nothing corrects it
+  afterwards. A tape laid at omega = 0 and replayed at 1e6 left LAWN 41
+  scaled residuals of 8e3 (117 for `solveBatch`, 76 for `factorEach` on
+  milder spans). At 1e-3 a replay admits exactly the pivots the full
+  factor would, and a refused lane peels to the scalar path.
+
+The tridiagonal engine has no replay. It applies the full factor's own
+test, |pivot| >= pivot_tol * |entry below|, and hands anything smaller to
+the pivoting LU.
+
 ## 4. Pseudo-code, GPU parallel
 
 What fundamentally serializes: column $k$'s triangular solve consumes

@@ -1141,6 +1141,26 @@ const DirectTests = struct {
     }
 };
 
+/// LAWN 41's scaled residual ||A x - b||_inf / (||A||_inf ||x||_inf n eps)
+/// of a dense row-major n x n `a`; 30 is LAPACK's bar.
+fn lawnRatio(n: usize, a: []const f64, x: []const f64, b: []const f64) f64 {
+    var rmax: f64 = 0;
+    var anorm: f64 = 0;
+    for (0..n) |i| {
+        var r = b[i];
+        var row: f64 = 0;
+        for (0..n) |j| {
+            r -= a[i * n + j] * x[j];
+            row += @abs(a[i * n + j]);
+        }
+        rmax = @max(rmax, @abs(r));
+        anorm = @max(anorm, row);
+    }
+    var xmax: f64 = 0;
+    for (x[0..n]) |v| xmax = @max(xmax, @abs(v));
+    return rmax / (anorm * xmax * @as(f64, @floatFromInt(n)) * std.math.floatEps(f64));
+}
+
 const FftTests = struct {
     const impl = @import("fft.zig");
     const fft = impl.fft;
@@ -1826,6 +1846,93 @@ const FreqSolveTests = struct {
         try fs.factorEach(&omegas);
         try testing.expectEqualSlices(u32, &.{0}, fs.held_id.items);
         try expectSolveEach(&fs, &omegas);
+    }
+
+    /// Ten copies of a node with G = 1 to a voltage source's branch
+    /// (G = [1 1; 1 0]) and C = 1 to ground: at omega = 0 the node column
+    /// pivots on its G, which a replay at omega = 1e6 keeps against a 1e6
+    /// C entry.
+    const BranchPlanes = struct {
+        const n = 20;
+        col_ptr: [n + 1]u32 = undefined,
+        row_idx: [2 * n]u32 = undefined,
+        g: [2 * n]f64 = undefined,
+        c: [2 * n]f64 = undefined,
+
+        fn init() BranchPlanes {
+            var self: BranchPlanes = .{};
+            self.col_ptr[0] = 0;
+            for (0..n) |j| {
+                const lo = j & ~@as(usize, 1);
+                for (0..2) |d| {
+                    const p = 2 * j + d;
+                    const row = lo + d;
+                    self.row_idx[p] = @intCast(row);
+                    const node_diag = row == j and j == lo;
+                    self.g[p] = if (row == j and j != lo) 0 else 1;
+                    self.c[p] = if (node_diag) 1 else 0;
+                }
+                self.col_ptr[j + 1] = @intCast(2 * (j + 1));
+            }
+            return self;
+        }
+
+        /// The stacked-real A(omega), dense row-major 2n x 2n.
+        fn stacked(self: BranchPlanes, omega: f64, out: *[4 * n * n]f64) void {
+            @memset(out, 0);
+            const nn = 2 * n;
+            for (0..n) |j| for (self.col_ptr[j]..self.col_ptr[j + 1]) |p| {
+                const i: usize = self.row_idx[p];
+                out[i * nn + j] += self.g[p];
+                out[(n + i) * nn + n + j] += self.g[p];
+                out[(n + i) * nn + j] += omega * self.c[p];
+                out[i * nn + n + j] -= omega * self.c[p];
+            };
+        }
+    };
+
+    test "frequency replays refuse pivots the full factor would not take (#44)" {
+        const allocator = testing.allocator;
+        const W = FreqSolver.test_access.W;
+        const pl = BranchPlanes.init();
+        const nn = 2 * BranchPlanes.n;
+        var fs = try FreqSolver.fromPlanes(allocator, BranchPlanes.n, &pl.col_ptr, &pl.row_idx, &pl.g, &pl.c);
+        defer fs.deinit();
+        try testing.expect(fs.strategy == .sp);
+        var a: [4 * BranchPlanes.n * BranchPlanes.n]f64 = undefined;
+        var b: [nn]f64 = undefined;
+        for (&b, 0..) |*v, i| v.* = @sin(0.37 * @as(f64, @floatFromInt(i)) + 0.1);
+        var x: [nn]f64 = undefined;
+
+        // Scalar: a solve at 1e6 replays the tape the solve at 0 laid.
+        try fs.solve(0, &b, &x);
+        try fs.solve(1e6, &b, &x);
+        pl.stacked(1e6, &a);
+        try testing.expect(lawnRatio(nn, &a, &x, &b) <= 30);
+
+        // Lanes: omega 0 in the lane the batch lays its tape at.
+        var omegas: [W]f64 = @splat(1e6);
+        omegas[W / 2] = 0;
+        var xs: [W * nn]f64 = undefined;
+        try fs.solve(0, &b, &x); // the batch replays the tape held
+        try fs.solveBatch(&omegas, .{}, &b, &xs, false);
+        for (omegas, 0..) |w, k| {
+            pl.stacked(w, &a);
+            try testing.expect(lawnRatio(nn, &a, xs[k * nn ..][0..nn], &b) <= 30);
+        }
+
+        // factorEach lays its tape at the middle omega, also 0 here.
+        const omegas3 = [_]f64{ 1e6, 0, 1e6 };
+        var rhs: [3 * nn]f64 = undefined;
+        for (0..3) |k| @memcpy(rhs[k * nn ..][0..nn], &b);
+        var x3: [3 * nn]f64 = undefined;
+        try fs.factorEach(&omegas3);
+        fs.solveEach(&rhs, &x3, false);
+        for (omegas3, 0..) |w, k| {
+            if (std.mem.indexOfScalar(u32, fs.held_id.items, @intCast(k)) != null) continue;
+            pl.stacked(w, &a);
+            try testing.expect(lawnRatio(nn, &a, x3[k * nn ..][0..nn], &b) <= 30);
+        }
     }
 
     test "slotCol: empty columns are skipped and a ground slot maps past the last column" {
