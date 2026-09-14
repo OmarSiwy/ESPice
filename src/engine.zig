@@ -224,6 +224,7 @@ pub const Simulation = struct {
         // `v_ports` is build-time scratch everywhere EXCEPT portList, which
         // runs below and hands the row straight to the .sp solve.
         for (nb.v_ports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
+        for (nb.br_rows[0..nb.n_br]) |*v| v.* = mapNode(perm, v.*);
         for (nb.l_branches[0..nb.n_l]) |*v| v.* = mapNode(perm, v.*);
         for (nb.ac_pos[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
         for (nb.ac_neg[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
@@ -263,12 +264,18 @@ pub const Simulation = struct {
             .ports = try nb.portList(sim_arena),
         };
 
-        // Probes: branch currents first, then every named node. ngspice raws
-        // carry i(<card>) for every V source and inductor (44.2 header:
-        // `i(v1)`, `i(l1)` — lowercase, which the parser's bulk lower already
-        // guarantees for card names). A sensed V card (F/H/W control) stamps
-        // nothing — its current flows in the controlling model's own branch —
-        // so its recorded row was never allocated and must be skipped.
+        // Probes: branch currents first, then every named node. The rule is
+        // ngspice's and it is structural, not a list of letters: every MNA
+        // branch-current unknown gets a `CKTmkCur` row and `CKTnames` turns
+        // every such row into an `i(<card>)` column. That covers V and L, and
+        // equally E (vcvsset.c:41-46), H (ccvsset.c:41-46) and a V-mode B
+        // (asrcsetup.c:78-83) — `nb.br_*` carries those. F, G and S stamp no
+        // branch and correctly have no column.
+        //
+        // A V card sensed by F/H/W is NOT skipped: it keeps its current, which
+        // now lives on the controlling model's `ctrl` branch (builder
+        // addBranchRef rewrites `v_branches[ctrl]` to that row). ngspice emits
+        // i(vam) for it too.
         //
         // Branch-first, NOT ngspice's voltage-first: tf/sens/dcmatch/pxf/pac/
         // disto default their output variable to probes[len-1], so the last
@@ -279,16 +286,14 @@ pub const Simulation = struct {
         const probe_buf = try sim_arena.alloc(u32, sim.circuit.n);
         const label_buf = try sim_arena.alloc([]const u8, sim.circuit.n);
         var n_probes: u32 = 0;
-        for (nb.v_names[0..nb.n_v], nb.v_branches[0..nb.n_v], nb.v_sensed[0..nb.n_v]) |name, br, sensed| {
-            if (sensed) continue;
-            probe_buf[n_probes] = br;
-            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
-            n_probes += 1;
-        }
-        for (nb.l_names[0..nb.n_l], nb.l_branches[0..nb.n_l]) |name, br| {
-            probe_buf[n_probes] = br;
-            label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
-            n_probes += 1;
+        for ([_][]const []const u8{ nb.v_names[0..nb.n_v], nb.l_names[0..nb.n_l], nb.br_names[0..nb.n_br] },
+            [_][]const u32{ nb.v_branches[0..nb.n_v], nb.l_branches[0..nb.n_l], nb.br_rows[0..nb.n_br] }) |names, rows|
+        {
+            for (names, rows) |name, br| {
+                probe_buf[n_probes] = br;
+                label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
+                n_probes += 1;
+            }
         }
         for (1..sim.circuit.n) |i| {
             const label = sim.circuit.nodeName(@intCast(i));
