@@ -315,7 +315,16 @@ pub const Simulation = struct {
             for (sim.circuit.batches) |batch| total += batch.count;
             if (total < devices.par.default_min_instances) break :enable_par;
             const ckt = &sim.circuit;
-            sim.par_eval = devices.par.ParEval.init(sim_arena, io_val, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, @min(lanes, 16)) catch break :enable_par;
+            // ESPICE_THREADS is honoured as asked. It used to be `@min(lanes,
+            // 16)`, silently, which made every "32 lanes" measurement a 16-lane
+            // measurement. The only clamp left is against the machine, and it
+            // says so on stderr instead of pretending.
+            const cpus: u32 = @intCast(std.Thread.getCpuCount() catch 16);
+            const n_lanes = if (lanes > cpus) blk: {
+                std.debug.print("espice: ESPICE_THREADS={d} exceeds {d} CPUs; using {d} lanes\n", .{ lanes, cpus, cpus });
+                break :blk cpus;
+            } else lanes;
+            sim.par_eval = devices.par.ParEval.init(sim_arena, io_val, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, n_lanes) catch break :enable_par;
         }
 
         return sim;
