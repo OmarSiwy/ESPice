@@ -27,6 +27,13 @@ fn isGroundName(name: []const u8) bool {
 // ---------------------------------------------------------------------------
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 
+/// `ParamRef.device_type` is `@typeName(D)` past the last dot; match it.
+fn shortTypeName(comptime D: type) []const u8 {
+    const full = @typeName(D);
+    const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
+    return full[dot + 1 ..];
+}
+
 pub const Builder = struct {
     gpa: std.mem.Allocator,
     n: u32,
@@ -45,6 +52,22 @@ pub const Builder = struct {
     /// lives here rather than on every Model; `deriveModel` copies it into the
     /// models that declare they read it.
     nom_temp_c: f64 = 27.0,
+
+    /// Netlist card currently being expanded, "" outside one. Set once per
+    /// card by NetBuilder.addDevice — the single funnel every card goes
+    /// through — and read by addDevice below.
+    card: []const u8 = "",
+    /// (device type, instance ordinal) → card name. `ParamRef` identifies a
+    /// device only by its class ordinal (`resistor#0`), which is not resolvable
+    /// to anything in a raw file; `.sens` needs the card. Strings point into
+    /// the PARSE arena, like `NetBuilder.v_names` — copy before it dies.
+    cards: std.ArrayList(analysis.CardRef) = .empty,
+    /// Per-device-type instance counter — the ordinal `ParamRef.index` carries.
+    /// Kept here rather than read off a `ProtoStore` because a GENERATED device
+    /// is instantiated through `vt.proto_add` into the device object's own
+    /// store, which this compilation unit deliberately cannot name. Counted for
+    /// EVERY add, card or not, so the ordinal stays in lockstep with the store.
+    card_counts: std.StringHashMapUnmanaged(u32) = .empty,
 
     pub fn init(gpa: std.mem.Allocator) Builder {
         var labels: std.ArrayList([]const u8) = .empty;
@@ -67,6 +90,8 @@ pub const Builder = struct {
 
     inline fn deinitStorage(self: *Builder) void {
         self.protos.deinit(self.gpa);
+        self.cards.deinit(self.gpa);
+        self.card_counts.deinit(self.gpa);
         for (self.node_labels.items) |label| {
             if (!std.mem.eql(u8, label, "0")) self.gpa.free(label);
         }
@@ -221,6 +246,20 @@ pub const Builder = struct {
         const n_u = comptime std.meta.fields(D.U).len;
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
+
+        // BEFORE the generated-device branch below, which returns. Every
+        // shipped device has a generated model, so a card table hung off the
+        // in-process `ProtoStore` path recorded nothing at all.
+        {
+            const gop = try self.card_counts.getOrPut(self.gpa, comptime shortTypeName(D));
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            if (self.card.len != 0) try self.cards.append(self.gpa, .{
+                .type_name = comptime shortTypeName(D),
+                .index = gop.value_ptr.*,
+                .name = self.card,
+            });
+            gop.value_ptr.* += 1;
+        }
 
         // A GENERATED device is reached through its own object's vtable: same
         // `collapse`, same `ProtoStore(D).append` behind `proto_add`, the only
@@ -876,6 +915,11 @@ pub const NetBuilder = struct {
     }
 
     fn addDevice(self: *NetBuilder, dev_in: types.Device) !void {
+        // Every card routes through here, including the ones that expand into
+        // several instances (URC, CPL), so stamping the open card once is all
+        // it takes for Builder.addDevice to attribute every instance it makes.
+        self.b.card = dev_in.name;
+        defer self.b.card = "";
         // Runtime-loaded Verilog-A/Verilog device instance: handled
         // by addDynDevices after NetBuilder runs, regardless of card letter.
         // Its nodes still get a DC mark — a foreign model is opaque, and an
@@ -1295,6 +1339,8 @@ pub const NetBuilder = struct {
 
     fn resolveDeferred(self: *NetBuilder) !void {
         for (self.deferred[0..self.n_deferred]) |def| {
+            self.b.card = def.dev.name;
+            defer self.b.card = "";
             switch (def.letter) {
                 'f' => try self.addBranchRef(devices.cccs, def.dev, 1.0),
                 'h' => try self.addBranchRef(devices.ccvs, def.dev, 0.0),

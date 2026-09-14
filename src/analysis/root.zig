@@ -19,6 +19,7 @@ pub const BbdBlock = shared.BbdBlock;
 pub const BbdInfo = shared.BbdInfo;
 pub const GROUND = shared.GROUND;
 pub const ParamRef = shared.ParamRef;
+pub const CardRef = shared.CardRef;
 pub const NoiseSource = shared.NoiseSource;
 pub const NoiseGen = shared.NoiseGen;
 pub const freeze = shared.freeze;

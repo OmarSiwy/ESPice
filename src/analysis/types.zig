@@ -45,6 +45,27 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     return names;
 }
 
+/// One netlist card, keyed the way `ParamRef` identifies a device: by device
+/// TYPE plus ordinal within that type. The netlist layer fills it (src/
+/// builder.zig, at the one place instance ordinals are handed out); `.sens` is
+/// the consumer, because ngspice names a sensitivity column after the CARD and
+/// `resistor#0` resolves to nothing a raw-file reader can use.
+pub const CardRef = struct {
+    type_name: []const u8,
+    index: u32,
+    name: []const u8,
+
+    /// ponytail: linear scan. Decks run tens of cards against tens of params;
+    /// sort by (type_name.ptr, index) and binary-search if a 10k-device .sens
+    /// ever shows up in a profile.
+    pub fn lookup(cards: []const CardRef, ref: ParamRef) ?[]const u8 {
+        for (cards) |c| {
+            if (c.index == ref.index and std.mem.eql(u8, c.type_name, ref.device_type)) return c.name;
+        }
+        return null;
+    }
+};
+
 // -- Re-exports for analysis modules + src/ consumers --
 pub const ParamRef = devices.batch.ParamRef;
 pub const NoiseSource = devices.batch.NoiseSource;
