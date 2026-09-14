@@ -281,6 +281,18 @@ mapped through `objdump`. Full derivation: `docs/device-eval-vs-ngspice-2026-09.
       Wants either a param-only REGION hoist (phi with param-only incoming and
       param-only controlling conditions) or if-conversion before the hoist,
       since `pcClass` already handles `.select`.
+- [x] **`jac_f32` — RESOLVED 2026-09-10 by making the width belong to the
+      INSTANTIATION.** `docs/perf/jac-width-2026-09-10.md`. The two answers
+      below are both right and no longer have to be one number: the GPU kernel
+      takes f32 (`engine.gpuJacFloat`, default `-Djac-f32-gpu=mos1,mos6`) and
+      the CPU stays f64 (`engine.jacFloat`, `-Djac-f32=<stems>` to override).
+      One comptime `F` on `evalRange`, the same shape `rank4` used for the
+      basis. 257/257 raws byte-identical on the CPU; GPU 927 -> 799 ms,
+      254 -> 176 registers, NR 1356 -> 1354, `inverter_chain_4k` now PASSes
+      under `--backend cuda`. The CPU half stays f64 on the evidence below;
+      the cheap follow-up the change unblocks is f64 for the OP solve and f32
+      for the transient, which is where all of `mosmem`'s cost lives.
+      Historical CPU measurement follows.
 - [ ] **`-Djac-f32=mos1,mos6` — MEASURED 2026-09-10, a win, not yet a default.**
       Full numbers and method in `docs/perf/jac-f32-2026-09-10.md` (two real
       builds, callgrind Ir, `ZP_TRAN_STATS`/`ZP_OPDBG` iteration counts).

@@ -72,9 +72,10 @@ const fma_ok = switch (builtin.cpu.arch) {
 /// accuracy of the RESIDUAL, and an approximate Jacobian costs iteration count
 /// rather than the answer. It exists because sm_89 runs f32 at 69x its f64 rate
 /// (docs/gpu-device-eval.md §1), which is the only route by which a compact
-/// model beats this CPU. `jacFloat` decides per device — the permission is the
-/// device's `jac_f32`, because only the physics knows whether its unknowns fit
-/// in f32's ~7 digits.
+/// model beats this CPU. The permission is the device's `jac_f32`, because only
+/// the physics knows whether its unknowns fit in f32's ~7 digits — but taking
+/// it is per INSTANTIATION, not per device: `gpuJacFloat` takes it in the GPU
+/// kernel, `jacFloat` declines it on the host, one binary.
 pub fn Dual(comptime N: usize, comptime F: type) type {
     return DualFor(N, F, false);
 }
@@ -379,11 +380,35 @@ fn RealFor(comptime collapsed: bool) type {
 // Constants + contract re-exports
 // ===========================================================================
 
-/// Width of the derivative half of `Dual` for device D. `pub const jac_f32` is
-/// VerA's `--jac-f32` permission (contract.zig, "THE WIDTHS INSIDE S ARE THE
-/// HOST'S"); a device that does not declare it gets f64, which is what a host
-/// must assume.
+/// Width of the derivative half of `Dual` for device D **on the CPU**.
+///
+/// `pub const jac_f32` is VerA's `--jac-f32` PERMISSION (contract.zig, "THE
+/// WIDTHS INSIDE S ARE THE HOST'S"). A permission is not an order, and the
+/// width is a property of the INSTANTIATION rather than of the device: the two
+/// sides want opposite answers and both are right.
+///
+/// - **GPU takes it** (`gpuJacFloat`). sm_89 runs f32 at 69x its f64 rate;
+///   measured on `arp_eval_mos1`, 2028 → 1074 f64-pipe ops and 248 → 183
+///   registers, **1.21x** end to end on `parallel_inverters_2000`, values
+///   agreeing with the f64 build to 3.9e-10.
+/// - **CPU declines it by default.** On AVX2 the same narrowing is worth
+///   −6.4% on a gate deck and *costs* +13.7% on `ngspice/mosmem`, where the
+///   f32 Jacobian knocks plain Newton off the operating point and the whole
+///   gmin ladder gets paid (`docs/perf/jac-f32-2026-09-10.md`). Same answer
+///   both times — this is an economics call, not a safety one.
+///
+/// `pub const jac_f32_host` (VerA's `--jac-f32-host`, ESPice's
+/// `-Djac-f32=<stems>`) is how the CPU is told to take the permission anyway.
+/// It implies `jac_f32`, so this predicate is the whole host-side story.
+/// See `docs/perf/jac-width-2026-09-10.md`.
 pub fn jacFloat(comptime D: type) type {
+    return if (@hasDecl(D, "jac_f32_host") and D.jac_f32_host) f32 else f64;
+}
+
+/// Width of the derivative half of `Dual` for device D **in its GPU kernel** —
+/// the permission itself, taken wherever the physics grants it. A device that
+/// must stay f64 declares nothing and stays f64 on both paths.
+pub fn gpuJacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32") and D.jac_f32) f32 else f64;
 }
 
@@ -937,9 +962,17 @@ fn canNarrow(comptime D: type) bool {
 // device call, same `S` type constructor, one comptime width apart. It is only
 // sound on instances whose `collapse` is maximal, which is what
 // `ProtoStore.finalize`'s partition guarantees for `[0, narrow_count)`.
+//
+// `F` is the derivative half's FLOAT WIDTH, and it is the same shape of
+// parameter for the same reason: one comptime width, nothing else moves. It is
+// a parameter rather than `jacFloat(D)` because the two instantiations of this
+// body want different answers — `gpuJacFloat(D)` in `DeviceKernel.run`,
+// `jacFloat(D)` on the host — which is the whole of
+// `docs/perf/jac-width-2026-09-10.md`. A width is not kernel logic; AGENTS.md's
+// "no GPU-only kernel logic" is about bodies, and there is still exactly one.
 // ===========================================================================
 
-fn evalRange(comptime D: type, comptime narrow: bool, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
+fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
     @setFloatMode(.optimized);
@@ -962,7 +995,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, sink: anytype, first: u32,
     };
     const jac_rep = comptime repMask(n_u, lane, alias, jac_pat);
     const q_rep = comptime repMask(n_u, lane, alias, q_pat);
-    const S = DualFor(W, jacFloat(D), @hasDecl(D, "collapse"));
+    const S = DualFor(W, F, @hasDecl(D, "collapse"));
     const use_lim = if (comptime has_limit) limiting else false;
     const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
     // BRANCHLESS GROUND on the host. A ground row/column already resolves to
@@ -1603,10 +1636,10 @@ pub fn DeviceBatch(comptime D: type) type {
                 // slice that straddles it still runs each instance under the
                 // basis its own collapse earned.
                 const split = std.math.clamp(self.narrow_count, first, last);
-                if (split > first) evalRange(D, true, &sink, first, split, t, limiting);
-                if (last > split) evalRange(D, false, &sink, split, last, t, limiting);
+                if (split > first) evalRange(D, true, jacFloat(D), &sink, first, split, t, limiting);
+                if (last > split) evalRange(D, false, jacFloat(D), &sink, split, last, t, limiting);
             } else {
-                evalRange(D, false, &sink, first, last, t, limiting);
+                evalRange(D, false, jacFloat(D), &sink, first, last, t, limiting);
             }
         }
 
@@ -2263,7 +2296,12 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
             // boundary; adding one is a kernel-argument change across a frozen
             // GPU boundary for a win nobody has priced on a GPU.
             // ponytail: pass `narrow_count` and branch here when it is.
-            evalRange(D, false, &sink, id, id + 1, t, limiting != 0);
+            //
+            // ...but the FLOAT width is `gpuJacFloat(D)`, not the host's. It is
+            // a comptime type, so it moves no kernel argument and no byte of
+            // the frozen boundary — the residual, the `[]f64` planes and the
+            // u32 tapes are all untouched. See `jacFloat`.
+            evalRange(D, false, gpuJacFloat(D), &sink, id, id + 1, t, limiting != 0);
         }
     };
 }
@@ -3121,6 +3159,28 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
         // …and the Jacobian degrades to f32 precision, and only to that.
         for (0..2) |c| try std.testing.expectApproxEqRel(a.ddxAt(c), b.ddxAt(c), 1e-6);
     }
+}
+
+test "jac width: one device, two instantiations" {
+    // The whole of docs/perf/jac-width-2026-09-10.md in four lines. `jac_f32`
+    // is a permission the GPU kernel takes and the host declines; `jac_f32_host`
+    // is the separate order that makes the host take it too. If these two ever
+    // collapse back into one predicate, the GPU loses its 1.21x or the CPU
+    // inherits `ngspice/mosmem`'s gmin ladder — and this is where it shows.
+    const Plain = struct {};
+    const Permitted = struct {
+        pub const jac_f32 = true;
+    };
+    const Ordered = struct {
+        pub const jac_f32 = true;
+        pub const jac_f32_host = true;
+    };
+    try std.testing.expectEqual(f64, jacFloat(Plain));
+    try std.testing.expectEqual(f64, gpuJacFloat(Plain));
+    try std.testing.expectEqual(f64, jacFloat(Permitted));
+    try std.testing.expectEqual(f32, gpuJacFloat(Permitted));
+    try std.testing.expectEqual(f32, jacFloat(Ordered));
+    try std.testing.expectEqual(f32, gpuJacFloat(Ordered));
 }
 
 test "RealFor: every primitive is Dual's value half, bit for bit" {
