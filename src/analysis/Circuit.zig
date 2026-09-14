@@ -196,7 +196,7 @@ pub const Circuit = struct {
     /// Reference to the engine-owned parallel eval context (mechanism lives
     /// in par.zig, ownership in src/engine.zig). Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
-    /// Engine-owned persistent GPU context (mechanism in src/gpu_context.zig,
+    /// Engine-owned persistent GPU context (mechanism in src/engine/gpu.zig,
     /// same ownership pattern as par_eval). Provides single-solve, batch
     /// Newton, batch frequency, and transient dispatch. Null ⇒ CPU only.
     gpu_hook: ?GpuHook = null,

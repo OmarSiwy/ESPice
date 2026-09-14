@@ -12,7 +12,27 @@ const devices = @import("devices");
 const frontend = @import("frontend");
 const types = frontend.types;
 const netlist = @import("builder");
-const gpu_context = @import("gpu_context.zig");
+// The GPU launcher is engine-INTERNAL, and that is the whole point of the file
+// being here rather than beside the engine under a name of its own. The
+// backend is a runtime choice, not an architectural layer: the engine owns
+// when to go to the device, and everything outside asks the engine. Kernel
+// code is not in here at all — it lives once in devices/engine.zig and gompute
+// compiles it for host, CUDA and HIP, which is what makes CPU and GPU the same
+// code rather than two implementations to keep in step.
+const gpu = @import("gpu.zig");
+
+/// Which compute backend the caller asked for. `auto` keeps the work-gate
+/// heuristic and may decline; naming a device is an explicit request.
+pub const Request = gpu.Request;
+
+/// Why a GPU request was refused — policy, capability, or machine.
+pub const Decline = gpu.Decline;
+
+/// Whether this binary carries the artifacts `req` needs.
+pub const requestSupported = gpu.requestSupported;
+
+/// The backend actually detected, for the diagnostic when a request fails.
+pub const detectedName = gpu.detectedName;
 
 const Circuit = analysis.Circuit;
 const Job = analysis.Job;
@@ -53,7 +73,7 @@ pub const SimConfig = struct {
     /// asking for `auto`. One flag because it is one promise: the performance
     /// work-gate is bypassed AND a decline it cannot override is a hard error
     /// naming what was detected, never a silent CPU run. Correctness-driven
-    /// fallbacks survive it — see `gpu_context.Decline`.
+    /// fallbacks survive it — see `gpu.Decline`.
     gpu_explicit: bool = false,
 };
 
@@ -112,7 +132,7 @@ pub const Simulation = struct {
     /// SimConfig.gpu_explicit — the user named the device, so the work gate is
     /// off and a machine-level refusal is an error rather than a CPU run.
     gpu_explicit: bool,
-    gpu_ctx: ?*gpu_context.GpuContext,
+    gpu_ctx: ?*gpu.GpuContext,
     /// Operating point memo, indexed by flavor: [0] DCOP, [1] TRANOP. Each
     /// is solved once on first demand and shared across jobs of that flavor.
     op_cache: [2]?[]f64,
@@ -405,11 +425,11 @@ pub const Simulation = struct {
         // CPU" is exactly how the benchmark came to report CPU timings in its
         // GPU column, so every refusal either prints or returns.
         if (self.gpu_requested) {
-            if (gpu_context.GpuContext.init(self.arena, &self.circuit, self.gpu_explicit)) |g| {
+            if (gpu.GpuContext.init(self.arena, &self.circuit, self.gpu_explicit)) |g| {
                 self.gpu_ctx = g;
                 self.circuit.gpu_hook = g.hook();
                 self.circuit.gpu_active = true;
-            } else |e| switch (gpu_context.declineKind(e)) {
+            } else |e| switch (gpu.declineKind(e)) {
                 // POLICY. Only `auto` can reach this — an explicit request set
                 // `gpu_explicit`, which turns the work gate off entirely.
                 .policy => std.debug.print(
@@ -433,7 +453,7 @@ pub const Simulation = struct {
                     if (self.gpu_explicit) {
                         std.debug.print(
                             "Error: GPU requested but unavailable ({s}); detected artifacts: {s}\n",
-                            .{ @errorName(e), gpu_context.detectedName() },
+                            .{ @errorName(e), gpu.detectedName() },
                         );
                         return e;
                     }

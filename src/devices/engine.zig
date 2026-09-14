@@ -1442,7 +1442,7 @@ pub fn ProtoStore(comptime D: type) type {
             if (comptime @hasDecl(D, "limit")) {
                 // ZEROED, and the layout stays full width. Only the
                 // `limit_writes` slots are ever written or read now, but
-                // gpu_context uploads the whole plane, and uploading bytes
+                // the engine's GPU launcher uploads the whole plane, and uploading bytes
                 // nothing ever wrote is how a clean run grows a valgrind
                 // report. Keeping the stride at n_u keeps the scatter-tape
                 // ABI and `layout_hash` untouched.
@@ -2313,7 +2313,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         /// PLAIN, NON-ATOMIC, on the device too — and that is a contract with
         /// the launcher, not a shortcut. On the device the tape does not index
         /// the plane, it indexes a per-contribution STAGING cell that exactly
-        /// one thread ever touches; `gpu_context` builds that permutation and
+        /// one thread ever touches; the engine's GPU launcher builds that permutation and
         /// then sums each plane cell's run of staging cells in tape order.
         ///
         /// An `@atomicRmw(.Add)` here would hand the summation order back to the
@@ -2501,7 +2501,8 @@ pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
 /// Segmented sum: one plane cell per thread, `plane[i] = sum(stage[seg[i]..seg[i+1]])`.
 ///
 /// This is the second half of the deterministic scatter. `Sink.add` on the
-/// device writes each contribution to its OWN staging cell, and gpu_context
+/// device writes each contribution to its OWN staging cell, and the engine's
+/// GPU launcher
 /// ordered those cells so that a plane cell's contributors sit contiguously and
 /// in tape order — so this loop reduces them in the SAME order the serial CPU
 /// stamp accumulates them, every launch, forever. (Exactly, for a segment the

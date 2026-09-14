@@ -5,7 +5,7 @@ const contract = @import("contract.zig");
 
 // Shared context lives in types.zig so the leaves below never import this
 // file — root.zig is the TOP of the analysis DAG (aggregation + dispatch),
-// re-exporting everything for src/ consumers (engine, builder, gpu_context).
+// re-exporting everything for src/ consumers (engine, builder).
 const shared = @import("types.zig");
 pub const solvers = @import("solvers");
 pub const devices = @import("devices");
