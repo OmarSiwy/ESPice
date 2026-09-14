@@ -75,6 +75,35 @@ comptime {
     for (catalog) |e| engine.checkHost(e.type);
 }
 
+/// The catalog stem of a generated device type, or null for the hand-written
+/// natives (ltra_native and friends), which have no object of their own.
+pub fn modelName(comptime D: type) ?[]const u8 {
+    @setEvalBranchQuota(100_000);
+    inline for (catalog) |e| {
+        if (e.type == D) return e.name;
+    }
+    return null;
+}
+
+/// The device's own object, reached through the runtime ABI it already
+/// defines. build.zig compiles `host_device.zig` once per model into
+/// `arp_device_<stem>`; everything the host needs from a generated device —
+/// `derive`, `collapse`, the `Proto`, and behind that `DeviceBatch(D).eval`
+/// and `Hooks` — hangs off this one symbol, so the executable's own
+/// compilation never instantiates a device body.
+///
+/// ponytail: no ABI/layout check across the boundary, unlike `loadDevice`'s
+/// `arp_layout_hash` gate. These objects are built from this tree, by this
+/// build graph, at the same target and optimize mode — the two sides cannot
+/// disagree without the build itself being wrong. Upgrade path if that ever
+/// stops being true is the same exported hash the `.so` path uses.
+pub fn vtable(comptime name: []const u8) *const engine.DeviceVtable {
+    const get = @extern(*const fn () callconv(.c) *const engine.DeviceVtable, .{
+        .name = "arp_device_" ++ name,
+    });
+    return get();
+}
+
 /// Resolve a device type by model name (comptime — `catalog` carries `type`).
 pub fn byName(comptime name: []const u8) type {
     // Consumers resolve every DeviceId tag in one comptime frame (an

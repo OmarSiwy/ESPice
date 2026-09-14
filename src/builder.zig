@@ -214,6 +214,25 @@ pub const Builder = struct {
         const n_u = comptime std.meta.fields(D.U).len;
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
+
+        // A GENERATED device is reached through its own object's vtable: same
+        // `collapse`, same `ProtoStore(D).append` behind `proto_add`, the only
+        // difference being which compilation unit they were codegen'd in —
+        // which is the whole point (devices/host_device.zig). Naming
+        // `D.collapse` or `ProtoStore(D)` here instead drags the device body
+        // back into the executable's own compilation and undoes the split.
+        if (comptime devices.modelName(D)) |name| {
+            const vt = devices.vtable(name);
+            if (comptime n_u > D.num_ports) {
+                var col: [n_u]i32 = @splat(-1);
+                if (vt.collapse) |cf| cf(@ptrCast(&model), @ptrCast(&instance), &col);
+                for (D.num_ports..n_u) |u|
+                    all[u] = if (col[u] >= 0) all[@intCast(col[u])] else self.addNode();
+            }
+            const proto = try self.dynProto(vt);
+            return vt.proto_add(proto.ctx, self.gpa, @ptrCast(&model), @ptrCast(&instance), &all);
+        }
+
         // Zero-parasitic internal nodes collapse onto their port (ngspice
         // DIOsetup: posPrimeNode = posNode when RS=0). Keeping them separate
         // behind a 1e12 short makes elimination cancel catastrophically
@@ -1441,6 +1460,16 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
     }
 }
 
+/// §6.3.4/§3.4.5 `derive`, through the device's own object when it has one.
+/// Same function either way — calling `D.derive` directly would codegen the
+/// generated body (bsim4's runs to thousands of lines) a second time, inside
+/// the executable, for every model.
+fn deriveModel(comptime D: type, model: *D.Model) void {
+    if (comptime devices.modelName(D)) |name| {
+        if (devices.vtable(name).derive) |f| f(@ptrCast(model));
+    } else if (comptime @hasDecl(D, "derive")) D.derive(model);
+}
+
 fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_models: []const types.Model) !void {
     if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
     var model: D.Model = .{};
@@ -1480,7 +1509,7 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
     // last card value is written. Guarded per-field on `__given` inside, so an
     // explicit card value always wins. The dlopen path (vt.derive) already
     // did this; the comptime path silently never did.
-    if (comptime @hasDecl(D, "derive")) D.derive(&model);
+    deriveModel(D, &model);
     try b.addDevice(D, model, instance, try deviceNodes(b, D, dev));
 }
 
