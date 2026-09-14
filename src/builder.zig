@@ -558,6 +558,11 @@ pub const NetBuilder = struct {
     /// cktdisto.c:100-117). `{0, 0}` means the card never named it, which is
     /// also ngspice's no-op. Degrees, like the AC phase.
     v_distof1: [][2]f64,
+    /// `.sp` port index of each V card, 1-based; 0 = not a port. ngspice keeps
+    /// the same thing as `VSRCportNum`/`VSRCportZ0` on the source instance
+    /// (vsrcdefs.h:104-105) and sorts `CKTrfPorts` by it (vsrctemp.c:110-124).
+    v_portnum: []u16,
+    v_z0: []f64,
     n_v: u32,
 
     // Pre-allocated to bucket('i').size()
@@ -638,6 +643,8 @@ pub const NetBuilder = struct {
             .v_dc = try arena.alloc(f64, nv),
             .v_sensed = try arena.alloc(bool, nv),
             .v_distof1 = try arena.alloc([2]f64, nv),
+            .v_portnum = try arena.alloc(u16, nv),
+            .v_z0 = try arena.alloc(f64, nv),
             .n_v = 0,
             .i_names = try arena.alloc([]const u8, ni),
             .n_i = 0,
@@ -689,6 +696,27 @@ pub const NetBuilder = struct {
             }
         }
         return exc;
+    }
+
+    /// The deck's `.sp` ports, ordered by `portnum` — ngspice sorts
+    /// `CKTrfPorts` the same way (vsrctemp.c:110-124) and rejects a gapped or
+    /// duplicated numbering as "incorrect port ordering" (vsrctemp.c:143-160).
+    /// Empty when no V card carries `portnum`, which leaves `.sp` on its
+    /// one-port fallback.
+    pub fn portList(self: *const NetBuilder, gpa: std.mem.Allocator) ![]analysis.sp.Port {
+        var n_ports: usize = 0;
+        for (self.v_portnum[0..self.n_v]) |num| n_ports = @max(n_ports, num);
+        if (n_ports == 0) return &.{};
+        const ports = try gpa.alloc(analysis.sp.Port, n_ports);
+        for (ports) |*p| p.branch = std.math.maxInt(u32); // "unset" marker
+        for (self.v_portnum[0..self.n_v], self.v_ports[0..self.n_v], self.v_branches[0..self.n_v], self.v_z0[0..self.n_v]) |num, node, br, z0| {
+            if (num == 0) continue;
+            const slot = &ports[num - 1];
+            if (slot.branch != std.math.maxInt(u32)) return error.DuplicatePortNumber;
+            slot.* = .{ .node = node, .branch = br, .z0 = z0 };
+        }
+        for (ports) |p| if (p.branch == std.math.maxInt(u32)) return error.MissingPortNumber;
+        return ports;
     }
 
     /// ngspice TRANinit semantics: PULSE TR/TF default to TSTEP, PW/PER to
@@ -894,6 +922,9 @@ pub const NetBuilder = struct {
                 self.v_dc[self.n_v] = bound[0].dc;
                 self.v_sensed[self.n_v] = sensed;
                 self.v_distof1[self.n_v] = sourceDistoF1(dev);
+                const port = if (sensed) null else sourcePort(dev);
+                self.v_portnum[self.n_v] = if (port) |p| p.num else 0;
+                self.v_z0[self.n_v] = if (port) |p| p.z0 else 0;
                 self.n_v += 1;
                 // A replaced source stamps nothing, so it cannot be the
                 // reference the .op ladder anchors on — nor can it be driven:
@@ -1981,6 +2012,32 @@ fn sourceDc(dev: types.Device) ?f64 {
 /// `vsrctemp.c:38-43` (what a missing one becomes): bare `AC` is mag 1 phase 0,
 /// `AC mag` is phase 0, `AC mag phase` is both. Phase is DEGREES —
 /// `vsrctemp.c:68` is `radians = acPhase * M_PI / 180.0`.
+/// `VP1 in 0 DC 0 AC 1 portnum 1 z0 50` — the RF-port spelling of a V card.
+/// ngspice `vsrctemp.c:74-82`: a V source is a port when `portnum` is GIVEN;
+/// `z0` then defaults to 50, and the card counts as a port only while
+/// `z0 > 0 && portnum > 0`. Both spellings are accepted — `portnum 1` (the
+/// positional pair every ngspice IOP is written as on a card) and `portnum=1`.
+fn sourcePort(dev: types.Device) ?struct { num: u16, z0: f64 } {
+    const num_f = blk: {
+        if (kvNumber(dev.kv, "portnum")) |v| break :blk v;
+        for (dev.positional, 0..) |pos, idx| {
+            if (pos != .name or !std.mem.eql(u8, pos.name, "portnum")) continue;
+            break :blk positionalNumber(dev, idx + 1) orelse return null;
+        }
+        return null;
+    };
+    const z0 = blk: {
+        if (kvNumber(dev.kv, "z0")) |v| break :blk v;
+        for (dev.positional, 0..) |pos, idx| {
+            if (pos != .name or !std.mem.eql(u8, pos.name, "z0")) continue;
+            break :blk positionalNumber(dev, idx + 1) orelse 50.0;
+        }
+        break :blk 50.0;
+    };
+    if (!(num_f >= 1) or !(z0 > 0) or num_f > 1024) return null;
+    return .{ .num = @intFromFloat(num_f), .z0 = z0 };
+}
+
 fn sourceAc(dev: types.Device) ?struct { re: f64, im: f64 } {
     var mag: f64 = 1;
     var phase: f64 = 0;

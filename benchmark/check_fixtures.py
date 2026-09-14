@@ -18,7 +18,9 @@ PLOTS = dict(zip(
      "Envelope Analysis", "Fourier Analysis", "Harmonic Balance", "MATEX Transient Analysis",
      "Monte Carlo", "Noise Analysis", "Operating Point", "Periodic AC Analysis",
      "Periodic Noise Analysis", "Periodic Steady State", "Periodic Transfer Function Analysis",
-     "Pole-Zero Analysis", "Quasi-Periodic Steady State", "DC Sensitivity", "S-Parameter Analysis",
+     "Pole-Zero Analysis", "Quasi-Periodic Steady State", "DC Sensitivity",
+     "SP Analysis",  # ngspice's own newAnalysis string, inp2dot.c:710
+
      "Stability Analysis", "Temperature Sweep", "Transfer Function", "Transient Analysis",
      "Transient Noise Analysis"]))
 

@@ -38,6 +38,9 @@ const Sources = struct {
     /// `{mag, phase deg}` of each V card's `DISTOF1`; `{0, _}` = absent.
     /// `.disto` picks its drive by this, never by card order.
     v_distof1: []const [2]f64,
+    /// `.sp` ports declared by `portnum`/`z0` on V cards, in port order.
+    /// Empty = no port card, which leaves `.sp` on its one-port fallback.
+    ports: []const analysis.sp.Port = &.{},
 };
 
 pub const SimConfig = struct {
@@ -218,6 +221,9 @@ pub const Simulation = struct {
             }
         }.f;
         for (nb.v_branches[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
+        // `v_ports` is build-time scratch everywhere EXCEPT portList, which
+        // runs below and hands the row straight to the .sp solve.
+        for (nb.v_ports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
         for (nb.l_branches[0..nb.n_l]) |*v| v.* = mapNode(perm, v.*);
         for (nb.ac_pos[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
         for (nb.ac_neg[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
@@ -252,6 +258,9 @@ pub const Simulation = struct {
             .i_names = nb.i_names[0..nb.n_i],
             .v_branches = nb.v_branches[0..nb.n_v],
             .v_distof1 = nb.v_distof1[0..nb.n_v],
+            // Ports outlive `sources` — `.sp` Options holds the slice — so it
+            // lands on the sim arena, not the parse arena.
+            .ports = try nb.portList(sim_arena),
         };
 
         // Probes: branch currents first, then every named node. ngspice raws
@@ -839,7 +848,7 @@ fn buildJob(dir: types.Directive, node_id: u32, sources: Sources) !?Job {
             const sweep = std.StaticStringMap(analysis.sp.SweepType).initComptime(.{ .{ "dec", .log }, .{ "lin", .linear } }).get(mode) orelse return error.UnsupportedFrequencySweep;
             const npoints = if (sweep == .log) analysis.types.logSweepCount(first, last, n) else n;
             if (npoints > std.math.maxInt(u16)) return error.InvalidAnalysisArguments;
-            return .{ .sp = .{ .f_start = first, .f_stop = last, .n_points = @intCast(npoints), .sweep_type = sweep } };
+            return .{ .sp = .{ .f_start = first, .f_stop = last, .n_points = @intCast(npoints), .sweep_type = sweep, .ports = sources.ports } };
         },
         .stb => return error.UnsupportedStabilityAnalysis,
         .envelope => {
