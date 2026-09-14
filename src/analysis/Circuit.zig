@@ -328,17 +328,23 @@ pub const Circuit = struct {
     ///
     /// For the transient's post-accept re-read (tran.zig), which consumes the
     /// charges and nothing else — the next step's first `evalNewton` restamps
-    /// the other three planes. Falls back to the full pass on the two paths
-    /// whose accumulation this cannot reproduce bit-for-bit: the GPU (one fused
-    /// kernel, no charge-only entry) and ParEval (per-lane slabs reduced in lane
-    /// order). ponytail: both stay correct, just not faster; give ParEval a
-    /// `.charge` Mode if a threaded run ever leans on this.
+    /// the other three planes. Falls back to the full pass only on the GPU: one
+    /// fused kernel, no charge-only entry, so there is nothing to call.
+    ///
+    /// ParEval gets the charge-only pass too, through a `.charge` Mode that
+    /// reuses the SAME lane cuts and reduce order `.full` uses — so the q plane
+    /// is bit-for-bit what a threaded `eval` at this width would have left,
+    /// which is the promise this function makes. It used to fall back here, and
+    /// that cost the threaded transient a complete four-plane device pass per
+    /// accepted timestep: +40-45% device-eval passes on the very decks threading
+    /// was being judged on (docs/perf/pareval-evalq-2026-09-10.md).
     pub fn evalQ(self: *Circuit, x: []const f64, t: f64) void {
-        if (self.gpu_hook != null or self.par_eval != null) return self.eval(x, t);
+        if (self.gpu_hook != null) return self.eval(x, t);
         self.lin.valid = false; // q_vec is one of the four memoized planes
+        if (self.par_eval) |p| return p.evalQ(self.batches, self.ownPlanes(), x, t);
         @memset(self.q_vec, 0);
         const pl = self.ownPlanes();
-        for (self.batches) |b| if (b.hooks.eval_q) |f| f(b.ctx, &pl, x, t);
+        for (self.batches) |b| if (b.hooks.eval_q) |f| f(b.ctx, &pl, 0, b.count, x, t);
     }
 
     /// Ensure the four planes hold the linearization at `x_op`, reusing them if
