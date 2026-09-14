@@ -10,12 +10,24 @@ pub fn build(b: *std.Build) void {
     // `-Doptimize=Debug` away. (Not `standardOptimizeOption`: in 0.16 its
     // preferred mode only rides the `-Drelease` flag; the default stays Debug.)
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse .ReleaseFast;
-    // Mixed precision (docs/gpu-device-eval.md). A listed model gets vera's
-    // `--jac-f32`, which emits `pub const jac_f32 = true`; `engine.jacFloat`
-    // reads it and gives that device a `Dual` whose DERIVATIVE half is f32.
-    // The residual stays f64 either way. Opt-in per model because only the
-    // physics knows whether its unknowns fit in f32's ~7 digits.
-    const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to build with an f32 Jacobian") orelse "";
+    // Mixed precision (docs/perf/jac-width-2026-09-10.md). Two lists, because
+    // the f32 Jacobian is worth 1.21x on a GPU and −6.4%/+13.7% (deck
+    // depending) on this CPU, and the width is a property of the
+    // INSTANTIATION, not of the device.
+    //
+    // `-Djac-f32-gpu` — the PERMISSION. A listed model gets vera's
+    // `--jac-f32` ⇒ `pub const jac_f32 = true`, which `engine.gpuJacFloat`
+    // takes in the device kernel and `engine.jacFloat` declines on the host.
+    // Default is the measured set: mos1 (GPU 1.21x, agreeing to 3.9e-10) and
+    // mos6 (same n_u = 8, same U set, same accuracy sweep). Everything else
+    // stays f64 on both paths — `diode` and `bsim4va` are excluded by
+    // measurement, not by caution.
+    const jac_f32_gpu_list = b.option([]const u8, "jac-f32-gpu", "Comma-separated model stems whose physics permits an f32 Jacobian (GPU kernel takes it)") orelse "mos1,mos6";
+    // `-Djac-f32` — the HOST ORDER, and it still means exactly what it meant
+    // when the CPU numbers were taken: these stems run f32 on the CPU too.
+    // Now spelled `--jac-f32-host`, which implies the permission, so
+    // `-Djac-f32=mos1,mos6` reproduces the old build bit for bit.
+    const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to ALSO build with an f32 Jacobian on the CPU path") orelse "";
 
     const gompute = b.dependency("gompute", .{});
     const vera = b.dependency("vera", .{ .target = target, .optimize = optimize });
@@ -117,7 +129,8 @@ pub fn build(b: *std.Build) void {
         // lowering names the source instead of surfacing inside a cache file.
         if (m.hdl == .verilog_a) {
             run.addArgs(&.{"--emit-zig"});
-            if (inCsv(jac_f32_list, m.name)) run.addArg("--jac-f32");
+            if (inCsv(jac_f32_gpu_list, m.name)) run.addArg("--jac-f32");
+            if (inCsv(jac_f32_list, m.name)) run.addArg("--jac-f32-host");
             // W0650 (unit not provably finite -> strict float) predates the
             // current vera on several models; the empty-stderr gate would
             // otherwise fail any model that regenerates. Strict mode is
