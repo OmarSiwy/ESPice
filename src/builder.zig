@@ -8,7 +8,7 @@
 const std = @import("std");
 const analysis = @import("analysis");
 const devices = @import("devices");
-const types = @import("frontend/types.zig");
+const types = @import("frontend").types;
 const vaload = @import("devices").vaload;
 const batch = devices.batch;
 
