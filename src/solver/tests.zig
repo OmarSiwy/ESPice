@@ -1261,6 +1261,33 @@ const FftTests = struct {
         }
     }
 
+    test "fft: a 2^16-point complex exponential stays within a few eps of N in every bin (#41)" {
+        // x[t] = cis(2 pi k0 t / N) has X = N at k0 and 0 elsewhere; the
+        // input phase is reduced mod N, so it is exact to an ulp. Measured
+        // worst |X - want| / N: 518 eps with one twiddle recurrence per
+        // stage half, 2.2 eps reseeding every 32.
+        const gpa = testing.allocator;
+        const n: usize = 1 << 16;
+        const k0 = n / 3;
+        const re = try gpa.alloc(f64, n);
+        defer gpa.free(re);
+        const im = try gpa.alloc(f64, n);
+        defer gpa.free(im);
+        const nf: f64 = @floatFromInt(n);
+        for (re, im, 0..) |*r, *i, t| {
+            const ph = 2.0 * math.pi * @as(f64, @floatFromInt((t * k0) % n)) / nf;
+            r.* = @cos(ph);
+            i.* = @sin(ph);
+        }
+        fft(re, im);
+        var worst: f64 = 0;
+        for (re, im, 0..) |r, i, k| {
+            const want: f64 = if (k == k0) nf else 0;
+            worst = @max(worst, @abs(r - want), @abs(i));
+        }
+        try testing.expect(worst / nf <= 16 * math.floatEps(f64));
+    }
+
     test "nextPow2: exact powers map to themselves" {
         for ([_][2]usize{ .{ 1, 1 }, .{ 2, 2 }, .{ 3, 4 }, .{ 4, 4 }, .{ 5, 8 }, .{ 1024, 1024 }, .{ 1025, 2048 } }) |c|
             try testing.expectEqual(c[1], impl.nextPow2(c[0]));

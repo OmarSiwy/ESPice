@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- FFT spectra stay within a few eps of N per bin on long transforms; a 2^20-point transform had drifted to 9e3 eps (#41).
 - `ESPICE_SOLVER=jfnk` keeps the direct Newton contract: a residual past 1e154 still takes its step, the device load test gates acceptance, and gmin goes only where the gmin-stepping rung stamps it (#31).
 - GMRES (the PSS and QPSS Krylov solves) never reports convergence on an infinite right-hand side, and solves right-hand sides near 1e300 or 1e-200 instead of returning zero (#40).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
