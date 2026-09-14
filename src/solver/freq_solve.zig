@@ -446,10 +446,12 @@ pub const FreqSolver = struct {
     /// so `solveEach` can solve a different right-hand side per ω as often
     /// as it likes: the block-diagonal preconditioner shape. The sparse
     /// strategy holds ceil(len/W) LaneLu groups replaying one pivot tape,
-    /// taken at the middle ω. A lane the tape cannot replay has the tape
-    /// repivoted at its ω, at most twice; a lane that still fails, or a
-    /// singular dense block, is held as the identity and listed in
-    /// `held_id`. Any other factor or solve on `self` invalidates the held
+    /// taken at the middle ω. When lanes fail to replay it, up to two more
+    /// tapes are laid at the first failed ω not yet tried, and the tape
+    /// that held the fewest lanes is kept. A lane that still fails (every
+    /// lane when A at each tape ω is singular), or a singular dense block,
+    /// is held as the identity and listed in `held_id`, ascending. Any
+    /// other factor or solve on `self` invalidates the held
     /// factors. Asserts that `omegas` is not empty; the sparse strategy
     /// fails with `error.UnsupportedEngine` when the 2n system did not get
     /// the sparse LU, the only engine LaneLu replays.
@@ -493,41 +495,66 @@ pub const FreqSolver = struct {
         const gpa = self.gpa;
         // The sparse solver was built from the same gpa.
         assert(sp.slv.gpa.ptr == gpa.ptr);
-        const LL = lane_lu.LaneLu(W);
         const nn: usize = self.nn;
         if (sp.lane_work.len == 0)
             sp.lane_work = try gpa.alloc(@Vector(W, f64), 2 * nn);
-        const groups = (omegas.len + W - 1) / W;
+        var tried: [3]usize = undefined;
+        var tries: usize = 0;
+        var best: usize = undefined;
+        var best_held: usize = std.math.maxInt(usize);
         var tape = omegas.len / 2;
-        var tries: u8 = 0;
-        // Bounded: the third try (tries == 2) returns whatever it held.
-        while (true) : (tries += 1) {
-            assert(tries <= 2);
-            // A full factor at omegas[tape] lays down a fresh pivot tape.
-            sp.slv.factored = false;
-            try setOmegaSparse(self.n, sp, omegas[tape], .{}, 0);
-            const lu = sp.slv.sparse() orelse return error.UnsupportedEngine;
-            freeHeld(gpa, sp);
-            sp.held = try gpa.alloc(LL, groups);
-            for (sp.held, 0..) |*h, g| h.* = LL.init(gpa, lu) catch |err| {
-                for (sp.held[0..g]) |*done| done.deinit(gpa);
-                gpa.free(sp.held);
-                sp.held = &.{};
-                return err;
-            };
-            self.held_id.clearRetainingCapacity();
-            for (sp.held, 0..) |*h, g| {
-                const base = g * W;
-                const cnt = @min(W, omegas.len - base);
-                var ow: [W]f64 = undefined;
-                for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
-                const bad = h.refactor(Stacked(W).of(sp, ow, .{}, base, cnt), sp.slv.params.refactor_growth_limit);
-                for (0..cnt) |l| if ((bad >> @intCast(l)) & 1 != 0)
-                    try self.held_id.append(gpa, @intCast(base + l));
+        while (tries < tried.len) {
+            tried[tries] = tape;
+            tries += 1;
+            const held = try self.replayTape(sp, omegas, tape);
+            if (held < best_held) {
+                best = tape;
+                best_held = held;
             }
-            if (self.held_id.items.len == 0 or tries == 2) return;
-            tape = self.held_id.items[0];
+            if (held == 0) return;
+            tape = for (self.held_id.items) |k| {
+                if (std.mem.indexOfScalar(usize, tried[0..tries], k) == null) break k;
+            } else break;
         }
+        // A full factor can depend on the previous pivots (the re-pivot fill
+        // cap), so the replayed best may hold a different count.
+        if (best != tried[tries - 1]) _ = try self.replayTape(sp, omegas, best);
+    }
+
+    /// Lays a fresh pivot tape by a full factor at `omegas[tape]` and
+    /// replays it into every LaneLu group. `held_id` receives the ω it
+    /// cannot replay, every ω when A(omegas[tape]) is singular (no group is
+    /// built then). Returns how many ω that holds.
+    fn replayTape(self: *Self, sp: *Sparse, omegas: []const f64, tape: usize) !usize {
+        const gpa = self.gpa;
+        const LL = lane_lu.LaneLu(W);
+        freeHeld(gpa, sp);
+        self.held_id.clearRetainingCapacity();
+        sp.slv.factored = false;
+        setOmegaSparse(self.n, sp, omegas[tape], .{}, 0) catch |err| {
+            if (err != error.SingularMatrix) return err;
+            for (0..omegas.len) |k| try self.held_id.append(gpa, @intCast(k));
+            return omegas.len;
+        };
+        const lu = sp.slv.sparse() orelse return error.UnsupportedEngine;
+        const groups = (omegas.len + W - 1) / W;
+        sp.held = try gpa.alloc(LL, groups);
+        for (sp.held, 0..) |*h, g| h.* = LL.init(gpa, lu) catch |err| {
+            for (sp.held[0..g]) |*done| done.deinit(gpa);
+            gpa.free(sp.held);
+            sp.held = &.{};
+            return err;
+        };
+        for (sp.held, 0..) |*h, g| {
+            const base = g * W;
+            const cnt = @min(W, omegas.len - base);
+            var ow: [W]f64 = undefined;
+            for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
+            const bad = h.refactor(Stacked(W).of(sp, ow, .{}, base, cnt), sp.slv.params.refactor_growth_limit);
+            for (0..cnt) |l| if ((bad >> @intCast(l)) & 1 != 0)
+                try self.held_id.append(gpa, @intCast(base + l));
+        }
+        return self.held_id.items.len;
     }
 
     /// Solves right-hand side k (the stacked 2n vector at `rhs[k*2n..]`)
@@ -547,7 +574,8 @@ pub const FreqSolver = struct {
         assert(r0 + rhs.len * @sizeOf(f64) <= x0 or x0 + rhs.len * @sizeOf(f64) <= r0);
         switch (self.strategy) {
             .dense => |d| assert(d.held_piv.len == rhs.len),
-            .sp => |sp| assert(sp.held.len == (rhs.len / nn + W - 1) / W),
+            // No groups when no tape could be laid; every ω is held then (#43).
+            .sp => |sp| assert(sp.held.len == (rhs.len / nn + W - 1) / W or self.held_id.items.len == rhs.len / nn),
         }
         switch (self.strategy) {
             .dense => |*d| for (0..d.held_piv.len / nn) |k| {

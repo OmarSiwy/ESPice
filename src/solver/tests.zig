@@ -1747,6 +1747,87 @@ const FreqSolveTests = struct {
         empty.solveEach(&.{}, &.{}, false);
     }
 
+    /// A sparse (n = 20) tridiagonal system whose node 0 has only a
+    /// capacitor to ground, so its column of A(0) is zero. `coupled` keeps
+    /// G(0, 1) = -1 in row 0, which makes A(0) singular; without it node 0
+    /// is a void unknown at omega = 0, which the full factor pivots on 1.
+    const CapNodePlanes = struct {
+        const n = 20;
+        col_ptr: [n + 1]u32 = undefined,
+        row_idx: [3 * n - 2]u32 = undefined,
+        g: [3 * n - 2]f64 = undefined,
+        c: [3 * n - 2]f64 = undefined,
+
+        fn init(coupled: bool) CapNodePlanes {
+            var self: CapNodePlanes = .{};
+            var p: u32 = 0;
+            self.col_ptr[0] = 0;
+            for (0..n) |j| {
+                for ([_]i64{ -1, 0, 1 }) |d| {
+                    const r = @as(i64, @intCast(j)) + d;
+                    if (r < 0 or r >= n) continue;
+                    self.row_idx[p] = @intCast(r);
+                    self.g[p] = if (d == 0) 3 else -1;
+                    self.c[p] = if (j == 0 and d == 0) 0.02 else 0;
+                    // Column 0 of G is zero; row 0 keeps G(0, 1) if coupled.
+                    if (j == 0 or (r == 0 and !coupled)) self.g[p] = 0;
+                    p += 1;
+                }
+                self.col_ptr[j + 1] = p;
+            }
+            return self;
+        }
+    };
+
+    /// factorEach's held ω against a per-ω `solve`: held blocks copy rhs.
+    fn expectSolveEach(fs: *FreqSolver, omegas: []const f64) !void {
+        const allocator = testing.allocator;
+        const nn: usize = fs.nn;
+        const rhs = try allocator.alloc(f64, omegas.len * nn);
+        defer allocator.free(rhs);
+        for (rhs, 0..) |*v, i| v.* = @sin(0.37 * @as(f64, @floatFromInt(i)));
+        const x = try allocator.alloc(f64, rhs.len);
+        defer allocator.free(x);
+        var x_ref: [2 * CapNodePlanes.n]f64 = undefined;
+        fs.solveEach(rhs, x, false);
+        for (omegas, 0..) |w, k| {
+            const b = rhs[k * nn ..][0..nn];
+            const got = x[k * nn ..][0..nn];
+            if (std.mem.indexOfScalar(u32, fs.held_id.items, @intCast(k)) != null) {
+                try testing.expectEqualSlices(f64, b, got);
+                continue;
+            }
+            try fs.solve(w, b, x_ref[0..nn]);
+            for (x_ref[0..nn], got) |want, v| try testing.expectApproxEqRel(want, v, 1e-11);
+        }
+    }
+
+    test "factorEach holds a sparse omega whose A(omega) is singular as the identity (#43)" {
+        // The middle omega, 0, is the first tape; its factor is singular.
+        const allocator = testing.allocator;
+        const pl = CapNodePlanes.init(true);
+        var fs = try FreqSolver.fromPlanes(allocator, CapNodePlanes.n, &pl.col_ptr, &pl.row_idx, &pl.g, &pl.c);
+        defer fs.deinit();
+        try testing.expect(fs.strategy == .sp);
+        const omegas = [_]f64{ 1, 0, 2 };
+        try fs.factorEach(&omegas);
+        try testing.expectEqualSlices(u32, &.{1}, fs.held_id.items);
+        try expectSolveEach(&fs, &omegas);
+    }
+
+    test "factorEach holds only the omega no pivot tape could replay, also when a repivot omega has a void unknown (#43)" {
+        // Tape omega 2 fails only omega 0, whose own tape has a void column
+        // that no lane replays.
+        const allocator = testing.allocator;
+        const pl = CapNodePlanes.init(false);
+        var fs = try FreqSolver.fromPlanes(allocator, CapNodePlanes.n, &pl.col_ptr, &pl.row_idx, &pl.g, &pl.c);
+        defer fs.deinit();
+        const omegas = [_]f64{ 0, 1, 2, 3, 4 };
+        try fs.factorEach(&omegas);
+        try testing.expectEqualSlices(u32, &.{0}, fs.held_id.items);
+        try expectSolveEach(&fs, &omegas);
+    }
+
     test "slotCol: empty columns are skipped and a ground slot maps past the last column" {
         const col_ptr = [_]u32{ 0, 0, 2, 2, 3 };
         for ([_][2]u32{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 3 }, .{ 3, 4 } }) |c|
