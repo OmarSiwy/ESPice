@@ -67,7 +67,7 @@ module mos6(d, g, s, b);
     parameter real cgdo = 0.0 from [0:inf);  // F/m
     parameter real cgbo = 0.0 from [0:inf);  // F/m
     parameter real ld   = 0.0 from [0:inf);  // m lateral diffusion
-    parameter real tnom = 300.15 from (0:inf);
+    parameter real tnom = $simparam("tnom") + 273.15 from (0:inf);
 
     // ---- flicker noise ----------------------------------------------------
     parameter real kf = 0.0 from [0:inf);

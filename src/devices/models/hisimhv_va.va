@@ -1305,7 +1305,7 @@ branch(s ,bp) BRsbp  ;
 `MPRnb( DLY2      , 0.7E0      , "-"                             , "Parameter for transit time  ")
 `MPRoo( DLY3      , 0.8E-6     , "s/F"               ,   0 , inf , "Parameter for transforming bulk charge  ")
 `MPRco( DLYOV     , 0.8E-4     , "cm^2/A"            ,   0 , inf , "Parameter for transforming overlap charge  ")
-`MPRoo( TNOM      , 27.0       , "K"             , -273.15 , inf , "Nominal temperature  ")
+`MPRoo( TNOM      , $simparam("tnom")       , "K"             , -273.15 , inf , "Nominal temperature  ")
 `MPRnb( OVSLP     , 2.1E-7     , ""                              , "Coefficient for overlap capacitance")
 `MPRnb( OVMAG     , 0.6        , ""                              , "Coefficient for overlap capacitance")
 `MPRcc( GBMIN     , 1.0E-12    , ""                  ,   0 , 1E4 , "Minimum Substrate resistance network")

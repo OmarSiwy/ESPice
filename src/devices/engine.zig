@@ -1927,6 +1927,13 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn paramField(comptime T: type, comptime field: std.builtin.Type.StructField) bool {
             if (field.type != f32 and field.type != f64) return false;
+            // `<name>__` is VerA's own namespace, not a §3.4 parameter: no
+            // sanitized Verilog-A identifier ends in `_` (naming.zig escapes
+            // it), so the suffix is an exact test. `nom_temp__` — the host's
+            // `.options tnom` — is one of these, and letting `.mc`/`.sens`
+            // perturb a simulation global as if it were a model parameter is
+            // both wrong and a silent change to every existing draw sequence.
+            if (comptime std.mem.endsWith(u8, field.name, "__")) return false;
             if (@hasDecl(D, "AnalysisKind") and T == D.Instance) {
                 // VerA's emitModel owns VA parameters; Instance owns runtime
                 // state. Never perturb timers, timestep fields or prep caches.

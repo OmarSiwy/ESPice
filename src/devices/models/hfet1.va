@@ -32,7 +32,7 @@ module hfet1(d, g, s);
     parameter real dtemp = 0.0;                   // instance temp offset [K]
     parameter real temp  = -1.0;                  // explicit instance temp [K];
                                                   // <=0 means $temperature+dtemp
-    parameter real tnom  = 300.15 from (0:inf);   // .options tnom (CKTnomTemp) [K]
+    parameter real tnom  = $simparam("tnom") + 273.15 from (0:inf);   // .options tnom (CKTnomTemp) [K]
 
     // --- polarity / gate model selection ---
     parameter integer type    = 1 from [-1:1] exclude 0;  // +1 NHFET, -1 PHFET

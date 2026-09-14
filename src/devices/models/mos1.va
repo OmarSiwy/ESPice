@@ -46,7 +46,7 @@ module mos1(d, g, s, b);
     parameter real cgso   = 0.0;         // F/m gate-source overlap
     parameter real cgdo   = 0.0;         // F/m gate-drain overlap
     parameter real cgbo   = 0.0;         // F/m gate-bulk overlap (per length)
-    parameter real tnom   = 27.0;        // degC parameter measurement temp
+    parameter real tnom   = $simparam("tnom");        // degC parameter measurement temp
     parameter real gmin   = 1.0e-12;     // S   junction conductance floor
 
     // ---- instance parameters ---------------------------------------------

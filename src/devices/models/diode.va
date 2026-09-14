@@ -58,7 +58,7 @@ module diode(a, c);
     // (diompar.c:35 `DIOnomTemp = value->rValue + CONSTCtoK`) and like
     // models/vdmos.va / mos1.va / mos3.va. 27 degC == the old 300.15 K
     // default, so an unset card is unchanged.
-    parameter real tnom = 27.0;                  // degC .model TNOM / TREF
+    parameter real tnom = $simparam("tnom");                  // degC .model TNOM / TREF
     parameter integer tlev  = 0 from [0:2];      // IS / EG equation selector
     parameter integer tlevc = 0 from [0:1];      // VJ / CJO equation selector
     parameter real eg   = 1.11;                  // eV   activation energy (1.16 when TLEV=2)

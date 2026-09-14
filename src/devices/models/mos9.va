@@ -59,7 +59,7 @@ module mos9(d, g, s, b);
     parameter real cgbo  = 0.0 from [0:inf); // F/m gate-bulk overlap (per length)
     parameter real kf    = 0.0 from [0:inf); // -   flicker noise coefficient
     parameter real af    = 1.0 from (0:inf); // -   flicker noise exponent
-    parameter real tnom  = 27.0;             // C   parameter extraction temp
+    parameter real tnom  = $simparam("tnom");             // C   parameter extraction temp
     parameter real gmin  = 1.0e-12 from [0:inf);
 
     // ---- instance card ----------------------------------------------------

@@ -839,7 +839,7 @@ branch (xf2)          c_xf2;
 //  General model parameters
 //
 
-`MPRcc( tnom      ,  27.0     ,"degC"      ,-250.0,1000.0, "nominal (reference) temperature")
+`MPRcc( tnom      ,  $simparam("tnom")     ,"degC"      ,-250.0,1000.0, "nominal (reference) temperature")
 `MPRcc( tminclip  ,-100.0     ,"degC"      ,-250.0,  27.0, "clip minimum temperature")
 `MPRcc( tmaxclip  , 500.0     ,"degC"      ,  27.0,1000.0, "clip maximum temperature")
 

@@ -1001,7 +1001,7 @@ module hisim2_va(d, g, s, b);
     `MPRoo( DLY1      , 100.0E-12  , "s"                  ,   0 , inf , "Parameter for transit time  ")
     `MPRnb( DLY2      , 0.7        , "m^2"                            , "Parameter for transit time  ")
     `MPRoo( DLY3      , 0.8E-6     , "Ohm m^2"            ,   0 , inf , "Parameter for transforming bulk charge  ")
-    `MPRco( TNOM      , 27.0       , "degC"           , -273.15 , inf , "Nominal temperature  ")
+    `MPRco( TNOM      , $simparam("tnom")       , "degC"           , -273.15 , inf , "Nominal temperature  ")
     `MPRnb( OVSLP     , 2.1E-7     , "m/V"                            , "coefficient for overlap capacitance")
     `MPRnb( OVMAG     , 0.6        , "V"                              , "coefficient for overlap capacitance")
     `MPRcc( GBMIN     , 1.0E-12    , "-"                  ,   0 , 1E4 , "Substrate resistance network")

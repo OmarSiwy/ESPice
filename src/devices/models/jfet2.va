@@ -31,7 +31,7 @@ module jfet2(d, g, s);
     parameter real m     = 1.0  from (0:inf);
     parameter real temp  = 27.0 from (-273.15:inf);  // degC
     parameter real dtemp = 0.0;
-    parameter real tnom  = 27.0 from (-273.15:inf);
+    parameter real tnom  = $simparam("tnom") from (-273.15:inf);
 
     // ---- channel -----------------------------------------------------------
     parameter real beta   = 1e-4 from (0:inf);   // A/V^Q

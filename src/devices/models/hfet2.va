@@ -51,7 +51,7 @@ module hfet2(d, g, s);
     parameter real l     = 1e-6   from (0:inf);   // gate length [m]
     parameter real temp  = -1.0;                 // instance temperature [K]; <=0 uses ambient
     parameter real dtemp = 0.0;                   // temperature offset [K]
-    parameter real tnom  = 300.15 from (0:inf);   // nominal temperature [K]
+    parameter real tnom  = $simparam("tnom") + 273.15 from (0:inf);   // nominal temperature [K]
 
     // --- DC channel.  vto/eta/mu/vs defaults are per-polarity in
     // hfet2setup.c (NHFET / PHFET); the signed vto_t = type_nfet*vto below is

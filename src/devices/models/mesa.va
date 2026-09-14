@@ -49,7 +49,7 @@ module mesa(d, g, s);
     parameter real l     = 1.0e-6  from (0:inf);  // m   gate length
     parameter real w     = 20.0e-6 from (0:inf);  // m   gate width
     parameter real dtemp = 0.0;                   // K   instance temp offset
-    parameter real tnom  = 300.15  from (0:inf);  // K   parameter ref temp
+    parameter real tnom  = $simparam("tnom") + 273.15  from (0:inf);  // K   parameter ref temp
     // ngspice's instance parallel multiplier (mesa.c MESApTable `m`, default 1;
     // mesaload.c:422 scales every RHS/Y entry by it).  Named `mult` because the
     // model card's knee shape already owns `m` and a Verilog-A module has one

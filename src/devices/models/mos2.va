@@ -83,7 +83,7 @@ module mos2(d, g, s, b);
     // ---- noise / temperature ---------------------------------------------
     parameter real kf   = 0.0 from [0:inf);      // flicker coefficient
     parameter real af   = 1.0 from (0:inf);      // flicker exponent
-    parameter real tnom = 27.0;                  // parameter reference  [degC]
+    parameter real tnom = $simparam("tnom");                  // parameter reference  [degC]
     parameter real gmin = 1.0e-12 from [0:inf);  // junction shunt          [S]
 
     // ---- temperature / geometry prep (bias independent) ------------------
