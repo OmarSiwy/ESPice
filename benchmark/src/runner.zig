@@ -145,6 +145,75 @@ const Accuracy = struct {
     pass: bool,
 };
 
+/// Engine index space for the pairwise matrix: the RefIds in declaration order,
+/// then espice.
+const n_engines = std.enums.values(RefId).len + 1;
+const espice_engine = n_engines - 1;
+
+fn engineName(i: usize) []const u8 {
+    if (i == espice_engine) return "esp";
+    return ref_acc_label.get(@enumFromInt(i));
+}
+
+/// Every unordered pair of the four engines. Until this existed, `comparePlots`
+/// was only ever called with espice as the CANDIDATE, so the three
+/// reference-vs-reference cells were structurally absent — and an absent cell
+/// reads as agreement in every summary ever written out of this file.
+/// `docs/perf/ref-sims-2026-09-10.md` concluded from exactly that hole that there
+/// is "no fixture where ngspice is the outlier", which the instrument could not
+/// have observed either way. On `ensemble/pvt_corners` ngspice and Xyce disagree
+/// with each other MORE than Xyce disagrees with espice, so there was no majority
+/// for espice to be outside of.
+const all_pairs = blk: {
+    var out: [n_engines * (n_engines - 1) / 2][2]usize = undefined;
+    var n: usize = 0;
+    for (0..n_engines) |a| for (a + 1..n_engines) |b| {
+        out[n] = .{ a, b };
+        n += 1;
+    };
+    break :blk out;
+};
+
+/// True when neither end of the pair is espice: the three cells the espice-only
+/// row could never contain.
+fn refOnlyPair(p: [2]usize) bool {
+    return p[0] != espice_engine and p[1] != espice_engine;
+}
+
+/// One undirected cell out of the two directed comparisons that make it up.
+///
+/// `comparePlots` is DIRECTED — the reference side supplies the error
+/// denominator (its own peak and span) and the sample grid the other engine is
+/// resampled onto — and the two directions can differ by more than 10x. On
+/// `ensemble/pvt_corners`, ngspice-as-reference scores Xyce at 3.945e-3 rms and
+/// Xyce-as-reference scores ngspice at 4.559e-2, both reproduced to three digits
+/// from `docs/perf/pvt-arbitration-2026-09-10.md`. Picking one direction per pair
+/// would make the six cells of a row incomparable with each other, which is the
+/// one thing computing them is for.
+///
+/// Keeping the WORSE of the two is the same rule `comparePlots` already applies
+/// across variables and `compareRaws` across plots. Where only one direction
+/// could be scored at all — a transient span that covers the other engine's grid
+/// one way and not the other — that direction stands alone and the cell says so
+/// by being present; a refused direction is not evidence of agreement.
+///
+/// An INCOMPLETE direction likewise carries no evidence and does not get to set
+/// the cell, which is the same rule again. It matters here: espice writes more
+/// columns than Xyce does, so espice-as-reference is incomplete on most Xyce
+/// pairs, and letting that decide would mark N/A exactly the cells this matrix
+/// exists to show. Both directions incomplete stays incomplete.
+fn worseOf(x: ?Accuracy, y: ?Accuracy) ?Accuracy {
+    const a = x orelse return y;
+    const b = y orelse return a;
+    if (a.complete != b.complete) return if (a.complete) a else b;
+    return .{
+        .complete = a.complete,
+        .max_rel = @max(a.max_rel, b.max_rel),
+        .rms_rel = @max(a.rms_rel, b.rms_rel),
+        .pass = a.pass and b.pass,
+    };
+}
+
 const Result = struct {
     category: []const u8,
     name: []const u8,
@@ -157,19 +226,89 @@ const Result = struct {
     /// espice-CPU against each reference; ngspice is the headline pair.
     cpu_accuracy: std.enums.EnumArray(RefId, ?Accuracy) = .initFill(null),
     gpu_accuracy: ?Accuracy = null,
+    /// The full 4x4, indexed by `all_pairs`, each cell undirected per `worseOf`.
+    /// The espice cells here are NOT `cpu_accuracy`: those stay directed, because
+    /// they are the published PASS/FAIL columns and nothing about this defect
+    /// justifies restating them.
+    matrix: [all_pairs.len]?Accuracy = .{null} ** all_pairs.len,
 
     fn ng(self: *const Result) RefRun {
         return self.refs.get(.ngspice);
     }
+
+    /// True when any cell of the matrix fails the gate. A cell is the worse of
+    /// both directions, so every directed espice FAIL is included and the
+    /// reference-vs-reference cells are included too.
+    fn contested(self: *const Result) bool {
+        for (self.matrix) |a| if (a) |acc| {
+            if (!acc.pass and acc.complete) return true;
+        };
+        return false;
+    }
+
+    /// Whether two REFERENCES disagree with each other on this fixture — the
+    /// question the espice-only row could not be asked.
+    fn refsDisagree(self: *const Result) bool {
+        for (all_pairs, self.matrix) |p, a| if (a) |acc| {
+            if (refOnlyPair(p) and !acc.pass and acc.complete) return true;
+        };
+        return false;
+    }
 };
+
+/// Which engine, if any, is further from every other engine than any of them are
+/// from each other. That is the shape a reference makes when it has converged to
+/// a DIFFERENT MODEL rather than to a different answer — `devices/mos6_inverter`
+/// is the worked example: Xyce sits 2.3e-1 from both other engines at `tmax=1p`
+/// while they sit 2.1e-3 from each other, and
+/// `docs/perf/pvt-arbitration-2026-09-10.md` shows its own grid-to-grid motion
+/// there is 100x smaller than that distance. Such a reference should recuse
+/// itself; with only the espice row computed it silently counted as a vote.
+///
+/// The matrix half of that test is all this computes: an engine is named only
+/// when EVERY cell it appears in is worse than EVERY cell it does not. The
+/// grid-refinement half needs a second run per engine per deck and stays in the
+/// arbitration harness — and it is what decides the case, because "furthest"
+/// alone does not mean "wrong". On `ensemble/pvt_corners` this names Xyce, and
+/// the refinement shows Xyce is the engine that is RIGHT. Nothing here changes a
+/// verdict: it is a label on a table, never an input to `pass`.
+fn furthestEngine(r: *const Result) ?usize {
+    for (0..n_engines) |e| {
+        var mine: f64 = std.math.inf(f64);
+        var theirs: f64 = 0;
+        var n_mine: usize = 0;
+        var n_theirs: usize = 0;
+        for (all_pairs, r.matrix) |p, maybe| {
+            // An incomplete comparison is neither agreement nor disagreement and
+            // must not enter at either end.
+            const acc = maybe orelse continue;
+            if (!acc.complete) continue;
+            if (p[0] == e or p[1] == e) {
+                mine = @min(mine, acc.rms_rel);
+                n_mine += 1;
+            } else {
+                theirs = @max(theirs, acc.rms_rel);
+                n_theirs += 1;
+            }
+        }
+        // Two engines to be far FROM and one pair to be far RELATIVE TO. With
+        // fewer cells than that, "furthest" is not a statement about anything.
+        if (n_mine < 2 or n_theirs < 1) continue;
+        if (mine > theirs) return e;
+    }
+    return null;
+}
 
 /// What each timed binary costs before it has simulated anything: process
 /// start, dynamic linking, parser bring-up, raw-file open and close.
 ///
-/// This is not a detail. ngspice pays a fixed **10,229,999 Ir** of
+/// This is not a detail. ngspice pays a fixed ~10M instructions of
 /// dynamic-linker work (`do_lookup_x`, `_dl_lookup_symbol_x`,
-/// `_dl_relocate_object`) on every single run — identical to the instruction
-/// across four separate decks — where a statically linked espice pays ~0.87M.
+/// `_dl_relocate_object`) on every single run — 10,229,999 Ir on the deck
+/// `docs/perf/slow-decks-2026-09-10.md` measured, 9,814,699 Ir on the floor deck
+/// below, reproducible to the instruction on each. espice is NOT statically
+/// linked, whatever that doc says: it links three objects and pays 313,037 Ir to
+/// do it, for a whole-process floor of 590,749 Ir against ngspice's 15,280,438.
 /// On a 4 ms deck that difference IS the reported speedup, so a raw wall-clock
 /// ratio on a small deck measures the linker, not the simulator. Correcting
 /// only the reference would be the same sin in the other direction, so every
@@ -241,6 +380,15 @@ const Summary = struct {
     /// the RAW ratio. Each one is a coin toss that a median-only table used to
     /// print as a fact; `docs/perf/slow-decks-2026-09-10.md` found seven.
     p50_flips: usize = 0,
+    /// Fixtures with at least one cross-engine disagreement anywhere in the 4x4,
+    /// and of those the ones where two REFERENCES disagree with each other. The
+    /// second number was structurally zero before `all_pairs` existed, which is
+    /// how "ngspice is with the majority everywhere" got published.
+    contested: usize = 0,
+    ref_vs_ref_fails: usize = 0,
+    /// Fixtures where one engine is further from every other than any of them
+    /// are from each other — a candidate for recusal, not a vote.
+    outliers: usize = 0,
 
     fn geo(n: usize, log_sum: f64) f64 {
         if (n == 0) return 0;
@@ -256,6 +404,9 @@ const Summary = struct {
 fn summarize(results: []const Result, floors: *const Floors) Summary {
     var s: Summary = .{};
     for (results) |r| {
+        s.contested += @intFromBool(r.contested());
+        s.ref_vs_ref_fails += @intFromBool(r.refsDisagree());
+        if (r.contested() and furthestEngine(&r) != null) s.outliers += 1;
         const ng = r.ng().time;
         if (rawRatio(ng, r.zp_cpu)) |ratio| {
             s.raw_ranked += 1;
@@ -453,10 +604,35 @@ pub fn main(init: std.process.Init) !void {
             res.zp_cpu_rss_kb = measurePeakRss(io, fxa, .{ .argv = zp_cpu_argv }, cfg.timeout);
         }
 
+        // Each engine's raw is parsed ONCE and compared many times. The matrix
+        // is 12 directed comparisons over 4 files; re-reading per comparison
+        // would be 24 parses where the old espice-only row already paid 6, and
+        // the parse is the expensive half.
+        var plots: [n_engines]?[]const Plot = .{null} ** n_engines;
         for (std.enums.values(RefId)) |id| {
             const raw = res.refs.get(id).raw;
-            if (raw.len == 0 or res.zp_cpu == null) continue;
-            res.cpu_accuracy.set(id, compareRawFiles(io, fxa, raw, zp_cpu_raw_path, cfg.rtol));
+            if (raw.len > 0) plots[@intFromEnum(id)] = parseRawFile(io, fxa, raw);
+        }
+        if (res.zp_cpu != null) plots[espice_engine] = parseRawFile(io, fxa, zp_cpu_raw_path);
+
+        // The published espice row stays exactly as it was: DIRECTED, reference
+        // first. Nothing about the missing cells justifies restating it.
+        for (std.enums.values(RefId)) |id| {
+            const ref = plots[@intFromEnum(id)] orelse continue;
+            const cand = plots[espice_engine] orelse continue;
+            res.cpu_accuracy.set(id, compareRaws(fxa, ref, cand, cfg.rtol));
+        }
+        // The matrix, including the three reference-vs-reference cells that the
+        // runner has never once computed. No new comparator and no new run: the
+        // raws are already here and `compareRaws` has been doing this all along,
+        // just never with these arguments.
+        for (all_pairs, 0..) |p, i| {
+            const a = plots[p[0]] orelse continue;
+            const b = plots[p[1]] orelse continue;
+            res.matrix[i] = worseOf(
+                compareRaws(fxa, a, b, cfg.rtol),
+                compareRaws(fxa, b, a, cfg.rtol),
+            );
         }
         if (res.zp_gpu != null and res.ng().raw.len > 0) {
             res.gpu_accuracy = compareRawFiles(io, fxa, res.ng().raw, zp_gpu_raw_path, cfg.rtol);
@@ -1672,6 +1848,17 @@ fn reportRow(out: *Io.Writer, r: Result, floors: *const Floors, prev_cat: *[]con
         const run = r.refs.get(id);
         if (run.skip.len > 0) try out.print("    {s}: {s}\n", .{ ref_acc_label.get(id), run.skip });
     }
+    // Printed under the row, not in a column: a reference disagreeing with
+    // another reference is rare and is the loudest thing on the page when it
+    // happens. A blank column would have been the old behaviour by another name.
+    for (all_pairs, r.matrix) |p, maybe| if (maybe) |acc| {
+        if (!refOnlyPair(p) or acc.pass or !acc.complete) continue;
+        try out.print("    {s} vs {s}: {e:.2} {e:.2} FAIL\n", .{
+            engineName(p[0]), engineName(p[1]), acc.max_rel, acc.rms_rel,
+        });
+    };
+    if (r.contested()) if (furthestEngine(&r)) |e|
+        try out.print("    furthest from every other engine: {s}\n", .{engineName(e)});
 }
 
 fn accuracyStatus(acc: Accuracy) []const u8 {
@@ -1719,6 +1906,9 @@ fn reportFooter(out: *Io.Writer, s: Summary, closing: Summary) !void {
     try out.print("  same decks against the CLOSING floor: {d} faster of {d}, geomean {d:.2}x  <- the error bar\n", .{
         closing.corr_wins, closing.corr_ranked, Summary.geo(closing.corr_ranked, closing.corr_log_sum),
     });
+    try out.print("\npairwise matrix: {d} contested fixtures, {d} of them with a REFERENCE-vs-REFERENCE\n", .{ s.contested, s.ref_vs_ref_fails });
+    try out.print("disagreement — cells no espice-only row could ever show. {d} have one engine\n", .{s.outliers});
+    try out.print("further from every other than any of them are from each other.\n", .{});
 }
 
 /// `-` where a corrected ratio exists but was refused: the deck is too small
@@ -1884,6 +2074,94 @@ fn mdFloor(w: *Io.Writer, label: []const u8, open: ?Timing, close: ?Timing) !voi
     try w.print("| {s} | {s} | {s} | {s} | {s} |\n", .{ label, cells[0], cells[1], cells[2], cells[3] });
 }
 
+/// Every cross-engine cell on every contested fixture — the full matrix, not the
+/// espice row of it.
+///
+/// Only contested fixtures are listed. Where all six cells pass, the matrix says
+/// exactly what the espice row already said and printing it would bury the rows
+/// that do not.
+fn writeMatrix(w: *Io.Writer, results: []const Result) !void {
+    var contested: usize = 0;
+    var ref_fails: usize = 0;
+    var outliers: usize = 0;
+    for (results) |r| {
+        contested += @intFromBool(r.contested());
+        ref_fails += @intFromBool(r.refsDisagree());
+        if (r.contested() and furthestEngine(&r) != null) outliers += 1;
+    }
+
+    try w.writeAll("## Pairwise matrix\n\n");
+    try w.print(
+        \\Until this run the runner only ever called its comparator with espice as the
+        \\CANDIDATE. Every reference-vs-reference cell was structurally absent, and an
+        \\absent cell reads as agreement in every summary ever written out of this file
+        \\— including `docs/perf/ref-sims-2026-09-10.md`'s "no fixture where ngspice is
+        \\the outlier", which the instrument could not have observed either way.
+        \\
+        \\All six unordered pairs of the four engines are now scored, with the same
+        \\comparator, the same gate, and no per-fixture tolerance. **{d}** fixtures are
+        \\contested somewhere in the matrix; on **{d}** of them two REFERENCES disagree
+        \\with each other; on **{d}** one engine sits further from every other than any
+        \\of them sit from each other.
+        \\
+        \\`comparePlots` is directed: the reference supplies the error denominator (its
+        \\own peak and span) and the grid the other engine is resampled onto, and the
+        \\two directions of one pair can differ by more than 10x. Each cell below is
+        \\therefore the WORSE of both directions — the same "worst kept" rule the
+        \\comparator already applies across variables and across plots, and the only
+        \\reduction that makes the six numbers on a row comparable to each other.
+        \\The espice PASS/FAIL columns in the main table are unchanged and still
+        \\directed; nothing about this defect justifies restating them.
+        \\
+        \\`furthest` names an engine that is further from every other engine than any
+        \\of them are from each other. That is the shape a reference makes when it has
+        \\converged to a different MODEL rather than a different answer, and such a
+        \\reference should recuse itself rather than vote — on `devices/mos6_inverter`
+        \\Xyce's own grid-to-grid motion is 100x smaller than its distance from both
+        \\other engines. But furthest is not wrong: on `ensemble/pvt_corners` the same
+        \\column names Xyce, and the grid refinement in
+        \\`docs/perf/pvt-arbitration-2026-09-10.md` shows Xyce is the engine that is
+        \\RIGHT there. The column points at what to investigate. It is never an input
+        \\to PASS/FAIL.
+        \\
+        \\
+    , .{ contested, ref_fails, outliers });
+
+    try w.writeAll("| fixture |");
+    for (all_pairs) |p| try w.print(" {s}/{s} |", .{ engineName(p[0]), engineName(p[1]) });
+    try w.writeAll(" furthest |\n|---|");
+    for (all_pairs) |_| try w.writeAll("---|");
+    try w.writeAll("---|\n");
+
+    for (results) |r| {
+        if (!r.contested()) continue;
+        try w.print("| {s}/{s} |", .{ r.category, r.name });
+        for (r.matrix) |maybe| try mdCell(w, maybe);
+        if (furthestEngine(&r)) |e| try w.print(" {s} |\n", .{engineName(e)}) else try w.writeAll(" - |\n");
+    }
+    try w.writeAll(
+        \\
+        \\Cells read `rms (max)`. `-` is a comparison that could not be made at all —
+        \\one of the two engines did not run the deck. `N/A` is a comparison that was
+        \\attempted and came back incomplete; it is neither agreement nor disagreement
+        \\and does not enter the `furthest` test at either end.
+        \\
+        \\
+    );
+}
+
+/// One matrix cell. RMS carries the verdict, max is in parentheses because a
+/// single-point excursion and a whole-trace offset are different findings and
+/// the pair distinguishes them. An incomplete cell still prints its numbers
+/// under the `N/A` — it cannot support a verdict, but throwing the measurement
+/// away as well is how the espice-only row got read as agreement in the first
+/// place.
+fn mdCell(w: *Io.Writer, acc: ?Accuracy) !void {
+    const a = acc orelse return w.writeAll(" - |");
+    const tag: []const u8 = if (!a.complete) "N/A " else if (a.pass) "" else "**FAIL** ";
+    try w.print(" {s}{e:.2} ({e:.2}) |", .{ tag, a.rms_rel, a.max_rel });
+}
+
 fn writeResultsBody(
     w: *Io.Writer,
     results: []const Result,
@@ -1894,6 +2172,7 @@ fn writeResultsBody(
 ) !void {
     try w.writeAll("# Benchmark results — espice vs ngspice, Xyce and VACASK\n\n");
     try writeHeadline(w, summarize(results, floors), summarize(results, closing), floors, closing, refs);
+    try writeMatrix(w, results);
 
     // Which binary produced each column, verbatim. Ratios against an unnamed
     // "ngspice" are not reproducible — two 44.2 builds on the dev host differ
@@ -2453,6 +2732,99 @@ test "the headline is a geometric mean, and counts what it could not rank" {
     try std.testing.expectApproxEqAbs(@as(f64, 1.0), Summary.geo(2, @log(4.0) + @log(0.25)), 1e-12);
     // Deck 1 is espice-slower on min-of-N and espice-faster on median-of-N.
     try std.testing.expectEqual(@as(usize, 1), s.p50_flips);
+}
+
+test "a reference-vs-reference disagreement is counted, and the outlier is named" {
+    // `all_pairs` is generated, so pin the layout the rest of this test indexes.
+    try std.testing.expectEqual(@as(usize, 6), all_pairs.len);
+    const ng_xy = 0;
+    const ng_esp = 2;
+    const xy_esp = 4;
+    try std.testing.expectEqualSlices(usize, &.{ @intFromEnum(RefId.ngspice), @intFromEnum(RefId.xyce) }, &all_pairs[ng_xy]);
+    try std.testing.expectEqualSlices(usize, &.{ @intFromEnum(RefId.ngspice), espice_engine }, &all_pairs[ng_esp]);
+    try std.testing.expectEqualSlices(usize, &.{ @intFromEnum(RefId.xyce), espice_engine }, &all_pairs[xy_esp]);
+    try std.testing.expect(refOnlyPair(all_pairs[ng_xy]));
+    try std.testing.expect(!refOnlyPair(all_pairs[ng_esp]));
+
+    // One pair, both directions, VERBATIM from the arbitration table in
+    // docs/perf/pvt-arbitration-2026-09-10.md. A 10x asymmetry between the two
+    // directions is why a cell cannot be one of them.
+    const ng_ref_xy: Accuracy = .{ .max_rel = 6.732e-2, .rms_rel = 3.945e-3, .pass = false };
+    const xy_ref_ng: Accuracy = .{ .max_rel = 2.094e-1, .rms_rel = 4.559e-2, .pass = false };
+    const cell = worseOf(ng_ref_xy, xy_ref_ng).?;
+    try std.testing.expectEqual(@as(f64, 4.559e-2), cell.rms_rel);
+    try std.testing.expectEqual(@as(f64, 2.094e-1), cell.max_rel);
+    // A direction that could not be scored at all leaves the other standing —
+    // a refused comparison is not evidence of agreement.
+    try std.testing.expectEqual(@as(f64, 3.945e-3), worseOf(ng_ref_xy, null).?.rms_rel);
+    try std.testing.expect(worseOf(null, null) == null);
+    // Neither does an INCOMPLETE direction. espice emits columns Xyce does not,
+    // so espice-as-reference comes back incomplete on most Xyce pairs; if that
+    // decided the cell, every cell this matrix exists to show would read N/A.
+    const incomplete: Accuracy = .{ .complete = false, .max_rel = 5, .rms_rel = 5, .pass = false };
+    const one_sided = worseOf(xy_ref_ng, incomplete).?;
+    try std.testing.expect(one_sided.complete);
+    try std.testing.expectEqual(@as(f64, 4.559e-2), one_sided.rms_rel);
+    try std.testing.expect(!worseOf(incomplete, incomplete).?.complete);
+
+    var floors: Floors = .{};
+    floors.refs.set(.ngspice, null);
+
+    // `ensemble/pvt_corners`, in the shape the runner could not see. Every
+    // number is the worse direction of the corresponding arbitration-table row.
+    var pvt: Result = .{ .category = "ensemble", .name = "pvt_corners" };
+    pvt.matrix[ng_xy] = cell;
+    pvt.matrix[ng_esp] = .{ .max_rel = 1.176e-1, .rms_rel = 9.471e-3, .pass = false };
+    pvt.matrix[xy_esp] = .{ .max_rel = 1.167e-1, .rms_rel = 3.015e-2, .pass = false };
+    try std.testing.expect(pvt.contested());
+    try std.testing.expect(pvt.refsDisagree());
+    // The missing cell is the decisive one: ngspice and Xyce are further from
+    // each other (4.559e-2) than Xyce is from espice (3.015e-2). "espice is the
+    // lone dissenter" needed a majority, and there is not one.
+    try std.testing.expect(pvt.matrix[ng_xy].?.rms_rel > pvt.matrix[xy_esp].?.rms_rel);
+    // Furthest is Xyce — which the grid refinement shows is the engine that is
+    // RIGHT here. The column points at what to investigate; it is not a verdict.
+    try std.testing.expectEqual(@as(?usize, @intFromEnum(RefId.xyce)), furthestEngine(&pvt));
+
+    // `devices/mos6_inverter`: Xyce sits 2.3e-1 from both other engines while
+    // they sit 2.1e-3 from each other. A reference answering a different
+    // question must be visible as such rather than silently counted as a vote.
+    var mos6: Result = .{ .category = "devices", .name = "mos6_inverter" };
+    mos6.matrix[ng_xy] = .{ .max_rel = 3.0e-1, .rms_rel = 2.3e-1, .pass = false };
+    mos6.matrix[ng_esp] = .{ .max_rel = 9e-3, .rms_rel = 2.1e-3, .pass = false };
+    mos6.matrix[xy_esp] = .{ .max_rel = 3.1e-1, .rms_rel = 2.3e-1, .pass = false };
+    try std.testing.expectEqual(@as(?usize, @intFromEnum(RefId.xyce)), furthestEngine(&mos6));
+
+    // Three engines mutually at odds with nobody further out than the rest:
+    // there is no outlier to name, and naming one would be an invention.
+    var muddle: Result = .{ .category = "t", .name = "muddle" };
+    muddle.matrix[ng_xy] = .{ .max_rel = 1e-1, .rms_rel = 1e-2, .pass = false };
+    muddle.matrix[ng_esp] = .{ .max_rel = 1e-1, .rms_rel = 1e-2, .pass = false };
+    muddle.matrix[xy_esp] = .{ .max_rel = 1e-1, .rms_rel = 1e-2, .pass = false };
+    try std.testing.expect(furthestEngine(&muddle) == null);
+
+    // An agreeing fixture is not contested and is not listed.
+    var quiet: Result = .{ .category = "t", .name = "quiet" };
+    quiet.matrix[ng_xy] = .{ .max_rel = 1e-9, .rms_rel = 1e-12, .pass = true };
+    quiet.matrix[ng_esp] = .{ .max_rel = 1e-9, .rms_rel = 1e-12, .pass = true };
+    try std.testing.expect(!quiet.contested());
+
+    // An INCOMPLETE comparison is not a disagreement and not an agreement: it
+    // must not enter the matrix at either end. A single huge incomplete cell
+    // would otherwise make every other engine read as the outlier.
+    var unknown: Result = .{ .category = "t", .name = "unknown" };
+    unknown.matrix[ng_xy] = .{ .complete = false, .max_rel = 9, .rms_rel = 9, .pass = false };
+    unknown.matrix[ng_esp] = .{ .max_rel = 1e-9, .rms_rel = 1e-12, .pass = true };
+    unknown.matrix[xy_esp] = .{ .max_rel = 1e-9, .rms_rel = 1e-12, .pass = true };
+    try std.testing.expect(!unknown.contested());
+    try std.testing.expect(!unknown.refsDisagree());
+    try std.testing.expect(furthestEngine(&unknown) == null);
+
+    const results = [_]Result{ pvt, mos6, muddle, quiet, unknown };
+    const s = summarize(&results, &floors);
+    try std.testing.expectEqual(@as(usize, 3), s.contested);
+    try std.testing.expectEqual(@as(usize, 3), s.ref_vs_ref_fails);
+    try std.testing.expectEqual(@as(usize, 2), s.outliers);
 }
 
 test "GPU fallback diagnostics cannot become GPU timings" {
