@@ -3,12 +3,18 @@
 * Sweep differential pair L: 20 points [0.1u..5u]
 * Load/tail transistors fixed. Each instance electrically independent.
 * GPU benchmark: block-diagonal matrix, gain = V(out_i) at AC=1 input.
+* Tail bias VBIAS=1.0 gives M5 a 0.3 V overdrive over VTO=0.7; the
+* smallest branch current in the deck is 2.20e-07 A = 2.2e5 x the default
+* abstol of 1e-12 A, so the operating point is resolved and the AC result
+* compares the MODEL. Do not lower VBIAS below VTO: see
+* benchmark/fixtures/convergence/ota_cutoff_abstol and
+* docs/perf/fixture-bias-2026-09-10.md.
 *
 .model nch NMOS(level=1 VTO=0.7 KP=110u GAMMA=0.4 LAMBDA=0.04 PHI=0.65)
 .model pch PMOS(level=1 VTO=-0.7 KP=50u GAMMA=0.57 LAMBDA=0.05 PHI=0.65)
 *
 Vdd vdd 0 DC 1.8
-Vbias vbias 0 DC 0.55
+Vbias vbias 0 DC 1.0
 Vinp inp 0 DC 0.9 AC 1
 Vinn inn 0 DC 0.9
 * --- Instance 1: W=0.500u L=0.100u ---

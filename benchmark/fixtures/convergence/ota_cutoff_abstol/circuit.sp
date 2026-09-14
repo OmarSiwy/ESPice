@@ -1,20 +1,39 @@
-* 5T OTA W/L Sweep: 20x10 = 200 independent instances
+* 5T OTA at the abstol floor -- CONVERGENCE-GATE STRESS, NOT AN ACCURACY REFERENCE
+* ============================================================================
+* Deliberately biased into cutoff: VBIAS=0.55 against VTO=0.7 puts every tail
+* device off, so EVERY branch current in this deck is 1.368e-12 A against the
+* default abstol of 1e-12 A -- 1.4x the gate. The AC gain of v(d1_i) is a
+* ratio of two gate overdrives of 30 uV and 113 uV, and abstol/gm3 is 86 uV of
+* freedom on that node, i.e. 76% of vgst3.
+*
+* CONSEQUENCE, READ THIS BEFORE REPORTING A NUMBER FROM THIS DECK:
+* no engine at default tolerances resolves this operating point. ngspice
+* misses KCL at d1_1 by 2.7x abstol, espice by 21x. The resulting ~3.2e5
+* deviation between any two simulators here is the distance between two
+* stopping points INSIDE the convergence tolerance. It is NOT a model
+* discrepancy and must never be scored as one. Asked to converge
+* (.options abstol=1e-18 reltol=1e-10 vntol=1e-12) ngspice and espice agree
+* to 8.6e-11 normalized over all signals.
+*
+* What this deck is for: exercising the Newton convergence gate on a circuit
+* whose entire signal sits at the tolerance floor. Judge it on whether an
+* engine converges at all and how far it lands from the tolerance-converged
+* reference -- never on engine-vs-engine deviation at default tolerances.
+*
+* The accuracy/scaling version of this circuit is benchmark/fixtures/sweep/
+* opamp_wl_{200,1000,5000}, re-biased to VBIAS=1.0. Full diagnosis:
+* docs/perf/mos1-ac-2026-09-10.md and docs/perf/fixture-bias-2026-09-10.md.
+* ============================================================================
+* 5T OTA W/L sweep: 20x10 = 200 independent instances
 * Sweep differential pair W: 20 points [0.5u..50u]
 * Sweep differential pair L: 10 points [0.1u..5u]
 * Load/tail transistors fixed. Each instance electrically independent.
-* GPU benchmark: block-diagonal matrix, gain = V(out_i) at AC=1 input.
-* Tail bias VBIAS=1.0 gives M5 a 0.3 V overdrive over VTO=0.7; the
-* smallest branch current in the deck is 2.20e-07 A = 2.2e5 x the default
-* abstol of 1e-12 A, so the operating point is resolved and the AC result
-* compares the MODEL. Do not lower VBIAS below VTO: see
-* benchmark/fixtures/convergence/ota_cutoff_abstol and
-* docs/perf/fixture-bias-2026-09-10.md.
 *
 .model nch NMOS(level=1 VTO=0.7 KP=110u GAMMA=0.4 LAMBDA=0.04 PHI=0.65)
 .model pch PMOS(level=1 VTO=-0.7 KP=50u GAMMA=0.57 LAMBDA=0.05 PHI=0.65)
 *
 Vdd vdd 0 DC 1.8
-Vbias vbias 0 DC 1.0
+Vbias vbias 0 DC 0.55
 Vinp inp 0 DC 0.9 AC 1
 Vinn inn 0 DC 0.9
 * --- Instance 1: W=0.500u L=0.100u ---
