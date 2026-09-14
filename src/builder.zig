@@ -38,6 +38,13 @@ pub const Builder = struct {
     node_instance: std.ArrayList(u32) = .empty,
     node_type: std.ArrayList(u16) = .empty,
     needs_tran_op: bool = false,
+    /// `.options tnom` in DEGREES CELSIUS — ngspice's `CKTnomTemp`
+    /// (`cktsopt.c:71-73` converts the card to K; `cktntask.c:127` defaults it
+    /// to 300.15 K = 27 degC): the temperature a model card that gives no
+    /// `TNOM`/`TREF` of its own was extracted at. ONE number per run, so it
+    /// lives here rather than on every Model; `deriveModel` copies it into the
+    /// models that declare they read it.
+    nom_temp_c: f64 = 27.0,
 
     pub fn init(gpa: std.mem.Allocator) Builder {
         var labels: std.ArrayList([]const u8) = .empty;
@@ -1460,11 +1467,25 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
     }
 }
 
+/// VerA's reserved Model field for §9.15 `$simparam("tnom")` — the circuit's
+/// nominal temperature in degC. See `Lower.simparamHostField`.
+pub const nom_temp_field = "nom_temp__";
+
 /// §6.3.4/§3.4.5 `derive`, through the device's own object when it has one.
 /// Same function either way — calling `D.derive` directly would codegen the
 /// generated body (bsim4's runs to thousands of lines) a second time, inside
 /// the executable, for every model.
-fn deriveModel(comptime D: type, model: *D.Model) void {
+///
+/// `.options tnom` is published here, immediately before `derive`, because
+/// that is where the two halves meet: VerA turns a `parameter real tnom =
+/// $simparam("tnom")` into `if (!model.tnom__given) model.tnom =
+/// model.nom_temp__`, which is ngspice's `if (!BSIM4tnomGiven) BSIM4tnom =
+/// ckt->CKTnomTemp` (b4set.c:1950). Writing it before the card would let
+/// `derive` overwrite it; after `derive`, nothing would read it. A card
+/// `TNOM`/`TREF` raised `__given` in `applyKv`, so it still wins.
+fn deriveModel(comptime D: type, model: *D.Model, nom_temp_c: f64) void {
+    if (comptime @hasField(D.Model, nom_temp_field))
+        @field(model, nom_temp_field) = nom_temp_c;
     if (comptime devices.modelName(D)) |name| {
         if (devices.vtable(name).derive) |f| f(@ptrCast(model));
     } else if (comptime @hasDecl(D, "derive")) D.derive(model);
@@ -1509,7 +1530,7 @@ fn addSingleDevice(b: *Builder, comptime D: type, dev: types.Device, spice_model
     // last card value is written. Guarded per-field on `__given` inside, so an
     // explicit card value always wins. The dlopen path (vt.derive) already
     // did this; the comptime path silently never did.
-    deriveModel(D, &model);
+    deriveModel(D, &model, b.nom_temp_c);
     try b.addDevice(D, model, instance, try deviceNodes(b, D, dev));
 }
 

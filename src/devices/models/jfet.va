@@ -37,7 +37,7 @@ module jfet(d, g, s);
     parameter real pb     = 1.0 from (0:inf);     // V   gate junction potential
     parameter real fc     = 0.5 from [0:1);       // -   forward-bias cap coeff
     // --- Temperature (§1.5) ---
-    parameter real tnom    = 27.0;                // degC nominal
+    parameter real tnom    = $simparam("tnom");                // degC nominal
     // "Instance TEMP not given" is an impossible sentinel; any real card
     // value wins, everything else follows the simulator's circuit temperature
     // (ngspice: JFETtemp = CKTtemp + dtemp, instance TEMP is an absolute
