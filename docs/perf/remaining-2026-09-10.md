@@ -547,11 +547,12 @@ pair never straddles a lane) — 1.1e-16 to 4.4e-16 against a 1e-2 tolerance.
 
 ### 13. Build and measurement infrastructure
 
-- **Per-model LLVM objects.** Any VerA change forces a **~35 minute** ARPice
-  rebuild because all 38 models are `-M` modules in ONE `build-exe`, so Zig
-  caches the compilation as a unit. `../espice-buildsplit` has the per-model
-  `addObject` work but has diverged (36 files, 1896 lines, old base). This is
-  the single biggest drag on iteration speed for kernel work.
+- ~~**Per-model LLVM objects.**~~ DONE — docs/perf/build-split-2026-09-10.md.
+  Each model is its own `addObject` behind the runtime `DeviceVtable` the
+  `.so` loader already used. One-file ARPice edit 7:17 -> 2:36, one model
+  8:59 -> 3:55, all 38 10:20 -> 3:56; 286/286 fixtures bit-identical and Ir
+  moved +0.01%. The "~35 minute" figure above was never re-measured and was
+  wrong by 3.4x.
 - **Pin the reference simulator.** The runner takes `ngspice` from PATH.
   There are two 44.2 builds on this machine differing by **8.8%–16.2% depending
   on the deck** (re-measured 2026-09-10); RESULTS.md ratios are computed against
