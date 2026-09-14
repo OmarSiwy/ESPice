@@ -1715,7 +1715,7 @@ test "pnoise: single resistor noise density matches 4kTR" {
 
     // Only R2 as noise source
     const sources = [_]analysis.NoiseSource{
-        .{ .node_p = setup.n2, .node_n = GROUND, .conductance = 1.0 / 500.0 },
+        .{ .node_p = setup.n2, .node_n = GROUND, .white = 4.0 * k_boltzmann * 300.15 / 500.0 },
     };
 
     const n_points = freq.logSweepCount(1e3, 1e5, 5);
@@ -1763,7 +1763,7 @@ test "pnoise: PSS converges for resistive divider" {
     defer allocator.free(x);
 
     const sources = [_]analysis.NoiseSource{
-        .{ .node_p = setup.n1, .node_n = setup.n2, .conductance = 1.0 / 1000.0 },
+        .{ .node_p = setup.n1, .node_n = setup.n2, .white = 4.0 * k_boltzmann * 300.15 / 1000.0 },
     };
 
     const n_points = freq.logSweepCount(1e3, 1e4, 3);
@@ -2037,7 +2037,7 @@ test "tran_noise: resistor thermal noise power matches 4kTR*BW" {
 
     // Single noise source on R (between n1 and n2)
     const noise_sources = [_]analysis.NoiseSource{
-        .{ .node_p = setup.n1, .node_n = setup.n2, .conductance = 1.0 / r_val },
+        .{ .node_p = setup.n1, .node_n = setup.n2, .white = 4.0 * k_boltzmann * temp_k / r_val },
     };
 
     const probes = [_]u32{setup.n2};
@@ -2047,7 +2047,6 @@ test "tran_noise: resistor thermal noise power matches 4kTR*BW" {
         .dt_min = dt,
         .dt_max = dt,
         .max_steps = n_steps + 10,
-        .temp_k = temp_k,
         .seed = 12345,
     }, allocator);
     defer allocator.free(result.rows);
@@ -2119,7 +2118,7 @@ test "tran_noise: deterministic with same seed" {
     try testing.expect((try dc.solve(&setup.ckt, x1, .{})).converged);
 
     const noise_sources = [_]analysis.NoiseSource{
-        .{ .node_p = setup.n1, .node_n = setup.n2, .conductance = 1e-3 },
+        .{ .node_p = setup.n1, .node_n = setup.n2, .white = 4.0 * k_boltzmann * 300.15 * 1e-3 },
     };
     const probes = [_]u32{setup.n2};
 
@@ -2164,7 +2163,7 @@ test "tran_noise: RC circuit filters injected noise below open-loop level" {
     const dt: f64 = 0x1p-30;
     const n_steps: u32 = 20_000;
     const noise_sources = [_]analysis.NoiseSource{
-        .{ .node_p = n1, .node_n = GROUND, .conductance = 1e-3 },
+        .{ .node_p = n1, .node_n = GROUND, .white = 4.0 * k_boltzmann * 300.15 * 1e-3 },
     };
     const probes = [_]u32{n1};
 

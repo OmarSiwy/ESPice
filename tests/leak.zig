@@ -243,7 +243,7 @@ fn runInjected(a: std.mem.Allocator, d: *fixtures.Series, x: []f64) !void {
         .{ .disto = .{ .f_start = 1e3, .f_stop = 1e6, .points_per_decade = 3, .ac_source_node = 2, .ac_magnitude = 1.0, .output_node = 2 } },
         .{ .pss = .{ .period = 1e-3, .max_shooting_iter = 5, .shooting_tol = 1e-4, .fd_epsilon = 1e-6, .newton_tol = 1e-9, .max_newton_iter = 20, .n_samples = 8 } },
         .{ .envelope = .{ .t_carrier = 1e-6, .t_stop = 4e-6, .carrier_steps_per_period = 16, .periods_per_outer_step = 1, .max_periods_per_step = 2 } },
-        .{ .tran_noise = .{ .t_stop = dt * 20, .dt_init = dt, .dt_min = dt, .dt_max = dt, .max_steps = 30, .temp_k = 300.15, .seed = 12345 } },
+        .{ .tran_noise = .{ .t_stop = dt * 20, .dt_init = dt, .dt_min = dt, .dt_max = dt, .max_steps = 30, .seed = 12345 } },
     };
     for (jobs) |job| {
         const res = try analysis.run(&ctx, job);
@@ -269,6 +269,6 @@ test "leak: tran_noise" {
     const dt: f64 = 0x1p-30;
     const probes = [_]u32{setup.n2};
     const ctx: analysis.RunCtx = .{ .circuit = &setup.ckt, .x_op = x, .probes = &probes, .source_node = setup.n1, .source_branch = setup.vbranch, .allocator = a };
-    const res = try analysis.run(&ctx, .{ .tran_noise = .{ .t_stop = dt * 100, .dt_init = dt, .dt_min = dt, .dt_max = dt, .max_steps = 110, .temp_k = 300.15, .seed = 12345 } });
+    const res = try analysis.run(&ctx, .{ .tran_noise = .{ .t_stop = dt * 100, .dt_init = dt, .dt_min = dt, .dt_max = dt, .max_steps = 110, .seed = 12345 } });
     freeResult(a, res);
 }

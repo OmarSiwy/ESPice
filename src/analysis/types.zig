@@ -50,6 +50,7 @@ pub const ParamRef = devices.batch.ParamRef;
 pub const NoiseSource = devices.batch.NoiseSource;
 pub const NoiseGenKind = devices.batch.NoiseGenKind;
 pub const NoiseGen = devices.batch.NoiseGen;
+pub const PsdTerm = devices.batch.PsdTerm;
 /// Builder freeze: protos -> analysis.Circuit (union pattern + planes + tapes).
 pub const freeze = circuit_mod.init;
 

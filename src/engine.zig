@@ -619,9 +619,6 @@ fn applyDeckOptions(job: *Job, o: DeckOptions) void {
         inline else => |*opts| {
             if (comptime @hasField(@TypeOf(opts.*), "tol")) opts.tol = o.tol;
             if (comptime @hasField(@TypeOf(opts.*), "dc_options")) opts.dc_options.tol = o.tol;
-            if (comptime @hasField(@TypeOf(opts.*), "temp_k")) {
-                if (o.temp_c) |temp| opts.temp_k = temp + 273.15;
-            }
         },
     }
     if (job.* == .temp) job.temp.t_nom = o.temp_c orelse 27;
@@ -1149,10 +1146,12 @@ test "tf resolves numeric output and named second input before parse arena dies"
 }
 
 test "deck temperature and tolerances reach statistical and noise jobs" {
+    // `.temp` reaches noise through the DEVICES (engine.zig setCircuitTemp ->
+    // Instance.temperature -> the model's own `noisePsd`), not through an
+    // analysis-card copy: ngspice's NevalSrc multiplies by `ckt->CKTtemp`
+    // (nevalsrc.c:111) precisely because its devices hand over a bare
+    // conductance, and ours hand over a finished density.
     const options: DeckOptions = .{ .temp_c = 85, .tol = .{ .reltol = 1e-5 } };
-    var noise_job: Job = .{ .noise = .{ .out_node = 0, .f_start = 1, .f_stop = 10 } };
-    applyDeckOptions(&noise_job, options);
-    try std.testing.expectEqual(@as(f64, 358.15), noise_job.noise.temp_k);
     var temp_job: Job = .{ .temp = .{} };
     applyDeckOptions(&temp_job, options);
     try std.testing.expectEqual(@as(f64, 85), temp_job.temp.t_nom);
