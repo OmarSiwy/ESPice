@@ -412,6 +412,43 @@ pub fn gpuJacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32") and D.jac_f32) f32 else f64;
 }
 
+/// Width of the derivative half on the host **in the transient**, when the
+/// OP/transient split is on (`ESPICE_JAC_TRAN_F32`): the permission, taken.
+/// The operating-point solve keeps `jacFloat`.
+///
+/// Deliberately the same predicate as `gpuJacFloat` rather than a third decl —
+/// a host order implies the permission (`jac_f32_host` ⇒ `jac_f32`), so "the
+/// widest thing this device is allowed to be" already has exactly one spelling.
+/// This is that permission read at a third call site, not a third policy.
+/// See `docs/perf/jac-op-width-2026-09-10.md`.
+pub const tranJacFloat = gpuJacFloat;
+
+/// **Compiled out.** The OP-f64 / transient-f32 split was built and measured
+/// (`docs/perf/jac-op-width-2026-09-10.md`): it does remove the gmin-ladder
+/// fall-through `jac-f32` charged to the f32 Jacobian — `ngspice/mosmem` keeps
+/// its 50-iterate plain-Newton OP — but the transient win it was supposed to
+/// bank is **gone since `rank4-collapse`**. mos1/mos6 collapse to a rank-4
+/// basis, `@Vector(4, f64)` is already one ymm, so f32 halves no register and
+/// only adds converts: the transient at f32 now COSTS pi100 +0.68% and
+/// mos6_inverter +1.75% Ir. Nothing to trade for, so the switch ships off,
+/// and the whole thing is dead code at `false` (Ir-identical to the tip,
+/// measured).
+///
+/// Flip this to `true` to re-run the experiment — then `ESPICE_JAC_TRAN_F32=1`
+/// picks the split at runtime. Worth re-running when a device with a basis
+/// wider than 4 gets the permission, which is the case the win came from
+/// (`convergence/mos_series_r`, uncollapsed rank 8: f32 is −2.0% there).
+const op_tran_split = false;
+
+/// One-shot, same rule as `converger.opdbg`: read once, never per eval.
+var tran_f32_cache: ?bool = null;
+pub fn tranJacF32() bool {
+    if (tran_f32_cache) |v| return v;
+    const v = if (comptime builtin.link_libc) std.c.getenv("ESPICE_JAC_TRAN_F32") != null else false;
+    tran_f32_cache = v;
+    return v;
+}
+
 pub const GROUND: u32 = 0;
 
 pub const StateCtlOp = contract.StateCtlOp;
@@ -1380,6 +1417,7 @@ pub fn ProtoStore(comptime D: type) type {
             // be permuted together.
             store.count = count;
             if (comptime canNarrow(D)) store.narrow_count = try self.partitionCollapsed();
+            if (comptime op_tran_split and jacFloat(D) != tranJacFloat(D)) store.tran_f32 = false;
             store.models = &.{};
             store.instances = &.{};
             store.gath = &.{};
@@ -1563,12 +1601,23 @@ pub fn DeviceBatch(comptime D: type) type {
     // for its fully-collapsed instances? See `canNarrow`.
     const narrowable = canNarrow(D);
 
+    // Does it get a second, NARROWER-FLOAT one for the transient? Only a
+    // device whose permission the host declines has two widths to pick
+    // between; everything else has one and pays for no branch. `false` at
+    // `op_tran_split = false`, which is what keeps the shipped binary exactly
+    // the one without this change.
+    const splittable = op_tran_split and jacFloat(D) != tranJacFloat(D);
+
     return struct {
         count: usize,
         /// Instances `[0, narrow_count)` collapse maximally — `ProtoStore.finalize`
         /// sorted them to the front — so their derivative basis is the reduced
         /// one. The rest run at full width.
         narrow_count: if (narrowable) u32 else void,
+        /// The analysis is a transient AND the split is on — written by the
+        /// `set_sim_state` hook (once per solve attempt, main thread), read by
+        /// `evalInner` (per eval, any ParEval worker).
+        tran_f32: if (splittable) bool else void,
         models: []D.Model,
         saved_models: if (has_attempt) []D.Model else void,
         attempt_saved: if (has_attempt) bool else void,
@@ -1606,7 +1655,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // Only devices with an accepted-step FSM can write it.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step")) boundStep else null,
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
-            .set_sim_state = if (has_sim_state) setSimState else null,
+            .set_sim_state = if (has_sim_state or splittable) setSimState else null,
             // Gated on the decl, not on the dead histInject channel: VerA now
             // emits `delays` for absdelay devices (model-frame, like
             // nextBreakpoint), which is what makes the transient's wavefront
@@ -1665,17 +1714,29 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             const limiting = if (comptime has_limit) self.lim_active else false;
             var sink = Sink(D, false, skip_const).host(self, pl, x, undefined);
+            // `always_inline` for the same reason `evalQOnly` needs it: this
+            // body used to BE the `evalRange` calls, and letting the extracted
+            // helper go out of line cost pi100 +1.0% Ir for identical work.
+            if (comptime splittable) {
+                if (self.tran_f32)
+                    return @call(.always_inline, evalWidth, .{ self, tranJacFloat(D), &sink, first, last, t, limiting });
+            }
+            @call(.always_inline, evalWidth, .{ self, jacFloat(D), &sink, first, last, t, limiting });
+        }
+
+        /// The host's `evalRange` call, at one comptime derivative width.
+        fn evalWidth(self: *Self, comptime F: type, sink: anytype, first: u32, last: u32, t: f64, limiting: bool) void {
             if (comptime narrowable) {
                 // Two calls, ONE body: same `evalRange` at two comptime
-                // derivative widths. The split point is the partition
+                // derivative BASES. The split point is the partition
                 // boundary clamped into this worker's range, so a ParEval
                 // slice that straddles it still runs each instance under the
                 // basis its own collapse earned.
                 const split = std.math.clamp(self.narrow_count, first, last);
-                if (split > first) evalRange(D, true, jacFloat(D), &sink, first, split, t, limiting);
-                if (last > split) evalRange(D, false, jacFloat(D), &sink, split, last, t, limiting);
+                if (split > first) evalRange(D, true, F, sink, first, split, t, limiting);
+                if (last > split) evalRange(D, false, F, sink, split, last, t, limiting);
             } else {
-                evalRange(D, false, jacFloat(D), &sink, first, last, t, limiting);
+                evalRange(D, false, F, sink, first, last, t, limiting);
             }
         }
 
@@ -1816,6 +1877,12 @@ pub fn DeviceBatch(comptime D: type) type {
         /// this does not touch — so there is no derived state to invalidate.
         fn setSimState(ctx: *anyopaque, st: SimState) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
+            // The phase seam for the OP/transient width split. Every other
+            // Newton loop in the tree (op, dc sweep, ic, ac's linearisation)
+            // publishes a non-`.tran` kind before it evaluates, so this is
+            // false there and the width is `jacFloat` exactly as before.
+            if (comptime splittable) self.tran_f32 = st.kind == .tran and tranJacF32();
+            if (comptime !has_sim_state) return;
             for (self.instances) |*inst| {
                 if (comptime @hasField(D.Instance, "abstime")) inst.abstime = st.t;
                 if (comptime @hasField(D.Instance, "dt")) inst.dt = st.dt;
