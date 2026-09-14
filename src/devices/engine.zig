@@ -794,26 +794,177 @@ fn writtenRows(comptime D: type, comptime name: []const u8) [contract.nU(D)]bool
     return out;
 }
 
+/// The DERIVATIVE BASIS `evalRange` seeds — `w` lanes and, per unknown, the
+/// lane it seeds and whether it is the lane's Jacobian representative.
+///
+/// Wide form (`narrow = false`): the identity, one lane per unknown, which is
+/// what every device and every non-collapsed instance gets.
+///
+/// Narrow form: for an instance whose `collapse` is MAXIMAL (`collapse_full`),
+/// each merged set is ONE circuit node. Its members share a gather index, so
+/// their Jacobian columns share a matrix slot and the entry the solver sees is
+/// the SUM over the set — which is exactly what one shared seed lane computes.
+/// mos1/mos6 go 8 lanes to 4: `di ≡ d`, `si ≡ s`, and both branch-flow
+/// unknowns ride along (VerA aliases them onto the far node unconditionally).
+/// `@Vector(4, f64)` is one ymm where `@Vector(8, f64)` is two.
+///
+/// Sharing a lane means the members' stamps must not be written twice, so
+/// exactly one member per lane — the lowest set column in that row — carries
+/// the stamp. Residual ROWS are untouched: those are distinct values that
+/// genuinely sum into one row, and they already did.
+const Basis = struct {
+    w: usize,
+    /// lane[u] — the basis lane unknown u seeds into.
+    lane: []const u8,
+};
+
+fn basisOf(comptime D: type, comptime narrow: bool) Basis {
+    const n_u = contract.nU(D);
+    var lane: [n_u]u8 = undefined;
+    var w: usize = 0;
+    if (!narrow) {
+        for (&lane, 0..) |*l, u| l.* = @intCast(u);
+        w = n_u;
+    } else {
+        // `collapse_full` is fully resolved and aliases downward (the contract
+        // checks both), so the root is one lookup and roots are seen in
+        // ascending order — lane numbering falls out of the same walk.
+        var of_root: [n_u]u8 = @splat(0);
+        for (0..n_u) |u| {
+            if (D.collapse_full[u]) |r| {
+                lane[u] = of_root[r];
+            } else {
+                of_root[u] = @intCast(w);
+                lane[u] = @intCast(w);
+                w += 1;
+            }
+        }
+    }
+    const l = lane;
+    return .{ .w = w, .lane = &l };
+}
+
+/// One pattern half with every non-representative column cleared: of the
+/// columns a row stamps that share a lane, exactly one survives. Per HALF,
+/// because `g_vals` and `c_vals` are different planes — the two need not agree
+/// on which member carries the stamp, and requiring them to would drop a stamp
+/// whose lane-mate is live on the other half only.
+///
+/// WHICH member is not cosmetic, and it is the difference between byte-identical
+/// output and a 1-ulp drift. A lane group's columns all resolve to ONE matrix
+/// slot, but so can an unrelated column (gate tied to drain, bulk tied to
+/// source — every current mirror in the corpus), and then the slot's `+=` order
+/// decides the last bit. So the representative is the one the WIDE kernel put
+/// its nonzero on: the lowest ALIAS, never the root. Under maximal collapse the
+/// root is the port the physics stopped reading — that structural zero is
+/// exactly what makes the merge exact — and the alias is where the derivative
+/// actually lands. Picking the root instead moves the stamp from column `di` to
+/// column `d`, i.e. across `g` and `b`, and the shared slot sums in a different
+/// order. Measured: lowest-column drifted `ngspice/mosamp` and the three
+/// `sweep/opamp_wl_*` decks (max 3.4e-9 absolute, all four still PASS);
+/// lowest-alias is byte-identical on all 256.
+///
+/// `alias[cu]` is `collapse_full[cu] != null`. All-false (the wide basis, or a
+/// device with no collapse) makes every group a singleton and this the identity.
+fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]bool, comptime pat: [n_u]u64) [n_u]u64 {
+    var out: [n_u]u64 = @splat(0);
+    for (&out, pat) |*m, row| {
+        var rep: [n_u]?usize = @splat(null);
+        for (0..n_u) |cu| {
+            if ((row >> @intCast(cu)) & 1 == 0) continue;
+            const cur = rep[lane[cu]];
+            // First column of the lane wins, then any alias beats a root.
+            if (cur == null or (!alias[cur.?] and alias[cu])) rep[lane[cu]] = cu;
+        }
+        for (rep) |c| if (c) |cu| {
+            m.* |= @as(u64, 1) << @intCast(cu);
+        };
+    }
+    return out;
+}
+
+/// Can D's fully-collapsed instances run on a reduced basis, and is it worth a
+/// second instantiation of the kernel?
+///
+/// Three gates, all from `docs/perf/remaining-2026-09-10.md`'s settled table.
+/// On AVX2 every width from 1 to 4 is ONE ymm, so the only thing that pays is
+/// crossing a register boundary:
+///
+/// - `w <= 4` — the narrow side must fit in one ymm. `@Vector(6, f64)` lowers
+///   to ymm+xmm and measured a **21% loss**.
+/// - `n_u > 4` — the wide side must NOT already fit in one. That is the
+///   settled "narrowing popcount-2 values from 4 lanes to 2 saves zero" row,
+///   and it is why `diode` (n_u = 4, rank 2) is excluded: a real narrowing, no
+///   register saved, a second instantiation for nothing.
+/// - `n_u <= 8` — "the wide dual is at most two ymm", the regime the 488-Ir
+///   measurement and the k=4/k=6 rows were taken in. Wider devices (bsim4 at
+///   n_u = 18, the hisim family) would narrow further on paper, but nothing
+///   prices them today and each one doubles a very large kernel's compile.
+///   ponytail: lift the bound when a whale is on a gate deck.
+///
+/// Today that admits mos1/2/3/6/9, bsim1 and bsim3 (n_u = 8 → rank 4) and
+/// hfet2/jfet/mes (n_u = 7 → rank 3). `bjt`, `jfet2`, `vdmos`, `bsim4va`,
+/// `bsimsoi`, `hicum` and the hisim pair stay wide.
+///
+/// The limit guard is correctness, not economics: `evalRange` builds the
+/// limiting correction as one entry per LANE, so two unknowns sharing a lane
+/// must not both be corrected — they would need two different corrections in
+/// one slot. mos1/mos6 write `{di, si}`, one per lane, and pass.
+fn canNarrow(comptime D: type) bool {
+    if (!@hasDecl(D, "collapse_full")) return false;
+    const n_u = contract.nU(D);
+    if (n_u > 8 or n_u <= 4) return false;
+    const b = comptime basisOf(D, true);
+    if (b.w > 4 or b.w >= n_u) return false;
+    if (@hasDecl(D, "limit")) {
+        var seen: [n_u]bool = @splat(false);
+        const writes = contract.limitWrites(D);
+        for (0..n_u) |u| if ((writes >> @intCast(u)) & 1 != 0) {
+            if (seen[b.lane[u]]) return false;
+            seen[b.lane[u]] = true;
+        };
+    }
+    return true;
+}
+
 // ===========================================================================
 // Sink-parameterized eval — the ONE physics body. `sink` (comptime-known)
 // owns all memory access, so the same loop serves both instantiations of the
 // ONE `Sink` type (CPU `+=`, GPU atomic-scatter). Always AD (Dual): residual +
 // Jacobian in one pass.
+//
+// `narrow` picks the DERIVATIVE BASIS and nothing else — same body, same
+// device call, same `S` type constructor, one comptime width apart. It is only
+// sound on instances whose `collapse` is maximal, which is what
+// `ProtoStore.finalize`'s partition guarantees for `[0, narrow_count)`.
 // ===========================================================================
 
-fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
+fn evalRange(comptime D: type, comptime narrow: bool, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
     @setFloatMode(.optimized);
     const n_u = comptime contract.nU(D);
     const has_limit = comptime @hasDecl(D, "limit");
-    const S = DualFor(n_u, jacFloat(D), @hasDecl(D, "collapse"));
-    const use_lim = if (comptime has_limit) limiting else false;
-    const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
     const jac_pat = comptime rowPattern(D, "jac_pattern");
     const q_pat = comptime rowPattern(D, "q_pattern");
     const jac_row = comptime writtenRows(D, "jac_rows");
     const q_row = comptime writtenRows(D, "q_rows");
+
+    const B = comptime basisOf(D, narrow);
+    const W = B.w;
+    const lane = comptime B.lane[0..n_u].*;
+    const alias = comptime blk: {
+        var a: [n_u]bool = @splat(false);
+        if (narrow) for (&a, D.collapse_full) |*o, c| {
+            o.* = c != null;
+        };
+        break :blk a;
+    };
+    const jac_rep = comptime repMask(n_u, lane, alias, jac_pat);
+    const q_rep = comptime repMask(n_u, lane, alias, q_pat);
+    const S = DualFor(W, jacFloat(D), @hasDecl(D, "collapse"));
+    const use_lim = if (comptime has_limit) limiting else false;
+    const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
     // BRANCHLESS GROUND on the host. A ground row/column already resolves to
     // `trash_row`/`trash_slot` in the tape, so `+= v` there is architecturally
     // a no-op — the predicate only saves one add on a line that is L1-resident
@@ -832,7 +983,10 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
         // Gather the local eval point; corr = local(x) − lx (zero unless limiting).
         var lx: [n_u]f64 = undefined;
         var active: [n_u]bool = undefined;
-        var corr: @Vector(n_u, f64) = @splat(0);
+        // LANE-indexed, like the gradient it multiplies. `canNarrow` refuses a
+        // basis where two corrected unknowns share a lane, so this write is
+        // never a collision.
+        var corr: @Vector(W, f64) = @splat(0);
         inline for (0..n_u) |u| {
             const gi = sink.gath(id, u);
             active[u] = gi != GROUND;
@@ -846,17 +1000,20 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
             if (use_lim and comptime (lim_writes >> u) & 1 != 0) {
                 const l = sink.lim(id, u);
                 lx[u] = l;
-                corr[u] = xg - l;
+                corr[lane[u]] = xg - l;
             }
         }
         // Limiting being ARMED is not the same as any unknown having moved:
         // `lim_x` equals `x` on every instance the limiter left alone, which
         // near convergence is nearly all of them. One vector compare replaces
         // `2 * n_u` masked dot products of a zero vector.
-        const corr_live = use_lim and @reduce(.Or, corr != @as(@Vector(n_u, f64), @splat(0)));
+        const corr_live = use_lim and @reduce(.Or, corr != @as(@Vector(W, f64), @splat(0)));
 
+        // The VALUE half stays per unknown — `lx[d]` and `lx[di]` are the same
+        // node but not the same number once the limiter has moved `di`. Only
+        // the DERIVATIVE basis merges.
         var xv: [n_u]S = undefined;
-        inline for (0..n_u) |u| xv[u] = S.seed(lx[u], u);
+        inline for (0..n_u) |u| xv[u] = S.seed(lx[u], lane[u]);
 
         // `eval` and `q` each open their own call to the device's shared model
         // core, so asking for both ran the whole model TWICE — measured at 2x
@@ -921,8 +1078,8 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
             sink.scatterRes(row, val);
             if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
                 const g = out[ru].grad();
-                inline for (0..n_u) |cu| if (comptime (jac_pat[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
-                    sink.scatterJac(id, ru, cu, g[cu]);
+                inline for (0..n_u) |cu| if (comptime (jac_rep[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
+                    sink.scatterJac(id, ru, cu, g[lane[cu]]);
                 };
             }
         };
@@ -961,8 +1118,8 @@ fn evalRange(comptime D: type, sink: anytype, first: u32, end: u32, t: f64, limi
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
                     if (!mask_ground or active[ru]) {
                         const gq = qo[ru].grad();
-                        inline for (0..n_u) |cu| if (comptime (q_pat[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
-                            sink.scatterQJac(id, ru, cu, gq[cu]);
+                        inline for (0..n_u) |cu| if (comptime (q_rep[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
+                            sink.scatterQJac(id, ru, cu, gq[lane[cu]]);
                         };
                     }
                 }
@@ -1163,7 +1320,11 @@ pub fn ProtoStore(comptime D: type) type {
             const count = self.models.items.len;
             const store = try gpa.create(DeviceBatch(D));
 
+            // BEFORE the tapes are built and before the columns are duped:
+            // this is the only point where all three staging columns can still
+            // be permuted together.
             store.count = count;
+            if (comptime canNarrow(D)) store.narrow_count = try self.partitionCollapsed();
             store.models = &.{};
             store.instances = &.{};
             store.gath = &.{};
@@ -1236,6 +1397,52 @@ pub fn ProtoStore(comptime D: type) type {
             };
         }
 
+        /// Stable-partition the staging columns so every instance whose node
+        /// collapse is MAXIMAL comes first, and return how many that is.
+        /// `evalRange`'s narrow basis is only sound on those, and it is a
+        /// comptime width, so the range it runs over has to be uniform.
+        ///
+        /// `D.collapse` is the same call `Builder.addDevice` already makes per
+        /// instance; it is pure in (model, instance) and runs once more here,
+        /// at setup, rather than being threaded through `append` and the
+        /// type-erased `.so` path as a fourth column.
+        ///
+        /// A UNIFORM batch — every deck in the fixture corpus — takes the
+        /// early return and nothing moves, so instance order (and with it the
+        /// order contributions accumulate into a shared matrix slot, and
+        /// `ParamRef.index`) is untouched. Only a genuinely mixed batch is
+        /// reordered, and there the alternative is no narrowing at all.
+        fn partitionCollapsed(self: *Self) !u32 {
+            const models = self.models.items;
+            const insts = self.instances.items;
+            const nodes = self.nodes.items;
+            const flags = try staging_gpa.alloc(bool, models.len);
+            defer staging_gpa.free(flags);
+            var n: usize = 0;
+            for (models, insts, flags) |*m, *i, *f| {
+                f.* = std.meta.eql(D.collapse(m, i), D.collapse_full);
+                if (f.*) n += 1;
+            }
+            if (n != 0 and n != models.len) {
+                const sm = try staging_gpa.dupe(D.Model, models);
+                defer staging_gpa.free(sm);
+                const si = try staging_gpa.dupe(D.Instance, insts);
+                defer staging_gpa.free(si);
+                const sn = try staging_gpa.dupe([n_u]u32, nodes);
+                defer staging_gpa.free(sn);
+                var lo: usize = 0;
+                var hi: usize = n;
+                for (flags, 0..) |f, k| {
+                    const dst = if (f) &lo else &hi;
+                    models[dst.*] = sm[k];
+                    insts[dst.*] = si[k];
+                    nodes[dst.*] = sn[k];
+                    dst.* += 1;
+                }
+            }
+            return @intCast(n);
+        }
+
         pub fn applyPerm(ctx: *anyopaque, perm: []const u32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.nodes.items) |*nd| {
@@ -1298,8 +1505,16 @@ pub fn DeviceBatch(comptime D: type) type {
         @hasField(D.Instance, "is_initial_step") or
         @hasField(D.Instance, "is_final_step");
 
+    // Does this device get a second, narrower instantiation of `evalRange`
+    // for its fully-collapsed instances? See `canNarrow`.
+    const narrowable = canNarrow(D);
+
     return struct {
         count: usize,
+        /// Instances `[0, narrow_count)` collapse maximally — `ProtoStore.finalize`
+        /// sorted them to the front — so their derivative basis is the reduced
+        /// one. The rest run at full width.
+        narrow_count: if (narrowable) u32 else void,
         models: []D.Model,
         saved_models: if (has_attempt) []D.Model else void,
         attempt_saved: if (has_attempt) bool else void,
@@ -1381,7 +1596,18 @@ pub fn DeviceBatch(comptime D: type) type {
             const self: *Self = @ptrCast(@alignCast(ctx));
             const limiting = if (comptime has_limit) self.lim_active else false;
             var sink = Sink(D, false, skip_const).host(self, pl, x, undefined);
-            evalRange(D, &sink, first, last, t, limiting);
+            if (comptime narrowable) {
+                // Two calls, ONE body: same `evalRange` at two comptime
+                // derivative widths. The split point is the partition
+                // boundary clamped into this worker's range, so a ParEval
+                // slice that straddles it still runs each instance under the
+                // basis its own collapse earned.
+                const split = std.math.clamp(self.narrow_count, first, last);
+                if (split > first) evalRange(D, true, &sink, first, split, t, limiting);
+                if (last > split) evalRange(D, false, &sink, split, last, t, limiting);
+            } else {
+                evalRange(D, false, &sink, first, last, t, limiting);
+            }
         }
 
         fn localX(self: *Self, x: []const f64, id: usize) [n_u]f64 {
@@ -2032,7 +2258,12 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
                 .b = {},
             };
             const id: u32 = @intCast(tid);
-            evalRange(D, &sink, id, id + 1, t, limiting != 0);
+            // FULL WIDTH on the device, deliberately. The narrow basis is a
+            // per-instance property and this kernel's ABI carries no partition
+            // boundary; adding one is a kernel-argument change across a frozen
+            // GPU boundary for a win nobody has priced on a GPU.
+            // ponytail: pass `narrow_count` and branch here when it is.
+            evalRange(D, false, &sink, id, id + 1, t, limiting != 0);
         }
     };
 }
