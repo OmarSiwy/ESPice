@@ -1722,6 +1722,31 @@ const FreqSolveTests = struct {
         }
     }
 
+    test "factorEach holds a singular dense block as the identity; n = 0 solves nothing (#42)" {
+        // G = diag(1, 0), C = diag(0, 1): A(0) is singular, A(2) = diag(1, 2j).
+        const allocator = testing.allocator;
+        const col_ptr = [_]u32{ 0, 1, 2 };
+        const row_idx = [_]u32{ 0, 1 };
+        var fs = try FreqSolver.fromPlanes(allocator, 2, &col_ptr, &row_idx, &.{ 1, 0 }, &.{ 0, 1 });
+        defer fs.deinit();
+        try fs.factorEach(&.{ 0, 2 });
+        try testing.expectEqualSlices(u32, &.{0}, fs.held_id.items);
+        const rhs = [_]f64{ 1, 2, 3, 4, 1, 2, 3, 4 };
+        var x: [8]f64 = undefined;
+        for ([_]bool{ false, true }) |adjoint| {
+            fs.solveEach(&rhs, &x, adjoint);
+            try testing.expectEqualSlices(f64, rhs[0..4], x[0..4]);
+            // Node 1 at omega = 2: 2j x = 2 + 4j, so x = 2 - j (A^H: -2 + j).
+            const s: f64 = if (adjoint) -1 else 1;
+            for ([_]f64{ 1, 2 * s, 3, -s }, x[4..]) |want, got| try testing.expectApproxEqAbs(want, got, 1e-15);
+        }
+
+        var empty = try FreqSolver.fromPlanes(allocator, 0, &.{0}, &.{}, &.{}, &.{});
+        defer empty.deinit();
+        try empty.factorEach(&.{1});
+        empty.solveEach(&.{}, &.{}, false);
+    }
+
     test "slotCol: empty columns are skipped and a ground slot maps past the last column" {
         const col_ptr = [_]u32{ 0, 0, 2, 2, 3 };
         for ([_][2]u32{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 3 }, .{ 3, 4 } }) |c|

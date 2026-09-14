@@ -470,9 +470,18 @@ pub const FreqSolver = struct {
                 }
                 for (omegas, 0..) |omega, k| {
                     const a = d.held[k * nn * nn ..][0 .. nn * nn];
+                    const piv = d.held_piv[k * nn ..][0..nn];
                     dense_lu.buildComplexAdmittance(self.n, self.nn, d.g_dense, d.c_mat, omega, a);
-                    dense_lu.factorize(nn, a, d.held_piv[k * nn ..][0..nn]) catch
+                    dense_lu.factorize(nn, a, piv) catch {
+                        // A failed factor leaves `piv` partial; the identity
+                        // is a factor `solveEach` can read.
+                        @memset(a, 0);
+                        for (piv, 0..) |*p, i| {
+                            p.* = @intCast(i);
+                            a[i * nn + i] = 1;
+                        }
                         try self.held_id.append(allocator, @intCast(k));
+                    };
                 }
             },
             .sp => |*sp| try self.factorEachSparse(sp, omegas),
@@ -530,6 +539,7 @@ pub const FreqSolver = struct {
     /// the two do not overlap.
     pub fn solveEach(self: *Self, rhs: []const f64, x_out: []f64, adjoint: bool) void {
         const nn: usize = self.nn;
+        if (nn == 0) return;
         assert(rhs.len % nn == 0);
         assert(x_out.len >= rhs.len);
         const r0 = @intFromPtr(rhs.ptr);
