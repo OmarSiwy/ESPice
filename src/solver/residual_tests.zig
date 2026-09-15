@@ -189,7 +189,8 @@ fn permuteRows(r: std.Random, sys: System, groups: []const [2]u32) void {
 /// SPD ladder at κ 1e4 measured 105; Thomas has no growth check) and is
 /// skipped. Returns the worst ratio of all passes. `null` when the solver reports a matrix singular, which the
 /// caller allows only past κ = 1/eps. Fails unless `engine` picked the
-/// pattern and solved both passes without a demotion.
+/// pattern and solved both passes without a demotion, except Thomas's to
+/// the LU on a pivot below the threshold.
 fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engine: std.meta.Tag(direct.Engine)) !?f64 {
     var solver = try direct.Solver.init(gpa, sys.n, sys.col_ptr, sys.row_idx, info, .{});
     defer solver.deinit();
@@ -203,7 +204,9 @@ fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engin
             if (err == error.SingularMatrix) return null;
             return err;
         };
-        try testing.expectEqual(engine, std.meta.activeTag(solver.engine));
+        // Thomas hands a pivot threshold pivoting would leave to the LU (#45).
+        const got = std.meta.activeTag(solver.engine);
+        if (!(engine == .tri and got == .lu)) try testing.expectEqual(engine, got);
         for (0..2) |_| {
             for (b[0..sys.n]) |*v| v.* = 2 * r.float(f64) - 1;
             solver.solve(b[0..sys.n], x[0..sys.n]);

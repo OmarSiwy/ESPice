@@ -226,7 +226,7 @@ pub const Solver = struct {
             // Thomas has no pivoting, so an MNA branch row's zero diagonal
             // fails here. ponytail: vsource-bearing ladders lose the
             // tridiagonal speed; a 2x2-block-pivot Thomas would recover it.
-            .tri => |*tri| if (tri.factor(vals)) |_| {
+            .tri => |*tri| if (tri.factor(vals, self.params.pivot_tol)) |_| {
                 self.factored = true;
                 return;
             } else |_| try self.demote(),
@@ -238,6 +238,7 @@ pub const Solver = struct {
         }
         const lu = &self.engine.lu;
         lu.fill_cap = self.params.repivot_fill_cap;
+        lu.keep_min = self.params.refactor_growth_limit;
         const ptol = self.params.pivot_tol;
         if (self.factored) {
             if (self.refactorLu(vals, execution)) |_| return else |_| {}

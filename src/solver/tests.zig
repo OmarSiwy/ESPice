@@ -1161,6 +1161,66 @@ fn lawnRatio(n: usize, a: []const f64, x: []const f64, b: []const f64) f64 {
     return rmax / (anorm * xmax * @as(f64, @floatFromInt(n)) * std.math.floatEps(f64));
 }
 
+const PivotTests = struct {
+    const Solver = @import("direct.zig").Solver;
+    const SparseLu = @import("sparse_lu.zig").SparseLu;
+
+    test "Thomas refuses a pivot threshold pivoting would leave, and the LU solves it (#45)" {
+        // A 1e-9 diagonal over a unit sub-diagonal: Thomas's multiplier
+        // 1e9 left a scaled residual of 1.2e7.
+        const gpa = testing.allocator;
+        const a = [4][4]f64{ .{ 1e-9, 1, 0, 0 }, .{ 1, 2, 1, 0 }, .{ 0, 1, 2, 1 }, .{ 0, 0, 1, 2 } };
+        var csc = DenseCsc(4).from(a);
+        var s = try Solver.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], null, .{});
+        defer s.deinit();
+        try testing.expect(s.engine == .tri);
+        try s.factor(csc.vals[0..csc.nnz()], .{});
+        try testing.expect(s.engine == .lu);
+        const b = [4]f64{ 1, -2, 3, 0.5 };
+        var x: [4]f64 = undefined;
+        s.solve(&b, &x);
+        try testing.expect(lawnRatio(4, @ptrCast(&a), &x, &b) <= 30);
+    }
+
+    test "a zero pivot tolerance still refuses a zero pivot (#45)" {
+        const gpa = testing.allocator;
+        // [0 1; 1 1]; the zero diagonal is structural, as the MNA pattern keeps it.
+        const col_ptr = [_]u32{ 0, 2, 4 };
+        const row_idx = [_]u32{ 0, 1, 0, 1 };
+        const vals = [_]f64{ 0, 1, 1, 1 };
+        var q = identity(2);
+        var lu = try SparseLu.init(gpa, 2, &col_ptr, &row_idx, &q);
+        defer lu.deinit(gpa);
+        try lu.factor(gpa, &col_ptr, &row_idx, &vals, 0);
+        for (lu.udiag) |d| try testing.expect(d != 0);
+        var x: [2]f64 = undefined;
+        lu.solve(&.{ 1, 2 }, &x);
+        try testing.expectEqual([2]f64{ 1, 1 }, x);
+    }
+
+    test "a capped re-pivot keeps no previous pivot the refactor would refuse (#45)" {
+        const gpa = testing.allocator;
+        var a = [4][4]f64{ .{ 2, -1, 0, 0 }, .{ -1, 2, -1, 0 }, .{ 0, -1, 2, -1 }, .{ 0, 0, -1, 2 } };
+        var csc = DenseCsc(4).from(a);
+        const nnz = csc.nnz();
+        var q = identity(4);
+        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        defer lu.deinit(gpa);
+        lu.fill_cap = 1;
+        lu.keep_min = 1e-12;
+        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        // Past the cap, and the old diagonal pivot is 1e-14 of its column.
+        a[0][0] = 1e-14;
+        csc = DenseCsc(4).from(a);
+        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        try testing.expect(lu.pinv[0] != 0);
+        const b = [4]f64{ 1, 2, 3, 4 };
+        var x: [4]f64 = undefined;
+        lu.solve(&b, &x);
+        try testing.expect(lawnRatio(4, @ptrCast(&a), &x, &b) <= 30);
+    }
+};
+
 const FftTests = struct {
     const impl = @import("fft.zig");
     const fft = impl.fft;
@@ -3408,7 +3468,7 @@ const TridiagTests = struct {
         const csc = DenseCsc(4).from(a4);
         var td = try TriDiag.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
         defer td.deinit(gpa);
-        try td.factor(csc.vals[0..csc.nnz()]);
+        try td.factor(csc.vals[0..csc.nnz()], 1e-3);
 
         const rhs = [4]f64{ 7, 13, 20, 23 };
         var x = rhs;
@@ -3430,7 +3490,7 @@ const TridiagTests = struct {
         const csc = DenseCsc(3).from(a);
         var td = try TriDiag.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
         defer td.deinit(gpa);
-        try testing.expectError(error.SingularMatrix, td.factor(csc.vals[0..csc.nnz()]));
+        try testing.expectError(error.SingularMatrix, td.factor(csc.vals[0..csc.nnz()], 1e-3));
     }
 
     test "isTridiag: accepts band 1 from n = 3, rejects wider or smaller" {

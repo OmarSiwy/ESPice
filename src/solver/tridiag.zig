@@ -1,6 +1,6 @@
 //! O(n) Thomas solver for tridiagonal patterns (RC ladders, chains).
-//! No pivoting: a zero or non-finite pivot fails the factor and `direct`
-//! demotes the system to the pivoting sparse LU.
+//! No pivoting: a pivot threshold pivoting would not keep fails the factor
+//! and `direct` demotes the system to the pivoting sparse LU.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -42,8 +42,9 @@ pub const TriDiag = struct {
     mul: []f64,
     cv: []f64,
 
-    /// `SingularMatrix`: a modified pivot is zero or non-finite. Thomas
-    /// does not pivot, so this covers nonsingular matrices too.
+    /// `SingularMatrix`: a modified pivot is zero, non-finite or too small
+    /// against its column. Thomas does not pivot, so this covers
+    /// nonsingular matrices too.
     pub const FactorError = error{SingularMatrix};
 
     /// Builds the slot maps. Borrows nothing. Free with `deinit`. Asserts
@@ -99,23 +100,28 @@ pub const TriDiag = struct {
     }
 
     /// Thomas forward sweep, O(n). Fails when a modified pivot is zero or
-    /// non-finite; the factors are then unusable.
-    pub fn factor(self: *Self, vals: []const f64) FactorError!void {
+    /// non-finite, or below `pivot_tol` times the entry under it: the test
+    /// threshold partial pivoting would keep the diagonal by, so the sparse
+    /// LU `direct` demotes to pivots where Thomas cannot (#45). The factors
+    /// are then unusable.
+    pub fn factor(self: *Self, vals: []const f64, pivot_tol: f64) FactorError!void {
         const n = self.n;
         assert(n >= 3);
+        assert(pivot_tol >= 0);
 
         self.bp[0] = triVal(self.b_pos[0], vals);
-        if (self.bp[0] == 0 or !std.math.isFinite(self.bp[0])) return error.SingularMatrix;
         self.cv[0] = triVal(self.c_pos[0], vals);
-
-        for (1..n) |i| {
-            const a = triVal(self.a_pos[i], vals);
-            const b = triVal(self.b_pos[i], vals);
-            const m = a / self.bp[i - 1];
-            self.mul[i] = m;
-            self.bp[i] = b - m * self.cv[i - 1];
-            if (self.bp[i] == 0 or !std.math.isFinite(self.bp[i])) return error.SingularMatrix;
-            if (i + 1 < n) self.cv[i] = triVal(self.c_pos[i], vals);
+        for (0..n) |i| {
+            if (i > 0) {
+                const m = triVal(self.a_pos[i], vals) / self.bp[i - 1];
+                self.mul[i] = m;
+                self.bp[i] = triVal(self.b_pos[i], vals) - m * self.cv[i - 1];
+                if (i + 1 < n) self.cv[i] = triVal(self.c_pos[i], vals);
+            }
+            const d = @abs(self.bp[i]);
+            const below = if (i + 1 < n) @abs(triVal(self.a_pos[i + 1], vals)) else 0;
+            // Negated, so a NaN pivot fails too.
+            if (!(d > 0 and d < std.math.inf(f64) and d >= pivot_tol * below)) return error.SingularMatrix;
         }
     }
 
@@ -183,7 +189,7 @@ test "TriDiag: random diagonally dominant ladders solve both ways; NaN, Inf and 
         try testing.expect(isTridiag(nn, col_ptr[0 .. n + 1], row_idx[0..p]));
         var td = try TriDiag.init(gpa, nn, col_ptr[0 .. n + 1], row_idx[0..p]);
         defer td.deinit(gpa);
-        try td.factor(vals[0..p]);
+        try td.factor(vals[0..p], 1e-3);
         var x: [64]f64 = undefined;
         var b: [64]f64 = undefined;
         for (b[0..n]) |*v| v.* = 2 * r.float(f64) - 1;
@@ -200,7 +206,7 @@ test "TriDiag: random diagonally dominant ladders solve both ways; NaN, Inf and 
         const bad = r.uintLessThan(u32, p);
         const keep = vals[bad];
         vals[bad] = if (r.boolean()) std.math.nan(f64) else std.math.inf(f64);
-        try testing.expectError(error.SingularMatrix, td.factor(vals[0..p]));
+        try testing.expectError(error.SingularMatrix, td.factor(vals[0..p], 1e-3));
         vals[bad] = keep;
     }
 }
