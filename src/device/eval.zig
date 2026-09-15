@@ -137,7 +137,11 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
         /// lanes included.
         pub fn sel(c: anytype, a: anytype, b: anytype) Val(@TypeOf(a).lanes | @TypeOf(b).lanes) {
             const r = @TypeOf(a).lanes | @TypeOf(b).lanes;
-            const pick = c.v != 0.0;
+            // `c.v != 0.0` from the bits: Zig 0.17's self-hosted x86_64
+            // backend reads `!=`'s parity-or-nonzero flags a second time
+            // after clobbering them, so `pick` was true at c == 0 (#25,
+            // dev/zig-backend.md). Same answer for every c, NaN included.
+            const pick = @as(u64, @bitCast(c.v)) << 1 != 0;
             // A lane select, not a branch: on the GPU each thread's indicator
             // differs, and selection is exact, so the bits are the branch's.
             const d = if (comptime width(r) == 0) a.spread(r) else @select(F, @as(@Vector(width(r), bool), @splat(pick)), a.spread(r), b.spread(r));

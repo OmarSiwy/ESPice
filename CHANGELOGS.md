@@ -74,6 +74,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - FFT spectra stay within a few eps of N per bin on long transforms; a 2^20-point transform had drifted to 9e3 eps (#41).
 - `ESPICE_SOLVER=jfnk` keeps the direct Newton contract: a residual past 1e154 still takes its step, the device load test gates acceptance, and gmin goes only where the gmin-stepping rung stamps it (#31).
 - GMRES (the PSS and QPSS Krylov solves) never reports convergence on an infinite right-hand side, and solves right-hand sides near 1e300 or 1e-200 instead of returning zero (#40).
+- Debug builds evaluate B-source `abs`, `min`, `max` and `?:`, and model conditionals on device values, as release builds do; Zig 0.17's self-hosted backend took the true arm at a zero condition (#25).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).
