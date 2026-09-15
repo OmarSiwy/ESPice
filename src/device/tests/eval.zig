@@ -1142,3 +1142,19 @@ test "snapLimited returns the iterate for a few-ulp limited leg and keeps a real
     try std.testing.expectEqual(@as(f64, 2.1), lx[1]);
     try std.testing.expectEqual(@as(f64, 99.0), lx[2]);
 }
+
+test "Dual: sel takes b at a ±0 indicator and a at any other, NaN included" {
+    // `sel` computes `c.v != 0.0` on the bits (#25); this pins the bit trick
+    // to the float compare. The miscompile it dodges needs a stripped object
+    // (dev/zig-backend.md), as the device models are: the B source tests in
+    // src/tests catch it.
+    const S = impl.test_access.Sparse;
+    const x = S.probe(1, 0.5);
+    const ax = S.sel(x.lt(S.con(0.0)), x.neg(), x);
+    try std.testing.expectEqual(@as(f64, 0.5), ax.v);
+    try std.testing.expectEqual(@as(f64, 1), ax.ddxAt(1));
+    for ([_]f64{ 0.0, -0.0 }) |c| try std.testing.expectEqual(@as(f64, 0.5), S.sel(S.con(c), x.neg(), x).v);
+    for ([_]f64{ 1.0, -1.0, std.math.floatTrueMin(f64), std.math.inf(f64), std.math.nan(f64) }) |c| {
+        try std.testing.expectEqual(@as(f64, -0.5), S.sel(S.con(c), x.neg(), x).v);
+    }
+}

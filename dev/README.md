@@ -37,6 +37,7 @@ retired paths and their replacements.
 | Solvers | [solvers/](solvers/README.md): sparse LU, ordering, Newton, continuation, measured performance |
 | Conformance | [conformance-phase2.md](conformance-phase2.md): root causes and fix recipes for the decks the retired `issues.md` indexed; [verilog-ams-conformance-plan.md](verilog-ams-conformance-plan.md): the Verilog-AMS audit checklist |
 | Transmission lines | [vera-gaps.md](vera-gaps.md): the VerA features the Verilog-A lines needed, and what is still open; [native-transmission-line-migration.md](native-transmission-line-migration.md): the migration audit |
+| Toolchain | [zig-backend.md](zig-backend.md): self-hosted x86_64 backend miscompiles that changed Debug results, with their workarounds |
 | Plans | [plan/optimize.md](plan/optimize.md): open work streams; [plan/vacask-comparison.md](plan/vacask-comparison.md): feature and speed comparison with VACASK, ranked gaps |
 
 Model sources live in `models/`. Shared data lives in `src/core/`, devices
