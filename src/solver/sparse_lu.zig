@@ -118,6 +118,11 @@ pub const SparseLu = struct {
     /// A re-pivot whose L plus U grows past `fill_cap * base_lu` is
     /// abandoned for the previous pivot sequence. 0 disables the cap.
     fill_cap: f64 = 0,
+    /// The capped re-pivot keeps a previous pivot only while it is at least
+    /// this fraction of its column max, the test a refactor applies
+    /// (`direct` sets its `refactor_growth_limit`); a smaller one is
+    /// threshold-pivoted like a zero one (#45).
+    keep_min: f64 = 0,
     /// Print every full factor's fill and census (`direct.Knobs.stats`).
     stats: bool = false,
 
@@ -232,8 +237,8 @@ pub const SparseLu = struct {
     ///
     /// A re-pivot (a factor after a successful one, which the caller runs
     /// when `refactor` fails) that fills past `fill_cap * base_lu` restarts
-    /// on the previous pivot sequence, keeping every old pivot that is
-    /// still nonzero. Measured on the chain_bsim4_10k operating point's
+    /// on the previous pivot sequence, keeping every old pivot that still
+    /// passes `keep_min`. Measured on the chain_bsim4_10k operating point's
     /// diverging Newton steps (values up to 1e60): threshold pivoting
     /// sent 4,503 of 44,925 columns off the diagonal and filled 34x
     /// against 2.6x (dev/solvers/gilbert-peierls-lu.md, "Re-pivoting").
@@ -293,7 +298,7 @@ pub const SparseLu = struct {
     }
 
     /// One full factor. `keep_prev` starts each column from `prev` and
-    /// takes any nonzero there; otherwise from the diagonal under the
+    /// takes it while it passes `keep_min`; otherwise from the diagonal under the
     /// threshold test. Returns true, unfactored, once L plus U exceeds `cap`.
     fn factorPass(
         self: *Self,
@@ -481,9 +486,10 @@ pub const SparseLu = struct {
                 const pr = want[c];
                 if (pinv[pr] == NONE) {
                     const dmag = @abs(w[pr]);
+                    // `dmag > 0`: a zero tolerance must not accept a zero pivot.
                     if (keep_prev) {
-                        if (dmag > 0) piv = pr;
-                    } else if (dmag >= pivot_tol * amax) {
+                        if (dmag > 0 and dmag >= self.keep_min * amax) piv = pr;
+                    } else if (dmag > 0 and dmag >= pivot_tol * amax) {
                         piv = pr;
                     } else if (dmag > 0 and dmag * rscale[pr] >= pivot_tol * smax) {
                         // The diagonal is the largest entry measured against

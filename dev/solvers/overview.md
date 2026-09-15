@@ -86,7 +86,7 @@ re-pivoting factor when the replay fails the growth monitor.
 |---|---|---|
 | `execution` | serial | scheduler for the BBD block factors |
 | `pivot_tol` | 1e-3 | threshold partial pivoting keeps the diagonal while \|diag\| >= pivot_tol * column max |
-| `refactor_growth_limit` | 1e-12 | a replayed pivot below this fraction of its column max forces a full factor; 0 disables |
+| `refactor_growth_limit` | 1e-12 | a replayed pivot below this fraction of its column max forces a full factor; 0 disables. `FreqSolver` raises it to `pivot_tol` (gilbert-peierls-lu.md, "Two replay thresholds") |
 | `bbd_refine_growth` | 1e3 | a BBD factor with more Schur growth is probed (demoting on failure) and refines every solve |
 
 Only BBD solves refine, and there is no choice of ordering: the ordering is

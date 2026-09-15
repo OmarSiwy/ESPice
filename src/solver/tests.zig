@@ -629,6 +629,85 @@ const ConvergerTests = struct {
         try testing.expect(!capped.converged);
     }
 
+    test "jfnk: a residual past 1e154 still takes its Newton step (#31)" {
+        // F = 2x - 6 from x = 1e300: ||F||^2 overflows an unscaled norm.
+        const a = std.testing.allocator;
+        inline for (.{ newton, jfnk }) |solve| {
+            var rhs = [_]f64{0};
+            var sys: IterationSystem = .{ .target = 3, .slope = 2, .rhs = &rhs };
+            var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null, .{}, .{});
+            defer ws.deinit(a);
+            var x = [_]f64{1e300};
+            const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 32 }, IterationSystem.Hook{});
+            try testing.expect(r.converged);
+            try testing.expectApproxEqAbs(@as(f64, 3), x[0], 1e-8);
+        }
+    }
+
+    /// F = A x - b, A = [2 1; 1 3], b = [3; 4], on a full 2x2 pattern
+    /// (CSC slots (0,0), (1,0), (0,1), (1,1)). `load_ok` is what its
+    /// device load test answers.
+    const LinearSystem = struct {
+        n: u32 = 2,
+        nnz: u32 = 4,
+        diag_slots: [2]u32 = .{ 0, 3 },
+        current_row: []const bool = &.{ false, false },
+        rhs: []f64,
+        g_vals: [4]f64 = @splat(0),
+        load_ok: bool = true,
+
+        pub fn loadCheck(self: *@This(), _: []const f64, _: []const f64, _: []const f64, _: f64, _: f64) bool {
+            return self.load_ok;
+        }
+
+        const Hook = struct {
+            pub fn assemble(_: @This(), sys: *LinearSystem, x: []const f64, _: f64) void {
+                sys.rhs[0] = 2 * x[0] + x[1] - 3;
+                sys.rhs[1] = x[0] + 3 * x[1] - 4;
+                sys.g_vals = .{ 2, 1, 1, 3 };
+            }
+            pub fn vals(_: @This(), sys: *LinearSystem) []f64 {
+                return &sys.g_vals;
+            }
+            pub fn diagAt(_: @This(), sys: *LinearSystem, slot: u32) f64 {
+                return sys.g_vals[slot];
+            }
+        };
+    };
+
+    test "jfnk: an iterate the device load test refuses is not accepted, as under newton (#31)" {
+        const a = std.testing.allocator;
+        inline for (.{ newton, jfnk }) |solve| {
+            for ([_]bool{ true, false }) |load_ok| {
+                var rhs = [_]f64{ 0, 0 };
+                var sys: LinearSystem = .{ .rhs = &rhs, .load_ok = load_ok };
+                var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null, .{}, .{});
+                defer ws.deinit(a);
+                var x = [_]f64{ 0, 0 };
+                const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 8 }, LinearSystem.Hook{});
+                try testing.expectEqual(load_ok, r.converged);
+            }
+        }
+    }
+
+    test "gmin_stamps: jfnk loads gmin only at each stamp's (row, col), as newton does (#31)" {
+        // gmin = 1 at (0,0) and (0,1): (A + [1 1; 0 0]) x = b gives
+        // x = (1/7, 9/7); a gmin on every diagonal would give (1/3, 1).
+        const a = std.testing.allocator;
+        const stamps = [_]impl.GminStamp{ .{ .slot = 0, .row = 0, .col = 0 }, .{ .slot = 2, .row = 0, .col = 1 } };
+        inline for (.{ newton, jfnk }) |solve| {
+            var rhs = [_]f64{ 0, 0 };
+            var sys: LinearSystem = .{ .rhs = &rhs };
+            var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null, .{}, .{});
+            defer ws.deinit(a);
+            var x = [_]f64{ 0, 0 };
+            const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 1, .gmin_stamps = &stamps, .max_iter = 8 }, LinearSystem.Hook{});
+            try testing.expect(r.converged);
+            try testing.expectApproxEqAbs(@as(f64, 1.0 / 7.0), x[0], 1e-9);
+            try testing.expectApproxEqAbs(@as(f64, 9.0 / 7.0), x[1], 1e-9);
+        }
+    }
+
     test "residual gate: a branch row with no diagonal is not gated on an absolute floor" {
         const a = std.testing.allocator;
         const exact = GainRowSystem.gain * GainRowSystem.vin / (1.0 + GainRowSystem.gain);
@@ -1062,6 +1141,86 @@ const DirectTests = struct {
     }
 };
 
+/// LAWN 41's scaled residual ||A x - b||_inf / (||A||_inf ||x||_inf n eps)
+/// of a dense row-major n x n `a`; 30 is LAPACK's bar.
+fn lawnRatio(n: usize, a: []const f64, x: []const f64, b: []const f64) f64 {
+    var rmax: f64 = 0;
+    var anorm: f64 = 0;
+    for (0..n) |i| {
+        var r = b[i];
+        var row: f64 = 0;
+        for (0..n) |j| {
+            r -= a[i * n + j] * x[j];
+            row += @abs(a[i * n + j]);
+        }
+        rmax = @max(rmax, @abs(r));
+        anorm = @max(anorm, row);
+    }
+    var xmax: f64 = 0;
+    for (x[0..n]) |v| xmax = @max(xmax, @abs(v));
+    return rmax / (anorm * xmax * @as(f64, @floatFromInt(n)) * std.math.floatEps(f64));
+}
+
+const PivotTests = struct {
+    const Solver = @import("direct.zig").Solver;
+    const SparseLu = @import("sparse_lu.zig").SparseLu;
+
+    test "Thomas refuses a pivot threshold pivoting would leave, and the LU solves it (#45)" {
+        // A 1e-9 diagonal over a unit sub-diagonal: Thomas's multiplier
+        // 1e9 left a scaled residual of 1.2e7.
+        const gpa = testing.allocator;
+        const a = [4][4]f64{ .{ 1e-9, 1, 0, 0 }, .{ 1, 2, 1, 0 }, .{ 0, 1, 2, 1 }, .{ 0, 0, 1, 2 } };
+        var csc = DenseCsc(4).from(a);
+        var s = try Solver.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], null, .{});
+        defer s.deinit();
+        try testing.expect(s.engine == .tri);
+        try s.factor(csc.vals[0..csc.nnz()], .{});
+        try testing.expect(s.engine == .lu);
+        const b = [4]f64{ 1, -2, 3, 0.5 };
+        var x: [4]f64 = undefined;
+        s.solve(&b, &x);
+        try testing.expect(lawnRatio(4, @ptrCast(&a), &x, &b) <= 30);
+    }
+
+    test "a zero pivot tolerance still refuses a zero pivot (#45)" {
+        const gpa = testing.allocator;
+        // [0 1; 1 1]; the zero diagonal is structural, as the MNA pattern keeps it.
+        const col_ptr = [_]u32{ 0, 2, 4 };
+        const row_idx = [_]u32{ 0, 1, 0, 1 };
+        const vals = [_]f64{ 0, 1, 1, 1 };
+        var q = identity(2);
+        var lu = try SparseLu.init(gpa, 2, &col_ptr, &row_idx, &q);
+        defer lu.deinit(gpa);
+        try lu.factor(gpa, &col_ptr, &row_idx, &vals, 0);
+        for (lu.udiag) |d| try testing.expect(d != 0);
+        var x: [2]f64 = undefined;
+        lu.solve(&.{ 1, 2 }, &x);
+        try testing.expectEqual([2]f64{ 1, 1 }, x);
+    }
+
+    test "a capped re-pivot keeps no previous pivot the refactor would refuse (#45)" {
+        const gpa = testing.allocator;
+        var a = [4][4]f64{ .{ 2, -1, 0, 0 }, .{ -1, 2, -1, 0 }, .{ 0, -1, 2, -1 }, .{ 0, 0, -1, 2 } };
+        var csc = DenseCsc(4).from(a);
+        const nnz = csc.nnz();
+        var q = identity(4);
+        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        defer lu.deinit(gpa);
+        lu.fill_cap = 1;
+        lu.keep_min = 1e-12;
+        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        // Past the cap, and the old diagonal pivot is 1e-14 of its column.
+        a[0][0] = 1e-14;
+        csc = DenseCsc(4).from(a);
+        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        try testing.expect(lu.pinv[0] != 0);
+        const b = [4]f64{ 1, 2, 3, 4 };
+        var x: [4]f64 = undefined;
+        lu.solve(&b, &x);
+        try testing.expect(lawnRatio(4, @ptrCast(&a), &x, &b) <= 30);
+    }
+};
+
 const FftTests = struct {
     const impl = @import("fft.zig");
     const fft = impl.fft;
@@ -1180,6 +1339,33 @@ const FftTests = struct {
                 try testing.expectApproxEqAbs(dim[k], im[k], tol);
             }
         }
+    }
+
+    test "fft: a 2^16-point complex exponential stays within a few eps of N in every bin (#41)" {
+        // x[t] = cis(2 pi k0 t / N) has X = N at k0 and 0 elsewhere; the
+        // input phase is reduced mod N, so it is exact to an ulp. Measured
+        // worst |X - want| / N: 518 eps with one twiddle recurrence per
+        // stage half, 2.2 eps reseeding every 32.
+        const gpa = testing.allocator;
+        const n: usize = 1 << 16;
+        const k0 = n / 3;
+        const re = try gpa.alloc(f64, n);
+        defer gpa.free(re);
+        const im = try gpa.alloc(f64, n);
+        defer gpa.free(im);
+        const nf: f64 = @floatFromInt(n);
+        for (re, im, 0..) |*r, *i, t| {
+            const ph = 2.0 * math.pi * @as(f64, @floatFromInt((t * k0) % n)) / nf;
+            r.* = @cos(ph);
+            i.* = @sin(ph);
+        }
+        fft(re, im);
+        var worst: f64 = 0;
+        for (re, im, 0..) |r, i, k| {
+            const want: f64 = if (k == k0) nf else 0;
+            worst = @max(worst, @abs(r - want), @abs(i));
+        }
+        try testing.expect(worst / nf <= 16 * math.floatEps(f64));
     }
 
     test "nextPow2: exact powers map to themselves" {
@@ -1616,6 +1802,199 @@ const FreqSolveTests = struct {
         }
     }
 
+    test "factorEach holds a singular dense block as the identity; n = 0 solves nothing (#42)" {
+        // G = diag(1, 0), C = diag(0, 1): A(0) is singular, A(2) = diag(1, 2j).
+        const allocator = testing.allocator;
+        const col_ptr = [_]u32{ 0, 1, 2 };
+        const row_idx = [_]u32{ 0, 1 };
+        var fs = try FreqSolver.fromPlanes(allocator, 2, &col_ptr, &row_idx, &.{ 1, 0 }, &.{ 0, 1 });
+        defer fs.deinit();
+        try fs.factorEach(&.{ 0, 2 });
+        try testing.expectEqualSlices(u32, &.{0}, fs.held_id.items);
+        const rhs = [_]f64{ 1, 2, 3, 4, 1, 2, 3, 4 };
+        var x: [8]f64 = undefined;
+        for ([_]bool{ false, true }) |adjoint| {
+            fs.solveEach(&rhs, &x, adjoint);
+            try testing.expectEqualSlices(f64, rhs[0..4], x[0..4]);
+            // Node 1 at omega = 2: 2j x = 2 + 4j, so x = 2 - j (A^H: -2 + j).
+            const s: f64 = if (adjoint) -1 else 1;
+            for ([_]f64{ 1, 2 * s, 3, -s }, x[4..]) |want, got| try testing.expectApproxEqAbs(want, got, 1e-15);
+        }
+
+        var empty = try FreqSolver.fromPlanes(allocator, 0, &.{0}, &.{}, &.{}, &.{});
+        defer empty.deinit();
+        try empty.factorEach(&.{1});
+        empty.solveEach(&.{}, &.{}, false);
+    }
+
+    /// A sparse (n = 20) tridiagonal system whose node 0 has only a
+    /// capacitor to ground, so its column of A(0) is zero. `coupled` keeps
+    /// G(0, 1) = -1 in row 0, which makes A(0) singular; without it node 0
+    /// is a void unknown at omega = 0, which the full factor pivots on 1.
+    const CapNodePlanes = struct {
+        const n = 20;
+        col_ptr: [n + 1]u32 = undefined,
+        row_idx: [3 * n - 2]u32 = undefined,
+        g: [3 * n - 2]f64 = undefined,
+        c: [3 * n - 2]f64 = undefined,
+
+        fn init(coupled: bool) CapNodePlanes {
+            var self: CapNodePlanes = .{};
+            var p: u32 = 0;
+            self.col_ptr[0] = 0;
+            for (0..n) |j| {
+                for ([_]i64{ -1, 0, 1 }) |d| {
+                    const r = @as(i64, @intCast(j)) + d;
+                    if (r < 0 or r >= n) continue;
+                    self.row_idx[p] = @intCast(r);
+                    self.g[p] = if (d == 0) 3 else -1;
+                    self.c[p] = if (j == 0 and d == 0) 0.02 else 0;
+                    // Column 0 of G is zero; row 0 keeps G(0, 1) if coupled.
+                    if (j == 0 or (r == 0 and !coupled)) self.g[p] = 0;
+                    p += 1;
+                }
+                self.col_ptr[j + 1] = p;
+            }
+            return self;
+        }
+    };
+
+    /// factorEach's held ω against a per-ω `solve`: held blocks copy rhs.
+    fn expectSolveEach(fs: *FreqSolver, omegas: []const f64) !void {
+        const allocator = testing.allocator;
+        const nn: usize = fs.nn;
+        const rhs = try allocator.alloc(f64, omegas.len * nn);
+        defer allocator.free(rhs);
+        for (rhs, 0..) |*v, i| v.* = @sin(0.37 * @as(f64, @floatFromInt(i)));
+        const x = try allocator.alloc(f64, rhs.len);
+        defer allocator.free(x);
+        var x_ref: [2 * CapNodePlanes.n]f64 = undefined;
+        fs.solveEach(rhs, x, false);
+        for (omegas, 0..) |w, k| {
+            const b = rhs[k * nn ..][0..nn];
+            const got = x[k * nn ..][0..nn];
+            if (std.mem.indexOfScalar(u32, fs.held_id.items, @intCast(k)) != null) {
+                try testing.expectEqualSlices(f64, b, got);
+                continue;
+            }
+            try fs.solve(w, b, x_ref[0..nn]);
+            for (x_ref[0..nn], got) |want, v| try testing.expectApproxEqRel(want, v, 1e-11);
+        }
+    }
+
+    test "factorEach holds a sparse omega whose A(omega) is singular as the identity (#43)" {
+        // The middle omega, 0, is the first tape; its factor is singular.
+        const allocator = testing.allocator;
+        const pl = CapNodePlanes.init(true);
+        var fs = try FreqSolver.fromPlanes(allocator, CapNodePlanes.n, &pl.col_ptr, &pl.row_idx, &pl.g, &pl.c);
+        defer fs.deinit();
+        try testing.expect(fs.strategy == .sp);
+        const omegas = [_]f64{ 1, 0, 2 };
+        try fs.factorEach(&omegas);
+        try testing.expectEqualSlices(u32, &.{1}, fs.held_id.items);
+        try expectSolveEach(&fs, &omegas);
+    }
+
+    test "factorEach holds only the omega no pivot tape could replay, also when a repivot omega has a void unknown (#43)" {
+        // Tape omega 2 fails only omega 0, whose own tape has a void column
+        // that no lane replays.
+        const allocator = testing.allocator;
+        const pl = CapNodePlanes.init(false);
+        var fs = try FreqSolver.fromPlanes(allocator, CapNodePlanes.n, &pl.col_ptr, &pl.row_idx, &pl.g, &pl.c);
+        defer fs.deinit();
+        const omegas = [_]f64{ 0, 1, 2, 3, 4 };
+        try fs.factorEach(&omegas);
+        try testing.expectEqualSlices(u32, &.{0}, fs.held_id.items);
+        try expectSolveEach(&fs, &omegas);
+    }
+
+    /// Ten copies of a node with G = 1 to a voltage source's branch
+    /// (G = [1 1; 1 0]) and C = 1 to ground: at omega = 0 the node column
+    /// pivots on its G, which a replay at omega = 1e6 keeps against a 1e6
+    /// C entry.
+    const BranchPlanes = struct {
+        const n = 20;
+        col_ptr: [n + 1]u32 = undefined,
+        row_idx: [2 * n]u32 = undefined,
+        g: [2 * n]f64 = undefined,
+        c: [2 * n]f64 = undefined,
+
+        fn init() BranchPlanes {
+            var self: BranchPlanes = .{};
+            self.col_ptr[0] = 0;
+            for (0..n) |j| {
+                const lo = j & ~@as(usize, 1);
+                for (0..2) |d| {
+                    const p = 2 * j + d;
+                    const row = lo + d;
+                    self.row_idx[p] = @intCast(row);
+                    const node_diag = row == j and j == lo;
+                    self.g[p] = if (row == j and j != lo) 0 else 1;
+                    self.c[p] = if (node_diag) 1 else 0;
+                }
+                self.col_ptr[j + 1] = @intCast(2 * (j + 1));
+            }
+            return self;
+        }
+
+        /// The stacked-real A(omega), dense row-major 2n x 2n.
+        fn stacked(self: BranchPlanes, omega: f64, out: *[4 * n * n]f64) void {
+            @memset(out, 0);
+            const nn = 2 * n;
+            for (0..n) |j| for (self.col_ptr[j]..self.col_ptr[j + 1]) |p| {
+                const i: usize = self.row_idx[p];
+                out[i * nn + j] += self.g[p];
+                out[(n + i) * nn + n + j] += self.g[p];
+                out[(n + i) * nn + j] += omega * self.c[p];
+                out[i * nn + n + j] -= omega * self.c[p];
+            };
+        }
+    };
+
+    test "frequency replays refuse pivots the full factor would not take (#44)" {
+        const allocator = testing.allocator;
+        const W = FreqSolver.test_access.W;
+        const pl = BranchPlanes.init();
+        const nn = 2 * BranchPlanes.n;
+        var fs = try FreqSolver.fromPlanes(allocator, BranchPlanes.n, &pl.col_ptr, &pl.row_idx, &pl.g, &pl.c);
+        defer fs.deinit();
+        try testing.expect(fs.strategy == .sp);
+        var a: [4 * BranchPlanes.n * BranchPlanes.n]f64 = undefined;
+        var b: [nn]f64 = undefined;
+        for (&b, 0..) |*v, i| v.* = @sin(0.37 * @as(f64, @floatFromInt(i)) + 0.1);
+        var x: [nn]f64 = undefined;
+
+        // Scalar: a solve at 1e6 replays the tape the solve at 0 laid.
+        try fs.solve(0, &b, &x);
+        try fs.solve(1e6, &b, &x);
+        pl.stacked(1e6, &a);
+        try testing.expect(lawnRatio(nn, &a, &x, &b) <= 30);
+
+        // Lanes: omega 0 in the lane the batch lays its tape at.
+        var omegas: [W]f64 = @splat(1e6);
+        omegas[W / 2] = 0;
+        var xs: [W * nn]f64 = undefined;
+        try fs.solve(0, &b, &x); // the batch replays the tape held
+        try fs.solveBatch(&omegas, .{}, &b, &xs, false);
+        for (omegas, 0..) |w, k| {
+            pl.stacked(w, &a);
+            try testing.expect(lawnRatio(nn, &a, xs[k * nn ..][0..nn], &b) <= 30);
+        }
+
+        // factorEach lays its tape at the middle omega, also 0 here.
+        const omegas3 = [_]f64{ 1e6, 0, 1e6 };
+        var rhs: [3 * nn]f64 = undefined;
+        for (0..3) |k| @memcpy(rhs[k * nn ..][0..nn], &b);
+        var x3: [3 * nn]f64 = undefined;
+        try fs.factorEach(&omegas3);
+        fs.solveEach(&rhs, &x3, false);
+        for (omegas3, 0..) |w, k| {
+            if (std.mem.indexOfScalar(u32, fs.held_id.items, @intCast(k)) != null) continue;
+            pl.stacked(w, &a);
+            try testing.expect(lawnRatio(nn, &a, x3[k * nn ..][0..nn], &b) <= 30);
+        }
+    }
+
     test "slotCol: empty columns are skipped and a ground slot maps past the last column" {
         const col_ptr = [_]u32{ 0, 0, 2, 2, 3 };
         for ([_][2]u32{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 3 }, .{ 3, 4 } }) |c|
@@ -1880,6 +2259,34 @@ const GmresTests = struct {
         var x = [2]f64{ 0, 0 };
         const result = gmres.solve(&mv, &.{ std.math.nan(f64), 1 }, &x, 1e-10, 2);
         try testing.expect(!result.converged);
+        x = .{ 0, 0 };
+        const inf_result = gmres.solve(&mv, &.{ std.math.inf(f64), 1 }, &x, 1e-10, 2);
+        try testing.expect(!inf_result.converged);
+    }
+
+    test "GMRES: right-hand sides near 1e300 and 1e-200 solve like unit ones (#40)" {
+        // A = [2 1; 0 3], x = s [1; 1]: the unscaled sum of squares
+        // overflows at s = 1e300 and underflows at s = 1e-200.
+        const gpa = testing.allocator;
+        var mv = DenseMatvec{ .a = &.{ 2, 1, 0, 3 }, .n = 2 };
+        var gmres = try Gmres.init(gpa, 2, 2);
+        defer gmres.deinit(gpa);
+        for ([_]f64{ 1, 1e300, 1e-200 }) |s| {
+            var x = [2]f64{ 0, 0 };
+            const result = gmres.solve(&mv, &.{ 3 * s, 3 * s }, &x, 1e-12, 2);
+            try testing.expect(result.converged);
+            for (x) |xi| try testing.expectApproxEqRel(s, xi, 1e-12);
+        }
+    }
+
+    test "GMRES: max_restarts at the top of its u32 range runs and stops when it converges" {
+        const gpa = testing.allocator;
+        var mv = DenseMatvec{ .a = &.{ 2, 1, 0, 3 }, .n = 2 };
+        var gmres = try Gmres.init(gpa, 2, 2);
+        defer gmres.deinit(gpa);
+        var x = [2]f64{ 0, 0 };
+        const result = gmres.solve(&mv, &.{ 3, 3 }, &x, 1e-12, std.math.maxInt(u32));
+        try testing.expect(result.converged);
     }
 
     test "GMRES: n = 1, an exact initial guess and an exact preconditioner" {
@@ -2431,6 +2838,110 @@ const SparseTests = struct {
 
     const order = @import("order.zig");
 
+    /// L + U entries after `factor` under column order `q`.
+    fn luFill(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, vals: []const f64, q: []const u32) !usize {
+        var lu = try SparseLu.init(gpa, n, col_ptr, row_idx, q);
+        defer lu.deinit(gpa);
+        try lu.factor(gpa, col_ptr, row_idx, vals, 1e-3);
+        return lu.li.items.len + lu.ui.items.len;
+    }
+
+    test "order never fills more than the natural order on rail-last chains (#46)" {
+        // A chain with skip couplings and 1 to 3 rails numbered last, each
+        // coupled to most chain nodes; symmetric and diagonally dominant, so
+        // every pivot stays on the diagonal. AMD alone filled more than the
+        // natural order on about a tenth of these.
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(42);
+        const r = prng.random();
+        var col_ptr: std.ArrayList(u32) = .empty;
+        defer col_ptr.deinit(gpa);
+        var row_idx: std.ArrayList(u32) = .empty;
+        defer row_idx.deinit(gpa);
+        var vals: std.ArrayList(f64) = .empty;
+        defer vals.deinit(gpa);
+        var dense: [40 * 40]bool = undefined;
+        for (0..300) |_| {
+            const n: u32 = r.intRangeAtMost(u32, 6, 40);
+            const m = n - r.intRangeAtMost(u32, 1, 3);
+            @memset(dense[0 .. n * n], false);
+            for (1..m) |i| {
+                dense[i * n + i - 1] = true;
+                dense[(i - 1) * n + i] = true;
+                if (r.float(f64) < 0.3 and i >= 2) {
+                    dense[i * n + i - 2] = true;
+                    dense[(i - 2) * n + i] = true;
+                }
+            }
+            for (m..n) |rl| for (0..m) |i| if (r.float(f64) < 0.7) {
+                dense[rl * n + i] = true;
+                dense[i * n + rl] = true;
+            };
+            col_ptr.clearRetainingCapacity();
+            row_idx.clearRetainingCapacity();
+            vals.clearRetainingCapacity();
+            try col_ptr.append(gpa, 0);
+            for (0..n) |j| {
+                for (0..n) |i| if (i == j or dense[i * n + j]) {
+                    try row_idx.append(gpa, @intCast(i));
+                    try vals.append(gpa, if (i == j) @floatFromInt(2 * n) else -1);
+                };
+                try col_ptr.append(gpa, @intCast(row_idx.items.len));
+            }
+            var q: [40]u32 = undefined;
+            const ws_buf = try gpa.alloc(u32, order.wsSize(n, row_idx.items.len));
+            defer gpa.free(ws_buf);
+            var ws = order.Ws.init(ws_buf);
+            try order.order(n, col_ptr.items, row_idx.items, q[0..n], &ws);
+            var nat: [40]u32 = undefined;
+            for (nat[0..n], 0..) |*v, i| v.* = @intCast(i);
+            const got = try luFill(gpa, n, col_ptr.items, row_idx.items, vals.items, q[0..n]);
+            const natural = try luFill(gpa, n, col_ptr.items, row_idx.items, vals.items, nat[0..n]);
+            try testing.expect(got <= natural);
+        }
+    }
+
+    test "order fits wsSize on random degree-10 patterns at n = 2000 and 4000 (#46)" {
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x46);
+        const r = prng.random();
+        for ([_]u32{ 2000, 4000 }) |n| {
+            var col_ptr: std.ArrayList(u32) = .empty;
+            defer col_ptr.deinit(gpa);
+            var row_idx: std.ArrayList(u32) = .empty;
+            defer row_idx.deinit(gpa);
+            const seen_in = try gpa.alloc(u32, n);
+            defer gpa.free(seen_in);
+            @memset(seen_in, std.math.maxInt(u32));
+            try col_ptr.append(gpa, 0);
+            for (0..n) |j| {
+                try row_idx.append(gpa, @intCast(j));
+                seen_in[j] = @intCast(j);
+                for (0..10) |_| {
+                    const i = r.uintLessThan(u32, n);
+                    if (seen_in[i] == j) continue;
+                    seen_in[i] = @intCast(j);
+                    try row_idx.append(gpa, i);
+                }
+                try col_ptr.append(gpa, @intCast(row_idx.items.len));
+            }
+            const q = try gpa.alloc(u32, n);
+            defer gpa.free(q);
+            const ws_buf = try gpa.alloc(u32, order.wsSize(n, row_idx.items.len));
+            defer gpa.free(ws_buf);
+            var ws = order.Ws.init(ws_buf);
+            try order.order(n, col_ptr.items, row_idx.items, q, &ws);
+            try testing.expectEqual(@as(usize, 0), ws.used);
+            const seen = try gpa.alloc(bool, n);
+            defer gpa.free(seen);
+            @memset(seen, false);
+            for (q) |c| {
+                try testing.expect(!seen[c]);
+                seen[c] = true;
+            }
+        }
+    }
+
     test "3x3: factor + solve verified against dense reference" {
         const gpa = testing.allocator;
         const a = [3][3]f64{
@@ -2837,13 +3348,14 @@ const SparseTests = struct {
         const r = rng.random();
         var dense: [n][n]bool = @splat(@splat(false));
         for (0..n - 1) |j| {
-            dense[j][j] = j != br;
+            dense[j][j] = true; // br's diagonal is a structural zero
             for (0..3) |_| {
                 const i: usize = @intCast(r.uintLessThan(u64, n - 1)); // the same draw on 32-bit targets
                 dense[i][j] = true;
                 dense[j][i] = true;
             }
         }
+        dense[v][v] = true;
         dense[3][v] = true;
         dense[v][3] = true;
         dense[br][2] = true;
@@ -2873,7 +3385,7 @@ const SparseTests = struct {
         for (0..8) |round| {
             for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
                 const i = row_idx.items[p];
-                vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else -1) else if (i == j) 5 + r.float(f64) else r.float(f64) - 0.5;
+                vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else if (i > j) -1 else 0) else if (i == j) 5 + r.float(f64) else r.float(f64) - 0.5;
             };
             // Round 5 collapses one pivot, and only that round fails.
             if (round == 5) for (col_ptr[0]..col_ptr[1]) |p| {
@@ -3061,7 +3573,7 @@ const TridiagTests = struct {
         const csc = DenseCsc(4).from(a4);
         var td = try TriDiag.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
         defer td.deinit(gpa);
-        try td.factor(csc.vals[0..csc.nnz()]);
+        try td.factor(csc.vals[0..csc.nnz()], 1e-3);
 
         const rhs = [4]f64{ 7, 13, 20, 23 };
         var x = rhs;
@@ -3083,7 +3595,7 @@ const TridiagTests = struct {
         const csc = DenseCsc(3).from(a);
         var td = try TriDiag.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()]);
         defer td.deinit(gpa);
-        try testing.expectError(error.SingularMatrix, td.factor(csc.vals[0..csc.nnz()]));
+        try testing.expectError(error.SingularMatrix, td.factor(csc.vals[0..csc.nnz()], 1e-3));
     }
 
     test "isTridiag: accepts band 1 from n = 3, rejects wider or smaller" {
@@ -3131,7 +3643,7 @@ const LuKernelTests = struct {
         defer gpa.free(dense);
         @memset(dense, false);
         for (0..n - 1) |j| {
-            dense[j * n + j] = j != br;
+            dense[j * n + j] = true; // br's diagonal is a structural zero
             // Couplings stay inside clusters of 6, so the rail's U column
             // is wide and shallow, the shape the gather form is for.
             for (0..2) |_| {
@@ -3144,6 +3656,7 @@ const LuKernelTests = struct {
                 dense[j * n + rail] = true;
             }
         }
+        dense[v * n + v] = true;
         dense[3 * n + v] = true;
         dense[v * n + 3] = true;
         dense[br * n + 2] = true;
@@ -3173,7 +3686,7 @@ const LuKernelTests = struct {
         const br = 5;
         for (0..c.n) |j| for (c.col_ptr[j]..c.col_ptr[j + 1]) |p| {
             const i = c.row_idx[p];
-            vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else -1) else if (i == j) 4 + r.float(f64) else r.float(f64) - 0.5;
+            vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else if (i > j) -1 else 0) else if (i == j) 4 + r.float(f64) else r.float(f64) - 0.5;
         };
     }
 

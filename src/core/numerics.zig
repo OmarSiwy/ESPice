@@ -148,6 +148,42 @@ pub fn normInf(buf: []const f64) f64 {
     return m;
 }
 
+/// Euclidean norm of `buf` that neither overflows nor underflows: the
+/// reassociated `dot(buf, buf)` when its sum lands in the normal range,
+/// else Σ (x / max|x|)² rescaled by max|x| (LAPACK dnrm2's idea). inf when
+/// an entry is inf, NaN when one is NaN and none is inf, 0 when empty.
+pub fn norm2(buf: []const f64) f64 {
+    const ss = dot(buf, buf);
+    // Below this an underflowed square could cost more than one ulp per entry.
+    const tiny = std.math.floatMin(f64) / std.math.floatEps(f64);
+    if (ss >= tiny and ss < std.math.inf(f64)) return @sqrt(ss);
+    const amax = normInf(buf); // skips NaN entries
+    if (amax == std.math.inf(f64)) return amax;
+    if (std.math.isNan(ss)) return ss;
+    if (amax == 0) return 0;
+    // ponytail: plain loop, reached only past the f64 square range; a
+    // stdpp pipeline if a caller ever lives there.
+    var acc: f64 = 0;
+    for (buf) |x| {
+        const t = x / amax;
+        acc += t * t;
+    }
+    std.debug.assert(acc >= 1);
+    return amax * @sqrt(acc);
+}
+
+test "norm2: overflow, underflow and non-finite entries" {
+    try std.testing.expectEqual(@as(f64, 0), norm2(&.{}));
+    try std.testing.expectEqual(@as(f64, 0), norm2(&.{ 0, -0.0 }));
+    try std.testing.expectEqual(@as(f64, 5), norm2(&.{ 3, -4 }));
+    try std.testing.expectApproxEqRel(@as(f64, 5e300), norm2(&.{ 3e300, -4e300 }), 1e-15);
+    try std.testing.expectApproxEqRel(@as(f64, 5e-200), norm2(&.{ 3e-200, -4e-200 }), 1e-15);
+    try std.testing.expectApproxEqRel(@as(f64, 5e-320), norm2(&.{ 3e-320, -4e-320 }), 0.01);
+    try std.testing.expectEqual(std.math.inf(f64), norm2(&.{ 1, -std.math.inf(f64), std.math.nan(f64) }));
+    try std.testing.expect(std.math.isNan(norm2(&.{ 1, std.math.nan(f64) })));
+    try std.testing.expect(std.math.isNan(norm2(&.{ 1e300, std.math.nan(f64) })));
+}
+
 test "vector helpers run on stdpp's SIMD path" {
     // lane_count is null when a callback is not lanewise or the backend has
     // no vector form; other self-hosted backends run the scalar fallback.

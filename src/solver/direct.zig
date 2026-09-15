@@ -23,6 +23,11 @@ pub const Params = struct {
     pivot_tol: f64 = 1e-3,
     /// A refactor whose reused pivot falls below this fraction of its column
     /// max fails, forcing a full re-pivoting factor. 0 disables the monitor.
+    /// Permissive for Newton, whose residual gate absorbs an inexact step
+    /// and whose diverging iterates (values to 1e60) would otherwise
+    /// re-pivot and fill every iteration; `FreqSolver`, whose solves are
+    /// final, raises it to `pivot_tol` (#44). dev/solvers/gilbert-peierls-lu.md,
+    /// "Two replay thresholds".
     refactor_growth_limit: f64 = 1e-12,
     /// A re-pivot whose L plus U outgrows this multiple of the fresh
     /// factor's restarts on the previous pivots (`SparseLu.fill_cap`).
@@ -242,7 +247,7 @@ pub const Solver = struct {
             // Thomas has no pivoting, so an MNA branch row's zero diagonal
             // fails here. ponytail: vsource-bearing ladders lose the
             // tridiagonal speed; a 2x2-block-pivot Thomas would recover it.
-            .tri => |*tri| if (tri.factor(vals)) |_| {
+            .tri => |*tri| if (tri.factor(vals, self.params.pivot_tol)) |_| {
                 self.factored = true;
                 return;
             } else |_| try self.demote(),
@@ -257,6 +262,7 @@ pub const Solver = struct {
         }
         const lu = &self.engine.lu;
         lu.fill_cap = self.params.repivot_fill_cap;
+        lu.keep_min = self.params.refactor_growth_limit;
         const ptol = self.params.pivot_tol;
         if (self.factored) {
             if (self.refactorLu(vals, execution)) |_| return else |_| {}

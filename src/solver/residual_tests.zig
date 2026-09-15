@@ -205,7 +205,8 @@ fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engin
             return err;
         };
         const live = std.meta.activeTag(solver.engine);
-        if (demoted != null and live == .lu) demoted.?.* = true else try testing.expectEqual(engine, live);
+        // Thomas hands a pivot threshold pivoting would leave to the LU (#45).
+        if (demoted != null and live == .lu) demoted.?.* = true else if (!(engine == .tri and live == .lu)) try testing.expectEqual(engine, live);
         for (0..2) |_| {
             for (b[0..sys.n]) |*v| v.* = 2 * r.float(f64) - 1;
             solver.solve(b[0..sys.n], x[0..sys.n]);

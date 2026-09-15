@@ -9,6 +9,15 @@ const math = std.math;
 const W = std.simd.suggestVectorLength(f64) orelse 1;
 const V = @Vector(W, f64);
 
+/// Twiddles come from cos/sin exactly every `reseed` butterflies and by a
+/// rotation recurrence in between, whose rounding grows with its length:
+/// one recurrence per stage half drifted to 9e3 eps of N on a 2^20-point
+/// bin, against 3 eps reseeding every 32 (#41).
+const reseed = 32;
+comptime {
+    assert(reseed % W == 0);
+}
+
 /// Forward DFT in place, O(N log N). Asserts that `re` and `im` have the
 /// same length N and that N is a power of two (N = 1 is the identity).
 pub fn fft(re: []f64, im: []f64) void {
@@ -64,9 +73,14 @@ fn butterflyStageScalar(re: []f64, im: []f64, half: usize, angle_step: f64) void
     const dwi = @sin(angle_step);
     var group: usize = 0;
     while (group < n) : (group += 2 * half) {
-        var wr: f64 = 1.0;
-        var wi: f64 = 0.0;
+        var wr: f64 = undefined;
+        var wi: f64 = undefined;
         for (0..half) |k| {
+            if (k % reseed == 0) {
+                const a = angle_step * @as(f64, @floatFromInt(k));
+                wr = @cos(a);
+                wi = @sin(a);
+            }
             const i = group + k;
             const j = i + half;
             const tr = wr * re[j] - wi * im[j];
@@ -82,31 +96,34 @@ fn butterflyStageScalar(re: []f64, im: []f64, half: usize, angle_step: f64) void
     }
 }
 
-/// The first W twiddles are exact per stage; after that the lanes advance
-/// together by cis(W * step), so the recurrence drifts W times less than a
-/// per-element one.
+/// `butterflyStageScalar` W butterflies at a time: the lanes advance
+/// together by cis(W * step) between the exact reseeds.
 fn butterflyStageVec(re: []f64, im: []f64, half: usize, angle_step: f64) void {
     const n = re.len;
     // Whole vectors per group half: half and W are powers of two, half >= W.
     assert(half % W == 0);
     assert(half < n);
-    var twr0: [W]f64 = undefined;
-    var twi0: [W]f64 = undefined;
-    for (0..W) |l| {
-        const a = angle_step * @as(f64, @floatFromInt(l));
-        twr0[l] = @cos(a);
-        twi0[l] = @sin(a);
-    }
     const step = angle_step * @as(f64, @floatFromInt(W));
     const rot_r: V = @splat(@cos(step));
     const rot_i: V = @splat(@sin(step));
 
     var group: usize = 0;
     while (group < n) : (group += 2 * half) {
-        var wr: V = twr0;
-        var wi: V = twi0;
+        var wr: V = undefined;
+        var wi: V = undefined;
         var k: usize = 0;
         while (k < half) : (k += W) {
+            if (k % reseed == 0) {
+                var twr: [W]f64 = undefined;
+                var twi: [W]f64 = undefined;
+                for (0..W) |l| {
+                    const a = angle_step * @as(f64, @floatFromInt(k + l));
+                    twr[l] = @cos(a);
+                    twi[l] = @sin(a);
+                }
+                wr = twr;
+                wi = twi;
+            }
             const i = group + k;
             const j = i + half;
             const xr: V = re[i..][0..W].*;

@@ -107,20 +107,22 @@ pub const Gmres = struct {
         assert(b.len >= n);
         assert(x.len >= n);
 
-        const b_norm = vecNorm(b[0..n]);
+        const b_norm = num.norm2(b[0..n]);
         if (b_norm == 0) {
             @memset(x[0..n], 0);
             return .{ .iterations = 0, .residual = 0, .converged = true };
         }
+        // An inf or NaN tolerance would accept any residual.
+        if (!std.math.isFinite(b_norm)) return .{ .iterations = 0, .residual = b_norm, .converged = false };
         const abs_tol = tol * b_norm;
 
         var total_iters: u32 = 0;
 
-        for (0..max_restarts + 1) |_| {
+        for (0..@as(u64, max_restarts) + 1) |_| {
             op.matvec(x[0..n], self.r[0..n]);
             self.residual(b[0..n]);
 
-            const beta = vecNorm(self.r[0..n]);
+            const beta = num.norm2(self.r[0..n]);
             if (beta <= abs_tol) {
                 return .{ .iterations = total_iters, .residual = beta / b_norm, .converged = true };
             }
@@ -155,7 +157,7 @@ pub const Gmres = struct {
                     num.axpy(self.r[0..n], -hij, vi);
                 }
 
-                const h_jp1_j = vecNorm(self.r[0..n]);
+                const h_jp1_j = num.norm2(self.r[0..n]);
                 self.h[(ju + 1) * m + ju] = h_jp1_j;
 
                 if (h_jp1_j != 0) {
@@ -202,7 +204,7 @@ pub const Gmres = struct {
 
         op.matvec(x[0..n], self.r[0..n]);
         self.residual(b[0..n]);
-        const final_res = vecNorm(self.r[0..n]);
+        const final_res = num.norm2(self.r[0..n]);
         assert(total_iters <= (@as(u64, max_restarts) + 1) * self.m);
         return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = final_res <= abs_tol };
     }
@@ -288,10 +290,6 @@ pub const Gmres = struct {
                 num.axpy(x, self.y[j], vj);
             }
         }
-    }
-
-    fn vecNorm(v: []const f64) f64 {
-        return @sqrt(num.dot(v, v));
     }
 };
 

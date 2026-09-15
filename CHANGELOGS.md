@@ -66,6 +66,14 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - The device LU's triangular solves run across the whole GPU: 4x faster on a 100k-transistor post-layout chain, where the device LU now beats the host LU (#141).
 - API: `Options.display` (a `*std.Io.Writer`) and C `display` + `display_user` (a callback) receive `.hdl` display-task lines instead of stdout (#127).
 - C API: `.hdl` models compile from a C handle; its Io had no allocator or environment, so the build failed as `CompilerGone` (#127).
+- The column ordering compacts its workspace, so patterns from n = 2000 no longer fail with `OutOfWorkspace`, and keeps the natural order where AMD would fill more (#46).
+- The tridiagonal engine hands a pivot under 1e-3 of its column to the pivoting LU, a zero pivot tolerance no longer accepts a zero pivot, and a capped re-pivot keeps no old pivot the refactor would refuse (#45).
+- Frequency solves (AC, noise, S-parameters) re-pivot when a replayed pivot falls below 1e-3 of its column, where pivots down to 1e-12 were accepted (scaled residuals up to 8e3) (#44).
+- `FreqSolver.factorEach` on sparse systems holds a frequency whose A(ω) is singular instead of failing with `SingularMatrix`, and holds only the frequencies no pivot tape replays (#43).
+- The per-frequency block factorization (`FreqSolver.factorEach`) holds a singular dense block as the identity instead of reading undefined pivots, and an empty system solves nothing (#42).
+- FFT spectra stay within a few eps of N per bin on long transforms; a 2^20-point transform had drifted to 9e3 eps (#41).
+- `ESPICE_SOLVER=jfnk` keeps the direct Newton contract: a residual past 1e154 still takes its step, the device load test gates acceptance, and gmin goes only where the gmin-stepping rung stamps it (#31).
+- GMRES (the PSS and QPSS Krylov solves) never reports convergence on an infinite right-hand side, and solves right-hand sides near 1e300 or 1e-200 instead of returning zero (#40).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).
