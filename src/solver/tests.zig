@@ -2838,6 +2838,110 @@ const SparseTests = struct {
 
     const order = @import("order.zig");
 
+    /// L + U entries after `factor` under column order `q`.
+    fn luFill(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, vals: []const f64, q: []const u32) !usize {
+        var lu = try SparseLu.init(gpa, n, col_ptr, row_idx, q);
+        defer lu.deinit(gpa);
+        try lu.factor(gpa, col_ptr, row_idx, vals, 1e-3);
+        return lu.li.items.len + lu.ui.items.len;
+    }
+
+    test "order never fills more than the natural order on rail-last chains (#46)" {
+        // A chain with skip couplings and 1 to 3 rails numbered last, each
+        // coupled to most chain nodes; symmetric and diagonally dominant, so
+        // every pivot stays on the diagonal. AMD alone filled more than the
+        // natural order on about a tenth of these.
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(42);
+        const r = prng.random();
+        var col_ptr: std.ArrayList(u32) = .empty;
+        defer col_ptr.deinit(gpa);
+        var row_idx: std.ArrayList(u32) = .empty;
+        defer row_idx.deinit(gpa);
+        var vals: std.ArrayList(f64) = .empty;
+        defer vals.deinit(gpa);
+        var dense: [40 * 40]bool = undefined;
+        for (0..300) |_| {
+            const n: u32 = r.intRangeAtMost(u32, 6, 40);
+            const m = n - r.intRangeAtMost(u32, 1, 3);
+            @memset(dense[0 .. n * n], false);
+            for (1..m) |i| {
+                dense[i * n + i - 1] = true;
+                dense[(i - 1) * n + i] = true;
+                if (r.float(f64) < 0.3 and i >= 2) {
+                    dense[i * n + i - 2] = true;
+                    dense[(i - 2) * n + i] = true;
+                }
+            }
+            for (m..n) |rl| for (0..m) |i| if (r.float(f64) < 0.7) {
+                dense[rl * n + i] = true;
+                dense[i * n + rl] = true;
+            };
+            col_ptr.clearRetainingCapacity();
+            row_idx.clearRetainingCapacity();
+            vals.clearRetainingCapacity();
+            try col_ptr.append(gpa, 0);
+            for (0..n) |j| {
+                for (0..n) |i| if (i == j or dense[i * n + j]) {
+                    try row_idx.append(gpa, @intCast(i));
+                    try vals.append(gpa, if (i == j) @floatFromInt(2 * n) else -1);
+                };
+                try col_ptr.append(gpa, @intCast(row_idx.items.len));
+            }
+            var q: [40]u32 = undefined;
+            const ws_buf = try gpa.alloc(u32, order.wsSize(n, row_idx.items.len));
+            defer gpa.free(ws_buf);
+            var ws = order.Ws.init(ws_buf);
+            try order.order(n, col_ptr.items, row_idx.items, q[0..n], &ws);
+            var nat: [40]u32 = undefined;
+            for (nat[0..n], 0..) |*v, i| v.* = @intCast(i);
+            const got = try luFill(gpa, n, col_ptr.items, row_idx.items, vals.items, q[0..n]);
+            const natural = try luFill(gpa, n, col_ptr.items, row_idx.items, vals.items, nat[0..n]);
+            try testing.expect(got <= natural);
+        }
+    }
+
+    test "order fits wsSize on random degree-10 patterns at n = 2000 and 4000 (#46)" {
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x46);
+        const r = prng.random();
+        for ([_]u32{ 2000, 4000 }) |n| {
+            var col_ptr: std.ArrayList(u32) = .empty;
+            defer col_ptr.deinit(gpa);
+            var row_idx: std.ArrayList(u32) = .empty;
+            defer row_idx.deinit(gpa);
+            const seen_in = try gpa.alloc(u32, n);
+            defer gpa.free(seen_in);
+            @memset(seen_in, std.math.maxInt(u32));
+            try col_ptr.append(gpa, 0);
+            for (0..n) |j| {
+                try row_idx.append(gpa, @intCast(j));
+                seen_in[j] = @intCast(j);
+                for (0..10) |_| {
+                    const i = r.uintLessThan(u32, n);
+                    if (seen_in[i] == j) continue;
+                    seen_in[i] = @intCast(j);
+                    try row_idx.append(gpa, i);
+                }
+                try col_ptr.append(gpa, @intCast(row_idx.items.len));
+            }
+            const q = try gpa.alloc(u32, n);
+            defer gpa.free(q);
+            const ws_buf = try gpa.alloc(u32, order.wsSize(n, row_idx.items.len));
+            defer gpa.free(ws_buf);
+            var ws = order.Ws.init(ws_buf);
+            try order.order(n, col_ptr.items, row_idx.items, q, &ws);
+            try testing.expectEqual(@as(usize, 0), ws.used);
+            const seen = try gpa.alloc(bool, n);
+            defer gpa.free(seen);
+            @memset(seen, false);
+            for (q) |c| {
+                try testing.expect(!seen[c]);
+                seen[c] = true;
+            }
+        }
+    }
+
     test "3x3: factor + solve verified against dense reference" {
         const gpa = testing.allocator;
         const a = [3][3]f64{
@@ -3244,13 +3348,14 @@ const SparseTests = struct {
         const r = rng.random();
         var dense: [n][n]bool = @splat(@splat(false));
         for (0..n - 1) |j| {
-            dense[j][j] = j != br;
+            dense[j][j] = true; // br's diagonal is a structural zero
             for (0..3) |_| {
                 const i = r.uintLessThan(usize, n - 1);
                 dense[i][j] = true;
                 dense[j][i] = true;
             }
         }
+        dense[v][v] = true;
         dense[3][v] = true;
         dense[v][3] = true;
         dense[br][2] = true;
@@ -3280,7 +3385,7 @@ const SparseTests = struct {
         for (0..8) |round| {
             for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
                 const i = row_idx.items[p];
-                vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else -1) else if (i == j) 5 + r.float(f64) else r.float(f64) - 0.5;
+                vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else if (i > j) -1 else 0) else if (i == j) 5 + r.float(f64) else r.float(f64) - 0.5;
             };
             // Round 5 collapses one pivot, and only that round fails.
             if (round == 5) for (col_ptr[0]..col_ptr[1]) |p| {
@@ -3538,7 +3643,7 @@ const LuKernelTests = struct {
         defer gpa.free(dense);
         @memset(dense, false);
         for (0..n - 1) |j| {
-            dense[j * n + j] = j != br;
+            dense[j * n + j] = true; // br's diagonal is a structural zero
             // Couplings stay inside clusters of 6, so the rail's U column
             // is wide and shallow, the shape the gather form is for.
             for (0..2) |_| {
@@ -3551,6 +3656,7 @@ const LuKernelTests = struct {
                 dense[j * n + rail] = true;
             }
         }
+        dense[v * n + v] = true;
         dense[3 * n + v] = true;
         dense[v * n + 3] = true;
         dense[br * n + 2] = true;
@@ -3580,7 +3686,7 @@ const LuKernelTests = struct {
         const br = 5;
         for (0..c.n) |j| for (c.col_ptr[j]..c.col_ptr[j + 1]) |p| {
             const i = c.row_idx[p];
-            vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else -1) else if (i == j) 4 + r.float(f64) else r.float(f64) - 0.5;
+            vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else if (i > j) -1 else 0) else if (i == j) 4 + r.float(f64) else r.float(f64) - 0.5;
         };
     }
 

@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- The column ordering compacts its workspace, so patterns from n = 2000 no longer fail with `OutOfWorkspace`, and keeps the natural order where AMD would fill more (#46).
 - The tridiagonal engine hands a pivot under 1e-3 of its column to the pivoting LU, a zero pivot tolerance no longer accepts a zero pivot, and a capped re-pivot keeps no old pivot the refactor would refuse (#45).
 - Frequency solves (AC, noise, S-parameters) re-pivot when a replayed pivot falls below 1e-3 of its column, where pivots down to 1e-12 were accepted (scaled residuals up to 8e3) (#44).
 - `FreqSolver.factorEach` on sparse systems holds a frequency whose A(ω) is singular instead of failing with `SingularMatrix`, and holds only the frequencies no pivot tape replays (#43).

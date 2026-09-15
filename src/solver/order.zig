@@ -200,8 +200,114 @@ pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *
         }
         const sub_q = try ws.alloc(bs);
         try amd(@intCast(bs), sub_cp, sub_ri, sub_q, ws);
-        for (sub_q, 0..) |lq, i| q[lo + i] = verts[lq];
+        // AMD is a heuristic: on a rail-last inverter chain it fills more
+        // than the natural order (50 against 48 at n = 10), so the block
+        // keeps whichever of the two fills less.
+        const nat = try ws.alloc(bs);
+        @memcpy(nat, verts);
+        std.sort.pdq(u32, nat, {}, std.sort.asc(u32));
+        for (nat) |*v| v.* = loc[v.*];
+        const ord = if (try cholCount(sub_cp, sub_ri, nat, ws) < try cholCount(sub_cp, sub_ri, sub_q, ws)) nat else sub_q;
+        for (ord, 0..) |lq, i| q[lo + i] = verts[lq];
     }
+}
+
+/// Entries of the Cholesky factor L, diagonal included, of the symmetrized
+/// pattern A + A^T eliminated in the order `perm` (perm[k] = column at step
+/// k): Liu's elimination tree with path compression, then each row's
+/// subtree walked once, so O(|L|). Restores `ws` on return.
+fn cholCount(col_ptr: []const u32, row_idx: []const u32, perm: []const u32, ws: *Ws) Error!u64 {
+    const n = perm.len;
+    const nnz = col_ptr[n];
+    const base = ws.mark();
+    defer ws.release(base);
+    const pinv = try ws.alloc(n);
+    for (perm, 0..) |c, k| pinv[c] = @intCast(k);
+    // Each off-diagonal entry, as the earlier step under the later one.
+    const ptr = try ws.allocSet(n + 1, 0);
+    const lst = try ws.alloc(nnz);
+    for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
+        const a: usize = pinv[row_idx[p]];
+        const b: usize = pinv[j];
+        // Not @max: at comptime its result narrows to the operands' range.
+        if (a != b) ptr[(if (a > b) a else b) + 1] += 1;
+    };
+    for (1..n + 1) |k| ptr[k] += ptr[k - 1];
+    const fill = try ws.alloc(n);
+    @memcpy(fill, ptr[0..n]);
+    for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
+        const a: usize = pinv[row_idx[p]];
+        const b: usize = pinv[j];
+        if (a == b) continue;
+        const hi = if (a > b) a else b;
+        lst[fill[hi]] = @intCast(if (a > b) b else a);
+        fill[hi] += 1;
+    };
+    const parent = try ws.alloc(n);
+    const anc = fill; // reused: the counting sort is done
+    for (0..n) |k| {
+        parent[k] = NONE;
+        anc[k] = NONE;
+        for (lst[ptr[k]..ptr[k + 1]]) |first| {
+            var i = first;
+            while (i != NONE and i < k) {
+                const next = anc[i];
+                anc[i] = @intCast(k);
+                if (next == NONE) parent[i] = @intCast(k);
+                i = next;
+            }
+        }
+    }
+    const flag = anc;
+    var count: u64 = 0;
+    for (0..n) |k| {
+        flag[k] = @intCast(k);
+        count += 1;
+        for (lst[ptr[k]..ptr[k + 1]]) |first| {
+            var i = first;
+            // k is an ancestor of every i < k with A(i, k) != 0, so the
+            // walk stops at a flagged node.
+            while (flag[i] != k) : (i = parent[i]) {
+                flag[i] = @intCast(k);
+                count += 1;
+            }
+        }
+    }
+    assert(count >= n);
+    return count;
+}
+
+/// Tags a span's first word in place of its value while `compact` sweeps.
+const span_tag: u32 = 1 << 31;
+
+/// Slides every live span of `adj` below `top` to the front, keeping their
+/// order, and returns the new top. Owner o's span is `adj[pe[o]..][0..len[o]]`,
+/// live when `live_a[o] != 0` or `live_b[o] != 0`. Each live span's first
+/// word is parked in `first` and its slot tagged with o, so one forward
+/// sweep finds every span start among the dead words. O(top + n).
+fn compact(adj: []u32, top: usize, pe: []u32, len: []const u32, live_a: []const u32, live_b: []const u32, first: []u32) usize {
+    for (pe, len, 0..) |at, l, o| {
+        if (l == 0 or (live_a[o] == 0 and live_b[o] == 0)) continue;
+        first[o] = adj[at];
+        adj[at] = span_tag | @as(u32, @intCast(o));
+    }
+    var dst: usize = 0;
+    var src: usize = 0;
+    while (src < top) {
+        if (adj[src] & span_tag == 0) {
+            src += 1; // dead word
+            continue;
+        }
+        const o = adj[src] & ~span_tag;
+        const l = len[o];
+        adj[dst] = first[o];
+        std.mem.copyForwards(u32, adj[dst + 1 ..][0 .. l - 1], adj[src + 1 ..][0 .. l - 1]);
+        pe[o] = @intCast(dst);
+        dst += l;
+        src += l;
+    }
+    assert(dst <= top);
+    return dst;
 }
 
 /// Doubly-linked degree buckets: O(1) insert and remove.
@@ -229,9 +335,6 @@ const DegLists = struct {
     }
 };
 
-// ponytail: element lists grow by relocation in `ea` without compaction;
-// pathological fill can exhaust the slab. A compaction pass is the upgrade.
-
 // AMD on the symmetrized pattern; writes q[k] = column eliminated at step k.
 // Quotient graph with approximate external degrees, aggressive absorption,
 // hashed supervariable detection and dense-row deferral (rows of degree
@@ -240,6 +343,7 @@ fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Er
     if (n == 0) return;
     assert(q.len == n);
     assert(col_ptr.len == @as(usize, n) + 1);
+    assert(n < span_tag); // `compact` tags with the top bit
     const base = ws.mark();
     defer ws.release(base);
 
@@ -276,6 +380,7 @@ fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Er
     const mlink = try ws.allocSet(n, NONE); // supervariable merge chains
     const lp_buf = try ws.alloc(n);
     const touched = try ws.alloc(n);
+    const first = try ws.alloc(n); // `compact` scratch
 
     var dl = DegLists{
         .head = try ws.allocSet(n + 1, NONE),
@@ -415,7 +520,11 @@ fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Er
         nv[p] = 0;
         elem_alive[p] = 1;
 
-        if (va_free + nlp > va.len) return error.OutOfWorkspace;
+        if (va_free + nlp > va.len) {
+            va_len[p] = 0; // p's variable list is spent: Lp is in lp_buf
+            va_free = compact(va, va_free, va_pe, va_len, nv, elem_alive, first);
+            if (va_free + nlp > va.len) return error.OutOfWorkspace;
+        }
         va_pe[p] = @intCast(va_free);
         va_len[p] = nlp;
         @memcpy(va[va_free..][0..nlp], lp_buf[0..nlp]);
@@ -462,7 +571,13 @@ fn amd(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Er
                 ea[ea_pe[i] + ewp] = p;
             } else {
                 const nc: u32 = (ewp + 1) * 2;
-                if (ea_free + nc > ea.len) return error.OutOfWorkspace;
+                if (ea_free + nc > ea.len) {
+                    ea_len[i] = ewp;
+                    ea_free = compact(ea, ea_free, ea_pe, ea_len, nv, nv, first);
+                    // Compacted spans have no slack left.
+                    for (0..n) |o| ea_lim[o] = ea_len[o];
+                    if (ea_free + nc > ea.len) return error.OutOfWorkspace;
+                }
                 @memcpy(ea[ea_free..][0..ewp], ea[ea_pe[i]..][0..ewp]);
                 ea[ea_free + ewp] = p;
                 ea_pe[i] = @intCast(ea_free);
@@ -582,9 +697,7 @@ test "order and amd return permutations and restore the workspace on random patt
     for (0..300) |t| {
         const n: u32 = if (t < 64) @intCast(t + 1) else r.intRangeAtMost(u32, 1, 64);
         // Full diagonal, as `order` requires. Circuit-like sparsity, or
-        // dense enough that `wsSize`'s 4 nnz covers any fill; random graphs
-        // of average degree near 10 may outgrow the slab (the `amd`
-        // ponytail note).
+        // dense.
         const density = if (t % 4 == 0) 0.3 + 0.6 * r.float(f64) else 0.05 * r.float(f64);
         var nnz: u32 = 0;
         col_ptr[0] = 0;
