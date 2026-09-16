@@ -1941,7 +1941,11 @@ fn Reader(comptime S: type) type {
             else
                 try r.stepTarget(args[i].name);
             i += 1;
-            if (i < args.len and args[i] == .name and std.mem.eql(u8, args[i].name, "list")) return .{ .target = target, .values = try r.numbers(args[i + 1 ..]) };
+            if (i < args.len and args[i] == .name and std.mem.eql(u8, args[i].name, "list")) {
+                // An empty list would plan no runs at all (#66).
+                if (i + 1 == args.len) return error.ParseError;
+                return .{ .target = target, .values = try r.numbers(args[i + 1 ..]) };
+            }
             if (grid == .poi) return error.ParseError;
             const n = try r.numbers(args[i..]);
             if (n.len != 3) return error.ParseError;

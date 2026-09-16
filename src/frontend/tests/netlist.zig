@@ -766,6 +766,8 @@ test "malformed cards fail with ParseError, never a panic" {
         "t\n.connect a\n",
         "t\n.global v(a)\n",
         "t\n.step param nosuch 1 2 1\n",
+        // A list with no values would plan no runs (#66).
+        "t\n.param p=1\n.step param p list\n",
         // A point count past usize, and a trial range past any budget.
         "t\n.tran 1n 10n sweep v1 poi 1e300 1 2\n",
         "t\n.tran 1n 10n sweep monte=list(1:4294967295)\n",

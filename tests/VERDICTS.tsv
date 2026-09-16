@@ -842,6 +842,7 @@ PASS	fixtures/variants/monte_dev_lot.sp
 PASS	fixtures/variants/monte_divider.sp
 PASS	fixtures/variants/monte_list.sp
 PASS	fixtures/variants/monte_tran_meas.sp
+PASS	fixtures/variants/step_alter_keeps_steps.sp
 PASS	fixtures/variants/step_param_bsource_all_rebuilt.sp
 PASS	fixtures/variants/step_param_bsource_bare.sp
 PASS	fixtures/variants/step_param_divider.sp
