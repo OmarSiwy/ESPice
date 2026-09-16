@@ -143,6 +143,8 @@ const L = struct {
     out: std.Io.Writer.Allocating = undefined,
     loose: std.StringHashMapUnmanaged(void) = .empty,
     globals: Scope = .empty,
+    /// The global `.param` names in deck order.
+    global_keys: std.ArrayList([]const u8) = .empty,
     subckts: std.StringHashMapUnmanaged(u32) = .empty,
     models: std.StringHashMapUnmanaged(void) = .empty,
     global_nets: std.StringHashMapUnmanaged(void) = .empty,
@@ -199,6 +201,14 @@ const L = struct {
         try l.declare(deck, &l.globals, true);
         l.wnflag = l.dialect != .ngspice;
         try l.prescan(deck);
+        // ngspice evaluates each `.param` once, in deck order: a chain reads
+        // its predecessor's number, at any depth (#110).
+        for (l.global_keys.items) |key| {
+            const d = l.globals.getPtr(key).?;
+            if (d.* == .row) if (l.evalRef(key, &.{&l.globals}, 0)) |v| {
+                d.* = .{ .num = v };
+            };
+        }
         const top: Frame = .{ .scopes = &.{&l.globals} };
         // Walk 2: devices, models and deck cards, in card order.
         try l.walk(deck, &top, true);
@@ -262,6 +272,7 @@ const L = struct {
                 while (a.next()) |as| if (l.kind(as) == l.r.assign) {
                     const key = l.text(l.t.child(as, l.r.key).?);
                     try scope.put(l.arena, key, .{ .row = valueRow(l, as) });
+                    if (scope == &l.globals) try l.global_keys.append(l.arena, key);
                 } else if (l.kind(as) == l.r.funcdef) try l.defineFunc(as);
             } else if (k == l.r.func) {
                 try l.defineFunc(c);
@@ -283,6 +294,7 @@ const L = struct {
             while (a.next()) |as| if (l.kind(as) == l.r.assign) {
                 const key = l.text(l.t.child(as, l.r.key).?);
                 try scope.put(l.arena, key, .{ .row = valueRow(l, as) });
+                if (scope == &l.globals) try l.global_keys.append(l.arena, key);
             } else if (l.kind(as) == l.r.funcdef) try l.defineFunc(as);
         } else if (k == l.r.model) {
             try l.models.put(l.arena, l.text(l.t.child(card, l.r.name).?), {});

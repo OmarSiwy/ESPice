@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- A `.param` chain of any depth resolves; past 62 links it was a `ParseError` (#110).
 - A `.step` of a parameter that a `.model` value reads reaches the model; every point ran with the nominal value (#65).
 - `K` coupling and its mutual inductance stay f64 from card to stamp; they were rounded through f32 (#89).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).

@@ -881,6 +881,19 @@ test ".step reaches a .model value that reads the swept name" {
     }
 }
 
+test "a .param chain resolves at any depth" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ngspice evaluates each .param once in deck order; no depth bound (#110).
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "chain\n.param p0=1\n");
+    for (1..1001) |k| try src.print(a, ".param p{d}={{p{d}+1}}\n", .{ k, k - 1 });
+    try src.appendSlice(a, "v1 a 0 {p1000}\n.end\n");
+    const nl = try parse(a, src.items);
+    try std.testing.expectEqual(@as(f64, 1001), try numeric((try device(nl, "v1")).positional[0]));
+}
+
 test "parseAnalyses reads analysis cards only and resolves their nets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

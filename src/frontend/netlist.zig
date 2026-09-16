@@ -944,6 +944,8 @@ fn Reader(comptime S: type) type {
         /// `Frame.models_mark` splits it by instance.
         instance_models: std.ArrayList(struct { name: []const u8, row: u32 }) = .empty,
         globals: Scope = .empty,
+        /// The global `.param` names in deck order, for `foldGlobals`.
+        global_keys: std.ArrayList([]const u8) = .empty,
         global_scopes: [1]*const Scope = undefined,
         analyses: std.ArrayList(Analysis) = .empty,
         config: std.ArrayList(Config) = .empty,
@@ -1111,6 +1113,7 @@ fn Reader(comptime S: type) type {
             }
             for (r.blocks.items) |b| try r.readBlock(b);
             for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
+            try r.foldGlobals();
             // Global models in line order, then each subcircuit's own, kept
             // together: `models_lo..models_hi` is one range per subcircuit,
             // nested definitions included. They follow the directives, so a
@@ -1358,8 +1361,10 @@ fn Reader(comptime S: type) type {
                         const text = try r.paramText(&f);
                         if (depth > 0)
                             try opens[depth - 1].defaults.append(arena, .{ .key = key, .text = text })
-                        else
+                        else {
                             try r.globals.put(arena, key, .{ .text = text });
+                            try r.global_keys.append(arena, key);
+                        }
                     },
                     .model => try models.append(arena, if (depth > 0)
                         .{ .line = i, .cond = opens[depth - 1].ifs > 0, .owner = opens[depth - 1].id }
@@ -1877,6 +1882,37 @@ fn Reader(comptime S: type) type {
             try r.live_names.put(r.arena, name, {});
             try r.live_nominal.append(r.arena, v);
             return @intCast(r.live_names.count() - 1);
+        }
+
+        /// Folds each global `.param` to its number in deck order, once every
+        /// live name is known, so each link of a chain reads its
+        /// predecessor's number and `subst` recurses one level per read, not
+        /// one per link (#110). A value that reads a live name, draws a
+        /// distribution or does not fold keeps its text, and an error stays
+        /// for the card that reads it.
+        fn foldGlobals(r: *R) Error!void {
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            const was_in_card = r.in_card;
+            r.in_card = true;
+            defer r.in_card = was_in_card;
+            for (r.global_keys.items) |key| {
+                const entry = r.globals.getPtr(key).?;
+                if (entry.* != .text) continue;
+                const ops_mark = r.ops.items.len;
+                const consts_mark = r.consts.items.len;
+                const sites_mark = r.site_ops.items.len;
+                const v: ?Value = r.exprValue(entry.text, &top, false) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => null, // else: the reading card reports it
+                };
+                r.ops.shrinkRetainingCapacity(ops_mark);
+                r.consts.shrinkRetainingCapacity(consts_mark);
+                r.site_ops.shrinkRetainingCapacity(sites_mark);
+                r.site_keys.shrinkRetainingCapacity(sites_mark);
+                if (v) |x| if (x == .num) {
+                    entry.* = .{ .num = x.num };
+                };
+            }
         }
 
         /// A swept name: a global `.param`, `temp`, or a card.
