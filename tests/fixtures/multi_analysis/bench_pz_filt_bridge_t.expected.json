@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "analysis": [
+    "op",
+    "pz"
+  ],
+  "purpose": "BRIDGE-T FILTER",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "7c906a37d5715825e5f690a3669719b969c276d144becfe8fa083a8342ba3423",
+    "warnings": [
+      ".print line ignored since rawfile was produced."
+    ]
+  },
+  "origin": "benchmark/fixtures/pz/filt_bridge_t/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(1)": {
+            "values": [
+              12.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(2)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(3)": {
+            "values": [
+              12.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(v1)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "checks": [
+      {
+        "kind": "pole_zero_sets",
+        "plot": "Pole-Zero Analysis",
+        "poles": [
+          [
+            -2618.0339887499,
+            0.0
+          ],
+          [
+            -381.96601125011,
+            0.0
+          ]
+        ],
+        "zeros": [
+          [
+            -1000.0,
+            0.0
+          ],
+          [
+            -1000.0,
+            0.0
+          ]
+        ],
+        "rtol": 0.001,
+        "atol": 1e-06,
+        "multiplicity": true
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7ce6fdb622a65b75ed1b9f84628ed7f3e982ba9af3df4ddf0be2a14a8a3d98c6",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

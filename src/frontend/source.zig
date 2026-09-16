@@ -10,19 +10,31 @@ const directives = std.StaticStringMap(Directive).initComptime(.{
 
 pub fn load(io: Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
     const src = try Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited);
+    errdefer arena.free(src);
+    if (try expand(io, arena, path, src)) |expanded| {
+        arena.free(src);
+        return expanded;
+    }
+    return src;
+}
+
+/// Expand supplied bytes using origin's directory for includes. Always returns
+/// owned storage, including when the input needs no expansion.
+pub fn loadBytes(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]const u8 {
+    return try expand(io, arena, origin, src) orelse try arena.dupe(u8, src);
+}
+
+fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) !?[]const u8 {
     var lines = std.mem.splitScalar(u8, src, '\n');
     _ = lines.next(); // The title is opaque even when it starts with .include.
     while (lines.next()) |line| {
         if (directiveOf(std.mem.trim(u8, line, " \t\r")) != null) break;
-    } else return src;
+    } else return null;
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.heap.page_allocator);
-    {
-        defer arena.free(src);
-        try appendContents(io, path, src, null, 0, &out);
-    }
-    return arena.dupe(u8, out.items);
+    try appendContents(io, origin, src, null, 0, &out);
+    return try arena.dupe(u8, out.items);
 }
 
 fn directiveOf(line: []const u8) ?Directive {
@@ -104,40 +116,4 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
     }
     if (current_section != null) return error.InvalidLibrarySection;
     if (!found) return error.LibrarySectionNotFound;
-}
-
-test "source: nested relative includes select only requested case-insensitive corner" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "Models");
-    try tmp.dir.writeFile(io, .{ .sub_path = "deck.sp", .data = "Title\n.LIB 'Models/lib.sp' TT\n.end\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib ss ; ignored corner\n.include missing.sp\n.endl ss\n.lib tt $ selected corner\n.inc 'res.sp'\n.endl TT ; close\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "Models/res.sp", .data = "R1 out 0 1k\n" });
-    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
-    defer std.testing.allocator.free(path);
-    const text = try load(io, std.testing.allocator, path);
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "R1 out 0 1k") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "missing") == null);
-    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib tt\n.endl ff\n" });
-    try std.testing.expectError(error.InvalidLibrarySection, load(io, std.testing.allocator, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib ff\n.endl ff\n" });
-    try std.testing.expectError(error.LibrarySectionNotFound, load(io, std.testing.allocator, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib tt\n.include 'lib.sp'\n.endl tt\n" });
-    // An unselected library declaration is inert when included without a corner.
-    const inert = try load(io, std.testing.allocator, path);
-    defer std.testing.allocator.free(inert);
-    try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib tt\n.lib 'lib.sp' tt\n.endl tt\n" });
-    try std.testing.expectError(error.IncludeDepthExceeded, load(io, std.testing.allocator, path));
-    try tmp.dir.writeFile(io, .{ .sub_path = "deck.sp", .data = "\n* unmatched ' comment\n.include 'Models/res.sp'\n.end\n" });
-    const blank_title = try load(io, std.testing.allocator, path);
-    defer std.testing.allocator.free(blank_title);
-    try std.testing.expectEqualStrings("\n* unmatched ' comment\nR1 out 0 1k\n\n.end\n\n", blank_title);
-    // Include-free input is returned byte-for-byte, including CRLF and no final LF.
-    const plain = ".include is only the title\r\n* .lib 'comment\r\nR1 out 0 1k\r\n.end";
-    try tmp.dir.writeFile(io, .{ .sub_path = "deck.sp", .data = plain });
-    const unchanged = try load(io, std.testing.allocator, path);
-    defer std.testing.allocator.free(unchanged);
-    try std.testing.expectEqualStrings(plain, unchanged);
 }

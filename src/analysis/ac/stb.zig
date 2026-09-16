@@ -2,6 +2,7 @@
 //! probe source between probe_p and probe_n to form (n+1)², then sweep.
 //! T(ω) = −i_br(ω). Phase unwrap mandatory for gain-margin extraction.
 const std = @import("std");
+const batch = @import("batch.zig");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const types = @import("solvers").types;
@@ -12,15 +13,7 @@ const dc = @import("../dc/dc.zig");
 
 const Complex = types.Complex;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
-    /// Probe insertion nodes; probe_p null → ctx.source_node.
-    probe_p: ?u32 = null,
-    probe_n: u32 = GROUND,
-};
+pub const Options = @import("requests").Stb;
 
 pub const SolveResult = struct {
     freqs: []f64,
@@ -132,11 +125,7 @@ pub fn solve(
     root.zeroSimd(rhs);
     rhs[branch_idx] = 1.0;
 
-    const x_out = ckt.gpuFreqBatch(allocator, g_aug, c_aug, omegas, rhs, @intCast(n_aug), false) orelse blk: {
-        const cpu = try allocator.alloc(f64, n_points * nn);
-        try fs.solveBatch(allocator, omegas, rhs, cpu, false);
-        break :blk cpu;
-    };
+    const x_out = try batch.solve(ckt, &fs, allocator, g_aug, c_aug, omegas, rhs, false);
     defer allocator.free(x_out);
 
     for (0..n_points) |k| {
@@ -250,74 +239,7 @@ fn computeMargins(result: *SolveResult) void {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "STB: margin computation with synthetic data" {
-    const allocator = testing.allocator;
-
-    const k_gain: f64 = 10.0;
-    const f0: f64 = 1000.0;
-    const n_pts: u32 = 200;
-
-    var result = try SolveResult.init(allocator, n_pts);
-    defer result.deinit(allocator);
-
-    for (0..n_pts) |idx| {
-        const frac = @as(f64, @floatFromInt(idx)) / @as(f64, @floatFromInt(n_pts - 1));
-        const f = std.math.pow(f64, 10.0, frac * 6.0);
-        const ratio = f / f0;
-        const denom = @sqrt(1.0 + ratio * ratio);
-        const m = k_gain / denom;
-        const phase_rad = -std.math.atan(ratio);
-
-        result.freqs[idx] = f;
-        result.loop_gain[idx] = .{ .re = m * @cos(phase_rad), .im = m * @sin(phase_rad) };
-    }
-
-    computeMargins(&result);
-
-    try testing.expect(!std.math.isNan(result.phase_margin_deg));
-    try testing.expectApproxEqAbs(95.7, result.phase_margin_deg, 2.0);
-    // Single-pole: phase never reaches −180° → gain margin is NaN (correct).
-    try testing.expect(std.math.isNan(result.gain_margin_db));
-}
-
-test "STB: three-pole margin computation" {
-    // Two poles only approach −180° asymptotically and never cross it
-    // (gain margin is then rightly NaN); three poles give a real crossing.
-    const allocator = testing.allocator;
-
-    const k_gain: f64 = 100.0;
-    const f1: f64 = 100.0;
-    const f2: f64 = 1000.0;
-    const f3: f64 = 10000.0;
-    const n_pts: u32 = 500;
-
-    var result = try SolveResult.init(allocator, n_pts);
-    defer result.deinit(allocator);
-
-    for (0..n_pts) |idx| {
-        const frac = @as(f64, @floatFromInt(idx)) / @as(f64, @floatFromInt(n_pts - 1));
-        const f = std.math.pow(f64, 10.0, frac * 7.0);
-        const r1 = f / f1;
-        const r2 = f / f2;
-        const r3 = f / f3;
-        const m = k_gain / (@sqrt(1.0 + r1 * r1) * @sqrt(1.0 + r2 * r2) * @sqrt(1.0 + r3 * r3));
-        const phase_rad = -std.math.atan(r1) - std.math.atan(r2) - std.math.atan(r3);
-
-        result.freqs[idx] = f;
-        result.loop_gain[idx] = .{ .re = m * @cos(phase_rad), .im = m * @sin(phase_rad) };
-    }
-
-    computeMargins(&result);
-
-    try testing.expect(!std.math.isNan(result.phase_margin_deg));
-    try testing.expect(result.phase_margin_deg > 0);
-    try testing.expect(result.phase_margin_deg < 180.0);
-    try testing.expect(!std.math.isNan(result.gain_margin_db));
-    try testing.expect(result.gain_margin_db > 0);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .computeMargins = computeMargins,
+} else {};

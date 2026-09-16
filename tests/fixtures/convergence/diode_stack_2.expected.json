@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "2 series junctions",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Identical series junctions have equal voltage; solve total stack KCL by bisection."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(n1)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              1.4612802382976
+            ]
+          },
+          "v(n2)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              0.73064011914881
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 0.0003,
+            "atol": 1e-09,
+            "values": [
+              -0.018538719761702
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "78a96cfa499bc3645541fea4d2c2c1612c06511201dc33c9a8e24cb2d574839c"
+}

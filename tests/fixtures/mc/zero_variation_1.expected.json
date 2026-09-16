@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "Zero-variance Monte Carlo and structural lane tails",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Zero parameter variation gives exactly the nominal operating point on all trials; no failed trials may be silently omitted."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Monte Carlo",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              7.5
+            ]
+          },
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              10
+            ]
+          }
+        },
+        "axis": {
+          "name": "run",
+          "values": [
+            0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2fa8d3d1d0671d2bb75a4e638a3c77330cbb1d53e2bc62e476f21627e0bb76c5"
+}

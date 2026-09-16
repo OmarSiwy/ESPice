@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "RC lowpass on lin frequency grid",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H(f)=1/(1+j*2*pi*f*R*C). LIN includes both endpoints; DEC/OCT are points per decade/octave."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.7169568003249,
+                -0.45047724336839
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "96104272fdae5e81a253aa4fa8cea5617421114b9734305664c72291908f65de",
+  "known_gaps": [
+    "non-DEC frequency sweeps are not yet supported by the shared analysis dispatcher"
+  ]
+}

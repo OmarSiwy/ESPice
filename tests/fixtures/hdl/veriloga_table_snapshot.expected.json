@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Array table data captures the first invocation per instance while Newton updates the source arrays.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "At the initial zero iterate the table rows are (0,0),(1,2), so lookup at 0.5 is 1. VAMS-2023 9.21.1 holds that data fixed; I=V-1 gives V(out)=1."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 0,
+            "atol": 1e-10
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e44d496458651430fa5fda54f18515276cae7212b7adc1ede6c249337882d7ed"
+}

@@ -4,7 +4,6 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .benchmark = .{ .path = "benchmark" },
         // The Verilog-A / Verilog compiler, and the `contract` its generated
         // devices import. A path dep while both trees move together; swap to a
         // git+URL with a pinned hash once VerA stabilizes.
@@ -26,8 +25,9 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "models",
+        "include",
         "tests",
         "docs",
-        "benchmark",
     },
 }

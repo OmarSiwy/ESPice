@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "trannoise",
+  "purpose": "Transient noise timestep must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Transient noise timestep must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "b0fe2ed5768cf81c01d3e7dac0e078c2dc36a308816efa3a7a7f37905199f812"
+}

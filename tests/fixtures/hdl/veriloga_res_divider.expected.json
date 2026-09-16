@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Verilog-A resistor divider: va_res (100 ohm) under R1 -> v(out) = 0.35",
+  "origin": "benchmark/fixtures/verilogA/res_divider/circuit.sp",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "The supplied VA resistor is exactly 100 ohm. Two equal resistors divide .7V into .35V."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.35
+            ],
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06
+          },
+          "i(vin)": {
+            "values": [
+              -0.0035
+            ],
+            "unit": "A",
+            "rtol": 0.002,
+            "atol": 1e-11
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "6c4c049a5b11f0b4e9acfdbc6fabfc0c5fe018540a1884b6448c9e3e36c4928f"
+}

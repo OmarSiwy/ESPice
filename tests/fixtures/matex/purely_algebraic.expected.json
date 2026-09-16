@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "analysis": "matex",
+  "purpose": "No dynamic states: MATEX reduces to algebraic solve",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=.75*Vin at every time, including PWL knots."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "MATEX Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0,
+              0.375,
+              0.75,
+              0.375,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.0005,
+            0.001,
+            0.0015,
+            0.002
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "87a8485ac4c312e2236effd8dc0d8a3e08ebad9af206873f8bccce285212ff3e"
+}

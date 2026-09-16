@@ -7,15 +7,7 @@ const dc = @import("../dc/dc.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solvers").converger;
 
-
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    t_start: f64 = -40.0,
-    t_stop: f64 = 125.0,
-    t_step: f64 = 1.0,
-    t_nom: f64 = 27.0,
-    dc_options: dc.Options = .{},
-};
+pub const Options = @import("requests").Temp;
 
 pub const Status = struct {
     completed: bool,
@@ -75,10 +67,11 @@ pub fn sweep(
     var failed: u32 = 0;
 
     const ws = try ckt.workspace();
-    const nopts = options.dc_options.tol.newtonOpts(options.dc_options.tol.itl2);
+    const nopts = converger.optionsFromTolerances(options.dc_options.tol, options.dc_options.tol.itl2);
 
     var temp = options.t_start;
     while (temp <= options.t_stop + options.t_step * 0.5) : (temp += options.t_step) {
+        if (points + failed != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = points + failed });
         // Device-internal temperature physics: every batch with a temp field
         // (tc1/tc2, junction physics, ...) re-evaluates at this temperature.
         ckt.setCircuitTemp(@floatCast(temp));
@@ -95,8 +88,10 @@ pub fn sweep(
         // Non-convergence or solver error => count as failed, skip point
         const converged = if (converger.run(ckt, ws, x, 0, nopts, root.EvalHook{})) |r|
             r.converged
-        else |_|
-            false;
+        else |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => false,
+        };
 
         if (converged) {
             temps[points] = temp;
@@ -172,7 +167,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .t_nom = opts.t_nom };
     const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
-    const nopts = opts.dc_options.tol.newtonOpts(opts.dc_options.tol.itl2);
+    const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
 
     // Collect converged points, point-major (temp, probes...).
@@ -198,27 +193,4 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = npoints,
         .data = data,
     };
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-test "temp_sweep: numPoints calculation" {
-    try testing.expectEqual(@as(u32, 166), numPoints(.{
-        .t_start = -40.0,
-        .t_stop = 125.0,
-        .t_step = 1.0,
-    }));
-    try testing.expectEqual(@as(u32, 34), numPoints(.{
-        .t_start = -40.0,
-        .t_stop = 125.0,
-        .t_step = 5.0,
-    }));
-    try testing.expectEqual(@as(u32, 1), numPoints(.{
-        .t_start = 27.0,
-        .t_stop = 27.0,
-        .t_step = 1.0,
-    }));
 }

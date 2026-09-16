@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "Standard deviation cannot be negative.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Standard deviation cannot be negative."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "8535529971c8dea7b687728951b2d3a4f4d5d6f2c550fc64c4f7ada8250fb8fc"
+}

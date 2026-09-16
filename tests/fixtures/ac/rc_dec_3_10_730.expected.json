@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "RC lowpass on dec frequency grid",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H(f)=1/(1+j*2*pi*f*R*C). LIN includes both endpoints; DEC/OCT are points per decade/octave."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.99606768240717,
+                -0.062584778270572
+              ],
+              [
+                0.98200547803514,
+                -0.13293125721258
+              ],
+              [
+                0.92161339613117,
+                -0.26877898765108
+              ],
+              [
+                0.7169568003249,
+                -0.45047724336839
+              ],
+              [
+                0.35305425893427,
+                -0.4779193961147
+              ],
+              [
+                0.10520372067802,
+                -0.30681573922067
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            21.544346900319,
+            46.415888336128,
+            100.0,
+            215.44346900319,
+            464.15888336128
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 6
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "bfe6660c67f553ba774184754f40b0ed3e93e19501504c830ff9cd8c86cb952c",
+  "known_gaps": [
+    "the current frequency helper stretches the grid to the stop instead of keeping the requested points-per-decade spacing"
+  ]
+}

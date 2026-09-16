@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Linearize the nonlinear diode at the solved bias",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Solve Shockley KCL; gd=IS*exp(v/VT)/VT+gmin. Gain=1/(1+R*gd), Rin=R+1/gd, Rout=1/(1/R+gd)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 0.0008,
+            "atol": 1e-09,
+            "values": [
+              0.005969319761602
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 0.0008,
+            "atol": 1e-09,
+            "values": [
+              1006.0051665208
+            ]
+          },
+          "output_resistance": {
+            "unit": "ohm",
+            "rtol": 0.0008,
+            "atol": 1e-09,
+            "values": [
+              5.969319761602
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5438e028757436aff462bb704206a84dc5e135c5a5fcaeb78bab8129f0dc5957"
+}

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "5 independent frequency points, vector batch tails",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H=1/(1+j*2*pi*f*.001); every requested lane must appear exactly once."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.99606768240717,
+                -0.062584778270572
+              ],
+              [
+                0.0040124744403958,
+                -0.063216884526691
+              ],
+              [
+                0.001010166979158,
+                -0.031767066937825
+              ],
+              [
+                0.00044981388728187,
+                -0.02120404571653
+              ],
+              [
+                0.00025323881296516,
+                -0.015911463888303
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            2507.5,
+            5005.0,
+            7502.5,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ee48e8b7b5eaceea2c05d59b02f2b41bce757046b3ac64b24b77e8a7f55049b4",
+  "known_gaps": [
+    "non-DEC frequency sweeps are not yet supported by the shared analysis dispatcher"
+  ]
+}

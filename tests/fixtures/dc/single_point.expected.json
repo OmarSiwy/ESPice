@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "DC single_point",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Sweep includes start, steps toward stop without crossing it. Vout=.75*Vin."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1.0
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.75
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.00025
+            ]
+          }
+        },
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            1.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "afb060c817ad9dd7aab5931cac52b3a070a2b296c2bf391de2496f4fe879dc16"
+}

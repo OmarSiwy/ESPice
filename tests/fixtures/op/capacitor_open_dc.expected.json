@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "capacitor open dc",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Capacitor is open in DC."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              3
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              0
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "75f9d9862fb8a1873bd42cb4493b97285954183ba7f7ed98ed5500f16232acb9"
+}

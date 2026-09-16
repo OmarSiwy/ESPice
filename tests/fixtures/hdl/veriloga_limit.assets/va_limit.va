@@ -1,0 +1,20 @@
+`include "disciplines.vams"
+// VAMS-2023 9.17.3: the limiter may defer convergence but cannot change the root.
+module va_limit(p, n);
+    inout p, n;
+    electrical p, n;
+    analog function real halfvolt;
+        input value, previous;
+        real value, previous, limited;
+        begin
+            if ($simparam("iteration") == 1)
+                limited = 0.0;
+            else
+                limited = min(max(value, previous - 0.5), previous + 0.5);
+            if (abs(limited - value) > 1e-12)
+                $discontinuity(-1);
+            halfvolt = limited;
+        end
+    endfunction
+    analog I(p, n) <+ exp($limit(V(p, n), halfvolt)) - exp(2.0);
+endmodule

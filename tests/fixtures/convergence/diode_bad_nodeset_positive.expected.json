@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "diode bad nodeset positive",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Monotonic scalar KCL root: (Vin-v)/R=IS*expm1(v/(N*VT))+1e-12*v, VT=0.025864925786328753 V at 27 C. Solved by 160 bisections."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 2e-06,
+            "values": [
+              0.69288783237806
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 0.0003,
+            "atol": 1e-12,
+            "values": [
+              -0.0043071121676219
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "0aa4cea662490d14fb28dc8e33fac27dbde67ec30cc93af16cb8c86455a77074"
+}

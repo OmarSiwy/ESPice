@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "Coupled two-state RC ladder",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Roots of (sRC)^2+3*sRC+1."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Pole-Zero Analysis",
+        "match": "unordered",
+        "columns": {
+          "pole": {
+            "unit": "rad/s",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                -381.96601125011,
+                0.0
+              ],
+              [
+                -2618.0339887499,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 2
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7c2488210da3724097eb4af0a1a46b146fd9f42967d90a5ee006d8b7839cfe56",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

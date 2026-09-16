@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "8-resistor chain; sparse solve and accumulated residual",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Equal series resistors divide the source into N equal drops."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(n1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.875
+            ]
+          },
+          "v(n2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.75
+            ]
+          },
+          "v(n3)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.625
+            ]
+          },
+          "v(n4)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.5
+            ]
+          },
+          "v(n5)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.375
+            ]
+          },
+          "v(n6)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.25
+            ]
+          },
+          "v(n7)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.125
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.000125
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "25e2530dbd96068131788088275b3966b11aef1e245a97b14429065ab5bcace3"
+}

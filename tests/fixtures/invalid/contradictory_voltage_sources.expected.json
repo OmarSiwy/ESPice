@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Parallel ideal sources impose contradictory voltages.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Parallel ideal sources impose contradictory voltages."
+  },
+  "expect": {
+    "status": "error",
+    "category": "inconsistent_circuit",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "dfcc076d22a079dae4fed7d3c04c85319da6cddef41dec6e8a46347a06d25374"
+}

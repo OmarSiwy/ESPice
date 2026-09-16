@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "four",
+  "purpose": "Known nonlinear Fourier harmonics",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "sin^2=(1-cos(2t))/2; sin^3=(3sin(t)-sin(3t))/4."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Fourier Analysis",
+        "match": "exact",
+        "columns": {
+          "magnitude": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.0003,
+            "values": [
+              0.5,
+              0,
+              0.5,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "harmonic",
+          "values": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 10
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1c1a287a46d602ffd19ef1e5fc161721b5c1487019a60c0409197be4148ad4af"
+}

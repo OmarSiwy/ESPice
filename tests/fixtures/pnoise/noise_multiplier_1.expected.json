@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "pnoise",
+  "purpose": "Physical folding of colored noise through a periodic multiplier",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "For y=A*cos(wLO*t)*x, time-averaged one-sided PSD Sy(f)=A^2/4*[Sx(|f-fLO|)+Sx(f+fLO)]. Sx=4*kB*T*R/(1+(2*pi*f*RC)^2)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "pnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.01,
+            "atol": 1e-25,
+            "values": [
+              2.0480991850507e-19,
+              2.0502107389747e-19,
+              2.0600423465472e-19,
+              2.1063449056924e-19
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            21.544346900319,
+            46.415888336128,
+            100.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 4
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9ebf2b63566514716d6b8962db82b3bfaa89b0292c2adc76306edca272afebf5",
+  "known_gaps": [
+    "the behavioral-source compiler only supports a limited single-control polynomial subset",
+    "periodic noise must distinguish genuine frequency conversion from an LTI circuit; extra LTI sidebands must not add noise"
+  ]
+}

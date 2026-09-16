@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "analysis": "envelope",
+  "purpose": "Carrier-window absolute peak and RMS",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Over every complete period: absolute peak=|offset|+|amplitude| and RMS=sqrt(offset^2+amplitude^2/2). Exclude a t=0 initialization row."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Envelope Analysis",
+        "match": "samples",
+        "columns": {
+          "peak(v(out))": {
+            "unit": "V",
+            "rtol": 0.005,
+            "atol": 1e-07,
+            "values": [
+              5,
+              5,
+              5,
+              5,
+              5
+            ]
+          },
+          "rms(v(out))": {
+            "unit": "V",
+            "rtol": 0.005,
+            "atol": 1e-07,
+            "values": [
+              3.3166247903554,
+              3.3166247903554,
+              3.3166247903554,
+              3.3166247903554,
+              3.3166247903554
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.001,
+            0.002,
+            0.003,
+            0.004,
+            0.005
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "490f826aed81f818deb354f263ded8cb7116233980ea158a12242a0901366b1f"
+}

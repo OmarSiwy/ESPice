@@ -120,8 +120,8 @@ whole sweep (no silent point skipping). Knobs: `f_start`, `f_stop`,
 `points_per_decade`; tolerance bundle only affects the upstream OP.
 
 **Noise — the in-device convention.** Every device model **owns its noise
-sources**; analyses only consume them (see the "Noise model (in-device)"
-sections and noise-coverage column in [docs/devices/](../devices/README.md)).
+sources**; analyses only consume them. Model source definitions live in
+[models/](../../models/).
 The contract interface (`../VerA/tools/contract.zig`): a device
 declares comptime `noise_gens` metadata — `NoiseGen{row, col, kind}` with
 `kind ∈ {thermal, shot, flicker}`, `row/col` naming the local unknowns the
@@ -140,13 +140,13 @@ per-source log-log band integral above.
 
 A model that declares no generator is **silent, not zero-noise**: `collect_noise`
 is installed only for devices with a `noise_gens` decl
-(`devices/engine.zig` `Hooks.collect_noise`), so an omitted declaration removes
+(`src/analysis/eval/engine.zig` `Hooks.collect_noise`), so an omitted declaration removes
 the device from the analysis entirely. That is what made a resistor-only
 `.noise` deck return exactly 0 until 2026-09-13.
 
 Current coverage gap, flagged and measured: the collector maps only
 `kind = thermal` ($S = 4kTg$); `shot` and `flicker` generators are declared by
-16 models and **silently dropped** (`devices/engine.zig collectNoise`,
+16 models and **silently dropped** (`src/analysis/eval/engine.zig collectNoise`,
 `.shot, .flicker => {}`). VerA compounds it — every `white_noise` call is
 tagged `.thermal` regardless of what its argument computes
 (`../VerA/src/ir/lower.zig` `noiseSrcsOf`), so a shot generator written
@@ -155,8 +155,8 @@ amplitude. Cost on the fixtures: `noise/amp_noise` +19.5%,
 `devices/vbic_noise_scale` −62% at 1 kHz where ngspice's flicker term
 dominates. The fix is the device-side `noisePsd` hook (contract surface landed
 2026-07-12, `../VerA/tools/contract.zig PsdTerm`) plus VerA codegen emitting a
-scalar noise-expression variant; the two land together. See
-[docs/perf/zero-analyses-2026-09-10.md](../perf/zero-analyses-2026-09-10.md).
+scalar noise-expression variant; the two land together. These figures
+come from the historical 2026-09-10 zero-analysis audit.
 
 Related small-signal analyses share the machinery: `ac/sp.zig`
 (S-parameters), `ac/stb.zig` (stability/loop gain), `dc/tf.zig` (DC transfer
@@ -231,9 +231,9 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Stacked-real $2n$ sweep — sparse path fills the KLU pattern per $\omega$ (streamed copy, no re-assembly), dense below `DENSE_THRESHOLD = 16` | [klu-pipeline.md](../solvers/klu-pipeline.md), [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `src/solvers/freq_solve.zig` (`fromCircuit`/`setOmega`/`solve`) |
+| Stacked-real $2n$ sweep — sparse path fills the KLU pattern per $\omega$ (streamed copy, no re-assembly), dense below `DENSE_THRESHOLD = 16` | [klu-pipeline.md](../solvers/klu-pipeline.md), [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `src/analysis/solvers/freq_solve.zig` (`fromCircuit`/`setOmega`/`solve`) |
 | Noise adjoint: transposed solve on the same per-$\omega$ factors | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse `solveT`; dense fallback transposes per call) | `freq_solve.zig solveRhsT` |
-| Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `helper/converger.zig` |
+| Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `src/analysis/solvers/converger.zig` |
 
 ---
 
@@ -253,7 +253,7 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
   implementation's `solveRhsT` + per-source dot.
 - §2 in-device noise convention: verified against
   `../VerA/tools/contract.zig` (`noise_gens`/`NoiseGen`) and
-  `src/devices/engine.zig collectNoise` (AD-Jacobian
+  `src/analysis/eval/engine.zig collectNoise` (AD-Jacobian
   conductance read; thermal-only gap marked in source).
 - §3: direct transcription. §4: extrapolation of the repo's batched-eval /
   JFNK GPU style to the frequency axis (frequency batching not yet
@@ -263,7 +263,7 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
 
 - `src/analysis/ac/ac.zig` — AC sweep.
 - `src/analysis/ac/noise.zig` — adjoint noise.
-- `src/solvers/freq_solve.zig` — stacked-real solver.
+- `src/analysis/solvers/freq_solve.zig` — stacked-real solver.
 - Related: `ac/sp.zig`, `ac/stb.zig`, `dc/tf.zig`, `eigen/pz.zig`.
 - Bench fixtures: `benchmark/fixtures/ac/rc_lowpass`,
   `benchmark/fixtures/noise/{amp_noise,rc_noise,resistor_noise}`,

@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "diode reverse",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Independent bisection of resistor/Shockley KCL at each source value, including 1pS junction shunt."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.0003,
+            "atol": 3e-06,
+            "values": [
+              -1.99999999799,
+              -1.79999999819,
+              -1.59999999839,
+              -1.39999999859,
+              -1.19999999879,
+              -0.99999999899,
+              -0.79999999919,
+              -0.59999999939,
+              -0.39999999959,
+              -0.19999999979,
+              0.0
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 0.0003,
+            "atol": 1e-12,
+            "values": [
+              2.0100001663081e-12,
+              1.8099999277155e-12,
+              1.610000133212e-12,
+              1.4100001166639e-12,
+              1.2100003221605e-12,
+              1.0100000835678e-12,
+              8.100000670197e-13,
+              6.1000005047163e-13,
+              4.1000003392355e-13,
+              2.0999563199453e-13,
+              -0.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            -2.0,
+            -1.8,
+            -1.6,
+            -1.4,
+            -1.2,
+            -1.0,
+            -0.8,
+            -0.6,
+            -0.4,
+            -0.2,
+            0.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 11
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4f7658031323412d5f2d8ebafc879cc04b1ab91c593ef42a0e46e75a2e99fc8d"
+}

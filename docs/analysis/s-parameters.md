@@ -120,8 +120,8 @@ kernel sp(lanes = freq points):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `src/solvers/freq_solve.zig` (`initDense` here; `DENSE_THRESHOLD = 16` governs the `fromCircuit` route) |
-| Dense factorization per point | none (dense path) | `src/solvers/dense_lu.zig` |
+| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `src/analysis/solvers/freq_solve.zig` (`initDense` here; `DENSE_THRESHOLD = 16` governs the `fromCircuit` route) |
+| Dense factorization per point | none (dense path) | `src/analysis/solvers/dense_lu.zig` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
 Note: the termination stamp densifies only port branch diagonals — a

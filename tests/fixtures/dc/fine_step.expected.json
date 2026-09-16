@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "DC fine_step",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Sweep includes start, steps toward stop without crossing it. Vout=.75*Vin."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.0,
+              0.001,
+              0.002,
+              0.003,
+              0.004,
+              0.005,
+              0.006,
+              0.007,
+              0.008,
+              0.009,
+              0.01
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.0,
+              0.00075,
+              0.0015,
+              0.00225,
+              0.003,
+              0.00375,
+              0.0045,
+              0.00525,
+              0.006,
+              0.00675,
+              0.0075
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.0,
+              -2.5e-07,
+              -5e-07,
+              -7.5e-07,
+              -1e-06,
+              -1.25e-06,
+              -1.5e-06,
+              -1.75e-06,
+              -2e-06,
+              -2.25e-06,
+              -2.5e-06
+            ]
+          }
+        },
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            0.0,
+            0.001,
+            0.002,
+            0.003,
+            0.004,
+            0.005,
+            0.006,
+            0.007,
+            0.008,
+            0.009,
+            0.01
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 11
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b62a0ee005f0ffb5dfb6f790335a1d46f171c847fb19de04ca2b126bed87ae9f"
+}

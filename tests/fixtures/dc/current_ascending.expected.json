@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Sweep an independent current source",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=1000*Iin; current arrow points from ground into out."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -2.0,
+              -1.0,
+              0.0,
+              1.0,
+              2.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "i(i-sweep)",
+          "values": [
+            -0.002,
+            -0.001,
+            0.0,
+            0.001,
+            0.002
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "6ddbd31bf0d8a26f75c5e66cbd30aeed311b3073b158bc84ba346968c7f1292d"
+}

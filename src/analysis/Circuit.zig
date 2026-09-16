@@ -8,16 +8,18 @@
 //!   DC   A = G;   TRAN  A = G + a*C;   AC  A = G + jwC.
 
 const std = @import("std");
-const devices = @import("devices");
+const device_ir = @import("device_ir");
+const device_eval = @import("device_eval");
+const Prepared = @import("problem_types").Circuit;
+const progress_api = @import("progress.zig");
 const solvers = @import("solvers");
-const memstats = @import("memstats");
 // Leaf types only (Waveform/Options/SimResult) — importing the transient
 // driver here would close a cycle: tran.zig -> ../types.zig -> Circuit.zig.
 const tran = @import("tran/types.zig");
 
-const Batch = devices.batch.Batch;
-const Planes = devices.batch.Planes;
-const ParamRef = devices.batch.ParamRef;
+const Batch = device_ir.Batch;
+const Planes = device_ir.Planes;
+const ParamRef = device_ir.ParamRef;
 
 /// A parameter that takes a DIFFERENT value in the frequency domain.
 /// ngspice keeps a parallel value per device for exactly this (`RESacResist` /
@@ -31,12 +33,11 @@ pub const AcParam = struct {
     saved: f64 = 0,
 };
 
-const NoiseSource = devices.batch.NoiseSource;
-const StateCtlOp = devices.batch.StateCtlOp;
-const PatternBuilder = devices.batch.PatternBuilder;
-const PatternView = devices.batch.PatternView;
-const Proto = devices.batch.Proto;
-const ParEval = devices.par.ParEval;
+const NoiseSource = device_ir.NoiseSource;
+const StateCtlOp = device_ir.StateCtlOp;
+const Proto = device_ir.Proto;
+const PatternView = device_ir.PatternView;
+const ParEval = device_eval.ParEval;
 const converger = solvers.converger;
 
 // ---------------------------------------------------------------------------
@@ -45,15 +46,12 @@ const converger = solvers.converger;
 
 pub const GROUND: u32 = 0;
 
-// ponytail: platform SIMD width — not hardcoded
-const vec_width = std.simd.suggestVectorLength(f32) orelse 8;
-
 // ---------------------------------------------------------------------------
 // Re-exports from solvers
 // ---------------------------------------------------------------------------
 
-pub const BbdBlock = solvers.BbdBlock;
-pub const BbdInfo = solvers.BbdInfo;
+pub const BbdBlock = @import("numerics").BbdBlock;
+pub const BbdInfo = @import("numerics").BbdInfo;
 
 // ---------------------------------------------------------------------------
 // Utility types
@@ -160,7 +158,6 @@ pub const Circuit = struct {
 
     // -- hot: flags --
     has_charge: bool,
-    has_history: bool,
     /// Some charge-carrying batch advances device state at the ACCEPTED step
     /// (freeze_grad latches, absdelay rings): the transient must re-read q
     /// under the committed state before recording it as q_prev, or the next
@@ -192,21 +189,22 @@ pub const Circuit = struct {
 
     // -- cold: structure --
     bbd: ?BbdInfo = null,
-    solver_execution: @import("solvers").types.Execution = .{},
-    /// Reference to the engine-owned parallel eval context (mechanism lives
-    /// in par.zig, ownership in src/engine.zig). Null ⇒ serial eval.
+    solver_execution: @import("numerics").Execution = .{},
+    /// Executor-owned parallel evaluation context. Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
-    /// Engine-owned persistent GPU context (mechanism in src/engine/gpu.zig,
-    /// same ownership pattern as par_eval). Provides single-solve, batch
+    /// Executor-owned persistent GPU context (mechanism in gpu.zig).
+    /// Provides single-solve, batch
     /// Newton, batch frequency, and transient dispatch. Null ⇒ CPU only.
     gpu_hook: ?GpuHook = null,
     gpa: std.mem.Allocator,
+    owns_topology: bool = true,
+    progress: ?progress_api.Callback = null,
 
     // -- cold: linearization memo --
     /// "The four planes currently hold the linearization at this x_op." Set by
     /// `linearize` after it fills the planes; every writer of a plane or device
     /// parameter clears `valid`. Pointer identity is sound: x_op is the single
-    /// arena slice engine.ensureOp builds, handed read-only to each analysis.
+    /// arena slice the OP executor builds, handed read-only to each consumer.
     /// Read once per analysis start (cache-hit check) — cold, no hot-loop use.
     lin: struct { x_ptr: [*]const f64 = undefined, len: u32 = 0, valid: bool = false } = .{},
 
@@ -230,14 +228,90 @@ pub const Circuit = struct {
         return &self.ws.?;
     }
 
+    pub fn checkpoint(self: *Circuit, event: progress_api.Event) error{QueryCancelled}!void {
+        if (self.progress) |callback| try callback.checkpoint(event);
+    }
+
+    /// Consumes prepared storage, including on allocation failure.
+    pub fn fromPrepared(prepared: Prepared) !Circuit {
+        var owned = prepared;
+        errdefer owned.deinit();
+        return allocate(prepared, prepared.allocator, prepared.batches, true);
+    }
+
+    /// Shares immutable topology and creates independent device and solver state.
+    /// The never-evaluated template must outlive this circuit.
+    pub fn instantiate(template: *const Prepared, allocator: std.mem.Allocator) !Circuit {
+        const batches = try allocator.alloc(Batch, template.batches.len);
+        errdefer allocator.free(batches);
+        var count: usize = 0;
+        errdefer for (batches[0..count]) |batch| batch.hooks.deinit(batch.ctx, allocator);
+        for (template.batches, batches) |source, *target| {
+            target.* = try source.hooks.instantiate(source.ctx, allocator);
+            count += 1;
+        }
+        return allocate(template.*, allocator, batches, false);
+    }
+
+    /// Copy a completed dependency's evaluator state, borrowing the same topology.
+    pub fn fromSnapshot(template: *const Prepared, source: *const Circuit, allocator: std.mem.Allocator) !Circuit {
+        if (source.n != template.n or source.col_ptr.ptr != template.col_ptr.ptr)
+            return error.IncompatibleDependency;
+        const batches = try allocator.alloc(Batch, source.batches.len);
+        errdefer allocator.free(batches);
+        var count: usize = 0;
+        errdefer for (batches[0..count]) |batch| batch.hooks.deinit(batch.ctx, allocator);
+        for (source.batches, batches) |original, *target| {
+            target.* = try original.hooks.snapshot(original.ctx, allocator);
+            count += 1;
+        }
+        return allocate(template.*, allocator, batches, false);
+    }
+
+    fn allocate(data: Prepared, allocator: std.mem.Allocator, batches: []Batch, owns_topology: bool) !Circuit {
+        const g_vals = try allocator.alloc(f64, @as(usize, data.nnz) + 1);
+        errdefer allocator.free(g_vals);
+        const c_vals = try allocator.alloc(f64, @as(usize, data.nnz) + 1);
+        errdefer allocator.free(c_vals);
+        const rhs = try allocator.alloc(f64, @as(usize, data.n) + 1);
+        errdefer allocator.free(rhs);
+        const q_vec = try allocator.alloc(f64, @as(usize, data.n) + 1);
+        @memset(c_vals, 0);
+        @memset(q_vec, 0);
+        return .{
+            .gpa = allocator,
+            .col_ptr = data.col_ptr,
+            .row_idx = data.row_idx,
+            .nnz = data.nnz,
+            .trash_slot = data.nnz,
+            .n = data.n,
+            .g_vals = g_vals,
+            .c_vals = c_vals,
+            .rhs = rhs,
+            .q_vec = q_vec,
+            .diag_slots = data.diag_slots,
+            .batches = batches,
+            .current_row = data.current_row,
+            .has_charge = data.has_charge,
+            .has_state_q = data.has_state_q,
+            .has_baseline = false,
+            .gpu_active = false,
+            .g_base = &.{},
+            .c_base = &.{},
+            .needs_tran_op = data.needs_tran_op,
+            .intern_bytes = data.intern_bytes,
+            .intern_offs = data.intern_offs,
+            .bbd = data.bbd,
+            .owns_topology = owns_topology,
+        };
+    }
+
     pub fn deinit(self: *Circuit) void {
         const gpa = self.gpa;
         if (self.ws) |*w| w.deinit(gpa);
         if (self.param_refs) |refs| gpa.free(refs);
         for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
         gpa.free(self.batches);
-        gpa.free(self.col_ptr);
-        gpa.free(self.row_idx);
         gpa.free(self.g_vals);
         gpa.free(self.c_vals);
         // Unconditional: computeBaseline can fail mid-way leaving buffers
@@ -246,11 +320,15 @@ pub const Circuit = struct {
         gpa.free(self.c_base);
         gpa.free(self.rhs);
         gpa.free(self.q_vec);
-        gpa.free(self.diag_slots);
-        gpa.free(self.current_row);
-        if (self.bbd) |bbd| gpa.free(bbd.blocks);
-        gpa.free(self.intern_bytes);
-        gpa.free(self.intern_offs);
+        if (self.owns_topology) {
+            gpa.free(self.col_ptr);
+            gpa.free(self.row_idx);
+            gpa.free(self.diag_slots);
+            gpa.free(self.current_row);
+            if (self.bbd) |bbd| gpa.free(bbd.blocks);
+            gpa.free(self.intern_bytes);
+            gpa.free(self.intern_offs);
+        }
         self.* = undefined;
     }
 
@@ -492,20 +570,7 @@ pub const Circuit = struct {
 
     pub fn combineGC(self: *const Circuit, alpha: f64, out: []f64) void {
         std.debug.assert(out.len >= self.nnz);
-        const W = vec_width;
-        const V = @Vector(W, f64);
-        const av: V = @splat(alpha);
-        const g = self.g_vals;
-        const c = self.c_vals;
-        var i: usize = 0;
-        while (i + W <= self.nnz) : (i += W) {
-            const gv: V = g[i..][0..W].*;
-            const cv: V = c[i..][0..W].*;
-            out[i..][0..W].* = gv + av * cv;
-        }
-        while (i < self.nnz) : (i += 1) {
-            out[i] = g[i] + alpha * c[i];
-        }
+        combinePlanes(std.simd.suggestVectorLength(f64) orelse 1, out[0..self.nnz], self.g_vals[0..self.nnz], self.c_vals[0..self.nnz], alpha);
     }
 
     pub fn denseG(self: *const Circuit, out: []f64) void {
@@ -561,6 +626,23 @@ pub const Circuit = struct {
         for (self.batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
     }
 
+    pub fn beginSolve(self: *Circuit) void {
+        self.lin.valid = false;
+        for (self.batches) |b| if (b.hooks.begin_solve) |f| f(b.ctx);
+    }
+
+    pub fn advanceIteration(self: *Circuit, previous_x: []const f64) void {
+        self.lin.valid = false;
+        for (self.batches) |b| if (b.hooks.advance_iteration) |f| f(b.ctx, previous_x);
+    }
+
+    pub fn checkConvergence(self: *const Circuit, x: []const f64) bool {
+        for (self.batches) |b| if (b.hooks.check_convergence) |f| {
+            if (!f(b.ctx, x)) return false;
+        };
+        return true;
+    }
+
     pub fn updateStates(self: *const Circuit, x: []const f64) ?f64 {
         if (self.gpu_hook) |gh| if (gh.update_states) |f| return f(gh.ctx, x);
         var min_reject: ?f64 = null;
@@ -594,14 +676,6 @@ pub const Circuit = struct {
             if (f(b.ctx, sop)) dirty = true;
         };
         return dirty;
-    }
-
-    pub fn recordHistory(self: *Circuit, x: []const f64, t: f64) void {
-        for (self.batches) |b| if (b.hooks.record_history) |f| f(b.ctx, x, t);
-    }
-
-    pub fn injectHistory(self: *Circuit, t: f64) void {
-        for (self.batches) |b| if (b.hooks.inject_history) |f| f(b.ctx, t, self.rhs);
     }
 
     pub fn minDelay(self: *const Circuit) ?f64 {
@@ -647,7 +721,7 @@ pub const Circuit = struct {
     /// it. Must run BEFORE the eval/Newton pass it describes — a generated
     /// device reads `Instance.abstime`, not the `t` argument of eval.
     /// O(instances), so call it per solve attempt, never per Newton iteration.
-    pub fn setSimState(self: *const Circuit, st: devices.batch.SimState) void {
+    pub fn setSimState(self: *const Circuit, st: device_ir.SimState) void {
         for (self.batches) |b| if (b.hooks.set_sim_state) |f| f(b.ctx, st);
     }
 
@@ -739,21 +813,14 @@ pub const Circuit = struct {
         return try list.toOwnedSlice(gpa);
     }
 
-    /// Freq-sweep GPU dispatch: one flat blob of `omegas.len * 2n` f64 (lane k at
-    /// [k*2n..][0..2n], real‖imag), solved via the gpu_hook's freq_solve_batch
-    /// (or adjoint) in a single launch. Returns null on ANY failure (missing
-    /// hook, alloc, kernel error) so callers `orelse` into their serial path.
-    /// Caller frees the returned blob.
-    pub fn gpuFreqBatch(self: *Circuit, a: std.mem.Allocator, g: []const f64, c: []const f64, omegas: []const f64, rhs: []const f64, n: u32, adjoint: bool) ?[]f64 {
+    /// Write directly into caller-owned frequency lanes. Failure leaves the
+    /// destination available for a complete CPU overwrite.
+    pub fn gpuFreqBatch(self: *Circuit, g: []const f64, c: []const f64, omegas: []const f64, rhs: []const f64, n: u32, adjoint: bool, output: []f64) ?void {
         const gh = self.gpu_hook orelse return null;
         const f = (if (adjoint) gh.freq_solve_adjoint_batch else gh.freq_solve_batch) orelse return null;
-        const nn = 2 * @as(usize, n);
-        const blob = a.alloc(f64, omegas.len * nn) catch return null;
-        f(gh.ctx, g, c, omegas, rhs, blob, n) catch {
-            a.free(blob);
-            return null;
-        };
-        return blob;
+        std.debug.assert(output.len == omegas.len * 2 * @as(usize, n));
+        f(gh.ctx, g, c, omegas, rhs, output, n) catch return null;
+        return {};
     }
 
     pub fn nodeName(self: *const Circuit, node: u32) []const u8 {
@@ -777,105 +844,27 @@ pub fn init(
     protos: []const Proto,
     bbd: ?BbdInfo,
 ) !Circuit {
-    // The pre-dedup key array and the radix ping-pong are build scratch that
-    // dies with this frame, so they do NOT come from `gpa` — see
-    // PatternBuilder's header. Same reasoning as ProtoStore's `staging_gpa`.
-    const scratch = std.heap.smp_allocator;
-    const pat_row = memstats.enter("circuit: pattern build");
-    var pb: PatternBuilder = .{};
-    defer pb.deinit(scratch);
-    try pb.reserve(scratch, n);
-    for (0..n) |i| try pb.add(scratch, @intCast(i), @intCast(i));
-    for (protos) |p| try p.pattern(p.ctx, scratch, &pb);
-    memstats.scaleBy("circuit: pattern build", pb.keys.items.len);
-    memstats.leave(pat_row);
-
-    var ckt: Circuit = undefined;
-    ckt.gpa = gpa;
-    ckt.n = n;
-    ckt.intern_bytes = intern_bytes;
-    ckt.intern_offs = intern_offs;
-    ckt.has_charge = false;
-    ckt.has_history = false;
-    ckt.has_state_q = false;
-    ckt.has_baseline = false;
-    ckt.gpu_active = false;
-    ckt.g_base = &.{};
-    ckt.c_base = &.{};
-    ckt.bbd = bbd;
-    ckt.par_eval = null;
-    ckt.ws = null;
-    ckt.param_refs = null;
-    // `undefined` above means struct defaults do NOT apply — every field is
-    // assigned here or it is garbage.
-    ckt.ac_params = &.{};
-    ckt.gpu_hook = null;
-
-    const csc_row = memstats.enter("circuit: CSC + planes");
-    defer memstats.leave(csc_row);
-    ckt.nnz = try pb.toCsc(gpa, scratch, n, &ckt.col_ptr, &ckt.row_idx);
-    errdefer gpa.free(ckt.col_ptr);
-    errdefer gpa.free(ckt.row_idx);
-    ckt.trash_slot = ckt.nnz;
-    ckt.g_vals = try gpa.alloc(f64, ckt.nnz + 1);
-    errdefer gpa.free(ckt.g_vals);
-    ckt.c_vals = try gpa.alloc(f64, ckt.nnz + 1);
-    errdefer gpa.free(ckt.c_vals);
-    ckt.rhs = try gpa.alloc(f64, @as(usize, n) + 1);
-    errdefer gpa.free(ckt.rhs);
-    ckt.q_vec = try gpa.alloc(f64, @as(usize, n) + 1);
-    errdefer gpa.free(ckt.q_vec);
-    // eval() only re-zeroes c_vals/q_vec when has_charge; chargeless
-    // circuits must still expose an exact C = 0 plane (pz/stb/ac read it).
-    @memset(ckt.c_vals, 0);
-    @memset(ckt.q_vec, 0);
-
-    ckt.diag_slots = try gpa.alloc(u32, n);
-    errdefer gpa.free(ckt.diag_slots);
-    for (0..n) |i| ckt.diag_slots[i] = ckt.findSlot(@intCast(i), @intCast(i)).?;
-
-    const pv: PatternView = .{
-        .col_ptr = ckt.col_ptr,
-        .row_idx = ckt.row_idx,
-        .n = ckt.n,
-        .trash_slot = ckt.trash_slot,
-    };
-
-    const batches = try gpa.alloc(Batch, protos.len);
-    errdefer gpa.free(batches);
-    var n_final: usize = 0;
-    errdefer for (batches[0..n_final]) |b| b.hooks.deinit(b.ctx, gpa);
-    for (protos, 0..) |p, bi| {
-        // `p.type_name` is the device type's static name pointer — the same
-        // identity the Builder keys protos on, so the row interns for free.
-        const b_row = memstats.enter(p.type_name);
-        batches[bi] = try p.finalize(p.ctx, gpa, pv);
-        memstats.scaleBy(p.type_name, batches[bi].count);
-        memstats.leave(b_row);
-        n_final = bi + 1;
-        if (batches[bi].has_charge) ckt.has_charge = true;
-        if (batches[bi].hooks.inject_history != null) ckt.has_history = true;
-        if (batches[bi].has_charge and
-            (batches[bi].hooks.update_state != null or batches[bi].hooks.commit_state != null))
-            ckt.has_state_q = true;
-    }
-    ckt.batches = batches;
-
-    // Row-kind mask: branch-current unknowns get abstol, node voltages get
-    // vntol in the converger (ngspice NIconvTest split).
-    ckt.current_row = try gpa.alloc(bool, n);
-    @memset(ckt.current_row, false);
-    for (batches) |b| if (b.hooks.mark_current_rows) |f| f(b.ctx, ckt.current_row);
-
-    // Protos consumed: instance data moved into batches, shells freed.
-    for (protos) |p| p.destroy(p.ctx, gpa);
-    return ckt;
+    return Circuit.fromPrepared(try Prepared.init(gpa, n, intern_bytes, intern_offs, protos, bbd));
 }
 
 // ---------------------------------------------------------------------------
-// zeroSimd / copySimd live in solvers/types.zig (the DAG leaf) so files
+// zeroSimd / copySimd live in problem/numerics.zig so files
 // above and below Circuit share one copy. Re-exported for the 50+ callers.
 // ---------------------------------------------------------------------------
 
-pub const zeroSimd = solvers.types.zeroSimd;
-pub const copySimd = solvers.types.copySimd;
+pub const zeroSimd = @import("numerics").zeroSimd;
+pub const copySimd = @import("numerics").copySimd;
+
+/// Independent CSC entries: out = G + alpha*C. W=1 is also the tail and oracle.
+pub fn combinePlanes(comptime W: usize, out: []f64, g: []const f64, c: []const f64, alpha: f64) void {
+    std.debug.assert(out.len == g.len and out.len == c.len);
+    const V = @Vector(W, f64);
+    const scale: V = @splat(alpha);
+    var i: usize = 0;
+    while (i + W <= out.len) : (i += W) {
+        const gv: V = g[i..][0..W].*;
+        const cv: V = c[i..][0..W].*;
+        out[i..][0..W].* = gv + scale * cv;
+    }
+    if (comptime W > 1) combinePlanes(1, out[i..], g[i..], c[i..], alpha);
+}

@@ -28,15 +28,10 @@ implementation + bench fixtures.
 | [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary noise, adjoint pnoise | implemented (frozen-time LPTV approximation; full LPTV/adjoint: documented target) |
 | [pac.md](pac.md) | Periodic AC: harmonic conversion matrix over the PSS orbit | implemented (settling PSS front end) |
 | [mpde-envelope.md](mpde-envelope.md) | MPDE multirate formulation, Fourier-envelope, sample-envelope following | partial (sample-envelope variant, quasi-static inner; MPDE/Fourier-envelope: documented target) |
-| [matex-exponential-integrators.md](matex-exponential-integrators.md) | Exponential integrators, Krylov e^{Ah}v, I-/R-MATEX | not implemented (design doc) |
-
-## Index — future analyses (spec'd, not implemented)
-
-| Doc | Covers | Blocking solver need |
-|---|---|---|
-| [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC) | transpose solve on the conversion matrix / shooting-Jacobian reuse |
-| [qpss.md](qpss.md) | Quasi-periodic steady state (QP-HB, MFT shooting) | Krylov-HB / Krylov shooting (dense is infeasible at $nK$) |
-| [dcmatch.md](dcmatch.md) | Pelgrom mismatch offset via adjoint sensitivity | `solveT` on KLU factors + device $\partial F/\partial p$ stamps |
+| [matex-exponential-integrators.md](matex-exponential-integrators.md) | Exponential integrators, Krylov e^{Ah}v, I-/R-MATEX | implemented (explicit linear R-MATEX; I-MATEX/nonlinear/GPU paths remain targets) |
+| [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC) | implemented (dense adjoint conversion matrix; matrix-free/time-domain/GPU extensions remain targets) |
+| [qpss.md](qpss.md) | Quasi-periodic steady state (QP-HB, MFT shooting) | implemented (two-tone QP-HB with GMRES; MFT/full multidimensional preconditioning remain targets) |
+| [dcmatch.md](dcmatch.md) | Pelgrom mismatch offset via adjoint sensitivity | implemented (finite-difference stamps; analytic stamps/AC mismatch remain targets) |
 
 ## Beat-Spectre checklist mapping (RESEARCH.md §2)
 
@@ -46,18 +41,18 @@ implementation + bench fixtures.
 | 2 | Robust OP homotopy chain: gmin → source → pseudo-transient | [operating-point-homotopy.md](operating-point-homotopy.md) |
 | 3 | Krylov-shooting PSS + pnoise (SpectreRF core) | [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md), [periodic-noise.md](periodic-noise.md), [pac.md](pac.md), [pxf.md](pxf.md) |
 | 4 | Multirate/envelope for RF (MPDE) | [mpde-envelope.md](mpde-envelope.md), [qpss.md](qpss.md) |
-| 5 | Parallel/GPU transient (megakernel angle) | §4 of [transient-integration.md](transient-integration.md) + §4 of every doc; kernel spec in `src/devices/engine.zig` |
+| 5 | Parallel/GPU transient (megakernel angle) | §4 of [transient-integration.md](transient-integration.md) + §4 of every doc; kernel spec in `src/analysis/eval/engine.zig` |
 | — | Past-Spectre: matrix-exponential integrators | [matex-exponential-integrators.md](matex-exponential-integrators.md) |
 | — | AC + adjoint noise (baseline capability) | [ac-small-signal-noise.md](ac-small-signal-noise.md) |
 | — | Spectre-suite parity: sp/stb/pz/tf/sens/disto/four/MC/dcmatch | [s-parameters.md](s-parameters.md), [stability.md](stability.md), [pole-zero.md](pole-zero.md), [tf.md](tf.md), [sensitivity.md](sensitivity.md), [distortion.md](distortion.md), [fourier-thd.md](fourier-thd.md), [ensemble-sweeps.md](ensemble-sweeps.md), [dcmatch.md](dcmatch.md) |
 
 ## Shared machinery
 
-All analyses converge through `src/solvers/converger.zig`
+Nonlinear analyses use `src/analysis/solvers/converger.zig`
 (one `Tolerances` bundle, one acceptance kernel, direct-Newton + JFNK
 strategies) and, on GPU, the cooperative megakernel in
-`src/devices/engine.zig` (batched SoA device eval, on-device
+`src/analysis/eval/engine.zig` (batched SoA device eval, on-device
 GMRES, CPU-identical acceptance gates). Linear-solver theory lives in
 [docs/solvers/](../solvers/README.md); each analysis doc's **Solvers
 used** section maps its phases onto those docs and
-`src/solvers/*`.
+`src/analysis/solvers/*`.

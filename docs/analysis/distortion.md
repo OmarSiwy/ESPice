@@ -166,7 +166,7 @@ kernel disto(lanes = freq points):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-frequency complex solves (stacked-real dense) | none (dense path) | `src/solvers/dense_lu.zig` `buildComplexAdmittance` + `factorizeSolve` |
+| Per-frequency complex solves (stacked-real dense) | none (dense path) | `src/analysis/solvers/dense_lu.zig` `buildComplexAdmittance` + `factorizeSolve` |
 | Sparse upgrade for large n | [klu-pipeline.md](../solvers/klu-pipeline.md) via `freq_solve.zig` (same pattern at $\omega$ and $2\omega$) | upgrade path |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 

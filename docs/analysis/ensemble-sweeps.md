@@ -151,11 +151,11 @@ compose: big circuits use the former, small circuits the latter.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` |
+| Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/direct.zig` via `converger.run` |
 | Workspace/pattern reuse; memcmp/sig refactor bypass for lanes where values repeat | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()`, `converger.Options.matrix_sig` |
 | Ladder fallback for hard corners | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig solveLadder` (dc-sweep style demotion; MC currently records non-convergence instead — upgrade knob) |
-| Batched GPU solves | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) + megakernel JFNK | `src/devices/engine.zig` |
-| Within-solve lane-parallel eval | none (eval-side, not solver) | `src/devices/engine.zig` |
+| Batched GPU solves | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) + megakernel JFNK | `src/analysis/eval/engine.zig` |
+| Within-solve lane-parallel eval | none (eval-side, not solver) | `src/analysis/eval/engine.zig` |
 
 ---
 

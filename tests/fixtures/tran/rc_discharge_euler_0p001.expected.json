@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "RC discharge, euler, tau=0.001s",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "With UIC, Vout(0)=1 and Vout(t)=exp(-t/(R*C)); I(Vin)=Vout/R."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.004,
+            "atol": 2e-06,
+            "values": [
+              1.0,
+              0.99004983374917,
+              0.90483741803596,
+              0.60653065971263,
+              0.36787944117144,
+              0.13533528323661,
+              0.049787068367864,
+              0.0067379469990855
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            1e-05,
+            0.0001,
+            0.0005,
+            0.001,
+            0.002,
+            0.003,
+            0.005
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "abfe5f40f297cb655a54b87932341b0dcf51d1e35c4e1c99330cfb6d37646c45"
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Harmonic order must be an integer.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Harmonic order must be an integer."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "422c5c4a8e16b3162fc90c7b885f66d5bbe1a06e8061eb843b3b9cb4e70a0a2b"
+}

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "5 frequency lanes with DEC sweep",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "One decade with N-1 intervals produces N frequencies. H=1/(1+j*2*pi*f*.001)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.024704523031858,
+                -0.15522309613465
+              ],
+              [
+                0.0079464903650645,
+                -0.088788195476327
+              ],
+              [
+                0.0025266295636082,
+                -0.050202048829271
+              ],
+              [
+                0.00080037317848259,
+                -0.028279543512188
+              ],
+              [
+                0.00025323881296516,
+                -0.015911463888303
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            1778.2794100389,
+            3162.2776601684,
+            5623.4132519035,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8c75bad03681513609676c015f3d429830ae295003f6d399e85fbd4816207102"
+}

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Differential noise sums independent resistor-noise powers",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Ideal input is noiseless; each divider midpoint contributes 4*kB*T*Rth. Differential PSD is twice that value."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 2e-05,
+            "atol": 1e-18,
+            "values": [
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09,
+              4.9863922670604e-09
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            21.544346900319,
+            46.415888336128,
+            100.0,
+            215.44346900319,
+            464.15888336128,
+            1000.0,
+            2154.4346900319,
+            4641.5888336128,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 10
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1b927855339ac3e21334deb2407c43d1bbc8bb1e8e393d9395044661fc6594c2",
+  "known_gaps": [
+    "differential analysis output must be resolved as a node difference"
+  ]
+}

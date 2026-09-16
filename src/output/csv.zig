@@ -1,12 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
+const types = @import("output_types");
+const Plot = types.Plot;
 
 /// Write simulation data as CSV. Complex variables split into _re/_im columns.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     const nvars = plot.varnames.len;
-    const per: usize = if (plot.is_complex) 2 else 1;
-    if (plot.data.len != plot.npoints * nvars * per) return error.DataLengthMismatch;
+    try types.validatePlot(.csv, plot);
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);

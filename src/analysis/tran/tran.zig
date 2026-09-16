@@ -47,7 +47,7 @@ const integrator = struct {
     /// immediately: mos6 at 373 steps was 8.2e-2 rms against its own converged
     /// reference, worse than the 316-step trapezoidal run.
     const Coeffs = struct { ag0: f64, ag2: f64 };
-    fn coeffs(method: Method, dt: f64, dt_prev: f64) Coeffs {
+    pub fn coeffs(method: Method, dt: f64, dt_prev: f64) Coeffs {
         return switch (method) {
             .backward_euler => .{ .ag0 = 1.0 / dt, .ag2 = 0 },
             .trapezoidal => .{ .ag0 = 2.0 / dt, .ag2 = 0 },
@@ -71,7 +71,7 @@ const integrator = struct {
     /// tables, which is why BE reads the same either way — and why the order-2
     /// GEAR entry (2/9) was the only one that could be, and was, wrong: it had
     /// been sharing `trapCoeff[1]`, a 1.63x looser bound than GEAR asks for.
-    fn lteCoeff(method: Method) f64 {
+    pub fn lteCoeff(method: Method) f64 {
         return switch (method) {
             .backward_euler => 0.5, // gearCoeff[0] == trapCoeff[0]
             .trapezoidal => 1.0 / 12.0, // trapCoeff[1]
@@ -133,7 +133,7 @@ const integrator = struct {
     /// promotion probe (dctran.c:901-913) that is the method being PROBED.
     /// `cur_method`/`c` are the ones the step actually integrated with, which
     /// is what `CKTstate0[qcap+1]` holds when CKTterr reads it.
-    fn stepBound(
+    pub fn stepBound(
         method: Method,
         cur_method: Method,
         q_cur: []const f64,
@@ -238,7 +238,6 @@ const TranHook = struct {
     /// (nothing carries charge, or the GPU owns the stamp).
     qt_snap: ?[]f64 = null,
     has_charge: bool,
-    has_history: bool,
 
     pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
@@ -284,7 +283,6 @@ const TranHook = struct {
                     ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]);
             }
         }
-        if (self.has_history) ckt.injectHistory(t);
     }
 
     pub fn vals(self: TranHook, ckt: *root.Circuit) []f64 {
@@ -318,7 +316,7 @@ pub fn simulateInto(
     // A streamed recorder cannot rewind already-written samples on fallback.
     if (comptime @TypeOf(waveform) == *Waveform) if (ckt.gpu_hook) |gh| {
         if (gh.simulate_tran) |gt| {
-            if (options.step_fn == null and !ckt.has_history) gpu: {
+            if (options.step_fn == null and ckt.progress == null) gpu: {
                 const len0 = waveform.len;
                 const r = gt(gh.ctx, x, probes, waveform, options) catch {
                     waveform.len = len0;
@@ -330,7 +328,6 @@ pub fn simulateInto(
     };
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
-    const has_history = ckt.has_history;
     const trap = options.method == .trapezoidal;
     const gear = options.method == .gear_2;
 
@@ -418,7 +415,6 @@ pub fn simulateInto(
         }
     }
 
-    if (has_history) ckt.recordHistory(x, 0);
     // Seed absdelay rings with the operating point: commitStates drives the
     // §4.5.7 zHistPush, whose first push fills the WHOLE ring with (0, v_op).
     // Without it the first Newton solve queries an all-zero ring and every
@@ -462,9 +458,7 @@ pub fn simulateInto(
     // per-device delays if mixed-td circuits still show edge smear.
     var echo_bps: [256]f64 = undefined;
     var n_echo: usize = 0;
-    // Keyed on minDelay availability itself — `has_history` is the dead
-    // histInject channel and gated the whole echo machinery off for every
-    // generated line (VerA now emits `delays`, which is what minDelay reads).
+    // Generated absdelay models declare the delay used for wavefront echoes.
     const echo_td: ?f64 = ckt.minDelay();
     if (echo_td) |td_| {
         // t = 0 is itself a breakpoint (source edges often start there).
@@ -522,8 +516,18 @@ pub fn simulateInto(
     // the dt the LTE wanted before the breakpoint clamp shortened it.
     var bp_target: ?f64 = null;
     var bp_save_dt: f64 = 0;
+    var attempted_dt = dt;
 
     while (t < options.t_stop and steps < options.max_steps) {
+        if (st_attempts != 0) try ckt.checkpoint(.{
+            .phase = .transient,
+            .completed = st_attempts,
+            .simulation_time = t,
+            .step_size = attempted_dt,
+            .next_step = dt,
+            .accepted = steps,
+        });
+        attempted_dt = dt;
         // Publish the point this attempt is aiming at BEFORE anything evaluates
         // it: converger.run below drives eval (§9.10 `$abstime`, `ddt`) and
         // updateStates, and a generated device reads Instance.abstime, not the
@@ -555,13 +559,15 @@ pub fn simulateInto(
             .q_snap = if (has_charge) q_hist[0] else null,
             .qt_snap = if (n_qt > 0) qt_hist[0] else null,
             .has_charge = has_charge,
-            .has_history = has_history,
         };
 
         simdCopy(trial, cur);
-        var nr_opts = options.tol.newtonOpts(options.tol.itl4);
+        var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         nr_opts.dx_clamp = std.math.inf(f64);
-        const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+        const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+        };
         st_attempts += 1;
         st_nr_iters += nr.iterations;
 
@@ -638,9 +644,21 @@ pub fn simulateInto(
                 dt_next = dt;
             } else {
                 const del = integrator.stepBound(
-                    eff_method, eff_method, lq0, lq1, lq2, lq3,
-                    lip, cf, dt, dt_prev, dt_prev2,
-                    options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
+                    eff_method,
+                    eff_method,
+                    lq0,
+                    lq1,
+                    lq2,
+                    lq3,
+                    lip,
+                    cf,
+                    dt,
+                    dt_prev,
+                    dt_prev2,
+                    options.tol.reltol,
+                    options.tol.abstol,
+                    options.tol.chgtol,
+                    options.tol.trtol,
                 );
                 if (del < 0.9 * dt) {
                     st_rej_lte += 1;
@@ -682,9 +700,21 @@ pub fn simulateInto(
             // the delayed wavefront at 33.04 ns).
             if (steps > 0 and use_be) {
                 const trial_del = integrator.stepBound(
-                    options.method, eff_method, lq0, lq1, lq2, lq3,
-                    lip, cf, dt, dt_prev, dt_prev2,
-                    options.tol.reltol, options.tol.abstol, options.tol.chgtol, options.tol.trtol,
+                    options.method,
+                    eff_method,
+                    lq0,
+                    lq1,
+                    lq2,
+                    lq3,
+                    lip,
+                    cf,
+                    dt,
+                    dt_prev,
+                    dt_prev2,
+                    options.tol.reltol,
+                    options.tol.abstol,
+                    options.tol.chgtol,
+                    options.tol.trtol,
                 );
                 const nd2 = @min(2.0 * dt, trial_del);
                 if (nd2 > 1.05 * dt) use_be = false;
@@ -756,7 +786,6 @@ pub fn simulateInto(
             bp_target = null;
         }
 
-        if (has_history) ckt.recordHistory(cur, t);
         // §4.5.2 accepted-step bookkeeping for devices whose state is not
         // revertible. Here — once per ACCEPTED point, beside the host's own
         // history record — and not inside the Newton loop, which ran it per
@@ -841,6 +870,14 @@ pub fn simulateInto(
         if (t + dt > options.t_stop) dt = options.t_stop - t;
     }
 
+    try ckt.checkpoint(.{
+        .phase = .transient,
+        .completed = st_attempts,
+        .simulation_time = t,
+        .step_size = attempted_dt,
+        .next_step = if (t < options.t_stop) dt else 0,
+        .accepted = steps,
+    });
     if (stats_on) {
         std.debug.print(
             "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
@@ -885,359 +922,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-const testing = std.testing;
-test "waveform: doubling fallback keeps probe-major data intact" {
-    const allocator = testing.allocator;
-    var waveform = try Waveform.init(allocator, 2, 2);
-    defer waveform.deinit();
-
-    const probes = [_]u32{ 0, 1 };
-    for (0..10) |i| {
-        const fi: f64 = @floatFromInt(i);
-        const xv = [_]f64{ fi, 100.0 + fi };
-        try waveform.record(fi * 1e-9, &xv, &probes);
-    }
-
-    try testing.expectEqual(@as(u32, 10), waveform.len);
-    try testing.expect(waveform.capacity >= 10);
-    for (0..10) |i| {
-        const fi: f64 = @floatFromInt(i);
-        try testing.expectApproxEqAbs(fi * 1e-9, waveform.timeSlice()[i], 1e-24);
-        try testing.expectApproxEqAbs(fi, waveform.probeValues(0)[i], 1e-15);
-        try testing.expectApproxEqAbs(100.0 + fi, waveform.probeValues(1)[i], 1e-15);
-    }
-}
-
-test "waveform: toRows tiling crosses tile boundaries exactly" {
-    // 70 points over a 32-point tile: two full tiles plus a 6-point remainder,
-    // with more probes than one tile of rows. Exact equality — the tiling only
-    // reorders the copy, never the values.
-    const allocator = testing.allocator;
-    const n_probes = 5;
-    var waveform = try Waveform.init(allocator, n_probes, 70);
-    defer waveform.deinit();
-
-    var xv: [n_probes]f64 = undefined;
-    const probes = [_]u32{ 0, 1, 2, 3, 4 };
-    for (0..70) |i| {
-        for (&xv, 0..) |*v, k| v.* = @as(f64, @floatFromInt(i)) * 10.0 + @as(f64, @floatFromInt(k));
-        try waveform.record(@as(f64, @floatFromInt(i)) * 1e-9, &xv, &probes);
-    }
-
-    const ncols = n_probes + 1;
-    const rows = try waveform.toRows(allocator, ncols);
-    defer allocator.free(rows);
-    try testing.expectEqual(@as(usize, 70 * ncols), rows.len);
-    for (0..70) |p| {
-        try testing.expectEqual(@as(f64, @floatFromInt(p)) * 1e-9, rows[p * ncols]);
-        for (0..n_probes) |k| {
-            const want = @as(f64, @floatFromInt(p)) * 10.0 + @as(f64, @floatFromInt(k));
-            try testing.expectEqual(want, rows[p * ncols + k + 1]);
-        }
-    }
-}
-
-test "coeffs: BE 1/dt, trap 2/dt, gear-2 variable-step BDF2" {
-    const dt: f64 = 1e-9;
-    try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt).ag0, 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 2e9), integrator.coeffs(.trapezoidal, dt, dt).ag0, 1e-12);
-    // r == 1 must reproduce the uniform-step triple that used to be hardcoded.
-    const u = integrator.coeffs(.gear_2, dt, dt);
-    try testing.expectApproxEqRel(@as(f64, 1.5e9), u.ag0, 1e-12);
-    try testing.expectApproxEqRel(@as(f64, 0.5e9), u.ag2, 1e-12);
-    // Consistency on a NON-uniform grid is the whole point: the corrector must
-    // be exact on constants (sum of coefficients zero, ag1 = -(ag0+ag2)) and on
-    // the linear ramp q(t) = t through the actual node spacing 0, dt1, dt1+dt.
-    for ([_]f64{ 0.25, 0.5, 1.0, 2.0, 4.0 }) |r| {
-        const dt1 = dt / r;
-        const c = integrator.coeffs(.gear_2, dt, dt1);
-        const ag1 = -(c.ag0 + c.ag2);
-        // q0 = 0, q1 = -dt, q2 = -(dt+dt1) as offsets from t_n: dq/dt == 1.
-        const dqdt = c.ag0 * 0.0 + ag1 * (-dt) + c.ag2 * (-(dt + dt1));
-        try testing.expectApproxEqRel(@as(f64, 1.0), dqdt, 1e-12);
-        // and exact on the quadratic too — BDF2 is a 3-point formula, exact
-        // through degree 2, so d/dt(t^2) at t_n must come out 0. The surviving
-        // terms are each O(dt) = 1e-9, so the tolerance below is rounding noise
-        // and not a free pass: 1e-6/dt would have accepted anything.
-        const sq = c.ag0 * 0.0 + ag1 * (dt * dt) + c.ag2 * ((dt + dt1) * (dt + dt1));
-        try testing.expectApproxEqAbs(@as(f64, 0.0), sq, 1e-22);
-    }
-}
-
-// cktterr.c:24-34 verbatim. gear_2 used to read trapCoeff[1] (1/12), which is
-// 8/3 smaller and — through the sqrt at order 2 — a 1.63x LOOSER dt bound than
-// GEAR's own error control asks for. Pin all three against the C tables.
-test "lteCoeff: ngspice gearCoeff/trapCoeff tables" {
-    try testing.expectEqual(@as(f64, 0.5), integrator.lteCoeff(.backward_euler));
-    try testing.expectApproxEqRel(@as(f64, 0.08333333333), integrator.lteCoeff(.trapezoidal), 1e-10);
-    try testing.expectApproxEqRel(@as(f64, 0.2222222222), integrator.lteCoeff(.gear_2), 1e-10);
-    // The bound is trtol*tol/(coeff*|dd|) under a sqrt, so the ratio a gear
-    // deck's dt moves by is sqrt(trapCoeff[1]/gearCoeff[1]) = 0.6124.
-    try testing.expectApproxEqRel(
-        @as(f64, 0.61237243569),
-        @sqrt(integrator.lteCoeff(.trapezoidal) / integrator.lteCoeff(.gear_2)),
-        1e-9,
-    );
-}
-
-// The whole point of per-device-state LTE, as a pure function. Two charge
-// contributions that cancel EXACTLY on their shared row: each swings 2 pC over
-// the step, the row sums to a flat zero. ngspice's CKTterr sees each state and
-// binds; the summed q plane sees nothing and steps 14 decades too far. Fails
-// the moment stepBound is fed row-summed charge again.
-test "stepBound: per-state min survives what the summed row cancels" {
-    const dt: f64 = 1e-9;
-    const reltol: f64 = 1e-3;
-    const abstol: f64 = 1e-12;
-    const chgtol: f64 = 1e-14;
-    const trtol: f64 = 7.0;
-
-    // 2*W+1: W cancelling pairs through the vector body, one dead slot so the
-    // scalar tail runs too.
-    const len = 2 * W + 1;
-    var s_cur: [len]f64 = @splat(0);
-    var s_prev: [len]f64 = @splat(0);
-    const s_zero: [len]f64 = @splat(0);
-    var k: usize = 0;
-    while (k + 1 < len) : (k += 2) {
-        s_cur[k] = 3e-12;
-        s_cur[k + 1] = -3e-12;
-        s_prev[k] = 1e-12;
-        s_prev[k + 1] = -1e-12;
-    }
-    // Row view: every pair sums to zero, and so does its whole history.
-    const row: [W + 1]f64 = @splat(0);
-
-    const del_state = integrator.stepBound(
-        .backward_euler, .backward_euler, &s_cur, &s_prev, &s_zero, &s_zero, &s_zero,
-        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
-    );
-    const del_row = integrator.stepBound(
-        .backward_euler, .backward_euler, &row, &row, &row, &row, &row,
-        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
-    );
-
-    // Closed form, so the CKTterr formula is pinned and not just the inequality:
-    //   i_new     = (1/dt)*(3e-12 - 1e-12)            = 2e-3
-    //   volttol   = abstol + reltol*i_new             = 2.000001e-6
-    //   chargetol = reltol*3e-12/dt                   = 3e-6      <- binds
-    //   dd  = ((3e-12-1e-12)/dt - (1e-12-0)/dt)/(2*dt) = 5e5
-    //   del = trtol*3e-6 / (0.5*5e5)                  = 8.4e-11
-    try testing.expectApproxEqRel(@as(f64, trtol * 3e-6 / 2.5e5), del_state, 1e-12);
-    try testing.expect(del_state < dt);
-    // The summed row: dd == 0, so the bound collapses to trtol*tol/abstol.
-    try testing.expect(del_row > 1e6 * dt);
-
-    // The ground-mirror entries are INERT, which is why the tape needs no
-    // trash-row mask. ngspice terrs one state per instance (captrunc.c:
-    // `CKTterr(here->CAPqcap)`, capdefs.h: CAPnumStates = 2 for q AND its
-    // current, i.e. ONE charge); the tape carries q on one terminal and -q on
-    // the other, and the old per-row path never saw the ground side at all
-    // because stepBound walks q_hist[0..n], excluding the trash cell q_vec[n].
-    // Every CKTterr term is even in q — |q|, |dd|, |i| — so the mirror scores
-    // identically and cannot move the min. Masking it would be work for zero
-    // numerical effect; this assert is what says so.
-    const one_sided = [_]f64{ 3e-12, 0 };
-    const one_sided_p = [_]f64{ 1e-12, 0 };
-    const mirrored = [_]f64{ 3e-12, -3e-12 };
-    const mirrored_p = [_]f64{ 1e-12, -1e-12 };
-    const pair_zero = [_]f64{ 0, 0 };
-    const del_one = integrator.stepBound(
-        .backward_euler, .backward_euler, &one_sided, &one_sided_p, &pair_zero, &pair_zero, &pair_zero,
-        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
-    );
-    const del_mirror = integrator.stepBound(
-        .backward_euler, .backward_euler, &mirrored, &mirrored_p, &pair_zero, &pair_zero, &pair_zero,
-        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
-    );
-    try testing.expectEqual(del_one, del_mirror);
-
-    // CKTterr is HOMOGENEOUS OF DEGREE ZERO in the charge: tol scales with |q|
-    // (both volttol and chargetol) and so does |dd|, so `del` does not depend on
-    // how big the contribution is — only on its RELATIVE curvature. Away from
-    // the abstol/chgtol floors, scaling a state by 1000 leaves its bound put.
-    //
-    // This is the whole reason per-state LTE is not simply "more conservative":
-    // a contribution 1000x smaller than its row-mates is still a full-strength
-    // truncation candidate once it is its own state. It is what ngspice does
-    // too — and it is exactly why devices/kinduc regressed, since espice gives
-    // a K card its own charge states where ngspice folds the mutual flux into
-    // the inductor's single INDflux (indload.c:70-77, and MUT has no MUTtrunc).
-    const big: [2]f64 = .{ s_cur[0] * 1e3, 0 };
-    const big_p: [2]f64 = .{ s_prev[0] * 1e3, 0 };
-    const del_big = integrator.stepBound(
-        .backward_euler, .backward_euler, &big, &big_p, &pair_zero, &pair_zero, &pair_zero,
-        .{ .ag0 = 1.0 / dt, .ag2 = 0 }, dt, dt, dt, reltol, abstol, chgtol, trtol,
-    );
-    try testing.expectApproxEqRel(del_one, del_big, 1e-9);
-}
-
-// The plumbing invariant: every charge the devices stamped is in the tape
-// exactly once, and it is stamped PER INSTANCE, not merged onto the node.
-// Catches a missing scatterQ write, a double write, a stale dedup replay and a
-// ParEval lane overlap — the failure modes that are otherwise silent.
-test "q tape: per-device-state charges, one entry each, summing to the q plane" {
-    const gpa = testing.allocator;
-    const dev = @import("devices");
-    const Cap = dev.models.capacitor;
-    const Proto = dev.batch.Proto;
-
-    // The txl2_3_line shape: a big load cap and a small parasitic sharing
-    // node 1. Per-row LTE differences their SUM; per-state keeps them apart.
-    const CStore = dev.batch.ProtoStore(Cap);
-    const cstore = try gpa.create(CStore);
-    cstore.* = .{};
-    try cstore.append(.{ .c = 7.398e-15 }, .{}, .{ 1, 0 }); // load cap, node 1 -> ground
-    try cstore.append(.{ .c = 5.0e-17 }, .{}, .{ 1, 2 }); // parasitic, node 1 -> node 2
-
-    const protos = [_]Proto{.{
-        .ctx = cstore,
-        .type_name = @typeName(Cap),
-        .pattern = CStore.addPattern,
-        .finalize = CStore.finalize,
-        .destroy = CStore.destroy,
-        .apply_perm = CStore.applyPerm,
-    }};
-
-    const intern_bytes = try gpa.dupe(u8, "000");
-    const intern_offs = try gpa.alloc(u32, 4);
-    for (intern_offs, 0..) |*o, i| o.* = @intCast(i);
-    var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, null);
-    defer ckt.deinit();
-
-    // 2 instances * 2 unknowns. Per NODE there would be 3 rows; per STATE there
-    // are 4 contributions, and node 1 carries two of them.
-    try testing.expectEqual(@as(u32, 4), ckt.qTapeLen());
-
-    const x = [_]f64{ 0.0, 1.0, 0.25 };
-    ckt.eval(&x, 0);
-
-    const tape = try gpa.alloc(f64, ckt.qTapeLen());
-    defer gpa.free(tape);
-    ckt.snapshotQTape(tape);
-
-    // Indexed id*n_u + ru, exactly like rhs_idx.
-    try testing.expectApproxEqRel(@as(f64, 7.398e-15 * 1.00), tape[0], 1e-9);
-    try testing.expectApproxEqRel(@as(f64, -7.398e-15 * 1.00), tape[1], 1e-9);
-    try testing.expectApproxEqRel(@as(f64, 5.0e-17 * 0.75), tape[2], 1e-9);
-    try testing.expectApproxEqRel(@as(f64, -5.0e-17 * 0.75), tape[3], 1e-9);
-
-    // Every contribution lands in exactly one q_vec cell (the ground terminal
-    // in the trash row q_vec[n]), so the two totals are the same number.
-    var sum_tape: f64 = 0;
-    for (tape) |v| sum_tape += v;
-    var sum_plane: f64 = 0;
-    for (ckt.q_vec) |v| sum_plane += v;
-    try testing.expectApproxEqAbs(sum_plane, sum_tape, 1e-30);
-
-    // And the merge the old controller had to live with: node 1's row is the
-    // sum, whose slope is neither cap's.
-    try testing.expectApproxEqRel(
-        @as(f64, 7.398e-15 * 1.00 + 5.0e-17 * 0.75),
-        ckt.q_vec[1],
-        1e-9,
-    );
-}
-
-// The one property the `set_sim_state` plumbing exists for. A generated
-// device reads `Instance.abstime` (§9.10 `$abstime`), NOT the `t` argument of
-// eval — with the host never writing that field every SPICE waveform is
-// pinned at its t=0 value and a PULSE is a flat line at V1. Real generated
-// vsource + resistor, real Circuit, real integrator: nothing is mocked, so a
-// regression anywhere on the path (hook, vtable gate, call site, ordering)
-// fails here.
-test "transient: a PULSE vsource output actually moves with $abstime" {
-    const gpa = testing.allocator;
-    const dev = @import("devices");
-    const Vsrc = dev.models.vsource;
-    const Res = dev.models.resistor;
-    const Proto = dev.batch.Proto;
-
-    // node 0 = ground, node 1 = out, node 2 = vsource branch current.
-    // PULSE(0 5 2ns 1ps 1ps 4ns 20ns): flat 0 up to 2 ns, 5 V over 2..6 ns.
-    const VStore = dev.batch.ProtoStore(Vsrc);
-    const vstore = try gpa.create(VStore);
-    vstore.* = .{};
-    try vstore.append(.{
-        .waveform = 1,
-        .pulse_v1 = 0.0,
-        .pulse_v2 = 5.0,
-        .pulse_td = 2e-9,
-        .pulse_tr = 1e-12,
-        .pulse_tf = 1e-12,
-        .pulse_pw = 4e-9,
-        .pulse_per = 20e-9,
-    }, .{}, .{ 1, 0, 2 });
-
-    const RStore = dev.batch.ProtoStore(Res);
-    const rstore = try gpa.create(RStore);
-    rstore.* = .{};
-    try rstore.append(.{ .r = 1000.0 }, .{}, .{ 1, 0 });
-
-    const protos = [_]Proto{
-        .{
-            .ctx = vstore,
-            .type_name = @typeName(Vsrc),
-            .pattern = VStore.addPattern,
-            .finalize = VStore.finalize,
-            .destroy = VStore.destroy,
-            .apply_perm = VStore.applyPerm,
-        },
-        .{
-            .ctx = rstore,
-            .type_name = @typeName(Res),
-            .pattern = RStore.addPattern,
-            .finalize = RStore.finalize,
-            .destroy = RStore.destroy,
-            .apply_perm = RStore.applyPerm,
-        },
-    };
-
-    // Flat intern table: 3 nodes all labelled "0" → bytes "000", offs step 1.
-    const intern_bytes = try gpa.dupe(u8, "000");
-    const intern_offs = try gpa.alloc(u32, 4);
-    for (intern_offs, 0..) |*o, i| o.* = @intCast(i);
-    var ckt = try root.freeze(gpa, 3, intern_bytes, intern_offs, &protos, null);
-    defer ckt.deinit();
-
-    const x = try gpa.alloc(f64, 3);
-    defer gpa.free(x);
-    root.zeroSimd(x);
-
-    const probes = [_]u32{1};
-    var wf = try Waveform.init(gpa, 1, 512);
-    defer wf.deinit();
-
-    const sim = try simulate(&ckt, x, &probes, &wf, .{
-        .t_stop = 8e-9,
-        .dt_init = 1e-10,
-        .method = .backward_euler,
-    }, gpa);
-    try testing.expect(sim.completed);
-
-    // The waveform must reach BOTH pulse levels. Before the fix every sample
-    // read v1 (abstime stuck at 0), so `hi` was 0 and this failed.
-    const times = wf.timeSlice();
-    const vals = wf.probeValues(0);
-    var lo: f64 = std.math.inf(f64);
-    var hi: f64 = -std.math.inf(f64);
-    for (vals) |v| {
-        lo = @min(lo, v);
-        hi = @max(hi, v);
-    }
-    try testing.expectApproxEqAbs(@as(f64, 0.0), lo, 1e-9);
-    try testing.expectApproxEqAbs(@as(f64, 5.0), hi, 1e-9);
-
-    // ...and reach them at the RIGHT times: a plumbing bug that fed a stale or
-    // off-by-one-step time would still swing 0..5.
-    for (times, vals) |tt, v| {
-        const want: f64 = if (tt < 2e-9 or tt > 6e-9) 0.0 else 5.0;
-        // Skip the 1 ps edges themselves — a sample can legitimately land
-        // mid-ramp there.
-        const on_edge = @abs(tt - 2e-9) < 2e-12 or @abs(tt - 6e-9) < 2e-12;
-        if (!on_edge) try testing.expectApproxEqAbs(want, v, 1e-6);
-    }
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .W = W,
+    .integrator = integrator,
+} else {};

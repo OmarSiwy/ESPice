@@ -1,19 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
+const types = @import("output_types");
+const Plot = types.Plot;
 
 /// Write CITIfile format. Only valid for S-parameter data.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
-    if (!plot.is_complex) return error.NotSParameterData;
+    try types.validatePlot(.citi, plot);
     const nvars = plot.varnames.len;
-    if (nvars < 2) return error.NotSParameterData;
-    if (plot.data.len != plot.npoints * nvars * 2) return error.DataLengthMismatch;
-
-    var has_sparam = false;
-    for (plot.varnames) |name| {
-        if (std.mem.startsWith(u8, name, "S(")) { has_sparam = true; break; }
-    }
-    if (!has_sparam) return error.NotSParameterData;
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -33,13 +26,8 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     try w.writeAll("VAR_LIST_END\n");
 
     for (plot.varnames, 0..) |name, vi| {
-        if (!std.mem.startsWith(u8, name, "S(")) continue;
-        // Convert S(m,n) -> S[m,n] for CITIfile
-        try w.writeAll("DATA S[");
-        const inner_start: usize = 2;
-        const inner_end = std.mem.indexOfScalar(u8, name, ')') orelse name.len;
-        try w.writeAll(name[inner_start..inner_end]);
-        try w.writeAll("] RI\n");
+        const ports = types.sParameter(name) orelse continue;
+        try w.print("DATA S[{d},{d}] RI\n", .{ ports[0], ports[1] });
 
         for (0..plot.npoints) |pt| {
             const idx = pt * nvars * 2 + vi * 2;
@@ -78,4 +66,16 @@ test "CITIfile rejects non-S-parameter" {
     const data = [_]f64{ 0.0, 1.0 };
     const plot: Plot = .{ .title = "bad", .plotname = "Transient", .varnames = &varnames, .is_complex = false, .npoints = 1, .data = &data };
     try std.testing.expectError(error.NotSParameterData, write(io, "zig-out/bad.citi", plot));
+}
+
+test "S-parameter labels accept both producers and reject malformed port identities" {
+    try std.testing.expectEqual([2]u32{ 12, 3 }, types.sParameter("S(12,3)").?);
+    try std.testing.expectEqual([2]u32{ 12, 3 }, types.sParameter("v(S_12_3)").?);
+    for ([_][]const u8{ "S()", "S(0,1)", "S(1,)", "S(1,2,3)", "v(S_)", "v(S_1_0)", "v(S_1_2_3)", "v(S_+1_2)", "v(S_4294967296_1)" }) |name| {
+        try std.testing.expect(types.sParameter(name) == null);
+        try std.testing.expectError(error.NotSParameterData, types.validateSchema(.citi, .{
+            .varnames = &.{ "frequency", "S(1,1)", name },
+            .is_complex = true,
+        }));
+    }
 }

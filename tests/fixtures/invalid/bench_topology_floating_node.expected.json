@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Topology fixture: node `island` has no DC path to ground (cap-coupled",
+  "origin": "benchmark/fixtures/topology/floating_node/circuit.sp",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "At DC both capacitors are open. Island voltage is undetermined; report a floating-node/nonunique-operating-point diagnostic rather than a made-up golden voltage."
+  },
+  "expect": {
+    "status": "error",
+    "category": "nonunique_operating_point",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "0e62886b9b4d833733c870c0c29762e03f08697f4f191d046a682856afb329cf"
+}

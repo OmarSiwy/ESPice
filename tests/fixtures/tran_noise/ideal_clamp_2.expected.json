@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "analysis": "tran_noise",
+  "purpose": "Noise cannot perturb an ideal voltage constraint",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Ideal voltage source fixes Vout at every accepted sample; resistor noise changes only source current."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Noise Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-10,
+            "values": [
+              2,
+              2,
+              2,
+              2,
+              2
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            2.5e-05,
+            5e-05,
+            7.5e-05,
+            0.0001
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "51f2d14a69769d80110da753bc8ce1d2b91333fba03b27c43b31ad454fbae388"
+}

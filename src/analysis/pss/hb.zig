@@ -23,13 +23,7 @@ const dense_lu = solvers.dense_lu;
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    f0: f64,
-    n_harmonics: u16 = 8,
-    max_iter: u16 = 200,
-    hb_tol: f64 = 1e-9,
-};
+pub const Options = @import("requests").Hb;
 
 pub const SolveResult = @import("pss.zig").SolveResult;
 
@@ -117,7 +111,7 @@ pub fn solve(
     {
         const ws = try ckt.workspace();
         root.zeroSimd(x_sample);
-        _ = converger.run(ckt, ws, x_sample, 0, options.tol.newtonOpts(null), root.EvalHook{}) catch {};
+        _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(options.tol, null), root.EvalHook{}) catch {};
         for (0..n) |node| x_hat[node * nf] = x_sample[node];
     }
 
@@ -141,6 +135,7 @@ pub fn solve(
 
     var iter: u16 = 0;
     while (iter < options.max_iter) : (iter += 1) {
+        if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
         // IDFT: Fourier coefficients -> time-domain samples (node-major: x_td[node * nf + k])
         // ponytail: IDFT is trivially parallel per (node, k) — one GPU thread per element
         for (0..n) |node| {

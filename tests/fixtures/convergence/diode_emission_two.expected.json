@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "diode emission two",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Monotonic scalar KCL root: (Vin-v)/R=IS*expm1(v/(N*VT))+1e-12*v, VT=0.025864925786328753 V at 27 C. Solved by 160 bisections."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 2e-06,
+            "values": [
+              1.3768306171346
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 0.0003,
+            "atol": 1e-12,
+            "values": [
+              -0.0036231693828654
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "84351e16bc1769158be9a1371002cdf3d3e69ad9770dbf3b44181ccf1c555e86"
+}

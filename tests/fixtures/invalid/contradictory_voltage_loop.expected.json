@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Ideal voltage loop violates KVL.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Ideal voltage loop violates KVL."
+  },
+  "expect": {
+    "status": "error",
+    "category": "inconsistent_circuit",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "5871b29c573ab6231740a121399b615c1570be1174a09d38da35d35ccf2f926e"
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "analysis": "pss",
+  "purpose": "Periodic RC orbit",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Periodic solution is offset + Im[A*H(jw)*exp(jwt)], H=1/(1+jwRC). Values at t=0 and T agree; no exp(-t/RC) startup term."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic Steady State",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 9.430603528655391e-05,
+            "values": [
+              2.6895538077307,
+              2.8154188637765,
+              3.0494090460637,
+              3.2544560792708,
+              3.3104461922693,
+              3.1845811362235,
+              2.9505909539363,
+              2.7455439207292,
+              2.6895538077307
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            0.000125,
+            0.00025,
+            0.000375,
+            0.0005,
+            0.000625,
+            0.00075,
+            0.000875,
+            0.001
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7397e2b428289549ec2e98dbc66992666dddec36d0de6f3877e997835593f9c8"
+}

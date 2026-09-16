@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "temp",
+  "purpose": "Every requested temperature must be physically valid.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Every requested temperature must be physically valid."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "6f447927ff7b9f633e2bfe43243a018337fb6d98a3626235ac5e63687b921d58"
+}

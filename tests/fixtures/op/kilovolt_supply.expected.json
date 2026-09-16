@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "kilovolt supply",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "KCL: V(out)=Vin*R2/(R1+R2); I(Vin)=-Vin/(R1+R2)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1000
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-14,
+            "values": [
+              750.0
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.00025
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7e4226935b8e62d8dc48d8b013d9974353132d27c431e7ee7fa477341cd327f9"
+}

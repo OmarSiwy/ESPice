@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "dcmatch",
+  "purpose": "Mismatch output node must exist.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Mismatch output node must exist."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "de1f73e5276d0e1c2e36b7c1c23bed21a9b81ba73e1873a10fb47fcbc3ed9f7a"
+}

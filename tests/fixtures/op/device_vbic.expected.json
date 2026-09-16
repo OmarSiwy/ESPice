@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Unit fixture: VBIC NPN bias point (level 4).",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "c67d00ef1699dfe9b001b4005139770553991eb300704d51fee3420b9c34c028"
+  },
+  "origin": "benchmark/fixtures/devices/vbic/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vcc)": {
+            "values": [
+              5.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(b)": {
+            "values": [
+              0.8
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(c)": {
+            "values": [
+              2.2921545235795
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vb)": {
+            "values": [
+              -2.7078453396889e-05
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vcc)": {
+            "values": [
+              -0.0027078454764205
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "6cbefa517814913c9c3ee7afa2bc590ccf51ba82bec554ccae885539125434ca"
+}

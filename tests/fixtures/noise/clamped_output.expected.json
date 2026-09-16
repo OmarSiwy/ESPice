@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Ideal voltage source suppresses output voltage noise",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Zero output impedance makes output noise exactly zero."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 2e-05,
+            "atol": 1e-20,
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "inoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 2e-05,
+            "atol": 1e-20,
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            17.782794100389,
+            31.622776601684,
+            56.234132519035,
+            100.0,
+            177.82794100389,
+            316.22776601684,
+            562.34132519035,
+            1000.0,
+            1778.2794100389,
+            3162.2776601684,
+            5623.4132519035,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 13
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b2d9d692fa2045f9422ba79a527ce003b53b9fa3e36aba538ad59a6357ac97cd"
+}

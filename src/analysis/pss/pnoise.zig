@@ -20,27 +20,12 @@ const converger = @import("solvers").converger;
 const dense_lu = @import("solvers").dense_lu;
 const types = @import("solvers").types;
 
-const q_electron = 1.602176634e-19; // C — tests only; PSDs are device-side now
-
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
 pub const NoiseSource = root.NoiseSource;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    out_node: u32,
-    f_start: f64,
-    f_stop: f64,
-    f_fundamental: f64,
-    points_per_decade: u16 = 10,
-    pss_n_samples: u32 = 64,
-    pss_shoot_tol: f64 = 1e-6,
-    pss_shoot_max_iter: u16 = 50,
-    pss_newton_max_iter: u16 = 50,
-    pss_newton_tol: f64 = 1e-9,
-    n_sidebands: u16 = 7,
-};
+pub const Options = @import("requests").Pnoise;
 
 pub const SweepStatus = struct {
     total_noise: f64,
@@ -52,8 +37,7 @@ pub const SweepStatus = struct {
 // ---------------------------------------------------------------------------
 
 /// `S(f) = white + flicker / |f|^ef` at one sideband. `white`/`flicker` are the
-/// TIME-SAMPLE values (cyclostationary modulation); `ef` is a model parameter,
-/// so it is read off the DC-collected source.
+/// TIME-SAMPLE values (cyclostationary modulation), including the exponent.
 inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
     if (flicker == 0) return white;
     // ponytail: guard f_sideband == 0 (DC sideband); a 1/f PSD diverges there —
@@ -80,7 +64,7 @@ inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
 ///      a. For each sideband m = -M..+M, compute the sideband frequency
 ///         f_m = f_out + m * f_fundamental.
 ///      b. At each time sample, build the complex admittance Y_k = G_k + j*2*pi*f_m*C_k,
-///         factor once, then one back-substitution per noise source.
+///         factor once, then solve the adjoint for the measurement node.
 ///      c. Average |H_k(f_m)|^2 * S_s(f_m, t_k) over the PSS period (frozen-time
 ///         approximation with cyclostationary source modulation and per-kind PSD).
 ///      d. Fold: sum contributions from all sidebands.
@@ -119,10 +103,12 @@ pub fn sweep(
     // Per-sample noise PSDs for cyclostationary modulation: the device's own
     // white and 1/f coefficients at x(t_k), which vary along the orbit.
     // ponytail: SoA layout — n_samples * n_srcs flat array, sample-major
-    const src_white = try allocator.alloc(f64, n_samples * n_srcs);
-    defer allocator.free(src_white);
-    const src_flicker = try allocator.alloc(f64, n_samples * n_srcs);
-    defer allocator.free(src_flicker);
+    const terms = @as(usize, n_samples) * n_srcs;
+    const source_planes = try allocator.alloc(f64, 3 * terms);
+    defer allocator.free(source_planes);
+    const src_white = source_planes[0..terms];
+    const src_flicker = source_planes[terms..][0..terms];
+    const src_exponent = source_planes[2 * terms ..];
 
     for (0..n_samples) |k| {
         const x_k = pss_traj[k * n .. (k + 1) * n];
@@ -136,14 +122,14 @@ pub fn sweep(
 
         const w_row = src_white[k * n_srcs ..][0..n_srcs];
         const f_row = src_flicker[k * n_srcs ..][0..n_srcs];
-        // Match sources by ordering — same ordering guaranteed by
-        // the collector, which iterates devices deterministically.
-        for (0..n_srcs) |s| {
-            // ponytail: trust ordering from collectNoiseSources is deterministic
-            // across calls; if not, a hash-match is the upgrade path
-            const src = if (s < srcs_k.len) srcs_k[s] else noise_sources[s]; // else DC
-            w_row[s] = src.white;
-            f_row[s] = src.flicker;
+        const e_row = src_exponent[k * n_srcs ..][0..n_srcs];
+        if (srcs_k.len != n_srcs) return error.NoiseTopologyChanged;
+        for (srcs_k, noise_sources, w_row, f_row, e_row) |src, original, *white, *flicker, *exponent| {
+            if (src.node_p != original.node_p or src.node_n != original.node_n)
+                return error.NoiseTopologyChanged;
+            white.* = src.white;
+            flicker.* = src.flicker;
+            exponent.* = src.ef;
         }
     }
 
@@ -155,6 +141,8 @@ pub fn sweep(
     defer allocator.free(piv);
     const rhs_work = try allocator.alloc(f64, nn);
     defer allocator.free(rhs_work);
+    simdZero(rhs_work);
+    if (options.out_node != root.GROUND) rhs_work[options.out_node] = 1;
     const x_work = try allocator.alloc(f64, nn);
     defer allocator.free(x_work);
     // Per-source period-averaged |H|^2 * PSD accumulator (one admittance
@@ -172,6 +160,7 @@ pub fn sweep(
     var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
     var pt: usize = 0;
     while (sw.next()) |f_out| : (pt += 1) {
+        if (pt != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = pt, .total = freqs.len });
         var total_density: f64 = 0;
 
         var m: i32 = -m_max;
@@ -186,13 +175,14 @@ pub fn sweep(
             simdZero(h_sq_acc);
 
             // Average over PSS time samples: factor the admittance once per
-            // sample, then one back-substitution per noise source.
+            // sample, then one adjoint back-substitution for all sources.
             for (0..n_samples) |k| {
                 const g_offset = k * n * n;
                 const g_mat = g_mats[g_offset .. g_offset + n * n];
                 const c_mat = c_mats[g_offset .. g_offset + n * n];
                 const w_row = src_white[k * n_srcs ..][0..n_srcs];
                 const f_row = src_flicker[k * n_srcs ..][0..n_srcs];
+                const e_row = src_exponent[k * n_srcs ..][0..n_srcs];
 
                 // Build 2n x 2n complex admittance system:
                 //   | G  -wC | | v_re |   | i_re |
@@ -200,23 +190,19 @@ pub fn sweep(
                 dense_lu.buildComplexAdmittance(n, nn, g_mat, c_mat, omega, a_work);
                 try dense_lu.factorize(nn, a_work, piv);
 
+                // One adjoint solve measures every device generator.
+                dense_lu.solveFactoredT(nn, a_work, piv, rhs_work, x_work);
                 for (noise_sources, 0..) |src, s| {
-                    // Excitation: unit current at noise source nodes
-                    simdZero(rhs_work);
-                    if (src.node_p != root.GROUND) rhs_work[src.node_p] = 1.0;
-                    if (src.node_n != root.GROUND) rhs_work[src.node_n] = -1.0;
-
-                    dense_lu.solveFactored(nn, a_work, piv, rhs_work, x_work);
-
-                    // Transfer to output node (complex: re in [0..n), im in [n..2n))
-                    const h_re = x_work[options.out_node];
-                    const h_im = x_work[n + options.out_node];
+                    const h_re = (if (src.node_p != root.GROUND) x_work[src.node_p] else 0) -
+                        (if (src.node_n != root.GROUND) x_work[src.node_n] else 0);
+                    const h_im = (if (src.node_p != root.GROUND) x_work[n + src.node_p] else 0) -
+                        (if (src.node_n != root.GROUND) x_work[n + src.node_n] else 0);
                     const h_sq = h_re * h_re + h_im * h_im;
 
                     // Per-source PSD with cyclostationary modulation. `f_sb` is
                     // the actual (unfolded) sideband frequency, which is what
                     // a 1/f shape has to be evaluated at.
-                    const psd = sourcePsd(w_row[s], f_row[s], src.ef, f_sb);
+                    const psd = sourcePsd(w_row[s], f_row[s], e_row[s], f_sb);
                     h_sq_acc[s] += h_sq * psd;
                 }
             }
@@ -335,7 +321,8 @@ fn runPSS(
 
     var shoot_iter: u16 = 0;
     while (shoot_iter < options.pss_shoot_max_iter) : (shoot_iter += 1) {
-        integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
+        if (shoot_iter != 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = shoot_iter });
+        try integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
 
         // Shooting residual: phi = x_end - x0
         var max_residual: f64 = 0;
@@ -357,7 +344,7 @@ fn runPSS(
     }
 
     // If not converged, fill the trajectory with the last attempt anyway.
-    integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
+    try integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
 
     return false;
 }
@@ -374,7 +361,7 @@ fn integrateOnePeriod(
     period: f64,
     options: Options,
     ws: *converger.Workspace,
-) void {
+) !void {
     const dt = period / @as(f64, @floatFromInt(n_samples));
     const nr_opts = converger.Options{
         .max_iter = options.pss_newton_max_iter,
@@ -388,41 +375,17 @@ fn integrateOnePeriod(
     // Solve at each subsequent time sample (frozen-time quasi-static Newton).
     for (1..n_samples) |k| {
         const t_k = @as(f64, @floatFromInt(k)) * dt;
-        _ = converger.run(ckt, ws, x_end, t_k, nr_opts, root.EvalHook{}) catch {};
+        _ = converger.run(ckt, ws, x_end, t_k, nr_opts, root.EvalHook{}) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => {},
+        };
 
         const offset = k * n;
         simdCopy(pss_traj[offset .. offset + n], x_end);
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-// The 2q|I| vs 4kTg distinction is the DEVICE's, and its tests are in
-// ac/noise.zig + the ngspice fixtures; what this function owns is the
-// sideband frequency axis.
-
-test "sourcePsd white is flat, and a negative sideband mirrors" {
-    const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .white = 2.0 * q_electron * 1e-3 };
-    try std.testing.expectEqual(src.white, sourcePsd(src.white, 0, 1, 1e6));
-    try std.testing.expectEqual(src.white, sourcePsd(src.white, 0, 1, -1e6));
-}
-
-test "sourcePsd flicker rolls off as 1/|f_sb|^ef" {
-    // KF*|I|^AF = 1e-27, EF = 1 (dionoise.c:99-104).
-    try std.testing.expectApproxEqRel(10.0, sourcePsd(0, 1e-27, 1, 100.0) / sourcePsd(0, 1e-27, 1, 1000.0), 1e-12);
-    // Folded sideband: |f| is what the shape sees.
-    try std.testing.expectEqual(sourcePsd(0, 1e-27, 1, 100.0), sourcePsd(0, 1e-27, 1, -100.0));
-    // mos1noi.c:175-181 nlev 2/3: the exponent is a model parameter.
-    try std.testing.expectApproxEqRel(1e-27 / std.math.pow(f64, 100.0, 1.4), sourcePsd(0, 1e-27, 1.4, 100.0), 1e-12);
-    // Both halves on one generator.
-    try std.testing.expectApproxEqRel(3e-17 + 1e-30, sourcePsd(3e-17, 1e-27, 1, 1e3), 1e-12);
-}
-
-test "sourcePsd flicker near-DC clamp" {
-    // f_sideband == 0 must not blow up (clamped to the 1e-30 floor).
-    const psd = sourcePsd(0, 1e-24, 1, 0.0);
-    try std.testing.expect(std.math.isFinite(psd));
-    try std.testing.expect(psd > 0);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .sourcePsd = sourcePsd,
+} else {};

@@ -1,17 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub const Plot = struct {
-    title: []const u8,
-    plotname: []const u8,
-    varnames: []const []const u8,
-    is_complex: bool,
-    npoints: usize,
-    /// Point-major: all vars for point 0, then all vars for point 1, ...
-    /// For real data: length = npoints * nvars
-    /// For complex data: length = npoints * nvars * 2 (re,im pairs per variable)
-    data: []const f64,
-};
+const types = @import("output_types");
+pub const Plot = types.Plot;
 
 /// Infer the ngspice type string for a variable name.
 /// "time" -> "time", "frequency" -> "frequency",
@@ -103,10 +94,7 @@ pub const Stream = struct {
 };
 
 fn writeInner(io: Io, path: []const u8, plot: Plot, append: bool) !void {
-    const nvars = plot.varnames.len;
-    const per: usize = if (plot.is_complex) 2 else 1;
-    const expected_len = plot.npoints * nvars * per;
-    if (plot.data.len != expected_len) return error.DataLengthMismatch;
+    try types.validatePlot(.binary, plot);
 
     const file = try Io.Dir.cwd().createFile(io, path, .{ .truncate = !append });
     defer file.close(io);

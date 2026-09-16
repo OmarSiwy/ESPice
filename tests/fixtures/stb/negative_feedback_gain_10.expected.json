@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "analysis": "stb",
+  "purpose": "Negative-feedback return ratio, sign and gain",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Set independent input to zero. Beta=Rin/(Rin+Rf)=.1. Negative-feedback return ratio T=-returned/injected=A*beta, positive at DC."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Stability Analysis",
+        "match": "exact",
+        "columns": {
+          "loop_gain": {
+            "unit": "dimensionless",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1.0,
+            1.7782794100389,
+            3.1622776601684,
+            5.6234132519035,
+            10.0,
+            17.782794100389,
+            31.622776601684,
+            56.234132519035,
+            100.0,
+            177.82794100389,
+            316.22776601684,
+            562.34132519035,
+            1000.0,
+            1778.2794100389,
+            3162.2776601684,
+            5623.4132519035,
+            10000.0,
+            17782.794100389,
+            31622.776601684,
+            56234.132519035,
+            100000.0,
+            177827.94100389,
+            316227.76601684,
+            562341.32519035,
+            1000000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 25
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8004f0d40b509653fc57142cc18175a37119048a3f0295e7de95f11e551b7ae7",
+  "known_gaps": [
+    "STB dispatch is rejected and does not yet implement the specified return-ratio measurement"
+  ]
+}

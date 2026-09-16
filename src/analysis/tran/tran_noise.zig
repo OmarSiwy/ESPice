@@ -12,19 +12,7 @@ const converger = @import("solvers").converger;
 
 pub const NoiseSource = root.NoiseSource;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    t_stop: f64,
-    dt_init: f64 = 1e-9,
-    dt_min: f64 = 1e-18,
-    dt_max: f64 = 1e-3,
-    // Runaway guard only — a healthy 1 us-grid second is 1e6 accepted points
-    // (vacask/rc hit the old 1e6 wall at t = 0.994 s and reported
-    // TimestepTooSmall on a perfectly marching transient). dt_min is the
-    // real brake; this only stops a stuck loop.
-    max_steps: u32 = 1_000_000_000,
-    seed: u64 = 0xDEAD_BEEF_CAFE_1234,
-};
+pub const Options = @import("requests").TranNoise;
 
 /// simulate() output. `rows` is the full allocation (caller frees); the
 /// recorded samples are rows[0 .. npoints * (probes.len + 1)], point-major:
@@ -42,11 +30,11 @@ pub const SimResult = struct {
 const Xorshift64 = struct {
     state: u64,
 
-    fn init(seed: u64) Xorshift64 {
+    pub fn init(seed: u64) Xorshift64 {
         return .{ .state = if (seed == 0) 1 else seed };
     }
 
-    fn next(self: *Xorshift64) u64 {
+    pub fn next(self: *Xorshift64) u64 {
         var s = self.state;
         s ^= s << 13;
         s ^= s >> 7;
@@ -61,7 +49,7 @@ const Xorshift64 = struct {
     }
 
     /// Standard normal via Box-Muller transform.
-    fn randn(self: *Xorshift64) f64 {
+    pub fn randn(self: *Xorshift64) f64 {
         const r1 = @max(self.uniform(), 1e-300); // avoid log(0)
         const r2 = self.uniform();
         return @sqrt(-2.0 * @log(r1)) * @cos(2.0 * std.math.pi * r2);
@@ -167,7 +155,7 @@ pub fn simulate(
     const inj_nodes = try allocator.alloc(u32, 2 * noise_sources.len);
     defer allocator.free(inj_nodes);
     for (noise_sources, 0..) |src, s| {
-        noise_prefix[s] = src.white;
+        noise_prefix[s] = @sqrt(src.white);
         inj_nodes[2 * s] = src.node_p;
         inj_nodes[2 * s + 1] = src.node_n;
     }
@@ -211,13 +199,16 @@ pub fn simulate(
     var dt: f64 = options.dt_init;
     var steps: u32 = 0;
 
+    var attempts: u64 = 0;
     while (t < options.t_stop and steps < options.max_steps) {
+        if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
+        attempts += 1;
         // Bandwidth for this timestep: BW = 1 / (2 * dt)
-        const bandwidth = 1.0 / (2.0 * dt);
+        const bandwidth_scale = @sqrt(1.0 / (2.0 * dt));
 
-        // Thermal noise sample: i_rms = sqrt(4 * k * T * G * BW)
+        // Scale device-generated white noise to this timestep's bandwidth.
         for (noise_prefix, noise_currents) |pfx, *i_n| {
-            const sigma = @sqrt(pfx * bandwidth);
+            const sigma = pfx * bandwidth_scale;
             i_n.* = sigma * rng.randn();
         }
 
@@ -235,9 +226,12 @@ pub fn simulate(
         // `continue`s back here with the halved dt.
         ckt.setSimState(.{ .t = t + dt, .dt = dt, .kind = .tran, .initial_step = steps == 0 });
         simdCopy(x_try, x);
-        var tn_nr_opts = options.tol.newtonOpts(options.tol.itl4);
+        var tn_nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         tn_nr_opts.dx_clamp = std.math.inf(f64);
-        const nr = converger.run(ckt, ws, x_try, t + dt, tn_nr_opts, hook) catch converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 };
+        const nr = converger.run(ckt, ws, x_try, t + dt, tn_nr_opts, hook) catch |err| switch (err) {
+            error.QueryCancelled => return err,
+            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
+        };
 
         if (!nr.converged) {
             dt *= 0.5;
@@ -270,8 +264,7 @@ pub fn simulate(
     };
 }
 
-/// Contract entry: sources off the analytic Jacobian (builtin device noise via
-/// collectNoiseSources — never re-derived per resistor), BE transient with
+/// Contract entry: device-generated sources from collectNoiseSources, BE transient with
 /// per-step noise injection. Data layout: point-major (time, probes...).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
@@ -306,42 +299,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "tran_noise: xorshift64 produces deterministic sequence" {
-    var rng1 = Xorshift64.init(42);
-    var rng2 = Xorshift64.init(42);
-
-    for (0..100) |_| {
-        try testing.expectEqual(rng1.next(), rng2.next());
-    }
-}
-
-test "tran_noise: randn distribution has zero mean and unit variance" {
-    var rng = Xorshift64.init(0xCAFE_BABE);
-    const n_samples: usize = 100_000;
-
-    var sum: f64 = 0;
-    var sum_sq: f64 = 0;
-    for (0..n_samples) |_| {
-        const v = rng.randn();
-        sum += v;
-        sum_sq += v * v;
-    }
-    const mean = sum / @as(f64, @floatFromInt(n_samples));
-    const variance = sum_sq / @as(f64, @floatFromInt(n_samples)) - mean * mean;
-
-    try testing.expectApproxEqAbs(@as(f64, 0.0), mean, 0.02);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), variance, 0.02);
-}
-
-test "tran_noise: simdCopy matches element-wise" {
-    const src = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0 };
-    var dst: [11]f64 = undefined;
-    simdCopy(&dst, &src);
-    for (src, dst) |s, d| try testing.expectEqual(s, d);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .Xorshift64 = Xorshift64,
+    .simdCopy = simdCopy,
+} else {};

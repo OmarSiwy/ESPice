@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Linear DC sweep of source voltage across a divider.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "347cafb4b5284b965fd9a7376fc9aa87e3f05d92cd1f0458a82ca115303dcaa5"
+  },
+  "origin": "benchmark/fixtures/dc_sweep/vin_sweep/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "values": [
+              0.0,
+              0.5,
+              1.0,
+              1.5,
+              2.0,
+              2.5,
+              3.0,
+              3.5,
+              4.0,
+              4.5,
+              5.0,
+              5.5,
+              6.0,
+              6.5,
+              7.0,
+              7.5,
+              8.0,
+              8.5,
+              9.0,
+              9.5,
+              10.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(out)": {
+            "values": [
+              0.0,
+              0.375,
+              0.75,
+              1.125,
+              1.5,
+              1.875,
+              2.25,
+              2.625,
+              3.0,
+              3.375,
+              3.75,
+              4.125,
+              4.5,
+              4.875,
+              5.25,
+              5.625,
+              6.0,
+              6.375,
+              6.75,
+              7.125,
+              7.5
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(v1)": {
+            "values": [
+              0.0,
+              -0.000125,
+              -0.00025,
+              -0.000375,
+              -0.0005,
+              -0.000625,
+              -0.00075,
+              -0.000875,
+              -0.001,
+              -0.001125,
+              -0.00125,
+              -0.001375,
+              -0.0015,
+              -0.001625,
+              -0.00175,
+              -0.001875,
+              -0.002,
+              -0.002125,
+              -0.00225,
+              -0.002375,
+              -0.0025
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 21,
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            2.5,
+            3.0,
+            3.5,
+            4.0,
+            4.5,
+            5.0,
+            5.5,
+            6.0,
+            6.5,
+            7.0,
+            7.5,
+            8.0,
+            8.5,
+            9.0,
+            9.5,
+            10.0
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e2ba46ffc112f72551327bdf8cb36bbc2cf259b1a785ab06d7bd48ff044e032c"
+}

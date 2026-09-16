@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "Retain poles separated by twelve orders of magnitude",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Independent RC states at -1e9 and -.001 rad/s; neither is algebraic."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Pole-Zero Analysis",
+        "match": "unordered",
+        "columns": {
+          "pole": {
+            "unit": "rad/s",
+            "rtol": 0.0001,
+            "atol": 1e-08,
+            "values": [
+              [
+                -1000000000.0,
+                0.0
+              ],
+              [
+                -0.001,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 2
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b405957a71cb4262bcc9a53884514e05650859a71ccf107e6808312ac1cd7836",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher",
+    "the pole solver can discard real fast poles using a relative eigenvalue cutoff"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "analysis": "dcmatch",
+  "purpose": "Adjoint mismatch combines independent sensitivities in quadrature",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Local unit-variance fallback: total_3sigma=3*sqrt((dV/dVin)^2+(dV/dR1)^2+(dV/dR2)^2); derivatives follow the divider formula. Zero bias still has source sensitivity."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC Mismatch",
+        "match": "exact",
+        "columns": {
+          "total_3sigma": {
+            "unit": "V",
+            "rtol": 0.003,
+            "atol": 1e-06,
+            "values": [
+              2.25
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "80aa9da7c9a37d63b7715ade44958ce317a61e9754f23c78d92e2405853ab158"
+}

@@ -1,0 +1,12 @@
+* BSIM3SOI-PD (Partial Depletion) NMOS operating point.
+* Expected results: device_b3soipd.expected.json
+* Origin: benchmark/fixtures/devices/b3soipd/circuit.sp
+* ngspice: NMOS level=10, 4 terminals (D G S E).
+Vdd vdd 0 DC 1.8
+Vg g 0 DC 1.0
+Vb body 0 DC 0
+Rd vdd d 10k
+M1 d g 0 body nsoipd W=10u L=0.18u
+.model nsoipd NMOS(LEVEL=10 VERSION=2 TNOM=27 TOX=4.1e-9 VTH0=0.35 K1=0.53 K2=-0.06 VSAT=1.5e5 U0=280 RDSW=200)
+.op
+.end

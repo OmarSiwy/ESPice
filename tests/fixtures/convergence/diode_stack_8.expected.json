@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "8 series junctions",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Identical series junctions have equal voltage; solve total stack KCL by bisection."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(n1)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              5.7900964582097
+            ]
+          },
+          "v(n2)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              5.0663344009335
+            ]
+          },
+          "v(n3)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              4.3425723436573
+            ]
+          },
+          "v(n4)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              3.6188102863811
+            ]
+          },
+          "v(n5)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              2.8950482291049
+            ]
+          },
+          "v(n6)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              2.1712861718286
+            ]
+          },
+          "v(n7)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              1.4475241145524
+            ]
+          },
+          "v(n8)": {
+            "unit": "V",
+            "rtol": 0.0002,
+            "atol": 3e-06,
+            "values": [
+              0.72376205727622
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 0.0003,
+            "atol": 1e-09,
+            "values": [
+              -0.01420990354179
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "41d1f3805e099928d31a9b68384f72d733245e793035601bd51ca26570bf4fc5"
+}

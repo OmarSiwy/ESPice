@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "pxf",
+  "purpose": "PXF pump frequency must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "PXF pump frequency must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "e50eaf924dd5fc79eb5c9c4e2927e8ae19828488df2c4689b1ecfcefe6ac2592"
+}

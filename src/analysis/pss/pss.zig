@@ -41,23 +41,7 @@ const V = @Vector(W, f64);
 /// Below this, the O(n^2) dense path is cheaper than Krylov overhead.
 const krylov_threshold: usize = 50;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    period: f64,
-    max_shooting_iter: u16 = 50,
-    shooting_tol: f64 = 1e-7,
-    fd_epsilon: f64 = 1e-7,
-    max_newton_iter: u16 = 50,
-    newton_tol: f64 = 1e-9,
-    /// Fixed trapezoidal steps per period; the waveform has n_samples+1 rows.
-    n_samples: u32 = 256,
-    /// GMRES restart depth for Krylov path (n >= krylov_threshold).
-    gmres_restart: u32 = 30,
-    /// Maximum GMRES outer restarts.
-    gmres_max_restarts: u32 = 10,
-    /// GMRES relative tolerance for the inner linear solve.
-    gmres_tol: f64 = 1e-3,
-};
+pub const Options = @import("requests").Pss;
 
 pub const SolveResult = struct {
     converged: bool,
@@ -146,7 +130,6 @@ const PeriodHook = struct {
     q_snap: []f64, // captures q(x) from the last Newton iter for the accept update
     a_vals: []f64,
     has_charge: bool,
-    has_history: bool,
 
     pub fn assemble(self: PeriodHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
@@ -166,7 +149,6 @@ const PeriodHook = struct {
             while (i < n) : (i += 1)
                 ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - self.i_prev[i];
         }
-        if (self.has_history) ckt.injectHistory(t);
     }
 
     pub fn vals(self: PeriodHook, ckt: *root.Circuit) []f64 {
@@ -200,7 +182,6 @@ fn integrateOnePeriod(
     const dt = options.period / @as(f64, @floatFromInt(steps));
     const alpha = 2.0 / dt; // trapezoidal companion coefficient
     const has_charge = ckt.has_charge;
-    const has_history = ckt.has_history;
     const ncols = 1 + probes.len;
 
     if (has_charge) {
@@ -208,7 +189,6 @@ fn integrateOnePeriod(
         simdCopy(sc.q_prev[0..n], ckt.q_vec[0..n]);
         simdZero(sc.i_prev[0..n]);
     }
-    if (has_history) ckt.recordHistory(x, 0);
     if (wave.len != 0) {
         const row = wave[0..ncols];
         row[0] = 0;
@@ -224,7 +204,6 @@ fn integrateOnePeriod(
             .q_snap = sc.q_cur,
             .a_vals = sc.a_vals,
             .has_charge = has_charge,
-            .has_history = has_history,
         };
         const nr = converger.run(ckt, ws, x, t, .{
             .max_iter = options.max_newton_iter,
@@ -250,7 +229,6 @@ fn integrateOnePeriod(
                 sc.q_prev[j] = sc.q_cur[j];
             }
         }
-        if (has_history) ckt.recordHistory(x, t);
         if (wave.len != 0) {
             const row = wave[(k + 1) * ncols ..][0..ncols];
             row[0] = t;
@@ -275,10 +253,6 @@ fn gpuIntegrateOnePeriod(
     options: Options,
     allocator: std.mem.Allocator,
 ) bool {
-    // ponytail: same gate as tran.zig — skip GPU when has_history (needs
-    // per-step host callbacks the megakernel can't service).
-    if (ckt.has_history) return false;
-
     const gh = ckt.gpu_hook orelse return false;
     const gt = gh.simulate_tran orelse return false;
 
@@ -552,6 +526,7 @@ pub fn solve(
     var res_norm: f64 = std.math.inf(f64);
 
     while (iter < options.max_shooting_iter) : (iter += 1) {
+        if (iter != 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = iter });
         const period_ok = integrateFrom(ckt, ws, &sc, x0, x_end, options, allocator);
 
         if (!period_ok) {
@@ -649,112 +624,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-const testing = std.testing;
-
-test "pss: krylov_threshold is reasonable" {
-    try testing.expect(krylov_threshold > 0);
-    try testing.expect(krylov_threshold <= 200);
-}
-
-test "pss: simdCopy round-trip" {
-    var a = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    var b: [10]f64 = undefined;
-    simdZero(&b);
-    simdCopy(&b, &a);
-    for (0..10) |i| try testing.expectEqual(a[i], b[i]);
-}
-
-test "pss: simdSub correctness" {
-    var a = [_]f64{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
-    const b = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    var c: [10]f64 = undefined;
-    simdSub(&c, &a, &b);
-    for (0..10) |i| try testing.expectApproxEqAbs(a[i] - b[i], c[i], 1e-15);
-    _ = &a;
-}
-
-test "pss: simdAdd correctness" {
-    var a = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    const b = [_]f64{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
-    var c: [10]f64 = undefined;
-    simdAdd(&c, &a, &b);
-    for (0..10) |i| try testing.expectApproxEqAbs(a[i] + b[i], c[i], 1e-15);
-    _ = &a;
-}
-
-test "pss: simdAxpy correctness" {
-    var dst = [_]f64{ 1, 2, 3, 4, 5 };
-    const src = [_]f64{ 10, 20, 30, 40, 50 };
-    simdAxpy(&dst, 0.5, &src);
-    try testing.expectApproxEqAbs(@as(f64, 6.0), dst[0], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 12.0), dst[1], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 18.0), dst[2], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 24.0), dst[3], 1e-15);
-    try testing.expectApproxEqAbs(@as(f64, 30.0), dst[4], 1e-15);
-}
-
-test "pss: simdScale correctness" {
-    const src = [_]f64{ 2, 4, 6, 8, 10 };
-    var dst: [5]f64 = undefined;
-    simdScale(&dst, -1.0, &src);
-    for (0..5) |i| try testing.expectApproxEqAbs(-src[i], dst[i], 1e-15);
-}
-
-test "pss: normInf" {
-    const v = [_]f64{ -3, 1, 2, -5, 4 };
-    try testing.expectApproxEqAbs(@as(f64, 5.0), normInf(&v), 1e-15);
-}
-
-test "pss: shootingMatvec identity operator" {
-    // Verify the FD matvec structure compiles and the function pointer
-    // signature matches GMRES expectations.
-    const ptr: *const fn ([]const f64, []f64, *anyopaque) void = &shootingMatvec;
-    try testing.expect(@intFromPtr(ptr) != 0);
-}
-
-test "pss: Options defaults are sane" {
-    const opts = Options{ .period = 1e-9 };
-    try testing.expect(opts.max_shooting_iter > 0);
-    try testing.expect(opts.n_samples > 0);
-    try testing.expect(opts.fd_epsilon > 0);
-    try testing.expect(opts.shooting_tol > 0);
-    try testing.expect(opts.gmres_restart > 0);
-    try testing.expect(opts.gmres_tol > 0);
-    try testing.expect(opts.gmres_max_restarts > 0);
-}
-
-test "pss: use_krylov gate" {
-    // Verify the threshold logic: small n uses dense, large n uses Krylov.
-    try testing.expect(!(10 >= krylov_threshold)); // small => dense
-    try testing.expect(100 >= krylov_threshold); // large => krylov
-}
-
-test "pss: GMRES init/deinit for Krylov path" {
-    const gpa = testing.allocator;
-    var krylov = try Gmres.init(gpa, 64, 30);
-    defer krylov.deinit(gpa);
-    try testing.expectEqual(@as(u32, 64), krylov.n);
-    try testing.expectEqual(@as(u32, 30), krylov.m);
-}
-
-test "pss: SolveResult fields" {
-    const r = SolveResult{
-        .converged = true,
-        .iterations = 5,
-        .residual_norm = 1e-10,
-    };
-    try testing.expect(r.converged);
-    try testing.expectEqual(@as(u16, 5), r.iterations);
-}
-
-test "pss: gpuIntegrateOnePeriod returns false without gpu_hook" {
-    // Verify GPU fallback: when gpu_hook is null, returns false immediately.
-    // We can't construct a full Circuit, but the function signature and
-    // the null-check logic is the critical path.
-    const ptr: *const fn (*root.Circuit, []f64, Options, std.mem.Allocator) bool = &gpuIntegrateOnePeriod;
-    try testing.expect(@intFromPtr(ptr) != 0);
-}
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .gpuIntegrateOnePeriod = gpuIntegrateOnePeriod,
+    .krylov_threshold = krylov_threshold,
+    .shootingMatvec = shootingMatvec,
+    .simdAdd = simdAdd,
+    .simdAxpy = simdAxpy,
+    .simdCopy = simdCopy,
+    .simdScale = simdScale,
+    .simdSub = simdSub,
+    .simdZero = simdZero,
+} else {};

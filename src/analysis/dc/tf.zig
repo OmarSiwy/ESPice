@@ -7,14 +7,7 @@ const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const dense_lu = @import("solvers").dense_lu;
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    /// Branch-current unknown of the input vsource (its row is v_p - v_n - V = 0).
-    /// null -> ctx.source_branch (the first source's branch).
-    input_branch: ?u32 = null,
-    /// null -> the last probe node.
-    output_node: ?u32 = null,
-};
+pub const Options = @import("requests").Tf;
 
 pub const Values = struct {
     gain: f64,

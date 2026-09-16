@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
+const types = @import("output_types");
+const Plot = types.Plot;
 
 // ponytail: Fortran-style unformatted record writer — HSPICE TR0/SST2 uses this framing.
 fn writeRecord(w: anytype, data: []const u8) !void {
@@ -23,7 +24,7 @@ fn writeRecordI32(w: anytype, value: i32) !void {
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     const nvars = plot.varnames.len;
     const per: usize = if (plot.is_complex) 2 else 1;
-    if (plot.data.len != plot.npoints * nvars * per) return error.DataLengthMismatch;
+    try types.validatePlot(.sst2, plot);
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
