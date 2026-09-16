@@ -129,8 +129,13 @@ shortcuts carry a `ponytail:` comment naming the ceiling and upgrade path.
 ## Verification
 
 - `zig build && zig build test` after every step. Historical baseline: 305/307 —
-  the 2 `disto` HD2 failures (tests/analyses.zig:972,1070) pre-date the
-  refactor (verified on clean HEAD 285e7e7 in a worktree).
+  the 2 `disto` HD2 failures pre-date the refactor (verified on clean HEAD
+  285e7e7 in a worktree). Their assertions moved with the module split; the
+  analysis-contract suite is `src/problem/tests/analyses.zig` now, and the
+  remaining distortion gap is tracked as C7 in `issues.md`.
+- The numeric deck corpus is `tests/fixtures/**`. A deck that a feature does
+  not cover yet says so IN THE DECK (`* KNOWN GAP: ...`) and is expected to
+  fail until the feature lands — `issues.md` is the audited index of them.
 - New SIMD kernels: differential test vs the scalar oracle in
   `ref/SIMD-Strategies/verify.zig`, plus an asm spot-check that the expected
   vector instruction is emitted. The build has no backend flag any more (the

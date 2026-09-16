@@ -77,7 +77,7 @@ Defaults: with no explicit port list, the drive source becomes port 1 (a
 1-port $S_{11}$ measurement). Failure: singular factorization at a
 frequency point errors the sweep.
 
-Knobs: `f_start/f_stop/n_points/sweep_type`, per-port `z0`.
+Knobs: the shared `sweep` grid (`f_start`/`f_stop`/`points`/`kind`), per-port `z0`.
 
 ## 3. Pseudo-code, CPU sequential
 

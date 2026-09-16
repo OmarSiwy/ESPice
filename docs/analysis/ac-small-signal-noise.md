@@ -116,8 +116,9 @@ linearization; the sweep never touches the circuit again. Phases: (1) build
 (2) stamp the excitation phasor on the source branch row; (3) log sweep,
 per point: set $\omega$, refill, refactor, solve, gather probes. Failure
 handling: a singular factor at some $\omega$ surfaces as an error for the
-whole sweep (no silent point skipping). Knobs: `f_start`, `f_stop`,
-`points_per_decade`; tolerance bundle only affects the upstream OP.
+whole sweep (no silent point skipping). Knobs: the shared `sweep` grid
+(`f_start`/`f_stop`/`points`/`kind`, where `kind` is `dec`/`oct`/`lin`);
+tolerance bundle only affects the upstream OP.
 
 **Noise — the in-device convention.** Every device model **owns its noise
 sources**; analyses only consume them. Model source definitions live in

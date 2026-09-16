@@ -64,7 +64,59 @@ and quoted spans remain. Reconsider token SIMD only with measured gains across
 short-token and long-token decks; mask caching adds state that this result
 does not justify.
 
-## Repeating the measurements
+## Controlled-source preparation — 2026-09-16
+
+`op/controlled_source_scaling.sp` contains 2,048 independent
+voltage-source/resistor/CCCS/load groups, with permuted control references and
+an analytic voltage/current oracle. It stresses preparation; it does not
+represent a long nonlinear transient simulation.
+
+The former implementation scanned every F/H/W reference for every voltage
+source, then scanned every voltage-source name again for each control binding.
+Control names now form one sorted slice of borrowed strings, queried with
+case-insensitive binary search. Deferred binding builds one exact-name map of
+the actual native voltage-source rows. Its `u32` values preserve the first
+duplicate name and exclude dynamically loaded cards skipped during native
+source construction. Both indexes die with parse scratch; published source
+columns and device/GPU layouts are unchanged. Missing and unknown controls
+retain their existing errors, and case-insensitive sensing remains distinct
+from exact-name binding.
+
+The ReleaseFast end-to-end benchmark measured a median of nine runs after
+one warm-up. Times include process startup, preparation, the operating-point
+solve, and output; reference conversion is outside the timed interval.
+
+| ESPice before | ESPice after | End-to-end reduction | Reference comparison |
+|---:|---:|---:|---|
+| 36.761 ms | 22.541 ms | 38.68% | Both runs agree with ngspice and VACASK |
+
+This reduction applies to this fixture and the combined preparation changes.
+The after executable also includes the sparse-pattern radix optimization;
+these measurements do not isolate name-lookup throughput or establish a
+device-evaluation speedup or a 99% evaluation / 1% preparation split.
+
+Exact commands, run against the respective before and after working tree states:
+
+```sh
+zig build bench -- --filter op/controlled_source_scaling.sp --iters 9 --timeout 30 \
+  --ngspice /nix/store/zks09ghph193x3imsww3s8vnpr09nav8-ngspice-45/bin/ngspice \
+  --vacask /nix/store/cjp1w6v1g1s0ih1g13ip8pnkhyygjnl9-vacask-unstable-2026/bin/vacask \
+  --out /tmp/espice-src-cleanup/bench-before.md
+zig build bench -- --filter op/controlled_source_scaling.sp --iters 9 --timeout 30 \
+  --ngspice /nix/store/zks09ghph193x3imsww3s8vnpr09nav8-ngspice-45/bin/ngspice \
+  --vacask /nix/store/cjp1w6v1g1s0ih1g13ip8pnkhyygjnl9-vacask-unstable-2026/bin/vacask \
+  --out /tmp/espice-src-cleanup/bench-after.md
+```
+
+The local reports identify the before executable as
+`.zig-cache/o/e4abfd366363552628590b32af8c7a32/espice` and the after executable
+as `.zig-cache/o/d079a8673824e0684f6bd976281d2e5f/espice`.
+
+## Historical AST/build refactor measurements
+
+The measurements and checks below describe the earlier AST/build refactor,
+not the controlled-source preparation changes above. That refactor used the
+following frontend-specific benchmark commands:
 
 ```sh
 zig build bench-frontend -- tests/fixtures/stress/scaling_rc_ladder_100k.sp 11
@@ -73,28 +125,28 @@ zig build test-frontend -Doptimize=Debug
 zig run ref/SIMD-Strategies/verify.zig -fllvm -OReleaseSafe -mcpu=native
 ```
 
-The frontend benchmark times parsing plus semantic expansion, excluding file
-loading, device binding and simulation. Each iteration owns a fresh arena;
-results report median time, arena capacity and a device-count checksum.
+The frontend benchmark timed parsing plus semantic expansion, excluding file
+loading, device binding and simulation. Each iteration owned a fresh arena;
+results reported median time, arena capacity and a device-count checksum.
 
 A before/after run used `zig build ... bench` with the same standalone harness,
 LLVM ReleaseFast, x86_64_v3 and 11 iterations on `scaling_rc_ladder_100k.sp`:
 42.848ms before, 45.443ms after; both reserved 143,648,772 arena bytes and
 produced checksum 2,400,012. The baseline was a snapshot of the working frontend
-before this refactor, not clean HEAD. Other compilations were active, and
+before that refactor, not clean HEAD. Other compilations were active, and
 repeated runs varied substantially. These results do **not** establish a
 frontend throughput improvement. The retained changes establish the AST/build
 boundary and reduce repeated copying and scans; future performance claims need
 an isolated before/after run.
 
-Validation of this working tree: `zig build` passes; the frontend differential
-suite passes in Debug and ReleaseFast, and the standalone SIMD verification
-passes. A temporary structural comparison against the saved frontend snapshot
+Validation recorded for that earlier working tree: `zig build` passed; the
+frontend differential suite passed in Debug and ReleaseFast, and the standalone
+SIMD verification passed. A temporary structural comparison against the saved frontend snapshot
 found identical device, model and directive values on all 612 fixture decks,
-ignoring internal subcircuit IDs. The full numerical fixture gate reports
+ignoring internal subcircuit IDs. The full numerical fixture gate reported
 416 passes and 196 failures; the structural comparison does not prove that
-all numerical failures predate the change. The combined unit run passes
-321/323 tests: two Problem allocation-failure tests fail, including a compiled
+all numerical failures predate the change. The combined unit run passed
+321/323 tests: two Problem allocation-failure tests failed, including a compiled
 device callback that reports `PermissionDenied` where `OutOfMemory` is expected.
 
 An OP/transient/AC CLI smoke test with `--jobs=2` produced byte-identical CSV

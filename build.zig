@@ -148,7 +148,7 @@ pub fn build(b: *std.Build) void {
     // cached all 38 whale evals as ONE unit: a one-line solver edit recompiled
     // the lot, single-threaded, on a 32-core box. See
     // docs/perf/build-split-2026-09-10.md and src/analysis/eval.zig.
-    const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len) catch @panic("OOM");
+    const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len + 1) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
         // The catalog keys devices by FILE stem while the generated type name
@@ -214,7 +214,23 @@ pub fn build(b: *std.Build) void {
         host_objs[i].use_llvm = optimize != .Debug;
     }
 
+    // Native line algorithms retain their own accepted-step history. Export
+    // the existing neutral vtables from a CPU object, as for generated models.
+    const native_models_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
+    inline for (.{ "ltra_native", "txl_native", "cpl_native_2", "cpl_native_3", "cpl_native_4" }) |name|
+        agg_src.appendSlice(b.allocator, b.fmt("pub const {s} = @import(\"native_models\").{s};\n", .{ name, name })) catch @panic("OOM");
+    const native_host_mod = M.make(b.path("src/analysis/eval.zig"), &.{
+        .{ .name = "contract", .module = contract_mod },
+        .{ .name = "models", .module = native_models_mod },
+        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "gompute", .module = gompute.module("gompute") },
+    });
+    native_host_mod.link_libc = true;
+    host_objs[models.len] = b.addObject(.{ .name = "dev_native_lines", .root_module = native_host_mod });
+    host_objs[models.len].use_llvm = optimize != .Debug;
+
     const models_mod = M.make(wf.add("models.zig", agg_src.items), &.{});
+    models_mod.addImport("native_models", native_models_mod);
     for (models, dev_mods) |m, dev_mod| models_mod.addImport(m.name, dev_mod);
 
     const devices_mod = M.make(b.path("src/frontend/models.zig"), &.{
@@ -274,7 +290,6 @@ pub fn build(b: *std.Build) void {
 
     const app_imports: []const std.Build.Module.Import = &.{
         .{ .name = "output", .module = output_mod },
-        .{ .name = "frontend", .module = frontend_mod },
         .{ .name = "problem", .module = problem_mod },
     };
     const exe = b.addExecutable(.{
@@ -480,7 +495,30 @@ pub fn build(b: *std.Build) void {
     b.step("test-iteration", "Run analysis tests including Newton lifecycle integration").dependOn(&run_analysis.step);
     test_step.dependOn(&run_analysis.step);
 
+    const native_tests_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
+    native_tests_mod.link_libc = true;
+    const native_tests = b.addTest(.{ .root_module = native_tests_mod });
+    const run_native = b.addRunArtifact(native_tests);
+    b.step("test-native-lines", "Run native transmission-line oracle tests").dependOn(&run_native.step);
+    test_step.dependOn(&run_native.step);
+
     const eval_tests_mod = M.make(b.path("src/analysis/tests/eval.zig"), &.{.{ .name = "device_eval", .module = device_eval_mod }});
+    // A separate object is essential: Zig error ordinals differ between
+    // compilations even when the callback signatures use the same error set.
+    const error_object_mod = M.make(b.path("src/analysis/tests/device_errors_object.zig"), &.{
+        .{ .name = "device_eval", .module = device_eval_mod },
+        .{ .name = "device_ir", .module = device_ir_mod },
+    });
+    error_object_mod.link_libc = true;
+    const error_object = b.addObject(.{ .name = "device_errors", .root_module = error_object_mod, .use_llvm = optimize != .Debug });
+    const error_tests_mod = M.make(b.path("src/analysis/tests/device_errors.zig"), &.{.{ .name = "device_ir", .module = device_ir_mod }});
+    error_tests_mod.link_libc = true;
+    error_tests_mod.addObject(error_object);
+    const error_tests = b.addTest(.{ .root_module = error_tests_mod, .use_llvm = optimize != .Debug });
+    const run_error_tests = b.addRunArtifact(error_tests);
+    b.step("test-device-errors", "Check separately compiled device callback statuses").dependOn(&run_error_tests.step);
+    test_step.dependOn(&run_error_tests.step);
+
     const solver_tests_mod = M.make(b.path("src/analysis/tests/solvers.zig"), &.{.{ .name = "solvers", .module = solvers_mod }});
     solver_tests_mod.link_libc = true;
 
@@ -501,7 +539,10 @@ pub fn build(b: *std.Build) void {
         // Building this at all pulls every models/* through vera.
         .{ .name = "test-devices", .desc = "Run device tests", .mod = frontend_model_tests },
     }) |suite| {
-        const run = b.addRunArtifact(b.addTest(.{ .root_module = suite.mod }));
+        const suite_tests = b.addTest(.{ .root_module = suite.mod });
+        if (suite.mod == frontend_builder_tests)
+            for (host_objs) |obj| suite_tests.root_module.addObject(obj);
+        const run = b.addRunArtifact(suite_tests);
         b.step(suite.name, suite.desc).dependOn(&run.step);
     }
 

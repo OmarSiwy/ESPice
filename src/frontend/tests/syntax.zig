@@ -483,3 +483,17 @@ test "elaboration preserves the AST and scales shared subcircuit instances once"
     try std.testing.expectEqual(@as(f64, 2), try parameter(original.kv, "w"));
     try std.testing.expect(ast.models[0].kv[1].value == .expr);
 }
+
+test "CPL matrices preserve negative entries after the named coefficient" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ast = try Parser(ngspice).parse(a, "* matrix list\n.model line CPL c={3p+0.5p} -0.3p 3.5p length=1+1\n.end\n");
+    const nl = try elaborate(a, ast);
+    const values = nl.models[0].kv;
+    try std.testing.expectEqual(@as(usize, 4), values.len);
+    try std.testing.expectEqual(@as(f64, 3.5e-12), values[0].value.num);
+    try std.testing.expectEqual(@as(f64, -0.3e-12), values[1].value.num);
+    try std.testing.expectEqual(@as(f64, 3.5e-12), values[2].value.num);
+    try std.testing.expectEqual(@as(f64, 2), values[3].value.num);
+}

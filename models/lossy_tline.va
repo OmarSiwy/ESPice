@@ -1,5 +1,8 @@
-// LTRA lossy transmission line (ngspice netlist letter `O`, `.model ltra`).
-// Spec: modules/devices/docs/ltra-lossy-line.md.
+// Partial LTRA model retained for comparison and the static RG construction path.
+// O-card RLC/RC devices use the native convolution model; LC uses tline.va.
+// Migration requirements: docs/native-transmission-line-migration.md.
+// Numbered line-equation references below describe ngspice's model equations,
+// not mandatory Verilog-AMS implementation algorithms.
 //
 // §1.3 writes each port's branch equation with one branch-current unknown per
 // port (ngspice rows brEq1/brEq2), i1 and i2 both flowing INTO the line:
@@ -16,13 +19,14 @@
 //   RC  (R>0, G=0, L=0, C>0)   degrades to its exact DC series resistance
 //   RG  (R>0, G>0, L=C=0)      exact hyperbolic two-port (§1.3 DC block)
 //
-// Dropped: the h1'/h2/h3' convolutions (§1.4-§1.6).  They need an unbounded
-// per-instance history list, a per-timepoint coefficient rebuild with
-// chopReltol truncation, straight-line history compaction and quadratic
-// delayed-value interpolation - none of which is a Verilog-A construct (there
-// is no history array, no accepted-step hook).  The RC case, whose whole
-// behaviour lives in the erfc kernels, therefore degrades to its exact DC
-// series resistance.
+// Missing here: the h1'/h2/h3' convolutions (§1.4-§1.6), accepted-history
+// storage, coefficient rebuilds, compaction and quadratic interpolation.
+// Arrays, loops and user functions can express their numerical arithmetic.
+// Exact accepted-point handling also needs simulator support, such as the
+// standard VPI acbAcceptedPoint callback; there is no source accepted_step
+// event. These omissions are implementation gaps, not an analog-subset ban.
+// Consequently this file's RC branch supplies only DC resistance, not its
+// transient erfc dispersion, and must not replace the native RC route.
 //
 // Loss (RLC), with the kernels gone: whatever is left has to stay exact at DC,
 // because §1.3's DC reduction (i1 + i2 = 0, v1 - v2 = R*len*i1) is also the
@@ -42,11 +46,9 @@
 // the network is passive for every R (|Z0-Rh| < Z0+Rh), and driven from a
 // matched source into a matched load its first transit arrives attenuated by
 // 1/(1 + beta*T/2)^2 = A + O((beta*T)^2), i.e. §1.2's A = exp(-beta*T) to
-// first order in the loss (beta*T = R*len/(2*Z0)).  This is the N = 1 member of
-// the [R/2N - ideal T - R/2N] cascade our host already expands O cards into
-// (src/builder.zig addLossyLine, ~3e-4 rms vs ngspice at larger N).  What is
-// lost with the kernels is the Bessel dispersion tail; what is gained is end
-// reflections off Rh that a distributed loss would not make.
+// first order in the loss (beta*T = R*len/(2*Z0)). It omits the Bessel
+// dispersion tail and introduces end reflections off Rh. This approximation
+// does not meet the native-device migration gate.
 //
 // absdelay is NOT guarded by analysis("static"): §4.5.6 makes it return its
 // input in DC and operating-point analyses and hold Input(0) for t < T, which
@@ -57,8 +59,8 @@
 // branch currents undetermined.
 //
 // §1.5-§1.7 (coefficient/history compaction, interpolation choice, LTE) are
-// solver-side; their `.model ltra` keywords are declared so a real card binds,
-// and of those only stepLimit has a Verilog-A spelling ($bound_step).
+// not implemented in this file. The `.model ltra` keywords are declared for
+// binding compatibility; only the step-limit flags affect this implementation.
 //
 // Noise: none (doc "Noise model": ngspice has no ltranoise.c).
 module lossy_tline(p1, n1, p2, n2);

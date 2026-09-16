@@ -9,8 +9,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const solvers = @import("solvers");
 const dense_lu = solvers.dense_lu;
 
@@ -114,7 +113,7 @@ pub fn sweep(
     const drive_re = 0.5 * options.ac_magnitude * @cos(phase_rad);
     const drive_im = 0.5 * options.ac_magnitude * @sin(phase_rad);
 
-    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var sw = options.sweep.iter();
     var k: usize = 0;
     while (sw.next()) |f| : (k += 1) {
         if (k != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = k, .total = freqs.len });
@@ -181,11 +180,15 @@ pub fn sweep(
 
         freqs[k] = f;
         hd2[k] = hd2_val;
-        // DkerProc (dkerproc.c:43-52) scales each stored kernel back to
-        // sinusoid amplitude before it is written out: ×2 for f1 and 2f1.
-        // hd2 is a ratio and so is untouched by it.
-        v1_mag[k] = 2.0 * v1_out_mag;
-        v2_mag[k] = 2.0 * v2_out_mag;
+        // The printed magnitudes are the HALF-AMPLITUDE kernels, exactly as
+        // solved: the F1 drive is ½·DISTOF1 on the branch row and what comes
+        // out of the output node is what gets printed. An earlier ×2 here
+        // cited DkerProc's rescale, but the oracles say otherwise and say it
+        // unambiguously — `disto/linear_divider_0p01` is a plain 0.75 divider
+        // on `DISTOF1 0.01` and wants 3.75e-3, i.e. ½·0.01·0.75. hd2 is a
+        // ratio and was right either way, which is how the factor survived.
+        v1_mag[k] = v1_out_mag;
+        v2_mag[k] = v2_out_mag;
     }
 }
 
@@ -208,7 +211,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         o.output_node = ctx.probes[ctx.probes.len - 1];
     }
 
-    const n_points: usize = types.logSweepCount(o.f_start, o.f_stop, o.points_per_decade);
+    const n_points: usize = o.sweep.count();
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator orelse a;

@@ -3,8 +3,7 @@
 //! The planes are the linearization — one eval() at the op.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const solvers = @import("solvers");
 const dense_lu = solvers.dense_lu;
 
@@ -84,7 +83,15 @@ pub fn solve(
     // λ → s = 1/λ = conj(λ)/|λ|²; drop |λ| ≈ 0 (no dynamics, not poles at origin).
     var max_abs: f64 = 0;
     for (eigs[0..eig.count]) |l| max_abs = @max(max_abs, l.mag());
-    const cutoff = 1e-9 * max_abs;
+    // The eigenvalues being dropped are the ones with NO dynamics — resistive
+    // nodes and branch rows — and those are zero to within the QR's backward
+    // error, O(n·eps·‖A‖). Anything above that is a real time constant, however
+    // small next to the slowest one. A 1e-9 RELATIVE cutoff instead threw away
+    // genuine fast poles the moment a deck spanned more than nine decades:
+    // `pz/widely_separated_modes` carries τ = 1 ns and τ = 1000 s, and the
+    // 1 ns mode sat twelve decades down, so the analysis reported one pole for
+    // a two-pole circuit.
+    const cutoff = @as(f64, @floatFromInt(n)) * std.math.floatEps(f64) * max_abs;
 
     var n_poles: usize = 0;
     for (eigs[0..eig.count]) |l| {

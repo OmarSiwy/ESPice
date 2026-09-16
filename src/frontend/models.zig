@@ -5,13 +5,13 @@
 const std = @import("std");
 
 // ===========================================================================
-// Device catalog, auto-formed from the generated models.
+// Device catalog, auto-formed from generated and native model exports.
 // ===========================================================================
 
 /// Neutral construction/evaluation ABI. No runtime evaluator is imported here.
 pub const ir = @import("device_ir");
 pub const vaload = @import("model_loader.zig");
-/// Every build-time-generated device, keyed by module name. `models.NAME` is
+/// Every build-time device, keyed by its binding name. `models.NAME` is
 /// the contract-shaped device type.
 pub const models = @import("models");
 
@@ -27,7 +27,7 @@ pub const catalog: []const Entry = blk: {
     break :blk &frozen;
 };
 
-/// Linked binding name for a generated model definition.
+/// Linked binding name for a generated or native model definition.
 pub fn modelName(comptime D: type) ?[]const u8 {
     @setEvalBranchQuota(100_000);
     inline for (catalog) |e| {
@@ -61,7 +61,7 @@ pub fn byName(comptime name: []const u8) type {
     return @field(models, name);
 }
 
-/// True at comptime if a model of this name was generated.
+/// True at comptime if a model of this name is registered.
 pub fn has(comptime name: []const u8) bool {
     return @hasDecl(models, name);
 }
@@ -97,6 +97,7 @@ pub const DeviceId = enum {
     cswitch,
     tline,
     lossy_tline,
+    txl_native,
     coupled_tlines,
     diode,
     // M card levels.
@@ -168,10 +169,8 @@ pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "w", DeviceId.cswitch },
     .{ "t", DeviceId.tline },
     .{ "o", DeviceId.lossy_tline },
-    // TXL (y card): frequency-independent RLGC line — the same physics
-    // lossy_tline models; its card spells the length `length=`, which the
-    // builder already translates to `len` for this device.
-    .{ "y", DeviceId.lossy_tline },
+    // Y cards require the TXL Padé/history algorithm; they are not LTRA cards.
+    .{ "y", DeviceId.txl_native },
     .{ "p", DeviceId.coupled_tlines },
     .{ "d", DeviceId.diode },
 });
@@ -194,6 +193,8 @@ pub const bsource = DeviceId.Type(.bsource);
 pub const cswitch = DeviceId.Type(.cswitch);
 pub const tline = DeviceId.Type(.tline);
 pub const lossy_tline = DeviceId.Type(.lossy_tline);
+pub const ltra_native = byName("ltra_native");
+pub const txl_native = byName("txl_native");
 pub const coupled_tlines = DeviceId.Type(.coupled_tlines);
 
 /// `.model` LEVEL tables, per ngspice src/spicelib/parser/inpdomod.c.

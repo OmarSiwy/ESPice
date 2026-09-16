@@ -18,7 +18,7 @@ test "catalog reflects the generated model set" {
 
 test "dispatch policy resolves letters and levels" {
     try std.testing.expectEqual(DeviceId.lossy_tline, letter_map.get("o").?);
-    try std.testing.expectEqual(DeviceId.lossy_tline, letter_map.get("y").?);
+    try std.testing.expectEqual(DeviceId.txl_native, letter_map.get("y").?);
     try std.testing.expectEqual(DeviceId.mos1, try mosfetDeviceId(1));
     try std.testing.expectEqual(DeviceId.bsim4va, try mosfetDeviceId(54));
     try std.testing.expectEqual(DeviceId.bsim3, try mosfetDeviceId(49));

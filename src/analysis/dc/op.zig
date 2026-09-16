@@ -63,7 +63,19 @@ pub fn solveLadder(
     x: []f64,
     options: Options,
 ) !SolveResult {
-    if (ckt.needs_tran_op) return transientOp(ckt, ws, x, options);
+    if (ckt.needs_tran_op) {
+        // A node with no DC path has an identically-zero G row, so the static
+        // operating point is not unique — the transient fallback only reports
+        // whichever value the from-zero settling happened to land on. ngspice
+        // accepts that under TRANOP, where the transient owns the initial
+        // condition; a standalone .op/.ac/.pz has no such owner and the deck
+        // is a floating-node deck, not a converged one.
+        if (!options.tran_op) {
+            std.log.err("topology: a node has no DC path to ground (capacitor-only island) — the operating point is not unique", .{});
+            return error.FloatingNode;
+        }
+        return transientOp(ckt, ws, x, options);
+    }
     // Rung 1: plain Newton. NO diagonal gmin: ngspice's NIiter never loads
     // one outside gmin stepping — junction gmin lives in the device models.
     // The always-on 1e-12 shunt this used to carry pinned every solution a

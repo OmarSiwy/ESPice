@@ -68,7 +68,7 @@ test "four: pure cosine has zero THD" {
         samples[k] = @cos(2.0 * math.pi * t);
     }
 
-    const result = try analyzeBuffer(&samples, allocator);
+    const result = try analyzeBuffer(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 1e-10);
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
@@ -86,7 +86,7 @@ test "four: DC offset is reported correctly" {
         samples[k] = dc_offset + @cos(2.0 * math.pi * t);
     }
 
-    const result = try analyzeBuffer(&samples, allocator);
+    const result = try analyzeBuffer(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(dc_offset, result.dc, 1e-10);
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
@@ -114,7 +114,7 @@ test "four: square wave THD ~ 48.3%" {
         samples[k] = val * 4.0 / math.pi;
     }
 
-    const result = try analyzeBuffer(&samples, allocator);
+    const result = try analyzeBuffer(&samples, 9, allocator);
 
     // Fundamental magnitude: (4/pi) * 1 = 1.2732
     try testing.expectApproxEqAbs(@as(f64, 4.0 / math.pi), result.fundamental, 1e-3);
@@ -141,7 +141,7 @@ test "four: known amplitude and phase" {
         samples[k] = amp * @cos(2.0 * math.pi * t + phase_rad);
     }
 
-    const result = try analyzeBuffer(&samples, allocator);
+    const result = try analyzeBuffer(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(amp, result.fundamental, 1e-8);
     try testing.expectApproxEqAbs(45.0, result.harmonics[0].phase_deg, 0.1);
@@ -158,7 +158,7 @@ test "four: analyzeBuffer with non-power-of-2 input" {
         samples[k] = 1.5 * @cos(2.0 * math.pi * t);
     }
 
-    const result = try analyzeBuffer(&samples, allocator);
+    const result = try analyzeBuffer(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(@as(f64, 1.5), result.fundamental, 1e-2);
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 1e-2);
@@ -184,7 +184,7 @@ test "four: analyze waveform from tran data" {
         try waveform.record(t, &v, &probes);
     }
 
-    const result = try analyze(&waveform, 0, f_fund, allocator);
+    const result = try analyze(&waveform, 0, f_fund, 9, allocator);
 
     try testing.expectApproxEqAbs(@as(f64, 2.5), result.fundamental, 0.05);
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 0.05);

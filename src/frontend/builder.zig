@@ -281,7 +281,7 @@ pub const Builder = struct {
                 all[u] = if (col[u] >= 0) all[@intCast(col[u])] else try self.addNode();
         }
         const proto = try self.dynProto(vt);
-        try vt.proto_add(proto.ctx, self.gpa, @ptrCast(&model), @ptrCast(&instance), &all);
+        try vt.proto_add(proto.ctx, self.gpa, @ptrCast(&model), @ptrCast(&instance), &all).unwrap();
     }
 
     /// Find-or-create the type-erased proto for a runtime (dlopen'd) device.
@@ -291,7 +291,7 @@ pub const Builder = struct {
         for (self.protos.items) |p| {
             if (p.type_name.ptr == vt.name.ptr) return p;
         }
-        const proto = try vt.proto_create(self.gpa);
+        const proto = try vt.proto_create(self.gpa).unwrap();
         try self.protos.append(self.gpa, proto);
         return proto;
     }
@@ -445,7 +445,7 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
         }
 
         const proto = try b.dynProto(vt);
-        try vt.proto_add(proto.ctx, b.gpa, mblob.ptr, iblob.ptr, nodes.ptr);
+        try vt.proto_add(proto.ctx, b.gpa, mblob.ptr, iblob.ptr, nodes.ptr).unwrap();
     }
 }
 
@@ -551,6 +551,8 @@ pub const NetBuilder = struct {
     arena: std.mem.Allocator,
     b: *Builder,
     nl: types.Netlist,
+    /// Borrowed F/H/W control names, sorted case-insensitively for V sensing.
+    sensed_sources: []const []const u8,
 
     // Pre-allocated to bucket('v').size()
     v_names: [][]const u8,
@@ -561,13 +563,12 @@ pub const NetBuilder = struct {
     /// binder has to carry both ends, not just the branch index.
     v_nports: []u32,
     v_branches: []u32,
-    /// DC value of each V card, and whether an F/H/W card sensed it. A sensed
-    /// source is NOT stamped: the 4-port model carries its own `branch (cp,cn)
+    /// DC value of each V card. A source sensed by an F/H/W card
+    /// is NOT stamped: the 4-port model carries its own `branch (cp,cn)
     /// ctrl` and drives `V(ctrl) <+ vsense`, so leaving the original in place
     /// put two sources across one node pair and the control current split
     /// between them (`I/(1+N)` for N consumers). `v_dc` is what `vsense` gets.
     v_dc: []f64,
-    v_sensed: []bool,
     /// `DISTOF1 [mag [phase]]` off each V card — `.disto`'s F1 drive, and the
     /// ONLY thing that selects which source it lands on (ngspice
     /// cktdisto.c:100-117). `{0, 0}` means the card never named it, which is
@@ -602,6 +603,10 @@ pub const NetBuilder = struct {
 
     // Pre-allocated to bucket('i').size()
     i_names: [][]const u8,
+    /// Node rows of each I card, `+` then `−`. An I source has no branch row,
+    /// so a `.tf` driven from one excites the node PAIR instead.
+    i_pos: []u32,
+    i_neg: []u32,
     n_i: u32,
 
     // -- AC excitation table: one row per source carrying an `AC` spec -------
@@ -664,21 +669,33 @@ pub const NetBuilder = struct {
         const nv = dl.bucket('v').size();
         const ni = dl.bucket('i').size();
         const nl_ = dl.bucket('l').size();
-        const n_def = dl.bucket('f').size() + dl.bucket('h').size() +
-            dl.bucket('w').size() + dl.bucket('k').size();
-        const n_br = dl.bucket('e').size() + dl.bucket('h').size() + dl.bucket('b').size();
+        const n_refs = dl.bucket('f').size() + dl.bucket('h').size() + dl.bucket('w').size();
+        const n_def = n_refs + dl.bucket('k').size();
+        const n_br = dl.bucket('e').size() + dl.bucket('h').size() + dl.bucket('b').size() + dl.bucket('y').size() + dl.bucket('p').size();
         const nr = dl.bucket('r').size();
+        const sensed = try arena.alloc([]const u8, n_refs);
+        var n_sensed: usize = 0;
+        for ("fhw") |letter| for (dl.bucket(letter).positional) |pos| {
+            if (pos.len == 0 or pos[0] != .name) continue;
+            sensed[n_sensed] = pos[0].name;
+            n_sensed += 1;
+        };
+        std.mem.sort([]const u8, sensed[0..n_sensed], {}, struct {
+            fn less(_: void, a: []const u8, b_: []const u8) bool {
+                return std.ascii.lessThanIgnoreCase(a, b_);
+            }
+        }.less);
 
         return .{
             .arena = arena,
             .b = b,
             .nl = nl,
+            .sensed_sources = sensed[0..n_sensed],
             .v_names = try arena.alloc([]const u8, nv),
             .v_ports = try arena.alloc(u32, nv),
             .v_nports = try arena.alloc(u32, nv),
             .v_branches = try arena.alloc(u32, nv),
             .v_dc = try arena.alloc(f64, nv),
-            .v_sensed = try arena.alloc(bool, nv),
             .v_distof1 = try arena.alloc([2]f64, nv),
             .v_portnum = try arena.alloc(u16, nv),
             .v_z0 = try arena.alloc(f64, nv),
@@ -690,6 +707,8 @@ pub const NetBuilder = struct {
             .ac_res_values = try arena.alloc(f64, nr),
             .n_ac_res = 0,
             .i_names = try arena.alloc([]const u8, ni),
+            .i_pos = try arena.alloc(u32, ni),
+            .i_neg = try arena.alloc(u32, ni),
             .n_i = 0,
             .ac_pos = try arena.alloc(u32, nv + ni),
             .ac_neg = try arena.alloc(u32, nv + ni),
@@ -967,16 +986,15 @@ pub const NetBuilder = struct {
                 // which is why cccs/ccvs read 0.5 and cswitch never tripped.
                 // The model header says it plainly: the netlist layer wires the
                 // sense branch IN PLACE OF that source.
-                const sensed = self.isSensedSource(dev.name);
+                const sensed = std.sort.binarySearch([]const u8, self.sensed_sources, dev.name, std.ascii.orderIgnoreCase) != null;
                 if (!sensed) try self.b.addDevice(devices.vsource, bound[0], bound[1], nodes);
                 self.v_names[self.n_v] = dev.name;
                 self.v_ports[self.n_v] = nodes[0];
                 self.v_nports[self.n_v] = if (nodes.len > 1) nodes[1] else 0;
                 self.v_branches[self.n_v] = br;
                 self.v_dc[self.n_v] = bound[0].dc;
-                self.v_sensed[self.n_v] = sensed;
                 self.v_distof1[self.n_v] = sourceDistoF1(dev);
-                const port = if (sensed) null else sourcePort(dev);
+                const port = if (sensed) null else try sourcePort(dev);
                 self.v_portnum[self.n_v] = if (port) |p| p.num else 0;
                 self.v_z0[self.n_v] = if (port) |p| p.z0 else 0;
                 self.n_v += 1;
@@ -998,6 +1016,8 @@ pub const NetBuilder = struct {
                 try self.b.addDevice(devices.isource, bound[0], bound[1], nodes);
                 if (sourceAc(dev)) |ac| self.addAcDrive(nodes[0], nodes[1], ac.re, ac.im);
                 self.i_names[self.n_i] = dev.name;
+                self.i_pos[self.n_i] = nodes[0];
+                self.i_neg[self.n_i] = if (nodes.len > 1) nodes[1] else GROUND;
                 self.n_i += 1;
             },
             'f', 'h', 'w', 'k' => {
@@ -1016,6 +1036,8 @@ pub const NetBuilder = struct {
                     self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", first));
             },
             'p' => try self.addCpl(dev),
+            'o' => try self.addLossyLine(dev),
+            'y' => try self.addTxl(dev),
             'u' => try self.addUrc(dev),
             'e' => {
                 const first = self.b.n;
@@ -1024,6 +1046,138 @@ pub const NetBuilder = struct {
             },
             else => try self.addByLetter(letter, dev),
         }
+    }
+
+    fn addTxl(self: *NetBuilder, dev: types.Device) !void {
+        route: {
+            if (dev.nodes.len != 4) return error.InvalidTransmissionLinePorts;
+            var r: f64 = 0;
+            var l: f64 = 0;
+            var g: f64 = 0;
+            var c: f64 = 0;
+            var len: f64 = 0;
+            if (positionalName(dev, 0)) |name| {
+                if (findModel(self.nl.models, name)) |m| {
+                    r = try numericParameter(m.kv, "r") orelse 0;
+                    l = try numericParameter(m.kv, "l") orelse 0;
+                    g = try numericParameter(m.kv, "g") orelse 0;
+                    c = try numericParameter(m.kv, "c") orelse 0;
+                    len = try numericParameter(m.kv, "length") orelse 0;
+                }
+            }
+            if ((try numericParameter(dev.kv, "length")) orelse (try numericParameter(dev.kv, "len"))) |v| len = v;
+            if (!std.math.isFinite(r) or !std.math.isFinite(l) or !std.math.isFinite(g) or !std.math.isFinite(c) or !std.math.isFinite(len) or g < 0) break :route;
+            if (r <= 0 or l <= 0 or c <= 0 or len <= 0) break :route;
+            if (r / l > 1.6e10) break :route; // inp2y's 3-pi RC expansion case
+            if (!std.math.isFinite(r * len) or r * len <= 0) break :route;
+            const fit = devices.txl_native.fitLine(r, l, g, c, len);
+            if (!fit.ok or fit.taul <= 0 or fit.sqtCdL <= 0 or !finiteLineCoefficients(fit)) break :route;
+            const nm: devices.txl_native.Model = .{ .r = r, .l = l, .g = g, .c = c, .len = len };
+            const n1 = try self.b.internNode(dev.nodes[0]);
+            const n2 = try self.b.internNode(dev.nodes[2]);
+            try self.b.addDevice(devices.txl_native, nm, .{}, [2]u32{ n1, n2 });
+            // ngspice writes duplicate i(Y) names; the named oracle retains
+            // the final (far-end) branch, as it does for CPL below.
+            self.addBranchProbe(dev.name, self.b.n - 1);
+            return;
+        }
+        return error.UnsupportedTransmissionLineParameters;
+    }
+
+    /// LTRA (O card). Routing per ngspice LTRAsetup §1.1:
+    ///   RLC (r,l,c > 0, g = 0) and RC (r,c > 0, l = g = 0) → the native
+    ///     recursive-convolution device (devices.ltra_native, ngspice's real
+    ///     h1'/h2/h3' method — history, coefficients, chop, step limit);
+    ///   LC (r = g = 0) → one exact Bergeron ideal line (tline.va);
+    ///   RG and rejects → lossy_tline.va (exact hyperbolic two-port / $error).
+    fn addLossyLine(self: *NetBuilder, dev: types.Device) !void {
+        if (dev.nodes.len != 4) return error.InvalidTransmissionLinePorts;
+        var model: devices.lossy_tline.Model = .{};
+        if (positionalName(dev, 0)) |name| {
+            if (findModel(self.nl.models, name)) |m| {
+                try applyKv(&model, m.kv);
+                // TXL model cards spell the line length `length=`; the
+                // lossy_tline field is `len` (same alias addSingleDevice has).
+                if (try numericParameter(m.kv, "length")) |length| model.len = @floatCast(length);
+            }
+        }
+        try applyKv(&model, dev.kv);
+        if (try numericParameter(dev.kv, "length")) |length| model.len = @floatCast(length);
+
+        const len: f64 = @as(f64, model.len);
+        if (len <= 0 or model.r < 0 or model.l < 0 or model.g < 0 or model.c < 0)
+            return error.UnsupportedTransmissionLineParameters;
+        const r_t: f64 = @as(f64, model.r) * len;
+        const l_t: f64 = @as(f64, model.l) * len;
+        const c_t: f64 = @as(f64, model.c) * len;
+        const g_t: f64 = @as(f64, model.g) * len;
+        if (!std.math.isFinite(r_t) or !std.math.isFinite(l_t) or !std.math.isFinite(c_t) or !std.math.isFinite(g_t))
+            return error.NonFiniteParameter;
+
+        if ((model.r > 0 and r_t == 0) or (model.l > 0 and l_t == 0) or
+            (model.c > 0 and c_t == 0) or (model.g > 0 and g_t == 0))
+            return error.UnsupportedTransmissionLineParameters;
+        // Classify raw parameters: scaling underflow must not change the case.
+        const wave = model.l > 0 and model.c > 0 and model.g == 0;
+        const rc = model.r > 0 and model.c > 0 and model.l == 0 and model.g == 0;
+        if (wave) {
+            const impedance = @sqrt(model.l / model.c);
+            const delay = @sqrt(model.l * model.c) * len;
+            if (!finiteLineCoefficients(.{ impedance, 1.0 / impedance, delay, model.r / model.l }) or impedance <= 0 or delay <= 0)
+                return error.UnsupportedTransmissionLineParameters;
+        } else if (rc) {
+            const cbyr = model.c / model.r;
+            const rclsqr = model.r * model.c * len * len;
+            if (!finiteLineCoefficients(.{ cbyr, rclsqr }) or cbyr <= 0 or rclsqr <= 0)
+                return error.UnsupportedTransmissionLineParameters;
+        }
+
+        // Only the static RG branch of lossy_tline.va is equivalent. Never
+        // let an unsupported dynamic line silently use its RC/RLC approximation.
+        if (!wave and !rc) {
+            if (model.r > 0 and model.g > 0 and model.l == 0 and model.c == 0) {
+                const rg = model.r * model.g;
+                if (rg == 0) return error.UnsupportedTransmissionLineParameters;
+                const gl = len * @sqrt(rg);
+                const sinhc = if (gl > 1e-9) std.math.sinh(gl) / gl else 1.0 + gl * gl / 6.0;
+                const zs = r_t * sinhc;
+                if (gl <= 0 or !finiteLineCoefficients(.{ gl, sinhc, std.math.cosh(gl), zs, zs * (1.0 + 1e-12) }))
+                    return error.UnsupportedTransmissionLineParameters;
+                deriveModel(devices.lossy_tline, &model, self.b.nom_temp_c);
+                return self.b.addDevice(devices.lossy_tline, model, .{}, try deviceNodes(self.b, devices.lossy_tline, dev));
+            }
+            return error.UnsupportedTransmissionLineParameters;
+        }
+
+        const pos1 = if (dev.nodes.len > 0) try self.b.internNode(dev.nodes[0]) else GROUND;
+        const neg1 = if (dev.nodes.len > 1) try self.b.internNode(dev.nodes[1]) else GROUND;
+        const pos2 = if (dev.nodes.len > 2) try self.b.internNode(dev.nodes[2]) else GROUND;
+        const neg2 = if (dev.nodes.len > 3) try self.b.internNode(dev.nodes[3]) else GROUND;
+
+        if (rc or r_t > 0) {
+            const nm: devices.ltra_native.Model = .{
+                .r = model.r,
+                .l = model.l,
+                .g = model.g,
+                .c = model.c,
+                .len = model.len,
+                .compactrel = model.compactrel,
+                .compactabs = model.compactabs,
+                .rel = model.rel,
+                .steplimit = if (model.nosteplimit != 0) 0 else 1,
+                .truncdontcut = @floatFromInt(model.truncdontcut),
+            };
+            return self.b.addDevice(devices.ltra_native, nm, .{}, [4]u32{ pos1, neg1, pos2, neg2 });
+        }
+
+        // Lossless LC: one exact Bergeron ideal line.
+        const t_model: devices.tline.Model = .{
+            .z0 = @floatCast(@sqrt(l_t / c_t)),
+            .td = @floatCast(@sqrt(l_t * c_t)),
+        };
+        if (!finiteLineCoefficients(.{ t_model.z0, t_model.td }) or t_model.z0 <= 0 or t_model.td <= 0)
+            return error.UnsupportedTransmissionLineParameters;
+        try self.b.addDevice(devices.tline, t_model, .{}, [4]u32{ pos1, neg1, pos2, neg2 });
     }
 
     /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. ngspice has no
@@ -1246,50 +1400,75 @@ pub const NetBuilder = struct {
     }
 
     fn resolveDeferred(self: *NetBuilder) !void {
+        if (self.n_deferred == 0) return;
+        var source_index: std.StringHashMapUnmanaged(u32) = .empty;
+        if (self.sensed_sources.len != 0) {
+            try source_index.ensureTotalCapacity(self.arena, self.n_v);
+            for (self.v_names[0..self.n_v], 0..) |name, i| {
+                const entry = source_index.getOrPutAssumeCapacity(name);
+                if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
+            }
+        }
         for (self.deferred[0..self.n_deferred]) |def| {
             self.b.card = def.dev.name;
             defer self.b.card = "";
             switch (def.letter) {
-                'f' => try self.addBranchRef(devices.cccs, def.dev, 1.0),
-                'h' => try self.addBranchRef(devices.ccvs, def.dev, 0.0),
-                'w' => try self.addBranchRef(devices.cswitch, def.dev, null),
+                'f' => try self.addBranchRef(devices.cccs, def.dev, source_index, 1.0),
+                'h' => try self.addBranchRef(devices.ccvs, def.dev, source_index, 0.0),
+                'w' => try self.addBranchRef(devices.cswitch, def.dev, source_index, null),
                 'k' => try self.addKinduc(def.dev),
                 else => unreachable,
             }
         }
     }
 
-    /// Does any F/H/W card sense this V card? Runs during the 'v' bucket, so
-    /// it reads the f/h/w buckets directly rather than any state built later.
-    fn isSensedSource(self: *const NetBuilder, name: []const u8) bool {
-        for ([_]u8{ 'f', 'h', 'w' }) |c| {
-            const bkt = self.nl.devices.bucket(c);
-            for (0..bkt.size()) |i| {
-                const ref = positionalName(bkt.get(i), 0) orelse continue;
-                if (std.ascii.eqlIgnoreCase(ref, name)) return true;
+    /// CPL keeps ngspice's modal fit and accepted-step convolution for the
+    /// supported dimensions. The two-conductor VA approximation is not a fallback.
+    fn addCpl(self: *NetBuilder, dev: types.Device) !void {
+        if (dev.nodes.len < 6 or dev.nodes.len % 2 != 0) return error.UnsupportedCoupledLineDimension;
+        const n_lines = (dev.nodes.len - 2) / 2;
+        if (n_lines > 4) return error.UnsupportedCoupledLineDimension;
+        const card = findModel(self.nl.models, positionalName(dev, 0) orelse return error.UnsupportedTransmissionLineParameters) orelse return error.UnsupportedTransmissionLineParameters;
+        var rr: [10]f64 = undefined;
+        var ll: [10]f64 = undefined;
+        var cc: [10]f64 = undefined;
+        var gg: [10]f64 = @splat(0);
+        const nr = try cplVector(card.kv, "r", &rr);
+        const nl = try cplVector(card.kv, "l", &ll);
+        const nc = try cplVector(card.kv, "c", &cc);
+        const ng = try cplVector(card.kv, "g", &gg);
+        const length = (try numericParameter(dev.kv, "length")) orelse (try numericParameter(card.kv, "length")) orelse 0;
+        const tri = n_lines * (n_lines + 1) / 2;
+        if (nr != tri or nl != tri or nc != tri or (ng != 0 and ng != tri) or !std.math.isFinite(length) or length <= 0)
+            return error.UnsupportedTransmissionLineParameters;
+        inline for (.{ devices.models.cpl_native_2, devices.models.cpl_native_3, devices.models.cpl_native_4 }) |D| {
+            const N = D.num_ports / 2;
+            if (n_lines == N) {
+                var model: D.Model = .{ .length = length };
+                @memcpy(&model.rr, rr[0..tri]);
+                @memcpy(&model.ll, ll[0..tri]);
+                @memcpy(&model.cc, cc[0..tri]);
+                @memcpy(&model.gg, gg[0..tri]);
+                // Declined or nonfinite modal fits must not become DC-only lines.
+                var instance: D.Instance = .{};
+                D.precompute(&instance, &model);
+                if (!model.ok or model.min_tau_s <= 0 or !finiteLineCoefficients(model)) return error.UnsupportedTransmissionLineParameters;
+                // ngspice cplsetup binds conductor nodes and ignores references.
+                var nodes: [2 * N]u32 = undefined;
+                for (0..N) |i| nodes[i] = try self.b.internNode(dev.nodes[i]);
+                for (0..N) |i| nodes[N + i] = try self.b.internNode(dev.nodes[N + 1 + i]);
+                try self.b.addDevice(D, model, instance, nodes);
+                self.addBranchProbe(dev.name, self.b.n - 1);
+                return;
             }
         }
-        return false;
+        unreachable;
     }
 
-    /// The generated CPL model has exactly two conductors per port.
-    fn addCpl(self: *NetBuilder, dev: types.Device) !void {
-        if (dev.nodes.len != 6) return error.UnsupportedCoupledLineDimension;
-        const D = devices.coupled_tlines;
-        if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
-        var model: D.Model = .{};
-        if (positionalName(dev, 0)) |name| {
-            if (findModel(self.nl.models, name)) |m| applyCplKv(&model, m.kv);
-        }
-        applyCplKv(&model, dev.kv);
-        try self.b.addDevice(D, model, .{}, try deviceNodes(self.b, D, dev));
-    }
-
-    fn addBranchRef(self: *NetBuilder, comptime D: type, dev: types.Device, comptime default_gain: ?f64) !void {
+    fn addBranchRef(self: *NetBuilder, comptime D: type, dev: types.Device, source_index: std.StringHashMapUnmanaged(u32), comptime default_gain: ?f64) !void {
         if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
         const ctrl_name = positionalName(dev, 0) orelse return error.MissingControlSource;
-        // ponytail: one O(n_v) name lookup for all control fields; index names if profiled.
-        const ctrl = findNameIndex(self.v_names[0..self.n_v], ctrl_name) orelse return error.UnknownControlSource;
+        const ctrl = source_index.get(ctrl_name) orelse return error.UnknownControlSource;
 
         var model: D.Model = .{};
         // W card: `W n+ n- Vctrl model` — model is positional[1] (positional[0]
@@ -1940,11 +2119,17 @@ pub fn directiveNumber(dir: types.Directive, index: usize) ?f64 {
 }
 
 pub fn directiveNodeName(dir: types.Directive, index: usize) ?[]const u8 {
+    return directiveNodeNameAt(dir, index, 0);
+}
+
+/// `which` selects inside a `v(a,b)` group: 0 is `a`, 1 is `b`. A bare name
+/// or a one-argument `v(a)` has no second node.
+pub fn directiveNodeNameAt(dir: types.Directive, index: usize, which: usize) ?[]const u8 {
     if (index >= dir.args.len) return null;
     return switch (dir.args[index]) {
-        .name => |n| n,
-        .group => |g| if (std.mem.eql(u8, g.name, "v") and g.args.len > 0)
-            switch (g.args[0]) {
+        .name => |n| if (which == 0) n else null,
+        .group => |g| if (std.mem.eql(u8, g.name, "v") and g.args.len > which)
+            switch (g.args[which]) {
                 .name => |n| n,
                 else => null,
             }
@@ -2003,7 +2188,7 @@ fn sourceDc(dev: types.Device) ?f64 {
 /// `z0` then defaults to 50, and the card counts as a port only while
 /// `z0 > 0 && portnum > 0`. Both spellings are accepted — `portnum 1` (the
 /// positional pair every ngspice IOP is written as on a card) and `portnum=1`.
-fn sourcePort(dev: types.Device) ?struct { num: u16, z0: f64 } {
+fn sourcePort(dev: types.Device) !?struct { num: u16, z0: f64 } {
     const num_f = blk: {
         if (kvNumber(dev.kv, "portnum")) |v| break :blk v;
         for (dev.positional, 0..) |pos, idx| {
@@ -2020,7 +2205,11 @@ fn sourcePort(dev: types.Device) ?struct { num: u16, z0: f64 } {
         }
         break :blk 50.0;
     };
-    if (!(num_f >= 1) or !(z0 > 0) or num_f > 1024) return null;
+    // `portnum` was GIVEN, so the card claims to be a port: a reference
+    // impedance that is not positive, or a port number outside the table, is
+    // a bad deck. Returning null here instead demoted the card to a plain V
+    // source and `sp/zero_impedance` ran a one-port S-parameter sweep on it.
+    if (!(num_f >= 1) or num_f > 1024 or !(z0 > 0)) return error.InvalidAnalysisArguments;
     return .{ .num = @intFromFloat(num_f), .z0 = z0 };
 }
 
@@ -2075,28 +2264,38 @@ fn findModel(spice_models: []const types.Model, name: []const u8) ?types.Model {
     return null;
 }
 
-fn applyCplKv(model: *devices.coupled_tlines.Model, kv: []const types.Kv) void {
-    var i: usize = 0;
-    while (i < kv.len) : (i += 1) {
-        const key = kv[i].key;
-        const v0 = valueNumber(kv[i].value) orelse continue;
-        // Gather the ""-keyed tail: [self, mutual, self2, ...]
-        var mutual: ?f64 = null;
-        var tail: usize = 0;
-        while (i + 1 < kv.len and kv[i + 1].key.len == 0) : (i += 1) {
-            if (valueNumber(kv[i + 1].value)) |v| {
-                if (tail == 0) mutual = v;
-                tail += 1;
-            }
-        }
-        inline for (.{ "r", "l", "c", "g" }, .{ "rm", "lm", "cm", "gm" }) |sf, mf| {
-            if (std.mem.eql(u8, key, sf)) {
-                @field(model, sf) = @floatCast(v0);
-                if (mutual) |mv| @field(model, mf) = @floatCast(mv);
-            }
-        }
-        if (std.mem.eql(u8, key, "length")) model.length = @floatCast(v0);
+/// Cold native-line setup validation, including every nested fitted coefficient.
+fn finiteLineCoefficients(value: anytype) bool {
+    switch (@typeInfo(@TypeOf(value))) {
+        .float => return std.math.isFinite(value),
+        .bool => {},
+        .array => for (value) |item| {
+            if (!finiteLineCoefficients(item)) return false;
+        },
+        .@"struct" => inline for (std.meta.fields(@TypeOf(value))) |field| {
+            if (!finiteLineCoefficients(@field(value, field.name))) return false;
+        },
+        else => @compileError("unexpected native line coefficient type"),
     }
+    return true;
+}
+
+/// Packed upper-triangular matrix entries follow the first named value.
+fn cplVector(kv: []const types.Kv, key: []const u8, out: []f64) !usize {
+    for (kv, 0..) |entry, start| {
+        if (!std.mem.eql(u8, entry.key, key)) continue;
+        var i = start;
+        var n: usize = 0;
+        while (i < kv.len and (i == start or kv[i].key.len == 0)) : (i += 1) {
+            const value = valueNumber(kv[i].value) orelse return error.InvalidParameterValue;
+            if (!std.math.isFinite(value)) return error.NonFiniteParameter;
+            if (n == out.len) return error.UnsupportedTransmissionLineParameters;
+            out[n] = value;
+            n += 1;
+        }
+        return n;
+    }
+    return 0;
 }
 
 /// Backing storage for normalizeBjt; must outlive the returned Device

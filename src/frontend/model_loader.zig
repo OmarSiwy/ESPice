@@ -54,7 +54,7 @@ pub fn isEmpty() bool {
 /// The app is the only caller, and it is the only one that knows where it was
 /// built from.
 pub const BuildPaths = struct {
-    /// FastVAF-owned scratch: generated device.zig, compiler cache, artifacts.
+    /// Parent of isolated generated-source build trees and compiler caches.
     work_dir: []const u8,
     /// VerA device contract imported by the generated model.
     contract: []const u8,
@@ -100,11 +100,6 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     if (already) return null;
     const zig_source = try result.generateDevice();
 
-    // generation = generated-source hash XOR the host's dyn-ABI layout/version. Same
-    // device + same ABI ⇒ same generation, so FastVAF's per-generation build
-    // tree IS the compile cache: first load pays, later loads hit it.
-    const generation: u32 = @truncate(std.hash.Fnv1a_64.hash(zig_source) ^ ir.layoutHash() ^ ir.abi_version);
-
     std.debug.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ result.mir.name, path });
     // Order is load-bearing: the orchestrator hashes this list into
     // `layout_hash`, so it must match what the CLI's --emit-so passes.
@@ -123,13 +118,51 @@ fn prepareOne(gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: Build
     // (Debug) host cannot load HDL at all — say so instead of tripping the
     // orchestrator's assert. Release espice is LLVM and just works.
     if (@import("builtin").zig_backend != .stage2_llvm) return error.HdlNeedsLlvmHost;
-    var built = try fastvaf.buildArtifact(gpa, io, &result, .{
+    var options: fastvaf.orchestrator.Options = .{
         .work_dir = paths.work_dir,
         .name = result.mir.name,
         .optimize = @import("builtin").mode,
         .backend = .llvm,
         .modules = &modules,
-    }, generation, null);
+    };
+    // VerA's generation versions the LIBRARY, not device.zig or u/*.zig.
+    // Its writer prunes that tree, so unrelated sources must never share it.
+    // Keep a stable tree for Zig's compiler cache; include module roots, compiler
+    // options and the host ABI so different hosts do not overwrite each other.
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(zig_source);
+    const host_layout = ir.layoutHash();
+    const module_layout = fastvaf.orchestrator.layoutHash(options);
+    hash.update(std.mem.asBytes(&host_layout));
+    hash.update(std.mem.asBytes(&ir.abi_version));
+    hash.update(std.mem.asBytes(&module_layout));
+    const digest = hash.finalResult();
+    const work_dir = try std.fs.path.join(gpa, &.{ paths.work_dir, &std.fmt.bytesToHex(digest, .lower) });
+    defer gpa.free(work_dir);
+    options.work_dir = work_dir;
+    try std.Io.Dir.cwd().createDirPath(io, work_dir);
+    const dir = try std.Io.Dir.cwd().openDir(io, work_dir, .{});
+    defer dir.close(io);
+    // Independently opened file descriptions serialize same-source threads AND
+    // processes. Keep the lock through dlopen; closing releases it on all paths.
+    const lock = try dir.createFile(io, "build.lock", .{ .truncate = false, .lock = .exclusive });
+    defer lock.close(io);
+
+    // publish() copies onto this path. Unlink first so it creates a fresh inode:
+    // truncating an inode mapped by another loader can corrupt its live vtable.
+    // POSIX keeps an unlinked mapping alive. Platforms forbidding this unlink
+    // return that error; never fall back to overwriting the mapped file.
+    const generation = 1;
+    const target = @import("builtin").target;
+    const library = try std.fmt.allocPrint(gpa, "{s}{s}.{d}{s}", .{
+        target.libPrefix(), result.mir.name, generation, target.dynamicLibSuffix(),
+    });
+    defer gpa.free(library);
+    dir.deleteFile(io, library) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    var built = try fastvaf.buildArtifact(gpa, io, &result, options, generation, null);
     defer built.deinit(gpa);
     const art = switch (built) {
         .ok => |a| a,

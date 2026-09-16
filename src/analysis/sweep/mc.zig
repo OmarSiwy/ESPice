@@ -7,7 +7,6 @@
 //! one numeric path.
 const std = @import("std");
 const root = @import("../types.zig");
-const dc = @import("../dc/dc.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solvers").converger;
 

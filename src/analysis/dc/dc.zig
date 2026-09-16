@@ -45,16 +45,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // lane path both inherit this.
     ckt.setSimState(.{ .kind = .dc });
 
-    // Locate the DC param pointer for the source at opts.source_index.
+    // Locate the swept parameter. Matching the DEVICE TYPE as well as the
+    // index is what lets a deck hold both a V and an I card (their
+    // batch-local indices overlap) and what lets the sweep name a resistor.
     const refs = try ckt.collectParams();
-    var target: ?root.ParamRef = null;
-    for (refs) |ref| {
-        if (std.mem.eql(u8, ref.param_name, "dc") and ref.index == opts.source_index) {
-            target = ref;
-            break;
-        }
-    }
-    const t = target orelse return error.DcSweepSourceNotFound;
+    const t = findTarget(refs, opts.target) orelse return error.DcSweepSourceNotFound;
     const saved = t.get();
     defer {
         t.set(saved);
@@ -73,23 +68,22 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // (v-sweep restarts per block). The outer install is one ParamRef write
     // (or a circuit temperature set) followed by the same serial march.
     if (opts.hasOuter()) {
-        const t2: ?root.ParamRef = if (opts.source2_index) |idx2| blk: {
-            for (refs) |ref| {
-                if (std.mem.eql(u8, ref.param_name, "dc") and ref.index == idx2) break :blk ref;
-            }
-            return error.DcSweepSourceNotFound;
-        } else null;
+        const outer = opts.target2.?;
+        const t2: ?root.ParamRef = if (outer.is_temp)
+            null
+        else
+            findTarget(refs, outer) orelse return error.DcSweepSourceNotFound;
         const saved2: f64 = if (t2) |r| r.get() else 0;
         defer if (t2) |r| {
             r.set(saved2);
         };
         var temperatures: std.ArrayList(f64) = .empty;
         defer temperatures.deinit(a);
-        if (opts.source2_is_temp) for (refs) |ref| {
+        if (outer.is_temp) for (refs) |ref| {
             if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature"))
                 try temperatures.append(a, ref.get());
         };
-        defer if (opts.source2_is_temp) {
+        defer if (outer.is_temp) {
             var i: usize = 0;
             for (refs) |ref| {
                 if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature")) {
@@ -139,11 +133,34 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     return .{
         .plotname = "DC transfer characteristic",
-        .varnames = try root.probeNames(ctx, "v(v-sweep)"),
+        // ngspice names the sweep column after the swept QUANTITY, not after
+        // the analysis: a current source sweeps `i(i-sweep)`, a resistance
+        // `res-sweep`, the temperature `temp-sweep`.
+        .varnames = try root.probeNames(ctx, sweepColumn(opts.target)),
         .is_complex = false,
         .npoints = npoints,
         .data = data,
     };
+}
+
+fn sweepColumn(target: Options.SweepTarget) []const u8 {
+    if (target.is_temp) return "temp-sweep";
+    const named = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "isource", "i(i-sweep)" },
+        .{ "resistor", "res-sweep" },
+        .{ "capacitor", "cap-sweep" },
+        .{ "inductor", "ind-sweep" },
+    });
+    return named.get(target.type_name) orelse "v(v-sweep)";
+}
+
+fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget) ?root.ParamRef {
+    for (refs) |ref| {
+        if (ref.index == want.index and
+            std.mem.eql(u8, ref.param_name, want.param_name) and
+            std.mem.eql(u8, ref.device_type, want.type_name)) return ref;
+    }
+    return null;
 }
 
 /// solveLanesGpu apply/restore state: lane k installs sweep value

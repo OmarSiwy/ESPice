@@ -16,7 +16,7 @@ pub const Options = tran_types.Options;
 pub const Waveform = tran_types.Waveform;
 pub const SimResult = tran_types.SimResult;
 pub const initialCapacity = tran_types.initialCapacity;
-const simdCopy = tran_types.simdCopy;
+const simdCopy = @import("numerics").copySimd;
 
 // ---------------------------------------------------------------------------
 // Integration methods: dynamic-residual coefficient, LTE estimate, timestep
@@ -476,7 +476,9 @@ pub fn simulateInto(
         }
     }.call;
 
-    try waveform.record(0, x, probes);
+    // ngspice tstart suppresses OUTPUT, never the solve: t = 0 through
+    // t_start is integrated with the same history and simply not recorded.
+    if (options.t_start <= 0) try waveform.record(0, x, probes);
 
     var cur: []f64 = x;
     var trial: []f64 = x_try;
@@ -493,6 +495,7 @@ pub fn simulateInto(
     if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| {
         if (bp0 < dt) dt = bp0 / 10.0;
     }
+    if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
     var dt_prev: f64 = dt;
     var dt_prev2: f64 = dt;
     var steps: u32 = 0;
@@ -851,7 +854,7 @@ pub fn simulateInto(
             }
         }
 
-        try waveform.record(t, cur, probes);
+        if (t >= options.t_start) try waveform.record(t, cur, probes);
         if (options.step_fn) |f| f(options.step_ctx, t, cur);
 
         // Breakpoint handling: clamp dt to land on the next breakpoint,
@@ -865,6 +868,12 @@ pub fn simulateInto(
                 bp_target = bp;
             }
         }
+
+        // Land one step exactly on t_start so the first PRINTED point is at
+        // t_start rather than wherever LTE happened to put the step after it
+        // (ngspice does this with a breakpoint). Not a discontinuity: no
+        // order drop, no bp_target, nothing else changes.
+        if (t < options.t_start and t + dt_next > options.t_start) dt_next = options.t_start - t;
 
         dt = dt_next;
         if (t + dt > options.t_stop) dt = options.t_stop - t;

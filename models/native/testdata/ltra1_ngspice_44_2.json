@@ -1,0 +1,30 @@
+{
+  "oracle": "ngspice-44.2",
+  "source": "tests/fixtures/tran/bench_tline_ltra1_1_line.sp",
+  "source_sha256": "a889453b910f7b75b74368bf054bcfb330ca23fc5d9f0799f35eeefa2ea2d371",
+  "command": "ngspice -n -b -r reference.raw tests/fixtures/tran/bench_tline_ltra1_1_line.sp",
+  "reference_raw_sha256": "10d2967731b304910d65ccbbf431ddb8e3b398932ceeff25f1c128a82bdd8a08",
+  "fixture_sha256": "9a211df323cf8a5e7a54eaccd04728de18eda68b418480a9c89c0b1949a25444",
+  "format": "little-endian IEEE754 binary64, row-major, no header",
+  "rows": 498,
+  "columns": [
+    "time",
+    "v(2)",
+    "v(3)",
+    "v(o1#i1)",
+    "v(o1#i2)"
+  ],
+  "purpose": "Native LTRA residual replay using independently accepted ngspice timepoints, voltages and branch currents; no native-generated expected data.",
+  "native_parameters": {
+    "r": 12.45,
+    "l": 8.972e-09,
+    "g": 0,
+    "c": 4.68e-13,
+    "len": 16,
+    "rel": 1,
+    "steplimit": 1,
+    "compactrel": 0.001,
+    "compactabs": 1e-14
+  },
+  "residual_absolute_tolerance_A": 1e-12
+}

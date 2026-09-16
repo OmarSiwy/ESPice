@@ -1,14 +1,4 @@
 //! Frontend: source preparation and model-to-circuit construction.
-const syntax = @import("syntax");
-pub const types = syntax.types;
-pub const Parser = syntax.Parser;
-pub const load = syntax.load;
-pub const ngspice = syntax.ngspice;
-pub const hspice = syntax.hspice;
-pub const spectre = syntax.spectre;
-pub const Ast = syntax.Ast;
-pub const Builder = @import("builder").Builder;
-pub const models = @import("device_models");
 const preparation = @import("prepare.zig");
 pub const Source = preparation.Source;
 pub const Dialect = preparation.Dialect;

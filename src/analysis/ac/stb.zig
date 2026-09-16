@@ -4,8 +4,7 @@
 const std = @import("std");
 const batch = @import("batch.zig");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const solvers = @import("solvers");
 const GROUND = root.GROUND;
 const FreqSolver = solvers.freq_solve.FreqSolver;
@@ -40,20 +39,31 @@ pub const SolveResult = struct {
     }
 };
 
-/// Low-level solve: DC bias → linearize → augment → sweep → margins.
+/// Low-level solve: DC bias → linearize → inject at the probe → margins.
 /// `x_op_in` reuses an operating point the engine already solved; pass null
 /// (standalone callers) to run the DC solve here.
+///
+/// The probe is the deck's own 0 V source (`.stb Vprobe ...`), NOT a source
+/// this module adds: its branch equation is already `v_p - v_n - V = 0`, so
+/// driving `rhs[branch] = 1` turns it into the 1 V loop injection and leaves
+/// every other stamp alone. Augmenting to (n+1)² instead put a second 0 V
+/// source across the same node pair as the deck's — two contradictory
+/// constraints on one pair, and the factorization had nothing to say.
+///
+/// Return ratio, ngspice's orientation: the probe's `+` node is where the
+/// signal ARRIVES (the driven side of the break) and `−` is where it leaves
+/// into the rest of the loop, so `T = −V(+)/V(−)`.
 pub fn solve(
     ckt: *root.Circuit,
-    probe_p: u32,
-    probe_n: u32,
     options: Options,
     x_op_in: ?[]const f64,
     allocator: std.mem.Allocator,
 ) !SolveResult {
     const n: usize = ckt.n;
-    const n_aug = n + 1;
-    const branch_idx = n;
+    if (options.probe_branch >= n or options.probe_p >= n or options.probe_n >= n)
+        return error.InvalidProbe;
+    // A probe whose `−` side is ground has no returned voltage to divide by.
+    if (options.probe_n == GROUND) return error.InvalidProbe;
 
     // --- Bias point: reuse the engine's op if given, else DC solve here ------
     var owned_x_op: ?[]f64 = null;
@@ -71,45 +81,13 @@ pub fn solve(
     // --- Linearize at the operating point ------------------------------------
     try ckt.linearizeAc(x_op);
 
-    // --- Augment to (n+1)² with probe branch ---------------------------------
-    // FreqSolver.initDense takes ownership of both arrays.
-    const g_aug = try allocator.alloc(f64, n_aug * n_aug);
-    const c_aug = allocator.alloc(f64, n_aug * n_aug) catch |err| {
-        allocator.free(g_aug);
-        return err;
-    };
-    root.zeroSimd(g_aug);
-    root.zeroSimd(c_aug);
-
-    for (0..n) |col| {
-        for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
-            const dst = @as(usize, ckt.row_idx[slot]) * n_aug + col;
-            g_aug[dst] = ckt.g_vals[slot];
-            c_aug[dst] = ckt.c_vals[slot];
-        }
-    }
-
-    // Stamp 0 V probe source: ±1 couplings, zero diagonal.
-    if (probe_p != GROUND) {
-        g_aug[probe_p * n_aug + branch_idx] += 1.0;
-        g_aug[branch_idx * n_aug + probe_p] += 1.0;
-    }
-    if (probe_n != GROUND) {
-        g_aug[probe_n * n_aug + branch_idx] -= 1.0;
-        g_aug[branch_idx * n_aug + probe_n] -= 1.0;
-    }
-
     // --- Frequency sweep ------------------------------------------------------
-    // All freq points are independent (G+jωC)x=rhs solves over one shared rhs
-    // (unit voltage on the probe branch): lane axis = frequency. GPU batch
-    // dispatch orelse the CPU lane solveBatch (dense strategy peels to the
-    // per-omega serial ladder inside solveBatch — same numeric path).
-    const n_points = types.logSweepCount(options.f_start, options.f_stop, options.points_per_decade);
-    const nn = 2 * n_aug;
+    // Independent (G+jωC)x = e_branch solves: lane axis = frequency. GPU batch
+    // dispatch orelse the CPU lane solveBatch.
+    const nn = 2 * n;
+    const n_points = options.sweep.count();
 
-    // FreqSolver.initDense takes ownership of g_aug, c_aug; gpuFreqBatch only
-    // borrows them (read-only) so fs owning them is fine for both paths.
-    var fs = try FreqSolver.initDense(allocator, @intCast(n_aug), g_aug, c_aug);
+    var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
     defer fs.deinit(allocator);
 
     var result = try SolveResult.init(allocator, n_points);
@@ -117,23 +95,22 @@ pub fn solve(
 
     const omegas = try allocator.alloc(f64, n_points);
     defer allocator.free(omegas);
-    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, result.freqs, omegas);
+    options.sweep.fill(result.freqs, omegas);
 
-    // One shared rhs: unit excitation on the probe branch (stacked-real 2n).
+    // One shared rhs: the 1 V injection on the probe's own branch row.
     const rhs = try allocator.alloc(f64, nn);
     defer allocator.free(rhs);
     root.zeroSimd(rhs);
-    rhs[branch_idx] = 1.0;
+    rhs[options.probe_branch] = 1.0;
 
-    const x_out = try batch.solve(ckt, &fs, allocator, g_aug, c_aug, omegas, rhs, false);
+    const x_out = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, false);
     defer allocator.free(x_out);
 
     for (0..n_points) |k| {
-        // T(f) = −(x_re[branch] + j·x_im[branch])
-        result.loop_gain[k] = .{
-            .re = -x_out[k * nn + branch_idx],
-            .im = -x_out[k * nn + n_aug + branch_idx],
-        };
+        const lane = x_out[k * nn ..][0..nn];
+        const v_p: Complex = .{ .re = lane[options.probe_p], .im = lane[n + options.probe_p] };
+        const v_n: Complex = .{ .re = lane[options.probe_n], .im = lane[n + options.probe_n] };
+        result.loop_gain[k] = v_p.div(v_n).scale(-1);
     }
 
     computeMargins(&result);
@@ -145,12 +122,10 @@ pub fn solve(
 /// complex data: (frequency, loop_gain) per row.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const probe_p = opts.probe_p orelse ctx.source_node;
-
     // `res` is deinit-ed here, so it is scratch, and `a` is a results arena
     // whose free() is a no-op. See RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator orelse a;
-    var res = try solve(ctx.circuit, probe_p, opts.probe_n, opts, ctx.x_op, scratch);
+    var res = try solve(ctx.circuit, opts, ctx.x_op, scratch);
     defer res.deinit(scratch);
 
     const names = try a.dupe([]const u8, &.{ "frequency", "loop_gain" });

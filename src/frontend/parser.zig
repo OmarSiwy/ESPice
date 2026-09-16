@@ -216,7 +216,12 @@ pub fn Parser(comptime Tok: type) type {
                                 if (peek.next()) |nx| {
                                     if (nx == .eq) {
                                         t.* = peek;
-                                        const v = try parseParamValue(arena, t);
+                                        // CPL matrices are whitespace-separated values;
+                                        // a negative next entry is not subtraction.
+                                        const matrix = std.mem.eql(u8, mkind, "cpl") and std.StaticStringMap(void).initComptime(.{
+                                            .{ "r", {} }, .{ "l", {} }, .{ "g", {} }, .{ "c", {} },
+                                        }).has(w);
+                                        const v = if (matrix) try parseValueToken(arena, t) else try parseParamValue(arena, t);
                                         try kv.append(arena, .{ .key = w, .value = v });
                                         continue;
                                     }

@@ -17,7 +17,7 @@
 const std = @import("std");
 const direct = @import("direct.zig");
 const newton_core = @import("newton_core.zig");
-const BbdInfo = @import("types.zig").BbdInfo;
+const BbdInfo = @import("numerics").BbdInfo;
 
 pub const Strategy = enum { newton, jfnk };
 

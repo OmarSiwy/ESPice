@@ -1,5 +1,4 @@
-const impl = @import("../executor.zig");
-const Worker = impl.test_access.Worker;
+const Worker = @import("../worker.zig").Worker;
 const progress = @import("../progress.zig");
 const std = @import("std");
 

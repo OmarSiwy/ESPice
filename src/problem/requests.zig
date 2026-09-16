@@ -5,7 +5,8 @@ const ir = @import("device_ir");
 pub const QueryId = enum(u32) { _ };
 pub const invalid_query: QueryId = @enumFromInt(std.math.maxInt(u32));
 pub const Method = enum { backward_euler, trapezoidal, gear_2 };
-pub const SweepType = enum { log, linear };
+pub const FreqSweep = @import("numerics").FreqSweep;
+pub const SweepKind = @import("numerics").SweepKind;
 pub const Port = struct { node: u32, branch: u32, z0: f64 = 50.0 };
 pub const CardRef = struct {
     type_name: []const u8,
@@ -19,27 +20,28 @@ pub const CardRef = struct {
 
 pub const Ac = struct {
     tol: Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
+    sweep: FreqSweep,
 };
 
 pub const Noise = struct {
     tol: Tolerances = .{},
     out_node: u32,
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
+    /// `v(a,b)`: the measurement is v(out_node) − v(out_neg). GROUND is the
+    /// single-ended case and costs nothing — the adjoint rhs is e_pos − e_neg
+    /// and e_GROUND is not stamped.
+    out_neg: u32 = 0,
+    sweep: FreqSweep,
+    /// MNA branch row of the `.noise v(out) SRC ...` input source. It does
+    /// not drive the solve — it is what `inoise_spectrum` refers the measured
+    /// noise back to. null emits the output-referred curve only.
+    in_branch: ?u32 = null,
     /// Emit integrated device noise in V rms instead of the measured PSD.
     integrated: bool = false,
 };
 
 pub const Sp = struct {
     tol: Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    n_points: u16 = 50,
-    sweep_type: SweepType = .log,
+    sweep: FreqSweep,
     /// Explicit port list. Empty means one port at the drive source
     /// (ctx.source_node / ctx.source_branch) when running via the contract.
     ports: []const Port = &.{},
@@ -47,12 +49,12 @@ pub const Sp = struct {
 
 pub const Stb = struct {
     tol: Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
-    /// Probe insertion nodes; probe_p null → ctx.source_node.
-    probe_p: ?u32 = null,
-    probe_n: u32 = 0,
+    sweep: FreqSweep,
+    /// The deck's own 0 V probe source (`.stb Vprobe ...`): its two node rows
+    /// and its MNA branch row. `probe_p` is the arriving (driven) side.
+    probe_p: u32,
+    probe_n: u32,
+    probe_branch: u32,
 };
 
 pub const Op = struct {
@@ -70,24 +72,45 @@ pub const Dc = struct {
     start: f64 = 0,
     stop: f64 = 0,
     step: f64 = 1,
-    /// Batch-local index of the source to sweep (0 = first V or I source).
-    source_index: u32 = 0,
+    /// What the inner sweep drives. A bare batch-local index aliased a V card
+    /// with an I card of the same ordinal — which is why a deck holding both
+    /// had to be rejected outright — and could not name a resistor at all.
+    /// The device type and parameter travel with the index instead.
+    target: SweepTarget = .{},
     /// ngspice's optional second sweep variable — the OUTER loop
-    /// (`.dc src1 ... src2 start2 stop2 incr2`). null second index with
-    /// `source2_is_temp` set sweeps the circuit temperature (`.dc ... temp ...`).
-    source2_index: ?u32 = null,
-    source2_is_temp: bool = false,
+    /// (`.dc src1 ... src2 start2 stop2 incr2`), or `.dc ... temp ...`.
+    target2: ?SweepTarget = null,
     start2: f64 = 0,
     stop2: f64 = 0,
     step2: f64 = 1,
 
+    pub const SweepTarget = struct {
+        /// Device type name as `ParamRef.device_type` spells it.
+        type_name: []const u8 = "vsource",
+        /// Batch-local instance index within that type.
+        index: u32 = 0,
+        param_name: []const u8 = "dc",
+        /// `.dc ... temp ...` sweeps the circuit temperature; the three
+        /// fields above are then unused.
+        is_temp: bool = false,
+    };
+
     pub fn hasOuter(self: Dc) bool {
-        return self.source2_index != null or self.source2_is_temp;
+        return self.target2 != null;
     }
 };
 
 pub const Tf = struct {
     tol: Tolerances = .{},
+    /// `v(a,b)` reference node for the output; GROUND is single-ended.
+    output_neg: u32 = 0,
+    /// `.tf i(Vmeasure) ...`: the output is that source's BRANCH current, not
+    /// a node voltage. Set ⇒ `output_node`/`output_neg` are unused.
+    output_branch: ?u32 = null,
+    /// `.tf v(out) Iin`: the input is a current source, which has no branch
+    /// row — the excitation is a unit current into its node pair instead.
+    /// Set ⇒ `input_branch` is unused.
+    input_nodes: ?[2]u32 = null,
     /// Branch-current unknown of the input vsource (its row is v_p - v_n - V = 0).
     /// null -> ctx.source_branch (the first source's branch).
     input_branch: ?u32 = null,
@@ -133,10 +156,8 @@ pub const Pac = struct {
     f_lo: f64,
     /// Number of LO harmonics to include: sidebands span [-n_harmonics..+n_harmonics].
     n_harmonics: u16 = 3,
-    /// Input frequency sweep range.
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
+    /// Input frequency sweep.
+    sweep: FreqSweep,
     /// Number of time samples per LO period (must be power of 2, >= 2*(2*n_harmonics+1)).
     n_time_samples: u16 = 64,
     /// PSS shooting parameters.
@@ -148,10 +169,8 @@ pub const Pac = struct {
 pub const Pnoise = struct {
     tol: Tolerances = .{},
     out_node: u32,
-    f_start: f64,
-    f_stop: f64,
+    sweep: FreqSweep,
     f_fundamental: f64,
-    points_per_decade: u16 = 10,
     pss_n_samples: u32 = 64,
     pss_shoot_tol: f64 = 1e-6,
     pss_shoot_max_iter: u16 = 50,
@@ -183,6 +202,12 @@ pub const Tran = struct {
     t_stop: f64,
     dt_init: f64 = 1e-9,
     dt_min: f64 = 1e-18,
+    /// ngspice tstart: OUTPUT suppression only. The integration still starts
+    /// at t = 0 with the same history, so a deck that relies on settling
+    /// before the printed window keeps it; only the recorded points before
+    /// `t_start` are dropped. The driver lands one step exactly on it so the
+    /// first printed point is at `t_start`, as ngspice's breakpoint does.
+    t_start: f64 = 0,
     /// ngspice tmax: default is t_stop/50; an explicit value replaces it.
     dt_max: ?f64 = null,
     method: Method = .trapezoidal,
@@ -275,6 +300,8 @@ pub const Sens = struct {
     tol: Tolerances = .{},
     /// null → the last probe node.
     output_node: ?u32 = null,
+    /// `v(a,b)` reference node for the output; GROUND is single-ended.
+    output_neg: u32 = 0,
     /// Instance-ordinal → card name, so a column can name the card ngspice
     /// names. Empty falls back to `<type>#<ordinal>`, which is what every
     /// column read like before this table existed.
@@ -295,13 +322,15 @@ pub const Four = struct {
     /// Transient window to analyze; defaults to 5 fundamental periods at
     /// 200 points/period (the old engine reused a queued .tran here).
     tran_opts: ?Tran = null,
+
+    /// Size of the harmonic table the extractor carries. A `Spectrum` is
+    /// returned by value, so the table is fixed and this is its ceiling.
+    pub const max_harmonics = 64;
 };
 
 pub const Disto = struct {
     tol: Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    points_per_decade: u16 = 10,
+    sweep: FreqSweep,
     /// MNA BRANCH row of the V card carrying `DISTOF1`. ngspice cktdisto.c:115
     /// puts a voltage source's F1 drive there and nowhere else; a NODE row is
     /// wrong, because that node is pinned by the source's own branch equation

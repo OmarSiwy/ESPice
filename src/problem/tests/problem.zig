@@ -33,7 +33,7 @@ test "Problem: compiled device callbacks preserve allocation errors" {
     defer p.deinit();
     for (p.prepared.circuit.batches) |batch| {
         var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
-        try t.expectError(error.OutOfMemory, batch.hooks.instantiate(batch.ctx, failing.allocator()));
+        try t.expectError(error.OutOfMemory, batch.hooks.instantiate(batch.ctx, failing.allocator()).unwrap());
     }
 }
 
@@ -113,7 +113,7 @@ test "Problem: append is transactional, retains IDs and owns request slices" {
     try t.expectEqual(@as(u32, 1), p.delivery.published);
     var ids: [2]api.QueryId = undefined;
     try t.expectError(error.InvalidQueryOptions, p.append_queries(&.{
-        .{ .ac = .{ .f_start = 1, .f_stop = 10 } },
+        .{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 10 } } },
         .{ .dc = .{ .start = 0, .stop = 1, .step = 0 } },
     }, &ids));
     try t.expectEqual(original, p.query_count());
@@ -179,7 +179,7 @@ test "Problem: source and appended port slices are owned after the call returns"
     const op = try find(p, .op); // A deck without directives gets one OP.
     var ports = [_]api.requests.Port{.{ .node = p.prepared.source_node, .branch = p.prepared.source_branch }};
     var ids: [1]api.QueryId = undefined;
-    _ = try p.append_queries(&.{.{ .sp = .{ .f_start = 1, .f_stop = 10, .n_points = 2, .ports = &ports } }}, &ids);
+    _ = try p.append_queries(&.{.{ .sp = .{ .sweep = .{ .f_start = 1, .f_stop = 10, .points = 2, .kind = .lin }, .ports = &ports } }}, &ids);
     ports[0].z0 = 150;
     try t.expectEqual(op, (try p.query_info(ids[0])).dependency.?);
     try p.run_all();
@@ -209,7 +209,7 @@ test "Problem: allocation failures during append preserve results and permit ret
         var ids = [_]api.QueryId{api.requests.invalid_query};
         failing.fail_index = failing.alloc_index + failures;
         failing.resize_fail_index = failing.resize_index;
-        const appended = p.append_queries(&.{.{ .sp = .{ .f_start = 1, .f_stop = 10, .n_points = 2, .ports = &ports } }}, &ids);
+        const appended = p.append_queries(&.{.{ .sp = .{ .sweep = .{ .f_start = 1, .f_stop = 10, .points = 2, .kind = .lin }, .ports = &ports } }}, &ids);
         failing.fail_index = std.math.maxInt(usize);
         failing.resize_fail_index = std.math.maxInt(usize);
         if (appended) |n| {
@@ -310,8 +310,8 @@ test "Problem: output validation rejects an entire append before publishing IDs"
         const retained = try p.result(sp);
         const count = p.query_count();
         const jobs = [_]api.Query{
-            .{ .sp = .{ .f_start = 10, .f_stop = 100 } },
-            .{ .ac = .{ .f_start = 10, .f_stop = 100 } },
+            .{ .sp = .{ .sweep = .{ .f_start = 10, .f_stop = 100 } } },
+            .{ .ac = .{ .sweep = .{ .f_start = 10, .f_stop = 100 } } },
         };
         // Sizing does not validate or commit; rejection leaves both IDs untouched.
         try t.expectEqual(jobs.len, try p.append_queries(&jobs, &.{}));
@@ -360,6 +360,8 @@ test "device noise needs no input source and retains its thermal PSD" {
     );
     defer p.deinit();
     try p.run_all();
+    // 4kTR, the PSD in V^2/Hz. ngspice's curves are AMPLITUDE spectra, so the
+    // column carries its square root; the totals stay V rms.
     const expected = 4 * 1.380649e-23 * 300.15 * 1000;
     var spectra: u8 = 0;
     var totals: u8 = 0;
@@ -368,13 +370,24 @@ test "device noise needs no input source and retains its thermal PSD" {
         const kind = (try p.query_info(id)).kind;
         if (kind != .noise and kind != .pnoise) continue;
         const result = try p.result(id);
-        if (result.varnames.len == 1) {
-            try t.expectEqualStrings("noise_rms", result.varnames[0]);
+        if (kind == .noise and result.npoints == 1) {
+            try t.expectEqual(@as(usize, 2), result.varnames.len);
+            try t.expectEqualStrings("v(onoise_total)", result.varnames[0]);
+            try t.expectEqualStrings("v(inoise_total)", result.varnames[1]);
             try t.expectApproxEqRel(@sqrt(expected * 9000), result.data[0], 1e-6);
+            // No `.noise` input source was named, so nothing to refer back to.
+            try t.expectEqual(@as(f64, 0), result.data[1]);
             totals += 1;
+        } else if (kind == .noise) {
+            try t.expectEqual(@as(usize, 3), result.varnames.len);
+            try t.expectEqualStrings("onoise_spectrum", result.varnames[1]);
+            try t.expectEqualStrings("inoise_spectrum", result.varnames[2]);
+            for (0..result.npoints) |point|
+                try t.expectApproxEqRel(@sqrt(expected), result.data[3 * point + 1], 1e-6);
+            spectra += 1;
         } else {
             try t.expectEqual(@as(usize, 2), result.varnames.len);
-            try t.expectEqualStrings(if (kind == .noise) "noise_density" else "pnoise_density", result.varnames[1]);
+            try t.expectEqualStrings("pnoise_density", result.varnames[1]);
             for (0..result.npoints) |point|
                 try t.expectApproxEqRel(expected, result.data[2 * point + 1], 1e-6);
             spectra += 1;

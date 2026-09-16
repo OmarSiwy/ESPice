@@ -3,7 +3,6 @@
 //! a power of 2, FFT, and read off harmonic magnitudes, phases, and THD.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
 const fft_mod = @import("solvers").fft;
 const tran = @import("../tran/tran.zig");
 
@@ -16,17 +15,25 @@ pub const Harmonic = struct {
 
 pub const Options = @import("requests").Four;
 
+/// ngspice prints nine harmonics by default; a deck may ask for more
+/// (`.four 1k v(out) 16`). The table is fixed-size and `n_harmonics` says how
+/// much of it is live — a Spectrum is a value returned by copy, so a slice
+/// into scratch would dangle.
+pub const max_harmonics = Options.max_harmonics;
+
 pub const Spectrum = struct {
     dc: f64,
     fundamental: f64,
-    harmonics: [9]Harmonic,
+    harmonics: [max_harmonics]Harmonic,
+    /// Live prefix of `harmonics`, 1-based (index 0 IS the fundamental).
+    n_harmonics: usize,
     thd_percent: f64,
 };
 
 /// Run Fourier analysis on a transient waveform captured in a Waveform struct.
 /// Extracts one period from the end (steady-state), resamples to power-of-2,
 /// applies FFT, and computes harmonic magnitudes, phases, and THD.
-pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, allocator: std.mem.Allocator) !Spectrum {
+pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
     const times = waveform.timeSlice();
     const values = waveform.probeValues(probe_idx);
 
@@ -68,12 +75,12 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, f_fund: f64, allo
 
     fft_mod.fft(re, im);
 
-    return extractSpectrum(re, im, n_fft);
+    return extractSpectrum(re, im, n_fft, n_harmonics);
 }
 
 /// Fourier analysis from pre-computed uniform samples (no transient sim needed).
 /// `samples` are uniformly spaced over exactly one period of the fundamental.
-pub fn analyzeBuffer(samples: []const f64, allocator: std.mem.Allocator) !Spectrum {
+pub fn analyzeBuffer(samples: []const f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
     if (samples.len < 2) return error.InsufficientData;
 
     const n_fft = fft_mod.nextPow2(samples.len);
@@ -98,7 +105,7 @@ pub fn analyzeBuffer(samples: []const f64, allocator: std.mem.Allocator) !Spectr
 
     fft_mod.fft(re, im);
 
-    return extractSpectrum(re, im, n_fft);
+    return extractSpectrum(re, im, n_fft, n_harmonics);
 }
 
 /// Contract entry: transient from the operating point, then the harmonic
@@ -129,10 +136,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const tran_result = try tran.simulate(ctx.circuit, x, &probes, &waveform, tran_opts, scratch);
         if (!tran_result.completed) return error.TransientFailed;
 
-        break :blk try analyze(&waveform, 0, opts.f_fundamental, scratch);
+        break :blk try analyze(&waveform, 0, opts.f_fundamental, opts.n_harmonics, scratch);
     };
 
-    const n_harm: usize = @min(opts.n_harmonics, spec.harmonics.len);
+    const n_harm: usize = spec.n_harmonics;
     const npoints = 1 + n_harm;
     const names = try a.dupe([]const u8, &.{ "harmonic", "frequency", "magnitude", "phase_deg" });
     errdefer a.free(names); // entries are literals
@@ -176,7 +183,7 @@ fn bsearchGe(times: []const f64, target: f64) usize {
     return lo;
 }
 
-fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
+fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: usize) Spectrum {
     const n_f: f64 = @floatFromInt(n_fft);
     const scale = 2.0 / n_f;
 
@@ -186,7 +193,8 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
     // Fundamental (bin 1)
     const fund_mag = @sqrt(re[1] * re[1] + im[1] * im[1]) * scale;
 
-    var harmonics: [9]Harmonic = undefined;
+    const n_harm = std.math.clamp(n_harmonics, 1, max_harmonics);
+    var harmonics: [max_harmonics]Harmonic = undefined;
     // Harmonic 1 = fundamental
     // fft convention: X[1] = (N*A/2)*e^{+j*phi} for A*cos(2*pi*f0*t + phi), so the
     // phase is +atan2 — no negation.
@@ -195,9 +203,10 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
         .phase_deg = math.radiansToDegrees(math.atan2(im[1], re[1])),
     };
 
-    // Harmonics 2..9
+    // Harmonics 2..n_harm — the THD denominator is the fundamental and the
+    // numerator is every harmonic the deck asked to see, as ngspice's is.
     var thd_sum_sq: f64 = 0;
-    for (1..9) |h| {
+    for (1..n_harm) |h| {
         const bin = h + 1; // harmonic number = h+1, bin index = h+1
         if (bin >= n_fft / 2) {
             harmonics[h] = .{ .mag = 0, .phase_deg = 0 };
@@ -215,6 +224,7 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize) Spectrum {
         .dc = dc,
         .fundamental = fund_mag,
         .harmonics = harmonics,
+        .n_harmonics = n_harm,
         .thd_percent = thd_percent,
     };
 }

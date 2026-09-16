@@ -4,8 +4,7 @@
 const std = @import("std");
 const batch = @import("batch.zig");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const FreqSolver = @import("solvers").freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
@@ -51,7 +50,7 @@ pub fn sweep(
     // lane axis = frequency. GPU batch dispatch orelse the CPU lane solveBatch.
     const omegas = try allocator.alloc(f64, n_points);
     defer allocator.free(omegas);
-    types.fillLogSweep(options.f_start, options.f_stop, options.points_per_decade, freqs, omegas);
+    options.sweep.fill(freqs, omegas);
 
     const x_out = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, false);
     defer allocator.free(x_out);
@@ -79,7 +78,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // rest of the run. See RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator orelse a;
     const x_op = ctx.x_op orelse return error.NoOperatingPoint;
-    const n_points = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
+    const n_points = opts.sweep.count();
 
     const freqs = try scratch.alloc(f64, n_points);
     defer scratch.free(freqs);

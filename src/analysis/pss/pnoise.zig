@@ -18,7 +18,7 @@ const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 const dense_lu = @import("solvers").dense_lu;
-const types = @import("solvers").types;
+const types = @import("numerics");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -157,7 +157,7 @@ pub fn sweep(
     const m_max: i32 = @intCast(options.n_sidebands);
     const inv_n_samples = 1.0 / n_samples_f;
 
-    var sw = types.logSweep(options.f_start, options.f_stop, options.points_per_decade);
+    var sw = options.sweep.iter();
     var pt: usize = 0;
     while (sw.next()) |f_out| : (pt += 1) {
         if (pt != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = pt, .total = freqs.len });
@@ -261,7 +261,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);
 
-    const n_points = types.logSweepCount(opts.f_start, opts.f_stop, opts.points_per_decade);
+    const n_points = opts.sweep.count();
     const freqs_buf = try scratch.alloc(f64, n_points);
     defer scratch.free(freqs_buf);
     const density_buf = try scratch.alloc(f64, n_points);

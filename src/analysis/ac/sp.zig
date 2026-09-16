@@ -11,8 +11,7 @@
 //! all other a_j = 0. Column p of S(ω) follows from S_jk = b_j / a_k.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const solvers = @import("solvers");
 const FreqSolver = solvers.freq_solve.FreqSolver;
 
@@ -25,7 +24,6 @@ pub const Complex = types.Complex;
 /// clamping their node.
 pub const Port = @import("requests").Port;
 
-pub const SweepType = @import("requests").SweepType;
 
 pub const Options = @import("requests").Sp;
 
@@ -43,11 +41,11 @@ pub fn sweep(
 ) !void {
     const n: usize = ckt.n;
     const n_ports: usize = ports.len;
-    const n_points: usize = options.n_points;
+    const n_points: usize = options.sweep.count();
     std.debug.assert(freqs.len == n_points);
     std.debug.assert(s.len == n_points * n_ports * n_ports);
 
-    for (0..n_points) |fi| freqs[fi] = genFreq(options, fi);
+    for (0..n_points) |fi| freqs[fi] = options.sweep.at(@intCast(fi));
 
     // -- GPU batch path: one batch call per driven port ----------------------
     // ponytail: P batch calls of N_freq each; packing all P*N into one call
@@ -161,16 +159,6 @@ fn writeColumn(n: usize, ports: []const Port, x_work: []const f64, a_p: f64, s_m
     }
 }
 
-fn genFreq(options: Options, k: usize) f64 {
-    return switch (options.sweep_type) {
-        .log => types.logSweepFreq(options.f_start, options.f_stop, options.n_points, @intCast(k)),
-        .linear => blk: {
-            const frac = if (options.n_points > 1) @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(options.n_points - 1)) else 0;
-            break :blk options.f_start + frac * (options.f_stop - options.f_start);
-        },
-    };
-}
-
 /// Contract entry: opts.ports (or the single drive source as port 1),
 /// full S-matrix per frequency. Data layout: point-major
 /// (frequency, S11, S12, ..., Snn) with (re, im) per variable.
@@ -182,7 +170,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ports: []const Port = if (opts.ports.len > 0) opts.ports else &one_port;
     const n_ports = ports.len;
     const n_s = n_ports * n_ports;
-    const n_points: usize = opts.n_points;
+    const n_points: usize = opts.sweep.count();
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.

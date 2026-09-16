@@ -247,7 +247,7 @@ pub const Circuit = struct {
         var count: usize = 0;
         errdefer for (batches[0..count]) |batch| batch.hooks.deinit(batch.ctx, allocator);
         for (template.batches, batches) |source, *target| {
-            target.* = try source.hooks.instantiate(source.ctx, allocator);
+            target.* = try source.hooks.instantiate(source.ctx, allocator).unwrap();
             count += 1;
         }
         return allocate(template.*, allocator, batches, false);
@@ -262,7 +262,7 @@ pub const Circuit = struct {
         var count: usize = 0;
         errdefer for (batches[0..count]) |batch| batch.hooks.deinit(batch.ctx, allocator);
         for (source.batches, batches) |original, *target| {
-            target.* = try original.hooks.snapshot(original.ctx, allocator);
+            target.* = try original.hooks.snapshot(original.ctx, allocator).unwrap();
             count += 1;
         }
         return allocate(template.*, allocator, batches, false);
@@ -731,7 +731,9 @@ pub const Circuit = struct {
         self.lin.valid = false; // param re-derivation (sweeps, dc, mc)
         self.has_baseline = false;
         self.markGpuDirty();
-        for (self.batches) |b| if (b.hooks.recompute) |f| try f(b.ctx);
+        for (self.batches) |b| if (b.hooks.recompute) |f| {
+            if (!f(b.ctx)) return error.TopologyChanged;
+        };
     }
 
     /// `recompute` restricted to the one device type whose parameters moved.
@@ -771,10 +773,14 @@ pub const Circuit = struct {
                 b.type_name;
             if (!std.mem.eql(u8, tail, type_name)) continue;
             hit = true;
-            if (b.hooks.recompute) |f| try f(b.ctx);
+            if (b.hooks.recompute) |f| {
+                if (!f(b.ctx)) return error.TopologyChanged;
+            }
         }
         if (!hit) for (self.batches) |b| {
-            if (b.hooks.recompute) |f| try f(b.ctx);
+            if (b.hooks.recompute) |f| {
+                if (!f(b.ctx)) return error.TopologyChanged;
+            }
         };
     }
 
@@ -797,7 +803,7 @@ pub const Circuit = struct {
         const gpa = self.gpa;
         var list: std.ArrayList(ParamRef) = .empty;
         errdefer list.deinit(gpa);
-        for (self.batches) |b| try b.hooks.collect_params(b.ctx, gpa, &list);
+        for (self.batches) |b| try b.hooks.collect_params(b.ctx, gpa, &list).unwrap();
         self.param_refs = try list.toOwnedSlice(gpa);
         return self.param_refs.?;
     }
@@ -809,7 +815,7 @@ pub const Circuit = struct {
     pub fn collectNoiseSources(self: *const Circuit, x: []const f64, gpa: std.mem.Allocator) ![]NoiseSource {
         var list: std.ArrayList(NoiseSource) = .empty;
         errdefer list.deinit(gpa);
-        for (self.batches) |b| if (b.hooks.collect_noise) |f| try f(b.ctx, x, gpa, &list);
+        for (self.batches) |b| if (b.hooks.collect_noise) |f| try f(b.ctx, x, gpa, &list).unwrap();
         return try list.toOwnedSlice(gpa);
     }
 

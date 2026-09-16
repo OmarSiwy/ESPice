@@ -184,6 +184,13 @@ fn integrateOnePeriod(
     const has_charge = ckt.has_charge;
     const ncols = 1 + probes.len;
 
+    // §4.6.1: a source waveform only exists while `analysis("tran")` is
+    // true. PSS inherited whatever phase the shared operating point left
+    // behind, so every SIN/PULSE/PWL card answered with its DC value and the
+    // shooting loop converged on an UNDRIVEN circuit — `pss/rc_*` printed
+    // zeros for a deck with a 1 kHz drive. The phase has to be re-declared at
+    // every point the loop evaluates, exactly as tran.zig does.
+    ckt.setSimState(.{ .t = 0, .dt = dt, .kind = .tran });
     if (has_charge) {
         ckt.eval(x, 0);
         simdCopy(sc.q_prev[0..n], ckt.q_vec[0..n]);
@@ -205,6 +212,7 @@ fn integrateOnePeriod(
             .a_vals = sc.a_vals,
             .has_charge = has_charge,
         };
+        ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
         const nr = converger.run(ckt, ws, x, t, .{
             .max_iter = options.max_newton_iter,
             .abstol = options.newton_tol,

@@ -11,7 +11,6 @@ const Job = requests.Query;
 const NO_NODE = std.math.maxInt(u32);
 const build = impl.build;
 const resolveQueries = impl.resolveQueries;
-const Sources = impl.test_access.Sources;
 const DeckOptions = impl.test_access.DeckOptions;
 const parseDeckOptions = impl.test_access.parseDeckOptions;
 const buildJob = impl.test_access.buildJob;
@@ -21,7 +20,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const sources: Sources = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_distof1 = &.{.{ 0, 0 }} };
+    const sources: problem.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
     const directives = [_][]const u8{
         ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
         ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
@@ -36,11 +35,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
     for (directives, 0..) |directive, index| {
         const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "dispatch\n{s}\n.end\n", .{directive}));
         const id: requests.Kind = @enumFromInt(index);
-        if (id == .stb) {
-            try std.testing.expectError(error.UnsupportedStabilityAnalysis, buildJob(nl.directives[0], 1, sources));
-            continue;
-        }
-        const job = (try buildJob(nl.directives[0], 1, sources)).?;
+        const job = (try buildJob(nl.directives[0], 1, sources, &.{})).?;
         try std.testing.expectEqual(id, std.meta.activeTag(job));
         if (job == .pss) try std.testing.expectEqual(@as(f64, 1e-3), job.pss.period);
     }
@@ -53,10 +48,10 @@ test "analysis directives dispatch every implemented capability and reject malfo
     };
     for (malformed) |directive| {
         const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "invalid\n{s}\n.end\n", .{directive}));
-        if (buildJob(nl.directives[0], 1, sources)) |_| return error.AcceptedInvalidAnalysis else |_| {}
+        if (buildJob(nl.directives[0], 1, sources, &.{})) |_| return error.AcceptedInvalidAnalysis else |_| {}
     }
     const unknown: types.Directive = .{ .kind = "options", .args = &.{} };
-    try std.testing.expectEqual(null, try buildJob(unknown, NO_NODE, sources));
+    try std.testing.expectEqual(null, try buildJob(unknown, NO_NODE, sources, &.{}));
 }
 
 test "deck temperature and tolerances reach statistical and noise jobs" {
@@ -151,15 +146,18 @@ test "prepared metadata and query identities outlive parse storage" {
         \\.dc vb 0 1 0.1
         \\.noise v(2) vb dec 2 10 100
         \\.tran 1u 10u
+        \\.sens v(2)
     );
-    try std.testing.expectEqual(@as(usize, 5), appended.len);
+    try std.testing.expectEqual(@as(usize, 6), appended.len);
     try std.testing.expectEqual(node, appended[0].tf.output_node.?);
     try std.testing.expectEqual(prepared.probes[1], appended[0].tf.input_branch.?);
-    try std.testing.expectEqual(@as(u32, 1), appended[1].dc.source_index);
+    try std.testing.expectEqualStrings("vsource", appended[1].dc.target.type_name);
+    try std.testing.expectEqual(@as(u32, 1), appended[1].dc.target.index);
     try std.testing.expectEqual(node, appended[2].noise.out_node);
     try std.testing.expect(appended[3].noise.integrated);
     try std.testing.expectEqual(requests.Method.backward_euler, appended[4].tran.method);
     try std.testing.expectEqual(prepared.deck_tol.reltol, appended[4].tran.tol.reltol);
+    try std.testing.expectEqualStrings("r1", appended[5].sens.cards[2].name);
     for ([_][]const u8{
         "r3 2 0 1k",            ".model rm r(r=1k)", ".hdl \"part.va\"", ".include \"part.cir\"",
         ".param p=1",           ".options temp=12",  ".temp 12",         ".subckt unused a b\n.ends",
@@ -220,7 +218,7 @@ test "prepared bindings retain model fields and exclude runtime state from param
     defer prepared.deinit();
     _ = parse.reset(.free_all);
     var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
-    for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, session.allocator(), &refs);
+    for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, session.allocator(), &refs).unwrap();
     var saw_pub = false;
     var resistors: u32 = 0;
     for (refs.items) |ref| {
@@ -263,7 +261,7 @@ test "constant behavioral sources preserve value and output mode after folding" 
         var prepared = try build(a, a, ast);
         defer prepared.deinit();
         var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
-        for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs);
+        for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
         var found = false;
         for (refs.items) |ref| if (std.mem.eql(u8, ref.device_type, "bsource") and std.mem.eql(u8, ref.param_name, "c0")) {
             try std.testing.expectApproxEqAbs(expected, ref.get(), 1e-15);
@@ -310,4 +308,34 @@ test "input preparation resolves file includes and selected dialect" {
     }, .ngspice);
     try std.testing.expectEqual(@as(usize, 2), from_bytes.ast.devices.len);
     try std.testing.expectEqual(input.Dialect.hspice, input.parseDialect("hs").?);
+}
+
+test "control source binding retains first exact duplicate and distinct mixed-case names" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ast = try Parser(syntax.spectre).parse(a,
+        \\VCase first 0 2
+        \\vcase second 0 3
+        \\VCase duplicate 0 9
+        \\R1 first 0 1k
+        \\R2 second 0 1k
+        \\R3 duplicate 0 1k
+        \\F1 out1 0 VCase 1
+        \\F2 out2 0 vcase 1
+        \\R4 out1 0 1k
+        \\R5 out2 0 1k
+    );
+    var prepared = try build(a, a, ast);
+    defer prepared.deinit();
+    var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
+    for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
+    var found: u32 = 0;
+    for (refs.items) |ref| {
+        if (!std.mem.eql(u8, ref.device_type, "cccs") or !std.mem.eql(u8, ref.param_name, "vsense")) continue;
+        try std.testing.expect(ref.index < 2);
+        try std.testing.expectEqual(([_]f64{ 2, 3 })[ref.index], ref.get());
+        found += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 2), found);
 }

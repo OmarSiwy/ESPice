@@ -12,10 +12,8 @@ pub const preconditioner = @import("preconditioner.zig");
 pub const order = @import("order.zig");
 pub const converger = @import("converger.zig");
 pub const newton_core = @import("newton_core.zig");
-pub const types = @import("types.zig");
+pub const types = @import("numerics");
 
-// Types re-exported for analysis consumers (BbdBlock/BbdInfo used by analysis/root.zig).
-// Defined in types.zig so solver leaves (direct/bbd/converger) reach them
-// without importing this root — keeps the intra-module import graph acyclic.
+// Shared numerical contracts. Solver leaves import numerics directly.
 pub const BbdBlock = types.BbdBlock;
 pub const BbdInfo = types.BbdInfo;

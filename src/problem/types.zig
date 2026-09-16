@@ -21,6 +21,12 @@ pub const QueryBindings = struct {
     v_names: []const []const u8,
     i_names: []const []const u8,
     v_branches: []const u32,
+    /// Node rows of each V card, `+` then `−`, post-permutation.
+    v_pos: []const u32,
+    v_neg: []const u32,
+    /// Same for each I card. An I source has no branch row of its own.
+    i_pos: []const u32,
+    i_neg: []const u32,
     v_distof1: []const [2]f64,
     ports: []const requests.Port,
 };
@@ -36,7 +42,6 @@ pub const Prepared = struct {
     ac_drive: []const f64,
     title: []const u8,
     n_devices: u32,
-    n_directives: u32,
     ic: []const Ic,
     deck_tol: numerics.Tolerances,
     deck_temp: ?f64,
@@ -85,7 +90,7 @@ pub const Circuit = struct {
         defer pattern.deinit(scratch);
         try pattern.reserve(scratch, n);
         for (0..n) |i| try pattern.add(scratch, @intCast(i), @intCast(i));
-        for (protos) |proto| try proto.pattern(proto.ctx, scratch, &pattern);
+        for (protos) |proto| try proto.pattern(proto.ctx, scratch, &pattern).unwrap();
 
         var col_ptr: []u32 = undefined;
         var row_idx: []u32 = undefined;
@@ -110,7 +115,7 @@ pub const Circuit = struct {
         var has_charge = false;
         var has_state_q = false;
         for (protos, batches) |proto, *batch| {
-            batch.* = try proto.finalize(proto.ctx, allocator, view);
+            batch.* = try proto.finalize(proto.ctx, allocator, view).unwrap();
             count += 1;
             has_charge = has_charge or batch.has_charge;
             has_state_q = has_state_q or (batch.has_charge and

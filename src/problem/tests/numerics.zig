@@ -116,12 +116,14 @@ test "waveform measurements respect the common prefix and degenerate time spans"
 }
 
 test "frequency grids retain both endpoints and support a single frequency" {
-    var sweep = numerics.logSweep(10, 1000, 2);
+    const grid: numerics.FreqSweep = .{ .f_start = 10, .f_stop = 1000, .points = 2 };
+    var sweep = grid.iter();
     const expected = [_]f64{ 10, @sqrt(1000.0), 100, @sqrt(100000.0), 1000 };
     try testing.expectEqual(expected.len, sweep.n);
     for (expected) |frequency| try testing.expectApproxEqRel(frequency, sweep.next().?, 1e-12);
     try testing.expect(sweep.next() == null);
-    var single = numerics.logSweep(7, 7, 10);
+    const point: numerics.FreqSweep = .{ .f_start = 7, .f_stop = 7, .points = 10 };
+    var single = point.iter();
     try testing.expectApproxEqRel(@as(f64, 7), single.next().?, 1e-12);
     try testing.expect(single.next() == null);
 }
