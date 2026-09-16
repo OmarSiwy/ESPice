@@ -1109,9 +1109,13 @@ fn Reader(comptime S: type) type {
                     return error.UnknownParameter;
                 };
             }
+            for (r.blocks.items) |b| try r.readBlock(b);
+            for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
             // Global models in line order, then each subcircuit's own, kept
             // together: `models_lo..models_hi` is one range per subcircuit,
-            // nested definitions included.
+            // nested definitions included. They follow the directives, so a
+            // `.step` or `.dc` swept name is live when a model value reads it
+            // (#65).
             for (model_lines.items) |ml| if (ml.owner == top_level) try r.readModel(r.lines.items[ml.line], &top, true);
             for (r.subckts.items, 0..) |*sub, id| for (model_lines.items) |ml| {
                 if (ml.owner != id) continue;
@@ -1124,8 +1128,6 @@ fn Reader(comptime S: type) type {
                 sub.models_hi = @intCast(r.local_models.items.len);
                 try r.local_names.put(arena, name, {});
             };
-            for (r.blocks.items) |b| try r.readBlock(b);
-            for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
             try r.binOptions();
 
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);

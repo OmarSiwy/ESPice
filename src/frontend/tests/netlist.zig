@@ -868,6 +868,19 @@ test ".step sweeps a global parameter; the device keeps its nominal" {
     try std.testing.expectEqualSlices(f64, &.{ 5, 7 }, list.deck.steps[0].values);
 }
 
+test ".step reaches a .model value that reads the swept name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The model card precedes the .step card that makes isat live (#65).
+    for ([_][]const u8{ "is={isat}", "is=isat" }) |value| {
+        const src = try std.fmt.allocPrint(a, "s\n.param isat=1e-14\nd1 a 0 dm\n.model dm d {s}\n.step param isat list 1e-14 2e-14\n.end\n", .{value});
+        const nl = try parse(a, src);
+        try std.testing.expectEqual(@as(usize, 1), nl.live.slots.len);
+        try std.testing.expectEqual(@as(f64, 1e-14), try parameter(nl.models[0].kv, "is"));
+    }
+}
+
 test "parseAnalyses reads analysis cards only and resolves their nets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

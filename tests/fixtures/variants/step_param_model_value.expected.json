@@ -1,0 +1,49 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#65: .step of a parameter read by a .model value reaches the model.",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "ngspice-45 has no .step: the deck run once per point with .param isat=<value>, print all at numdgt=12: v1#branch = -1.00999976740e-12 and -1.01999953480e-12.",
+  "command": "ngspice -b (per point)"
+ },
+ "origin": "tests/fixtures/variants/step_param_model_value.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Operating Point (isat=0.00000000000001)",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(v1)": {
+      "values": [
+       -1.0099997674e-12
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-20
+     }
+    }
+   },
+   {
+    "name": "Operating Point (isat=0.00000000000002)",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(v1)": {
+      "values": [
+       -1.0199995348e-12
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-20
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "ef7a411ec392fe098c1c3fe4a53ffd49e25f77ff4e5a864e5f21b90cf4d8bd3f"
+}

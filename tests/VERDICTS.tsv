@@ -844,6 +844,7 @@ PASS	fixtures/variants/monte_tran_meas.sp
 PASS	fixtures/variants/step_param_bsource_all_rebuilt.sp
 PASS	fixtures/variants/step_param_bsource_bare.sp
 PASS	fixtures/variants/step_param_divider.sp
+PASS	fixtures/variants/step_param_model_value.sp
 PASS	fixtures/variants/step_temp_source.sp
 PASS	fixtures/xf/diode_divider.sp
 PASS	fixtures/xf/resistive_bridge.sp
