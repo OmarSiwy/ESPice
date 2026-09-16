@@ -466,6 +466,57 @@ const ConvergerTests = struct {
         try std.testing.expectApproxEqAbs(sys.target, x[0], 1e-20);
         try std.testing.expect(@abs(sys.slope * (x[0] - sys.target)) < 1e-3);
     }
+
+    /// `Eamp out 0 in out 1e9` in two unknowns: a KCL node row and a
+    /// voltage-DEFINED branch row whose own diagonal is a structural zero.
+    /// Row 1 is `(1+A)·v_out = A·vin`; at A = 1e9 the EXACT solution still
+    /// leaves ~A·eps ≈ 3e-8 of cancellation in that residual, so a gate that
+    /// falls back to the absolute `residual_tol` floor when it finds no
+    /// diagonal refuses a 14-digit answer forever
+    /// (convergence/negative_feedback_1000000000 → OpDidNotConverge).
+    const GainRowSystem = struct {
+        const gain = 1e9;
+        const g_load = 1e-3;
+        const vin = 1.0;
+
+        n: u32 = 2,
+        nnz: u32 = 4,
+        // CSC {(0,0),(1,0),(0,1),(1,1)}; slot 3 is row 1's diagonal, always 0.
+        diag_slots: [2]u32 = .{ 0, 3 },
+        current_row: []const bool = &.{ false, true },
+        rhs: []f64,
+        g_vals: [4]f64 = @splat(0),
+
+        const Hook = struct {
+            pub fn assemble(_: @This(), sys: *GainRowSystem, x: []const f64, _: f64) void {
+                sys.rhs[0] = g_load * x[0] + x[1];
+                sys.rhs[1] = (1.0 + gain) * x[0] - gain * vin;
+                sys.g_vals = .{ g_load, 1.0 + gain, 1.0, 0.0 };
+            }
+            pub fn vals(_: @This(), sys: *GainRowSystem) []f64 {
+                return &sys.g_vals;
+            }
+            pub fn diagAt(_: @This(), sys: *GainRowSystem, slot: u32) f64 {
+                return sys.g_vals[slot];
+            }
+        };
+    };
+
+    test "residual gate: a branch row with no diagonal is not gated on an absolute floor" {
+        const a = std.testing.allocator;
+        const exact = GainRowSystem.gain * GainRowSystem.vin / (1.0 + GainRowSystem.gain);
+        inline for (.{ newton, jfnk }) |solve| {
+            var rhs = [_]f64{ 0, 0 };
+            var sys: GainRowSystem = .{ .rhs = &rhs };
+            var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null);
+            defer ws.deinit(a);
+            var x = [_]f64{ 0, 0 };
+            const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 32 }, GainRowSystem.Hook{});
+            try std.testing.expect(r.converged);
+            try std.testing.expectApproxEqRel(exact, x[0], 1e-12);
+            try std.testing.expectApproxEqRel(-GainRowSystem.g_load * exact, x[1], 1e-12);
+        }
+    }
 };
 
 const DenseLuTests = struct {

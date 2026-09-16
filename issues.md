@@ -39,6 +39,14 @@ run; they are counted in the numeric total above, not double-counted here.
 
 Legend: `[ ]` open, `[x]` fixed this session, `[~]` partially fixed.
 
+FILE-OWNERSHIP NOTE: one `.disto` card must publish THREE plots, and the tree's
+only fan-out mechanism is `prepare.zig queriesFromDirectives` (the same route
+`.noise` already uses to become two jobs). So C7 required two small additive
+edits outside its assigned files — `Disto.plot: Plot = .summary` in
+`requests.zig` and an 8-line fan-out beside the `.noise` one, plus the job
+ceiling `directives.len * 2` -> `* 3`. Default `.summary` means nothing else in
+the tree changes behaviour.
+
 "Fixed" means the change is in and the deck it was written against passes in
 the final `zig build test` run — every `[x]` below is in the 33-deck flip
 list above or was verified against its own oracle by hand. Nothing is marked
@@ -233,13 +241,63 @@ fails — but it means the plot schema was never anyone's deliberate choice.
   time. It is the only deck of the three behind a buffer (`Ebuf`), which is
   where to start.
 
-- [ ] **C7 — complex HD2/HD3 distortion output not exposed.** 3 decks
-  (`disto/bench_disto_*`). `analysis/post/disto.zig` emits magnitude ratios
-  (`hd2`, `v1_mag`, `v2_mag`) and no third harmonic. Matches the two
-  historically-failing disto assertions named in AGENTS.md.
+- [x] **C7 — `.disto` now emits ngspice's real output product.** 3 decks
+  (`disto/bench_disto_*`), the whole remaining MissingPlot group. All 3 pass,
+  all 6 summary decks still pass, corpus 494 -> 497 with zero regressions.
+  Two things worth keeping:
+  * **The O(n^4) tensor was avoided.** `d3` is only ever used as the single
+    contraction `d3(V1,V1,V1)`, so it is taken as a DIRECTIONAL second
+    difference of the analytic Jacobian instead of being stored: with
+    `V1 = p + jq`, `S(u)[row,a] = (G(x+hu) - 2G(x) + G(x-hu))[row,a]/h^2` and
+    `T(w,u,u)[row] = sum_a w[a]*S(u)[row,a]` by symmetry, giving
+    `Re = T(p,p,p) - 3T(p,q,q)`, `Im = 3T(p,p,q) - T(q,q,q)`. Four evals per
+    frequency point, one extra n*n plane plus 4n of scratch — both far below
+    the existing O(n^3) `d2`.
+  * **The ×2 is real for the harmonic VECTORS and not for the summary.** The
+    oracles' harmonic plots are sinusoid amplitude (DkerProc), twice the
+    one-sided phasor; confirmed analytically on `bench_disto_diode_clipper`
+    (the closed-form Volterra result is exactly half the expected V2 AND
+    exactly half the expected V3) before any code was written. The summary
+    columns stay unscaled, which is what keeps E5's `v1_mag = 3.75e-3` intact.
+    So E5 and C7 are NOT contradictory: same factor, different products.
 
-- [ ] **C8 — the resistor model is missing most of its ngspice parameter
-  set, not just the tempcos.** 6 decks (`temp/resistor_tc_*`,
+  ORIGINAL ENTRY: **`.disto` is missing ngspice's REAL output product.** 3 decks
+  (`disto/bench_disto_*`, the whole remaining MissingPlot group). Two
+  schemas coexist in the corpus and we only implement one: the six
+  `diode_*`/`linear_divider_*` decks want the summary plot `Distortion
+  Analysis` (frequency, hd2, v1_mag, v2_mag) and now pass; the three bench
+  decks want ngspice's own pair, `DISTORTION - 2nd harmonic` and
+  `DISTORTION - 3rd harmonic`, each a COMPLEX column per probe
+  (`v(vcc) v(in) v(b) v(c) i(vin) i(vcc)`) — the full distortion solution
+  vector, not a 4-column summary at one node. Measured on
+  `bench_disto_bjt_ce`: 31 rows (which the new FreqSweep grid already
+  matches exactly), `v(vcc)`/`v(in)` identically zero (source-clamped) and
+  the rest genuinely nonzero (2nd: v(c) = -7.4419e-3, 3rd: v(c) = 9.1040e-5).
+  V2 is already solved as a full vector (`x_work2`) so the 2nd-harmonic plot
+  is mostly reshaping. The 3rd needs a `d3` tensor — `disto.zig` builds only
+  `d2`, by finite difference on G — plus the third-order Volterra RHS. That
+  is the real cost of C7, and it is why both plots are missing rather than
+  one.
+
+- [~] **C8 — resistor temperature model DONE; the `.sens` half is not a model
+  job at all.**
+  Numeric half fixed in `models/resistor.va`: ngspice's `res` temperature model
+  (`restemp.c`) — `tnom`, `temp`, `dtemp`, `tc1`, `tc2`, `tce`, with
+  `R(T) = r·(1 + tc1·d + tc2·d²)` and the `tce` exponential form REPLACING the
+  polynomial rather than multiplying it. All four `temp/resistor_tc_*` decks
+  pass. VerA hoists the whole block into `precompute`, so there is no
+  per-Newton cost, and `r` stays Model field 0 so it remains the principal and
+  prints as `v(r1)`, not `v(r1:r)`.
+  Proven not to move anything else: controlled A/B in a worktree at `e1bc608`
+  with `models/resistor.va` as the ONLY difference, full corpus both sides —
+  494/122 before, 498/118 after, 4 FAIL→PASS, 0 PASS→FAIL. With `tc1=tc2=0`
+  the factor is exactly 1.0 and `300.15 − 273.15 = 27.0` is exact (Sterbenz),
+  so `rt == r` bit for bit. Every one of the 30 new `.sens` columns on the
+  bridge reads exactly 0.0.
+  See E10 for why `sens/bench_sens_bridge` is still red.
+
+  ORIGINAL ENTRY (the diagnosis that sent the work to the wrong layer):
+  **the resistor model is missing most of its ngspice parameter set.** 6 decks (`temp/resistor_tc_*`,
   `dc/device_resistor_temp`, and `sens/bench_sens_bridge`, which I had
   mis-filed under E8 as a column-naming problem). Measured: `.sens` emits
   184 columns and NOT ONE of the 24 the bridge oracle asks for. For `r5` we
@@ -364,6 +422,47 @@ fails — but it means the plot schema was never anyone's deliberate choice.
   `diode_0p01` wants v1 9.9939e-4 / v2 1.5448e-5 against our 1.9988e-3 /
   3.0897e-5 — a clean factor of two on BOTH. `hd2` is their ratio and was
   correct throughout, which is exactly how the factor survived this long.
+
+- [ ] **E10 — `.sens` cannot name an INSTANCE parameter, so 10 of the bridge
+  oracle's 24 columns are structurally unreachable from any `.va`.**
+  1 deck (`sens/bench_sens_bridge`). The naming rule
+  (`src/analysis/sweep/sens.zig:220`) is: Model param → `v(card:param)`,
+  Instance param → `v(card_param)`, principal → `v(card)`. The oracle wants 10
+  instance-spelled columns (`v(r5_l)`, `v(r4_temp)`, `v(r3_w)`, `v(r1_scale)`,
+  …). VerA emits a FIXED `Instance` struct (`../VerA/src/backend/codegen.zig`
+  `emitInstance`) — no Verilog-A `parameter` can land in it — and
+  `src/analysis/eval.zig:1671` narrows Instance further to the allowlist
+  `{temperature, mfactor}`. So a `.va` can only ever produce `:`-spelled
+  columns, and adding the 9 remaining ngspice model-card names would deliver
+  12/24, leave the deck red, and cost 9 dead f64 per resistor instance. Two
+  more columns need their own thing: `v(r4:r)` needs a model default
+  resistance separate from the instance value (`builder.zig addPassive`
+  hard-codes `value_field = "r"` as the principal), and `v(vin_phase)` is the
+  vsource naming miss already noted under C8.
+  Our sens NUMBERS are right — `v(r1..r5)` match the ngspice reference raw to
+  ~11 significant digits (ours −0.0023863074548945585 vs ngspice
+  −0.002386307455259285). This deck fails purely on column names.
+  Fixing it is an `eval.zig` + VerA job, not a model job.
+
+- [ ] **E11 — `.options tnom` never reaches R/C/L.** `builder.zig addPassive`
+  never calls `deriveModel`, so passives fall back to the emitted 27 °C
+  default. Harmless on today's corpus (every oracle uses Tnom = 27) and
+  therefore invisible — which is exactly why it is worth writing down.
+
+- [ ] **E12 — model-card tempcos cannot reach a passive.**
+  `.model RMOD R (tc1=...)` is dropped: `addPassive` only `applyKv`s the
+  DEVICE card. The instance spelling `R1 a b 1k tc1=...` — what every current
+  deck uses — works, so the corpus does not catch this.
+
+- [ ] **E9 — no device terminal-current probe (`i(q1)`).** 2 decks
+  (`dc/device_vbic_temp`, `dc/device_vbic_forced_output` → MissingColumn).
+  Measured: we emit `i(v1) i(vc) i(vb) v(1) v(q1_c) v(q1_b)` and the oracle
+  wants those plus `i(q1)`. The probe rule is structural — every MNA
+  BRANCH-current unknown becomes an `i(<card>)` column — and a BJT has no
+  branch row, so no transistor can ever get one. ngspice's `i(q1)` is the
+  device's terminal current, which only the device evaluation knows. This is
+  a new capability (per-device terminal-current probes), not a naming fix,
+  and it is the entire remaining MissingColumn story apart from C8.
 
 - [ ] **E6 — device-model DC accuracy.** 11 decks (`dc/device_bsim1`,
   `device_bsim2*`, `device_hisim2`, `device_mesa_*`, `device_mesfet_*`,

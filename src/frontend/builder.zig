@@ -17,7 +17,7 @@ const GROUND = @as(u32, 0);
 const Circuit = problem.Circuit;
 const Proto = batch.Proto;
 
-fn isGroundName(name: []const u8) bool {
+pub fn isGroundName(name: []const u8) bool {
     return std.mem.eql(u8, name, "0") or
         std.ascii.eqlIgnoreCase(name, "gnd") or
         std.ascii.eqlIgnoreCase(name, "ground");

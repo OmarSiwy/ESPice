@@ -52,11 +52,17 @@ concurrent edits to `lower.zig` and `codegen.zig` from overwriting one another.
 | H01 | `ams_dynamic_arrays` | Exact defaults, conditional/short-circuit derivation, logical shifts and real remainder integrated and reviewed; general context typing remains open |
 | A01 | `ams_dynamic_arrays` | Runtime multidimensional reads/writes, direction, scope and guarded reads integrated and reviewed |
 | D02 | Integrating agent and `ams_parameter_precision` | Recursive typing, integral power, casts and concatenation/replication integrated; packed read selects under implementation |
-| D04/D05 | `ams_parameter_precision` and `ams_standards_review` | Initial/always control flow and explicit `@` event control integrated; 44 scheduler/time/source tests and four CLI transcripts pass; implicit sensitivity, named events and mixed-signal re-entry remain open |
+| D04/D05 | `ams_parameter_precision` and `ams_standards_review` | Initial/always control flow and explicit `@` event control integrated; implicit sensitivity, named events and mixed-signal re-entry remain open |
 | A07 | `ams_dynamic_arrays` and `ams_standards_review` | Reference algorithms, guarded errors and host overrides integrated; paramset skipped-arm folding under implementation; fractional counts and lifecycle open |
 | Q03 | Integrating agent | Loader isolation and CPU ABI 10 integrated; Problem allocation regressions and separate-object tests pass, combined verification continues |
 | X01 | Integrating agent | Native routes and setup guards restored; prescribed ngspice-grid replay passes, five of eleven full waveform comparisons remain open |
-| Q01–Q03 | Integrating agent and `ams_dynamic_arrays` | Compiler build, 370 units and 1,301 strict fixtures pass; host build and 295 units pass, circuit suite 494/616 with 122 failures |
+| Q01–Q03 | Integrating agent and `ams_dynamic_arrays` | Compiler build, 404 units and 1,323/1,323 strict fixtures pass. Host build and 297 units pass; the circuit suite is NOT a stable gate — see the completion rules |
+| D03 | `nets` worktree | Net state, independent drivers, §7.9 wired-logic resolution, `assign` and one-dimensional memories integrated; drive strengths remain open |
+| P01 | `vpi` worktree | `vpi_user.h`, the elaborated object model and eleven handle/traversal/property routines integrated; a compiled C application walks a three-deep design. P02/P03 values and callbacks remain open |
+| A06 | `noise` worktree | `noise_table`/`noise_table_log` export as `noise_tables` with linear and log-log interpolation; ARPice host spectral integration remains open |
+| D10 | `directives` worktree | `default_nettype`, `celldefine` and `unconnected_drive` now reach elaboration; timescale operands validated |
+| A08/A02 | `analog-gaps` worktree | Nodeset exports as `u_nodeset`; `$analog_node_alias`/`$analog_port_alias` perform the alias. Switch branches were already implemented |
+| Q01 | `audit` worktree | `VerA/docs/CLAUSE-AUDIT.md`: 119 inherited obligations classified, and the chapter `COVERAGE.md` files reconciled against source |
 
 Subsequent work is queued, not already running. The main dependencies are:
 
@@ -519,6 +525,13 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Mark each obligation missing, partial, implemented-without-evidence, verified,
   optional, implementation-defined or non-normative, with a reason and reference.
 - Keep native compatibility X01 separate. Do not use fixture count as a percent.
+- The ARPice circuit suite is not reproducible run to run: one tree scored 492,
+  494 and 518 of 616 on three runs. Device code emitted for all 39 models was
+  checked byte-identical outside comments across that span, so the movement is
+  the suite's own and not the compiler's. The load-sensitive failure kinds
+  (`TimestepTooSmall`, `SimulatorFailed`, `MissingTimeCoverage`) point at the
+  8-worker runner. Until a fixture's result depends only on the tree, no count
+  from this suite is evidence for or against any conformance row.
 
 ### Q02 — Independent behavioral oracles
 

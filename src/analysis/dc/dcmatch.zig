@@ -70,7 +70,12 @@ fn fdSensitivity(
         param.set(orig);
         ckt.recompute() catch unreachable; // restores the checked original parameter
     }
-    try ckt.recompute();
+    // Same trap as sens.zig: the +1e-12 floor un-collapses an internal node
+    // whose parasitic is nominally 0, and the frozen pattern has no row for
+    // it. The derivative is unrepresentable, not small — report 0.
+    ckt.recompute() catch |e| switch (e) {
+        error.TopologyChanged => return 0,
+    };
 
     ckt.eval(x_op, 0);
 

@@ -9,9 +9,9 @@
 //! truncated to K1 harmonics of f1 and K2 harmonics of f2, giving
 //! K = (2*K1+1)*(2*K2+1) mix products per node, total unknowns = n * K.
 //!
-//! Dense Jacobian is infeasible at n*K; we use matrix-free GMRES with a
-//! block-circulant preconditioner (one sparse (G0+jω_{kl}C0) factor per
-//! mix product).
+//! Dense Jacobian is infeasible at n*K; we use matrix-free GMRES. A
+//! block-circulant preconditioner (one sparse (G0+jω_{kl}C0) factor per mix
+//! product) is the upgrade path — see the note in `solve`.
 //!
 //! The operator apply is a "DFT sandwich": IDFT to 2-D time grid, per-sample
 //! device eval (sparse), DFT back + frequency-domain charge terms.
@@ -65,7 +65,7 @@ const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
 const solvers = @import("solvers");
 const gmres_mod = solvers.gmres;
-const precond_mod = solvers.preconditioner;
+const dense_lu = solvers.dense_lu;
 const infNorm = @import("pss.zig").normInf;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
@@ -145,6 +145,9 @@ const OperatorCtx = struct {
     v_td: []f64, // n * nf (IDFT of perturbation)
     w_td: []f64, // n * nf (time-domain product)
 
+    // One scalar instant per grid point — see buildSampleTimes.
+    times: []f64, // nf
+
     // 2-D DFT basis (precomputed)
     // basis_cos[flat_freq * nf + time_sample], basis_sin[...]
     basis_cos: []f64, // nf * nf
@@ -157,9 +160,6 @@ const OperatorCtx = struct {
     x_sample: []f64, // n
     // Scratch for dense G extraction (heap-allocated, size n*n)
     g_buf: []f64, // n * n
-
-    // Preconditioner (optional)
-    precond: ?*precond_mod.Preconditioner(f64),
 };
 
 // ============================================================================
@@ -191,46 +191,79 @@ inline fn simdScale(dst: []f64, src: []const f64, s: f64) void {
 // 2-D DFT / IDFT over the mix-product grid
 // ============================================================================
 
-/// Build the 2-D DFT basis.
-/// Time grid: nf = nf1 * nf2 samples, t_{s} at (s1/nf1 * T1, s2/nf2 * T2).
-/// Basis for mix product (k,l) at time sample s:
-///   angle = 2π * (k*s1/nf1 + l*s2/nf2)
-///   basis_cos[freq * nf + sample] = cos(angle)
-///   basis_sin[freq * nf + sample] = sin(angle)
+/// Scratch `buildTransform` needs, in f64 and in u32.
+fn transformWork(nf: usize) struct { f64s: usize, u32s: usize } {
+    const m = 2 * nf;
+    return .{ .f64s = m * m + 2 * m, .u32s = m };
+}
+
+/// Build the forward transform Γ[s][f] = e^{j ω_f t_s} and its exact inverse,
+/// in the two layouts `idft2D` and `dft2D` already read:
 ///
-/// The `_t` outputs hold the same values indexed [sample * nf + freq]. The DFT
-/// sums over samples and the IDFT over frequencies, so one layout can only be
-/// contiguous for one of them; both are written here from the same @cos/@sin.
-/// ponytail: 2*nf*nf extra doubles buys the IDFT contiguous loads. Generate the
-/// transpose in tiles if nf ever grows past what the cache tolerates.
-fn buildBasis2D(
+///   basis_cos_t[s*nf+f], basis_sin_t[s*nf+f] = Re Γ[s][f],  Im Γ[s][f]
+///   basis_cos[f*nf+s],   basis_sin[f*nf+s]   = nf·Re Γ⁻¹[f][s], −nf·Im Γ⁻¹[f][s]
+///
+/// (the nf and the sign absorb the 1/nf and the −Im that `dft2D` applies).
+///
+/// Why an inverse rather than the textbook orthogonal 2-D DFT basis: that basis
+/// is orthogonal only on the exact torus points, and incommensurate tones admit
+/// no instant that is an exact torus point for BOTH tones (see
+/// `buildSampleTimes`). Sampling a tone at the nearly-right instants and
+/// projecting on the ideal basis leaks it into every other mix product at the
+/// level of the instants' phase error — parts in 10⁵, where the corpus wants a
+/// mix product that carries nothing to read as 1e-7. Γ⁻¹ is exact at whatever
+/// instants Γ was built from, so a signal that is a sum of exactly these
+/// exponentials lands on exactly its own lines, to roundoff. The APFT instants
+/// still matter: they keep Γ within their phase error of the ideal DFT matrix,
+/// which is what keeps the inverse well conditioned.
+///
+/// ponytail: one (2nf)² dense factorization and nf solves, once per analysis,
+/// against nf circuit evaluations per GMRES iteration. nf ≤ 121 at the default
+/// truncation, so this is a 242×242 LU — no reason to exploit the structure.
+fn buildTransform(
     grid: MixGrid,
+    f1: f64,
+    f2: f64,
+    times: []const f64,
     basis_cos: []f64,
     basis_sin: []f64,
     basis_cos_t: []f64,
     basis_sin_t: []f64,
-) void {
+    work: []f64,
+    piv: []u32,
+) !void {
     const nf = grid.nf;
-    const nf1 = grid.nf1;
-    const nf2 = grid.nf2;
+    const m = 2 * nf; // real embedding of the complex nf x nf system
+    const gamma = work[0 .. m * m];
+    const rhs = work[m * m ..][0..m];
+    const sol = work[m * m + m ..][0..m];
 
-    for (0..nf) |freq| {
-        const kl = grid.signedKL(freq);
-        const k_f: f64 = @floatFromInt(kl.k);
-        const l_f: f64 = @floatFromInt(kl.l);
-
-        for (0..nf) |samp| {
-            const s1 = samp % nf1;
-            const s2 = samp / nf1;
-            const angle = 2.0 * std.math.pi *
-                (k_f * @as(f64, @floatFromInt(s1)) / @as(f64, @floatFromInt(nf1)) +
-                    l_f * @as(f64, @floatFromInt(s2)) / @as(f64, @floatFromInt(nf2)));
+    simdZero(gamma);
+    for (0..nf) |s| {
+        for (0..nf) |f| {
+            const angle = grid.omega(f, f1, f2) * times[s];
             const c = @cos(angle);
-            const s = @sin(angle);
-            basis_cos[freq * nf + samp] = c;
-            basis_sin[freq * nf + samp] = s;
-            basis_cos_t[samp * nf + freq] = c;
-            basis_sin_t[samp * nf + freq] = s;
+            const sn = @sin(angle);
+            basis_cos_t[s * nf + f] = c;
+            basis_sin_t[s * nf + f] = sn;
+            // [ Re Γ  −Im Γ ]
+            // [ Im Γ   Re Γ ]
+            gamma[s * m + f] = c;
+            gamma[s * m + nf + f] = -sn;
+            gamma[(nf + s) * m + f] = sn;
+            gamma[(nf + s) * m + nf + f] = c;
+        }
+    }
+
+    try dense_lu.factorize(m, gamma, piv);
+    const nf_f: f64 = @floatFromInt(nf);
+    for (0..nf) |s| {
+        simdZero(rhs);
+        rhs[s] = 1.0; // column s of the identity, zero imaginary part
+        dense_lu.solveFactored(m, gamma, piv, rhs, sol);
+        for (0..nf) |f| {
+            basis_cos[f * nf + s] = nf_f * sol[f];
+            basis_sin[f * nf + s] = -nf_f * sol[nf + f];
         }
     }
 }
@@ -323,6 +356,57 @@ fn dft2D(
     }
 }
 
+/// Signed distance between two phases measured in cycles, wrapped to ±0.5.
+inline fn cycleErr(phase: f64, target: f64) f64 {
+    const d = phase - target;
+    return @abs(d - @round(d));
+}
+
+/// One scalar instant per 2-D mix-grid point.
+///
+/// A device reads a single clock, so the torus point (s1/nf1 through tone 1,
+/// s2/nf2 through tone 2) has to be spelled as ONE time — and it used to be
+/// spelled as t = 0 for every sample, which is why no source waveform could
+/// vary across the grid at all.
+///
+/// Tone 1 is exact at every t = (s1/nf1 + m)/f1 for integer m, so m is free to
+/// spend on tone 2: pick the one whose frac(f2*t) lands closest to s2/nf2.
+/// Incommensurate tones admit no instant exact for both — that is the APFT
+/// sample-selection problem — but frac(m*f2/f1) equidistributes, so the leftover
+/// phase error is O(1/horizon).
+///
+/// That leftover does NOT have to be small for the answer to be right:
+/// `buildTransform` inverts the transform these instants actually generate, so
+/// the spectra are exact wherever the instants land. What the horizon buys is
+/// CONDITIONING — instants near the torus points keep Γ near the ideal DFT
+/// matrix — and it is bounded above by f64 phase resolution, since the device
+/// evaluates sin(2π·f·t) at t = O(horizon/f1).
+///
+/// ponytail: linear scan, O(nf · horizon) ≈ 5e5 flops once per analysis. A
+/// continued-fraction search of f2/f1 would reach the same error in O(log)
+/// steps — worth writing only if the horizon ever has to grow.
+fn buildSampleTimes(times: []f64, grid: MixGrid, f1: f64, f2: f64) void {
+    const horizon: usize = 1 << 12;
+    const rho = f2 / f1;
+    const nf1_f: f64 = @floatFromInt(grid.nf1);
+    const nf2_f: f64 = @floatFromInt(grid.nf2);
+    for (0..grid.nf) |s| {
+        const phase1 = @as(f64, @floatFromInt(s % grid.nf1)) / nf1_f;
+        const target = @as(f64, @floatFromInt(s / grid.nf1)) / nf2_f;
+        var best_u = phase1;
+        var best_err = std.math.inf(f64);
+        for (0..horizon) |m| {
+            const u = phase1 + @as(f64, @floatFromInt(m));
+            const err = cycleErr(rho * u, target);
+            if (err < best_err) {
+                best_err = err;
+                best_u = u;
+            }
+        }
+        times[s] = best_u / f1;
+    }
+}
+
 // ============================================================================
 // QP-HB residual evaluation
 // ============================================================================
@@ -354,7 +438,13 @@ fn computeResidual(
     for (0..nf) |s| {
         for (0..n) |node| ctx.x_sample[node] = ctx.x_td[node * nf + s];
 
-        ckt.eval(ctx.x_sample[0..n], 0);
+        // §4.6.1: a source waveform only exists while `analysis("tran")` is
+        // true, and each grid point is a DIFFERENT instant. Both were missing
+        // (every sample was `eval(x, 0)` in the inherited operating-point
+        // phase), so the deck's two tones answered with one DC value and QPSS
+        // balanced an undriven circuit. The excitation enters here.
+        ckt.setSimState(.{ .t = ctx.times[s], .kind = .tran });
+        ckt.eval(ctx.x_sample[0..n], ctx.times[s]);
 
         for (0..n) |node| ctx.w_td[node * nf + s] = ckt.rhs[node];
 
@@ -486,20 +576,12 @@ inline fn addChargeTerms(
     }
 }
 
-/// Preconditioner callback for GMRES: apply P^{-1} in-place.
-fn precondApply(r: []f64, ctx_raw: *anyopaque) void {
-    const ctx: *OperatorCtx = @ptrCast(@alignCast(ctx_raw));
-    if (ctx.precond) |p| p.apply(r);
-}
-
 // ============================================================================
 // Solve (Newton + GMRES)
 // ============================================================================
 
 pub fn solve(
     ckt: *root.Circuit,
-    source_node: u32,
-    source_mag: f64,
     probes: []const u32,
     spectra_re: []f64,
     spectra_im: []f64,
@@ -526,6 +608,7 @@ pub fn solve(
         nf * nf + // basis_sin
         nf * nf + // basis_cos_t (sample-major, for the IDFT)
         nf * nf + // basis_sin_t
+        nf + // times (one instant per mix-grid point)
         n + // x_sample (per-sample eval scratch)
         n * n; // g_buf (dense G extraction scratch)
 
@@ -557,6 +640,8 @@ pub fn solve(
     off += nf * nf;
     const basis_sin_t = arena[off..][0 .. nf * nf];
     off += nf * nf;
+    const times = arena[off..][0..nf];
+    off += nf;
     const x_sample = arena[off..][0..n];
     off += n;
     const g_buf = arena[off..][0 .. n * n];
@@ -565,7 +650,15 @@ pub fn solve(
 
     simdZero(x_hat);
 
-    buildBasis2D(grid, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
+    buildSampleTimes(times, grid, options.f1, options.f2);
+    {
+        const need = transformWork(nf);
+        const work = try allocator.alloc(f64, need.f64s);
+        defer allocator.free(work);
+        const piv = try allocator.alloc(u32, need.u32s);
+        defer allocator.free(piv);
+        try buildTransform(grid, options.f1, options.f2, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t, work, piv);
+    }
 
     var op_ctx = OperatorCtx{
         .ckt = ckt,
@@ -578,82 +671,57 @@ pub fn solve(
         .c_mat = c_mat,
         .v_td = v_td,
         .w_td = w_td,
+        .times = times,
         .basis_cos = basis_cos,
         .basis_sin = basis_sin,
         .basis_cos_t = basis_cos_t,
         .basis_sin_t = basis_sin_t,
         .x_sample = x_sample,
         .g_buf = g_buf,
-        .precond = null,
     };
 
-    // ponytail: at x=0 all nf samples are identical. Borrow the G/C planes
-    // through init, which reads them without evaluating the circuit; it still
-    // averages nf terms in the same order. A varying orbit needs sample storage.
-    const g_sample_ptrs = try allocator.alloc([]const f64, nf);
-    defer allocator.free(g_sample_ptrs);
-    const c_sample_ptrs = try allocator.alloc([]const f64, nf);
-    defer allocator.free(c_sample_ptrs);
-    const c_zero = try allocator.alloc(f64, if (ckt.has_charge) 0 else ckt.nnz);
-    defer allocator.free(c_zero);
-
-    simdZero(x_sample);
-    ckt.eval(x_sample, 0);
-    simdZero(c_zero);
-    const g_sample = ckt.g_vals[0..ckt.nnz];
-    const c_sample = if (ckt.has_charge) ckt.c_vals[0..ckt.nnz] else c_zero;
-    for (0..nf) |s| {
-        g_sample_ptrs[s] = g_sample;
-        c_sample_ptrs[s] = c_sample;
-    }
-
-    // ponytail: the preconditioner factors independent (G+jωC) systems and
-    // retains their factors for triangular solves. GPU batching needs a new
-    // apply strategy; parallel CPU factorization is an intermediate option
-    // when those serial factorizations dominate Newton setup.
-    // Use the largest harmonic count for the 1-D preconditioner — the preconditioner
-    // treats the system as if it had max(K1,K2) harmonics of a single fundamental.
-    // ponytail: simplified multi-tone preconditioner — use per-mix-product diagonal blocks
-    // This is an approximation but captures the dominant conditioning.
-    const max_harm: u32 = @intCast((@max(options.k1, options.k2)));
-    // nf = (2*k1+1)*(2*k2+1) always covers 2*max(k1,k2)+1 sidebands.
-    var precond_inst: ?precond_mod.Preconditioner(f64) = precond_mod.Preconditioner(f64).init(
-        allocator,
-        @intCast(n),
-        ckt.col_ptr,
-        ckt.row_idx,
-        max_harm,
-        @intCast(nf),
-        g_sample_ptrs,
-        c_sample_ptrs,
-        2.0 * std.math.pi * options.f1, // dominant tone
-        .averaged_circulant,
-    ) catch null;
-    defer if (precond_inst) |*p| p.deinit(allocator);
-
-    op_ctx.precond = if (precond_inst != null) &precond_inst.? else null;
+    // No preconditioner. `solvers/preconditioner.zig` cannot be pointed at this
+    // system as it stands: `applyBlockDiag` walks `2*max(K1,K2)+1` SIDEBAND-major
+    // blocks of n and factors block p at ω = p·2πf1, while the QPSS vector is
+    // n NODE-major blocks of nf and its blocks sit at the mix frequencies
+    // k·f1 + l·f2. Both the indexing and the frequencies disagree, so the
+    // "preconditioner" was solving the wrong subvectors against the wrong ω.
+    // Harmless where C is absent (every block is then the same G⁻¹, however it
+    // is permuted — `qpss/square_mixer` converged through it) and actively
+    // misleading where it is not: all three `qpss/linear_two_tone_*` decks,
+    // which differ from square_mixer by one capacitor, stalled GMRES until this
+    // came out.
+    //
+    // ponytail: unpreconditioned GMRES, because these systems are 2·n·nf ≤ a few
+    // hundred unknowns at a conditioning the restart depth already handles. The
+    // upgrade is a real block-diagonal preconditioner — one sparse
+    // (G₀ + jω_{kl}C₀) factor per MIX PRODUCT, node-major — which is what the
+    // module doc above describes and what `Preconditioner` would need a
+    // per-block ω and this layout to provide.
 
     // --- GMRES workspace ---
-    const gmres_m: u32 = @intCast(@min(options.gmres_restart, total));
+    // ponytail: no restarts at all below 512 unknowns. Unrestarted GMRES
+    // terminates in at most `total` iterations, and `total` here is 2·n·nf —
+    // 90 for `qpss/linear_two_tone_1_1`. Restarting at 30 threw away the
+    // Arnoldi basis three times over on a 90-unknown system and stalled: the
+    // matrix spans a voltage source's ±1 branch stamp and a 1 kΩ conductance's
+    // 1e-3, and one capacitor's ω·C on top of that pushes the spread past 1e4,
+    // which is exactly where a short restart cycle gives up. The basis costs
+    // m·total doubles, so 512 is ~2 MB; past it the requested depth stands and
+    // the real answer is the block preconditioner noted above.
+    const want_m: usize = if (total <= 512) total else options.gmres_restart;
+    const gmres_m: u32 = @intCast(@min(want_m, total));
     var gmres = try gmres_mod.Gmres(f64).init(allocator, @intCast(total), gmres_m);
     defer gmres.deinit(allocator);
 
-    // --- Add source excitation at f1 (cosine = pure real part at k=1, l=0) ---
-    // The source appears as a known RHS contribution. We add it after each
-    // residual evaluation into the appropriate spectral slot.
-    const source_freq_idx = grid.flatIdx(1, 0); // k=1, l=0 → positive f1
-
     // --- Newton iteration ---
+    // The excitation is not injected here any more: `computeResidual` evaluates
+    // the circuit in the transient phase at each grid point's own instant, so
+    // every source card's real spectrum is already in `residual`.
     var iter: u16 = 0;
     while (iter < options.max_newton) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
         computeResidual(&op_ctx, x_hat, residual);
-
-        // Add source excitation: cosine at f1 into source_node's KCL row
-        // In stacked-real: source enters as re component at the (k=1,l=0) slot
-        if (source_node != root.GROUND) {
-            residual[source_node * nf + source_freq_idx] += source_mag;
-        }
 
         const res_norm = infNorm(residual);
         if (res_norm < options.hb_tol) {
@@ -667,12 +735,11 @@ pub fn solve(
 
         simdZero(dx);
 
-        const has_precond = op_ctx.precond != null;
         _ = gmres.solve(
             &matvec,
             @ptrCast(&op_ctx),
-            if (has_precond) &precondApply else null,
-            if (has_precond) @ptrCast(&op_ctx) else null,
+            null,
+            null,
             residual,
             dx,
             options.gmres_tol,
@@ -683,9 +750,6 @@ pub fn solve(
     }
 
     computeResidual(&op_ctx, x_hat, residual);
-    if (source_node != root.GROUND) {
-        residual[source_node * nf + source_freq_idx] += source_mag;
-    }
     const final_norm = infNorm(residual);
 
     extractSpectra2D(x_hat, probes, spectra_re, spectra_im, n, nf);
@@ -727,7 +791,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const spectra_im = try scratch.alloc(f64, ctx.probes.len * nf);
     defer scratch.free(spectra_im);
 
-    const st = try solve(ctx.circuit, ctx.source_node, opts.source_mag, ctx.probes, spectra_re, spectra_im, opts, scratch);
+    const st = try solve(ctx.circuit, ctx.probes, spectra_re, spectra_im, opts, scratch);
 
     if (!st.converged) return error.QpssDidNotConverge;
 
@@ -770,9 +834,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 // Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .MixGrid = MixGrid,
-    .buildBasis2D = buildBasis2D,
+    .buildTransform = buildTransform,
+    .transformWork = transformWork,
     .dft2D = dft2D,
     .gvProduct = gvProduct,
     .idft2D = idft2D,
+    .buildSampleTimes = buildSampleTimes,
     .simdZero = simdZero,
 } else {};

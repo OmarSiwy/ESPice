@@ -134,7 +134,27 @@ pub fn solve(
             p.ptr.set(orig);
             ckt.recompute() catch unreachable; // restores the checked original parameter
         }
-        try ckt.recompute();
+        // A parameter whose NOMINAL value collapses an internal node (bjt
+        // RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the +1e-12 floor in
+        // `delta_req`: `collapse` stops folding c' onto c, the builder never
+        // allocated a distinct c', and the batch reports TopologyChanged. The
+        // derivative is not small there, it is not REPRESENTABLE — the
+        // perturbed circuit has a node the frozen matrix pattern does not.
+        // Report 0 rather than failing the whole analysis; ngspice's sens
+        // never perturbs a topology parameter at all (cktsens.c drives the
+        // per-device analytic sensitivity routines, not a generic FD).
+        ckt.recompute() catch |e| switch (e) {
+            error.TopologyChanged => {
+                entry.* = .{
+                    .device_name = p.device_name,
+                    .param_name = p.param_name,
+                    .sensitivity = 0,
+                    .is_instance = p.ptr.is_instance,
+                    .principal = p.ptr.primary,
+                };
+                continue;
+            },
+        };
 
         const delta = p.ptr.get() - orig;
         if (delta == 0) return error.ZeroDelta;
