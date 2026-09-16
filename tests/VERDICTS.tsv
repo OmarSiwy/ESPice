@@ -35,6 +35,7 @@ PASS	fixtures/ac/divider_phase_90.sp
 PASS	fixtures/ac/divider_phase_minus90.sp
 PASS	fixtures/ac/floating_ac_source.sp
 PASS	fixtures/ac/hfet2_zero_vds_gds.sp
+PASS	fixtures/ac/kinduc_k_exact.sp
 PASS	fixtures/ac/lane_tail_15.sp
 PASS	fixtures/ac/lane_tail_16.sp
 PASS	fixtures/ac/lane_tail_17.sp

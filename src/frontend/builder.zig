@@ -1657,12 +1657,12 @@ pub const NetBuilder = struct {
         const ibr1 = self.l.items(.branch)[li1];
         const ibr2 = self.l.items(.branch)[li2];
         var model: devices.kinduc.Model = .{};
-        if (positionalNumber(dev, 2)) |k| model.k = try castField(f32, k);
+        if (positionalNumber(dev, 2)) |k| model.k = try castField(@TypeOf(model.k), k);
         if (dev.model) |m| try applyKv(&model, m.kv);
         try applyKv(&model, dev.kv);
         // The card gives the coupling k; the device stamps M = k*sqrt(L1*L2)
         // (ngspice INDsetup).
-        model.k = try castField(f32, @as(f64, model.k) *
+        model.k = try castField(@TypeOf(model.k), model.k *
             @sqrt(self.l.items(.value)[li1] * self.l.items(.value)[li2]));
         try self.b.addDevice(devices.kinduc, dev.name, model, .{}, [2]u32{ ibr1, ibr2 });
     }
