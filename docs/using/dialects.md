@@ -120,7 +120,9 @@ collides with an ngspice spelling:
   earlier results, `TD=TRIG`, and measures of FFT, LSTB, DCMATCH, ACMATCH,
   PHASENOISE and PTDNOISE plots.
 - **Digital stimuli:** `PAT (vhi vlo td tr tf tsample data)` sources and
-  `.vec` vector files, rewritten to PWL sources and `.dout` checks.
+  `.vec` vector files, rewritten to PWL sources and `.dout` checks. A
+  pattern nests at most 32 `[ ]` levels, counted through the `.pat` names
+  it reads.
 - **Checks and reports:** `.check rise|fall|slew|setup|hold|edge|irdrop`,
   `.dout`, `.biaschk`, `.power`, `.stim`.
 - **Statistics:** `agauss`, `gauss`, `aunif`, `unif`, `limit`; `DEV` and
