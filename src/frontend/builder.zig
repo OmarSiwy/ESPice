@@ -1328,6 +1328,7 @@ pub const NetBuilder = struct {
     /// `resolvePulseDefaults`, so the -1 sentinels survive every legitimate
     /// write before the `.tran` card fills them.
     fn bindSource(self: *const NetBuilder, comptime D: type, dev: Device) !struct { D.Model, D.Instance } {
+        try refuseUnknownWave(dev);
         var model: D.Model = .{};
         var instance: D.Instance = .{};
         const dc = sourceDc(dev);
@@ -2329,6 +2330,30 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
 
 /// Source waveform shapes; the tag is the model's `waveform` code (0 is DC only).
 const Wave = enum(u8) { pulse = 1, sin = 2, exp = 3, pwl = 4, sffm = 5, am = 6 };
+
+/// Source waveforms ngspice or HSPICE define that the source models do not
+/// draw. A card naming one is refused rather than run as its DC value
+/// (#72), and so is HSPICE's `PWL FILE=`.
+/// ponytail: refused, not drawn; TRNOISE/TRRANDOM need ngspice's noise
+/// generator per source and breakpoints at each sample.
+fn refuseUnknownWave(dev: Device) error{UnsupportedCard}!void {
+    const unknown = std.StaticStringMap(void).initComptime(.{ .{"trnoise"}, .{"trrandom"}, .{"lfsr"}, .{"hb"} });
+    var buf: [8]u8 = undefined;
+    for (dev.positional) |v| {
+        const name = switch (v) {
+            .group => |g| g.name,
+            .name => |n| n,
+            else => continue, // else: numbers and expressions name no waveform
+        };
+        if (name.len > buf.len or !unknown.has(std.ascii.lowerString(&buf, name))) continue;
+        if (!@import("builtin").is_test) std.log.err("{s}: the {s} source waveform is not supported", .{ dev.name, name });
+        return error.UnsupportedCard;
+    }
+    for (dev.kv) |item| if (std.ascii.eqlIgnoreCase(item.key, "file")) {
+        if (!@import("builtin").is_test) std.log.err("{s}: a PWL FILE= source is not supported", .{dev.name});
+        return error.UnsupportedCard;
+    };
+}
 
 /// The waveform a source keyword names, case-insensitively.
 fn waveKind(name: []const u8) ?Wave {

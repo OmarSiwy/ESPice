@@ -403,6 +403,10 @@ PASS	fixtures/invalid/pss_zero_frequency.sp
 PASS	fixtures/invalid/pxf_zero_lo.sp
 PASS	fixtures/invalid/qpss_zero_second_frequency.sp
 PASS	fixtures/invalid/sens_unknown_node.sp
+PASS	fixtures/invalid/source_lfsr_refused.sp
+PASS	fixtures/invalid/source_pwl_file_refused.sp
+PASS	fixtures/invalid/source_trnoise_refused.sp
+PASS	fixtures/invalid/source_trrandom_refused.sp
 PASS	fixtures/invalid/sp_zero_impedance.sp
 PASS	fixtures/invalid/spectre_tran_unknown_param.sp
 PASS	fixtures/invalid/temp_absolute_zero.sp

@@ -35,6 +35,9 @@ A current source pushes current from `n+` through the source to `n-`, so
 | `SFFM(vo va fm mdi fc)` | single-frequency FM (ngspice argument order) |
 | `AM(va vo mf fc td)` | amplitude modulation |
 
+ngspice's `TRNOISE` and `TRRANDOM`, HSPICE's `LFSR` and `HB`, and
+`PWL FILE=` are refused with an error naming the card.
+
 Trailing arguments may be left off. A `PULSE` with no rise or fall time
 uses the transient's step; with no width or period it stays high until the
 end.
