@@ -896,6 +896,16 @@ test "a .param chain resolves at any depth" {
     try std.testing.expectEqual(@as(f64, 1001), try numeric((try device(nl, "v1")).positional[0]));
 }
 
+test "a controlled-source type word for another letter is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ngspice refuses `E1 o 0 CCCS ...`; it is not a zero-gain VCVS (#75).
+    try std.testing.expectError(error.UnsupportedCard, parse(a, "t\nvs a 0 0\ne1 o 0 cccs vs 2\n.end\n"));
+    try std.testing.expectError(error.UnsupportedCard, netlist.parse(a, "t\ne1 o 0 vcr c 0 2\n.end\n", .hspice));
+    _ = try parse(a, "t\nv1 c 0 1\ne1 o 0 vcvs c 0 2\n.end\n");
+}
+
 test "parseAnalyses reads analysis cards only and resolves their nets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

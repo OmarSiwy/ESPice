@@ -1049,6 +1049,10 @@ const L = struct {
             // LAPLACE, POLE and DELAY keep their letter and control nodes;
             // the other forms become a two-terminal B card.
             const form = if (words.items.len > 2) words.items[2] else "";
+            // A type word for another letter is refused, as ngspice does, and
+            // HSPICE's VCR and VCCAP are G forms only (#75).
+            const owners = [_]struct { []const u8, u8 }{ .{ "vcvs", 'e' }, .{ "vccs", 'g' }, .{ "ccvs", 'h' }, .{ "cccs", 'f' }, .{ "vcr", 'g' }, .{ "vccap", 'g' } };
+            for (owners) |o| if (std.mem.eql(u8, form, o[0]) and letter != o[1]) return error.Refused;
             if (std.mem.eql(u8, form, "laplace") or std.mem.eql(u8, form, "pole") or std.mem.eql(u8, form, "delay"))
                 for (words.items[3..@min(5, words.items.len)]) |node| try pins.append(l.arena, try l.net(frame, node));
             try l.loose.put(l.arena, flat, {});

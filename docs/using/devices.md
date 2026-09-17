@@ -51,7 +51,8 @@ out) choose the device. The tables follow ngspice's `inpdomod.c`.
 | 73 | HiSIM-HV |
 | 1040 | PSP 103 (ngspice has no PSP level; this is the number VACASK-derived decks use) |
 
-`.model name VDMOS(...)` selects VDMOS whatever the level, and
+`.model name VDMOS(...)` selects VDMOS whatever the level (N-channel
+only: a `pchan` model is refused), and
 `.model name psp103va(...)`, the name ngspice loads PSP 103 under as OSDI,
 selects the built-in PSP 103. A PSP card that sets `SWNQS` to a nonzero
 value runs the non-quasi-static build, which carries four times the
@@ -68,8 +69,11 @@ and 9 VBIC 1.3, 8 HICUM/L2.
 is MESFET, 2 to 4 MESA, 5 HFET1, 6 HFET2.
 
 A LEVEL outside these tables (B3SOI-PD at 57, SOI3 at 60, or any other
-number) is refused with `UnsupportedDevice` and a warning naming the
-level. ESPice never substitutes a different model.
+number) is refused with `UnsupportedDevice` and errors naming the level
+and the card. So is a card whose model is another element's type (a `D`
+card on an `NPN` model), as ngspice's "incorrect model type". ESPice never
+substitutes a different model. P-type MESA (`PMF` at levels 2 to 4) is
+refused too: the model has no polarity parameter.
 
 ## Model licences
 

@@ -3024,12 +3024,18 @@ fn Reader(comptime S: type) type {
                     // `E1 a b VCVS c d 2`: the type word only repeats the letter.
                     // A run of them goes in one copy, so the re-read never recurses.
                     if (form == .kind) {
+                        // A word for another letter (`E1 o 0 CCCS ...`) is
+                        // refused, as ngspice does, not read as this one (#75).
+                        const kinds = std.StaticStringMap(u8).initComptime(.{ .{ "vcvs", 'e' }, .{ "vccs", 'g' }, .{ "ccvs", 'h' }, .{ "cccs", 'f' } });
+                        if (kinds.get(std.ascii.lowerString(&buf, t)) != letter) return r.unsupported(line, "a controlled-source type word for another letter");
                         while (probe.peek()) |u| {
                             if (u.len > buf.len or (behavioural.get(std.ascii.lowerString(&buf, u)) orelse .refused) != .kind) break;
                             _ = probe.next();
                         }
                         return r.readDevice(try std.mem.concat(r.arena, u8, &.{ line[0..at], " ", probe.line[probe.pos..] }), frame);
                     }
+                    // HSPICE: VCR and VCCAP are G-element forms only (#75).
+                    if ((form == .vcr or form == .vccap) and letter != 'g') return r.unsupported(line, "VCR or VCCAP on a card other than G");
                     return r.behaviouralCard(line, head, letter, f, frame, form);
                 };
             }

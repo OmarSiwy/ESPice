@@ -1,0 +1,15 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#75: a D card on an NPN model is refused (ngspice-45: incorrect model type).",
+ "oracle": {
+  "kind": "diagnostic",
+  "derivation": "#75: a D card on an NPN model is refused (ngspice-45: incorrect model type)."
+ },
+ "origin": "tests/fixtures/invalid/model_kind_mismatch_refused.sp",
+ "expect": {
+  "status": "error",
+  "category": "unsupported_input"
+ },
+ "netlist_sha256": "aeecdfd535b8d8447929d7586e58b857a4900c4932d77a4972d64725f9db11fe"
+}

@@ -1,0 +1,34 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#75: a PJF model runs P-channel through jfet.va's jtype.",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "ngspice-45 on this deck: vd#branch = 2.020000015100e-04.",
+  "command": "ngspice -b (print all, numdgt=12)"
+ },
+ "origin": "tests/fixtures/op/jfet_pjf.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Operating Point",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(vd)": {
+      "values": [
+       0.00020200000151
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-12
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "0404b4b0ac5bf195788cc486a70809947460d7cdd2fbcde0e0679e3462694a2a"
+}

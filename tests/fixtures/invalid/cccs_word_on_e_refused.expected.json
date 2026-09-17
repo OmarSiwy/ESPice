@@ -1,0 +1,15 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#75: a CCCS type word on an E card is refused (ngspice-45 fails the deck).",
+ "oracle": {
+  "kind": "diagnostic",
+  "derivation": "#75: a CCCS type word on an E card is refused (ngspice-45 fails the deck)."
+ },
+ "origin": "tests/fixtures/invalid/cccs_word_on_e_refused.sp",
+ "expect": {
+  "status": "error",
+  "category": "unsupported_input"
+ },
+ "netlist_sha256": "f5c87ea84fb198270316c2b21457fbd056c22707ef9cc0326791df284150a011"
+}

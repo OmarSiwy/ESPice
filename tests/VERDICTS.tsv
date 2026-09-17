@@ -370,6 +370,7 @@ PASS	fixtures/invalid/ac_fractional_density.sp
 PASS	fixtures/invalid/ac_negative_frequency.sp
 PASS	fixtures/invalid/ac_zero_density.sp
 PASS	fixtures/invalid/bench_topology_floating_node.sp
+PASS	fixtures/invalid/cccs_word_on_e_refused.sp
 PASS	fixtures/invalid/contradictory_voltage_loop.sp
 PASS	fixtures/invalid/contradictory_voltage_sources.sp
 PASS	fixtures/invalid/current_into_capacitor_dc.sp
@@ -384,10 +385,12 @@ PASS	fixtures/invalid/envelope_zero_period.sp
 PASS	fixtures/invalid/four_zero_fundamental.sp
 PASS	fixtures/invalid/hb_fractional_harmonics.sp
 PASS	fixtures/invalid/hb_negative_frequency.sp
+PASS	fixtures/invalid/level57_refused.sp
 PASS	fixtures/invalid/matex_negative_step.sp
 PASS	fixtures/invalid/mc_fractional_trials.sp
 PASS	fixtures/invalid/mc_negative_variation.sp
 PASS	fixtures/invalid/mc_zero_trials.sp
+PASS	fixtures/invalid/model_kind_mismatch_refused.sp
 PASS	fixtures/invalid/noise_missing_output.sp
 PASS	fixtures/invalid/noise_missing_source.sp
 PASS	fixtures/invalid/noise_zero_frequency.sp
@@ -419,6 +422,7 @@ PASS	fixtures/invalid/tran_negative_stop.sp
 PASS	fixtures/invalid/tran_zero_step.sp
 PASS	fixtures/invalid/trannoise_zero_step.sp
 PASS	fixtures/invalid/unresolved_parameter.sp
+PASS	fixtures/invalid/vdmos_pchan_refused.sp
 PASS	fixtures/layout/capacitive_divider_tran.sp
 PASS	fixtures/layout/coupled_ac.sp
 PASS	fixtures/layout/fanout_tran.sp
@@ -527,6 +531,7 @@ PASS	fixtures/op/divider_default.sp
 PASS	fixtures/op/floating_voltage_source.sp
 PASS	fixtures/op/gigaohm_load.sp
 PASS	fixtures/op/inductor_short_dc.sp
+PASS	fixtures/op/jfet_pjf.sp
 PASS	fixtures/op/kilovolt_supply.sp
 PASS	fixtures/op/ltra_op_series_resistance.sp
 PASS	fixtures/op/mfactor_parallel_copies.sp
