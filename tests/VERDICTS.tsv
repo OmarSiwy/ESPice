@@ -498,6 +498,7 @@ PASS	fixtures/op/bench_medium_resistor_mesh.sp
 PASS	fixtures/op/bench_mosfet_nand2.sp
 PASS	fixtures/op/bjt_instance_area.sp
 PASS	fixtures/op/bsource_brace_expr.sp
+PASS	fixtures/op/bsource_ln_zero_start.sp
 PASS	fixtures/op/capacitor_open_dc.sp
 PASS	fixtures/op/cccs_sign.sp
 PASS	fixtures/op/ccvs_gain.sp

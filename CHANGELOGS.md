@@ -16,6 +16,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- A B source's `ln`/`log`/`log10` of 0 is -1e99 as in ngspice, so an argument that starts Newton at 0 V converges instead of failing (#77).
 - V and I cards using `TRNOISE`, `TRRANDOM`, `LFSR`, `HB` or `PWL FILE=` are refused with an error naming the card; they ran silently as their DC value (#72).
 - HSPICE `.pat` names count toward the 32-level `[ ]` nesting limit; a long chain of names no longer overflows the stack (#67).
 - `.step` with `.alter` keeps the base run's step points, and `.step param p list` with no values is a parse error instead of running nothing (#66).
