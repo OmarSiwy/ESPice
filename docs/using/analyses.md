@@ -531,7 +531,9 @@ These wrap other analyses rather than being analyses themselves; see the
 
 - `.step` reruns every analysis per point; plots are named
   `<plot> (name=value)`.
-- `.alter` blocks rerun the deck with changes: `<plot> (alter=n)`.
+- `.alter` blocks rerun the deck with changes: `<plot> (alter=n)`. With
+  `.step` too, the base run keeps its step points and each `.alter` run
+  steps again.
 - `SWEEP DATA=`, `SWEEP MONTE=` and `SWEEP OPTIMIZE=` on one card:
   `<plot> (monte=n)`, `(optimize=...)`.
 - An HSPICE `.temp` list: `<plot> (temp=t)`.

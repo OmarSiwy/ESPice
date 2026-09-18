@@ -362,6 +362,7 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
         .{ "UnsupportedCard", "unsupported_input" },
         .{ "UnresolvedParameter", "unsupported_input" },
         .{ "UnknownParameter", "unsupported_input" },
+        .{ "UnsupportedDevice", "unsupported_input" },
         .{ "WrongNodeCount", "inconsistent_circuit" },
         .{ "OsdiUnsupported", "unsupported_input" },
         .{ "UnpairedPoleRoot", "unsupported_input" },

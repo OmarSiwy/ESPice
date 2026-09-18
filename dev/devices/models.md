@@ -218,6 +218,10 @@ Intentional divergences, kept rather than matched:
   mode (ptfuncs.c `PTpowerH`) and the fixture oracles' analytic math;
   ngspice's default mode computes `|x|^k` for every constant power (see
   `models/bsource.va`).
+- `bsource`: `ln`/`log`/`log10` of 0 is ptfuncs.c `PTlog`'s -1e99, so a B
+  source whose argument starts Newton at 0 V recovers as in ngspice (#77,
+  `op/bsource_ln_zero_start`). A negative argument stays IEEE NaN where
+  `PTlog` returns `HUGE` (inf); both fail the solver's finiteness check.
 - `bsource`/`bsource_i`/`bsource_q` interpret the B card's expression tape
   in Verilog-A (they replaced the native `bsource.zig`, `btape.zig` and
   `bcharge.zig`). The stack is `(* vera_scratch *)`, so the device is

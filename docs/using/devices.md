@@ -66,7 +66,8 @@ out) choose the device. The tables follow ngspice's `inpdomod.c`.
 ngspice has no built-in level for BSIM-CMG, L-UTSOI, BSIM-BULK or BSIM-IMG;
 those four are HSPICE's numbers.
 
-`.model name VDMOS(...)` selects VDMOS whatever the level. An `N` card whose
+`.model name VDMOS(...)` selects VDMOS whatever the level (N-channel only:
+a `pchan` model is refused). An `N` card whose
 `.model` type is a model's Verilog-A module name, the name ngspice loads it
 under as OSDI, selects the built-in model: `psp103va`, `pspnqs103va`,
 `psp103tva`, `psp104va`, `pspnqs104va`, `psp104tva`, `juncap200`, `bsimimg`,
@@ -89,8 +90,11 @@ JUNCAP2 (HSPICE's number).
 is MESFET, 2 to 4 MESA, 5 HFET1, 6 HFET2.
 
 A LEVEL outside these tables (B3SOI-PD at 57, SOI3 at 60, or any other
-number) is refused with `UnsupportedDevice` and a warning naming the
-level. ESPice never substitutes a different model.
+number) is refused with `UnsupportedDevice` and errors naming the level
+and the card. So is a card whose model is another element's type (a `D`
+card on an `NPN` model), as ngspice's "incorrect model type". ESPice never
+substitutes a different model. P-type MESA (`PMF` at levels 2 to 4) is
+refused too: the model has no polarity parameter.
 
 ## Model licences
 

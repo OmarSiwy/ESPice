@@ -748,6 +748,8 @@ test "malformed cards fail with ParseError, never a panic" {
         "t\n.connect a\n",
         "t\n.global v(a)\n",
         "t\n.step param nosuch 1 2 1\n",
+        // A list with no values would plan no runs (#66).
+        "t\n.param p=1\n.step param p list\n",
         // A point count past usize, and a trial range past any budget.
         "t\n.tran 1n 10n sweep v1 poi 1e300 1 2\n",
         "t\n.tran 1n 10n sweep monte=list(1:4294967295)\n",
@@ -848,6 +850,42 @@ test ".step sweeps a global parameter; the device keeps its nominal" {
     try std.testing.expectEqual(@as(f64, 1), try numeric((try device(nl, "r1")).positional[0]));
     const list = try parse(a, "s\n.param r=1\nr1 a 0 {r}\n.step r list 5 7\n.end\n");
     try std.testing.expectEqualSlices(f64, &.{ 5, 7 }, list.deck.steps[0].values);
+}
+
+test ".step reaches a .model value that reads the swept name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The model card precedes the .step card that makes isat live (#65).
+    for ([_][]const u8{ "is={isat}", "is=isat" }) |value| {
+        const src = try std.fmt.allocPrint(a, "s\n.param isat=1e-14\nd1 a 0 dm\n.model dm d {s}\n.step param isat list 1e-14 2e-14\n.end\n", .{value});
+        const nl = try parse(a, src);
+        try std.testing.expectEqual(@as(usize, 1), nl.live.slots.len);
+        try std.testing.expectEqual(@as(f64, 1e-14), try parameter(nl.models[0].kv, "is"));
+    }
+}
+
+test "a .param chain resolves at any depth" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ngspice evaluates each .param once in deck order; no depth bound (#110).
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "chain\n.param p0=1\n");
+    for (1..1001) |k| try src.print(a, ".param p{d}={{p{d}+1}}\n", .{ k, k - 1 });
+    try src.appendSlice(a, "v1 a 0 {p1000}\n.end\n");
+    const nl = try parse(a, src.items);
+    try std.testing.expectEqual(@as(f64, 1001), try numeric((try device(nl, "v1")).positional[0]));
+}
+
+test "a controlled-source type word for another letter is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ngspice refuses `E1 o 0 CCCS ...`; it is not a zero-gain VCVS (#75).
+    try std.testing.expectError(error.UnsupportedCard, parse(a, "t\nvs a 0 0\ne1 o 0 cccs vs 2\n.end\n"));
+    try std.testing.expectError(error.UnsupportedCard, netlist.parse(a, "t\ne1 o 0 vcr c 0 2\n.end\n", .hspice));
+    _ = try parse(a, "t\nv1 c 0 1\ne1 o 0 vcvs c 0 2\n.end\n");
 }
 
 test "parseAnalyses reads analysis cards only and resolves their nets" {

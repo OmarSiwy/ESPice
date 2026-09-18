@@ -24,9 +24,10 @@
 // - x^k with a constant integer k in [0, 255] keeps the sign of x (x*x*...*x),
 //   as ngspice's hspice/ltspice compat (ptfuncs.c PTpowerH) and the corpus
 //   oracles do; any other exponent is |x|^y, ngspice's default.
-// - sqrt/log of a negative argument, log(0) and exp overflow follow IEEE
-//   (NaN/inf, caught by the solver's finiteness check) instead of ptfuncs.c's
-//   HUGE and +-1e99 substitutes. Division follows ngspice (PTdivide's 1e-32).
+// - sqrt/log of a negative argument and exp overflow follow IEEE (NaN/inf,
+//   caught by the solver's finiteness check) instead of ptfuncs.c's HUGE
+//   substitute. log(0) is PTlog's -1e99, finite, so Newton recovers from a
+//   0 V start. Division follows ngspice (PTdivide's 1e-32).
 // - min, max and abs keep ngspice's tie rules: a tie goes to a, abs keeps -0.
 //
 // Temperature (asrcload.c): the value is scaled by 1 + tc1*dT + tc2*dT^2,
@@ -121,8 +122,10 @@ module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
                         21: r = sqrt(a);
                         22: if (a < 0.0) r = -a; else r = a;
                         25: r = exp(a);
-                        26: r = ln(a);
-                        27: r = ln(a) * 0.4342944819032518;
+                        // ln(0) is ptfuncs.c PTlog's -1e99, so a Newton
+                        // start at 0 V recovers (#77).
+                        26: r = (a == 0.0) ? -1e99 : ln(a);
+                        27: r = (a == 0.0) ? -1e99 : ln(a) * 0.4342944819032518;
                         28: r = sin(a);
                         29: r = cos(a);
                         30: r = sin(a) / cos(a);

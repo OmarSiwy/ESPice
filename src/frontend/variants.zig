@@ -138,11 +138,13 @@ pub fn plan(p: *Planner) !Plan {
         fanout.global.count = p.count() - fanout.global.first;
     }
     if (deck.alters.len != 0) {
-        // With other variants, each `.alter` run carries its own.
+        // With other variants, each `.alter` run carries its own: it is a
+        // rebuild, adds no row, and the `.step` rows stay the global span
+        // (#66).
         const own = swept or deck.steps.len != 0;
-        fanout.global = .{ .first = p.count(), .nominal = true };
+        if (!own) fanout.global = .{ .first = p.count(), .nominal = true };
         for (deck.alters, 1..) |text, k| try p.addAlter(text, k, own);
-        fanout.global.count = p.count() - fanout.global.first;
+        if (!own) fanout.global.count = p.count() - fanout.global.first;
     }
     if (p.prefix.len != 0 and p.count() == 0) {
         try p.closeRow(p.prefix, 0, null);

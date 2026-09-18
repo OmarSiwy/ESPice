@@ -25,7 +25,7 @@ are split and a handful of meanings.
 | Inline comment | `;` anywhere; `$` or `//` after a blank or comma | `$` after a blank, a comma or a number | `//` |
 | Continuation | `+` on the next line; `\\` at line end joins with no blank | `+` on the next line; ` \` at line end, or `\\` to join with no blank | `+` on the next line, or `\` at line end |
 | Quotes | `'...'` and `"..."` keep comment characters | `'...'` and `"..."` keep `$` | `"..."` strings |
-| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'` or a bare parameter name; braces are not read | bare (`r=2*a`) |
+| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'` or a bare parameter name; `{...}` too, with a note (an ESPice extension) | bare (`r=2*a`) |
 | `M` / `m` suffix | milli, either case | milli, either case | `M` mega, `m` milli |
 | `x` suffix | none | mega | none |
 | Includes, `.alter` | `.include`, `.lib`, `.alter` | `.include`, `.lib`, `.alter` | `include "f" [section=s]`; no `.alter` |
@@ -120,7 +120,9 @@ collides with an ngspice spelling:
   earlier results, `TD=TRIG`, and measures of FFT, LSTB, DCMATCH, ACMATCH,
   PHASENOISE and PTDNOISE plots.
 - **Digital stimuli:** `PAT (vhi vlo td tr tf tsample data)` sources and
-  `.vec` vector files, rewritten to PWL sources and `.dout` checks.
+  `.vec` vector files, rewritten to PWL sources and `.dout` checks. A
+  pattern nests at most 32 `[ ]` levels, counted through the `.pat` names
+  it reads.
 - **Checks and reports:** `.check rise|fall|slew|setup|hold|edge|irdrop`,
   `.dout`, `.biaschk`, `.power`, `.stim`.
 - **Statistics:** `agauss`, `gauss`, `aunif`, `unif`, `limit`; `DEV` and

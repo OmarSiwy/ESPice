@@ -959,6 +959,10 @@ fn Reader(comptime S: type) type {
         /// `Frame.models_mark` splits it by instance.
         instance_models: std.ArrayList(struct { name: []const u8, row: u32 }) = .empty,
         globals: Scope = .empty,
+        /// Set once the HSPICE brace note is logged (`noteBrace`).
+        brace_noted: bool = false,
+        /// The global `.param` names in deck order, for `foldGlobals`.
+        global_keys: std.ArrayList([]const u8) = .empty,
         global_scopes: [1]*const Scope = undefined,
         analyses: std.ArrayList(Analysis) = .empty,
         config: std.ArrayList(Config) = .empty,
@@ -1124,9 +1128,14 @@ fn Reader(comptime S: type) type {
                     return error.UnknownParameter;
                 };
             }
+            for (r.blocks.items) |b| try r.readBlock(b);
+            for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
+            try r.foldGlobals();
             // Global models in line order, then each subcircuit's own, kept
             // together: `models_lo..models_hi` is one range per subcircuit,
-            // nested definitions included.
+            // nested definitions included. They follow the directives, so a
+            // `.step` or `.dc` swept name is live when a model value reads it
+            // (#65).
             for (model_lines.items) |ml| if (ml.owner == top_level) try r.readModel(r.lines.items[ml.line], &top, true);
             for (r.subckts.items, 0..) |*sub, id| for (model_lines.items) |ml| {
                 if (ml.owner != id) continue;
@@ -1139,8 +1148,6 @@ fn Reader(comptime S: type) type {
                 sub.models_hi = @intCast(r.local_models.items.len);
                 try r.local_names.put(arena, name, {});
             };
-            for (r.blocks.items) |b| try r.readBlock(b);
-            for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
             try r.binOptions();
 
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
@@ -1371,8 +1378,10 @@ fn Reader(comptime S: type) type {
                         const text = try r.paramText(&f);
                         if (depth > 0)
                             try opens[depth - 1].defaults.append(arena, .{ .key = key, .text = text })
-                        else
+                        else {
                             try r.globals.put(arena, key, .{ .text = text });
+                            try r.global_keys.append(arena, key);
+                        }
                     },
                     .model => try models.append(arena, if (depth > 0)
                         .{ .line = i, .cond = opens[depth - 1].ifs > 0, .owner = opens[depth - 1].id }
@@ -1892,6 +1901,37 @@ fn Reader(comptime S: type) type {
             return @intCast(r.live_names.count() - 1);
         }
 
+        /// Folds each global `.param` to its number in deck order, once every
+        /// live name is known, so each link of a chain reads its
+        /// predecessor's number and `subst` recurses one level per read, not
+        /// one per link (#110). A value that reads a live name, draws a
+        /// distribution or does not fold keeps its text, and an error stays
+        /// for the card that reads it.
+        fn foldGlobals(r: *R) Error!void {
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            const was_in_card = r.in_card;
+            r.in_card = true;
+            defer r.in_card = was_in_card;
+            for (r.global_keys.items) |key| {
+                const entry = r.globals.getPtr(key).?;
+                if (entry.* != .text) continue;
+                const ops_mark = r.ops.items.len;
+                const consts_mark = r.consts.items.len;
+                const sites_mark = r.site_ops.items.len;
+                const v: ?Value = r.exprValue(entry.text, &top, false) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => null, // else: the reading card reports it
+                };
+                r.ops.shrinkRetainingCapacity(ops_mark);
+                r.consts.shrinkRetainingCapacity(consts_mark);
+                r.site_ops.shrinkRetainingCapacity(sites_mark);
+                r.site_keys.shrinkRetainingCapacity(sites_mark);
+                if (v) |x| if (x == .num) {
+                    entry.* = .{ .num = x.num };
+                };
+            }
+        }
+
         /// A swept name: a global `.param`, `temp`, or a card.
         fn stepTarget(r: *R, name: []const u8) Error!StepTarget {
             if (std.mem.eql(u8, name, "temp")) return .temp;
@@ -1918,7 +1958,11 @@ fn Reader(comptime S: type) type {
             else
                 try r.stepTarget(args[i].name);
             i += 1;
-            if (i < args.len and args[i] == .name and std.mem.eql(u8, args[i].name, "list")) return .{ .target = target, .values = try r.numbers(args[i + 1 ..]) };
+            if (i < args.len and args[i] == .name and std.mem.eql(u8, args[i].name, "list")) {
+                // An empty list would plan no runs at all (#66).
+                if (i + 1 == args.len) return error.ParseError;
+                return .{ .target = target, .values = try r.numbers(args[i + 1 ..]) };
+            }
             if (grid == .poi) return error.ParseError;
             const n = try r.numbers(args[i..]);
             if (n.len != 3) return error.ParseError;
@@ -2394,6 +2438,7 @@ fn Reader(comptime S: type) type {
         /// `readValue` whose first field `t` is already read.
         fn valueAt(r: *R, t: []const u8, f: *F, frame: *const Frame, subst_names: bool, geometry: bool) Error!Value {
             if (!F.isWord(t)) {
+                if (t[0] == '{') r.noteBrace();
                 if (t[0] == '{' or F.isQuote(t[0])) return r.exprValue(F.body(t), frame, geometry);
                 return error.ParseError;
             }
@@ -2447,6 +2492,14 @@ fn Reader(comptime S: type) type {
             if (ops.len == 1 and ops[0].code == .num) return .{ .num = r.scratch.consts.items[ops[0].a] };
             if (ops.len == 1 and ops[0].code == .ident) return r.nameValue(r.scratch.names.items[ops[0].a], frame, geometry);
             return r.fold(mark.ops, frame, geometry);
+        }
+
+        /// HSPICE's manual reads braces as name bytes; the dialect reads
+        /// `{expr}` as ngspice does and says so once per deck (#153).
+        fn noteBrace(r: *R) void {
+            if (r.dialect != .hspice or r.brace_noted) return;
+            r.brace_noted = true;
+            if (!@import("builtin").is_test) std.log.info("netlist: `{{...}}` expressions are an ESPice extension, not HSPICE syntax; HSPICE quotes them ('...')", .{});
         }
 
         /// A bare name: substituted when a scope defines it.
@@ -3057,12 +3110,18 @@ fn Reader(comptime S: type) type {
                     // `E1 a b VCVS c d 2`: the type word only repeats the letter.
                     // A run of them goes in one copy, so the re-read never recurses.
                     if (form == .kind) {
+                        // A word for another letter (`E1 o 0 CCCS ...`) is
+                        // refused, as ngspice does, not read as this one (#75).
+                        const kinds = std.StaticStringMap(u8).initComptime(.{ .{ "vcvs", 'e' }, .{ "vccs", 'g' }, .{ "ccvs", 'h' }, .{ "cccs", 'f' } });
+                        if (kinds.get(std.ascii.lowerString(&buf, t)) != letter) return r.unsupported(line, "a controlled-source type word for another letter");
                         while (probe.peek()) |u| {
                             if (u.len > buf.len or (behavioural.get(std.ascii.lowerString(&buf, u)) orelse .refused) != .kind) break;
                             _ = probe.next();
                         }
                         return r.readDevice(try std.mem.concat(r.arena, u8, &.{ line[0..at], " ", probe.line[probe.pos..] }), frame);
                     }
+                    // HSPICE: VCR and VCCAP are G-element forms only (#75).
+                    if ((form == .vcr or form == .vccap) and letter != 'g') return r.unsupported(line, "VCR or VCCAP on a card other than G");
                     return r.behaviouralCard(line, head, letter, f, frame, form);
                 };
             }

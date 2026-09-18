@@ -75,6 +75,15 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `ESPICE_SOLVER=jfnk` keeps the direct Newton contract: a residual past 1e154 still takes its step, the device load test gates acceptance, and gmin goes only where the gmin-stepping rung stamps it (#31).
 - GMRES (the PSS and QPSS Krylov solves) never reports convergence on an infinite right-hand side, and solves right-hand sides near 1e300 or 1e-200 instead of returning zero (#40).
 - Debug builds evaluate B-source `abs`, `min`, `max` and `?:`, and model conditionals on device values, as release builds do; Zig 0.17's self-hosted backend took the true arm at a zero condition (#25).
+- Device cards: a type word for another letter (`E1 o 0 CCCS ...`) and a model of another element's type (`D` on `NPN`) are refused as in ngspice; P-channel JFET, MESFET and HFET2 models run; a P-channel VDMOS is refused; every `UnsupportedDevice` names the card and maps to unsupported input (#75).
+- HSPICE dialect: `{expr}` is read as an expression, as in ngspice, with a note that braces are an ESPice extension; `R1 a 0 {rv}` failed with `UnresolvedParameter` (#153).
+- A B source's `ln`/`log`/`log10` of 0 is -1e99 as in ngspice, so an argument that starts Newton at 0 V converges instead of failing (#77).
+- V and I cards using `TRNOISE`, `TRRANDOM`, `LFSR`, `HB` or `PWL FILE=` are refused with an error naming the card; they ran silently as their DC value (#72).
+- HSPICE `.pat` names count toward the 32-level `[ ]` nesting limit; a long chain of names no longer overflows the stack (#67).
+- `.step` with `.alter` keeps the base run's step points, and `.step param p list` with no values is a parse error instead of running nothing (#66).
+- A `.param` chain of any depth resolves; past 62 links it was a `ParseError` (#110).
+- A `.step` of a parameter that a `.model` value reads reaches the model; every point ran with the nominal value (#65).
+- `K` coupling and its mutual inductance stay f64 from card to stamp; they were rounded through f32 (#89).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

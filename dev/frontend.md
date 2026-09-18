@@ -191,6 +191,7 @@ Reference, SA = Simulation and Analysis guide]:
 | `.tran s1 t1 s2 t2 ...` | one run to the last stop [CR .TRAN]; the SPICE `tstep tstop tstart tmax` reading only when `s2` and `t2` are both below `t1` and no `START=` | ngspice |
 | untyped `.measure name func ...` | the last `.tran`/`.ac`/`.dc` card | rejected |
 | unknown `.option` names | one warning each | ignored, as ngspice does |
+| `{expr}` | an expression, as in ngspice, with a note: HSPICE's manual reads braces as name bytes and turns them into `[]` (hspice-syntax.md T2), so HSPICE itself refuses `R1 a 0 {rv}`; ESPice is lenient (#153) | an expression |
 | `.save [TYPE=NODESET\|IC] [FILE=] [LEVEL=] [TIME=]` | writes the operating point as `.nodeset` (or `.ic`) cards [CR .SAVE] | output vector selection |
 
 HSPICE `.save` writes after the run, beside the output file (the working

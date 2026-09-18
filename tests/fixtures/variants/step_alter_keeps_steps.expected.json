@@ -1,0 +1,79 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#66: with .step and .alter, the base run keeps its step points.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "i(v1) = -v/rv: base V1 = 1 V, alter V1 = 2 V, rv = 1k and 2k."
+ },
+ "origin": "tests/fixtures/variants/step_alter_keeps_steps.sp",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Operating Point (rv=1000)",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(v1)": {
+      "values": [
+       -0.001
+      ],
+      "unit": "A",
+      "rtol": 1e-09,
+      "atol": 1e-15
+     }
+    }
+   },
+   {
+    "name": "Operating Point (rv=2000)",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(v1)": {
+      "values": [
+       -0.0005
+      ],
+      "unit": "A",
+      "rtol": 1e-09,
+      "atol": 1e-15
+     }
+    }
+   },
+   {
+    "name": "Operating Point (alter=1, rv=1000)",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(v1)": {
+      "values": [
+       -0.002
+      ],
+      "unit": "A",
+      "rtol": 1e-09,
+      "atol": 1e-15
+     }
+    }
+   },
+   {
+    "name": "Operating Point (alter=1, rv=2000)",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "i(v1)": {
+      "values": [
+       -0.001
+      ],
+      "unit": "A",
+      "rtol": 1e-09,
+      "atol": 1e-15
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "3f224e692984788447b3c9e13a124c39fea613dc62f1fafa3533c0fc2e80f035",
+ "tokenizer": "hspice"
+}

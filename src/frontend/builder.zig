@@ -881,7 +881,7 @@ pub const NetBuilder = struct {
         // resistor/capacitor/diode lumps in addUrc, like ngspice's URCsetup.
         if (letter != 'u' and devices.letter_map.get(&.{letter}) == null) {
             if (try inferDeviceFromModel(dev) == null)
-                return error.UnsupportedDevice;
+                return named(dev, error.UnsupportedDevice);
         }
 
         switch (letter) {
@@ -1328,6 +1328,7 @@ pub const NetBuilder = struct {
     /// `resolvePulseDefaults`, so the -1 sentinels survive every legitimate
     /// write before the `.tran` card fills them.
     fn bindSource(self: *const NetBuilder, comptime D: type, dev: Device) !struct { D.Model, D.Instance } {
+        try refuseUnknownWave(dev);
         var model: D.Model = .{};
         var instance: D.Instance = .{};
         const dc = sourceDc(dev);
@@ -1354,10 +1355,10 @@ pub const NetBuilder = struct {
     fn addByLetter(self: *NetBuilder, letter: u8, dev: Device) !void {
         // The netlist moved a Q/M card's model name to positional[0] whatever
         // its terminal count.
-        switch (try resolveDeviceId(letter, dev)) {
+        switch (resolveDeviceId(letter, dev) catch |err| return named(dev, err)) {
             inline else => |comptime_id| {
                 const D = devices.DeviceId.Type(comptime_id);
-                try addSingleDevice(self, D, dev);
+                addSingleDevice(self, D, dev) catch |err| return named(dev, err);
                 // ngspice's VBIC `i(q1)` is its excess-phase branch, made only
                 // when TD > 0 (vbicsetup.c:510-525). Node xf2 carries only a
                 // 1 ohm load, so that current equals v(xf2): alias the column.
@@ -1657,12 +1658,12 @@ pub const NetBuilder = struct {
         const ibr1 = self.l.items(.branch)[li1];
         const ibr2 = self.l.items(.branch)[li2];
         var model: devices.kinduc.Model = .{};
-        if (positionalNumber(dev, 2)) |k| model.k = try castField(f32, k);
+        if (positionalNumber(dev, 2)) |k| model.k = try castField(@TypeOf(model.k), k);
         if (dev.model) |m| try applyKv(&model, m.kv);
         try applyKv(&model, dev.kv);
         // The card gives the coupling k; the device stamps M = k*sqrt(L1*L2)
         // (ngspice INDsetup).
-        model.k = try castField(f32, @as(f64, model.k) *
+        model.k = try castField(@TypeOf(model.k), model.k *
             @sqrt(self.l.items(.value)[li1] * self.l.items(.value)[li2]));
         try self.b.addDevice(devices.kinduc, dev.name, model, .{}, [2]u32{ ibr1, ibr2 });
     }
@@ -1683,7 +1684,37 @@ fn resolveDeviceId(letter: u8, dev: Device) !devices.DeviceId {
     return id;
 }
 
+/// `err`, logged with the card and its model when it is `UnsupportedDevice`,
+/// so the refusal names what to fix (#75).
+fn named(dev: Device, err: anyerror) anyerror {
+    if (err == error.UnsupportedDevice and !@import("builtin").is_test) {
+        const m = dev.model orelse return err;
+        std.log.err("{s}: model '{s}' ({s}) is not a device this card can use", .{ dev.name, m.name, m.kind });
+    }
+    return err;
+}
+
+/// The built-in model kinds of each semiconductor letter. A card whose model
+/// is another letter's kind is refused, as ngspice's "incorrect model type"
+/// (#75); a kind outside these (an HDL module) is not checked.
+const letter_kinds = std.StaticStringMap(u8).initComptime(.{
+    .{ "nmos", 'm' }, .{ "pmos", 'm' },  .{ "vdmos", 'm' },
+    .{ "npn", 'q' },  .{ "pnp", 'q' },   .{ "d", 'd' },
+    .{ "njf", 'j' },  .{ "pjf", 'j' },   .{ "nmf", 'z' },
+    .{ "pmf", 'z' },  .{ "nhfet", 'z' }, .{ "phfet", 'z' },
+});
+
 fn deviceIdOf(letter: u8, dev: Device) !devices.DeviceId {
+    if (dev.model) |m| if (std.mem.indexOfScalar(u8, "mqdjz", letter) != null) {
+        var buf: [8]u8 = undefined;
+        const owner = if (m.kind.len <= buf.len) letter_kinds.get(std.ascii.lowerString(&buf, m.kind)) else null;
+        if (owner != null and owner.? != letter) return error.UnsupportedDevice;
+        // ponytail: vdmos.va has no polarity parameter, so a P-channel
+        // VDMOS is refused rather than run N-channel; add `type` to the .va.
+        if (owner == 'm' and std.ascii.eqlIgnoreCase(m.kind, "vdmos")) for (m.kv) |kv| {
+            if (kv.key.len == 0 and kv.value == .name and std.ascii.eqlIgnoreCase(kv.value.name, "pchan")) return error.UnsupportedDevice;
+        };
+    };
     const level = try modelLevel(dev);
     return switch (letter) {
         // `.model X VDMOS(...)` has no LEVEL; the model kind selects it, as
@@ -1753,8 +1784,17 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
     } else if (comptime @hasField(D.Model, "TYPE")) {
         model.TYPE = -1; // bsimsoi/hisim2/hisimhv: `TYPE` +1=NMOS, -1=PMOS
         markGiven(model, "TYPE");
+    } else if (comptime @hasField(D.Model, "jtype")) {
+        model.jtype = -1; // jfet/jfet2: PJF (#75)
+        markGiven(model, "jtype");
+    } else if (comptime @hasField(D.Model, "ztype")) {
+        model.ztype = -1; // mes: PMF
+        markGiven(model, "ztype");
+    } else if (comptime @hasField(D.Model, "type_nfet")) {
+        model.type_nfet = -1; // hfet2: PHFET
+        markGiven(model, "type_nfet");
     } else {
-        // ponytail: jfet/jfet2/mes/mesa/vdmos have no polarity parameter, so
+        // ponytail: mesa and vdmos have no polarity parameter, so
         // a P-type card on them is refused rather than run N-type (silent
         // NaN). Upgrade path: a `type` parameter in the .va, as mos1 has.
         return error.UnsupportedDevice;
@@ -2331,6 +2371,30 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
 
 /// Source waveform shapes; the tag is the model's `waveform` code (0 is DC only).
 const Wave = enum(u8) { pulse = 1, sin = 2, exp = 3, pwl = 4, sffm = 5, am = 6 };
+
+/// Source waveforms ngspice or HSPICE define that the source models do not
+/// draw. A card naming one is refused rather than run as its DC value
+/// (#72), and so is HSPICE's `PWL FILE=`.
+/// ponytail: refused, not drawn; TRNOISE/TRRANDOM need ngspice's noise
+/// generator per source and breakpoints at each sample.
+fn refuseUnknownWave(dev: Device) error{UnsupportedCard}!void {
+    const unknown = std.StaticStringMap(void).initComptime(.{ .{"trnoise"}, .{"trrandom"}, .{"lfsr"}, .{"hb"} });
+    var buf: [8]u8 = undefined;
+    for (dev.positional) |v| {
+        const name = switch (v) {
+            .group => |g| g.name,
+            .name => |n| n,
+            else => continue, // else: numbers and expressions name no waveform
+        };
+        if (name.len > buf.len or !unknown.has(std.ascii.lowerString(&buf, name))) continue;
+        if (!@import("builtin").is_test) std.log.err("{s}: the {s} source waveform is not supported", .{ dev.name, name });
+        return error.UnsupportedCard;
+    }
+    for (dev.kv) |item| if (std.ascii.eqlIgnoreCase(item.key, "file")) {
+        if (!@import("builtin").is_test) std.log.err("{s}: a PWL FILE= source is not supported", .{dev.name});
+        return error.UnsupportedCard;
+    };
+}
 
 /// The waveform a source keyword names, case-insensitively.
 fn waveKind(name: []const u8) ?Wave {

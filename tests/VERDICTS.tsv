@@ -35,6 +35,7 @@ PASS	fixtures/ac/divider_phase_90.sp
 PASS	fixtures/ac/divider_phase_minus90.sp
 PASS	fixtures/ac/floating_ac_source.sp
 PASS	fixtures/ac/hfet2_zero_vds_gds.sp
+PASS	fixtures/ac/kinduc_k_exact.sp
 PASS	fixtures/ac/lane_tail_15.sp
 PASS	fixtures/ac/lane_tail_16.sp
 PASS	fixtures/ac/lane_tail_17.sp
@@ -304,6 +305,7 @@ PASS	fixtures/hdl/veriloga_wrong_node_count.sp
 PASS	fixtures/hspice/ac_poi.sp
 PASS	fixtures/hspice/behavioural_sources.sp
 PASS	fixtures/hspice/behavioural_time_delay.sp
+PASS	fixtures/hspice/brace_expression.sp
 PASS	fixtures/hspice/checks.sp
 PASS	fixtures/hspice/connect.sp
 PASS	fixtures/hspice/cshunt_delmax.sp
@@ -370,6 +372,7 @@ PASS	fixtures/invalid/ac_fractional_density.sp
 PASS	fixtures/invalid/ac_negative_frequency.sp
 PASS	fixtures/invalid/ac_zero_density.sp
 PASS	fixtures/invalid/bench_topology_floating_node.sp
+PASS	fixtures/invalid/cccs_word_on_e_refused.sp
 PASS	fixtures/invalid/contradictory_voltage_loop.sp
 PASS	fixtures/invalid/contradictory_voltage_sources.sp
 PASS	fixtures/invalid/current_into_capacitor_dc.sp
@@ -384,10 +387,12 @@ PASS	fixtures/invalid/envelope_zero_period.sp
 PASS	fixtures/invalid/four_zero_fundamental.sp
 PASS	fixtures/invalid/hb_fractional_harmonics.sp
 PASS	fixtures/invalid/hb_negative_frequency.sp
+PASS	fixtures/invalid/level57_refused.sp
 PASS	fixtures/invalid/matex_negative_step.sp
 PASS	fixtures/invalid/mc_fractional_trials.sp
 PASS	fixtures/invalid/mc_negative_variation.sp
 PASS	fixtures/invalid/mc_zero_trials.sp
+PASS	fixtures/invalid/model_kind_mismatch_refused.sp
 PASS	fixtures/invalid/noise_missing_output.sp
 PASS	fixtures/invalid/noise_missing_source.sp
 PASS	fixtures/invalid/noise_zero_frequency.sp
@@ -403,6 +408,10 @@ PASS	fixtures/invalid/pss_zero_frequency.sp
 PASS	fixtures/invalid/pxf_zero_lo.sp
 PASS	fixtures/invalid/qpss_zero_second_frequency.sp
 PASS	fixtures/invalid/sens_unknown_node.sp
+PASS	fixtures/invalid/source_lfsr_refused.sp
+PASS	fixtures/invalid/source_pwl_file_refused.sp
+PASS	fixtures/invalid/source_trnoise_refused.sp
+PASS	fixtures/invalid/source_trrandom_refused.sp
 PASS	fixtures/invalid/sp_zero_impedance.sp
 PASS	fixtures/invalid/spectre_tran_unknown_param.sp
 PASS	fixtures/invalid/temp_absolute_zero.sp
@@ -415,6 +424,7 @@ PASS	fixtures/invalid/tran_negative_stop.sp
 PASS	fixtures/invalid/tran_zero_step.sp
 PASS	fixtures/invalid/trannoise_zero_step.sp
 PASS	fixtures/invalid/unresolved_parameter.sp
+PASS	fixtures/invalid/vdmos_pchan_refused.sp
 PASS	fixtures/layout/capacitive_divider_tran.sp
 PASS	fixtures/layout/coupled_ac.sp
 PASS	fixtures/layout/fanout_tran.sp
@@ -494,6 +504,7 @@ PASS	fixtures/op/bench_medium_resistor_mesh.sp
 PASS	fixtures/op/bench_mosfet_nand2.sp
 PASS	fixtures/op/bjt_instance_area.sp
 PASS	fixtures/op/bsource_brace_expr.sp
+PASS	fixtures/op/bsource_ln_zero_start.sp
 PASS	fixtures/op/capacitor_open_dc.sp
 PASS	fixtures/op/cccs_sign.sp
 PASS	fixtures/op/ccvs_gain.sp
@@ -522,6 +533,7 @@ PASS	fixtures/op/divider_default.sp
 PASS	fixtures/op/floating_voltage_source.sp
 PASS	fixtures/op/gigaohm_load.sp
 PASS	fixtures/op/inductor_short_dc.sp
+PASS	fixtures/op/jfet_pjf.sp
 PASS	fixtures/op/kilovolt_supply.sp
 PASS	fixtures/op/ltra_op_series_resistance.sp
 PASS	fixtures/op/mfactor_parallel_copies.sp
@@ -533,6 +545,7 @@ PASS	fixtures/op/nodeset_latch.sp
 PASS	fixtures/op/option_gmin_ngspice.sp
 PASS	fixtures/op/option_rshunt_ngspice.sp
 PASS	fixtures/op/parallel_resistors.sp
+PASS	fixtures/op/param_chain_100.sp
 PASS	fixtures/op/ratio_million_to_one.sp
 PASS	fixtures/op/ratio_one_to_million.sp
 PASS	fixtures/op/series_sources.sp
@@ -847,9 +860,11 @@ PASS	fixtures/variants/monte_dev_lot.sp
 PASS	fixtures/variants/monte_divider.sp
 PASS	fixtures/variants/monte_list.sp
 PASS	fixtures/variants/monte_tran_meas.sp
+PASS	fixtures/variants/step_alter_keeps_steps.sp
 PASS	fixtures/variants/step_param_bsource_all_rebuilt.sp
 PASS	fixtures/variants/step_param_bsource_bare.sp
 PASS	fixtures/variants/step_param_divider.sp
+PASS	fixtures/variants/step_param_model_value.sp
 PASS	fixtures/variants/step_temp_source.sp
 PASS	fixtures/xf/diode_divider.sp
 PASS	fixtures/xf/resistive_bridge.sp

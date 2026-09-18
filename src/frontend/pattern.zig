@@ -21,12 +21,15 @@ const max_depth = 32;
 const Error = error{ OutOfMemory, InvalidPattern };
 
 /// One component: a b-string's bits, or a nested list, repeated `r` more
-/// times from its `rb`-th element (1-based).
+/// times from its `rb`-th element (1-based). `depth` counts the `[ ... ]`
+/// levels inside it, through the `.pat` names it reads, so `expand`
+/// recurses at most `max_depth` deep (#67).
 const Comp = struct {
     bits: []const u8 = "",
     list: []const Comp = &.{},
     r: u32 = 0,
     rb: u32 = 1,
+    depth: u8 = 0,
 
     fn units(c: Comp) usize {
         return if (c.list.len > 0) c.list.len else c.bits.len;
@@ -54,7 +57,11 @@ pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
         if (!std.mem.startsWith(u8, line, ".pat ")) continue;
         const toks = try tokens(arena, line[5..]);
         if (toks.len < 3 or !std.mem.eql(u8, toks[1], "=")) return error.InvalidPattern;
-        try defs.put(arena, toks[0], try group(arena, toks[2..], defs));
+        const def = group(arena, toks[2..], defs) catch |err| {
+            if (err == error.InvalidPattern) std.log.warn("pattern: cannot read '{s}'", .{line});
+            return err;
+        };
+        try defs.put(arena, toks[0], def);
     }
     for (lines) |*line| {
         if (line.len == 0 or (line.*[0] != 'v' and line.*[0] != 'i')) continue;
@@ -129,7 +136,13 @@ fn group(arena: std.mem.Allocator, toks: []const []const u8, defs: std.StringHas
     var i: usize = 0;
     const list = try sequence(arena, toks, &i, defs, 0);
     if (i != toks.len or list.len == 0) return error.InvalidPattern;
-    return if (list.len == 1) list[0] else .{ .list = list };
+    return if (list.len == 1) list[0] else .{ .list = list, .depth = maxDepth(list) };
+}
+
+fn maxDepth(list: []const Comp) u8 {
+    var d: u8 = 0;
+    for (list) |c| d = @max(d, c.depth);
+    return d;
 }
 
 fn sequence(arena: std.mem.Allocator, toks: []const []const u8, i: *usize, defs: std.StringHashMapUnmanaged(Comp), depth: u8) Error![]Comp {
@@ -143,7 +156,7 @@ fn sequence(arena: std.mem.Allocator, toks: []const []const u8, i: *usize, defs:
             const list = try sequence(arena, toks, i, defs, depth + 1);
             if (i.* == toks.len or list.len == 0) return error.InvalidPattern;
             i.* += 1;
-            try out.append(arena, .{ .list = list });
+            try out.append(arena, .{ .list = list, .depth = 1 + maxDepth(list) });
         } else if ((std.mem.eql(u8, t, "r") or std.mem.eql(u8, t, "rb")) and i.* + 1 < toks.len and std.mem.eql(u8, toks[i.*], "=")) {
             const n = std.fmt.parseInt(i32, toks[i.* + 1], 10) catch return error.InvalidPattern;
             i.* += 2;
@@ -159,7 +172,11 @@ fn sequence(arena: std.mem.Allocator, toks: []const []const u8, i: *usize, defs:
             }
         } else if (t[0] == 'b' and t.len > 1 and std.mem.indexOfNone(u8, t[1..], "01m") == null) {
             try out.append(arena, .{ .bits = t[1..] });
-        } else try out.append(arena, defs.get(t) orelse return error.InvalidPattern);
+        } else {
+            const def = defs.get(t) orelse return error.InvalidPattern;
+            if (depth + def.depth > max_depth) return error.InvalidPattern;
+            try out.append(arena, def);
+        }
     }
     return out.items;
 }
@@ -266,4 +283,22 @@ test "pattern corner cases" {
     }
     var bad_def = [_][]const u8{".pat a b1"};
     try std.testing.expectError(error.InvalidPattern, rewrite(a, &bad_def));
+}
+
+test "a .pat name nests as deep as its definition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // p0 = [b1] and pK = [p(K-1)]: pK is K+1 levels deep.
+    var lines: [34][]const u8 = undefined;
+    lines[0] = ".pat p0=[b1]";
+    for (1..33) |k| lines[k] = try std.fmt.allocPrint(a, ".pat p{d}=[p{d}]", .{ k, k - 1 });
+    // p31 is 32 deep, the limit.
+    lines[32] = "v1 1 0 pat (5 0 0 1n 1n 1n p31)";
+    try rewrite(a, lines[0..33]);
+    try std.testing.expectEqualStrings("v1 1 0 pwl(0 '5')", lines[32]);
+    // p32 is 33 deep.
+    lines[32] = ".pat p32=[p31]";
+    lines[33] = "v1 1 0 pat (5 0 0 1n 1n 1n p32)";
+    try std.testing.expectError(error.InvalidPattern, rewrite(a, &lines));
 }
