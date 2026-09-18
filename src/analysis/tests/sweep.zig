@@ -118,6 +118,13 @@ const SensTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 32.0), adjointFd(&lambda, &pert, &nom, 0.5), 1e-15);
     }
 
+    test "fdStep: relative to the parameter, absolute only at 0 (#85)" {
+        // IS = 1e-14 steps by 1e-20, not by a 1e-12 floor that is 100 IS.
+        try testing.expectEqual(@as(f64, 1e-6 * 1e-14), impl.fdStep(1e-14));
+        try testing.expectEqual(@as(f64, 1e-6 * 1e3), impl.fdStep(-1e3));
+        try testing.expectEqual(@as(f64, 1e-12), impl.fdStep(0));
+    }
+
     test "copySimd: round-trip" {
         var dst: [5]f64 = undefined;
         const src = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0 };

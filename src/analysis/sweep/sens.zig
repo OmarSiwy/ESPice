@@ -12,6 +12,14 @@ pub const Options = @import("core").query.Sens;
 
 const copySimd = root.copySimd;
 
+/// Forward-difference step for a parameter at `orig`: ngspice's relative
+/// 1e-6 (cktsens.c `Sens_Delta`), absolute 1e-12 only at 0. An absolute
+/// floor added to the relative step would move a diode IS = 1e-14 by 100x
+/// (#85). `.sens`, `.dcmatch` and `.acmatch` share it.
+pub fn fdStep(orig: f64) f64 {
+    return if (orig == 0) 1e-12 else 1e-6 * @abs(orig);
+}
+
 /// Returns λ^T · (pert - nom) · inv_delta, the adjoint dot of a forward
 /// difference, over `lambda.len` rows. Deterministic for a given target: the
 /// summation order is fixed by the lane width, so `.sens` and `.dcmatch`
@@ -79,7 +87,7 @@ pub fn solve(
     for (params, sens, 0..) |p, *out, index| {
         if (index != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = index, .total = params.len });
         const orig: f64 = p.get();
-        const delta_req = 1e-6 * @abs(orig) + 1e-12;
+        const delta_req = fdStep(orig);
 
         // Only this parameter moves and temperature does not, so re-deriving
         // its own device type is the whole recompute (Circuit.recomputeType).
@@ -90,7 +98,7 @@ pub fn solve(
         }
         // A parameter whose nominal value collapses an internal node
         // (gummel_poon RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the
-        // +1e-12 floor in `delta_req`: `collapse` stops folding c' onto c, the
+        // absolute step at 0 (`fdStep`): `collapse` stops folding c' onto c, the
         // builder never allocated a distinct c', and the batch reports
         // TopologyChanged. The perturbed circuit has a node the frozen pattern
         // lacks, so the derivative is not representable; report 0 rather than

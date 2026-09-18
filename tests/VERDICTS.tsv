@@ -324,6 +324,7 @@ PASS	fixtures/hspice/lin_pad.sp
 PASS	fixtures/hspice/lin_rc_noise.sp
 PASS	fixtures/hspice/load_ic.sp
 PASS	fixtures/hspice/match_diode.sp
+PASS	fixtures/hspice/match_diode_is.sp
 PASS	fixtures/hspice/meas_events.sp
 PASS	fixtures/hspice/meas_forms.sp
 PASS	fixtures/hspice/meas_lstb.sp
