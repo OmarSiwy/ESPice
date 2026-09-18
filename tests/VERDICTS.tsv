@@ -656,6 +656,7 @@ PASS	fixtures/regression/ota_buffer_large_step.sp
 PASS	fixtures/regression/ota_buffer_large_step_0p88.sp
 PASS	fixtures/sens/balanced.sp
 PASS	fixtures/sens/bench_sens_bridge.sp
+PASS	fixtures/sens/bjt_infinite_defaults.sp
 PASS	fixtures/sens/diode_ngspice.sp
 PASS	fixtures/sens/divider.sp
 PASS	fixtures/sens/high_impedance.sp

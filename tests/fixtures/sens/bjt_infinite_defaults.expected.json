@@ -1,0 +1,88 @@
+{
+ "schema_version": 1,
+ "analysis": "sens",
+ "purpose": ".sens reports 0 for parameters whose default 0 means infinite.",
+ "oracle": {
+  "kind": "ngspice-45",
+  "derivation": "ngspice 45 -b with `run` and `print all` in a .control block; six significant digits as printed. The four infinite-default columns are exactly 0 there.",
+  "command": "ngspice -b bjt_infinite_defaults.cir"
+ },
+ "netlist_sha256": "f28ebef683ae685f6b7541dc2ebe2a21bcd60550ad56bb676dc95af894a27bef",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Sensitivity Analysis",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "v(q1:vaf)": {
+      "values": [
+       0.0
+      ],
+      "rtol": 0.0001,
+      "atol": 1e-09
+     },
+     "v(q1:var)": {
+      "values": [
+       0.0
+      ],
+      "rtol": 0.0001,
+      "atol": 1e-09
+     },
+     "v(q1:ikf)": {
+      "values": [
+       0.0
+      ],
+      "rtol": 0.0001,
+      "atol": 1e-09
+     },
+     "v(q1:ikr)": {
+      "values": [
+       0.0
+      ],
+      "rtol": 0.0001,
+      "atol": 1e-09
+     },
+     "v(q1:is)": {
+      "values": [
+       -567035000000000.0
+      ],
+      "rtol": 0.0001,
+      "atol": 0
+     },
+     "v(q1:isc)": {
+      "values": [
+       -999.998
+      ],
+      "rtol": 0.0001,
+      "atol": 0
+     },
+     "v(rc)": {
+      "values": [
+       -5.67034e-05
+      ],
+      "rtol": 0.0001,
+      "atol": 0
+     },
+     "v(vcc)": {
+      "values": [
+       1.0
+      ],
+      "rtol": 0.0001,
+      "atol": 0
+     },
+     "v(vb)": {
+      "values": [
+       -2.19229
+      ],
+      "rtol": 0.0001,
+      "atol": 0
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

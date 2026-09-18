@@ -87,41 +87,59 @@ pub fn solve(
     for (params, sens, 0..) |p, *out, index| {
         if (index != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = index, .total = params.len });
         const orig: f64 = p.get();
-        const delta_req = fdStep(orig);
-
-        // Only this parameter moves and temperature does not, so re-deriving
-        // its own device type is the whole recompute (Circuit.recomputeType).
-        p.set(orig + delta_req);
-        defer {
-            p.set(orig);
-            ckt.recomputeType(p.type) catch unreachable; // restores the checked original parameter
+        out.* = try fdAdjoint(ckt, x_op, lambda[0..n], rhs_nom, p, orig + fdStep(orig));
+        // 0 is the "infinite" default of a 1/p parameter (gummel_poon VAF,
+        // IKF: `inv_vaf = 0` unless vaf > 0), where dV/dp tends to 0, while
+        // the step lands on a finite p and swaps the term in whole: the
+        // quotient is roundoff-dominated and flips sign with line order
+        // (#91). A smooth parameter's quotient barely moves when the step
+        // doubles; this one's halves or worse, so it reports 0 as ngspice.
+        if (orig == 0 and out.* != 0) {
+            const twice = try fdAdjoint(ckt, x_op, lambda[0..n], rhs_nom, p, 2 * fdStep(0));
+            if (@abs(twice - out.*) > 0.25 * @abs(out.*)) out.* = 0;
         }
-        // A parameter whose nominal value collapses an internal node
-        // (gummel_poon RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the
-        // absolute step at 0 (`fdStep`): `collapse` stops folding c' onto c, the
-        // builder never allocated a distinct c', and the batch reports
-        // TopologyChanged. The perturbed circuit has a node the frozen pattern
-        // lacks, so the derivative is not representable; report 0 rather than
-        // fail the analysis. ngspice never perturbs a topology parameter
-        // (cktsens.c uses per-device analytic sensitivities, not a generic FD).
-        ckt.recomputeType(p.type) catch |e| switch (e) {
-            error.TopologyChanged => {
-                out.* = 0;
-                continue;
-            },
-        };
-
-        // Difference against the step actually stored: an f32 parameter
-        // rounds it, and the requested delta would give a wrong derivative,
-        // not a small one.
-        const delta = p.get() - orig;
-        if (delta == 0) return error.ZeroDelta;
-
-        ckt.evalNewton(x_op, 0);
-        out.* = -adjointFd(lambda[0..n], ckt.rhs[0..n], rhs_nom, 1.0 / delta);
     }
 
     return sens;
+}
+
+/// -λ^T dF/dp by a forward difference that moves `p` to `to` and back.
+/// Returns 0 when the move would change the topology, error.ZeroDelta when
+/// it rounds away.
+fn fdAdjoint(
+    ckt: *root.Circuit,
+    x_op: []const f64,
+    lambda: []const f64,
+    rhs_nom: []const f64,
+    p: root.ParamRef,
+    to: f64,
+) !f64 {
+    const orig = p.get();
+    // Only this parameter moves and temperature does not, so re-deriving
+    // its own device type is the whole recompute (Circuit.recomputeType).
+    p.set(to);
+    defer {
+        p.set(orig);
+        ckt.recomputeType(p.type) catch unreachable; // restores the checked original parameter
+    }
+    // A parameter whose nominal value collapses an internal node
+    // (gummel_poon RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the
+    // absolute step at 0 (`fdStep`): `collapse` stops folding c' onto c, the
+    // builder never allocated a distinct c', and the batch reports
+    // TopologyChanged. The perturbed circuit has a node the frozen pattern
+    // lacks, so the derivative is not representable; report 0 rather than
+    // fail the analysis. ngspice never perturbs a topology parameter
+    // (cktsens.c uses per-device analytic sensitivities, not a generic FD).
+    ckt.recomputeType(p.type) catch |e| switch (e) {
+        error.TopologyChanged => return 0,
+    };
+    // Difference against the step actually stored: an f32 parameter
+    // rounds it, and the requested delta would give a wrong derivative,
+    // not a small one.
+    const delta = p.get() - orig;
+    if (delta == 0) return error.ZeroDelta;
+    ckt.evalNewton(x_op, 0);
+    return -adjointFd(lambda, ckt.rhs[0..lambda.len], rhs_nom, 1.0 / delta);
 }
 
 /// ngspice's IF_PRINCIPAL parameter (IOPP/IOPAP in res.c, cap.c, ind.c,
