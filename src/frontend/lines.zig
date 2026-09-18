@@ -404,7 +404,9 @@ pub const hspice = struct {
     /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
     /// Field splitter over one logical line.
-    pub const Split = Fields("'\"", false);
+    /// Braces delimit an expression as in ngspice, an ESPice extension:
+    /// HSPICE's manual reads them as name bytes (#153).
+    pub const Split = Fields("'\"", true);
 
     /// Logical-line iterator; a joined line is allocated in `arena`.
     pub const Lines = struct {
@@ -715,9 +717,9 @@ test Fields {
     try std.testing.expect(!f.takeEq());
     try std.testing.expectEqual('v', f.nextByte());
     try std.testing.expect(F.isWord("abc") and !F.isWord("=") and !F.isWord("'x'") and !F.isWord("{x}"));
-    // HSPICE: `"` quotes too, and braces are plain word bytes.
-    var h = hspice.Split.init("{a} \"b c\"");
-    try std.testing.expectEqualStrings("{a}", h.next().?);
+    // HSPICE: `"` quotes too, and braces delimit an expression (#153).
+    var h = hspice.Split.init("{a + b} \"b c\"");
+    try std.testing.expectEqualStrings("{a + b}", h.next().?);
     try std.testing.expectEqualStrings("\"b c\"", h.next().?);
     try std.testing.expect(hspice.Split.isQuote('"') and !ngspice.Split.isQuote('"'));
 }

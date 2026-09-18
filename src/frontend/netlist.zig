@@ -944,6 +944,8 @@ fn Reader(comptime S: type) type {
         /// `Frame.models_mark` splits it by instance.
         instance_models: std.ArrayList(struct { name: []const u8, row: u32 }) = .empty,
         globals: Scope = .empty,
+        /// Set once the HSPICE brace note is logged (`noteBrace`).
+        brace_noted: bool = false,
         /// The global `.param` names in deck order, for `foldGlobals`.
         global_keys: std.ArrayList([]const u8) = .empty,
         global_scopes: [1]*const Scope = undefined,
@@ -2361,6 +2363,7 @@ fn Reader(comptime S: type) type {
         /// `readValue` whose first field `t` is already read.
         fn valueAt(r: *R, t: []const u8, f: *F, frame: *const Frame, subst_names: bool, geometry: bool) Error!Value {
             if (!F.isWord(t)) {
+                if (t[0] == '{') r.noteBrace();
                 if (t[0] == '{' or F.isQuote(t[0])) return r.exprValue(F.body(t), frame, geometry);
                 return error.ParseError;
             }
@@ -2414,6 +2417,14 @@ fn Reader(comptime S: type) type {
             if (ops.len == 1 and ops[0].code == .num) return .{ .num = r.scratch.consts.items[ops[0].a] };
             if (ops.len == 1 and ops[0].code == .ident) return r.nameValue(r.scratch.names.items[ops[0].a], frame, geometry);
             return r.fold(mark.ops, frame, geometry);
+        }
+
+        /// HSPICE's manual reads braces as name bytes; the dialect reads
+        /// `{expr}` as ngspice does and says so once per deck (#153).
+        fn noteBrace(r: *R) void {
+            if (r.dialect != .hspice or r.brace_noted) return;
+            r.brace_noted = true;
+            if (!@import("builtin").is_test) std.log.info("netlist: `{{...}}` expressions are an ESPice extension, not HSPICE syntax; HSPICE quotes them ('...')", .{});
         }
 
         /// A bare name: substituted when a scope defines it.

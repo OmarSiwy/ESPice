@@ -305,6 +305,7 @@ PASS	fixtures/hdl/veriloga_wrong_node_count.sp
 PASS	fixtures/hspice/ac_poi.sp
 PASS	fixtures/hspice/behavioural_sources.sp
 PASS	fixtures/hspice/behavioural_time_delay.sp
+PASS	fixtures/hspice/brace_expression.sp
 PASS	fixtures/hspice/checks.sp
 PASS	fixtures/hspice/connect.sp
 PASS	fixtures/hspice/cshunt_delmax.sp
