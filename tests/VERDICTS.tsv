@@ -312,6 +312,7 @@ PASS	fixtures/hspice/dc_poi_grid.sp
 PASS	fixtures/hspice/dc_start_stop.sp
 PASS	fixtures/hspice/dcvolt_uic.sp
 PASS	fixtures/hspice/fft_hann.sp
+PASS	fixtures/hspice/fft_kaiser.sp
 PASS	fixtures/hspice/fft_meas.sp
 PASS	fixtures/hspice/fft_rect.sp
 PASS	fixtures/hspice/gshunt.sp

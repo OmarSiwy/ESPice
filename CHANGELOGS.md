@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.fft` WINDOW=KAISER and GAUSS use the symmetric NP-1 indexing of the cosine windows; Kaiser side lobes now match Harris 1978 (-69 dB at ALFA=3) (#82).
 - `.sens` lists a V or I source's `dc` alone, no waveform or table entries (`v(v1:pwl_timesZ5b0Z5d)`), and prints parameter names in lower case (#154).
 - `.sens` reports 0 for a parameter at its "infinite" default of 0 (BJT VAF, VAR, IKF, IKR), as ngspice does, instead of a huge value whose sign followed line order (#91).
 - `.acmatch`, `.dcmatch` and `.sens` step a parameter by 1e-6 of its value (1e-12 only at 0), so a diode IS column no longer flips sign from a 100x step (#85).

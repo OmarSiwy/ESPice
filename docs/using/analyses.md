@@ -347,8 +347,10 @@ sine starting at the window, as ngspice's: `sin(0 1 1k)` reads 0 degrees.
 
 HSPICE FFT of a `.tran` output, resampled on NP points (rounded up to a
 power of two) and windowed (`rect`, `bart`, `hann`, `hamm`, `black`,
-`harris`, `gauss`, `kaiser`). Plot `FFT Analysis v(out)`: `frequency` and
-one complex column. `.meas fft` reads THD, SNR, SNDR, ENOB and SFDR from it.
+`harris`, `gauss`, `kaiser`; ALFA, default 3, shapes the last two, and
+`kaiser` is the symmetric Kaiser-Bessel window of Harris 1978). Plot
+`FFT Analysis v(out)`: `frequency` and one complex column. `.meas fft`
+reads THD, SNR, SNDR, ENOB and SFDR from it.
 
 ```text
 .fft v(out) NP=1024 WINDOW=hann
