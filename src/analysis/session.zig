@@ -628,7 +628,9 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .lstb => |o| if (o.margins) 5 else 8,
         .dcxf => |o| (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,
         .acxf => |o| 1 + (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,
-        .noise => |o| if (o.integrated) 1 else 2,
+        .noise => |o| try @import("ac/noise.zig").columnCount(allocator, topology.batches, topology.batch_types, o),
+        // Time, then peak and rms per probe.
+        .envelope => 1 + 2 * deck.probes.len,
         .four => 4,
         .disto => |o| if (o.plot == .summary) 4 else deck.probes.len + 1,
         .pz, .stb, .pnoise, .hbnoise, .phasenoise, .fft => 2,

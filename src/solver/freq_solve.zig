@@ -371,9 +371,14 @@ pub const FreqSolver = struct {
             // chunk, or one after a failed factor, pays a scalar factor.
             // A lane whose pivots decay fails the scalar growth monitor,
             // and its serial full factor repivots for the next chunk.
-            if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2], dyn, base + cnt / 2) catch {
-                try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
-                continue;
+            // A singular centre point falls back to the serial path; an
+            // allocation failure is the caller's, not a numerical one (#83).
+            if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2], dyn, base + cnt / 2) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => { // else: a numerical factor failure takes the serial path
+                    try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
+                    continue;
+                },
             };
             // LaneLu replays SparseLu only, not the tridiagonal engine.
             const lu = sp.slv.sparse() orelse {
