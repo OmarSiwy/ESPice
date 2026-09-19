@@ -474,8 +474,12 @@ test "topology: V/L shorts must agree on KVL, current sources need a DC path" {
     // An inductor is a 0 V short.
     try std.testing.expectError(error.VoltageSourceLoop, buildDeck("* l loop\nV1 a 0 1\nL1 a 0 1u\n.end\n", .ngspice));
     try std.testing.expectError(error.CurrentSourceCutset, buildDeck("* cutset\nI1 0 out 1m\nC1 out 0 1u\n.end\n", .ngspice));
-    // A node only capacitors reach needs the transient operating point.
+    // A node only capacitors reach needs the transient operating point,
+    // also behind a series short that touches no ground (#90).
     try std.testing.expect(try buildDeck("* cap node\nV1 a 0 1\nC1 a b 1p\nC2 b 0 1p\n.end\n", .ngspice));
+    try std.testing.expect(try buildDeck("* ammeter\nV1 a 0 1\nC1 a m 1p\nVam m b 0\nC2 b 0 1p\n.end\n", .ngspice));
+    try std.testing.expect(try buildDeck("* series r\nV1 a 0 1\nC1 a m 1p\nR1 m b 1m\nC2 b 0 1p\n.end\n", .ngspice));
+    try std.testing.expect(!try buildDeck("* divider\nV1 a 0 1\nR1 a b 1k\nR2 b 0 1k\n.end\n", .ngspice));
 }
 
 test "cards the builder refuses instead of misbinding" {

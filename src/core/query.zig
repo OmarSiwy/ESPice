@@ -588,6 +588,10 @@ pub const Tran = struct {
     /// HSPICE `.op <time>`: publish only the state at `t_stop`, as an
     /// operating-point plot named for that time.
     snapshot: bool = false,
+    /// Every device sees t = 0 while the steps advance, so sources hold
+    /// their DC values: the operating point's OPtran rung, as ngspice's
+    /// optran.c keeps CKTtime at 0 on its own clock.
+    sources_at_zero: bool = false,
 };
 
 /// Transient noise: a transient with sampled noise sources, or the noise

@@ -794,6 +794,7 @@ PASS	fixtures/tran/ic_large.sp
 PASS	fixtures/tran/ic_negative.sp
 PASS	fixtures/tran/ic_no_uic_op.sp
 PASS	fixtures/tran/ic_small.sp
+PASS	fixtures/tran/island_series_short.sp
 PASS	fixtures/tran/jitter_sffm.sp
 PASS	fixtures/tran/lc_energy_gear.sp
 PASS	fixtures/tran/lc_energy_trap.sp

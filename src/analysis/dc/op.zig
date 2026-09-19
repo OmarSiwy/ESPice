@@ -286,8 +286,9 @@ pub fn solveLadder(
     return result;
 }
 
-/// Rung 5, ngspice OPtran (optran.c): a real transient with full sources,
-/// dt 10 ns to 1 µs, no ramp and no extra regularization, so the device
+/// Rung 5, ngspice OPtran (optran.c): a real transient with full sources
+/// held at their t = 0 values (optran.c runs its own clock and leaves
+/// CKTtime at 0), dt 10 ns to 1 µs, no ramp and no extra regularization, so the device
 /// capacitances do the conditioning the static rungs could not. The settled
 /// state only seeds a clean Newton, whose result is the answer; reporting the
 /// settled state itself would be a false success
@@ -316,6 +317,7 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
         .dt_init = 1e-8,
         .dt_max = 1e-8,
         .uic = true,
+        .sources_at_zero = true,
     }, opa) catch |err| switch (err) {
         error.QueryCancelled, error.OutOfMemory => return err,
         else => null, // else: a numerical failure fails this rung
