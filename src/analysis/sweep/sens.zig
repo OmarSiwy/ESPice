@@ -150,6 +150,16 @@ const principal = std.StaticStringMap([]const u8).initComptime(.{
     .{ "vsource", "dc" }, .{ "isource", "dc" },
 });
 
+/// Whether `.sens` lists parameter `name` of a `type_name` device. ngspice
+/// lists device and model parameters but no source waveform (vsrc.c's
+/// sensitivity table is `dc` and the port parameters) and no table entry,
+/// which VerA flattens into one field per slot (`pwl_timesZ5b0Z5d`, #154).
+pub fn isSensParam(type_name: []const u8, name: []const u8) bool {
+    if (std.mem.indexOf(u8, name, "Z5b") != null) return false;
+    const src = std.mem.eql(u8, type_name, "vsource") or std.mem.eql(u8, type_name, "isource");
+    return !src or std.mem.eql(u8, name, "dc");
+}
+
 /// Contract entry: one real point, one column per collected device parameter
 /// holding dVout/dp. Columns carry ngspice's names (cktsens.c:224-238):
 ///   model parameter                  -> `<card>:<param>`   (r1:tc1)
@@ -158,7 +168,11 @@ const principal = std.StaticStringMap([]const u8).initComptime(.{
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
-    const refs = try ctx.circuit.collectParams();
+    const all = try ctx.circuit.collectParams();
+    var kept: std.ArrayList(root.ParamRef) = .empty;
+    defer kept.deinit(scratch);
+    for (all) |ref| if (isSensParam(ctx.circuit.typeName(ref.type), ref.param_name)) try kept.append(scratch, ref);
+    const refs = kept.items;
     const sens = try solve(ctx.circuit, ctx.x_op, refs, opts.output_node, opts.output_neg, scratch);
     defer scratch.free(sens);
 
@@ -181,10 +195,14 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             std.mem.eql(u8, ref.param_name, pp)
         else
             false;
-        name.* = if (is_principal)
-            try std.fmt.allocPrint(a, "v({s})", .{dev})
-        else
-            try std.fmt.allocPrint(a, "v({s}{s}{s})", .{ dev, if (ref.is_instance) "_" else ":", pname });
+        if (is_principal) {
+            name.* = try std.fmt.allocPrint(a, "v({s})", .{dev});
+        } else {
+            // ngspice prints keywords in lower case; gummel_poon spells
+            // `VAR` upper case because `var` is a Zig keyword.
+            const s = try std.fmt.allocPrint(a, "v({s}{s}{s})", .{ dev, if (ref.is_instance) "_" else ":", pname });
+            name.* = std.ascii.lowerString(s, s);
+        }
         done += 1;
     }
     const data = try a.dupe(f64, sens);

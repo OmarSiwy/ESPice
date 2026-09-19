@@ -638,7 +638,19 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .hbxf => |o| 1 + try hbSidebands(allocator, o) * topology.n,
         .hblin => |o| 1 + o.ports.len * o.ports.len + @intFromBool(o.noise and o.ports.len >= 2),
         .sp => |o| @import("ac/sp.zig").columns(@import("ac/sp.zig").modeCount(o.ports), o.lin),
-        .sens, .dcmatch, .dcsens, .acmatch => blk: {
+        // The parameters `.sens` lists, which isSensParam narrows (#154).
+        .sens => blk: {
+            var refs: std.ArrayList(ParamRef) = .empty;
+            defer refs.deinit(allocator);
+            var n: usize = 0;
+            for (topology.batches) |b| {
+                refs.clearRetainingCapacity();
+                try b.hooks.collect_params(b.ctx, allocator, &refs).unwrap();
+                for (refs.items) |r| n += @intFromBool(@import("sweep/sens.zig").isSensParam(b.type_name, r.param_name));
+            }
+            break :blk n;
+        },
+        .dcmatch, .dcsens, .acmatch => blk: {
             const groups = switch (query) {
                 inline .dcmatch, .dcsens, .acmatch => |o| o.variations.starts.len -| 1,
                 else => 0,

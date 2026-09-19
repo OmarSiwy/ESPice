@@ -85,7 +85,8 @@ voltage or current, plus the input and output resistances. Plot
 
 DC sensitivity of the output to every device parameter, from one adjoint
 solve. Plot `Sensitivity Analysis`, one column per instance parameter,
-named like ngspice's (`v(r1)`, `v(vcc)`, `v(vin:acmag)`, ...). A parameter
+named like ngspice's (`v(r1)`, `v(vcc)`, `v(d1:is)`, ...). A V or I source
+contributes its DC value only, not its waveform parameters. A parameter
 whose default 0 means infinite (a BJT's `vaf`, `ikf`) reads 0, as in
 ngspice.
 

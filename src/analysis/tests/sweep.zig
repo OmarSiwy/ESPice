@@ -125,6 +125,18 @@ const SensTests = struct {
         try testing.expectEqual(@as(f64, 1e-12), impl.fdStep(0));
     }
 
+    test "isSensParam: a source's dc, no waveform or table entry (#154)" {
+        try testing.expect(impl.isSensParam("vsource", "dc"));
+        try testing.expect(impl.isSensParam("isource", "dc"));
+        try testing.expect(!impl.isSensParam("vsource", "acmag"));
+        try testing.expect(!impl.isSensParam("vsource", "pulse_v1"));
+        try testing.expect(!impl.isSensParam("vsource", "mfactor"));
+        try testing.expect(!impl.isSensParam("vsource", "pwl_timesZ5b0Z5d"));
+        try testing.expect(!impl.isSensParam("bsource", "coefZ5b3Z5d"));
+        try testing.expect(impl.isSensParam("gummel_poon", "VAR"));
+        try testing.expect(impl.isSensParam("resistor", "mfactor"));
+    }
+
     test "copySimd: round-trip" {
         var dst: [5]f64 = undefined;
         const src = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0 };
