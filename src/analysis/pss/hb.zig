@@ -283,7 +283,7 @@ pub fn solve(
         }
 
         const max_residual = normInf(f_hat);
-        if (std.posix.getenv("ESPICE_HB_TRACE") != null) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, normInf(x_hat) });
+        if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, normInf(x_hat) });
         if (max_residual < options.hb_tol) {
             extractSpectra(x_hat, probes, spectra, nf);
             return .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual };

@@ -35,7 +35,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
     for (directives, 0..) |directive, index| {
         const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "dispatch\n{s}\n.end\n", .{directive}));
         const id: requests.Kind = @enumFromInt(index);
-        const job = (try buildJob(nl.directives[0], 1, sources, &.{})).?;
+        const job = (try buildJob(nl.directives[0], 1, NO_NODE, @splat(NO_NODE), sources, &.{})).?;
         try std.testing.expectEqual(id, std.meta.activeTag(job));
         if (job == .pss) try std.testing.expectEqual(@as(f64, 1e-3), job.pss.period);
     }
@@ -48,10 +48,10 @@ test "analysis directives dispatch every implemented capability and reject malfo
     };
     for (malformed) |directive| {
         const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "invalid\n{s}\n.end\n", .{directive}));
-        if (buildJob(nl.directives[0], 1, sources, &.{})) |_| return error.AcceptedInvalidAnalysis else |_| {}
+        if (buildJob(nl.directives[0], 1, NO_NODE, @splat(NO_NODE), sources, &.{})) |_| return error.AcceptedInvalidAnalysis else |_| {}
     }
     const unknown: types.Directive = .{ .kind = "options", .args = &.{} };
-    try std.testing.expectEqual(null, try buildJob(unknown, NO_NODE, sources, &.{}));
+    try std.testing.expectEqual(null, try buildJob(unknown, NO_NODE, NO_NODE, @splat(NO_NODE), sources, &.{}));
 }
 
 test "deck temperature and tolerances reach statistical and noise jobs" {
