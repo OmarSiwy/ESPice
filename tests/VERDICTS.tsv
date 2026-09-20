@@ -830,6 +830,7 @@ PASS	fixtures/tran/trap_xmu_damping.sp
 PASS	fixtures/tran/txl_tran_long_run_past_2048.sp
 PASS	fixtures/tran/txl_tran_matched_step.sp
 PASS	fixtures/tran/txl_tran_mismatched_load.sp
+PASS	fixtures/tran/uic_t0_row.sp
 PASS	fixtures/tran/zero_abstol_vntol.sp
 PASS	fixtures/tran/zero_vntol_chgtol.sp
 PASS	fixtures/tran_noise/hspice_samples.sp

@@ -103,6 +103,29 @@ const TranHook = struct {
     }
 };
 
+/// The t = 0 row: `x` itself after an operating point. Under uic no
+/// operating point ran and `x` holds only the `.ic` values, which break KVL
+/// (V1 = 2 V read as 0 V, #161), so the row is instead one step solve over
+/// `hook`'s vanishing dt into `scratch`: every charge and flux stays at its
+/// initial value and the rest of the network is solved around them. The
+/// device state it leaves is reverted. Falls back to `x` when that solve
+/// fails. ngspice prints no t = 0 row under uic at all.
+fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratch: []f64, hook: TranHook, options: Options) ![]const f64 {
+    if (!options.uic) return x;
+    ckt.setSimState(.{ .t = 0, .dt = 1 / hook.c.ag0, .kind = .tran, .initial_step = true });
+    defer ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
+    simdCopy(scratch, x);
+    var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+    nr_opts.residual_tol = std.math.inf(f64);
+    ckt.clearRejectAt();
+    const nr = converger.run(ckt, ws, scratch, 0, nr_opts, hook) catch |err| switch (err) {
+        error.QueryCancelled, error.OutOfMemory => return err,
+        else => null, // else: a numerical failure keeps the `.ic` row
+    };
+    _ = ckt.stateCtl(.revert);
+    return if (nr != null and nr.?.converged) scratch else x;
+}
+
 /// Integrates from the operating point in `x` to options.t_stop, recording
 /// accepted points at t >= t_start into `waveform`. On return `x` holds the
 /// last accepted solution. `allocator` backs per-run scratch only. A dt
@@ -300,7 +323,15 @@ pub fn simulate(
 
     // tstart suppresses output, never the solve: [0, t_start) is integrated
     // with full history and not recorded.
-    if (options.t_start <= 0) try waveform.record(0, x, probes);
+    if (options.t_start <= 0) try waveform.record(0, try uicStart(ckt, ws, x, x_try, .{
+        .method = .backward_euler,
+        .c = integrator.coeffs(.backward_euler, delmin, delmin, options.xmu),
+        .q_prev = q_hist[1],
+        .i_prev = i_prev,
+        .q_prev2 = q_hist[2],
+        .a_vals = a_vals,
+        .has_charge = has_charge,
+    }, options), probes);
 
     var cur: []f64 = x;
     var trial: []f64 = x_try;
