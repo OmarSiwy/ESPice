@@ -428,11 +428,11 @@ pub const NetBuilder = struct {
     /// a node whose component lacks ground has no DC path, however many
     /// elements touch it (#90). V and L cards are DC shorts: `uf`/`pot` form
     /// a weighted union-find with `pot` = v(x) - v(parent), and a loop of
-    /// shorts is an error only when its KVL sum is inconsistent (V1=5
-    /// parallel to V2=3).
+    /// shorts is an error when its KVL sum is inconsistent (V1=5 parallel to
+    /// V2=3) or when V sources alone close it (#70).
     topo: std.MultiArrayList(struct { seen: bool, comp: u32, uf: u32, pot: f64 }) = .empty,
-    /// I cards as rows and DC value: a current source into a component
-    /// without a DC path is a cutset.
+    /// I cards as rows and DC value, for the current balance of each
+    /// component without a DC path.
     topo_isrc: std.ArrayList(struct { pos: u32, neg: u32, dc: f64 }) = .empty,
 
     /// A V card as the queries and the F/H/W cards see it.
@@ -835,7 +835,10 @@ pub const NetBuilder = struct {
     /// Classifies one card's nodes. `.dc` and `.short` join the pins into one
     /// DC-path component, `.cap` and `.cur` mark presence only; `.short` also
     /// joins the first two nodes as a DC short with v(node0) - v(node1) =
-    /// `vshort` and rejects a loop whose KVL sum disagrees.
+    /// `vshort` and rejects a loop whose KVL sum disagrees, or which V
+    /// sources alone close: V cards are marked before any L, so a V that
+    /// finds its pins already shorted closes a loop of V sources, whose
+    /// current no equation fixes (ngspice: singular matrix).
     fn topoMark(self: *NetBuilder, dev: Device, kind: enum { dc, cap, cur, short }, vshort: f64) !void {
         var first_two: [2]u32 = .{ GROUND, GROUND };
         for (dev.pins, 0..) |pin, i| {
@@ -859,6 +862,13 @@ pub const NetBuilder = struct {
                     );
                     return error.VoltageSourceLoop;
                 }
+                if (dev.kind == 'v') {
+                    if (!@import("builtin").is_test) std.log.err(
+                        "topology: '{s}' closes a loop of voltage sources — the loop current is not unique",
+                        .{dev.name},
+                    );
+                    return error.NonuniqueOperatingPoint;
+                }
             } else {
                 // Attach so every member's potential stays consistent:
                 // v(b) = pot_b + pot[rb] must equal v(a) - vshort.
@@ -868,25 +878,32 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// Rejects a component without a DC path to ground that a current source
-    /// drives, which static KCL cannot satisfy. A capacitor-only component
-    /// sets `needs_tran_op`, ngspice's OPtran fallback.
+    /// Rejects a component without a DC path to ground whose current sources
+    /// do not balance, which static KCL cannot satisfy. A component that
+    /// balances (capacitors only, or equal sources in and out, #70) sets
+    /// `needs_tran_op`, ngspice's OPtran fallback.
     fn topoCheck(self: *NetBuilder) !void {
         const quiet = @import("builtin").is_test; // the test runner fails any test that logs an error
         try self.topoEnsure(GROUND);
-        // Whether a current source touches each component root.
-        const driven = try self.arena.alloc(bool, self.topo.len);
-        @memset(driven, false);
+        // Net current into, and the magnitude through, each component root.
+        const net = try self.arena.alloc(f64, 2 * self.topo.len);
+        @memset(net, 0);
+        const mag = net[self.topo.len..];
         for (self.topo_isrc.items) |src| {
-            for ([2]u32{ src.pos, src.neg }) |node| driven[self.compRoot(node)] = true;
+            // n+ to n- through the source: out of n+, into n-.
+            for ([2]u32{ src.pos, src.neg }, [2]f64{ -src.dc, src.dc }) |node, i| {
+                const r = self.compRoot(node);
+                net[r] += i;
+                mag[r] += @abs(i);
+            }
         }
         const ground = self.compRoot(GROUND);
         for (0..self.topo.len) |id| {
             if (!self.topo.items(.seen)[id]) continue;
             const r = self.compRoot(@intCast(id));
             if (r == ground) continue;
-            if (driven[r]) {
-                if (!quiet) std.log.err("topology: node '{s}' is a current-source cutset — KCL has no DC path to satisfy it", .{self.b.node_labels.items[id]});
+            if (!(@abs(net[r]) <= 1e-9 * mag[r])) {
+                if (!quiet) std.log.err("topology: node '{s}' is a current-source cutset — its current sources do not balance and KCL has no DC path to satisfy it", .{self.b.node_labels.items[id]});
                 return error.CurrentSourceCutset;
             }
             self.b.needs_tran_op = true;

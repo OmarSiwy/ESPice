@@ -411,6 +411,7 @@ PASS	fixtures/invalid/temp_below_absolute_zero.sp
 PASS	fixtures/invalid/temp_zero_step.sp
 PASS	fixtures/invalid/tf_missing_output.sp
 PASS	fixtures/invalid/tf_missing_source.sp
+PASS	fixtures/invalid/topology_parallel_voltage_sources.sp
 PASS	fixtures/invalid/tran_negative_maxstep.sp
 PASS	fixtures/invalid/tran_negative_stop.sp
 PASS	fixtures/invalid/tran_zero_step.sp
@@ -788,6 +789,7 @@ PASS	fixtures/tran/device_switch_hysteresis.sp
 PASS	fixtures/tran/device_tline.sp
 PASS	fixtures/tran/device_urc.sp
 PASS	fixtures/tran/device_vsource.sp
+PASS	fixtures/tran/equal_current_sources.sp
 PASS	fixtures/tran/finite_rise_negative.sp
 PASS	fixtures/tran/finite_rise_positive.sp
 PASS	fixtures/tran/ic_large.sp

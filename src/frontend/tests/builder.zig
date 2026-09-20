@@ -466,14 +466,19 @@ fn buildDeck(source: []const u8, dialect: netlist.Dialect) !bool {
 
 test "topology: V/L shorts must agree on KVL, current sources need a DC path" {
     try std.testing.expectError(error.VoltageSourceLoop, buildDeck("* loop\nV1 a 0 5\nV2 a 0 3\n.end\n", .ngspice));
-    try std.testing.expect(!try buildDeck("* parallel\nV1 a 0 5\nV2 a 0 5\nR1 a 0 1k\n.end\n", .ngspice));
+    // Agreeing sources in a loop leave its current free (#70).
+    try std.testing.expectError(error.NonuniqueOperatingPoint, buildDeck("* parallel\nV1 a 0 5\nV2 a 0 5\nR1 a 0 1k\n.end\n", .ngspice));
     // A chain of shorts listed against its order, closed by a fourth source:
     // v(c) = 3 agrees with it, 2 does not.
-    try std.testing.expect(!try buildDeck("* chain\nV3 c b 1\nV2 b a 1\nV1 a 0 1\nV4 c 0 3\n.end\n", .ngspice));
+    try std.testing.expectError(error.NonuniqueOperatingPoint, buildDeck("* chain\nV3 c b 1\nV2 b a 1\nV1 a 0 1\nV4 c 0 3\n.end\n", .ngspice));
     try std.testing.expectError(error.VoltageSourceLoop, buildDeck("* chain\nV3 c b 1\nV2 b a 1\nV1 a 0 1\nV4 c 0 2\n.end\n", .ngspice));
     // An inductor is a 0 V short.
     try std.testing.expectError(error.VoltageSourceLoop, buildDeck("* l loop\nV1 a 0 1\nL1 a 0 1u\n.end\n", .ngspice));
     try std.testing.expectError(error.CurrentSourceCutset, buildDeck("* cutset\nI1 0 out 1m\nC1 out 0 1u\n.end\n", .ngspice));
+    // Current sources that balance on a capacitor node are an island (#70);
+    // unequal ones are a cutset.
+    try std.testing.expect(try buildDeck("* balanced\nI1 0 a 1m\nI2 a b 1m\nR1 b 0 1k\nC1 a 0 1p\n.end\n", .ngspice));
+    try std.testing.expectError(error.CurrentSourceCutset, buildDeck("* unbalanced\nI1 0 a 1m\nI2 a b 2m\nR1 b 0 1k\nC1 a 0 1p\n.end\n", .ngspice));
     // A node only capacitors reach needs the transient operating point,
     // also behind a series short that touches no ground (#90).
     try std.testing.expect(try buildDeck("* cap node\nV1 a 0 1\nC1 a b 1p\nC2 b 0 1p\n.end\n", .ngspice));

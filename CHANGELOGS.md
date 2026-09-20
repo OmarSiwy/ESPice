@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- Equal V sources in parallel are refused as `NonuniqueOperatingPoint`; current sources that cancel on a capacitor node make an island, not a `CurrentSourceCutset` (#70).
 - A capacitor island behind a 0 V source or a series resistor starts at its charge-division voltage, as a plain divider does; the transient operating point holds sources at their t = 0 values (#90).
 - An `.envelope` or `.noise` query reports its real column count before it runs, so a format with a column limit refuses it up front; HB with a NaN residual no longer converges; an allocation failure in a batched AC solve is reported (#83).
 - `.fft` WINDOW=KAISER and GAUSS use the symmetric NP-1 indexing of the cosine windows; Kaiser side lobes now match Harris 1978 (-69 dB at ALFA=3) (#82).
