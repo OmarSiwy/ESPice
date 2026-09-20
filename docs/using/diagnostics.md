@@ -43,7 +43,7 @@ and the rest of the line no longer parses. Rename the node.
 
 | Error | Cause |
 |---|---|
-| `FloatingNode` | a node, or a group of nodes, has no DC path to ground: only capacitors, or nothing, connect it |
+| `FloatingNode` | a node, or a group of nodes, has no DC path to ground: only capacitors, or nothing, connect it; also a node that only an expression reads (`B1 o 0 V={v(a)}` with nothing at `a`) |
 | `VoltageSourceLoop` | voltage sources (and inductors) form a loop that breaks Kirchhoff's voltage law, such as two different sources in parallel |
 | `NonuniqueOperatingPoint` | voltage sources alone form a loop that agrees with KVL, such as two equal sources in parallel: no equation fixes the current around it |
 | `CurrentSourceCutset` | current sources drive a group of nodes with no DC path to ground and their currents do not cancel |

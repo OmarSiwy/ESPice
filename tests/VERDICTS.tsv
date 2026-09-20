@@ -382,6 +382,8 @@ PASS	fixtures/invalid/dcmatch_unknown_node.sp
 PASS	fixtures/invalid/disto_f2_without_source.sp
 PASS	fixtures/invalid/disto_zero_count.sp
 PASS	fixtures/invalid/envelope_zero_period.sp
+PASS	fixtures/invalid/floating_sense_node_hb.sp
+PASS	fixtures/invalid/floating_sense_node_op.sp
 PASS	fixtures/invalid/four_zero_fundamental.sp
 PASS	fixtures/invalid/hb_fractional_harmonics.sp
 PASS	fixtures/invalid/hb_negative_frequency.sp

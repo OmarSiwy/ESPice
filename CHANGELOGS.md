@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- A node that only a B-source expression reads is refused as `FloatingNode` before any analysis runs, instead of `.op` publishing and HB reading undefined memory (#92).
 - Equal V sources in parallel are refused as `NonuniqueOperatingPoint`; current sources that cancel on a capacitor node make an island, not a `CurrentSourceCutset` (#70).
 - A capacitor island behind a 0 V source or a series resistor starts at its charge-division voltage, as a plain divider does; the transient operating point holds sources at their t = 0 values (#90).
 - An `.envelope` or `.noise` query reports its real column count before it runs, so a format with a column limit refuses it up front; HB with a NaN residual no longer converges; an allocation failure in a batched AC solve is reported (#83).

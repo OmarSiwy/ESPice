@@ -228,6 +228,20 @@ point is not unique. Under a transient's own OP the ladder goes straight to
 OPtran and reports the settled state, as ngspice does under TRANOP. A
 standalone `.op`, `.ac` or `.pz` fails with `error.FloatingNode`.
 
+The builder decides "no DC path" by connectivity, not per node: every
+element but capacitors and current sources joins its pins in a union-find,
+and a component without ground is an island however many elements touch it
+(a divider island behind a 0 V ammeter or a 1 mOhm resistor, #90). Current
+sources into an island must cancel: unequal ones are a
+`CurrentSourceCutset`, equal ones (1 mA in, 1 mA out) an ordinary island
+(#70). Divergence: ngspice reports that balanced island's `.op` through its
+transient OP (a = 0, b = 1); ESPice refuses a standalone `.op` on any
+island as above, and agrees under `.tran`. Two topology refusals are
+ESPice's own names for ngspice's "singular matrix": a loop of V sources
+whose KVL agrees (two equal sources in parallel) is
+`NonuniqueOperatingPoint`, and a node that only an expression reads is
+`FloatingNode` (#92).
+
 **Rung 1: plain Newton** with no diagonal gmin and the ITL1 budget.
 ngspice's `NIiter` loads a diagonal gmin only during gmin stepping (junction
 gmin lives in the device models); an always-on shunt moved `voltage_divider`

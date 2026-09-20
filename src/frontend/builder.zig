@@ -878,12 +878,18 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// Rejects a component without a DC path to ground whose current sources
-    /// do not balance, which static KCL cannot satisfy. A component that
+    /// Rejects a net no element touches (one only an expression reads, #92)
+    /// and a component without a DC path to ground whose current sources do
+    /// not balance, which static KCL cannot satisfy. A component that
     /// balances (capacitors only, or equal sources in and out, #70) sets
     /// `needs_tran_op`, ngspice's OPtran fallback.
     fn topoCheck(self: *NetBuilder) !void {
         const quiet = @import("builtin").is_test; // the test runner fails any test that logs an error
+        for (self.rows) |row| {
+            if (row == 0 or (row < self.topo.len and self.topo.items(.seen)[row])) continue;
+            if (!quiet) std.log.err("topology: node '{s}' is read but no element connects to it", .{self.b.node_labels.items[row]});
+            return error.FloatingNode;
+        }
         try self.topoEnsure(GROUND);
         // Net current into, and the magnitude through, each component root.
         const net = try self.arena.alloc(f64, 2 * self.topo.len);

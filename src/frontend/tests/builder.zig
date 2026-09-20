@@ -485,6 +485,8 @@ test "topology: V/L shorts must agree on KVL, current sources need a DC path" {
     try std.testing.expect(try buildDeck("* ammeter\nV1 a 0 1\nC1 a m 1p\nVam m b 0\nC2 b 0 1p\n.end\n", .ngspice));
     try std.testing.expect(try buildDeck("* series r\nV1 a 0 1\nC1 a m 1p\nR1 m b 1m\nC2 b 0 1p\n.end\n", .ngspice));
     try std.testing.expect(!try buildDeck("* divider\nV1 a 0 1\nR1 a b 1k\nR2 b 0 1k\n.end\n", .ngspice));
+    // A node only an expression reads has no equation at all (#92).
+    try std.testing.expectError(error.FloatingNode, buildDeck("* sense\nB1 o 0 V={v(a)+1}\nR1 o 0 1k\n.end\n", .ngspice));
 }
 
 test "cards the builder refuses instead of misbinding" {
