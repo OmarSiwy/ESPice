@@ -22,6 +22,16 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.step` and `set_params` points, and `.dcmatch` groups from a PDK's mismatch, keep the parameter-write path when a live value sits at zero (sky130's mismatch terms at the nominal corner) instead of rebuilding the circuit per point or per site (#130).
 - `--backend cuda` stages device state at the converged iterate like the CPU, not one limit pass ahead: `tran/device_hfet_inverter` drifted 0.34% (#15).
 - The bordered-block-diagonal solver refines its solves when a block is ill-conditioned and falls back to the sparse LU when refinement cannot recover them; it could lose 5 digits silently (#136).
+- An operating point with unknowns past 1e9 (a 1e12 V source, a 1e-12 ohm resistor) solves instead of publishing zeros with exit 0, and JFNK no longer accepts x = 0 on a V source's row (#152).
+- `.tran ... UIC` publishes a t = 0 row that satisfies KVL around the held capacitor voltages, not the zero vector (#161).
+- A node that only a B-source expression reads is refused as `FloatingNode` before any analysis runs, instead of `.op` publishing and HB reading undefined memory (#92).
+- Equal V sources in parallel are refused as `NonuniqueOperatingPoint`; current sources that cancel on a capacitor node make an island, not a `CurrentSourceCutset` (#70).
+- A capacitor island behind a 0 V source or a series resistor starts at its charge-division voltage, as a plain divider does; the transient operating point holds sources at their t = 0 values (#90).
+- An `.envelope` or `.noise` query reports its real column count before it runs, so a format with a column limit refuses it up front; HB with a NaN residual no longer converges; an allocation failure in a batched AC solve is reported (#83).
+- `.fft` WINDOW=KAISER and GAUSS use the symmetric NP-1 indexing of the cosine windows; Kaiser side lobes now match Harris 1978 (-69 dB at ALFA=3) (#82).
+- `.sens` lists a V or I source's `dc` alone, no waveform or table entries (`v(v1:pwl_timesZ5b0Z5d)`), and prints parameter names in lower case (#154).
+- `.sens` reports 0 for a parameter at its "infinite" default of 0 (BJT VAF, VAR, IKF, IKR), as ngspice does, instead of a huge value whose sign followed line order (#91).
+- `.acmatch`, `.dcmatch` and `.sens` step a parameter by 1e-6 of its value (1e-12 only at 0), so a diode IS column no longer flips sign from a 100x step (#85).
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - `--backend cuda` evaluates BSIM4 (LEVEL 14/54, sky130), VBIC and MOS levels 1/2/3/6/9 on the GPU: held variables and limiting now live in device state; device ABI 27 (#140).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.

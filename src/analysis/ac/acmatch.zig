@@ -10,6 +10,7 @@ const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const dcmatch = @import("../dc/dcmatch.zig");
+const fdStep = @import("../sweep/sens.zig").fdStep;
 const num = @import("core").numerics;
 const Complex = num.Complex;
 const z = @import("stdpp");
@@ -108,7 +109,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         for (groups.members(g)) |m| {
             const p = refs[m.param];
             const orig = p.get();
-            p.set(orig + 1e-6 * @abs(orig) + 1e-12);
+            p.set(orig + fdStep(orig));
             const delta = p.get() - orig;
             defer {
                 p.set(orig);

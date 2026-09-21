@@ -1,0 +1,51 @@
+{
+ "schema_version": 1,
+ "analysis": "tran",
+ "purpose": "A capacitor island behind a 0 V source or a small series resistor starts at its charge-division voltage, not 0 V.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "At DC the island has no path to ground; the transient operating point settles it as the source steps on: equal series capacitors split 1 V, so v(i1) = v(i2) = 0.5 V for all t (no resistive discharge path). ngspice 45: 0.5 and 0.4999959 at t = 0. The 1 mOhm island settles to within 2e-4 V of 0.5 V at t = 0 (OPtran), hence atol 5e-4."
+ },
+ "netlist_sha256": "426c4dee0f6a072e4b01dcf24d9461fc5aba03ad4e619c58f75877c3a63f141f",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Transient Analysis",
+    "match": "samples",
+    "axis": {
+     "name": "time",
+     "values": [
+      0,
+      5e-09,
+      1e-08
+     ],
+     "rtol": 0,
+     "atol": 0
+    },
+    "columns": {
+     "v(i1)": {
+      "values": [
+       0.5,
+       0.5,
+       0.5
+      ],
+      "rtol": 0,
+      "atol": 0.0005
+     },
+     "v(i2)": {
+      "values": [
+       0.5,
+       0.5,
+       0.5
+      ],
+      "rtol": 0,
+      "atol": 0.0005
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

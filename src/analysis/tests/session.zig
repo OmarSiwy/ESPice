@@ -305,3 +305,36 @@ test "schemaOf names the plot and scale column a transient and an AC sweep publi
     // A query that does not stream names no plot.
     try t.expectEqual(0, (try schemaOf(t.allocator, &prepared, &deck, .{ .op = .{} })).plotname.len);
 }
+
+test "schemaOf predicts the columns envelope and noise publish (#83)" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    const out = try b.addNode();
+    try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, out });
+    try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ out, GROUND });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    const deck = bareDeck(&.{ vin, out }, &.{ "v(vin)", "v(out)" });
+    const sweep: requests.FreqSweep = .{ .f_start = 1, .f_stop = 1e3 };
+    const queries = [_]requests.Query{
+        .{ .envelope = .{ .t_carrier = 1e-6, .t_stop = 1e-5 } },
+        .{ .noise = .{ .out_node = out, .sweep = sweep } },
+        .{ .noise = .{ .out_node = out, .sweep = sweep, .integrated = true } },
+        .{ .noise = .{ .out_node = out, .sweep = sweep, .contributions = true } },
+        .{ .noise = .{ .out_node = out, .sweep = sweep, .contributions = true, .integrated = true } },
+    };
+    for (queries) |q| {
+        var s = Session.init(t.allocator, t.io, &prepared, &deck, .{});
+        defer s.deinit();
+        var ids: [1]requests.QueryId = undefined;
+        _ = try s.append(&.{q}, &ids);
+        while (!(try s.info(ids[0])).status.terminal()) _ = try s.advance(ids[0]);
+        const res = try s.result(ids[0]);
+        const schema = try @import("../session.zig").schemaOf(t.allocator, &prepared, &deck, q);
+        try t.expectEqual(res.varnames.len, schema.columns);
+    }
+}

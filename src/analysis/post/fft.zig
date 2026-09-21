@@ -18,9 +18,12 @@ pub fn window(kind: Options.Window, n: usize, np: usize, alfa: f64) f64 {
     const x: f64 = @floatFromInt(n);
     const m: f64 = @floatFromInt(np);
     const c = 2 * std.math.pi * x / (m - 1);
-    // Distance from the centre the GAUSS and KAISER halves use.
     const half = m / 2;
-    const d = if (x <= half - 1) half - 1 - x else x - half;
+    // Distance from the centre of the symmetric NP - 1 forms the cosine
+    // windows use, so GAUSS and KAISER reach their edge value at n = 0 and
+    // n = NP - 1 (#82): Kaiser's u = 2d/(NP - 1) spans [0, 1], as in Harris
+    // 1978 and numpy's kaiser(NP, pi ALFA).
+    const d = @abs(x - (m - 1) / 2);
     return switch (kind) {
         .rect => 1,
         .bart => if (x <= half - 1) 2 * x / (m - 1) else 2 - 2 * x / (m - 1),
@@ -31,7 +34,7 @@ pub fn window(kind: Options.Window, n: usize, np: usize, alfa: f64) f64 {
         .gauss => @exp(-0.5 * alfa * alfa * d * d / (m * m)),
         .kaiser => blk: {
             const x1 = std.math.pi * alfa;
-            const r = 2 * d / m;
+            const r = 2 * d / (m - 1);
             break :blk besselI0(x1 * @sqrt(@max(1 - r * r, 0))) / besselI0(x1);
         },
     };
@@ -135,6 +138,35 @@ test "window: every kind is symmetric and peaks at 1 or less" {
     try std.testing.expectApproxEqAbs(@as(f64, 0), window(.hann, 0, np, 0), 1e-15);
     try std.testing.expectEqual(@as(f64, 1), window(.rect, 7, np, 0));
     try std.testing.expectEqual(@as(f64, 1), window(.kaiser, 7, np, 0));
+}
+
+test "window: Kaiser side lobes match Harris 1978 Table I" {
+    // Highest side lobe of the 64-point window's spectrum, 16x zero-padded:
+    // Harris gives -57, -69 and -82 dB at ALFA 2.5, 3 and 3.5. The old
+    // centre-sample indexing kept the edge high and gave -55.9, -64.5 and
+    // -69.4 (#82).
+    const np = 64;
+    const pad = 16 * np;
+    for ([_]f64{ 2.5, 3, 3.5 }, [_]f64{ -57, -69, -82 }) |alfa, want| {
+        var mag: [pad / 2]f64 = undefined;
+        for (&mag, 0..) |*out, k| {
+            var re: f64 = 0;
+            var im: f64 = 0;
+            for (0..np) |n| {
+                const ph = 2 * std.math.pi * @as(f64, @floatFromInt(k * n)) / pad;
+                const w = window(.kaiser, n, np, alfa);
+                re += w * @cos(ph);
+                im -= w * @sin(ph);
+            }
+            out.* = @sqrt(re * re + im * im);
+        }
+        var k: usize = 1;
+        while (mag[k] < mag[k - 1]) k += 1; // past the main lobe's first null
+        var peak: f64 = 0;
+        for (mag[k..]) |v| peak = @max(peak, v);
+        const db = 20 * @log10(peak / mag[0]);
+        try std.testing.expectApproxEqAbs(want, db, 1.5);
+    }
 }
 
 test "besselI0: series against reference values" {

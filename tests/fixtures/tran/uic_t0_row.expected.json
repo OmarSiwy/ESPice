@@ -1,0 +1,60 @@
+{
+ "schema_version": 1,
+ "analysis": "tran",
+ "purpose": "Under UIC the t = 0 row solves the circuit around the held capacitor voltage instead of publishing the zero vector.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "C1 starts at 0 V (UIC, no .ic): v(a) = 2 V from V1, v(b)(t) = 2 (1 - exp(-t/(R1 C1))), i(v1) = -(2 - v(b))/R1. At t = 0: 2 V, 0 V, -2 mA."
+ },
+ "netlist_sha256": "5d9a1ea910a9c045efce9fe9f6e72cc46b2b76db4e407d5f9fd73a31441fc52d",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Transient Analysis",
+    "match": "samples",
+    "axis": {
+     "name": "time",
+     "values": [
+      0,
+      1e-06,
+      3e-06
+     ],
+     "rtol": 0,
+     "atol": 0
+    },
+    "columns": {
+     "v(a)": {
+      "values": [
+       2,
+       2,
+       2
+      ],
+      "rtol": 1e-06,
+      "atol": 1e-09
+     },
+     "v(b)": {
+      "values": [
+       0.0,
+       1.2642411176571153,
+       1.900425863264272
+      ],
+      "rtol": 0.002,
+      "atol": 1e-06
+     },
+     "i(v1)": {
+      "values": [
+       -0.002,
+       -0.0007357588823428847,
+       -9.95741367357279e-05
+      ],
+      "rtol": 0.002,
+      "atol": 1e-09
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

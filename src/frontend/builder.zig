@@ -423,12 +423,17 @@ pub const NetBuilder = struct {
     source_branch: u32 = GROUND,
 
     /// Topology check (ngspice CKTsetup-class), indexed by row; only rows of
-    /// netlist nets are `seen`. `dc`: some element gives the node a DC path
-    /// (all but capacitors and current sources); `cur`: an I source touches
-    /// it. V and L cards are DC shorts: `uf`/`pot` form a weighted union-find
-    /// with `pot` = v(x) - v(parent), and a loop of shorts is an error only
-    /// when its KVL sum is inconsistent (V1=5 parallel to V2=3).
-    topo: std.MultiArrayList(struct { seen: bool, dc: bool, cur: bool, uf: u32, pot: f64 }) = .empty,
+    /// netlist nets are `seen`. `comp` is a union-find over the DC paths
+    /// (every element but capacitors and current sources joins its pins), so
+    /// a node whose component lacks ground has no DC path, however many
+    /// elements touch it (#90). V and L cards are DC shorts: `uf`/`pot` form
+    /// a weighted union-find with `pot` = v(x) - v(parent), and a loop of
+    /// shorts is an error when its KVL sum is inconsistent (V1=5 parallel to
+    /// V2=3) or when V sources alone close it (#70).
+    topo: std.MultiArrayList(struct { seen: bool, comp: u32, uf: u32, pot: f64 }) = .empty,
+    /// I cards as rows and DC value, for the current balance of each
+    /// component without a DC path.
+    topo_isrc: std.ArrayList(struct { pos: u32, neg: u32, dc: f64 }) = .empty,
 
     /// A V card as the queries and the F/H/W cards see it.
     pub const VCard = struct {
@@ -785,7 +790,7 @@ pub const NetBuilder = struct {
     fn topoEnsure(self: *NetBuilder, id: u32) !void {
         while (self.topo.len <= id) {
             const next: u32 = @intCast(self.topo.len);
-            try self.topo.append(self.arena, .{ .seen = false, .dc = false, .cur = false, .uf = next, .pot = 0 });
+            try self.topo.append(self.arena, .{ .seen = false, .comp = next, .uf = next, .pot = 0 });
         }
     }
 
@@ -816,35 +821,53 @@ pub const NetBuilder = struct {
         return .{ .root = root, .pot = total };
     }
 
-    /// Classifies one card's nodes. `.dc` marks a DC path, `.cap` presence
-    /// only, `.cur` a current source; `.short` also joins the first two nodes
-    /// as a DC short with v(node0) - v(node1) = `vshort` and rejects a loop
-    /// whose KVL sum disagrees.
+    /// Root of `id` in the DC-path forest, halving the path as it walks.
+    fn compRoot(self: *NetBuilder, id0: u32) u32 {
+        const comp = self.topo.items(.comp);
+        var id = id0;
+        while (comp[id] != id) {
+            comp[id] = comp[comp[id]];
+            id = comp[id];
+        }
+        return id;
+    }
+
+    /// Classifies one card's nodes. `.dc` and `.short` join the pins into one
+    /// DC-path component, `.cap` and `.cur` mark presence only; `.short` also
+    /// joins the first two nodes as a DC short with v(node0) - v(node1) =
+    /// `vshort` and rejects a loop whose KVL sum disagrees, or which V
+    /// sources alone close: V cards are marked before any L, so a V that
+    /// finds its pins already shorted closes a loop of V sources, whose
+    /// current no equation fixes (ngspice: singular matrix).
     fn topoMark(self: *NetBuilder, dev: Device, kind: enum { dc, cap, cur, short }, vshort: f64) !void {
         var first_two: [2]u32 = .{ GROUND, GROUND };
         for (dev.pins, 0..) |pin, i| {
             const id = try self.rowOf(pin);
             try self.topoEnsure(id);
             self.topo.items(.seen)[id] = true;
-            switch (kind) {
-                .cap => {},
-                .cur => self.topo.items(.cur)[id] = true,
-                .dc, .short => self.topo.items(.dc)[id] = true,
-            }
             if (i < 2) first_two[i] = id;
+            if (i > 0 and (kind == .dc or kind == .short))
+                self.topo.items(.comp)[self.compRoot(id)] = self.compRoot(first_two[0]);
         }
         if (kind == .short and dev.pins.len >= 2) {
             const a = self.topoRoot(first_two[0]);
             const b_ = self.topoRoot(first_two[1]);
             if (a.root == b_.root) {
                 const gap = (a.pot - b_.pot) - vshort;
+                // The test runner fails any test that logs an error.
                 if (@abs(gap) > 1e-9 * @max(1.0, @abs(vshort))) {
-                    // The test runner fails any test that logs an error.
                     if (!@import("builtin").is_test) std.log.err(
                         "topology: '{s}' closes an inconsistent voltage-source/inductor loop ({d} V of KVL violation)",
                         .{ dev.name, gap },
                     );
                     return error.VoltageSourceLoop;
+                }
+                if (dev.kind == 'v') {
+                    if (!@import("builtin").is_test) std.log.err(
+                        "topology: '{s}' closes a loop of voltage sources — the loop current is not unique",
+                        .{dev.name},
+                    );
+                    return error.NonuniqueOperatingPoint;
                 }
             } else {
                 // Attach so every member's potential stays consistent:
@@ -855,14 +878,38 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// Rejects current-source cutsets, which static KCL cannot satisfy. A
-    /// capacitor-only node sets `needs_tran_op`, ngspice's OPtran fallback.
+    /// Rejects a net no element touches (one only an expression reads, #92)
+    /// and a component without a DC path to ground whose current sources do
+    /// not balance, which static KCL cannot satisfy. A component that
+    /// balances (capacitors only, or equal sources in and out, #70) sets
+    /// `needs_tran_op`, ngspice's OPtran fallback.
     fn topoCheck(self: *NetBuilder) !void {
-        const topo = self.topo.slice();
-        for (topo.items(.seen), topo.items(.dc), topo.items(.cur), 0..) |seen, dc, cur, id| {
-            if (!seen or id == GROUND or dc) continue;
-            if (cur) {
-                if (!@import("builtin").is_test) std.log.err("topology: node '{s}' is a current-source cutset — KCL has no DC path to satisfy it", .{self.b.node_labels.items[id]});
+        const quiet = @import("builtin").is_test; // the test runner fails any test that logs an error
+        for (self.rows) |row| {
+            if (row == 0 or (row < self.topo.len and self.topo.items(.seen)[row])) continue;
+            if (!quiet) std.log.err("topology: node '{s}' is read but no element connects to it", .{self.b.node_labels.items[row]});
+            return error.FloatingNode;
+        }
+        try self.topoEnsure(GROUND);
+        // Net current into, and the magnitude through, each component root.
+        const net = try self.arena.alloc(f64, 2 * self.topo.len);
+        @memset(net, 0);
+        const mag = net[self.topo.len..];
+        for (self.topo_isrc.items) |src| {
+            // n+ to n- through the source: out of n+, into n-.
+            for ([2]u32{ src.pos, src.neg }, [2]f64{ -src.dc, src.dc }) |node, i| {
+                const r = self.compRoot(node);
+                net[r] += i;
+                mag[r] += @abs(i);
+            }
+        }
+        const ground = self.compRoot(GROUND);
+        for (0..self.topo.len) |id| {
+            if (!self.topo.items(.seen)[id]) continue;
+            const r = self.compRoot(@intCast(id));
+            if (r == ground) continue;
+            if (!(@abs(net[r]) <= 1e-9 * mag[r])) {
+                if (!quiet) std.log.err("topology: node '{s}' is a current-source cutset — its current sources do not balance and KCL has no DC path to satisfy it", .{self.b.node_labels.items[id]});
                 return error.CurrentSourceCutset;
             }
             self.b.needs_tran_op = true;
@@ -1005,6 +1052,7 @@ pub const NetBuilder = struct {
                 for (try pwlTail(devices.isource, self.arena, dev)) |seg| try self.b.addDevice(devices.isource, dev.name, seg, .{}, nodes);
                 if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = nodes[0], .neg = nodes[1], .re = ac.re, .im = ac.im });
                 try self.i.append(self.arena, .{ .name = dev.name, .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND });
+                try self.topo_isrc.append(self.arena, .{ .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND, .dc = bound[0].dc });
             },
             'w' => if (self.nl.deck.dialect == .hspice) try self.addWline(dev) else try self.deferred.append(self.arena, dev),
             's' => if (self.nl.deck.dialect == .hspice) try self.addSparam(dev) else try self.addByLetter(letter, dev),

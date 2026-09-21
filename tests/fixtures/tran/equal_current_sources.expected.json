@@ -1,0 +1,51 @@
+{
+ "schema_version": 1,
+ "analysis": "tran",
+ "purpose": "A node whose current sources balance (1 mA in, 1 mA out) is a valid capacitor island, not a current-source cutset.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "KCL at a: I1 - I2 - C1 dv(a)/dt = 0 with I1 = I2, so v(a) keeps its operating-point value 0 V (the transient operating point starts the island at 0); v(b) = I2 R1 = 1 V. ngspice 45 .op: a = 0, b = 1."
+ },
+ "netlist_sha256": "3ff7681473aff7567836048c7e2b753382b3f6ef350765dd6050f47ea8e74474",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Transient Analysis",
+    "match": "samples",
+    "axis": {
+     "name": "time",
+     "values": [
+      0,
+      5e-09,
+      1e-08
+     ],
+     "rtol": 0,
+     "atol": 0
+    },
+    "columns": {
+     "v(a)": {
+      "values": [
+       0.0,
+       0.0,
+       0.0
+      ],
+      "rtol": 0,
+      "atol": 1e-06
+     },
+     "v(b)": {
+      "values": [
+       1.0,
+       1.0,
+       1.0
+      ],
+      "rtol": 0,
+      "atol": 1e-06
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

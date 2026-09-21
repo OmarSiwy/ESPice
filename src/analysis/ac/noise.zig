@@ -290,7 +290,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var columns: Columns = .{};
     var per_source: ?PerSource = null;
     if (opts.contributions) {
-        columns = try Columns.build(a, ctx.circuit, opts.cards, srcs.len);
+        columns = try Columns.build(a, ctx.circuit.batches, ctx.circuit.batch_types, opts.cards, srcs.len);
         const ps = try a.alloc(f64, srcs.len * (@as(usize, n_points) + 2));
         @memset(ps, 0);
         per_source = .{ .dens = ps[0 .. srcs.len * n_points], .out = ps[srcs.len * n_points ..][0..srcs.len], .in = ps[srcs.len * (n_points + 1) ..] };
@@ -382,6 +382,28 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 /// The contribution columns and where each noise source lands in them.
 /// Generators of one instance that share a name (LRM §4.6.4 `name`) share a
 /// column; each instance's total column follows its generator columns.
+const Batch = @import("device").abi.Batch;
+const DeviceType = @import("device").abi.DeviceType;
+
+/// The columns `run` publishes for `opts` over `batches`, which
+/// `session.schemaOf` reports before the query runs (#83).
+pub fn columnCount(gpa: std.mem.Allocator, batches: []const Batch, types: []const DeviceType, opts: Options) !usize {
+    if (opts.phase) return 2;
+    var n_cols: usize = 0;
+    if (opts.contributions) {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        // One source per generator per instance, as collectNoiseSources
+        // yields them.
+        var n_sources: usize = 0;
+        for (batches) |b| {
+            if (b.hooks.collect_noise != null) n_sources += b.count * b.hooks.noise_names.len;
+        }
+        n_cols = (try Columns.build(arena.allocator(), batches, types, opts.cards, n_sources)).labels.len;
+    }
+    return if (opts.integrated) 2 * n_cols + 2 else n_cols + 3 + @intFromBool(opts.sample != null);
+}
+
 const Columns = struct {
     /// `<inst>_<gen>` or `<inst>`, in column order.
     labels: []const []const u8 = &.{},
@@ -394,13 +416,13 @@ const Columns = struct {
     /// by batch and instance by instance, from each batch's `noise_names`
     /// and the card names in `cards`. `error.NoiseLabelMismatch` when the
     /// batches' generator counts do not add up to `n_sources`.
-    fn build(a: std.mem.Allocator, ckt: *const root.Circuit, cards: []const root.CardRef, n_sources: usize) !Columns {
+    fn build(a: std.mem.Allocator, batches: []const Batch, types: []const DeviceType, cards: []const root.CardRef, n_sources: usize) !Columns {
         var labels: std.ArrayList([]const u8) = .empty;
         const map = try a.alloc(u32, 2 * n_sources);
         const gen = map[0..n_sources];
         const total = map[n_sources..];
         var s: usize = 0;
-        for (ckt.batches, ckt.batch_types) |b, t| {
+        for (batches, types) |b, t| {
             if (b.hooks.collect_noise == null) continue;
             const gens = b.hooks.noise_names;
             if (s + b.count * gens.len > n_sources) return error.NoiseLabelMismatch;

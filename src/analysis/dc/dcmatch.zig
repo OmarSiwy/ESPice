@@ -9,6 +9,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const adjointFd = @import("../sweep/sens.zig").adjointFd;
+const fdStep = @import("../sweep/sens.zig").fdStep;
 
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Dcmatch;
@@ -148,7 +149,7 @@ fn fdSensitivity(
 ) !f64 {
     const n: usize = ckt.n;
     const orig: f64 = param.get();
-    const delta_req = 1e-6 * @abs(orig) + 1e-12;
+    const delta_req = fdStep(orig);
 
     // Only this parameter moves and temperature does not, so re-deriving its
     // own device type is the whole recompute (Circuit.recomputeType).
@@ -159,7 +160,7 @@ fn fdSensitivity(
         param.set(orig);
         ckt.recomputeType(param.type) catch unreachable; // restores the checked original parameter
     }
-    // As in sens.zig: the +1e-12 floor un-collapses an internal node whose
+    // As in sens.zig: the absolute step at 0 un-collapses an internal node whose
     // parasitic is nominally 0, and the frozen pattern has no row for it. The
     // derivative is unrepresentable, not small.
     ckt.recomputeType(param.type) catch |e| switch (e) {

@@ -517,7 +517,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
             addOmega(omegas, q_hat, f_hat);
         }
 
-        const residual = num.normInf(f_hat);
+        const residual = residualNorm(f_hat);
         if (ckt.knobs.hb_trace) std.debug.print("MHB iter={d} res={e} step={e}\n", .{ iter, residual, step });
         if (residual < options.hb_tol) return .{ .converged = true, .iterations = iter + 1, .residual_norm = residual };
 
@@ -685,6 +685,13 @@ pub fn solveOneTone(ckt: *root.Circuit, x_hat: []f64, options: Options, allocato
     const spec = try spectrum(allocator, &tones, &.{options.n_harmonics}, 0, 1);
     defer spec.deinit(allocator);
     return solve(ckt, x_hat, spec, &tones, options, allocator);
+}
+
+/// max |r[i]|, NaN when any entry is NaN. `num.normInf` skips NaN by
+/// contract, so a NaN residual would read as converged and HB would
+/// publish NaN (#83).
+pub fn residualNorm(r: []const f64) f64 {
+    return if (std.math.isNan(num.sum(r))) std.math.nan(f64) else num.normInf(r);
 }
 
 /// Private implementation access for the analysis test suite; void outside tests.

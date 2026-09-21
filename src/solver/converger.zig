@@ -171,6 +171,7 @@ pub fn newton(
     const x_old = ws.x_old;
     var iter: u16 = 0;
     var init_fix = opts.init_fix;
+    var limit: f64 = x_plausible;
     if (comptime @hasDecl(S, "beginSolve")) sys.beginSolve();
     const prof = &ws.prof;
 
@@ -183,6 +184,7 @@ pub fn newton(
         prof.lap(.eval);
         const v = hook.vals(sys);
         loadExtras(sys, v, x, opts);
+        if (iter == 0) limit = plausibleLimit(sys, x[0..sys.n], sys.rhs[0..sys.n], v);
         var norm_f: f64 = 0; // read only by the traces
         if (ws.knobs.newton_debug or ws.knobs.opdbg) {
             norm_f = num.normInf(sys.rhs[0..sys.n]);
@@ -217,7 +219,7 @@ pub fn newton(
         // The INITFIX pass does not stage: its converged iterate is not the
         // answer, and staging there restarted a Newton-history limiter from a
         // stale value, so the extra pass solved F(lim(x)) = 0 (#53).
-        const st = finalizeStep(sys, hook, x, dx, x_old, sys.rhs, v, iter, t, opts, load_ok, !init_fix);
+        const st = finalizeStep(sys, hook, x, dx, x_old, sys.rhs, v, iter, t, opts, limit, load_ok, !init_fix);
         prof.lap(.update);
         if (ws.knobs.opdbg) {
             var fi: usize = 0;
@@ -258,12 +260,13 @@ pub fn loadExtras(sys: anytype, v: []f64, x: []const f64, opts: Options) void {
 /// nonzero diagonal has |F_i| at or below it. A zero `diag` returns inf.
 pub fn residualGate(opts: Options, diag: f64, xi: f64) f64 {
     const scale = @abs(diag);
-    // A zero diagonal is a voltage-defined branch row (V/E/H source): its
-    // scale is the source gain, and an exact solution still leaves
-    // O(gain * eps) residual there (a 1e9-gain E source reads 2.7e-8).
-    // The delta test alone governs such rows, as in ngspice NIconvTest.
-    if (scale == 0) return inf;
-    return @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(xi) + opts.vntol));
+    // A zero diagonal is a voltage-defined branch row (V/E/H source): it is
+    // gated at scale 1, a loose 10*(reltol*|x| + vntol) that an exact
+    // solution's O(gain * eps) residual (a 1e9-gain E source reads 2.7e-8)
+    // still passes, but that refuses x = 0 when the only residual sits on
+    // such a row (#152).
+    const s = if (scale == 0) 1.0 else scale;
+    return @max(opts.residual_tol, 10.0 * s * (opts.reltol * @abs(xi) + opts.vntol));
 }
 
 fn sysNodeName(sys: anytype, idx: u32) []const u8 {
@@ -274,19 +277,34 @@ fn sysNodeName(sys: anytype, idx: u32) []const u8 {
 
 const Step = struct { converged: bool, scaled: f64, flipped: bool = false, why: Reject = .converged };
 
-/// The largest |x| an accepted iterate may hold. Every acceptance test is
-/// relative: the delta test to |x|, the residual gate to the diagonal
-/// conductance. A Newton that ran away carries both with it (a FET fed from
-/// a current source at 0 V reached 5e24 V with 1e45 S diagonals, and its
-/// 3e39 A residual passed), so a runaway iterate is refused outright (#3).
-/// No physical node voltage or branch current comes near 1e9.
-/// ponytail: a fixed bound, not a per-circuit scale; derive one from the
-/// sources' magnitudes if a deck ever needs unknowns past 1e9.
+/// The floor of the largest |x| an accepted iterate may hold. Every
+/// acceptance test is relative: the delta test to |x|, the residual gate to
+/// the diagonal conductance. A Newton that ran away carries both with it (a
+/// FET fed from a current source at 0 V reached 5e24 V with 1e45 S
+/// diagonals, and its 3e39 A residual passed), so a runaway iterate is
+/// refused outright (#3).
 const x_plausible = 1e9;
 
-/// Whether every unknown is finite and within `x_plausible`.
-fn plausible(x: []const f64) bool {
-    for (x) |xi| if (!(@abs(xi) <= x_plausible)) return false;
+/// The runaway bound of one solve, read off its first assembly: 1e3 times
+/// the scale the circuit sets there, the start |x| or the drive |F| times
+/// the largest diagonal conductance, between `x_plausible` and 1e21. A 1e12 V
+/// source or a 1e-12 ohm resistor (1e12 A from 1 V) solves; with the fixed
+/// 1e9 every iterate was refused and an operating point published zeros
+/// (#152).
+/// ponytail: the 1e18 scale cap keeps a solve that starts already run away
+/// (#3's 5e24 V) refused; a bound from the circuit's sources and constant
+/// stamps alone would need no cap.
+fn plausibleLimit(sys: anytype, x: []const f64, f: []const f64, vals: []const f64) f64 {
+    var g: f64 = 1;
+    for (sys.diag_slots[0..sys.n]) |slot| g = @max(g, @abs(vals[slot]));
+    const scale = @min(@max(num.normInf(x), num.normInf(f) * g), 1e18);
+    // Negated, so a NaN start keeps the floor.
+    return if (!(1e3 * scale > x_plausible)) x_plausible else 1e3 * scale;
+}
+
+/// Whether every unknown is finite and within `limit`.
+fn plausible(x: []const f64, limit: f64) bool {
+    for (x) |xi| if (!(@abs(xi) <= limit)) return false;
     return true;
 }
 
@@ -305,6 +323,7 @@ fn finalizeStep(
     iter: u16,
     t: f64,
     opts: Options,
+    limit: f64,
     load_ok: bool,
     stage: bool,
 ) Step {
@@ -326,7 +345,7 @@ fn finalizeStep(
     if (limited) return .{ .converged = false, .scaled = scaled, .why = .limited };
     if (iter == 0) return .{ .converged = false, .scaled = scaled, .why = .first_iter };
     if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
-    if (!plausible(x[0..n])) return .{ .converged = false, .scaled = scaled, .why = .runaway };
+    if (!plausible(x[0..n], limit)) return .{ .converged = false, .scaled = scaled, .why = .runaway };
     for (0..n) |i| {
         // Negated, so a NaN residual fails too.
         if (!(@abs(residual[i]) <= residualGate(opts, vals[sys.diag_slots[i]], x[i])))
@@ -405,6 +424,7 @@ pub fn jfnk(
     if (comptime @hasDecl(S, "beginSolve")) sys.beginSolve();
     @memcpy(x_old, x);
 
+    var limit: f64 = x_plausible;
     var iter: u16 = 0;
     while (iter < opts.max_iter) : (iter += 1) {
         if (comptime @hasDecl(S, "checkpoint")) if (iter != 0) {
@@ -415,6 +435,7 @@ pub fn jfnk(
 
         assembleShifted(sys, x, t, opts, hook);
         @memcpy(f0, sys.rhs[0..n]);
+        if (iter == 0) limit = plausibleLimit(sys, x, f0, hook.vals(sys));
         const v = hook.vals(sys);
         loadGmin(sys, v, null, x, opts);
         // Before the factor, which may overwrite `v`.
@@ -427,7 +448,7 @@ pub fn jfnk(
         applyPreconditioner(r, diag, slv);
         const beta = num.norm2(r);
 
-        if (beta < opts.abstol and residualConverged(sys, hook, x, f0, opts)) {
+        if (beta < opts.abstol and residualConverged(sys, hook, x, f0, opts, limit)) {
             @memset(r, 0);
             @memcpy(x_old, x);
             const limited = applyLimits(sys, x, x_old);
@@ -527,7 +548,7 @@ pub fn jfnk(
 
         // Limiting may clamp x, so it runs before the residual gate.
         const limited = applyLimits(sys, x, x_old);
-        const residual_ok = residualConverged(sys, hook, x, f0, opts);
+        const residual_ok = residualConverged(sys, hook, x, f0, opts, limit);
         // Publishes x_k+1: JFNK is not ngspice's iteration, and its inexact
         // steps leave x_k further out than a direct solve does.
         if (iter > 0 and scaled < 1.0 and residual_ok and !limited and load_ok and acceptStep(sys, x))
@@ -642,14 +663,18 @@ fn acceptStep(sys: anytype, x: []f64) bool {
 }
 
 /// Row-scaled residual gate, as in `finalizeStep`, that also rejects a
-/// non-finite residual or iterate.
-fn residualConverged(sys: anytype, hook: anytype, x: []const f64, residual: []const f64, opts: Options) bool {
+/// non-finite residual or an iterate past `limit`. A row with no diagonal
+/// (a V source's branch row) holds its KVL residual in volts to
+/// 10 (reltol |x| + vntol): JFNK has no delta test to govern it, and
+/// skipping the row accepted a cold x = 0 whose only residual was the
+/// source's own value (#152).
+fn residualConverged(sys: anytype, hook: anytype, x: []const f64, residual: []const f64, opts: Options, limit: f64) bool {
     assert(x.len == sys.n);
     var ok = true;
     for (x, residual, 0..) |xi, ri, i| {
         const rt = residualGate(opts, hook.diagAt(sys, sys.diag_slots[i]), xi);
         // Negated comparisons reject NaN too.
-        if (!(@abs(ri) <= rt) or !(@abs(xi) <= x_plausible)) ok = false;
+        if (!(@abs(ri) <= rt) or !(@abs(xi) <= limit)) ok = false;
     }
     return ok;
 }

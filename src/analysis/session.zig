@@ -666,7 +666,9 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .lstb => |o| if (o.margins) 5 else 8,
         .dcxf => |o| (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,
         .acxf => |o| 1 + (if (o.tf_only) @as(usize, 1) else 3) * o.sources.len,
-        .noise => |o| if (o.integrated) 1 else 2,
+        .noise => |o| try @import("ac/noise.zig").columnCount(allocator, topology.batches, topology.batch_types, o),
+        // Time, then peak and rms per probe.
+        .envelope => 1 + 2 * deck.probes.len,
         .four => 4,
         .disto => |o| if (o.plot == .summary) 4 else deck.probes.len + 1,
         .pz, .stb, .pnoise, .hbnoise, .phasenoise, .fft => 2,
@@ -676,7 +678,19 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .hbxf => |o| 1 + try hbSidebands(allocator, o) * topology.n,
         .hblin => |o| 1 + o.ports.len * o.ports.len + @intFromBool(o.noise and o.ports.len >= 2),
         .sp => |o| @import("ac/sp.zig").columns(@import("ac/sp.zig").modeCount(o.ports), o.lin),
-        .sens, .dcmatch, .dcsens, .acmatch => blk: {
+        // The parameters `.sens` lists, which isSensParam narrows (#154).
+        .sens => blk: {
+            var refs: std.ArrayList(ParamRef) = .empty;
+            defer refs.deinit(allocator);
+            var n: usize = 0;
+            for (topology.batches) |b| {
+                refs.clearRetainingCapacity();
+                try b.hooks.collect_params(b.ctx, allocator, &refs).unwrap();
+                for (refs.items) |r| n += @intFromBool(@import("sweep/sens.zig").isSensParam(b.type_name, r.param_name));
+            }
+            break :blk n;
+        },
+        .dcmatch, .dcsens, .acmatch => blk: {
             const groups = switch (query) {
                 inline .dcmatch, .dcsens, .acmatch => |o| o.variations.starts.len -| 1,
                 else => 0,

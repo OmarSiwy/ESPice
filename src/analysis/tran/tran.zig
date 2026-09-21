@@ -107,6 +107,29 @@ const TranHook = struct {
     }
 };
 
+/// The t = 0 row: `x` itself after an operating point. Under uic no
+/// operating point ran and `x` holds only the `.ic` values, which break KVL
+/// (V1 = 2 V read as 0 V, #161), so the row is instead one step solve over
+/// `hook`'s vanishing dt into `scratch`: every charge and flux stays at its
+/// initial value and the rest of the network is solved around them. The
+/// device state it leaves is reverted. Falls back to `x` when that solve
+/// fails. ngspice prints no t = 0 row under uic at all.
+fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratch: []f64, hook: TranHook, options: Options) ![]const f64 {
+    if (!options.uic) return x;
+    ckt.setSimState(.{ .t = 0, .dt = 1 / hook.c.ag0, .kind = .tran, .initial_step = true });
+    defer ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
+    simdCopy(scratch, x);
+    var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+    nr_opts.residual_tol = std.math.inf(f64);
+    ckt.clearRejectAt();
+    const nr = converger.run(ckt, ws, scratch, 0, nr_opts, hook) catch |err| switch (err) {
+        error.QueryCancelled, error.OutOfMemory => return err,
+        else => null, // else: a numerical failure keeps the `.ic` row
+    };
+    _ = ckt.stateCtl(.revert);
+    return if (nr != null and nr.?.converged) scratch else x;
+}
+
 /// Integrates from the operating point in `x` to options.t_stop, recording
 /// accepted points at t >= t_start into `waveform`. On return `x` holds the
 /// last accepted solution. `allocator` backs per-run scratch only. A dt
@@ -304,7 +327,15 @@ pub fn simulate(
 
     // tstart suppresses output, never the solve: [0, t_start) is integrated
     // with full history and not recorded.
-    if (options.t_start <= 0) try waveform.record(0, x, probes);
+    if (options.t_start <= 0) try waveform.record(0, try uicStart(ckt, ws, x, x_try, .{
+        .method = .backward_euler,
+        .c = integrator.coeffs(.backward_euler, delmin, delmin, options.xmu),
+        .q_prev = q_hist[1],
+        .i_prev = i_prev,
+        .q_prev2 = q_hist[2],
+        .a_vals = a_vals,
+        .has_charge = has_charge,
+    }, options), probes);
 
     var cur: []f64 = x;
     var trial: []f64 = x_try;
@@ -349,6 +380,8 @@ pub fn simulate(
             .accepted = steps,
         });
         attempted_dt = dt;
+        // The time the devices evaluate at; OPtran holds it at 0.
+        const t_dev = if (options.sources_at_zero) 0 else t + dt;
         // Publish the point this attempt aims at before anything evaluates
         // it: generated devices read Instance.abstime (§9.10 `$abstime`,
         // `ddt`), not the `t` argument. A rejected step comes back here with
@@ -356,7 +389,7 @@ pub fn simulate(
         // dt. §5.10.2: initial_step is the analysis' first step, final_step
         // the one that lands on t_stop.
         ckt.setSimState(.{
-            .t = t + dt,
+            .t = t_dev,
             .dt = dt,
             .kind = .tran,
             .initial_step = steps == 0,
@@ -381,7 +414,7 @@ pub fn simulate(
         const xfact = dt / dt_prev;
         predict(trial, cur, prev, xfact);
         ckt.predictFirstIterate(trial, cur, prev, dt / dt_prev2);
-        ckt.evalFollowsFirst(trial, t + dt);
+        ckt.evalFollowsFirst(trial, t_dev);
         _ = ckt.applyLimits(trial, cur);
         // ngspice's transient Newton accepts on the per-row delta test alone
         // (niconv.c): a step that has converged in x but leaves a residual on
@@ -390,7 +423,7 @@ pub fn simulate(
         var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         nr_opts.residual_tol = std.math.inf(f64);
         ckt.clearRejectAt();
-        const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
+        const nr = converger.run(ckt, ws, trial, t_dev, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure retries the step
         };
@@ -430,7 +463,7 @@ pub fn simulate(
         // A device state flipped inside this step (a switch crossed its
         // threshold): reject and shrink so the conductance step lands within
         // state_eps of the crossing instead of smeared across dt.
-        if (has_charge and !ckt.q_fresh) ckt.evalFollows(trial, t + dt, true);
+        if (has_charge and !ckt.q_fresh) ckt.evalFollows(trial, t_dev, true);
         if (dt > state_eps and ckt.stateCtl(.query)) {
             st.rej_state += 1;
             _ = ckt.stateCtl(.revert);
@@ -452,7 +485,7 @@ pub fn simulate(
             // x), so re-read q at the solution: the LTE, advanceCurrent and
             // the next residual all see q(trial).
             // `q_fresh`: the converger's `updateStates` already stamped them.
-            if (!ckt.q_fresh) ckt.evalQ(trial, t + dt);
+            if (!ckt.q_fresh) ckt.evalQ(trial, t_dev);
             simdCopy(q_hist[0], ckt.q_vec[0..n]);
             if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
             // Taken before the ring rotation below.

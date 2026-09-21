@@ -91,7 +91,10 @@ voltage or current, plus the input and output resistances. Plot
 
 DC sensitivity of the output to every device parameter, from one adjoint
 solve. Plot `Sensitivity Analysis`, one column per instance parameter,
-named like ngspice's (`v(r1)`, `v(vcc)`, `v(vin:acmag)`, ...).
+named like ngspice's (`v(r1)`, `v(vcc)`, `v(d1:is)`, ...). A V or I source
+contributes its DC value only, not its waveform parameters. A parameter
+whose default 0 means infinite (a BJT's `vaf`, `ikf`) reads 0, as in
+ngspice.
 
 ```text
 .sens v(out)
@@ -352,8 +355,10 @@ sine starting at the window, as ngspice's: `sin(0 1 1k)` reads 0 degrees.
 
 HSPICE FFT of a `.tran` output, resampled on NP points (rounded up to a
 power of two) and windowed (`rect`, `bart`, `hann`, `hamm`, `black`,
-`harris`, `gauss`, `kaiser`). Plot `FFT Analysis v(out)`: `frequency` and
-one complex column. `.meas fft` reads THD, SNR, SNDR, ENOB and SFDR from it.
+`harris`, `gauss`, `kaiser`; ALFA, default 3, shapes the last two, and
+`kaiser` is the symmetric Kaiser-Bessel window of Harris 1978). Plot
+`FFT Analysis v(out)`: `frequency` and one complex column. `.meas fft`
+reads THD, SNR, SNDR, ENOB and SFDR from it.
 
 ```text
 .fft v(out) NP=1024 WINDOW=hann

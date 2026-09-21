@@ -698,6 +698,11 @@ const MhbTests = struct {
     const f1: f64 = 1000;
     const f2: f64 = 1300;
 
+    test "residualNorm: a NaN residual never reads as converged (#83)" {
+        try testing.expectEqual(@as(f64, 3), impl.residualNorm(&.{ 1, -3, 2 }));
+        try testing.expect(std.math.isNan(impl.residualNorm(&.{ 1, std.math.nan(f64), 2 })));
+    }
+
     /// Expects `spec` to hold exactly the products (k1, k2), DC first and
     /// by frequency.
     fn expectLines(spec: impl.Spectrum, want: []const [2]i16) !void {

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "A node only an expression reads has no equation; the deck is refused before any analysis runs.",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice 45 stops with 'singular matrix: check node a'. Nothing stamps node a's KCL row, so v(a) is free and every analysis is singular."
+  },
+  "expect": {
+    "status": "error",
+    "category": "nonunique_operating_point",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "ca1223243429f2c09e0cea575b8d538d695fd937d75c1ece06bc6f821291e963"
+}
