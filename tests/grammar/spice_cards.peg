@@ -15,28 +15,38 @@
 # pairs in card order, `name(args)` groups, `{...}`/quoted expressions.
 
 Deck       <- card*
+# A dot keyword is the whole word (`!namechar` after it): `.optn` is no
+# `.opt`, as the frontend's card table and both manuals' keyword lists read
+# it. ngspice's inp.c matches some keywords as prefixes (`.opt*`,
+# `.control*`); that is undocumented and not ESPice's reading.
 card       <- (Subckt / Control / Block / Cond / dotcard / Element) nl
 
 # §2.5, D1: `.subckt name nodes [params:] defaults` ... `.ends [name]`;
 # `.macro`/`.eom` are the same. Definitions nest.
-Subckt     <- ('.subckt' / '.macro') s Name ports nl body Ends
+Subckt     <- ('.subckt' / '.macro') s Name ports nl sbody Ends
 ports      <- (s? !pairstart !'params:' field)* (s? ('params:' s?)? fields)?
+# §2.4.3: a definition holds no analysis card (#165).
+sbody      <- (!ends !Analysis !Temp card)*
 body       <- (!ends card)*
 ends       <- ('.ends' / '.eom') !namechar
 Ends       <- ends rest
 
 # §4.1: a `.control` block is ngspice's interpreter; its lines are skipped.
-Control    <- '.control' rest nl (!('.endc' !namechar) rest nl)* '.endc' rest
+# ESPice: the keyword exactly. ngspice's inp.c matches `.control` as a
+# prefix, so `.controls` opens a block there; the manual (§16.4) names only
+# `.control` and `.endc`.
+Control    <- '.control' !namechar rest nl (!('.endc' !namechar) rest nl)* '.endc' rest
 
 # D4, .data/.enddata and .variation/.end_variation: rows the variant runner
 # reads (src/frontend/variants.zig).
-Block      <- '.data' rest nl (!('.enddata' !namechar) rest nl)* '.enddata' rest
-            / '.variation' rest nl (!('.end_variation' !namechar) rest nl)* '.end_variation' rest
+# HSPICE `.DATA datanm pnam1 ...`: the table has a name.
+Block      <- '.data' s Key rest nl (!('.enddata' !namechar) rest nl)* '.enddata' rest
+            / '.variation' !namechar rest nl (!('.end_variation' !namechar) rest nl)* '.end_variation' rest
 
 # §4.1, D4: `.if (cond)` ... `.elseif (cond)` ... `.else` ... `.endif`.
-Cond       <- '.if' s? cond nl body (Elseif nl body)* (Else nl body)? '.endif' rest
-Elseif     <- '.elseif' s? cond
-Else       <- '.else' rest
+Cond       <- '.if' !namechar s? cond nl body (Elseif nl body)* (Else nl body)? '.endif' rest
+Elseif     <- '.elseif' !namechar s? cond
+Else       <- '.else' !namechar rest
 cond       <- '(' x Ternary x ')' rest / Ternary rest
 
 dotcard    <- Model / Param / Func / Options / Temp / Ic / Nodeset / Global
@@ -59,24 +69,24 @@ FuncDef    <- Key s? '(' s? (Key (s? ',' s? Key)*)? s? ')' s? '=' s? value
 Func       <- '.func' s Key s? '(' s? (Key (s? ',' s? Key)*)? s? ')' s? ('=' s?)? value
 
 # §4.3: `.options a=1 b`.
-Options    <- ('.options' / '.option' / '.opts' / '.opt') fields?
+Options    <- ('.options' / '.option' / '.opts' / '.opt') !namechar fields?
 
 # §4.2: `.temp t` (HSPICE: a list, each run once).
-Temp       <- ('.temperature' / '.temp') (s? '=')? fields?
+Temp       <- ('.temperature' / '.temp') !namechar (s? '=')? fields?
 
 # §4.4: `.ic v(n)=x ...`; `.dcvolt` is `.ic`.
-Ic         <- ('.ic' / '.dcvolt') fields?
-Nodeset    <- '.nodeset' fields?
+Ic         <- ('.ic' / '.dcvolt') !namechar fields?
+Nodeset    <- '.nodeset' !namechar fields?
 
-Global     <- '.global' fields?
+Global     <- '.global' !namechar fields?
 
 # §4.1, D3: include-like cards: the path as written. `.include`/`.inc` of a
 # netlist, `.lib` and HSPICE `.load` are expanded before this stage
 # (frontend/source.zig); an `.include` left here names an HDL model.
-Include    <- ('.include' / '.hdl' / '.osdi_include' / '.pre_osdi' / '.verilog') rest
+Include    <- ('.include' / '.hdl' / '.osdi_include' / '.pre_osdi' / '.verilog') !namechar rest
 
 # §4.5: output selection.
-Save       <- '.save' fields?
+Save       <- '.save' !namechar fields?
 
 # §4.6 and the HSPICE analysis forms: `.<kind> fields`. The kind table is
 # the frontend's (`cards` in netlist.zig); each card's own argument rules
@@ -93,15 +103,18 @@ Kind       <- 'acphasenoise' / 'acmatch' / 'acxf' / 'ac' / 'dcmatch' / 'dcinc' /
 # (netlist.zig `cards` and `variant_cards`): its text is kept, not split
 # into fields. A dot card outside the list is refused, as ngspice refuses one
 # ("unimplemented dot command", §4).
+# A `.endc` with no `.control` open is set aside: ngspice warns "Missing
+# .control statement" and reads on.
 Other      <- '.' OtherKind !namechar rest
 OtherKind  <- 'measure' / 'meas' / 'jitter' / 'check' / 'dout' / 'biaschk' / 'power' / 'stimuli' / 'stim'
             / 'store' / 'sample' / 'mosra' / 'appendmodel' / 'connect' / 'pat' / 'print' / 'plot'
             / 'probe' / 'graph' / 'width' / 'title' / 'protect' / 'unprotect' / 'prot' / 'unprot'
-            / 'step'
+            / 'step' / 'endc'
 
 # §3.1: `name nodes... tail`: a field list. Which fields are nodes, which
-# the model, is decided by model lookup (§3.1 table), not by syntax.
-Element    <- &[a-zA-Z] Name fields?
+# the model, is decided by model lookup (§3.1 table), not by syntax. Every
+# element has nodes, so a name alone is no card (ngspice: "bad syntax").
+Element    <- &[a-zA-Z] Name fields
 
 # Fields, §1.8: blanks, `,`, `=`, `(` and `)` separate; `=` pairs a key with
 # its value and `(` after a word opens a group.

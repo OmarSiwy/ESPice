@@ -17,7 +17,9 @@ body       <- (stop / Line / skip)*
 # §1.3: a line whose first non-blank character is `@` ends the file.
 stop       <- blank* '@' .*
 
-# §1.5: a comment line. `*`, `#`, `$` and `;` are silent; the punctuation
+# §1.5: a comment line. A line holding only an end-of-line `//` comment
+# becomes one too (inp_stripcomments_line), so a `+` after it continues
+# nothing. `*`, `#`, `$` and `;` are silent; the punctuation
 # `= [ ] ? ( ) & % " ! : ,` and form feed are turned into comments with a
 # warning. §1.3: blank lines are dropped. §1.6: a `+` line with no statement
 # to continue is ignored ("Illegal continuation line").
@@ -26,13 +28,14 @@ skip       <- blank* [*#$;=\[\]?()&%"!:,\x0c] (!eol .)* eolx
             / blank* eol
             / blank+ !.
             / blank* '+' (!eol .)* eolx
+            / blank* '//' (!glue_end !eol .)* eolx
 
 # §1.7: `.end` (alone or followed by a blank) becomes a comment, and
 # reading goes on: a card after it is still in the circuit.
 end        <- blank* '.end'i ![^ \t\r\n] (!eol .)* eolx
 
 # A statement: its first physical line, then its continuations.
-Line       <- blank* ![+*#$;@=\[\]?()&%"!:,\x0c] !end !eolx Piece comment? more* eolx
+Line       <- blank* ![+*#$;@=\[\]?()&%"!:,\x0c] !end !eolx !('//' (!glue_end !eol .)* eolx) Piece comment? more* eolx
 
 # §1.6: `+` as the first non-blank character continues the statement, past
 # comment and blank lines; a trailing `\\` continues it too (the backslashes

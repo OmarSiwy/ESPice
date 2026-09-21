@@ -37,7 +37,9 @@ Probe      <- [vi] x '(' x Pname (x ',' x Pname)? x ')'
 Pname      <- (![ \t,()\n] .)+
 Call       <- Ref x '(' x (Ternary (x ',' x Ternary)*)? x ')'
 Num        <- Mantissa ([e] [+\-]? [0-9]+)? [a-z]*
-Ref        <- [a-zA-Z_$] [a-zA-Z0-9_.$!]*
+# No `!` in a name: `a!=b` is an inequality (ngspice manual §2.8.5's `!=`),
+# and no corpus deck or case names a parameter with one.
+Ref        <- [a-zA-Z_$] [a-zA-Z0-9_.$]*
 x          <- [ \t]*
 
 OrOp       <- '||'
