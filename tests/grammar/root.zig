@@ -5,6 +5,7 @@ pub const peg = @import("peg.zig");
 pub const canon = @import("canon.zig");
 pub const lines = @import("lines.zig");
 pub const corpus = @import("corpus.zig");
+pub const gen = @import("gen.zig");
 
 test {
     _ = peg;
@@ -13,6 +14,7 @@ test {
     _ = @import("vec_check.zig");
     _ = @import("include_check.zig");
     _ = @import("data_check.zig");
+    _ = gen;
 }
 
 fn grammar(arena: std.mem.Allocator, comptime file: []const u8) !peg.Grammar {
@@ -130,6 +132,7 @@ const line_cases = struct {
         "t\nv1 (a 0) vsource file=\"x // y\nr1 (a b) resistor r=1\n",
     };
     const ngspice = [_][]const u8{
+        "t\n//only a comment\n+ r9 continues nothing\n  // indented\nr1 a b 1 //c\n.control\n//x\n.endc\n",
         "title\nR1 a b 1k $ comment\n.end\n",
         "title\n# hash comment\n; semicolon comment\n$ dollar comment\nR1 a b 1k\n",
         "title\nR1 a$b c 1k\n",
@@ -166,10 +169,13 @@ fn checkLines(comptime d: netlist.Dialect, comptime file: []const u8, cases: []c
     const a = arena.allocator();
     const g = try grammar(a, file);
     var inputs: std.ArrayList(struct { name: []const u8, src: []const u8 }) = .empty;
-    for (cases, 0..) |src, i| try inputs.append(a, .{ .name = try std.fmt.allocPrint(a, "case {d}", .{i}), .src = src });
     for (try corpus.load(a, std.testing.io)) |deck| if (deck.dialect == d) try inputs.append(a, .{ .name = deck.path, .src = deck.src });
+    const fixtures = inputs.items.len;
+    for (cases, 0..) |src, i| try inputs.append(a, .{ .name = try std.fmt.allocPrint(a, "case {d}", .{i}), .src = src });
     var bad: usize = 0;
-    for (inputs.items) |in| {
+    for (inputs.items, 0..) |in, k| {
+        // No Spectre deck is in the numeric corpus yet: its worklist would be the whole grammar.
+        if (k == fixtures and d != .spectre) bad += try checkFixtureGaps(a, g, file);
         var diag: peg.Diag = .{};
         const want = lines.oracle(a, g, in.src, netlist.lines.Syntax(d).fold_case, &diag) catch |err| {
             bad += 1;
@@ -192,6 +198,53 @@ fn checkLines(comptime d: netlist.Dialect, comptime file: []const u8, cases: []c
         std.debug.print("{s}: {d} inputs, {d} disagree, {d} coverage gaps\n", .{ file, inputs.items.len, bad, holes.len });
         return error.GrammarCheck;
     }
+}
+
+/// The fixture-coverage worklist: per grammar, the alternatives and
+/// optional parts no `tests/fixtures` deck exercises, one
+/// `grammar\trule\tnode` row each. The hand cases above reach every one of
+/// them (the `peg.gaps` gate); a row here is syntax no simulated deck
+/// checks end to end. Removing one means adding a fixture that reaches it.
+const fixture_gaps_path = "tests/grammar/FIXTURE_GAPS.tsv";
+
+/// `g`'s gaps after the fixture decks alone, against its rows (`key`) in
+/// `FIXTURE_GAPS.tsv`. Returns how many rows are new or stale.
+fn checkFixtureGaps(a: std.mem.Allocator, g: peg.Grammar, key: []const u8) !usize {
+    var got: std.ArrayList([]const u8) = .empty;
+    for (try peg.gaps(a, g)) |h| {
+        var w: std.Io.Writer.Allocating = .init(a);
+        try w.writer.print("{s}\t", .{h.rule});
+        try peg.render(&w.writer, g, h.node);
+        try got.append(a, w.written());
+    }
+    return checkWorklist(a, fixture_gaps_path, key, got.items);
+}
+
+/// `rows` against the rows of worklist file `path` whose first column is
+/// `key`. Prints each row that is new (add it, or fix its cause) or stale
+/// (its cause is gone: delete it), and returns how many.
+fn checkWorklist(a: std.mem.Allocator, path: []const u8, key: []const u8, rows: []const []const u8) !usize {
+    const listed = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 20));
+    var want: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var lines_it = std.mem.tokenizeScalar(u8, listed, '\n');
+    while (lines_it.next()) |row| {
+        if (row[0] == '#') continue;
+        const tab = std.mem.indexOfScalar(u8, row, '\t') orelse return error.Malformed;
+        if (std.mem.eql(u8, row[0..tab], key)) try want.put(a, row[tab + 1 ..], {});
+    }
+    var got: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var mismatches: usize = 0;
+    for (rows) |row| {
+        if ((try got.getOrPut(a, row)).found_existing) continue;
+        if (want.contains(row)) continue;
+        mismatches += 1;
+        std.debug.print("{s}: new row:\n{s}\t{s}\n", .{ path, key, row });
+    }
+    for (want.keys()) |row| if (!got.contains(row)) {
+        mismatches += 1;
+        std.debug.print("{s}: stale row, delete it:\n{s}\t{s}\n", .{ path, key, row });
+    };
+    return mismatches;
 }
 
 /// The vendored Spectre corpus (tests/grammar/spectre_corpus), each deck
@@ -308,10 +361,26 @@ fn printDiff(want: []const u8, got: []const u8) void {
     }
 }
 
+/// How the two readers took one deck. `unnamed`: the frontend refused it
+/// with an error that names no fault in the deck (out of memory, or a table
+/// overflow, on an input a few hundred bytes long).
+const Verdict = enum { same, differ, oracle_refused, frontend_refused, both_refused, unnamed };
+
+/// Set while the shrinker re-runs a failing deck: the comparisons print nothing.
+var quiet = false;
+
+/// The frontend's refusal of `err` as a verdict: null for a named fault.
+fn unnamed(err: netlist.Error) ?Verdict {
+    return switch (err) {
+        error.ParseError, error.UnsupportedCard, error.ModelBinNotFound => null,
+        error.OutOfMemory, error.CircuitTooLarge => .unnamed,
+    };
+}
+
 /// One deck through both readers: the grammar's (lines, cards, lowering)
 /// and the frontend's (`netlist.parse`, canon.zig), after the same include
 /// expansion `prepare` does.
-fn compareDeck(a: std.mem.Allocator, comptime d: netlist.Dialect, lg: peg.Grammar, cg: peg.Grammar, path: []const u8, src: []const u8) !enum { same, differ, oracle_refused, frontend_refused, both_refused } {
+fn compareDeck(a: std.mem.Allocator, comptime d: netlist.Dialect, lg: peg.Grammar, cg: peg.Grammar, path: []const u8, src: []const u8) !Verdict {
     const origin = try std.fmt.allocPrint(a, "tests/fixtures/{s}", .{path});
     const runs = try netlist.source.splitAlters(a, src);
     const text = netlist.source.expand(std.testing.io, std.heap.page_allocator, a, origin, runs[0]) catch return .both_refused;
@@ -334,17 +403,20 @@ fn compareDeck(a: std.mem.Allocator, comptime d: netlist.Dialect, lg: peg.Gramma
             break :blk null;
         };
     } else null;
-    const nl: ?netlist.Netlist = netlist.parse(a, text, d) catch null;
+    const nl: ?netlist.Netlist = netlist.parse(a, text, d) catch |err| blk: {
+        if (unnamed(err)) |v| return v;
+        break :blk null;
+    };
     if (low == null and nl == null) return .both_refused;
     if (low == null) {
-        std.debug.print("{s}", .{why.written()});
+        if (!quiet) std.debug.print("{s}", .{why.written()});
         return .oracle_refused;
     }
     if (nl == null) return .frontend_refused;
     var out: std.Io.Writer.Allocating = .init(a);
     try canon.write(&out.writer, &nl.?, &low.?.loose);
     if (std.mem.eql(u8, low.?.text, out.written())) return .same;
-    printDiff(low.?.text, out.written());
+    if (!quiet) printDiff(low.?.text, out.written());
     return .differ;
 }
 
@@ -425,6 +497,7 @@ const card_cases = struct {
         "t\nv1 1 0 1\nr1 1 2 1k\nr2 2 0 1k\n.tf v(2,0) v1\n",
         "t\nv1 1 0 1\nb1 2 0 v=v(1,0)*2\nr1 2 0 1k\n",
         "t\nr1 1 0 1k\n.end\n",
+        "t\nr1 1 0 1k\n.endc\n",
         "t\nr1 1 0 1k\n.stateye\n",
         "t\n.foo bar\nr1 1 0 1k\n",
         "t\nr1 1 0 1k\n.dc temp 0 50 10\n.ac dec 10 1 1meg\n.tran 1n 1u 0 1n uic\n.op\n",
@@ -516,7 +589,6 @@ fn checkNetlistCorpus(comptime d: netlist.Dialect, comptime lines_file: []const 
     const a = arena.allocator();
     const lg = try grammar(a, lines_file);
     const cg = try grammarOf(a, card_files);
-    const Verdict = @typeInfo(@typeInfo(@TypeOf(compareDeck)).@"fn".return_type.?).error_union.payload;
     var counts = std.EnumArray(Verdict, usize).initFill(0);
     for (try corpus.load(a, std.testing.io)) |deck| {
         if (deck.dialect != d) continue;
@@ -526,6 +598,7 @@ fn checkNetlistCorpus(comptime d: netlist.Dialect, comptime lines_file: []const 
         counts.getPtr(verdict).* += 1;
         if (verdict != .same and verdict != .both_refused) std.debug.print("{s}: {t}\n", .{ deck.path, verdict });
     }
+    const stale = try checkFixtureGaps(a, cg, card_files[card_files.len - 1]);
     for (cases) |src| {
         var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer scratch.deinit();
@@ -539,7 +612,7 @@ fn checkNetlistCorpus(comptime d: netlist.Dialect, comptime lines_file: []const 
         try peg.render(&w.writer, cg, h.node);
         std.debug.print("{t} cards: rule {s}: never matched: {s}\n", .{ d, h.rule, w.written() });
     }
-    if (counts.get(.differ) + counts.get(.oracle_refused) + counts.get(.frontend_refused) + holes.len > 0) {
+    if (counts.get(.differ) + counts.get(.oracle_refused) + counts.get(.frontend_refused) + counts.get(.unnamed) + holes.len + stale > 0) {
         var it = counts.iterator();
         while (it.next()) |e| std.debug.print("{t} {t}: {d}\n", .{ d, e.key, e.value.* });
         return error.Mismatch;
@@ -822,7 +895,7 @@ pub const lower_spectre = @import("lower_spectre.zig");
 
 /// One Spectre deck through both readers: the grammar's (lines, statements,
 /// the oracle's translation, then the SPICE oracle) and the frontend's.
-fn compareSpectre(a: std.mem.Allocator, lg: peg.Grammar, sg: peg.Grammar, cg: peg.Grammar, name: []const u8, src: []const u8) !enum { same, differ, oracle_refused, frontend_refused, both_refused } {
+fn compareSpectre(a: std.mem.Allocator, lg: peg.Grammar, sg: peg.Grammar, cg: peg.Grammar, name: []const u8, src: []const u8) !Verdict {
     var diag: peg.Diag = .{};
     // The oracle's refusal, printed only when the frontend reads the deck.
     var why: std.Io.Writer.Allocating = .init(a);
@@ -848,6 +921,7 @@ fn compareSpectre(a: std.mem.Allocator, lg: peg.Grammar, sg: peg.Grammar, cg: pe
         };
     };
     const nl: ?netlist.Netlist = netlist.parse(a, src, .spectre) catch |err| blk: {
+        if (unnamed(err)) |v| return v;
         // Name where the frontend's rewrite stops, for the report.
         var dl: peg.Diag = .{};
         if (lines.oracle(a, lg, src, false, &dl)) |l| {
@@ -855,7 +929,7 @@ fn compareSpectre(a: std.mem.Allocator, lg: peg.Grammar, sg: peg.Grammar, cg: pe
             for (l.lines, 0..) |_, i| {
                 _ = netlist.spectre_rewrite.translate(a, l.lines[0 .. i + 1], &kinds) catch |e| {
                     if (e != error.ParseError or i + 1 == l.lines.len) {
-                        if (low != null) std.debug.print("{s}: frontend: {t} ({t}) at: {s}\n", .{ name, err, e, l.lines[i] });
+                        if (low != null and !quiet) std.debug.print("{s}: frontend: {t} ({t}) at: {s}\n", .{ name, err, e, l.lines[i] });
                         break;
                     }
                     continue;
@@ -866,14 +940,14 @@ fn compareSpectre(a: std.mem.Allocator, lg: peg.Grammar, sg: peg.Grammar, cg: pe
     };
     if (low == null and nl == null) return .both_refused;
     if (low == null) {
-        std.debug.print("{s}", .{why.written()});
+        if (!quiet) std.debug.print("{s}", .{why.written()});
         return .oracle_refused;
     }
     if (nl == null) return .frontend_refused;
     var out: std.Io.Writer.Allocating = .init(a);
     try canon.write(&out.writer, &nl.?, &low.?.loose);
     if (std.mem.eql(u8, low.?.text, out.written())) return .same;
-    printDiff(low.?.text, out.written());
+    if (!quiet) printDiff(low.?.text, out.written());
     return .differ;
 }
 
@@ -887,7 +961,6 @@ test "spectre netlist: corpus" {
     const lg = try grammar(a, "spectre_lines.peg");
     const sg = try grammar(a, "spectre.peg");
     const cg = try grammarOf(a, &.{ "spice_cards.peg", "hspice.peg" });
-    const Verdict = @typeInfo(@typeInfo(@TypeOf(compareSpectre)).@"fn".return_type.?).error_union.payload;
     var counts = std.EnumArray(Verdict, usize).initFill(0);
     var decks: std.ArrayList(NamedDeck) = .empty;
     try decks.appendSlice(a, try spectreDecks(a));
@@ -899,9 +972,149 @@ test "spectre netlist: corpus" {
         counts.getPtr(v).* += 1;
         if (v != .same and v != .both_refused) std.debug.print("{s}: {t}\n", .{ deck.name, v });
     }
-    if (counts.get(.differ) + counts.get(.oracle_refused) + counts.get(.frontend_refused) > 0) {
+    if (counts.get(.differ) + counts.get(.oracle_refused) + counts.get(.frontend_refused) + counts.get(.unnamed) > 0) {
         var it = counts.iterator();
         while (it.next()) |e| std.debug.print("spectre {t}: {d}\n", .{ e.key, e.value.* });
         return error.Mismatch;
     }
 }
+
+/// The generator's fixed seed: every run derives the same decks, so a
+/// failure names its seed and reproduces anywhere.
+const gen_seed = 0x121_5eed;
+
+/// `count` decks derived from the card grammar (`unit`, one statement, a
+/// few per deck after a title line), each through both readers like a
+/// corpus deck, then once more with one random byte edit. A mutant the
+/// frontend reads but the grammar refuses, any disagreement, and a refusal
+/// with an unnamed error all fail. A frontend refusal of a grammar sentence
+/// is only counted: the grammar is syntax, and field counts, names and
+/// block contents are the frontend's to check. Failures are
+/// grouped by verdict and leading card; the first of each group prints
+/// shrunk. A frontend panic or failed assert ends the run on its own: run
+/// it in ReleaseSafe and they act as oracles.
+fn generated(comptime d: netlist.Dialect, comptime lines_file: []const u8, comptime card_files: []const []const u8, unit: []const u8, count: usize) !void {
+    std.testing.log_level = .err;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const lg = try grammar(a, lines_file);
+    const cg = try grammarOf(a, card_files);
+    const sg = if (d == .spectre) try grammar(a, "spectre.peg") else {};
+    const gg = if (d == .spectre) sg else cg;
+    var prng: std.Random.DefaultPrng = .init(gen_seed);
+    const rng = prng.random();
+    var g = try gen.Gen.init(a, gg, rng, 10, 200);
+    const unit_rule = gg.rule(unit);
+    var counts = std.EnumArray(Verdict, usize).initFill(0);
+    // Per failure group (verdict, derived or mutant, leading card), its count.
+    var groups: std.StringArrayHashMapUnmanaged(usize) = .empty;
+    // Known groups need no shrunk example.
+    const listed = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, generated_path, a, .limited(1 << 20));
+    var scratch: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer scratch.deinit();
+    for (0..count) |_| {
+        _ = scratch.reset(.retain_capacity);
+        const s = scratch.allocator();
+        var body: std.ArrayList(u8) = .empty;
+        try body.appendSlice(s, "t\n");
+        for (0..1 + rng.uintLessThan(usize, 3)) |_| {
+            if (try g.sentence(s, unit_rule, 16)) |stmt| try body.appendSlice(s, stmt);
+        }
+        const mutant = try std.mem.concat(s, u8, &.{ "t\n", try g.mutate(s, body.items[2..]) });
+        for ([_][]const u8{ body.items, mutant }, [_]bool{ true, false }) |deck, derived| {
+            quiet = true;
+            const v = if (d == .spectre) try compareSpectre(s, lg, sg, cg, "generated", deck) else try compareDeck(s, d, lg, cg, "generated", deck);
+            quiet = false;
+            counts.getPtr(v).* += 1;
+            switch (v) {
+                .same, .both_refused => continue,
+                // A derived deck the oracle refuses is a sentence its later
+                // stages (lines, lowering) do not take: no finding.
+                .oracle_refused => if (derived) continue,
+                // The grammar is syntax only: `e ""` is a sentence, and an
+                // element with the wrong field count is the frontend's to
+                // refuse (ngspice: "bad syntax"). Counted, not a finding.
+                .frontend_refused => continue,
+                .differ, .unnamed => {},
+            }
+            const lines_only = try shrink(s, d, lg, sg, cg, deck, v, false);
+            const key = try std.fmt.allocPrint(a, "{t} {s} {s}", .{ v, if (derived) "derived" else "mutant", leading(lines_only) });
+            const gop = try groups.getOrPut(a, key);
+            if (gop.found_existing) {
+                gop.value_ptr.* += 1;
+                continue;
+            }
+            gop.value_ptr.* = 1;
+            if (std.mem.indexOf(u8, listed, key) != null) continue;
+            const small = try shrink(s, d, lg, sg, cg, lines_only, v, true);
+            std.debug.print("--- {s}, shrunk:\n{s}\n", .{ key, small });
+            _ = if (d == .spectre) try compareSpectre(s, lg, sg, cg, "shrunk", small) else try compareDeck(s, d, lg, cg, "shrunk", small);
+        }
+    }
+    const stale = try checkWorklist(a, generated_path, @tagName(d), groups.keys());
+    if (stale + counts.get(.unnamed) > 0) {
+        var it = counts.iterator();
+        while (it.next()) |e| std.debug.print("{t} generated {t}: {d}\n", .{ d, e.key, e.value.* });
+        return error.Mismatch;
+    }
+}
+
+/// The generator's disagreement groups, one `dialect\tgroup` row each, with
+/// the cause on the comment line above it. A group no row names, or a row no
+/// group fills, fails the generated tests.
+const generated_path = "tests/grammar/GENERATED.tsv";
+
+/// A deck's group name: its first card's dot keyword (letters only), or
+/// its element letter.
+fn leading(deck: []const u8) []const u8 {
+    const body = deck[(std.mem.indexOfScalar(u8, deck, '\n') orelse return "") + 1 ..];
+    const t = std.mem.trimStart(u8, body, " \t");
+    if (t.len == 0) return "";
+    if (t[0] != '.') return t[0..1];
+    var n: usize = 1;
+    while (n < t.len and std.ascii.isAlphabetic(t[n])) n += 1;
+    return t[0..n];
+}
+
+/// `deck` cut down a line at a time, then (with `bytes`) a byte at a time,
+/// while its verdict stays `want`.
+fn shrink(a: std.mem.Allocator, comptime d: netlist.Dialect, lg: peg.Grammar, sg: anytype, cg: peg.Grammar, deck: []const u8, want: Verdict, bytes: bool) ![]const u8 {
+    quiet = true;
+    defer quiet = false;
+    var cur = deck;
+    var progress = true;
+    // Each pass that keeps going removes at least one byte.
+    var passes: usize = 0;
+    while (progress) : (passes += 1) {
+        std.debug.assert(passes <= deck.len);
+        progress = false;
+        for ([_]bool{ true, false }) |by_line| {
+            if (!by_line and !bytes) continue;
+            var at: usize = 2; // keep the title line
+            while (at < cur.len) {
+                const end = if (by_line) (std.mem.indexOfScalarPos(u8, cur, at, '\n') orelse cur.len - 1) + 1 else at + 1;
+                const cand = try std.mem.concat(a, u8, &.{ cur[0..at], cur[end..] });
+                const v = if (d == .spectre) try compareSpectre(a, lg, sg, cg, "shrink", cand) else try compareDeck(a, d, lg, cg, "shrink", cand);
+                if (v == want) {
+                    cur = cand;
+                    progress = true;
+                } else at = end;
+            }
+        }
+    }
+    return cur;
+}
+
+test "ngspice netlist: generated" {
+    try generated(.ngspice, "ngspice_lines.peg", &.{ "spice_cards.peg", "ngspice.peg" }, "card", 3000);
+}
+
+test "hspice netlist: generated" {
+    try generated(.hspice, "hspice_lines.peg", &.{ "spice_cards.peg", "hspice.peg" }, "card", 3000);
+}
+
+test "spectre netlist: generated" {
+    try generated(.spectre, "spectre_lines.peg", &.{ "spice_cards.peg", "hspice.peg" }, "line", 3000);
+}
+

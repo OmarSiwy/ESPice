@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "ngspice line syntax: a // comment-only line (#164), a continuation after it, ; // $ end-of-line comments, a \\\\ continuation, the mil scale, .temp, .opts and subcircuit params:",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "x1 is two 2k resistors from in to 0 through mid: v(mid)=1. r3=1e6 mil=25.4 ohm. i(v1)=-(2/25.4+2/4000).",
+    "cross_check": "ngspice 44.2 (ngspice -b) agrees on every column"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(mid)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              1.0
+            ]
+          },
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              2.0
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.07924015748031496
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4e3d96a11ffe41a517a4752a312f2983e61d79052e6117479ee119617d46db73"
+}
