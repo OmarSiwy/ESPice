@@ -525,6 +525,7 @@ PASS	fixtures/op/divider_balanced.sp
 PASS	fixtures/op/divider_default.sp
 PASS	fixtures/op/floating_voltage_source.sp
 PASS	fixtures/op/gigaohm_load.sp
+PASS	fixtures/op/huge_source.sp
 PASS	fixtures/op/inductor_short_dc.sp
 PASS	fixtures/op/kilovolt_supply.sp
 PASS	fixtures/op/ltra_op_series_resistance.sp
@@ -539,6 +540,7 @@ PASS	fixtures/op/ratio_million_to_one.sp
 PASS	fixtures/op/ratio_one_to_million.sp
 PASS	fixtures/op/series_sources.sp
 PASS	fixtures/op/tiny_output.sp
+PASS	fixtures/op/tiny_resistors.sp
 PASS	fixtures/op/unequal_nondecimal.sp
 PASS	fixtures/op/vccs_sign.sp
 PASS	fixtures/op/vcvs_negative_gain.sp
