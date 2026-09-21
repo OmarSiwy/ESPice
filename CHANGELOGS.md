@@ -16,6 +16,10 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.four` phases use ngspice's sine reference: `sin(0 1 1k)` reads 0 degrees, was -90 (#148).
 - `.four` analyses the last period of the deck's `.tran` (stop time, `uic`, `.ic`) instead of its own 5-period run (#147).
 - C and L instance `ic=` seeds a `.tran ... uic` start instead of being dropped (#145).
+- A malformed card's `ParseError` names the card it stopped at (#144).
+- A stray `.enddata` or `.end_variation` is refused as `ParseError` instead of read as nothing (#162).
+- An ngspice line holding only a `//` comment is a comment line, not a `ParseError` (and no longer a panic inside `.control` in safe builds) (#164).
+- An analysis card inside a `.subckt` is refused as `UnsupportedCard` instead of run as a top-level analysis (#165).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

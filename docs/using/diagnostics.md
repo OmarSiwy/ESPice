@@ -15,13 +15,18 @@ Error: bad_args.sp: InvalidAnalysisArguments
 | Error | Cause | Fix |
 |---|---|---|
 | `FileNotFound` | the deck, an `.include`, a `.lib` file or a data file does not exist | paths resolve against the directory of the file that names them |
-| `ParseError` | a card ESPice cannot read: a missing node or value, an unbalanced parenthesis, a keyword where a node belongs | check the card's syntax in the [reference](reference.md) |
-| `UnsupportedCard` | a dot card or element form ESPice does not simulate; the line is printed | see [what is not supported](dialects.md#what-is-not-supported-or-differs) |
+| `ParseError` | a card ESPice cannot read: a missing node or value, an unbalanced parenthesis, a keyword where a node belongs, a block close (`.ends`, `.endif`, `.enddata`, `.end_variation`) with no block open; the card is printed | check the card's syntax in the [reference](reference.md) |
+| `UnsupportedCard` | a dot card or element form ESPice does not simulate, or an analysis card inside a `.subckt`; the line is printed | see [what is not supported](dialects.md#what-is-not-supported-or-differs) |
 | `UnresolvedParameter` | an `R`, `C` or `L` value names a parameter no `.param` defines | define it, or check its spelling and scope |
 | `OsdiUnsupported` | `pre_osdi` or `.osdi_include` | load the Verilog-A source with `.hdl`; see [Verilog-A](devices.md#osdi-is-not-loaded) |
 | `UnsupportedDevice` | a `.model` LEVEL with no built-in model; a warning names it | see the [LEVEL tables](devices.md#model-type-and-level) |
 | `LibrarySectionNotFound`, `InvalidLibrarySection` | `.lib file section` names a section the file does not have | check the section names inside the library |
 | `IncludeDepthExceeded` | includes nested more than 32 deep, usually a file including itself | |
+
+```text
+error: netlist: cannot read the card: .subckt
+Error: bad_subckt.sp: ParseError
+```
 
 ```text
 error: netlist: unsupported card: .foo 1 2
