@@ -447,6 +447,16 @@ pub fn build(b: *std.Build) void {
     run_correctness.addPassthruArgs();
     test_step.dependOn(&run_correctness.step);
 
+    // Metamorphic rewrites of the linear decks (tests/metamorphic.zig): each
+    // must leave every result where it was.
+    const run_metamorphic = b.addRunArtifact(correctness);
+    run_metamorphic.setCwd(b.path("."));
+    run_metamorphic.addArtifactArg2(exe, .{});
+    run_metamorphic.addArg("--metamorphic");
+    run_metamorphic.addPassthruArgs();
+    b.step("test-metamorphic", "Check that metamorphic rewrites of the fixture decks keep their results").dependOn(&run_metamorphic.step);
+    test_step.dependOn(&run_metamorphic.step);
+
     // The same corpus and expectations on the device path. Not part of
     // `test`: it needs a GPU, and without one every deck fails by design.
     const run_gpu_corpus = b.addRunArtifact(correctness);
@@ -500,6 +510,7 @@ pub fn build(b: *std.Build) void {
     const run_harness_tests = t.run(M.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
     run_harness_tests.setCwd(b.path("."));
     run_correctness.step.dependOn(&run_harness_tests.step);
+    run_metamorphic.step.dependOn(&run_harness_tests.step);
 
     const bench_runner = b.addExecutable(.{
         .name = "bench-runner",
