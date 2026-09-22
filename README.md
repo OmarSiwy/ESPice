@@ -15,7 +15,6 @@ it is built to last.
 - Zig 0.16
 - [VerA](https://github.com/OmarSiwy/VerA): the Verilog-A / Verilog frontends and the device contract
 - [Gompute](https://github.com/OmarSiwy/Gompute): GPU compute; compiles the shared device kernels for host, CUDA and HIP
-- Verilator (only for the digital HDL models)
 
 Both are pinned git dependencies in `build.zig.zon`, so a fresh checkout builds
 on its own. Co-developing either one means pointing its entry back at a local
