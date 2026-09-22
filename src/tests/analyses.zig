@@ -386,6 +386,34 @@ test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays 
     try std.testing.expect(std.mem.startsWith(u8, res.varnames[res.varnames.len - 1], "v("));
 }
 
+test "sensing: a Spectre cccs binds the first exact-case source of its probe name" {
+    // F1 mirrors i(VCase) = -2 mA into out1 (+2 V), F2 i(vcase) = -3 mA
+    // (+3 V); binding the duplicate VCase would read 9 V.
+    const problem = try api.Problem.init(std.testing.allocator, std.testing.io, .{
+        .source = .{ .bytes = .{ .data =
+        \\// Spectre keeps case: VCase and vcase are two sources
+        \\VCase (first 0) vsource dc=2
+        \\vcase (second 0) vsource dc=3
+        \\VCase (duplicate 0) vsource dc=9
+        \\R1 (first 0) resistor r=1k
+        \\R2 (second 0) resistor r=1k
+        \\R3 (duplicate 0) resistor r=1k
+        \\F1 (out1 0) cccs probe=VCase gain=1
+        \\F2 (out2 0) cccs probe=vcase gain=1
+        \\R4 (out1 0) resistor r=1k
+        \\R5 (out2 0) resistor r=1k
+        \\op1 dc
+        \\
+        , .origin = "sensing.scs" } },
+        .dialect = .spectre,
+    });
+    defer problem.deinit();
+    try problem.run_all();
+    const res = try requestedResult(problem, 0);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), probeFirst(res, "out1") orelse return error.NoProbe, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), probeFirst(res, "out2") orelse return error.NoProbe, 1e-9);
+}
+
 test "bsource: expressions of several probes match ngspice at the operating point" {
     // ngspice 45 on this deck (numdgt=12), except v(c): ngspice's default
     // `^` is |x|^3 = +0.421875; an integer power keeps the sign here.

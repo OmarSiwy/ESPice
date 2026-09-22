@@ -96,7 +96,7 @@ test "numeric field binding rejects invalid native and dynamic parameter values"
     try std.testing.expectError(error.UnresolvedParameter, bindKv(bindMode, @ptrCast(&blob), &.{.{ .key = "mode", .value = .{ .name = "unresolved" } }}));
 }
 
-test "control source sensing ignores case while binding rejects missing and inexact names" {
+test "control source binding rejects missing and inexact names" {
     for ([_][]const u8{ "vcase", "missing", "" }) |control| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
@@ -110,8 +110,6 @@ test "control source sensing ignores case while binding rejects missing and inex
         defer b.deinit();
         var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(if (control.len == 0) error.MissingControlSource else error.UnknownControlSource, nb.build());
-        if (std.mem.eql(u8, control, "vcase"))
-            try std.testing.expect(b.card_counts.items.len <= @backingInt(device.Library.builtin("vsource")));
     }
 }
 

@@ -386,7 +386,7 @@ numbers past `_tr0`. A PWL source's table holds 64 points; a longer PWL
 starting on the last point of the one before and holding the change from
 there, in series with a V card and in parallel with an I card
 (`builder.zig` `pwlTail`, fixture `tran/pwl_long`). `r=` repeat is refused
-past 64 points, as are sensed and port sources.
+past 64 points, as are port sources.
 Test: `src/tests/espice.zig` (".stim writes PWL sources and a .data
 table"); unconfirmed against HSPICE.
 

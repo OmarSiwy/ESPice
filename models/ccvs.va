@@ -6,15 +6,14 @@
 //   modified BSD license.
 //
 // Ports in card order: H<name> p n <vnam> <value>, with (cp,cn) standing in for
-// `vnam` exactly as in cccs.va; `vsense` carries the replaced source's DC value.
+// `vnam` exactly as in cccs.va: a 0 V ammeter in series with that source.
 //
 //   linear   H... p n vnam <gain>            V = gain*Ic
 //   POLY(1)  H... p n vnam POLY(1) c0 c1 c2  V = c0 + c1*Ic + c2*Ic^2
 // The builder fills either `gain` or c0..c2 and leaves the other set at 0, so
 // one polynomial covers both; `gain` and `c1` are the same coefficient.
 //
-// ponytail: one H/F consumer per `vnam` (see cccs.va), and POLY is limited to
-// order 2 in one dimension, the same ceiling as bsource.va.
+// ponytail: POLY is limited to order 2 in one dimension, the same ceiling as bsource.va.
 module ccvs(p, n, cp, cn);
     inout p, n, cp, cn;
     electrical p, n, cp, cn;
@@ -25,7 +24,7 @@ module ccvs(p, n, cp, cn);
     parameter real c0     = 0.0;  // V      POLY(1) constant term
     parameter real c1     = 0.0;  // V/A    POLY(1) linear term
     parameter real c2     = 0.0;  // V/A^2  POLY(1) square term
-    parameter real vsense = 0.0;  // V      DC value of the replaced control source
+    parameter real vsense = 0.0;  // V      ammeter voltage; the builder leaves it 0
 
     real k1, ic;
     analog begin

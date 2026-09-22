@@ -1,5 +1,5 @@
-* All-source DC transfer past an F element: Vs is sensed, so it stamps
-* nothing and is not a source of the transfer.
+* All-source DC transfer past an F element: Vs is sensed and is still a
+* source of the transfer, as every V card is.
 * Expected results: sensed_source.expected.json
 V1 in 0 1
 Vs in a 0

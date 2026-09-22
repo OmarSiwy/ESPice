@@ -9,7 +9,7 @@
 // Same FSM as vswitch.va (see its header for the memoryless/latched split);
 // only the control quantity differs. A W card names a voltage source
 // (`W1 p n vnam csw1`), so the control is the current in the (cp,cn) branch,
-// and `vsense` carries that source's value (0 for a dedicated sense source).
+// a 0 V ammeter the builder puts in series with that source (see cccs.va).
 module cswitch(p, n, cp, cn);
     inout p, n, cp, cn;
     electrical p, n, cp, cn;
@@ -21,7 +21,7 @@ module cswitch(p, n, cp, cn);
     parameter real ih     = 0.0;                  // A    hysteresis half-width
     parameter real ron    = 1.0    from (0:inf);  // ohm  on resistance
     parameter real roff   = 1.0e12 from (0:inf);  // ohm  off resistance (1/gmin)
-    parameter real vsense = 0.0;                  // V    value of the sensed source
+    parameter real vsense = 0.0;                  // V    ammeter voltage; the builder leaves it 0
     parameter integer ic  = 0;                    //      >0 = start ON
 
     integer latched;  // held across evaluations: the in-band memory

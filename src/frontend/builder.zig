@@ -380,8 +380,9 @@ pub const NetBuilder = struct {
     /// Circuit row of each net, 0 until a device touches it (ground is 0
     /// anyway). Rows follow stamping order, not net order.
     rows: []u32,
-    /// F/H/W control names, sorted case-insensitively: V cards named here are sensed.
-    sensed_sources: []const []const u8,
+    /// Per control name, how many F/H/W cards sense it. The first V card of
+    /// that name takes the count, as `resolveDeferred` binds the first.
+    sensors: std.StringHashMapUnmanaged(u32),
 
     /// One row per V card.
     v: std.MultiArrayList(VCard) = .empty,
@@ -441,11 +442,14 @@ pub const NetBuilder = struct {
         /// `pos`/`neg`: the node pair, which is the control port of an F/H/W sensing it.
         pos: u32,
         neg: u32,
-        /// Branch-current row; for a sensed source, the sensing model's control branch.
+        /// Branch-current row.
         branch: u32,
-        /// DC value. A sensed source is not stamped; the sensing model's own
-        /// `branch (cp,cn) ctrl` holds this voltage as `vsense`.
-        dc: f64,
+        /// A sensed source drives `pos` to `tap`, and its sensors' 0 V
+        /// control branches chain from `tap` to `neg`, so each carries the
+        /// source's whole current (ngspice cccsset.c reads that branch).
+        /// `tap` is the next sensor's cp; `sensors` how many are still to come.
+        tap: u32,
+        sensors: u32,
         /// `DISTOF1 [mag [phase]]`, `.disto`'s F1 drive (ngspice
         /// cktdisto.c:100-117), phase in degrees. `{0, 0}` when not given.
         distof1: [2]f64,
@@ -461,22 +465,23 @@ pub const NetBuilder = struct {
 
     /// A builder over `nl` writing into `b`; both must outlive it.
     pub fn init(arena: std.mem.Allocator, b: *Builder, nl: Netlist) !NetBuilder {
-        var sensed: std.ArrayList([]const u8) = .empty;
+        // The cards `resolveDeferred` hands to addBranchRef, and no others:
+        // a sensor counted here and never added would leave its chain open.
+        var sensors: std.StringHashMapUnmanaged(u32) = .empty;
         for ("fhw") |letter| for (nl.bucket(letter)) |e| {
             const d = nl.device(e);
-            if (d.positional.len == 0 or d.positional[0] != .name) continue;
-            try sensed.append(arena, d.positional[0].name);
+            // An HSPICE W card is a transmission line, and an HDL card is not deferred.
+            if (letter == 'w' and nl.deck.dialect == .hspice) continue;
+            if (loadedType(b.lib, d) != null) continue;
+            const name = positionalName(d, 0) orelse continue;
+            const entry = try sensors.getOrPut(arena, name);
+            entry.value_ptr.* = if (entry.found_existing) entry.value_ptr.* + 1 else 1;
         };
-        std.mem.sort([]const u8, sensed.items, {}, struct {
-            fn less(_: void, a: []const u8, b_: []const u8) bool {
-                return std.ascii.lessThanIgnoreCase(a, b_);
-            }
-        }.less);
         const rows = try arena.alloc(u32, nl.graph.vertexCount());
         @memset(rows, 0);
         const cards = try arena.alloc(?BoundCard, nl.models.len);
         @memset(cards, null);
-        var nb: NetBuilder = .{ .arena = arena, .b = b, .nl = nl, .rows = rows, .sensed_sources = sensed.items, .bound_cards = cards };
+        var nb: NetBuilder = .{ .arena = arena, .b = b, .nl = nl, .rows = rows, .sensors = sensors, .bound_cards = cards };
         for (nl.deck.analyses) |dir| {
             if (dir.kind != .tran) continue;
             const a0 = argNumber(dir.args, 0);
@@ -600,7 +605,7 @@ pub const NetBuilder = struct {
 
     /// What the deck keeps of the cards, in frozen rows.
     pub const Published = struct {
-        /// Source, sensed-name and `.sp` port tables, copied into the
+        /// Source and `.sp` port tables, copied into the
         /// publish arena.
         bindings: core.QueryBindings,
         /// Branch currents first, then every named node; parallel to
@@ -687,7 +692,6 @@ pub const NetBuilder = struct {
                 .i_neg = try arena.dupe(u32, self.i.items(.neg)),
                 .v_distof1 = try arena.dupe([2]f64, self.v.items(.distof1)),
                 .v_distof2 = try arena.dupe([2]f64, self.v.items(.distof2)),
-                .sensed = try copyNames(arena, self.sensed_sources),
                 .ports = try self.portList(arena),
             },
             .probes = probe_buf[0..n_probes],
@@ -965,11 +969,8 @@ pub const NetBuilder = struct {
                 const bound = try self.bindSource(devices.vsource, dev);
                 var nodes = try deviceNodes(self, devices.vsource, dev);
                 const pos = nodes[0];
-                // A source sensed by F/H/W is replaced by the sensing model's
-                // own `branch (cp,cn) ctrl`; stamping both would split the
-                // current between two sources on one node pair.
-                const sensed = std.sort.binarySearch([]const u8, self.sensed_sources, dev.name, std.ascii.orderIgnoreCase) != null;
-                const port = if (sensed) null else try sourcePort(dev);
+                const sensors: u32 = if (self.sensors.fetchRemove(dev.name)) |kv| kv.value else 0;
+                const port = if (sensors != 0) null else try sourcePort(dev);
                 // An HSPICE P card keeps its z0 in series in every analysis
                 // [SA Ch.17]: a noiseless resistor from n+ to a hidden node the
                 // source drives. ngspice's portnum V stays ideal.
@@ -999,15 +1000,18 @@ pub const NetBuilder = struct {
                 // A PWL past the table's capacity continues in sources of its
                 // later segments, in series between the card's source and n-.
                 const tail = try pwlTail(devices.vsource, self.arena, dev);
-                if (tail.len != 0 and (sensed or series)) {
-                    if (!@import("builtin").is_test) std.log.err("{s}: a PWL past {d} points on a sensed or port source", .{ dev.name, comptime pwlCapacity(devices.vsource.Model) });
+                if (tail.len != 0 and series) {
+                    if (!@import("builtin").is_test) std.log.err("{s}: a PWL past {d} points on a port source", .{ dev.name, comptime pwlCapacity(devices.vsource.Model) });
                     return error.UnsupportedCard;
                 }
+                // A sensed source ends at a hidden tap; addBranchRef chains
+                // its sensors from there to n- (see `VCard.tap`).
+                if (sensors != 0) nodes[1] = try self.b.addNode();
                 const chain_end = nodes[1];
                 if (tail.len != 0) nodes[1] = try self.b.addNode();
                 const br = self.b.n;
                 if (balanced == null) port_branch = br;
-                if (!sensed) try self.b.addDevice(devices.vsource, dev.name, bound[0], bound[1], nodes);
+                try self.b.addDevice(devices.vsource, dev.name, bound[0], bound[1], nodes);
                 var from = nodes[1];
                 for (tail, 0..) |seg, k| {
                     const to = if (k + 1 == tail.len) chain_end else try self.b.addNode();
@@ -1019,7 +1023,8 @@ pub const NetBuilder = struct {
                     .pos = pos,
                     .neg = neg,
                     .branch = br,
-                    .dc = bound[0].dc,
+                    .tap = chain_end,
+                    .sensors = sensors,
                     .distof1 = sourceDisto(dev, "distof1"),
                     .distof2 = sourceDisto(dev, "distof2"),
                     .portnum = if (port) |p| p.num else 0,
@@ -1033,15 +1038,11 @@ pub const NetBuilder = struct {
                         .balanced = balanced,
                     } else .{ .node = GROUND, .branch = GROUND },
                 });
-                // A replaced source stamps nothing, so it can neither anchor
-                // the .op ladder nor be driven: `br` is the next card's row.
-                if (!sensed) {
-                    if (self.source_branch == GROUND) {
-                        self.source_node = if (series) pos else nodes[0];
-                        self.source_branch = br;
-                    }
-                    if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = GROUND, .neg = br, .re = ac.re, .im = ac.im });
+                if (self.source_branch == GROUND) {
+                    self.source_node = if (series) pos else nodes[0];
+                    self.source_branch = br;
                 }
+                if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = GROUND, .neg = br, .re = ac.re, .im = ac.im });
             },
             'i' => {
                 if (comptime !@hasDecl(devices.isource, "eval")) return error.UnsupportedDevice;
@@ -1442,12 +1443,10 @@ pub const NetBuilder = struct {
     fn resolveDeferred(self: *NetBuilder) !void {
         if (self.deferred.items.len == 0) return;
         var source_index: std.StringHashMapUnmanaged(u32) = .empty;
-        if (self.sensed_sources.len != 0) {
-            try source_index.ensureTotalCapacity(self.arena, @intCast(self.v.len));
-            for (self.v.items(.name), 0..) |name, i| {
-                const entry = source_index.getOrPutAssumeCapacity(name);
-                if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
-            }
+        try source_index.ensureTotalCapacity(self.arena, @intCast(self.v.len));
+        for (self.v.items(.name), 0..) |name, i| {
+            const entry = source_index.getOrPutAssumeCapacity(name);
+            if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
         }
         for (self.deferred.items) |dev| {
             switch (dev.kind) {
@@ -1657,8 +1656,8 @@ pub const NetBuilder = struct {
         unreachable;
     }
 
-    /// F, H or W card: a device across the sensed V card's node pair that
-    /// takes over that source's branch. `default_gain` null: no gain parameter.
+    /// F, H or W card: a device whose 0 V control branch is the next link of
+    /// the sensed V card's chain (`VCard.tap`). `default_gain` null: no gain parameter.
     fn addBranchRef(self: *NetBuilder, comptime D: type, dev: Device, source_index: std.StringHashMapUnmanaged(u32), comptime default_gain: ?f64) !void {
         if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
         const ctrl_name = positionalName(dev, 0) orelse return error.MissingControlSource;
@@ -1673,24 +1672,23 @@ pub const NetBuilder = struct {
         var instance: D.Instance = .{};
         if (comptime default_gain) |dflt|
             _ = try setParam(D, &model, &instance, "gain", positionalNumber(dev, 1) orelse kvNumber(dev.kv, "gain") orelse dflt);
-        // The sensed source is not stamped (see the 'v' case); `vsense` keeps
-        // its voltage on this model's stand-in branch.
-        _ = try setParam(D, &model, &instance, "vsense", self.v.items(.dc)[ctrl]);
         try applyKv(&instance, dev.kv);
 
-        // (p, n, cp, cn): the control port is the sensed source's node pair.
-        // The model's `branch (cp, cn) ctl` across it carries that source's current.
+        // (p, n, cp, cn): the model's `branch (cp, cn) ctrl` at `vsense` = 0
+        // is an ammeter in series with the sensed source.
+        const left = &self.v.items(.sensors)[ctrl];
+        std.debug.assert(left.* != 0); // init counted this card
+        left.* -= 1;
+        const tap = &self.v.items(.tap)[ctrl];
+        const cp = tap.*;
+        tap.* = if (left.* == 0) self.v.items(.neg)[ctrl] else try self.b.addNode();
         const nodes = [4]u32{
             if (dev.pins.len > 0) try self.rowOf(dev.pins[0]) else GROUND,
             if (dev.pins.len > 1) try self.rowOf(dev.pins[1]) else GROUND,
-            self.v.items(.pos)[ctrl],
-            self.v.items(.neg)[ctrl],
+            cp,
+            tap.*,
         };
         try self.b.addDevice(D, dev.name, model, instance, nodes);
-
-        // The sensed source's current lives on this model's control branch;
-        // its `i(v...)` column reads that row (ngspice cccsset.c:47).
-        self.v.items(.branch)[ctrl] = internalRow(D, "flowZ28cpZ2ccnZ29", self.b.n);
         // H also carries its own output branch, and ngspice names it i(h1).
         if (comptime @hasDecl(D, "U") and D == devices.ccvs)
             try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", self.b.n));

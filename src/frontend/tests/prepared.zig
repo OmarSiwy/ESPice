@@ -316,7 +316,7 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqual(@as(usize, 5), prepared.deck.queries.len);
 }
 
-test ".dcxf leaves out a V card an F or H senses" {
+test ".dcxf keeps a V card an F or H senses" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
     const nl = try parse(session.allocator(),
@@ -333,9 +333,10 @@ test ".dcxf leaves out a V card an F or H senses" {
     var prepared = try build(session.allocator(), session.allocator(), nl);
     defer prepared.deinit();
     const sources = prepared.deck.queries[0].dcxf.sources;
-    try std.testing.expectEqual(@as(usize, 2), sources.len);
+    try std.testing.expectEqual(@as(usize, 3), sources.len);
     try std.testing.expectEqualStrings("v1", sources[0].name);
-    try std.testing.expectEqualStrings("i1", sources[1].name);
+    try std.testing.expectEqualStrings("vs", sources[1].name);
+    try std.testing.expectEqualStrings("i1", sources[2].name);
 }
 
 test "a numeric reference node is that node, not ground" {
@@ -518,37 +519,6 @@ test "input preparation resolves file includes and selected dialect" {
     }, .ngspice);
     try std.testing.expectEqual(@as(u32, 2), from_bytes.deviceCount());
     try std.testing.expectEqual(input.Dialect.hspice, input.parseDialect("hs").?);
-}
-
-test "control source binding retains first exact duplicate and distinct mixed-case names" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const nl = try netlist.parse(a,
-        \\// Spectre keeps case: VCase and vcase are two sources
-        \\VCase (first 0) vsource dc=2
-        \\vcase (second 0) vsource dc=3
-        \\VCase (duplicate 0) vsource dc=9
-        \\R1 (first 0) resistor r=1k
-        \\R2 (second 0) resistor r=1k
-        \\R3 (duplicate 0) resistor r=1k
-        \\F1 (out1 0) cccs probe=VCase gain=1
-        \\F2 (out2 0) cccs probe=vcase gain=1
-        \\R4 (out1 0) resistor r=1k
-        \\R5 (out2 0) resistor r=1k
-    , .spectre);
-    var prepared = try build(a, a, nl);
-    defer prepared.deinit();
-    var refs: std.ArrayList(device.abi.ParamRef) = .empty;
-    try collectTyped(&prepared.circuit, a, &refs);
-    var found: u32 = 0;
-    for (refs.items) |ref| {
-        if (ref.type != device.Library.builtin("cccs") or !std.mem.eql(u8, ref.param_name, "vsense")) continue;
-        try std.testing.expect(ref.index < 2);
-        try std.testing.expectEqual(([_]f64{ 2, 3 })[ref.index], ref.get());
-        found += 1;
-    }
-    try std.testing.expectEqual(@as(u32, 2), found);
 }
 
 test "one binder: a runtime-registered device binds a card exactly as the same model built in" {

@@ -98,6 +98,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A stray `.enddata` or `.end_variation` is refused as `ParseError` instead of read as nothing (#162).
 - An ngspice line holding only a `//` comment is a comment line, not a `ParseError` (and no longer a panic inside `.control` in safe builds) (#164).
 - An analysis card inside a `.subckt` is refused as `UnsupportedCard` instead of run as a top-level analysis (#165).
+- A V source an F, H or W card senses keeps its AC drive, transient waveform and `.dc` sweep, and two sensors of one source each read its whole current (#74, #103, #106).
 - A `.step` whose every point needs its own circuit runs just those points, instead of writing past the query table (#132).
 - Running out of memory during a transient, PSS, HB, DC homotopy or sweep step reports `OutOfMemory` instead of a convergence failure such as `TimestepTooSmall` (#134).
 - A run whose implicit operating point fails reports that failure, not `DependencyFailed` (#135).

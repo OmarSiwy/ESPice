@@ -599,14 +599,10 @@ fn currentProbeName(args: []const Value, i: usize) ?[]const u8 {
     };
 }
 
-/// Every independent source, V cards then I cards, in card order. A V card
-/// an F or H senses stamps nothing, so it is left out.
+/// Every independent source, V cards then I cards, in card order.
 fn xfSources(arena: std.mem.Allocator, sources: core.QueryBindings) ![]const requests.XfSource {
     var out: std.ArrayList(requests.XfSource) = try .initCapacity(arena, sources.v_names.len + sources.i_names.len);
-    for (sources.v_names, sources.v_branches) |name, br| {
-        if (std.sort.binarySearch([]const u8, sources.sensed, name, std.ascii.orderIgnoreCase) == null)
-            out.appendAssumeCapacity(.{ .name = name, .branch = br });
-    }
+    for (sources.v_names, sources.v_branches) |name, br| out.appendAssumeCapacity(.{ .name = name, .branch = br });
     for (sources.i_names, sources.i_pos, sources.i_neg) |name, p, m| out.appendAssumeCapacity(.{ .name = name, .branch = null, .nodes = .{ p, m } });
     return out.items;
 }

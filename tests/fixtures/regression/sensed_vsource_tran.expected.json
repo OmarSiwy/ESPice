@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A V source an H card senses keeps its transient waveform",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice-44.2 run of this deck; values match the closed form in the deck header.",
+    "command": "ngspice-45 -b (meas tran find v(1), v(2) at=50n, 300n, 800n)"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-08,
+            3e-07,
+            8e-07
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        },
+        "columns": {
+          "v(1)": {
+            "values": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(2)": {
+            "values": [
+              0.0,
+              -1.0,
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "96ef70431e48e015200d62bafc30cba6ee8e091441151d3e393b82cbffe95e63"
+}

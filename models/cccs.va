@@ -8,13 +8,10 @@
 // Ports in card order: F<name> p n <vnam> <gain>, with (cp,cn) standing in for
 // `vnam`. ngspice reads the named V-source's branch unknown (cccsset.c
 // CKTfndBranch); a Verilog-A module has no cross-instance handle, so the
-// builder wires (cp,cn) in place of that source and `vsense` carries its DC
-// value (the source keeps its value; it is not a forced 0 V ammeter).
-// `m` folds into the transfer as in cccspar.c. Constant stamp.
-//
-// ponytail: one F/H consumer per `vnam`. The sense branch is private to the
-// instance, and two of them across one node pair make a singular MNA row;
-// sharing a control branch between consumers has to happen host-side.
+// builder puts (cp,cn) in series with that source, and `ctrl` at `vsense`
+// = 0 is an ammeter carrying its whole current. Several sensors of one
+// source chain in series. `m` folds into the transfer as in cccspar.c.
+// Constant stamp.
 module cccs(p, n, cp, cn);
     inout p, n, cp, cn;
     electrical p, n, cp, cn;
@@ -22,7 +19,7 @@ module cccs(p, n, cp, cn);
 
     parameter real gain   = 1.0;               // A/A  current gain
     parameter real m      = 1.0 from (0:inf);  //      parallel multiplier
-    parameter real vsense = 0.0;               // V    DC value of the replaced control source
+    parameter real vsense = 0.0;               // V    ammeter voltage; the builder leaves it 0
 
     real k;
     analog begin

@@ -144,10 +144,8 @@ Divergences, recorded:
 - `.dcinc` takes the real part of each source's AC excitation, so a
   phase other than 0 or 180° scales it by cos(phase). VACASK reads `mag`
   alone and has no phase to apply.
-- A V card sensed by an F, H or W element stamps nothing of its own
-  (`frontend/builder.zig`), so it is not a source of `.dcxf`/`.acxf`
-  and has no columns (`QueryBindings.sensed`; `xf/sensed_source`). VACASK
-  keeps every V card; HSPICE's exclusion is unconfirmed.
+- A V card sensed by an F, H or W element is a source of `.dcxf`/`.acxf`
+  like any other (`xf/sensed_source`), as in VACASK.
 - ponytail: the forward `.acxf` path holds 64·sources·2n values per lane
   chunk; split the sources into groups when a deck with hundreds of
   sources and a large n needs it.
