@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Transfer function low_impedance",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Gain=R2/(R1+R2); Rin=R1+R2; Rout=R1||R2 with the independent source zeroed."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.75
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.004
+            ]
+          },
+          "output_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.00075
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a169202b05821f5943c080d187528cc97108c0e9deac78a1291ea94f635b5f90"
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "analysis": "tran_noise",
+  "purpose": "Analysis directive alias tran_noise",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Alias must have exactly the same numerical semantics as its canonical analysis."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Noise Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2,
+              2,
+              2
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            5e-06,
+            1e-05
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7038b4e98f5d150bc9e2eb5461d54e389476534fce4f6e1cdddfaf3de26ab399"
+}

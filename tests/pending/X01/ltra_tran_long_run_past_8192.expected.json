@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: LTRA run whose live history depth exceeds the native capacity bound 8192 (ltra_native), driven by a curved waveform so the overflow cannot be hidden by straight-line compaction.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Matched near-lossless line, Z0=sqrt(l/c)=50, Rs=RL=Z0 so GammaS=GammaL=0 and v(b)(t)=v(a)(t-Td) exactly. Source SIN(0 1 250meg): v(a)=0.5 sin(2 pi f t), v(b)=0.5 sin(2 pi f (t-Td)) for t>Td and 0 before. f=250 MHz makes Td=10 ns exactly 2.5 periods, so v(b)=-v(a) after the wavefront and a discarded still-live history entry cannot even produce the right SIGN. The forced 1 ps step makes the far-end value depend on an entry 10000 accepted points back, 1808 past the bound. compactrel=compactabs=1e-30 makes straightLineCheck reject every interior triple of this curved waveform, so compact() falls through to discarding the oldest interior point; the deck also fails at the default 1e-3/1e-12 (max v(b) error 0.917 V).",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with the seven hand rows to 1.4e-7; the host is wrong by up to 0.919 V. See the .sp header for the tmax=10 ps control run.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-06,
+            "values": [
+              0.07821723252011617,
+              0.5,
+              -0.5,
+              0.5,
+              0.5,
+              -0.5,
+              0.3535533905932748
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-06,
+            "values": [
+              0.0,
+              -0.5,
+              0.5,
+              -0.5,
+              -0.5,
+              0.5,
+              -0.3535533905932738
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            9.9e-09,
+            1.3e-08,
+            1.5e-08,
+            1.7e-08,
+            2.1e-08,
+            2.3e-08,
+            2.45e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "d9aeb14047f47b43edc55b5bd9faad956957ab14170cbd743f101f1a4c5ab87f"
+}

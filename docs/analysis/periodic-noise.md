@@ -108,8 +108,8 @@ analytic planes; `denseG`/`denseC` capture $G(t_k)$, $C(t_k)$.
 
 **Noise sources — the in-device convention.** pnoise folds **the same
 device-owned noise sources** the LTI analysis uses (see
-[ac-small-signal-noise.md](ac-small-signal-noise.md) §2 and the "Noise
-model (in-device)" sections in [docs/devices/](../devices/README.md)):
+[ac-small-signal-noise.md](ac-small-signal-noise.md) §2 and model sources
+in [models/](../../models/)):
 devices declare `noise_gens` in the contract, `collectNoiseSources` reads
 each generator's conductance off the AD Jacobian, and this analysis never
 owns a source table. Cyclostationarity is, by this convention, nothing but
@@ -205,7 +205,7 @@ Sequential remains: PSS orbit computation and the ordering of nothing else
 | Phase | Solver doc | Impl |
 |---|---|---|
 | PSS phase (frozen-time Newton per sample) | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md), [klu-pipeline.md](../solvers/klu-pipeline.md) | `converger.run` in `pnoise.runPSS` |
-| Per-(frequency × sideband × sample) admittance factor + per-source back-substitutions | none (dense stacked-real path) | `src/solvers/dense_lu.zig` (`buildComplexAdmittance`, `factorize`, `solveFactored`) |
+| Per-(frequency × sideband × sample) admittance factor + per-source back-substitutions | none (dense stacked-real path) | `src/analysis/solvers/dense_lu.zig` (`buildComplexAdmittance`, `factorize`, `solveFactored`) |
 | Adjoint upgrade (one transposed solve per lane replaces the per-source RHS batch) | [klu-pipeline.md](../solvers/klu-pipeline.md) (`solveT` flavor) | target — same shape as `freq_solve.solveRhsT` |
 
 ---

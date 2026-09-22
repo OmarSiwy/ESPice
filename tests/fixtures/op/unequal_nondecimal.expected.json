@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "unequal nondecimal",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "KCL: V(out)=Vin*R2/(R1+R2); I(Vin)=-Vin/(R1+R2)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              3.3
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-14,
+            "values": [
+              2.2478260869565
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.00047826086956522
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8d42e8404f2acf18303cf9092ceae21502a8d405bac18b841031f358e0e53e10"
+}

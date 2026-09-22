@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Harmonic balance with physical voltage drive",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "DC coefficient equals source offset; one-sided fundamental peak magnitude=abs(A/(1+jwRC)); higher harmonics vanish."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-07,
+            "values": [
+              0,
+              0.99998026137563,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0,
+            1000,
+            2000,
+            3000,
+            4000,
+            5000,
+            6000,
+            7000,
+            8000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 9
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ad3eeb0f7bbd7fe9d907c78ca26168ca03450efb998398e98d821c0537cc0fc2",
+  "known_gaps": [
+    "HB does not yet drive the solve from the physical source waveforms and amplitudes"
+  ]
+}

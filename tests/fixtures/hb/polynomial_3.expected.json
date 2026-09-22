@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Nonlinear harmonic generation without device-model ambiguity",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "sin^2(t)=(1-cos(2t))/2; sin^3(t)=(3*sin(t)-sin(3t))/4. HB columns are one-sided peak magnitudes, signed DC."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-07,
+            "values": [
+              0,
+              0.75,
+              0,
+              0.25,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0,
+            1000,
+            2000,
+            3000,
+            4000,
+            5000,
+            6000,
+            7000,
+            8000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 9
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e146b69a4cf6b08fe5afc6b69d37b557a1e6d462cf1a646ccc64da2344ff96e8",
+  "known_gaps": [
+    "HB does not yet drive the solve from the physical source waveforms and amplitudes",
+    "the behavioral-source compiler only supports a limited single-control polynomial subset"
+  ]
+}

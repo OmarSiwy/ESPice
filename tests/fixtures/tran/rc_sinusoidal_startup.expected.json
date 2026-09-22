@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Sinusoidal forced response plus initial-condition transient",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=[sin(wt)-w*tau*cos(wt)+w*tau*exp(-t/tau)]/[1+(w*tau)^2], starting uncharged."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 2e-05,
+            "values": [
+              0.0,
+              0.044693333436643,
+              0.14559239185229,
+              0.24937066303583,
+              0.048617675795053,
+              -0.098119710271732,
+              -0.1342159344544,
+              -0.15238008595865
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.000125,
+            0.00025,
+            0.0005,
+            0.00075,
+            0.001,
+            0.002,
+            0.004
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a0b0a5ee8b1420375e97350effd8cd997ab17336d45fa060181445183259bfc0"
+}

@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "analysis": [
+    "tf",
+    "sens"
+  ],
+  "purpose": "simple differential pair - CM and DM dc sensitivity",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "b45820b852fb1576236556d99478f4e37ec54fc77d6066dac8094e8405929728",
+    "warnings": [
+      ".print line ignored since rawfile was produced."
+    ]
+  },
+  "origin": "benchmark/fixtures/sens/diffpair/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "v(transfer_function)": {
+            "values": [
+              -87.847384665727
+            ],
+            "unit": "V/V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(vdm#input_impedance)": {
+            "values": [
+              8941.099750297
+            ],
+            "unit": "ohm",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(output_impedance_at_v(5))": {
+            "values": [
+              9446.8441222838
+            ],
+            "unit": "ohm",
+            "rtol": 0.001,
+            "atol": 2e-06
+          }
+        },
+        "row_count": 1,
+        "input_source": "vdm"
+      },
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "v(transfer_function)": {
+            "values": [
+              -0.11034131936978
+            ],
+            "unit": "V/V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(vcm#input_impedance)": {
+            "values": [
+              1793369.1589252
+            ],
+            "unit": "ohm",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(output_impedance_at_v(5))": {
+            "values": [
+              9446.8441222838
+            ],
+            "unit": "ohm",
+            "rtol": 0.001,
+            "atol": 2e-06
+          }
+        },
+        "row_count": 1,
+        "input_source": "vcm"
+      },
+      {
+        "name": "Sensitivity Analysis",
+        "match": "exact",
+        "columns": {
+          "v(q3:tnom)": {
+            "values": [
+              -6.525290852922e-14
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q3:kf)": {
+            "values": [
+              7.9517179246278e-21
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q3:tnr2)": {
+            "values": [
+              7.9517179246278e-21
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q3:tmje1)": {
+            "values": [
+              7.9517179246278e-21
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q3:ib_max)": {
+            "values": [
+              7.9517179246278e-120
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q2:rb)": {
+            "values": [
+              0.0014879440389384
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q2:tirb1)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q2:tvjc)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q2:tiss2)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q4:ikf)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q4:qco)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q4:trm1)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q4:tns2)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q4_temp)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q1:xti)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q1:tnf2)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q1:ttr1)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(q1:pd_max)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(rbias_temp)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(rc2_dtemp)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(rc1_l)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(rs2_w)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(rs1_m)": {
+            "values": [
+              1.3468610181859
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(vcm_phase)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "11f9cc2a4ac1c14aa246ba14ec4cebc3ba67b0c43f8cdc74a68b19835b530eb5",
+  "known_gaps": [
+    "differential analysis output must be resolved as a node difference"
+  ]
+}

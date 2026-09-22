@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Cascode amplifier: stacked NPN for high output impedance.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "3c0ecf96664aa5eee4a0a22b0b96d2d4512da27157ec30d9494860da53af1910"
+  },
+  "origin": "benchmark/fixtures/bjt/cascode/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vcc)": {
+            "values": [
+              10.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(bias)": {
+            "values": [
+              5.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(in)": {
+            "values": [
+              0.65
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(out)": {
+            "values": [
+              9.9577931151391
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(mid)": {
+            "values": [
+              4.3504464746856
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vin)": {
+            "values": [
+              -6.8369979834037e-08
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vbias)": {
+            "values": [
+              -6.7017569459485e-08
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vcc)": {
+            "values": [
+              -8.4413769721754e-06
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "08b22a1d86e8b76ca56e6af163a76a7676e540a52edc39cb0b2a910ab9afd78f"
+}

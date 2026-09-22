@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Positive-feedback comparator (Schmitt-style) with hysteresis: latch-prone DC.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "81a5b6ca90fdd9f61ba6955ffedae1be626a00e692746377e82df71d3656be69"
+  },
+  "origin": "benchmark/fixtures/convergence/schmitt/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vcc)": {
+            "values": [
+              5.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(in)": {
+            "values": [
+              2.5
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(out)": {
+            "values": [
+              5.0001000019838
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(fb)": {
+            "values": [
+              2.500050001
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(e1)": {
+            "values": [
+              -0.00025000500009838
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vin)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vcc)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2cb0ca22fa3186763fc6d6b1554a6ceeedc6aeefc8e213a7342bc503a4064c17"
+}

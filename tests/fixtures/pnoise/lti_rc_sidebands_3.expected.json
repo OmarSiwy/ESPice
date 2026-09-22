@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "pnoise",
+  "purpose": "LTI periodic noise is independent of sideband truncation",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "No periodic coefficient modulation means no frequency conversion. Output PSD is 4*kB*T*R/(1+(2*pi*f*R*C)^2), even with nonzero periodic forcing."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Periodic Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "pnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.005,
+            "atol": 1e-25,
+            "values": [
+              1.6510889514871e-17,
+              1.6277793404212e-17,
+              1.5276729912744e-17,
+              1.1884327467078e-17,
+              5.8522527785773e-18,
+              1.7438644374752e-18,
+              4.0950394988305e-19,
+              8.9968734074255e-20,
+              1.9466068142343e-20,
+              4.1977047700617e-21
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            21.544346900319,
+            46.415888336128,
+            100.0,
+            215.44346900319,
+            464.15888336128,
+            1000.0,
+            2154.4346900319,
+            4641.5888336128,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 10
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "703062840eda599bb088a79d92669c27e7bb02d26e4b94f619b76b9721aabf89",
+  "known_gaps": [
+    "periodic noise must distinguish genuine frequency conversion from an LTI circuit; extra LTI sidebands must not add noise"
+  ]
+}

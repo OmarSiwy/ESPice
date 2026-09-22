@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "analysis": "sp",
+  "purpose": "One-port resistive reflection",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "S11=(R-Z0)/(R+Z0), Z0=50 ohm."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "SP Analysis",
+        "match": "exact",
+        "columns": {
+          "v(S_1_1)": {
+            "unit": "dimensionless",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ],
+              [
+                -0.99996000079998,
+                0.0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            2154.4346900319,
+            4641.5888336128,
+            10000.0,
+            21544.346900319,
+            46415.888336128,
+            100000.0,
+            215443.46900319,
+            464158.88336128,
+            1000000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 10
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "cd447101ce3382674664db15d61280e6bb674cf69da62715528060cb1c2a0789"
+}

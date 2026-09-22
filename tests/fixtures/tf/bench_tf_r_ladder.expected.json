@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "TF fixture: three-section resistive ladder, gain and port resistances.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "8b7c4f4b7ac7ee5c8b9709e506151c4c0a26001b80cb8b44a9d3ac7bd12ece80"
+  },
+  "origin": "benchmark/fixtures/tf/r_ladder/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "v(transfer_function)": {
+            "values": [
+              0.18604651162791
+            ],
+            "unit": "V/V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(vin#input_impedance)": {
+            "values": [
+              2047.619047619
+            ],
+            "unit": "ohm",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(output_impedance_at_v(out))": {
+            "values": [
+              976.74418604651
+            ],
+            "unit": "ohm",
+            "rtol": 0.001,
+            "atol": 2e-06
+          }
+        },
+        "row_count": 1,
+        "input_source": "vin"
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1808ccfd0f8cf284dae782d61ab1b454130799293e930238e0c9a721400fbff3"
+}

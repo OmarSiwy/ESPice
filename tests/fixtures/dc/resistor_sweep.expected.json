@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Sweep a resistor instance value",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=R2/(1000+R2)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.5,
+              0.66666666666667,
+              0.75,
+              0.8,
+              0.83333333333333
+            ]
+          }
+        },
+        "axis": {
+          "name": "res-sweep",
+          "values": [
+            1000,
+            2000,
+            3000,
+            4000,
+            5000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "c403bf0cef7a8c8d782f7ca1f8f745fa33a7a33d2f060913f28b5a9e685a3c43",
+  "known_gaps": [
+    "resistor and primary temperature DC sweep targets are not yet supported"
+  ]
+}

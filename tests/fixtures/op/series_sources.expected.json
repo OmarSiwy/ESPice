@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "series sources",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Series voltages add; both deliver 5 mA."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              5
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.005
+            ]
+          },
+          "i(v2)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.005
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "474c70c4fab56ac0cee937048b9b398594ff55088807eb8cdfe8e0e19620d05c"
+}

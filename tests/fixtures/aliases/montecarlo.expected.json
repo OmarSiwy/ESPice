@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "Analysis directive alias montecarlo",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Alias must have exactly the same numerical semantics as its canonical analysis."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Monte Carlo",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              7.5,
+              7.5,
+              7.5,
+              7.5
+            ]
+          }
+        },
+        "axis": {
+          "name": "run",
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 4
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "d97de8515ff959942cda1cc7afd7d7de2d8dda115b21d7b823a9eb14ee0f572e"
+}

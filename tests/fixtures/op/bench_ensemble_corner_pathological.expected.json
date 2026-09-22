@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Ensemble lane-peeling target: one corner drives the diode into a",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "22c1b5bd2b4144a86cb6a29d137b1f06661ea99a860fbc62915318117b7f26a3"
+  },
+  "origin": "benchmark/fixtures/ensemble/corner_pathological/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "values": [
+              12.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(out)": {
+            "values": [
+              0.83663292458581
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vin)": {
+            "values": [
+              -111.63367075414
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a794bf5ef10ceaf8225a9ea81e4ff7304b25db1b55b8e339a4d332bf27881e76"
+}

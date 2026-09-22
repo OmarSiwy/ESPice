@@ -11,39 +11,21 @@
 //! all other a_j = 0. Column p of S(ω) follows from S_jk = b_j / a_k.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("solvers").types;
+const types = @import("numerics");
 const solvers = @import("solvers");
 const FreqSolver = solvers.freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
-
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
 
 /// A port is a netlist vsource: `node` its + terminal, `branch` its MNA
 /// branch-current unknown. The sweep turns each into a Thevenin source with
 /// series z0 by adding −z0 to the branch row diagonal (branch equation becomes
 /// v_p − v_n − z0·i_br = V_s), so un-excited ports terminate in z0 instead of
 /// clamping their node.
-pub const Port = struct {
-    node: u32,
-    branch: u32,
-    z0: f64 = 50.0,
-};
+pub const Port = @import("requests").Port;
 
-pub const SweepType = enum { log, linear };
 
-pub const Options = struct {
-    tol: converger.Tolerances = .{},
-    f_start: f64,
-    f_stop: f64,
-    n_points: u16 = 50,
-    sweep_type: SweepType = .log,
-    /// Explicit port list. Empty means one port at the drive source
-    /// (ctx.source_node / ctx.source_branch) when running via the contract.
-    ports: []const Port = &.{},
-};
+pub const Options = @import("requests").Sp;
 
 /// Caller owns the output: freqs[n_points] and the flat S-matrix stack
 /// s[n_points * n_ports²], point-major — S(row,col) at frequency point fi is
@@ -59,18 +41,17 @@ pub fn sweep(
 ) !void {
     const n: usize = ckt.n;
     const n_ports: usize = ports.len;
-    const n_points: usize = options.n_points;
+    const n_points: usize = options.sweep.count();
     std.debug.assert(freqs.len == n_points);
     std.debug.assert(s.len == n_points * n_ports * n_ports);
 
-    // Fill frequency array up front — both paths need it.
-    for (0..n_points) |fi| freqs[fi] = genFreq(options, fi);
+    for (0..n_points) |fi| freqs[fi] = options.sweep.at(@intCast(fi));
 
     // -- GPU batch path: one batch call per driven port ----------------------
     // ponytail: P batch calls of N_freq each; packing all P*N into one call
     // would need per-solve RHS, add when freq_solve_batch gains rhs-per-lane.
-    if (ckt.gpu_hook != null) gpu: {
-        ckt.linearize(x_op);
+    if (ckt.gpu_hook != null and ckt.progress == null) gpu: {
+        try ckt.linearizeAc(x_op);
 
         // Stamp port z0 onto the sparse G diagonal (analysis-side mod).
         // Save originals so we can restore after the batch calls.
@@ -86,7 +67,6 @@ pub fn sweep(
             ckt.g_vals[slot] = saved[idx];
         };
 
-        // Build omega array.
         const omegas = allocator.alloc(f64, n_points) catch break :gpu;
         defer allocator.free(omegas);
         for (freqs, 0..) |f, i| omegas[i] = 2.0 * std.math.pi * f;
@@ -94,14 +74,14 @@ pub fn sweep(
         const rhs = allocator.alloc(f64, 2 * n) catch break :gpu;
         defer allocator.free(rhs);
 
+        const x_out = allocator.alloc(f64, n_points * 2 * n) catch break :gpu;
+        defer allocator.free(x_out);
         for (0..n_ports) |p| {
             root.zeroSimd(rhs);
             rhs[ports[p].branch] = 1.0;
-            // rhs imag part is zero (already zeroed).
 
             // Per-frequency output: x_out[k] is 2*n (real‖imag expansion).
-            const x_out = ckt.gpuFreqBatch(allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false) orelse break :gpu;
-            defer allocator.free(x_out);
+            ckt.gpuFreqBatch(ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false, x_out) orelse break :gpu;
 
             const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
             const nn = 2 * n;
@@ -109,27 +89,13 @@ pub fn sweep(
             for (0..n_points) |fi| {
                 const x_work = x_out[fi * nn ..][0..nn];
                 const s_mat = s[fi * n_ports * n_ports ..][0 .. n_ports * n_ports];
-                for (0..n_ports) |k| {
-                    const node_k: usize = ports[k].node;
-                    const br_k: usize = ports[k].branch;
-                    const z0_k = ports[k].z0;
-
-                    const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
-                        .re = x_work[node_k],
-                        .im = x_work[n + node_k],
-                    };
-                    const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
-                    const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
-
-                    s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
-                }
+                writeColumn(n, ports, x_work, a_p, s_mat, p);
             }
         }
         return; // GPU path done — skip CPU fallback.
     }
 
-    // -- CPU serial path (existing) ------------------------------------------
-    ckt.linearize(x_op);
+    try ckt.linearizeAc(x_op);
     const g = try allocator.alloc(f64, n * n);
     ckt.denseG(g);
     const c = allocator.alloc(f64, n * n) catch |err| {
@@ -154,6 +120,7 @@ pub fn sweep(
     defer allocator.free(x_work);
 
     for (0..n_points) |fi| {
+        if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = n_points });
         const f = freqs[fi];
         try fs.setOmega(2.0 * std.math.pi * f);
 
@@ -167,33 +134,29 @@ pub fn sweep(
 
             const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
 
-            for (0..n_ports) |k| {
-                const node_k: usize = ports[k].node;
-                const br_k: usize = ports[k].branch;
-                const z0_k = ports[k].z0;
-
-                const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
-                    .re = x_work[node_k],
-                    .im = x_work[n + node_k],
-                };
-                // i into the DUT = −i_branch (branch stamps F_p = +i_br).
-                const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
-                const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
-
-                s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
-            }
+            writeColumn(n, ports, x_work, a_p, s_mat, p);
         }
     }
 }
 
-fn genFreq(options: Options, k: usize) f64 {
-    return switch (options.sweep_type) {
-        .log => types.logSweepFreq(options.f_start, options.f_stop, options.n_points, @intCast(k)),
-        .linear => blk: {
-            const frac = if (options.n_points > 1) @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(options.n_points - 1)) else 0;
-            break :blk options.f_start + frac * (options.f_stop - options.f_start);
-        },
-    };
+// ponytail: one wave conversion for CPU and GPU solve outputs.
+fn writeColumn(n: usize, ports: []const Port, x_work: []const f64, a_p: f64, s_mat: []Complex, p: usize) void {
+    const n_ports = ports.len;
+    for (0..n_ports) |k| {
+        const node_k: usize = ports[k].node;
+        const br_k: usize = ports[k].branch;
+        const z0_k = ports[k].z0;
+
+        const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
+            .re = x_work[node_k],
+            .im = x_work[n + node_k],
+        };
+        // i into the DUT = −i_branch (branch stamps F_p = +i_br).
+        const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
+        const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
+
+        s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
+    }
 }
 
 /// Contract entry: opts.ports (or the single drive source as port 1),
@@ -207,18 +170,26 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ports: []const Port = if (opts.ports.len > 0) opts.ports else &one_port;
     const n_ports = ports.len;
     const n_s = n_ports * n_ports;
-    const n_points: usize = opts.n_points;
+    const n_points: usize = opts.sweep.count();
 
-    const freqs = try a.alloc(f64, n_points);
-    defer a.free(freqs);
-    const s = try a.alloc(Complex, n_points * n_s);
-    defer a.free(s);
-    try sweep(ctx.circuit, x_op, ports, freqs, s, opts, a);
+    // `defer`-freed == scratch; `a` is a results arena. See
+    // RunCtx.scratch_allocator.
+    const scratch = ctx.scratch_allocator orelse a;
+    const freqs = try scratch.alloc(f64, n_points);
+    defer scratch.free(freqs);
+    const s = try scratch.alloc(Complex, n_points * n_s);
+    defer scratch.free(s);
+    try sweep(ctx.circuit, x_op, ports, freqs, s, opts, scratch);
 
     const names = try a.alloc([]const u8, 1 + n_s);
     names[0] = "frequency";
     for (0..n_ports) |i| for (0..n_ports) |j| {
-        names[1 + i * n_ports + j] = try std.fmt.allocPrint(a, "S{d}{d}", .{ i + 1, j + 1 });
+        // ngspice span.c:544-551 names the S-matrix columns `S_<row>_<col>`
+        // (1-based) as UID_OTHER, and its raw writer types every non-current
+        // UID as a voltage — so the column lands in the file spelled
+        // `v(S_1_1)`. That spelling IS the addressable name; anything else is
+        // a column no reader of an ngspice .sp raw will find.
+        names[1 + i * n_ports + j] = try std.fmt.allocPrint(a, "v(S_{d}_{d})", .{ i + 1, j + 1 });
     };
     const ncols = names.len;
     const data = try a.alloc(f64, n_points * ncols * 2);
@@ -233,7 +204,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     return .{
-        .plotname = "S-Parameter Analysis",
+        // ngspice span.c:599-601 opens the plot under the job name, which is
+        // "SP Analysis" in the raw.
+        .plotname = "SP Analysis",
         .varnames = names,
         .is_complex = true,
         .npoints = n_points,

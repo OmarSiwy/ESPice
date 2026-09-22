@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Current sweep in a circuit that also contains a voltage source",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Vout=Vbias+1000*Iin; a voltage-source index must not alias the current-source index."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0,
+              0.5,
+              1,
+              1.5,
+              2
+            ]
+          },
+          "v(bias)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "axis": {
+          "name": "i(i-sweep)",
+          "values": [
+            -0.001,
+            -0.0005,
+            0,
+            0.0005,
+            0.001
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 5
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8a49b84e7ace15649858f998a134cee1beedcda68ec022d9f051bd29db0baae3",
+  "known_gaps": [
+    "DC current sweeps are rejected when the deck also contains voltage sources"
+  ]
+}

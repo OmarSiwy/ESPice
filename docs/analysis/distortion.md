@@ -28,6 +28,15 @@ $$
 \big(G + j\omega C\big)\, V_1 = U .
 $$
 
+$U$ is not free. ngspice takes the F1 drive from whichever source card carries
+`DISTOF1 [mag [phase]]` — never "the first source" — and a V card's drive lands
+on that card's **MNA branch row**, at *half* the sinusoid amplitude, because
+every Volterra kernel here is a one-sided phasor (`cktdisto.c:100-117`, the
+stamp at `:115-116`). An I card instead drives its two node rows with
+$\mp\tfrac12\,\text{mag}$ (`cktdisto.c:151-158`). Stamping the V-card drive on
+a *node* row is what returned $V_1 = 0$ on every `.disto` deck until
+2026-09-13: that node is pinned by the source's own branch equation.
+
 **Second order** — the second-order nonlinear current at $2\omega$ acts as
 the only source:
 
@@ -41,6 +50,13 @@ $$
 $$
 \big(G + j\,3\omega\,C\big)\, V_3 = -\,F''\,[V_1, V_2] - \tfrac{1}{6} F'''\,[V_1,V_1,V_1],
 $$
+
+The $\tfrac12$ on $F''[V_1,V_1]$ is ngspice's too — it spells the factor into
+the device coefficient ($g_2 = \tfrac12\,g_d/v_{te}$, `diodset.c:78`) and
+contributes $g_2 V_1^2$ (`dloadfns.c:545` `D1n2F1`); here the full double sum
+already covers both $(a,b)$ and $(b,a)$, so the factor belongs once on the RHS.
+Kernels are reported back as **sinusoid amplitudes**, i.e. $\times 2$ for $f_1$
+and $2f_1$ (`dkerproc.c:24-52`).
 
 Distortion figures: $\mathrm{HD2} = |V_2^{\text{out}}|/|V_1^{\text{out}}|$,
 $\mathrm{HD3} = |V_3^{\text{out}}|/|V_1^{\text{out}}|$; two-tone inputs
@@ -80,15 +96,27 @@ difference).
    device-side analytic $F''$ stamps are the scalable upgrade). A final
    `eval(x_op)` leaves the planes consistent with the op.
 3. Per frequency (log sweep): first-order stacked-real solve at $\omega$
-   (excitation: unit current at the drive node — a current-source flavor,
-   vs the AC analysis's branch-row voltage drive); form
-   $D_2 = F''[V_1, V_1]$ by the tensor contraction with complex $V_1$;
-   second solve at $2\omega$ with $-D_2$; record HD2, $|V_1|$, $|V_2|$ at
-   the output node.
+   (excitation: $\tfrac12\,\text{mag}\,e^{j\phi}$ on `drive_branch`, the
+   branch row of the `DISTOF1` V card that `engine.zig buildJob` resolved off
+   the deck; `ac_source_node` is the I-card form and takes the negated stamp);
+   form $D_2 = F''[V_1, V_1]$ by the tensor contraction with complex $V_1$;
+   second solve at $2\omega$ with $-\tfrac12 D_2$; record HD2 and
+   $2|V_1|$, $2|V_2|$ at the output node.
 
 Failure: singular admittance at any point errors the sweep. Knobs:
-sweep triple, `ac_magnitude`, `fd_eps` ($10^{-6}$), drive/output node
-defaults from the contract.
+sweep triple, `ac_magnitude`/`ac_phase`, `fd_eps` ($10^{-6}$), drive branch
+and output node, defaults from the contract.
+
+**Output contract — an espice divergence, deliberate.** ngspice writes two
+complex plots (`DISTORTION - 2nd harmonic`, `DISTORTION - 3rd harmonic`) over
+*every* circuit variable; espice writes one real plot,
+(`frequency`, `hd2`, `v1_mag`, `v2_mag`), at a single node — `output_node`,
+defaulting to the last probe. The kernel numbers agree (all four `disto/*`
+fixtures match the corresponding ngspice 2nd-harmonic column to
+$\le 2.1\times10^{-5}$), but "the last probe" is an artifact of MNA row
+numbering, not a contract: on `disto/bjt_ce` it selects `v(b)`, not the
+collector. Emitting ngspice's shape needs the third-order kernel as well;
+both are the same follow-up.
 
 ## 3. Pseudo-code, CPU sequential
 
@@ -101,10 +129,11 @@ disto(ckt, x_op, f_range):
         d2[:, :, b] = (denseG() - G)/eps
     eval(x_op)                          # restore planes
     for f in log_sweep(f_range):
-        solve (G + jwC) V1 = mag * e[src]            # first order
+        solve (G + jwC) V1 = 0.5*mag*e^{j*phase} * e[drive_branch]
         D2[i] = sum_ab d2[i,a,b] * V1[a]*V1[b]       # complex contraction
-        solve (G + j2wC) V2 = -D2                    # second order
-        HD2(f) = |V2[out]| / |V1[out]|
+        solve (G + j2wC) V2 = -0.5*D2                # second order
+        HD2(f) = |V2[out]| / |V1[out]|               # the 2x cancels
+        V1mag(f), V2mag(f) = 2*|V1[out]|, 2*|V2[out]|
 ```
 
 ## 4. Pseudo-code, GPU parallel
@@ -137,7 +166,7 @@ kernel disto(lanes = freq points):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-frequency complex solves (stacked-real dense) | none (dense path) | `src/solvers/dense_lu.zig` `buildComplexAdmittance` + `factorizeSolve` |
+| Per-frequency complex solves (stacked-real dense) | none (dense path) | `src/analysis/solvers/dense_lu.zig` `buildComplexAdmittance` + `factorizeSolve` |
 | Sparse upgrade for large n | [klu-pipeline.md](../solvers/klu-pipeline.md) via `freq_solve.zig` (same pattern at $\omega$ and $2\omega$) | upgrade path |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 

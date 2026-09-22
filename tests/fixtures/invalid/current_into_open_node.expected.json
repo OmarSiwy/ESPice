@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "No branch can carry the injected DC current.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "No branch can carry the injected DC current."
+  },
+  "expect": {
+    "status": "error",
+    "category": "inconsistent_circuit",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "c5d635c7b11084403b64a9265afd6eef806b261e858b3bd0b0e5ba17f9bc7a2b"
+}

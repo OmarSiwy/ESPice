@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "Noise output node must exist.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Noise output node must exist."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "c7befe06b9282e1169b5f3c93c371d08e74352129a88dc10b36a697a6a577dd5"
+}

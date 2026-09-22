@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "$abstime read back at every accepted point equals that point's time, across rejected attempts.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "LRM 9.10: $abstime is the absolute time in seconds. The model is a pure voltage source of that value, so at an accepted row v(ta) == t identically. N2 forces rejected-and-retried steps at t = 0.125, 0.375, 0.625, 0.875; per LRM 8.4.7 the engine cannot advance past an unaccepted solution, so no accepted row may carry the time of a rejected trial point."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            0.2,
+            0.4,
+            0.6,
+            0.8,
+            1.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(ta)": {
+            "values": [
+              0.0,
+              0.2,
+              0.4,
+              0.6,
+              0.8,
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ed9bb9e464e76469fe71b3526782cc0aaea4d31e81ff58c0d341069199ea9ea5",
+  "row": "A09"
+}

@@ -133,7 +133,7 @@ over frequency points on top (independent lanes, as in
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Nominal + perturbed Newton solves (refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` |
+| Nominal + perturbed Newton solves (refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/direct.zig` via `converger.run` |
 | Workspace/pattern reuse across all solves | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()` |
 | Adjoint upgrade (transposed solve on existing factors) | [klu-pipeline.md](../solvers/klu-pipeline.md) (solve with $L^{\mathsf T}U^{\mathsf T}$ order swapped) | `direct.zig` solveT / `freq_solve.zig` `solveRhsT` (AC case) |
 

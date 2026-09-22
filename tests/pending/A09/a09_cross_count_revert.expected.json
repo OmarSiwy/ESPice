@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A held variable written from a cross() event is rolled back with a rejected attempt and applied once on acceptance: v(rej) = crossing count.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "KCL at the single node: 1e-3*(V - flips) = 0, so v(rej) == flips exactly. Rising zero crossings of sin(2*pi*(t-0.125)/0.25) are t = 0.125, 0.375, 0.625, 0.875 (LRM 5.10.3.1), giving flips = 0, 1, 2, 3, 4 at the sample times 0.05, 0.25, 0.5, 0.75, 0.95 -- all chosen inside a flat plateau so interpolation between accepted points is exact. LRM 5.10.3.1 licenses exactly one event per rising transition ('If dir is +1, the event and timestep control only occur on rising edge transitions of the signal'; 'The event shall occur after the threshold crossing, and while the signal remains in the box defined by actual crossing and expr_tol and time_tol'), so the count is four and only four. LRM 8.4.7, 'Advance of time in an analog algorithm', third bullet: 'Having calculated the solution for a given time, the analog engine can either accept or reject that solution; it cannot calculate a solution for a future time until it has accepted the solution for the current time.' LRM 8.3.3: the first-iteration values 'do not satisfy Kirchhoff's Laws', so an iterate is not a solution and cannot license an event. Resolving each crossing takes several rejected attempts; an increment that survived a rejected attempt would over-count past the four licensed crossings and an increment lost on acceptance would under-count. WITHDRAWN: 8.4.7's 'they can be rejected along with the solution, if it is rejected' is deliberately not cited -- it sits under 8.4.7's 'Analog to digital events' heading and is conditioned on 'until they are consumed by the digital engine'. This deck has no digital engine. That claim belongs to plan row M02, whose clause list spans 8.4.1-8.4.7."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.05,
+            0.25,
+            0.5,
+            0.75,
+            0.95
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(rej)": {
+            "values": [
+              0.0,
+              1.0,
+              2.0,
+              3.0,
+              4.0
+            ],
+            "unit": "V",
+            "rtol": 0.0,
+            "atol": 1e-09
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9b8d07dc62d45a5abda7f4202393a7dd0832ecc4e09637a7537779b74ac8a090",
+  "row": "A09"
+}

@@ -1,12 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
+const types = @import("output_types");
+const Plot = types.Plot;
 
 /// Write simulation data as CSV. Complex variables split into _re/_im columns.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     const nvars = plot.varnames.len;
-    const per: usize = if (plot.is_complex) 2 else 1;
-    if (plot.data.len != plot.npoints * nvars * per) return error.DataLengthMismatch;
+    try types.validatePlot(.csv, plot);
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -14,7 +14,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     var fw = file.writer(io, &buf);
     const w = &fw.interface;
 
-    // Header row
     for (plot.varnames, 0..) |name, i| {
         if (i > 0) try w.writeByte(',');
         if (plot.is_complex) {
@@ -25,7 +24,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     }
     try w.writeByte('\n');
 
-    // Data rows
     for (0..plot.npoints) |pt| {
         for (0..nvars) |v| {
             if (v > 0) try w.writeByte(',');
@@ -55,8 +53,7 @@ test "CSV real data" {
     defer allocator.free(blob);
     try std.testing.expect(std.mem.startsWith(u8, blob, "time,v(out)\n"));
     // Verify 2 data rows + header = 3 lines
-    var lines: usize = 0;
-    for (blob) |c| { if (c == '\n') lines += 1; }
+    const lines = std.mem.countScalar(u8, blob, '\n');
     try std.testing.expectEqual(@as(usize, 3), lines);
 }
 

@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "Nested DC sweep ordering and superposition",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "First source varies fastest; Vout=(V1+V2)/3."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -1,
+              0,
+              1,
+              -1,
+              0,
+              1,
+              -1,
+              0,
+              1
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0,
+              0,
+              0,
+              2,
+              2,
+              2,
+              4,
+              4,
+              4
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.33333333333333,
+              0.0,
+              0.33333333333333,
+              0.33333333333333,
+              0.66666666666667,
+              1.0,
+              1.0,
+              1.3333333333333,
+              1.6666666666667
+            ]
+          }
+        },
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            -1,
+            0,
+            1,
+            -1,
+            0,
+            1,
+            -1,
+            0,
+            1
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 9
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8c9cc838461d6fe8610e364dc4b664322c0ee20cf769c9fc73cbf6e4d2ef4b39"
+}

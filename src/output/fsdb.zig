@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
+const types = @import("output_types");
+const Plot = types.Plot;
 
 // ponytail: FSDB is proprietary (Synopsys). This implements a minimal analog FSDB
 // structure based on publicly documented format. Full vendor tool compatibility
@@ -9,27 +10,10 @@ const Plot = @import("rawfile.zig").Plot;
 const FSDB_MAGIC = "FSDB";
 const FSDB_VERSION: u32 = 0x0300; // v3.0
 
-fn writeU32(w: anytype, val: u32) !void {
-    var b: [4]u8 = undefined;
-    std.mem.writeInt(u32, &b, val, .little);
-    try w.writeAll(&b);
-}
-
-fn writeU16(w: anytype, val: u16) !void {
-    var b: [2]u8 = undefined;
-    std.mem.writeInt(u16, &b, val, .little);
-    try w.writeAll(&b);
-}
-
-fn writeF64(w: anytype, val: f64) !void {
-    try w.writeAll(std.mem.asBytes(&val));
-}
-
 /// Write FSDB (Fast Signal Database) format for analog simulation data.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     const nvars = plot.varnames.len;
-    const per: usize = if (plot.is_complex) 2 else 1;
-    if (plot.data.len != plot.npoints * nvars * per) return error.DataLengthMismatch;
+    try types.validatePlot(.fsdb, plot);
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -37,32 +21,29 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     var fw = file.writer(io, &buf);
     const w = &fw.interface;
 
-    // Section 1: File header
     try w.writeAll(FSDB_MAGIC);
-    try writeU32(w, FSDB_VERSION);
-    try writeU32(w, @intCast(nvars));
-    try writeU32(w, @intCast(plot.npoints));
-    try writeU32(w, if (plot.is_complex) @as(u32, 1) else @as(u32, 0));
+    try w.writeInt(u32, FSDB_VERSION, .little);
+    try w.writeInt(u32, @intCast(nvars), .little);
+    try w.writeInt(u32, @intCast(plot.npoints), .little);
+    try w.writeInt(u32, if (plot.is_complex) @as(u32, 1) else @as(u32, 0), .little);
 
     // Section 2: Title and plotname (length-prefixed strings)
-    try writeU16(w, @intCast(plot.title.len));
+    try w.writeInt(u16, @intCast(plot.title.len), .little);
     try w.writeAll(plot.title);
-    try writeU16(w, @intCast(plot.plotname.len));
+    try w.writeInt(u16, @intCast(plot.plotname.len), .little);
     try w.writeAll(plot.plotname);
 
-    // Section 3: Signal definitions — name table
     for (plot.varnames) |name| {
-        try writeU16(w, @intCast(name.len));
+        try w.writeInt(u16, @intCast(name.len), .little);
         try w.writeAll(name);
     }
 
-    // Section 4: Data block — column-major f64, same layout as Plot.data
+    // Section 4: Data block — point-major f64, same layout as Plot.data
     try w.writeAll(std.mem.sliceAsBytes(plot.data));
 
     try w.flush();
 }
 
-/// Read back and verify an FSDB file header. Used by tests.
 fn verifyHeader(blob: []const u8) !struct { nvars: u32, npoints: u32 } {
     if (blob.len < 20) return error.TooShort;
     if (!std.mem.startsWith(u8, blob, FSDB_MAGIC)) return error.BadMagic;
@@ -102,7 +83,6 @@ test "FSDB complex data" {
     defer allocator.free(blob);
     const hdr = try verifyHeader(blob);
     try std.testing.expectEqual(@as(u32, 2), hdr.nvars);
-    // Complex flag should be 1
     const complex_flag = std.mem.readInt(u32, blob[16..20], .little);
     try std.testing.expectEqual(@as(u32, 1), complex_flag);
 }

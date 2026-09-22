@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: TXL step into RL=3*Z0; must agree with the LTRA twin fixture.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "GammaL=(150-50)/(150+50)=0.5, GammaS=0, Vi=0.5. v(b)=Vi(1+GammaL)=0.75 for t>Td=10 ns; v(a)=0.5 for t<2Td then 0.75. DC check 150/200=0.75. Identical electrical line to ltra_tran_mismatched_load, so both fixtures must give the same numbers via different native kernels.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with every tabulated value; the per-fixture bound is stated in the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-07,
+            "values": [
+              0.5,
+              0.5,
+              0.75,
+              0.75
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 5e-07,
+            "values": [
+              0.0,
+              0.75,
+              0.75,
+              0.75
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-09,
+            1.5e-08,
+            2.5e-08,
+            4.4e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ad004c7d6642774e21d220efcef0fd219c67ecbdb57029ccc284f16b7ad02f40"
+}

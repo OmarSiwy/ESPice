@@ -1,0 +1,201 @@
+// Approximate two-conductor model retained for comparison. P cards use the
+// native CPL implementation. See docs/native-transmission-line-migration.md.
+//
+// N = 2 symmetric lines have fixed even/odd eigenvectors. This file uses
+// Sv = Si = [[1,1],[1,-1]] and two decoupled Bergeron lines with lumped loss.
+// It omits the native modal fitting and recursive convolution. Matrix
+// arithmetic and user interpolation are expressible with analog arrays,
+// loops and functions; their absence here is an implementation limitation.
+// Accepted-history ownership and callbacks need matching simulator support.
+// The simplification is not an exact translation, even for two conductors.
+//
+// Card order matches ngspice: conductors of port 1, its return, conductors of
+// port 2, its return  (`P1 a1 a2 0 b1 b2 0 pline`).
+//
+// Per-unit-length matrices, upper triangle as ngspice spells it
+// (R = r rm r, L = l lm l, ...): self term `x`, mutual term `xm`.
+// Modal reduction (§1.5): X_e = x + xm, X_o = x - xm.
+//
+// Two knowingly-taken positions:
+//
+//  1. The DC series resistance is the FULL matrix product (R*length*i)_m that
+//     §1.3 writes, mutual included, so v_p1 - v_n1 = length*(r*i1 + rm*i2).
+//     ngspice's cond1 row loop steps `resindex` over the packed upper triangle
+//     and picks only R_mm, dropping the mutual; that is a reference
+//     simplification. This file deliberately differs from that algorithm;
+//     the difference is unobservable on rm = 0 cards.
+//  2. Shunt loss G lives in the transient wave attenuation only (§1.2's
+//     attenuation entries, alpha = G*Z/2). A single-delay attenuated Bergeron
+//     line has no shunt path for the current the attenuation removes, so its
+//     transient steady state sits slightly below the exact DC point stamped
+//     below. Fixing that needs an explicit g*length/2 shunt at each end, which
+//     needs internal nodes (a branch cannot take both a potential and a flow
+//     contribution). ponytail: known ceiling, worth internal nodes only if a
+//     G-dominated card shows up.
+module coupled_tlines(p1, p2, pr, n1, n2, nr);
+    inout p1, p2, pr, n1, n2, nr;
+    electrical p1, p2, pr, n1, n2, nr;
+
+    // Conductor branches, each against its own common return. I(bk) is the
+    // current into the line, V(bk) the port voltage of that conductor.
+    branch (p1, pr) b1;
+    branch (p2, pr) b2;
+    branch (n1, nr) b3;
+    branch (n2, nr) b4;
+
+    // §1.5: this topology IS the 2-conductor even/odd special case. ngspice's
+    // instance parameter `dimension` (cpl.c CPL_DIM, "number of coupled
+    // lines") is range-limited so a dimension=3 card is a parameter-range error
+    // at bind time instead of silently running a 3-line P card on 2-line
+    // topology (the 7.5e34 blowup of §1.5 lines 99-103).
+    //
+    // The range is `[2:3)` and not `[2:2]`, which is what it used to say: LRM
+    // 3.4.2 requires that "the first expression in the range shall be
+    // numerically smaller than the second expression in the range", so a
+    // both-ends-inclusive single-value range is not a legal spelling of "exactly
+    // 2" — VerA refuses it with E0347. On an INTEGER parameter `[2:3)` is the
+    // same one-element set, because 2 is included and 3 is not.
+    parameter integer dimension = 2 from [2:3);
+
+    // Per-unit-length RLGC. Ranges are permissive because ngspice does not
+    // reject out-of-range entries, it floors them (see rc/rmc below).
+    //
+    // NOTE, deliberate non-reference defaults: ngspice returns E_BADPARM when
+    // R, L, G, C or length is absent (cplsetup.c) and cpl.c defines no
+    // defaults. Verilog-A has no "mandatory parameter", so l/c/length default
+    // to a nominal 50 ohm, 1 m line and the mandatory-parameter check belongs
+    // in the P-card mapping (src/frontend/builder.zig), not here.
+    parameter real r      = 0.0     from [0:inf);  // ohm/m
+    parameter real rm     = 0.0;                   // ohm/m
+    parameter real l      = 250e-9  from (0:inf);  // H/m
+    parameter real lm     = 0.0;                   // H/m
+    parameter real g      = 0.0     from [0:inf);  // S/m
+    parameter real gm     = 0.0;                   // S/m
+    parameter real c      = 100e-12 from (0:inf);  // F/m  (Maxwell form: cm < 0)
+    parameter real cm     = 0.0;                   // F/m
+    parameter real length = 1.0     from (0:inf);  // m
+
+    // §1.3 "plus 0.1*gmin conditioning on all port diagonals".
+    parameter real gmin   = 1e-12   from [0:inf);
+
+    // Modal line constants — parameters only, no node voltages.
+    real rc, rmc, lmc, cmc, gmc;
+    real le, lo, ce, co, ze, zo, te, to, re, ro, ae, ao;
+    // Modal port variables and outgoing waves.
+    real ve1, vo1, ie1, io1, we1, wo1;
+    real ve2, vo2, ie2, io2, we2, wo2;
+    real xe1, xo1, xe2, xo2;
+
+    analog begin
+        // ngspice floors every supplied R entry — self AND mutual, the whole
+        // packed upper triangle — at 1e-4 ohm/m (cplsetup.c:422
+        // `MAX(f, 1.0e-4)`), so R is never singular and §1.2's sqrt(G_mm/R_mm)
+        // DC anchor is always defined. r = 0 therefore runs as 1e-4, as it does
+        // in the reference.
+        rc  = max(r,  1e-4);
+        rmc = max(rm, 1e-4);
+
+        // Physical coupling obeys |xm| < x. A card violating it (or a >=3-line
+        // card squeezed onto this topology) is not representable and §1.5
+        // requires it be rejected or split UPSTREAM. Clamping the mutual to a
+        // coupling coefficient of 0.999 keeps the odd mode positive-definite
+        // here instead of sqrt(<=0), and keeps the §1.4 forced step within
+        // ~5e-4 of the nominal delay — a bad card runs slow, not the 0.9 fs
+        // dead stall that a bare 1e-18/1e-21 floor handed $bound_step.
+        // ponytail: 0.999 is a guard, not a model knob; real rejection is the
+        // dimension range above plus the P-card mapping.
+        lmc = max(min(lm, 0.999 * l), -0.999 * l);
+        cmc = max(min(cm, 0.999 * c), -0.999 * c);
+        gmc = max(min(gm, 0.999 * g), -0.999 * g);
+
+        le = l + lmc;
+        lo = l - lmc;
+        ce = c + cmc;
+        co = c - cmc;
+
+        ze = sqrt(le / ce);
+        zo = sqrt(lo / co);
+        te = length * sqrt(le * ce);
+        to = length * sqrt(lo * co);
+
+        // §1.3 DC: the line must collapse to its series resistance R*length.
+        // Half of each modal R*length sits at each end, folded into the
+        // Bergeron termination; 2*re / 2*ro are the full modal DC resistances
+        // used by the static rows below. ro is floored like every sibling modal
+        // quantity: rm > r would otherwise give a negative odd-mode series
+        // resistance (an active element) and an under-sized (zo+ro)
+        // termination.
+        re = 0.5 * length * (rc + rmc);
+        ro = 0.5 * length * max(rc - rmc, 1e-4);
+
+        // Shunt loss as modal wave attenuation (the G part of the low-loss
+        // attenuation constant, alpha = G*Z/2). Transient only — see the
+        // analysis("static") gate below, which stamps the exact §1.3 DC rows so
+        // that no amount of G can shift the DC operating point.
+        ae = exp(-0.5 * length * (g + gmc) * ze);
+        ao = exp(-0.5 * length * (g - gmc) * zo);
+
+        // §1.4: the delayed-wave interpolation needs at least one sample per
+        // modal delay; ngspice forces it, so do we.
+        $bound_step(0.9 * min(te, to));
+
+        // Sv^-1 / Si^-1 on the port variables (§1.3 "transform port histories
+        // to modes"). For the symmetric pair the transform is the constant
+        // even/odd average.
+        ve1 = 0.5 * (V(b1) + V(b2));
+        vo1 = 0.5 * (V(b1) - V(b2));
+        ie1 = 0.5 * (I(b1) + I(b2));
+        io1 = 0.5 * (I(b1) - I(b2));
+        ve2 = 0.5 * (V(b3) + V(b4));
+        vo2 = 0.5 * (V(b3) - V(b4));
+        ie2 = 0.5 * (I(b3) + I(b4));
+        io2 = 0.5 * (I(b3) - I(b4));
+
+        // Wave leaving each line terminal (port voltage minus the lumped
+        // half-R drop, plus the characteristic term).
+        we1 = ve1 + (ze - re) * ie1;
+        wo1 = vo1 + (zo - ro) * io1;
+        we2 = ve2 + (ze - re) * ie2;
+        wo2 = vo2 + (zo - ro) * io2;
+
+        if (!analysis("static")) begin
+            // Modal port equations: instantaneous characteristic admittance
+            // term + the attenuated, tau_m-delayed wave from the far end.
+            xe1 = (ze + re) * ie1 + ae * absdelay(we2, te);
+            xo1 = (zo + ro) * io1 + ao * absdelay(wo2, to);
+            xe2 = (ze + re) * ie2 + ae * absdelay(we1, te);
+            xo2 = (zo + ro) * io2 + ao * absdelay(wo1, to);
+        end else begin
+            // §1.3 "DC / cond1", per mode. absdelay is transparent at DC, so
+            // the delayed-wave form above would fold the attenuation ae/ao into
+            // the DC answer and inflate the modal resistance; the exact rows go
+            // here instead (same split as lossy_tline.va lines 93-103).
+            //
+            //   ve1 = ve2 - Rdc*ie2  and  ve2 = ve1 - Rdc*ie1
+            //
+            // sum  => ie1 + ie2 = 0
+            // diff => ve1 - ve2 = Rdc*ie1,  Rdc_e = 2*re, Rdc_o = 2*ro
+            //
+            // In conductor terms that is exactly (R*length*i)_m:
+            //   v_p1 - v_n1 = length*(rc*i1 + rmc*i2).
+            xe1 = ve2 - 2.0 * re * ie2;
+            xo1 = vo2 - 2.0 * ro * io2;
+            xe2 = ve1 - 2.0 * re * ie1;
+            xo2 = vo1 - 2.0 * ro * io1;
+        end
+
+        // Si transform back to conductors (v1 = v_e + v_o, v2 = v_e - v_o).
+        V(b1) <+ xe1 + xo1;
+        V(b2) <+ xe1 - xo1;
+        V(b3) <+ xe2 + xo2;
+        V(b4) <+ xe2 - xo2;
+
+        // §1.3 tail: ngspice unconditionally adds 0.1*CKTgmin to
+        // posPos/negNeg/negPos/posNeg for every conductor before anything else
+        // (cplload.c:71-86), i.e. a tiny conductance end-to-end across each
+        // conductor. Every other branch here is voltage-defined, so this is the
+        // only conductance on those rows.
+        I(p1, n1) <+ 0.1 * gmin * V(p1, n1);
+        I(p2, n2) <+ 0.1 * gmin * V(p2, n2);
+    end
+endmodule

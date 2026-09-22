@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "BSIM4 thermal-noise mode must preserve connected DC source/drain branches.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "66176cd9c51baa1ddc2d677b79a7aacf8c6cda1bc8d47b5546e0cafa212c984e"
+  },
+  "origin": "benchmark/fixtures/regression/bsim4_tnoimod1/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(dn)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(gn)": {
+            "values": [
+              1.2
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(dp)": {
+            "values": [
+              -1.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(gp)": {
+            "values": [
+              -1.2
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vgp)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vdp)": {
+            "values": [
+              0.00076648380865447
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vgn)": {
+            "values": [
+              0.0
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vdn)": {
+            "values": [
+              -0.0018044732123927
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5140f7d9caf9e0d2c398592717af6c6c94cbb8ea88fe4f32afd9819f6edec51e"
+}

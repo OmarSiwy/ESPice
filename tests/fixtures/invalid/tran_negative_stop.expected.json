@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Transient stop time must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Transient stop time must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "d5d75cad0f8839a1891dc299a5bfed2ea6aab2eaaa56b9b3a5fec955206fcd37"
+}

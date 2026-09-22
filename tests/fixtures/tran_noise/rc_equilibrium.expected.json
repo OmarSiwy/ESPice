@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "analysis": "tran_noise",
+  "purpose": "Stationary RC thermal noise variance",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Fluctuation-dissipation gives E[V]=0 and Var[V]=kB*T/C. Discard first 20RC; correlated samples require time-weighted statistics."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "time_weighted_moments",
+        "plot": "Transient Noise Analysis",
+        "column": "v(out)",
+        "time_window": [
+          2e-08,
+          1e-05
+        ],
+        "mean_abs_max": 5e-06,
+        "variance_min": 3.108013480125e-09,
+        "variance_max": 5.180022466875e-09,
+        "min_points": 10000
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Statistical acceptance interval, not a deterministic noise waveform. Fixed PRNG samples are not prescribed. Approximately 10000 correlation times give a wide confidence margin."
+  ],
+  "netlist_sha256": "b848349845c00b83393fd4769b4534f38660ba6cf6aa16e03937b741b7467105"
+}

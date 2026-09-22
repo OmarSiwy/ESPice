@@ -1,0 +1,449 @@
+// ngspice MOS LEVEL=9 (netlist letter M) — "modified level 3", the
+// Gillespie/Philips-family empirical short-channel MOSFET.
+//
+// Normative: docs/mos-legacy.md §1.4 (MOS9 = the §1.2 MOS3 chain with the
+// mos9load.c deltas) and §3, riding the MOS1 chassis
+// (docs/mos1-shichman-hodges.md §1.2 defaulting, §1.3 temperature, §1.4 bulk
+// diodes, §1.6 Meyer caps, §1.8 d'/s' topology).
+//
+// Verilog-A gets every gm/gds/gmbs by differentiating the value chain, so all
+// of ngspice's d*/dv* bookkeeping is dropped: only the *value* expressions of
+// mos3load.c/mos9load.c are transcribed.  The one exception is gdsat inside
+// the channel-length-modulation block, which ngspice writes as a closed-form
+// expression (cdsat*(1-fdrain)/vdsc), so it is transcribed literally.
+//
+// Limiting (fetlim/limvds/pnjlim, §1.7) and MODEINITJCT seeding are spelled
+// with $limit as in models/mos1.va: $limit stays the identity inside eval,
+// and VerA's contract `limit`/`seed` hooks hand the host the clamps to run
+// between the linear solve and the next eval.
+module mos9(d, g, s, b);
+    inout d, g, s, b;
+    electrical d, g, s, b;
+    electrical di, si;                       // §1.8 series-resistance nodes
+
+    // ---- model card (ngspice names / defaults / units) ---------------------
+    parameter integer mtype = 1 from [-1:1] exclude 0;  // +1 NMOS, -1 PMOS
+    parameter integer tpg = 1 from [-1:1];   // gate type: +1 opposite, -1 same, 0 Al
+    parameter real vto   = 0.0;              // V   zero-bias threshold (0: from wkfngs)
+    parameter real delvto = 0.0;             // V   threshold shift
+    parameter real nss   = 0.0 from [0:inf); // cm^-2 surface state density
+    parameter real kp    = 2.0e-5;           // A/V^2 transconductance (not given: from uo)
+    parameter real gamma = 0.0 from [0:inf); // sqrt(V) body effect (0 + nsub: derived)
+    parameter real phi   = 0.6;              // V   surface potential (not given: from nsub)
+    parameter real uo    = 600.0 from (0:inf); // cm^2/Vs surface mobility
+    parameter real theta = 0.0 from [0:inf); // 1/V  mobility modulation
+    parameter real eta   = 0.0 from [0:inf); // -    static feedback (DIBL)
+    parameter real kappa = 0.2 from [0:inf); // -    saturation-field factor
+    parameter real delta = 0.0 from [0:inf); // -    narrow-width factor
+    parameter real nfs   = 0.0 from [0:inf); // cm^-2 fast surface state density
+    parameter real xj    = 0.0 from [0:inf); // m   junction depth
+    parameter real ld    = 0.0 from [0:inf); // m   lateral diffusion
+    parameter real tox   = 1.0e-7 from (0:inf); // m oxide thickness
+    parameter real nsub  = 0.0 from [0:inf); // cm^-3 substrate doping
+    parameter real vmax  = 0.0 from [0:inf); // m/s max drift velocity (0: off)
+    parameter real rd    = 0.0 from [0:inf); // ohm drain series R
+    parameter real rs    = 0.0 from [0:inf); // ohm source series R
+    parameter real rsh   = 0.0 from [0:inf); // ohm/sq sheet resistance
+    parameter real is    = 1.0e-14 from [0:inf); // A  bulk junction sat current
+    parameter real js    = 0.0 from [0:inf);     // A/m^2 sat current density
+    parameter real cbd   = 0.0 from [0:inf); // F   b-d zero-bias cap (0: from cj)
+    parameter real cbs   = 0.0 from [0:inf); // F   b-s zero-bias cap
+    parameter real cj    = 0.0 from [0:inf); // F/m^2 bottom junction cap
+    parameter real cjsw  = 0.0 from [0:inf); // F/m   sidewall junction cap
+    parameter real pb    = 0.8 from (0:inf); // V   bulk junction potential
+    parameter real mj    = 0.5 from (0:1);   // -   bottom grading
+    parameter real mjsw  = 0.33 from (0:1);  // -   sidewall grading
+    parameter real fc    = 0.5 from (0:1);   // -   forward-bias cap coefficient
+    parameter real cgso  = 0.0 from [0:inf); // F/m gate-source overlap
+    parameter real cgdo  = 0.0 from [0:inf); // F/m gate-drain overlap
+    parameter real cgbo  = 0.0 from [0:inf); // F/m gate-bulk overlap (per length)
+    parameter real kf    = 0.0 from [0:inf); // -   flicker noise coefficient
+    parameter real af    = 1.0 from (0:inf); // -   flicker noise exponent
+    parameter real tnom  = $simparam("tnom");             // C   parameter extraction temp
+    parameter real gmin  = 1.0e-12 from [0:inf);
+
+    // ---- instance card ----------------------------------------------------
+    parameter real l  = 1.0e-4 from (0:inf); // m  drawn channel length
+    parameter real w  = 1.0e-4 from (0:inf); // m  channel width
+    parameter real xl = 0.0;                 // m  length mask adjust
+    parameter real xw = 0.0;                 // m  width mask adjust
+    parameter real wd = 0.0;                 // m  width narrowing per side
+    parameter real ad = 0.0 from [0:inf);    // m^2 drain diffusion area
+    parameter real as = 0.0 from [0:inf);    // m^2 source diffusion area
+    parameter real pd = 0.0 from [0:inf);    // m  drain perimeter
+    parameter real ps = 0.0 from [0:inf);    // m  source perimeter
+    parameter real nrd = 1.0 from [0:inf);   // squares of drain diffusion
+    parameter real nrs = 1.0 from [0:inf);   // squares of source diffusion
+    parameter real m  = 1.0 from (0:inf);    // parallel multiplicity
+
+    // Junction depletion charge, both sides of fc*pj (mos1 §1.3): power law
+    // below, the f1/f2/f3 quadratic continuation above.
+    analog function real depq;
+        input v, cz, pj, mgrad, fcv;
+        real v, cz, pj, mgrad, fcv;
+        real f1, f2, f3, fcpb;
+        begin
+            fcpb = fcv * pj;
+            // mos9load.c:918,977's own guard (`if (Cbs != 0 || Cbssw != 0)`):
+            // both arms below are `cz * <something finite>`, so with no
+            // junction capacitance the charge is exactly zero and the two
+            // `pow` per junction per Newton iteration compute it the long way.
+            // A layout netlist leaves CJ/CJSW and AD/AS/PD/PS at zero.
+            if (cz == 0.0) depq = 0.0;
+            else if (v < fcpb)
+                depq = pj * cz * (1.0 - pow(1.0 - v / pj, 1.0 - mgrad)) / (1.0 - mgrad);
+            else begin
+                f1 = pj * (1.0 - pow(1.0 - fcv, 1.0 - mgrad)) / (1.0 - mgrad);
+                f2 = pow(1.0 - fcv, 1.0 + mgrad);
+                f3 = 1.0 - fcv * (1.0 + mgrad);
+                depq = cz * (f1 + (f3 * (v - fcpb)
+                       + (mgrad / (2.0 * pj)) * (v * v - fcpb * fcpb)) / f2);
+            end
+        end
+    endfunction
+
+    // Bulk junction current, mos9load.c:416-435 form: forward exponential
+    // tangent-continued above 80·vth (a flat clamp zeroes the restoring slope
+    // on evals at unlimited x — LTE probes, sweep warm starts; bjt.va pnj),
+    // and the diode-style cubic (3*vt/(v*e))^3 reverse expansion below -3*vt.
+    analog function real jcur;
+        input v, isat, vth, gm;
+        real v, isat, vth, gm;
+        real arg, u;
+        begin
+            if (v > -3.0 * vth) begin
+                u = min(v / vth, 80.0);
+                jcur = isat * (exp(u) * (1.0 + (v / vth - u)) - 1.0) + gm * v;
+            end else begin
+                arg = 3.0 * vth / (v * 2.718281828459045);
+                jcur = -isat * (1.0 + arg * arg * arg) + gm * v;
+            end
+        end
+    endfunction
+
+    // temperature / geometry prep (bias independent)
+    real tk, tnomk, vt, vtnom, vt300, eg, egnom, fact1, fact2, pbfact1, pbfact;
+    real ratio, tphi, tpb, tvbi, kpt, uot, sqtphi, pbo, gmaold, gmanew;
+    real ist, capf, capfsw, wkfngs, vtoeff;
+    real coxp, leff, weff, oxcap, beta0, alpha, xd, etac, narrow, csonco;
+    real isatd, isats, czbd, czbdsw, czbs, czbssw, gdser, gsser;
+    real kpeff, phinom, gammaeff, cgsov, cgdov, cgbov, gmch;
+    real ty, vcrits, vcritd;
+    // bias dependent
+    real vbs, vgs, vds, vbd, vgd, ibs, ibd;
+    real mode, vbx, vgx, vdx, sqphbs, phibs, fshort, wponxj, wconxj;
+    real arga, argb, argc, gammas, fbody, qbonco, vbix, vth, von, xn;
+    real vgsx, vgst, onfg, us, vdsc, vdsat, vdse, cdo, fdrain, cdrain;
+    real cdsat, gdsat, emax, delxl, clfact, id;
+    real vgstm, vdsatm, cgsh, cgdh, cgbh, chgs, chgd, capgs, capgd, capgb;
+
+    analog begin
+        // ---- §1.3 SPICE temperature maps -------------------------------
+        tk = $temperature;
+        tnomk = tnom + 273.15;
+        vt = 1.380649e-23 * tk / 1.602176634e-19;
+        vtnom = 1.380649e-23 * tnomk / 1.602176634e-19;
+        vt300 = 1.380649e-23 * 300.15 / 1.602176634e-19;
+        egnom = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
+        eg = 1.16 - 7.02e-4 * tk * tk / (tk + 1108.0);
+        fact1 = tnomk / 300.15;
+        fact2 = tk / 300.15;
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1)
+                  - egnom / (2.0 * vtnom) + 1.1150877 / (2.0 * vt300));
+        pbfact = -2.0 * vt * (1.5 * ln(fact2)
+                 - eg / (2.0 * vt) + 1.1150877 / (2.0 * vt300));
+        ratio = tk / tnomk;
+
+        // ---- §1.2 defaulting from TOX / NSUB ---------------------------
+        coxp = 3.9 * 8.8541878128e-12 / tox;      // C'ox [F/m^2]
+        leff = max(l - 2.0 * ld + xl, 1.0e-9);
+        weff = max(w - 2.0 * wd + xw, 1.0e-9);
+        oxcap = coxp * leff * weff * m;
+        // "Given" is $param_given, as in mos1.va: the KP/PHI defaults
+        // (2e-5, 0.6) are legal card values, so a value sentinel can never
+        // take mos9temp.c:66-68's UO derivation or the NSUB-derived PHI.
+        if ($param_given(kp)) kpeff = kp;
+        else kpeff = uo * coxp * 1.0e-4;
+        if ($param_given(phi) || nsub <= 1.45e10) phinom = phi;
+        else phinom = max(0.1, 2.0 * vtnom * ln(nsub * 1.0e6 / 1.45e16));
+        gammaeff = ((gamma <= 0.0) && (nsub > 0.0))
+                   ? sqrt(2.0 * 11.7 * 8.8541878128e-12 * 1.602176634e-19 * nsub * 1.0e6) / coxp
+                   : gamma;
+
+        // VTO from the gate work-function difference when the card gives
+        // NSUB (+NSS/TPG) but no VTO (mos9temp.c:81-104; §1.2 V_fb chain).
+        wkfngs = ((tpg != 0) ? 3.25 + 0.5 * egnom - tpg * mtype * 0.5 * egnom : 3.2)
+                 - (3.25 + 0.5 * egnom + mtype * 0.5 * phinom);
+        vtoeff = ((vto == 0.0) && (nsub > 1.45e10))
+                 ? wkfngs - nss * 1.0e4 * 1.602176634e-19 / coxp
+                   + mtype * (gammaeff * sqrt(phinom) + phinom)
+                 : vto;
+
+        tphi = fact2 * (phinom - pbfact1) / fact1 + pbfact;
+        pbo = (pb - pbfact1) / fact1;
+        tpb = fact2 * pbo + pbfact;
+        sqtphi = sqrt(tphi);
+        tvbi = vtoeff + delvto - mtype * gammaeff * sqrt(phinom) + 0.5 * (egnom - eg)
+               + mtype * 0.5 * (tphi - phinom);
+        kpt = kpeff / pow(ratio, 1.5);
+        uot = uo / pow(ratio, 1.5);
+
+        beta0 = kpt * m * weff / leff;
+        // alpha = 2*eps_si/(q*Nsub) drives both the CLM depletion width and
+        // the short-channel depletion-layer coefficient xd = sqrt(alpha).
+        alpha = (nsub > 0.0)
+                ? 2.0 * 11.7 * 8.8541878128e-12 / (1.602176634e-19 * nsub * 1.0e6)
+                : 0.0;
+        xd = sqrt(alpha);
+        etac = eta * 8.15e-22 / (coxp * leff * leff * leff);
+        narrow = delta * 0.5 * 3.14159265358979323846 * 11.7 * 8.8541878128e-12 / (coxp * weff);
+        csonco = 1.602176634e-19 * nfs * 1.0e4 / coxp;
+
+        // junction saturation currents and zero-bias caps (§1.3/§1.4):
+        // IS/JS carry exp(-Eg/Vt + Eg,nom/Vt,nom), the depletion caps the
+        // two-stage 1 + MJ*(4e-4*dT - gamma_ma) factor (mos9temp.c:233-256).
+        ist = exp(-eg / vt + egnom / vtnom);
+        gmaold = (pb - pbo) / pbo;
+        gmanew = (tpb - pbo) / pbo;
+        capf = (1.0 + mj * (4.0e-4 * (tk - 300.15) - gmanew))
+               / (1.0 + mj * (4.0e-4 * (tnomk - 300.15) - gmaold));
+        capfsw = (1.0 + mjsw * (4.0e-4 * (tk - 300.15) - gmanew))
+                 / (1.0 + mjsw * (4.0e-4 * (tnomk - 300.15) - gmaold));
+
+        isatd = (((js > 0.0) && (ad > 0.0)) ? js * ad * m : is * m) * ist;
+        isats = (((js > 0.0) && (as > 0.0)) ? js * as * m : is * m) * ist;
+        czbd = ((cbd > 0.0) ? cbd : cj * ad) * m * capf;
+        czbs = ((cbs > 0.0) ? cbs : cj * as) * m * capf;
+        czbdsw = cjsw * pd * m * capfsw;
+        czbssw = cjsw * ps * m * capfsw;
+
+        gdser = (rd > 0.0) ? m / rd : ((rsh > 0.0) && (nrd > 0.0) ? m / (rsh * nrd) : 0.0);
+        gsser = (rs > 0.0) ? m / rs : ((rsh > 0.0) && (nrs > 0.0) ? m / (rsh * nrs) : 0.0);
+
+        cgsov = cgso * weff * m;
+        cgdov = cgdo * weff * m;
+        cgbov = cgbo * leff * m;
+
+        // ---- bias, type-corrected to s' (§2 step 2), §1.7 limited ------
+        // mos1.va's MODE ladder: "fetlimds" on both gate legs + "limvds"
+        // emits ngspice's old-vds swap (mos9load.c:351-364); pnjlim stays on
+        // both bulk junctions (see mos1.va). Trailing `ty` = VerA frame sign
+        // (PMOS limits mtype·v); ty is mtype as a real — integer $limit args
+        // are declined.
+        ty     = mtype;
+        vcrits = vt * ln(vt / (1.4142135623730951 * isats));
+        vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
+        vgs = ty * $limit(V(g, si), "fetlimds", ty * (vtoeff + delvto), ty);
+        vgd = ty * $limit(V(g, di), "fetlimds", ty * (vtoeff + delvto), ty);
+        vds = ty * $limit(V(di, si), "limvds", ty);
+        vgd = vgs - vds;
+        vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
+        vbd = ty * $limit(V(b, di), "pnjlim", vt, vcritd, ty);
+
+        // ---- §1.4 bulk diodes ------------------------------------------
+        ibs = jcur(vbs, isats, vt, gmin);
+        ibd = jcur(vbd, isatd, vt, gmin);
+
+        // ---- mode swap: everything below is in the source-referenced frame
+        mode = (vds >= 0.0) ? 1.0 : -1.0;
+        vbx = (mode > 0.0) ? vbs : vbd;
+        vgx = (mode > 0.0) ? vgs : vgd;
+        vdx = mode * vds;                        // >= 0
+
+        // square-root body term, mos3/mos9 form (Taylor branch for vb > 0)
+        if (vbx <= 0.0) begin
+            phibs = tphi - vbx;
+            sqphbs = sqrt(phibs);
+        end
+        else begin
+            sqphbs = sqtphi / (1.0 + vbx / (tphi + tphi));
+            phibs = sqphbs * sqphbs;
+        end
+
+        // short-channel factor (Dang depletion sharing); constants are
+        // mos9load.c's coeff0/1/2.
+        if ((xj > 0.0) && (xd > 0.0)) begin
+            wponxj = xd * sqphbs / xj;
+            wconxj = 0.0631353 + 0.8013292 * wponxj - 0.01110777 * wponxj * wponxj;
+            arga = wconxj + ld / xj;
+            argc = wponxj / (1.0 + wponxj);
+            argb = sqrt(1.0 - argc * argc);
+            fshort = 1.0 - (xj / leff) * (arga * argb - ld / xj);
+        end
+        else
+            fshort = 1.0;
+
+        // body effect + narrow width, then static feedback into the threshold.
+        // fbody is ngspice's (1 + fbody), narrow term included (mos9load.c:624),
+        // so it divides vdsat and multiplies vdse in cdo with no extra 1.
+        gammas = gammaeff * fshort;
+        fbody = 1.0 + 0.5 * gammas / (sqphbs + sqphbs) + narrow;
+        qbonco = gammas * sqphbs + narrow * phibs;
+        vbix = tvbi * mtype - etac * vdx;
+        vth = vbix + qbonco;
+
+        // joint weak/strong inversion (NFS): von = vth + vt*xn
+        if (nfs > 0.0) begin
+            xn = 1.0 + csonco + qbonco / (phibs + phibs);
+            von = vth + vt * xn;
+        end
+        else begin
+            xn = 1.0;
+            von = vth;
+        end
+
+        // strong-inversion chain is always evaluated at vgsx = max(vgx, von);
+        // the subthreshold exponential below re-scales it.
+        vgsx = max(vgx, von);
+        vgst = vgsx - vth;
+
+        // mobility modulation by gate voltage
+        onfg = 1.0 + theta * vgst;
+        us = uot * 1.0e-4 / onfg;
+
+        // saturation voltage (velocity-saturation form when VMAX given)
+        if (vmax > 0.0) begin
+            vdsc = leff * vmax / us;
+            arga = vgst / fbody;
+            vdsat = arga + vdsc - sqrt(arga * arga + vdsc * vdsc);
+        end
+        else begin
+            vdsc = 0.0;
+            vdsat = vgst / fbody;
+        end
+
+        // normalized drain current, clamped at vdsat
+        vdse = min(vdx, vdsat);
+        cdo = vgst - 0.5 * fbody * vdse;
+        cdrain = (beta0 / onfg) * cdo * vdse;
+
+        // velocity-saturation factor
+        if (vmax > 0.0) begin
+            fdrain = 1.0 / (1.0 + vdse / vdsc);
+            cdrain = fdrain * cdrain;
+        end
+        else
+            fdrain = 1.0;
+
+        // channel-length modulation (mos9load.c:746-828, the default non-badmos3
+        // path): KAPPA appears in BOTH emax and argc, the saturation delta-L
+        // carries the +vdsat/8 offset, and triode gets its own (vdx/vdsat)^4
+        // ramp — the pair is C1-continuous at vdx = vdsat.
+        delxl = 0.0;
+        if (alpha > 0.0) begin
+            if (vdx > vdsat) begin
+                if (vmax > 0.0) begin
+                    cdsat = cdrain;
+                    gdsat = max(1.0e-12, cdsat * (1.0 - fdrain) / vdsc);
+                    emax = kappa * cdsat / (leff * gdsat);
+                    arga = 0.5 * emax * alpha;
+                    argc = kappa * alpha;
+                    delxl = sqrt(arga * arga + argc * (vdx - vdsat)) - arga;
+                end
+                else
+                    delxl = sqrt(kappa * alpha * (vdx - vdsat + 0.125 * vdsat));
+            end
+            else if ((vmax <= 0.0) && (vdsat > 0.0)) begin
+                arga = vdx / vdsat;
+                arga = arga * arga;
+                delxl = sqrt(kappa * alpha * 0.125 * vdsat) * arga * arga;
+            end
+            // punch-through approximation keeps delxl < leff
+            if (delxl > 0.5 * leff)
+                delxl = leff - leff * leff / (4.0 * delxl);
+            clfact = 1.0 - delxl / leff;
+            cdrain = cdrain / clfact;
+        end
+
+        // cutoff / subthreshold
+        if (vgx <= von) begin
+            if (nfs > 0.0)
+                cdrain = cdrain * exp(min(0.0, (vgx - von) / (vt * xn)));
+            else
+                cdrain = 0.0;
+        end
+
+        id = mode * cdrain;
+
+        // ---- §1.6 Meyer gate capacitances ------------------------------
+        // DEVqmeyer returns half the non-constant part; the load routine sums
+        // the two timepoint halves — spelled below as half + $prev(half) +
+        // overlap, ngspice's exact MODETRAN averaging (OP/AC read 2*half +
+        // overlap via $prev's commit at OP exit).  Meyer caps are
+        // capacitance-based (q advanced as C*dv), which is exactly
+        // C(v)*ddt(V) here — not charge conserving, matching ngspice.
+        vgstm = vgx - von;
+        vdsatm = max(vdsat, 0.025);
+        // DEVqmeyer picks the cgs base per vgst band, then the SAME vdsat/vds
+        // split (devsup.c:659-671) redistributes it into cgs/cgd — including in
+        // the -phi/2 < vgst <= 0 band, where cgd is therefore not zero.
+        if (vgstm <= -tphi) begin
+            cgbh = 0.5 * oxcap;
+            cgsh = 0.0;
+        end
+        else if (vgstm <= -0.5 * tphi) begin
+            cgbh = -vgstm * oxcap / (2.0 * tphi);
+            cgsh = 0.0;
+        end
+        else if (vgstm <= 0.0) begin
+            cgbh = -vgstm * oxcap / (2.0 * tphi);
+            cgsh = vgstm * oxcap / (1.5 * tphi) + oxcap / 3.0;
+        end
+        else begin
+            cgbh = 0.0;
+            cgsh = oxcap / 3.0;
+        end
+        if (vdsatm <= vdx)
+            cgdh = 0.0;
+        else begin
+            argb = 2.0 * vdsatm - vdx;
+            arga = vdsatm - vdx;
+            cgdh = cgsh * (1.0 - vdsatm * vdsatm / (argb * argb));
+            cgsh = cgsh * (1.0 - arga * arga / (argb * argb));
+        end
+        // inverted mode: qmeyer is called swapped, so swap its cgs/cgd back
+        // BEFORE averaging (state slots are device-frame branches).
+        chgs = (mode > 0.0) ? cgsh : cgdh;
+        chgd = (mode > 0.0) ? cgdh : cgsh;
+        capgs = chgs + $prev(chgs) + cgsov;
+        capgd = chgd + $prev(chgd) + cgdov;
+        capgb = cgbh + $prev(cgbh) + cgbov;
+
+        // ---- stamps (§1.8 topology, all signed by mtype) ----------------
+        if (gdser > 0.0)
+            I(d, di) <+ gdser * V(d, di)
+                      + white_noise(4.0 * 1.380649e-23 * tk * gdser, "rd");
+        else
+            V(d, di) <+ 0.0;
+        if (gsser > 0.0)
+            I(s, si) <+ gsser * V(s, si)
+                      + white_noise(4.0 * 1.380649e-23 * tk * gsser, "rs");
+        else
+            V(s, si) <+ 0.0;
+
+        I(di, si) <+ mtype * id;
+
+        // ---- noise (mos-legacy.md noise table; mos9noi.c = mos1noi.c template).
+        // gm comes from the same AD that builds the Jacobian, so no hand-derived
+        // conductance chain is needed.
+        gmch = ddx(mtype * id, V(g));
+        I(di, si) <+ white_noise(4.0 * 1.380649e-23 * tk * (2.0 / 3.0) * abs(gmch),
+                                 "channel");
+        if (kf > 0.0)
+            I(di, si) <+ flicker_noise(kf * pow(abs(id), af)
+                                       / (weff * m * leff * coxp * coxp), 1.0, "flicker");
+        I(b, di) <+ mtype * ibd;
+        I(b, si) <+ mtype * ibs;
+
+        // junction depletion charge (bottom + sidewall per side)
+        I(b, di) <+ mtype * ddt(depq(vbd, czbd, tpb, mj, fc)
+                              + depq(vbd, czbdsw, tpb, mjsw, fc));
+        I(b, si) <+ mtype * ddt(depq(vbs, czbs, tpb, mj, fc)
+                              + depq(vbs, czbssw, tpb, mjsw, fc));
+
+        // Meyer gate caps
+        I(g, si) <+ capgs * ddt(V(g, si));
+        I(g, di) <+ capgd * ddt(V(g, di));
+        I(g, b) <+ capgb * ddt(V(g, b));
+    end
+endmodule

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "Unstable pole must not be hidden",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Net G=-.001 S, C=1uF; s=-G/C=+1000 rad/s."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Pole-Zero Analysis",
+        "match": "unordered",
+        "columns": {
+          "pole": {
+            "unit": "rad/s",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                1000.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "45deef56822d32bcd6084d17348e2d1c78d285af0a670bbffcb9c221873473c3",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

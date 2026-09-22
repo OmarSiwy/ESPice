@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "analysis": "qpss",
+  "purpose": "Independent incommensurate tones and two-sided normalization",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "QPSS reports |X(k,l)|, not peak amplitude: at (+/-1,0), |X|=A1*|H(f1)|/2; at (0,+/-1), A2*|H(f2)|/2; all other mix products zero."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Quasi-Periodic Steady State",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.003,
+            "atol": 1e-07,
+            "values": [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.02795839335028,
+              0.0,
+              0.0,
+              0.0,
+              0.078588362738795,
+              0.0,
+              0.078588362738795,
+              0.0,
+              0.0,
+              0.0,
+              0.02795839335028,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            -4828.4271247462,
+            -3828.4271247462,
+            -2828.4271247462,
+            -1828.4271247462,
+            -828.42712474619,
+            -3414.2135623731,
+            -2414.2135623731,
+            -1414.2135623731,
+            -414.2135623731,
+            585.7864376269,
+            -2000.0,
+            -1000.0,
+            0.0,
+            1000.0,
+            2000.0,
+            -585.7864376269,
+            414.2135623731,
+            1414.2135623731,
+            2414.2135623731,
+            3414.2135623731,
+            828.42712474619,
+            1828.4271247462,
+            2828.4271247462,
+            3828.4271247462,
+            4828.4271247462
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 25
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "29ab1e323189ccbeeb395ae109d586ab166ee26f0588f1692352176f929b77f3",
+  "known_gaps": [
+    "QPSS does not yet honor the physical two-tone source spectra"
+  ]
+}

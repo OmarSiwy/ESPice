@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "BJT differential pair with resistive emitter tail to a negative rail.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "4ffc5df97aed6ad8fe983dcecb41b404c3bd4ff731c67d9381fd5f133c9a7a6b"
+  },
+  "origin": "benchmark/fixtures/analog/diff_pair/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(vcc)": {
+            "values": [
+              5.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(vee)": {
+            "values": [
+              -5.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(inp)": {
+            "values": [
+              0.1
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(inn)": {
+            "values": [
+              -0.1
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(cp)": {
+            "values": [
+              0.71656078555979
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(cn)": {
+            "values": [
+              4.9981222861648
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(tail)": {
+            "values": [
+              -0.67182995038278
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "i(vn)": {
+            "values": [
+              -3.9905084628083e-09
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vp)": {
+            "values": [
+              -9.1137005980925e-06
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vee)": {
+            "values": [
+              0.00092088724459941
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          },
+          "i(vcc)": {
+            "values": [
+              -0.00091176955920753
+            ],
+            "unit": "A",
+            "rtol": 0.001,
+            "atol": 1e-11
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9e5cd88b20e7d94ea27c78958bae2c8a7629ae246181d257835b9a3698225f15"
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Verilog inverter: input high -> output driven low",
+  "origin": "benchmark/fixtures/verilog/inverter/circuit.sp",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Digital input logic high drives inverter output logic low, 0V in the supplied mixed-signal interface."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(a)": {
+            "values": [
+              5.0
+            ],
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06
+          },
+          "v(y)": {
+            "values": [
+              0.0
+            ],
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-06
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "f9a5fee1a814db95ba674c36930097e884265b246e36dac6ac15fdcbf0f9d278"
+}

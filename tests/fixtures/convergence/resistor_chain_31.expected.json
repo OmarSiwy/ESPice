@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "31-resistor chain; sparse solve and accumulated residual",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Equal series resistors divide the source into N equal drops."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(n1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.96774193548387
+            ]
+          },
+          "v(n2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.93548387096774
+            ]
+          },
+          "v(n3)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.90322580645161
+            ]
+          },
+          "v(n4)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.87096774193548
+            ]
+          },
+          "v(n5)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.83870967741935
+            ]
+          },
+          "v(n6)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.80645161290323
+            ]
+          },
+          "v(n7)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.7741935483871
+            ]
+          },
+          "v(n8)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.74193548387097
+            ]
+          },
+          "v(n9)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.70967741935484
+            ]
+          },
+          "v(n10)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.67741935483871
+            ]
+          },
+          "v(n11)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.64516129032258
+            ]
+          },
+          "v(n12)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.61290322580645
+            ]
+          },
+          "v(n13)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.58064516129032
+            ]
+          },
+          "v(n14)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.54838709677419
+            ]
+          },
+          "v(n15)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.51612903225806
+            ]
+          },
+          "v(n16)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.48387096774194
+            ]
+          },
+          "v(n17)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.45161290322581
+            ]
+          },
+          "v(n18)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.41935483870968
+            ]
+          },
+          "v(n19)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.38709677419355
+            ]
+          },
+          "v(n20)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.35483870967742
+            ]
+          },
+          "v(n21)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.32258064516129
+            ]
+          },
+          "v(n22)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.29032258064516
+            ]
+          },
+          "v(n23)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.25806451612903
+            ]
+          },
+          "v(n24)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.2258064516129
+            ]
+          },
+          "v(n25)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.19354838709677
+            ]
+          },
+          "v(n26)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.16129032258065
+            ]
+          },
+          "v(n27)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.12903225806452
+            ]
+          },
+          "v(n28)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.096774193548387
+            ]
+          },
+          "v(n29)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.064516129032258
+            ]
+          },
+          "v(n30)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.032258064516129
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -3.2258064516129e-05
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1b70f7534f5495af3ec95a046bdc5682a91b873717981fe68adb73e371e47b80"
+}

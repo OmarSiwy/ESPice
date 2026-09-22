@@ -138,6 +138,84 @@ $\min(\delta,\,2h,\,h_{\max})$ as the next step (spice3 `dctran.c`).
 `trtol` (default 7) deflates the worst-case LTE bound to its empirically
 observed sharpness.
 
+**Per-device-state LTE (landed 2026-09-07).** ngspice runs the formula above
+once per device charge *state* (`ckttrunc.c` → `DEVtrunc` → `cktterr.c`; see
+`captrunc.c`, `bjttrunc.c`, `mos1trun.c`) and mins over states, then over
+devices. espice used to run it on the `q_vec` plane, i.e. the per-row
+(per-node) SUM of charges, which adds co-moving contributions' divided
+differences together and loses the binding state.
+
+The fix needed no ABI change and nothing had to be unfrozen. The
+per-contribution index space was **already there**: `engine.buildTapes` writes
+`rhs_idx[id * n_u + ru]`, a dense `(instance, unknown)` array whose *value* is
+the row — many-to-one onto rows, which is precisely "which device state landed
+on which node". `Sink.scatterQ` now also stores its `qv` into a host-only
+`DeviceBatch.q_tape` on that same index, and `simulate` keeps a second history
+(`qt_hist[4]`, `qt_i_prev`) over it. `stepBound` is unchanged — it is handed
+different slices. Cost: one nullable fn pointer on the cold `Hooks` vtable
+(which moves `layoutHash()` and so re-keys the FastVAF `.so` cache once —
+that is the mechanism working, not a break). The four `[]f64` planes, the u32
+tapes, the CSC pattern, the Model/Instance PODs and `DeviceKernel.run`'s
+parameter list are byte-identical.
+
+Measured on the 264-fixture corpus: **151 PASS / 7 FAIL, unchanged**; 9
+fixtures better, 3 worse. `tline/txl2_3_line` 1.23e-2 → 5.40e-3 max (the case
+this was built for: node 168's 7.398 fF load cap is a state again instead of
+being merged into a 7.498 fF row slope), `ltra2_2_line` 1.13e-4 → 9.65e-6,
+`fourbitadder` 3.55e-4 → 3.37e-5, `mos1_large_signal` 8.58e-4 → 1.06e-4,
+`mosmem` 3.13e-3 → 8.89e-4. Step counts are unchanged on most of the corpus
+and move ±7 % where they move at all — the "more constraints ⇒ smaller steps"
+intuition is wrong, see the scale-invariance note below. `ZP_NO_QTAPE=1`
+forces the per-row path on a live binary and reproduces the pre-change numbers
+exactly; `ZP_TRAN_STATS=1` prints `n_qt`.
+
+**Divergence 1 — the partition is per-(instance, terminal), not per-`ddt`.**
+VerA emits `D.q` as one charge per device *unknown*, so a two-terminal cap,
+inductor or diode gets exactly ngspice's state set (`CAPqcap`, `INDflux`,
+`DIOqd`), but a MOSFET's `qgs + qgd + qgb` arrive already summed on the gate
+unknown where `MOS1trunc` terrs them separately. Neither partition is a
+superset of the other — `MOS1trunc` also omits `qbd`/`qbs` entirely. Going
+finer is a VerA change (emit per-`ddt` charges), which *is* a device-ABI event.
+
+**Divergence 2 — espice can have MORE states than ngspice, and that is what
+regressed `devices/kinduc`** (1.53e-8 → 2.75e-4 max; still PASS with 36×
+margin). espice lowers a `K` card to its own `kinduc` instance writing
+`q[br1] = −M·i2`, `q[br2] = −M·i1` onto the two inductors' branch rows, so
+each branch row carries two contributions (self flux + mutual). ngspice
+accumulates the mutual term **into the inductor's single `INDflux` state**
+(`indload.c:70-77`) and `MUT` has no `MUTtrunc` at all — so ngspice's
+truncation candidate for a coupled inductor is exactly espice's *row sum*.
+Splitting it is strictly finer than ngspice, not coarser.
+
+Why a *small* extra state still moves the grid: **`CKTterr` is homogeneous of
+degree zero in the charge.** `volttol` and `chargetol` both scale with `|q_j|`
+and so does `|dd_j|`, so `del_j` depends only on a contribution's *relative*
+curvature, not its size — away from the `abstol`/`chgtol` floors, scaling a
+state by 1000 leaves its bound put (pinned by an assert in
+`tran.zig`'s `stepBound` test). Measured on `kinduc` by sweeping the coupling:
+per-state / per-row max error is 2.75e-4 / 1.53e-8 at k = 0.99, 2.62e-4 /
+1.86e-8 at k = 0.5, 2.81e-4 / 3.80e-9 at k = 0.1 and 6.17e-5 / 2.02e-12 at
+k = 0.001. The gap does not scale with the coupling — a mutual flux 1000×
+smaller than the self flux is still a full-strength candidate once it is its
+own state. Fixing it means teaching the host that a `K` card's charge belongs
+to the inductor's state; not done, because the fixture passes and the
+machinery would be a device-type special case.
+
+**Divergence 3 — the GPU keeps per-row LTE.** `Circuit.qTapeLen()` returns 0
+when a `gpu_hook.eval_planes` stamp is installed, because `eval`/`evalNewton`
+then return before any host batch runs and the tapes would be stale. Closing
+that means adding the tape to `DeviceKernel.run`, which *is* a GPU ABI change.
+The whole-transient megakernel (`gpu_hook.simulate_tran`) is unaffected — it
+has its own LTE reduce.
+
+**Not a divergence: ground-side charge.** The old per-row path walked
+`q_hist[0..n]`, excluding the trash cell `q_vec[n]`, so every ground-terminal
+contribution was exempt from LTE; the tape has no such exemption. This looks
+like a behavioural change but is numerically inert: every `CKTterr` term is
+even in `q` (`|q|`, `|dd|`, `|i|`), so a grounded device's `−q` mirror scores
+identically to its `+q` partner and cannot move a min. Asserted in the same
+test. No trash-row mask is needed, which is why none was built.
+
 ### Breakpoints
 
 Sources with corners (PULSE/PWL edges) register breakpoint times. The step
@@ -166,12 +244,17 @@ acceptance test, then bookkeeping (dynamic-current update matching the
 method actually used, history rotation by pointer swap).
 
 **Order control.** Start at BE; promote to the configured method
-(trap/gear-2) when a trial LTE evaluation at the higher order says the step
-it would allow exceeds $1.05\times$ the current $h$ (ngspice promotion
-rule). Drop back to BE at every landed breakpoint (kills trap companion
-ringing at source-edge discontinuities) and on any rejection: **order drop
-first, halve $h$ only when the retry already ran order 1** — a discontinuity
-rejects trap long before $h$ is the problem.
+(trap/gear-2) when the order-2 trunc recompute allows
+$\min(2h, \delta_2) > 1.05\,h$ — and adopt that value as the next $h$
+**whether or not the promotion sticks** (dctran.c:901-913 assigns
+`CKTdelta = newdelta` from the order-2 recompute even when the order drops
+back to 1; keeping the order-1 $\delta$ instead left every post-breakpoint
+ramp a half-octave behind ngspice's — ltra1_1_line carried a 37 ps
+grid-phase offset into the 33 ns wavefront, 1.02e-2). Drop back to BE at
+every landed breakpoint (kills trap companion ringing at source-edge
+discontinuities) and on any rejection: **order drop first, halve $h$ only
+when the retry already ran order 1** — a discontinuity rejects trap long
+before $h$ is the problem.
 
 **Failure handling.** Newton non-convergence → revert device FSM state,
 order-drop/halve; $h < \texttt{dt\_min}$ → hard failure ("timestep too
@@ -290,10 +373,10 @@ Spectre X on throughput rather than latency.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-step Newton on $G + \alpha C$ (numeric refactor when $\alpha$ changes) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `src/solvers/direct.zig` via `converger.run` + `TranHook` |
+| Per-step Newton on $G + \alpha C$ (numeric refactor when $\alpha$ changes) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `src/analysis/solvers/direct.zig` via `converger.run` + `TranHook` |
 | Refactor bypass across steps at constant $\alpha$ (linear circuits) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`, value-memcmp) | `converger.Options.matrix_sig` (E2 factor-once) |
-| Newton gates / JFNK per step | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/converger.zig` |
-| GPU on-device march (JFNK) vs level-set refactor alternative | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | `src/devices/engine.zig` (`TranEnv`/`cvec`) |
+| Newton gates / JFNK per step | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/converger.zig` |
+| GPU on-device march (JFNK) vs level-set refactor alternative | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | `src/analysis/eval/engine.zig` (`TranEnv`/`cvec`) |
 
 ---
 
@@ -322,8 +405,8 @@ Spectre X on throughput rather than latency.
 
 - `src/analysis/tran/tran.zig` — integrator, LTE (`stepBound`),
   order control, breakpoints.
-- `src/solvers/converger.zig` — per-step Newton.
-- `src/devices/engine.zig` (`TranEnv`, `cvec`) — on-device companion.
+- `src/analysis/solvers/converger.zig` — per-step Newton.
+- `src/analysis/eval/engine.zig` (`TranEnv`, `cvec`) — on-device companion.
 - Bench fixtures: `benchmark/fixtures/tran/{fourbitadder,rc_pulse}`,
   `benchmark/fixtures/tline/*` (breakpoint echoes),
   `benchmark/fixtures/digital/*`, `benchmark/fixtures/ngspice/*` transient

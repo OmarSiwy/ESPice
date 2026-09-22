@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "Repeated eigenvalue with two independent states",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Two independent RC states each contribute -1000 rad/s."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Pole-Zero Analysis",
+        "match": "unordered",
+        "columns": {
+          "pole": {
+            "unit": "rad/s",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                -1000.0,
+                0.0
+              ],
+              [
+                -1000.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 2
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4d609e9fb12677ac97ca406284647e997ef3fbcd31aed3d4b6400c37a9633da6",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

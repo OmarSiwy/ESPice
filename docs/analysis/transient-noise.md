@@ -82,9 +82,8 @@ to exist.
 1. **Sources — the in-device convention.** The device model owns the
    noise physics; the analysis only converts PSD → sample sequence. The
    same contract path as `.noise`
-   ([ac-small-signal-noise.md](ac-small-signal-noise.md) §2, device-side
-   "Noise model (in-device)" sections in
-   [docs/devices/](../devices/README.md)): devices declare `noise_gens`
+   ([ac-small-signal-noise.md](ac-small-signal-noise.md) §2, model sources in
+   [models/](../../models/)): devices declare `noise_gens`
    (`kind ∈ {thermal, shot, flicker}`), `collectNoiseSources` reads each
    generator's conductance off the AD Jacobian at the device's own bias —
    the device says $4kTg$ / $2qI$ / $K_F I^{A_F}/f$; the synthesis step
@@ -159,9 +158,9 @@ host: cross-lane statistics / batched Welch PSD
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-step Newton on $G + C/h$ | [klu-pipeline.md](../solvers/klu-pipeline.md) (refactor per $h$ change), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` + `NoiseHook` |
+| Per-step Newton on $G + C/h$ | [klu-pipeline.md](../solvers/klu-pipeline.md) (refactor per $h$ change), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/direct.zig` via `converger.run` + `NoiseHook` |
 | Refactor bypass when $h$ repeats (constant-step stretches) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `matrix_sig` (applicable; not currently passed by this hook) |
-| GPU per-step JFNK | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) §4 alternatives | `src/devices/engine.zig` |
+| GPU per-step JFNK | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) §4 alternatives | `src/analysis/eval/engine.zig` |
 
 ---
 

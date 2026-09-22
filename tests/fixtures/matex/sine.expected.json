@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "analysis": "matex",
+  "purpose": "Matrix-exponential propagation of a driven RC",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Solve tau*dVout/dt+Vout=Vin(t) by convolution. Ramp: a*(t-tau*(1-exp(-t/tau))); sine includes its startup homogeneous term."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "MATEX Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 3e-05,
+            "values": [
+              0.0,
+              0.029394497136642,
+              0.24937066303583,
+              -0.098119710271732,
+              -0.1342159344544,
+              -0.15417721113986
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.0001,
+            0.0005,
+            0.001,
+            0.002,
+            0.005
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3cb68735304456a866d3497ecfcab96c5d2a77e49a2c9394e6e6a0691ae64872"
+}

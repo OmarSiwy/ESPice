@@ -1,0 +1,167 @@
+// Partial LTRA model retained for comparison and the static RG construction path.
+// O-card RLC/RC devices use the native convolution model; LC uses tline.va.
+// Migration requirements: docs/native-transmission-line-migration.md.
+// Numbered line-equation references below describe ngspice's model equations,
+// not mandatory Verilog-AMS implementation algorithms.
+//
+// §1.3 writes each port's branch equation with one branch-current unknown per
+// port (ngspice rows brEq1/brEq2), i1 and i2 both flowing INTO the line:
+//
+//     Y0*v1 + Y0*(h1'*v1) - i1 = (h2*i2) + Y0*(h3'*v2)      (port 2 symmetric)
+//
+// Multiplied by Z0 = 1/Y0 the same row is a potential relation, which is what a
+// Verilog-A branch can stamp:  v_i = Z0*i_i + <history>.
+//
+// Cases, per the §1.1 table.  Everything else is E_BADPARM in ngspice
+// ltraset.c and is an $error here (see the analog initial block):
+//   LC  (R=0, G=0, L>0, C>0)   exact: pure delay T = len*sqrt(L*C)
+//   RLC (R>0, G=0, L>0, C>0)   delay + loss, see "Loss" below
+//   RC  (R>0, G=0, L=0, C>0)   degrades to its exact DC series resistance
+//   RG  (R>0, G>0, L=C=0)      exact hyperbolic two-port (§1.3 DC block)
+//
+// Missing here: the h1'/h2/h3' convolutions (§1.4-§1.6), accepted-history
+// storage, coefficient rebuilds, compaction and quadratic interpolation.
+// Arrays, loops and user functions can express their numerical arithmetic.
+// Exact accepted-point handling also needs simulator support, such as the
+// standard VPI acbAcceptedPoint callback; there is no source accepted_step
+// event. These omissions are implementation gaps, not an analog-subset ban.
+// Consequently this file's RC branch supplies only DC resistance, not its
+// transient erfc dispersion, and must not replace the native RC route.
+//
+// Loss (RLC), with the kernels gone: whatever is left has to stay exact at DC,
+// because §1.3's DC reduction (i1 + i2 = 0, v1 - v2 = R*len*i1) is also the
+// t=0 operating point the transient solution must continue from.  Attenuating
+// the travelling wave alone - A = exp(-beta*T) on the §1.3 lossless part -
+// does not: summing the two rows leaves (1-A)(v1+v2) = Z0(1+A)(i1+i2), a
+// spurious common-mode conductance although G = 0, and the differential part
+// comes out as R*len/2, half of §1.3, so the operating point and t=0+ would
+// disagree by a factor of two.  The loss is carried DC-consistently instead,
+// by splitting R*len into Rh = R*len/2 in series at each port around a
+// lossless Branin core (algebraically: Rh folded into the two coefficients):
+//
+//     v1 = (Z0 + Rh)*i1 + [v2 + (Z0 - Rh)*i2](t-T)          (port 2 symmetric)
+//
+// Sum and difference of the two rows are ngspice's MODEDC rows verbatim
+// (ltraload.c: brEq1 <- Ibr1 + Ibr2, brEq2 <- pos1 - pos2 - R*len*Ibr1),
+// the network is passive for every R (|Z0-Rh| < Z0+Rh), and driven from a
+// matched source into a matched load its first transit arrives attenuated by
+// 1/(1 + beta*T/2)^2 = A + O((beta*T)^2), i.e. §1.2's A = exp(-beta*T) to
+// first order in the loss (beta*T = R*len/(2*Z0)). It omits the Bessel
+// dispersion tail and introduces end reflections off Rh. This approximation
+// does not meet the native-device migration gate.
+//
+// absdelay is NOT guarded by analysis("static"): §4.5.6 makes it return its
+// input in DC and operating-point analyses and hold Input(0) for t < T, which
+// is precisely §1.3's "before t <= T the initial values are used instead" and
+// §2's initVolt/initCur snapshot - and it is what makes the DC rows above
+// appear for the LC line (R = 0), where a separate static stamp of the
+// hyperbolic pair would collapse to V(br1)-V(br2) = 0 twice and leave both
+// branch currents undetermined.
+//
+// §1.5-§1.7 (coefficient/history compaction, interpolation choice, LTE) are
+// not implemented in this file. The `.model ltra` keywords are declared for
+// binding compatibility; only the step-limit flags affect this implementation.
+//
+// Noise: none (doc "Noise model": ngspice has no ltranoise.c).
+module lossy_tline(p1, n1, p2, n2);
+    inout p1, n1, p2, n2;
+    electrical p1, n1, p2, n2;
+
+    // One branch per port; its flow is the MNA branch-current unknown.
+    branch (p1, n1) br1;
+    branch (p2, n2) br2;
+
+    // Per-unit-length RLGC and length (§1.1).  A Verilog-A parameter cannot be
+    // declared without a default (A.2.3), so ngspice's two "must be given"
+    // rules - a length (`lossy line length must be given`, E_BADPARM) and at
+    // least two nonzero of R,L,G,C - are enforced in the analog initial block
+    // below; len = 0 is the "not given" marker, never a legal value.
+    parameter real r   = 0.0 from [0:inf);
+    parameter real l   = 0.0 from [0:inf);
+    parameter real g   = 0.0 from [0:inf);
+    parameter real c   = 0.0 from [0:inf);
+    parameter real len = 0.0 from [0:inf);   // REQUIRED [m]
+
+    // The remaining `.model ltra` keywords (ngspice ltra.c IOP table) with
+    // ltraset.c's effective defaults: rel/abs = 1, compactrel = CKTreltol,
+    // compactabs = CKTabstol, lteConType = NOCONTROL, howToInterp = QUADINTERP,
+    // stepLimit on.  Accepted for card compatibility; only steplimit acts.
+    // `abs` (REAL, default 1) is the one card keyword that cannot be declared:
+    // it is a reserved word (Annex B, math function of §4.3), so a card
+    // carrying it needs a host-side alias.
+    parameter real rel           = 1.0   from (0:inf);  // §1.7 LTE reltol
+    parameter real compactrel    = 1e-3  from [0:inf);  // §1.5 CKTreltol
+    parameter real compactabs    = 1e-12 from [0:inf);  // §1.5 CKTabstol
+    parameter integer nocontrol   = 1 from [0:1];  // §1.7 lteConType (default)
+    parameter integer steplimit   = 1 from [0:1];  // §1.7 dt <= nl*T (default)
+    parameter integer nosteplimit = 0 from [0:1];
+    parameter integer lininterp   = 0 from [0:1];  // §1.6 howToInterp
+    parameter integer quadinterp  = 1 from [0:1];  // §1.6 default
+    parameter integer mixedinterp = 0 from [0:1];
+    parameter integer truncnr      = 0 from [0:1]; // §1.7
+    parameter integer truncdontcut = 0 from [0:1];
+
+    // §1.7's step cap as a fraction of the delay is an internal ngspice
+    // constant, not a card keyword - hence localparam, not parameter (§3.4.5).
+    localparam real nl = 0.25;
+
+    // §1.1 classification: LC/RLC take the delay form, RC/RG the hyperbolic
+    // two-port.  Parameter-only, so it is constant for the whole run and legal
+    // as the condition around an analog operator (§4.5 / §5.2).
+    localparam integer wave = (g == 0.0) && (l > 0.0) && (c > 0.0);
+    localparam integer ok = wave
+        || ((r > 0.0) && (g == 0.0) && (l == 0.0) && (c > 0.0))    // RC
+        || ((r > 0.0) && (g > 0.0) && (l == 0.0) && (c == 0.0));   // RG
+
+    real z0, td, rh;         // §1.2 sqrt(L/C), T, R*len/2
+    real gl, sinhc, ch, zs;  // §1.3 hyperbolic two-port
+
+    // §1.1 card validity.  §9.7.3: an $error in an analog initial block issues
+    // the message and stops the run at the end of initialization, which is
+    // ngspice's E_BADPARM (the card never becomes a device).  Without this,
+    // RL silently becomes a plain R*len resistor, a general-G line silently
+    // discards L and C, and R = 0 with G > 0 leaves the branch rows singular.
+    analog initial begin
+        if (len <= 0.0)
+            $error("lossy_tline: lossy line length must be given (len > 0)");
+        if (!ok)
+            $error("lossy_tline: unsupported r/l/g/c set; supported: LC, RLC, RC (r,c>0, l=g=0), RG (r,g>0, l=c=0). RL and general G are rejected, and at least two of r,l,g,c must be nonzero.");
+    end
+
+    analog begin
+        if (wave) begin
+            // §1.2 constants; Rh = R*len/2 is the port-side half of the line
+            // resistance, zero for LC, which makes the pair the plain Branin
+            // line (and, DC, v1 = v2 with i1 = -i2).
+            z0 = sqrt(l / c);
+            td = len * sqrt(l * c);
+            rh = 0.5 * r * len;
+
+            // §1.7 stepLimit: an edge launched now must be resolvable when it
+            // lands at t+T.  The only §1.5-§1.7 knob with a Verilog-A spelling.
+            // (td > 0 too: an invalid card still evaluates this block once
+            // before the analog initial $error stops the run, and a zero step
+            // bound would hang the sweep instead of reporting the card.)
+            if (steplimit && !nosteplimit && (td > 0.0))
+                $bound_step(nl * td);
+
+            V(br1) <+ (z0 + rh) * I(br1) + absdelay(V(br2) + (z0 - rh) * I(br2), td);
+            V(br2) <+ (z0 + rh) * I(br2) + absdelay(V(br1) + (z0 - rh) * I(br1), td);
+        end else begin
+            // §1.3 hyperbolic two-port, v1 = cosh(gl)*v2 - sqrt(R/G)*sinh(gl)*i2
+            // and the mirror row, i.e. v1 - v2 = zs*i1 with i1 = -i2.  RG uses
+            // it exactly; for RC (G = 0) it collapses to cosh -> 1, zs -> R*len,
+            // the exact DC series resistance the dropped erfc kernels leave.
+            gl = len * sqrt(r * g);
+            sinhc = (gl > 1e-9) ? sinh(gl) / gl : 1.0 + gl * gl / 6.0;
+            ch = cosh(gl);
+            // sqrt(R/G)*sinh(gl) == R*len*sinh(gl)/gl.  §1.3 puts (1+gmin) on
+            // the RG stamp only, so G = 0 keeps R*len unscaled.
+            zs = r * len * sinhc;
+            if (g > 0.0)
+                zs = zs * (1.0 + $simparam("gmin", 1e-12));
+            V(br1) <+ ch * V(br2) - zs * I(br2);
+            V(br2) <+ ch * V(br1) - zs * I(br1);
+        end
+    end
+endmodule

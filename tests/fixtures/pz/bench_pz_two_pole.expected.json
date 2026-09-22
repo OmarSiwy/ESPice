@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "PZ fixture: two cascaded RC sections, two real poles.",
+  "oracle": {
+    "kind": "ngspice-44.2",
+    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "command": "ngspice -n -b -r reference.raw circuit.sp",
+    "source_sha256": "f333d103dc38f4f59f20c9b5006591e2ba6ce2dbe50bf71f6fc740a27f4a6a07"
+  },
+  "origin": "benchmark/fixtures/pz/two_pole/circuit.sp",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "pole_zero_sets",
+        "plot": "Pole-Zero Analysis",
+        "poles": [
+          [
+            -13701.562118716,
+            0.0
+          ],
+          [
+            -7298.4378812836,
+            0.0
+          ]
+        ],
+        "zeros": [],
+        "rtol": 0.001,
+        "atol": 1e-06,
+        "multiplicity": true
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "30f2157be6b8b00cba776438a806aeed45e4ef1fed02c66b77db302256bb51b7",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

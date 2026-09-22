@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Repeated rise/fall edges retain capacitor history",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Superpose exact finite-ramp RC responses. Pulse starts at 1ms and 4ms; falling ramp starts 1.1ms after each rising ramp starts."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 2e-05,
+            "values": [
+              0,
+              0,
+              0.01229424500714,
+              0.048374180359595,
+              0.61309781430843,
+              0.64991642526637,
+              0.65469595767184,
+              0.63485710178163,
+              0.285259683906,
+              0.10494117310408,
+              0.14332888047676,
+              0.68484830728208,
+              0.66646477571186,
+              0.29946192729122
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.001,
+            0.00105,
+            0.0011,
+            0.002,
+            0.0021,
+            0.00215,
+            0.0022,
+            0.003,
+            0.004,
+            0.0041,
+            0.0051,
+            0.0052,
+            0.006
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "48aea1692e43ec8c26515083fc6cc876ed0a8e599f8b1fc7fdda021828d6c581"
+}

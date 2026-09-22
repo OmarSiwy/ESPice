@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "analysis": "disto",
+  "purpose": "Linear circuits have exactly zero second-order distortion",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "First-order coefficient=.5*DISTOF1*.75; second-order coefficient and HD2 are zero."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Distortion Analysis",
+        "match": "exact",
+        "columns": {
+          "v1_mag": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.00375,
+              0.00375,
+              0.00375,
+              0.00375,
+              0.00375,
+              0.00375,
+              0.00375
+            ]
+          },
+          "v2_mag": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-10,
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "hd2": {
+            "unit": "ratio",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100.0,
+            215.44346900319,
+            464.15888336128,
+            1000.0,
+            2154.4346900319,
+            4641.5888336128,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 7
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "932279250c1eec62b149c83310f28e1994e4f83f2ab3ec2527bbaae461a4a69e"
+}

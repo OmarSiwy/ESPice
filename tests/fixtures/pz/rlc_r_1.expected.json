@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "pz",
+  "purpose": "RLC poles across under-, critical-, and overdamping",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Roots of s^2+(R/L)*s+1/(L*C)=0; multiplicity is significant."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Pole-Zero Analysis",
+        "match": "unordered",
+        "columns": {
+          "pole": {
+            "unit": "rad/s",
+            "rtol": 0.0002,
+            "atol": 0.05,
+            "values": [
+              [
+                -500.0,
+                31618.823507525
+              ],
+              [
+                -500.0,
+                -31618.823507525
+              ]
+            ]
+          }
+        },
+        "row_count": 2
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e35736c1228cbc9594b069432040d98a7885850e5f4266dad7240ddf4fa91c11",
+  "known_gaps": [
+    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Ideal source clamps output resistance to zero",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "dVout/dVin=1; load draws Vin/1k; ideal voltage source has zero output impedance."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1000
+            ]
+          },
+          "output_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8efcba7de717b34bcd43a79717d429d64831fcf181490d2ab0fd322b08f39204"
+}

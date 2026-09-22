@@ -1,29 +1,13 @@
 const std = @import("std");
 const Io = std.Io;
-const Plot = @import("rawfile.zig").Plot;
-
-fn detectPorts(varnames: []const []const u8) !u32 {
-    var max_port: u32 = 0;
-    for (varnames) |name| {
-        if (name.len < 5 or !std.mem.startsWith(u8, name, "S(")) continue;
-        const close = std.mem.indexOfScalar(u8, name, ')') orelse continue;
-        const inner = name[2..close];
-        const comma = std.mem.indexOfScalar(u8, inner, ',') orelse continue;
-        const m = std.fmt.parseInt(u32, inner[0..comma], 10) catch continue;
-        const n = std.fmt.parseInt(u32, inner[comma + 1 ..], 10) catch continue;
-        if (m > max_port) max_port = m;
-        if (n > max_port) max_port = n;
-    }
-    if (max_port == 0) return error.NotSParameterData;
-    return max_port;
-}
+const types = @import("output_types");
+const Plot = types.Plot;
 
 /// Write Touchstone (.snp) format. Only valid for S-parameter analysis data.
 pub fn write(io: Io, path: []const u8, plot: Plot) !void {
-    if (!plot.is_complex) return error.NotSParameterData;
-    const n_ports = try detectPorts(plot.varnames);
+    try types.validatePlot(.touchstone, plot);
+    const n_ports = try types.portCount(plot.schema());
     const nvars = plot.varnames.len;
-    if (plot.data.len != plot.npoints * nvars * 2) return error.DataLengthMismatch;
 
     const file = try Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -40,7 +24,6 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
         try w.print("{e}", .{plot.data[base]});
 
         if (n_ports <= 2) {
-            // 1- or 2-port: all on one line
             // 2-port spec order: S11, S21, S12, S22 (column-major)
             if (n_ports == 1) {
                 try w.print(" {e} {e}", .{ plot.data[base + 2], plot.data[base + 3] });
@@ -71,15 +54,13 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
 test "Touchstone 2-port write" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    // frequency + S(1,1) S(1,2) S(2,1) S(2,2) — 5 complex vars
     const varnames = [_][]const u8{ "frequency", "S(1,1)", "S(1,2)", "S(2,1)", "S(2,2)" };
-    // 1 point, 5 vars * 2 (complex) = 10 floats
     const data = [_]f64{
         1.0e9, 0.0, // frequency
-        0.5,   -0.3, // S(1,1)
-        0.8,   0.1, // S(1,2)
-        0.1,   -0.05, // S(2,1)
-        0.4,   -0.2, // S(2,2)
+        0.5, -0.3, // S(1,1)
+        0.8, 0.1, // S(1,2)
+        0.1, -0.05, // S(2,1)
+        0.4, -0.2, // S(2,2)
     };
     const plot: Plot = .{ .title = "s2p test", .plotname = "S-Parameter Analysis", .varnames = &varnames, .is_complex = true, .npoints = 1, .data = &data };
     const path = "zig-out/test.s2p";

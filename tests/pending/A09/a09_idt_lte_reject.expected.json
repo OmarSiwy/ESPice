@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Step rejections raised by the truncation-error controller leave a charge-free instance's idt untouched: v(out) = t.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(out) = t exactly (LRM 4.5.4). The Rs/C1 branch driven by a 20 Hz sine makes the step controller of LRM 8.3.2 ('The simulator controls the interval between the time points to ensure the accuracy of the finite difference approximation') reject and retry steps repeatedly. N1 stores no charge and takes no event, so per LRM 4.5.15 its accumulator advances once per accepted point regardless. This is the second, independent rejection origin: integrator-driven rather than event-driven."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.0,
+            0.2,
+            0.4,
+            0.6,
+            0.8,
+            1.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-12
+        },
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.0,
+              0.2,
+              0.4,
+              0.6,
+              0.8,
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "62658d7c8dc8f310de4acfee4bf2466d8d8ec71888f2e6612cdebb1d5555d8aa",
+  "row": "A09"
+}

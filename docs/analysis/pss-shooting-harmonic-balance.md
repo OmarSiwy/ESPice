@@ -252,10 +252,10 @@ march inside shooting.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Inner fixed-step trap Newton (per timestep of every period integration) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solvers/direct.zig` via `converger.run` + `PeriodHook` |
-| Shooting Jacobian solve (dense $J_\Phi$) | none (dense path) | `src/solvers/dense_lu.zig factorizeSolveNeg` |
+| Inner fixed-step trap Newton (per timestep of every period integration) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/direct.zig` via `converger.run` + `PeriodHook` |
+| Shooting Jacobian solve (dense $J_\Phi$) | none (dense path) | `src/analysis/solvers/dense_lu.zig factorizeSolveNeg` |
 | Krylov-shooting upgrade: monodromy products via sensitivity replay on saved per-step factors, GMRES on $(\Phi-I)$, subspace recycling | [monodromy-krylov.md](../solvers/monodromy-krylov.md) — full spec | target — reuses `converger.jfnk` GMRES core + `direct.zig solve/solveT` |
-| HB spectral Jacobian solve (dense) | none (dense path); Krylov-HB upgrade = matrix-free block-Toeplitz apply per [lptv-block-solves.md](../solvers/lptv-block-solves.md) + block-circulant preconditioner per [structured-preconditioners.md](../solvers/structured-preconditioners.md) | `dense_lu.zig`; `src/solvers/fft.zig` for the operator apply |
+| HB spectral Jacobian solve (dense) | none (dense path); Krylov-HB upgrade = matrix-free block-Toeplitz apply per [lptv-block-solves.md](../solvers/lptv-block-solves.md) + block-circulant preconditioner per [structured-preconditioners.md](../solvers/structured-preconditioners.md) | `dense_lu.zig`; `src/analysis/solvers/fft.zig` for the operator apply |
 | Upstream OP for the initial orbit guess | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
 ---

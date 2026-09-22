@@ -285,8 +285,9 @@ const z = types.Complex{ .re = 1, .im = 2 };
 const m = z.mag();       // 2.236
 const db = z.magDb();    // 6.99 dB
 
-// Log-frequency sweep iterator
-var sw = types.logSweep(1e3, 1e9, 10);  // 10 pts/decade
+// Frequency sweep iterator (dec/oct/lin share one grid)
+const grid = types.FreqSweep{ .f_start = 1e3, .f_stop = 1e9, .points = 10 };
+var sw = grid.iter();  // 10 pts/decade
 while (sw.next()) |f| { ... }
 
 // Waveform measurements

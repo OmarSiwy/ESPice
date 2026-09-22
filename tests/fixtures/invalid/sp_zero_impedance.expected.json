@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "sp",
+  "purpose": "Power-wave reference impedance must be positive.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Power-wave reference impedance must be positive."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "0e021b1b460391a0bfe90302d7df0820a17d38d6b4ef900a98b4ed0f60967612"
+}

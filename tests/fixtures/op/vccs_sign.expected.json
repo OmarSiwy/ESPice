@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "vccs sign",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "2 mA leaves output through VCCS; resistor supplies it."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -4
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "10bac1bf403be62de8ac3279c51476e04f1d041e839540f97e55ea096b43987d"
+}

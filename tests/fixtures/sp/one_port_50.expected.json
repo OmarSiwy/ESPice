@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "analysis": "sp",
+  "purpose": "One-port resistive reflection",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "S11=(R-Z0)/(R+Z0), Z0=50 ohm."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "SP Analysis",
+        "match": "exact",
+        "columns": {
+          "v(S_1_1)": {
+            "unit": "dimensionless",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            2154.4346900319,
+            4641.5888336128,
+            10000.0,
+            21544.346900319,
+            46415.888336128,
+            100000.0,
+            215443.46900319,
+            464158.88336128,
+            1000000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 10
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4bbb2ec9562963c85677c531a198df14ad2ebba59e23a475a928d5930ae0f2f9"
+}
