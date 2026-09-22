@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "X01: LTRA DC operating point equals the lumped series resistance r*len, on two lines with the same r*len but 2x the characteristic impedance and 32x the delay.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "At DC the telegrapher solution degenerates to R*len in series and G*len in shunt; L and C carry no DC current, so Z0 and Td cancel out. lline r=0.5 len=2 and lline2 r=0.125 len=8 both give R_line=1 ohm; loop 50+1+50=101 on each. v(a)=51/101, v(b)=50/101, i(vin)=-1/101 on BOTH lines. The pair is the discriminator: a stamp using Z0 gives 100/150 on line 1 and 150/200 on line 2 (they disagree with each other); a stamp treating the line as a short gives 0.5 on both, 4.95e-3 off.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist reproduces all six values exactly (delta 0.0); see the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.504950495049505
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.49504950495049505
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.009900990099009901
+            ]
+          },
+          "v(a2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.504950495049505
+            ]
+          },
+          "v(b2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0.49504950495049505
+            ]
+          },
+          "i(vin2)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.009900990099009901
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "7c47dc3f7b0b1e7c1b9c0a5cf1f386d20db8a25c12275ab8f113be9dcda746bc"
+}

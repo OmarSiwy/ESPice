@@ -1,0 +1,16 @@
+`include "disciplines.vams"
+// VAMS-2023 9.10: "$abstime returns the absolute time, that is a real value
+// number representing time in seconds."
+//
+// The time a model sees is the time of the SOLUTION POINT being attempted, and
+// the point that survives into the output is the ACCEPTED one (VAMS-2023 8.4.7:
+// "the analog engine can either accept or reject that solution; it cannot
+// calculate a solution for a future time until it has accepted the solution for
+// the current time").  So at every accepted row of the transient output,
+// V(p,n) == t, with no residue from any rejected trial point at t + dt_rejected.
+module a09_abstime_source(p, n);
+    inout p, n;
+    electrical p, n;
+    analog
+        V(p, n) <+ $abstime;
+endmodule

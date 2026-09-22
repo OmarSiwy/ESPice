@@ -1,0 +1,26 @@
+`include "disciplines.vams"
+// The rejection generator used by the A09 decks.
+//
+// VAMS-2023 5.10.3 `cross`: the crossing is a monitored analog event, and the
+// simulator must resolve the time at which the expression crosses zero.  In a
+// host that resolves crossings by REJECTING the converged step that straddles
+// the crossing and retrying on a shorter one (VAMS-2023 8.4.7: "the analog
+// engine can either accept or reject that solution"), this module forces one
+// rejection burst per crossing without depending on any integrator tolerance.
+//
+// `flips` is a held variable written from the event body, so KCL at p gives
+//   1e-3 * (V(p,n) - flips) = 0  =>  V(p,n) = flips
+// i.e. the node reads back the number of rising crossings accepted so far.
+// With period = 0.25 and the -0.125 phase shift the rising zero crossings of
+// sin(2*pi*(t - 0.125)/0.25) inside (0, 1] are t = 0.125, 0.375, 0.625, 0.875.
+module a09_cross_rejector(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real period = 0.25;
+    real flips;
+    analog begin
+        @(cross(sin(6.283185307179586 * ($abstime - 0.125) / period), +1))
+            flips = flips + 1.0;
+        I(p, n) <+ 1.0e-3 * (V(p, n) - flips);
+    end
+endmodule

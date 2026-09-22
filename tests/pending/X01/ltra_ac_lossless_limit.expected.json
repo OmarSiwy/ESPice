@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "X01: LTRA AC phasor must rotate with frequency; RL=3*Z0 so v(a) and v(b) are both complex at all eight points and none coincides with the DC-resistance fallback.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Z0=sqrt(l/c)=50, Td=len*sqrt(l*c)=10 ns, Rs=Z0 (reflectionless source), RL=150 so GammaL=+0.5. Ideal form v(a)=0.5(1+0.5 exp(-2j theta)), v(b)=0.75 exp(-j theta) with theta=w Td. Frequencies theta=(2k-1)pi/8, k=1..8, i.e. 6.25 to 93.75 MHz in 12.5 MHz steps, chosen off the multiples of pi/2 where v(a) would turn real and coincide with the DC answer. Tabulated values are the exact telegrapher solution retaining r=1e-6 (alpha*L=2e-8 Np); it agrees with the ideal form to 1.7e-8. The host's DC-resistance fallback is v(a)=(150+2e-6)/200.000002=0.7500000025 and v(b)=150/200.000002=0.7499999925, purely real; the closest tabulated value is 0.19134171 away.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist reproduces all 24 tabulated values to <= 1.3e-15 (measured max 1.241e-15).",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.6767766981610404,
+                -0.1767766942055922
+              ],
+              [
+                0.3232233129641886,
+                -0.17677669472049168
+              ],
+              [
+                0.3232233110605761,
+                0.17677668432861568
+              ],
+              [
+                0.6767766868062163,
+                0.1767766873712802
+              ],
+              [
+                0.6767766893295105,
+                -0.17677668889001621
+              ],
+              [
+                0.3232233120989103,
+                -0.1767766899969119
+              ],
+              [
+                0.3232233114998709,
+                0.17677668672674068
+              ],
+              [
+                0.6767766875632042,
+                0.1767766878269012
+              ]
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.6929096406933143,
+                -0.28701257370160793
+              ],
+              [
+                0.28701256437464695,
+                -0.6929096396841912
+              ],
+              [
+                -0.2870125710289175,
+                -0.6929096330299209
+              ],
+              [
+                -0.6929096347869805,
+                -0.2870125677952742
+              ],
+              [
+                -0.6929096360994991,
+                0.28701256910779277
+              ],
+              [
+                -0.28701256739931563,
+                0.6929096366595224
+              ],
+              [
+                0.2870125694933159,
+                0.6929096345655216
+              ],
+              [
+                0.6929096351807358,
+                0.2870125681890301
+              ]
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-12,
+            "values": [
+              [
+                -0.006464466036779193,
+                -0.003535533884111844
+              ],
+              [
+                -0.013535533740716229,
+                -0.0035355338944098335
+              ],
+              [
+                -0.013535533778788477,
+                0.0035355336865723138
+              ],
+              [
+                -0.006464466263875674,
+                0.0035355337474256036
+              ],
+              [
+                -0.006464466213409789,
+                -0.003535533777800324
+              ],
+              [
+                -0.013535533758021794,
+                -0.003535533799938238
+              ],
+              [
+                -0.013535533770002583,
+                0.0035355337345348136
+              ],
+              [
+                -0.006464466248735916,
+                0.003535533756538024
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            6250000.0,
+            18750000.0,
+            31250000.0,
+            43750000.0,
+            56250000.0,
+            68750000.0,
+            81250000.0,
+            93750000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 8
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "f1b968aadb95f54bd95de6c9cbf660b54c7e4f65241960da4841d215c145b4d7"
+}

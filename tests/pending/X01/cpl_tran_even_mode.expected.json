@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "X01: CPL two-conductor even mode matched to Ze=100 ohm, Td=8 ns.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Le=L11+L12=400n, Ce=C11+C12=40p -> Ze=sqrt(400n/40p)=100 ohm; Lo=100n, Co=160p -> Zo=25 ohm; Le*Ce=Lo*Co=1.6e-17 so both modes travel at 4 ns/m and Td=2*4=8 ns. Common-mode drive through 100 ohm into 100 ohm excites and matches the even mode alone: v(a1)=v(a2)=Ze/(Rs+Ze)=0.5, v(b1)=v(b2)=0.5 delayed by 8 ns. Ignoring the mutual terms would give 50 ohm and a -1/3 reflection staircase instead of flat 0.5.",
+    "cross_check": "Independent ngspice-44.2 run of this exact netlist agrees with every tabulated value; the per-fixture bound is stated in the .sp header.",
+    "command": "ngspice -n -b -r reference.raw <netlist>.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.5,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "v(a2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.5,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "v(b1)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.0,
+              0.0,
+              0.5,
+              0.5,
+              0.5
+            ]
+          },
+          "v(b2)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-08,
+            "values": [
+              0.0,
+              0.0,
+              0.5,
+              0.5,
+              0.5
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            4e-09,
+            7.9e-09,
+            8.2e-09,
+            2e-08,
+            3.9e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "c8e2e830acaa43293e994685bc888953c2a5ebb3d8e4988f4c0e10e6e9a38432"
+}
