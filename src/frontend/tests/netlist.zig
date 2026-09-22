@@ -406,6 +406,35 @@ test ".if chains keep the first true branch, per subcircuit instance" {
     try std.testing.expectError(error.ParseError, parse(arena2.allocator(), "t\n.if (1)\nr1 a 0 1\n.end\n"));
 }
 
+test "a line holding only a // comment is a comment line (#164)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(), "t\n//x\n+ r9 a 0 9\nv1 1 0 1\n.control\n//y\n.endc\nr1 1 0 1k //z\n\\\\\n\n.op\n");
+    try std.testing.expectEqual(2, nl.deviceCount());
+}
+
+test "an analysis card inside a subcircuit is refused (#165)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ ".tran 1n 2n", ".op", ".temp 50" }) |card| {
+        const src = try std.fmt.allocPrint(arena.allocator(), "t\n.subckt s a\nr1 a 0 1k\n{s}\n.ends\nx1 1 s\n", .{card});
+        try std.testing.expectError(error.UnsupportedCard, parse(arena.allocator(), src));
+    }
+    // Its legal neighbour: the same card after `.ends`.
+    _ = try parse(arena.allocator(), "t\n.subckt s a\nr1 a 0 1k\n.ends\nx1 1 s\n.tran 1n 2n\n");
+}
+
+test "a block close with no block open is refused (#162)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ ".enddata", ".end_variation", ".ends", ".endif" }) |close| {
+        const src = try std.fmt.allocPrint(arena.allocator(), "t\nr1 1 0 1k\n{s}\n.op\n", .{close});
+        try std.testing.expectError(error.ParseError, parse(arena.allocator(), src));
+    }
+    // Its legal neighbour: the same close after its open.
+    _ = try parse(arena.allocator(), "t\nr1 1 0 1k\n.param w=1\n.data d w\n1\n.enddata\n.op\n");
+}
+
 test "parameters: ngspice power unary logical and ternary precedence" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

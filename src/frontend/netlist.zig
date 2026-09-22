@@ -930,6 +930,10 @@ fn Reader(comptime S: type) type {
         dialect: Dialect,
         orig: []const u8,
         text: []const u8,
+        /// The card a walk is reading: a refusal no reader logged names it (#144).
+        card: []const u8 = "",
+        /// Set once `failed` or `unsupported` has logged the refusal's card.
+        logged: bool = false,
         lines: std.ArrayList([]const u8) = .empty,
         hg: Hypergraph.Builder,
         pool: InternPool = .{},
@@ -1057,6 +1061,8 @@ fn Reader(comptime S: type) type {
                 break :blk src;
             };
             var r: R = try .init(arena, src, text, dialect);
+            errdefer if (!r.logged and r.card.len > 0 and !@import("builtin").is_test)
+                std.log.err("netlist: cannot read the card: {s}", .{r.written(r.card)});
             r.global_scopes = .{&r.globals};
             var split: S.Lines = .{ .rest = text, .arena = arena };
             var title: []const u8 = "";
@@ -1067,7 +1073,10 @@ fn Reader(comptime S: type) type {
                 split.rest = if (nl < text.len) text[nl + 1 ..] else "";
             }
             try r.lines.ensureTotalCapacity(arena, line_hint);
-            while (try split.next()) |line| try r.lines.append(arena, line);
+            // A line left blank (`\\` glued to a blank line) is no card (#164).
+            while (try split.next()) |line| {
+                if (std.mem.trim(u8, line, " \t").len > 0) try r.lines.append(arena, line);
+            }
             // Spectre statements become the SPICE cards the walks read.
             if (dialect == .spectre) {
                 const translated = try spectre.translate(arena, r.lines.items, &r.kinds);
@@ -1151,6 +1160,8 @@ fn Reader(comptime S: type) type {
             try r.binOptions();
 
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
+            // The passes below read no one card.
+            r.card = "";
             try r.shunts();
             try r.readMeasures();
             var live = try r.resolveLive();
@@ -1275,6 +1286,7 @@ fn Reader(comptime S: type) type {
             var control = false;
             for (r.lines.items, 0..) |line, index| {
                 const i: u32 = @intCast(index);
+                r.card = line;
                 if (control) {
                     var cf = F.init(line);
                     const head = cf.next().?;
@@ -1362,6 +1374,11 @@ fn Reader(comptime S: type) type {
                         try r.subckts.append(arena, .{ .name = name, .ports = ports.items, .defaults = &.{}, .first = i + 1, .end = i + 1 });
                         try r.subckt_ids.put(arena, name, id);
                     },
+                    // A block's close outside its block closes nothing (#162).
+                    .enddata, .end_variation => return r.failed(line, error.ParseError),
+                    // A subcircuit holds devices, models and parameters; an
+                    // analysis there is no part of it (§2.4.3) (#165).
+                    .analysis => if (depth > 0) return r.unsupported(line, "analysis card inside a subcircuit") else try directives.append(arena, i),
                     .func => try r.readFunc(&f, false),
                     .param => while (true) {
                         const at = f.pos;
@@ -1490,6 +1507,7 @@ fn Reader(comptime S: type) type {
         /// Reads a `.model` card under `frame` into a new row; `global`
         /// makes it the row its name resolves to outside subcircuits.
         fn readModel(r: *R, line: []const u8, frame: *const Frame, global: bool) Error!void {
+            r.card = line;
             var f = F.init(line);
             _ = f.next();
             const name = f.next() orelse return error.ParseError;
@@ -1719,6 +1737,7 @@ fn Reader(comptime S: type) type {
         }
 
         fn readDirective(r: *R, line: []const u8) Error!void {
+            r.card = line;
             var f = F.init(line);
             const card = cardOf(f.next().?[1..]);
             // Read once every analysis card is: HSPICE's untyped `.meas`
@@ -1873,7 +1892,8 @@ fn Reader(comptime S: type) type {
 
         /// Logs `line` with `err` and returns `err`; `ParseError` for a
         /// malformed card, `UnsupportedCard` for a form ESPice cannot run.
-        fn failed(r: *const R, line: []const u8, err: Error) Error {
+        fn failed(r: *R, line: []const u8, err: Error) Error {
+            r.logged = true;
             if (!@import("builtin").is_test) std.log.err("netlist: {s}: {s}", .{ @errorName(err), r.written(line) });
             return err;
         }
@@ -2144,6 +2164,7 @@ fn Reader(comptime S: type) type {
 
         /// A `.data` or `.variation` block, lines `b[0]..b[1]`.
         fn readBlock(r: *R, b: [2]u32) Error!void {
+            r.card = r.lines.items[b[0]];
             var f = F.init(r.lines.items[b[0]]);
             const card = cardOf(f.next().?[1..]).?;
             if (card == .variation) return r.readVariation(b);
@@ -2420,7 +2441,8 @@ fn Reader(comptime S: type) type {
         }
 
         /// Logs `line` as `what` and fails the parse with `UnsupportedCard`.
-        fn unsupported(r: *const R, line: []const u8, what: []const u8) Error {
+        fn unsupported(r: *R, line: []const u8, what: []const u8) Error {
+            r.logged = true;
             // The test runner fails any test that logs an error.
             if (!@import("builtin").is_test) std.log.err("netlist: {s}: {s}", .{ what, r.written(line) });
             return error.UnsupportedCard;
@@ -3080,6 +3102,7 @@ fn Reader(comptime S: type) type {
         }
 
         fn readDevice(r: *R, line: []const u8, frame: *const Frame) Error!void {
+            r.card = line;
             const arena = r.arena;
             const port_card = r.dialect == .hspice and std.ascii.toLower(line[0]) == 'p';
             var f = F.init(if (port_card) try r.portLine(line) else line);

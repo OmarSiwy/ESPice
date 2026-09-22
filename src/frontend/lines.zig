@@ -358,6 +358,9 @@ pub const ngspice = struct {
                 }
                 // §1.6: a `+` line with nothing to continue is ignored.
                 if (t[0] == '+') continue;
+                // §1.5: a line holding only an end-of-line comment (`//x`)
+                // becomes a comment line, so a `+` after it continues nothing.
+                if (!endsGlued(t) and stripComment(t).len == 0) continue;
                 break;
             }
             var glued = endsGlued(t);

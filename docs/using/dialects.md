@@ -21,8 +21,8 @@ are split and a handful of meanings.
 | First line | title | title | title |
 | Case | ignored | ignored | kept |
 | Statements | SPICE cards | SPICE cards | Spectre statements; SPICE cards after `simulator lang=spice` |
-| Line comment | `*`, `#` or `;` at line start | `*` or `$` at line start | `*` in the first column, or a `//` line |
-| Inline comment | `;` anywhere; `$` or `//` after a blank or comma | `$` after a blank, a comma or a number | `//` |
+| Line comment | `*`, `#`, `$` or `;` at line start, or a line holding only a `//` comment | `*` or `$` at line start | `*` in the first column, or a `//` line |
+| Inline comment | `;` or `//` anywhere; `$` after a blank or comma | `$` after a blank, a comma or a number | `//` |
 | Continuation | `+` on the next line; `\\` at line end joins with no blank | `+` on the next line; ` \` at line end, or `\\` to join with no blank | `+` on the next line, or `\` at line end |
 | Quotes | `'...'` and `"..."` keep comment characters | `'...'` and `"..."` keep `$` | `"..."` strings |
 | Expressions | `{...}`, `'...'` or a bare parameter name | `'...'` or a bare parameter name; `{...}` too, with a note (an ESPice extension) | bare (`r=2*a`) |

@@ -496,6 +496,33 @@ three gates:
   a rule nobody tests, or one the stage before makes unreachable; add a
   case, or delete the alternative.
 
+Two more inputs come from the grammars themselves:
+
+- **Generated decks** (`gen.zig`, the `* netlist: generated` tests). A
+  seeded random derivation of the card grammar's `card` rule (Spectre:
+  `line`), bounded in depth and length, past which every choice takes its
+  shortest alternative. Lookaheads are not generative, so a candidate is
+  kept only when the grammar parses it back. Each deck of one to three
+  statements goes through both readers, and again after one random byte
+  edit. A frontend panic or failed assert ends the run (the gate is
+  ReleaseSafe), and a refusal must be a named fault (`ParseError`,
+  `UnsupportedCard`, `ModelBinNotFound`), not `OutOfMemory` or
+  `CircuitTooLarge` on a few hundred bytes. The grammar is syntax only, so
+  a frontend refusal of a sentence (an element with too few fields, an
+  empty `.variation`) is counted, not judged. The disagreements left (a
+  deck read differently, a mutant only the frontend reads) are grouped by
+  verdict and leading card, and the groups must equal the rows of
+  `GENERATED.tsv`; a new group prints its first deck shrunk a line, then a
+  byte, at a time. The seed is fixed (`gen_seed`), so a run reproduces
+  anywhere. Found so far: #144, #162, #164 (a panic), #165.
+- **Fixture coverage** (`FIXTURE_GAPS.tsv`). The hand cases reach every
+  alternative, but a case is only parsed, never simulated. After the
+  fixture decks alone, every SPICE card and lines grammar's remaining gaps
+  must equal its rows in `FIXTURE_GAPS.tsv`: a new gap (no fixture reaches
+  it any more) and a stale row (a fixture now does) both fail. The file is
+  the worklist of syntax no simulated deck checks end to end. There is no
+  Spectre deck in `tests/fixtures`, so Spectre has no rows yet.
+
 To add syntax: write the rule in the grammar with its source (manual page
 or research section), add the case that reaches it, lower it in the
 oracle, then make the frontend agree. Where ESPice deliberately reads

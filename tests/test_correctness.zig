@@ -13,6 +13,9 @@
 //! a deck added, removed, or moved between PASS and XFAIL. After a measured
 //! run whose differences are intended, rewrite the file from that run:
 //!   zig build test -- --update-verdicts
+//! With `--metamorphic` it instead runs every deck tests/metamorphic.zig can
+//! rewrite exactly, once as written and once per rewrite, and fails when a
+//! rewrite moves a result past float noise (`zig build test-metamorphic`).
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -20,6 +23,7 @@ const Json = std.json.Value;
 const Complex = std.math.Complex(f64);
 
 const catalog = @import("fixture_catalog");
+const metamorphic = @import("metamorphic.zig");
 const spice_files = catalog.spice_files;
 const expected_files = catalog.expected_files;
 const expected_outputs = catalog.expected_outputs;
@@ -82,6 +86,7 @@ const Runner = struct {
     app: []const u8,
     filter: []const u8,
     timeout_seconds: u32,
+    metamorphic: bool,
     next: std.atomic.Value(u32) = .init(0),
     outcomes: []Outcome,
 };
@@ -103,11 +108,13 @@ pub fn main(init: std.process.Init) !u8 {
     var timeout_seconds: u32 = 300;
     var list = equal(app, "--list");
     var update_verdicts = false;
-    const Flag = enum(u8) { list, filter, jobs, timeout, backend, update_verdicts };
+    var metamorphic_mode = false;
+    const Flag = enum(u8) { list, filter, jobs, timeout, backend, update_verdicts, metamorphic };
     const flags = std.StaticStringMap(Flag).initComptime(.{
         .{ "--list", .list },       .{ "--filter", .filter },
         .{ "--jobs", .jobs },       .{ "--timeout", .timeout },
         .{ "--backend", .backend }, .{ "--update-verdicts", .update_verdicts },
+        .{ "--metamorphic", .metamorphic },
     });
     while (args.next()) |arg| {
         switch (flags.get(arg) orelse return error.UnknownArgument) {
@@ -117,6 +124,7 @@ pub fn main(init: std.process.Init) !u8 {
             .timeout => timeout_seconds = try std.fmt.parseInt(u32, args.next() orelse return error.MissingArgument, 10),
             .backend => backend_name = args.next() orelse return error.MissingArgument,
             .update_verdicts => update_verdicts = true,
+            .metamorphic => metamorphic_mode = true,
         }
     }
     if (jobs == 0) return error.InvalidWorkerCount;
@@ -132,7 +140,7 @@ pub fn main(init: std.process.Init) !u8 {
     const outcomes = try init.gpa.alloc(Outcome, spice_files.len);
     defer init.gpa.free(outcomes);
     @memset(outcomes, .unselected);
-    var runner: Runner = .{ .io = init.io, .app = app, .filter = filter, .timeout_seconds = timeout_seconds, .outcomes = outcomes };
+    var runner: Runner = .{ .io = init.io, .app = app, .filter = filter, .timeout_seconds = timeout_seconds, .metamorphic = metamorphic_mode, .outcomes = outcomes };
     var group: Io.Group = .init;
     defer group.cancel(init.io);
     std.debug.print("Correctness: {d} fixtures, {d} workers\n", .{ selected, @min(jobs, selected) });
@@ -145,7 +153,7 @@ pub fn main(init: std.process.Init) !u8 {
     });
     const clean = count.get(.fail) == 0 and count.get(.xpass) == 0;
     // The name list holds only for the whole corpus on the CPU path.
-    if (filter.len != 0 or !equal(backend_name, "cpu")) return if (clean) 0 else 1;
+    if (metamorphic_mode or filter.len != 0 or !equal(backend_name, "cpu")) return if (clean) 0 else 1;
     const current = try verdictList(init.gpa, outcomes);
     defer init.gpa.free(current);
     if (update_verdicts) {
@@ -241,6 +249,17 @@ fn worker(runner: *Runner) void {
         diagnostics = &report.writer;
         defer diagnostics = null;
         const gap = knownGap(arena.allocator(), runner.io, path);
+        if (runner.metamorphic) {
+            // A known gap's results are wrong to begin with: nothing to keep.
+            const ran = !gap and (runMetamorphic(arena.allocator(), runner.io, runner.app, path, expected_outputs[i], runner.timeout_seconds) catch |err| {
+                runner.outcomes[i] = .fail;
+                std.debug.print("FAIL {s}: {s}\n{s}", .{ path, @errorName(err), report.written() });
+                continue;
+            });
+            runner.outcomes[i] = if (ran) .pass else .skip;
+            if (ran) std.debug.print("PASS {s}\n", .{path});
+            continue;
+        }
         runCase(arena.allocator(), runner.io, runner.app, path, expected_outputs[i], runner.timeout_seconds) catch |err| {
             if (err == error.NotEligible) {
                 runner.outcomes[i] = .skip;
@@ -309,6 +328,91 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
         try requireSuccess(try simulate(a, io, executable, netlist, output, timeout_seconds, oracle.tokenizer));
         const repeated = try parseRaw(a, try Io.Dir.cwd().readFileAlloc(io, output, a, .unlimited));
         try repeatable(plots, repeated);
+    }
+}
+
+/// The deck at `path` as written and after each metamorphic rewrite,
+/// compared column by column; false when no rewrite applies (an error
+/// oracle, a dialect other than ngspice, or syntax the rewrites skip).
+fn runMetamorphic(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []const u8, timeout_seconds: u32) !bool {
+    const oracle = try std.json.parseFromSliceLeaky(Oracle, a, expected, .{ .ignore_unknown_fields = true });
+    if (oracle.expect.status == .@"error" or oracle.tokenizer != null) return false;
+    const netlist = try std.fmt.allocPrint(a, "tests/{s}", .{path});
+    const source = try Io.Dir.cwd().readFileAlloc(io, netlist, a, .unlimited);
+    var random: [16]u8 = undefined;
+    io.random(&random);
+    const scratch = try std.fmt.allocPrint(a, ".zig-cache/metamorphic/{s}", .{std.fmt.bytesToHex(random, .lower)});
+    try Io.Dir.cwd().createDirPath(io, scratch);
+    defer Io.Dir.cwd().deleteTree(io, scratch) catch {};
+    const dir = try Io.Dir.cwd().realPathFileAlloc(io, scratch, a);
+    const executable = try Io.Dir.cwd().realPathFileAlloc(io, app, a);
+    var base: ?[]const Plot = null;
+    var bad = false;
+    for (std.meta.tags(metamorphic.Kind)) |kind| {
+        const v = try metamorphic.rewrite(a, source, kind) orelse continue;
+        if (base == null) {
+            const output = try std.fmt.allocPrint(a, "{s}/base.raw", .{dir});
+            try requireSuccess(try simulate(a, io, executable, netlist, output, timeout_seconds, null));
+            base = try parseRaw(a, try Io.Dir.cwd().readFileAlloc(io, output, a, .unlimited));
+        }
+        const deck = try std.fmt.allocPrint(a, "{s}/{t}.sp", .{ dir, kind });
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = deck, .data = v.text });
+        const output = try std.fmt.allocPrint(a, "{s}/{t}.raw", .{ dir, kind });
+        try requireSuccess(try simulate(a, io, executable, deck, output, timeout_seconds, null));
+        const plots = try parseRaw(a, try Io.Dir.cwd().readFileAlloc(io, output, a, .unlimited));
+        sameResults(a, base.?, plots, v) catch |err| {
+            diagnostic("  {t}: {s}\n{s}", .{ kind, @errorName(err), v.text });
+            bad = true;
+        };
+    }
+    if (bad) return error.MetamorphicMismatch;
+    return base != null;
+}
+
+/// Every column of every plot of `base` against its `v.column` in `got`:
+/// pointwise for op, dc and ac; for a transient, at the time points both
+/// grids hold. A rewrite may move the step grid (the LTE test's `abstol` and
+/// `chgtol` floors are absolute, so `scale` moves it in ngspice too), and an
+/// interpolated coarse step is no evidence either way.
+fn sameResults(a: Allocator, base: []const Plot, got: []const Plot, v: metamorphic.Variant) !void {
+    if (base.len != got.len) return error.PlotCount;
+    for (base, got) |p, q| {
+        if (!equal(p.name, q.name)) return error.PlotName;
+        const transient = std.ascii.findIgnoreCase(p.name, "transient") != null;
+        if (!transient and p.rows != q.rows) return error.RowCount;
+        for (p.names, 0..) |name, col| {
+            const qcol = q.column(try v.column(a, name)) catch |err| {
+                diagnostic("  column {s}: {s}\n", .{ name, @errorName(err) });
+                return err;
+            };
+            const current = std.mem.startsWith(u8, name, "i(") or std.mem.endsWith(u8, name, "#branch");
+            const factor: f64 = if (current) v.current_factor else 1;
+            var peak: f64 = 0;
+            for (0..p.rows) |r| peak = @max(peak, std.math.hypot(p.value(r, col).re, p.value(r, col).im));
+            // Float noise for a direct solve; a transient point within the LTE bound (reltol 1e-3).
+            const rtol: f64 = if (transient) 1e-3 else 1e-6;
+            const atol = rtol * peak + 1e-15;
+            var compared: usize = 0;
+            var at: usize = 0; // both time axes increase: one merge walk
+            for (0..p.rows) |r| {
+                const row = if (!transient) r else blk: {
+                    const t = p.value(r, 0).re;
+                    while (at < q.rows and q.value(at, 0).re < t) at += 1;
+                    if (at == q.rows or q.value(at, 0).re != t) continue;
+                    break :blk at;
+                };
+                compared += 1;
+                const raw = q.value(row, qcol);
+                const have: Complex = .init(raw.re * factor, raw.im * factor);
+                const want = p.value(r, col);
+                if (!close(have, want, rtol, atol)) {
+                    diagnostic("  {s} ({s}) row {d}: {d} != {d}\n", .{ name, p.name, r, have.re, want.re });
+                    return error.ResultMoved;
+                }
+            }
+            // Time 0 and the stop time are on every grid.
+            if (p.rows > 0 and compared == 0) return error.NoCommonPoints;
+        }
     }
 }
 
@@ -928,6 +1032,10 @@ fn repeatable(first: []const Plot, second: []const Plot) !void {
         for (p.names, q.names) |x, y| if (!equal(x, y)) return error.NotRepeatable;
         if (!std.mem.eql(u8, std.mem.sliceAsBytes(p.data), std.mem.sliceAsBytes(q.data))) return error.NotRepeatable;
     }
+}
+
+test {
+    _ = metamorphic;
 }
 
 test "every discovered fixture has a valid oracle and matching source hash" {

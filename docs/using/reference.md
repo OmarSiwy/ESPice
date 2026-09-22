@@ -20,8 +20,9 @@ element cards
 ```
 
 Logical lines: a line starting with `+` continues the one before it.
-Comments: `*` at the start of a line; `;` cuts the rest of a line, and so
-do `$` and `//` after a blank or a comma, outside quotes (ngspice dialect). The [dialects](dialects.md) page has the HSPICE and
+Comments: `*` at the start of a line; `;` and `//` cut the rest of a line,
+and so does `$` after a blank or a comma, outside quotes (ngspice dialect).
+A line left holding only a comment is a comment line. The [dialects](dialects.md) page has the HSPICE and
 Spectre rules.
 
 Values: a number with an optional scale suffix (`t g meg k m mil u n p f a`,

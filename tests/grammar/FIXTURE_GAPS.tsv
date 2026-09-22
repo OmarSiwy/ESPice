@@ -1,0 +1,189 @@
+# The fixture-coverage worklist: grammar alternatives no tests/fixtures deck
+# exercises (tests/grammar/root.zig checkFixtureGaps). Columns: grammar, rule,
+# grammar node. The test fails on a missing or stale row.
+hspice.peg	Assign	s
+hspice.peg	Block	(!('.enddata' !namechar) rest nl)
+hspice.peg	CmpOp	'!='
+hspice.peg	CmpOp	'<='
+hspice.peg	CmpOp	'>='
+hspice.peg	Cond	('.if' !namechar s? cond nl body (Elseif nl body)* (Else nl body)? '.endif' rest)
+hspice.peg	Control	('.control' !namechar rest nl (!('.endc' !namechar) rest nl)* '.endc' rest)
+hspice.peg	Else	('.else' !namechar rest)
+hspice.peg	Elseif	('.elseif' !namechar s? cond)
+hspice.peg	Func	('=' s?)
+hspice.peg	Func	s
+hspice.peg	FuncDef	(s? ',' s? Key)
+hspice.peg	FuncDef	s
+hspice.peg	Group	s
+hspice.peg	Include	(('.include' / '.hdl' / '.osdi_include' / '.pre_osdi' / '.verilog') !namechar rest)
+hspice.peg	Kind	'acxf'
+hspice.peg	Kind	'dcinc'
+hspice.peg	Kind	'dcxf'
+hspice.peg	Kind	'disto'
+hspice.peg	Kind	'envelope'
+hspice.peg	Kind	'envlp'
+hspice.peg	Kind	'four'
+hspice.peg	Kind	'hbac'
+hspice.peg	Kind	'hbnoise'
+hspice.peg	Kind	'hbosc'
+hspice.peg	Kind	'hbxf'
+hspice.peg	Kind	'matex'
+hspice.peg	Kind	'mc'
+hspice.peg	Kind	'montecarlo'
+hspice.peg	Kind	'pac'
+hspice.peg	Kind	'phasenoise'
+hspice.peg	Kind	'pnoise'
+hspice.peg	Kind	'pss'
+hspice.peg	Kind	'pxf'
+hspice.peg	Kind	'qpss'
+hspice.peg	Kind	'sens'
+hspice.peg	Kind	'snosc'
+hspice.peg	Kind	'sp'
+hspice.peg	Kind	'stb'
+hspice.peg	Kind	'tf'
+hspice.peg	Kind	'tran_noise'
+hspice.peg	LPair	Expr
+hspice.peg	LPair	s
+hspice.peg	Mantissa	('.' [...]+)
+hspice.peg	Nodeset	('.nodeset' !namechar fields?)
+hspice.peg	Number	[...]
+hspice.peg	Options	'.opt'
+hspice.peg	Options	'.opts'
+hspice.peg	OtherKind	'endc'
+hspice.peg	OtherKind	'graph'
+hspice.peg	OtherKind	'jitter'
+hspice.peg	OtherKind	'plot'
+hspice.peg	OtherKind	'print'
+hspice.peg	OtherKind	'probe'
+hspice.peg	OtherKind	'prot'
+hspice.peg	OtherKind	'protect'
+hspice.peg	OtherKind	'stim'
+hspice.peg	OtherKind	'stimuli'
+hspice.peg	OtherKind	'store'
+hspice.peg	OtherKind	'title'
+hspice.peg	OtherKind	'unprot'
+hspice.peg	OtherKind	'unprotect'
+hspice.peg	OtherKind	'width'
+hspice.peg	Pair	s
+hspice.peg	Param	'.parameter'
+hspice.peg	Path	Str
+hspice.peg	PowOp	'**'
+hspice.peg	Probe	(x ',' x Pname)
+hspice.peg	Save	('.save' !namechar fields?)
+hspice.peg	Scale	'mil'
+hspice.peg	Str	('\"' (!'\"' .)* '\"')
+hspice.peg	Subckt	'.macro'
+hspice.peg	Temp	'.temperature'
+hspice.peg	Temp	(s? '=')
+hspice.peg	Vec	s
+hspice.peg	card	Cond
+hspice.peg	card	Control
+hspice.peg	cond	(('(' x Ternary x ')' rest) / (Ternary rest))
+hspice.peg	dotcard	Include
+hspice.peg	dotcard	Nodeset
+hspice.peg	dotcard	Save
+hspice.peg	ends	'.eom'
+hspice.peg	gfield	Expr
+hspice.peg	gfield	Group
+hspice.peg	pathkey	'citifile'
+hspice.peg	pathkey	'rlgcfile'
+hspice.peg	ports	('params:' s?)
+hspice.peg	value	Word
+hspice_lines.peg	EndRun	(!eol .)
+hspice_lines.peg	EndRun	NextRun
+hspice_lines.peg	EndRun	blank
+hspice_lines.peg	EndRun	skip
+hspice_lines.peg	Glue	chunk*
+hspice_lines.peg	Line	blank
+hspice_lines.peg	NextRun	.+
+hspice_lines.peg	chunk	numtok
+hspice_lines.peg	eol	'\r'
+hspice_lines.peg	eolx	!.
+hspice_lines.peg	glue_break	(blank* '\\\\' blank* eolx blank*)
+hspice_lines.peg	glue_end	('\\\\' blank* eolx)
+hspice_lines.peg	keep_break	blank
+hspice_lines.peg	more	(glue_break Glue)
+hspice_lines.peg	numtok	([...]? ((digit+ ('.' digit*)?) / ('.' digit+)) ([...] [...]? digit+)? [...]* &'$')
+hspice_lines.peg	plus_break	blank
+hspice_lines.peg	plus_break	skip
+hspice_lines.peg	qbreak	(('\\\\' blank* eol blank*) / (blank '\\' blank* eol))
+hspice_lines.peg	quoted	qbreak
+hspice_lines.peg	skip	(blank* eol)
+hspice_lines.peg	skip	(blank+ !.)
+hspice_lines.peg	skip	blank
+ngspice.peg	Block	(('.data' s Key rest nl (!('.enddata' !namechar) rest nl)* '.enddata' rest) / ('.variation' !namechar rest nl (!('.end_variation' !namechar) rest nl)* '.end_variation' rest))
+ngspice.peg	Func	('=' s?)
+ngspice.peg	Func	s
+ngspice.peg	FuncDef	(s? ',' s? Key)
+ngspice.peg	FuncDef	s
+ngspice.peg	Group	s
+ngspice.peg	Ic	'.dcvolt'
+ngspice.peg	Ident	('[' wordchar* ']')
+ngspice.peg	Include	'.include'
+ngspice.peg	Include	'.osdi_include'
+ngspice.peg	Include	'.pre_osdi'
+ngspice.peg	Include	'.verilog'
+ngspice.peg	Kind	'acmatch'
+ngspice.peg	Kind	'acphasenoise'
+ngspice.peg	Kind	'dcsens'
+ngspice.peg	Kind	'fft'
+ngspice.peg	Kind	'hblin'
+ngspice.peg	Kind	'lin'
+ngspice.peg	Kind	'net'
+ngspice.peg	Kind	'ptdnoise'
+ngspice.peg	Kind	'sn'
+ngspice.peg	Kind	'snac'
+ngspice.peg	Kind	'snnoise'
+ngspice.peg	Kind	'snxf'
+ngspice.peg	LPair	Expr
+ngspice.peg	OtherKind	'appendmodel'
+ngspice.peg	OtherKind	'biaschk'
+ngspice.peg	OtherKind	'check'
+ngspice.peg	OtherKind	'connect'
+ngspice.peg	OtherKind	'dout'
+ngspice.peg	OtherKind	'endc'
+ngspice.peg	OtherKind	'graph'
+ngspice.peg	OtherKind	'mosra'
+ngspice.peg	OtherKind	'pat'
+ngspice.peg	OtherKind	'power'
+ngspice.peg	OtherKind	'probe'
+ngspice.peg	OtherKind	'prot'
+ngspice.peg	OtherKind	'protect'
+ngspice.peg	OtherKind	'sample'
+ngspice.peg	OtherKind	'stim'
+ngspice.peg	OtherKind	'stimuli'
+ngspice.peg	OtherKind	'store'
+ngspice.peg	OtherKind	'title'
+ngspice.peg	OtherKind	'unprot'
+ngspice.peg	OtherKind	'unprotect'
+ngspice.peg	Pair	(&(pathkey !namechar) Key s? '=' s? Path)
+ngspice.peg	Pair	(&(tolkey !namechar) Key s? '=' s? Word)
+ngspice.peg	Param	'.parameter'
+ngspice.peg	Path	(Str / (![...] .)+)
+ngspice.peg	Str	('\"' (!'\"' .)* '\"')
+ngspice.peg	Subckt	'.macro'
+ngspice.peg	Temp	'.temperature'
+ngspice.peg	Temp	(s? '=')
+ngspice.peg	card	Block
+ngspice.peg	cond	(Ternary rest)
+ngspice.peg	ends	'.eom'
+ngspice.peg	field	Str
+ngspice.peg	gfield	Expr
+ngspice.peg	gfield	Str
+ngspice.peg	pathkey	('tstonefile' / 'rlgcfile' / 'citifile')
+ngspice.peg	tolkey	(('dev' / 'lot') ('/' [...]+)?)
+ngspice.peg	value	Str
+ngspice_lines.peg	body	stop
+ngspice_lines.peg	chunk	('$' wchar*)
+ngspice_lines.peg	end	(!eol .)
+ngspice_lines.peg	end	blank
+ngspice_lines.peg	eol	'\r'
+ngspice_lines.peg	glue_break	blank
+ngspice_lines.peg	glue_end	blank
+ngspice_lines.peg	more	blank
+ngspice_lines.peg	more	comment
+ngspice_lines.peg	quoted	&(glue_end / eolx)
+ngspice_lines.peg	quoted	('\\' !eol !glue_end .)
+ngspice_lines.peg	skip	(blank+ !.)
+ngspice_lines.peg	skip	blank
+ngspice_lines.peg	stop	(blank* '@' .*)
