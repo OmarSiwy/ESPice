@@ -10,10 +10,8 @@ espice my_circuit.sp --format=touchstone --rawfile out.s2p
 espice my_circuit.sp --jobs=8 --backend=cuda
 ```
 
-Pre-release, version 0.1.0. It runs real netlists and every fixture is checked
-against ngspice and VACASK, but the conformance suite is not a release gate yet.
-[Accuracy and performance](#accuracy-and-performance) says what has actually
-been measured.
+Pre-release, version 0.1.0. Every fixture is checked against ngspice and VACASK;
+[Accuracy and performance](#accuracy-and-performance) gives the numbers.
 
 ## Why this one
 
@@ -83,10 +81,9 @@ Usage: espice [OPTION]... FILE...
 | Switches | voltage- and current-controlled |
 | Transmission lines | `tline`, `lossy_tline`, `coupled_tlines`, and native LTRA, TXL and coupled-LTRA |
 
-The transmission lines are the one place native Zig beats the Verilog-A route:
-the `.va` versions dropped convolution kernels and fell back to a two-conductor
-modal approximation, so the native models stay until a replacement passes the
-same numerical comparisons.
+Transmission lines are the one place native Zig beats the Verilog-A route: the
+`.va` versions dropped convolution kernels and fell back to a two-conductor
+modal approximation, so the native models stay.
 
 ## Formats
 
@@ -100,95 +97,59 @@ same numerical comparisons.
 `tests/fixtures/` holds 616 netlists across 34 categories, each with a
 checked-in `.expected.json`. `zig build bench` runs every deck through ESPice,
 ngspice and VACASK, compares each shared output column by name, and reports
-speed and agreement side by side:
+speed and agreement together:
 
 ```sh
 nix develop .#benchmarking
 zig build bench -- --iters 3 --out results.md
 ```
 
-Everything below is one such run, all 616 fixtures, against ngspice 45 and
-VACASK 2026 on the same machine.
+The numbers below are one such run against ngspice 45 and VACASK 2026. A second
+full run returned all 1,848 verdicts identical, wall times within a few percent.
 
-### Agreement
-
-| Compared with | agree | DIFFER | incomplete | other engine could not run it |
+| Compared with | agree | DIFFER | incomplete | could not run it |
 |---|---:|---:|---:|---:|
 | ngspice 45 | 379 | 26 | 29 | 182 |
 | VACASK 2026 | 232 | 17 | 0 | 367 |
 
-The large "could not run it" columns are mostly decks the other simulator has no
-counterpart for: `.ic`, `.trannoise`, `u`/`o`/`t`/`z` device cards, and PWL
-sources, which this VACASK build aborts on.
+"Could not run it" is mostly decks the other simulator has no counterpart for:
+`.ic`, `.trannoise`, `u`/`o`/`t`/`z` device cards, and PWL sources, which this
+VACASK build aborts on.
 
-Two independent runs of the whole suite returned all 1,848 verdicts identical
-(616 fixtures, three engine pairs each), with wall times within a few percent.
+On speed, ESPice beat ngspice on 320 of the 439 decks both finished, median
+ratio 0.66, and VACASK on 267 shared decks at 0.47. Read those narrowly: most
+fixtures finish in 10 to 30 ms, which is mostly process startup for all three.
+The large circuits are where it means something. Milliseconds, median of 3 runs:
 
-### Speed
-
-Of the 439 decks ESPice and ngspice both completed, ESPice was faster on 320,
-median ratio 0.66. Against VACASK it was 0.47 over 267 shared decks. Read those
-medians narrowly: most fixtures finish in 10 to 30 ms, which is mostly process
-startup on all three engines.
-
-The `stress/` set is where the difference is real. Milliseconds, median of 3
-runs after a warm-up:
-
-| Fixture | ESPice | ngspice | VACASK | vs ngspice |
+| Fixture | ESPice | ngspice | VACASK | agreement |
 |---|---:|---:|---:|---|
-| `scaling_resistor_grid_100x100` | 72.4 | 1784.8 | 120.6 | agree |
-| `scaling_resistor_grid_32x32` | 9.8 | 29.9 | 23.9 | agree |
-| `scaling_resistor_grid` | 6.8 | 17.2 | 16.1 | agree |
-| `scaling_rc_ladder_100k` | 2899.1 | 5632.6 | 10039.3 | agree |
-| `scaling_rc_ladder_1k` | 40.1 | 50.7 | 89.1 | agree |
+| `resistor_grid_100x100` | 72.4 | 1784.8 | 120.6 | agree |
 | `sweep_opamp_wl_5000` | 1017.7 | 4009.9 | 2563.7 | agree |
-| `sweep_opamp_wl_200` | 51.8 | 30.7 | 85.8 | agree |
-| `scaling_divider_chain` | 8.0 | 15.6 | 15.4 | agree |
-| `scaling_parallel_inverters_100` | 48.6 | 56.1 | 143.6 | agree |
-| `scaling_parallel_inverters_2000` | 842.4 | 1124.8 | 3082.8 | DIFFER |
-| `scaling_inverter_chain_256` | 432.9 | 365.4 | 2966.7 | DIFFER |
-| `scaling_inverter_chain_4k` | 106312.8 | 6802.8 | 79323.3 | DIFFER |
-| `vacask_rc` | 4190.7 | 1581.4 | 1286.7 | agree |
+| `rc_ladder_100k` | 2899.1 | 5632.6 | 10039.3 | agree |
 | `vacask_graetz` | 5433.2 | 2780.0 | n/a | agree |
-| `vacask_mul` | 2976.7 | 1512.4 | n/a | DIFFER |
+| `vacask_rc` | 4190.7 | 1581.4 | 1286.7 | agree |
+| `inverter_chain_256` | 432.9 | 365.4 | 2966.7 | DIFFER |
+| `inverter_chain_4k` | 106312.8 | 6802.8 | 79323.3 | DIFFER |
 | `vacask_ring` | n/a | 169.9 | n/a | ESPice produced nothing |
 
-Large sparse DC and sweep problems are the strong case: the 100x100 resistor
-grid is 24x faster than ngspice, the 5000-point opamp sweep 4x, the 100k RC
-ladder 2x. Long MOS transient runs are the weak case, and the worst of them is
-very bad: `scaling_inverter_chain_4k` takes 106 seconds against ngspice's 6.8,
-and it disagrees, so that row is not even a like-for-like comparison. Three of
-the four `vacask_*` decks are slower too, and `vacask_ring` produced no output
-at all.
-
-### A measured before and after
-
-Indexing voltage-source names during binding, and cutting `PatternBuilder`
-radix-sort work:
-
-| Fixture | Runs | Before, ms | After, ms |
-|---|---:|---:|---:|
-| `op/controlled_source_scaling.sp` | 9 | 36.761 | 22.541 |
-| `stress/scaling_resistor_grid_100x100.sp` | 7 | 90.336 | 102.385 |
-
-The grid case got slower, and it is printed because it did. The radix change is
-an instruction-count win, not a wall-time one: under Callgrind on a
-topology-equivalent driver the grid fell 44.7% (11,944,431 to 6,602,513
-instructions) and a 100k RC ladder 6.8% (73,456,908 to 68,480,580). Those are
-instructions, not elapsed time. Method, paired-sample ranges and binary hashes
-are in
-[docs/Problem/preparation-performance.md](docs/Problem/preparation-performance.md).
+Large sparse DC and sweep problems are the strong case: 24x on the resistor
+grid, 4x on the opamp sweep, 2x on the RC ladder. Long MOS transient chains are
+the weak one, and `inverter_chain_4k` is bad enough to be a bug rather than a
+tuning gap: 106 seconds against ngspice's 6.8, and it disagrees, so the timing
+is not even like-for-like. `vacask_ring` produces nothing at all.
 
 ### What is not claimed
 
-The 379-of-405 agreement above is a differential comparison against two other
-simulators, not a conformance score, and it only covers the decks all engines
-can express. Separately, `zig build test` has scored 492, 494 and 518 out of 616
-on one unchanged tree while the emitted device code stayed byte-identical. That
-instability is in the host suite, not in the benchmark above, and until it is
-fixed no pass rate is quoted as a release number. Per-area status labels live in
-`docs/`; a model appearing in a dispatch table does not establish complete SPICE
-conformance.
+That table is a differential comparison against two simulators, not a
+conformance score, and it covers only decks all three engines can express.
+Separately, `zig build test` has scored 492, 494 and 518 out of 616 on one
+unchanged tree while the emitted device code stayed byte-identical. That
+instability is in the host suite rather than the benchmark, and until it is
+fixed no pass rate is quoted as a release number. A model appearing in a
+dispatch table does not establish complete SPICE conformance; `docs/` carries
+per-area status labels, and
+[preparation-performance.md](docs/Problem/preparation-performance.md) has the
+one instruction-level before/after measured so far.
 
 ## Project structure
 
@@ -208,12 +169,10 @@ conformance.
 `frontend` and `analysis` are siblings; neither imports the other. `problem`
 composes both plus `output`, and `main` sees only `problem` and `output`.
 
-`zig build test` runs every suite. `zig build --help` lists the per-area steps
-(`test-solvers`, `test-frontend`, `test-output`, and the rest).
-
-Co-developing VerA or Gompute means pointing that entry in `build.zig.zon` back
-at a local `.path` and restoring the pin before you push. A pinned build
-resolves to the package cache and will not see your sibling checkout.
+`zig build test` runs every suite, and `zig build --help` lists the per-area
+steps. To co-develop VerA or Gompute, point its entry in `build.zig.zon` back at
+a local `.path` and restore the pin before pushing; a pinned build resolves to
+the package cache and will not see your sibling checkout.
 
 ## Why the name
 
