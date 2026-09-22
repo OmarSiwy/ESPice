@@ -104,12 +104,59 @@ speed and agreement side by side:
 
 ```sh
 nix develop .#benchmarking
-zig build bench -- --iters 9 --out results.md
+zig build bench -- --iters 3 --out results.md
 ```
 
-One row per fixture: three timings (median after a warm-up, process startup and
-output included) and three verdicts, one per engine pair, each `agree`, `DIFFER`
-or `incomplete`.
+Everything below is one such run, all 616 fixtures, against ngspice 45 and
+VACASK 2026 on the same machine.
+
+### Agreement
+
+| Compared with | agree | DIFFER | incomplete | other engine could not run it |
+|---|---:|---:|---:|---:|
+| ngspice 45 | 379 | 26 | 29 | 182 |
+| VACASK 2026 | 232 | 17 | 0 | 367 |
+
+The large "could not run it" columns are mostly decks the other simulator has no
+counterpart for: `.ic`, `.trannoise`, `u`/`o`/`t`/`z` device cards, and PWL
+sources, which this VACASK build aborts on.
+
+### Speed
+
+Of the 439 decks ESPice and ngspice both completed, ESPice was faster on 320,
+median ratio 0.66. Against VACASK it was 0.47 over 267 shared decks. Read those
+medians narrowly: most fixtures finish in 10 to 30 ms, which is mostly process
+startup on all three engines.
+
+The `stress/` set is where the difference is real. Milliseconds, median of 3
+runs after a warm-up:
+
+| Fixture | ESPice | ngspice | VACASK | vs ngspice |
+|---|---:|---:|---:|---|
+| `scaling_resistor_grid_100x100` | 72.4 | 1784.8 | 120.6 | agree |
+| `scaling_resistor_grid_32x32` | 9.8 | 29.9 | 23.9 | agree |
+| `scaling_resistor_grid` | 6.8 | 17.2 | 16.1 | agree |
+| `scaling_rc_ladder_100k` | 2899.1 | 5632.6 | 10039.3 | agree |
+| `scaling_rc_ladder_1k` | 40.1 | 50.7 | 89.1 | agree |
+| `sweep_opamp_wl_5000` | 1017.7 | 4009.9 | 2563.7 | agree |
+| `sweep_opamp_wl_200` | 51.8 | 30.7 | 85.8 | agree |
+| `scaling_divider_chain` | 8.0 | 15.6 | 15.4 | agree |
+| `scaling_parallel_inverters_100` | 48.6 | 56.1 | 143.6 | agree |
+| `scaling_parallel_inverters_2000` | 842.4 | 1124.8 | 3082.8 | DIFFER |
+| `scaling_inverter_chain_256` | 432.9 | 365.4 | 2966.7 | DIFFER |
+| `scaling_inverter_chain_4k` | 106312.8 | 6802.8 | 79323.3 | DIFFER |
+| `vacask_rc` | 4190.7 | 1581.4 | 1286.7 | agree |
+| `vacask_graetz` | 5433.2 | 2780.0 | n/a | agree |
+| `vacask_mul` | 2976.7 | 1512.4 | n/a | DIFFER |
+| `vacask_ring` | n/a | 169.9 | n/a | ESPice produced nothing |
+
+Large sparse DC and sweep problems are the strong case: the 100x100 resistor
+grid is 24x faster than ngspice, the 5000-point opamp sweep 4x, the 100k RC
+ladder 2x. Long MOS transient runs are the weak case, and the worst of them is
+very bad: `scaling_inverter_chain_4k` takes 106 seconds against ngspice's 6.8,
+and it disagrees, so that row is not even a like-for-like comparison. Three of
+the four `vacask_*` decks are slower too, and `vacask_ring` produced no output
+at all.
 
 ### A measured before and after
 
@@ -131,11 +178,12 @@ are in
 
 ### What is not claimed
 
-No pass rate. The host suite scored 492, 494 and 518 out of 616 on one unchanged
-tree while the emitted device code stayed byte-identical, so the suite moves on
-its own and cannot be quoted as a conformance number yet. Per-area status labels
-live in `docs/`; a model appearing in a dispatch table does not establish
-complete SPICE conformance.
+The 379-of-405 agreement above is one run of a differential comparison, not a
+conformance score. The host fixture suite has separately scored 492, 494 and 518
+out of 616 on one unchanged tree while the emitted device code stayed
+byte-identical, so it still moves on its own and no pass rate is quoted as a
+release number. Per-area status labels live in `docs/`; a model appearing in a
+dispatch table does not establish complete SPICE conformance.
 
 ## Project structure
 
