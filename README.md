@@ -3,7 +3,7 @@
 An E(gyptian)Spice circuit simulator written in Zig, for full control over
 performance and the careful optimizations that control buys. SPICE netlists in;
 DC, AC, transient, PSS, noise and sweep analyses out. BSIM3, BSIM4, BSIMSOI and
-Verilog-A models are supported natively — device models are compiled from
+Verilog-A models are supported natively: device models are compiled from
 Verilog-A at build time rather than hand-ported.
 
 Why the naming? The pyramids were built long ago from scratch, were ahead of
@@ -13,14 +13,14 @@ it is built to last.
 #### Dependencies:
 
 - Zig 0.16
-- `../VerA` — the Verilog-A / Verilog frontends and the device contract
-- `../gompute` — GPU compute; compiles the shared device kernels for host, CUDA and HIP
+- `../VerA`: the Verilog-A / Verilog frontends and the device contract
+- `../gompute`: GPU compute; compiles the shared device kernels for host, CUDA and HIP
 - Verilator (only for the digital HDL models)
 
 Both sibling packages are path dependencies (`build.zig.zon`), so they must sit
 beside this checkout.
 
-#### Project Structure:
+#### Project structure:
 
 ```
 ├── src/
