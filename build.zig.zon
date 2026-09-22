@@ -4,22 +4,26 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        // Both deps are pinned git+URLs, so a checkout of this repo alone
+        // builds. The cost, and it is a real one: the build resolves to a
+        // content-addressed copy under the global cache, so an edit in a
+        // sibling `../VerA` or `../Gompute` working tree does NOT reach this
+        // build. While co-developing either one, point the dep back at
+        // `.{ .path = "../VerA" }` locally and restore the pin before pushing.
+
         // The Verilog-A / Verilog compiler, and the `contract` its generated
-        // devices import. A path dep while both trees move together; swap to a
-        // git+URL with a pinned hash once VerA stabilizes.
-        .vera = .{ .path = "../VerA" },
-        // The GPU runtime — and `gompute.math`, which every generated device's
-        // transcendentals route through, so it sits on the hottest path in the
-        // simulator and moves with this tree while that path is being worked.
-        //
-        // A path dep, like `vera` above, for exactly that reason: under the
-        // git+URL pin the build resolved to a content-addressed copy under
-        // `zig-pkg/`, so an edit in `../gompute` silently did nothing — the
-        // sibling checkout looked live and was not. `../gompute` sits on the
-        // commit that pin named (e928f1c), so this changes no code, only which
-        // copy is authoritative. Swap back to a pinned git+URL once the math
-        // work lands upstream.
-        .gompute = .{ .path = "../gompute" },
+        // devices import.
+        .vera = .{
+            .url = "git+https://github.com/OmarSiwy/VerA#297e97dc82f78bf2a6edaf3e4f664a6cd5270ba7",
+            .hash = "vera-0.9.0-fzAu7Mh6uwBeLgFDA5CllD2_6ZKdw6oU6C57gPYKJ5Gw",
+        },
+        // The GPU runtime, plus `gompute.math`: every generated device routes
+        // its transcendentals through it, so it sits on the hottest path in
+        // the simulator.
+        .gompute = .{
+            .url = "git+https://github.com/OmarSiwy/Gompute#67f1983b2741275765e45124ff83235ed5832432",
+            .hash = "gompute-1.0.0-YJVc1tJmBgDAQL6u0F8AQHejCpSxtLB5Rk75ResEwGeh",
+        },
     },
     .paths = .{
         "build.zig",
