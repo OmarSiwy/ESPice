@@ -746,7 +746,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
         // `lim_x` equals `x` on every instance the limiter left alone, which
         // near convergence is nearly all of them. One vector compare replaces
         // `2 * n_u` masked dot products of a zero vector.
-        const corr_live = use_lim and @reduce(.Or, corr != @as(@Vector(W, f64), @splat(0)));
+        const corr_live = use_lim and anyNonzero(W, corr);
 
         // The VALUE half stays per unknown — `lx[d]` and `lx[di]` are the same
         // node but not the same number once the limiter has moved `di`. Only
@@ -865,6 +865,14 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
             };
         }
     }
+}
+
+/// `@reduce(.Or, v != 0)` — any lane nonzero or NaN, ±0 not — tested on the
+/// BITS: shifting out the sign leaves zero only for ±0. The float compare
+/// lowered its i1 mask through vpermps/vpslld/vpmovsxdq/vmovmskpd; this is
+/// vpaddq + vptest. Oracle and differential case: tests/eval.zig.
+inline fn anyNonzero(comptime w: usize, v: @Vector(w, f64)) bool {
+    return @reduce(.Or, @as(@Vector(w, u64), @bitCast(v)) << @splat(1)) != 0;
 }
 
 /// `evalRange`'s REACTIVE half, alone — same seed, same `D.q`, same `scatterQ`,
@@ -2923,4 +2931,5 @@ comptime {
 pub const test_access = if (@import("builtin").is_test) .{
     .DualFor = DualFor,
     .RealFor = RealFor,
+    .anyNonzero = anyNonzero,
 } else {};
