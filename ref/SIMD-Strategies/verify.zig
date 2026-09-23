@@ -387,6 +387,11 @@ pub fn main() void {
     // still pays the guard chain. Differential case against the one-at-a-time
     // oracle over lengths 0..8: src/analysis/tests/solvers.zig (SparseTests) (same
     // standalone-import reason as LaneLu above).
+    //
+    // converger.updateAndNorm (x_old = x; x += dx; max scaled |dx|) is
+    // W-wide with a scalar tail. Max is exact, so the lane split cannot change
+    // the result; its bitwise case against the scalar loop, lengths 0..39 with
+    // NaN/inf/-0 inputs, is ConvergerTests in src/analysis/tests/solvers.zig.
 
     std.debug.print("ok — zig {f}, ssse3={}, pclmul={}\n", .{
         builtin.zig_version, has_ssse3, has_pclmul,
