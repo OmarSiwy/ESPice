@@ -19,6 +19,7 @@ our implementation + fixtures.
 | [newton-raphson-convergence.md](newton-raphson-convergence.md) | ngspice convergence criteria (reltol/vntol/abstol), pnjlim/fetlim/limvds as globalization, JFNK + GMRES(m) + preconditioning | ngspice devsup.c (fetched), Kelley (derived) |
 | [gpu-sparse-lu.md](gpu-sparse-lu.md) | GLU 3.0 level sets, double-U relaxed dependency detection, three kernel modes; NICSLU cluster/pipeline modes; our refactor-replay port spec | GLU3.0 arXiv:1908.00204 (fetched), NICSLU README (fetched) |
 | [homotopy-continuation.md](homotopy-continuation.md) | gmin / source / pseudo-transient stepping as solver-level homotopy, Gillespie adaptive controllers, exact ngspice ladder | ngspice cktop.c (fetched), Kelley & Keyes (derived) |
+| [solver-perf-2026-09.md](solver-perf-2026-09.md) | Measured solver profile per deck, kernel changes with before/after numbers, retired experiments | callgrind + hyperfine on this repo |
 
 ## Index — structured solvers and extensions
 
