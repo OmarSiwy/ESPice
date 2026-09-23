@@ -1,11 +1,16 @@
-// MESA — unified GaAs MESFET / HEMT (Ytterdal-Lee-Shur-Fjeldly), ngspice `Z`
-// element with `.model ... nmf level=2|3|4`.
+// MESA: unified GaAs MESFET / HEMT (ngspice netlist letter Z,
+// `.model ... nmf level=2|3|4`).
 //
-// docs/jfet-mesfet-hfet.md §1.4 (structural) + §1.5 (temperature/limiting) and
-// §3 (`fet_eval` spine).  §1.4 says the equations were "fetched but not
-// transcribed", so the transcription here follows the named reference source
-// (ngspice mesa/{mesaload,mesatemp,mesasetup}.c) with the parameter names,
-// defaults and units of `mesa.c`'s IOP table.  §3's spine is unchanged:
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice mesa (mesaload.c, mesatemp.c, mesasetup.c, mesa.c), the
+//   MESA model of T. Ytterdal, K. Lee, M. Shur and T. A. Fjeldly.
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Spec: docs/jfet-mesfet-hfet.md §1.4 (structural) + §1.5 (temperature/
+// limiting) and §3 (`fet_eval` spine). §1.4 defers the equations to ngspice,
+// so they follow mesaload.c/mesatemp.c with the parameter names, defaults and
+// units of mesa.c's IOP table. §3's spine:
 //   bias -> gate junctions -> mode select on sign(vds) -> charge-control
 //   channel -> gate charges -> stamp through the RD/RS/RG/RI/RF series network.
 //
@@ -13,15 +18,14 @@
 //   d --RD-- d1 --RF-- d2      g --RG-- g1      s --RS-- s1 --RI-- s2
 //   gate junctions g1-s1, g1-d1;  channel d1-s1;  gate charges g1-s2, g1-d2.
 // The series elements are voltage branches, so R=0 (the ngspice default, where
-// the node is not created at all) degenerates to an exact short instead of a
-// 1/0 conductance.
+// the node is not created at all) is an exact short, not a 1/0 conductance.
 //
-// Known reference deltas (deliberate):
-//   * frequency-dependent lambda (mesaacl.c:39-43) — parameters accepted, the
+// Deliberate differences from ngspice:
+//   * frequency-dependent lambda (mesaacl.c:39-43): parameters accepted, the
 //     tanh(f) dispersion is not expressible in a pure analog block.
 //   * `inverse` is recomputed per evaluation; ngspice leaks it across instances
-//     in one MESAload call (mesaload.c:91) — that bug is NOT replicated, so
-//     multi-Z netlists can diverge if any device runs at vds < 0.
+//     in one MESAload call (mesaload.c:91), so multi-Z netlists can differ
+//     from ngspice if any device runs at vds < 0.
 //   * ngspice's `off` flag / icvds / icvgs cold-start seeds are netlist-level
 //     initial conditions, not model equations; the solver owns them.
 module mesa(d, g, s);
@@ -228,18 +232,15 @@ module mesa(d, g, s);
         imax   = qe * nmax * vs * w;
 
         // Per-junction critical voltages (mesatemp.c:98-106), the vcrit
-        // DEVpnjlim needs at mesaload.c:273-283.  Derived here so the limiter is
-        // handed the right number instead of guessing one.
+        // DEVpnjlim needs at mesaload.c:273-283.
         vcrits = vt  * ln(vt  / (1.4142135623730951 * csatfs));
         vcritd = vtj * ln(vtj / (1.4142135623730951 * csatfd));
 
         // ------------------------------------------------------------------
-        // §3: bias.  §1.5 limiting order is fetlim(vgs), fetlim(vgd), limvds,
-        // then pnjlim on both gate junctions.  The limiting ALGORITHM stays the
-        // solver's companion-model job (as in models/diode.va), but §4.5.15
-        // `$limit` is where the model declares which algorithm and with which
-        // critical voltage — a host that ignores it gets the raw solution, which
-        // is exactly today's behaviour.
+        // §3: bias. §1.5 limiting order is fetlim(vgs), fetlim(vgd), limvds,
+        // then pnjlim on both gate junctions; only the pnjlim legs are declared
+        // here. $limit names the algorithm and critical voltage; the host runs
+        // it (as in models/diode.va).
         // ------------------------------------------------------------------
         vgs = $limit(V(g1, s1), "pnjlim", vtes, vcrits);
         vgd = $limit(V(g1, d1), "pnjlim", vted, vcritd);
