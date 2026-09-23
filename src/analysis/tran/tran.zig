@@ -117,6 +117,22 @@ const integrator = struct {
         }
     }
 
+    /// Accepted-point charge re-read: `i_cur += alpha·(q_new − q_old)`, per
+    /// element. Elementwise, so every `w` is bit-identical; `w == 1` is the
+    /// scalar oracle (tests/transient.zig). LLVM left the plain loop scalar —
+    /// it cannot prove the three history slices disjoint.
+    pub fn rebaseCurrent(comptime w: usize, i_cur: []f64, q_new: []const f64, q_old: []const f64, alpha: f64) void {
+        const V = @Vector(w, f64);
+        const av: V = @splat(alpha);
+        var j: usize = 0;
+        while (j + w <= i_cur.len) : (j += w) {
+            const qn: V = q_new[j..][0..w].*;
+            const qo: V = q_old[j..][0..w].*;
+            i_cur[j..][0..w].* = @as(V, i_cur[j..][0..w].*) + av * (qn - qo);
+        }
+        if (comptime w > 1) rebaseCurrent(1, i_cur[j..], q_new[j..], q_old[j..], alpha);
+    }
+
     /// ngspice CKTterr: per-state timestep bound, in seconds. For each
     /// charge state j (tolerance in CURRENT units, cktterr.c):
     ///   i_new_j     = what `advanceCurrent` will write for `cur_method`
@@ -835,11 +851,8 @@ pub fn simulateInto(
         // Newton correction past the x the planes hold — always, limited or not.
         if (has_charge and ckt.has_state_q) {
             ckt.evalQ(cur, t);
-            for (0..n) |j2| {
-                const q_new = ckt.q_vec[j2];
-                i_prev[j2] += alpha_val * (q_new - q_hist[1][j2]);
-                q_hist[1][j2] = q_new;
-            }
+            integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], alpha_val);
+            simdCopy(q_hist[1], ckt.q_vec[0..n]);
             // The per-state tape is the SAME two writes on the same Δq, off the
             // same re-read — `stepBound` now reduces over it, so leaving it
             // uncorrected would reintroduce exactly the "one Newton correction
@@ -847,10 +860,11 @@ pub fn simulateInto(
             // close, only on the LTE side instead of the residual side.
             if (n_qt > 0) {
                 ckt.snapshotQTape(qt_hist[0]);
-                for (0..n_qt) |j2| {
-                    qt_i_prev[j2] += alpha_val * (qt_hist[0][j2] - qt_hist[1][j2]);
-                    qt_hist[1][j2] = qt_hist[0][j2];
-                }
+                integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], alpha_val);
+                // Swap, not copy: qt_hist[0] is the ring's scratch slot (the
+                // rotation above just parked the stale tail there) and the next
+                // assemble overwrites it via `qt_snap` before anything reads it.
+                std.mem.swap([]f64, &qt_hist[0], &qt_hist[1]);
             }
         }
 
