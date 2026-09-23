@@ -101,6 +101,11 @@
 //*********************************************************************/
 //
 
+// ESPice integration: flattened into one file for VerA (the `[flatten]`
+// markers) and adapted where commented, by Omar El-Sawy, University of
+// Waterloo. The model and its Verilog-A source are the work of the authors
+// credited above and remain under their terms.
+
 // [flatten] annex D `include "disciplines.vams" — supplied by FastVAF
 
 // Definitions for `ifdef directives
