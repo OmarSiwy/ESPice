@@ -52,7 +52,7 @@ open PDKs (sky130, GF180, IHP SG13G2) are written against:
   an integer power.
 - `.option seed=N` without a Monte Carlo sweep draws the statistical
   functions once from the seed, instead of folding them to their nominal.
-- Unknown `.option` names are ignored, as in ngspice.
+- Unknown `.option` names are ignored with one warning each.
 
 The sky130 PDK decks run as written.
 
@@ -94,7 +94,6 @@ The `.alter` run doubles R, and the 50 % crossing moves from RC ln 2 =
 | `.tran s1 t1 s2 t2 ...` | one run to the last stop | `tstep tstop tstart tmax` |
 | untyped `.measure name func ...` | measures the last `.tran`, `.ac` or `.dc` card | rejected |
 | TARG without `TD=` in `.measure` | inherits TRIG's `TD` | `TD=0` |
-| unknown `.option` names | one warning each | ignored |
 | `.save [TYPE=NODESET\|IC] [FILE=] [LEVEL=] [TIME=]` | writes the operating point as `.nodeset` (or `.ic`) cards | output vector selection |
 | `SFFM(vo va fc mdi fs)` | HSPICE's argument order | ngspice's `(vo va fm mdi fc)` |
 | `AM(...)` | `(va vo mf fc td)` | ngspice's `(vo vmo vma fm fc td phasem phasec)` |

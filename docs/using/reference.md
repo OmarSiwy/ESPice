@@ -194,7 +194,7 @@ against each `.option search='dir'`. Includes nest up to 32 levels.
 `reltol` and `trtol` must be positive; a zero or negative value fails at its
 card. `abstol`, `vntol` and `chgtol` may be 0, as in ngspice.
 
-Other names are ignored (the HSPICE dialect warns about each).
+Other names are ignored, with one warning each.
 
 ### Initial conditions
 

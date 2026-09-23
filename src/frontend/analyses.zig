@@ -338,8 +338,9 @@ pub const DeckOptions = struct {
 /// LTE bound (dev/analysis/tolerance-system.md has the measurements).
 const runlvl_trtol = [6]f64{ 28, 14, 7, 3.5, 1.75, 0.875 };
 
-/// Option names outside this list are not simulated; the HSPICE dialect
-/// warns about each. `gshunt`, `cshunt` and `rshunt` are read by the netlist.
+/// Option names outside this list (and the ones `foldOptions` passes on to
+/// other readers) are not simulated, and each draws a warning in every
+/// dialect. `gshunt`, `cshunt` and `rshunt` are read by the netlist.
 const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, xmu, gshunt, cshunt, rshunt };
 
 /// Folds the deck's `.options` and `.temp` cards; `InvalidAnalysisArguments`
@@ -396,11 +397,12 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
         var i: usize = 0;
         while (i < args.len) : (i += 1) {
             const key = nameAt(args, i) orelse continue;
-            if (key.len > lower.len) continue;
             // Monte Carlo draws read these (frontend/variants.zig), EM_AVG
-            // measures the last (frontend/measure.zig).
-            // `search` is read by frontend/source.zig.
-            if (std.ascii.eqlIgnoreCase(key, "seed") or std.ascii.eqlIgnoreCase(key, "sampling_method") or std.ascii.eqlIgnoreCase(key, "em_recovery") or std.ascii.eqlIgnoreCase(key, "search")) {
+            // measures the third (frontend/measure.zig), frontend/source.zig
+            // `search`, and model binning `scale` and `wnflag` (netlist.zig).
+            if (std.ascii.eqlIgnoreCase(key, "seed") or std.ascii.eqlIgnoreCase(key, "sampling_method") or std.ascii.eqlIgnoreCase(key, "em_recovery") or
+                std.ascii.eqlIgnoreCase(key, "search") or std.ascii.eqlIgnoreCase(key, "scale") or std.ascii.eqlIgnoreCase(key, "wnflag"))
+            {
                 i += 1;
                 continue;
             }
@@ -419,8 +421,9 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
                 }
                 continue;
             }
-            const option = names.get(std.ascii.lowerString(lower[0..key.len], key)) orelse {
-                if (dialect == .hspice) std.log.warn("options: ignoring unsupported option '{s}'", .{key});
+            const known = if (key.len <= lower.len) names.get(std.ascii.lowerString(lower[0..key.len], key)) else null;
+            const option = known orelse {
+                std.log.warn("options: ignoring unsupported option '{s}'", .{key});
                 continue;
             };
             i += 1;
