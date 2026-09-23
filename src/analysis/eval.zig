@@ -746,7 +746,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
         // `lim_x` equals `x` on every instance the limiter left alone, which
         // near convergence is nearly all of them. One vector compare replaces
         // `2 * n_u` masked dot products of a zero vector.
-        const corr_live = use_lim and @reduce(.Or, corr != @as(@Vector(W, f64), @splat(0)));
+        const corr_live = use_lim and anyNonzero(W, corr);
 
         // The VALUE half stays per unknown — `lx[d]` and `lx[di]` are the same
         // node but not the same number once the limiter has moved `di`. Only
@@ -865,6 +865,14 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
             };
         }
     }
+}
+
+/// `@reduce(.Or, v != 0)` — any lane nonzero or NaN, ±0 not — tested on the
+/// BITS: shifting out the sign leaves zero only for ±0. The float compare
+/// lowered its i1 mask through vpermps/vpslld/vpmovsxdq/vmovmskpd; this is
+/// vpaddq + vptest. Oracle and differential case: tests/eval.zig.
+inline fn anyNonzero(comptime w: usize, v: @Vector(w, f64)) bool {
+    return @reduce(.Or, @as(@Vector(w, u64), @bitCast(v)) << @splat(1)) != 0;
 }
 
 /// `evalRange`'s REACTIVE half, alone — same seed, same `D.q`, same `scatterQ`,
@@ -1949,11 +1957,14 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         lim_: gompute.GlobalPtr(f64),
         xo: gompute.GlobalPtr(f64), // x_old (limit pass only)
 
-        /// The owning batch, for the host-side tables that have no device
-        /// mirror — today just `q_tape`, which `scatterQ` writes per
-        /// (id, ru) and the transient's LTE reads. `void` under `device`, so
-        /// a GPU compilation never names a host slice.
-        b: if (device) void else *BatchT,
+        /// The batch's `q_tape`, the one host-side table with no device
+        /// mirror: `scatterQ` writes it per (id, ru) and the transient's LTE
+        /// reads it. `void` under `device`, so a GPU compilation never names a
+        /// host slice. The bare pointer, not the owning `*BatchT`: through the
+        /// batch, every plane store could alias the slice header, so LLVM
+        /// reloaded `b.q_tape.ptr` (3 instructions) before each of the 4 mos1
+        /// charge-row stores, per instance, in both `evalRange` and `evalQRange`.
+        q_tape: if (device or !@hasDecl(D, "q")) void else [*]f64,
 
         pub const skip_g = skip_const and const_g;
         pub const skip_c = skip_const and const_c;
@@ -2031,7 +2042,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         pub inline fn scatterQ(s: *const Sk, id: u32, ru: usize, row: u32, qv: f64) void {
             add(s.q_vec, row, qv);
             if (comptime !device and @hasDecl(D, "q"))
-                s.b.q_tape[@as(usize, id) * n_u + ru] = qv;
+                s.q_tape[@as(usize, id) * n_u + ru] = qv;
         }
         pub inline fn scatterQJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
             add(s.c_vals, s.slot(id, ru, cu), val);
@@ -2055,7 +2066,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
                 .q_vec = pl.q_vec.ptr,
                 .lim_ = if (comptime @hasDecl(D, "limit")) b.lim_x.ptr else undefined,
                 .xo = @constCast(xo),
-                .b = b,
+                .q_tape = if (comptime @hasDecl(D, "q")) b.q_tape.ptr else {},
             };
         }
     };
@@ -2098,7 +2109,7 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
                 .q_vec = q_vec,
                 .lim_ = lim,
                 .xo = undefined, // limit pass only; never read in evalRange
-                .b = {},
+                .q_tape = {},
             };
             const id: u32 = @intCast(tid);
             // FULL WIDTH on the device, deliberately. The narrow basis is a
@@ -2920,4 +2931,5 @@ comptime {
 pub const test_access = if (@import("builtin").is_test) .{
     .DualFor = DualFor,
     .RealFor = RealFor,
+    .anyNonzero = anyNonzero,
 } else {};

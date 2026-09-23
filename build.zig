@@ -200,7 +200,11 @@ pub fn build(b: *std.Build) void {
         // pulls — ProtoStore, DeviceBatch, eval, hooks — under the runtime ABI
         // symbol `arp_device_<stem>`. Same `one_models` aggregate the GPU
         // kernel root gets, so host and device compile the SAME device type.
-        const host_mod = M.make(b.path("src/analysis/eval.zig"), &.{
+        // Strip pinned (`GPU.make`) for the same reason as `dev_mods`: with
+        // `-Ddebug-info=true` every host device object SEGV'd the compiler, so
+        // no symbolized profile could be built. Pinned, the symbols survive
+        // (callgrind names `DeviceBatch(mos1).eval`) and src/ keeps its lines.
+        const host_mod = GPU.make(b.path("src/analysis/eval.zig"), &.{
             .{ .name = "contract", .module = contract_mod },
             .{ .name = "models", .module = one_models[i] },
             .{ .name = "device_ir", .module = device_ir_mod },

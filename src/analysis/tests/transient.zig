@@ -321,6 +321,29 @@ const TranTests = struct {
         }
     }
 
+    test "rebaseCurrent: vector kernel is bit-identical to its w=1 oracle" {
+        var prng = std.Random.DefaultPrng.init(0x7e1a);
+        const r = prng.random();
+        // Lengths straddle the vector width so every tail length runs.
+        for (0..3 * W + 2) |len| {
+            var q_new: [3 * W + 2]f64 = undefined;
+            var q_old: [3 * W + 2]f64 = undefined;
+            var vec: [3 * W + 2]f64 = undefined;
+            for (0..len) |j| {
+                q_new[j] = (r.float(f64) - 0.5) * 1e-12;
+                q_old[j] = (r.float(f64) - 0.5) * 1e-12;
+                vec[j] = (r.float(f64) - 0.5) * 1e-3;
+            }
+            if (len > 0) q_new[0] = -0.0; // signed zero and NaN propagate lanewise
+            if (len > 1) q_old[len - 1] = std.math.nan(f64);
+            var ora = vec;
+            const alpha = 2.0 / (r.float(f64) * 1e-9 + 1e-12);
+            integrator.rebaseCurrent(W, vec[0..len], q_new[0..len], q_old[0..len], alpha);
+            integrator.rebaseCurrent(1, ora[0..len], q_new[0..len], q_old[0..len], alpha);
+            try testing.expectEqualSlices(u64, @ptrCast(ora[0..len]), @ptrCast(vec[0..len]));
+        }
+    }
+
     test "coeffs: BE 1/dt, trap 2/dt, gear-2 variable-step BDF2" {
         const dt: f64 = 1e-9;
         try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt).ag0, 1e-12);
