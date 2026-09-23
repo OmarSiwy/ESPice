@@ -397,9 +397,8 @@ fn isDynDevice(dev: types.Device, models: []const types.Model) bool {
 /// proto_add copies them.
 pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !void {
     if (vaload.isEmpty()) return;
-    const dl = nl.devices;
-    for (0..dl.len()) |di| {
-        const pos = dl.positional[di];
+    for (nl.devices) |dev| {
+        const pos = dev.positional;
         if (pos.len == 0) continue;
         const model_name = switch (pos[0]) {
             .name => |nm| nm,
@@ -417,7 +416,7 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
         // Card kv overrides .model card: VA "instance" params are Model
         // fields (the generated Instance holds only temp), so a card's
         // R=100 must land in the model blob to take effect.
-        try applyKvDyn(vt.set_model_param, mblob.ptr, dl.kv[di]);
+        try applyKvDyn(vt.set_model_param, mblob.ptr, dev.kv);
         // LRM 6.3.4 / 3.4.5, and it has to be HERE. Every write above lands in a
         // flat Model field, so a parameter declared over another one — and every
         // localparam — still holds the value it was built with. `derive` is the
@@ -427,13 +426,13 @@ pub fn addDynDevices(b: *Builder, arena: std.mem.Allocator, nl: types.Netlist) !
         if (vt.derive) |df| df(mblob.ptr);
         const iblob = try arena.alignedAlloc(u8, .@"16", vt.instance_size);
         vt.init_instance(iblob.ptr);
-        try applyKvDyn(vt.set_instance_param, iblob.ptr, dl.kv[di]);
+        try applyKvDyn(vt.set_instance_param, iblob.ptr, dev.kv);
 
         // Ports from the card, internal unknowns allocated here (node policy
         // stays app-side); collapse folds zero-parasitic internals onto their
         // port exactly like Builder.addDevice does for comptime devices.
         const nodes = try arena.alloc(u32, vt.n_u);
-        const dev_nodes = dl.nodes[di];
+        const dev_nodes = dev.nodes;
         for (0..vt.num_ports) |p|
             nodes[p] = if (p < dev_nodes.len) try b.internNode(dev_nodes[p]) else GROUND;
         if (vt.n_u > vt.num_ports) {
@@ -665,17 +664,17 @@ pub const NetBuilder = struct {
     const Deferred = struct { dev: types.Device, letter: u8 };
 
     pub fn init(arena: std.mem.Allocator, b: *Builder, nl: types.Netlist) !NetBuilder {
-        const dl = nl.devices;
-        const nv = dl.bucket('v').size();
-        const ni = dl.bucket('i').size();
-        const nl_ = dl.bucket('l').size();
-        const n_refs = dl.bucket('f').size() + dl.bucket('h').size() + dl.bucket('w').size();
-        const n_def = n_refs + dl.bucket('k').size();
-        const n_br = dl.bucket('e').size() + dl.bucket('h').size() + dl.bucket('b').size() + dl.bucket('y').size() + dl.bucket('p').size();
-        const nr = dl.bucket('r').size();
+        const nv = nl.bucket('v').len;
+        const ni = nl.bucket('i').len;
+        const nl_ = nl.bucket('l').len;
+        const n_refs = nl.bucket('f').len + nl.bucket('h').len + nl.bucket('w').len;
+        const n_def = n_refs + nl.bucket('k').len;
+        const n_br = nl.bucket('e').len + nl.bucket('h').len + nl.bucket('b').len + nl.bucket('y').len + nl.bucket('p').len;
+        const nr = nl.bucket('r').len;
         const sensed = try arena.alloc([]const u8, n_refs);
         var n_sensed: usize = 0;
-        for ("fhw") |letter| for (dl.bucket(letter).positional) |pos| {
+        for ("fhw") |letter| for (nl.bucket(letter)) |d| {
+            const pos = d.positional;
             if (pos.len == 0 or pos[0] != .name) continue;
             sensed[n_sensed] = pos[0].name;
             n_sensed += 1;
@@ -825,25 +824,11 @@ pub const NetBuilder = struct {
         if (target.pulse_per < 0) target.pulse_per = tstop;
     }
 
+    /// V and L first so F/H/W/K (deferred until the end) can find them.
     pub fn build(self: *NetBuilder) !void {
-        const dl = self.nl.devices;
-        try self.addBucket(dl.bucket('v'));
-        try self.addBucket(dl.bucket('l'));
-        try self.addBucket(dl.bucket('i'));
-        try self.addBucket(dl.bucket('f'));
-        try self.addBucket(dl.bucket('h'));
-        try self.addBucket(dl.bucket('w'));
-        try self.addBucket(dl.bucket('k'));
-        inline for ("abcdefghijklmnopqrstuvwxyz") |c| {
-            if (comptime c != 'f' and c != 'h' and c != 'i' and c != 'k' and c != 'l' and c != 'v' and c != 'w')
-                try self.addBucket(dl.bucket(c));
-        }
+        for ("vlifhwkabcdegjmnopqrstuxyz") |c| for (self.nl.bucket(c)) |dev| try self.addDevice(dev);
         try self.resolveDeferred();
         try self.topoCheck();
-    }
-
-    fn addBucket(self: *NetBuilder, bkt: types.DeviceList.Bucket) !void {
-        for (0..bkt.size()) |i| try self.addDevice(bkt.get(i));
     }
 
     // -- Topology diagnosis helpers ---------------------------------------
@@ -1538,9 +1523,8 @@ pub const NetBuilder = struct {
 // Subcircuit BBD tagging
 // ---------------------------------------------------------------------------
 
-pub fn tagSubcircuitNodes(b: *Builder, dl: types.DeviceList) !void {
-    for (0..dl.len()) |i| {
-        const dev = dl.get(i);
+pub fn tagSubcircuitNodes(b: *Builder, devs: []const types.Device) !void {
+    for (devs) |dev| {
         if (dev.subckt_instance == 0) continue;
         for (dev.nodes) |node_name| {
             if (b.node_names.get(node_name)) |node_id|
