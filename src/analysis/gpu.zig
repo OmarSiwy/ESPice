@@ -111,6 +111,7 @@ pub fn requestSupported(req: Request) bool {
 /// does not exist. Every use is behind `comptime backend != null`.
 const Raw = if (backend) |be| gompute.RawByName(be) else void;
 const Buffer = if (backend != null) Raw.Buffer else void;
+const Stream = if (backend != null) Raw.Stream else void;
 
 /// Must match `devices/kernels.zig`, which sized the launch when it exported
 /// the kernels: `DeviceKernel(D, block_size)` bakes the block width into
@@ -402,7 +403,7 @@ pub const GpuContext = struct {
     /// stream is enough — the work within an iteration is a strict chain
     /// (upload -> zero -> launch -> download) and the only thing that needs to
     /// run alongside it is the HOST, which is not on a stream at all.
-    stream: Raw.Stream,
+    stream: Stream,
 
     /// The CPU half. Its own workspace because `solve_newton` is reached
     /// through `GpuHook`, which carries no allocator and no analysis state —
@@ -904,6 +905,7 @@ pub const GpuContext = struct {
     /// `StateKernel` launches arm and `clearLimits` disarms — so outside a
     /// Newton solve this is the plain eval both ways.
     fn evalOnGpu(self: *Self, x: []const f64, t: f64) !void {
+        if (comptime backend == null) return Error.NoGpuArtifacts;
         if (self.poisoned) return error.GpuStateReject;
         if (self.params_dirty) try repack(self);
         const ckt = self.ckt;
@@ -949,6 +951,7 @@ pub const GpuContext = struct {
     /// whole optimization: the downloads are issued BEFORE the host does its own
     /// work, so they drain during it instead of after it.
     fn enqueueEval(self: *Self, x: []const f64, t: f64) !void {
+        if (comptime backend == null) return Error.NoGpuArtifacts;
         const ckt = self.ckt;
         const g_bytes = ckt.g_vals.len * @sizeOf(f64);
         const rhs_bytes = ckt.rhs.len * @sizeOf(f64);
@@ -1061,6 +1064,7 @@ pub const GpuContext = struct {
     /// permutation that lets two threads share a staging cell — shows up here as
     /// a printed gap on the highest-fan-in row in the circuit.
     fn evalCheck(self: *Self, x: []const f64, t: f64) !void {
+        if (comptime backend == null) return Error.NoGpuArtifacts;
         const ng = self.pin_g.len;
         const chk_g = self.chk[0..ng];
         const chk_rhs = self.chk[ng..];
@@ -1145,6 +1149,7 @@ pub const GpuContext = struct {
     /// back-to-back at the same x). Synchronous: `finalizeStep` consumes the
     /// `limited` answer immediately.
     fn applyLimitsOnGpu(self: *Self, x: []f64, x_old: []const f64) !bool {
+        if (comptime backend == null) return false;
         if (self.poisoned) return error.GpuStateReject;
         if (self.params_dirty) try repack(self);
         const n = self.ckt.n;
@@ -1258,6 +1263,7 @@ pub const GpuContext = struct {
     /// does not exist (tran mutates no params). ponytail: if one ever does,
     /// the fix is an instance download-back before repack.
     fn stateCtlOnGpu(self: *Self, op: device_ir.StateCtlOp) !bool {
+        if (comptime backend == null) return false;
         if (self.poisoned) return error.GpuStateReject;
         var launched = false;
         for (self.batches) |*bg| {
@@ -1384,6 +1390,7 @@ pub const GpuContext = struct {
     /// Re-upload the parameter arrays after a sweep mutated them. The tapes are
     /// pattern and stay put — only `models`/`instances` can have changed.
     fn repack(ctx: *anyopaque) anyerror!void {
+        if (comptime backend == null) return;
         const self: *Self = @ptrCast(@alignCast(ctx));
         for (self.batches) |*bg| {
             const p = bg.payload(bg.ctx);
