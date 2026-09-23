@@ -19,43 +19,43 @@ module mos1(d, g, s, b);
 
     // ---- model parameters (ngspice mos1 names, defaults, units) -----------
     parameter real    type   = 1.0;                  // +1 NMOS, -1 PMOS
-    parameter real    vto    = 0.0;                  // V   zero-bias threshold
-    parameter real    kp     = 2.0e-5;               // A/V^2 transconductance
-    parameter real    gamma  = 0.0;                  // sqrt(V) body effect
-    parameter real    phi    = 0.6 from (0:inf);     // V surface potential
-    parameter real    lambda = 0.0;                  // 1/V channel-length modulation
-    parameter real    tox    = 1.0e-7 from [0:inf);  // m   oxide thickness (0 == none)
-    parameter real    ld     = 0.0;                  // m   lateral diffusion
-    parameter real    u0     = 600.0;                // cm^2/Vs surface mobility
-    parameter real    nsub   = 0.0 from [0:inf);     // cm^-3 substrate doping
-    parameter real    nss    = 0.0 from [0:inf);     // cm^-2 surface state density
+    parameter real    vto    = 0.0;                  // zero-bias threshold [V]
+    parameter real    kp     = 2.0e-5;               // transconductance [A/V^2]
+    parameter real    gamma  = 0.0;                  // body effect [sqrt(V)]
+    parameter real    phi    = 0.6 from (0:inf);     // surface potential [V]
+    parameter real    lambda = 0.0;                  // channel-length modulation [1/V]
+    parameter real    tox    = 1.0e-7 from [0:inf);  // oxide thickness (0 == none) [m]
+    parameter real    ld     = 0.0;                  // lateral diffusion [m]
+    parameter real    u0     = 600.0;                // surface mobility [cm^2/Vs]
+    parameter real    nsub   = 0.0 from [0:inf);     // substrate doping [cm^-3]
+    parameter real    nss    = 0.0 from [0:inf);     // surface state density [cm^-2]
     parameter integer tpg    = 1 from [-1:1];        // gate type: +1 opp, -1 same, 0 Al
-    parameter real    rd     = 0.0;                  // ohm
-    parameter real    rs     = 0.0;                  // ohm
-    parameter real    rsh    = 0.0;                  // ohm/square
-    parameter real    is     = 1.0e-14;              // A   bulk junction sat current
-    parameter real    js     = 0.0;                  // A/m^2 bulk junction sat density
-    parameter real    cbd    = 0.0;                  // F   b-d zero-bias cap
-    parameter real    cbs    = 0.0;                  // F   b-s zero-bias cap
-    parameter real    cj     = 0.0;                  // F/m^2 bottom junction cap
-    parameter real    cjsw   = 0.0;                  // F/m   sidewall junction cap
-    parameter real    pb     = 0.8 from (0:inf);     // V  junction potential
+    parameter real    rd     = 0.0;                  // drain resistance [ohm]
+    parameter real    rs     = 0.0;                  // source resistance [ohm]
+    parameter real    rsh    = 0.0;                  // sheet resistance [ohm/square]
+    parameter real    is     = 1.0e-14;              // bulk junction sat current [A]
+    parameter real    js     = 0.0;                  // bulk junction sat density [A/m^2]
+    parameter real    cbd    = 0.0;                  // b-d zero-bias cap [F]
+    parameter real    cbs    = 0.0;                  // b-s zero-bias cap [F]
+    parameter real    cj     = 0.0;                  // bottom junction cap [F/m^2]
+    parameter real    cjsw   = 0.0;                  // sidewall junction cap [F/m]
+    parameter real    pb     = 0.8 from (0:inf);     // junction potential [V]
     parameter real    mj     = 0.5 from (0:1);       // bottom grading
     parameter real    mjsw   = 0.5 from (0:1);       // sidewall grading
     parameter real    fc     = 0.5 from (0:1);       // fwd-bias cap coefficient
-    parameter real    cgso   = 0.0;                  // F/m gate-source overlap
-    parameter real    cgdo   = 0.0;                  // F/m gate-drain overlap
-    parameter real    cgbo   = 0.0;                  // F/m gate-bulk overlap (per length)
-    parameter real    tnom   = $simparam("tnom");    // degC parameter measurement temp
-    parameter real    gmin   = 1.0e-12;              // S   junction conductance floor
+    parameter real    cgso   = 0.0;                  // gate-source overlap [F/m]
+    parameter real    cgdo   = 0.0;                  // gate-drain overlap [F/m]
+    parameter real    cgbo   = 0.0;                  // gate-bulk overlap (per length) [F/m]
+    parameter real    tnom   = $simparam("tnom");    // parameter measurement temp [degC]
+    parameter real    gmin   = 1.0e-12;              // junction conductance floor [S]
 
     // ---- instance parameters ---------------------------------------------
-    parameter real    l   = 1.0e-4 from (0:inf);  // m  drawn channel length
-    parameter real    w   = 1.0e-4 from (0:inf);  // m  channel width
-    parameter real    ad  = 0.0;                  // m^2 drain area
-    parameter real    as  = 0.0;                  // m^2 source area
-    parameter real    pd  = 0.0;                  // m   drain perimeter
-    parameter real    ps  = 0.0;                  // m   source perimeter
+    parameter real    l   = 1.0e-4 from (0:inf);  // drawn channel length [m]
+    parameter real    w   = 1.0e-4 from (0:inf);  // channel width [m]
+    parameter real    ad  = 0.0;                  // drain area [m^2]
+    parameter real    as  = 0.0;                  // source area [m^2]
+    parameter real    pd  = 0.0;                  // drain perimeter [m]
+    parameter real    ps  = 0.0;                  // source perimeter [m]
     parameter real    nrd = 1.0 from [0:inf);     // squares of drain diffusion
     parameter real    nrs = 1.0 from [0:inf);     // squares of source diffusion
     parameter real    m   = 1.0 from (0:inf);     // multiplicity
