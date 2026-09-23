@@ -92,6 +92,13 @@ const integrator = struct {
     /// expressions are untouched, so the row plane — which feeds the residual —
     /// stays bit-identical on every non-gear deck.
     fn advanceCurrent(method: Method, i_cur: []f64, q0: []const f64, q1: []const f64, q2: []const f64, c: Coeffs) void {
+        // Comptime method, for the reason `stepBound` gives.
+        switch (method) {
+            inline else => |m| advanceCurrentAt(m, i_cur, q0, q1, q2, c),
+        }
+    }
+
+    fn advanceCurrentAt(comptime method: Method, i_cur: []f64, q0: []const f64, q1: []const f64, q2: []const f64, c: Coeffs) void {
         const V = @Vector(W, f64);
         const av: V = @splat(c.ag0);
         const a2: V = @splat(c.ag2);
@@ -152,6 +159,33 @@ const integrator = struct {
     pub fn stepBound(
         method: Method,
         cur_method: Method,
+        q_cur: []const f64,
+        q_prev: []const f64,
+        q_prev2: []const f64,
+        q_prev3: []const f64,
+        i_prev: []const f64,
+        c: Coeffs,
+        dt: f64,
+        dt1: f64,
+        dt2: f64,
+        reltol: f64,
+        abstol: f64,
+        chgtol: f64,
+        trtol: f64,
+    ) f64 {
+        // Both methods comptime: LLVM kept the `cur_method` switch and the
+        // `order2` test inside the vector loop (6 of ~60 instructions per
+        // 4 states). Same arithmetic per arm, so the result is bit-identical.
+        return switch (method) {
+            inline else => |m| switch (cur_method) {
+                inline else => |cm| stepBoundAt(m, cm, q_cur, q_prev, q_prev2, q_prev3, i_prev, c, dt, dt1, dt2, reltol, abstol, chgtol, trtol),
+            },
+        };
+    }
+
+    fn stepBoundAt(
+        comptime method: Method,
+        comptime cur_method: Method,
         q_cur: []const f64,
         q_prev: []const f64,
         q_prev2: []const f64,
