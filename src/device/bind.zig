@@ -76,6 +76,36 @@ fn applyKv(target: anytype, params: []const Param) !void {
     }
 }
 
+/// Sets `known[i]` for every `params[i]` whose key `apply` would bind on a
+/// `T`: a scalar field's lowercased name or one of its `aliasesOf`.
+/// `known` is parallel to `params`; entries already set stay set.
+pub fn markKnown(comptime T: type, params: []const Param, known: []bool) void {
+    std.debug.assert(known.len == params.len);
+    @setEvalBranchQuota(1_000_000);
+    var seen: u64 = 0;
+    for (params) |p| seen |= keyBit(p.key);
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        if (comptime isScalar(field_type)) {
+            const key = comptime blk: {
+                var buf: [field_name.len]u8 = undefined;
+                for (field_name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+                const frozen = buf;
+                break :blk frozen;
+            };
+            markKey(params, seen, &key, known);
+            inline for (comptime aliasesOf(field_name)) |alias| markKey(params, seen, alias, known);
+        }
+    }
+}
+
+fn markKey(params: []const Param, seen: u64, key: []const u8, known: []bool) void {
+    if (seen & keyBit(key) == 0) return;
+    for (params, known) |p, *hit| if (std.mem.eql(u8, p.key, key)) {
+        hit.* = true;
+    };
+}
+
 /// The value of the first pair keyed `key`, or null when there is none.
 /// Errors rather than letting a recognized field fall back to its default.
 /// `seen` is the `keyBit` union of `params`' keys.
@@ -280,6 +310,14 @@ test "apply: errors by status, earlier fields keep their new values" {
     try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{.{ .key = "noise", .value = 0 }}));
     try std.testing.expectEqual(M{ .a = 1, .noisy = false, .noisy__given = true }, m);
     try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{}));
+}
+
+test markKnown {
+    const T = struct { vto: f64 = 0, w: f64 = 0, list: [2]f64 = .{ 0, 0 } };
+    const params = [_]Param{ .{ .key = "vt0", .value = 1 }, .{ .key = "ww", .value = 1 }, .{ .key = "w", .value = 1 }, .{ .key = "list", .value = 1 } };
+    var known: [params.len]bool = @splat(false);
+    markKnown(T, &params, &known);
+    try std.testing.expectEqual([_]bool{ true, false, true, false }, known);
 }
 
 test BindStatus {

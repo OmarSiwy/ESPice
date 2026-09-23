@@ -113,6 +113,25 @@ test "control source binding rejects missing and inexact names" {
     }
 }
 
+test "an unknown instance parameter fails the card; a model or alias key binds" {
+    for ([_]struct { []const u8, ?anyerror }{
+        .{ "M1 d g 0 0 nm ww=10u l=1u", error.UnknownParameter },
+        .{ "M1 d g 0 0 nm w=10u l=1u m=2", null },
+        .{ "M1 d g 0 0 nm w=10u l=1u vt0=1", null },
+    }) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const source = try std.fmt.allocPrint(a, "unknown key\nVD d 0 5\nVG g 0 2\n{s}\n.model nm nmos level=1 vto=1 kp=20u\n.op\n.end\n", .{case[0]});
+        const nl = try netlist.parse(a, source, .ngspice);
+        const lib = try device.Library.init(a);
+        var b = try Builder.init(a, &lib);
+        defer b.deinit();
+        var nb = try builder.NetBuilder.init(a, &b, nl);
+        if (case[1]) |err| try std.testing.expectError(err, nb.build()) else try nb.build();
+    }
+}
+
 test "transmission-line cards route to their convolution algorithms" {
     const cases = .{
         .{ "O1 a 0 b 0 line\n.model line LTRA r=0.5 l=250n c=100p len=2\n", "ltra" },

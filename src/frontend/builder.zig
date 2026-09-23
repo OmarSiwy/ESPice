@@ -2066,10 +2066,27 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     };
     try applyKv(&model, kv);
     try applyKv(&instance, kv);
+    try refuseUnknownKeys(self.arena, D, dev.name, kv);
     // §6.3.4/§3.4.5: derived parameters after the last write; explicit card
     // values win through `__given`.
     deriveModel(D, &model, b, dev.pins.len);
     try b.addDevice(D, dev.name, model, instance, try deviceNodes(self, D, dev));
+}
+
+/// Refuses a card pair that neither `D.Model` nor `D.Instance` binds, as
+/// ngspice refuses an unknown instance parameter: `ww=10u` for `w=10u`
+/// would otherwise run with the default width (#35).
+fn refuseUnknownKeys(arena: std.mem.Allocator, comptime D: type, name: []const u8, kv: []const Kv) !void {
+    const params = try arena.alloc(batch.Param, kv.len);
+    for (kv, params) |item, *p| p.* = .{ .key = item.key, .value = null };
+    const known = try arena.alloc(bool, kv.len);
+    @memset(known, false);
+    batch.bind.markKnown(D.Model, params, known);
+    batch.bind.markKnown(D.Instance, params, known);
+    for (kv, known) |item, hit| if (!hit) {
+        if (!@import("builtin").is_test) std.log.err("{s}: unknown instance parameter '{s}'", .{ name, item.key });
+        return error.UnknownParameter;
+    };
 }
 
 /// A card's resistance as ngspice resparam.c keeps it: the sign stays and

@@ -53,7 +53,7 @@ and the rest of the line no longer parses. Rename the node.
 | `NonuniqueOperatingPoint` | voltage sources alone form a loop that agrees with KVL, such as two equal sources in parallel: no equation fixes the current around it |
 | `CurrentSourceCutset` | current sources drive a group of nodes with no DC path to ground and their currents do not cancel |
 | `InvalidParameterValue` | a value out of its allowed range, such as a URC model's `K` |
-| `UnknownParameter`, `WrongNodeCount` | a Verilog-A instance sets a parameter its module does not declare, or has the wrong number of nodes |
+| `UnknownParameter`, `WrongNodeCount` | an instance card sets a parameter its device (built-in or Verilog-A) does not declare, such as `ww=10u` for `w=10u`, or a Verilog-A instance has the wrong number of nodes |
 
 ```text
 error: topology: a node has no DC path to ground (capacitor-only island) — the operating point is not unique

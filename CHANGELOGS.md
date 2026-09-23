@@ -98,6 +98,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A stray `.enddata` or `.end_variation` is refused as `ParseError` instead of read as nothing (#162).
 - An ngspice line holding only a `//` comment is a comment line, not a `ParseError` (and no longer a panic inside `.control` in safe builds) (#164).
 - An analysis card inside a `.subckt` is refused as `UnsupportedCard` instead of run as a top-level analysis (#165).
+- An instance parameter the device does not declare (`ww=10u` on an M card) fails the deck with `UnknownParameter`, as in ngspice (#35).
 - Sources follow ngspice: explicit 0 PULSE edges, width and period take the `.tran` defaults, PULSE's eighth argument is a pulse count, SIN's default frequency is 1/TSTOP, EXP's delays and time constants default from TSTEP, ngspice-dialect AM reads `(vo vmo vma fm fc td phasem phasec)`, `I ... m=` scales the source, and a PWL `r=` off its time points is refused (#73).
 - A negative or zero resistance keeps its sign with |R| floored at 1e-12, as ngspice does, instead of becoming 1 mOhm (#73).
 - A V source an F, H or W card senses keeps its AC drive, transient waveform and `.dc` sweep, and two sensors of one source each read its whole current (#74, #103, #106).

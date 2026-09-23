@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "An unknown instance parameter fails the deck.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "ngspice 44.2 refuses `ww=10u` on an M card (unknown parameter) and the run stops."
+  },
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "c5bb4fa8a410ad056256ad134a7844980397461a32417c60b1259315191810ad"
+}
