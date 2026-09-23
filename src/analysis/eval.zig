@@ -188,7 +188,7 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         /// x == 0 keeps the second `pow`, and is NOT a rounding nicety: at
         /// c == 1 the true slope is 1, but c·p/x is 0/0 = NaN, the isFinite
         /// gate below would drop it, and the Jacobian row goes flat. `mjs`
-        /// defaults to 0 in bjt.va, so `1 - mjs` is exactly that exponent and
+        /// defaults to 0 in gummel_poon.va, so `1 - mjs` is exactly that exponent and
         /// the substrate base `1 - v/ps` reaches exactly 0 at v == ps. The
         /// branch is never taken at a normal bias, so the hot path is still
         /// one `pow`. Same rule VerA's `zPow` applies — codegen now routes a
@@ -634,7 +634,7 @@ fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]boo
 ///   ponytail: lift the bound when a whale is on a gate deck.
 ///
 /// Today that admits mos1/2/3/6/9, bsim1 and bsim3 (n_u = 8 → rank 4) and
-/// hfet2/jfet/mes (n_u = 7 → rank 3). `bjt`, `jfet2`, `vdmos`, `bsim4va`,
+/// hfet2/jfet/mes (n_u = 7 → rank 3). `gummel_poon`, `jfet2`, `vdmos`, `bsim4va`,
 /// `bsimsoi`, `hicum` and the hisim pair stay wide.
 ///
 /// The limit guard is correctness, not economics: `evalRange` builds the

@@ -134,7 +134,7 @@ pub fn solve(
             p.ptr.set(orig);
             ckt.recompute() catch unreachable; // restores the checked original parameter
         }
-        // A parameter whose NOMINAL value collapses an internal node (bjt
+        // A parameter whose NOMINAL value collapses an internal node (gummel_poon
         // RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the +1e-12 floor in
         // `delta_req`: `collapse` stops folding c' onto c, the builder never
         // allocated a distinct c', and the batch reports TopologyChanged. The
