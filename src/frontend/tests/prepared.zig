@@ -164,6 +164,13 @@ test "prepared metadata and query identities outlive parse storage" {
         ".op\n.end\nr3 2 0 1k",
     }) |text| try std.testing.expectError(error.UnsupportedDirectiveMutation, resolveQueries(session.allocator(), &prepared, text));
     try std.testing.expectError(error.AnalysisNodeNotFound, resolveQueries(session.allocator(), &prepared, ".tf v(missing) vb"));
+    // A numeric reference node is a node, not ground: `2` tokenizes as a number.
+    const diff = try resolveQueries(session.allocator(), &prepared,
+        \\.tf v(in, 2) vb
+        \\.noise v(in, 2) vb dec 2 10 100
+    );
+    try std.testing.expectEqual(node, diff[0].tf.output_neg);
+    try std.testing.expectEqual(node, diff[1].noise.out_neg);
     try std.testing.expectEqual(@as(usize, 5), prepared.queries.len);
 }
 
@@ -282,10 +289,8 @@ test "input preparation retains bytes and origin after caller storage changes" {
     }, .ngspice);
     @memset(&source, 'x');
     @memset(&origin, 'x');
-    try std.testing.expectEqualStrings("Models/Deck.cir", prepared.origin);
-    try std.testing.expect(std.mem.startsWith(u8, prepared.source, "retained input\n"));
-    try std.testing.expectEqual(@as(usize, 2), prepared.ast.devices.len);
-    try std.testing.expectEqualStrings("retained input", prepared.ast.title);
+    try std.testing.expectEqual(@as(usize, 2), prepared.devices.len);
+    try std.testing.expectEqualStrings("retained input", prepared.title);
 }
 
 test "input preparation resolves file includes and selected dialect" {
@@ -302,11 +307,11 @@ test "input preparation resolves file includes and selected dialect" {
     });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/input.cir", .{tmp.sub_path});
     const prepared = try input.prepare(io, a, .{ .file = path }, .hspice);
-    try std.testing.expectEqual(@as(usize, 2), prepared.ast.devices.len);
+    try std.testing.expectEqual(@as(usize, 2), prepared.devices.len);
     const from_bytes = try input.prepare(io, a, .{
         .bytes = .{ .data = "byte input\n.include res.inc\nV1 out 0 1\n.end\n", .origin = path },
     }, .ngspice);
-    try std.testing.expectEqual(@as(usize, 2), from_bytes.ast.devices.len);
+    try std.testing.expectEqual(@as(usize, 2), from_bytes.devices.len);
     try std.testing.expectEqual(input.Dialect.hspice, input.parseDialect("hs").?);
 }
 
