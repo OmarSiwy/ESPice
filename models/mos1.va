@@ -17,8 +17,10 @@ module mos1(d, g, s, b);
     electrical d, g, s, b;
     electrical di, si;              // internal drain/source behind rd/rs
 
-    // ---- model parameters (ngspice mos1 names, defaults, units) -----------
+    // ---- polarity -------------------------------------------------------
     parameter real    type   = 1.0;                  // +1 NMOS, -1 PMOS
+
+    // ---- channel (Shichman-Hodges) --------------------------------------
     parameter real    vto    = 0.0;                  // zero-bias threshold [V]
     parameter real    kp     = 2.0e-5;               // transconductance [A/V^2]
     parameter real    gamma  = 0.0;                  // body effect [sqrt(V)]
@@ -30,9 +32,13 @@ module mos1(d, g, s, b);
     parameter real    nsub   = 0.0 from [0:inf);     // substrate doping [cm^-3]
     parameter real    nss    = 0.0 from [0:inf);     // surface state density [cm^-2]
     parameter integer tpg    = 1 from [-1:1];        // gate type: +1 opp, -1 same, 0 Al
+
+    // ---- series resistance ---------------------------------------------
     parameter real    rd     = 0.0;                  // drain resistance [ohm]
     parameter real    rs     = 0.0;                  // source resistance [ohm]
     parameter real    rsh    = 0.0;                  // sheet resistance [ohm/square]
+
+    // ---- bulk junctions ------------------------------------------------
     parameter real    is     = 1.0e-14;              // bulk junction sat current [A]
     parameter real    js     = 0.0;                  // bulk junction sat density [A/m^2]
     parameter real    cbd    = 0.0;                  // b-d zero-bias cap [F]
@@ -43,13 +49,17 @@ module mos1(d, g, s, b);
     parameter real    mj     = 0.5 from (0:1);       // bottom grading
     parameter real    mjsw   = 0.5 from (0:1);       // sidewall grading
     parameter real    fc     = 0.5 from (0:1);       // fwd-bias cap coefficient
+
+    // ---- gate overlap capacitance --------------------------------------
     parameter real    cgso   = 0.0;                  // gate-source overlap [F/m]
     parameter real    cgdo   = 0.0;                  // gate-drain overlap [F/m]
     parameter real    cgbo   = 0.0;                  // gate-bulk overlap (per length) [F/m]
+
+    // ---- temperature ---------------------------------------------------
     parameter real    tnom   = $simparam("tnom");    // parameter measurement temp [degC]
     parameter real    gmin   = 1.0e-12;              // junction conductance floor [S]
 
-    // ---- instance parameters ---------------------------------------------
+    // ---- instance ------------------------------------------------------
     parameter real    l   = 1.0e-4 from (0:inf);  // drawn channel length [m]
     parameter real    w   = 1.0e-4 from (0:inf);  // channel width [m]
     parameter real    ad  = 0.0;                  // drain area [m^2]
@@ -233,7 +243,8 @@ module mos1(d, g, s, b);
             + czbssw * pbt * (1.0 - argf * sargs) / (1.0 - mjsw)
             - 0.5 * f3s * depcap * depcap - depcap * f2s;
 
-        // Series resistance: RD/RS, else RSH*squares, else node collapse.
+        // ============ series resistance ===================================
+        // RD/RS, else RSH*squares, else 0 = node collapse.
         if (rd > 0.0) gdrain = m / rd;
         else if (rsh > 0.0 && nrd > 0.0) gdrain = m / (rsh * nrd);
         else gdrain = 0.0;
@@ -258,11 +269,12 @@ module mos1(d, g, s, b);
         vbs = type * $limit(V(b, si), "pnjlim", vt, vcrits, type);
         vbd = type * $limit(V(b, di), "pnjlim", vt, vcritd, type);
 
-        // Bulk diodes
+        // ============ bulk junctions ======================================
         ibs = jcur(vbs, isats, vt, gmin);
         ibd = jcur(vbd, isatd, vt, gmin);
 
-        // Mode select: work in the swapped frame, sign the result with mode.
+        // ============ mode swap ===========================================
+        // Work in the swapped frame, sign the result with mode.
         if (vds >= 0.0) begin
             mode = 1.0;
             vbx = vbs;
@@ -274,6 +286,7 @@ module mos1(d, g, s, b);
         end
         vdsx = mode * vds;                      // |vds|
 
+        // ============ drain current (Shichman-Hodges) =====================
         if (vbx <= 0.0) sbody = sqrt(phit - vbx);
         else begin
             tmp = sqrt(phit);
@@ -289,12 +302,11 @@ module mos1(d, g, s, b);
         else if (vgst <= vdsx) id = 0.5 * bp * vgst * vgst;      // saturation
         else id = bp * vdsx * (vgst - 0.5 * vdsx);               // linear
 
-        // Junction depletion charge
+        // ============ junction and gate charges ===========================
         qbd = jchg(vbd, czbd, czbdsw, pbt, mj, mjsw, fc, f2d, f3d, f4d);
         qbs = jchg(vbs, czbs, czbssw, pbt, mj, mjsw, fc, f2s, f3s, f4s);
 
-        // ============ Meyer gate capacitances (DEVqmeyer) =================
-        // Evaluated in the swapped frame (vgst/vdsx already swapped). The
+        // Meyer gate capacitances (DEVqmeyer), evaluated in the swapped frame (vgst/vdsx already swapped). The
         // halves are averaged with the last ACCEPTED timepoint below ($prev),
         // mos1load.c's MODETRAN form: capgs = state0 + state1 + overlap.
         if (vdsat > 0.025) vdsp = vdsat; else vdsp = 0.025;
