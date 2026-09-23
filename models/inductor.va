@@ -1,9 +1,11 @@
-// Linear inductor. V(p,n) = l * d/dt i(branch).
+// Inductor: linear, V(p,n) = l * d/dt I(br).
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
 module inductor(p, n);
     inout p, n;
     electrical p, n;
     branch (p, n) br;
-    parameter real l = 1e-9 from (0:inf);
+    parameter real l = 1e-9 from (0:inf);  // H  inductance
 
     analog V(br) <+ l * ddt(I(br));
 endmodule
