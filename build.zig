@@ -305,7 +305,8 @@ pub fn build(b: *std.Build) void {
     // an optimizer. Tests stay self-hosted below — correctness needs no
     // optimizer and the compile-time win is the whole point there.
     exe.use_llvm = optimize != .Debug;
-    exe.use_lld = optimize != .Debug;
+    // LLD cannot link Mach-O; macOS keeps Zig's own linker.
+    exe.use_lld = optimize != .Debug and !target.result.os.tag.isDarwin();
     for (host_objs) |o| exe.root_module.addObject(o);
     b.installArtifact(exe);
 
@@ -342,17 +343,21 @@ pub fn build(b: *std.Build) void {
             .heavy = m.size >= heavy_model_bytes,
         }) catch @panic("OOM");
     }
+    // HIP is PINNED, CUDA is probed by default. `.auto` asks the BUILD machine,
+    // so on a dev box with an NVIDIA card it found no AMD device and compiled
+    // the hip backend out — silently making `--backend hip` a hard error in
+    // every binary shipped from here, whatever the deploy machine has. gfx1100
+    // (RDNA3) is the baseline we claim. Release builds run on GPU-less CI and
+    // must pin CUDA too: the CUDA blob is PTX, which the driver JITs forward,
+    // so an old `sm_` runs on every newer card. `none` compiles a backend out.
+    const cuda_arch = b.option([]const u8, "cuda-arch", "CUDA arch (sm_75, ...), `auto` to probe the build machine, `none` to omit") orelse "auto";
+    const hip_arch = b.option([]const u8, "hip-arch", "HIP arch (gfx1100, ...), `none` to omit") orelse "gfx1100";
     gompute_build.emitKernels(b, gompute, exe, .{
         .kernel_roots = roots.items,
         .heavy_lanes = 2,
         .target = target,
-        // HIP is PINNED, CUDA is probed. `.auto` asks the BUILD machine, so on
-        // a dev box with an NVIDIA card it found no AMD device and compiled the
-        // hip backend out — silently making `--backend hip` a hard error in
-        // every binary shipped from here, whatever the deploy machine has.
-        // gfx1100 (RDNA3) is the baseline we claim; a CUDA build still probes
-        // because the probe succeeds here and pinning would freeze sm_89 in.
-        .hip = .{ .gpu = .{ .name = "gfx1100" } },
+        .cuda = gpuArch(cuda_arch),
+        .hip = gpuArch(hip_arch),
         // measured 443s vs 13.6s for hisimhv_va.
         .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
     });
@@ -710,6 +715,12 @@ fn matchExt(file_name: []const u8) ?@TypeOf(hdl_by_ext[0]) {
 // the device compilation, the IR rewrite, PTX/HSACO assembly and the artifacts
 // module.
 // ===========================================================================
+
+fn gpuArch(arch: []const u8) gompute_build.CudaOptions {
+    if (std.mem.eql(u8, arch, "none")) return .{ .enabled = false };
+    if (std.mem.eql(u8, arch, "auto")) return .{};
+    return .{ .gpu = .{ .name = arch } };
+}
 
 /// What `deviceKernelImports` needs, passed through `emitKernels` untouched.
 const DeviceImports = struct {
