@@ -1,7 +1,7 @@
 // Mutual inductance (K element): pure cross-flux between two inductor branches.
 //
 // Verilog-A implementation: Omar El-Sawy, University of Waterloo.
-// Based on: ngspice K element (ind/mutsetup.c, indload.c).
+// Based on: ngspice K element (src/spicelib/devices/ind/, mut*.c).
 //   ngspice: Copyright Regents of the University of California and others,
 //   modified BSD license.
 //
