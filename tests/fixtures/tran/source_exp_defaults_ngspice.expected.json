@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "EXP's omitted delays and time constants come from TSTEP",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice-44.2 run of this deck; values match the closed form in the deck header.",
+    "command": "ngspice-45 -b (meas tran find v(a) at the axis times); values are the closed form in the deck header"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-10,
+            1.5e-09,
+            3e-09,
+            5e-09
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        },
+        "columns": {
+          "v(a)": {
+            "values": [
+              0,
+              0.39346934028736646,
+              0.23254415793482952,
+              0.03147142947912973
+            ],
+            "unit": "V",
+            "rtol": 0.01,
+            "atol": 0.02
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "d2ead2eea70e683d5c0e75144e95544a3e97e1b694bff9c5f5cb6d2fa1653602"
+}

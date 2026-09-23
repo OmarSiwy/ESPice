@@ -33,7 +33,7 @@ A current source pushes current from `n+` through the source to `n-`, so
 | `EXP(v1 v2 td1 tau1 td2 tau2)` | start, end, rise delay and time constant, fall delay and time constant |
 | `PWL(t1 v1 t2 v2 ...)` | time and value pairs, linear in between; `r=` repeats, `td=` delays |
 | `SFFM(vo va fm mdi fc)` | single-frequency FM (ngspice argument order) |
-| `AM(va vo mf fc td)` | amplitude modulation |
+| `AM(vo vmo vma fm fc td)` | amplitude modulation (HSPICE: `AM(va vo mf fc td)`) |
 
 ngspice's `TRNOISE` and `TRRANDOM`, HSPICE's `LFSR` and `HB`, and
 `PWL FILE=` are refused with an error naming the card.

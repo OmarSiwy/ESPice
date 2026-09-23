@@ -45,12 +45,12 @@ The first letter of an element's name selects its kind.
 
 | Letter | Element | Syntax |
 |---|---|---|
-| `R` | resistor | `R1 n+ n- value [tc1= tc2= m=]` |
+| `R` | resistor | `R1 n+ n- value [tc1= tc2= m=]`; a negative value stays negative, and \|value\| is at least 1e-12 |
 | `C` | capacitor | `C1 n+ n- value [ic=v m=]` |
 | `L` | inductor | `L1 n+ n- value [ic=i m=]` |
 | `K` | mutual inductance | `K1 L1 L2 k` |
 | `V` | voltage source | `V1 n+ n- [DC v] [AC mag [phase]] [waveform] [portnum n z0 Z]` |
-| `I` | current source | `I1 n+ n- [DC i] [AC mag [phase]] [waveform]` |
+| `I` | current source | `I1 n+ n- [DC i] [AC mag [phase]] [waveform] [m=]` |
 | `E` | voltage-controlled voltage source | `E1 o+ o- c+ c- gain`, or a nonlinear form |
 | `G` | voltage-controlled current source | `G1 o+ o- c+ c- gm`, or a nonlinear form |
 | `F` | current-controlled current source | `F1 o+ o- Vsense gain` |
@@ -81,12 +81,12 @@ Waveforms for `V` and `I` cards, in `.tran` (and as the drive in `.pss`,
 
 | Waveform | Arguments |
 |---|---|
-| `PULSE(v1 v2 [td tr tf pw per [phase]])` | `tr`, `tf` default to the `.tran` step; `pw`, `per` to its stop time |
-| `SIN(vo va [freq td theta phase])` | `theta` is the damping factor in 1/s; phase in degrees |
-| `EXP(v1 v2 [td1 tau1 td2 tau2])` | |
+| `PULSE(v1 v2 [td tr tf pw per [np]])` | `tr`, `tf` default to the `.tran` step and `pw`, `per` to its stop time, also when given as 0; `np` pulses, then `v1` |
+| `SIN(vo va [freq td theta phase])` | `theta` is the damping factor in 1/s; phase in degrees; `freq` omitted or 0 is 1/stop time |
+| `EXP(v1 v2 [td1 tau1 td2 tau2])` | omitted or 0: `td1`, `tau1`, `tau2` are the `.tran` step, `td2` is `td1` plus the step |
 | `PWL(t1 v1 t2 v2 ...) [r=t] [td=t]` | any number of points; `r=` repeats from time `t` (64 points at most with `r=`) |
 | `SFFM(vo va [fm mdi fc td phasem phasec])` | ngspice order; HSPICE dialect reads `(vo va fc mdi fs)` |
-| `AM(va vo mf fc [td phasec phases])` | |
+| `AM(vo vmo [vma fm fc td phasem phasec])` | ngspice order, `vo` must be 0; HSPICE dialect reads `(va vo mf fc [td phasec phases])` |
 | `PAT(vhi vlo td tr tf tsample data)` | HSPICE bit patterns (`b0101`, `[...]` groups, `R=`/`RB=` repeats), rewritten to PWL |
 
 `DISTOF1 mag [phase]` and `DISTOF2 mag [phase]` on a V card mark the

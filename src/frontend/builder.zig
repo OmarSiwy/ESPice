@@ -751,10 +751,12 @@ pub const NetBuilder = struct {
         return ports;
     }
 
-    /// ngspice TRANinit: PULSE TR/TF default to TSTEP and PW/PER to TSTOP,
-    /// known only from the `.tran` card. Replaces the -1 sentinels the model
-    /// defaults leave. A no-op on a struct without the PULSE fields, so it can
-    /// run over both Model and Instance.
+    /// ngspice's `.tran`-card defaults (vsrcload.c:102-215): PULSE TR/TF are
+    /// TSTEP and PW/PER TSTOP when omitted or 0 (the model's -1 sentinel is
+    /// omitted), SIN's frequency 1/TSTOP, and EXP's TD1, TAU1 and TAU2 TSTEP
+    /// and TD2 TD1 + TSTEP (applyWaveArgs zeroes the EXP time constants
+    /// first). A no-op on a struct without the PULSE fields, so it can run
+    /// over both Model and Instance.
     fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
         const T = @TypeOf(target.*);
         if (comptime !@hasField(T, "pulse_tr")) return;
@@ -769,15 +771,24 @@ pub const NetBuilder = struct {
                 if (target.sffm_fm == -1.0) target.sffm_fm = @floatCast(5.0 / tstop);
                 if (target.sffm_fc == 0.0) target.sffm_fc = @floatCast(500.0 / tstop);
             };
+            if (comptime @hasField(T, "sin_freq")) if (target.waveform == @backingInt(Wave.sin)) {
+                if (target.sin_freq == 0) target.sin_freq = @floatCast(1.0 / tstop);
+            };
+            if (comptime @hasField(T, "exp_td1")) if (target.waveform == @backingInt(Wave.exp)) {
+                if (target.exp_td1 == 0) target.exp_td1 = @floatCast(tstep);
+                if (target.exp_tau1 == 0) target.exp_tau1 = @floatCast(tstep);
+                if (target.exp_td2 == 0) target.exp_td2 = @floatCast(target.exp_td1 + tstep);
+                if (target.exp_tau2 == 0) target.exp_tau2 = @floatCast(tstep);
+            };
             if (target.waveform != @backingInt(Wave.pulse)) {
                 target.pulse_td = 1e30;
                 return;
             }
         }
-        if (target.pulse_tr < 0) target.pulse_tr = tstep;
-        if (target.pulse_tf < 0) target.pulse_tf = tstep;
-        if (target.pulse_pw < 0) target.pulse_pw = tstop;
-        if (target.pulse_per < 0) target.pulse_per = tstop;
+        if (target.pulse_tr <= 0) target.pulse_tr = tstep;
+        if (target.pulse_tf <= 0) target.pulse_tf = tstep;
+        if (target.pulse_pw <= 0) target.pulse_pw = tstop;
+        if (target.pulse_per <= 0) target.pulse_per = tstop;
     }
 
     /// Adds every built-in card, then checks the topology. V and L go
@@ -920,7 +931,9 @@ pub const NetBuilder = struct {
         }
     }
 
-    fn addDevice(self: *NetBuilder, dev: Device) !void {
+    fn addDevice(self: *NetBuilder, card: Device) !void {
+        // A source's waveform in the model's argument order (ngspiceWaveform).
+        const dev = if (card.kind == 'v' or card.kind == 'i') try self.ngspiceWaveform(card) else card;
         // HDL devices are added by addDynDevices; their opaque nodes count as
         // a DC path for the topology check.
         if (loadedType(self.b.lib, dev) != null) {
@@ -1030,7 +1043,7 @@ pub const NetBuilder = struct {
                     .portnum = if (port) |p| p.num else 0,
                     .port = if (port) |p| .{
                         .node = pos,
-                        .neg = nodes[1],
+                        .neg = chain_end,
                         .branch = port_branch,
                         .z0 = p.z0,
                         .band = p.band,
@@ -1046,12 +1059,15 @@ pub const NetBuilder = struct {
             },
             'i' => {
                 if (comptime !@hasDecl(devices.isource, "eval")) return error.UnsupportedDevice;
-                const bound = try self.bindSource(devices.isource, dev);
+                var bound = try self.bindSource(devices.isource, dev);
+                // isrcload.c/isrcacld.c scale every value by `m=`.
+                const m = kvNumber(dev.kv, "m") orelse 1;
+                bound[1].mfactor = m;
                 const nodes = try deviceNodes(self, devices.isource, dev);
                 try self.b.addDevice(devices.isource, dev.name, bound[0], bound[1], nodes);
                 // A PWL past the table's capacity: its later segments in parallel.
-                for (try pwlTail(devices.isource, self.arena, dev)) |seg| try self.b.addDevice(devices.isource, dev.name, seg, .{}, nodes);
-                if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = nodes[0], .neg = nodes[1], .re = ac.re, .im = ac.im });
+                for (try pwlTail(devices.isource, self.arena, dev)) |seg| try self.b.addDevice(devices.isource, dev.name, seg, .{ .mfactor = m }, nodes);
+                if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = nodes[0], .neg = nodes[1], .re = m * ac.re, .im = m * ac.im });
                 try self.i.append(self.arena, .{ .name = dev.name, .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND });
                 try self.topo_isrc.append(self.arena, .{ .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND, .dc = bound[0].dc });
             },
@@ -1315,7 +1331,8 @@ pub const NetBuilder = struct {
         // A value that did not fold (an undefined parameter) is an error, not
         // the 1 mOhm or zero that a missing value defaults to.
         if (dev.positional.len > 0 and dev.model == null and positionalNumber(dev, 0) == null) return error.UnresolvedParameter;
-        var value = positionalNumber(dev, 0) orelse try numericParameter(dev.kv, value_field) orelse try numericParameter(dev.kv, alias) orelse blk: {
+        const given = positionalNumber(dev, 0) orelse try numericParameter(dev.kv, value_field) orelse try numericParameter(dev.kv, alias);
+        var value = if (given) |v| (if (D == devices.resistor) resistanceFloor(v) else v) else blk: {
             // Semiconductor resistor (ngspice restemp.c RESupdate_conduct):
             // R = RSH*(L-2*SHORT)/(W-2*NARROW), W defaulting to the model's
             // DEFW. A non-positive result reads as open, as ngspice's
@@ -1333,6 +1350,8 @@ pub const NetBuilder = struct {
                     }
                     if (kvNumber(m.kv, "r")) |mr| break :blk mr;
                 }
+                // restemp.c: "resistance too low or not given, set to 1 mOhm".
+                break :blk 1e-3;
             }
             break :blk 0;
         };
@@ -1343,15 +1362,10 @@ pub const NetBuilder = struct {
             const mult = kvNumber(dev.kv, "m") orelse 1;
             value *= scale;
             value /= mult;
-            // ngspice restemp.c: "resistance too low or not given, set to 1 mOhm"
-            if (!(value > 0)) value = 1e-3;
             // `ac=` is an AC-only resistance (restemp.c:112-118) with the same
             // instance factors; Circuit.linearizeAc swaps it in.
-            if (kvNumber(dev.kv, "ac")) |ac_r| {
-                var ac_value = ac_r * scale / mult;
-                if (!(ac_value > 0)) ac_value = 1e-3;
-                try self.ac_res.append(self.arena, .{ .name = dev.name, .value = ac_value });
-            }
+            if (kvNumber(dev.kv, "ac")) |ac_r|
+                try self.ac_res.append(self.arena, .{ .name = dev.name, .value = resistanceFloor(ac_r) * scale / mult });
         }
         // The model card first (`.model rm R(TC1=2e-3 TNOM=25)`), so the card
         // value and instance pairs win over it, as in ngspice's RESmodel.
@@ -1366,6 +1380,94 @@ pub const NetBuilder = struct {
         const br = self.b.n;
         try self.b.addDevice(D, dev.name, model, instance, nodes);
         return br;
+    }
+
+    /// `dev` with its waveform in the source models' argument order. PULSE's
+    /// eighth argument is ngspice's pulse count (vsrcload.c:120-135), which
+    /// becomes a PWL of that many pulses, and the ngspice dialect's
+    /// `AM(VO VMO VMA FM FC TD PHASEM PHASEC)` (vsrcload.c:283-315) maps onto
+    /// the models' HSPICE-order AM. Any other card comes back as it is.
+    fn ngspiceWaveform(self: *const NetBuilder, dev: Device) !Device {
+        const w = waveAt(dev) orelse return dev;
+        const args: []const Value = switch (w.kind) {
+            .pulse => if (w.args.len < 8) return dev else try self.pulseTrain(dev.name, w.args),
+            .am => if (self.nl.deck.dialect == .hspice or w.args.len < 2) return dev else try self.amArgs(dev.name, w.args),
+            else => return dev, // else: only PULSE and AM have an order to fix
+        };
+        const kind: []const u8 = if (w.kind == .am or args.len == 7) @tagName(w.kind) else "pwl";
+        const positional = try self.arena.alloc(Value, dev.positional.len - (w.end - w.start) + 1);
+        @memcpy(positional[0..w.start], dev.positional[0..w.start]);
+        positional[w.start] = .{ .group = .{ .name = kind, .args = args } };
+        @memcpy(positional[w.start + 1 ..], dev.positional[w.end..]);
+        var out = dev;
+        out.positional = positional;
+        return out;
+    }
+
+    /// PULSE arguments with ngspice's pulse count NP (the eighth) applied:
+    /// the first seven when the count never ends the train before TSTOP,
+    /// else PWL points for NP pulses and then V1.
+    /// ponytail: a PWL, not a model parameter; the models carry no count, and
+    /// past 4096 pulses the card is refused.
+    fn pulseTrain(self: *const NetBuilder, name: []const u8, args: []const Value) ![]const Value {
+        var a: [8]f64 = undefined;
+        for (&a, args[0..8]) |*x, v| x.* = valueNumber(v) orelse return error.UnresolvedParameter;
+        const v1, const v2, const td = .{ a[0], a[1], a[2] };
+        const tr = if (a[3] != 0) a[3] else self.tran_step;
+        const tf = if (a[4] != 0) a[4] else self.tran_step;
+        const pw = if (a[5] != 0) a[5] else self.tran_stop;
+        const per = @max(if (a[6] != 0) a[6] else self.tran_stop, tr + pw + tf);
+        const end = td + a[7] * per;
+        if (!(a[7] > 0) or end >= self.tran_stop) return args[0..7];
+        const pulses = @ceil(a[7]);
+        if (pulses > 4096) {
+            if (!@import("builtin").is_test) std.log.err("{s}: a PULSE count past 4096 pulses", .{name});
+            return error.UnsupportedCard;
+        }
+        var pts: std.ArrayList(Value) = .empty;
+        try pts.appendSlice(self.arena, &.{ .{ .num = td }, .{ .num = v1 } });
+        var t_prev = td;
+        var v_prev = v1;
+        var k: f64 = 0;
+        corners: while (k < pulses) : (k += 1) {
+            const base = td + k * per;
+            const corners = [_][2]f64{ .{ base + tr, v2 }, .{ base + tr + pw, v2 }, .{ base + tr + pw + tf, v1 }, .{ base + per, v1 } };
+            for (corners) |c| {
+                if (c[0] == t_prev) continue;
+                if (c[0] > end) {
+                    // ngspice holds V1 past NP*PER: cut the pulse there.
+                    const v_end = v_prev + (c[1] - v_prev) * (end - t_prev) / (c[0] - t_prev);
+                    try pts.appendSlice(self.arena, &.{ .{ .num = end }, .{ .num = v_end }, .{ .num = end }, .{ .num = v1 } });
+                    break :corners;
+                }
+                try pts.appendSlice(self.arena, &.{ .{ .num = c[0] }, .{ .num = c[1] } });
+                t_prev, v_prev = c;
+            }
+        }
+        return pts.items;
+    }
+
+    /// The ngspice dialect's `AM(VO VMO VMA FM FC TD PHASEM PHASEC)`, value
+    /// VO + (VMO + VMA sin(2 pi FM t' + PHASEM)) sin(2 pi FC t' + PHASEC) on
+    /// t' = t - TD, as the models' `AM(VA VO MF FC TD PHASEC PHASES)`, value
+    /// VA (VO + sin(2 pi MF t + PHASES)) sin(2 pi FC t + PHASEC): the delay
+    /// moves into the phases, and VMA = 0 holds the envelope at sin(90).
+    /// ponytail: a nonzero VO offset is refused; the models have no slot for it.
+    fn amArgs(self: *const NetBuilder, name: []const u8, args: []const Value) ![]const Value {
+        var a = [8]f64{ 0, 0, 1, 5 / self.tran_stop, 500 / self.tran_stop, 0, 0, 0 };
+        for (a[0..@min(args.len, 8)], args[0..@min(args.len, 8)]) |*x, v| x.* = valueNumber(v) orelse return error.UnresolvedParameter;
+        const vo, const vmo, const vma, const fm, const fc, const td, const phasem, const phasec = a;
+        if (vo != 0) {
+            if (!@import("builtin").is_test) std.log.err("{s}: AM with a nonzero VO offset", .{name});
+            return error.UnsupportedCard;
+        }
+        const out = try self.arena.alloc(Value, 7);
+        const ours = if (vma != 0)
+            [7]f64{ vma, vmo / vma, fm, fc, td, phasec - 360 * fc * td, phasem - 360 * fm * td }
+        else
+            [7]f64{ vmo, 0, 0, fc, td, phasec - 360 * fc * td, 90 };
+        for (out, ours) |*o, x| o.* = .{ .num = x };
+        return out;
     }
 
     /// Binds a V or I card (`V1 a b DC 5 PULSE(0 5 1n 1n 1n 1u 2u)`), all but
@@ -1388,7 +1490,19 @@ pub const NetBuilder = struct {
         try applyKv(&instance, dev.kv);
         // The PWL suffixes `td=` and `r=` (vsrcpar.c VSRC_TD, VSRC_R).
         if (kvNumber(dev.kv, "td")) |td| _ = try setParam(D, &model, &instance, "pwl_td", td);
-        if (kvNumber(dev.kv, "r")) |r| _ = try setParam(D, &model, &instance, "pwl_repeat", r);
+        if (kvNumber(dev.kv, "r")) |r| if (pwlArgs(dev)) |pts| {
+            // vsrcpar.c:160-176: the repeat start is one of the table's
+            // times and before its last.
+            var on_point = false;
+            var k: usize = 0;
+            while (k + 1 < pts.len) : (k += 2) on_point = on_point or valueNumber(pts[k]) == r;
+            const last = if (pts.len >= 2) valueNumber(pts[pts.len - pts.len % 2 - 2]) orelse r else r;
+            if (!on_point or r >= last) {
+                if (!@import("builtin").is_test) std.log.err("{s}: PWL r={e} is not a time point before the last", .{ dev.name, r });
+                return error.InvalidParameterValue;
+            }
+            _ = try setParam(D, &model, &instance, "pwl_repeat", r);
+        };
         self.resolvePulseDefaults(&model);
         self.resolvePulseDefaults(&instance);
         // ngspice: a source with a transient spec and no DC value has the
@@ -1956,6 +2070,13 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     // values win through `__given`.
     deriveModel(D, &model, b, dev.pins.len);
     try b.addDevice(D, dev.name, model, instance, try deviceNodes(self, D, dev));
+}
+
+/// A card's resistance as ngspice resparam.c keeps it: the sign stays and
+/// |R| is at least 1e-12 (0 is +1e-12), so `R1 a 0 -2k` is a negative
+/// resistor, not the 1 mOhm restemp.c gives a missing value.
+fn resistanceFloor(r: f64) f64 {
+    return if (@abs(r) < 1e-12) std.math.copysign(@as(f64, 1e-12), r) else r;
 }
 
 /// B card as an expression tape, run by models/bsource.va (V output),
@@ -2532,22 +2653,41 @@ fn applyWaveArgs(comptime T: type, target: anytype, kind: Wave, args: []const Va
             }
             target.pwl_len = @intCast(n_pts);
         },
+        // ngspice's omitted EXP time constants are TSTEP, which
+        // resolvePulseDefaults fills over 0.
+        .exp => {
+            if (comptime @hasField(T, "exp_tau1")) {
+                target.exp_tau1 = 0;
+                target.exp_tau2 = 0;
+            }
+            applyGroupArgs(T, target, args, comptime fieldPairs(.exp));
+        },
         inline else => |cw| applyGroupArgs(T, target, args, comptime fieldPairs(cw)),
     }
 }
 
-/// The PWL points of `dev`'s `PWL(...)` group, or null when it has none.
-fn pwlArgs(dev: Device) ?[]const Value {
+/// A card's waveform: its kind, its arguments, and the positional range
+/// `[start, end)` that spells it (one group, or a keyword and its numbers).
+const WaveAt = struct { kind: Wave, args: []const Value, start: usize, end: usize };
+
+/// The first waveform of `dev`, or null when it has none.
+fn waveAt(dev: Device) ?WaveAt {
     for (dev.positional, 0..) |v, i| switch (v) {
-        .group => |g| if (waveKind(g.name) == .pwl) return g.args,
-        .name => |nm| if (waveKind(nm) == .pwl) {
+        .group => |g| if (waveKind(g.name)) |kind| return .{ .kind = kind, .args = g.args, .start = i, .end = i + 1 },
+        .name => |nm| if (waveKind(nm)) |kind| {
             var end = i + 1;
             while (end < dev.positional.len and dev.positional[end] == .num) end += 1;
-            return dev.positional[i + 1 .. end];
+            return .{ .kind = kind, .args = dev.positional[i + 1 .. end], .start = i, .end = end };
         },
         else => {},
     };
     return null;
+}
+
+/// The PWL points of `dev`'s `PWL(...)` group, or null when it has none.
+fn pwlArgs(dev: Device) ?[]const Value {
+    const w = waveAt(dev) orelse return null;
+    return if (w.kind == .pwl) w.args else null;
 }
 
 /// Models for the segments of a PWL past `D`'s table capacity: segment k

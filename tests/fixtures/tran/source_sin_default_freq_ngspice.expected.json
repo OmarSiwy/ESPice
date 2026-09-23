@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "SIN without a frequency runs at 1/TSTOP",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice-44.2 run of this deck; values match the closed form in the deck header.",
+    "command": "ngspice-45 -b (meas tran find v(a) at the axis times); values are the closed form in the deck header"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            1.25e-07,
+            2.5e-07,
+            5e-07,
+            7.5e-07
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        },
+        "columns": {
+          "v(a)": {
+            "values": [
+              0.7071067811865475,
+              1,
+              0,
+              -1
+            ],
+            "unit": "V",
+            "rtol": 0.01,
+            "atol": 0.005
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "bb893e7ab51e53c522aeac0c71d3994d349a4f733eac5d64454489124ed5e88d"
+}

@@ -46,8 +46,8 @@ module resistor(p, n);
         dt = tdev - tnom;
         if ($param_given(tce)) rt = r * pow(1.01, tce * dt);
         else rt = r * (1.0 + dt * (tc1 + tc2 * dt));
-        // ponytail: no floor on rt. ngspice clamps the card value (1 mOhm, in
-        // the builder) but not the temperature factor, so a tempco that drives
+        // ponytail: no floor on rt. ngspice clamps the card value (|R| >= 1e-12,
+        // in the builder) but not the temperature factor, so a tempco that drives
         // the resistance to zero is a NaN here as it is there.
         I(p, n) <+ V(p, n) / rt;
         I(p, n) <+ white_noise(noisy * 4.0 * 1.38064852e-23 * (tdev + 273.15) / rt, "thermal");

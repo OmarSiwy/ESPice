@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "AM takes ngspice's argument order",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice-44.2 run of this deck; values match the closed form in the deck header.",
+    "command": "ngspice-45 -b (meas tran find v(a) at the axis times); values are the closed form in the deck header"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-07,
+            2e-06,
+            3.25e-06,
+            7.1e-06,
+            1.16e-05
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        },
+        "columns": {
+          "v(a)": {
+            "values": [
+              0,
+              0.9995275786145235,
+              1.0136944409524795,
+              -0.43189832257338623,
+              -1.2678890606989912
+            ],
+            "unit": "V",
+            "rtol": 0.02,
+            "atol": 0.01
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e7be369b421c35fc5deb6d016763abfa6cb081d7b31492855e768be766dd40b9"
+}

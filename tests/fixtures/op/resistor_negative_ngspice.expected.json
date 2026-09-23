@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A negative resistance keeps its sign, and m= scales it",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice-44.2 run of this deck; values match the closed form in the deck header.",
+    "command": "ngspice-45 -b deck.sp (print all)"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "i(v1)": {
+            "values": [
+              0.0005
+            ],
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-15
+          },
+          "i(v3)": {
+            "values": [
+              0.002
+            ],
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-15
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4d34330999d1422ba66ff321936b3985280c7236736299298d37f77fd858ea65"
+}

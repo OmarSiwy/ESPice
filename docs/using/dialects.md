@@ -97,6 +97,7 @@ The `.alter` run doubles R, and the 50 % crossing moves from RC ln 2 =
 | unknown `.option` names | one warning each | ignored |
 | `.save [TYPE=NODESET\|IC] [FILE=] [LEVEL=] [TIME=]` | writes the operating point as `.nodeset` (or `.ic`) cards | output vector selection |
 | `SFFM(vo va fc mdi fs)` | HSPICE's argument order | ngspice's `(vo va fm mdi fc)` |
+| `AM(...)` | `(va vo mf fc td)` | ngspice's `(vo vmo vma fm fc td phasem phasec)` |
 | `P` element | a port: a V card numbered for `.lin` (`P1 in 0 port=1 z0=50`) | a coupled transmission line (CPL) |
 | `S` element | an S-parameter block from Touchstone or CITI data | voltage-controlled switch |
 | `W` element | a W-element lossy line from an RLGC file or table | current-controlled switch |

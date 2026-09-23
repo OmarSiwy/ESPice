@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A PWL repeat time that is not one of its time points is refused.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "ngspice-45 vsrcpar.c refuses r= that matches no PWL time point (E_PARMVAL)."
+  },
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "04e15b67ab9ac944f9324e9292d8816bb783c8755ad63ed62067f08c7363e785"
+}
