@@ -234,10 +234,10 @@ fn resolveDirectiveNodes(arena: std.mem.Allocator, directives: []const types.Dir
                 return error.UnsupportedAnalysisOutput,
             else => {},
         };
-        const name = directiveNodeName(dir, arg, 0) orelse
+        const name = directiveNodeName(arena, dir, arg, 0) orelse
             (if (arg < dir.args.len) icNodeName(arena, dir.args[arg]) else null);
         p.* = if (name) |wanted| try nodes.get(wanted) else NO_NODE;
-        n.* = if (directiveNodeName(dir, arg, 1)) |wanted| try nodes.get(wanted) else NO_NODE;
+        n.* = if (directiveNodeName(arena, dir, arg, 1)) |wanted| try nodes.get(wanted) else NO_NODE;
         port.* = @splat(NO_NODE);
         if (!std.ascii.eqlIgnoreCase(dir.kind, "pz")) continue;
         for (port, 0..) |*id, i| {
@@ -329,15 +329,12 @@ fn directiveName(dir: types.Directive, index: usize) ?[]const u8 {
 
 /// A bare node name, or name `which` inside a `v(a,b)` group (0 is `a`, 1 is
 /// `b`). A bare name or a one-argument `v(a)` has no second node.
-fn directiveNodeName(dir: types.Directive, index: usize, which: usize) ?[]const u8 {
+fn directiveNodeName(arena: std.mem.Allocator, dir: types.Directive, index: usize, which: usize) ?[]const u8 {
     if (index >= dir.args.len) return null;
     return switch (dir.args[index]) {
         .name => |n| if (which == 0) n else null,
         .group => |g| if (std.mem.eql(u8, g.name, "v") and g.args.len > which)
-            switch (g.args[which]) {
-                .name => |n| n,
-                else => null,
-            }
+            nodeNameOf(arena, g.args[which])
         else
             null,
         else => null,
