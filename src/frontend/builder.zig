@@ -1838,38 +1838,9 @@ fn positionalName(dev: types.Device, index: usize) ?[]const u8 {
     };
 }
 
-pub fn directiveName(dir: types.Directive, index: usize) ?[]const u8 {
-    if (index >= dir.args.len) return null;
-    return switch (dir.args[index]) {
-        .name => |n| n,
-        else => null,
-    };
-}
-
 pub fn directiveNumber(dir: types.Directive, index: usize) ?f64 {
     if (index >= dir.args.len) return null;
     return valueNumber(dir.args[index]);
-}
-
-pub fn directiveNodeName(dir: types.Directive, index: usize) ?[]const u8 {
-    return directiveNodeNameAt(dir, index, 0);
-}
-
-/// `which` selects inside a `v(a,b)` group: 0 is `a`, 1 is `b`. A bare name
-/// or a one-argument `v(a)` has no second node.
-pub fn directiveNodeNameAt(dir: types.Directive, index: usize, which: usize) ?[]const u8 {
-    if (index >= dir.args.len) return null;
-    return switch (dir.args[index]) {
-        .name => |n| if (which == 0) n else null,
-        .group => |g| if (std.mem.eql(u8, g.name, "v") and g.args.len > which)
-            switch (g.args[which]) {
-                .name => |n| n,
-                else => null,
-            }
-        else
-            null,
-        else => null,
-    };
 }
 
 fn kvNumber(kv: []const types.Kv, key: []const u8) ?f64 {
