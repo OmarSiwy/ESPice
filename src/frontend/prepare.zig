@@ -13,9 +13,7 @@ const Job = requests.Query;
 const Ic = problem.Ic;
 pub const Prepared = problem.Prepared;
 const GROUND = problem.GROUND;
-const directiveName = netlist.directiveName;
 const directiveNumber = netlist.directiveNumber;
-const directiveNodeName = netlist.directiveNodeName;
 const findNameIndex = netlist.findNameIndex;
 
 pub const Dialect = syntax.types.Dialect;
@@ -28,12 +26,6 @@ pub const Source = union(enum) {
     pub const Bytes = struct { data: []const u8, origin: []const u8 };
 };
 
-pub const PreparedInput = struct {
-    source: []const u8,
-    origin: []const u8,
-    ast: syntax.Ast,
-};
-
 pub fn parseDialect(name: []const u8) ?Dialect {
     return std.StaticStringMap(Dialect).initComptime(.{
         .{ "ngspice", .ngspice }, .{ "ng", .ngspice },
@@ -42,57 +34,34 @@ pub fn parseDialect(name: []const u8) ?Dialect {
     }).get(name);
 }
 
-/// Copies caller input into the supplied arena. The AST borrows its storage;
-/// the caller may release it once build has published the prepared circuit.
-pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !PreparedInput {
-    const prepared = try parseSource(io, session, input, dialect);
-    try loadModels(io, session, prepared);
-    return prepared;
-}
-
-fn parseSource(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !PreparedInput {
-    const origin = try session.dupe(u8, switch (input) {
+/// Read, expand and parse `input` into `session`, then load its HDL models.
+/// The AST borrows `session`; release it once `build` has returned.
+pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !syntax.Ast {
+    const origin = switch (input) {
         .file => |path| path,
         .bytes => |bytes| bytes.origin,
-    });
-    const source = switch (input) {
-        .file => if (dialect == .spectre)
-            try std.Io.Dir.cwd().readFileAlloc(io, origin, session, .unlimited)
-        else
-            try syntax.load(io, session, origin),
-        .bytes => |bytes| if (dialect == .spectre)
-            try session.dupe(u8, bytes.data)
-        else
-            try syntax.source.loadBytes(io, session, origin, bytes.data),
     };
+    const raw = switch (input) {
+        .file => |path| try std.Io.Dir.cwd().readFileAlloc(io, path, session, .unlimited),
+        .bytes => |bytes| try session.dupe(u8, bytes.data),
+    };
+    const source = if (dialect == .spectre) raw else try syntax.source.expand(io, session, origin, raw);
     const ast = switch (dialect) {
         .ngspice => try syntax.Parser(syntax.ngspice).parse(session, source),
         .hspice => try syntax.Parser(syntax.hspice).parse(session, source),
         .spectre => try syntax.Parser(syntax.spectre).parse(session, source),
     };
-    return .{ .source = source, .origin = origin, .ast = ast };
+    try loadModels(io, session, ast.foreign, origin);
+    return ast;
 }
 
-fn loadModels(io: std.Io, session: std.mem.Allocator, prepared: PreparedInput) !void {
-    var model_count: usize = 0;
-    for (prepared.ast.foreign) |foreign| switch (foreign.kind) {
-        .verilog_a, .verilog => model_count += 1,
-        else => {},
-    };
-    if (model_count == 0) return;
-
-    const paths = try session.alloc([]const u8, model_count);
-    var index: usize = 0;
-    for (prepared.ast.foreign) |foreign| switch (foreign.kind) {
-        .verilog_a, .verilog => {
-            paths[index] = if (std.fs.path.isAbsolute(foreign.path))
-                foreign.path
-            else
-                try std.fs.path.join(session, &.{ std.fs.path.dirname(prepared.origin) orelse ".", foreign.path });
-            index += 1;
-        },
-        else => {},
-    };
+fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const types.Foreign, origin: []const u8) !void {
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (foreign) |f| if (f.kind == .verilog_a or f.kind == .verilog) try paths.append(session, if (std.fs.path.isAbsolute(f.path))
+        f.path
+    else
+        try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path }));
+    if (paths.items.len == 0) return;
 
     const compiler_paths: models.vaload.BuildPaths = .{
         .work_dir = try std.fs.path.join(session, &.{ build_options.src_root, ".zig-cache", "espice-hdl" }),
@@ -102,226 +71,124 @@ fn loadModels(io: std.Io, session: std.mem.Allocator, prepared: PreparedInput) !
         .device_ir = build_options.device_ir_path,
     };
     // Registry keys and loaded code outlive this problem's session arena.
-    try models.vaload.ensureAllLoaded(std.heap.smp_allocator, io, paths, compiler_paths);
+    try models.vaload.ensureAllLoaded(std.heap.smp_allocator, io, paths.items, compiler_paths);
 }
 
 /// Build a passive circuit from syntax. Scratch owns semantic expansion and
 /// wiring; the session arena owns every published slice.
 pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: types.Ast) !Prepared {
     const nl = try syntax.elaborate(parse_arena, ast);
-    if (nl.devices.len() > std.math.maxInt(u32) or nl.directives.len > (std.math.maxInt(u32) - 1) / 2)
+    if (nl.devices.len > std.math.maxInt(u32) or nl.directives.len > (std.math.maxInt(u32) - 1) / 2)
         return error.CircuitTooLarge;
     const deck_opts = try parseDeckOptions(nl.directives);
     var b = try Builder.init(sim_arena);
     var compiled_ok = false;
     errdefer if (!compiled_ok) b.deinit();
 
-    // Before `nb.build()`, because `.options tnom` is a MODEL-CARD default
-    // (`b4set.c:1950`), not an analysis knob: every model is derived from
-    // it as it is created, so nothing downstream has to re-derive and
-    // `collapse` sees its final answer the first time.
+    // `.options tnom` is a model-card default (b4set.c:1950): models read it
+    // as they are derived, before the pattern freezes.
     b.nom_temp_c = deck_opts.tnom_c;
-
-    // Node count is bounded by (and usually close to) device count;
-    // reserving here avoids incremental rehash during interning.
-    try b.reserveNodes(@intCast(@min(nl.devices.len(), std.math.maxInt(u32))));
+    // Node count is bounded by, and usually close to, device count.
+    try b.reserveNodes(@intCast(nl.devices.len));
 
     var nb = try netlist.NetBuilder.init(parse_arena, &b, nl);
     try nb.build();
-
     try netlist.tagSubcircuitNodes(&b, nl.devices);
-
-    // Runtime-loaded (.hdl card, dlopen'd) VA/V devices: erased Proto
-    // path, batch machinery lives inside the model's .so. Must happen
-    // before compile() freezes the pattern.
+    // Runtime-loaded HDL devices, after the built-in ones and before the freeze.
     try netlist.addDynDevices(&b, parse_arena, nl);
 
-    var prepared: Prepared = undefined;
-    // Resolve the output node(s) before compile() destroys the name table.
-    // `v(a,b)` is a node DIFFERENCE, so the second name is resolved alongside
-    // the first and NO_NODE means "single-ended" downstream.
-    const dir_nodes = try parse_arena.alloc(u32, nl.directives.len);
-    const dir_nodes_neg = try parse_arena.alloc(u32, nl.directives.len);
-    for (nl.directives, dir_nodes, dir_nodes_neg) |dir, *id, *id_neg| {
-        const arg: usize = if (std.ascii.eqlIgnoreCase(dir.kind, "four")) 1 else 0;
-        if (requests.Keywords.get(dir.kind) != null and arg < dir.args.len) switch (dir.args[arg]) {
-            .group => |g| if (g.args.len > 2) return error.UnsupportedAnalysisOutput,
-            else => {},
-        };
-        const name = directiveNodeName(dir, arg) orelse
-            (if (arg < dir.args.len) icNodeName(parse_arena, dir.args[arg]) else null);
-        id.* = if (name) |n| b.node_names.get(n) orelse NO_NODE else NO_NODE;
-        const neg = netlist.directiveNodeNameAt(dir, arg, 1);
-        id_neg.* = if (neg) |n| b.node_names.get(n) orelse NO_NODE else NO_NODE;
+    // The card table outlives the Builder; its names live on the parse arena.
+    const cards = try sim_arena.dupe(requests.CardRef, b.cards.items);
+    for (cards) |*c| {
+        c.name = try sim_arena.dupe(u8, c.name);
+        c.type_name = try sim_arena.dupe(u8, c.type_name);
     }
+    var perm: ?[]const u32 = null;
+    var circuit = try b.compilePerm(&perm);
+    compiled_ok = true;
+    errdefer circuit.deinit();
 
-    // `.pz in+ in− out+ out− vol|cur pol|zer|pz` names four BARE nodes, three
-    // more than `dir_nodes` carries, and the name table dies at compile() too.
-    const dir_ports = try parse_arena.alloc([4]u32, nl.directives.len);
-    for (nl.directives, dir_ports) |dir, *ports| {
-        ports.* = @splat(NO_NODE);
-        if (!std.ascii.eqlIgnoreCase(dir.kind, "pz")) continue;
-        for (ports, 0..) |*port, i| {
-            const name = bareNodeName(parse_arena, dir, i) orelse continue;
-            port.* = b.node_names.get(name) orelse
-                (if (netlist.isGroundName(name)) GROUND else NO_NODE);
-        }
-    }
+    // Rows the NetBuilder recorded before the freeze are in pre-BBD coordinates.
+    if (perm) |p| for ([_][]u32{
+        nb.v.items(.branch),       nb.v.items(.pos),    nb.v.items(.neg),  nb.i.items(.pos),  nb.i.items(.neg),
+        nb.br.items(.row),         nb.l.items(.branch), nb.ac.items(.pos), nb.ac.items(.neg), (&nb.source_node)[0..1],
+        (&nb.source_branch)[0..1],
+    }) |rows| for (rows) |*row| {
+        if (row.* < p.len) row.* = p[row.*];
+    };
 
-    // `.ic` cards, resolved here for the same reason as `dir_nodes`: this is
-    // the last point where `b.node_names` exists. Two passes so the result
-    // is an exact prepared-arena slice rather than a growable list — the count is
-    // known from the arg shape (`v(node)` group followed by its value).
-    var n_ic: usize = 0;
-    for (nl.directives) |dir| {
-        if (!std.ascii.eqlIgnoreCase(dir.kind, "ic")) continue;
-        n_ic += dir.args.len / 2;
-    }
-    const ic_buf = try sim_arena.alloc(Ic, n_ic);
-    var n_ic_used: usize = 0;
+    var nodes: NodeIndex = .{ .arena = parse_arena, .circuit = &circuit };
+    var ic: std.ArrayList(Ic) = .empty;
     for (nl.directives) |dir| {
         if (!std.ascii.eqlIgnoreCase(dir.kind, "ic")) continue;
         var i: usize = 0;
         while (i + 1 < dir.args.len) : (i += 2) {
             const name = icNodeName(parse_arena, dir.args[i]) orelse continue;
             const value = netlist.valueNumber(dir.args[i + 1]) orelse continue;
-            // An `.ic` on a node the netlist never mentions is a typo, not a
-            // constraint. Dropping it silently matches how the rest of the
-            // directive path treats unresolvable names.
-            const id = b.node_names.get(name) orelse continue;
-            if (id == GROUND) continue;
-            ic_buf[n_ic_used] = .{ .node = id, .value = value };
-            n_ic_used += 1;
+            // An `.ic` on a node the netlist never mentions is dropped, like
+            // every other unresolvable directive name.
+            const id = try nodes.get(name);
+            if (id == NO_NODE or id == GROUND) continue;
+            try ic.append(sim_arena, .{ .node = id, .value = value });
         }
     }
-    prepared.ic = ic_buf[0..n_ic_used];
 
-    // compile() may apply the BBD node permutation (subckt decks) and
-    // undefines the Builder on return, so the permutation comes back via
-    // this out-param, not off `b`. Every index recorded BEFORE compile —
-    // source branches/ports, inductor branches, `.ic` nodes, directive
-    // nodes — is in old coordinates; the device protos were permuted
-    // through applyPerm but these caller-side tables were not, which is
-    // how a subckt branch probe read a voltage (fourbitadder i(vin1a) at
-    // ~5 V). `mapNode` is the identity when perm is null (no BBD).
-    var perm: ?[]const u32 = null;
-    // compilePerm tears the Builder shell down; the card table is the one
-    // thing on it that outlives the freeze (`.sens` names columns with it).
-    // Rows are already on sim_arena — only the parse-arena name strings
-    // have to be copied.
-    const cards = try sim_arena.dupe(requests.CardRef, b.cards.items);
-    for (cards) |*c| {
-        c.name = try sim_arena.dupe(u8, c.name);
-        c.type_name = try sim_arena.dupe(u8, c.type_name);
-    }
-    prepared.circuit = try b.compilePerm(&perm);
-    compiled_ok = true;
-
-    errdefer prepared.circuit.deinit();
-
-    const mapNode = struct {
-        fn f(p: ?[]const u32, id: u32) u32 {
-            const pp = p orelse return id;
-            return if (id < pp.len) pp[id] else id;
-        }
-    }.f;
-    for (nb.v_branches[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
-    // `v_ports`/`v_nports` are build-time scratch everywhere EXCEPT portList
-    // and the STB probe binding, both of which hand the row straight to a solve.
-    for (nb.v_ports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
-    for (nb.v_nports[0..nb.n_v]) |*v| v.* = mapNode(perm, v.*);
-    for (nb.i_pos[0..nb.n_i]) |*v| v.* = mapNode(perm, v.*);
-    for (nb.i_neg[0..nb.n_i]) |*v| v.* = mapNode(perm, v.*);
-    for (nb.br_rows[0..nb.n_br]) |*v| v.* = mapNode(perm, v.*);
-    for (nb.l_branches[0..nb.n_l]) |*v| v.* = mapNode(perm, v.*);
-    for (nb.ac_pos[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
-    for (nb.ac_neg[0..nb.n_ac]) |*v| v.* = mapNode(perm, v.*);
-    nb.source_node = mapNode(perm, nb.source_node);
-    nb.source_branch = mapNode(perm, nb.source_branch);
-    for (dir_nodes) |*v| {
-        if (v.* != NO_NODE) v.* = mapNode(perm, v.*);
-    }
-    for (dir_nodes_neg) |*v| {
-        if (v.* != NO_NODE) v.* = mapNode(perm, v.*);
-    }
-    for (dir_ports) |*ports| {
-        for (ports) |*v| {
-            if (v.* != NO_NODE) v.* = mapNode(perm, v.*);
-        }
-    }
-    for (ic_buf[0..n_ic_used]) |*e| e.node = mapNode(perm, e.node);
-    // Escapes into run-time lifetime: title read at output time, counts in
-    // the summary. Dupe/copy off the parse arena so it can be reset now.
-    prepared.title = try sim_arena.dupe(u8, nl.title);
-    prepared.n_devices = @intCast(nl.devices.len());
-
-    prepared.source_node = nb.source_node;
-    prepared.source_branch = nb.source_branch;
-    // Every `AC`-carrying source collapsed into ONE excitation vector, in
-    // post-permutation coordinates. Built here rather than per analysis
-    // because it is deck data, not analysis data.
-    prepared.ac_drive = try nb.acExcitation(sim_arena, prepared.circuit.n);
-
-    prepared.cards = cards;
-    prepared.bindings = .{
-        .v_names = try copyNames(sim_arena, nb.v_names[0..nb.n_v]),
-        .i_names = try copyNames(sim_arena, nb.i_names[0..nb.n_i]),
-        .v_branches = try sim_arena.dupe(u32, nb.v_branches[0..nb.n_v]),
-        .v_pos = try sim_arena.dupe(u32, nb.v_ports[0..nb.n_v]),
-        .v_neg = try sim_arena.dupe(u32, nb.v_nports[0..nb.n_v]),
-        .i_pos = try sim_arena.dupe(u32, nb.i_pos[0..nb.n_i]),
-        .i_neg = try sim_arena.dupe(u32, nb.i_neg[0..nb.n_i]),
-        .v_distof1 = try sim_arena.dupe([2]f64, nb.v_distof1[0..nb.n_v]),
+    const bindings: problem.QueryBindings = .{
+        .v_names = try copyNames(sim_arena, nb.v.items(.name)),
+        .i_names = try copyNames(sim_arena, nb.i.items(.name)),
+        .v_branches = try sim_arena.dupe(u32, nb.v.items(.branch)),
+        .v_pos = try sim_arena.dupe(u32, nb.v.items(.pos)),
+        .v_neg = try sim_arena.dupe(u32, nb.v.items(.neg)),
+        .i_pos = try sim_arena.dupe(u32, nb.i.items(.pos)),
+        .i_neg = try sim_arena.dupe(u32, nb.i.items(.neg)),
+        .v_distof1 = try sim_arena.dupe([2]f64, nb.v.items(.distof1)),
         .ports = try nb.portList(sim_arena),
     };
-    prepared.ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res_names[0..nb.n_ac_res], nb.ac_res_values[0..nb.n_ac_res]);
 
-    // Probes: branch currents first, then every named node. The rule is
-    // ngspice's and it is structural, not a list of letters: every MNA
-    // branch-current unknown gets a `CKTmkCur` row and `CKTnames` turns
-    // every such row into an `i(<card>)` column. That covers V and L, and
-    // equally E (vcvsset.c:41-46), H (ccvsset.c:41-46) and a V-mode B
-    // (asrcsetup.c:78-83) — `nb.br_*` carries those. F, G and S stamp no
-    // branch and correctly have no column.
-    //
-    // A V card sensed by F/H/W is NOT skipped: it keeps its current, which
-    // now lives on the controlling model's `ctrl` branch (builder
-    // addBranchRef rewrites `v_branches[ctrl]` to that row). ngspice emits
-    // i(vam) for it too.
-    //
-    // Branch-first, NOT ngspice's voltage-first: tf/sens/dcmatch/pxf/pac/
-    // disto default their output variable to probes[len-1], so the last
-    // probe must stay the last NAMED NODE. Raw readers key on column
-    // names, never position.
-    // Named nodes and branch rows are disjoint (branches carry no label),
-    // so circuit.n bounds the total.
-    const probe_buf = try sim_arena.alloc(u32, prepared.circuit.n);
-    const label_buf = try sim_arena.alloc([]const u8, prepared.circuit.n);
+    // Probes: branch currents first, then every named node. ngspice gives every
+    // MNA branch-current unknown an `i(<card>)` column (V, L, E, H, V-mode B);
+    // F, G, S and I-mode B stamp no branch. Branch-first, unlike ngspice,
+    // because tf/sens/dcmatch/pxf/pac/disto default their output to the last
+    // probe, which must stay the last named node. Named nodes and branch rows
+    // are disjoint, so circuit.n bounds the total.
+    const probe_buf = try sim_arena.alloc(u32, circuit.n);
+    const label_buf = try sim_arena.alloc([]const u8, circuit.n);
     var n_probes: u32 = 0;
-    for ([_][]const []const u8{ nb.v_names[0..nb.n_v], nb.l_names[0..nb.n_l], nb.br_names[0..nb.n_br] }, [_][]const u32{ nb.v_branches[0..nb.n_v], nb.l_branches[0..nb.n_l], nb.br_rows[0..nb.n_br] }) |names, rows| {
+    for ([_][]const []const u8{ nb.v.items(.name), nb.l.items(.name), nb.br.items(.name) }, [_][]const u32{ nb.v.items(.branch), nb.l.items(.branch), nb.br.items(.row) }) |names, rows| {
         for (names, rows) |name, br| {
             probe_buf[n_probes] = br;
             label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "i({s})", .{name});
             n_probes += 1;
         }
     }
-    for (1..prepared.circuit.n) |i| {
-        const label = prepared.circuit.nodeName(@intCast(i));
+    for (1..circuit.n) |i| {
+        const label = circuit.nodeName(@intCast(i));
         if (label.len != 0) {
             probe_buf[n_probes] = @intCast(i);
             label_buf[n_probes] = try std.fmt.allocPrint(sim_arena, "v({s})", .{label});
             n_probes += 1;
         }
     }
-    prepared.probes = probe_buf[0..n_probes];
-    prepared.probe_labels = label_buf[0..n_probes];
 
-    prepared.deck_tol = deck_opts.tol;
-    prepared.deck_temp = deck_opts.temp_c;
-    prepared.deck_method = deck_opts.method;
-    prepared.queries = try queriesFromDirectives(sim_arena, nl.directives, dir_nodes, dir_nodes_neg, dir_ports, prepared.bindings, cards, deck_opts);
-
-    return prepared;
+    const dir_nodes = try resolveDirectiveNodes(parse_arena, nl.directives, &nodes, 2);
+    return .{
+        .circuit = circuit,
+        .probes = probe_buf[0..n_probes],
+        .probe_labels = label_buf[0..n_probes],
+        .source_node = nb.source_node,
+        .source_branch = nb.source_branch,
+        .ac_drive = try nb.acExcitation(sim_arena, circuit.n),
+        .title = try sim_arena.dupe(u8, nl.title),
+        .n_devices = @intCast(nl.devices.len),
+        .ic = ic.items,
+        .deck_tol = deck_opts.tol,
+        .deck_temp = deck_opts.temp_c,
+        .deck_method = deck_opts.method,
+        .queries = try queriesFromDirectives(sim_arena, nl.directives, dir_nodes, bindings, cards, deck_opts),
+        .bindings = bindings,
+        .cards = cards,
+        .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
+    };
 }
 
 fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
@@ -330,27 +197,75 @@ fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []con
     return copied;
 }
 
-fn queriesFromDirectives(arena: std.mem.Allocator, directives: []const types.Directive, dir_nodes: []const u32, dir_nodes_neg: []const u32, dir_ports: []const [4]u32, sources: problem.QueryBindings, cards: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
+/// Frozen-circuit node row by label; NO_NODE when the deck never named it.
+/// The map is built on the first lookup: most decks name no node.
+const NodeIndex = struct {
+    arena: std.mem.Allocator,
+    circuit: *const problem.Circuit,
+    map: ?std.StringHashMapUnmanaged(u32) = null,
+
+    fn get(self: *NodeIndex, name: []const u8) !u32 {
+        if (self.map == null) {
+            var map: std.StringHashMapUnmanaged(u32) = .empty;
+            try map.ensureTotalCapacity(self.arena, self.circuit.n);
+            for (0..self.circuit.n) |i| {
+                const label = self.circuit.nodeName(@intCast(i));
+                if (label.len != 0) map.putAssumeCapacity(label, @intCast(i));
+            }
+            self.map = map;
+        }
+        return self.map.?.get(name) orelse NO_NODE;
+    }
+};
+
+/// Per directive: the output node (`v(a)` or a bare name), the `v(a,b)`
+/// reference node, and `.pz`'s four bare port nodes.
+const DirectiveNodes = struct { pos: []const u32, neg: []const u32, ports: []const [4]u32 };
+
+/// `max_group_args` is how many nodes an output `v(...)` group may name.
+fn resolveDirectiveNodes(arena: std.mem.Allocator, directives: []const types.Directive, nodes: *NodeIndex, max_group_args: usize) !DirectiveNodes {
+    const pos = try arena.alloc(u32, directives.len);
+    const neg = try arena.alloc(u32, directives.len);
+    const ports = try arena.alloc([4]u32, directives.len);
+    for (directives, pos, neg, ports) |dir, *p, *n, *port| {
+        const arg: usize = if (std.ascii.eqlIgnoreCase(dir.kind, "four")) 1 else 0;
+        if (requests.Keywords.get(dir.kind) != null and arg < dir.args.len) switch (dir.args[arg]) {
+            .group => |g| if (g.args.len > max_group_args or (max_group_args == 1 and g.args.len == 0))
+                return error.UnsupportedAnalysisOutput,
+            else => {},
+        };
+        const name = directiveNodeName(dir, arg, 0) orelse
+            (if (arg < dir.args.len) icNodeName(arena, dir.args[arg]) else null);
+        p.* = if (name) |wanted| try nodes.get(wanted) else NO_NODE;
+        n.* = if (directiveNodeName(dir, arg, 1)) |wanted| try nodes.get(wanted) else NO_NODE;
+        port.* = @splat(NO_NODE);
+        if (!std.ascii.eqlIgnoreCase(dir.kind, "pz")) continue;
+        for (port, 0..) |*id, i| {
+            const port_name = bareNodeName(arena, dir, i) orelse continue;
+            id.* = if (netlist.isGroundName(port_name)) GROUND else try nodes.get(port_name);
+        }
+    }
+    return .{ .pos = pos, .neg = neg, .ports = ports };
+}
+
+fn queriesFromDirectives(arena: std.mem.Allocator, directives: []const types.Directive, nodes: DirectiveNodes, sources: problem.QueryBindings, cards: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
     // Fan-out ceiling: `.disto` is the widest card at three plots per line.
     const jobs = try arena.alloc(Job, directives.len * 3);
     var n_jobs: u32 = 0;
-    for (directives, dir_nodes, dir_nodes_neg, dir_ports) |dir, node_id, node_neg, ports| {
+    for (directives, nodes.pos, nodes.neg, nodes.ports) |dir, node_id, node_neg, ports| {
         if (try buildJob(dir, node_id, node_neg, ports, sources, cards)) |job0| {
             var job = job0;
             applyDeckOptions(&job, deck_opts);
             jobs[n_jobs] = job;
             n_jobs += 1;
             // The "Integrated Noise" plot always exists; a degenerate band
-            // (`.noise ... dec 4 100 100`) integrates to zero and ngspice
-            // still prints the row, which is what `noise/single_frequency`
-            // pins.
+            // integrates to zero and ngspice still prints the row.
             if (job == .noise) {
                 job.noise.integrated = true;
                 jobs[n_jobs] = job;
                 n_jobs += 1;
             }
-            // ngspice's `.disto` output product is the pair of complex
-            // harmonic solution vectors; the summary digest above is ours.
+            // ngspice's `.disto` output is the pair of complex harmonic vectors.
             if (job == .disto) {
                 inline for (.{ .second, .third }) |harmonic| {
                     job.disto.plot = harmonic;
@@ -390,47 +305,44 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
         return error.UnsupportedDirectiveMutation;
     const nl = try syntax.elaborate(arena, ast);
     if (nl.directives.len > (std.math.maxInt(u32) - 1) / 2) return error.CircuitTooLarge;
-    const nodes = try arena.alloc(u32, nl.directives.len);
-    // Appended queries currently accept only single-ended outputs below.
-    const nodes_neg = try arena.alloc(u32, nl.directives.len);
-    @memset(nodes_neg, NO_NODE);
-    const ports = try arena.alloc([4]u32, nl.directives.len);
-    for (nl.directives, ports) |dir, *port| {
-        port.* = @splat(NO_NODE);
-        if (!std.ascii.eqlIgnoreCase(dir.kind, "pz")) continue;
-        for (port, 0..) |*id, i| {
-            const name = bareNodeName(arena, dir, i) orelse continue;
-            id.* = if (netlist.isGroundName(name)) GROUND else findNode(prepared, name);
-        }
-    }
-    for (nl.directives, nodes) |dir, *node| {
-        if (std.mem.eql(u8, dir.kind, "temp") and dir.args.len == 1) return error.UnsupportedDirectiveMutation;
-        const arg: usize = if (std.mem.eql(u8, dir.kind, "four")) 1 else 0;
-        if (arg < dir.args.len) switch (dir.args[arg]) {
-            .group => |g| if (g.args.len != 1) return error.UnsupportedAnalysisOutput,
-            else => {},
-        };
-        const name = directiveNodeName(dir, arg) orelse
-            (if (arg < dir.args.len) icNodeName(arena, dir.args[arg]) else null);
-        node.* = if (name) |wanted| findNode(prepared, wanted) else NO_NODE;
-    }
-    return queriesFromDirectives(arena, nl.directives, nodes, nodes_neg, ports, prepared.bindings, prepared.cards, .{
+    // A single `.temp` is deck configuration, fixed at build.
+    for (nl.directives) |dir| if (std.mem.eql(u8, dir.kind, "temp") and dir.args.len == 1) return error.UnsupportedDirectiveMutation;
+    var nodes: NodeIndex = .{ .arena = arena, .circuit = &prepared.circuit };
+    // Appended queries accept only single-ended outputs.
+    const dir_nodes = try resolveDirectiveNodes(arena, nl.directives, &nodes, 1);
+    return queriesFromDirectives(arena, nl.directives, dir_nodes, prepared.bindings, prepared.cards, .{
         .tol = prepared.deck_tol,
         .method = prepared.deck_method,
         .temp_c = prepared.deck_temp,
     });
 }
 
-/// Node row by label, for the appended-directive path: it runs after compile()
-/// has taken the name table apart, so the intern table is the only index left.
-fn findNode(prepared: *const Prepared, wanted: []const u8) u32 {
-    for (0..prepared.circuit.n) |i| {
-        if (std.mem.eql(u8, prepared.circuit.nodeName(@intCast(i)), wanted)) return @intCast(i);
-    }
-    return NO_NODE;
+const NO_NODE: u32 = std.math.maxInt(u32);
+
+fn directiveName(dir: types.Directive, index: usize) ?[]const u8 {
+    if (index >= dir.args.len) return null;
+    return switch (dir.args[index]) {
+        .name => |n| n,
+        else => null,
+    };
 }
 
-const NO_NODE: u32 = std.math.maxInt(u32);
+/// A bare node name, or name `which` inside a `v(a,b)` group (0 is `a`, 1 is
+/// `b`). A bare name or a one-argument `v(a)` has no second node.
+fn directiveNodeName(dir: types.Directive, index: usize, which: usize) ?[]const u8 {
+    if (index >= dir.args.len) return null;
+    return switch (dir.args[index]) {
+        .name => |n| if (which == 0) n else null,
+        .group => |g| if (std.mem.eql(u8, g.name, "v") and g.args.len > which)
+            switch (g.args[which]) {
+                .name => |n| n,
+                else => null,
+            }
+        else
+            null,
+        else => null,
+    };
+}
 
 /// A node NAME out of one directive argument. `2` tokenizes as a NUMBER while
 /// `node_names` is keyed by the string the device cards used, so an integral

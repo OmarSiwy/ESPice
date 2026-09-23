@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
         const nl = try syntax.elaborate(arena.allocator(), parsed);
         const elapsed = start.durationTo(std.Io.Timestamp.now(init.io, .awake)).nanoseconds;
         if (i > 0) times[i - 1] = elapsed;
-        checksum +%= nl.devices.len();
+        checksum +%= nl.devices.len;
         capacity = arena.queryCapacity();
     }
     std.mem.sort(i96, times[0..runs], {}, std.sort.asc(i96));

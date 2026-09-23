@@ -162,8 +162,8 @@ test "transmission-line cards retain native numerical algorithms" {
         try std.testing.expectEqual(@as(usize, 1), builder.protos.items.len);
         try std.testing.expectEqualStrings(devices.vtable(case[1]).name, builder.protos.items[0].type_name);
         if (case[0][0] == 'Y' or case[0][0] == 'P') {
-            try std.testing.expectEqual(@as(u32, 1), nb.n_br);
-            try std.testing.expectEqual(builder.n - 1, nb.br_rows[0]);
+            try std.testing.expectEqual(@as(u32, 1), @as(u32, @intCast(nb.br.len)));
+            try std.testing.expectEqual(builder.n - 1, nb.br.items(.row)[0]);
         }
         var circuit = try builder.compile();
         compiled = true;
