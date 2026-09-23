@@ -242,7 +242,10 @@ pub fn LaneLu(comptime W: usize) type {
         /// Bool vector -> per-lane bitmask (lane l -> bit l). Lane 0 = low bit.
         inline fn maskBits(m: @Vector(W, bool)) u64 {
             const bits: std.meta.Int(.unsigned, W) = @bitCast(m);
-            return bits;
+            // A no-op under LLVM. Zig 0.16's self-hosted x86 backend (Debug
+            // builds) widens this bitcast with a stray bit W set: an all-false
+            // 4-lane mask read back as 16.
+            return @as(u64, bits) & std.math.maxInt(std.meta.Int(.unsigned, W));
         }
     };
 }
