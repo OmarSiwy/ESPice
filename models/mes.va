@@ -1,13 +1,16 @@
-// Statz GaAs MESFET — ngspice `mes` (netlist letter Z, level 1).
-// docs/jfet-mesfet-hfet.md: §1.3 is the channel law *and* the Statz `qgg` gate
-// charge, §1.5 the temperature / limiting notes, §3 the `.mes` arm of fet_eval,
-// the noise table the four mesnoise.c generators.
+// MES: Statz GaAs MESFET (ngspice Z, level 1).
 //
-// Topology as in mesload.c: D--RD--di, S--RS--si, two gate junctions g--di and
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice MES element (mes/mesload.c, mesnoise.c), the Statz et al.
+//   GaAs FET model (IEEE Trans. Electron Devices, 1987) as implemented in
+//   Berkeley SPICE3.
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Topology as in mesload.c: D--RD--di, S--RS--si, gate junctions g--di and
 // g--si, channel current di--si with the normal/inverse swap on sign(vds).
-// Limiting (fetlim/limvds/pnjlim, §1.5) is the solver's job, as in diode.va;
-// the MODEINITJCT vgs = vgd = -1 V seed likewise has no VA representation
-// (FastVAF renders $limit as a pass-through, so writing it would be a no-op).
+// No $limit is requested (fetlim/limvds/pnjlim are left to the host), and the
+// MODEINITJCT vgs = vgd = -1 V seed has no Verilog-A spelling.
 module mes(d, g, s);
     inout d, g, s;
     electrical d, g, s;
@@ -15,8 +18,8 @@ module mes(d, g, s);
     branch (d, di) brd;
     branch (s, si) brs;
 
-    // +1 = NMF, -1 = PMF.  ngspice carries this in the .model *name*, not as a
-    // card parameter; mesload.c applies MEStype to every terminal current.
+    // +1 = NMF, -1 = PMF. ngspice carries this in the .model name; mesload.c
+    // applies MEStype to every terminal current.
     parameter integer ztype = 1 from [-1:1] exclude 0;
 
     parameter real vto    = -2.0;                   // threshold [V]
@@ -31,8 +34,8 @@ module mes(d, g, s);
     parameter real pb     = 1.0     from (0:inf);   // gate junction potential [V]
     parameter real is     = 1.0e-14 from (0:inf);   // gate saturation current [A]
     // `fc` is on the ngspice mes card but mesload.c never reads
-    // MESdepletionCapCoeff — the Statz qgg charge below has no FC extension.
-    // Declared so existing .model lines still parse; deliberately unused.
+    // MESdepletionCapCoeff (the Statz qgg charge has no FC extension).
+    // Declared so .model lines naming it parse.
     parameter real fc     = 0.5     from (0:1);     // forward-bias cap coeff
     parameter real kf     = 0.0     from [0:inf);   // flicker noise coefficient
     parameter real af     = 1.0     from (0:inf);   // flicker noise exponent
@@ -47,25 +50,22 @@ module mes(d, g, s);
     real cplus, cminus, capgs, capgd;
 
     analog begin
-        // ---- bias-independent prep: no V() below this line touches it ------
-        // mesload.c uses the *fixed* CONSTvt0 = k*300.15/q for both gate-diode
-        // arms: `mes` has no tnom/temp card parameter and no VTO/BETA/IS
-        // temperature maps, so §1.5's family-common maps do not apply here.
-        // (The old `tnom` parameter was a unit trap — read as Kelvin while
-        // every sibling reads degC — and is gone.)
+        // ---- bias-independent prep -------------------------------------------
+        // mesload.c uses the fixed CONSTvt0 = k*300.15/q for both gate diodes:
+        // `mes` has no tnom/temp card parameter and no temperature maps.
         vt0    = 1.380649e-23 * 300.15 / 1.602176634e-19;
         scale  = area * m;                          // mesload.c: czxx*area, then m*
         fourkt = 4.0 * 1.380649e-23 * $temperature;
 
-        // Polarity-normalized biases: all math below is NMF (jfet.va pattern).
+        // Polarity-normalized biases: all math below is NMF.
         vgs = ztype * V(g, si);
         vgd = ztype * V(g, di);
         vds = vgs - vgd;
 
-        // ---- gate junctions, both sides (§3 gate_junction, mesload.c) ------
-        // Reverse arm keeps the cubic (1+arg) term that jfetload.c drops:
+        // ---- gate junctions, both sides (mesload.c) ---------------------------
+        // Reverse arm keeps the cubic term that jfetload.c drops:
         // arg = 3*vt0/(v*e), I = -Is*(1+arg^3) + gmin*v below -3*vt0.
-        // The exp-argument clamp at 80 is the finite-NR guard from jfet.va:81.
+        // The exp-argument clamp at 80 keeps unlimited evaluations finite.
         if (vgs <= -3.0 * vt0) begin
             arg = 3.0 * vt0 / (vgs * 2.718281828459045);
             igs = -is * (1.0 + arg * arg * arg) + gmin * vgs;
@@ -79,12 +79,12 @@ module mes(d, g, s);
             igd = is * (exp(min(vgd / vt0, 80.0)) - 1.0) + gmin * vgd;
         end
 
-        // ---- mode select: sign(vds), swap vgs <-> vgd (§3) ----------------
+        // ---- mode select: sign(vds), swap vgs <-> vgd ------------------------
         mode = (vds >= 0.0) ? 1.0 : -1.0;
         vx   = (vds >= 0.0) ? vgs : vgd;
         vdx  = mode * vds;
 
-        // ---- Statz channel, §1.3 -----------------------------------------
+        // ---- Statz channel (mesload.c) ---------------------------------------
         vgst = vx - vto;
         if (vgst <= 0.0) begin                      // cutoff
             ids = 0.0;
@@ -103,12 +103,12 @@ module mes(d, g, s);
             gm  = betap * vgst * (2.0 + b * vgst) * knee / (denom * denom);
         end
 
-        // ---- Statz unified gate charge, §1.3 (mesload.c qggnew) ------------
+        // ---- Statz unified gate charge (mesload.c qggnew) --------------------
         // One charge qgg = cgs*(2*pb*(1-qroot) + ext) + cgd*veff2 with a smooth
         // vgs/vgd partition driven by alpha and vto, and a vmax = 0.5 clamp
-        // above which the sqrt law continues linearly.  capgs/capgd below are
-        // exactly dqgg/dvgs and dqgg/dvgd, so the two ddt() stamps sum to
-        // ddt(qgg) into the gate: charge-based, not Meyer, and no `fc`.
+        // above which the sqrt law continues linearly. capgs/capgd are
+        // dqgg/dvgs and dqgg/dvgd, so the two C*ddt(v) stamps sum to ddt(qgg)
+        // into the gate. No `fc`.
         veroot = sqrt((vgs - vgd) * (vgs - vgd) + 1.0 / (alpha * alpha));
         veff1  = 0.5 * (vgs + vgd + veroot);
         veff2  = veff1 - veroot;
@@ -133,14 +133,14 @@ module mes(d, g, s);
         I(g, di)  <+ ztype * scale * igd + ztype * scale * capgd * ddt(vgd);
         I(di, si) <+ ztype * scale * mode * ids;
 
-        // ---- noise (doc noise table, mesnoise.c): RD/RS thermal, channel
-        //      thermal 2/3|gm|, flicker KF|Id|^AF/f; m rides in via `scale`.
+        // ---- noise (mesnoise.c): RD/RS thermal, channel thermal 2/3|gm|,
+        // flicker KF|Id|^AF/f; m rides in via `scale`.
         I(di, si) <+ white_noise(fourkt * (2.0 / 3.0) * abs(gm) * scale, "channel");
         if (kf > 0.0)
             I(di, si) <+ flicker_noise(m * kf * pow(abs(scale * ids), af), 1.0, "flicker");
 
-        // ---- series resistances; a zero one collapses to a short, matching
-        //      ngspice building no internal node for it ---------------------
+        // ---- series resistances; zero collapses to a short, as ngspice
+        // builds no internal node for it
         if (rd > 0.0) begin
             I(brd) <+ scale * V(brd) / rd;
             I(brd) <+ white_noise(fourkt * scale / rd, "rd");

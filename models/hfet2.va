@@ -1,40 +1,42 @@
-// ngspice Z element, LEVEL=6 — HFET2, the "simplified" heterostructure FET
-// (Berkeley SPICE3f5 / ngspice `hfeta2`, hfet2/hfet2load.c).  inpdomod.c maps
-// nhfet/phfet LEVEL 1 -> MES, 2/3/4 -> MESA, 5 -> HFET1, 6 -> HFET2, so this
-// device is LEVEL=6; LEVEL=2 on a .model card selects MESA instead.
+// HFET2: simplified heterostructure FET (ngspice netlist letter Z, LEVEL=6).
+// inpdomod.c maps nhfet/phfet LEVEL 1 -> MES, 2/3/4 -> MESA, 5 -> HFET1,
+// 6 -> HFET2.
 //
-// Spec: docs/jfet-mesfet-hfet.md §1.4 (structural: "HEMT-class charge-control
-// channel, DIBL, velocity saturation, two Schottky diodes, W-D gate charge")
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice hfet2 (hfet2load.c `hfeta2()`, hfet2temp.c, hfet2setup.c),
+//   the Berkeley SPICE3 HFET2 model (T. Ytterdal).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+//
+// Spec: docs/jfet-mesfet-hfet.md §1.4 (structural: HEMT-class charge-control
+// channel, DIBL, velocity saturation, two Schottky diodes, W-D gate charge)
 // and §3 (the fet_eval chain: bias -> gate diodes -> mode select -> channel ->
-// gate charges -> stamps).  §1.4 leaves the algebra un-transcribed, so the
-// normative equations here are the in-tree line-audit of hfet2load.c that the
-// doc names as the next step; same source and same order as the sibling
-// models/hfet1.va, which shares this skeleton with fewer fitting parameters.
+// gate charges -> stamps). §1.4 leaves the algebra to hfet2load.c, which is
+// transcribed here in the same order as models/hfet1.va.
 //
-// HFET2 vs HFET1 (the "simplified variant, same skeleton" of §1.4):
-//   * gate leakage is ONE exponential + GGR term per side (js/n/del) instead of
+// HFET2 vs HFET1:
+//   * gate leakage is one exponential + GGR term per side (js/n/del) instead of
 //     HFET1's dual exponential (js1s/js2s/m1s/m2s),
 //   * sheet density is the log charge-control form nsn = 2*N0*ln(1+b/2), with
-//     an OPTIONAL second (delta-doped) layer harmonically combined,
-//     ns = nsn*nsc/(nsn+nsc).  hfeta2() takes that branch only when the card
-//     gives BOTH eta2 and d2 (`if(HFET2eta2Given && HFET2d2Given)`), and
+//     an optional second (delta-doped) layer harmonically combined,
+//     ns = nsn*nsc/(nsn+nsc). hfeta2() takes that branch only when the card
+//     gives both eta2 and d2 (`if(HFET2eta2Given && HFET2d2Given)`), and
 //     hfet2temp.c computes N02 only `if(HFET2eta2Given)`; the setup defaults
-//     D2=0.2e-6/ETA2=2 are fallbacks that do NOT enable the layer.  Both
-//     default to 0 here so "given" == "> 0" and the layer is off by default.
+//     D2=0.2e-6/ETA2=2 do not enable the layer. Both default to 0 here so
+//     "given" == "> 0" and the layer is off by default.
 //   * subthreshold smoothing is the Vt-scaled hyperbola Vgte = Vt(2+u+t),
 //   * RD/RS are real series parasitics on internal nodes dp/sp (RDI/RSI stay
 //     folded into the channel conductance as in HFET1).
 //
 // Topology (hfet2load.c): D--RD--dp, S--RS--sp, Schottky diodes g--dp and
 // g--sp, channel dp--sp with the inverse-mode sign flip + cap swap on
-// sign(vds).  Newton limiting is the solver's job, but HFET2 does NOT use the
-// family-common order of doc §1.5: hfet2load.c runs DEVpnjlim(vgs)/DEVpnjlim(vgd)
-// with vt0 = CONSTvt0 and VCRIT = vt*log(vt/(sqrt2*1e-11)) FIRST, then
-// DEVfetlim(vgs,TVTO)/DEVfetlim(vgd,TVTO), and has NO limvds; MODEINITJCT
-// seeds vgs = vgd = -1 when off == 0, else 0.  The pnjlim leg is declared
-// below with $limit; the fetlim(TVTO) leg that follows it is recorded here
-// because $limit's first argument must be an access function, so the two
-// cannot be chained in one expression.
+// sign(vds). HFET2 does not use the family-common limiting order of doc §1.5:
+// hfet2load.c runs DEVpnjlim(vgs)/DEVpnjlim(vgd) with vt0 = CONSTvt0 and
+// VCRIT = vt*log(vt/(sqrt2*1e-11)) first, then DEVfetlim(vgs,TVTO)/
+// DEVfetlim(vgd,TVTO), and has no limvds; MODEINITJCT seeds vgs = vgd = -1
+// when off == 0, else 0. Only the pnjlim leg is declared ($limit): its first
+// argument must be an access function, so the fetlim(TVTO) leg that follows
+// cannot be chained onto it.
 module hfet2(d, g, s);
     inout d, g, s;
     electrical d, g, s;
@@ -91,8 +93,7 @@ module hfet2(d, g, s);
     parameter real eta1   = 2.0       from (0:inf); // first-layer cap ideality
     parameter real eta2   = 0.0       from [0:inf); // second-layer cap ideality, 0 = off
     // hfet2temp.c derived defaults: VT1 = VTO + q*NMAX*DI/EPSI (raw signed
-    // VTO, untempered NMAX), VT2 = VTO.  Both stay overridable; the all-default
-    // NHFET card reproduces the old hardcoded 1.3323 / 0.15.
+    // VTO, untempered NMAX), VT2 = VTO. Both stay overridable.
     parameter real vt1 = vto + 1.602176634e-19 * nmax * di / epsi; // Cg1 transition [V]
     parameter real vt2 = vto;                       // second-layer threshold [V]
 
@@ -181,10 +182,9 @@ module hfet2(d, g, s);
         vds  = max(abs(vdsr), 1e-30);
 
         // ---- Schottky gate diodes, both sides, on the *raw* (pre-swap)
-        // biases: forward exponential + GGR reverse-leakage term.  hfeta2()
+        // biases: forward exponential + GGR reverse-leakage term. hfeta2()
         // leaves these exps unguarded (it relies on pnjlim/fetlim); the min at
-        // 80 here is only an overflow ceiling of ours, well past the bias range
-        // the limiter admits.
+        // 80 is an overflow ceiling well past the bias range the limiter admits.
         igs = jslw * (exp(min(vgsr / vtn, 80.0)) - 1.0)
             + ggrlw * vgsr * exp(min(-vgsr * del / vth, 80.0));
         igd = jslw * (exp(min(vgdr / vtn, 80.0)) - 1.0)
@@ -194,8 +194,8 @@ module hfet2(d, g, s);
         // ternary (`if(vds<0){vds=-vds;inverse=1;} ... hfeta2(...,vds>0?vgs:vgd,...)`),
         // so the argument is always vgs: HFET2 evaluates the channel and both
         // caps with vgs even in inverse mode and only flips cdrain's sign and
-        // swaps capgs/capgd.  Doc §3's generic `vx = m>0 ? vgs : vgd` swap is
-        // the family default, not this device (§1.4 defers to the line audit).
+        // swaps capgs/capgd. Doc §3's generic `vx = m>0 ? vgs : vgd` swap is
+        // the family default, not this device.
         mode = (vdsr < 0.0) ? -1.0 : 1.0;
         vgs  = vgsr;
 

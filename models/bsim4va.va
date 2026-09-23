@@ -38,6 +38,11 @@ Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)
  * Authors: Xuemei Xi, Kanyu M. Cao, Hui Wan, Mansun Chan, Chenming Hu.
  * Project Director: Prof. Chenming Hu.
  **********/
+// ESPice integration: flattened into one file for VerA (the `[flatten]`
+// markers) and adapted where commented, by Omar El-Sawy, University of
+// Waterloo. The model and its Verilog-A source are the work of the authors
+// credited above and remain under their terms.
+
 // [flatten] annex D `include "disciplines.vams" — supplied by FastVAF
 // [flatten] annex D `include "constants.vams" — supplied by FastVAF
 

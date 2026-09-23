@@ -48,6 +48,12 @@
 //      added, per D. Sheridan, this is Igcx.
 //
 
+// ESPice integration: flattened into one file for VerA (the `[flatten]`
+// markers) and adapted where commented, by Omar El-Sawy, University of
+// Waterloo. Based on: the VBIC 1.3 Verilog-A release
+// (VBIC developers, Colin McAndrew et al.); the model and its Verilog-A
+// source are theirs.
+
 // [flatten] annex D `include "disciplines.vams" — supplied by FastVAF
 // [flatten] begin vbic/vacode/cmcGeneralMacrosAndDefines.va
 
