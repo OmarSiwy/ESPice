@@ -48,6 +48,7 @@ pub fn LaneLu(comptime W: usize) type {
         udiag: []V,
 
         // workspaces (length n each)
+        /// All-zero between calls; `refactor` zeroes each slot as it consumes it.
         w: []V,
         y: []V,
 
@@ -72,6 +73,7 @@ pub fn LaneLu(comptime W: usize) type {
             self.udiag = try gpa.alloc(V, n);
             self.w = try gpa.alloc(V, n);
             self.y = try gpa.alloc(V, n);
+            @memset(self.w, @as(V, @splat(0)));
             return self;
         }
 
@@ -97,34 +99,48 @@ pub fn LaneLu(comptime W: usize) type {
             const up = b.up;
             const lp = b.lp;
             const prow = b.prow;
+            // Locals, not `self.` fields: a `[]V` store may alias `self`, so
+            // field access reloaded both slice pointers on every axpy element.
+            const w = self.w;
+            const lx = self.lx;
+            const ux = self.ux;
+            const udiag = self.udiag;
             const one: V = @splat(1);
             const zero: V = @splat(0);
+            const inf: V = @splat(std.math.inf(f64));
+            const all_lanes: u64 = std.math.maxInt(std.meta.Int(.unsigned, W));
             var bad: u64 = 0;
 
             for (0..self.n) |k| {
                 const c = b.q[k];
-                // Zero the stored pattern, then scatter A[:,c] in permuted rows.
-                for (ui[up[k]..up[k + 1]]) |i| self.w[i] = zero;
-                for (li[lp[k]..lp[k + 1]]) |i| self.w[i] = zero;
-                self.w[k] = zero;
-                for (col_ptr[c]..col_ptr[c + 1]) |p| self.w[prow[p]] = vals[p];
+                // `w` is all-zero here: every slot this column writes is zeroed
+                // below as it is consumed (SparseLu.refactor's invariant).
+                for (col_ptr[c]..col_ptr[c + 1]) |p| w[prow[p]] = vals[p];
 
-                // Replay the triangular solve in stored topological order.
+                // Replay the triangular solve in stored topological order. No
+                // later entry of this column writes w[i] once it is read.
                 for (up[k]..up[k + 1]) |p| {
                     const i = ui[p];
-                    const uki = self.w[i];
-                    self.ux[p] = uki;
-                    for (lp[i]..lp[i + 1]) |pl| self.w[li[pl]] -= self.lx[pl] * uki;
+                    const uki = w[i];
+                    w[i] = zero;
+                    ux[p] = uki;
+                    for (lp[i]..lp[i + 1]) |pl| w[li[pl]] -= lx[pl] * uki;
                 }
 
-                var d = self.w[k];
+                // A fabricated (void) pivot is not replayed: every lane fails
+                // and peels to the scalar ladder, which owns the void logic.
+                if (b.void_col[k]) {
+                    @memset(w, zero);
+                    return all_lanes;
+                }
+                var d = w[k];
+                w[k] = zero;
                 // Per-lane singular / non-finite: mask, then substitute 1.0 so
                 // the surviving lanes' divisions stay finite and exact.
-                const inf: V = @splat(std.math.inf(f64));
                 const dead_diag = (d == zero) | !(@abs(d) < inf);
                 bad |= maskBits(dead_diag);
                 d = @select(f64, dead_diag, one, d);
-                self.udiag[k] = d;
+                udiag[k] = d;
 
                 // `scaled_pivot` is a property of the SHARED base tape, so this
                 // is an outer-loop branch with no lane divergence — lane l stays
@@ -134,15 +150,21 @@ pub fn LaneLu(comptime W: usize) type {
                 if (growth_limit > 0 and !b.scaled_pivot[k]) {
                     var cmax = @abs(d);
                     for (lp[k]..lp[k + 1]) |p| {
-                        const v = self.w[li[p]];
+                        const r = li[p];
+                        const v = w[r];
+                        w[r] = zero;
                         cmax = @max(cmax, @abs(v));
-                        self.lx[p] = v / d;
+                        lx[p] = v / d;
                     }
                     // |d| < growth_limit * cmax => pivot decayed too far.
                     const grow: V = @splat(growth_limit);
                     bad |= maskBits(@abs(d) < grow * cmax);
                 } else {
-                    for (lp[k]..lp[k + 1]) |p| self.lx[p] = self.w[li[p]] / d;
+                    for (lp[k]..lp[k + 1]) |p| {
+                        const r = li[p];
+                        lx[p] = w[r] / d;
+                        w[r] = zero;
+                    }
                 }
             }
             return bad;
@@ -156,28 +178,33 @@ pub fn LaneLu(comptime W: usize) type {
             const b = self.base;
             const li = b.li.items;
             const ui = b.ui.items;
+            const lp = b.lp;
+            const up = b.up;
+            const lx = self.lx;
+            const ux = self.ux;
+            const y = self.y;
 
             // 1. y = P b
-            for (b_in, 0..) |bi, r| self.y[b.pinv[r]] = bi;
+            for (b_in, 0..) |bi, r| y[b.pinv[r]] = bi;
 
             // 2. L y' = y (forward, unit lower). The `if (yk==0) continue` skip
             //    is dropped — cross-lane, and the arithmetic is a no-op anyway.
             for (0..self.n) |k| {
-                const yk = self.y[k];
-                for (b.lp[k]..b.lp[k + 1]) |p| self.y[li[p]] -= self.lx[p] * yk;
+                const yk = y[k];
+                for (lp[k]..lp[k + 1]) |p| y[li[p]] -= lx[p] * yk;
             }
 
             // 3. U z = y' (back)
             var k = self.n;
             while (k > 0) {
                 k -= 1;
-                const zk = self.y[k] / self.udiag[k];
-                self.y[k] = zk;
-                for (b.up[k]..b.up[k + 1]) |p| self.y[ui[p]] -= self.ux[p] * zk;
+                const zk = y[k] / self.udiag[k];
+                y[k] = zk;
+                for (up[k]..up[k + 1]) |p| y[ui[p]] -= ux[p] * zk;
             }
 
             // 4. x = Q^{-1} z
-            for (b.q, 0..) |c, j| x[c] = self.y[j];
+            for (b.q, 0..) |c, j| x[c] = y[j];
         }
 
         // ====================================================================
@@ -187,27 +214,38 @@ pub fn LaneLu(comptime W: usize) type {
             const b = self.base;
             const li = b.li.items;
             const ui = b.ui.items;
+            const lp = b.lp;
+            const up = b.up;
+            const lx = self.lx;
+            const ux = self.ux;
+            const y = self.y;
 
-            for (b.q, 0..) |c, k| self.y[k] = b_in[c];
+            for (b.q, 0..) |c, k| y[k] = b_in[c];
 
             for (0..self.n) |k| {
-                for (b.up[k]..b.up[k + 1]) |p| self.y[k] -= self.ux[p] * self.y[ui[p]];
-                self.y[k] /= self.udiag[k];
+                var yk = y[k];
+                for (up[k]..up[k + 1]) |p| yk -= ux[p] * y[ui[p]];
+                y[k] = yk / self.udiag[k];
             }
 
             var k = self.n;
             while (k > 0) {
                 k -= 1;
-                for (b.lp[k]..b.lp[k + 1]) |p| self.y[k] -= self.lx[p] * self.y[li[p]];
+                var yk = y[k];
+                for (lp[k]..lp[k + 1]) |p| yk -= lx[p] * y[li[p]];
+                y[k] = yk;
             }
 
-            for (0..self.n) |r| x[r] = self.y[b.pinv[r]];
+            for (0..self.n) |r| x[r] = y[b.pinv[r]];
         }
 
         /// Bool vector -> per-lane bitmask (lane l -> bit l). Lane 0 = low bit.
         inline fn maskBits(m: @Vector(W, bool)) u64 {
             const bits: std.meta.Int(.unsigned, W) = @bitCast(m);
-            return bits;
+            // A no-op under LLVM. Zig 0.16's self-hosted x86 backend (Debug
+            // builds) widens this bitcast with a stray bit W set: an all-false
+            // 4-lane mask read back as 16.
+            return @as(u64, bits) & std.math.maxInt(std.meta.Int(.unsigned, W));
         }
     };
 }

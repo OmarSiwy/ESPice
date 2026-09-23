@@ -184,8 +184,12 @@ pub fn newton(
                 sys.rhs[i] += opts.gmin * x[i];
             }
         }
+        // Read only by the debug prints below; an O(n) pass per iterate
+        // otherwise.
         var norm_f: f64 = 0;
-        for (0..sys.n) |i| norm_f = @max(norm_f, @abs(sys.rhs[i]));
+        if (newtonDbg() or opdbg()) {
+            for (0..sys.n) |i| norm_f = @max(norm_f, @abs(sys.rhs[i]));
+        }
         if (newtonDbg())
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
         if (opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig) {
@@ -264,8 +268,7 @@ fn finalizeStep(
 ) Step {
     const S = Deref(@TypeOf(sys));
     const n = sys.n;
-    @memcpy(x_old[0..n], x[0..n]);
-    const scaled = updateAndNorm(x[0..n], dx[0..n], x_old[0..n], sys.current_row, opts.reltol, opts.abstol, opts.vntol);
+    const scaled = updateAndNorm(x[0..n], dx[0..n], x_old[0..n], sys.current_row[0..n], opts.reltol, opts.abstol, opts.vntol);
 
     const limited = if (comptime @hasDecl(S, "applyLimits")) sys.applyLimits(x, x_old) else false;
 
@@ -668,12 +671,37 @@ fn applyPreconditioner(r: []f64, diag: []const f64, slv: ?*direct.Solver, n: usi
     for (0..n) |i| r[i] *= diag[i];
 }
 
-fn updateAndNorm(x: []f64, dx: []const f64, x_old: []const f64, current_row: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
-    var worst: f64 = 0;
-    for (x, dx, x_old, current_row) |*xi, dxi, xoi, is_cur| {
-        xi.* += dxi;
+pub const test_access = if (@import("builtin").is_test) .{ .updateAndNorm = updateAndNorm } else {};
+
+/// x_old = x; x += dx; returns max |dx| / (reltol * max(|x|, |x_old|) + atol),
+/// atol = abstol on current rows, vntol elsewhere. Max is exact and
+/// order-independent, so the vector body and the scalar tail agree bitwise
+/// with a plain scalar loop.
+fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
+    const W = std.simd.suggestVectorLength(f64) orelse 1;
+    const V = @Vector(W, f64);
+    const rel: V = @splat(reltol);
+    const abs_i: V = @splat(abstol);
+    const abs_v: V = @splat(vntol);
+    var worst_v: V = @splat(0);
+    var i: usize = 0;
+    while (i + W <= x.len) : (i += W) {
+        const xo: V = x[i..][0..W].*;
+        const d: V = dx[i..][0..W].*;
+        const cur: @Vector(W, bool) = current_row[i..][0..W].*;
+        const xn = xo + d;
+        x_old[i..][0..W].* = xo;
+        x[i..][0..W].* = xn;
+        const tol = rel * @max(@abs(xn), @abs(xo)) + @select(f64, cur, abs_i, abs_v);
+        worst_v = @max(worst_v, @abs(d) / tol);
+    }
+    var worst: f64 = @reduce(.Max, worst_v);
+    for (x[i..], dx[i..], x_old[i..], current_row[i..x.len]) |*xi, dxi, *xoi, is_cur| {
+        const xo = xi.*;
+        xoi.* = xo;
+        xi.* = xo + dxi;
         const atol = if (is_cur) abstol else vntol;
-        const tol = reltol * @max(@abs(xi.*), @abs(xoi)) + atol;
+        const tol = reltol * @max(@abs(xi.*), @abs(xo)) + atol;
         worst = @max(worst, @abs(dxi) / tol);
     }
     return worst;
