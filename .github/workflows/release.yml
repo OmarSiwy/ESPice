@@ -1,0 +1,97 @@
+# One binary per OS, CPU arch and microarchitecture level, so a user downloads
+# the build that matches their machine instead of compiling from source. Every
+# vector width in the simulator (Dual lanes, LaneLu, FMA gating in eval.zig) is
+# fixed at compile time from the target CPU, so a baseline build leaves most of
+# the speed on the table.
+#
+# Linux targets glibc 2.28, not static musl: gompute dlopens libcuda/libamdhip
+# at runtime, which a static binary cannot do.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64 levels: v2 = SSE4.2 (fallback), v3 = AVX2+FMA, v4 = AVX-512.
+          - { name: linux-x86_64-v2, runner: ubuntu-24.04, target: x86_64-linux-gnu.2.28, cpu: x86_64_v2, cuda: sm_75, hip: gfx1100, check: sse4_2 }
+          - { name: linux-x86_64-v3, runner: ubuntu-24.04, target: x86_64-linux-gnu.2.28, cpu: x86_64_v3, cuda: sm_75, hip: gfx1100, check: avx2 }
+          - { name: linux-x86_64-v4, runner: ubuntu-24.04, target: x86_64-linux-gnu.2.28, cpu: x86_64_v4, cuda: sm_75, hip: gfx1100, check: avx512f }
+          # aarch64: ARMv8.0 baseline, and Neoverse N1 (Graviton2, Ampere Altra).
+          # No ROCm on Arm, so HIP is compiled out; CUDA covers Grace and Jetson.
+          - { name: linux-aarch64, runner: ubuntu-24.04-arm, target: aarch64-linux-gnu.2.28, cpu: generic, cuda: sm_75, hip: none, check: asimd }
+          - { name: linux-aarch64-neoverse-n1, runner: ubuntu-24.04-arm, target: aarch64-linux-gnu.2.28, cpu: neoverse_n1, cuda: sm_75, hip: none, check: asimddp }
+          # Every Apple silicon Mac is at least an M1. No CUDA or HIP on macOS.
+          - { name: macos-arm64, runner: macos-14, target: aarch64-macos, cpu: apple_m1, cuda: none, hip: none, check: "" }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build
+        run: >
+          zig build
+          -Doptimize=ReleaseFast
+          -Dtarget=${{ matrix.target }}
+          -Dcpu=${{ matrix.cpu }}
+          -Dcuda-arch=${{ matrix.cuda }}
+          -Dhip-arch=${{ matrix.hip }}
+          --prefix out
+
+      # Run the binary only where the runner's CPU has the level's features;
+      # hosted runners do not guarantee AVX-512, and a missing feature is
+      # SIGILL, not a failed test.
+      - name: Smoke test
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.check }}" ] && ! grep -qw "${{ matrix.check }}" /proc/cpuinfo; then
+            echo "runner CPU lacks ${{ matrix.check }}; skipping run"
+            exit 0
+          fi
+          out/bin/espice --version
+          out/bin/espice --backend cpu --rawfile op.raw tests/fixtures/op/device_hicum2.sp
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dir="espice-${version}-${{ matrix.name }}"
+          mv out "$dir"
+          cp README.md "$dir"/
+          tar czf "$dir.tar.gz" "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: espice-*.tar.gz
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum espice-*.tar.gz > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            espice-*.tar.gz
+            SHA256SUMS
