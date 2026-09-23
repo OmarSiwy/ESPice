@@ -1,12 +1,38 @@
 //! Query validation at the analysis boundary: every numeric option a driver
-//! would otherwise trust, checked once before any allocation.
+//! would otherwise trust, checked once before any allocation. The frontend
+//! runs it on each analysis card's query too, so a card it refuses names
+//! its line (#108).
 const std = @import("std");
-const requests = @import("core").query;
-const Deck = @import("core").Deck;
+const requests = @import("query.zig");
+const Deck = @import("deck.zig").Deck;
+
+/// The most tones a multi-tone HB spectrum takes (analysis/pss/mhb.zig).
+pub const mhb_max_tones = 8;
+
+/// The largest box a multi-tone HB spectrum enumerates, Π(2H_i + 1).
+pub const mhb_max_box: usize = 1 << 22;
+
 // What the drivers allocate, not their caps: a cap times n can pass the
 // 64-plane ceiling on a 32-bit target (wasm) where the run never comes near it.
-const envelope = @import("tran/envelope.zig");
-const matex = @import("tran/matex.zig");
+// Both live here so the frontend can validate without the analysis module;
+// analysis/tran/envelope.zig and matex.zig alias them.
+
+/// Upper bound on envelope rows: every accepted outer step advances at least
+/// min_periods_per_step carrier periods, plus the t = 0 row and one row of
+/// rounding slack.
+pub fn envelopeMaxPoints(options: requests.Envelope) u32 {
+    const min_step = @as(f64, @floatFromInt(@max(options.min_periods_per_step, 1))) * options.t_carrier;
+    const by_time = @ceil(options.t_stop / min_step);
+    const cap = @as(f64, @floatFromInt(options.max_outer_steps));
+    return @as(u32, @intFromFloat(@min(by_time, cap))) + 2;
+}
+
+/// The waveform rows MATEX's `run` reserves up front: two per output-capped
+/// step, at least 256, at most `max_points`. The waveform grows past it.
+pub fn matexEstPoints(opts: requests.Matex) u32 {
+    const h_cap = opts.h_output_cap orelse opts.t_stop / 200.0;
+    return @intFromFloat(@min(@max(256, opts.t_stop / h_cap * 2.0), @as(f64, @floatFromInt(opts.max_points))));
+}
 
 /// True when every float reachable from `value` is finite.
 fn finite(value: anytype) bool {
@@ -65,7 +91,7 @@ fn elements(factors: []const usize) !usize {
 /// reltol and trtol scale every acceptance test and step bound, so they must
 /// be positive. abstol, vntol and chgtol are absolute floors that ngspice
 /// accepts at 0, leaving the relative part alone.
-fn tolerance(t: @import("core").numerics.Tolerances) !void {
+fn tolerance(t: @import("numerics.zig").Tolerances) !void {
     inline for (.{ "reltol", "residual_tol", "trtol" }) |field|
         try positive(@field(t, field));
     if (t.abstol < 0 or t.vntol < 0 or t.chgtol < 0 or t.gmin < 0 or t.gmin_start < 0 or t.itl1 == 0 or t.itl2 == 0 or t.itl4 == 0)
@@ -222,8 +248,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .hb => |o| {
             if (o.n_harmonics == 0 or o.subharms == 0) return error.InvalidQueryOptions;
             if (o.extra_tones.len != 0) {
-                const mhb = @import("pss/mhb.zig");
-                if (o.osc_node != 0 or o.extra_harmonics.len != o.extra_tones.len or o.extra_tones.len >= mhb.max_tones)
+                if (o.osc_node != 0 or o.extra_harmonics.len != o.extra_tones.len or o.extra_tones.len >= mhb_max_tones)
                     return error.InvalidQueryOptions;
                 var box: usize = 2 * @as(usize, o.n_harmonics) + 1;
                 var top = o.f0 * @as(f64, @floatFromInt(o.n_harmonics));
@@ -233,7 +258,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
                     box = try elements(&.{ box, 2 * @as(usize, h) + 1 });
                     top += f * @as(f64, @floatFromInt(h));
                 }
-                if (box > mhb.max_box) return error.InvalidQueryOptions;
+                if (box > mhb_max_box) return error.InvalidQueryOptions;
                 _ = try elements(&.{ box, box, 2 * n });
                 try frequency(top);
                 return;
@@ -265,14 +290,14 @@ pub fn validate(query: requests.Query, n: u32) !void {
                 return error.InvalidQueryOptions;
             try timeStep(o.t_carrier / @as(f64, @floatFromInt(o.carrier_steps_per_period)));
             try positive(o.t_carrier * @as(f64, @floatFromInt(o.max_periods_per_step)));
-            _ = try elements(&.{ envelope.maxPoints(o), 2 * @as(usize, n) + 1 });
+            _ = try elements(&.{ envelopeMaxPoints(o), 2 * @as(usize, n) + 1 });
         },
         .matex => |o| {
             try timeStep(o.gamma orelse o.t_stop / 1000);
             try timeStep(o.h_output_cap orelse o.t_stop / 200);
             _ = try elements(&.{ @as(usize, o.m_max) + 1, @as(usize, o.m_max) + 1 });
             _ = try elements(&.{ @as(usize, o.m_max) + 1, n });
-            _ = try elements(&.{ matex.estPoints(o), @as(usize, n) + 1 });
+            _ = try elements(&.{ matexEstPoints(o), @as(usize, n) + 1 });
         },
         .tf, .pz => {
             _ = try elements(&.{ n, n });

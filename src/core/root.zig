@@ -11,6 +11,8 @@ pub const gpa: std.mem.Allocator = if (@import("builtin").single_threaded) std.h
 pub const numerics = @import("numerics.zig");
 /// One options struct per analysis, and the `Query` union over them.
 pub const query = @import("query.zig");
+/// Query validation (`validate.validate`), shared by the analysis boundary and the frontend.
+pub const validate = @import("validate.zig");
 /// The HSPICE `.model OPT` Levenberg-Marquardt optimizer, driven by its caller.
 pub const lm = @import("lm.zig");
 /// The HSPICE `.model OPT` bisection and pass/fail searches.

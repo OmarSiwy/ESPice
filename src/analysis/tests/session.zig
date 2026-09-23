@@ -4,8 +4,8 @@ const Deck = @import("core").Deck;
 const builtin = @import("device").Library.builtin;
 const requests = @import("core").query;
 const std = @import("std");
-const validate = @import("../validate.zig").validate;
-const validateDeck = @import("../validate.zig").validateDeck;
+const validate = @import("core").validate.validate;
+const validateDeck = @import("core").validate.validateDeck;
 
 test "query boundary rejects nonfinite values and nonterminating sweeps" {
     const t = std.testing;

@@ -356,12 +356,9 @@ fn negGinvMul(slv_g: *Solver, v: []const f64, dest: []f64) void {
     num.scale(dest, -1.0, dest);
 }
 
-/// The waveform rows `run` reserves up front: two per output-capped step,
-/// at least 256, at most `max_points`. The waveform grows past it.
-pub fn estPoints(opts: Options) u32 {
-    const h_cap = opts.h_output_cap orelse opts.t_stop / 200.0;
-    return @intFromFloat(@min(@max(256, opts.t_stop / h_cap * 2.0), @as(f64, @floatFromInt(opts.max_points))));
-}
+/// The waveform rows `run` reserves up front (core/validate.zig, which query
+/// validation shares).
+pub const estPoints = @import("core").validate.matexEstPoints;
 
 /// Contract entry: march from ctx.x_op with the piecewise-linear source
 /// integral (MATEX eq. 5), stepping to each transition spot or h_output_cap.

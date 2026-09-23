@@ -11,7 +11,7 @@ const execution = @import("executor.zig");
 const progress = @import("progress.zig");
 const types = @import("types.zig");
 const Result = types.Result;
-const validateDeck = @import("validate.zig").validateDeck;
+const validateDeck = @import("core").validate.validateDeck;
 
 /// Why a query ended without a result: its run failed (`QueryError`,
 /// `error.QueryCancelled` included), its executor could not be built

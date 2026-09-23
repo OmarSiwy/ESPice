@@ -69,7 +69,7 @@ Error: bad_short.sp: VoltageSourceLoop
 
 | Error | Cause |
 |---|---|
-| `InvalidAnalysisArguments` | wrong number of arguments, a negative or zero step, an unknown keyword |
+| `InvalidAnalysisArguments` | wrong number of arguments, a negative or zero step, an unknown keyword, or a value the analysis cannot represent: a frequency whose 2πf or 1/f overflows, a step too small to resolve, a sweep past 2^32 points |
 | `UnsupportedFrequencySweep` | a sweep type other than `dec`, `oct`, `lin` (or `poi`) |
 | `AnalysisNodeNotFound` | the card's output node does not exist, or is ground |
 | `AnalysisSourceNotFound` | the card names a source (or probe) the deck does not have |

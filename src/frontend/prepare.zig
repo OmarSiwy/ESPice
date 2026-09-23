@@ -300,7 +300,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
     const tuning = if (nl.tunable.len != 0 and run.point == null and run.prefix.len == 0) try variants.Tuning.init(core.gpa, lib, sim_arena, parse_arena, nl, &circuit, cards) else null;
     errdefer if (tuning) |t| t.deinit();
     card_opts.sample = nl.deck.sample;
-    const queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout);
+    const queries = try analyses.queries(sim_arena, cards_rows, circuit.n, false, out.bindings, cards, card_opts, plan.fanout);
     if (aging) |*a| a.mosra.tran = for (queries) |q| {
         if (q == .tran and q.tran.tol.variant == null) break q.tran;
     } else {
@@ -431,7 +431,7 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
     for (cards) |*a| if (namesNoOutput(a.*)) {
         a.pos = prepared.deck.output_node;
     };
-    return analyses.queries(arena, cards, true, prepared.deck.bindings, prepared.deck.cards, .{
+    return analyses.queries(arena, cards, prepared.circuit.n, true, prepared.deck.bindings, prepared.deck.cards, .{
         .tol = prepared.deck.deck_tol,
         .method = prepared.deck.deck_method,
         .temp_c = prepared.deck.deck_temp,

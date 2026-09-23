@@ -41,9 +41,10 @@ pub const Fanout = struct {
 /// names one or two nodes in the deck; `appended` cards must name exactly one.
 /// `fanout` copies them over the deck's variants, and an HSPICE `.temp` list
 /// copies everything once per temperature. Errors are `buildJob`'s, logged
-/// with the card that raised them; `OutOfMemory` also covers a fan-out
-/// count too large for `usize`.
-pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, appended: bool, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions, fanout: Fanout) ![]const Job {
+/// with the card that raised them, and `InvalidAnalysisArguments` for a card
+/// whose query `core.validate` refuses on a circuit of `n_rows` unknowns;
+/// `OutOfMemory` also covers a fan-out count too large for `usize`.
+pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, n_rows: u32, appended: bool, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions, fanout: Fanout) ![]const Job {
     for (cards) |c| {
         const args = c.args;
         const arg: usize = if (c.kind == .four) 1 else 0;
@@ -147,6 +148,9 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
             else => {},
         }
         applyDeckOptions(&job, deck_opts);
+        // Query validation stays the API's backstop; a card it would refuse
+        // fails here, with its line (#108).
+        core.validate.validate(job, n_rows) catch return cardError(c.line, error.InvalidAnalysisArguments);
         // HSPICE `.op t1 t2 ...` [CR .OP]: one operating point per time, a
         // transient snapshot past t = 0.
         if (job == .op and hasNumber(c.args)) {
@@ -1927,30 +1931,30 @@ test queries {
     const a = arena.allocator();
     const none: core.QueryBindings = .{ .v_names = &.{}, .i_names = &.{}, .v_branches = &.{}, .v_pos = &.{}, .v_neg = &.{}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{}, .ports = &.{} };
     const op: netlist.Analysis = .{ .kind = .op, .args = &.{} };
-    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{}, false, none, &.{}, .{}, .{})).len);
+    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{}, 16, false, none, &.{}, .{}, .{})).len);
     // A `.temp` list runs every job once per temperature.
-    const temps = try queries(a, &.{op}, false, none, &.{}, .{ .temp_list = argv(.{ -40, 125 }) }, .{});
+    const temps = try queries(a, &.{op}, 16, false, none, &.{}, .{ .temp_list = argv(.{ -40, 125 }) }, .{});
     try testing.expectEqual(@as(usize, 2), temps.len);
     try testing.expectEqual(@as(?f64, -40), temps[0].op.tol.temp_c);
     try testing.expectEqual(@as(?f64, 125), temps[1].op.tol.temp_c);
-    try testing.expectError(error.InvalidAnalysisArguments, queries(a, &.{op}, false, none, &.{}, .{ .temp_list = argv(.{ 0, -300 }) }, .{}));
+    try testing.expectError(error.InvalidAnalysisArguments, queries(a, &.{op}, 16, false, none, &.{}, .{ .temp_list = argv(.{ 0, -300 }) }, .{}));
     // HSPICE `.op 0 1u`: the operating point, then a snapshot at 1 us.
-    const times = try queries(a, &.{.{ .kind = .op, .args = argv(.{ 0, 1e-6 }) }}, false, none, &.{}, .{}, .{});
+    const times = try queries(a, &.{.{ .kind = .op, .args = argv(.{ 0, 1e-6 }) }}, 16, false, none, &.{}, .{}, .{});
     try testing.expectEqual(@as(usize, 2), times.len);
     try testing.expect(times[0] == .op);
     try testing.expect(times[1].tran.snapshot);
     try testing.expectEqual(@as(f64, 1e-6), times[1].tran.t_stop);
     // Global rows after the nominal one.
-    const rows = try queries(a, &.{op}, false, none, &.{}, .{}, .{ .global = .{ .first = 0, .count = 2, .nominal = true } });
+    const rows = try queries(a, &.{op}, 16, false, none, &.{}, .{}, .{ .global = .{ .first = 0, .count = 2, .nominal = true } });
     try testing.expectEqual(@as(usize, 3), rows.len);
     for (rows, [_]?u32{ null, 0, 1 }) |j, want| try testing.expectEqual(want, j.op.tol.variant);
     // Every row rebuilt as its own run: no jobs left here, and none
     // written past the table (#132).
-    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{op}, false, none, &.{}, .{}, .{ .global = .{ .first = 0, .count = 0, .nominal = false } })).len);
+    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{op}, 16, false, none, &.{}, .{}, .{ .global = .{ .first = 0, .count = 0, .nominal = false } })).len);
     const cards: []const Fanout.Span = &.{.{ .count = 0, .nominal = false }};
-    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{op}, false, none, &.{}, .{}, .{ .cards = cards })).len);
+    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{op}, 16, false, none, &.{}, .{}, .{ .cards = cards })).len);
     // `only` keeps one card's jobs.
-    const only = try queries(a, &.{ op, .{ .kind = .dcinc, .args = &.{} } }, false, none, &.{}, .{}, .{ .only = 1 });
+    const only = try queries(a, &.{ op, .{ .kind = .dcinc, .args = &.{} } }, 16, false, none, &.{}, .{}, .{ .only = 1 });
     try testing.expectEqual(@as(usize, 1), only.len);
     try testing.expect(only[0] == .dcinc);
 }

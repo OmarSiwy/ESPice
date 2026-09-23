@@ -118,4 +118,4 @@ Implementation: [session](../../src/analysis/session.zig) (graph,
 publication, `schemaOf`), [executor](../../src/analysis/executor.zig)
 (dispatch and per-query state), [worker](../../src/analysis/worker.zig) (the
 checkpoint controller), [progress](../../src/analysis/progress.zig), and
-[request validation](../../src/analysis/validate.zig).
+[request validation](../../src/core/validate.zig).

@@ -316,6 +316,16 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqual(@as(usize, 5), prepared.deck.queries.len);
 }
 
+test "a card query validation would refuse fails at the card" {
+    for ([_][]const u8{ ".ac dec 10 1 1e308", ".tran 1e-310 1u", ".dc v1 0 1 1e-10", ".pss 1e-310 64" }) |text| {
+        var session = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer session.deinit();
+        const a = session.allocator();
+        const nl = try parse(a, try std.fmt.allocPrint(a, "x2\nv1 in 0 1\nr1 in out 1k\nc1 out 0 1n\n{s}\n.end\n", .{text}));
+        try std.testing.expectError(error.InvalidAnalysisArguments, build(a, a, nl));
+    }
+}
+
 test ".dcxf keeps a V card an F or H senses" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();

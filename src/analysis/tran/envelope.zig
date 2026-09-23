@@ -23,15 +23,8 @@ pub const SimResult = struct {
     n_points: u32,
 };
 
-/// Upper bound on envelope rows: every accepted outer step advances at least
-/// min_periods_per_step carrier periods, plus the t = 0 row and one row of
-/// rounding slack.
-pub fn maxPoints(options: Options) u32 {
-    const min_step = @as(f64, @floatFromInt(@max(options.min_periods_per_step, 1))) * options.t_carrier;
-    const by_time = @ceil(options.t_stop / min_step);
-    const cap = @as(f64, @floatFromInt(options.max_outer_steps));
-    return @as(u32, @intFromFloat(@min(by_time, cap))) + 2;
-}
+/// Upper bound on envelope rows (core/validate.zig, which query validation shares).
+pub const maxPoints = @import("core").validate.envelopeMaxPoints;
 
 /// Trapezoidal charge history carried across every envelope step, coarse and
 /// fine alike (trapezoid is one-step, so dt may change between them).
