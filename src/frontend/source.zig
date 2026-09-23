@@ -11,25 +11,19 @@ const directives = std.StaticStringMap(Directive).initComptime(.{
 pub fn load(io: Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
     const src = try Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited);
     errdefer arena.free(src);
-    if (try expand(io, arena, path, src)) |expanded| {
-        arena.free(src);
-        return expanded;
-    }
-    return src;
+    const out = try expand(io, arena, path, src);
+    if (out.ptr != src.ptr) arena.free(src);
+    return out;
 }
 
-/// Expand supplied bytes using origin's directory for includes. Always returns
-/// owned storage, including when the input needs no expansion.
-pub fn loadBytes(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]const u8 {
-    return try expand(io, arena, origin, src) orelse try arena.dupe(u8, src);
-}
-
-fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) !?[]const u8 {
+/// Inline includes and selected .lib sections, resolving paths against
+/// `origin`'s directory. Returns `src` itself when it names none.
+pub fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]const u8 {
     var lines = std.mem.splitScalar(u8, src, '\n');
     _ = lines.next(); // The title is opaque even when it starts with .include.
     while (lines.next()) |line| {
         if (directiveOf(std.mem.trim(u8, line, " \t\r")) != null) break;
-    } else return null;
+    } else return src;
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.heap.page_allocator);

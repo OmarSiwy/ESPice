@@ -13,9 +13,6 @@ pub const Ast = types.Ast;
 /// `hspice` or `spectre`.
 pub const Parser = parser.Parser;
 
-/// Syntax and input-size errors.
-pub const Error = parser.Error;
-
 /// Read a deck into `arena`. Separable: the parser takes bytes, not a path.
 pub const load = source.load;
 
@@ -23,5 +20,3 @@ pub const ngspice = tokenizer.ngspice;
 pub const hspice = tokenizer.hspice;
 pub const spectre = tokenizer.spectre;
 
-/// Build a tokenizer dialect from a character-class configuration.
-pub const GenTokens = tokenizer.GenTokens;
