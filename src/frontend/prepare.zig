@@ -117,7 +117,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
         if (row.* < p.len) row.* = p[row.*];
     };
 
-    const nodes = try NodeIndex.init(parse_arena, circuit);
+    var nodes: NodeIndex = .{ .arena = parse_arena, .circuit = &circuit };
     var ic: std.ArrayList(Ic) = .empty;
     for (nl.directives) |dir| {
         if (!std.ascii.eqlIgnoreCase(dir.kind, "ic")) continue;
@@ -127,7 +127,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
             const value = netlist.valueNumber(dir.args[i + 1]) orelse continue;
             // An `.ic` on a node the netlist never mentions is dropped, like
             // every other unresolvable directive name.
-            const id = nodes.get(name);
+            const id = try nodes.get(name);
             if (id == NO_NODE or id == GROUND) continue;
             try ic.append(sim_arena, .{ .node = id, .value = value });
         }
@@ -198,21 +198,23 @@ fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []con
 }
 
 /// Frozen-circuit node row by label; NO_NODE when the deck never named it.
+/// The map is built on the first lookup: most decks name no node.
 const NodeIndex = struct {
-    map: std.StringHashMapUnmanaged(u32) = .empty,
+    arena: std.mem.Allocator,
+    circuit: *const problem.Circuit,
+    map: ?std.StringHashMapUnmanaged(u32) = null,
 
-    fn init(arena: std.mem.Allocator, circuit: problem.Circuit) !NodeIndex {
-        var index: NodeIndex = .{};
-        try index.map.ensureTotalCapacity(arena, circuit.n);
-        for (0..circuit.n) |i| {
-            const label = circuit.nodeName(@intCast(i));
-            if (label.len != 0) index.map.putAssumeCapacity(label, @intCast(i));
+    fn get(self: *NodeIndex, name: []const u8) !u32 {
+        if (self.map == null) {
+            var map: std.StringHashMapUnmanaged(u32) = .empty;
+            try map.ensureTotalCapacity(self.arena, self.circuit.n);
+            for (0..self.circuit.n) |i| {
+                const label = self.circuit.nodeName(@intCast(i));
+                if (label.len != 0) map.putAssumeCapacity(label, @intCast(i));
+            }
+            self.map = map;
         }
-        return index;
-    }
-
-    fn get(self: *const NodeIndex, name: []const u8) u32 {
-        return self.map.get(name) orelse NO_NODE;
+        return self.map.?.get(name) orelse NO_NODE;
     }
 };
 
@@ -221,7 +223,7 @@ const NodeIndex = struct {
 const DirectiveNodes = struct { pos: []const u32, neg: []const u32, ports: []const [4]u32 };
 
 /// `max_group_args` is how many nodes an output `v(...)` group may name.
-fn resolveDirectiveNodes(arena: std.mem.Allocator, directives: []const types.Directive, nodes: *const NodeIndex, max_group_args: usize) !DirectiveNodes {
+fn resolveDirectiveNodes(arena: std.mem.Allocator, directives: []const types.Directive, nodes: *NodeIndex, max_group_args: usize) !DirectiveNodes {
     const pos = try arena.alloc(u32, directives.len);
     const neg = try arena.alloc(u32, directives.len);
     const ports = try arena.alloc([4]u32, directives.len);
@@ -234,13 +236,13 @@ fn resolveDirectiveNodes(arena: std.mem.Allocator, directives: []const types.Dir
         };
         const name = directiveNodeName(dir, arg, 0) orelse
             (if (arg < dir.args.len) icNodeName(arena, dir.args[arg]) else null);
-        p.* = if (name) |wanted| nodes.get(wanted) else NO_NODE;
-        n.* = if (directiveNodeName(dir, arg, 1)) |wanted| nodes.get(wanted) else NO_NODE;
+        p.* = if (name) |wanted| try nodes.get(wanted) else NO_NODE;
+        n.* = if (directiveNodeName(dir, arg, 1)) |wanted| try nodes.get(wanted) else NO_NODE;
         port.* = @splat(NO_NODE);
         if (!std.ascii.eqlIgnoreCase(dir.kind, "pz")) continue;
         for (port, 0..) |*id, i| {
             const port_name = bareNodeName(arena, dir, i) orelse continue;
-            id.* = if (netlist.isGroundName(port_name)) GROUND else nodes.get(port_name);
+            id.* = if (netlist.isGroundName(port_name)) GROUND else try nodes.get(port_name);
         }
     }
     return .{ .pos = pos, .neg = neg, .ports = ports };
@@ -305,7 +307,7 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
     if (nl.directives.len > (std.math.maxInt(u32) - 1) / 2) return error.CircuitTooLarge;
     // A single `.temp` is deck configuration, fixed at build.
     for (nl.directives) |dir| if (std.mem.eql(u8, dir.kind, "temp") and dir.args.len == 1) return error.UnsupportedDirectiveMutation;
-    const nodes = try NodeIndex.init(arena, prepared.circuit);
+    var nodes: NodeIndex = .{ .arena = arena, .circuit = &prepared.circuit };
     // Appended queries accept only single-ended outputs.
     const dir_nodes = try resolveDirectiveNodes(arena, nl.directives, &nodes, 1);
     return queriesFromDirectives(arena, nl.directives, dir_nodes, prepared.bindings, prepared.cards, .{
