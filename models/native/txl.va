@@ -1,0 +1,593 @@
+// TXL lossy transmission line (ngspice Y card), Hough/SWEC method: [3/3] Padé
+// fits of the characteristic admittance Y(s) and propagation H(s) at setup,
+// then O(1)-per-step recursive convolution of the exponential kernels.
+//
+// Verilog-A implementation: Omar El-Sawy, University of Waterloo.
+// Based on: ngspice TXL (txl/txlsetup.c, txlload.c), from the SWEC
+//   transmission-line model of Hough et al. (University of Illinois).
+//   ngspice: Copyright Regents of the University of California and others,
+//   modified BSD license.
+// Transcribed from models/native/txl_native.zig, which remains the built and
+// used device; this file is NOT registered in build.zig (discoverModels scans
+// models/ only). Bug-compatible with txlsetup/txlload like the native model:
+// integer-picosecond history times, the h3 complex-pair DC seed by real
+// division, and update_cnv's slope accumulated across terms.
+//
+// The pinned VerA compiles this file (`vera --emit-zig --check` clean apart
+// from the W0650 the build allows); it has not been run against the native
+// fixtures. The gaps below cost speed and robustness, not compilation:
+//
+// VERA-GAP: memory-backed arrays with runtime indexing -- needed for the
+//   2048-point delayed-read history (VerA scalarizes arrays, lib/ir/lower.zig
+//   declareVarDecl): this file emits 25 MB of Zig.
+// VERA-GAP: held analog-initial results -- needed for the Padé fit. VerA
+//   holds only variables assigned under @(...) (lib/ir/lower.zig scanHeld);
+//   an `analog initial` result reads as sel(is_analog_initial, value, 0), so
+//   it is correct only while the host leaves is_analog_initial set, and then
+//   the whole fit (Gauss, cubic roots, Newton polish) reruns on EVERY
+//   evaluation instead of once per sub-task (§5.2.1).
+// VERA-GAP: per-timepoint cache that survives Newton iterations and is
+//   dropped on rejection -- needed to run the delayed-history walk and the
+//   9 + 3 exponentials once per timepoint (native cache_t/cache_dt); here
+//   they rerun every Newton iteration (same numbers, more work).
+//
+// State model: variables assigned under @(initial_step) are held, i.e. every
+// evaluation starts from the values the last ACCEPTED evaluation left behind
+// (VerA HeldVar, §5.10). So the native committed/pending pair (ngspice's
+// txline/txline2) collapses to one set: the block advances the convolution
+// state from the held values, and only an accepted point keeps the result.
+//
+// Nodes: ngspice's inp2y binds the two signal nodes and ignores the card's
+// reference nodes, so n1/n2 are declared for the card shape and unused.
+module txl(p1, n1, p2, n2);
+    inout p1, n1, p2, n2;
+    electrical p1, n1, p2, n2;
+    branch (p1) br1;   // I(br1): current into the line at port 1
+    branch (p2) br2;
+
+    parameter real r   = 0.0 from [0:inf);
+    parameter real l   = 0.0 from [0:inf);
+    parameter real g   = 0.0 from [0:inf);
+    parameter real c   = 0.0 from [0:inf);
+    parameter real len = 0.0 from [0:inf);   // card keyword `length`
+
+    localparam integer cap = 2048;   // history capacity (native CAP)
+
+    analog function real eval2;
+        input a, b, c0, x;
+        real a, b, c0, x;
+        eval2 = a * x * x + b * x + c0;
+    endfunction
+
+    // Maclaurin of sqrt((1 + a z)/(1 + b z)), txlsetup mac().
+    analog function real mac;
+        input a, b;
+        output m;
+        real a, b, m[0:4], y1, y2, y3, y4, y5;
+        begin
+            y1 = 0.5 * (a - b);
+            y2 = 0.5 * (3.0 * b * b - 2.0 * a * b - a * a) * y1 / (a - b);
+            y3 = ((3.0 * b * b + a * a) * y1 * y1 + 0.5 * (3.0 * b * b - 2.0 * a * b - a * a) * y2) / (a - b);
+            y4 = ((3.0 * b * b - 3.0 * a * a) * y1 * y1 * y1 + (9.0 * b * b + 3.0 * a * a) * y1 * y2
+                + 0.5 * (3.0 * b * b - 2.0 * a * b - a * a) * y3) / (a - b);
+            y5 = (12.0 * a * a * y1 * y1 * y1 * y1 + y1 * y1 * y2 * (18.0 * b * b - 18.0 * a * a)
+                + (9.0 * b * b + 3.0 * a * a) * (y2 * y2 + y1 * y3) + (3.0 * b * b + a * a) * y1 * y3
+                + 0.5 * (3.0 * b * b - 2.0 * a * b - a * a) * y4) / (a - b);
+            m[0] = y1;
+            m[1] = y2 / 2.0;
+            m[2] = y3 / 6.0;
+            m[3] = y4 / 24.0;
+            m[4] = y5 / 120.0;
+            mac = 0.0;
+        end
+    endfunction
+
+    // In-place 3x4 Gauss-Jordan with partial pivot; 0 on pivot collapse.
+    analog function integer gauss3;
+        inout a;
+        input eps;
+        real a[0:2][0:3], eps, mx, f, f2, s;
+        integer i, j, k, imax, ok;
+        begin
+            ok = 1;
+            for (i = 0; i < 3 && ok; i = i + 1) begin
+                imax = i;
+                mx = abs(a[i][i]);
+                for (j = i + 1; j < 3; j = j + 1)
+                    if (abs(a[j][i]) > mx) begin
+                        imax = j;
+                        mx = abs(a[j][i]);
+                    end
+                if (mx < eps)
+                    ok = 0;
+                else begin
+                    if (imax != i)
+                        for (k = 0; k < 4; k = k + 1) begin
+                            s = a[i][k];
+                            a[i][k] = a[imax][k];
+                            a[imax][k] = s;
+                        end
+                    f = 1.0 / a[i][i];
+                    a[i][i] = 1.0;
+                    for (j = i + 1; j < 4; j = j + 1) a[i][j] = a[i][j] * f;
+                    for (j = 0; j < 3; j = j + 1)
+                        if (j != i) begin
+                            f2 = a[j][i];
+                            a[j][i] = 0.0;
+                            for (k = i + 1; k < 4; k = k + 1) a[j][k] = a[j][k] - f2 * a[i][k];
+                        end
+                end
+            end
+            gauss3 = ok;
+        end
+    endfunction
+
+    analog function real root3;
+        input a1, a2, a3, x;
+        real a1, a2, a3, x;
+        root3 = x - (x * x * x + a1 * x * x + a2 * x + a3) / (3.0 * x * x + 2.0 * a1 * x + a2);
+    endfunction
+
+    // Cubic roots (find_roots / exp_find_roots). Returns 1 for a complex
+    // pair x2 +- j x3, 0 for three real roots. `scale` is the reference's
+    // discriminant overflow guard (1e9 for Y, 1e8 for H).
+    analog function integer findroots;
+        input a1in, a2in, a3, scale;
+        output x1, x2, x3;
+        real a1in, a2in, a3, scale, x1, x2, x3, a1, a2, q, p, disc, x, t, backup;
+        integer n, done;
+        begin
+            a1 = a1in;
+            a2 = a2in;
+            q = (a1 * a1 - 3.0 * a2) / 9.0;
+            p = (2.0 * a1 * a1 * a1 - 9.0 * a1 * a2 + 27.0 * a3) / 54.0;
+            disc = q * q * q - p * p;
+            if (disc >= 0.0)
+                x = -2.0 * sqrt(q) * cos(acos(p / (q * sqrt(q))) / 3.0) - a1 / 3.0;
+            else if (p > 0.0) begin
+                t = pow(sqrt(-disc) + p, 1.0 / 3.0);
+                x = -(t + q / t) - a1 / 3.0;
+            end else if (p == 0.0)
+                x = -a1 / 3.0;
+            else begin
+                t = pow(sqrt(-disc) - p, 1.0 / 3.0);
+                x = (t + q / t) - a1 / 3.0;
+            end
+            // Newton polish: 5e-4 absolute stop, revert after 32 iterations.
+            backup = x;
+            n = 0;
+            done = 0;
+            t = root3(a1, a2, a3, x);
+            while (!done && abs(t - x) > 5.0e-4) begin
+                n = n + 1;
+                if (n == 32) begin
+                    x = backup;
+                    done = 1;
+                end else begin
+                    x = t;
+                    t = root3(a1, a2, a3, x);
+                end
+            end
+            x1 = x;
+            // Deflate to s^2 + (a1 + x)s - a3/x.
+            a1 = a1in + x;
+            a2 = -a3 / x;
+            t = a1 * a1 - 4.0 * a2;
+            if (t < 0.0) begin
+                x2 = -0.5 * a1;
+                x3 = 0.5 * sqrt(-t);
+                findroots = 1;
+            end else begin
+                t = t * scale * scale;
+                t = sqrt(t) / scale;
+                x2 = (a1 >= 0.0) ? -0.5 * (a1 + t) : -0.5 * (a1 - t);
+                x3 = a2 / x2;
+                findroots = 0;
+            end
+        end
+    endfunction
+
+    // Residue of the [3/3] fit at the complex pole a + j b (txlsetup get_c).
+    analog function real getc;
+        input eq1, eq2, eq3, ep1, ep2, a, b;
+        output cr, ci;
+        real eq1, eq2, eq3, ep1, ep2, a, b, cr, ci, d, n, u, v;
+        begin
+            u = 3.0 * (a * a - b * b) + 2.0 * ep1 * a + ep2;
+            v = 6.0 * a * b + 2.0 * ep1 * b;
+            d = u * u + v * v;
+            n = -(eq1 * (a * a - b * b) + eq2 * a + eq3) * v + (2.0 * eq1 * a * b + eq2 * b) * u;
+            ci = n / d;
+            n = u * (eq1 * (a * a - b * b) + eq2 * a + eq3) + v * (2.0 * eq1 * a * b + eq2 * b);
+            cr = n / d;
+            getc = 0.0;
+        end
+    endfunction
+
+    // ---- fit (main_pade: y_pade, exp_pade, get_h3, update_h1C_c) ----
+    // VERA-GAP: held analog-initial results -- needed so this fit runs once, not per evaluation
+    integer ok, lsl, if_img, i, k;
+    real sqtcdl, taul, h1cc, h2_aten, h3_aten;
+    real h1_c[0:2], h1_x[0:2], h2_c[0:2], h2_x[0:2], h3_c[0:5], h3_x[0:5];
+    real ll, rdl, gdc, tau, a0, h0, dummy, x1, x2, x3, cr, ci, d, ra, rb, rr;
+    real bm[0:4], am[0:2][0:3], bb[0:5], aa[0:5];
+    real p1c, p2c, p3c, q1c, q2c, q3c, y1, y2, y3, y4, y5, y6;
+
+    // ---- convolution state and history (held: see header) ----
+    // VERA-GAP: memory-backed arrays with runtime indexing -- needed for these 5 x cap histories
+    real cnv1_i[0:2], cnv1_o[0:2], cnv2_i[0:2], cnv2_o[0:2], cnv3_i[0:5], cnv3_o[0:5];
+    real vprev_i, vprev_o, dv_i, dv_o, dc1, dc2, tlast;
+    real ht[0:cap-1], hvi[0:cap-1], hvo[0:cap-1], hii[0:cap-1], hio[0:cap-1];
+    integer nh, drop, j;
+
+    // ---- per-evaluation rebuild (right_consts_txl) ----
+    // VERA-GAP: per-timepoint cache surviving Newton iterations -- needed so this rebuild runs once per timepoint
+    real t, h, h1, tps, t1, ta, tb, f, ff, gg, ff1, yc, e, e3, epair, er, ei;
+    real a2c, b2c, c2, d2, ar, ai, v1, v2, bi, bo, tt, delta, cutoff;
+    real dv1_i, dv1_o, di1_i, di1_o, dv2_i, dv2_o, di2_i, di2_o;
+    real h1e[0:2], h2e[0:2], p2_i[0:2], p2_o[0:2], p3_i[0:5], p3_o[0:5];
+
+    analog initial begin
+        ok = 0;
+        lsl = 0;
+        if_img = 0;
+        ll = max(l, 1e-12);   // ReadTxL's LL floor
+        if (r / ll < 5.0e5 && g < 1.0e-2) begin
+            // Lossless shortcut: pure delay with Y0 and unit propagation.
+            ok = 1;
+            lsl = 1;
+            taul = sqrt(c * ll) * len * 1.0e12;
+            sqtcdl = sqrt(c / ll);
+            h3_aten = sqtcdl;
+            h2_aten = 1.0;
+        end else begin
+            sqtcdl = sqrt(c / ll);
+            rdl = r / ll;
+            gdc = g / c;
+
+            // y_pade: Y(s)/sqtCdL ~ 1 + sum c_i/(s - x_i).
+            dummy = mac(gdc, rdl, bm);
+            am[0][0] = 1.0 - sqrt(gdc / rdl); am[0][1] = bm[0]; am[0][2] = bm[1]; am[0][3] = -bm[2];
+            am[1][0] = bm[0];                 am[1][1] = bm[1]; am[1][2] = bm[2]; am[1][3] = -bm[3];
+            am[2][0] = bm[1];                 am[2][1] = bm[2]; am[2][2] = bm[3]; am[2][3] = -bm[4];
+            ok = gauss3(am, 1.0e-16);
+            if (ok) begin
+                p3c = am[0][3];
+                p2c = am[1][3];
+                p1c = am[2][3];
+                q1c = p1c + bm[0];
+                q2c = bm[0] * p1c + p2c + bm[1];
+                q3c = p3c * sqrt(gdc / rdl);
+                // A complex Y pole makes ngspice exit; here the fit is declined.
+                ok = !findroots(p1c, p2c, p3c, 1.0e9, x1, x2, x3);
+                h1_x[0] = x1; h1_x[1] = x2; h1_x[2] = x3;
+                for (i = 0; i < 3; i = i + 1)
+                    h1_c[i] = eval2(q1c - p1c, q2c - p2c, q3c - p3c, h1_x[i])
+                        / eval2(3.0, 2.0 * p1c, p2c, h1_x[i]);
+            end
+
+            // exp_pade: H(s) e^{s tau l} ~ e^{-a0} (1 + sum ec_i/(s - ex_i)).
+            if (ok) begin
+                tau = sqrt(ll * c);
+                y1 = 0.5 * (rdl + gdc);
+                y2 = rdl * gdc - y1 * y1;
+                y3 = -3.0 * y1 * y2;
+                y4 = -3.0 * y2 * y2 - 4.0 * y1 * y3;
+                y5 = -5.0 * y1 * y4 - 10.0 * y2 * y3;
+                y6 = -10.0 * y3 * y3 - 15.0 * y2 * y4 - 6.0 * y1 * y5;
+                a0 = y1 * tau * len;
+                aa[0] = 0.0;
+                aa[1] = -(y2 * tau * tau / 2.0 * len);
+                aa[2] = -(y3 * tau * tau * tau / 6.0 * len);
+                aa[3] = -(y4 * tau * tau * tau * tau / 24.0 * len);
+                aa[4] = -(y5 * tau * tau * tau * tau * tau / 120.0 * len);
+                aa[5] = -(y6 * tau * tau * tau * tau * tau * tau / 720.0 * len);
+                // pade(): series of exp(sum -a_i z^i).
+                bb[0] = 1.0;
+                bb[1] = aa[1];
+                for (i = 2; i < 6; i = i + 1) begin
+                    bb[i] = 0.0;
+                    for (k = 1; k <= i; k = k + 1) bb[i] = bb[i] + k * aa[k] * bb[i - k];
+                    bb[i] = bb[i] / i;
+                end
+                h0 = exp(a0 - len * sqrt(r * g));   // fit's value at s = 0
+                am[0][0] = 1.0 - h0; am[0][1] = bb[1]; am[0][2] = bb[2]; am[0][3] = -bb[3];
+                am[1][0] = bb[1];    am[1][1] = bb[2]; am[1][2] = bb[3]; am[1][3] = -bb[4];
+                am[2][0] = bb[2];    am[2][1] = bb[3]; am[2][2] = bb[4]; am[2][3] = -bb[5];
+                ok = gauss3(am, 1.0e-28);
+            end
+            if (ok) begin
+                p3c = am[0][3];
+                p2c = am[1][3];
+                p1c = am[2][3];
+                q1c = p1c + bb[1];
+                q2c = bb[1] * p1c + p2c + bb[2];
+                q3c = p3c * h0;
+                p3c = p3c / (tau * tau * tau);
+                p2c = p2c / (tau * tau);
+                p1c = p1c / tau;
+                q3c = q3c / (tau * tau * tau);
+                q2c = q2c / (tau * tau);
+                q1c = q1c / tau;
+                if_img = findroots(p1c, p2c, p3c, 1.0e8, x1, x2, x3);
+                h2_x[0] = x1; h2_x[1] = x2; h2_x[2] = x3;
+                h2_c[0] = eval2(q1c - p1c, q2c - p2c, q3c - p3c, x1) / eval2(3.0, 2.0 * p1c, p2c, x1);
+                if (if_img) begin
+                    dummy = getc(q1c - p1c, q2c - p2c, q3c - p3c, p1c, p2c, x2, x3, cr, ci);
+                    h2_c[1] = cr;
+                    h2_c[2] = ci;
+                end else
+                    for (i = 1; i < 3; i = i + 1)
+                        h2_c[i] = eval2(q1c - p1c, q2c - p2c, q3c - p3c, h2_x[i])
+                            / eval2(3.0, 2.0 * p1c, p2c, h2_x[i]);
+                taul = tau * len;
+                h2_aten = exp(-a0);
+
+                // get_h3: h3 = Y*H over the six poles h3_x = h1_x ++ h2_x.
+                h3_aten = h2_aten * sqtcdl;
+                for (i = 0; i < 3; i = i + 1) begin
+                    h3_x[i] = h1_x[i];
+                    h3_x[i + 3] = h2_x[i];
+                end
+                if (if_img) begin
+                    for (i = 0; i < 3; i = i + 1)
+                        h3_c[i] = h1_c[i] + h1_c[i] * (h2_c[0] / (h3_x[i] - h3_x[3])
+                            + 2.0 * (h2_c[1] * h3_x[i] - h3_x[5] * h2_c[2] - h3_x[4] * h2_c[1])
+                            / (h3_x[i] * h3_x[i] - 2.0 * h3_x[4] * h3_x[i] + h3_x[4] * h3_x[4] + h3_x[5] * h3_x[5]));
+                    h3_c[3] = h2_c[0] + h2_c[0] * (h1_c[0] / (h3_x[3] - h3_x[0])
+                        + h1_c[1] / (h3_x[3] - h3_x[1]) + h1_c[2] / (h3_x[3] - h3_x[2]));
+                    h3_c[4] = h2_c[1];
+                    h3_c[5] = h2_c[2];
+                    for (i = 0; i < 3; i = i + 1) begin
+                        // (c4 + j c5) / ((x4 - x_i) + j x5), div_C.
+                        rb = h3_x[4] - h3_x[i];
+                        d = rb * rb + h3_x[5] * h3_x[5];
+                        ra = (h2_c[1] * rb + h2_c[2] * h3_x[5]) / d;
+                        rr = (-h2_c[1] * h3_x[5] + h2_c[2] * rb) / d;
+                        h3_c[4] = h3_c[4] + ra * h1_c[i];
+                        h3_c[5] = h3_c[5] + rr * h1_c[i];
+                    end
+                end else begin
+                    for (i = 0; i < 3; i = i + 1)
+                        h3_c[i] = h1_c[i] + h1_c[i] * (h2_c[0] / (h3_x[i] - h3_x[3])
+                            + h2_c[1] / (h3_x[i] - h3_x[4]) + h2_c[2] / (h3_x[i] - h3_x[5]));
+                    for (i = 3; i < 6; i = i + 1)
+                        h3_c[i] = h2_c[i - 3] + h2_c[i - 3] * (h1_c[0] / (h3_x[i] - h3_x[0])
+                            + h1_c[1] / (h3_x[i] - h3_x[1]) + h1_c[2] / (h3_x[i] - h3_x[2]));
+                end
+
+                // update_h1C_c: fold the attenuations in, reference order.
+                taul = taul * 1.0e12;
+                h1cc = 0.0;
+                for (i = 0; i < 3; i = i + 1) begin
+                    h1_c[i] = h1_c[i] * sqtcdl;
+                    h1cc = h1cc + h1_c[i];
+                end
+                for (i = 0; i < 3; i = i + 1) h2_c[i] = h2_c[i] * h2_aten;
+                for (i = 0; i < 6; i = i + 1) h3_c[i] = h3_c[i] * h3_aten;
+            end
+        end
+    end
+
+    analog begin
+        // Fresh transient. Assigning here is also what makes these held.
+        @(initial_step) begin
+            nh = 0;
+            tlast = 0.0;
+            vprev_i = 0.0; vprev_o = 0.0; dv_i = 0.0; dv_o = 0.0; dc1 = 0.0; dc2 = 0.0;
+            for (k = 0; k < 6; k = k + 1) begin
+                cnv3_i[k] = 0.0;
+                cnv3_o[k] = 0.0;
+            end
+            for (k = 0; k < 3; k = k + 1) begin
+                cnv1_i[k] = 0.0; cnv1_o[k] = 0.0; cnv2_i[k] = 0.0; cnv2_o[k] = 0.0;
+            end
+            for (k = 0; k < cap; k = k + 1) begin
+                ht[k] = 0.0; hvi[k] = 0.0; hvo[k] = 0.0; hii[k] = 0.0; hio[k] = 0.0;
+            end
+        end
+
+        t = $abstime;
+        v1 = V(br1);
+        v2 = V(br2);
+        h = t - tlast;   // host dt: seconds since the last accepted point
+
+        if (!analysis("tran") || !ok || nh == 0 || h <= 0.0) begin
+            // MODEDC rows: i1 + i2 = 0; v1 - v2 = R*len*i1.
+            V(br1) <+ V(br2) + r * len * I(br1);
+            V(br2) <+ V(br2) + I(br1) + I(br2);
+        end else begin
+            h1 = 0.5 * h;
+            tps = floor(t * 1e12);   // ngspice anchors delayed reads on integer ps
+            ff = 0.0;
+            gg = 0.0;
+            if (!lsl) begin
+                ff1 = 0.0;
+                for (i = 0; i < 3; i = i + 1) begin
+                    h1e[i] = exp(h1_x[i] * h);
+                    ff1 = ff1 - h1_c[i] * h1e[i];
+                    ff = ff - cnv1_i[i] * h1e[i];
+                    gg = gg - cnv1_o[i] * h1e[i];
+                end
+                ff = ff + ff1 * h1 * vprev_i;
+                gg = gg + ff1 * h1 * vprev_o;
+            end
+
+            // get_pvs_vi_txl: delayed values at (t1 - tau, t2 - tau).
+            t1 = ht[nh - 1];
+            ta = t1 - taul;
+            tb = tps - taul;
+            if (tb > t1) tb = t1;   // dt > tau is cut off by the 0.9 tau step bound
+            dv1_i = dc1; dv1_o = dc2; di1_i = 0.0; di1_o = 0.0;
+            dv2_i = dc1; dv2_o = dc2; di2_i = 0.0; di2_o = 0.0;
+            if (tb > 0.0) begin
+                j = 1;
+                if (ta > 0.0) begin
+                    while (j + 1 < nh && ht[j] < ta) j = j + 1;
+                    f = (ta - ht[j - 1]) / (ht[j] - ht[j - 1]);
+                    dv1_i = hvi[j - 1] + f * (hvi[j] - hvi[j - 1]);
+                    dv1_o = hvo[j - 1] + f * (hvo[j] - hvo[j - 1]);
+                    di1_i = hii[j - 1] + f * (hii[j] - hii[j - 1]);
+                    di1_o = hio[j - 1] + f * (hio[j] - hio[j - 1]);
+                end
+                while (j + 1 < nh && ht[j] < tb) j = j + 1;
+                f = (tb - ht[j - 1]) / (ht[j] - ht[j - 1]);
+                dv2_i = hvi[j - 1] + f * (hvi[j] - hvi[j - 1]);
+                dv2_o = hvo[j - 1] + f * (hvo[j] - hvo[j - 1]);
+                di2_i = hii[j - 1] + f * (hii[j] - hii[j - 1]);
+                di2_o = hio[j - 1] + f * (hio[j] - hio[j - 1]);
+            end
+
+            if (lsl) begin
+                ff = h3_aten * dv2_o + h2_aten * di2_o;
+                gg = h3_aten * dv2_i + h2_aten * di2_i;
+            end else if (if_img) begin
+                // h3: 4 real terms + a complex pair in slots 4, 5. Poles 0..2
+                // are h1's (h1e), 3..5 are h2's, so e3/er/ei serve h2 too.
+                e3 = exp(h3_x[3] * h);
+                for (i = 0; i < 4; i = i + 1) begin
+                    e = (i < 3) ? h1e[i] : e3;
+                    p3_i[i] = cnv3_i[i] * e + h1 * h3_c[i] * (dv1_i * e + dv2_i);
+                    p3_o[i] = cnv3_o[i] * e + h1 * h3_c[i] * (dv1_o * e + dv2_o);
+                end
+                epair = exp(h3_x[4] * h);
+                er = epair * cos(h3_x[5] * h);
+                ei = epair * sin(h3_x[5] * h);
+                a2c = h1 * h3_c[4];
+                b2c = h1 * h3_c[5];
+                ar = cnv3_i[4] * er - cnv3_i[5] * ei;
+                ai = cnv3_i[4] * ei + cnv3_i[5] * er;
+                p3_i[4] = ar + (a2c * (dv1_i * er + dv2_i) - b2c * (dv1_i * ei));
+                p3_i[5] = ai + (a2c * (dv1_i * ei) + b2c * (dv1_i * er + dv2_i));
+                ar = cnv3_o[4] * er - cnv3_o[5] * ei;
+                ai = cnv3_o[4] * ei + cnv3_o[5] * er;
+                p3_o[4] = ar + (a2c * (dv1_o * er + dv2_o) - b2c * (dv1_o * ei));
+                p3_o[5] = ai + (a2c * (dv1_o * ei) + b2c * (dv1_o * er + dv2_o));
+                ff = ff + h3_aten * dv2_o;
+                gg = gg + h3_aten * dv2_i;
+                for (i = 0; i < 4; i = i + 1) begin
+                    ff = ff + p3_o[i];
+                    gg = gg + p3_i[i];
+                end
+                ff = ff + 2.0 * p3_o[4];
+                gg = gg + 2.0 * p3_i[4];
+
+                // h2: 1 real term + the complex pair in slots 1, 2.
+                p2_i[0] = cnv2_i[0] * e3 + h1 * h2_c[0] * (di1_i * e3 + di2_i);
+                p2_o[0] = cnv2_o[0] * e3 + h1 * h2_c[0] * (di1_o * e3 + di2_o);
+                c2 = h1 * h2_c[1];
+                d2 = h1 * h2_c[2];
+                ar = cnv2_i[1] * er - cnv2_i[2] * ei;
+                ai = cnv2_i[1] * ei + cnv2_i[2] * er;
+                p2_i[1] = ar + (c2 * (di1_i * er + di2_i) - d2 * (di1_i * ei));
+                p2_i[2] = ai + (c2 * (di1_i * ei) + d2 * (di1_i * er + di2_i));
+                ar = cnv2_o[1] * er - cnv2_o[2] * ei;
+                ai = cnv2_o[1] * ei + cnv2_o[2] * er;
+                p2_o[1] = ar + (c2 * (di1_o * er + di2_o) - d2 * (di1_o * ei));
+                p2_o[2] = ai + (c2 * (di1_o * ei) + d2 * (di1_o * er + di2_o));
+                ff = ff + (h2_aten * di2_o + p2_o[0] + 2.0 * p2_o[1]);
+                gg = gg + (h2_aten * di2_i + p2_i[0] + 2.0 * p2_i[1]);
+            end else begin
+                // Six real h3 poles: h1e for 0..2, the h2 exponentials for 3..5.
+                for (i = 0; i < 3; i = i + 1) h2e[i] = exp(h2_x[i] * h);
+                for (i = 0; i < 6; i = i + 1) begin
+                    e = (i < 3) ? h1e[i] : h2e[i - 3];
+                    p3_i[i] = cnv3_i[i] * e + h1 * h3_c[i] * (dv1_i * e + dv2_i);
+                    p3_o[i] = cnv3_o[i] * e + h1 * h3_c[i] * (dv1_o * e + dv2_o);
+                end
+                ff = ff + h3_aten * dv2_o;
+                gg = gg + h3_aten * dv2_i;
+                for (i = 0; i < 6; i = i + 1) begin
+                    ff = ff + p3_o[i];
+                    gg = gg + p3_i[i];
+                end
+                for (i = 0; i < 3; i = i + 1) begin
+                    p2_i[i] = cnv2_i[i] * h2e[i] + h1 * h2_c[i] * (di1_i * h2e[i] + di2_i);
+                    p2_o[i] = cnv2_o[i] * h2e[i] + h1 * h2_c[i] * (di1_o * h2e[i] + di2_o);
+                end
+                ff = ff + h2_aten * di2_o;
+                gg = gg + h2_aten * di2_i;
+                for (i = 0; i < 3; i = i + 1) begin
+                    ff = ff + p2_o[i];
+                    gg = gg + p2_i[i];
+                end
+            end
+
+            // Branch rows yc*v - i = ff (resp. gg), solved for the port voltage.
+            yc = sqtcdl + h1 * h1cc;
+            V(br1) <+ (I(br1) + ff) / yc;
+            V(br2) <+ (I(br2) + gg) / yc;
+        end
+
+        // ---- accepted-point bookkeeping (TXLload's accept loop) ----
+        // Runs on every evaluation; only an accepted evaluation's result is held.
+        if (analysis("tran") && ok) begin
+            tps = floor(t * 1e12);
+            if (t == 0.0 || nh == 0) begin
+                // DC seed: h1/h3 at their steady values, h2 at zero. The complex
+                // h3 pair is seeded by plain real division (txlload.c:187-192).
+                nh = 1;
+                ht[0] = 0.0; hvi[0] = v1; hvo[0] = v2; hii[0] = I(br1); hio[0] = I(br2);
+                dc1 = v1; dc2 = v2; vprev_i = v1; vprev_o = v2; dv_i = 0.0; dv_o = 0.0;
+                if (!lsl) begin
+                    for (i = 0; i < 3; i = i + 1) begin
+                        cnv1_i[i] = -v1 * h1_c[i] / h1_x[i];
+                        cnv1_o[i] = -v2 * h1_c[i] / h1_x[i];
+                        cnv2_i[i] = 0.0;
+                        cnv2_o[i] = 0.0;
+                    end
+                    for (i = 0; i < 6; i = i + 1) begin
+                        cnv3_i[i] = -v1 * h3_c[i] / h3_x[i];
+                        cnv3_o[i] = -v2 * h3_c[i] / h3_x[i];
+                    end
+                end
+            end else if (tps > ht[nh - 1]) begin
+                // Adopt the advanced h2/h3 states; advance h1 over the accepted
+                // segment (update_cnv_txl, slope in volts per ps).
+                delta = tps - ht[nh - 1];
+                bi = (v1 - vprev_i) / delta;
+                bo = (v2 - vprev_o) / delta;
+                dv_i = bi;
+                dv_o = bo;
+                vprev_i = v1;
+                vprev_o = v2;
+                if (!lsl) begin
+                    for (i = 0; i < 6; i = i + 1) begin
+                        cnv3_i[i] = p3_i[i];
+                        cnv3_o[i] = p3_o[i];
+                    end
+                    for (i = 0; i < 3; i = i + 1) begin
+                        cnv2_i[i] = p2_i[i];
+                        cnv2_o[i] = p2_o[i];
+                        tt = h1_c[i] / h1_x[i];
+                        // ngspice-compatible: bi accumulates the c/x product
+                        // across terms (never reset), as update_cnv_txl does.
+                        bi = bi * tt;
+                        bo = bo * tt;
+                        cnv1_i[i] = (cnv1_i[i] - bi * delta) * h1e[i] + (h1e[i] - 1.0) * (v1 * tt + 1.0e12 * bi / h1_x[i]);
+                        cnv1_o[i] = (cnv1_o[i] - bo * delta) * h1e[i] + (h1e[i] - 1.0) * (v2 * tt + 1.0e12 * bo / h1_x[i]);
+                    end
+                end
+                // Prune the dead front: all delayed reads anchor at tail - tau,
+                // keep one bracket point before it; full buffer drops the oldest.
+                cutoff = tps - taul;
+                drop = 0;
+                while (drop + 1 < nh && ht[drop + 1] < cutoff) drop = drop + 1;
+                if (drop > 64 || nh == cap) begin
+                    if (nh == cap && drop == 0) drop = 1;
+                    for (k = 0; k + drop < nh; k = k + 1) begin
+                        ht[k] = ht[k + drop]; hvi[k] = hvi[k + drop]; hvo[k] = hvo[k + drop];
+                        hii[k] = hii[k + drop]; hio[k] = hio[k + drop];
+                    end
+                    nh = nh - drop;
+                end
+                ht[nh] = tps; hvi[nh] = v1; hvo[nh] = v2; hii[nh] = I(br1); hio[nh] = I(br2);
+                nh = nh + 1;
+            end
+            // A sub-ps step appends nothing (the reference merges it), but the
+            // host's next dt is still measured from it.
+            tlast = t;
+            $bound_step(0.9 * taul * 1e-12);   // ngspice's only TXL step control
+        end
+    end
+endmodule
