@@ -14,12 +14,19 @@
 // division, and update_cnv's slope accumulated across terms.
 //
 // The pinned VerA compiles this file (`vera --emit-zig --check` clean apart
-// from the W0650 the build allows); it has not been run against the native
-// fixtures. The gaps below cost speed and robustness, not compilation:
+// from the W0650 the build allows), and the host passes semantic analysis on
+// the 25 MB of Zig it emits, but LLVM ReleaseFast did not finish that object
+// in 12.5 h, so it has never run (docs/vera-gaps.md). The gaps below:
+//
+// VERA-GAP: held integers keep their integer type -- needed to reuse one loop
+//   variable inside and outside @(initial_step). VerA types a join of joins
+//   three deep as real (docs/vera-gaps.md), so the resets below loop on their
+//   own `kz` and `k` stays unheld.
 //
 // VERA-GAP: memory-backed arrays with runtime indexing -- needed for the
 //   2048-point delayed-read history (VerA scalarizes arrays, lib/ir/lower.zig
-//   declareVarDecl): this file emits 25 MB of Zig.
+//   declareVarDecl): this file emits 25 MB of Zig, and LLVM
+//   ReleaseFast did not finish compiling it in 12.5 h.
 // VERA-GAP: held analog-initial results -- needed for the Padé fit. VerA
 //   holds only variables assigned under @(...) (lib/ir/lower.zig scanHeld);
 //   an `analog initial` result reads as sel(is_analog_initial, value, 0), so
@@ -218,7 +225,7 @@ module txl(p1, n1, p2, n2);
     real cnv1_i[0:2], cnv1_o[0:2], cnv2_i[0:2], cnv2_o[0:2], cnv3_i[0:5], cnv3_o[0:5];
     real vprev_i, vprev_o, dv_i, dv_o, dc1, dc2, tlast;
     real ht[0:cap-1], hvi[0:cap-1], hvo[0:cap-1], hii[0:cap-1], hio[0:cap-1];
-    integer nh, drop, j;
+    integer nh, drop, j, kz;
 
     // ---- per-evaluation rebuild (right_consts_txl) ----
     // VERA-GAP: per-timepoint cache surviving Newton iterations -- needed so this rebuild runs once per timepoint
@@ -371,19 +378,20 @@ module txl(p1, n1, p2, n2);
 
     analog begin
         // Fresh transient. Assigning here is also what makes these held.
+        // VERA-GAP: held integers keep their integer type -- needed to use `k` here, not `kz`
         @(initial_step) begin
             nh = 0;
             tlast = 0.0;
             vprev_i = 0.0; vprev_o = 0.0; dv_i = 0.0; dv_o = 0.0; dc1 = 0.0; dc2 = 0.0;
-            for (k = 0; k < 6; k = k + 1) begin
-                cnv3_i[k] = 0.0;
-                cnv3_o[k] = 0.0;
+            for (kz = 0; kz < 6; kz = kz + 1) begin
+                cnv3_i[kz] = 0.0;
+                cnv3_o[kz] = 0.0;
             end
-            for (k = 0; k < 3; k = k + 1) begin
-                cnv1_i[k] = 0.0; cnv1_o[k] = 0.0; cnv2_i[k] = 0.0; cnv2_o[k] = 0.0;
+            for (kz = 0; kz < 3; kz = kz + 1) begin
+                cnv1_i[kz] = 0.0; cnv1_o[kz] = 0.0; cnv2_i[kz] = 0.0; cnv2_o[kz] = 0.0;
             end
-            for (k = 0; k < cap; k = k + 1) begin
-                ht[k] = 0.0; hvi[k] = 0.0; hvo[k] = 0.0; hii[k] = 0.0; hio[k] = 0.0;
+            for (kz = 0; kz < cap; kz = kz + 1) begin
+                ht[kz] = 0.0; hvi[kz] = 0.0; hvo[kz] = 0.0; hii[kz] = 0.0; hio[kz] = 0.0;
             end
         end
 

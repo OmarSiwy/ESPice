@@ -1613,7 +1613,9 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn collectParamsLocal(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
-            @setEvalBranchQuota(100_000);
+            // Scales with the field count: `paramField` runs per field at
+            // comptime, and txl.va's scalarized history has ~10k of them.
+            @setEvalBranchQuota(100_000 + 100 * (@typeInfo(D.Instance).@"struct".fields.len + @typeInfo(D.Model).@"struct".fields.len));
             const self: *Self = @ptrCast(@alignCast(ctx));
             try appendParams(D.Instance, self.instances, true, gpa, list);
             try appendParams(D.Model, self.models, false, gpa, list);
@@ -2354,7 +2356,7 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
         fn setParam(comptime T: type) *const fn ([*]u8, []const u8, f64) bool {
             return struct {
                 fn f(dest: [*]u8, param: []const u8, value: f64) bool {
-                    @setEvalBranchQuota(10_000);
+                    @setEvalBranchQuota(10_000 + 10 * @typeInfo(T).@"struct".fields.len);
                     if (!std.math.isFinite(value)) return false;
                     const p: *T = @ptrCast(@alignCast(dest));
                     inline for (@typeInfo(T).@"struct".fields) |field| {

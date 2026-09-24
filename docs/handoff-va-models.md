@@ -67,7 +67,7 @@ that needs it. The native `.zig` models remain the ones built and used.
 | file | compiles on pinned VerA | VERA-GAP features |
 |---|---|---|
 | ltra.va | no (`erfc` unknown, E0512) | 1. `erfc()` builtin (RC kernels)<br>2. memory-backed arrays: VerA scalarizes arrays, so this file emits 96 MB of Zig<br>3. growable history instead of a fixed cap<br>4. per-timepoint cache that survives Newton iterations and is dropped on rejection<br>5. dynamic timer re-arming: only the first wavefront breakpoint lands<br>6. held `analog initial` results: setup reruns on every evaluation |
-| txl.va | vera `--emit-zig --check` passes (26 MB of Zig), but the ESPice build fails: see below | 2, 4, 6<br>8. held integer variables keep their integer type (VerA bug) |
+| txl.va | vera `--emit-zig --check` passes (26 MB of Zig) and host sema passes, but LLVM did not finish the object in 12.5 h: see below | 2, 4, 6<br>8. held integer variables keep their integer type (VerA bug, worked around)<br>9. compile time (follows from 2) |
 | coupled_ltra.va | no (array slices as function arguments, E0511, 9 call sites) | 7. array-slice function arguments<br>plus 2, 4, 6. With temporaries in place of the slices, N=2 compiles. |
 
 The existing .va lines only partly cover the native ones:
@@ -75,32 +75,36 @@ The existing .va lines only partly cover the native ones:
 - lossy_tline.va only approximates RLC (lumped half-R).
 - Nothing implements the TXL Padé method or the CPL modal fit.
 
-## TXL validation (stopped when the budget ran out)
+## TXL validation (second pass)
 
-Validation ran in a scratch copy (`models/txl.va` registered, Y card routed
-to it). **txl.va does not build in ESPice.** The `-Dgpu=false` build ran
-8 min and failed with 3 errors. The generated txl.zig is 26 MB.
+The full gap list, with a minimal repro of the held-integer bug, is in
+`docs/vera-gaps.md`. That page is the to-do list for VerA.
 
-1. A VerA bug: the held integer loop variable `k` is emitted as a real
-   (`inst.txl__held__k = m.f3`, found R, expected i64). The other held
-   integer, `nh`, is fine.
-2. `src/analysis/eval.zig` ~1674: the comptime branch quota on the `knobs`
-   StaticStringMap is exceeded.
-3. `src/analysis/eval.zig` ~2791: the comptime branch quota in `setParam` is
-   exceeded.
-
-Workarounds exist in the scratch copy only (a separate held loop variable
-`kz`, raised quotas). The rebuild with them was killed before it finished, so
-**no TXL deck has run on the .va**. The native baseline passes both TXL decks
-(about 0.03–0.05 s each). Recommendation: don't switch.
+- The eval.zig quota blockers are fixed (ccab930). `collectParamsLocal` and
+  `setParam` now scale their comptime branch quota with the device's field
+  count, and the base stays the old constant. Checked with `-Dgpu=false`:
+  the espice binary is byte-identical to 6bfb0c0, all 616 fixture rawfiles
+  and exit codes are identical, and `zig build test` gives the same 518/616
+  fixtures and 304/304 unit tests. The default GPU build was not run here.
+  It is left to the joint GPU verification pass.
+- Held-integer bug: `lib/ir/analysis.zig` stops refining phi types after 2
+  sweeps, so a join of joins three deep stays `.real`. txl.va works around
+  it: the `@(initial_step)` resets loop on their own `kz`, so `k` is no
+  longer held. This is committed in models/native/txl.va and labelled.
+- With both fixed, `dev_txl` passes Zig sema in about 2 min, but LLVM
+  ReleaseFast did not finish that object in 12.5 h (killed, one thread,
+  about 0.6 GB RSS). The generated txl.zig is 26 MB, with 10,306 Instance
+  fields. **No TXL deck has run on the .va.** `txl_native.zig` stays the
+  Y-card device. The cause is gap 2 (scalarized arrays), recorded as gap 9
+  in vera-gaps.md.
 
 ## What's left
 
-1. TXL: fix the VerA held-integer typing bug (or keep the `kz` workaround).
-   Raise the two eval.zig comptime quotas. Then rebuild and run
-   `bench_tline_txl1_1_line` and `bench_tline_txl2_3_line` against native.
-   Weigh the 26 MB device's build time against the
-   O(history)-per-iteration slowdown (gap 4) before switching the Y card.
-2. VerA features 1–7 above, in VerA, not here.
+1. VerA: fix gaps 1-9 in `docs/vera-gaps.md`, in VerA, not here. Gap 2
+   (memory-backed arrays) comes first: until it lands, none of the three
+   line models builds in reasonable time.
+2. Then register txl.va (copy it into models/, route `addTxl` to it) and
+   diff `bench_tline_txl1_1_line` and `bench_tline_txl2_3_line` against
+   native before switching the Y card.
 3. Optional: sharing the MOS junction helpers through an `include` needs
    build.zig to track the included file as a vera input.
