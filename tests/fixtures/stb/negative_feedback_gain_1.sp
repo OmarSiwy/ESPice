@@ -1,6 +1,4 @@
 * Negative-feedback return ratio, sign and gain
-* KNOWN GAP: STB dispatch is rejected and does not yet implement the specified return-ratio measurement.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: negative_feedback_gain_1.expected.json
 Vin in 0 0
 Rin in sum 1k

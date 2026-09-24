@@ -1,6 +1,4 @@
 * Bypass fixture: pulse hits stage 1 of a 40-stage RC-diode ladder; the
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_bypass_idle_ladder.expected.json
 * Origin: benchmark/fixtures/bypass/idle_ladder/circuit.sp
 * wave dies within a few stages, leaving the tail latent (bypass food).

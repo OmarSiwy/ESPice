@@ -1,6 +1,4 @@
 * NMOS Level 1 large-signal transient: CMOS inverter switching.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_mos1_large_signal.expected.json
 * Origin: benchmark/fixtures/devices/mos1_large_signal/circuit.sp
 * Tests dynamic behavior with parasitic capacitances.

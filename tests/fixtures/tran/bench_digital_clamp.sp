@@ -1,6 +1,4 @@
 * Diode clamp on a logic line: limits overshoot to one diode drop above rail.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_digital_clamp.expected.json
 * Origin: benchmark/fixtures/digital/clamp/circuit.sp
 Vin in 0 DC 0 PULSE(0 6 0 1n 1n 20n 40n)

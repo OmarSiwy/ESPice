@@ -95,8 +95,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "bfe6660c67f553ba774184754f40b0ed3e93e19501504c830ff9cd8c86cb952c",
-  "known_gaps": [
-    "the current frequency helper stretches the grid to the stop instead of keeping the requested points-per-decade spacing"
-  ]
+  "netlist_sha256": "448bec897d889ba0687df4faae2f5bd3952a8065be9c14f32d17fddeaad72e79"
 }

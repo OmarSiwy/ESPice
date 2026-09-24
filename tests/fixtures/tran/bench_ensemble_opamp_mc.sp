@@ -1,6 +1,4 @@
 * Ensemble MC fixture (README 2.6, load-bearing): 5-transistor BJT op-amp,
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_ensemble_opamp_mc.expected.json
 * Origin: benchmark/fixtures/ensemble/opamp_mc/circuit.sp
 * unity follower, step response. [sampling] declares 3-sigma mismatch MC over

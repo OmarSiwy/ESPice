@@ -1,6 +1,4 @@
 * Parallel CMOS inverters: 100 instances — GPU batch stress test
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: scaling_parallel_inverters_100.expected.json
 * Origin: benchmark/fixtures/scaling/parallel_inverters_100/circuit.sp
 .model nch NMOS(level=1 VTO=0.7 KP=110u GAMMA=0.4 LAMBDA=0.04 PHI=0.65)

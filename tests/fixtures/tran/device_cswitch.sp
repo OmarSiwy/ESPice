@@ -1,6 +1,4 @@
 * Current-controlled switch: W device with ramping control current.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_cswitch.expected.json
 * Origin: benchmark/fixtures/devices/cswitch/circuit.sp
 Vin in 0 DC 10

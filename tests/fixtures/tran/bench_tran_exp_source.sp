@@ -1,6 +1,4 @@
 * EXP stimulus into an RC: no other deck in the suite used one.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_tran_exp_source.expected.json
 * Origin: benchmark/fixtures/tran/exp_source/circuit.sp
 * PULSE, SIN and PWL are all covered several times over; EXP and SFFM were
