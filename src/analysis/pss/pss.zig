@@ -26,6 +26,7 @@ const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
+const integrator = @import("../tran/integrator.zig");
 const dense_lu = @import("solvers").dense_lu;
 const Gmres = @import("solvers").gmres.Gmres(f64);
 
@@ -132,17 +133,7 @@ const PeriodHook = struct {
             const n: usize = ckt.n;
             // q_vec now holds q(x) for this iteration — snapshot for accept.
             simdCopy(self.q_snap[0..n], ckt.q_vec[0..n]);
-            const av: V = @splat(self.alpha);
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const r: V = ckt.rhs[i..][0..W].*;
-                const qv: V = ckt.q_vec[i..][0..W].*;
-                const qp: V = self.q_prev[i..][0..W].*;
-                const ip: V = self.i_prev[i..][0..W].*;
-                ckt.rhs[i..][0..W].* = r + av * (qv - qp) - ip;
-            }
-            while (i < n) : (i += 1)
-                ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - self.i_prev[i];
+            integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
         }
     }
 
@@ -218,19 +209,8 @@ fn integrateOnePeriod(
         if (has_charge) {
             // Accept: trap dynamic current i = alpha*(q - q_prev) - i_prev,
             // then rotate the charge history via copy (no std.mem.swap).
-            const av: V = @splat(alpha);
-            var j: usize = 0;
-            while (j + W <= n) : (j += W) {
-                const q0: V = sc.q_cur[j..][0..W].*;
-                const q1: V = sc.q_prev[j..][0..W].*;
-                const ip: V = sc.i_prev[j..][0..W].*;
-                sc.i_prev[j..][0..W].* = av * (q0 - q1) - ip;
-                sc.q_prev[j..][0..W].* = q0;
-            }
-            while (j < n) : (j += 1) {
-                sc.i_prev[j] = alpha * (sc.q_cur[j] - sc.q_prev[j]) - sc.i_prev[j];
-                sc.q_prev[j] = sc.q_cur[j];
-            }
+            integrator.companionAt(.trapezoidal, false, sc.i_prev[0..n], sc.q_cur[0..n], sc.q_prev[0..n], &.{}, sc.i_prev[0..n], .{ .ag0 = alpha, .ag2 = 0 });
+            simdCopy(sc.q_prev[0..n], sc.q_cur[0..n]);
         }
         if (wave.len != 0) {
             const row = wave[(k + 1) * ncols ..][0..ncols];

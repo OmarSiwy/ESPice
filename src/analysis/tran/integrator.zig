@@ -77,33 +77,51 @@ pub fn lteCoeff(method: Method) f64 {
 pub fn advanceCurrent(method: Method, i_cur: []f64, q0: []const f64, q1: []const f64, q2: []const f64, c: Coeffs) void {
     // Comptime method, for the reason `stepBound` gives.
     switch (method) {
-        inline else => |m| advanceCurrentAt(m, i_cur, q0, q1, q2, c),
+        inline else => |m| companionAt(m, false, i_cur, q0, q1, q2, i_cur, c),
     }
 }
 
-fn advanceCurrentAt(comptime method: Method, i_cur: []f64, q0: []const f64, q1: []const f64, q2: []const f64, c: Coeffs) void {
+/// The one companion kernel, `d = ag0·(q0 − q1)` plus the method's history
+/// term, over any index space:
+///   accumulate = false: out  = d [− i_prev | − ag2·(q1 − q2)]  (NIintegrate)
+///   accumulate = true:  out += the same, the Newton residual's dynamic part
+/// `i_prev` may alias `out` (the in-place recurrence). With `accumulate` the
+/// vector body sums (out + d) − history while the scalar tail sums
+/// out + (d − history): the two orders the hand copies had, kept so every
+/// deck stays bit-identical. q2 is read by gear only, i_prev by trap only.
+pub fn companionAt(
+    comptime method: Method,
+    comptime accumulate: bool,
+    out: []f64,
+    q0: []const f64,
+    q1: []const f64,
+    q2: []const f64,
+    i_prev: []const f64,
+    c: Coeffs,
+) void {
     const V = @Vector(W, f64);
     const av: V = @splat(c.ag0);
     const a2: V = @splat(c.ag2);
     var j: usize = 0;
-    while (j + W <= i_cur.len) : (j += W) {
+    while (j + W <= out.len) : (j += W) {
         const a: V = q0[j..][0..W].*;
         const b: V = q1[j..][0..W].*;
-        const ip: V = i_cur[j..][0..W].*;
         const d = av * (a - b);
-        i_cur[j..][0..W].* = switch (method) {
-            .trapezoidal => d - ip,
-            .gear_2 => d - a2 * (b - @as(V, q2[j..][0..W].*)),
-            .backward_euler => d,
+        const base = if (accumulate) @as(V, out[j..][0..W].*) + d else d;
+        out[j..][0..W].* = switch (method) {
+            .trapezoidal => base - @as(V, i_prev[j..][0..W].*),
+            .gear_2 => base - a2 * (b - @as(V, q2[j..][0..W].*)),
+            .backward_euler => base,
         };
     }
-    while (j < i_cur.len) : (j += 1) {
+    while (j < out.len) : (j += 1) {
         const d = c.ag0 * (q0[j] - q1[j]);
-        i_cur[j] = switch (method) {
-            .trapezoidal => d - i_cur[j],
+        const v = switch (method) {
+            .trapezoidal => d - i_prev[j],
             .gear_2 => d - c.ag2 * (q1[j] - q2[j]),
             .backward_euler => d,
         };
+        out[j] = if (accumulate) out[j] + v else v;
     }
 }
 

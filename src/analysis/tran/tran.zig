@@ -34,11 +34,13 @@ const Stats = struct {
 
 /// Newton hook: companion RHS from the q plane, matrix = G + alpha*C.
 const TranHook = struct {
-    alpha: f64,
+    /// The method this attempt integrates with (BE while order-dropped).
+    method: Method,
+    /// ag0 is alpha, the q(x) coefficient; ag2 the gear q_prev2 coefficient.
+    c: integrator.Coeffs,
     q_prev: []const f64,
-    i_prev: ?[]const f64, // trap only
-    q_prev2: ?[]const f64, // gear_2 only
-    ag2: f64, // gear_2: the q_prev2 coefficient (integrator.Coeffs.ag2)
+    i_prev: []const f64, // read by trap only
+    q_prev2: []const f64, // read by gear_2 only
     a_vals: []f64,
     q_snap: ?[]f64,
     /// Per-device-state charge snapshot, same cadence as `q_snap` and for the
@@ -54,55 +56,21 @@ const TranHook = struct {
         if (self.qt_snap) |snap| ckt.snapshotQTape(snap);
         if (self.has_charge) {
             const n: usize = ckt.n;
-            const V = @Vector(W, f64);
-            const av: V = @splat(self.alpha);
-            var i: usize = 0;
-            if (self.q_prev2) |qp2| {
-                // Gear-2: rhs += ag0*(q - q_prev) - ag2*(q_prev - q_prev2)
-                const hv: V = @splat(self.ag2);
-                while (i + W <= n) : (i += W) {
-                    const r: V = ckt.rhs[i..][0..W].*;
-                    const qv: V = ckt.q_vec[i..][0..W].*;
-                    const qp: V = self.q_prev[i..][0..W].*;
-                    const qp2v: V = qp2[i..][0..W].*;
-                    ckt.rhs[i..][0..W].* = r + av * (qv - qp) - hv * (qp - qp2v);
-                }
-                while (i < n) : (i += 1)
-                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - self.ag2 * (self.q_prev[i] - qp2[i]);
-            } else if (self.i_prev) |ipv| {
-                // Trapezoidal
-                while (i + W <= n) : (i += W) {
-                    const r: V = ckt.rhs[i..][0..W].*;
-                    const qv: V = ckt.q_vec[i..][0..W].*;
-                    const qp: V = self.q_prev[i..][0..W].*;
-                    const ip: V = ipv[i..][0..W].*;
-                    ckt.rhs[i..][0..W].* = r + av * (qv - qp) - ip;
-                }
-                while (i < n) : (i += 1)
-                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]) - ipv[i];
-            } else {
-                // Backward Euler (or Gear-2 first-step fallback)
-                while (i + W <= n) : (i += W) {
-                    const r: V = ckt.rhs[i..][0..W].*;
-                    const qv: V = ckt.q_vec[i..][0..W].*;
-                    const qp: V = self.q_prev[i..][0..W].*;
-                    ckt.rhs[i..][0..W].* = r + av * (qv - qp);
-                }
-                while (i < n) : (i += 1)
-                    ckt.rhs[i] += self.alpha * (ckt.q_vec[i] - self.q_prev[i]);
+            switch (self.method) {
+                inline else => |m| integrator.companionAt(m, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev, self.q_prev2, self.i_prev, self.c),
             }
         }
     }
 
     pub fn vals(self: TranHook, ckt: *root.Circuit) []f64 {
         if (!self.has_charge) return ckt.g_vals;
-        ckt.combineGC(self.alpha, self.a_vals);
+        ckt.combineGC(self.c.ag0, self.a_vals);
         return self.a_vals;
     }
     /// One diagonal, without materializing the whole combined plane —
     /// see `Circuit.gcAt`. The residual gate calls this per unknown.
     pub fn diagAt(self: TranHook, ckt: *root.Circuit, slot: u32) f64 {
-        return if (self.has_charge) ckt.gcAt(self.alpha, slot) else ckt.g_vals[slot];
+        return if (self.has_charge) ckt.gcAt(self.c.ag0, slot) else ckt.g_vals[slot];
     }
 };
 
@@ -335,17 +303,15 @@ pub fn simulate(
             .initial_step = steps == 0,
             .final_step = t + dt >= options.t_stop,
         });
-        const use_gear = gear and !use_be;
-        const use_trap = trap and !use_be;
         const eff_method: Method = if (use_be) .backward_euler else options.method;
         const cf = integrator.coeffs(eff_method, dt, dt_prev);
         const alpha_val = cf.ag0;
         const hook = TranHook{
-            .alpha = alpha_val,
+            .method = eff_method,
+            .c = cf,
             .q_prev = q_hist[1],
-            .i_prev = if (use_trap and has_charge) i_prev else null,
-            .q_prev2 = if (use_gear and has_charge) q_hist[2] else null,
-            .ag2 = cf.ag2,
+            .i_prev = i_prev,
+            .q_prev2 = q_hist[2],
             .a_vals = a_vals,
             .q_snap = if (has_charge) q_hist[0] else null,
             .qt_snap = if (n_qt > 0) qt_hist[0] else null,
