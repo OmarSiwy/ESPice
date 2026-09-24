@@ -16,6 +16,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
+const num = @import("numerics");
 const converger = @import("solvers").converger;
 const solvers = @import("solvers");
 const dense_lu = solvers.dense_lu;
@@ -280,8 +281,8 @@ pub fn solve(
             }
         }
 
-        const max_residual = normInf(f_hat);
-        if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, normInf(x_hat) });
+        const max_residual = num.normInf(f_hat);
+        if (converger.hbTrace()) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, num.normInf(x_hat) });
         if (max_residual < options.hb_tol) {
             extractSpectra(x_hat, probes, spectra, nf);
             return .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual };
@@ -292,7 +293,7 @@ pub fn solve(
             // still holds that direction, so no Jacobian is rebuilt.
             step *= 0.5;
             simdCopy(x_hat, x_prev);
-            axpy(x_hat, step, dx_hat);
+            num.axpy(x_hat, step, dx_hat);
             retrying = true;
             continue;
         }
@@ -419,41 +420,16 @@ pub fn solve(
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
         simdCopy(x_prev, x_hat);
-        axpy(x_hat, step, dx_hat);
+        num.axpy(x_hat, step, dx_hat);
     }
 
-    const final_norm = normInf(f_hat);
+    const final_norm = num.normInf(f_hat);
     extractSpectra(x_hat, probes, spectra, nf);
     return .{ .converged = false, .iterations = options.max_iter, .residual_norm = final_norm };
 }
 
 /// The shortest step the line search will take before giving up on shortening.
 const min_step: f64 = 1.0 / 1024.0;
-
-/// dst += a * src, over the whole slice.
-inline fn axpy(dst: []f64, a: f64, src: []const f64) void {
-    const av: V = @splat(a);
-    var i: usize = 0;
-    while (i + W <= dst.len) : (i += W) {
-        const dv: V = dst[i..][0..W].*;
-        const sv: V = src[i..][0..W].*;
-        dst[i..][0..W].* = dv + av * sv;
-    }
-    while (i < dst.len) : (i += 1) dst[i] += a * src[i];
-}
-
-inline fn normInf(buf: []const f64) f64 {
-    var mx: f64 = 0;
-    var ri: usize = 0;
-    while (ri + W <= buf.len) : (ri += W) {
-        const fv: V = buf[ri..][0..W].*;
-        mx = @max(mx, @reduce(.Max, @abs(fv)));
-    }
-    while (ri < buf.len) : (ri += 1) {
-        mx = @max(mx, @abs(buf[ri]));
-    }
-    return mx;
-}
 
 /// Copy each probed node's [dc, cos_1, sin_1, ...] block out of x_hat —
 /// spectra shares x_hat's per-node layout exactly.

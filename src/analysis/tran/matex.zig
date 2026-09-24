@@ -8,6 +8,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
+const num = @import("numerics");
 const solvers = @import("solvers");
 
 const DenseLu = solvers.dense_lu.DenseLu(f64);
@@ -202,37 +203,6 @@ fn denseMatMul(m: usize, A: []const f64, B: []const f64, C: []f64) void {
     }
 }
 
-/// SIMD axpy: y[i] += a * x[i]
-fn simdAxpy(a: f64, x: []const f64, y: []f64, n: usize) void {
-    const av: V = @splat(a);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const xv: V = x[i..][0..W].*;
-        const yv: V = y[i..][0..W].*;
-        y[i..][0..W].* = yv + av * xv;
-    }
-    while (i < n) : (i += 1) y[i] += a * x[i];
-}
-
-/// SIMD dot product
-fn simdDot(a: []const f64, b: []const f64, n: usize) f64 {
-    var acc: V = @splat(@as(f64, 0));
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const av: V = a[i..][0..W].*;
-        const bv: V = b[i..][0..W].*;
-        acc += av * bv;
-    }
-    var sum = @reduce(.Add, acc);
-    while (i < n) : (i += 1) sum += a[i] * b[i];
-    return sum;
-}
-
-/// SIMD 2-norm
-fn simdNorm(x: []const f64, n: usize) f64 {
-    return @sqrt(simdDot(x, x, n));
-}
-
 // ---------------------------------------------------------------------------
 // Arnoldi iteration for R-MATEX: basis of K_m((C + γG)⁻¹ C, v)
 //
@@ -271,7 +241,7 @@ fn arnoldi(
     const nn: usize = n;
 
     // v1 = v / ||v||
-    const beta = simdNorm(v, nn);
+    const beta = @sqrt(num.dot(v[0..nn], v[0..nn]));
     if (beta < 1e-300) return .{ .m = 0, .beta = 0 };
 
     const inv_beta = 1.0 / beta;
@@ -302,13 +272,13 @@ fn arnoldi(
         // Modified Gram-Schmidt orthogonalization
         for (0..jj + 1) |k| {
             const vk = V_basis[k * nn ..][0..nn];
-            const h_kj = simdDot(tmp2[0..nn], vk, nn);
+            const h_kj = num.dot(tmp2[0..nn], vk[0..nn]);
             H[k * m_max + jj] = h_kj;
-            simdAxpy(-h_kj, vk, tmp2[0..nn], nn);
+            num.axpy(tmp2[0..nn], -h_kj, vk[0..nn]);
         }
 
         // h_{j+1,j} = ||w||
-        const h_jp1_j = simdNorm(tmp2[0..nn], nn);
+        const h_jp1_j = @sqrt(num.dot(tmp2[0..nn], tmp2[0..nn]));
         if (h_jp1_j < 1e-300) {
             // Lucky breakdown — exact invariant subspace
             return .{ .m = j + 1, .beta = beta };
@@ -798,7 +768,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             DenseLu.factorize(m, H_copy[0..msq], piv) catch {
                 // Singular H — fall back to forward Euler
                 simdCopy(x_new[0..n], x[0..n]);
-                simdAxpy(h, b_t[0..n], x_new[0..n], n);
+                num.axpy(x_new[0..n], h, b_t[0..n]);
                 simdCopy(x[0..n], x_new[0..n]);
                 t += h;
                 steps += 1;
@@ -829,7 +799,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             for (0..m) |k| {
                 const coeff = ar.beta * expm_out[k * m]; // expm[k,0]
                 const vk = V_basis[k * n ..][0..n];
-                simdAxpy(coeff, vk, x_new[0..n], n);
+                num.axpy(x_new[0..n], coeff, vk[0..n]);
             }
         }
 
@@ -878,7 +848,4 @@ pub const test_access = if (@import("builtin").is_test) .{
     .buildCombinedVals = buildCombinedVals,
     .denseMatMul = denseMatMul,
     .expmSmall = expmSmall,
-    .simdAxpy = simdAxpy,
-    .simdDot = simdDot,
-    .simdNorm = simdNorm,
 } else {};
