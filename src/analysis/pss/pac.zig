@@ -9,8 +9,11 @@
 //!      solves at n_time_samples per period.
 //!   2. Sample G(t_k) and C(t_k) (conductance and capacitance Jacobians) at
 //!      N uniformly-spaced points within one LO period — one ckt.eval per
-//!      sample fills both planes, denseG/denseC capture them.
-//!   3. Fourier-decompose G and C into harmonic coefficients G_m, C_m via FFT.
+//!      sample fills both planes, captured slot-major over the CSC pattern.
+//!   3. Fourier-decompose each pattern slot of G and C into harmonic
+//!      coefficients G_m, C_m via FFT. A structurally zero entry has an
+//!      all-zero series whose FFT is +0 in every bin, and adding +0 into the
+//!      zeroed conversion matrix is a no-op, so the pattern is the whole job.
 //!   4. For each input frequency f_in, build and solve the LPTV conversion
 //!      matrix that couples sidebands f_in + m*f_LO for m in [-M..+M].
 //!   5. Result: complex transfer (gain + phase) at each sideband frequency.
@@ -58,8 +61,7 @@ pub fn sweep(
     std.debug.assert(out.len == @as(usize, n_freqs) * (if (adjoint) nn else n_sb));
 
     const linearization = try linearize(ckt, x_init, options, allocator);
-    defer allocator.free(linearization.g_hat);
-    defer allocator.free(linearization.c_hat);
+    defer linearization.deinit(allocator);
 
     // The LPTV system couples n_sb sidebands, each of dimension n. For
     // sideband p (harmonic m_p = p - n_harm) at omega_p = 2*pi*(f_in + m_p*f_LO):
@@ -86,7 +88,7 @@ pub fn sweep(
         root.zeroSimd(a_work);
         root.zeroSimd(rhs_work);
 
-        buildConversionMatrix(adjoint, a_work, linearization.g_hat, linearization.c_hat, n, n_sb, nn, nn2, f_in, options);
+        buildConversionMatrix(adjoint, a_work, linearization, n, n_sb, nn, nn2, f_in, options);
         rhs_work[n_harm * n + exc_node] = exc_val; // real part
 
         try dense_lu.factorizeSolve(nn2, a_work, rhs_work, x_work);
@@ -101,14 +103,29 @@ pub fn sweep(
     }
 }
 
-/// Settled G/C Fourier coefficients shared by PAC and PXF. Caller owns both
-/// slices; sample/FFT scratch is released after the coefficients are captured.
+/// Settled G/C Fourier coefficients, bin-major over the circuit's CSC
+/// pattern: g_hat[m * nnz + slot] is slot's m-th coefficient, slot at
+/// (row_idx[slot], col) for col_ptr[col] <= slot < col_ptr[col + 1].
+pub const Linearization = struct {
+    g_hat: []const Complex,
+    c_hat: []const Complex,
+    col_ptr: []const u32,
+    row_idx: []const u32,
+
+    pub fn deinit(self: Linearization, allocator: std.mem.Allocator) void {
+        allocator.free(self.g_hat);
+        allocator.free(self.c_hat);
+    }
+};
+
+/// Settled G/C Fourier coefficients shared by PAC and PXF. Caller owns the
+/// coefficient slices; sample/FFT scratch is released before returning.
 pub inline fn linearize(
     ckt: *root.Circuit,
     x_init: []const f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !struct { g_hat: []Complex, c_hat: []Complex } {
+) !Linearization {
     const n: usize = ckt.n;
     const n_samples: usize = options.n_time_samples;
     const period = 1.0 / options.f_lo;
@@ -128,10 +145,12 @@ pub inline fn linearize(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    const g_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(g_mats);
-    const c_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(c_mats);
+    const nnz: usize = ckt.nnz;
+    // Slot-major samples: g_td[slot * n_samples + k].
+    const g_td = try allocator.alloc(f64, n_samples * nnz);
+    defer allocator.free(g_td);
+    const c_td = try allocator.alloc(f64, n_samples * nnz);
+    defer allocator.free(c_td);
 
     var t: f64 = 0;
     const settle_steps = (@as(usize, options.pss_periods) - 1) * n_samples;
@@ -144,7 +163,7 @@ pub inline fn linearize(
         };
     }
 
-    // -- Step 2: capture dense G(t_k), C(t_k) over the final period ---------
+    // -- Step 2: capture G(t_k), C(t_k) over the final period --------------
     for (0..n_samples) |k| {
         if (k != 0 and k % 64 == 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = k, .total = n_samples });
         t += dt;
@@ -153,15 +172,16 @@ pub inline fn linearize(
             else => {},
         };
         ckt.eval(x_cur, t);
-        ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
-        ckt.denseC(c_mats[k * n * n ..][0 .. n * n]);
+        for (ckt.g_vals[0..nnz], ckt.c_vals[0..nnz], 0..) |g, c, slot| {
+            g_td[slot * n_samples + k] = g;
+            c_td[slot * n_samples + k] = c;
+        }
     }
 
-    // -- Step 3: FFT each matrix element across time samples ----------------
-    // G_hat[m][row][col] and C_hat[m][row][col] as complex Fourier coefficients.
-    const g_hat = try allocator.alloc(Complex, n_samples * n * n);
+    // -- Step 3: FFT each pattern slot across time samples -----------------
+    const g_hat = try allocator.alloc(Complex, n_samples * nnz);
     errdefer allocator.free(g_hat);
-    const c_hat = try allocator.alloc(Complex, n_samples * n * n);
+    const c_hat = try allocator.alloc(Complex, n_samples * nnz);
     errdefer allocator.free(c_hat);
 
     const fft_re = try allocator.alloc(f64, n_samples);
@@ -171,36 +191,30 @@ pub inline fn linearize(
 
     const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
 
-    for (0..n) |row| {
-        for (0..n) |col| {
-            const elem_off = row * n + col;
-
-            inline for (.{ .{ g_mats, g_hat }, .{ c_mats, c_hat } }) |plane| {
-                for (0..n_samples) |k| {
-                    fft_re[k] = plane[0][k * n * n + elem_off];
-                    fft_im[k] = 0;
-                }
-                fft_mod.fft(fft_re, fft_im);
-                for (0..n_samples) |m| {
-                    plane[1][m * n * n + elem_off] = .{
-                        .re = fft_re[m] * inv_n,
-                        .im = fft_im[m] * inv_n,
-                    };
-                }
+    for (0..nnz) |slot| {
+        inline for (.{ .{ g_td, g_hat }, .{ c_td, c_hat } }) |plane| {
+            @memcpy(fft_re, plane[0][slot * n_samples ..][0..n_samples]);
+            @memset(fft_im, 0);
+            fft_mod.fft(fft_re, fft_im);
+            for (0..n_samples) |m| {
+                plane[1][m * nnz + slot] = .{
+                    .re = fft_re[m] * inv_n,
+                    .im = fft_im[m] * inv_n,
+                };
             }
         }
     }
 
-    return .{ .g_hat = g_hat, .c_hat = c_hat };
+    return .{ .g_hat = g_hat, .c_hat = c_hat, .col_ptr = ckt.col_ptr, .row_idx = ckt.row_idx };
 }
 
 /// Fill the zeroed real-expanded LPTV matrix, optionally storing its transpose.
 /// The transpose is specialized at comptime so PXF needs no extra matrix pass.
+/// Each (p, q, row, col) owns its four entries, so slot order is free.
 pub inline fn buildConversionMatrix(
     comptime transpose: bool,
     a_work: []f64,
-    g_hat: []const Complex,
-    c_hat: []const Complex,
+    lin: Linearization,
     n: usize,
     n_sb: usize,
     nn: usize,
@@ -219,11 +233,13 @@ pub inline fn buildConversionMatrix(
             const m_diff = m_p - m_q;
 
             const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
+            const nnz = lin.g_hat.len / n_samples;
 
-            for (0..n) |row| {
-                for (0..n) |col| {
-                    const g_coeff = g_hat[fft_idx * n * n + row * n + col];
-                    const c_coeff = c_hat[fft_idx * n * n + row * n + col];
+            for (0..n) |col| {
+                for (lin.col_ptr[col]..lin.col_ptr[col + 1]) |slot| {
+                    const row: usize = lin.row_idx[slot];
+                    const g_coeff = lin.g_hat[fft_idx * nnz + slot];
+                    const c_coeff = lin.c_hat[fft_idx * nnz + slot];
 
                     // (G + j*omega*C) complex coefficient:
                     // real part: G_re - omega*C_im

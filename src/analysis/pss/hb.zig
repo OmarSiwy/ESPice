@@ -50,6 +50,7 @@ pub fn solve(
     allocator: std.mem.Allocator,
 ) !SolveResult {
     const n: usize = ckt.n;
+    const nnz: usize = ckt.nnz;
     const nh: usize = options.n_harmonics;
     const nf: usize = 2 * nh + 1;
     const total_unknowns = n * nf;
@@ -67,11 +68,10 @@ pub fn solve(
         n * n + // c_mat
         total_unknowns * total_unknowns + // jac
         total_unknowns + // dx_hat
-        nf * n * n + // g_td (element-major, samples contiguous)
+        nf * nnz + // g_td (slot-major, samples contiguous)
         nf * nh + // basis_cos (harmonic-major)
         nf * nh + // basis_sin
         n + // x_sample (gather buffer for device eval)
-        n * n + // g_sample (denseG scatter temp)
         total_unknowns + // x_prev (line-search rewind point)
         2 * (nh + 1); // gc / gs: one node pair's G(t) spectrum
 
@@ -93,16 +93,14 @@ pub fn solve(
     off += total_unknowns * total_unknowns;
     const dx_hat = arena[off..][0..total_unknowns];
     off += total_unknowns;
-    const g_td = arena[off..][0 .. nf * n * n];
-    off += nf * n * n;
+    const g_td = arena[off..][0 .. nf * nnz];
+    off += nf * nnz;
     const basis_cos = arena[off..][0 .. nf * nh];
     off += nf * nh;
     const basis_sin = arena[off..][0 .. nf * nh];
     off += nf * nh;
     const x_sample = arena[off..][0..n];
     off += n;
-    const g_sample = arena[off..][0 .. n * n];
-    off += n * n;
     const x_prev = arena[off..][0..total_unknowns];
     off += total_unknowns;
     const gc = arena[off..][0 .. nh + 1];
@@ -201,12 +199,7 @@ pub fn solve(
             ckt.setSimState(.{ .t = t_k, .dt = dt_sample, .kind = .tran });
             ckt.eval(x_sample, t_k);
             for (0..n) |node| f_td[node * nf + k] = ckt.rhs[node];
-            ckt.denseG(g_sample);
-            for (0..n) |row| {
-                for (0..n) |col| {
-                    g_td[(row * n + col) * nf + k] = g_sample[row * n + col];
-                }
-            }
+            for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nf + k] = g;
             if (k == 0) {
                 // dQ/dx at the DC sample, straight off the analytic C plane
                 if (ckt.has_charge) ckt.denseC(c_mat) else root.zeroSimd(c_mat);
@@ -321,9 +314,13 @@ pub fn solve(
         // and `hb/diode_rectifier_rc` ran the iteration limit out instead.
         root.zeroSimd(jac);
 
-        for (0..n) |row| {
-            for (0..n) |col| {
-                const g_slice = g_td[(row * n + col) * nf ..][0..nf];
+        // Only the pattern's slots: a structurally zero (row, col) has an
+        // all-zero G(t), every projection of which is +0, which is exactly
+        // what zeroSimd left in its jac entries.
+        for (0..n) |col| {
+            for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
+                const row: usize = ckt.row_idx[slot];
+                const g_slice = g_td[slot * nf ..][0..nf];
 
                 // Gc[0] = 2·mean(G); Gc[k>0], Gs[k>0] = the 2/nf projections.
                 var g_dc_acc: V = @splat(0.0);
