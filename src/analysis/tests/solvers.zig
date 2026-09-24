@@ -3463,6 +3463,91 @@ const SparseTests = struct {
         }
     }
 
+    test "factor: supernode panels are bitwise the column-at-a-time refactor" {
+        // A 24x24 grid Laplacian under AMD fills into supernodes with L
+        // columns past panel_min_rows, so `factor` switches to its panel
+        // loop. `refactor` replays the same U order one column at a time
+        // (the scalar oracle); the panel kernels promise the same operations
+        // per row in the same order, so the factors must match bit for bit.
+        // Unknown `v` is void (structural zeros only) to cover a fabricated
+        // pivot inside the supernodal loop.
+        inline for (.{ f64, f32 }) |T| {
+            const gpa = testing.allocator;
+            const k = 24;
+            const n = k * k + 1;
+            const v = k * k;
+            var rng = std.Random.DefaultPrng.init(0x9A1E);
+            const r = rng.random();
+            var col_ptr: [n + 1]u32 = undefined;
+            var row_idx: std.ArrayList(u32) = .empty;
+            defer row_idx.deinit(gpa);
+            var vals: std.ArrayList(T) = .empty;
+            defer vals.deinit(gpa);
+            col_ptr[0] = 0;
+            for (0..n) |j| {
+                if (j == v) {
+                    for ([_]u32{ 3, 100, v }) |i| {
+                        try row_idx.append(gpa, i);
+                        try vals.append(gpa, 0);
+                    }
+                } else {
+                    const x = j % k;
+                    const y = j / k;
+                    const nb = [_]?usize{
+                        if (y > 0) j - k else null,
+                        if (x > 0) j - 1 else null,
+                        j,
+                        if (x + 1 < k) j + 1 else null,
+                        if (y + 1 < k) j + k else null,
+                    };
+                    for (nb) |o| if (o) |i| {
+                        try row_idx.append(gpa, @intCast(i));
+                        try vals.append(gpa, if (i == j) 4 + r.float(T) else -0.5 - r.float(T));
+                    };
+                    if (j == 3 or j == 100) {
+                        try row_idx.append(gpa, v);
+                        try vals.append(gpa, 0);
+                    }
+                }
+                col_ptr[j + 1] = @intCast(row_idx.items.len);
+            }
+            var q: [n]u32 = undefined;
+            const ws_buf = try gpa.alloc(u32, order.wsSize(n, col_ptr[n]));
+            defer gpa.free(ws_buf);
+            var ws = order.Ws.init(ws_buf);
+            try order.order(n, &col_ptr, row_idx.items, &q, &ws);
+
+            var lu = try SparseLu(T).init(gpa, n, &col_ptr, row_idx.items, &q);
+            defer lu.deinit(gpa);
+            try lu.factor(gpa, &col_ptr, row_idx.items, vals.items, 1e-3);
+            try testing.expect(lu.panels.items.len > 0);
+            const lx = try gpa.dupe(T, lu.lx.items);
+            defer gpa.free(lx);
+            const ux = try gpa.dupe(T, lu.ux.items);
+            defer gpa.free(ux);
+            const ud = try gpa.dupe(T, lu.udiag);
+            defer gpa.free(ud);
+            try lu.refactor(&col_ptr, vals.items, 0);
+            try testing.expectEqualSlices(T, lx, lu.lx.items);
+            try testing.expectEqualSlices(T, ux, lu.ux.items);
+            try testing.expectEqualSlices(T, ud, lu.udiag);
+            for (lu.w) |wi| try testing.expectEqual(@as(T, 0), wi);
+
+            // The reach is complete: A x = b holds for the factored system.
+            var b: [n]T = undefined;
+            for (&b) |*bi| bi.* = r.float(T) - 0.5;
+            var sol: [n]T = undefined;
+            lu.solve(&b, &sol);
+            var res = b;
+            for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
+                res[row_idx.items[p]] -= vals.items[p] * sol[j];
+            };
+            res[v] -= sol[v]; // the fabricated unit pivot
+            const tol: T = if (T == f64) 1e-12 else 1e-4;
+            for (res) |ri| try testing.expect(@abs(ri) < tol);
+        }
+    }
+
     test "w is all-zero after factor, after refactor, and after a failed refactor" {
         // `factor` reads 0 out of every fill row it does not scatter, so whatever
         // ran before it must hand `w` back clean — refactor's per-column zeroing
