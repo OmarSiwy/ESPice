@@ -247,6 +247,22 @@ including one set where the growth monitor fails in both.
 
 All 616 decks byte-identical in raw, stdout and exit code.
 
+The forward substitution of a tape matrix then got the same treatment: one
+flat pass over L in column order (`lsrc` gives each entry's column) with a
+per-entry zero skip, instead of a `scatterAxpy` per column. The skip keeps
+the column loop's semantics exactly: a zero y[k] leaves its rows alone, so a
+-0 stays -0 (the differential case solves an all -0 right-hand side, which
+catches a skip-free variant). Back substitution keeps its per-column loop,
+since each column divides by its pivot before its entries run.
+
+| measure (callgrind Ir) | before | after |
+|---|---|---|
+| bench per Newton step, vacask_mul | 2,790 | 2,688 |
+| `vacask_mul` whole run | 11,493.7M | 11,358.5M |
+| `vacask_graetz` whole run | 17,472.7M | 17,320.8M |
+| `scaling_inverter_chain_256` whole run | 4,616.5M | 4,596.7M |
+| `scaling_parallel_inverters_100` whole run | 348.5M | 347.1M |
+
 ## Converger: per-iterate O(n) passes
 
 `newton` computed `norm_f = max |rhs|` on every iterate, and nothing but the

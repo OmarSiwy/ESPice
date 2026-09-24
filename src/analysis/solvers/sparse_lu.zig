@@ -96,6 +96,7 @@ pub fn SparseLu(comptime T: type) type {
         tape: std.ArrayList([3]u32) = .empty,
         tape_col: []u32, // column k's flops are tape[tape_col[k]..tape_col[k+1]]
         amap: []u32, // A entry p -> its slot in tv
+        lsrc: std.ArrayList(u32) = .empty, // L entry q -> its column; tape only
         /// Slot values: ux ++ udiag ++ lx ++ one discard slot.
         tv: std.ArrayList(T) = .empty,
 
@@ -197,6 +198,7 @@ pub fn SparseLu(comptime T: type) type {
             gpa.free(self.tape_col);
             gpa.free(self.amap);
             self.tape.deinit(gpa);
+            self.lsrc.deinit(gpa);
             self.tv.deinit(gpa);
             self.panels.deinit(gpa);
             self.panel_rows.deinit(gpa);
@@ -858,6 +860,8 @@ pub fn SparseLu(comptime T: type) type {
             const lx0 = nu + n;
             const discard: u32 = lx0 + @as(u32, @intCast(li.len));
             try self.tape.ensureTotalCapacityPrecise(gpa, flops);
+            try self.lsrc.resize(gpa, li.len);
+            for (0..n) |k| @memset(self.lsrc.items[lp[k]..lp[k + 1]], @intCast(k));
             try self.tv.resize(gpa, discard + 1);
             const pos = self.flag; // DFS scratch, free until the next factor
             for (0..n) |k| {
@@ -964,7 +968,15 @@ pub fn SparseLu(comptime T: type) type {
             for (b, 0..) |bi, r| y[self.pinv[r]] = bi;
 
             // 2. L y' = y (forward substitution, L is unit lower triangular)
-            for (0..self.n) |k| {
+            if (self.tv.items.len != 0) {
+                // Tape matrices: one flat pass over L in column order, no
+                // per-column loop setup. A zero y[k] leaves its rows alone,
+                // as the column loop's skip does (signed zeros included).
+                for (li, lx, self.lsrc.items) |r, l, k| {
+                    const yk = y[k];
+                    if (yk != 0) y[r] -= l * yk;
+                }
+            } else for (0..self.n) |k| {
                 const yk = y[k];
                 if (yk == 0) continue;
                 scatterAxpy(y, li, lx, lp[k], lp[k + 1], yk);
