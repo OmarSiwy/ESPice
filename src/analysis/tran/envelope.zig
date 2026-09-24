@@ -17,10 +17,6 @@ const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const converger = @import("solvers").converger;
 
-// ponytail: SIMD width for all vectorized loops
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
-
 pub const Options = @import("requests").Envelope;
 
 pub const SimResult = struct {
@@ -248,44 +244,14 @@ fn coarseAdvance(
     return true;
 }
 
-/// Extract peak value from a waveform slice (SIMD).
-pub fn extractPeak(values: []const f64) f64 {
-    if (values.len == 0) return 0;
-    var peak_v: V = @splat(0.0);
-    var i: usize = 0;
-    while (i + W <= values.len) : (i += W) {
-        const v: V = values[i..][0..W].*;
-        peak_v = @max(peak_v, @abs(v));
-    }
-    var peak: f64 = 0;
-    inline for (0..W) |lane| peak = @max(peak, peak_v[lane]);
-    while (i < values.len) : (i += 1) peak = @max(peak, @abs(values[i]));
-    return peak;
-}
-
-/// Extract RMS value from a waveform slice (SIMD).
-pub fn extractRMS(values: []const f64) f64 {
-    if (values.len == 0) return 0;
-    var acc: V = @splat(0.0);
-    var i: usize = 0;
-    while (i + W <= values.len) : (i += W) {
-        const v: V = values[i..][0..W].*;
-        acc += v * v;
-    }
-    var sum_sq: f64 = 0;
-    inline for (0..W) |lane| sum_sq += acc[lane];
-    while (i < values.len) : (i += 1) sum_sq += values[i] * values[i];
-    return @sqrt(sum_sq / @as(f64, @floatFromInt(values.len)));
-}
-
 /// Contract entry: envelope-follow from ctx.x_op. Data layout: point-major
 /// rows (time, peak/rms per probe) — the same rows simulate() writes.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
     // `defer`-freed == scratch; `a` is a results arena. `data` stays on `a`:
     // it IS the Result. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
     simdCopy(x, x_op);

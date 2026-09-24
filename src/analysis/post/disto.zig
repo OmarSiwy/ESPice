@@ -390,7 +390,7 @@ fn contract(s: []const f64, w: []const f64, scale: f64, dst: []f64) void {
 /// digest, real and point-major (frequency, hd2, v1_mag, v2_mag).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
 
     var o = opts;
     // No DISTOF1 anywhere in the deck: ngspice would solve an unexcited system
@@ -407,7 +407,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_points: usize = o.sweep.count();
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     // One flat block, four columns
     const cols = try scratch.alloc(f64, n_points * 4);
     defer scratch.free(cols);

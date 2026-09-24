@@ -96,7 +96,7 @@ pub fn solve(
 /// Contract entry: one point — gain, Rin, Rout at ctx.x_op.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
     const input_branch = opts.input_branch orelse ctx.source_branch;
     const output_node = opts.output_node orelse blk: {
         if (opts.output_branch != null) break :blk root.GROUND;
@@ -106,7 +106,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `solve` returns three scalars and frees its own workspace; `a` is a
     // results arena that cannot reclaim it. See RunCtx.scratch_allocator.
-    const res = try solve(ctx.circuit, x_op, opts, input_branch, output_node, opts.output_neg, ctx.scratch_allocator orelse a);
+    const res = try solve(ctx.circuit, x_op, opts, input_branch, output_node, opts.output_neg, ctx.scratch_allocator);
 
     const names = try a.dupe([]const u8, &.{ "transfer_function", "input_resistance", "output_resistance" });
     errdefer a.free(names); // entries are literals

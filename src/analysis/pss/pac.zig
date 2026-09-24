@@ -9,8 +9,11 @@
 //!      solves at n_time_samples per period.
 //!   2. Sample G(t_k) and C(t_k) (conductance and capacitance Jacobians) at
 //!      N uniformly-spaced points within one LO period — one ckt.eval per
-//!      sample fills both planes, denseG/denseC capture them.
-//!   3. Fourier-decompose G and C into harmonic coefficients G_m, C_m via FFT.
+//!      sample fills both planes, captured slot-major over the CSC pattern.
+//!   3. Fourier-decompose each pattern slot of G and C into harmonic
+//!      coefficients G_m, C_m via FFT. A structurally zero entry has an
+//!      all-zero series whose FFT is +0 in every bin, and adding +0 into the
+//!      zeroed conversion matrix is a no-op, so the pattern is the whole job.
 //!   4. For each input frequency f_in, build and solve the LPTV conversion
 //!      matrix that couples sidebands f_in + m*f_LO for m in [-M..+M].
 //!   5. Result: complex transfer (gain + phase) at each sideband frequency.
@@ -26,57 +29,51 @@ pub const Complex = types.Complex;
 
 pub const Options = @import("requests").Pac;
 
-/// Run PAC analysis: find periodic steady state, linearise, sweep input frequency.
-///
-/// `x_init` is the initial DC operating point (length ckt.n).
-/// `ac_source_node` is the node where the small-signal AC excitation is applied.
-/// `probe_node` is the output node to observe.
-///
-/// Caller owns the output: freqs[n_freqs] (n_freqs = types.logSweepCount of the
-/// sweep), transfer[n_freqs * n_sb] flat, point-major — transfer[fi*n_sb + p]
-/// is the sideband at harmonic m = p - n_harmonics (output f = f_in + m*f_LO).
-pub fn analyze(
+/// The LPTV sweep PAC and PXF share: find the periodic steady state,
+/// linearise, then per input frequency build the conversion matrix A(f)
+/// (Aᵀ when `adjoint`), drive unknown `exc_node` of sideband m = 0 with
+/// `exc_val`, and solve. Caller owns freqs[n_freqs] and `out`:
+///   PAC (adjoint = false): out[fi*n_sb + p] is `probe_node` at sideband
+///     m = p - n_harmonics (output f = f_in + m*f_LO).
+///   PXF (adjoint = true): out[fi*n_sb*n + sb*n + node] = conj(Y), the
+///     transfer from every node at every sideband to `exc_node`, the output;
+///     `probe_node` is unused.
+pub fn sweep(
+    comptime adjoint: bool,
     ckt: *root.Circuit,
     x_init: []const f64,
-    ac_source_node: u32,
-    ac_magnitude: f64,
+    exc_node: u32,
+    exc_val: f64,
     probe_node: u32,
     freqs: []f64,
-    transfer: []Complex,
+    out: []Complex,
     options: Options,
     allocator: std.mem.Allocator,
 ) !void {
     const n: usize = ckt.n;
     const n_harm: usize = options.n_harmonics;
     const n_sb: usize = 2 * n_harm + 1;
-
-    const n_freqs = options.sweep.count();
-    std.debug.assert(freqs.len == n_freqs);
-    std.debug.assert(transfer.len == @as(usize, n_freqs) * n_sb);
-
-    const linearization = try linearize(ckt, x_init, options, allocator);
-    defer allocator.free(linearization.g_hat);
-    defer allocator.free(linearization.c_hat);
-
-    // -- Step 4: Frequency sweep — build and solve conversion matrix ---------
-    // The LPTV system couples n_sb sidebands, each of dimension n.
-    // For sideband p (harmonic m_p = p - n_harm), the governing equation at
-    // frequency omega_p = 2*pi*(f_in + m_p*f_LO) is:
-    //
-    //   sum_{q} [G_{p-q} + j*omega_p * C_{p-q}] * X_q = B_p
-    //
-    // where G_{m}, C_{m} are the m-th Fourier coefficients and X_q is the
-    // unknown complex amplitude at sideband q.
-    //
-    // ponytail: GPU batch dispatch — Phase 4. The per-frequency solve here is a
-    // dense (2M+1)n × (2M+1)n real system (conversion matrix), not the sparse
-    // G+jωC that freq_solve_batch handles. A batched dense LU kernel
-    // (gh.dense_solve_batch) would cover this — pack all n_freqs matrices and
-    // RHS vectors, dispatch one call. Until that kernel exists, CPU-serial.
-
     const nn = n_sb * n;
     const nn2 = 2 * nn; // real expansion of the complex system
 
+    const n_freqs = options.sweep.count();
+    std.debug.assert(freqs.len == n_freqs);
+    std.debug.assert(out.len == @as(usize, n_freqs) * (if (adjoint) nn else n_sb));
+
+    const linearization = try linearize(ckt, x_init, options, allocator);
+    defer linearization.deinit(allocator);
+
+    // The LPTV system couples n_sb sidebands, each of dimension n. For
+    // sideband p (harmonic m_p = p - n_harm) at omega_p = 2*pi*(f_in + m_p*f_LO):
+    //
+    //   sum_{q} [G_{p-q} + j*omega_p * C_{p-q}] * X_q = B_p
+    //
+    // where G_{m}, C_{m} are the m-th Fourier coefficients. The adjoint
+    // A^H Y = e is A^T Y = e here: the real expansion of A is real.
+    //
+    // ponytail: dense (2M+1)n x (2M+1)n real system per frequency, CPU-serial.
+    // A batched dense LU (all n_freqs matrices in one launch) is the upgrade
+    // when PAC/PXF sweeps dominate a multi-harmonic mixer run.
     const a_work = try allocator.alloc(f64, nn2 * nn2);
     defer allocator.free(a_work);
     const rhs_work = try allocator.alloc(f64, nn2);
@@ -91,33 +88,44 @@ pub fn analyze(
         root.zeroSimd(a_work);
         root.zeroSimd(rhs_work);
 
-        buildConversionMatrix(false, a_work, linearization.g_hat, linearization.c_hat, n, n_sb, nn, nn2, f_in, options);
-
-        // Excitation: unit AC source at ac_source_node, sideband 0 (m=0, index n_harm).
-        const exc_row = n_harm * n + ac_source_node;
-        rhs_work[exc_row] = ac_magnitude; // real part
+        buildConversionMatrix(adjoint, a_work, linearization, n, n_sb, nn, nn2, f_in, options);
+        rhs_work[n_harm * n + exc_node] = exc_val; // real part
 
         try dense_lu.factorizeSolve(nn2, a_work, rhs_work, x_work);
 
         freqs[fi] = f_in;
-        for (0..n_sb) |p| {
+        if (adjoint) {
+            for (out[fi * nn ..][0..nn], x_work[0..nn], x_work[nn..nn2]) |*t, re, im| t.* = .{ .re = re, .im = -im };
+        } else for (0..n_sb) |p| {
             const idx = p * n + probe_node;
-            transfer[fi * n_sb + p] = .{
-                .re = x_work[idx],
-                .im = x_work[nn + idx],
-            };
+            out[fi * n_sb + p] = .{ .re = x_work[idx], .im = x_work[nn + idx] };
         }
     }
 }
 
-/// Settled G/C Fourier coefficients shared by PAC and PXF. Caller owns both
-/// slices; sample/FFT scratch is released after the coefficients are captured.
+/// Settled G/C Fourier coefficients, bin-major over the circuit's CSC
+/// pattern: g_hat[m * nnz + slot] is slot's m-th coefficient, slot at
+/// (row_idx[slot], col) for col_ptr[col] <= slot < col_ptr[col + 1].
+pub const Linearization = struct {
+    g_hat: []const Complex,
+    c_hat: []const Complex,
+    col_ptr: []const u32,
+    row_idx: []const u32,
+
+    pub fn deinit(self: Linearization, allocator: std.mem.Allocator) void {
+        allocator.free(self.g_hat);
+        allocator.free(self.c_hat);
+    }
+};
+
+/// Settled G/C Fourier coefficients shared by PAC and PXF. Caller owns the
+/// coefficient slices; sample/FFT scratch is released before returning.
 pub inline fn linearize(
     ckt: *root.Circuit,
     x_init: []const f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !struct { g_hat: []Complex, c_hat: []Complex } {
+) !Linearization {
     const n: usize = ckt.n;
     const n_samples: usize = options.n_time_samples;
     const period = 1.0 / options.f_lo;
@@ -137,10 +145,12 @@ pub inline fn linearize(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    const g_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(g_mats);
-    const c_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(c_mats);
+    const nnz: usize = ckt.nnz;
+    // Slot-major samples: g_td[slot * n_samples + k].
+    const g_td = try allocator.alloc(f64, n_samples * nnz);
+    defer allocator.free(g_td);
+    const c_td = try allocator.alloc(f64, n_samples * nnz);
+    defer allocator.free(c_td);
 
     var t: f64 = 0;
     const settle_steps = (@as(usize, options.pss_periods) - 1) * n_samples;
@@ -153,7 +163,7 @@ pub inline fn linearize(
         };
     }
 
-    // -- Step 2: capture dense G(t_k), C(t_k) over the final period ---------
+    // -- Step 2: capture G(t_k), C(t_k) over the final period --------------
     for (0..n_samples) |k| {
         if (k != 0 and k % 64 == 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = k, .total = n_samples });
         t += dt;
@@ -162,15 +172,16 @@ pub inline fn linearize(
             else => {},
         };
         ckt.eval(x_cur, t);
-        ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
-        ckt.denseC(c_mats[k * n * n ..][0 .. n * n]);
+        for (ckt.g_vals[0..nnz], ckt.c_vals[0..nnz], 0..) |g, c, slot| {
+            g_td[slot * n_samples + k] = g;
+            c_td[slot * n_samples + k] = c;
+        }
     }
 
-    // -- Step 3: FFT each matrix element across time samples ----------------
-    // G_hat[m][row][col] and C_hat[m][row][col] as complex Fourier coefficients.
-    const g_hat = try allocator.alloc(Complex, n_samples * n * n);
+    // -- Step 3: FFT each pattern slot across time samples -----------------
+    const g_hat = try allocator.alloc(Complex, n_samples * nnz);
     errdefer allocator.free(g_hat);
-    const c_hat = try allocator.alloc(Complex, n_samples * n * n);
+    const c_hat = try allocator.alloc(Complex, n_samples * nnz);
     errdefer allocator.free(c_hat);
 
     const fft_re = try allocator.alloc(f64, n_samples);
@@ -180,36 +191,30 @@ pub inline fn linearize(
 
     const inv_n = 1.0 / @as(f64, @floatFromInt(n_samples));
 
-    for (0..n) |row| {
-        for (0..n) |col| {
-            const elem_off = row * n + col;
-
-            inline for (.{ .{ g_mats, g_hat }, .{ c_mats, c_hat } }) |plane| {
-                for (0..n_samples) |k| {
-                    fft_re[k] = plane[0][k * n * n + elem_off];
-                    fft_im[k] = 0;
-                }
-                fft_mod.fft(fft_re, fft_im);
-                for (0..n_samples) |m| {
-                    plane[1][m * n * n + elem_off] = .{
-                        .re = fft_re[m] * inv_n,
-                        .im = fft_im[m] * inv_n,
-                    };
-                }
+    for (0..nnz) |slot| {
+        inline for (.{ .{ g_td, g_hat }, .{ c_td, c_hat } }) |plane| {
+            @memcpy(fft_re, plane[0][slot * n_samples ..][0..n_samples]);
+            @memset(fft_im, 0);
+            fft_mod.fft(fft_re, fft_im);
+            for (0..n_samples) |m| {
+                plane[1][m * nnz + slot] = .{
+                    .re = fft_re[m] * inv_n,
+                    .im = fft_im[m] * inv_n,
+                };
             }
         }
     }
 
-    return .{ .g_hat = g_hat, .c_hat = c_hat };
+    return .{ .g_hat = g_hat, .c_hat = c_hat, .col_ptr = ckt.col_ptr, .row_idx = ckt.row_idx };
 }
 
 /// Fill the zeroed real-expanded LPTV matrix, optionally storing its transpose.
 /// The transpose is specialized at comptime so PXF needs no extra matrix pass.
+/// Each (p, q, row, col) owns its four entries, so slot order is free.
 pub inline fn buildConversionMatrix(
     comptime transpose: bool,
     a_work: []f64,
-    g_hat: []const Complex,
-    c_hat: []const Complex,
+    lin: Linearization,
     n: usize,
     n_sb: usize,
     nn: usize,
@@ -228,11 +233,13 @@ pub inline fn buildConversionMatrix(
             const m_diff = m_p - m_q;
 
             const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
+            const nnz = lin.g_hat.len / n_samples;
 
-            for (0..n) |row| {
-                for (0..n) |col| {
-                    const g_coeff = g_hat[fft_idx * n * n + row * n + col];
-                    const c_coeff = c_hat[fft_idx * n * n + row * n + col];
+            for (0..n) |col| {
+                for (lin.col_ptr[col]..lin.col_ptr[col + 1]) |slot| {
+                    const row: usize = lin.row_idx[slot];
+                    const g_coeff = lin.g_hat[fft_idx * nnz + slot];
+                    const c_coeff = lin.c_hat[fft_idx * nnz + slot];
 
                     // (G + j*omega*C) complex coefficient:
                     // real part: G_re - omega*C_im
@@ -261,7 +268,7 @@ pub inline fn buildConversionMatrix(
 /// (frequency, tf_h{-M}..tf_h{+M}) with (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
     if (ctx.probes.len == 0) return error.NoProbe;
     const probe = ctx.probes[ctx.probes.len - 1];
 
@@ -269,13 +276,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const freqs = try scratch.alloc(f64, n_freqs);
     defer scratch.free(freqs);
     const transfer = try scratch.alloc(Complex, n_freqs * n_sb);
     defer scratch.free(transfer);
 
-    try analyze(ctx.circuit, x_op, ctx.source_node, 1.0, probe, freqs, transfer, opts, scratch);
+    try sweep(false, ctx.circuit, x_op, ctx.source_node, 1.0, probe, freqs, transfer, opts, scratch);
 
     const names = try a.alloc([]const u8, 1 + n_sb);
     names[0] = "frequency";

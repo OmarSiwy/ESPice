@@ -47,54 +47,6 @@ pub fn sweep(
 
     for (0..n_points) |fi| freqs[fi] = options.sweep.at(@intCast(fi));
 
-    // -- GPU batch path: one batch call per driven port ----------------------
-    // ponytail: P batch calls of N_freq each; packing all P*N into one call
-    // would need per-solve RHS, add when freq_solve_batch gains rhs-per-lane.
-    if (ckt.gpu_hook != null and ckt.progress == null) gpu: {
-        try ckt.linearizeAc(x_op);
-
-        // Stamp port z0 onto the sparse G diagonal (analysis-side mod).
-        // Save originals so we can restore after the batch calls.
-        const saved = allocator.alloc(f64, n_ports) catch break :gpu;
-        defer allocator.free(saved);
-        for (ports, 0..) |port, idx| {
-            const slot = ckt.diag_slots[port.branch];
-            saved[idx] = ckt.g_vals[slot];
-            ckt.g_vals[slot] -= port.z0;
-        }
-        defer for (ports, 0..) |_, idx| {
-            const slot = ckt.diag_slots[ports[idx].branch];
-            ckt.g_vals[slot] = saved[idx];
-        };
-
-        const omegas = allocator.alloc(f64, n_points) catch break :gpu;
-        defer allocator.free(omegas);
-        for (freqs, 0..) |f, i| omegas[i] = 2.0 * std.math.pi * f;
-
-        const rhs = allocator.alloc(f64, 2 * n) catch break :gpu;
-        defer allocator.free(rhs);
-
-        const x_out = allocator.alloc(f64, n_points * 2 * n) catch break :gpu;
-        defer allocator.free(x_out);
-        for (0..n_ports) |p| {
-            root.zeroSimd(rhs);
-            rhs[ports[p].branch] = 1.0;
-
-            // Per-frequency output: x_out[k] is 2*n (real‖imag expansion).
-            ckt.gpuFreqBatch(ckt.g_vals, ckt.c_vals, omegas, rhs, @intCast(n), false, x_out) orelse break :gpu;
-
-            const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
-            const nn = 2 * n;
-
-            for (0..n_points) |fi| {
-                const x_work = x_out[fi * nn ..][0..nn];
-                const s_mat = s[fi * n_ports * n_ports ..][0 .. n_ports * n_ports];
-                writeColumn(n, ports, x_work, a_p, s_mat, p);
-            }
-        }
-        return; // GPU path done — skip CPU fallback.
-    }
-
     try ckt.linearizeAc(x_op);
     const g = try allocator.alloc(f64, n * n);
     ckt.denseG(g);
@@ -139,7 +91,6 @@ pub fn sweep(
     }
 }
 
-// ponytail: one wave conversion for CPU and GPU solve outputs.
 fn writeColumn(n: usize, ports: []const Port, x_work: []const f64, a_p: f64, s_mat: []Complex, p: usize) void {
     const n_ports = ports.len;
     for (0..n_ports) |k| {
@@ -164,7 +115,7 @@ fn writeColumn(n: usize, ports: []const Port, x_work: []const f64, a_p: f64, s_m
 /// (frequency, S11, S12, ..., Snn) with (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
 
     const one_port = [_]Port{.{ .node = ctx.source_node, .branch = ctx.source_branch }};
     const ports: []const Port = if (opts.ports.len > 0) opts.ports else &one_port;
@@ -174,7 +125,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const freqs = try scratch.alloc(f64, n_points);
     defer scratch.free(freqs);
     const s = try scratch.alloc(Complex, n_points * n_s);

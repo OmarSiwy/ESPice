@@ -50,91 +50,62 @@ both the forward and reverse transmission through the probe are separated.
 
 ### What this repo implements
 
-A **single-injection voltage return-ratio probe**: augment the linearized
-$(G, C)$ with one extra branch (a 0 V probe source between `probe_p` and
-`probe_n`):
-
-$$
-\begin{pmatrix} G & \pm e \\ \pm e^{\mathsf T} & 0 \end{pmatrix},
-$$
-
-drive the probe branch row with a unit AC voltage, and read the loop gain
-as the negated branch current:
-
-$$
-T(\omega) = -\,i_{br}(\omega).
-$$
+A **single-injection voltage return-ratio probe** on the deck's own 0 V
+source (`.stb Vprobe ...`). Its branch equation is already
+$v_p - v_n - V = 0$, so driving `rhs[branch] = 1` makes it the 1 V loop
+injection and leaves every other stamp alone; no augmentation, no second
+source across the same node pair. Return ratio, ngspice's orientation:
+$T(\omega) = -V(+)/V(-)$, with `+` the side where the signal arrives.
 
 This is exact where the probe point is a good voltage-transfer break
 (low source impedance driving high load impedance — output of an op-amp /
 controlled source, the usual `.stb` probe discipline) and inherits the
 single-injection caveat otherwise. Tian's two-analysis combination is the
 documented upgrade (it costs exactly one more solve per frequency on the
-same factorization). Margin extraction: linear interpolation between sweep
-points at the crossings, with **phase unwrapping** for the gain margin —
-atan2 wraps to $(-180°, 180°]$, so the $-180°$ crossing is invisible to a
-raw comparison; the phase sequence is unwrapped before the scan.
+same factorization). The result is the complex $T(f)$ column; margins are
+not computed (nothing in the raw output carries them).
 
 ## 2. Flow explanation
 
 `src/analysis/ac/stb.zig`:
 
-1. DC solve (own call — stability wants its exact bias), one `eval()` at
-   the op; dense $G$/$C$ copies.
-2. Augment to $(n{+}1)^2$: probe branch row/column stamped ($\pm 1$
-   couplings, zero diagonal — an ideal 0 V source).
-3. `FreqSolver.initDense` over the augmented pair; log sweep with unit RHS
-   on the probe branch; $T(f) = -(x[br] + j\,x[n{+}br])$.
-4. `computeMargins`: PM from the 0 dB crossing (first strict down-crossing
-   preferred, any crossing as fallback), GM from the unwrapped $-180°$
-   crossing; NaN when a margin's crossing doesn't exist in-band (two-pole
-   loops never cross $-180°$ — correctly NaN, covered by unit test).
+1. Linearize at the job's operating point (`linearizeAc`), the same
+   `FreqSolver.fromCircuit` the `.ac` sweep uses.
+2. One shared rhs: unit injection on the probe's branch row.
+3. `ac/freq.zig` `Stream`: 64-frequency lane chunks of
+   `FreqSolver.solveBatch`; each point gives $T = -V(+)/V(-)$.
 
-Knobs: probe node pair (defaults: drive source node → ground), sweep
-triple, tolerance bundle for the DC solve.
+Knobs: probe node pair and branch, sweep.
 
 ## 3. Pseudo-code, CPU sequential
 
 ```
-stb(ckt, probe_p, probe_n):
-    x_op = dc_solve(ckt)
-    eval(x_op); G, C = dense copies
-    augment: G_aug[(n+1)^2] with probe branch b:
-        G_aug[probe_p, b] += 1; G_aug[b, probe_p] += 1   (0V source stamps)
-        G_aug[probe_n, b] -= 1; G_aug[b, probe_n] -= 1
-    fs = FreqSolver(G_aug, C_aug)
-    for f in log_sweep:
-        x = fs.solve(e[b])                    # unit voltage on probe branch
-        T(f) = -(x[b] + j*x[n_aug + b])
-    PM: find |T| 0dB crossing, interpolate phase, PM = 180 + phase
-    GM: unwrap phase, find -180 crossing, GM = -|T|_dB there
+stb(ckt, x_op, probe_p, probe_n, probe_branch):
+    linearize(x_op)
+    fs = FreqSolver(G, C)
+    rhs = e[probe_branch]
+    for f in sweep (64-lane chunks):
+        x = fs.solve(omega(f), rhs)
+        T(f) = -x[probe_p] / x[probe_n]        # complex, stacked-real x
 ```
 
 ## 4. Pseudo-code, GPU parallel
 
 Identical shape to AC: frequency points are independent lanes; the Tian
 upgrade adds a second RHS per lane (multiple-RHS on one factorization).
-Margins are a host-side epilogue over the sorted lane results (crossing
-scan is inherently sequential but trivial).
 
 ```
 kernel stb(lanes = freq points):
     per lane: fill values(omega); factor/GMRES; solve e[b] (+ e_i for Tian)
     T[lane] = combine(responses)
-host: unwrap + crossing scan -> PM, GM
 ```
 
 ## Solvers used
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Upstream DC | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/dc.zig solve` |
-| Augmented stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path exists; dense used here) | `src/analysis/solvers/freq_solve.zig initDense`, `src/analysis/solvers/dense_lu.zig` |
-
-The probe augmentation changes the pattern (one extra row/col) — a
-sparse-path variant needs the probe branch included in the symbolic
-analysis; cheap, since one branch row is exactly what the MNA pattern
-machinery already handles ([circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md)).
+| Upstream DC | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | the job's shared operating point (`dc/op.zig`) |
+| Stacked-real sweep | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/analysis/solvers/freq_solve.zig fromCircuit` + `solveBatch`, streamed by `src/analysis/ac/freq.zig` |
 
 ---
 

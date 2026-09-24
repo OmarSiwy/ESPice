@@ -165,7 +165,7 @@ pub const Executor = struct {
         }
         const run_ctx: types.RunCtx = .{
             .circuit = &self.circuit,
-            .x_op = self.x,
+            .x_op = self.x.?,
             .probes = self.prepared.probes,
             .probe_labels = self.prepared.probe_labels,
             .source_node = self.prepared.source_node,

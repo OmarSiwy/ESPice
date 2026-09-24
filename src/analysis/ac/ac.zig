@@ -2,7 +2,7 @@
 //! then every frequency point is a fill + factor + solve. No circuit
 //! contact inside the sweep.
 const std = @import("std");
-const batch = @import("batch.zig");
+const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const types = @import("numerics");
 const FreqSolver = @import("solvers").freq_solve.FreqSolver;
@@ -46,22 +46,15 @@ pub fn sweep(
     root.zeroSimd(rhs);
     if (exc.len == nn) @memcpy(rhs, exc);
 
-    // All freq points are independent (G+jωC)x=rhs solves over one shared rhs:
-    // lane axis = frequency. GPU batch dispatch orelse the CPU lane solveBatch.
     const omegas = try allocator.alloc(f64, n_points);
     defer allocator.free(omegas);
     options.sweep.fill(freqs, omegas);
 
-    const x_out = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, rhs, false);
-    defer allocator.free(x_out);
-
-    for (0..n_points) |k| {
-        const lane = x_out[k * nn ..][0..nn];
+    var stream = try freq.Stream.init(allocator, &fs, omegas, rhs, false);
+    defer stream.deinit(allocator);
+    while (try stream.next(ckt)) |pt| {
         for (probes, 0..) |node, p| {
-            resp[p * n_points + k] = .{
-                .re = lane[node],
-                .im = lane[n + node],
-            };
+            resp[p * n_points + pt.k] = .{ .re = pt.x[node], .im = pt.x[n + node] };
         }
     }
 }
@@ -76,8 +69,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // the probe-major `resp`, the sweep's whole lane workspace and the
     // point-major `data` were three live copies of the same payload for the
     // rest of the run. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const scratch = ctx.scratch_allocator;
+    const x_op = ctx.x_op;
     const n_points = opts.sweep.count();
 
     const freqs = try scratch.alloc(f64, n_points);
