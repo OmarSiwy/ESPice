@@ -25,17 +25,18 @@ machine load).
 |---|---|---|
 | `5f0b644` | `SparseLu.factor`: supernode panels + DFS scan end (`lend`), bitwise | grid factor 212.6M -> 123.3M Ir; `scaling_resistor_grid_100x100` 357.5M -> 272.4M Ir; circuit decks within 0.05% |
 | `4632ffe` | `SparseLu.refactor`: flat slot tape for factors with <= 2048 flops, bitwise | vacask_mul 12.00G -> 11.49G Ir (-4.2%), graetz -3.1%, inverter_chain_256 -2.1% |
-| next | `SparseLu.solve`: flat forward pass for tape matrices, bitwise | vacask_mul 11.49G -> 11.36G Ir (-1.2%), graetz -0.9%, inverter_chain_256 -0.4% |
+| `620f571` | `SparseLu.solve`: flat forward pass for tape matrices, bitwise | vacask_mul 11.49G -> 11.36G Ir (-1.2%), graetz -0.9%, inverter_chain_256 -0.4% |
 
 Each commit: 616 decks byte-identical to main (raw, stdout, exit code),
 `zig build test -Dgpu=false` unit tests green, correctness 518/616 with
 main's failure set.
 
-### Next candidates for small n
+### Dropped (numbers in solver-perf-2026-09.md)
 
-- Raise `tape_max_flops` past 2048: the hot bench shows -17% Ir per step at
-  n=2005 (12k flops, a 144KB tape), but that tape no longer fits L1; needs a
-  deck-level wall measurement (`parallel_inverters_2000`).
+- `tape_max_flops` 16384: -2% Ir on parallel_inverters_2000 and
+  fourbitadder, no wall change (144KB tape, past L1).
+- Always-on supernode bookkeeping, `panel_min_rows` 8/16, panels finalized
+  only at supernode end: each measured worse than what shipped.
 
 ## Pass 1 (branch `worktree-agent-ab9985e38396806c7`, based on main `bcc13b3`)
 
