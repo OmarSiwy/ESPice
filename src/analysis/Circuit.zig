@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const device_ir = @import("device_ir");
-const device_eval = @import("device_eval");
 const Prepared = @import("problem_types").Circuit;
 const progress_api = @import("progress.zig");
 const solvers = @import("solvers");
@@ -37,7 +36,7 @@ const NoiseSource = device_ir.NoiseSource;
 const StateCtlOp = device_ir.StateCtlOp;
 const Proto = device_ir.Proto;
 const PatternView = device_ir.PatternView;
-const ParEval = device_eval.ParEval;
+const ParEval = @import("par_eval.zig").ParEval;
 const converger = solvers.converger;
 
 // ---------------------------------------------------------------------------
