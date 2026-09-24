@@ -1,7 +1,7 @@
-const impl = @import("../eigen/pz.zig");
-const Complex = impl.test_access.Complex;
-const eigenvaluesQR = impl.test_access.eigenvaluesQR;
-const hessenbergReduce = impl.test_access.hessenbergReduce;
+const qr = @import("../eigen/qr.zig");
+const Complex = @import("numerics").Complex;
+const eigenvalues = qr.eigenvalues;
+const hessenbergReduce = qr.hessenbergReduce;
 const std = @import("std");
 
 // ============================================================================
@@ -14,7 +14,7 @@ test "eigenvaluesQR: 2x2 real eigenvalues" {
     var a = [_]f64{ 3, 1, 0, 2 };
     var eigs: [2]Complex = undefined;
 
-    const r = eigenvaluesQR(2, &a, &eigs, .{});
+    const r = eigenvalues(2, &a, &eigs, 1e-12, 1000);
     try testing.expect(r.converged);
     try testing.expectEqual(@as(usize, 2), r.count);
 
@@ -34,7 +34,7 @@ test "eigenvaluesQR: 2x2 complex conjugate pair" {
     var a = [_]f64{ 0, -1, 1, 0 };
     var eigs: [2]Complex = undefined;
 
-    const r = eigenvaluesQR(2, &a, &eigs, .{});
+    const r = eigenvalues(2, &a, &eigs, 1e-12, 1000);
     try testing.expect(r.converged);
     try testing.expectEqual(@as(usize, 2), r.count);
 
@@ -58,7 +58,7 @@ test "eigenvaluesQR: 3x3 with known eigenvalues" {
     };
     var eigs: [3]Complex = undefined;
 
-    const r = eigenvaluesQR(3, &a, &eigs, .{});
+    const r = eigenvalues(3, &a, &eigs, 1e-12, 1000);
     try testing.expect(r.converged);
     try testing.expectEqual(@as(usize, 3), r.count);
 
@@ -85,7 +85,7 @@ test "eigenvaluesQR: 4x4 with mixed real and complex eigenvalues" {
     };
     var eigs: [4]Complex = undefined;
 
-    const r = eigenvaluesQR(4, &a, &eigs, .{});
+    const r = eigenvalues(4, &a, &eigs, 1e-12, 1000);
     try testing.expect(r.converged);
     try testing.expectEqual(@as(usize, 4), r.count);
 
