@@ -230,18 +230,23 @@ fn inpEvaluate(lit: []const u8, scale_exp: i32, mil: bool) f64 {
     return sign * mantis * pow10(e);
 }
 
-/// 10^e as glibc's pow(10.0, e) returns it, which is the correctly rounded
-/// power for every e in [-40, 40] but 23.
+/// 10^e as glibc's pow(10.0, e) returns it: the correctly rounded power for
+/// every e but 23 and 210, 0 below 1e-330 and inf past 1e308 (#36).
 fn pow10(e: i32) f64 {
+    const lo = -330;
+    const hi = 308;
     const table = comptime blk: {
-        @setEvalBranchQuota(200_000);
-        var t: [81]f64 = undefined;
-        for (&t, 0..) |*p, k| p.* = std.fmt.parseFloat(f64, std.fmt.comptimePrint("1e{d}", .{@as(i32, k) - 40})) catch unreachable;
-        t[40 + 23] = 1.0000000000000001e23; // glibc rounds this one up
+        @setEvalBranchQuota(10_000_000);
+        var t: [hi - lo + 1]f64 = undefined;
+        for (&t, 0..) |*p, k| p.* = std.fmt.parseFloat(f64, std.fmt.comptimePrint("1e{d}", .{@as(i32, k) + lo})) catch unreachable;
+        // glibc rounds these two up.
+        t[23 - lo] = 1.0000000000000001e23;
+        t[210 - lo] = 1.0000000000000001e210;
         break :blk t;
     };
-    if (e < -40 or e > 40) return std.math.pow(f64, 10, @floatFromInt(e));
-    return table[@intCast(e + 40)];
+    if (e < lo) return 0;
+    if (e > hi) return std.math.inf(f64);
+    return table[@intCast(e - lo)];
 }
 
 /// Copies `src` lowercased into `dst` (at least as long) and returns its
@@ -748,6 +753,12 @@ test "number literals read as ngspice's INPevaluate" {
     try std.testing.expectApproxEqRel(25.4e-6, n("1mil").?, 1e-15);
     try std.testing.expectEqual(1.0000000000000001e23, n("1e23").?); // glibc's pow(10, 23)
     try std.testing.expect(1.0000000000000001e23 != 1e23);
+    // Past +-40 the exponent reads exactly too, as glibc's pow does (#36).
+    try std.testing.expectEqual(1e-300, n("1e-300").?);
+    try std.testing.expectEqual(1e300, n("1e300").?);
+    try std.testing.expectEqual(@as(f64, 3) * @as(f64, 1e45), n("3e45").?); // 3 * pow(10, 45), as inpeval.c
+    try std.testing.expectEqual(1.0000000000000001e210, n("1e210").?);
+    try std.testing.expectEqual(0, n("1e-331").?);
     try std.testing.expectEqual(0, n("0e400").?);
     try std.testing.expect(std.math.isInf(n("1e400").?));
     for ([_][]const u8{ "", "-", ".", "abc", "e5", "1e+" }) |bad| try std.testing.expectEqual(null, n(bad));

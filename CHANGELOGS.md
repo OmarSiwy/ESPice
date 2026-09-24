@@ -98,6 +98,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A stray `.enddata` or `.end_variation` is refused as `ParseError` instead of read as nothing (#162).
 - An ngspice line holding only a `//` comment is a comment line, not a `ParseError` (and no longer a panic inside `.control` in safe builds) (#164).
 - An analysis card inside a `.subckt` is refused as `UnsupportedCard` instead of run as a top-level analysis (#165).
+- Number literals with an exponent past +-40 (`1e-300`, `1e300`) read exactly, as ngspice's `pow(10, e)` gives them (#36).
 - An analysis card that query validation would refuse (`.ac dec 10 1 1e308`, `.tran 1e-310 1u`) fails as `InvalidAnalysisArguments` on a line naming the card, not a bare `InvalidQueryOptions` (#108).
 - Unknown `.options` names draw a warning in every dialect, names longer than 16 characters included; HSPICE no longer warns on `scale` and `wnflag` (#58).
 - An instance parameter the device does not declare (`ww=10u` on an M card) fails the deck with `UnknownParameter`, as in ngspice (#35).
