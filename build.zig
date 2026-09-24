@@ -270,22 +270,19 @@ pub fn build(b: *std.Build) void {
     });
 
     // The owning facade composes frontend preparation, analysis and output.
-    const problem_imports: []const std.Build.Module.Import = &.{
+    const espice_imports: []const std.Build.Module.Import = &.{
         core_import,
         .{ .name = "analysis", .module = analysis_mod },
         .{ .name = "frontend", .module = frontend_mod },
         .{ .name = "output", .module = output_mod },
     };
-    const problem_mod = M.make(b.path("src/problem/root.zig"), problem_imports);
+    const espice_mod = M.make(b.path("src/espice.zig"), espice_imports);
 
     // =======================================================================
     // The app
     // =======================================================================
 
-    const app_imports: []const std.Build.Module.Import = &.{
-        .{ .name = "output", .module = output_mod },
-        .{ .name = "problem", .module = problem_mod },
-    };
+    const app_imports: []const std.Build.Module.Import = &.{.{ .name = "espice", .module = espice_mod }};
     const exe = b.addExecutable(.{
         .name = "espice",
         .root_module = M.make(b.path("src/main.zig"), app_imports),
@@ -355,7 +352,7 @@ pub fn build(b: *std.Build) void {
         .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
     });
 
-    const c_api_mod = M.make(b.path("src/problem/c_api.zig"), &.{.{ .name = "problem", .module = problem_mod }});
+    const c_api_mod = M.make(b.path("src/c_api.zig"), &.{.{ .name = "espice", .module = espice_mod }});
     c_api_mod.link_libc = true;
     c_api_mod.addIncludePath(b.path("include")); // c_api.zig pins its enums to the header
     for (host_objs) |o| c_api_mod.addObject(o);
@@ -397,7 +394,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run every suite and the numeric SPICE fixtures");
     const t: HostTest = .{ .b = b, .exe = exe, .objs = host_objs };
 
-    const c_api_test_mod = M.make(b.path("src/problem/tests/c_api.zig"), &.{});
+    const c_api_test_mod = M.make(b.path("src/tests/c_api.zig"), &.{});
     c_api_test_mod.link_libc = true;
     c_api_test_mod.addIncludePath(b.path("include"));
     c_api_test_mod.linkLibrary(c_api_lib);
@@ -426,8 +423,8 @@ pub fn build(b: *std.Build) void {
     error_tests_mod.addObject(error_object);
 
     for ([_]struct { []const u8, []const u8, []const *std.Build.Step.Run }{
-        .{ "test-problem", "Run Problem, C ABI and numerical contract tests", &.{
-            t.run(M.make(b.path("src/problem/tests/problem.zig"), &.{.{ .name = "problem", .module = problem_mod }}), &.{}, true),
+        .{ "test-espice", "Run Problem facade, analysis contract and C ABI tests", &.{
+            t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true),
             run_c_api_tests,
         } },
         .{ "test-frontend", "Run netlist, builder and prepared-circuit tests", &.{

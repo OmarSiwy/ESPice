@@ -1,7 +1,7 @@
 //! C boundary for the owning Problem facade. Build as a separate module so the
 //! facade never imports its own adapter. Public layouts are in include/espice.h.
 const std = @import("std");
-const api = @import("problem");
+const api = @import("espice");
 const allocator = std.heap.smp_allocator;
 const abi_version = 1;
 const no_query = std.math.maxInt(u32);

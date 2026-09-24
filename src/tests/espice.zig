@@ -1,5 +1,5 @@
 const std = @import("std");
-const api = @import("problem");
+const api = @import("espice");
 const t = std.testing;
 const deck = "query fixture\nV1 in 0 dc 1 ac 1\nR1 in out 1k\nC1 out 0 1n\n.ac dec 80 1 100k\n.tran 1n 10n uic\n.end\n";
 
