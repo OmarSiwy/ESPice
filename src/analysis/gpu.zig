@@ -415,12 +415,12 @@ pub const GpuContext = struct {
     /// instead of every eval.
     chk_worst: f64 = 0,
 
-    has_charge: bool,
-    /// Whether any RESIDENT batch produces charge. Narrower than `has_charge`,
-    /// which covers the whole circuit: when every charge-producing device stayed
-    /// on the CPU there is nothing for the device C/Q planes to hold, so their
-    /// clears, downloads and merges are all moving zeros. The host planes still
-    /// follow `has_charge` — the CPU batches stamp them.
+    /// Whether any RESIDENT batch produces charge. Narrower than
+    /// `Circuit.has_charge`, which covers the whole circuit: when every
+    /// charge-producing device stayed on the CPU there is nothing for the
+    /// device C/Q planes to hold, so their clears, downloads and merges are all
+    /// moving zeros. The host planes still follow `Circuit.has_charge`: the CPU
+    /// batches stamp them.
     resident_charge: bool,
 
     const Self = @This();
@@ -641,7 +641,6 @@ pub const GpuContext = struct {
             .n_vslot = order.n_vslot,
             .n_vrow = order.n_vrow,
             .stream = try k0.createStream(),
-            .has_charge = ckt.has_charge,
             .resident_charge = resident_charge,
             .chk = if (std.c.getenv("ESPICE_GPU_EVAL_CHECK") != null)
                 try gpa.alloc(f64, ckt.g_vals.len + ckt.rhs.len)
@@ -898,12 +897,7 @@ pub const GpuContext = struct {
 
         // The ineligible devices stamp the host planes while the GPU is still
         // working and the D2H copies are still in flight.
-        @memset(ckt.g_vals, 0);
-        @memset(ckt.rhs, 0);
-        if (self.has_charge) {
-            @memset(ckt.c_vals, 0);
-            @memset(ckt.q_vec, 0);
-        }
+        ckt.clearPlanes(.full);
         const pl = ckt.ownPlanes();
         for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
 
@@ -920,10 +914,8 @@ pub const GpuContext = struct {
             addInto(ckt.q_vec, self.pin_q);
         }
 
-        // The ground pin, which `Circuit.evalNewton` applies after every batch
-        // has stamped. It is not a device, so no kernel emits it.
-        ckt.g_vals[ckt.diag_slots[0]] += 1.0;
-        ckt.rhs[0] += x[0];
+        // The ground pin is not a device, so no kernel emits it.
+        ckt.groundStamp(x);
     }
 
     /// The device half alone: upload x, clear the staging, launch every resident
@@ -1172,10 +1164,7 @@ pub const GpuContext = struct {
             try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
 
         // The CPU-side batches run their host walk while the device works.
-        var any = false;
-        for (self.cpu_batches) |b| if (b.hooks.apply_limits) |f| {
-            if (f(b.ctx, x, x_old)) any = true;
-        };
+        var any = Circuit.limitBatches(self.cpu_batches, x, x_old);
 
         if (launched) {
             try self.stream.synchronize();
@@ -1199,11 +1188,7 @@ pub const GpuContext = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         return self.applyLimitsOnGpu(x, x_old) catch {
             self.warnStateFallback();
-            var any = false;
-            for (self.ckt.batches) |b| if (b.hooks.apply_limits) |f| {
-                if (f(b.ctx, x, x_old)) any = true;
-            };
-            return any;
+            return Circuit.limitBatches(self.ckt.batches, x, x_old);
         };
     }
 
@@ -1213,14 +1198,7 @@ pub const GpuContext = struct {
     /// `StateKernel`), so the GPU half contributes null by construction.
     fn updateStatesHook(ctx: *anyopaque, x: []const f64) ?f64 {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        const walk = if (self.poisoned) self.ckt.batches else self.cpu_batches;
-        var min_reject: ?f64 = null;
-        for (walk) |b| {
-            if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
-                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
-            };
-        }
-        return min_reject;
+        return Circuit.updateBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches, x);
     }
 
     fn clearLimitsHook(ctx: *anyopaque) void {
@@ -1229,8 +1207,7 @@ pub const GpuContext = struct {
             bg.lim_active = false;
             bg.lim_dirty = false;
         }
-        const walk = if (self.poisoned) self.ckt.batches else self.cpu_batches;
-        for (walk) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
+        Circuit.clearLimitBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches);
     }
 
     /// The GPU half of `Circuit.stateCtl`: the accepted-step latch (path
@@ -1274,10 +1251,7 @@ pub const GpuContext = struct {
         if (launched)
             try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
 
-        var dirty = false;
-        for (self.cpu_batches) |b| if (b.hooks.state_ctl) |f| {
-            if (f(b.ctx, op)) dirty = true;
-        };
+        var dirty = Circuit.stateCtlBatches(self.cpu_batches, op);
         if (launched) {
             try self.stream.synchronize();
             if (std.mem.readInt(u32, self.pin_flags[0..4], .little) != 0) dirty = true;
@@ -1289,11 +1263,7 @@ pub const GpuContext = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
         return self.stateCtlOnGpu(op) catch {
             self.warnStateFallback();
-            var dirty = false;
-            for (self.ckt.batches) |b| if (b.hooks.state_ctl) |f| {
-                if (f(b.ctx, op)) dirty = true;
-            };
-            return dirty;
+            return Circuit.stateCtlBatches(self.ckt.batches, op);
         };
     }
 
@@ -1302,7 +1272,7 @@ pub const GpuContext = struct {
     /// is marked for upload at its next launch.
     fn seedJunctionsHook(ctx: *anyopaque, x: []f64) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        for (self.ckt.batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
+        Circuit.seedBatches(self.ckt.batches, x);
         for (self.batches) |*bg| {
             if (bg.has_lim) bg.lim_dirty = true;
         }
