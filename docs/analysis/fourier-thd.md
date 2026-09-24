@@ -68,9 +68,6 @@ binary-search + linear interpolation. (4) In-place radix-2 FFT
 harmonics 2–9. A pure-cosine unit test pins THD ≈ 0 and a square-wave test
 pins the analytic 48.3 % / truncated-9-harmonic value.
 
-`analyzeBuffer()` is the same pipeline for already-uniform single-period
-samples (HB/PSS spectra checks use it).
-
 Knobs: `f_fundamental`, `n_harmonics` (table size; THD always uses 2–9),
 `tran_opts` override; transient knobs pass through.
 

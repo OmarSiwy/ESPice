@@ -248,12 +248,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
 
-    // ponytail: Phase 4 — GPU batch dispatch not applicable here.
-    // Each PSS time sample k has its own Jacobian (G_k, C_k) from the periodic
-    // orbit, so freq_solve_batch (which takes one shared G,C with many omegas)
-    // cannot batch the (freq × sideband × sample) inner loop directly.
-    // Upgrade path: a per-sample-batched variant that accepts N×(G,C,omega)
-    // triples, or lifting the sample loop into the kernel.
+    // ponytail: no lane batching here. Each PSS time sample k has its own
+    // Jacobian (G_k, C_k) from the periodic orbit, so FreqSolver.solveBatch
+    // (one shared G,C, many omegas) cannot batch the (freq × sideband ×
+    // sample) inner loop. Upgrade path: a per-sample-batched variant taking
+    // N×(G,C,omega) triples.
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
