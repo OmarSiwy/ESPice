@@ -131,7 +131,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
             _ = try elements(&.{ o.n_trials, @as(usize, n) + 1 });
         },
         .tran => |o| {
-            if (o.dt_min > o.dt_init or o.step_fn != null or o.step_ctx != null) return error.InvalidQueryOptions;
+            if (o.dt_min > o.dt_init) return error.InvalidQueryOptions;
             if (o.dt_max) |max| if (max <= 0 or max < o.dt_min) return error.InvalidQueryOptions;
             try timeStep(o.dt_min);
             try timeStep(o.dt_init);

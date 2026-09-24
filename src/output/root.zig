@@ -12,7 +12,7 @@
 //!   case of "the user named a format on the command line".
 //!
 //! `Session` adds ordered, idempotent whole-plot publication with fixed output
-//! selection; the direct writers and transient `Stream` remain available.
+//! selection; the direct writers remain available.
 
 const std = @import("std");
 
@@ -37,19 +37,6 @@ pub const fsdb = @import("fsdb.zig");
 /// The one waveform payload every writer accepts.
 pub const Result = types.Result;
 pub const Plot = types.Plot;
-
-/// SPICE variable-class string (`voltage`, `current`, ...) for a signal name.
-pub const varType = rawfile.varType;
-
-/// Append a plot to an existing binary raw file.
-pub const writeAppend = rawfile.writeAppend;
-
-/// Whether `path` names a binary raw file that `Stream` may append to.
-pub const canStream = rawfile.canStream;
-
-/// Incremental binary-raw writer, for runs whose point count is not known up
-/// front. Only the binary format streams; the rest are whole-plot writers.
-pub const Stream = rawfile.Stream;
 
 /// Output encodings `write` can dispatch to.
 pub const Format = types.Format;

@@ -264,89 +264,6 @@ test "FreqSweep matches the ngspice grids the oracles were taken on" {
     try std.testing.expectEqual(@as(f64, 100), one.at(0));
 }
 
-// ============================================================================
-// Waveform measurement
-// ============================================================================
-
-pub const Waveform = struct {
-    times: []const f64,
-    values: []const f64,
-
-    pub fn len(self: Waveform) usize {
-        return @min(self.times.len, self.values.len);
-    }
-};
-
-pub fn wfMax(wf: Waveform) f64 {
-    const n = wf.len();
-    if (n == 0) return 0;
-    var result: f64 = wf.values[0];
-    for (wf.values[1..n]) |v| result = @max(result, v);
-    return result;
-}
-
-pub fn wfMin(wf: Waveform) f64 {
-    const n = wf.len();
-    if (n == 0) return 0;
-    var result: f64 = wf.values[0];
-    for (wf.values[1..n]) |v| result = @min(result, v);
-    return result;
-}
-
-pub fn wfPp(wf: Waveform) f64 {
-    return wfMax(wf) - wfMin(wf);
-}
-
-pub fn wfAvg(wf: Waveform) f64 {
-    const n = wf.len();
-    if (n < 2) return if (n == 1) wf.values[0] else 0;
-    var integral: f64 = 0;
-    for (1..n) |k| {
-        const dt = wf.times[k] - wf.times[k - 1];
-        integral += 0.5 * (wf.values[k - 1] + wf.values[k]) * dt;
-    }
-    const t_span = wf.times[n - 1] - wf.times[0];
-    if (t_span == 0) return wf.values[0];
-    return integral / t_span;
-}
-
-pub fn wfRms(wf: Waveform) f64 {
-    const n = wf.len();
-    if (n < 2) return if (n == 1) @abs(wf.values[0]) else 0;
-    var integral: f64 = 0;
-    for (1..n) |k| {
-        const dt = wf.times[k] - wf.times[k - 1];
-        const v0_sq = wf.values[k - 1] * wf.values[k - 1];
-        const v1_sq = wf.values[k] * wf.values[k];
-        integral += 0.5 * (v0_sq + v1_sq) * dt;
-    }
-    const t_span = wf.times[n - 1] - wf.times[0];
-    if (t_span == 0) return @abs(wf.values[0]);
-    return @sqrt(integral / t_span);
-}
-
-pub fn wfFrequency(wf: Waveform) f64 {
-    const n = wf.len();
-    if (n < 3) return 0;
-    const dc_offset = wfAvg(wf);
-    var first_crossing: ?f64 = null;
-    var last_crossing: ?f64 = null;
-    var crossing_count: u32 = 0;
-    for (1..n) |k| {
-        if (wf.values[k - 1] < dc_offset and wf.values[k] >= dc_offset) {
-            const frac = (dc_offset - wf.values[k - 1]) / (wf.values[k] - wf.values[k - 1]);
-            const t_cross = wf.times[k - 1] + frac * (wf.times[k] - wf.times[k - 1]);
-            if (first_crossing == null) first_crossing = t_cross;
-            last_crossing = t_cross;
-            crossing_count += 1;
-        }
-    }
-    if (crossing_count < 2) return 0;
-    const total_time = last_crossing.? - first_crossing.?;
-    if (total_time <= 0) return 0;
-    return @as(f64, @floatFromInt(crossing_count - 1)) / total_time;
-}
-
 pub const Tolerances = struct {
     reltol: f64 = 1e-3,
     abstol: f64 = 1e-12,
@@ -364,15 +281,4 @@ pub const Tolerances = struct {
 
     chgtol: f64 = 1e-14,
     trtol: f64 = 7.0,
-
-    pub const ngspice: Tolerances = .{};
-    pub const hspice: Tolerances = .{ .itl1 = 150 };
-    pub const ltspice: Tolerances = .{ .trtol = 1.0, .source_steps = 25 };
-    pub const tight: Tolerances = .{
-        .reltol = 1e-6,
-        .vntol = 1e-9,
-        .abstol = 1e-15,
-        .gmin = 1e-15,
-        .trtol = 1.0,
-    };
 };

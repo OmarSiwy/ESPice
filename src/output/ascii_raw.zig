@@ -15,7 +15,7 @@ pub fn write(io: Io, path: []const u8, plot: Plot) !void {
     var fw = file.writer(io, &buf);
     const w = &fw.interface;
 
-    _ = try rawfile.writeHeader(&fw, plot, false, false);
+    try rawfile.writeHeader(&fw.interface, plot, false);
 
     for (0..plot.npoints) |pt| {
         for (0..nvars) |v| {
