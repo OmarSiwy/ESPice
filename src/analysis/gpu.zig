@@ -190,24 +190,17 @@ fn statsOn() bool {
     return std.c.getenv("ESPICE_GPU_STATS") != null;
 }
 
-/// The model name inside an `arp_eval_<model>` kernel symbol, for the demotion
-/// report. Falls back to the whole symbol if it is not shaped that way.
-fn modelOf(kernel_symbol: []const u8) []const u8 {
-    const p = "arp_eval_";
-    return if (std.mem.startsWith(u8, kernel_symbol, p)) kernel_symbol[p.len..] else kernel_symbol;
-}
-
 /// A CAPABILITY demotion: this batch had a `gpu_payload` but the build emitted
 /// no image for its model, so it keeps stamping the host planes. Correct, and
 /// silently much slower — the host stamp is a scattered read-modify-write per
 /// Jacobian entry per instance and does not vectorize. Naming the model is the
 /// difference between "the GPU is slow here" and "bsim4 was never on it".
-fn reportDemote(on: bool, kernel_symbol: []const u8, which: []const u8, count: u32) void {
+fn reportDemote(on: bool, model: []const u8, which: []const u8, count: u32) void {
     if (!on) return;
     std.debug.print(
         "note: GPU batch '{s}' ({d} instances) stays on the CPU: no {s} kernel image " ++
             "in this build (model over gpu_max_model_bytes, or a stale image)\n",
-        .{ modelOf(kernel_symbol), count, which },
+        .{ model, count, which },
     );
 }
 
@@ -509,7 +502,7 @@ pub const GpuContext = struct {
             // a real fault, not a device the build chose to skip.
             var kernel = gompute.rawKernelByName(backend.?, p.kernel, 0) catch |e| switch (e) {
                 error.KernelNotFound => {
-                    reportDemote(report, p.kernel, "eval", p.count);
+                    reportDemote(report, b.type_name, "eval", p.count);
                     cpu_batches[n_cpu] = b;
                     n_cpu += 1;
                     continue;
@@ -525,7 +518,7 @@ pub const GpuContext = struct {
             if (p.lim_kernel.len > 0) {
                 lim_kernel = gompute.rawKernelByName(backend.?, p.lim_kernel, 0) catch |e| switch (e) {
                     error.KernelNotFound => {
-                        reportDemote(report, p.kernel, "limit/state", p.count);
+                        reportDemote(report, b.type_name, "limit/state", p.count);
                         kernel.deinit();
                         cpu_batches[n_cpu] = b;
                         n_cpu += 1;
@@ -540,7 +533,7 @@ pub const GpuContext = struct {
             if (p.ctl_kernel.len > 0) {
                 ctl_kernel = gompute.rawKernelByName(backend.?, p.ctl_kernel, 0) catch |e| switch (e) {
                     error.KernelNotFound => {
-                        reportDemote(report, p.kernel, "state-latch", p.count);
+                        reportDemote(report, b.type_name, "state-latch", p.count);
                         kernel.deinit();
                         if (lim_kernel) |*lk| lk.deinit();
                         cpu_batches[n_cpu] = b;

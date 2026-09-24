@@ -768,9 +768,8 @@ pub const Circuit = struct {
     /// first point of every inner sweep, which is the point right after the
     /// outer loop may have moved temperature, and narrows only thereafter.
     ///
-    /// `Batch.type_name` is `@typeName(D)` (`vsource.Vsource`) while
-    /// `ParamRef.device_type` is its last component (`Vsource`), so the match
-    /// is on the tail. No match at all falls back to the full walk: a silently
+    /// `Batch.type_name` and `ParamRef.device_type` are both `baseName(D)`
+    /// (`Vsource`). No match at all falls back to the full walk: a silently
     /// skipped re-derivation is a wrong answer, not a slow one.
     pub fn recomputeType(self: *Circuit, type_name: []const u8) error{TopologyChanged}!void {
         self.lin.valid = false;
@@ -778,11 +777,7 @@ pub const Circuit = struct {
         self.markGpuDirty();
         var hit = false;
         for (self.batches) |b| {
-            const tail = if (std.mem.lastIndexOfScalar(u8, b.type_name, '.')) |d|
-                b.type_name[d + 1 ..]
-            else
-                b.type_name;
-            if (!std.mem.eql(u8, tail, type_name)) continue;
+            if (!std.mem.eql(u8, b.type_name, type_name)) continue;
             hit = true;
             if (b.hooks.recompute) |f| {
                 if (!f(b.ctx)) return error.TopologyChanged;
