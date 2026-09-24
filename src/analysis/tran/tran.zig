@@ -42,18 +42,10 @@ const TranHook = struct {
     i_prev: []const f64, // read by trap only
     q_prev2: []const f64, // read by gear_2 only
     a_vals: []f64,
-    q_snap: ?[]f64,
-    /// Per-device-state charge snapshot, same cadence as `q_snap` and for the
-    /// same reason: JFNK's matvec re-evals after the converged assemble, so the
-    /// last plane state is not necessarily the solution's. Null ⇒ per-row LTE
-    /// (nothing carries charge, or the GPU owns the stamp).
-    qt_snap: ?[]f64 = null,
     has_charge: bool,
 
     pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
-        if (self.q_snap) |snap| simdCopy(snap, ckt.q_vec[0..ckt.n]);
-        if (self.qt_snap) |snap| ckt.snapshotQTape(snap);
         if (self.has_charge) {
             const n: usize = ckt.n;
             switch (self.method) {
@@ -85,8 +77,6 @@ pub fn simulate(
 ) !SimResult {
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
-    const trap = options.method == .trapezoidal;
-    const gear = options.method == .gear_2;
 
     const ws = try ckt.workspace();
     const x_try = try allocator.alloc(f64, n);
@@ -94,7 +84,7 @@ pub fn simulate(
 
     // Charge state: dynamic current i_prev and a charge-history ring
     // [cur, prev, prev2, prev3] for the companion residual + trap LTE.
-    // Slot 0 receives the Newton snapshot; the solve only reads slots 1..3.
+    // Slot 0 receives the charge at each converged attempt; the solve only reads slots 1..3.
     var a_vals: []f64 = &.{};
     var i_prev: []f64 = &.{};
     var q_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
@@ -124,6 +114,44 @@ pub fn simulate(
     // controller or because of something else, and `n_qt` in the stats line
     // says whether the tape is live at all. Setup-path getenv, never hot.
     const n_qt: usize = if (has_charge and std.c.getenv("ZP_NO_QTAPE") == null) ckt.qTapeLen() else 0;
+    // Coupled inductors: ngspice truncates ONE state per inductor, INDflux =
+    // L·i + Σ M·i_other (indload.c:72-76; MUT has no trunc routine). The tape
+    // holds L·i and each M·i as separate states, which bind where INDflux
+    // does not (device_kinduc 51.7x). With a K card, `lteSnap` zeroes the
+    // inductor and kinduc tape spans (a flat zero history never binds) and
+    // appends the row plane at every current row: an inductor's branch row
+    // sums exactly its INDflux. Circuits without a K card are unchanged.
+    // ponytail: every current row is appended (V-source rows carry no charge
+    // and stay inert); take only the inductors' rows once Circuit exposes
+    // the tape's rhs_idx.
+    const lte_rows: []u32 = rows: {
+        if (n_qt == 0) break :rows &.{};
+        for (ckt.batches) |b| {
+            if (!std.mem.eql(u8, b.type_name, "kinduc")) continue;
+            var list: std.ArrayList(u32) = .empty;
+            for (ckt.current_row[0..n], 0..) |is_cur, r| if (is_cur) try list.append(allocator, @intCast(r));
+            break :rows try list.toOwnedSlice(allocator);
+        }
+        break :rows &.{};
+    };
+    defer allocator.free(lte_rows);
+    const n_lt = n_qt + lte_rows.len;
+    const lteSnap = struct {
+        fn call(c: *root.Circuit, dst: []f64, rows: []const u32) void {
+            const n_tape = dst.len - rows.len;
+            c.snapshotQTape(dst[0..n_tape]);
+            if (rows.len == 0) return;
+            var off: usize = 0;
+            for (c.batches) |b| {
+                if (b.hooks.q_tape == null) continue;
+                const len = b.count * b.n_u;
+                if (std.mem.eql(u8, b.type_name, "inductor") or std.mem.eql(u8, b.type_name, "kinduc"))
+                    @memset(dst[off..][0..len], 0);
+                off += len;
+            }
+            for (rows, dst[n_tape..]) |r, *d| d.* = c.q_vec[r];
+        }
+    }.call;
     var qt_i_prev: []f64 = &.{};
     var qt_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
     defer if (n_qt > 0) {
@@ -150,9 +178,9 @@ pub fn simulate(
         root.zeroSimd(i_prev);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
         if (n_qt > 0) {
-            qt_i_prev = try allocator.alloc(f64, n_qt);
+            qt_i_prev = try allocator.alloc(f64, n_lt);
             root.zeroSimd(qt_i_prev);
-            for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_qt);
+            for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_lt);
         }
         // Deliberately NOT preceded by setSimState: q_prev must be the charge
         // the OPERATING POINT saw, so this seeding eval runs in the static
@@ -166,7 +194,7 @@ pub fn simulate(
         simdCopy(q_hist[3], ckt.q_vec[0..n]);
         // Same seeding on the per-state tape, off the same eval.
         if (n_qt > 0) {
-            ckt.snapshotQTape(qt_hist[1]);
+            lteSnap(ckt, qt_hist[1], lte_rows);
             simdCopy(qt_hist[2], qt_hist[1]);
             simdCopy(qt_hist[3], qt_hist[1]);
         }
@@ -261,8 +289,10 @@ pub fn simulate(
     if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
     dt /= 10.0;
     if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
-    var dt_prev: f64 = dt;
-    var dt_prev2: f64 = dt;
+    // dctran.c:312: CKTdeltaOld[] starts at CKTmaxStep, not the first dt —
+    // the first divided differences are ngspice's only with this seed.
+    var dt_prev: f64 = effective_dt_max;
+    var dt_prev2: f64 = effective_dt_max;
     var steps: u32 = 0;
     const stats_on = std.c.getenv("ZP_TRAN_STATS") != null;
     var st: Stats = .{};
@@ -314,8 +344,6 @@ pub fn simulate(
             .i_prev = i_prev,
             .q_prev2 = q_hist[2],
             .a_vals = a_vals,
-            .q_snap = if (has_charge) q_hist[0] else null,
-            .qt_snap = if (n_qt > 0) qt_hist[0] else null,
             .has_charge = has_charge,
         };
 
@@ -333,15 +361,11 @@ pub fn simulate(
             st.rej_newton += 1;
             // Rejected point: restore FSM devices to the last accepted state.
             _ = ckt.stateCtl(.revert);
-            // Order drop first: a discontinuity rejects trap long before dt
-            // is the problem. Retry at order 1 at the SAME dt; only halve
-            // when the retry already ran order 1 (ngspice-style).
-            if (!use_be and (trap or gear)) {
-                st.order_drops += 1;
-                use_be = true;
-                continue;
-            }
-            dt *= 0.5;
+            // dctran.c:815, :823: cut dt by 8 AND drop to order 1 in one
+            // retry — no same-dt BE attempt first.
+            if (!use_be) st.order_drops += 1;
+            use_be = true;
+            dt /= 8.0;
             if (dt < options.dt_min) {
                 // The most interesting exit — say where it died. (The stats
                 // block at the bottom is skipped by this return.)
@@ -388,6 +412,14 @@ pub fn simulate(
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         if (has_charge) {
+            // CKTterr reads the charge the published point carries. `newton()`
+            // returns x_k+1 while the planes hold q(x_k) (or a JFNK matvec's
+            // x), one correction back; read them at the solution so the LTE,
+            // advanceCurrent and the next residual all see q(trial). One
+            // charge-only pass per converged attempt.
+            ckt.evalQ(trial, t + dt);
+            simdCopy(q_hist[0], ckt.q_vec[0..n]);
+            if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_rows);
             // Captured before the ring rotation at the bottom of this block.
             const lh = lte_hist.*;
             const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
@@ -407,13 +439,9 @@ pub fn simulate(
                 if (del < 0.9 * dt) {
                     st.rej_lte += 1;
                     _ = ckt.stateCtl(.revert);
-                    if (!use_be and (trap or gear)) {
-                        st.order_drops += 1;
-                        use_be = true;
-                        continue;
-                    }
                     // ngspice retries at the LTE-suggested dt (dctran.c:966
-                    // `CKTdelta = newdelta`), not a halving ladder: one reject
+                    // `CKTdelta = newdelta`) at the SAME order — only a Newton
+                    // failure drops to order 1 (:823) — and not a halving ladder: one reject
                     // lands the right dt, so the step phase through an edge
                     // tracks ngspice's instead of drifting a half-octave
                     // (digital/clamp's 0.48 ns final edge chord). The branch
@@ -531,48 +559,22 @@ pub fn simulate(
         // assemble's fadd(pq, D) bit for bit. The i_prev correction is the same
         // α·Δq for both methods.
         //
-        // NOT diagnostic, and Δq is NOT a rounding floor — this was gated off
-        // once and had to come back (2026-09-07). `newton()` returns on the
-        // iterate it converged, WITHOUT reassembling: `ckt.q_vec` holds q(x_k)
-        // while `cur` is x_k+1. So Δq is the last Newton correction's charge,
-        // ~C·dx, and α·Δq is 1e-7…7.7e-5 A against abstol 1e-12 — five to eight
-        // decades above the floor. i_prev and q_hist[1] are not diagnostics
-        // either: both are read by the NEXT step's companion residual
-        // (`TranHook.assemble`, rhs += α(q − q_prev) − i_prev) and by
-        // `stepBound`. Skipping this integrates the next step from a point one
-        // Newton correction away from the one that was recorded.
-        // Measured cost of keeping it: +10% devices/mos6_inverter, +14%
-        // tran/fourbitadder, +17% scaling/parallel_inverters_100. Measured cost
-        // of dropping it: 151 -> 149 fixtures passing, parallel_inverters_100
-        // 8.98e-3 -> 1.49e-2 (PASS -> FAIL) while taking 3.4% MORE steps.
-        // The two writes are one correction — applying either alone is worse
-        // than applying neither (3.6e-2 on parallel_inverters_100).
-        // Only the CHARGES are read here — g/c/rhs stay dead until the next
-        // step's first `TranHook.assemble` zeroes and restamps all three — so
-        // this is `evalQ`, the reactive half of the pass, not `eval`, run on a
-        // value-only `S` (`engine.RealFor`) whose arithmetic is `Dual`'s value
-        // half verbatim. Same `D.q`, same scatter, same bits, so `q_vec`/
-        // `q_tape` are what the full pass wrote; it just stops computing the two
-        // Jacobians and the resistive residual it was throwing away.
-        //
-        // It cannot be skipped, and not because of limiting: `newton()` returns
-        // the iterate AFTER the one it assembled, so the accepted `cur` is one
-        // Newton correction past the x the planes hold — always, limited or not.
+        // The charge read before the LTE (above) already put q_hist at
+        // q(cur), so Δq here is only what the commit moved. It is not zero:
+        // dropping this re-read changes the bytes of txl2_3_line,
+        // hfet_inverter, mesa_oscillator and mos6_inverter. `evalQ` is the
+        // charge-only pass: same `D.q`, same scatter, same bits as `eval`.
         if (has_charge and ckt.has_state_q) {
             ckt.evalQ(cur, t);
             integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], alpha_val);
             simdCopy(q_hist[1], ckt.q_vec[0..n]);
-            // The per-state tape is the SAME two writes on the same Δq, off the
-            // same re-read — `stepBound` now reduces over it, so leaving it
-            // uncorrected would reintroduce exactly the "one Newton correction
-            // away from the recorded point" error the row loop above exists to
-            // close, only on the LTE side instead of the residual side.
+            // The per-state tape takes the SAME two writes on the same Δq.
             if (n_qt > 0) {
-                ckt.snapshotQTape(qt_hist[0]);
+                lteSnap(ckt, qt_hist[0], lte_rows);
                 integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], alpha_val);
                 // Swap, not copy: qt_hist[0] is the ring's scratch slot (the
                 // rotation above just parked the stale tail there) and the next
-                // assemble overwrites it via `qt_snap` before anything reads it.
+                // accepted attempt's charge read overwrites it before anything reads it.
                 std.mem.swap([]f64, &qt_hist[0], &qt_hist[1]);
             }
         }
