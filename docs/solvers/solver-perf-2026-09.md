@@ -177,6 +177,12 @@ Tuning and dropped variants, bench Ir for three factors plus setup:
 - `panel_min_rows` 8 and 16: grid 423M and 421M against 419M at 32; 8 opens
   panels on the opamp's 2x2 complex blocks and costs 21% there.
 - The `lend` shortcut alone: grid 675M to 626M.
+- Retired after the panels landed: an 8-wide skip over marked children in
+  the supernodal loop's DFS scan (load 8 flags, compare to the mark, jump to
+  the first unmarked by ctz; order-preserving, bitwise). Grid 407.5M to
+  398.5M Ir (-2%), and the bench min wall moved inside its noise (29.5 to
+  29.7 ms against 26.5 to 29.6 ms over three alternating runs). Most scans
+  meet an unmarked child within the first few entries.
 
 Not done: the DFS is now the larger half of the grid factor. A supernodal
 DFS (one adjacency scan per supernode, as SuperLU does) changes the
@@ -272,6 +278,27 @@ time on parallel_inverters_2000 did not: min of 15, both run orders,
 804.6/828.9 ms before against 822.4/819.7 ms after. The 144KB tape is past
 L1; the earlier fourbitadder result (Ir down, wall up) is the same effect.
 Kept at 2,048.
+
+Also retired, bench Ir per Newton step (vacask_mul / graetz /
+inverter_chain_256, against 2,688 / 2,496 / 67,475):
+
+- One flop loop for all columns, with each column's pivot and L scaling run
+  when the flop index reaches the column's end: 2,732 / 2,608 / 70,529
+  (2,910 / 2,826 / 77,215 before the column end was hoisted into a
+  register). The per-column unrolled loop is cheaper than a compare per
+  flop.
+- A laned copy instead of `@memcpy` for `direct`'s value snapshot:
+  2,702 / 2,482 / 68,914. The call costs about 50 Ir on vacask_mul's 36
+  values, but compiler_rt's copy beats the loop once nnz reaches the
+  hundreds.
+
+Where vacask_mul's time is now (`-Ddebug-info` callgrind, 11,358M Ir):
+refactor 19.4% (1,630 Ir per call, 1.35M calls), solve 8.6%, diode eval
+15.5%, and 4.4% in compiler_rt `memset` called twice per Newton iterate
+from `Circuit.evalNewtonCpu` (analysis/Circuit.zig and
+problem/numerics.zig, zeroing the planes). That memset is outside
+`solvers/`; an inline laned zero there (the `fillZero` pattern) is the
+next small-matrix win.
 
 ## Converger: per-iterate O(n) passes
 
