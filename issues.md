@@ -96,13 +96,17 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `convergence/monotonic_cubic_1000` pass, and so do `hb/polynomial_2`,
   `hb/polynomial_3`, `pss/polynomial_2`, `pss/polynomial_3` (C1 was their
   only open cause).
-- [ ] **F4 — VBIC.** 4 decks. `dc/device_vbic_temp`,
-  `dc/device_vbic_forced_output`: self-heating (RTH) runs on a 4-terminal
-  instance. ngspice ties a missing 5th (temperature) terminal to ground
-  (`inp2q.c:85-87`), so dT = 0 there; our `dt` node floats with `sw_et = 1`.
-  Plus E9 (`i(q1)`).
-  `noise/device_vbic_noise_scale`: noise 17% off at M=2 (mfactor scaling).
-  `multi_analysis/device_vbic_ce_amp`: needs B3.
+- [~] **F4 — VBIC.** `dc/device_vbic_temp` FIXED (phase 2b): a card
+  without the fifth (thermal) node defaults `sw_et = 0` (ngspice ties the
+  missing node to ground, inp2q.c:85-87, so dT = 0; an explicit SW_ET on the
+  card still wins), and `i(q1)` is aliased to `v(q1#xf2)` when TD > 0 (E9).
+  `dc/device_vbic_forced_output`: MissingColumn -> 1 row at 3.26x (row 25,
+  the Vc = 3.45 V zero crossing of `i(vb)`, ~1e-6 relative; constants,
+  unverified). `noise/device_vbic_noise_scale` 28x unchanged (the VA's
+  double mfactor on noise, recipe 5b, not applied here).
+  `multi_analysis/device_vbic_ce_amp`: MissingColumn -> AC passes, needs B3.
+  `op/device_vbic` moves 0.0033x -> 0.0037x (self-heating now off, as in
+  ngspice).
 - [ ] **F5 — OP reports success after the confirming Newton failed.**
   `stress/scaling_inverter_chain_4k` (also slow: 308 s against the runner's
   300 s timeout, so it flips between Timeout and ValueMismatch). `op.zig`
@@ -579,7 +583,8 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   DEVICE card. The instance spelling `R1 a b 1k tc1=...` — what every current
   deck uses — works, so the corpus does not catch this.
 
-- [ ] **E9 — `i(q1)` in the VBIC oracles is NOT a terminal current.** 2 decks
+- [x] **E9 — `i(q1)` in the VBIC oracles is NOT a terminal current.** FIXED
+  (phase 2b): the builder aliases it to `v(<q>#xf2)` when TD > 0. 2 decks
   (`dc/device_vbic_temp`, `dc/device_vbic_forced_output` → MissingColumn).
   CORRECTED 2026-09-24: the earlier diagnosis (a missing per-device
   terminal-current probe) was wrong. ngspice `vbicsetup.c:510-525` creates
