@@ -1,26 +1,34 @@
 const std = @import("std");
-const impl = @import("../prepare.zig");
-const input = impl;
-const syntax = @import("syntax");
-const types = syntax.types;
-const Parser = syntax.Parser;
-const ngspice = syntax.ngspice;
+const input = @import("../prepare.zig");
+const analyses = @import("../analyses.zig");
+const netlist = @import("netlist");
 const problem = @import("problem_types");
 const requests = @import("requests");
 const Job = requests.Query;
-const NO_NODE = std.math.maxInt(u32);
-const build = impl.build;
-const resolveQueries = impl.resolveQueries;
-const DeckOptions = impl.test_access.DeckOptions;
-const parseDeckOptions = impl.test_access.parseDeckOptions;
-const buildJob = impl.test_access.buildJob;
-const applyDeckOptions = impl.test_access.applyDeckOptions;
+const NO_NODE = analyses.NO_NODE;
+const build = input.build;
+const resolveQueries = input.resolveQueries;
+
+fn parse(arena: std.mem.Allocator, src: []const u8) !netlist.Netlist {
+    return netlist.parse(arena, src, .ngspice);
+}
+
+/// The only card of `src`, with output node row 1 and no reference.
+fn card(arena: std.mem.Allocator, src: []const u8) !netlist.Analysis {
+    const nl = try parse(arena, try std.fmt.allocPrint(arena, "dispatch\n{s}\n.end\n", .{src}));
+    var a = nl.deck.analyses[0];
+    a.pos = 1;
+    a.neg = NO_NODE;
+    a.ports = @splat(NO_NODE);
+    return a;
+}
 
 test "analysis directives dispatch every implemented capability and reject malformed requests" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const sources: problem.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
+    const cards: []const requests.CardRef = &.{.{ .type_name = "vsource", .index = 0, .name = "vin" }};
     const directives = [_][]const u8{
         ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
         ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
@@ -33,25 +41,26 @@ test "analysis directives dispatch every implemented capability and reject malfo
     };
     try std.testing.expectEqual(std.meta.fields(requests.Kind).len, directives.len);
     for (directives, 0..) |directive, index| {
-        const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "dispatch\n{s}\n.end\n", .{directive}));
         const id: requests.Kind = @enumFromInt(index);
-        const job = (try buildJob(nl.directives[0], 1, NO_NODE, @splat(NO_NODE), sources, &.{})).?;
+        const job = (try analyses.buildJob(try card(a, directive), sources, cards)).?;
         try std.testing.expectEqual(id, std.meta.activeTag(job));
         if (job == .pss) try std.testing.expectEqual(@as(f64, 1e-3), job.pss.period);
     }
     const malformed = [_][]const u8{
         ".ac dec 0 1 10",                ".ac dec -1 1 10",     ".ac dec 2.5 1 10",                      ".ac dec 2 10 1",
-        ".ac lin 2 1 10",                ".dc missing 0 1 0.1", ".dc vin 0 1 0",                         ".dc vin 0 1 -1",
-        ".dc vin 0 1 1 missing 0 1 1",   ".tran 0 1u",          ".tran 1u 2u 1u",                        ".pss 0",
+        ".ac lin 2 -1 10",               ".dc missing 0 1 0.1", ".dc vin 0 1 0",                         ".dc vin 0 1 -1",
+        ".dc vin 0 1 1 missing 0 1 1",   ".tran 0 1u",          ".tran 1u 2u 2u",                        ".pss 0",
         ".pss 1k 2m v(out) 128 4 50 1m", ".mc 65536",           ".pnoise v(out) vin dec 2 10 100 1k -1", ".pz in 0 out 0 vol pz",
         ".tf v(out) missing",            ".temp -300 125 55",
     };
     for (malformed) |directive| {
-        const nl = try Parser(ngspice).parse(a, try std.fmt.allocPrint(a, "invalid\n{s}\n.end\n", .{directive}));
-        if (buildJob(nl.directives[0], 1, NO_NODE, @splat(NO_NODE), sources, &.{})) |_| return error.AcceptedInvalidAnalysis else |_| {}
+        if (analyses.buildJob(try card(a, directive), sources, cards)) |_| {
+            std.debug.print("accepted: {s}\n", .{directive});
+            return error.AcceptedInvalidAnalysis;
+        } else |_| {}
     }
-    const unknown: types.Directive = .{ .kind = "options", .args = &.{} };
-    try std.testing.expectEqual(null, try buildJob(unknown, NO_NODE, NO_NODE, @splat(NO_NODE), sources, &.{}));
+    // A single `.temp` is deck configuration, not a query.
+    try std.testing.expectEqual(null, try analyses.buildJob(try card(a, ".temp 50"), sources, cards));
 }
 
 test "deck temperature and tolerances reach statistical and noise jobs" {
@@ -60,9 +69,9 @@ test "deck temperature and tolerances reach statistical and noise jobs" {
     // analysis-card copy: ngspice's NevalSrc multiplies by `ckt->CKTtemp`
     // (nevalsrc.c:111) precisely because its devices hand over a bare
     // conductance, and ours hand over a finished density.
-    const options: DeckOptions = .{ .temp_c = 85, .tol = .{ .reltol = 1e-5 } };
+    const options: analyses.DeckOptions = .{ .temp_c = 85, .tol = .{ .reltol = 1e-5 } };
     var temp_job: Job = .{ .temp = .{} };
-    applyDeckOptions(&temp_job, options);
+    analyses.applyDeckOptions(&temp_job, options);
     try std.testing.expectEqual(@as(f64, 85), temp_job.temp.t_nom);
     try std.testing.expectEqual(options.tol.reltol, temp_job.temp.dc_options.tol.reltol);
 }
@@ -72,9 +81,13 @@ test "deck options reject invalid numeric conversions before construction" {
     defer arena.deinit();
     for ([_][]const u8{ "itl1=-1", "itl2=65536", "itl4=1.5", "temp=-300", "tnom=nan", "reltol=-1" }) |option| {
         const source = try std.fmt.allocPrint(arena.allocator(), "invalid options\n.options {s}\n.end\n", .{option});
-        const nl = try Parser(ngspice).parse(arena.allocator(), source);
-        try std.testing.expectError(error.InvalidAnalysisArguments, parseDeckOptions(nl.directives));
+        const nl = try parse(arena.allocator(), source);
+        try std.testing.expectError(error.InvalidAnalysisArguments, analyses.deckOptions(nl.deck.config));
     }
+    const nl = try parse(arena.allocator(), "later wins\n.temp 50\n.options temp=27 method=gear maxord=1\n.end\n");
+    const o = try analyses.deckOptions(nl.deck.config);
+    try std.testing.expectEqual(@as(f64, 27), o.temp_c.?);
+    try std.testing.expectEqual(requests.Method.backward_euler, o.method.?);
 }
 
 test "nonfinite model parameter cannot become its default" {
@@ -82,7 +95,7 @@ test "nonfinite model parameter cannot become its default" {
     defer sa.deinit();
     var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer pa.deinit();
-    const nl = try Parser(ngspice).parse(pa.allocator(),
+    const nl = try parse(pa.allocator(),
         \\invalid model value
         \\.model nm nmos(level=1 tox={1/0})
         \\vin in 0 1
@@ -97,9 +110,9 @@ test "nonfinite model parameter cannot become its default" {
 test "prepared metadata and query identities outlive parse storage" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
-    var parse = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer parse.deinit();
-    const source = try parse.allocator().dupe(u8,
+    var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer parse_arena.deinit();
+    const source = try parse_arena.allocator().dupe(u8,
         \\prepared lifetime
         \\va unused 0 dc 2
         \\vb in 0 dc 10 ac 1
@@ -113,10 +126,10 @@ test "prepared metadata and query identities outlive parse storage" {
         \\.tran 1u 10u uic
         \\.end
     );
-    const nl = try Parser(ngspice).parse(parse.allocator(), source);
-    var prepared = try build(session.allocator(), parse.allocator(), nl);
+    const nl = try parse(parse_arena.allocator(), source);
+    var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
-    _ = parse.reset(.free_all);
+    _ = parse_arena.reset(.free_all);
     try std.testing.expectEqualStrings("prepared lifetime", prepared.title);
     try std.testing.expectEqual(@as(usize, 5), prepared.queries.len);
     try std.testing.expectEqual(@as(f64, 85), prepared.deck_temp.?);
@@ -163,15 +176,31 @@ test "prepared metadata and query identities outlive parse storage" {
         ".param p=1",           ".options temp=12",  ".temp 12",         ".subckt unused a b\n.ends",
         ".op\n.end\nr3 2 0 1k",
     }) |text| try std.testing.expectError(error.UnsupportedDirectiveMutation, resolveQueries(session.allocator(), &prepared, text));
+    try std.testing.expectError(error.InvalidAnalysisArguments, resolveQueries(session.allocator(), &prepared, "* nothing\n"));
     try std.testing.expectError(error.AnalysisNodeNotFound, resolveQueries(session.allocator(), &prepared, ".tf v(missing) vb"));
-    // A numeric reference node is a node, not ground: `2` tokenizes as a number.
-    const diff = try resolveQueries(session.allocator(), &prepared,
+    try std.testing.expectError(error.UnsupportedAnalysisOutput, resolveQueries(session.allocator(), &prepared, ".tf v(in, 2) vb"));
+    try std.testing.expectEqual(@as(usize, 5), prepared.queries.len);
+}
+
+test "a numeric reference node is that node, not ground" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nl = try parse(a,
+        \\numeric reference
+        \\vb in 0 dc 10 ac 1
+        \\r1 in 2 1k
+        \\r2 2 0 3k
         \\.tf v(in, 2) vb
         \\.noise v(in, 2) vb dec 2 10 100
+        \\.end
     );
-    try std.testing.expectEqual(node, diff[0].tf.output_neg);
-    try std.testing.expectEqual(node, diff[1].noise.out_neg);
-    try std.testing.expectEqual(@as(usize, 5), prepared.queries.len);
+    var prepared = try build(a, a, nl);
+    defer prepared.deinit();
+    const node = prepared.probes[prepared.probes.len - 1];
+    try std.testing.expectEqualStrings("v(2)", prepared.probe_labels[prepared.probe_labels.len - 1]);
+    try std.testing.expectEqual(node, prepared.queries[0].tf.output_neg);
+    try std.testing.expectEqual(node, prepared.queries[1].noise.out_neg);
 }
 
 test "selected unresolved parameters fail while unused models stay inert" {
@@ -182,16 +211,16 @@ test "selected unresolved parameters fail while unused models stay inert" {
     }) |body| {
         var session = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer session.deinit();
-        var parse = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer parse.deinit();
-        const nl = try Parser(ngspice).parse(parse.allocator(), "unresolved numeric parameter\n.param dummy=1\nvin in 0 dc 1\nrload in out 1k\n" ++ body ++ ".op\n.end\n");
-        try std.testing.expectError(error.UnresolvedParameter, build(session.allocator(), parse.allocator(), nl));
+        var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer parse_arena.deinit();
+        const nl = try parse(parse_arena.allocator(), "unresolved numeric parameter\n.param dummy=1\nvin in 0 dc 1\nrload in out 1k\n" ++ body ++ ".op\n.end\n");
+        try std.testing.expectError(error.UnresolvedParameter, build(session.allocator(), parse_arena.allocator(), nl));
     }
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
-    var parse = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer parse.deinit();
-    const nl = try Parser(ngspice).parse(parse.allocator(),
+    var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer parse_arena.deinit();
+    const nl = try parse(parse_arena.allocator(),
         \\unused model
         \\.model unused nmos(level=1 tox={missing})
         \\vin in 0 dc 1
@@ -200,7 +229,7 @@ test "selected unresolved parameters fail while unused models stay inert" {
         \\.op
         \\.end
     );
-    var prepared = try build(session.allocator(), parse.allocator(), nl);
+    var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
     try std.testing.expectEqual(@as(usize, 1), prepared.queries.len);
 }
@@ -208,9 +237,9 @@ test "selected unresolved parameters fail while unused models stay inert" {
 test "prepared bindings retain model fields and exclude runtime state from parameter collection" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
-    var parse = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer parse.deinit();
-    const nl = try Parser(ngspice).parse(parse.allocator(),
+    var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer parse_arena.deinit();
+    const nl = try parse(parse_arena.allocator(),
         \\escaped parameter name
         \\.model nm nmos(level=54 pub=1.25e-18)
         \\vd drain 0 1
@@ -221,9 +250,9 @@ test "prepared bindings retain model fields and exclude runtime state from param
         \\.op
         \\.end
     );
-    var prepared = try build(session.allocator(), parse.allocator(), nl);
+    var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
-    _ = parse.reset(.free_all);
+    _ = parse_arena.reset(.free_all);
     var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
     for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, session.allocator(), &refs).unwrap();
     var saw_pub = false;
@@ -251,30 +280,32 @@ test "selected model integer fields and levels reject out-of-range values" {
     for ([_][]const u8{ "level=-1", "level=65536", "level=54 tnoimod=1e40", "level=54 tnoimod=1.5" }) |parameters| {
         var session = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer session.deinit();
-        var parse = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer parse.deinit();
-        const source = try std.fmt.allocPrint(parse.allocator(), "invalid integer parameter\n.model nm nmos({s})\nvd drain 0 1\nvg gate 0 1\nm1 drain gate 0 0 nm\n.op\n.end\n", .{parameters});
-        const nl = try Parser(ngspice).parse(parse.allocator(), source);
-        try std.testing.expectError(error.ParameterOutOfRange, build(session.allocator(), parse.allocator(), nl));
+        var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer parse_arena.deinit();
+        const source = try std.fmt.allocPrint(parse_arena.allocator(), "invalid integer parameter\n.model nm nmos({s})\nvd drain 0 1\nvg gate 0 1\nm1 drain gate 0 0 nm\n.op\n.end\n", .{parameters});
+        const nl = try parse(parse_arena.allocator(), source);
+        try std.testing.expectError(error.ParameterOutOfRange, build(session.allocator(), parse_arena.allocator(), nl));
     }
 }
 
-test "constant behavioral sources preserve value and output mode after folding" {
-    inline for (.{ "v=5", "i=1m", "v={2+3}", "i={2*0.0005}" }, .{ 5.0, 0.001, 5.0, 0.001 }) |output, expected| {
+test "behavioral sources fold constants and extract probes and polynomials" {
+    inline for (.{ "v=5", "i=1m", "v={2+3}", "i={2*0.0005}", "v={(1+2)*v(out)}", "i=3*v(out)*v(out)+2" }, .{ 5.0, 0.001, 5.0, 0.001, 0, 2 }, .{ 0, 0, 0, 0, 0, 0 }, .{ 0, 0, 0, 0, 0, 3 }) |output, c0, c1, c2| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const ast = try Parser(ngspice).parse(a, "constant behavioral source\nb1 out 0 " ++ output ++ "\nr1 out 0 1k\n.end\n");
-        var prepared = try build(a, a, ast);
+        const nl = try parse(a, "behavioral source\nb1 out 0 " ++ output ++ "\nr1 out 0 1k\n.end\n");
+        var prepared = try build(a, a, nl);
         defer prepared.deinit();
         var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
         for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
-        var found = false;
-        for (refs.items) |ref| if (std.mem.eql(u8, ref.device_type, "bsource") and std.mem.eql(u8, ref.param_name, "c0")) {
+        var found: u32 = 0;
+        for (refs.items) |ref| if (std.mem.eql(u8, ref.device_type, "bsource")) {
+            const want: ?f64 = if (std.mem.eql(u8, ref.param_name, "c0")) c0 else if (std.mem.eql(u8, ref.param_name, "c1")) c1 else if (std.mem.eql(u8, ref.param_name, "c2")) c2 else null;
+            const expected = want orelse continue;
             try std.testing.expectApproxEqAbs(expected, ref.get(), 1e-15);
-            found = true;
+            found += 1;
         };
-        try std.testing.expect(found);
+        try std.testing.expectEqual(@as(u32, 3), found);
         try std.testing.expectEqual(output[0] == 'v', std.mem.eql(u8, prepared.probe_labels[0], "i(b1)"));
     }
 }
@@ -289,8 +320,8 @@ test "input preparation retains bytes and origin after caller storage changes" {
     }, .ngspice);
     @memset(&source, 'x');
     @memset(&origin, 'x');
-    try std.testing.expectEqual(@as(usize, 2), prepared.devices.len);
-    try std.testing.expectEqualStrings("retained input", prepared.title);
+    try std.testing.expectEqual(@as(u32, 2), prepared.deviceCount());
+    try std.testing.expectEqualStrings("retained input", prepared.deck.title);
 }
 
 test "input preparation resolves file includes and selected dialect" {
@@ -307,11 +338,11 @@ test "input preparation resolves file includes and selected dialect" {
     });
     const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/input.cir", .{tmp.sub_path});
     const prepared = try input.prepare(io, a, .{ .file = path }, .hspice);
-    try std.testing.expectEqual(@as(usize, 2), prepared.devices.len);
+    try std.testing.expectEqual(@as(u32, 2), prepared.deviceCount());
     const from_bytes = try input.prepare(io, a, .{
         .bytes = .{ .data = "byte input\n.include res.inc\nV1 out 0 1\n.end\n", .origin = path },
     }, .ngspice);
-    try std.testing.expectEqual(@as(usize, 2), from_bytes.devices.len);
+    try std.testing.expectEqual(@as(u32, 2), from_bytes.deviceCount());
     try std.testing.expectEqual(input.Dialect.hspice, input.parseDialect("hs").?);
 }
 
@@ -319,7 +350,7 @@ test "control source binding retains first exact duplicate and distinct mixed-ca
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const ast = try Parser(syntax.spectre).parse(a,
+    const nl = try netlist.parse(a,
         \\VCase first 0 2
         \\vcase second 0 3
         \\VCase duplicate 0 9
@@ -330,8 +361,8 @@ test "control source binding retains first exact duplicate and distinct mixed-ca
         \\F2 out2 0 vcase 1
         \\R4 out1 0 1k
         \\R5 out2 0 1k
-    );
-    var prepared = try build(a, a, ast);
+    , .spectre);
+    var prepared = try build(a, a, nl);
     defer prepared.deinit();
     var refs: std.ArrayList(problem.device_ir.ParamRef) = .empty;
     for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();

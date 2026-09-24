@@ -545,7 +545,7 @@ pub fn rebaseCurrent(comptime w: usize, i_cur: []f64, q_new: []const f64, q_old:
     if (comptime w > 1) rebaseCurrent(1, i_cur[j..], q_new[j..], q_old[j..], alpha);
 }
 
-// Frontend parser.zig: normalization and line count; same W=1 oracle.
+// Frontend lines.zig: normalization and line count; same W=1 oracle.
 /// Copy normalized bytes and count physical lines in one pass. W=1 is the
 /// scalar oracle and tail; byte lanes are independent.
 fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
