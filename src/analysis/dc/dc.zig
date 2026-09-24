@@ -56,10 +56,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             r.set(saved2);
         };
         var temperatures: std.ArrayList(f64) = .empty;
-        defer temperatures.deinit(a);
+        defer temperatures.deinit(scratch);
         if (outer.is_temp) for (refs) |ref| {
             if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature"))
-                try temperatures.append(a, ref.get());
+                try temperatures.append(scratch, ref.get());
         };
         defer if (outer.is_temp) {
             var i: usize = 0;
@@ -74,7 +74,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             const v2 = opts.start2 + @as(f64, @floatFromInt(po)) * opts.step2;
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
-            try runSerial(ctx, ckt, a, t, opts, n_inner, ncols, block);
+            try runSerial(ctx, ckt, scratch, t, opts, n_inner, ncols, block);
         }
     } else {
         try runSerial(ctx, ckt, scratch, t, opts, npoints, ncols, data);
