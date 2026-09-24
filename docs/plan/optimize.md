@@ -56,6 +56,19 @@ G. Native lines → .va (user decision 2026-09-24): per model, when ready. Move
    our side an erfc analog function in ltra.va (not an LRM builtin). Until then
    the .zig models stay the O/Y/P devices.
 
+H. Multithreaded device evaluation (user-requested 2026-09-24; starts after E merges):
+   ParEval (analysis/par_eval.zig) already splits instances across threads with a
+   deterministic plane reduction, but it is hidden behind ESPICE_THREADS (default 1).
+   1. `--threads=N` CLI flag (+ C API field), default auto; keep the env var as an
+      override or delete it.
+   2. Auto-engage only above a measured cost threshold (instances × per-model cost),
+      so small decks never pay the two per-iteration barriers.
+   3. Measure 1/4/8/16 threads on a QUIET machine: parallel_inverters_2000, a bsim4
+      deck, rc_ladder_100k. Amdahl ceiling ~2.6x at 8 threads on transient decks
+      (device eval 52-71%); higher on big-model decks. Byte-identical outputs across
+      thread counts (the reduction order is fixed; test it).
+   4. Then attack the serial remainder if it dominates (reduction bandwidth, barriers).
+
 ## Deferred (needs a user decision)
 - Roundoff-changing speedups: tf/sp/disto dense→sparse, pac/pxf/pnoise LaneLu pencil,
   dcmatch reduction order, grid-factor dependency walk.

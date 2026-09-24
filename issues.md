@@ -118,9 +118,11 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   takes 15 s instead of 308 s, so it no longer flips to Timeout. OPtran
   reports the confirming Newton's verdict (no deck changed). The deck still
   fails in the transient (`i(vdd)` 2.3e8x -> 503x), which is F9's class.
-- [ ] **F6 — last transient row lands short of t_stop.**
-  `tran_noise/rc_equilibrium` (last row 9.999999999999999e-06 < 1e-5 ->
-  MissingTimeCoverage). Clamp the last step to t_stop.
+- [x] **F6 — last transient row lands short of t_stop.** FIXED in the
+  harness (user decision): `10u` parses to 9.999999999999999e-06 in espice
+  and ngspice alike, one ulp short of the check window's literal 1e-5, so
+  the `time_weighted_moments` coverage test now allows 1e-12 relative slack
+  on both window ends. `tran_noise/rc_equilibrium` passes; deck unchanged.
 - [ ] **F7 — OP Newton acceptance too loose.** See E7.
   `tran/bench_tline_ltra1_1_line`, `tran/bench_tline_txl1_1_line`.
 - [x] **F8 — envelope.** FIXED (phase 2b). `envelope/sine`: columns are
@@ -143,7 +145,10 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   r-drift: per-terminal q tape (one slot per `ddt()` site needs VerA) for
   mos6_inverter, schmitt, rca3040, rtlinv, hfet, chain_256; Newton
   robustness (MODEINITPRED, fetlim/limvds, CKTconvTest) for pvt_corners and
-  mosamp. Grid divergence: `stress/scaling_parallel_inverters_100`,
+  mosamp. `tran/bench_ngspice_mosamp`'s oracle is now ngspice at
+  reltol=1e-6 abstol=1e-15 vntol=1e-9, tmax 0.1 ns (0 Newton failures where
+  the deck's options take 718 dt/8 cuts; user decision): espice 3.9e5x
+  (i(vb)), 3.4e3x on v(20), against 3.8e5x / 944x on the old oracle. Grid divergence: `stress/scaling_parallel_inverters_100`,
   `stress/scaling_parallel_inverters_2000`, `stress/scaling_inverter_chain_256`,
   `tran/bench_bypass_idle_ladder`, `tran/bench_ensemble_pvt_corners`,
   `tran/bench_ngspice_mosmem`, `tran/device_mos6_inverter`,
@@ -162,9 +167,12 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   F3.
 - [x] **F11 — oracle defects, a user decision.** DECIDED and regenerated
   (phase 2b, options of docs/conformance-phase2.md group 15):
-  `tran/bench_tran_sffm_source` against the closed form (v(out)/i(v1) atol
-  1e-3 V / 1e-6 A: ngspice and espice at default options both sit 3.1e-4 V
-  off it); `dc/bench_mosfet_cmos_inverter` with LAMBDA=0.01 on both models,
+  `tran/bench_tran_sffm_source` back on ngspice 44.2's own run at the
+  original tolerances (second user decision, replacing the closed form).
+  FIXED: vsource.va/isource.va now read SFFM as ngspice 44 does, (VO VA FM
+  MDI FC TD PHASEM PHASEC) with MDI limited to FC/FM, the TSTOP defaults and
+  the zero-before-TD V source (vsrcload.c:228-282, isrcload.c:206-254,
+  isrcload.c's one-slot-early phases included). `dc/bench_mosfet_cmos_inverter` with LAMBDA=0.01 on both models,
   oracle ngspice at reltol=1e-9; `convergence/bench_ota_cutoff_abstol` now
   carries `.options abstol=1e-18 reltol=1e-10 vntol=1e-12` and its oracle is
   ngspice at them; `sens/bench_sens_bridge` restricted to v(r1..r5), v(vin);
@@ -644,7 +652,7 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   after LTE engages (F9). None of the four points at the line models.
 
 - [ ] **E8 — leftovers.** `envelope/sine`, `envelope/rc_startup_0p001`,
-  `four/polynomial_2`, `tran_noise/rc_equilibrium` (MissingTimeCoverage),
+  `four/polynomial_2`, `tran_noise/rc_equilibrium` (MissingTimeCoverage, FIXED F6),
   `convergence/bench_ota_cutoff_abstol` (`vacask_graetz` and `vacask_mul`
   FIXED under F9). One cause each; no cluster.
   (`sens/bench_sens_bridge` started here and moved to C8 once measured — it
