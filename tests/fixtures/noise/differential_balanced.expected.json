@@ -54,8 +54,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "cbbcfae52c7ad69e217893381ca02554558c2a7ac302ed637e163f0c4aeaebaa",
-  "known_gaps": [
-    "differential analysis output must be resolved as a node difference"
-  ]
+  "netlist_sha256": "3af69acd0976a3d8eccd0314d26d8ea0bfa88c21140510566834a772d014a68b"
 }

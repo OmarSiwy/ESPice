@@ -1,6 +1,4 @@
 * NMOS common-source amplifier, resistor load, transient drive.
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_mosfet_nmos_cs.expected.json
 * Origin: benchmark/fixtures/mosfet/nmos_cs/circuit.sp
 VDD vdd 0 DC 5

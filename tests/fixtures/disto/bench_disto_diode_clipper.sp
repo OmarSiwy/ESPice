@@ -1,6 +1,4 @@
 * DISTO fixture: diode clipper harmonic distortion sweep.
-* KNOWN GAP: full complex second- and third-harmonic distortion output is not yet exposed.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_disto_diode_clipper.expected.json
 * Origin: benchmark/fixtures/disto/diode_clipper/circuit.sp
 Vin in 0 DC 0.6 AC 1 DISTOF1 0.1

@@ -1,6 +1,4 @@
 * Bias-dependent diode depletion and diffusion capacitance
-* KNOWN GAP: diode transit-time charge is absent from the current diode model.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: diode_charge_ac.expected.json
 Vin in 0 DC .7 AC 1
 R1 in out 1k

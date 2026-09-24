@@ -1,6 +1,4 @@
 Simple coupled transmissionlines
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_tline_cpl_ibm2.expected.json
 * Origin: benchmark/fixtures/tline/cpl_ibm2/circuit.sp
 VES IN 0  PULSE (0 1 0N 1.5N 1.5N 4.5N 200N)

@@ -1,6 +1,4 @@
 simple differential pair - CM and DM dc sensitivity
-* KNOWN GAP: differential analysis output must be resolved as a node difference.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_sens_diffpair.expected.json
 * Origin: benchmark/fixtures/sens/diffpair/circuit.sp
 

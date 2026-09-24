@@ -1,6 +1,4 @@
 Basic RC circuit
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_ngspice_rc.expected.json
 * Origin: benchmark/fixtures/ngspice/rc/circuit.sp
 r 1 2 1.0

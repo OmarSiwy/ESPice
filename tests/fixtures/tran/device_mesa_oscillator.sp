@@ -1,6 +1,4 @@
 * Mesfet Ring Oscillator with ungated load
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_mesa_oscillator.expected.json
 * Origin: benchmark/fixtures/devices/mesa_oscillator/circuit.sp
 * Taken form macspice3f4

@@ -44,8 +44,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "c403bf0cef7a8c8d782f7ca1f8f745fa33a7a33d2f060913f28b5a9e685a3c43",
-  "known_gaps": [
-    "resistor and primary temperature DC sweep targets are not yet supported"
-  ]
+  "netlist_sha256": "52646a7f8322b13065fe39cc0cb63f099e7173d3d6ff39e1cd733a2b9a87954b"
 }

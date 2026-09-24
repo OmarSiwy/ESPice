@@ -28,8 +28,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "800bb0abc1192dbab231d4d8127b9f05d171eaf9e0a06f725db660e8f3f2cb70",
-  "known_gaps": [
-    "the behavioral-source compiler only supports a limited single-control polynomial subset"
-  ]
+  "netlist_sha256": "1e99a8a8142f5eed1fac642899c753931d1eceb0ecebd20c52bdb972f69fa19b"
 }

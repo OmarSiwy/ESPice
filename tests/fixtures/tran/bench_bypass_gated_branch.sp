@@ -1,6 +1,4 @@
 * Bypass fixture: small driven RC core + 20-diode quiescent bias string;
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_bypass_gated_branch.expected.json
 * Origin: benchmark/fixtures/bypass/gated_branch/circuit.sp
 * the string settles at t~0 and stays latent for the whole run.

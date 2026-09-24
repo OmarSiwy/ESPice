@@ -1,6 +1,4 @@
 * DISTO fixture: MOS level-1 common-source distortion.
-* KNOWN GAP: full complex second- and third-harmonic distortion output is not yet exposed.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_disto_mos_cs.expected.json
 * Origin: benchmark/fixtures/disto/mos_cs/circuit.sp
 Vdd vdd 0 DC 5

@@ -1,6 +1,4 @@
 * Subcircuit with parameterized values, instantiated twice (flatten test).
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: subckt_params.expected.json
 * Origin: benchmark/fixtures/parser/subckt_params/circuit.sp
 .subckt rcfilter a b r=1k c=1n
