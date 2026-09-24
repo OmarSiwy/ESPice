@@ -1,6 +1,5 @@
 const impl = @import("../post/four.zig");
 const analyze = impl.analyze;
-const analyzeBuffer = impl.analyzeBuffer;
 const interpolateAt = impl.test_access.interpolateAt;
 const math = std.math;
 const std = @import("std");
@@ -28,6 +27,18 @@ fn interpolate(times: []const f64, values: []const f64, t: f64) f64 {
     if (dt < 1e-30) return values[lo];
     const alpha = (t - times[lo]) / dt;
     return values[lo] * (1.0 - alpha) + values[hi] * alpha;
+}
+
+/// Spectrum of one period sampled at a power-of-two count: the FFT and the
+/// extraction `analyze` runs after its resampling step.
+fn spectrumOf(samples: []const f64, n_harmonics: usize, allocator: std.mem.Allocator) !impl.Spectrum {
+    const re = try allocator.dupe(f64, samples);
+    defer allocator.free(re);
+    const im = try allocator.alloc(f64, samples.len);
+    defer allocator.free(im);
+    @memset(im, 0);
+    @import("solvers").fft.fft(re, im);
+    return impl.test_access.extractSpectrum(re, im, samples.len, n_harmonics);
 }
 
 // ============================================================================
@@ -68,7 +79,7 @@ test "four: pure cosine has zero THD" {
         samples[k] = @cos(2.0 * math.pi * t);
     }
 
-    const result = try analyzeBuffer(&samples, 9, allocator);
+    const result = try spectrumOf(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 1e-10);
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
@@ -86,7 +97,7 @@ test "four: DC offset is reported correctly" {
         samples[k] = dc_offset + @cos(2.0 * math.pi * t);
     }
 
-    const result = try analyzeBuffer(&samples, 9, allocator);
+    const result = try spectrumOf(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(dc_offset, result.dc, 1e-10);
     try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
@@ -114,7 +125,7 @@ test "four: square wave THD ~ 48.3%" {
         samples[k] = val * 4.0 / math.pi;
     }
 
-    const result = try analyzeBuffer(&samples, 9, allocator);
+    const result = try spectrumOf(&samples, 9, allocator);
 
     // Fundamental magnitude: (4/pi) * 1 = 1.2732
     try testing.expectApproxEqAbs(@as(f64, 4.0 / math.pi), result.fundamental, 1e-3);
@@ -141,27 +152,10 @@ test "four: known amplitude and phase" {
         samples[k] = amp * @cos(2.0 * math.pi * t + phase_rad);
     }
 
-    const result = try analyzeBuffer(&samples, 9, allocator);
+    const result = try spectrumOf(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(amp, result.fundamental, 1e-8);
     try testing.expectApproxEqAbs(45.0, result.harmonics[0].phase_deg, 0.1);
-}
-
-test "four: analyzeBuffer with non-power-of-2 input" {
-    // Verify resampling works for arbitrary length input
-    const allocator = testing.allocator;
-    const n = 100; // not a power of 2
-    var samples: [n]f64 = undefined;
-
-    for (0..n) |k| {
-        const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        samples[k] = 1.5 * @cos(2.0 * math.pi * t);
-    }
-
-    const result = try analyzeBuffer(&samples, 9, allocator);
-
-    try testing.expectApproxEqAbs(@as(f64, 1.5), result.fundamental, 1e-2);
-    try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 1e-2);
 }
 
 test "four: analyze waveform from tran data" {
