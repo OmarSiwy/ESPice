@@ -147,14 +147,17 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `pss/rc_slow_settling`, `pss/bench_pss_rlc_driven`, `pss/diode_clipper`
   pass (worst 0.14x). `pss/polynomial_2`, `pss/polynomial_3` pass since
   F3.
-- [ ] **F11 — oracle defects, a user decision.** 5 decks:
-  `tran/bench_tran_sffm_source` (ngspice's SFFM is wrong),
-  `dc/bench_mosfet_cmos_inverter` (row 50 is metastable),
-  `convergence/bench_ota_cutoff_abstol` (not an accuracy reference),
-  `sens/bench_sens_bridge` (tests ngspice's parameter table, E10),
-  `multi_analysis/bench_sens_diffpair` (ngspice reverses the `.tf` plots).
-  The mesa inverter deck was filed here too, but ngspice at tight tolerance
-  still matches its oracle, so it is under E6.
+- [x] **F11 — oracle defects, a user decision.** DECIDED and regenerated
+  (phase 2b, options of docs/conformance-phase2.md group 15):
+  `tran/bench_tran_sffm_source` against the closed form (v(out)/i(v1) atol
+  1e-3 V / 1e-6 A: ngspice and espice at default options both sit 3.1e-4 V
+  off it); `dc/bench_mosfet_cmos_inverter` with LAMBDA=0.01 on both models,
+  oracle ngspice at reltol=1e-9; `convergence/bench_ota_cutoff_abstol` now
+  carries `.options abstol=1e-18 reltol=1e-10 vntol=1e-12` and its oracle is
+  ngspice at them; `sens/bench_sens_bridge` restricted to v(r1..r5), v(vin);
+  `multi_analysis/bench_sens_diffpair` TF plots in deck order, sensitivities
+  restricted to the principal R/V columns and q1/q2 ISE/ISC. The mesa
+  inverter deck is under E6, not here.
 - Open features, unchanged: multi-probe B sources, now rejected with
   `UnsupportedBsourceExpression` instead of silently wrong
   (`pac/ideal_multiplier_1`, `pac/ideal_multiplier_2`,

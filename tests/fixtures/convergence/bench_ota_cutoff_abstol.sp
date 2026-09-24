@@ -1,4 +1,4 @@
-* 5T OTA at the abstol floor -- CONVERGENCE-GATE STRESS, NOT AN ACCURACY REFERENCE
+* 5T OTA at the abstol floor -- CONVERGENCE-GATE STRESS, run at tight tolerances
 * Expected results: bench_ota_cutoff_abstol.expected.json
 * Origin: benchmark/fixtures/convergence/ota_cutoff_abstol/circuit.sp
 * ============================================================================
@@ -17,6 +17,7 @@
 * (.options abstol=1e-18 reltol=1e-10 vntol=1e-12) ngspice and espice agree
 * to 8.6e-11 normalized over all signals.
 *
+* So this deck now carries those options, and its oracle is ngspice at them.
 * What this deck is for: exercising the Newton convergence gate on a circuit
 * whose entire signal sits at the tolerance floor. Judge it on whether an
 * engine converges at all and how far it lands from the tolerance-converged
@@ -1440,4 +1441,6 @@ M5_200 tail_200 vbias 0 0 nch W=4u L=1u
 Cl_200 out_200 0 100f
 *
 .ac dec 10 1 1G
+* Converged, not stopped inside the gate: see the header.
+.options abstol=1e-18 reltol=1e-10 vntol=1e-12
 .end
