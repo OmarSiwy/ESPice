@@ -145,7 +145,10 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   r-drift: per-terminal q tape (one slot per `ddt()` site needs VerA) for
   mos6_inverter, schmitt, rca3040, rtlinv, hfet, chain_256; Newton
   robustness (MODEINITPRED, fetlim/limvds, CKTconvTest) for pvt_corners and
-  mosamp. Grid divergence: `stress/scaling_parallel_inverters_100`,
+  mosamp. `tran/bench_ngspice_mosamp`'s oracle is now ngspice at
+  reltol=1e-6 abstol=1e-15 vntol=1e-9, tmax 0.1 ns (0 Newton failures where
+  the deck's options take 718 dt/8 cuts; user decision): espice 3.9e5x
+  (i(vb)), 3.4e3x on v(20), against 3.8e5x / 944x on the old oracle. Grid divergence: `stress/scaling_parallel_inverters_100`,
   `stress/scaling_parallel_inverters_2000`, `stress/scaling_inverter_chain_256`,
   `tran/bench_bypass_idle_ladder`, `tran/bench_ensemble_pvt_corners`,
   `tran/bench_ngspice_mosmem`, `tran/device_mos6_inverter`,
