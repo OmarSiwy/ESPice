@@ -48,6 +48,14 @@ E. Reorg (after frontend-hypergraph merges): build hygiene (wire test-frontend +
 F. VerA-coupled (after VerA pins): deriv_reads/jac_const/ddx_reads host half
    (lane_of in Dual.ddxAt), fused accept (updateState+q), explicit setup call.
 
+G. Native lines → .va (user decision 2026-09-24): per model, when ready. Move
+   models/native/{ltra,txl,coupled_ltra}.va into models/ and delete the matching
+   .zig only once VerA compiles it and it matches the native model on the tline
+   decks (bench_tline_*, vacask_ring). Blockers (docs/vera-gaps.md): VerA
+   memory-backed arrays (all three), array-slice actuals (coupled_ltra), and on
+   our side an erfc analog function in ltra.va (not an LRM builtin). Until then
+   the .zig models stay the O/Y/P devices.
+
 ## Deferred (needs a user decision)
 - Roundoff-changing speedups: tf/sp/disto dense→sparse, pac/pxf/pnoise LaneLu pencil,
   dcmatch reduction order, grid-factor dependency walk.
