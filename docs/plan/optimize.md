@@ -62,6 +62,11 @@ F2. Per-ddt charge sites (VerA pin 0c4d6afc, local, not pushed; after F lands): 
    qbd/qbs off; BJT/VBIC: qbe/qbc/qsub/qbcx separate sites; BSIM/HiSIM per their
    trunc routines). Targets r-drift cause #6: mos6_inverter, schmitt, rca3040,
    rtlinv, hfet, chain_256. Then stepFill (per-timepoint cache), its own pin.
+   Known: qRows is one flat signed sum while the old per-row q nested three sums
+   (sites, statements, contributions), so rows built from multi-site contributions
+   move ≤1 ulp: bsimsoi (2.8e-16 rel), hisim2 (~1e-20 on ~1e-13 rows); hicumL2 and
+   inductor only in signed zeros. Exact for bsim4va, the mos family and vbic.
+   Documented, not avoided (VerA declined group ids in QStamp).
 
 I. Small follow-ups (after F lands): `.options tnom` never reaches runtime-loaded
    devices nor the built-in resistor (output-changing, toward ngspice); analysis tests
