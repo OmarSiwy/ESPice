@@ -50,8 +50,9 @@ Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)
 // parameter set 2 K off nominal: phi/vth0 shifted +1.5 mV and u0 picked up a
 // (T/Tnom)^ute factor, costing ~4.9% of the subthreshold current. It is gone
 // now rather than corrected to 27: nominal is the CIRCUIT's, read through
-// §9.15 `$simparam("tnom")` at the one place it is used, so a deck's
-// `.options tnom` reaches the model instead of being overruled by a literal.
+// §9.15 `$simparam("tnom")` as the default of the `tnom` parameter, so a
+// deck's `.options tnom` reaches the model instead of being overruled by a
+// literal.
 `define N_MINLOG 1.0e-38
 
     `define INITIAL_INSTANCE
@@ -649,7 +650,7 @@ module bsim4va(d, g, s, b);
     `MPRcc( voff  ,-0.08              ,"V"            ,-1.0           ,1.0            ,"Threshold voltage offset")
     `MPRcc( minv  ,0.0              ,""            ,0.0           ,1.0            ,"Fitting parm for moderate inv in Vgsteff")
     `MPRcc( voffl  ,0.0              ,""            ,0.0           ,1.0           ,"Length dependence parm for Vth offset")
-    `MPRcc( tnom  ,27.0              ,"C"            ,-200.0           ,300.0            ,"Parameter measurement temperature")
+    `MPRcc( tnom  ,$simparam("tnom") ,"C"            ,-200.0           ,300.0            ,"Parameter measurement temperature")
     `MPRcc( cgso  ,0.0              ,"F"            ,0.0           ,1.0            ,"Gate-source overlap capacitance per width")
     `MPRcc( cgdo  ,0.0              ,"F"            ,0.0           ,1.0            ,"Gate-drain overlap capacitance per width")
     `MPRcc( cgbo  ,0.0              ,"F"            ,0.0           ,1.0            ,"Gate-bulk overlap capacitance per length")
@@ -3086,15 +3087,12 @@ module bsim4va(d, g, s, b);
                 BSIM4plpeb = BSIM4plpe0;
 
             // b4set.c:1950 — `if (!BSIM4tnomGiven) BSIM4tnom = ckt->CKTnomTemp`,
-            // the CIRCUIT's `.options tnom` (degC, default 27), not this file's
-            // own idea of nominal. The NOTE that stood here said Verilog-A
-            // cannot reach the modelcard default; §9.15 Table 9-27 is how it
-            // can — VerA renders `$simparam("tnom")` from a Model field the
-            // host writes before derive().
-            if (!$param_given(tnom))
-                BSIM4tnom = $simparam("tnom") + `P_CELSIUS0;
-            else  // Shift from C to K:
-                BSIM4tnom = BSIM4tnom + `P_CELSIUS0;
+            // the CIRCUIT's `.options tnom` (degC, default 27): that is the
+            // `tnom` parameter's default, `$simparam("tnom")` (§9.15 Table
+            // 9-27). A default rather than a read here, so no simparam sits
+            // in the analog block and VerA can hoist the parameter-only
+            // prefix out of the per-eval core. Shift from C to K:
+            BSIM4tnom = BSIM4tnom + `P_CELSIUS0;
 
             if (!$param_given(llc))
                 BSIM4Llc = BSIM4Ll;

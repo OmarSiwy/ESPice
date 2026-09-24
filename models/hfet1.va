@@ -149,21 +149,22 @@ module hfet1(d, g, s);
     // ---- leak(): ngspice hfetload.c:481-522.  The two Schottky exponentials
     //      are in SERIES (harmonic sum of the two branch currents), with a
     //      series resistance rsq and one Newton continuation step around the
-    //      operating point (v0, dvdi0). ----
+    //      operating point (v0, dvdi0).  iseff and the two ln() shifts
+    //      (ln1, lne) are parameter-only: the caller computes them once in
+    //      the bias-independent prep and passes them in. ----
     analog function real leak;
-        input v, vtq, rsq, is1, is2, mm1, mm2, gmn;
-        real v, vtq, rsq, is1, is2, mm1, mm2, gmn;
-        real vtt1, vtt2, vteff, iseff, i1, i2, ia, dvdi0, v0, unorm;
+        input v, vtq, rsq, is1, is2, mm1, mm2, gmn, iseff, ln1, lne;
+        real v, vtq, rsq, is1, is2, mm1, mm2, gmn, iseff, ln1, lne;
+        real vtt1, vtt2, vteff, i1, i2, ia, dvdi0, v0, unorm;
         begin
             vtt1 = vtq * mm1;
             vtt2 = vtq * mm2;
             if (v > -10.0 * vtt1) begin
                 vteff = vtt1 + vtt2;
-                iseff = is2 * pow(is1 / is2, mm1 / (mm1 + mm2));
                 if (rsq > 0.0) begin
-                    unorm = (v + rsq * is1) / vtt1 + ln(rsq * is1 / vtt1);
+                    unorm = (v + rsq * is1) / vtt1 + ln1;
                     i1    = vtt1 * diode_i(unorm) / rsq - is1;
-                    unorm = (v + rsq * iseff) / vteff + ln(rsq * iseff / vteff);
+                    unorm = (v + rsq * iseff) / vteff + lne;
                     i2    = vteff * diode_i(unorm) / rsq - iseff;
                 end else begin
                     // ponytail: the rsq == 0 arm is the only place ngspice uses a
@@ -192,6 +193,7 @@ module hfet1(d, g, s);
     real tempk, dtn, vth, etavth, mu_t, vto_t, lambda_t, vt1_i, vt2_i;
     real n0, n02, gchi0, imax, vl, cf, area_half, rt, wl, iso, ggrwl;
     real is1s_a, is2s_a, is1d_a, is2d_a, deltasqr, csat_th;
+    real iseff_s, ln1_s, lne_s, iseff_d, ln1_d, lne_d;
     // bias-dependent
     real vgs, vgd, vds, vx, vdsx, inv, igs, igd, arg, earg;
     real sfac, sigma, vgt0, vgt, uu, tt, vgte, xb, rb, nsm, nsc, nsn;
@@ -234,6 +236,23 @@ module hfet1(d, g, s);
         is2s_a = js2s  * area_half;
         is1d_a = js1d  * area_half;
         is2d_a = js2d  * area_half;
+        // leak() invariants, same expressions leak() used to evaluate per call
+        iseff_s = 0.0; ln1_s = 0.0; lne_s = 0.0;
+        if (is1s_a > 0.0 && is2s_a > 0.0) begin
+            iseff_s = is2s_a * pow(is1s_a / is2s_a, m1s / (m1s + m2s));
+            if (rgs > 0.0) begin
+                ln1_s = ln(rgs * is1s_a / (vth * m1s));
+                lne_s = ln(rgs * iseff_s / (vth * m1s + vth * m2s));
+            end
+        end
+        iseff_d = 0.0; ln1_d = 0.0; lne_d = 0.0;
+        if (is1d_a > 0.0 && is2d_a > 0.0) begin
+            iseff_d = is2d_a * pow(is1d_a / is2d_a, m1d / (m1d + m2d));
+            if (rgd > 0.0) begin
+                ln1_d = ln(rgd * is1d_a / (vth * m1d));
+                lne_d = ln(rgd * iseff_d / (vth * m1d + vth * m2d));
+            end
+        end
         ggrwl  = ggr   * area_half;
         iso    = astar * area_half;
         csat_th = iso * tempk * tempk
@@ -341,7 +360,7 @@ module hfet1(d, g, s);
             // if EITHER saturation density is zero the whole diode pair is
             // dropped and only the GGR term survives.
             if (is1s_a > 0.0 && is2s_a > 0.0)
-                igs = leak(vgs, vth, rgs, is1s_a, is2s_a, m1s, m2s, gmin);
+                igs = leak(vgs, vth, rgs, is1s_a, is2s_a, m1s, m2s, gmin, iseff_s, ln1_s, lne_s);
             else
                 igs = 0.0;
             arg  = -vgs * del / vth;              // negative exponent, /vth
@@ -349,7 +368,7 @@ module hfet1(d, g, s);
             igs  = igs + ggrwl * vgs * earg;      // linear-in-v prefactor
 
             if (is1d_a > 0.0 && is2d_a > 0.0)
-                igd = leak(vgd, vth, rgd, is1d_a, is2d_a, m1d, m2d, gmin);
+                igd = leak(vgd, vth, rgd, is1d_a, is2d_a, m1d, m2d, gmin, iseff_d, ln1_d, lne_d);
             else
                 igd = 0.0;
             arg  = -vgd * del / vth;
