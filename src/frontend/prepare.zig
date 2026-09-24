@@ -1,22 +1,20 @@
-//! Prepare source and build immutable circuit/query data for Problem.
+//! Source to netlist to immutable circuit and queries, for Problem.
 const std = @import("std");
 const problem = @import("problem_types");
 const requests = @import("requests");
-const numerics = @import("numerics");
-const syntax = @import("syntax");
+const netlist = @import("netlist");
 const models = @import("device_models");
 const build_options = @import("build_options");
-const types = syntax.types;
-const netlist = @import("builder");
-const Builder = netlist.Builder;
+const analyses = @import("analyses.zig");
+const builder = @import("builder");
+const Builder = builder.Builder;
 const Job = requests.Query;
 const Ic = problem.Ic;
 pub const Prepared = problem.Prepared;
 const GROUND = problem.GROUND;
-const directiveNumber = netlist.directiveNumber;
-const findNameIndex = netlist.findNameIndex;
+const NO_NODE = analyses.NO_NODE;
 
-pub const Dialect = syntax.types.Dialect;
+pub const Dialect = netlist.Dialect;
 
 pub const Source = union(enum) {
     file: []const u8,
@@ -34,9 +32,9 @@ pub fn parseDialect(name: []const u8) ?Dialect {
     }).get(name);
 }
 
-/// Read, expand and parse `input` into `session`, then load its HDL models.
-/// The AST borrows `session`; release it once `build` has returned.
-pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !syntax.Ast {
+/// Read, expand and flatten `input` into `session`, then load its HDL models.
+/// The netlist borrows `session`; release it once `build` has returned.
+pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
         .bytes => |bytes| bytes.origin,
@@ -45,17 +43,13 @@ pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: D
         .file => |path| try std.Io.Dir.cwd().readFileAlloc(io, path, session, .unlimited),
         .bytes => |bytes| try session.dupe(u8, bytes.data),
     };
-    const source = if (dialect == .spectre) raw else try syntax.source.expand(io, session, origin, raw);
-    const ast = switch (dialect) {
-        .ngspice => try syntax.Parser(syntax.ngspice).parse(session, source),
-        .hspice => try syntax.Parser(syntax.hspice).parse(session, source),
-        .spectre => try syntax.Parser(syntax.spectre).parse(session, source),
-    };
-    try loadModels(io, session, ast.foreign, origin);
-    return ast;
+    const text = if (dialect == .spectre) raw else try netlist.source.expand(io, session, origin, raw);
+    const nl = try netlist.parse(session, text, dialect);
+    try loadModels(io, session, nl.foreign, origin);
+    return nl;
 }
 
-fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const types.Foreign, origin: []const u8) !void {
+fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.Foreign, origin: []const u8) !void {
     var paths: std.ArrayList([]const u8) = .empty;
     for (foreign) |f| if (f.kind == .verilog_a or f.kind == .verilog) try paths.append(session, if (std.fs.path.isAbsolute(f.path))
         f.path
@@ -74,13 +68,11 @@ fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const types.For
     try models.vaload.ensureAllLoaded(std.heap.smp_allocator, io, paths.items, compiler_paths);
 }
 
-/// Build a passive circuit from syntax. Scratch owns semantic expansion and
-/// wiring; the session arena owns every published slice.
-pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: types.Ast) !Prepared {
-    const nl = try syntax.elaborate(parse_arena, ast);
-    if (nl.devices.len > std.math.maxInt(u32) or nl.directives.len > (std.math.maxInt(u32) - 1) / 2)
-        return error.CircuitTooLarge;
-    const deck_opts = try parseDeckOptions(nl.directives);
+/// Build a passive circuit from a netlist. Scratch owns wiring; the session
+/// arena owns every published slice.
+pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
+    if (nl.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
+    const deck_opts = try analyses.deckOptions(nl.config);
     var b = try Builder.init(sim_arena);
     var compiled_ok = false;
     errdefer if (!compiled_ok) b.deinit();
@@ -88,14 +80,13 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
     // `.options tnom` is a model-card default (b4set.c:1950): models read it
     // as they are derived, before the pattern freezes.
     b.nom_temp_c = deck_opts.tnom_c;
-    // Node count is bounded by, and usually close to, device count.
-    try b.reserveNodes(@intCast(nl.devices.len));
+    try b.reserveNodes(nl.graph.vertexCount());
 
-    var nb = try netlist.NetBuilder.init(parse_arena, &b, nl);
+    var nb = try builder.NetBuilder.init(parse_arena, &b, &nl);
     try nb.build();
-    try netlist.tagSubcircuitNodes(&b, nl.devices);
+    try nb.tagSubcircuitNodes();
     // Runtime-loaded HDL devices, after the built-in ones and before the freeze.
-    try netlist.addDynDevices(&b, parse_arena, nl);
+    try nb.addDynDevices();
 
     // The card table outlives the Builder; its names live on the parse arena.
     const cards = try sim_arena.dupe(requests.CardRef, b.cards.items);
@@ -112,25 +103,18 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
     if (perm) |p| for ([_][]u32{
         nb.v.items(.branch),       nb.v.items(.pos),    nb.v.items(.neg),  nb.i.items(.pos),  nb.i.items(.neg),
         nb.br.items(.row),         nb.l.items(.branch), nb.ac.items(.pos), nb.ac.items(.neg), (&nb.source_node)[0..1],
-        (&nb.source_branch)[0..1],
+        (&nb.source_branch)[0..1], nb.rows,
     }) |rows| for (rows) |*row| {
         if (row.* < p.len) row.* = p[row.*];
     };
 
-    var nodes: NodeIndex = .{ .arena = parse_arena, .circuit = &circuit };
     var ic: std.ArrayList(Ic) = .empty;
-    for (nl.directives) |dir| {
-        if (!std.ascii.eqlIgnoreCase(dir.kind, "ic")) continue;
-        var i: usize = 0;
-        while (i + 1 < dir.args.len) : (i += 2) {
-            const name = icNodeName(parse_arena, dir.args[i]) orelse continue;
-            const value = netlist.valueNumber(dir.args[i + 1]) orelse continue;
-            // An `.ic` on a node the netlist never mentions is dropped, like
-            // every other unresolvable directive name.
-            const id = try nodes.get(name);
-            if (id == NO_NODE or id == GROUND) continue;
-            try ic.append(sim_arena, .{ .node = id, .value = value });
-        }
+    for (nl.ic) |item| {
+        // An `.ic` on a node no device touches is dropped, like every other
+        // unresolvable directive name.
+        const row = nb.frozenRow(item.net.index());
+        if (row == NO_NODE or row == GROUND) continue;
+        try ic.append(sim_arena, .{ .node = row, .value = item.value });
     }
 
     const bindings: problem.QueryBindings = .{
@@ -170,7 +154,13 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
         }
     }
 
-    const dir_nodes = try resolveDirectiveNodes(parse_arena, nl.directives, &nodes, 2);
+    // Analysis nets to circuit rows.
+    const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.analyses);
+    for (cards_rows) |*a| {
+        a.pos = nb.frozenRow(a.pos);
+        a.neg = nb.frozenRow(a.neg);
+        for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
+    }
     return .{
         .circuit = circuit,
         .probes = probe_buf[0..n_probes],
@@ -179,12 +169,12 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, ast: 
         .source_branch = nb.source_branch,
         .ac_drive = try nb.acExcitation(sim_arena, circuit.n),
         .title = try sim_arena.dupe(u8, nl.title),
-        .n_devices = @intCast(nl.devices.len),
+        .n_devices = nl.deviceCount(),
         .ic = ic.items,
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
-        .queries = try queriesFromDirectives(sim_arena, nl.directives, dir_nodes, bindings, cards, deck_opts),
+        .queries = try analyses.queries(sim_arena, cards_rows, 2, bindings, cards, deck_opts),
         .bindings = bindings,
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
@@ -198,349 +188,36 @@ fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []con
 }
 
 /// Frozen-circuit node row by label; NO_NODE when the deck never named it.
-/// The map is built on the first lookup: most decks name no node.
 const NodeIndex = struct {
-    arena: std.mem.Allocator,
-    circuit: *const problem.Circuit,
-    map: ?std.StringHashMapUnmanaged(u32) = null,
+    map: std.StringHashMapUnmanaged(u32),
 
-    fn get(self: *NodeIndex, name: []const u8) !u32 {
-        if (self.map == null) {
-            var map: std.StringHashMapUnmanaged(u32) = .empty;
-            try map.ensureTotalCapacity(self.arena, self.circuit.n);
-            for (0..self.circuit.n) |i| {
-                const label = self.circuit.nodeName(@intCast(i));
-                if (label.len != 0) map.putAssumeCapacity(label, @intCast(i));
-            }
-            self.map = map;
+    fn init(arena: std.mem.Allocator, circuit: *const problem.Circuit) !NodeIndex {
+        var map: std.StringHashMapUnmanaged(u32) = .empty;
+        try map.ensureTotalCapacity(arena, circuit.n);
+        for (0..circuit.n) |i| {
+            const label = circuit.nodeName(@intCast(i));
+            if (label.len != 0) map.putAssumeCapacity(label, @intCast(i));
         }
-        return self.map.?.get(name) orelse NO_NODE;
+        return .{ .map = map };
+    }
+
+    pub fn node(self: NodeIndex, name: []const u8) u32 {
+        return self.map.get(name) orelse NO_NODE;
     }
 };
-
-/// Per directive: the output node (`v(a)` or a bare name), the `v(a,b)`
-/// reference node, and `.pz`'s four bare port nodes.
-const DirectiveNodes = struct { pos: []const u32, neg: []const u32, ports: []const [4]u32 };
-
-/// `max_group_args` is how many nodes an output `v(...)` group may name.
-fn resolveDirectiveNodes(arena: std.mem.Allocator, directives: []const types.Directive, nodes: *NodeIndex, max_group_args: usize) !DirectiveNodes {
-    const pos = try arena.alloc(u32, directives.len);
-    const neg = try arena.alloc(u32, directives.len);
-    const ports = try arena.alloc([4]u32, directives.len);
-    for (directives, pos, neg, ports) |dir, *p, *n, *port| {
-        const arg: usize = if (std.ascii.eqlIgnoreCase(dir.kind, "four")) 1 else 0;
-        if (requests.Keywords.get(dir.kind) != null and arg < dir.args.len) switch (dir.args[arg]) {
-            .group => |g| if (g.args.len > max_group_args or (max_group_args == 1 and g.args.len == 0))
-                return error.UnsupportedAnalysisOutput,
-            else => {},
-        };
-        const name = directiveNodeName(arena, dir, arg, 0) orelse
-            (if (arg < dir.args.len) icNodeName(arena, dir.args[arg]) else null);
-        p.* = if (name) |wanted| try nodes.get(wanted) else NO_NODE;
-        n.* = if (directiveNodeName(arena, dir, arg, 1)) |wanted| try nodes.get(wanted) else NO_NODE;
-        port.* = @splat(NO_NODE);
-        if (!std.ascii.eqlIgnoreCase(dir.kind, "pz")) continue;
-        for (port, 0..) |*id, i| {
-            const port_name = bareNodeName(arena, dir, i) orelse continue;
-            id.* = if (netlist.isGroundName(port_name)) GROUND else try nodes.get(port_name);
-        }
-    }
-    return .{ .pos = pos, .neg = neg, .ports = ports };
-}
-
-fn queriesFromDirectives(arena: std.mem.Allocator, directives: []const types.Directive, nodes: DirectiveNodes, sources: problem.QueryBindings, cards: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
-    // Fan-out ceiling: `.disto` is the widest card at three plots per line.
-    const jobs = try arena.alloc(Job, directives.len * 3);
-    var n_jobs: u32 = 0;
-    for (directives, nodes.pos, nodes.neg, nodes.ports) |dir, node_id, node_neg, ports| {
-        if (try buildJob(dir, node_id, node_neg, ports, sources, cards)) |job0| {
-            var job = job0;
-            applyDeckOptions(&job, deck_opts);
-            jobs[n_jobs] = job;
-            n_jobs += 1;
-            // The "Integrated Noise" plot always exists; a degenerate band
-            // integrates to zero and ngspice still prints the row.
-            if (job == .noise) {
-                job.noise.integrated = true;
-                jobs[n_jobs] = job;
-                n_jobs += 1;
-            }
-            // ngspice's `.disto` output is the pair of complex harmonic vectors.
-            if (job == .disto) {
-                inline for (.{ .second, .third }) |harmonic| {
-                    job.disto.plot = harmonic;
-                    jobs[n_jobs] = job;
-                    n_jobs += 1;
-                }
-            }
-        }
-    }
-
-    return jobs[0..n_jobs];
-}
 
 /// Resolve additional SPICE analysis cards against the published circuit.
 /// Topology and deck settings are fixed; only query descriptions are allocated.
 pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, directive_text: []const u8) ![]const Job {
-    // The full parser consumes .end and uninstantiated subcircuits without
-    // retaining them. Check physical card kinds first so none can be hidden.
-    var lines = std.mem.splitScalar(u8, directive_text, '\n');
-    var have_directive = false;
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0 or trimmed[0] == '*') continue;
-        if (trimmed[0] == '+' and have_directive) continue;
-        if (trimmed[0] != '.') return error.UnsupportedDirectiveMutation;
-        const end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
-        const kind = trimmed[1..end];
-        var lower: [16]u8 = undefined;
-        if (kind.len > lower.len or requests.Keywords.get(std.ascii.lowerString(lower[0..kind.len], kind)) == null)
-            return error.UnsupportedDirectiveMutation;
-        have_directive = true;
-    }
-    if (!have_directive) return error.InvalidAnalysisArguments;
-    const source = try std.fmt.allocPrint(arena, "appended queries\n{s}\n.end\n", .{directive_text});
-    const ast = try syntax.Parser(syntax.ngspice).parse(arena, source);
-    if (ast.devices.len != 0 or ast.subcircuits.len != 0 or ast.models.len != 0 or ast.params.len != 0 or ast.foreign.len != 0)
-        return error.UnsupportedDirectiveMutation;
-    const nl = try syntax.elaborate(arena, ast);
-    if (nl.directives.len > (std.math.maxInt(u32) - 1) / 2) return error.CircuitTooLarge;
-    // A single `.temp` is deck configuration, fixed at build.
-    for (nl.directives) |dir| if (std.mem.eql(u8, dir.kind, "temp") and dir.args.len == 1) return error.UnsupportedDirectiveMutation;
-    var nodes: NodeIndex = .{ .arena = arena, .circuit = &prepared.circuit };
+    const nodes: NodeIndex = try .init(arena, &prepared.circuit);
+    const cards = try netlist.parseAnalyses(arena, directive_text, nodes);
+    if (cards.len == 0) return error.InvalidAnalysisArguments;
     // Appended queries accept only single-ended outputs.
-    const dir_nodes = try resolveDirectiveNodes(arena, nl.directives, &nodes, 1);
-    return queriesFromDirectives(arena, nl.directives, dir_nodes, prepared.bindings, prepared.cards, .{
+    return analyses.queries(arena, cards, 1, prepared.bindings, prepared.cards, .{
         .tol = prepared.deck_tol,
         .method = prepared.deck_method,
         .temp_c = prepared.deck_temp,
     });
-}
-
-const NO_NODE: u32 = std.math.maxInt(u32);
-
-fn directiveName(dir: types.Directive, index: usize) ?[]const u8 {
-    if (index >= dir.args.len) return null;
-    return switch (dir.args[index]) {
-        .name => |n| n,
-        else => null,
-    };
-}
-
-/// A bare node name, or name `which` inside a `v(a,b)` group (0 is `a`, 1 is
-/// `b`). A bare name or a one-argument `v(a)` has no second node.
-fn directiveNodeName(arena: std.mem.Allocator, dir: types.Directive, index: usize, which: usize) ?[]const u8 {
-    if (index >= dir.args.len) return null;
-    return switch (dir.args[index]) {
-        .name => |n| if (which == 0) n else null,
-        .group => |g| if (std.mem.eql(u8, g.name, "v") and g.args.len > which)
-            nodeNameOf(arena, g.args[which])
-        else
-            null,
-        else => null,
-    };
-}
-
-/// A node NAME out of one directive argument. `2` tokenizes as a NUMBER while
-/// `node_names` is keyed by the string the device cards used, so an integral
-/// node has to be spelled back out before the lookup.
-fn nodeNameOf(arena: std.mem.Allocator, value: types.Value) ?[]const u8 {
-    return switch (value) {
-        .name => |n| n,
-        .num => |n| if (n == @trunc(n) and @abs(n) < 1e9)
-            std.fmt.allocPrint(arena, "{d}", .{@as(i64, @intFromFloat(n))}) catch null
-        else
-            null,
-        else => null,
-    };
-}
-
-/// `.pz` spells its four ports as bare arguments rather than `v(...)` groups.
-fn bareNodeName(arena: std.mem.Allocator, dir: types.Directive, index: usize) ?[]const u8 {
-    if (index >= dir.args.len) return null;
-    return nodeNameOf(arena, dir.args[index]);
-}
-
-/// The node inside an `.ic v(<node>)=<value>` group.
-fn icNodeName(arena: std.mem.Allocator, value: types.Value) ?[]const u8 {
-    const g = switch (value) {
-        .group => |g| g,
-        else => return null,
-    };
-    if (!std.ascii.eqlIgnoreCase(g.name, "v") or g.args.len == 0) return null;
-    return nodeNameOf(arena, g.args[0]);
-}
-
-/// Parsed `.options` overrides. One pass over the deck's directives; the
-/// parser already splits `key=value` into adjacent name/value args.
-const DeckOptions = struct {
-    tol: numerics.Tolerances = .{},
-    method: ?requests.Method = null,
-    temp_c: ?f64 = null,
-    /// `.options tnom=<degC>` — ngspice `cktsopt.c:71-73` stores it as
-    /// `TSKnomTemp = val + CONSTCtoK`, so the CARD is Celsius; the default is
-    /// `cktntask.c:127`'s 300.15 K = 27 degC. Independent of `.options temp`
-    /// (`OPT_TEMP`, the same file's next case): nominal is where the model card
-    /// was extracted, `temp` is where the circuit is being run.
-    ///
-    /// Not optional and not applied per job: unlike `temp`, this is not an
-    /// analysis knob — it reaches the devices at BUILD time, before the
-    /// pattern is frozen, so no sweep can move it and `recompute`'s
-    /// topology-change path is never involved.
-    tnom_c: f64 = 27.0,
-};
-
-fn parseDeckOptions(directives: []const types.Directive) !DeckOptions {
-    const option_cards = std.StaticStringMap(void).initComptime(.{
-        .{ "options", {} }, .{ "option", {} }, .{ "opt", {} }, .{ "opts", {} },
-    });
-    const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom };
-    const names = std.StaticStringMap(Option).initComptime(.{
-        .{ "method", .method }, .{ "reltol", .reltol }, .{ "abstol", .abstol },
-        .{ "vntol", .vntol },   .{ "gmin", .gmin },     .{ "trtol", .trtol },
-        .{ "chgtol", .chgtol }, .{ "itl1", .itl1 },     .{ "itl2", .itl2 },
-        .{ "itl4", .itl4 },     .{ "maxord", .maxord }, .{ "temp", .temp },
-        .{ "tnom", .tnom },
-    });
-    const methods = std.StaticStringMap(requests.Method).initComptime(.{
-        .{ "gear", .gear_2 }, .{ "trap", .trapezoidal }, .{ "trapezoidal", .trapezoidal },
-    });
-    var o: DeckOptions = .{};
-    var maxord: ?f64 = null;
-    for (directives) |dir| {
-        if (std.ascii.eqlIgnoreCase(dir.kind, "temp") and dir.args.len == 1) {
-            o.temp_c = try number(dir, 0);
-            if (o.temp_c.? <= -273.15) return error.InvalidAnalysisArguments;
-            continue;
-        }
-        var lower: [16]u8 = undefined;
-        if (dir.kind.len > lower.len or !option_cards.has(std.ascii.lowerString(lower[0..dir.kind.len], dir.kind))) continue;
-        var i: usize = 0;
-        while (i < dir.args.len) : (i += 1) {
-            const key = directiveName(dir, i) orelse continue;
-            if (key.len > lower.len) continue;
-            const option = names.get(std.ascii.lowerString(lower[0..key.len], key)) orelse continue;
-            i += 1;
-            if (option == .method) {
-                const method = directiveName(dir, i) orelse return error.InvalidAnalysisArguments;
-                if (method.len > lower.len) return error.InvalidAnalysisArguments;
-                o.method = methods.get(std.ascii.lowerString(lower[0..method.len], method)) orelse return error.InvalidAnalysisArguments;
-                continue;
-            }
-            const value = try number(dir, i);
-            switch (option) {
-                .method => unreachable,
-                .temp, .tnom => {
-                    if (value <= -273.15) return error.InvalidAnalysisArguments;
-                    if (option == .temp) o.temp_c = value else o.tnom_c = value;
-                },
-                .itl1, .itl2, .itl4 => {
-                    if (value < 1 or value != @trunc(value) or value > std.math.maxInt(u16)) return error.InvalidAnalysisArguments;
-                    const iterations: u16 = @intFromFloat(value);
-                    switch (option) {
-                        .itl1 => o.tol.itl1 = iterations,
-                        .itl2 => o.tol.itl2 = iterations,
-                        .itl4 => o.tol.itl4 = iterations,
-                        else => unreachable,
-                    }
-                },
-                .maxord => {
-                    if (value < 1 or value != @trunc(value)) return error.InvalidAnalysisArguments;
-                    maxord = value;
-                },
-                inline else => |field| {
-                    if (value < 0) return error.InvalidAnalysisArguments;
-                    @field(o.tol, @tagName(field)) = value;
-                },
-            }
-        }
-    }
-    if (o.method == .gear_2 and maxord != null and maxord.? < 2) o.method = .backward_euler;
-    return o;
-}
-
-/// `uic` is a trailing KEYWORD, not a positional: `.tran 1n 100n uic` and
-/// `.tran 1n 100n 0 1n uic` are both legal, so scan rather than index.
-fn hasUic(dir: types.Directive) bool {
-    for (dir.args) |a| switch (a) {
-        .name => |n| if (std.ascii.eqlIgnoreCase(n, "uic")) return true,
-        else => {},
-    };
-    return false;
-}
-
-fn applyDeckOptions(job: *Job, o: DeckOptions) void {
-    switch (job.*) {
-        inline else => |*opts| {
-            if (comptime @hasField(@TypeOf(opts.*), "tol")) opts.tol = o.tol;
-            if (comptime @hasField(@TypeOf(opts.*), "dc_options")) opts.dc_options.tol = o.tol;
-        },
-    }
-    if (job.* == .temp) job.temp.t_nom = o.temp_c orelse 27;
-    if (o.method) |m| switch (job.*) {
-        .tran => |*t| t.method = m,
-        else => {},
-    };
-}
-
-fn number(dir: types.Directive, i: usize) !f64 {
-    const n = directiveNumber(dir, i) orelse return error.InvalidAnalysisArguments;
-    if (!std.math.isFinite(n)) return error.InvalidAnalysisArguments;
-    return n;
-}
-
-fn positive(dir: types.Directive, i: usize) !f64 {
-    const n = try number(dir, i);
-    if (n <= 0) return error.InvalidAnalysisArguments;
-    return n;
-}
-
-fn count(comptime T: type, dir: types.Directive, i: usize, default: T) !T {
-    if (i >= dir.args.len) return default;
-    const n = try positive(dir, i);
-    if (n != @trunc(n) or n > std.math.maxInt(T)) return error.InvalidAnalysisArguments;
-    return @intFromFloat(n);
-}
-
-fn arity(dir: types.Directive, min: usize, max: usize) !void {
-    if (dir.args.len < min or dir.args.len > max) return error.InvalidAnalysisArguments;
-}
-
-/// One case-insensitive keyword argument, lowered into caller storage so the
-/// `StaticStringMap` lookup that follows stays allocation-free.
-fn keyword(dir: types.Directive, i: usize, buf: []u8) ![]const u8 {
-    const name = directiveName(dir, i) orelse return error.InvalidAnalysisArguments;
-    if (name.len > buf.len) return error.InvalidAnalysisArguments;
-    return std.ascii.lowerString(buf[0..name.len], name);
-}
-
-fn outputNode(node: u32) !u32 {
-    if (node == NO_NODE or node == GROUND) return error.AnalysisNodeNotFound;
-    return node;
-}
-
-/// `i(name)` — a branch-current probe, as opposed to the `v(...)` groups
-/// `dir_nodes` resolves. Returns the named card.
-fn currentProbeName(dir: types.Directive, i: usize) ?[]const u8 {
-    if (i >= dir.args.len) return null;
-    return switch (dir.args[i]) {
-        .group => |g| if (std.ascii.eqlIgnoreCase(g.name, "i") and g.args.len == 1)
-            switch (g.args[0]) {
-                .name => |n| n,
-                else => null,
-            }
-        else
-            null,
-        else => null,
-    };
-}
-
-/// `v(a,b)` second node. Absent (single-ended) resolves to GROUND, which is
-/// what every consumer already means by "no reference node"; a name the deck
-/// never defines is a typo, not a ground reference.
-fn outputNeg(node: u32) !u32 {
-    if (node == NO_NODE) return GROUND;
-    return node;
 }
 
 /// Preserve card identities so each mutable analysis clone binds its own pointers.
@@ -560,265 +237,3 @@ fn acOverrides(
     }
     return overrides;
 }
-
-fn voltageSource(dir: types.Directive, i: usize, sources: problem.QueryBindings) !usize {
-    const name = directiveName(dir, i) orelse return error.InvalidAnalysisArguments;
-    return findNameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
-}
-
-/// `.dc <card|TEMP> start stop step`. The card table is the same one the AC
-/// overrides and `.sens` resolve through, so the swept quantity is named by
-/// (device type, instance index, parameter) — which is what `ParamRef` is
-/// keyed on. A batch-local index alone could not tell `V1` from `I1`.
-fn dcTarget(dir: types.Directive, i: usize, cards: []const requests.CardRef) !requests.Dc.SweepTarget {
-    const name = directiveName(dir, i) orelse return error.InvalidAnalysisArguments;
-    if (std.ascii.eqlIgnoreCase(name, "temp")) return .{ .is_temp = true };
-    for (cards) |c| {
-        if (!std.ascii.eqlIgnoreCase(c.name, name)) continue;
-        // ngspice sweeps a card's PRIMARY value: `dc` on a source, the
-        // element value on a passive.
-        const param = std.StaticStringMap([]const u8).initComptime(.{
-            .{ "resistor", "r" }, .{ "capacitor", "c" }, .{ "inductor", "l" },
-        }).get(c.type_name) orelse "dc";
-        return .{ .type_name = c.type_name, .index = c.index, .param_name = param };
-    }
-    return error.AnalysisSourceNotFound;
-}
-
-fn checkStep(start: f64, stop: f64, step: f64) !void {
-    const intervals = (stop - start) / step;
-    if (step == 0 or !std.math.isFinite(intervals) or intervals < 0 or
-        intervals >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return error.InvalidAnalysisArguments;
-}
-
-/// `dec|oct|lin N fstart fstop` — the one grid every frequency-domain
-/// directive spells the same way. `lin` is the only kind that admits
-/// fstart = 0 (a geometric grid has no zeroth point to step from).
-fn frequencySweep(dir: types.Directive, offset: usize) !numerics.FreqSweep {
-    const mode = directiveName(dir, offset) orelse return error.InvalidAnalysisArguments;
-    const kinds = std.StaticStringMap(numerics.SweepKind).initComptime(.{
-        .{ "dec", .dec }, .{ "oct", .oct }, .{ "lin", .lin },
-    });
-    var lower: [8]u8 = undefined;
-    if (mode.len > lower.len) return error.UnsupportedFrequencySweep;
-    const kind = kinds.get(std.ascii.lowerString(lower[0..mode.len], mode)) orelse return error.UnsupportedFrequencySweep;
-    const first = if (kind == .lin) try number(dir, offset + 2) else try positive(dir, offset + 2);
-    const last = try positive(dir, offset + 3);
-    if (first < 0 or last < first) return error.InvalidAnalysisArguments;
-    return .{ .f_start = first, .f_stop = last, .points = try count(u32, dir, offset + 1, 10), .kind = kind };
-}
-
-fn buildJob(dir: types.Directive, node_id: u32, node_neg: u32, ports: [4]u32, sources: problem.QueryBindings, cards: []const requests.CardRef) !?Job {
-    const id = requests.Keywords.get(dir.kind) orelse return null;
-    switch (id) {
-        .op => {
-            try arity(dir, 0, 0);
-            return .{ .op = .{} };
-        },
-        .tran, .tran_noise, .matex => {
-            try arity(dir, 2, if (id == .tran) 5 else 2);
-            const step = try positive(dir, 0);
-            const stop = try positive(dir, 1);
-            if (id == .matex) return .{ .matex = .{ .t_stop = stop, .h_output_cap = step } };
-            if (id == .tran_noise) return .{ .tran_noise = .{ .t_stop = stop, .dt_init = step, .dt_max = step } };
-            var numeric_end = dir.args.len;
-            const uic = hasUic(dir);
-            if (uic) numeric_end -= 1;
-            if (numeric_end > 4) return error.InvalidAnalysisArguments;
-            // ngspice tstart: suppresses OUTPUT before it, never the solve.
-            const t_start = if (numeric_end > 2) try number(dir, 2) else 0;
-            if (!(t_start >= 0) or t_start >= stop) return error.InvalidAnalysisArguments;
-            return .{ .tran = .{ .t_stop = stop, .dt_init = step, .t_start = t_start, .dt_max = if (numeric_end > 3) try positive(dir, 3) else @min(step, stop / 50), .uic = uic } };
-        },
-        .ac, .disto => {
-            try arity(dir, 4, 4);
-            const grid = try frequencySweep(dir, 0);
-            if (id == .ac) return .{ .ac = .{ .sweep = grid } };
-            var opts: requests.Disto = .{ .sweep = grid };
-            // ngspice cktdisto.c:100-117: the F1 drive is whichever card
-            // carries DISTOF1 — never "the first source" — and it lands on
-            // that card's BRANCH row. `disto/bjt_ce` is the proof: its first V
-            // card is the supply Vcc and the DISTOF1 is on Vin.
-            // ponytail: first such card only. ngspice sums every DISTOF1
-            // source into one RHS; no fixture has two, and the loop is the
-            // upgrade when one does.
-            for (sources.v_branches, sources.v_distof1) |br, d| {
-                if (d[0] == 0) continue;
-                opts.drive_branch = br;
-                opts.ac_magnitude = d[0];
-                opts.ac_phase = d[1];
-                break;
-            }
-            return .{ .disto = opts };
-        },
-        .dc => {
-            if (dir.args.len != 4 and dir.args.len != 8) return error.InvalidAnalysisArguments;
-            var opts: requests.Dc = .{ .target = try dcTarget(dir, 0, cards), .start = try number(dir, 1), .stop = try number(dir, 2), .step = try number(dir, 3) };
-            // Only the OUTER variable may be the temperature: the inner march
-            // installs its value through one ParamRef write, and temperature
-            // is a whole-circuit set plus a re-derive.
-            if (opts.target.is_temp) return error.UnsupportedTemperatureSweep;
-            try checkStep(opts.start, opts.stop, opts.step);
-            if (dir.args.len == 8) {
-                opts.target2 = try dcTarget(dir, 4, cards);
-                opts.start2 = try number(dir, 5);
-                opts.stop2 = try number(dir, 6);
-                opts.step2 = try number(dir, 7);
-                try checkStep(opts.start2, opts.stop2, opts.step2);
-            }
-            return .{ .dc = opts };
-        },
-        .noise => {
-            // The input reference source does not drive the noise solve, but
-            // it still has to EXIST: accepting a name no card carries turned
-            // `.noise v(out) Missing ...` into a silent success.
-            try arity(dir, 5, 6);
-            const in_branch: ?u32 = if (dir.args.len == 6)
-                sources.v_branches[try voltageSource(dir, 1, sources)]
-            else
-                null;
-            return .{ .noise = .{ .out_node = try outputNode(node_id), .out_neg = try outputNeg(node_neg), .in_branch = in_branch, .sweep = try frequencySweep(dir, dir.args.len - 4) } };
-        },
-        .pnoise => {
-            try arity(dir, 7, 8);
-            const sweep = try frequencySweep(dir, 2);
-            const sidebands = if (dir.args.len == 8) try number(dir, 7) else 7;
-            if (sidebands < 0 or sidebands != @trunc(sidebands) or sidebands > 31) return error.InvalidAnalysisArguments;
-            return .{ .pnoise = .{ .out_node = try outputNode(node_id), .sweep = sweep, .f_fundamental = try positive(dir, 6), .n_sidebands = @intFromFloat(sidebands) } };
-        },
-        .tf => {
-            try arity(dir, 2, 2);
-            var opts: requests.Tf = .{};
-            // `.tf i(Vmeasure) ...` measures a BRANCH current. `dir_nodes`
-            // only resolves `v(...)`, so the `i(...)` spelling is read here.
-            if (currentProbeName(dir, 0)) |probe| {
-                opts.output_branch = sources.v_branches[findNameIndex(sources.v_names, probe) orelse return error.AnalysisSourceNotFound];
-            } else {
-                opts.output_node = try outputNode(node_id);
-                opts.output_neg = try outputNeg(node_neg);
-            }
-            // The drive is a V card (branch row) or an I card (node pair).
-            const drive = directiveName(dir, 1) orelse return error.InvalidAnalysisArguments;
-            if (findNameIndex(sources.v_names, drive)) |v| {
-                opts.input_branch = sources.v_branches[v];
-            } else if (findNameIndex(sources.i_names, drive)) |i_idx| {
-                opts.input_nodes = .{ sources.i_pos[i_idx], sources.i_neg[i_idx] };
-            } else return error.AnalysisSourceNotFound;
-            return .{ .tf = opts };
-        },
-        .sens, .dcmatch => {
-            try arity(dir, 1, 1);
-            const node = try outputNode(node_id);
-            if (id == .sens) return .{ .sens = .{ .output_node = node, .output_neg = try outputNeg(node_neg), .cards = cards } };
-            return .{ .dcmatch = .{ .output_node = node } };
-        },
-        .four => {
-            try arity(dir, 2, 3);
-            return .{ .four = .{ .f_fundamental = try positive(dir, 0), .output_node = try outputNode(node_id), .n_harmonics = try count(u16, dir, 2, 9) } };
-        },
-        .pz => {
-            // Bare `.pz` asks for the circuit's own poles and names no transfer.
-            if (dir.args.len == 0) return .{ .pz = .{} };
-            try arity(dir, 6, 6);
-            const drive_kind = std.StaticStringMap(enum { vol, cur })
-                .initComptime(.{ .{ "vol", .vol }, .{ "cur", .cur } });
-            const wanted = std.StaticStringMap(enum { pol, zer, pz })
-                .initComptime(.{ .{ "pol", .pol }, .{ "zer", .zer }, .{ "pz", .pz } });
-            var lower: [4]u8 = undefined;
-            const kind = drive_kind.get(try keyword(dir, 4, &lower)) orelse return error.InvalidAnalysisArguments;
-            const want = wanted.get(try keyword(dir, 5, &lower)) orelse return error.InvalidAnalysisArguments;
-            var opts: requests.Pz = .{
-                .in_pos = try outputNode(ports[0]),
-                .in_neg = try outputNeg(ports[1]),
-                .out_pos = try outputNode(ports[2]),
-                .out_neg = try outputNeg(ports[3]),
-                .want_poles = want != .zer,
-                .want_zeros = want != .pol,
-            };
-            // A `vol` transfer is driven by a voltage source, and the source
-            // the deck already put across the input port IS that drive: its
-            // branch row is the column the numerator's Cramer rule needs, and
-            // its presence in the nulled matrix is the short the denominator
-            // needs. Adding a second one across the same pair would be two
-            // contradictory constraints on one node pair, which is the trap
-            // `.stb` fell into. `cur` needs no card: a current injection is
-            // just the node pair, which is why `bench_pz_simplepz` can ask for
-            // a transimpedance with no source in the deck at all.
-            if (kind == .vol) {
-                opts.drive_branch = for (sources.v_pos, sources.v_neg, sources.v_branches) |p, m, br| {
-                    if ((p == opts.in_pos and m == opts.in_neg) or (p == opts.in_neg and m == opts.in_pos)) break br;
-                } else return error.AnalysisSourceNotFound;
-            }
-            return .{ .pz = opts };
-        },
-        .pss => {
-            try arity(dir, 1, 2);
-            return .{ .pss = .{ .period = 1 / try positive(dir, 0), .n_samples = try count(u32, dir, 1, 256) } };
-        },
-        .hb => {
-            try arity(dir, 1, 2);
-            if (sources.v_names.len == 0) return error.AnalysisSourceNotFound;
-            return .{ .hb = .{ .f0 = try positive(dir, 0), .n_harmonics = try count(u16, dir, 1, 8) } };
-        },
-        .qpss => {
-            try arity(dir, 2, 4);
-            if (sources.v_names.len == 0) return error.AnalysisSourceNotFound;
-            return .{ .qpss = .{ .f1 = try positive(dir, 0), .f2 = try positive(dir, 1), .k1 = try count(u16, dir, 2, 5), .k2 = try count(u16, dir, 3, 5) } };
-        },
-        .pac, .pxf => {
-            try arity(dir, 5, 5);
-            const sweep = try frequencySweep(dir, 1);
-            const lo = try positive(dir, 0);
-            if (id == .pac) return .{ .pac = .{ .f_lo = lo, .sweep = sweep } };
-            return .{ .pxf = .{ .f_lo = lo, .sweep = sweep } };
-        },
-        .sp => {
-            try arity(dir, 4, 4);
-            return .{ .sp = .{ .sweep = try frequencySweep(dir, 0), .ports = sources.ports } };
-        },
-        .stb => {
-            // `.stb Vprobe dec N fstart fstop` — the named 0 V source IS the
-            // loop break; the sweep drives its branch row directly.
-            try arity(dir, 5, 5);
-            const probe = try voltageSource(dir, 0, sources);
-            return .{ .stb = .{
-                .sweep = try frequencySweep(dir, 1),
-                .probe_p = sources.v_pos[probe],
-                .probe_n = sources.v_neg[probe],
-                .probe_branch = sources.v_branches[probe],
-            } };
-        },
-        .envelope => {
-            try arity(dir, 2, 2);
-            return .{ .envelope = .{ .t_carrier = try positive(dir, 0), .t_stop = try positive(dir, 1) } };
-        },
-        .mc => {
-            try arity(dir, 1, 2);
-            var opts: requests.Mc = .{ .n_trials = try count(u16, dir, 0, 100) };
-            if (dir.args.len == 2) opts.variation = try number(dir, 1);
-            if (opts.variation < 0) return error.InvalidAnalysisArguments;
-            return .{ .mc = opts };
-        },
-        .temp => {
-            // Standard single-temperature card is deck configuration.
-            if (dir.args.len == 1) {
-                if (try number(dir, 0) <= -273.15) return error.InvalidAnalysisArguments;
-                return null;
-            }
-            try arity(dir, 3, 3);
-            const opts: requests.Temp = .{ .t_start = try number(dir, 0), .t_stop = try number(dir, 1), .t_step = try number(dir, 2) };
-            try checkStep(opts.t_start, opts.t_stop, opts.t_step);
-            if (opts.t_step <= 0 or (opts.t_stop - opts.t_start) / opts.t_step >= std.math.maxInt(u32) or
-                @min(opts.t_start, opts.t_stop) <= -273.15) return error.InvalidAnalysisArguments;
-            return .{ .temp = opts };
-        },
-    }
-}
-
-// Private implementation access for the frontend test suite.
-pub const test_access = if (@import("builtin").is_test) .{
-    .DeckOptions = DeckOptions,
-    .parseDeckOptions = parseDeckOptions,
-    .buildJob = buildJob,
-    .applyDeckOptions = applyDeckOptions,
-} else {};
