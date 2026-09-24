@@ -246,7 +246,7 @@ pub fn sweep(
 /// noise density per point. Data layout: point-major (frequency, pnoise_density).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
 
     // ponytail: Phase 4 — GPU batch dispatch not applicable here.
     // Each PSS time sample k has its own Jacobian (G_k, C_k) from the periodic
@@ -257,7 +257,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);
 

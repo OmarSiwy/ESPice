@@ -1,31 +1,11 @@
-//! DC: Newton on A = G. solve() is the point primitive;
-//! run() sweeps the primary source through its ParamRef and records probes.
+//! DC sweep: run() sweeps the primary source through its ParamRef, one
+//! warm-started Newton per point on A = G, and records the probes.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 const op = @import("op.zig");
 
 pub const Options = @import("requests").Dc;
-
-pub const SolveResult = converger.Result;
-
-pub fn solve(
-    ckt: *root.Circuit,
-    x: []f64,
-    options: Options,
-) !SolveResult {
-    op.coldStart(ckt, x);
-    // §4.6.1 `analysis("dc")`, §9.10 `$abstime` = 0. Every DC point is a static
-    // solve; `initial_step` stays with op.solve, which is what actually runs
-    // first in a job. ponytail: a standalone `.dc` sweep with no preceding OP
-    // therefore never raises initial_step — plumb it in dc.run's point loop the
-    // day a model needs a power-on latch without an operating point.
-    ckt.setSimState(.{ .kind = .dc });
-    try ckt.computeBaseline();
-    const ws = try ckt.workspace();
-    const copts = converger.optionsFromTolerances(options.tol, options.tol.itl2);
-    return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
-}
 
 /// Contract entry: sweep the primary source dc value, one warm-started
 /// solve per point. Swept value restored afterwards so the cached operating
@@ -35,7 +15,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     // `defer`-freed below == scratch; `a` is a results arena that cannot
     // reclaim it. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
 
     // DCOP flavor for the whole sweep, whatever the deck's shared op left
     // behind: a deck with a .tran runs its op in the ic phase, where

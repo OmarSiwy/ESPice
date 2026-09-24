@@ -169,8 +169,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     // `defer`-freed below == scratch, and `a` is a results arena that cannot
     // reclaim it. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const scratch = ctx.scratch_allocator;
+    const x_op = ctx.x_op;
 
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);

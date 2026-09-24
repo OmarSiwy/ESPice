@@ -381,12 +381,12 @@ fn eliminationRank(n: usize, a: []f64, tol: f64) usize {
 /// becomes ngspice's own: `pole(k)`/`zero(k)` columns on a single row.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
 
     // `res` owns a dense n x n eigen workspace and is deinit-ed here, so it is
     // scratch; `a` is a results arena whose free() is a no-op. See
     // RunCtx.scratch_allocator.
-    var res = try solve(ctx.circuit, x_op, opts, ctx.scratch_allocator orelse a);
+    var res = try solve(ctx.circuit, x_op, opts, ctx.scratch_allocator);
     defer res.deinit();
 
     if (!opts.want_zeros) {

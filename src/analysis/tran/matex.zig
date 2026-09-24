@@ -549,9 +549,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // the recorded waveform — is scratch, and `a` is a results arena whose
     // free() is a no-op. Only `names` and `data` at the bottom are the Result.
     // See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const ckt = ctx.circuit;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
     const n: usize = ckt.n;
     const nn: u32 = ckt.n;
 

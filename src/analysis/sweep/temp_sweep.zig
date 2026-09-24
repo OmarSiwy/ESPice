@@ -48,7 +48,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n: usize = ckt.n;
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const x_lanes = try scratch.alloc(f64, max_points * n);
     defer scratch.free(x_lanes);
     const results = try scratch.alloc(converger.Result, max_points);

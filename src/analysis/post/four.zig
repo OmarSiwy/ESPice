@@ -86,8 +86,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // `defer`-freed == scratch, and `a` is a results arena that cannot reclaim
     // it — the waveform below is a whole transient. `Spectrum` is a value
     // type and `analyze` frees its own FFT buffers, so it is scratch too.
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const scratch = ctx.scratch_allocator;
+    const x_op = ctx.x_op;
 
     const x = try scratch.dupe(f64, x_op);
     defer scratch.free(x);

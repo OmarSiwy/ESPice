@@ -951,8 +951,8 @@ pub fn simulateInto(
 /// waveform point-major: (time, probes...) per row.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const scratch = ctx.scratch_allocator;
+    const x_op = ctx.x_op;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
     simdCopy(x, x_op);

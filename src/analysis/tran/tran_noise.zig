@@ -268,10 +268,10 @@ pub fn simulate(
 /// per-step noise injection. Data layout: point-major (time, probes...).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const x_op = ctx.x_op;
     // `defer`-freed == scratch; `a` is a results arena. `simulate` keeps `a`:
     // its `st.rows` is realloc'd into Result.data below, so it is NOT scratch.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
     simdCopy(x, x_op);

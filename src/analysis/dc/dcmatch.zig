@@ -195,17 +195,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // `defer`-freed == scratch; `a` is a results arena. See
     // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse blk: {
-        const x = try scratch.alloc(f64, ckt.n);
-        errdefer scratch.free(x);
-        const r = try @import("op.zig").solve(ckt, x, .{ .tol = opts.tol });
-        if (!r.converged) return error.OpDidNotConverge;
-        break :blk x;
-    };
-    defer if (ctx.x_op == null) scratch.free(x_op);
-
-    const res = try solve(ckt, x_op, output_node, scratch);
+    const scratch = ctx.scratch_allocator;
+    const res = try solve(ckt, ctx.x_op, output_node, scratch);
     defer scratch.free(res.contributions);
 
     const n_contribs = res.contributions.len;

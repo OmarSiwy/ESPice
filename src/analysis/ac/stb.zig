@@ -8,7 +8,6 @@ const types = @import("numerics");
 const solvers = @import("solvers");
 const GROUND = root.GROUND;
 const FreqSolver = solvers.freq_solve.FreqSolver;
-const dc = @import("../dc/dc.zig");
 
 const Complex = types.Complex;
 
@@ -39,9 +38,7 @@ pub const SolveResult = struct {
     }
 };
 
-/// Low-level solve: DC bias → linearize → inject at the probe → margins.
-/// `x_op_in` reuses an operating point the engine already solved; pass null
-/// (standalone callers) to run the DC solve here.
+/// Low-level solve: linearize at `x_op` → inject at the probe → margins.
 ///
 /// The probe is the deck's own 0 V source (`.stb Vprobe ...`), NOT a source
 /// this module adds: its branch equation is already `v_p - v_n - V = 0`, so
@@ -56,7 +53,7 @@ pub const SolveResult = struct {
 pub fn solve(
     ckt: *root.Circuit,
     options: Options,
-    x_op_in: ?[]const f64,
+    x_op: []const f64,
     allocator: std.mem.Allocator,
 ) !SolveResult {
     const n: usize = ckt.n;
@@ -64,19 +61,6 @@ pub fn solve(
         return error.InvalidProbe;
     // A probe whose `−` side is ground has no returned voltage to divide by.
     if (options.probe_n == GROUND) return error.InvalidProbe;
-
-    // --- Bias point: reuse the engine's op if given, else DC solve here ------
-    var owned_x_op: ?[]f64 = null;
-    defer if (owned_x_op) |x| allocator.free(x);
-    // run() always passes ctx.x_op (engine.ensureOp guarantees it); this
-    // fallback fires only for standalone/direct solve() callers.
-    const x_op = x_op_in orelse blk: {
-        const x = try allocator.alloc(f64, n);
-        owned_x_op = x;
-        const dc_result = try dc.solve(ckt, x, .{ .tol = options.tol });
-        if (!dc_result.converged) return error.DcNotConverged;
-        break :blk x;
-    };
 
     // --- Linearize at the operating point ------------------------------------
     try ckt.linearizeAc(x_op);
@@ -124,7 +108,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     // `res` is deinit-ed here, so it is scratch, and `a` is a results arena
     // whose free() is a no-op. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
+    const scratch = ctx.scratch_allocator;
     var res = try solve(ctx.circuit, opts, ctx.x_op, scratch);
     defer res.deinit(scratch);
 

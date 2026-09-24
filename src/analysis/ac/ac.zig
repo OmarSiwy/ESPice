@@ -76,8 +76,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // the probe-major `resp`, the sweep's whole lane workspace and the
     // point-major `data` were three live copies of the same payload for the
     // rest of the run. See RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator orelse a;
-    const x_op = ctx.x_op orelse return error.NoOperatingPoint;
+    const scratch = ctx.scratch_allocator;
+    const x_op = ctx.x_op;
     const n_points = opts.sweep.count();
 
     const freqs = try scratch.alloc(f64, n_points);
