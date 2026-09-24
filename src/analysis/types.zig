@@ -4,7 +4,7 @@
 //! back would close the cycle this file exists to break.
 //!
 //! File-level DAG inside src/analysis/:
-//!   tran/types.zig -> Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig
+//!   Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig
 const std = @import("std");
 
 const circuit_mod = @import("Circuit.zig");
