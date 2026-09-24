@@ -40,6 +40,7 @@ const gompute = @import("gompute");
 
 const Circuit = analysis.Circuit;
 const GpuHook = analysis.GpuHook;
+const addSimd = @import("par_eval.zig").addSimd;
 
 /// Which backend this binary actually carries images for. Decided at COMPILE
 /// time because `gompute.RawByName(.cuda)` is a compile error in a build that
@@ -110,7 +111,7 @@ const Raw = if (backend) |be| gompute.RawByName(be) else void;
 const Buffer = if (backend != null) Raw.Buffer else void;
 const Stream = if (backend != null) Raw.Stream else void;
 
-/// Must match `devices/kernels.zig`, which sized the launch when it exported
+/// Must match the eval.zig build root, which sized the launch when it exported
 /// the kernels: `DeviceKernel(D, block_size)` bakes the block width into
 /// `globalIdX`, so a host that launches a different one indexes wrong.
 const block_size: u32 = device_ir.gpu_block_size;
@@ -120,7 +121,7 @@ pub const Error = error{
     /// the build machine, so `emitKernels` emitted nothing.
     NoGpuArtifacts,
     /// NO device type in this circuit has a GPU kernel, so there is nothing to
-    /// move. See `engine.gpuEligible`.
+    /// move. See `eval.gpuEligible`.
     CircuitNotEligible,
     /// The circuit HAS eligible devices, but too few to pay for the round trip.
     /// See `min_work`.
@@ -258,7 +259,7 @@ pub const GpuContext = struct {
     ckt: *Circuit,
     /// The eligible batches, resident on the device.
     batches: []BatchGpu,
-    /// The rest — whatever `engine.gpuEligible` turns down (history, a core
+    /// The rest — whatever `eval.gpuEligible` turns down (history, a core
     /// that reads host-published sim state, `State` without `limit`), plus
     /// anything eligible whose model the build declined to emit a kernel for
     /// (`gpu_max_model_bytes`).
@@ -900,11 +901,11 @@ pub const GpuContext = struct {
 
         if (self.chk.len > 0) try self.evalCheck(x, t);
 
-        addInto(ckt.g_vals, self.pin_g);
-        addInto(ckt.rhs, self.pin_rhs);
+        addSimd(ckt.g_vals, self.pin_g);
+        addSimd(ckt.rhs, self.pin_rhs);
         if (self.resident_charge) {
-            addInto(ckt.c_vals, self.pin_c);
-            addInto(ckt.q_vec, self.pin_q);
+            addSimd(ckt.c_vals, self.pin_c);
+            addSimd(ckt.q_vec, self.pin_q);
         }
 
         // The ground pin is not a device, so no kernel emits it.
@@ -1072,10 +1073,6 @@ pub const GpuContext = struct {
 
         @memcpy(self.pin_g, chk_g);
         @memcpy(self.pin_rhs, chk_rhs);
-    }
-
-    inline fn addInto(dst: []f64, src: []const f64) void {
-        for (dst, src) |*d, s| d.* += s;
     }
 
     /// `Circuit.eval` / `Circuit.evalNewton` on the device — the `eval_planes`

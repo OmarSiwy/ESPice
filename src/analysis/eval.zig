@@ -16,7 +16,7 @@ const gompute = @import("gompute"); // GPU: RawKernel build/launch (shared core)
 // NVIDIA-only check never sees it. `log1p` happens not to carry the idiom and
 // is still std's.
 const dmath = gompute.math;
-// engine.zig is the SHARED device core: the app compiles it at comptime for
+// eval.zig is the SHARED device core: the app compiles it at comptime for
 // builtins, and the FastVAF `.so` compiles this SAME source at runtime for
 // dynamics — identical format by construction. Deps: device_ir + contract + gompute
 // (both app and .so provide gompute). The frontend loader owns FastVAF.
@@ -933,7 +933,7 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
 /// SECOND time against the same `x_old`, so there the two differ; it is
 /// `backtrack = true`, which both CPU envs set false (converger.zig:351,
 /// newton_core.zig:417) and only a GPU solve turns on.
-fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) f64 {
+fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) bool {
     const n_u = comptime contract.nU(D);
     // The device's own live sets. A MOS ladder reads four of eight unknowns
     // and writes two: `d`, `s` and the two branch-flow unknowns are gathered,
@@ -944,7 +944,7 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
     // hand-written device), both read as ALL and the walk is the old one.
     const reads = comptime contract.limitReads(D);
     const writes = comptime contract.limitWrites(D);
-    var flag: f64 = 0;
+    var flag = false;
     var id: u32 = first;
     while (id < end) : (id += 1) {
         // Lanes outside `reads` stay undefined and that is sound, not sloppy:
@@ -984,7 +984,7 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         // the cost of DEFEATING the inliner, not the benefit of helping it.
         // Inlining questions need two builds.
         const lm = D.limit(sink.model(id), sink.inst(id), cur, old);
-        if (!lm.converged) flag = 1;
+        if (!lm.converged) flag = true;
         inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
             sink.setLim(id, u, lm.x[u]);
         };
@@ -1422,7 +1422,7 @@ pub fn DeviceBatch(comptime D: type) type {
             var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr);
             const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active);
             self.lim_active = true;
-            return any != 0;
+            return any;
         }
 
         fn clearLimits(ctx: *anyopaque) void {
@@ -1684,9 +1684,7 @@ pub fn DeviceBatch(comptime D: type) type {
         fn collectNoiseLocal(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
-                var xl: [n_u]f64 = undefined;
-                inline for (0..n_u) |u| xl[u] = x[self.gath[id * n_u + u]];
-                const terms = D.noisePsd(xl, &self.models[id], &self.instances[id]);
+                const terms = D.noisePsd(self.localX(x, id), &self.models[id], &self.instances[id]);
                 inline for (D.noise_gens, 0..) |gen, k| {
                     // Position k IS generator k (noise-contract.md §3). `@abs`
                     // is ngspice's own read of a signed density argument
@@ -1806,8 +1804,8 @@ pub fn DeviceBatch(comptime D: type) type {
 // ===========================================================================
 // GPU path — the SAME evalRange body, driven by a gompute RawKernel with an
 // atomic-scatter sink. One kernel per device type; builtins register at comptime
-// (kernels.zig), a dynamic `.so` registers its one device from this same
-// template. Buffers are flat SoA uploaded before launch (host mirrors of the
+// (this file's root `comptime` block), a dynamic `.so` registers its one
+// device from this same template. Buffers are flat SoA uploaded before launch (host mirrors of the
 // batch tapes/planes). First cut targets simple devices (no state / history /
 // limiting); richer devices stay CPU until their GPU state is added.
 // ===========================================================================
@@ -1869,7 +1867,7 @@ pub fn baseName(comptime D: type) []const u8 {
 
 /// The kernel symbol for device D — `arp_eval_<model>`.
 ///
-/// Derived from the TYPE, and called by both sides: `kernels.zig` to export the
+/// Derived from the TYPE, and called by both sides: the build root to export the
 /// symbol into the GPU image, and `gpuPayload` below to name the symbol the
 /// launcher looks up. One function so the two cannot drift into a green build
 /// that fails with `error.KernelNotFound` on a machine with a GPU.
@@ -1891,7 +1889,7 @@ pub fn ctlKernelName(comptime D: type) [:0]const u8 {
 /// The segmented-reduction symbol — `arp_reduce_<model>`.
 ///
 /// The BODY is device-independent (see `ReduceKernel`), but the symbol is keyed
-/// on D anyway: `kernels.zig` compiles one root per device and gompute requires
+/// on D anyway: the build root compiles once per device and gompute requires
 /// kernel names to be unique across roots, so a single shared `arp_reduce` would
 /// collide once per catalog entry. The launcher uses whichever resident batch's
 /// copy it finds first — they are the same code.
@@ -2052,7 +2050,7 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
 
 /// One-thread-per-instance GPU kernel for device D — the gompute RawKernel entry.
 /// Body is the SHARED `evalRange`; only the sink differs from the CPU path.
-/// `exportRaw`'d by kernels.zig (builtins) or the `.so` shim (dynamics), so it
+/// `exportRaw`'d by the build root (builtins) or the `.so` shim (dynamics), so it
 /// is analyzed only in device compilation (globalIdX is device-only).
 pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
     return struct {
@@ -2294,9 +2292,10 @@ pub fn checkHost(comptime D: type) void {
 }
 
 /// Export a contract-shaped device under the runtime ABI. The generated shim
-/// is one line: `comptime { engine.exportDevice(@import("device"), "name"); }`.
+/// is one line: `comptime { @import("dyn").exportDevice(@import("device"), "name"); }`.
 pub fn exportDevice(comptime D: type, comptime device_name: []const u8) void {
-    // Builtins are checked in host_device.zig; this covers loaded models.
+    // Builtins are checked in the build root's `comptime` block; this covers
+    // loaded models.
     comptime checkHost(D);
     const impl = Impl(D, device_name);
     @export(&impl.abiVersion, .{ .name = "arp_abi_version" });

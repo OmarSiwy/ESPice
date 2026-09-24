@@ -136,7 +136,7 @@ pub const Executor = struct {
         const self: *Executor = @ptrCast(@alignCast(ctx));
         var par: ?ParEval = null;
         if (self.config.device_threads > 1) {
-            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.circuit.trash_slot, self.config.device_threads);
+            par = try ParEval.init(self.allocator, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.circuit.trash_slot, self.config.device_threads);
             self.circuit.par_eval = &par.?;
         }
         defer {
