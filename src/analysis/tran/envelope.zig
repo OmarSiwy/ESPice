@@ -1,5 +1,5 @@
-//! Envelope-following transient: quasi-static Newton (A = G) sampled along
-//! the carrier. Outer steps skip whole carrier periods; one fine-resolution
+//! Envelope-following transient: trapezoid steps (A = G + 2C/dt; A = G with
+//! no charge) sampled along the carrier. Outer steps skip whole carrier periods; one fine-resolution
 //! period per outer step feeds the peak/RMS envelope extraction.
 //!
 //! Algorithm (sample-envelope, doc §3):
@@ -37,25 +37,70 @@ pub fn maxPoints(options: Options) u32 {
     return @as(u32, @intFromFloat(@min(by_time, cap))) + 2;
 }
 
-/// One quasi-static Newton solve at absolute time t: assemble = ckt.eval,
-/// matrix = G. Shared workspace; returns convergence only.
+/// Trapezoidal charge history carried across every envelope step (coarse
+/// and fine alike: trapezoid is one-step, so dt may change between them).
+/// Without it the envelope was quasi-static and a capacitor was open
+/// (`rc_startup` published v(out) = v(in)).
+const Trap = struct {
+    q_prev: []f64,
+    i_prev: []f64,
+    q_cur: []f64,
+    a_vals: []f64,
+    alpha: f64 = 0,
+
+    /// Companion residual alpha*(q - q_prev) - i_prev, matrix G + alpha*C.
+    pub fn assemble(self: Trap, ckt: *root.Circuit, x: []const f64, t: f64) void {
+        ckt.evalNewton(x, t);
+        const n: usize = ckt.n;
+        simdCopy(self.q_cur[0..n], ckt.q_vec[0..n]);
+        integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
+    }
+    pub fn vals(self: Trap, ckt: *root.Circuit) []f64 {
+        ckt.combineGC(self.alpha, self.a_vals);
+        return self.a_vals;
+    }
+    pub fn diagAt(self: Trap, ckt: *root.Circuit, slot: u32) f64 {
+        return ckt.gcAt(self.alpha, slot);
+    }
+    /// Accepted step: i = alpha*(q - q_prev) - i_prev, then q_prev = q.
+    fn accept(self: Trap, n: usize) void {
+        integrator.companionAt(.trapezoidal, false, self.i_prev[0..n], self.q_cur[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
+        simdCopy(self.q_prev[0..n], self.q_cur[0..n]);
+    }
+};
+const integrator = @import("integrator.zig");
+
+/// One step to absolute time t: a trapezoid step of length dt when the
+/// circuit has charge (`trap`), else the static solve (A = G). Shared
+/// workspace; returns convergence only.
 fn newtonAt(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
     x: []f64,
     t: f64,
+    dt: f64,
     options: Options,
+    trap: ?*Trap,
 ) !bool {
     // §9.10 `$abstime`: a generated device reads Instance.abstime, not the `t`
-    // argument, so the envelope's quasi-static probes have to publish it too —
-    // otherwise every source in the envelope sees t = 0. dt stays 0: this rung
-    // IS quasi-static, so `ddt` should return 0 (see the generated zDdt guard).
-    ckt.setSimState(.{ .t = t, .kind = .tran });
-    const nr = converger.run(ckt, ws, x, t, converger.optionsFromTolerances(options.tol, options.tol.itl4), root.EvalHook{}) catch |err| switch (err) {
+    // argument, so the envelope's probes have to publish it too — otherwise
+    // every source in the envelope sees t = 0.
+    const opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+    const nr = if (trap) |tr| blk: {
+        ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
+        tr.alpha = 2.0 / dt;
+        break :blk converger.run(ckt, ws, x, t, opts, tr.*);
+    } else blk: {
+        // No charge: dt stays 0, the step IS static.
+        ckt.setSimState(.{ .t = t, .kind = .tran });
+        break :blk converger.run(ckt, ws, x, t, opts, root.EvalHook{});
+    };
+    const r = nr catch |err| switch (err) {
         error.QueryCancelled => return err,
         else => return false,
     };
-    return nr.converged;
+    if (r.converged) if (trap) |tr| tr.accept(ckt.n);
+    return r.converged;
 }
 
 // ============================================================================
@@ -83,8 +128,11 @@ pub fn simulate(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    // One scratch alloc: [x_outer_save | prev_peak | peak | sum_sq]
-    const scratch = try allocator.alloc(f64, n + 3 * probes.len);
+    // One scratch alloc: [x_outer_save | prev_peak | peak | sum_sq | trap state]
+    // trap state = q_prev, i_prev, q_cur and the rollback copies of the first
+    // two, only when the circuit has charge.
+    const n_trap: usize = if (ckt.has_charge) 5 * n else 0;
+    const scratch = try allocator.alloc(f64, n + 3 * probes.len + n_trap);
     defer allocator.free(scratch);
     const x_outer_save = scratch[0..n];
     // Previous envelope values for adaptive stepping (one per probe),
@@ -92,7 +140,23 @@ pub fn simulate(
     const prev_peak = scratch[n..][0..probes.len];
     const peak = scratch[n + probes.len ..][0..probes.len];
     const sum_sq = scratch[n + 2 * probes.len ..][0..probes.len];
-
+    const ts = scratch[n + 3 * probes.len ..][0..n_trap];
+    var trap_state: Trap = undefined;
+    const trap: ?*Trap = if (ckt.has_charge) blk: {
+        trap_state = .{
+            .q_prev = ts[0..n],
+            .i_prev = ts[n..][0..n],
+            .q_cur = ts[2 * n ..][0..n],
+            .a_vals = try ws.ensureAVals(ckt.nnz),
+        };
+        // Exact at a DC operating point: q = q(x_op), no dynamic current.
+        ckt.eval(x, 0);
+        simdCopy(trap_state.q_prev, ckt.q_vec[0..n]);
+        @memset(trap_state.i_prev, 0);
+        break :blk &trap_state;
+    } else null;
+    const q_save = ts[n_trap / 5 * 3 ..][0 .. n_trap / 5];
+    const i_save = ts[n_trap / 5 * 4 ..][0 .. n_trap / 5];
     const dt_inner: f64 = t_carrier / @as(f64, @floatFromInt(options.carrier_steps_per_period));
 
     // Record initial envelope point (DC operating point)
@@ -119,6 +183,10 @@ pub fn simulate(
         attempts += 1;
         // Snapshot state for rollback on Newton failure
         simdCopy(x_outer_save, x);
+        if (trap) |tr| {
+            simdCopy(q_save, tr.q_prev);
+            simdCopy(i_save, tr.i_prev);
+        }
 
         const t_outer_step = @as(f64, @floatFromInt(periods_per_step)) * t_carrier;
         const t_target = @min(t + t_outer_step, options.t_stop);
@@ -141,10 +209,15 @@ pub fn simulate(
                 t_fine_start - t,
                 dt_inner * 4.0,
                 options,
+                trap,
             );
             if (!coarse_ok) {
                 // Coarse advance failed to converge; halve outer step, restore, retry
                 simdCopy(x, x_outer_save);
+                if (trap) |tr| {
+                    simdCopy(tr.q_prev, q_save);
+                    simdCopy(tr.i_prev, i_save);
+                }
                 if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
                 periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
                 continue;
@@ -164,7 +237,7 @@ pub fn simulate(
         const fine_duration = t_target - t_fine_start;
         var inner_failed = false;
         while (t_inner < fine_duration) {
-            const inner_converged = try newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, options);
+            const inner_converged = try newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, dt_inner, options, trap);
             if (!inner_converged) {
                 // Inner step fails → outer step too aggressive
                 inner_failed = true;
@@ -184,6 +257,10 @@ pub fn simulate(
         if (inner_failed) {
             // Inner sim did not complete; retry with smaller outer step
             simdCopy(x, x_outer_save);
+            if (trap) |tr| {
+                simdCopy(tr.q_prev, q_save);
+                simdCopy(tr.i_prev, i_save);
+            }
             if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
             periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
             continue;
@@ -237,11 +314,12 @@ fn coarseAdvance(
     duration: f64,
     dt_coarse: f64,
     options: Options,
+    trap: ?*Trap,
 ) !bool {
     var t_elapsed: f64 = 0;
     while (t_elapsed < duration) {
         const dt = @min(dt_coarse, duration - t_elapsed);
-        if (!try newtonAt(ckt, ws, x, t_start + t_elapsed + dt, options)) return false;
+        if (!try newtonAt(ckt, ws, x, t_start + t_elapsed + dt, dt, options, trap)) return false;
         t_elapsed += dt;
     }
     return true;

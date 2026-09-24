@@ -120,12 +120,13 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   MissingTimeCoverage). Clamp the last step to t_stop.
 - [ ] **F7 — OP Newton acceptance too loose.** See E7.
   `tran/bench_tline_ltra1_1_line`, `tran/bench_tline_txl1_1_line`.
-- [~] **F8 — envelope.** `envelope/sine` FIXED (phase 2b): columns are
+- [x] **F8 — envelope.** FIXED (phase 2b). `envelope/sine`: columns are
   named from the probe labels (`i(vin)` was published as `v(2)`), and the
   window RMS uses trapezoid endpoint weights (it counted 65 samples over 64
-  steps, sqrt(64/65) low). `envelope/dc_offset`, `negative_offset` go from
-  0.28x to exact. Open: `envelope/rc_startup_0p001` (quasi-static
-  envelope, the capacitor is open).
+  steps, sqrt(64/65) low). `envelope/rc_startup_0p001`: every envelope step
+  is now a trapezoid step carrying the charge history (it was quasi-static,
+  the capacitor open); 498x -> 0.14x. `dc_offset`, `negative_offset` go from
+  0.28x to exact, `rc_startup_1e-05` 0.57x -> 0.06x.
 - [ ] **F9 — transient drift once LTE engages.** 21 decks; re-measure after
   F1. Grid divergence: `stress/scaling_parallel_inverters_100`,
   `stress/scaling_parallel_inverters_2000`, `stress/scaling_inverter_chain_256`,
