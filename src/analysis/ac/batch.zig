@@ -1,4 +1,4 @@
-//! Bounded frequency batches retain SIMD/GPU lanes between query yields.
+//! Bounded frequency batches retain SIMD lanes between query yields.
 const std = @import("std");
 const root = @import("../types.zig");
 const FreqSolver = @import("solvers").freq_solve.FreqSolver;
@@ -11,8 +11,6 @@ pub fn solve(
     ckt: *root.Circuit,
     fs: *FreqSolver,
     allocator: std.mem.Allocator,
-    g: []const f64,
-    c: []const f64,
     omegas: []const f64,
     rhs: []const f64,
     adjoint: bool,
@@ -25,8 +23,7 @@ pub fn solve(
     while (first < omegas.len) {
         const end = first + @min(width, omegas.len - first);
         const dst = output[first * nn .. end * nn];
-        ckt.gpuFreqBatch(g, c, omegas[first..end], rhs, fs.n, adjoint, dst) orelse
-            try fs.solveBatch(omegas[first..end], rhs, dst, adjoint);
+        try fs.solveBatch(omegas[first..end], rhs, dst, adjoint);
         first = end;
         try ckt.checkpoint(.{ .phase = .frequency, .completed = end, .total = omegas.len });
     }

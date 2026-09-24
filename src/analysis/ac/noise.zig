@@ -85,7 +85,7 @@ pub fn sweep(
     e[options.out_node] = 1.0;
     if (options.out_neg != root.GROUND) e[options.out_neg] = -1.0;
 
-    const y_lanes = try batch.solve(ckt, &fs, allocator, ckt.g_vals, ckt.c_vals, omegas, e, true);
+    const y_lanes = try batch.solve(ckt, &fs, allocator, omegas, e, true);
     defer allocator.free(y_lanes);
 
     // ln of each source's density at the previous point -- ngspice's

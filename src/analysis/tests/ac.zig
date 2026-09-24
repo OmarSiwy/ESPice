@@ -31,22 +31,21 @@ const BatchTests = struct {
             }
         };
         var probe: Probe = .{};
-        // solve reads only the dispatch hook and checkpoint callback from Circuit.
+        // solve reads only the checkpoint callback from Circuit.
         var ckt: root.Circuit = undefined;
-        ckt.gpu_hook = null;
         for ([_]bool{ false, true }) |adjoint| {
             ckt.progress = null;
-            const whole = try solve(&ckt, &fs, a, g, c, &frequencies, &rhs, adjoint);
+            const whole = try solve(&ckt, &fs, a, &frequencies, &rhs, adjoint);
             defer a.free(whole);
             probe = .{};
             ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
-            const stepped = try solve(&ckt, &fs, a, g, c, &frequencies, &rhs, adjoint);
+            const stepped = try solve(&ckt, &fs, a, &frequencies, &rhs, adjoint);
             defer a.free(stepped);
             try std.testing.expectEqualSlices(f64, whole, stepped);
             try std.testing.expectEqual(@as(u16, 3), probe.calls);
             try std.testing.expectEqual(@as(u16, frequencies.len), probe.completed);
             probe = .{ .cancel = true };
-            try std.testing.expectError(error.QueryCancelled, solve(&ckt, &fs, a, g, c, &frequencies, &rhs, adjoint));
+            try std.testing.expectError(error.QueryCancelled, solve(&ckt, &fs, a, &frequencies, &rhs, adjoint));
             try std.testing.expectEqual(@as(u16, quantum), probe.completed);
         }
     }

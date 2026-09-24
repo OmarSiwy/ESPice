@@ -73,22 +73,11 @@ pub const EvalHook = struct {
 };
 
 /// Engine-owned GPU solve surface — persistent context, batch-capable.
-/// Single-solve (backward compat) + batch Newton + batch frequency.
 /// Errors fall back to the CPU path.
 pub const GpuHook = struct {
     ctx: *anyopaque,
     solve_newton: *const fn (*anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result,
     simulate_tran: ?*const fn (*anyopaque, x: []f64, probes: []const u32, waveform: *tran.Waveform, options: tran.Options) anyerror!tran.SimResult = null,
-    /// N independent Newton solves in one launch (MC/corners/temp/sens).
-    /// x_lanes is a flat blob: lane k is x_lanes[k*n..][0..n], overwritten with
-    /// the converged solution for that lane.
-    solve_batch: ?*const fn (*anyopaque, x_lanes: []f64, n: u32, t: f64, opts: converger.Options, results: []converger.Result) anyerror!void = null,
-    /// N independent frequency-domain solves: (G + jωC)x = rhs.
-    /// omegas[k] is the angular frequency; x_out is a flat blob, lane k written
-    /// to x_out[k*2n..][0..2n] (real‖imag).
-    freq_solve_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, x_out: []f64, n: u32) anyerror!void = null,
-    /// Adjoint variant: (G + jωC)^H y = rhs per frequency.
-    freq_solve_adjoint_batch: ?*const fn (*anyopaque, g_vals: []const f64, c_vals: []const f64, omegas: []const f64, rhs: []const f64, y_out: []f64, n: u32) anyerror!void = null,
     /// Stamp the planes on the device — the GPU half of `Circuit.eval` /
     /// `Circuit.evalNewton`, ground pin included.
     ///
@@ -817,16 +806,6 @@ pub const Circuit = struct {
         errdefer list.deinit(gpa);
         for (self.batches) |b| if (b.hooks.collect_noise) |f| try f(b.ctx, x, gpa, &list).unwrap();
         return try list.toOwnedSlice(gpa);
-    }
-
-    /// Write directly into caller-owned frequency lanes. Failure leaves the
-    /// destination available for a complete CPU overwrite.
-    pub fn gpuFreqBatch(self: *Circuit, g: []const f64, c: []const f64, omegas: []const f64, rhs: []const f64, n: u32, adjoint: bool, output: []f64) ?void {
-        const gh = self.gpu_hook orelse return null;
-        const f = (if (adjoint) gh.freq_solve_adjoint_batch else gh.freq_solve_batch) orelse return null;
-        std.debug.assert(output.len == omegas.len * 2 * @as(usize, n));
-        f(gh.ctx, g, c, omegas, rhs, output, n) catch return null;
-        return {};
     }
 
     pub fn nodeName(self: *const Circuit, node: u32) []const u8 {
