@@ -63,6 +63,11 @@ F2. Per-ddt charge sites (VerA pin 0c4d6afc, local, not pushed; after F lands): 
    trunc routines). Targets r-drift cause #6: mos6_inverter, schmitt, rca3040,
    rtlinv, hfet, chain_256. Then stepFill (per-timepoint cache), its own pin.
 
+I. Small follow-ups (after F lands): `.options tnom` never reaches runtime-loaded
+   devices nor the built-in resistor (output-changing, toward ngspice); analysis tests
+   still build circuits through the frontend Builder (test coupling); interning of
+   deck labels/result names deferred (no measured gain).
+
 H. Multithreaded device evaluation (user-requested 2026-09-24; starts after E merges):
    ParEval (analysis/par_eval.zig) already splits instances across threads with a
    deterministic plane reduction, but it is hidden behind ESPICE_THREADS (default 1).
