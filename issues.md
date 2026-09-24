@@ -107,11 +107,14 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `multi_analysis/device_vbic_ce_amp`: MissingColumn -> AC passes, needs B3.
   `op/device_vbic` moves 0.0033x -> 0.0037x (self-heating now off, as in
   ngspice).
-- [ ] **F5 — OP reports success after the confirming Newton failed.**
-  `stress/scaling_inverter_chain_4k` (also slow: 308 s against the runner's
-  300 s timeout, so it flips between Timeout and ValueMismatch). `op.zig`
-  rung 5 returns `converged = true`; the stepping rungs run Newton with itl1
-  where ngspice uses itl2.
+- [~] **F5 — OP reported success after the confirming Newton failed.**
+  FIXED the OP (phase 2b). The gmin and source stepping rungs run Newton with
+  itl2 and ngspice's factor rules (cktop.c:207-222), so
+  `stress/scaling_inverter_chain_4k` now follows ngspice's gmin sequence and
+  finishes on the gmin rung: the OP is right (row 0 matches) and the run
+  takes 15 s instead of 308 s, so it no longer flips to Timeout. OPtran
+  reports the confirming Newton's verdict (no deck changed). The deck still
+  fails in the transient (`i(vdd)` 2.3e8x -> 503x), which is F9's class.
 - [ ] **F6 — last transient row lands short of t_stop.**
   `tran_noise/rc_equilibrium` (last row 9.999999999999999e-06 < 1e-5 ->
   MissingTimeCoverage). Clamp the last step to t_stop.
