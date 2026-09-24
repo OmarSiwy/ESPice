@@ -24,7 +24,8 @@
 //     vdmos.va and mos1.va.
 //
 // ponytail: no sidewall (JSW/NS/CJP/PHP/MJSW/FCS/CTP/TPHP), no tunnel
-// (JTUN/NTUN/XTITUN/KEG), no TT transit time. Add when a deck needs one.
+// (JTUN/NTUN/XTITUN/KEG), no TTT1/TTT2 transit-time tempco. Add when a deck
+// needs one.
 module diode(a, c);
     inout a, c;
     electrical a, c, ai;
@@ -43,6 +44,7 @@ module diode(a, c);
     parameter real m    = 0.5    from (0:inf);  //      grading coefficient (card key `m`)
     parameter real fc   = 0.5    from (0:1);    //      forward-bias depletion coefficient
     parameter real gmin = 1e-12  from [0:inf);  // S    junction shunt
+    parameter real tt   = 0.0    from [0:inf);  // s    transit time (diffusion charge)
 
     // ---- temperature (diotemp.c / diosetup.c defaults) --------------------
     // tnom is in degC, like the ngspice TNOM/TREF card (diompar.c).
@@ -67,7 +69,7 @@ module diode(a, c);
     // bias-independent temperature prep (diotemp.c)
     real tk, tnomk, ratio, dtk, vtnom, egp, nbvx, vtebrk;
     real egfet, egfet1, fact1, fact2, arg1, argt, pbfact, pbfact1;
-    real pbo, gmaold, gmanew, mt, vj_t, cjo_t, is_t, isr_t, bv_t, rs_t;
+    real pbo, gmaold, gmanew, mt, vj_t, cjo_t, is_t, isr_t, bv_t, rs_t, xbv;
 
     analog begin
         // ==== diotemp.c: bias-independent temperature map ===================
@@ -145,6 +147,17 @@ module diode(a, c);
         if (tlev == 0) bv_t = bv - tcv * dtk;
         else           bv_t = bv * (1.0 - tcv * dtk);
 
+        // diotemp.c: the breakdown knee xbv, placed so the breakdown branch
+        // -is(T)*exp(-(xbv+vd)/vtebrk) carries IBV at vd = -BV(T). An IBV
+        // too small to resolve against IS keeps xbv = BV(T).
+        // ponytail: one refinement of ngspice's fixed-point loop, which
+        // meets its reltol*IBV test on that first pass for any real card.
+        xbv = bv_t;
+        if (bv > 0.0 && ibv >= is_t * bv_t / vt) begin
+            xbv = bv_t - vtebrk * ln(1.0 + ibv / is_t);
+            xbv = bv_t - vtebrk * ln(ibv / is_t + 1.0 - xbv / vt);
+        end
+
         // diotemp.c: RS(T). Floored like vdmos.va's rtemp(): the quadratic
         // can be driven <= 0 and the stamp below divides by it.
         rs_t = rs * (1.0 + trs * dtk + trs2 * dtk * dtk);
@@ -183,15 +196,17 @@ module diode(a, c);
         if (ikf > 0.0 && ihi > 0.0)
             ihi = ihi / (1.0 + sqrt(ihi / ikf));
 
-        // Reverse breakdown: -ibv at vd = -bv(T), exponential below, on
-        // vtebrk = NBV*vt (dioload.c). Armed off the raw bv, as ngspice's
-        // DIObreakdownVoltageGiven. ngspice runs a mirrored pnjlim here,
+        // Reverse breakdown (dioload.c): past -xbv the junction current is
+        // REPLACED by -is(T)*exp(-(xbv+vd)/vtebrk), vtebrk = NBV*vt; it
+        // reads -is at the knee and -IBV at -BV(T). Armed off the raw bv, as
+        // ngspice's DIObreakdownVoltageGiven, and only below -3*vte, where
+        // ngspice's forward branch ends. ngspice runs a mirrored pnjlim here,
         // which $limit cannot spell; the tangent continuation past
         // 80*vtebrk keeps Newton finite instead. Ratio-space clamp, as above.
-        if (bv > 0.0 && vd < -bv_t) begin
-            w    = -(bv_t + vd) / vtebrk;
+        if (bv > 0.0 && vd < -3.0 * vte && vd < -xbv) begin
+            w    = -(xbv + vd) / vtebrk;
             wlim = min(w, 80.0);
-            ihi  = ihi - ibv * (exp(wlim) * (1.0 + (w - wlim)) - 1.0);
+            ihi  = -is_t * exp(wlim) * (1.0 + (w - wlim));
         end
 
         I(ai, c) <+ ihi + gmin * vd;
@@ -223,6 +238,10 @@ module diode(a, c);
             end
             I(ai, c) <+ ddt(qj);
         end
+
+        // Diffusion charge TT*cd (dioload.c), cd the whole junction current
+        // including the gmin shunt, so its small-signal cap is TT*gd.
+        if (tt > 0.0) I(ai, c) <+ ddt(tt * (ihi + gmin * vd));
 
         // Guard on the raw rs: node collapse is a topology decision and must
         // not depend on temperature. rs_t is floored above.
