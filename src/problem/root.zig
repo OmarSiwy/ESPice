@@ -36,6 +36,8 @@ pub const Problem = struct {
     io: std.Io,
     allocation_mutex: std.Io.Mutex = .init,
     arena: std.heap.ArenaAllocator,
+    /// Every device type this problem can instantiate; outlives `prepared`.
+    library: frontend.Library,
     prepared: shared.Prepared,
     session: analysis.session.Session,
     delivery: output.Session,
@@ -60,9 +62,11 @@ pub const Problem = struct {
         var parse_arena = std.heap.ArenaAllocator.init(allocator);
         defer parse_arena.deinit();
         const scratch = parse_arena.allocator();
-        const ast = try frontend.prepare(io, scratch, options.source, options.dialect);
+        self.library = try frontend.Library.init(allocator);
+        errdefer self.library.deinit();
+        const ast = try frontend.prepare(io, &self.library, scratch, options.source, options.dialect);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
-        self.prepared = try frontend.build(a, scratch, ast);
+        self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
         errdefer self.prepared.deinit();
         self.delivery = try output.Session.init(allocator, options.output);
@@ -89,6 +93,7 @@ pub const Problem = struct {
         self.session.deinit();
         self.delivery.deinit();
         self.prepared.deinit();
+        self.library.deinit();
         self.arena.deinit();
         a.destroy(self);
     }

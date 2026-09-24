@@ -10,7 +10,7 @@ const pwlSlot = builder.test_access.pwlSlot;
 const pwlCapacity = builder.test_access.pwlCapacity;
 const Wave = builder.test_access.Wave;
 const castField = builder.test_access.castField;
-const applyKvDyn = builder.test_access.applyKvDyn;
+const bindKv = builder.test_access.bindKv;
 
 fn card(name: []const u8, positional: []const Value) netlist.Netlist.View {
     return .{ .name = name, .kind = 'v', .pins = &.{}, .positional = positional, .kv = &.{}, .model = null, .subckt_type = 0, .subckt_instance = 0 };
@@ -68,12 +68,10 @@ test "V/I cards: unspecified PULSE edges stay at the -1 sentinel" {
     }
 }
 
-fn integerParameterFixture(dest: [*]u8, name: []const u8, value: f64) bool {
-    if (!std.mem.eql(u8, name, "mode")) return false;
-    const converted = castField(i8, value) catch return false;
-    const field: *i8 = @ptrCast(dest);
-    field.* = converted;
-    return true;
+const ModeBlob = struct { mode: i8 = 7 };
+
+fn bindMode(dest: [*]u8, params: []const device.abi.Param) device.abi.BindStatus {
+    return device.abi.bind.apply(@as(*ModeBlob, @ptrCast(@alignCast(dest))), params);
 }
 
 test "numeric field binding rejects invalid native and dynamic parameter values" {
@@ -90,11 +88,11 @@ test "numeric field binding rejects invalid native and dynamic parameter values"
     try std.testing.expectError(error.NonFiniteParameter, castField(bool, std.math.nan(f64)));
     try std.testing.expectError(error.ParameterOutOfRange, castField(f32, 1e300));
 
-    var field: i8 = 7;
-    try applyKvDyn(integerParameterFixture, @ptrCast(&field), &.{.{ .key = "unknown", .value = .{ .num = 1e300 } }});
-    try std.testing.expectEqual(@as(i8, 7), field);
-    try std.testing.expectError(error.InvalidParameterValue, applyKvDyn(integerParameterFixture, @ptrCast(&field), &.{.{ .key = "mode", .value = .{ .num = 128 } }}));
-    try std.testing.expectError(error.InvalidParameterValue, applyKvDyn(integerParameterFixture, @ptrCast(&field), &.{.{ .key = "mode", .value = .{ .name = "unresolved" } }}));
+    var blob: ModeBlob = .{};
+    try bindKv(bindMode, @ptrCast(&blob), &.{.{ .key = "unknown", .value = .{ .num = 1e300 } }});
+    try std.testing.expectEqual(@as(i8, 7), blob.mode);
+    try std.testing.expectError(error.ParameterOutOfRange, bindKv(bindMode, @ptrCast(&blob), &.{.{ .key = "mode", .value = .{ .num = 128 } }}));
+    try std.testing.expectError(error.UnresolvedParameter, bindKv(bindMode, @ptrCast(&blob), &.{.{ .key = "mode", .value = .{ .name = "unresolved" } }}));
 }
 
 test "control source sensing ignores case while binding rejects missing and inexact names" {
@@ -104,7 +102,8 @@ test "control source sensing ignores case while binding rejects missing and inex
         const a = arena.allocator();
         const source = try std.fmt.allocPrint(a, "VCase in 0 2\nRin in 0 1k\nF1 out 0 {s}\nRout out 0 1k\n", .{control});
         const nl = try netlist.parse(a, source, .spectre);
-        var b = try Builder.init(a);
+        const lib = try device.Library.init(a);
+        var b = try Builder.init(a, &lib);
         defer b.deinit();
         var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(if (control.len == 0) error.MissingControlSource else error.UnknownControlSource, nb.build());
@@ -127,7 +126,8 @@ test "transmission-line cards retain native numerical algorithms" {
         defer arena.deinit();
         const a = arena.allocator();
         const nl = try netlist.parse(a, "* native line routing\n" ++ case[0] ++ ".end\n", .ngspice);
-        var b = try Builder.init(a);
+        const lib = try device.Library.init(a);
+        var b = try Builder.init(a, &lib);
         var compiled = false;
         defer if (!compiled) b.deinit();
         var nb = try builder.NetBuilder.init(a, &b, nl);
@@ -173,7 +173,8 @@ test "unsupported transmission-line cards never select approximate fallbacks" {
         defer arena.deinit();
         const a = arena.allocator();
         const nl = try netlist.parse(a, "* invalid line routing\n" ++ case[0] ++ ".end\n", .ngspice);
-        var b = try Builder.init(a);
+        const lib = try device.Library.init(a);
+        var b = try Builder.init(a, &lib);
         defer b.deinit();
         var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(case[1], nb.build());
@@ -186,7 +187,8 @@ test "RG line retains the checked instance length alias" {
     defer arena.deinit();
     const a = arena.allocator();
     const nl = try netlist.parse(a, "* static RG length override\nO1 a 0 b 0 line length=2\n.model line LTRA r=1 g=1 len=1\n.end\n", .ngspice);
-    var b = try Builder.init(a);
+    const lib = try device.Library.init(a);
+    var b = try Builder.init(a, &lib);
     var compiled = false;
     defer if (!compiled) b.deinit();
     var nb = try builder.NetBuilder.init(a, &b, nl);

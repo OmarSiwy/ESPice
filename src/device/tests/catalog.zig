@@ -7,8 +7,10 @@ test "catalog reflects the generated model set" {
 }
 
 test "parallel model preparation propagates errors" {
+    var lib = try device.Library.init(std.testing.allocator);
+    defer lib.deinit();
     try std.testing.expectError(error.UnsupportedHdlExtension, device.loader.ensureAllLoaded(
-        std.testing.allocator,
+        &lib,
         std.testing.io,
         &.{ "first.v", "second.sv" },
         .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "" },

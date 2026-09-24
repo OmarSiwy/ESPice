@@ -16,7 +16,7 @@ b1054dc. Scripts: session scratchpad `e/gate.sh <tag>` and `e/runall.sh`.
 | 1 | pure deletions | done |
 | 2 | src/solver/ | done |
 | 3 | src/device/ moves | done |
-| 4 | Library, one binder, recomputeType by id | todo |
+| 4 | Library, one binder, recomputeType by id | done |
 | 5 | src/core/ | todo |
 | 6 | src/espice.zig, c_api, delete problem/ | todo |
 | 7 | InternPool through Deck/Result/CardRef/ParamRef | todo |
@@ -42,3 +42,20 @@ callee read the trace pointer from r9 and faulted at 0. LLVM backend:
 Fix: pin `error_tracing = (optimize == .Debug)` on the host device objects.
 Check: `zig build test-frontend -Dgpu=false -Doptimize=Debug` (was 14 pass /
 10 crash, now 47/47).
+
+## Step 4 findings
+
+- Runtime loading of any `models/*.va` fails on b1054dc too: VerA's library
+  emit declares `const h = @import("../h.zig")` and a local `var h` in every
+  model with hoisted temporaries (`GeneratedDeviceDoesNotCompile`). The hdl/
+  fixtures load because their small models hoist nothing. So the binder pin
+  test registers the built-in resistor's own vtable as a runtime type; only
+  the dlopen step is not exercised. Needs a VerA fix, then the pin can load
+  models/resistor.va for real.
+- The built-in R card path never publishes `.options tnom` to the resistor
+  (`tnom` stays 27 under `.options tnom=50`); runtime-loaded devices never get
+  it either. Left alone: output-changing, and impl-verA owns the construction
+  sequence around derive.
+- Deferred: analysis tests still import the frontend `builder` module
+  (integration.zig builds circuits with Builder). Moving them onto a device
+  level assembly API would drop the last analysis->frontend test edge.
