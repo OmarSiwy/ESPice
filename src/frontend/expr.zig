@@ -59,7 +59,7 @@ pub const Code = enum(u8) {
 /// trial draws them instead (`eval`). `table(x, d, x1, y1, ...)` is the
 /// smoothed transfer of an E/G TABLE or PWL(1) card, built only by the
 /// B-source tape (models/bsource.va opcode 37).
-pub const Fn = enum(u8) { sqrt, abs, min, max, pow, pwr, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, sqr, int, nint, sgn, sinh, cosh, asin, acos, asinh, acosh, atanh, agauss, gauss, unif, aunif, limit, table, other };
+pub const Fn = enum(u8) { sqrt, abs, min, max, pow, pwr, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, sqr, int, nint, sgn, sinh, cosh, asin, acos, asinh, acosh, atanh, agauss, gauss, unif, aunif, limit, table, other, hsqrt, hlog, hlog10, hpow };
 
 /// True for the functions a Monte Carlo trial draws.
 pub fn isDistribution(f: Fn) bool {
@@ -82,6 +82,21 @@ const fns = std.StaticStringMap(Fn).initComptime(.{
     .{ "asinh", .asinh }, .{ "acosh", .acosh },   .{ "atanh", .atanh }, .{ "arctan", .atan },
     .{ "ternary_fcn", .ternary },
 });
+
+/// The HSPICE dialect's meanings [Star-Hspice Table 10-1]: sqrt(-x) is
+/// -sqrt(x), log and log10 of -x are -log(x), and pow uses the integer
+/// part of its exponent (#39).
+const hspice_fns = blk: {
+    const overrides = .{ .{ "sqrt", .hsqrt }, .{ "log", .hlog }, .{ "log10", .hlog10 }, .{ "pow", .hpow } };
+    var kvs: [fns.keys().len]struct { []const u8, Fn } = undefined;
+    for (fns.keys(), fns.values(), &kvs) |k, v, *out| {
+        out.* = .{ k, v };
+        for (overrides) |o| if (std.mem.eql(u8, k, o[0])) {
+            out.* = .{ k, o[1] };
+        };
+    }
+    break :blk std.StaticStringMap(Fn).initComptime(kvs);
+};
 
 /// One postfix op.
 pub const Op = struct { code: Code, a: u32 = 0, b: u32 = 0 };
@@ -113,26 +128,26 @@ pub const Scratch = struct {
 /// comparisons, `+ -`, `* /`, `^`/`**` (all left associative); unary `-`/`+`
 /// bind below power. Nesting deeper than `max_depth` is a ParseError.
 /// Invalidates slices of `s`'s tables, which grow in `gpa`.
-pub fn compile(comptime parseNum: fn ([]const u8) ?f64, gpa: std.mem.Allocator, s: *Scratch, text: []const u8, pos: usize) Error!usize {
-    var p: Compiler(parseNum) = .{ .text = text, .pos = pos, .gpa = gpa, .s = s };
+pub fn compile(comptime S: type, gpa: std.mem.Allocator, s: *Scratch, text: []const u8, pos: usize) Error!usize {
+    var p: Compiler(S) = .{ .text = text, .pos = pos, .gpa = gpa, .s = s };
     try p.bin(0);
     return p.pos;
 }
 
 /// `compile` over the whole of `text`; trailing input is a ParseError.
 /// Invalidates slices of `s`'s tables, which grow in `gpa`.
-pub fn compileAll(comptime parseNum: fn ([]const u8) ?f64, gpa: std.mem.Allocator, s: *Scratch, text: []const u8) Error!void {
-    var p: Compiler(parseNum) = .{ .text = text, .gpa = gpa, .s = s };
+pub fn compileAll(comptime S: type, gpa: std.mem.Allocator, s: *Scratch, text: []const u8) Error!void {
+    var p: Compiler(S) = .{ .text = text, .gpa = gpa, .s = s };
     try p.bin(0);
     if (p.peek() != null) return error.ParseError;
 }
 
 /// Recursion bound of `compile`, in parser calls: a level of parentheses,
-/// quotes, call arguments or ternary branch costs two, a unary operator one
-/// or two. Deeper input is a ParseError rather than a stack overflow.
+/// quotes or call arguments costs two, a ternary branch one, a unary
+/// operator one or two. Deeper input is a ParseError rather than a stack overflow.
 pub const max_depth = 512;
 
-fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
+fn Compiler(comptime S: type) type {
     return struct {
         text: []const u8,
         pos: usize = 0,
@@ -217,7 +232,8 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
                     }
                 }
                 try p.bin(prec + 1);
-                try p.emit(.{ .code = code });
+                // `b` marks an HSPICE power, which `fold` reads its own way.
+                try p.emit(.{ .code = code, .b = @intFromBool(code == .pow and S == @import("lines.zig").hspice) });
             }
         }
 
@@ -272,7 +288,7 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
             if (std.ascii.isDigit(c) or c == '.') {
                 const start = p.pos;
                 p.pos += numberLen(p.text[start..]);
-                const n = parseNum(p.text[start..p.pos]) orelse return error.ParseError;
+                const n = S.parseNum(p.text[start..p.pos]) orelse return error.ParseError;
                 try p.s.consts.append(p.gpa, n);
                 return p.emit(.{ .code = .num, .a = @intCast(p.s.consts.items.len - 1) });
             }
@@ -304,7 +320,8 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
             if (p.peek() != ')') return error.ParseError;
             p.pos += 1;
             if (probe) |code| return p.emit(.{ .code = code, .a = args[0], .b = args[1] });
-            if (fns.get(word)) |f| return p.emit(.{ .code = .call, .a = @backingInt(f), .b = argc });
+            const table = if (S == @import("lines.zig").hspice) hspice_fns else fns;
+            if (table.get(word)) |f| return p.emit(.{ .code = .call, .a = @backingInt(f), .b = argc });
             try p.emit(.{ .code = .ucall, .a = try p.name(word), .b = argc });
         }
     };
@@ -417,7 +434,7 @@ fn step(stack: *std.ArrayList(Val), op: Op, consts: []const f64, geometry: bool,
                 .div => x / y,
                 .mod => x - y * @trunc(x / y),
                 .idiv => @trunc(@abs(x / y)),
-                .pow => std.math.pow(f64, x, y),
+                .pow => if (op.b == 1) hspicePower(x, y) else std.math.pow(f64, @abs(x), y),
                 .lt => bool01(x < y),
                 .gt => bool01(x > y),
                 .le => bool01(x <= y),
@@ -446,7 +463,7 @@ fn call(f: Fn, args: []const Val) Val {
         .agauss, .gauss, .unif, .aunif => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
         .limit => return if (args.len == 2 and args[0].known) args[0] else .unknown(false),
         .ternary => 3,
-        .pow, .pwr, .min, .max => 2,
+        .pow, .pwr, .min, .max, .hpow => 2,
         else => 1,
     };
     if (args.len != want or !args[0].known) return .unknown(all_nominal);
@@ -462,9 +479,13 @@ fn call(f: Fn, args: []const Val) Val {
         .abs => @abs(a),
         .min => @min(a, b),
         .max => @max(a, b),
-        .pow => std.math.pow(f64, a, b),
-        // ngspice: sign(a)*|a|^b.
-        .pwr => std.math.copysign(std.math.pow(f64, @abs(a), b), a),
+        .pow => std.math.pow(f64, @abs(a), b),
+        // numparam's pwr is |a|^b (xpressn.c XFU_PWR), so pwr(-0, 0) is 1.
+        .pwr => std.math.pow(f64, @abs(a), b),
+        .hsqrt => std.math.copysign(@sqrt(@abs(a)), a),
+        .hlog => if (a < 0) -@log(-a) else @log(a),
+        .hlog10 => if (a < 0) -@log10(-a) else @log10(a),
+        .hpow => std.math.pow(f64, a, @trunc(b)),
         .exp => @exp(a),
         .ln, .log => @log(a),
         .log10 => @log10(a),
@@ -488,6 +509,15 @@ fn call(f: Fn, args: []const Val) Val {
         .atanh => std.math.atanh(a),
         .ternary, .agauss, .gauss, .unif, .aunif, .limit, .table, .other => unreachable,
     });
+}
+
+/// HSPICE's `x**y` (ngspice's hs compatibility, xpressn.c): a negative x
+/// takes the rounded exponent, and 0 to any power is 0. ngspice's own `^`
+/// is |x|^y, so (-8)**(1/3) is 2 and (-1.75)^3 is +5.359 (#39, #77).
+fn hspicePower(x: f64, y: f64) f64 {
+    if (x < 0) return std.math.pow(f64, x, @round(y));
+    if (x == 0) return 0;
+    return std.math.pow(f64, x, y);
 }
 
 /// numparam's `nint` (§2.2): to the nearest integer, a half to the even one.
@@ -558,7 +588,7 @@ pub fn eval(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op,
     return if (top.known) top.num else std.math.nan(f64);
 }
 
-const test_num = @import("lines.zig").ngspice.parseNum;
+const test_num = @import("lines.zig").ngspice;
 
 fn testFold(a: std.mem.Allocator, text: []const u8) !Val {
     var s: Scratch = .{};
@@ -584,7 +614,7 @@ test "compile and fold: precedence, associativity and calls" {
         .{ "sqrt(16)", 4 },        .{ "max(1,min(5,3))", 3 },      .{ "pow(2,10)", 1024 },
         .{ "abs(-3)", 3 },         .{ "floor(2.5)+ceil(2.5)", 5 }, .{ "1k*2", 2000 },
         .{ "agauss(1,0.1,3)", 1 }, .{ "limit(2,1)", 2 },           .{ "1e-3*2", 2e-3 },
-        .{ "pwr(-4,0.5)", -2 },    .{ "pwr(9,0.5)", 3 },
+        .{ "pwr(-4,0.5)", 2 },     .{ "pwr(9,0.5)", 3 },
         // numparam's operators and built-ins (#121).
         .{ "7%3", 1 },             .{ "-7%3", -1 },                .{ "7\\2", 3 },
         .{ "1<>2", 1 },            .{ "2<>2", 0 },                 .{ "tanh(0)", 0 },
@@ -592,6 +622,9 @@ test "compile and fold: precedence, associativity and calls" {
         .{ "nint(3.5)", 4 },       .{ "nint(-2.5)", -2 },          .{ "sgn(-3)", -1 },
         .{ "sinh(0)+cosh(0)", 1 }, .{ "arctan(0)+asin(0)", 0 },    .{ "acos(1)+asinh(0)+atanh(0)", 0 },
         .{ "acosh(1)", 0 },        .{ "ternary_fcn(0,2,3)", 3 },
+        // ngspice's powers of a negative base (#39).
+        .{ "pwr(-0,0)", 1 },       .{ "(-2)^3", 8 },               .{ "(-2)^0.5", @sqrt(2.0) },
+        .{ "(-2)^2.5", std.math.pow(f64, 2, 2.5) }, .{ "pow(-2,0.5)", @sqrt(2.0) },
     }) |case| {
         const v = try testFold(a, case[0]);
         try std.testing.expect(v.known);
@@ -607,6 +640,26 @@ test "compile and fold: precedence, associativity and calls" {
     // `compile` stops at the first byte that cannot continue the expression.
     var s: Scratch = .{};
     try std.testing.expectEqual(6, try compile(test_num, a, &s, "x 1+2 y", 2));
+}
+
+test "HSPICE sqrt, log, log10 and pow follow Star-Hspice Table 10-1 (#39)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { []const u8, f64 }{
+        .{ "sqrt(-4)", -2 }, .{ "log(-100)", -@log(100.0) }, .{ "log10(-100)", -2 },
+        .{ "pow(2,2.5)", 4 }, .{ "pow(-2,3.7)", -8 }, .{ "sqrt(4)", 2 },
+        .{ "(-2)**3", -8 },   .{ "(-2)**2.6", -8 },   .{ "0**2", 0 },
+    }) |case| {
+        var s: Scratch = .{};
+        try compileAll(@import("lines.zig").hspice, a, &s, case[0]);
+        var stack: std.ArrayList(Val) = .empty;
+        const v = try fold(a, &stack, s.ops.items, s.consts.items, false, &.{});
+        try std.testing.expect(v.known);
+        try std.testing.expectEqual(case[1], v.num);
+    }
+    // (-8)**(1/3) is |-8|^(1/3) in every ngspice mode.
+    try std.testing.expectApproxEqRel(2, (try testFold(a, "(-8)**(1/3)")).num, 1e-15);
 }
 
 test "compile bounds its recursion" {

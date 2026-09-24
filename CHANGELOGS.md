@@ -98,6 +98,11 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A stray `.enddata` or `.end_variation` is refused as `ParseError` instead of read as nothing (#162).
 - An ngspice line holding only a `//` comment is a comment line, not a `ParseError` (and no longer a panic inside `.control` in safe builds) (#164).
 - An analysis card inside a `.subckt` is refused as `UnsupportedCard` instead of run as a top-level analysis (#165).
+- `.param` powers follow ngspice: `(-2)^0.5` and `(-8)**(1/3)` are |x|^y instead of NaN, and `pwr(-0,0)` is 1; the HSPICE dialect reads `sqrt`, `log`, `log10` and `pow` as Star-Hspice does (#39).
+- Subcircuits nest at most 32 levels as documented (a 33rd is refused, naming the instance); appended analysis cards keep their line as written and read a `SWEEP` tail; `.model OPT` parameters register in deck order (#64).
+- An analysis card reading a `.step`-swept parameter is refused naming its line wherever the `.step` sits, instead of running at the nominal value when the card comes first; a `PAT` Z state is `UnsupportedCard` (#63).
+- `.four v(a,b)` analyses the difference; `.pss`, `.hb`, `.phasenoise`, `.snosc` and `.pac`/`.snxf` refuse a `v(a,b)` output instead of reading v(a); `.pnoise`/`.snnoise` check their input source and `.snnoise` keeps `v(a,b)`; `.phasenoise f0` may omit K before its keywords (#57).
+- `.param` powers follow ngspice's numparam: `x^y`, `x**y` and `pwr(x,y)` are |x|^y (`(-1.75)^3` is +5.359, `(-8)**(1/3)` is 2, `pwr(-0,0)` is 1); the HSPICE dialect's `**` rounds a negative base's exponent, and it reads `sqrt`, `log`, `log10` and `pow` as Star-Hspice does (#39, #77).
 - A lone `\\` continuation line at the end of a deck is ignored instead of indexing an empty line (#38).
 - Number literals with an exponent past +-40 (`1e-300`, `1e300`) read exactly, as ngspice's `pow(10, e)` gives them (#36).
 - An analysis card that query validation would refuse (`.ac dec 10 1 1e308`, `.tran 1e-310 1u`) fails as `InvalidAnalysisArguments` on a line naming the card, not a bare `InvalidQueryOptions` (#108).

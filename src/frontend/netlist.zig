@@ -1502,7 +1502,7 @@ fn Reader(comptime S: type) type {
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
             const start = f.pos;
-            f.pos = try expr.compile(S.parseNum, r.arena, &r.scratch, f.line, f.pos);
+            f.pos = try expr.compile(S, r.arena, &r.scratch, f.line, f.pos);
             return f.line[start..f.pos];
         }
 
@@ -2511,7 +2511,7 @@ fn Reader(comptime S: type) type {
             }
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
-            f.pos = try expr.compile(S.parseNum, r.arena, &r.scratch, f.line, f.pos);
+            f.pos = try expr.compile(S, r.arena, &r.scratch, f.line, f.pos);
             const ops = r.scratch.ops.items[mark.ops..];
             if (ops.len == 1 and ops[0].code == .num) return .{ .num = r.scratch.consts.items[ops[0].a] };
             if (ops.len == 1 and ops[0].code == .ident) return r.nameValue(r.scratch.names.items[ops[0].a], frame, geometry);
@@ -2741,7 +2741,7 @@ fn Reader(comptime S: type) type {
             const body = if (text.len > 0 and (text[0] == '{' or F.isQuote(text[0]))) F.body(text) else text;
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
-            try expr.compileAll(S.parseNum, r.arena, &r.scratch, body);
+            try expr.compileAll(S, r.arena, &r.scratch, body);
             // Copies: folding a parameter below reuses the scratch.
             const ops = try r.arena.dupe(expr.Op, r.scratch.ops.items[mark.ops..]);
             const names = try r.arena.dupe([]const u8, r.scratch.names.items);
@@ -2798,7 +2798,7 @@ fn Reader(comptime S: type) type {
         fn exprValue(r: *R, text: []const u8, frame: *const Frame, geometry: bool) Error!Value {
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
-            try expr.compileAll(S.parseNum, r.arena, &r.scratch, text);
+            try expr.compileAll(S, r.arena, &r.scratch, text);
             return r.fold(mark.ops, frame, geometry);
         }
 
@@ -2878,7 +2878,7 @@ fn Reader(comptime S: type) type {
                             .text => |text| {
                                 const mark = r.scratch.mark();
                                 defer r.scratch.reset(mark);
-                                try expr.compileAll(S.parseNum, r.arena, &r.scratch, text);
+                                try expr.compileAll(S, r.arena, &r.scratch, text);
                                 // Calls inside a parameter's text draw once per
                                 // scope that defines it: globally, or per instance.
                                 const owner = r.site_owner;
@@ -2957,7 +2957,7 @@ fn Reader(comptime S: type) type {
             r.ops.shrinkRetainingCapacity(end);
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
-            try expr.compileAll(S.parseNum, r.arena, &r.scratch, func.body);
+            try expr.compileAll(S, r.arena, &r.scratch, func.body);
             const outer = r.bindings.items.len;
             defer r.bindings.shrinkRetainingCapacity(outer);
             for (func.formals, args) |formal, a| try r.bindings.append(r.arena, .{ .name = formal, .ops = a });

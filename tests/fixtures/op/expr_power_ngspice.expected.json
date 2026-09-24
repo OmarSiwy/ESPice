@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": ".param powers of a negative base follow ngspice's numparam",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice-44.2 run of this deck; values match the closed form in the deck header.",
+    "command": "ngspice-45 -b expr_power_ngspice.sp (print all)"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(a)": {
+            "values": [
+              4.051307
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(c)": {
+            "values": [
+              5.359375
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(d)": {
+            "values": [
+              5.359375
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          },
+          "v(e)": {
+            "values": [
+              2.0
+            ],
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 2e-06
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "390fbb27ede28c038c5097bf78e60f74780d2cf6d083071c3a0617aa2e19c238"
+}

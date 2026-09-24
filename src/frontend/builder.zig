@@ -2549,6 +2549,9 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
         // numparam built-ins with no tape opcode: they fold when their
         // arguments are constant, and a B source reading a probe refuses them.
         .sqr, .int, .nint, .sgn, .sinh, .cosh, .asin, .acos, .asinh, .acosh, .atanh => error.UnsupportedFunction,
+        // ponytail: HSPICE's signed sqrt/log and integer-exponent pow fold
+        // on constants; a tape opcode is needed only if one reads a probe.
+        .hsqrt, .hlog, .hlog10, .hpow => error.UnsupportedFunction,
         inline else => |g| @field(tape.Code, @tagName(g)),
     };
 }

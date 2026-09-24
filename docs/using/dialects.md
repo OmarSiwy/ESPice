@@ -48,8 +48,9 @@ open PDKs (sky130, GF180, IHP SG13G2) are written against:
   103.
 - An R card whose braced value reads `v(`, `i(`, `time`, `temper` or
   `hertz` becomes a behavioural B source, as ngspice's `inp_compat` does.
-- In expressions, `pow(x, y)` is |x|^y while `x^y` keeps the sign of x for
-  an integer power.
+- In `.param` expressions `x^y`, `x**y`, `pow(x, y)` and `pwr(x, y)` are
+  |x|^y, as ngspice's numparam computes them; a B source reading a probe
+  keeps the sign of x for a constant integer power.
 - `.option seed=N` without a Monte Carlo sweep draws the statistical
   functions once from the seed, instead of folding them to their nominal.
 - Unknown `.option` names are ignored with one warning each.
@@ -97,6 +98,7 @@ The `.alter` run doubles R, and the 50 % crossing moves from RC ln 2 =
 | `.save [TYPE=NODESET\|IC] [FILE=] [LEVEL=] [TIME=]` | writes the operating point as `.nodeset` (or `.ic`) cards | output vector selection |
 | `SFFM(vo va fc mdi fs)` | HSPICE's argument order | ngspice's `(vo va fm mdi fc)` |
 | `AM(...)` | `(va vo mf fc td)` | ngspice's `(vo vmo vma fm fc td phasem phasec)` |
+| `sqrt(-x)`, `log(-x)`, `log10(-x)`, `pow(x, y)` | `-sqrt(x)`, `-log(x)`, `-log10(x)`, x to the integer part of y | NaN, NaN, NaN, \|x\|^y |
 | `P` element | a port: a V card numbered for `.lin` (`P1 in 0 port=1 z0=50`) | a coupled transmission line (CPL) |
 | `S` element | an S-parameter block from Touchstone or CITI data | voltage-controlled switch |
 | `W` element | a W-element lossy line from an RLGC file or table | current-controlled switch |
