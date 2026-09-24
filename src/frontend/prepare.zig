@@ -45,7 +45,7 @@ pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: D
     };
     const text = if (dialect == .spectre) raw else try netlist.source.expand(io, session, origin, raw);
     const nl = try netlist.parse(session, text, dialect);
-    try loadModels(io, session, nl.foreign, origin);
+    try loadModels(io, session, nl.deck.foreign, origin);
     return nl;
 }
 
@@ -71,8 +71,8 @@ fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.F
 /// Build a passive circuit from a netlist. Scratch owns wiring; the session
 /// arena owns every published slice.
 pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
-    if (nl.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
-    const deck_opts = try analyses.deckOptions(nl.config);
+    if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
+    const deck_opts = try analyses.deckOptions(nl.deck.config);
     var b = try Builder.init(sim_arena);
     var compiled_ok = false;
     errdefer if (!compiled_ok) b.deinit();
@@ -109,7 +109,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: n
     };
 
     var ic: std.ArrayList(Ic) = .empty;
-    for (nl.ic) |item| {
+    for (nl.deck.ic) |item| {
         // An `.ic` on a node no device touches is dropped, like every other
         // unresolvable directive name.
         const row = nb.frozenRow(item.net.index());
@@ -155,7 +155,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: n
     }
 
     // Analysis nets to circuit rows.
-    const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.analyses);
+    const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.deck.analyses);
     for (cards_rows) |*a| {
         a.pos = nb.frozenRow(a.pos);
         a.neg = nb.frozenRow(a.neg);
@@ -168,7 +168,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: n
         .source_node = nb.source_node,
         .source_branch = nb.source_branch,
         .ac_drive = try nb.acExcitation(sim_arena, circuit.n),
-        .title = try sim_arena.dupe(u8, nl.title),
+        .title = try sim_arena.dupe(u8, nl.deck.title),
         .n_devices = nl.deviceCount(),
         .ic = ic.items,
         .deck_tol = deck_opts.tol,

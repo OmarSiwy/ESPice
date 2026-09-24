@@ -643,7 +643,7 @@ pub const NetBuilder = struct {
         }
         var tstep: f64 = 1e-9;
         var tstop: f64 = 1e30;
-        for (self.nl.analyses) |dir| {
+        for (self.nl.deck.analyses) |dir| {
             if (dir.kind != .tran) continue;
             const a0 = argNumber(dir.args, 0);
             const a1 = argNumber(dir.args, 1);
