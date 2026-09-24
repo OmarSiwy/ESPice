@@ -47,7 +47,7 @@ PAC and PXF queries build and factor their own matrices.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Adjoint conversion-matrix solve $\mathcal A^{\mathsf H} Y = e$ | [lptv-block-solves.md](../solvers/lptv-block-solves.md) §"Transpose/adjoint solves" | `src/analysis/pss/pxf.zig`, `pac.buildConversionMatrix(true, ...)`, and `src/analysis/solvers/dense_lu.zig` |
+| Adjoint conversion-matrix solve $\mathcal A^{\mathsf H} Y = e$ | [lptv-block-solves.md](../solvers/lptv-block-solves.md) §"Transpose/adjoint solves" | `src/analysis/pss/pxf.zig`, `pac.buildConversionMatrix(true, ...)`, and `src/solver/dense_lu.zig` |
 | Time-domain alternative: transposed sensitivity replay over saved per-step factors | [monodromy-krylov.md](../solvers/monodromy-krylov.md) §"Adjoint recurrence" | requirement — shares the shooting tape |
 | Preconditioning of the matrix-free adjoint (same block solves, `solveT` per sideband) | [structured-preconditioners.md](../solvers/structured-preconditioners.md) | requirement |
 | GPU: frequency lanes + adjoint apply kernel | [lptv-block-solves.md](../solvers/lptv-block-solves.md) §4 | requirement |

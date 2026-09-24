@@ -234,7 +234,7 @@ against `converger.zig` (`Tolerances.gmin_start/source_steps`, gmin
 residual-consistent loading in `newton()`); the dc/op ladder drivers live in
 `src/analysis/dc/`. §4 — our design, not from a source.
 
-**Our implementation:** `src/analysis/solvers/converger.zig`
+**Our implementation:** `src/solver/converger.zig`
 (`Tolerances.{gmin_start, source_steps}`, `Options.gmin`, gmin loading in
 `newton()`/`jfnk()`); ladder drivers `src/analysis/dc/{op,dc}.zig`;
 GPU header patching `src/analysis/gpu.zig` (`solveNewton` writes `Tol.gmin`

@@ -46,7 +46,7 @@ main's failure set.
 
 - `Circuit.evalNewtonCpu` calls compiler_rt `memset` twice per Newton
   iterate: 4.4% of vacask_mul (503M Ir). Outside `solvers/`
-  (analysis/Circuit.zig, problem/numerics.zig); an inline laned zero like
+  (analysis/Circuit.zig, core/numerics.zig); an inline laned zero like
   `SparseLu.fillZero` fixes it.
 - Grid factor: the DFS is now the larger half. A supernodal DFS or sorting
   the reach by pivot step changes every full factor's summation order; it

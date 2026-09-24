@@ -2,12 +2,12 @@
 
 ## Problem file boundaries
 
-Problem keeps six production files: `root.zig` owns orchestration; `c_api.zig`
-adapts the C ABI; `types.zig` holds prepared data and its Circuit; `requests.zig`,
-`numerics.zig`, and `device_ir.zig` remain independent shared leaf modules.
-The former `circuit.zig` is folded into `types.zig` without changing layouts or
-ownership. Tests live in `src/problem/tests/`, separated into Problem lifecycle,
-analysis regressions, C ABI, and numerical helpers.
+`src/problem/` is gone. `src/espice.zig` owns orchestration and
+`src/c_api.zig` adapts the C ABI. The prepared data split in two: the frozen
+`Circuit` is in `src/device/Circuit.zig` and the deck data in
+`src/core/deck.zig`. Queries (`query.zig`) and `numerics.zig` are in
+`src/core/`; the device ABI is `src/device/abi.zig`. Facade tests live in
+`src/tests/` (lifecycle, analysis regressions, C ABI).
 
 S-parameter delivery accepts the analysis producer's `v(S_m_n)` labels as well
 as `S(m,n)` labels used by direct writer callers. One shared parser supplies
@@ -88,11 +88,11 @@ claim is made for this migration without the repository's benchmark evidence.
 
 ## Source ownership after the move
 
-`src/devices/models/` moved to `models/`; frontend construction and model loading
-now live under `src/frontend/`. The old engine became the owning Problem API in
-`src/problem/`. Device evaluation and GPU policy are analysis internals under
-`src/analysis/eval/` and `src/analysis/gpu.zig`; solver implementations are under
-`src/analysis/solvers/`. Shared passive contracts prevent consumers importing
+`src/devices/models/` moved to `models/`; frontend construction lives under
+`src/frontend/` and model loading under `src/device/`. The old engine became
+the owning API in `src/espice.zig`. Device evaluation is in `src/device/eval.zig`,
+GPU policy in `src/analysis/gpu.zig`, and solver implementations under
+`src/solver/`. Shared passive contracts prevent consumers importing
 frontend or the owning Problem facade.
 
 ## Resumption and memory ceiling

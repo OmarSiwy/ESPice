@@ -198,15 +198,15 @@ kernel precond_apply(v):                       # inside per-lane GMRES
   natural unit test).
 - §1 degradation analysis: derived (perturbation bound is standard).
 - §2 plug-in point: callback-based GMRES supports these preconditioners.
-  Spectral primitives now exist in `src/analysis/solvers/preconditioner.zig`.
+  Spectral primitives now exist in `src/solver/preconditioner.zig`.
 - §3/§4: design spec; full multidimensional and GPU paths remain targets.
 
 **Our implementation**
 
-- Exists: `src/analysis/solvers/preconditioner.zig` (DC-sample,
+- Exists: `src/solver/preconditioner.zig` (DC-sample,
   averaged-circulant, and block-banded variants),
-  `src/analysis/solvers/gmres.zig` (callback-based Krylov solve), and
-  `src/analysis/solvers/direct.zig` (per-sideband factors).
+  `src/solver/gmres.zig` (callback-based Krylov solve), and
+  `src/solver/direct.zig` (per-sideband factors).
 - Consumers: Krylov-HB in
   [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md),
   [pac](../analysis/pac.md)/[pxf](../analysis/pxf.md) matrix-free path,

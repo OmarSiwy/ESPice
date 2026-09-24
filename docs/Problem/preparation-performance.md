@@ -85,5 +85,5 @@ uncommitted. Logs: `/tmp/espice-src-cleanup/final-{build,test}.log` and
 `/tmp/espice-src-cleanup/baseline-problem.log`.
 
 These checks cover the cleanup snapshot. Concurrent changes to
-`src/frontend/model_loader.zig` and the `hdl/veriloga_parallel` fixture arrived
+`src/device/loader.zig` and the `hdl/veriloga_parallel` fixture arrived
 after validation; they were preserved and are not covered by these results.

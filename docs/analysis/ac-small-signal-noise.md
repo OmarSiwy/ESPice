@@ -127,7 +127,7 @@ The contract interface (`../VerA/tools/contract.zig`): a device
 declares comptime `noise_gens` metadata — `NoiseGen{row, col, kind}` with
 `kind ∈ {thermal, shot, flicker}`, `row/col` naming the local unknowns the
 generator sits across. The batch collector
-(`problem/batch.zig collectNoise`, surfaced as
+(`device/eval.zig collectNoise`, surfaced as
 `Circuit.collectNoiseSources`) evaluates each device once at $x_{op}$ with
 the AD scalar and reads the generator's small-signal conductance
 **straight off the analytic Jacobian entry** `∂F[row]/∂x[col]` — the PSD
@@ -232,9 +232,9 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Stacked-real $2n$ sweep — sparse path fills the KLU pattern per $\omega$ (streamed copy, no re-assembly), dense below `DENSE_THRESHOLD = 16` | [klu-pipeline.md](../solvers/klu-pipeline.md), [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `src/analysis/solvers/freq_solve.zig` (`fromCircuit`/`setOmega`/`solve`) |
+| Stacked-real $2n$ sweep — sparse path fills the KLU pattern per $\omega$ (streamed copy, no re-assembly), dense below `DENSE_THRESHOLD = 16` | [klu-pipeline.md](../solvers/klu-pipeline.md), [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `src/solver/freq_solve.zig` (`fromCircuit`/`setOmega`/`solve`) |
 | Noise adjoint: transposed solve on the same per-$\omega$ factors | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse `solveT`; dense fallback transposes per call) | `freq_solve.zig solveRhsT` |
-| Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `src/analysis/solvers/converger.zig` |
+| Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `src/solver/converger.zig` |
 
 ---
 
@@ -264,7 +264,7 @@ without it, the multiple-RHS axis would be $N_{\text{src}}$ wide per point.
 
 - `src/analysis/ac/ac.zig` — AC sweep.
 - `src/analysis/ac/noise.zig` — adjoint noise.
-- `src/analysis/solvers/freq_solve.zig` — stacked-real solver.
+- `src/solver/freq_solve.zig` — stacked-real solver.
 - Related: `ac/sp.zig`, `ac/stb.zig`, `dc/tf.zig`, `eigen/pz.zig`.
 - Bench fixtures: `benchmark/fixtures/ac/rc_lowpass`,
   `benchmark/fixtures/noise/{amp_noise,rc_noise,resistor_noise}`,

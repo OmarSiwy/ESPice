@@ -1,24 +1,24 @@
 # Module APIs and main
 
-The prepared data contract connects four modules. The owning Problem facade
-coordinates them; shared leaf modules keep that facade out of consumer imports.
+Four feature modules sit between two shared ones. The `espice` facade
+coordinates them; `core` and `device` keep it out of consumer imports.
 
 | Module | Input → output | Owned responsibility |
 |---|---|---|
-| `frontend` | Source → parsed input → `problem_types.Prepared` | Includes, dialect parsing, HDL loading, instance construction, directive/name resolution |
-| `problem` | Creation options and API calls → query events/results | Session lifetime, fixed backend/output choice, facade and C ABI |
-| `analysis` | Prepared template and resolved queries → progress/completed results | Graph scheduling, mutable circuit clones, algorithms, private solvers and GPU execution |
-| `output` | Shared schema/plot and fixed selection → encoded files | Validation, ordered publication, append/numbered paths, writer cleanup |
+| `frontend` | Source → `Prepared = {circuit, deck}` | Includes, dialect parsing, SPICE letter/LEVEL policy, instance construction, directive/name resolution |
+| `espice` | Creation options and API calls → query events/results | Session lifetime, the device `Library`, fixed backend/output choice; `c_api.zig` adapts it to C |
+| `analysis` | Circuit, deck and resolved queries → progress/completed results | Graph scheduling, mutable circuit clones, algorithms, solver use and GPU execution |
+| `output` | Result plus deck title and a fixed selection → encoded files | Validation, ordered publication, one atomic write, numbered paths |
 
-Model sources are in `models/`. Circuit/device IR is in shared Problem leaves;
-evaluation implementations are in `src/analysis/eval/`. Solvers live in
-`src/analysis/solvers/` and are never imported by frontend, Problem, output,
-or main.
+`core` holds the shared data (ids, numerics, queries, `Deck`, `Result`).
+`device` holds the device ABI, the evaluator in `src/device/eval.zig`, HDL
+loading, the frozen `Circuit` and the `Library`. Model sources are in
+`models/`. Solvers live in `src/solver/`; build.zig wires them into analysis
+only, so frontend, espice, output and main cannot import them.
 
-The named build modules `problem_types`, `requests`, `numerics`, `device_ir`,
-and `output_types` provide the shared contracts. Inside a module, leaves import
-other leaves or shared types, never its aggregation `root.zig`. Analysis does
-not import frontend; output does not import analysis.
+Inside a module, leaves import other leaves or shared types, never its
+aggregation `root.zig`. Analysis does not import frontend; output does not
+import analysis.
 
 ## Construction seam
 
@@ -47,7 +47,7 @@ arena remains the caller's responsibility.
 
 ## Execution seam
 
-[Problem methods](../../src/problem/root.zig) expose:
+[Problem methods](../../src/espice.zig) expose:
 
 ```text
 title() []const u8
@@ -86,10 +86,12 @@ concurrent external calls on one Problem. See
 
 ## Result and output seam
 
-`output_types.Schema` describes names, real/complex layout, and optional point
-count before data exists. `Plot` adds title, plot name, final point count, and
-point-major samples. Analysis and writers use the same leaf type definitions;
-writers need no analysis implementation types.
+`core.Schema` describes names, real/complex layout, and optional point count
+before data exists. `analysis.schemaOf` gives a query's column count before it
+runs, and `output.validateQuery` refuses a format that cannot hold it. `Plot`
+is `{title, result}`: the deck title over a `core.Result`. Every format is an
+encoder onto a `std.Io.Writer`; `output.write` validates, encodes and replaces
+the file atomically.
 
 `output.Session.init(allocator, selection)` copies its destination.
 `publish(io, ordinal, plot)` validates and writes one whole committed plot.
@@ -149,10 +151,10 @@ Its I/O setup preserves the host process's signal handlers; query workers still
 use native threads. HDL preparation uses caller I/O concurrency when available
 and synchronous execution otherwise.
 
-Regression coverage lives in [Problem tests](../../src/problem/tests/problem.zig),
-[numerical compatibility tests](../../src/problem/tests/analyses.zig),
-[C ABI tests](../../src/problem/tests/c_api.zig),
-[numerical helper tests](../../src/problem/tests/numerics.zig),
+Regression coverage lives in [Problem tests](../../src/tests/espice.zig),
+[numerical compatibility tests](../../src/tests/analyses.zig),
+[C ABI tests](../../src/tests/c_api.zig),
+[numerical helper tests](../../src/core/tests.zig),
 [frontend preparation tests](../../src/frontend/tests/prepared.zig), and
 [output session tests](../../src/output/session.zig). These check state/ownership
 contracts; analysis fixtures remain the evidence for numerical capability.

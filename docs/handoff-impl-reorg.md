@@ -1,7 +1,7 @@
 # Handoff: stream E, architecture reorg
 
-Plan: docs/plan/optimize.md stream E. Base b1054dc. Branch
-`worktree-agent-aa9264bf273c280fc`.
+Plan: docs/plan/optimize.md stream E. Base b1054dc, merged with main
+4e7d390 and 8f0fa3e. Branch `worktree-agent-aa9264bf273c280fc`.
 
 Gate for every commit: `zig build -Dgpu=false`, `zig build test -Dgpu=false`,
 fixture failing set equal to the 90-deck list (526/616 pass), and all 616 decks
@@ -21,7 +21,7 @@ b1054dc. Scripts: session scratchpad `e/gate.sh <tag>` and `e/runall.sh`.
 | 6 | src/espice.zig, c_api, delete problem/ | done |
 | 7 | DeviceType identity through CardRef/SweepTarget/AcOverride/ParamRef | done (see below) |
 | 8 | schemaOf, output encoders, Plot | done |
-| 9 | AGENTS.md, docs paths | todo |
+| 9 | AGENTS.md, docs paths | done |
 
 ## Step 0 findings
 
@@ -70,3 +70,9 @@ Not done: interning Deck labels / Result varnames through InternPool. They are
 output strings the writers print verbatim, and every Result already borrows or
 copies them once; an id table would add a pool lookup to every writer for no
 measured win. ParamRef.param_name stays a string for the same reason.
+
+## Merges
+
+main 4e7d390 (559/616) and 8f0fa3e (560/616) are merged. After each merge the
+gate compares against a -Dgpu=false build of that main commit: same failing
+set, all 616 decks byte-identical.
