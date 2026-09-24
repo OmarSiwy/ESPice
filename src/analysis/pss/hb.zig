@@ -112,8 +112,7 @@ pub fn solve(
 
     root.zeroSimd(x_hat);
 
-    // DC seed: solve the DC operating point via converger.run + EvalHook,
-    // which routes through gpu_hook.solve_newton when GPU is active.
+    // DC seed: solve the DC operating point via converger.run + EvalHook.
     // Seeding x_hat[dc] from the true DC op dramatically reduces HB iterations
     // for circuits with a nontrivial bias point.
     {
@@ -136,7 +135,6 @@ pub fn solve(
     }
 
     // ponytail: GPU status for HB —
-    //   DC seed above uses converger.run + EvalHook → gpu_hook.solve_newton when GPU active.
     //   HB inner loop (DFT sandwich: IDFT → device eval → DFT) stays CPU.
     //   GPU upgrade path: batched device eval kernel over nf time samples (each independent),
     //   plus cuSOLVER dense LU for the total_unknowns×total_unknowns spectral Jacobian.
