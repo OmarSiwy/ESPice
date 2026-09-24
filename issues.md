@@ -42,6 +42,9 @@ Legend: `[ ]` open, `[x]` fixed this session, `[~]` partially fixed.
 **Re-indexed 2026-09-24: 519/616 pass, 97 fail. Section F is the current
 index; sections A-E below are the audit history it points into.**
 
+**Phase 2b (docs/handoff-impl-conf2.md): 554/616 pass, 62 fail**, from 526 at
+b1054dc; no deck that passed there fails.
+
 FILE-OWNERSHIP NOTE: one `.disto` card must publish THREE plots, and the tree's
 only fan-out mechanism is `prepare.zig queriesFromDirectives` (the same route
 `.noise` already uses to become two jobs). So C7 required two small additive
