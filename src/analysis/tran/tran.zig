@@ -407,13 +407,9 @@ pub fn simulate(
                 if (del < 0.9 * dt) {
                     st.rej_lte += 1;
                     _ = ckt.stateCtl(.revert);
-                    if (!use_be and (trap or gear)) {
-                        st.order_drops += 1;
-                        use_be = true;
-                        continue;
-                    }
                     // ngspice retries at the LTE-suggested dt (dctran.c:966
-                    // `CKTdelta = newdelta`), not a halving ladder: one reject
+                    // `CKTdelta = newdelta`) at the SAME order — only a Newton
+                    // failure drops to order 1 (:823) — and not a halving ladder: one reject
                     // lands the right dt, so the step phase through an edge
                     // tracks ngspice's instead of drifting a half-octave
                     // (digital/clamp's 0.48 ns final edge chord). The branch
