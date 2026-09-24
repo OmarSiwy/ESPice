@@ -91,8 +91,11 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   analytic-oracle axes (`dc/diode_reverse`, `diode_reverse_continuation`)
   move by the accumulated roundoff (0.28x / 0.14x of the 1e-15 atol, still
   passing): the axis now carries ngspice's bits, not start+k*step.
-- [ ] **F3 — B-source.** See C1. `four/polynomial_2`, `four/polynomial_3`,
-  `convergence/monotonic_cubic_1`, `convergence/monotonic_cubic_1000`.
+- [x] **F3 — B-source.** FIXED (phase 2b), see C1. `four/polynomial_2`,
+  `four/polynomial_3`, `convergence/monotonic_cubic_1`,
+  `convergence/monotonic_cubic_1000` pass, and so do `hb/polynomial_2`,
+  `hb/polynomial_3`, `pss/polynomial_2`, `pss/polynomial_3` (C1 was their
+  only open cause).
 - [ ] **F4 — VBIC.** 4 decks. `dc/device_vbic_temp`,
   `dc/device_vbic_forced_output`: self-heating (RTH) runs on a 4-terminal
   instance. ngspice ties a missing 5th (temperature) terminal to ground
@@ -134,8 +137,8 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   diagonal C entry instead of zeroing it. `pss/rc_default`,
   `pss/rc_minimal_grid`, `pss/rc_negative_amplitude`,
   `pss/rc_slow_settling`, `pss/bench_pss_rlc_driven`, `pss/diode_clipper`
-  pass (worst 0.14x). `pss/polynomial_2`, `pss/polynomial_3` fail on C1
-  first.
+  pass (worst 0.14x). `pss/polynomial_2`, `pss/polynomial_3` pass since
+  F3.
 - [ ] **F11 — oracle defects, a user decision.** 5 decks:
   `tran/bench_tran_sffm_source` (ngspice's SFFM is wrong),
   `dc/bench_mosfet_cmos_inverter` (row 50 is metastable),
@@ -144,8 +147,9 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `multi_analysis/bench_sens_diffpair` (ngspice reverses the `.tf` plots).
   The mesa inverter deck was filed here too, but ngspice at tight tolerance
   still matches its oracle, so it is under E6.
-- Open features, unchanged: C1 (`hb/polynomial_2`, `hb/polynomial_3`,
-  `pac/ideal_multiplier_1`, `pac/ideal_multiplier_2`,
+- Open features, unchanged: multi-probe B sources, now rejected with
+  `UnsupportedBsourceExpression` instead of silently wrong
+  (`pac/ideal_multiplier_1`, `pac/ideal_multiplier_2`,
   `pnoise/noise_multiplier_1`, `pnoise/noise_multiplier_2`,
   `qpss/square_mixer` — each with a second open feature); C2
   (`hb/current_driven_rc`, `hb/diode_clipper`, `hb/diode_rectifier_rc`);
@@ -308,19 +312,18 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 
 ## C. Numerical / model gaps — deck runs, answers are wrong
 
-- [ ] **C1 — the B-source compiler SILENTLY compiles unsupported expressions
-  to an open circuit.** CORRECTED 2026-09-24: "polynomial subset" understated
-  it. `builder.zig extractPolyCoeffs` (~:1505) returns with all-zero
-  coefficients whenever `collectTerms` rejects the expression, and a zero
-  bsource is an open circuit, with no diagnostic. Measured: `V(a)^2`,
-  `V(a)**2`, `pow(V(a),2)` and `V(a)*V(a)*V(a)` all compile to 0; only
-  `V(a)*V(a)` reaches `c2`, and there is no `c3` term at all. Fix: `^`/`**`/
-  integer `pow` in `collectTerms`, a `c3` term in `models/bsource.va`, and a
-  hard error for anything still outside the subset (trust boundary). Decks:
-  `four/polynomial_2`, `four/polynomial_3`, `convergence/monotonic_cubic_1`,
-  `monotonic_cubic_1000` fail on this alone; it is one of two causes in
-  `hb/polynomial_*`, `pss/polynomial_*`, `pac/ideal_multiplier_*`,
-  `pnoise/noise_multiplier_*`, `qpss/square_mixer`.
+- [x] **C1 — the B-source compiler SILENTLY compiled unsupported
+  expressions to an open circuit.** FIXED (phase 2b). `extractPolyCoeffs`
+  builds a cubic polynomial in the one control pair: `+ - * /`, unary minus,
+  `^`/`**`/`pow()` with a constant integer exponent 0..3, and one
+  multiplicative `tanh(k*V)` factor; `models/bsource.va` gained `c3`.
+  Anything else (a second V() pair as in `V(a)*V(b)`, `sqrt`, `i()`, degree
+  above 3, a non-constant divisor) is a hard error naming the card and the key
+  (`UnsupportedBsourceExpression`); the model-side all-zero open-circuit
+  backstop is gone, so `v=0` is a 0 V source again. The multi-probe decks
+  (`pac/ideal_multiplier_*`, `pnoise/noise_multiplier_*`,
+  `qpss/square_mixer`) now fail with that error instead of computing
+  `V(a)^2`: a multi-input B source is an open feature.
 
 - [ ] **C2 — HB does not drive from the physical source spectra.** 12 decks
   (`hb/*`, `multi_analysis/bench_hb_tline_guard`). `hb/current_driven_rc`
