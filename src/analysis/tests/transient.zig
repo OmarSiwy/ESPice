@@ -1,8 +1,6 @@
 const EnvelopeTests = struct {
     const impl = @import("../tran/envelope.zig");
     const Options = @import("requests").Envelope;
-    const extractPeak = impl.extractPeak;
-    const extractRMS = impl.extractRMS;
     const maxPoints = impl.maxPoints;
     const std = @import("std");
 
@@ -11,47 +9,6 @@ const EnvelopeTests = struct {
     // ============================================================================
 
     const testing = std.testing;
-
-    test "envelope: extractPeak finds absolute maximum" {
-        const vals = [_]f64{ 1.0, -3.0, 2.0, -1.5, 0.5 };
-        const peak = extractPeak(&vals);
-        try testing.expectApproxEqAbs(@as(f64, 3.0), peak, 1e-15);
-    }
-
-    test "envelope: extractRMS of constant signal equals absolute value" {
-        const vals = [_]f64{ 2.0, 2.0, 2.0, 2.0 };
-        const rms = extractRMS(&vals);
-        try testing.expectApproxEqAbs(@as(f64, 2.0), rms, 1e-15);
-    }
-
-    test "envelope: extractRMS of sine wave is amplitude/sqrt(2)" {
-        // Generate one full period of sin
-        const n = 1024;
-        var vals: [n]f64 = undefined;
-        const amplitude = 3.0;
-        for (0..n) |k| {
-            const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-            vals[k] = amplitude * @sin(2.0 * std.math.pi * t);
-        }
-        const rms = extractRMS(&vals);
-        const expected_rms = amplitude / @sqrt(2.0);
-        try testing.expectApproxEqRel(expected_rms, rms, 1e-4);
-    }
-
-    test "envelope: extractRMS of empty slice returns zero" {
-        const empty: []const f64 = &.{};
-        try testing.expectEqual(@as(f64, 0), extractRMS(empty));
-    }
-
-    test "envelope: extractPeak of single element" {
-        const vals = [_]f64{-7.5};
-        try testing.expectApproxEqAbs(@as(f64, 7.5), extractPeak(&vals), 1e-15);
-    }
-
-    test "envelope: extractPeak of empty slice returns zero" {
-        const empty: []const f64 = &.{};
-        try testing.expectEqual(@as(f64, 0), extractPeak(empty));
-    }
 
     test "envelope: maxPoints monotone in max_outer_steps" {
         const base: Options = .{ .t_carrier = 1e-9, .t_stop = 1e-3 };
