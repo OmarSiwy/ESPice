@@ -109,11 +109,6 @@ fn fdSensitivity(
 // Core solve
 // -------------------------------------------------------------------------
 
-// GPU batch dispatch: not beneficial here. The inner loop is N FD parameter
-// perturbations (re-eval + adjoint dot), not N independent Newton solves.
-// The single OP solve and single adjoint solve are already covered by the
-// scalar GPU path. Batch Newton (solve_batch) has no leverage.
-
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,
