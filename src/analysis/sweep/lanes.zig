@@ -8,28 +8,21 @@ const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solvers").converger;
 
-/// Per-lane parameter installer. `ctx` is the caller's opaque state; `apply`
-/// writes lane k's params; `restore` puts the nominal params back once the
-/// sweep is done, on success and on error.
-pub const LaneSetup = struct {
-    ctx: *anyopaque,
-    apply: *const fn (ctx: *anyopaque, k: usize) void,
-    restore: *const fn (ctx: *anyopaque) void,
-};
-
 /// Solve `n_lanes` cold DC points into the flat blob `x_lanes` (lane k at
 /// x_lanes[k*n..][0..n]); `results[k]` gets lane k's converger.Result. The
 /// caller owns both slices (x_lanes.len == n_lanes*ckt.n, results.len ==
-/// n_lanes). Params are restored via `setup.restore` before returning.
+/// n_lanes). `setup` is a pointer to the caller's installer: `apply(k)`
+/// writes lane k's params, `restore()` puts the nominals back, and runs
+/// before returning on success and on error.
 pub fn solveLanes(
     ckt: *root.Circuit,
-    setup: LaneSetup,
+    setup: anytype,
     x_lanes: []f64,
     results: []converger.Result,
     opts: converger.Options,
 ) !void {
     errdefer {
-        setup.restore(setup.ctx);
+        setup.restore();
         ckt.recompute() catch {}; // preserve the original failure; no further solve follows
     }
     const n: usize = ckt.n;
@@ -37,7 +30,7 @@ pub fn solveLanes(
     const ws = try ckt.workspace();
     for (0..n_lanes) |k| {
         if (k != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = k, .total = n_lanes });
-        setup.apply(setup.ctx, k);
+        setup.apply(k);
         try ckt.recompute();
         const xl = x_lanes[k * n ..][0..n];
         root.zeroSimd(xl);
@@ -47,6 +40,6 @@ pub fn solveLanes(
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },
         };
     }
-    setup.restore(setup.ctx);
+    setup.restore();
     try ckt.recompute();
 }

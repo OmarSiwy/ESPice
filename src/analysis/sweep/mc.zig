@@ -50,8 +50,7 @@ const LaneCtx = struct {
     seed: u64,
     prng: std.Random.DefaultPrng,
 
-    fn apply(ptr: *anyopaque, k: usize) void {
-        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+    pub fn apply(self: *LaneCtx, k: usize) void {
         if (k == 0) self.prng = std.Random.DefaultPrng.init(self.seed);
         const rng = self.prng.random();
         for (self.param_vars) |pv| {
@@ -67,8 +66,7 @@ const LaneCtx = struct {
         }
     }
 
-    fn restore(ptr: *anyopaque) void {
-        const self: *LaneCtx = @ptrCast(@alignCast(ptr));
+    pub fn restore(self: *LaneCtx) void {
         for (self.param_vars) |pv| pv.param_ptr.set(pv.nominal);
     }
 };
@@ -100,9 +98,8 @@ pub fn analyze(
     defer allocator.free(results);
 
     var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .seed = options.seed, .prng = undefined };
-    const setup: lanes.LaneSetup = .{ .ctx = &lane_ctx, .apply = LaneCtx.apply, .restore = LaneCtx.restore };
     const nopts = converger.optionsFromTolerances(options.dc_options.tol, options.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, setup, x_lanes, results, nopts);
+    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts);
 
     var n_conv: u32 = 0;
     for (results, 0..) |r, t| {
