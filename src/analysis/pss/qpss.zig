@@ -386,7 +386,7 @@ fn buildSampleTimes(times: []f64, grid: MixGrid, f1: f64, f2: f64) void {
 // QP-HB residual evaluation
 // ============================================================================
 
-/// Compute F(X_hat) = DFT(f(IDFT(X_hat))) + jΩC·X_hat in stacked-real form.
+/// Compute F(X_hat) = DFT(f(IDFT(X_hat))) + jΩ·DFT(q(IDFT(X_hat))) in stacked-real form.
 /// x_hat layout: [re_0..re_{n-1}; im_0..im_{n-1}], each block has nf entries.
 /// Same layout for residual output.
 fn computeResidual(
@@ -422,6 +422,8 @@ fn computeResidual(
         ckt.eval(ctx.x_sample[0..n], ctx.times[s]);
 
         for (0..n) |node| ctx.w_td[node * nf + s] = ckt.rhs[node];
+        // q(t_s) for the charge term; v_td is free until the next matvec.
+        for (0..n) |node| ctx.v_td[node * nf + s] = ckt.q_vec[node];
 
         // Store dense G for Jacobian-vector products
         ckt.denseG(ctx.g_buf[0 .. n * n]);
@@ -446,7 +448,28 @@ fn computeResidual(
     const res_im = residual[total_re..][0..total_re];
     dft2D(res_re, res_im, ctx.w_td, ctx.basis_cos, ctx.basis_sin, n, nf);
 
-    addChargeTerms(ctx, x_re, x_im, res_re, res_im);
+    // jΩ·Q from the DFT of q(t_s) at every sample: jΩ·C(t0)·X was exact only
+    // for linear charge. Same projection and sign as dft2D.
+    // ponytail: scalar O(n*nf^2), the order of dft2D; the GMRES matvec keeps
+    // the C(t0) Jacobian (quasi-Newton for nonlinear charge).
+    if (ckt.has_charge) {
+        const inv_nf: f64 = 1.0 / @as(f64, @floatFromInt(nf));
+        for (0..n) |node| {
+            const q_slice = ctx.v_td[node * nf ..][0..nf];
+            for (0..nf) |f_idx| {
+                const omega_f = ctx.grid.omega(f_idx, ctx.f1, ctx.f2);
+                if (omega_f == 0) continue;
+                var q_re: f64 = 0;
+                var q_im: f64 = 0;
+                for (q_slice, ctx.basis_cos[f_idx * nf ..][0..nf], ctx.basis_sin[f_idx * nf ..][0..nf]) |q, bc, bs| {
+                    q_re += q * bc;
+                    q_im -= q * bs;
+                }
+                res_re[node * nf + f_idx] += omega_f * (-q_im * inv_nf);
+                res_im[node * nf + f_idx] += omega_f * (q_re * inv_nf);
+            }
+        }
+    }
 }
 
 // ============================================================================

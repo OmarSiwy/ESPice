@@ -113,6 +113,8 @@ pub fn sweep(
     for (0..n_samples) |k| {
         const x_k = pss_traj[k * n .. (k + 1) * n];
         const t_k = @as(f64, @floatFromInt(k)) * dt;
+        // Same time the sample was solved at (integrateOnePeriod below).
+        ckt.setSimState(.{ .t = t_k, .kind = .tran });
         ckt.eval(x_k, t_k);
         ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
         ckt.denseC(c_mats[k * n * n ..][0 .. n * n]);
@@ -374,6 +376,10 @@ fn integrateOnePeriod(
     // Solve at each subsequent time sample (frozen-time quasi-static Newton).
     for (1..n_samples) |k| {
         const t_k = @as(f64, @floatFromInt(k)) * dt;
+        // §4.6.1: sources follow their waveform only under analysis("tran");
+        // without it every SIN/PULSE card gave its DC value (no LO). dt stays
+        // 0: these solves are quasi-static.
+        ckt.setSimState(.{ .t = t_k, .kind = .tran });
         _ = converger.run(ckt, ws, x_end, t_k, nr_opts, root.EvalHook{}) catch |err| switch (err) {
             error.QueryCancelled => return err,
             else => {},

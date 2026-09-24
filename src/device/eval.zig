@@ -1613,7 +1613,9 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn collectParamsLocal(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
-            @setEvalBranchQuota(100_000);
+            // Scales with the field count: `paramField` runs per field at
+            // comptime, and txl.va's scalarized history has ~10k of them.
+            @setEvalBranchQuota(100_000 + 100 * (@typeInfo(D.Instance).@"struct".fields.len + @typeInfo(D.Model).@"struct".fields.len));
             const self: *Self = @ptrCast(@alignCast(ctx));
             try appendParams(D.Instance, self.instances, true, gpa, list);
             try appendParams(D.Model, self.models, false, gpa, list);
@@ -1858,7 +1860,7 @@ pub fn hasCtlKernel(comptime D: type) bool {
 }
 
 /// Device D's type name without its namespace (`vsource.Vsource` -> `Vsource`):
-/// the batch `type_name`, the `ParamRef.device_type` and every kernel symbol
+/// the batch `type_name` and every kernel symbol
 /// suffix.
 pub fn baseName(comptime D: type) []const u8 {
     const full = @typeName(D);

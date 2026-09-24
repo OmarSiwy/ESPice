@@ -70,8 +70,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
                 }
             }
         };
+        // ngspice accumulates both levels (dctrcurv.c:469 `+= TRCVvStep`),
+        // and its axis carries that roundoff (1.4975e-13 where start+k*step
+        // gives 0); the oracle's axis atol is below it.
+        var v2 = opts.start2;
         for (0..n_outer) |po| {
-            const v2 = opts.start2 + @as(f64, @floatFromInt(po)) * opts.step2;
+            if (po != 0) v2 += opts.step2;
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
             try runSerial(ctx, ckt, scratch, t, opts, n_inner, ncols, block);
@@ -136,9 +140,11 @@ fn runSerial(
     // stepping -> JFNK. Interior points warm-start from the previous solution
     // with a plain Newton at ITL2.
     var cold = true;
+    var v = opts.start;
     for (0..npoints) |pt| {
         if (pt != 0) try ckt.checkpoint(.{ .phase = .dc, .completed = pt, .total = npoints });
-        const v = opts.start + @as(f64, @floatFromInt(pt)) * opts.step;
+        // Accumulated like ngspice (see the outer loop in `run`).
+        if (pt != 0) v += opts.step;
         t.set(v);
         // Per-point: invalidate baseline and recompute device params so
         // constant-Jacobian stamps reflect the new swept value.
