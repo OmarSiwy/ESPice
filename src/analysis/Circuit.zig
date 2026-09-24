@@ -11,7 +11,7 @@ const std = @import("std");
 const device_ir = @import("device_ir");
 const Prepared = @import("problem_types").Circuit;
 const progress_api = @import("progress.zig");
-const solvers = @import("solvers");
+const solvers = @import("solver");
 
 const Batch = device_ir.Batch;
 const Planes = device_ir.Planes;

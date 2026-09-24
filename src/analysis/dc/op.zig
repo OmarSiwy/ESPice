@@ -3,7 +3,7 @@
 //! frozen, so ordering/symbolic work happens exactly once.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const tran = @import("../tran/tran.zig");
 
 pub const Method = enum { plain, gmin, source, jfnk, optran };

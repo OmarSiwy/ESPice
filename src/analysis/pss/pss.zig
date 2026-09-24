@@ -26,10 +26,10 @@ const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
 const num = @import("numerics");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const integrator = @import("../tran/integrator.zig");
-const dense_lu = @import("solvers").dense_lu;
-const Gmres = @import("solvers").gmres.Gmres(f64);
+const dense_lu = @import("solver").dense_lu;
+const Gmres = @import("solver").gmres.Gmres(f64);
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);

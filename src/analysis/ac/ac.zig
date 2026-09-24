@@ -5,7 +5,7 @@ const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const types = @import("numerics");
-const FreqSolver = @import("solvers").freq_solve.FreqSolver;
+const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
 

@@ -17,8 +17,8 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
 const num = @import("numerics");
-const converger = @import("solvers").converger;
-const solvers = @import("solvers");
+const converger = @import("solver").converger;
+const solvers = @import("solver");
 const dense_lu = solvers.dense_lu;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;

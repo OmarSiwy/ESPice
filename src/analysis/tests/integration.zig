@@ -3,7 +3,7 @@ const std = @import("std");
 const analysis = @import("../types.zig");
 const Builder = @import("builder").Builder;
 const eval = @import("device_eval");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const D = @import("limiter_device");
 const t = std.testing;
 

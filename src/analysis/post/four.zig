@@ -3,7 +3,7 @@
 //! a power of 2, FFT, and read off harmonic magnitudes, phases, and THD.
 const std = @import("std");
 const root = @import("../types.zig");
-const fft_mod = @import("solvers").fft;
+const fft_mod = @import("solver").fft;
 const tran = @import("../tran/tran.zig");
 
 const math = std.math;

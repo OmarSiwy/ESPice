@@ -1,6 +1,6 @@
 const StreamTests = struct {
     const freq = @import("../ac/freq.zig");
-    const FreqSolver = @import("solvers").freq_solve.FreqSolver;
+    const FreqSolver = @import("solver").freq_solve.FreqSolver;
     const quantum = freq.quantum;
     const root = @import("../types.zig");
     const std = @import("std");

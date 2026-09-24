@@ -1,6 +1,6 @@
 //! DEV-ONLY measurement harness for the sparse LU refactor kernel. Not part
 //! of any build; run standalone:
-//!   zig run -OReleaseFast -fllvm -mcpu=native src/analysis/solvers/dev_harness.zig -- /tmp/zplu-fba.bin [reps]
+//!   zig run -OReleaseFast -fllvm -mcpu=native src/solver/dev_harness.zig -- /tmp/zplu-fba.bin [reps]
 //! Input: ZP_LU_DUMP binary (magic,n,nnz,col_ptr,row_idx,q,vals) captured
 //! from a real fixture run. Reports L-column run-length structure (as-stored
 //! and sorted, flop-weighted) and a refactor microbench.

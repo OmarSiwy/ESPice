@@ -2,7 +2,7 @@
 //! warm-started Newton per point on A = G, and records the probes.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const op = @import("op.zig");
 
 pub const Options = @import("requests").Dc;

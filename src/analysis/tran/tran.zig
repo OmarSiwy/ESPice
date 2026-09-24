@@ -3,7 +3,7 @@
 //! is the analytic C plane — nothing is lagged, nothing is dense.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 // ponytail: platform SIMD width — not hardcoded
 const W = std.simd.suggestVectorLength(f64) orelse 8;

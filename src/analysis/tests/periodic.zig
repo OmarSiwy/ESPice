@@ -1,8 +1,8 @@
 const PacTests = struct {
     const impl = @import("../pss/pac.zig");
     const Complex = impl.Complex;
-    const dense_lu = @import("solvers").dense_lu;
-    const fft_mod = @import("solvers").fft;
+    const dense_lu = @import("solver").dense_lu;
+    const fft_mod = @import("solver").fft;
     const mapHarmonicToFftBin = impl.mapHarmonicToFftBin;
     const std = @import("std");
 
@@ -148,7 +148,7 @@ const PnoiseTests = struct {
 
 const PssTests = struct {
     const impl = @import("../pss/pss.zig");
-    const Gmres = @import("solvers").gmres.Gmres(f64);
+    const Gmres = @import("solver").gmres.Gmres(f64);
     const Options = @import("requests").Pss;
     const SolveResult = impl.SolveResult;
     const krylov_threshold = impl.test_access.krylov_threshold;
@@ -233,7 +233,7 @@ const QpssTests = struct {
     const simdZero = impl.test_access.simdZero;
     const std = @import("std");
 
-    const converger = @import("solvers").converger;
+    const converger = @import("solver").converger;
 
     // ============================================================================
     // Tests
