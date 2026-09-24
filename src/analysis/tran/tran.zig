@@ -259,8 +259,10 @@ pub fn simulate(
     if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
     dt /= 10.0;
     if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
-    var dt_prev: f64 = dt;
-    var dt_prev2: f64 = dt;
+    // dctran.c:312: CKTdeltaOld[] starts at CKTmaxStep, not the first dt —
+    // the first divided differences are ngspice's only with this seed.
+    var dt_prev: f64 = effective_dt_max;
+    var dt_prev2: f64 = effective_dt_max;
     var steps: u32 = 0;
     const stats_on = std.c.getenv("ZP_TRAN_STATS") != null;
     var st: Stats = .{};
