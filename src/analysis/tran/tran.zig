@@ -255,10 +255,11 @@ pub fn simulate(
     // 1 ps vs ngspice on tline/txl1, ringing down the TXL slow pole for 18 ns
     // after every wavefront). Never past the first breakpoint — a 1ns pulse
     // edge at t~0 must not be skipped.
-    var dt: f64 = @min(@min(options.dt_init, options.t_stop / 100.0) / 10.0, effective_dt_max) / 10.0;
-    if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| {
-        if (bp0 < dt) dt = bp0 / 10.0;
-    }
+    // dctran.c:578-586: the t = 0 breakpoint clamp (0.1 * breaks[1]) comes
+    // BEFORE the firsttime /10, so a binding breakpoint keeps it.
+    var dt: f64 = @min(@min(options.dt_init, options.t_stop / 100.0) / 10.0, effective_dt_max);
+    if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
+    dt /= 10.0;
     if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
     var dt_prev: f64 = dt;
     var dt_prev2: f64 = dt;
@@ -378,7 +379,12 @@ pub fn simulate(
         // which is why a TD=2 ns line responded at t=1.5 ns — the absdelay
         // history is a fixed 32-entry ring, and a query older than the ring
         // silently returns the newest sample instead of the delayed one.
-        var dt_next = @min(dt * 2.0, effective_dt_max);
+        // dctran.c firsttime: the first accepted point skips CKTtrunc
+        // entirely ("no check on first time point") — dt REPEATS, it neither
+        // grows nor rejects, with or without charge. Without this the
+        // accepted grid runs one first-dt ahead of ngspice's for the whole
+        // transient.
+        var dt_next = if (steps == 0) dt else @min(dt * 2.0, effective_dt_max);
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         if (has_charge) {
@@ -395,13 +401,8 @@ pub fn simulate(
                 .trtol = options.tol.trtol,
             };
 
-            // dctran.c firsttime: the first accepted point skips CKTtrunc
-            // entirely ("no check on first time point") — dt REPEATS, it
-            // neither grows nor rejects. Without this the accepted grid runs
-            // one first-dt ahead of ngspice's for the whole transient.
-            if (steps == 0) {
-                dt_next = dt;
-            } else {
+            // First accepted point: no CKTtrunc (see dt_next above).
+            if (steps > 0) {
                 const del = integrator.stepBound(eff_method, eff_method, lq, lte_ip, cf, lte);
                 if (del < 0.9 * dt) {
                     st.rej_lte += 1;
