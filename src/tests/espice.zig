@@ -475,7 +475,8 @@ test "Problem: parameter sweeps cannot mutate concurrently running transient sta
 
 test "device noise needs no input source and retains its thermal PSD" {
     const p = try create(
-        "device noise\nR1 out 0 1k\n.temp 27\n.noise v(out) dec 3 1k 10k\n.pnoise v(out) unused dec 3 1k 10k 1k 0\n.end\n",
+        // `.pnoise` names its input (a 0 A source, #57), which does not drive the solve.
+        "device noise\nR1 out 0 1k\nI1 out 0 0\n.temp 27\n.noise v(out) dec 3 1k 10k\n.pnoise v(out) i1 dec 3 1k 10k 1k 0\n.end\n",
     );
     defer p.deinit();
     try p.run_all();

@@ -686,6 +686,19 @@ fn xfOutput(comptime T: type, args: []const Value, node: u32, neg: u32, sources:
     return opts;
 }
 
+/// A noise card's input source `args[i]`: a V or I card the deck has. It
+/// names the input but does not drive the solve.
+fn inputSource(args: []const Value, i: usize, sources: core.QueryBindings) !void {
+    const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
+    if (netlist.nameIndex(sources.v_names, name) == null and netlist.nameIndex(sources.i_names, name) == null) return error.AnalysisSourceNotFound;
+}
+
+/// An output the card reads single-ended: `v(a,b)` with b not ground is
+/// `UnsupportedAnalysisOutput`, never silently v(a) (#57).
+fn singleEnded(node_neg: u32) !void {
+    if (node_neg != NO_NODE and node_neg != GROUND) return error.UnsupportedAnalysisOutput;
+}
+
 fn voltageSource(args: []const Value, i: usize, sources: core.QueryBindings) !usize {
     const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
     return netlist.nameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
@@ -1408,13 +1421,14 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             if (a.sn and std.ascii.startsWithIgnoreCase(a.line, ".ptdnoise")) return .{ .pnoise = try ptdNoise(ctx, args, node_id, node_neg) };
             if (a.sn) {
                 const f0 = ctx.sn_f0 orelse return error.MissingAnalysisCard;
-                _ = nameAt(args, 1) orelse return error.InvalidAnalysisArguments;
+                try inputSource(args, 1, sources);
                 const grid = try acGrid(ctx.arena, args, 2);
                 if (args.len > grid.end + 2) return error.InvalidAnalysisArguments;
                 if (grid.end < args.len and try number(args, grid.end) != 0) return error.InvalidAnalysisArguments;
-                return .{ .pnoise = .{ .out_node = try outputNode(node_id), .sweep = grid.sweep, .f_fundamental = f0 } };
+                return .{ .pnoise = .{ .out_node = try outputNode(node_id), .out_neg = try outputNeg(node_neg), .sweep = grid.sweep, .f_fundamental = f0 } };
             }
             try arity(args, 7, 8);
+            try inputSource(args, 1, sources);
             const sweep = try frequencySweep(args, 2);
             const sidebands = if (args.len == 8) try number(args, 7) else 7;
             if (sidebands < 0 or sidebands != @trunc(sidebands) or sidebands > 31) return error.InvalidAnalysisArguments;
@@ -1473,6 +1487,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .four = .{
                 .f_fundamental = try positive(args, 0),
                 .output_node = try outputNode(node_id),
+                .output_neg = try outputNeg(node_neg),
                 .n_harmonics = try count(u16, args, 2, 9),
                 .label = if (a.split) try outputLabel(ctx.arena, args[1]) else "",
                 .tran_opts = ctx.tran,
@@ -1531,6 +1546,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .pz = opts };
         },
         .pss => {
+            try singleEnded(node_neg);
             if (a.sn) return .{ .pss = try shootingNewton(args) };
             // `.pss v(osc) f [n [settle]]` (HSPICE `.snosc`) solves an
             // oscillator: f is the first guess and osc the phase node.
@@ -1545,6 +1561,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .pss = opts };
         },
         .hb => {
+            try singleEnded(node_neg);
             // HB drives from whatever sources the deck has, current ones
             // included, so it names none. `.hb v(osc) f [K]` (HSPICE
             // `.hbosc`) solves an oscillator from the first guess f.
@@ -1626,12 +1643,14 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             // f0 the oscillator is the deck's `.hbosc`; with it, v(out) is
             // the phase node. The LIST keywords shape HSPICE's listing and
             // are checked and unused.
+            try singleEnded(node_neg);
             const out = try outputNode(node_id);
             var o: requests.PhaseNoise = .{ .f0 = 0, .osc_node = out, .sweep = try frequencySweep(args, 1) };
             var i: usize = 5;
             if (i < args.len and args[i] == .num) {
                 o.f0 = try positive(args, i);
-                o.n_harmonics = try count(u16, args, i + 1, 8);
+                // K is optional: a keyword after f0 starts the pairs.
+                if (numberAt(args, i + 1) != null) o.n_harmonics = try count(u16, args, i + 1, 8);
                 i += if (i + 1 < args.len and args[i + 1] == .num) 2 else 1;
             }
             const Key = enum { method, carrierindex, listfreq, listcount, listfloor, listsources, spurious };
@@ -1653,6 +1672,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .phasenoise = o };
         },
         .pac, .pxf => {
+            try singleEnded(node_neg);
             // HSPICE `.snac <sweep>` and `.snxf v(out) <sweep>` [CR .SNAC,
             // .SNXF] run at the `.sn` fundamental.
             if (a.sn) {

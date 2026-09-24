@@ -742,6 +742,8 @@ pub const Four = struct {
     f_fundamental: f64,
     n_harmonics: u16 = 9,
     output_node: u32 = 0,
+    /// `v(a,b)` reference: the harmonics are of v(output_node) - v(output_neg).
+    output_neg: u32 = 0,
     /// The deck's `.tran`, whose last period is analyzed, as ngspice's
     /// `.four` reads the tran plot (dotcards.c). Null, for a deck without a
     /// `.tran`, means 5 fundamental periods at 200 points per period.

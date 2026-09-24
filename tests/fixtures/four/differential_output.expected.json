@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "four",
+  "purpose": ".four v(a,b) analyses the difference of the two nodes",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(a,b) = 0.5 sin - 0.25 sin = 0.25 sin(2 pi 1k t): DC 0, fundamental 0.25, no harmonics. ngspice-45 prints 0.2499 for harmonic 1."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Fourier Analysis",
+        "match": "exact",
+        "row_count": 10,
+        "axis": {
+          "name": "harmonic",
+          "values": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "magnitude": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.0002,
+            "values": [
+              0,
+              0.25,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "c683249ca4660532e020c10976d6e4be57f6744125746b0e55d1b99e9a2e7834"
+}

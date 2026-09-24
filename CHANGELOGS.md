@@ -98,6 +98,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - A stray `.enddata` or `.end_variation` is refused as `ParseError` instead of read as nothing (#162).
 - An ngspice line holding only a `//` comment is a comment line, not a `ParseError` (and no longer a panic inside `.control` in safe builds) (#164).
 - An analysis card inside a `.subckt` is refused as `UnsupportedCard` instead of run as a top-level analysis (#165).
+- `.four v(a,b)` analyses the difference; `.pss`, `.hb`, `.phasenoise`, `.snosc` and `.pac`/`.snxf` refuse a `v(a,b)` output instead of reading v(a); `.pnoise`/`.snnoise` check their input source and `.snnoise` keeps `v(a,b)`; `.phasenoise f0` may omit K before its keywords (#57).
 - `.param` powers follow ngspice: `(-2)^0.5` and `(-8)**(1/3)` are |x|^y instead of NaN, and `pwr(-0,0)` is 1; the HSPICE dialect reads `sqrt`, `log`, `log10` and `pow` as Star-Hspice does (#39).
 - Subcircuits nest at most 32 levels as documented (a 33rd is refused, naming the instance); appended analysis cards keep their line as written and read a `SWEEP` tail; `.model OPT` parameters register in deck order (#64).
 - An analysis card reading a `.step`-swept parameter is refused naming its line wherever the `.step` sits, instead of running at the nominal value when the card comes first; a `PAT` Z state is `UnsupportedCard` (#63).

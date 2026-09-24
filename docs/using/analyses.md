@@ -342,6 +342,7 @@ period. One plot per output, `Fourier Analysis
 (THD = x %)` (`Fourier Analysis v(out) (THD = ...)` for several outputs):
 `harmonic`, `frequency`, `magnitude`, `phase_deg`. The phase is against a
 sine starting at the window, as ngspice's: `sin(0 1 1k)` reads 0 degrees.
+An output `v(a,b)` is the difference of the two nodes.
 
 ```text
 .four 1k v(out)

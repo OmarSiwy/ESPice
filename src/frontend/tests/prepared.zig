@@ -326,6 +326,28 @@ test "a card query validation would refuse fails at the card" {
     }
 }
 
+test "v(a,b) outputs and noise inputs are read, or refused, on every card (#57)" {
+    const deck = "diff\nv1 a 0 sin(0 1 1k)\nr1 a b 1k\nr2 b 0 1k\n.tran 1u 2m\n{s}\n.end\n";
+    for ([_]struct { []const u8, ?anyerror }{
+        .{ ".four 1k v(a,b)", null },
+        .{ ".pss v(a,b) 1k", error.UnsupportedAnalysisOutput },
+        .{ ".hb v(a,b) 1k", error.UnsupportedAnalysisOutput },
+        .{ ".pnoise v(a) nosuch dec 10 1 1k 1k", error.AnalysisSourceNotFound },
+    }) |case| {
+        var session = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer session.deinit();
+        const a = session.allocator();
+        const nl = try parse(a, try std.fmt.allocPrint(a, deck, .{case[0]}));
+        if (case[1]) |err| {
+            try std.testing.expectError(err, build(a, a, nl));
+            continue;
+        }
+        var prepared = try build(a, a, nl);
+        defer prepared.deinit();
+        for (prepared.deck.queries) |q| if (q == .four) try std.testing.expect(q.four.output_neg != 0);
+    }
+}
+
 test ".dcxf keeps a V card an F or H senses" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
