@@ -19,6 +19,7 @@ columns and axis). Base failing set: the 62 decks failing at 0424baf.
 | # | change | pass | changed decks (worst err/tol, base -> after) |
 |---|---|---|---|
 | 1 | LTE rejection keeps the order (dctran.c:966) | 554 | see below |
+| 2 | Newton failure: dt/8 and order 1, no same-dt BE retry (:815, :823) | 554 | 3 decks |
 
 ### 1. LTE rejection keeps the integration order
 
@@ -41,3 +42,13 @@ failure (:823). No pass/fail flip. Changed decks:
   an instrumented ngspice: the grid now follows ngspice's (diode recovery
   tracks it to 4e-5; mosamp's oracle is ngspice's ~710 Newton /8 cuts in the
   MOS2 slew, fix 2's territory).
+
+### 2. Newton failure cuts dt by 8 and drops to order 1 in one retry
+
+The same-dt BE retry and the halving are gone; ngspice does `CKTdelta /= 8`
+and `CKTorder = 1` together. No pass/fail flip, no OP deck changed (OPtran
+never runs on the corpus). Against commit 1:
+
+- `hfet_inverter` 1.85e3 -> 704, `pvt_corners` 3.73e3 -> 3.23e3.
+- `mos6_inverter` 453 -> 668: predicted by the diagnosis (rows 317 -> 315,
+  ngspice's count); the residual is the per-terminal q tape (fix 6, VerA).

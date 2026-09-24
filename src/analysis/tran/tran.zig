@@ -85,8 +85,6 @@ pub fn simulate(
 ) !SimResult {
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
-    const trap = options.method == .trapezoidal;
-    const gear = options.method == .gear_2;
 
     const ws = try ckt.workspace();
     const x_try = try allocator.alloc(f64, n);
@@ -333,15 +331,11 @@ pub fn simulate(
             st.rej_newton += 1;
             // Rejected point: restore FSM devices to the last accepted state.
             _ = ckt.stateCtl(.revert);
-            // Order drop first: a discontinuity rejects trap long before dt
-            // is the problem. Retry at order 1 at the SAME dt; only halve
-            // when the retry already ran order 1 (ngspice-style).
-            if (!use_be and (trap or gear)) {
-                st.order_drops += 1;
-                use_be = true;
-                continue;
-            }
-            dt *= 0.5;
+            // dctran.c:815, :823: cut dt by 8 AND drop to order 1 in one
+            // retry — no same-dt BE attempt first.
+            if (!use_be) st.order_drops += 1;
+            use_be = true;
+            dt /= 8.0;
             if (dt < options.dt_min) {
                 // The most interesting exit — say where it died. (The stats
                 // block at the bottom is skipped by this return.)
