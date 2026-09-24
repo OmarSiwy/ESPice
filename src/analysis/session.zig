@@ -474,7 +474,7 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
 }
 
 const output = @import("output_types");
-const ir = @import("device_ir");
+const ir = @import("device").abi;
 
 pub fn validateOutputSchema(allocator: std.mem.Allocator, prepared: *const Prepared, query: requests.Query, format: output.Format) !void {
     if (format == .touchstone or format == .citi) {

@@ -8,8 +8,8 @@
 //!   DC   A = G;   TRAN  A = G + a*C;   AC  A = G + jwC.
 
 const std = @import("std");
-const device_ir = @import("device_ir");
-const Prepared = @import("problem_types").Circuit;
+const device_ir = @import("device").abi;
+const Prepared = @import("device").Circuit;
 const progress_api = @import("progress.zig");
 const solvers = @import("solver");
 
@@ -833,7 +833,7 @@ pub fn init(
     protos: []const Proto,
     bbd: ?BbdInfo,
 ) !Circuit {
-    return Circuit.fromPrepared(try Prepared.init(gpa, n, intern_bytes, intern_offs, protos, bbd));
+    return Circuit.fromPrepared(try Prepared.freeze(gpa, n, intern_bytes, intern_offs, protos, bbd));
 }
 
 // ---------------------------------------------------------------------------

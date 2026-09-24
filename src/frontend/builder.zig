@@ -8,7 +8,9 @@ const std = @import("std");
 const problem = @import("problem_types");
 const requests = @import("requests");
 const numerics = @import("numerics");
-const devices = @import("devices");
+const devices = @import("spice.zig");
+const device = @import("device");
+pub const spice = devices;
 const netlist = @import("netlist");
 const Netlist = netlist.Netlist;
 const Device = Netlist.View;
@@ -16,8 +18,8 @@ const Model = netlist.Model;
 const Kv = netlist.Kv;
 const Value = netlist.Value;
 const Op = netlist.expr.Op;
-const vaload = @import("devices").vaload;
-const batch = @import("device_ir");
+const vaload = device.loader;
+const batch = @import("device").abi;
 
 const GROUND = @as(u32, 0);
 const Circuit = problem.Circuit;
@@ -242,8 +244,8 @@ pub const Builder = struct {
         // Reach the device through its own object's vtable: naming
         // `D.collapse` or `ProtoStore(D)` here would compile the device body
         // into the executable a second time (analysis/eval.zig).
-        const vt = if (comptime devices.modelName(D)) |name|
-            devices.vtable(name)
+        const vt = if (comptime device.modelName(D)) |name|
+            device.vtable(name)
         else if (@hasDecl(D, "deviceVtable"))
             D.deviceVtable()
         else
@@ -319,10 +321,10 @@ pub const Builder = struct {
         }
         intern_offs[n] = off;
 
-        var ckt = try problem.Circuit.init(gpa, self.n, intern_bytes, intern_offs, self.protos.items, bbd.info);
+        var ckt = try Circuit.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, bbd.info);
         ckt.needs_tran_op = self.needs_tran_op;
 
-        self.deinitStorage(); // Circuit.init consumed the protos
+        self.deinitStorage(); // Circuit.freeze consumed the protos
 
         return ckt;
     }
@@ -1213,7 +1215,7 @@ pub const NetBuilder = struct {
         const tri = n_lines * (n_lines + 1) / 2;
         if (nr != tri or nl != tri or nc != tri or (ng != 0 and ng != tri) or !std.math.isFinite(length) or length <= 0)
             return error.UnsupportedTransmissionLineParameters;
-        inline for (.{ devices.models.cpl_native_2, devices.models.cpl_native_3, devices.models.cpl_native_4 }) |D| {
+        inline for (.{ device.models.cpl_native_2, device.models.cpl_native_3, device.models.cpl_native_4 }) |D| {
             const N = D.num_ports / 2;
             if (n_lines == N) {
                 var model: D.Model = .{ .length = length };
@@ -1394,8 +1396,8 @@ pub const nom_temp_field = "nom_temp__";
 fn deriveModel(comptime D: type, model: *D.Model, nom_temp_c: f64) void {
     if (comptime @hasField(D.Model, nom_temp_field))
         @field(model, nom_temp_field) = nom_temp_c;
-    if (comptime devices.modelName(D)) |name| {
-        if (devices.vtable(name).derive) |f| f(@ptrCast(model));
+    if (comptime device.modelName(D)) |name| {
+        if (device.vtable(name).derive) |f| f(@ptrCast(model));
     } else if (comptime @hasDecl(D, "derive")) D.derive(model);
 }
 

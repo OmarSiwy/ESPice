@@ -1,5 +1,5 @@
 const std = @import("std");
-const ir = @import("device_ir");
+const ir = @import("device_abi");
 const t = std.testing;
 extern fn testDeviceVtable() *const ir.DeviceVtable;
 extern fn testTooManyInstances() *const anyopaque;

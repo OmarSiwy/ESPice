@@ -9,7 +9,7 @@ const std = @import("std");
 
 const circuit_mod = @import("Circuit.zig");
 
-const device_ir = @import("device_ir");
+const device_ir = @import("device").abi;
 
 // -- Re-exports from Circuit.zig --
 pub const Circuit = circuit_mod.Circuit;

@@ -7,7 +7,6 @@ pub const validateOutputSchema = session.validateOutputSchema;
 test {
     _ = @import("tests/ac.zig");
     _ = @import("tests/circuit.zig");
-    _ = @import("tests/eval.zig");
     _ = @import("tests/executor.zig");
     _ = @import("tests/four.zig");
     _ = @import("tests/gpu.zig");

@@ -2,7 +2,7 @@
 //! scheduling, so it lives here and not in the device evaluator.
 
 const std = @import("std");
-const device_ir = @import("device_ir");
+const device_ir = @import("device").abi;
 const zeroSimd = @import("numerics").zeroSimd;
 
 const Batch = device_ir.Batch;

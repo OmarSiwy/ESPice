@@ -1,6 +1,6 @@
 //! Compiled as its own object: importing this into the test would hide the bug.
 const std = @import("std");
-const ir = @import("device_ir");
+const ir = @import("device_abi");
 const eval = @import("device_eval");
 
 const Device = struct {

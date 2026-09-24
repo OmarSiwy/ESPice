@@ -282,7 +282,7 @@ pub const PatternView = struct {
 /// BEFORE dedup, sorted and uniqued into CSC by `toCsc`.
 ///
 /// The `gpa` its methods take is build-time SCRATCH, not the circuit's owner:
-/// `keys` and the radix ping-pong buffer die inside `Circuit.init`, and only
+/// `keys` and the radix ping-pong buffer die inside `Circuit.freeze`, and only
 /// `col_ptr`/`row_idx` — which `toCsc` takes a separate allocator for —
 /// outlive it. Passing the sim arena here left the pre-dedup key array and the
 /// sort scratch resident for the whole run (measured 14.6 MB on

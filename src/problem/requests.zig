@@ -2,7 +2,7 @@
 //! frontend/netlist.zig `cards`. No parser, driver, or solver imports.
 const std = @import("std");
 const Tolerances = @import("numerics").Tolerances;
-const ir = @import("device_ir");
+const ir = @import("device_abi");
 pub const QueryId = enum(u32) { _ };
 pub const invalid_query: QueryId = @enumFromInt(std.math.maxInt(u32));
 pub const Method = enum { backward_euler, trapezoidal, gear_2 };

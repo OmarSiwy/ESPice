@@ -3,8 +3,7 @@ const std = @import("std");
 const problem = @import("problem_types");
 const requests = @import("requests");
 const netlist = @import("netlist");
-const models = @import("device_models");
-const build_options = @import("build_options");
+const device = @import("device");
 const analyses = @import("analyses.zig");
 const builder = @import("builder");
 const Builder = builder.Builder;
@@ -57,15 +56,7 @@ fn loadModels(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.F
         try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path }));
     if (paths.items.len == 0) return;
 
-    const compiler_paths: models.vaload.BuildPaths = .{
-        .work_dir = try std.fs.path.join(session, &.{ build_options.src_root, ".zig-cache", "espice-hdl" }),
-        .contract = build_options.contract_path,
-        .dyn = build_options.dyn_path,
-        .gompute = build_options.gompute_path,
-        .device_ir = build_options.device_ir_path,
-    };
-    // Registry keys and loaded code outlive this problem's session arena.
-    try models.vaload.ensureAllLoaded(std.heap.smp_allocator, io, paths.items, compiler_paths);
+    try device.load(io, paths.items);
 }
 
 /// Build a passive circuit from a netlist. Scratch owns wiring; the session

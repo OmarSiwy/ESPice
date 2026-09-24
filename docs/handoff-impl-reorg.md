@@ -15,7 +15,8 @@ b1054dc. Scripts: session scratchpad `e/gate.sh <tag>` and `e/runall.sh`.
 | 0 | test wiring, Debug crash | done |
 | 1 | pure deletions | done |
 | 2 | src/solver/ | done |
-| 3-4 | src/device/, Library | todo |
+| 3 | src/device/ moves | done |
+| 4 | Library, one binder, recomputeType by id | todo |
 | 5 | src/core/ | todo |
 | 6 | src/espice.zig, c_api, delete problem/ | todo |
 | 7 | InternPool through Deck/Result/CardRef/ParamRef | todo |
