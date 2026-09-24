@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const device_ir = @import("device_ir");
-const device_eval = @import("device_eval");
 const Prepared = @import("problem_types").Circuit;
 const progress_api = @import("progress.zig");
 const solvers = @import("solvers");
@@ -37,7 +36,8 @@ const NoiseSource = device_ir.NoiseSource;
 const StateCtlOp = device_ir.StateCtlOp;
 const Proto = device_ir.Proto;
 const PatternView = device_ir.PatternView;
-const ParEval = device_eval.ParEval;
+const par_eval = @import("par_eval.zig");
+const ParEval = par_eval.ParEval;
 const converger = solvers.converger;
 
 // ---------------------------------------------------------------------------
@@ -59,8 +59,6 @@ pub const BbdInfo = @import("numerics").BbdInfo;
 
 /// Plain hook: assemble = one eval, matrix = G. This IS dc.
 pub const EvalHook = struct {
-    pub const gpu_eligible = true;
-
     pub fn assemble(_: EvalHook, ckt: *Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
     }
@@ -72,12 +70,10 @@ pub const EvalHook = struct {
     }
 };
 
-/// Engine-owned GPU solve surface — persistent context, batch-capable.
-/// Single-solve (backward compat) + batch Newton + batch frequency.
-/// Errors fall back to the CPU path.
+/// Engine-owned GPU context: device eval and limit/state passes on the
+/// device. Errors fall back to the CPU path.
 pub const GpuHook = struct {
     ctx: *anyopaque,
-    solve_newton: *const fn (*anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result,
     simulate_tran: ?*const fn (*anyopaque, x: []f64, probes: []const u32, waveform: *tran.Waveform, options: tran.Options) anyerror!tran.SimResult = null,
     /// N independent Newton solves in one launch (MC/corners/temp/sens).
     /// x_lanes is a flat blob: lane k is x_lanes[k*n..][0..n], overwritten with
@@ -164,9 +160,6 @@ pub const Circuit = struct {
     /// step opens on a residual α·Δq that doubles as dt halves.
     has_state_q: bool,
     has_baseline: bool,
-    /// Set by engine when --gpu is active and circuit is GPU-eligible.
-    /// converger.run reads this to pick JFNK.
-    gpu_active: bool,
 
     // =======================================================================
     // COLD — metadata, memos and handles; off the hot cache lines
@@ -193,8 +186,7 @@ pub const Circuit = struct {
     /// Executor-owned parallel evaluation context. Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
     /// Executor-owned persistent GPU context (mechanism in gpu.zig).
-    /// Provides single-solve, batch
-    /// Newton, batch frequency, and transient dispatch. Null ⇒ CPU only.
+    /// Null ⇒ CPU only.
     gpu_hook: ?GpuHook = null,
     gpa: std.mem.Allocator,
     owns_topology: bool = true,
@@ -295,7 +287,6 @@ pub const Circuit = struct {
             .has_charge = data.has_charge,
             .has_state_q = data.has_state_q,
             .has_baseline = false,
-            .gpu_active = false,
             .g_base = &.{},
             .c_base = &.{},
             .needs_tran_op = data.needs_tran_op,
@@ -372,7 +363,7 @@ pub const Circuit = struct {
     }
 
     /// Ground pin: applied once, after all batch stamps (and any reduction).
-    fn groundStamp(self: *Circuit, x: []const f64) void {
+    pub fn groundStamp(self: *Circuit, x: []const f64) void {
         self.g_vals[self.diag_slots[0]] += 1.0;
         self.rhs[0] += x[0];
     }
@@ -389,9 +380,10 @@ pub const Circuit = struct {
     /// `combineGC`, limiting, history injection and every other host-side step
     /// layered on top of a stamp.
     ///
-    /// For the GPU the two functions are the same work — `gpuEligible` admits
-    /// no device with a `limit` decl, so `eval` and `eval_newton` agree — hence
-    /// one hook for both.
+    /// For the GPU the two functions are the same work: `eval` and
+    /// `eval_newton` differ only in skipping the constant-Jacobian baseline,
+    /// which the device path never uses (see `evalNewton`), hence one hook
+    /// for both.
     pub fn eval(self: *Circuit, x: []const f64, t: f64) void {
         // The memo names an x, and x_op is one stable arena slice — so a
         // direct eval at a DIFFERENT x (disto, matex, qpss, pss, pnoise,
@@ -403,20 +395,43 @@ pub const Circuit = struct {
             ev(gh.ctx, x, t);
             return;
         };
-        if (self.par_eval) |p| {
-            p.eval(self.batches, self.ownPlanes(), self.has_charge, x, t);
-            self.groundStamp(x);
-            return;
+        self.stamp(x, t, .full);
+    }
+
+    /// Clear (or baseline-seed) the planes `mode` writes: the one plane reset
+    /// the serial path, ParEval and the GPU's host half share.
+    pub fn clearPlanes(self: *Circuit, comptime mode: par_eval.Mode) void {
+        switch (mode) {
+            .charge => zeroSimd(self.q_vec),
+            .newton => {
+                @memcpy(self.g_vals, self.g_base);
+                if (self.has_charge) {
+                    @memcpy(self.c_vals, self.c_base);
+                    zeroSimd(self.q_vec);
+                }
+                zeroSimd(self.rhs);
+            },
+            .full => {
+                zeroSimd(self.g_vals);
+                if (self.has_charge) {
+                    zeroSimd(self.c_vals);
+                    zeroSimd(self.q_vec);
+                }
+                zeroSimd(self.rhs);
+            },
         }
-        zeroSimd(self.g_vals);
-        if (self.has_charge) {
-            zeroSimd(self.c_vals);
-            zeroSimd(self.q_vec);
-        }
-        zeroSimd(self.rhs);
+    }
+
+    /// Host stamp: clear, every batch serial or threaded, then the ground pin
+    /// (which `.charge` does not touch).
+    fn stamp(self: *Circuit, x: []const f64, t: f64, comptime mode: par_eval.Mode) void {
+        self.clearPlanes(mode);
         const pl = self.ownPlanes();
-        for (self.batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
-        self.groundStamp(x);
+        if (self.par_eval) |p|
+            p.run(self.batches, pl, x, t, mode)
+        else for (self.batches) |b|
+            par_eval.stampRange(b, &pl, 0, b.count, x, t, mode);
+        if (mode != .charge) self.groundStamp(x);
     }
 
     /// Charges only at `x`: `q_vec` and every batch's `q_tape`, bit-for-bit what
@@ -437,10 +452,7 @@ pub const Circuit = struct {
     pub fn evalQ(self: *Circuit, x: []const f64, t: f64) void {
         if (self.gpu_hook != null) return self.eval(x, t);
         self.lin.valid = false; // q_vec is one of the four memoized planes
-        if (self.par_eval) |p| return p.evalQ(self.batches, self.ownPlanes(), x, t);
-        zeroSimd(self.q_vec);
-        const pl = self.ownPlanes();
-        for (self.batches) |b| if (b.hooks.eval_q) |f| f(b.ctx, &pl, 0, b.count, x, t);
+        self.stamp(x, t, .charge);
     }
 
     /// Ensure the four planes hold the linearization at `x_op`, reusing them if
@@ -497,30 +509,7 @@ pub const Circuit = struct {
     }
 
     pub fn evalNewtonCpu(self: *Circuit, x: []const f64, t: f64) void {
-        if (self.par_eval) |p| {
-            p.evalNewton(self.batches, self.ownPlanes(), self.has_charge, self.has_baseline, self.g_base, self.c_base, x, t);
-            self.groundStamp(x);
-            return;
-        }
-        const pl = self.ownPlanes();
-        if (self.has_baseline) {
-            @memcpy(self.g_vals, self.g_base);
-            if (self.has_charge) {
-                @memcpy(self.c_vals, self.c_base);
-                zeroSimd(self.q_vec);
-            }
-            zeroSimd(self.rhs);
-            for (self.batches) |b| b.eval_newton(b.ctx, &pl, 0, b.count, x, t);
-        } else {
-            zeroSimd(self.g_vals);
-            if (self.has_charge) {
-                zeroSimd(self.c_vals);
-                zeroSimd(self.q_vec);
-            }
-            zeroSimd(self.rhs);
-            for (self.batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
-        }
-        self.groundStamp(x);
+        if (self.has_baseline) self.stamp(x, t, .newton) else self.stamp(x, t, .full);
     }
 
     pub fn computeBaseline(self: *Circuit) !void {
@@ -604,11 +593,44 @@ pub const Circuit = struct {
 
     pub fn applyLimits(self: *const Circuit, x: []f64, x_old: []const f64) bool {
         if (self.gpu_hook) |gh| if (gh.apply_limits) |f| return f(gh.ctx, x, x_old);
+        return limitBatches(self.batches, x, x_old);
+    }
+
+    // Host walks over a batch slice. `Circuit` walks every batch; the GPU
+    // context walks its host-resident ones, or every batch on a fallback.
+
+    pub fn limitBatches(batches: []const Batch, x: []f64, x_old: []const f64) bool {
         var any_limited = false;
-        for (self.batches) |b| if (b.hooks.apply_limits) |f| {
+        for (batches) |b| if (b.hooks.apply_limits) |f| {
             if (f(b.ctx, x, x_old)) any_limited = true;
         };
         return any_limited;
+    }
+
+    pub fn seedBatches(batches: []const Batch, x: []f64) void {
+        for (batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
+    }
+
+    pub fn clearLimitBatches(batches: []const Batch) void {
+        for (batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
+    }
+
+    pub fn updateBatches(batches: []const Batch, x: []const f64) ?f64 {
+        var min_reject: ?f64 = null;
+        for (batches) |b| {
+            if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
+                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
+            };
+        }
+        return min_reject;
+    }
+
+    pub fn stateCtlBatches(batches: []const Batch, sop: StateCtlOp) bool {
+        var dirty = false;
+        for (batches) |b| if (b.hooks.state_ctl) |f| {
+            if (f(b.ctx, sop)) dirty = true;
+        };
+        return dirty;
     }
 
     /// SPICE MODEINITJCT equivalent: devices write junction seed voltages
@@ -616,14 +638,14 @@ pub const Circuit = struct {
     /// of 0, and pnjlim/fetlim limit against the seed. Cold starts only.
     pub fn seedJunctions(self: *const Circuit, x: []f64) void {
         if (self.gpu_hook) |gh| if (gh.seed_junctions) |f| return f(gh.ctx, x);
-        for (self.batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
+        seedBatches(self.batches, x);
     }
 
     /// Reset device-private limiting state; called when a Newton solve
     /// finishes so later evals (waveform, AC, noise) see the node vector.
     pub fn clearLimits(self: *const Circuit) void {
         if (self.gpu_hook) |gh| if (gh.clear_limits) |f| return f(gh.ctx);
-        for (self.batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
+        clearLimitBatches(self.batches);
     }
 
     pub fn beginSolve(self: *Circuit) void {
@@ -645,13 +667,7 @@ pub const Circuit = struct {
 
     pub fn updateStates(self: *const Circuit, x: []const f64) ?f64 {
         if (self.gpu_hook) |gh| if (gh.update_states) |f| return f(gh.ctx, x);
-        var min_reject: ?f64 = null;
-        for (self.batches) |b| {
-            if (b.hooks.update_state) |f| if (f(b.ctx, x)) |tr| {
-                min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
-            };
-        }
-        return min_reject;
+        return updateBatches(self.batches, x);
     }
 
     /// Accepted-step half of `updateStates`: the devices whose state is not
@@ -671,11 +687,7 @@ pub const Circuit = struct {
     /// any device's working state differs from its last accepted state.
     pub fn stateCtl(self: *const Circuit, sop: StateCtlOp) bool {
         if (self.gpu_hook) |gh| if (gh.state_ctl) |f| return f(gh.ctx, sop);
-        var dirty = false;
-        for (self.batches) |b| if (b.hooks.state_ctl) |f| {
-            if (f(b.ctx, sop)) dirty = true;
-        };
-        return dirty;
+        return stateCtlBatches(self.batches, sop);
     }
 
     pub fn minDelay(self: *const Circuit) ?f64 {
@@ -757,9 +769,8 @@ pub const Circuit = struct {
     /// first point of every inner sweep, which is the point right after the
     /// outer loop may have moved temperature, and narrows only thereafter.
     ///
-    /// `Batch.type_name` is `@typeName(D)` (`vsource.Vsource`) while
-    /// `ParamRef.device_type` is its last component (`Vsource`), so the match
-    /// is on the tail. No match at all falls back to the full walk: a silently
+    /// `Batch.type_name` and `ParamRef.device_type` are both `baseName(D)`
+    /// (`Vsource`). No match at all falls back to the full walk: a silently
     /// skipped re-derivation is a wrong answer, not a slow one.
     pub fn recomputeType(self: *Circuit, type_name: []const u8) error{TopologyChanged}!void {
         self.lin.valid = false;
@@ -767,11 +778,7 @@ pub const Circuit = struct {
         self.markGpuDirty();
         var hit = false;
         for (self.batches) |b| {
-            const tail = if (std.mem.lastIndexOfScalar(u8, b.type_name, '.')) |d|
-                b.type_name[d + 1 ..]
-            else
-                b.type_name;
-            if (!std.mem.eql(u8, tail, type_name)) continue;
+            if (!std.mem.eql(u8, b.type_name, type_name)) continue;
             hit = true;
             if (b.hooks.recompute) |f| {
                 if (!f(b.ctx)) return error.TopologyChanged;

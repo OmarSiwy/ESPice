@@ -6,13 +6,11 @@
 //!   Fields: .n, .diag_slots[]u32, .rhs[]f64, .current_row[]bool
 //!   Optional methods: beginSolve, advanceIteration, checkConvergence,
 //!     applyLimits, updateStates, clearLimits, nodeName, checkpoint
-//!   Optional fields: .gpu_active, .gpu_hook
 //!
 //! Hook (hook: anytype) provides:
 //!   assemble(sys, x, t) void  — fill planes + rhs
 //!   vals(sys) []f64           — matrix to factor (newton path only)
 //!   Optional: residual(sys, x, t) void — JFNK residual-only eval
-//!   Optional: pub const gpu_eligible = true — gates GPU whole-Newton
 
 const std = @import("std");
 const direct = @import("direct.zig");
@@ -542,7 +540,7 @@ pub fn jfnk(
     return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
 }
 
-/// Auto-picks strategy. Optional GPU path via sys.gpu_hook + hook.gpu_eligible.
+/// Auto-picks strategy.
 pub fn run(
     sys: anytype,
     ws: *Workspace,
@@ -552,7 +550,6 @@ pub fn run(
     hook: anytype,
 ) !Result {
     const S = Deref(@TypeOf(sys));
-    const H = @TypeOf(hook);
 
     // `defer` is scoped to its ENCLOSING BLOCK, so wrapping this in an
     // `if { defer ... }` ran the cleanup at the closing brace — before the
@@ -572,16 +569,6 @@ pub fn run(
         // Still falls back: a pin is a preference, not a promise to return a
         // wrong answer.
         return newton(sys, ws, x, t, opts, hook);
-    }
-
-    // GPU whole-Newton: only for hooks that declare gpu_eligible
-    const hook_gpu = comptime @hasDecl(H, "gpu_eligible") and H.gpu_eligible;
-    if (comptime @hasField(S, "gpu_hook") and hook_gpu) {
-        if (sys.gpu_hook) |gh| {
-            if (gh.solve_newton(gh.ctx, x, t, opts)) |r| {
-                if (r.converged) return r;
-            } else |err| if (err == error.QueryCancelled) return err;
-        }
     }
 
     // Direct Newton. JFNK used to run FIRST here, on the reasoning that it
