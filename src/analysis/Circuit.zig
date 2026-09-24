@@ -400,7 +400,7 @@ pub const Circuit = struct {
 
     /// Clear (or baseline-seed) the planes `mode` writes: the one plane reset
     /// the serial path, ParEval and the GPU's host half share.
-    pub fn clearPlanes(self: *Circuit, mode: par_eval.Mode) void {
+    pub fn clearPlanes(self: *Circuit, comptime mode: par_eval.Mode) void {
         switch (mode) {
             .charge => zeroSimd(self.q_vec),
             .newton => {
@@ -424,7 +424,7 @@ pub const Circuit = struct {
 
     /// Host stamp: clear, every batch serial or threaded, then the ground pin
     /// (which `.charge` does not touch).
-    fn stamp(self: *Circuit, x: []const f64, t: f64, mode: par_eval.Mode) void {
+    fn stamp(self: *Circuit, x: []const f64, t: f64, comptime mode: par_eval.Mode) void {
         self.clearPlanes(mode);
         const pl = self.ownPlanes();
         if (self.par_eval) |p|
@@ -509,7 +509,7 @@ pub const Circuit = struct {
     }
 
     pub fn evalNewtonCpu(self: *Circuit, x: []const f64, t: f64) void {
-        self.stamp(x, t, if (self.has_baseline) .newton else .full);
+        if (self.has_baseline) self.stamp(x, t, .newton) else self.stamp(x, t, .full);
     }
 
     pub fn computeBaseline(self: *Circuit) !void {
