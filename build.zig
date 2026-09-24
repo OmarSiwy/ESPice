@@ -115,10 +115,13 @@ pub fn build(b: *std.Build) void {
     // Netlist front end. Also a std-only leaf — `builder` consumes its
     // `types.Netlist`, but nothing in it reaches back into the simulator.
     const syntax_mod = M.make(b.path("src/frontend/syntax.zig"), &.{});
+    // Netlist lines -> hypergraph + analysis cards. Imports only shared leaves.
+    const netlist_imports: []const std.Build.Module.Import = &.{.{ .name = "requests", .module = requests_mod }};
+    const netlist_mod = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
     const frontend_bench = b.addExecutable(.{
         .name = "frontend-bench",
         .use_llvm = optimize != .Debug,
-        .root_module = M.make(b.path("tests/benchmark/frontend.zig"), &.{.{ .name = "syntax", .module = syntax_mod }}),
+        .root_module = M.make(b.path("tests/benchmark/frontend.zig"), &.{.{ .name = "netlist", .module = netlist_mod }}),
     });
     const run_frontend_bench = b.addRunArtifact(frontend_bench);
     if (b.args) |args| run_frontend_bench.addArgs(args);
@@ -531,7 +534,7 @@ pub fn build(b: *std.Build) void {
     const solver_tests_mod = M.make(b.path("src/analysis/tests/solvers.zig"), &.{.{ .name = "solvers", .module = solvers_mod }});
     solver_tests_mod.link_libc = true;
 
-    const frontend_syntax_tests = M.make(b.path("src/frontend/tests/syntax.zig"), &.{.{ .name = "syntax", .module = syntax_mod }});
+    const frontend_netlist_tests = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
     const frontend_builder_tests = M.make(b.path("src/frontend/tests/builder.zig"), &.{
         .{ .name = "syntax", .module = syntax_mod },
         .{ .name = "builder", .module = builder_mod },
@@ -541,7 +544,7 @@ pub fn build(b: *std.Build) void {
 
     for ([_]struct { name: []const u8, desc: []const u8, mod: *std.Build.Module }{
         .{ .name = "test-output", .desc = "Run waveform writer tests", .mod = output_mod },
-        .{ .name = "test-frontend", .desc = "Run netlist front-end tests", .mod = frontend_syntax_tests },
+        .{ .name = "test-frontend", .desc = "Run netlist front-end tests", .mod = frontend_netlist_tests },
         .{ .name = "test-eval", .desc = "Run evaluation tests", .mod = eval_tests_mod },
         .{ .name = "test-builder", .desc = "Run netlist -> Circuit builder tests", .mod = frontend_builder_tests },
         .{ .name = "test-solvers", .desc = "Run solver tests", .mod = solver_tests_mod },
