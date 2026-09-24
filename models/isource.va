@@ -102,14 +102,19 @@ module isource(p, n);
     parameter real pwl_repeat = 0.0;  // s  `r=<t>`: replay [r, t_last]
     parameter real pwl_td     = 0.0;  // s  `td=<t>`
 
-    // ---- SFFM(IO IA FC MDI FS PHASEC PHASES) --------------------------------
-    parameter real sffm_vo     = 0.0;  // A    offset
-    parameter real sffm_va     = 0.0;  // A    amplitude
-    parameter real sffm_fc     = 0.0;  // Hz   carrier frequency
-    parameter real sffm_mdi    = 0.0;  //      modulation index
-    parameter real sffm_fs     = 0.0;  // Hz   signal frequency
-    parameter real sffm_phasec = 0.0;  // deg  carrier phase
-    parameter real sffm_phases = 0.0;  // deg  signal phase
+    // ---- SFFM(IO IA FM MDI FC TD PHASEM PHASEC) -----------------------------
+    // Same slots and defaults as vsource.va (isrcload.c:213-227), but
+    // isrcload.c reads its phases one slot early: PHASEM is the 6th argument
+    // (sffm_td, the same slot as TD, 222-225) and PHASEC the 7th (sffm_phasem,
+    // 226-227); TD itself is never applied and the 8th argument is unused.
+    parameter real sffm_vo     =  0.0;  // A    offset
+    parameter real sffm_va     =  0.0;  // A    amplitude
+    parameter real sffm_fm     = -1.0;  // Hz   modulating frequency (-1 = 5/TSTOP)
+    parameter real sffm_mdi    = 90.0;  //      modulation index
+    parameter real sffm_fc     =  0.0;  // Hz   carrier frequency    (0 = 500/TSTOP)
+    parameter real sffm_td     =  0.0;  // deg  6th arg: modulation phase (see above)
+    parameter real sffm_phasem =  0.0;  // deg  7th arg: carrier phase (see above)
+    parameter real sffm_phasec =  0.0;  //      8th arg: unused by isrcload.c
 
     // ---- AM(IA IO MF FC TD PHASEC PHASES) -----------------------------------
     parameter real am_va     = 0.0;  // A    amplitude
@@ -122,7 +127,7 @@ module isource(p, n);
 
     real t, out;
     real p_tr, p_tf, p_pw, p_per, t_rel, t_mod;
-    real t_sin, t_e1, t_e2, fm_mod, am_env, am_car;
+    real t_sin, t_e1, t_e2, fm_mdi, am_env, am_car;
     real t_e, t_first, t_last, v_first, v_last, tp, vp, tk, vk, span, excess;
     integer k, klo, khi;
 
@@ -296,9 +301,15 @@ module isource(p, n);
             end
 
         end else if (waveform == 5) begin
-            // ---- SFFM: no delay; both phases in degrees.
-            fm_mod = sffm_mdi * sin(`M_TWO_PI * sffm_fs * t + sffm_phases * `M_PI / 180.0);
-            out = sffm_vo + sffm_va * sin(`M_TWO_PI * sffm_fc * t + sffm_phasec * `M_PI / 180.0 + fm_mod);
+            // ---- SFFM, isrcload.c:206-254. MDI is limited to FC/FM, or
+            // raised to 0 (229-243); no delay, and the phases are the slots
+            // named in the parameter block (250-252). No breakpoints
+            // (isrcacct.c:171-174).
+            fm_mdi = sffm_mdi;
+            if (fm_mdi > sffm_fc / sffm_fm) fm_mdi = sffm_fc / sffm_fm;
+            else if (fm_mdi < 0.0) fm_mdi = 0.0;
+            out = sffm_vo + sffm_va * sin((`M_TWO_PI * sffm_fc * t + sffm_phasem * `M_PI / 180.0)
+                + fm_mdi * sin(`M_TWO_PI * sffm_fm * t + sffm_td * `M_PI / 180.0));
 
         end else if (waveform == 6) begin
             // ---- AM: IA * (IO + sin(2*pi*MF*t + PHASES)) * sin(2*pi*FC*t + PHASEC),

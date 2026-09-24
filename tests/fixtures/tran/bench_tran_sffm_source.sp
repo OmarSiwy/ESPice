@@ -11,9 +11,7 @@
 *
 *     v(t) = VO + VA * sin(2*pi*FC*t + MDI * sin(2*pi*FM*t))
 *
-* KNOWN GAP: espice (models/vsource.va) takes the SPICE3 order
-* SFFM(VO VA FC MDI FS) with no MDI limit, a 100 kHz carrier at MDI = 2, so
-* it fails this oracle (i(v1) 1.4e7x of tolerance) until the readings agree.
+* espice (models/vsource.va) reads the card the same way.
 V1 in 0 SFFM(0 1 100k 2 10k)
 R1 in out 1k
 C1 out 0 1n
