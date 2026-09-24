@@ -192,7 +192,6 @@ module bsim3(d, g, s, b);
         // pnjlim constants: CONSTvt0/CONSTroot2 (devsup frame, ngspice const.h)
         vt0 = 1.38064852e-23 * 300.15 / 1.6021766208e-19;
         vcrit = vt0 * ln(vt0 / (1.4142135623730951 * 1.0e-14));
-        gminx = $simparam("gmin", 1.0e-12);
 
         // junction saturation current density temperature mapping
         if (tk != tnomk) begin
@@ -345,6 +344,7 @@ module bsim3(d, g, s, b);
         vbd = type * $limit(V(b, di), "pnjlim", vt0, vcrit, type);
 
         // ============ bulk junctions (b3ld.c) =============================
+        gminx = $simparam("gmin", 1.0e-12);
         ibs = jcur(vbs, isats, nvtmj, vjsm, isevjsm, ijth, gminx);
         ibd = jcur(vbd, isatd, nvtmj, vjdm, isevjdm, ijth, gminx);
 
