@@ -59,7 +59,7 @@ module vdmos(d, g, s);
     parameter real rs   = 0.0 from [0:inf);    // source resistance [ohm]
     parameter real rb   = 0.0 from [0:inf);    // body-diode series resistance [ohm]
     parameter real rds  = 0.0 from [0:inf);    // drain-source shunt [ohm]
-    parameter real gmin = 1e-12 from [0:inf);  // d'-s' conductance floor [S]
+    parameter real gmin = 1e-12 from [0:inf);  // body-diode conductance floor [S]
 
     // --- body diode (dioload.c laws) ---------------------------------------
     parameter real is  = 1e-14 from (0:inf);   // saturation current [A]
@@ -278,8 +278,10 @@ module vdmos(d, g, s);
         idch = idch * (1.0 + lambda * vdse);
 
         I(dq, sp) <+ ty * msign * idch;
-        if (rds > 0.0) I(dp, sp) <+ m * V(dp, sp) / rds;
-        I(dp, sp) <+ gmin * V(dp, sp);
+        // vdmosset.c:292-299: the d-s shunt sits on the external nodes and is
+        // m/RDS, or 1e-15 S without RDS; gmin goes on the body diode only
+        // (vdmosload.c:808).
+        I(d, s) <+ (rds > 0.0 ? m / rds : 1e-15) * V(d, s);
 
         // ---- body diode s'->b' (RB carries it on to d') --------------------
         // dioload.c, all three regions: Shockley forward, the smooth cubic
