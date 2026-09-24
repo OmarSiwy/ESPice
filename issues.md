@@ -137,7 +137,9 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   reads the charge at the published solution. FIXED by the last:
   `stress/vacask_graetz` (13.2x -> 0.17x), `stress/vacask_mul` (242x ->
   0.71x), `tran/bench_bypass_gated_branch` (10.8x -> 0.63x),
-  `tran/bench_digital_clamp` (1.11x -> 0.92x). Open, remaining cause per
+  `tran/bench_digital_clamp` (1.11x -> 0.92x). FIXED by the INDflux LTE
+  for coupled inductors (indload.c:72-76): `tran/device_kinduc` (51.7x ->
+  0.0013x). Open, remaining cause per
   r-drift: per-terminal q tape (one slot per `ddt()` site needs VerA) for
   mos6_inverter, schmitt, rca3040, rtlinv, hfet, chain_256; Newton
   robustness (MODEINITPRED, fetlim/limvds, CKTconvTest) for pvt_corners and
@@ -148,7 +150,7 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `tran/bench_tran_fourbitadder`, `tran/device_hfet_inverter`,
   `multi_analysis/bench_ngspice_rca3040`, `multi_analysis/bench_ngspice_rtlinv`,
   `tran/device_mos1_large_signal`, `tran/bench_ngspice_schmitt`,
-  `tran/bench_tline_txl2_3_line`, `tran/device_kinduc`. Value drift:
+  `tran/bench_tline_txl2_3_line`. Value drift:
   `tran/device_mos6_simpleinv`, `tran/device_urc`. Also `reference/diode_reverse_recovery` (2 rows in the
   recovery tail).
 - [x] **F10 — PSS DC offset.** FIXED (phase 2b): `pss.zig` seeds the

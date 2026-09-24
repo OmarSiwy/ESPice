@@ -114,6 +114,44 @@ pub fn simulate(
     // controller or because of something else, and `n_qt` in the stats line
     // says whether the tape is live at all. Setup-path getenv, never hot.
     const n_qt: usize = if (has_charge and std.c.getenv("ZP_NO_QTAPE") == null) ckt.qTapeLen() else 0;
+    // Coupled inductors: ngspice truncates ONE state per inductor, INDflux =
+    // L·i + Σ M·i_other (indload.c:72-76; MUT has no trunc routine). The tape
+    // holds L·i and each M·i as separate states, which bind where INDflux
+    // does not (device_kinduc 51.7x). With a K card, `lteSnap` zeroes the
+    // inductor and kinduc tape spans (a flat zero history never binds) and
+    // appends the row plane at every current row: an inductor's branch row
+    // sums exactly its INDflux. Circuits without a K card are unchanged.
+    // ponytail: every current row is appended (V-source rows carry no charge
+    // and stay inert); take only the inductors' rows once Circuit exposes
+    // the tape's rhs_idx.
+    const lte_rows: []u32 = rows: {
+        if (n_qt == 0) break :rows &.{};
+        for (ckt.batches) |b| {
+            if (!std.mem.eql(u8, b.type_name, "kinduc")) continue;
+            var list: std.ArrayList(u32) = .empty;
+            for (ckt.current_row[0..n], 0..) |is_cur, r| if (is_cur) try list.append(allocator, @intCast(r));
+            break :rows try list.toOwnedSlice(allocator);
+        }
+        break :rows &.{};
+    };
+    defer allocator.free(lte_rows);
+    const n_lt = n_qt + lte_rows.len;
+    const lteSnap = struct {
+        fn call(c: *root.Circuit, dst: []f64, rows: []const u32) void {
+            const n_tape = dst.len - rows.len;
+            c.snapshotQTape(dst[0..n_tape]);
+            if (rows.len == 0) return;
+            var off: usize = 0;
+            for (c.batches) |b| {
+                if (b.hooks.q_tape == null) continue;
+                const len = b.count * b.n_u;
+                if (std.mem.eql(u8, b.type_name, "inductor") or std.mem.eql(u8, b.type_name, "kinduc"))
+                    @memset(dst[off..][0..len], 0);
+                off += len;
+            }
+            for (rows, dst[n_tape..]) |r, *d| d.* = c.q_vec[r];
+        }
+    }.call;
     var qt_i_prev: []f64 = &.{};
     var qt_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
     defer if (n_qt > 0) {
@@ -140,9 +178,9 @@ pub fn simulate(
         root.zeroSimd(i_prev);
         for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
         if (n_qt > 0) {
-            qt_i_prev = try allocator.alloc(f64, n_qt);
+            qt_i_prev = try allocator.alloc(f64, n_lt);
             root.zeroSimd(qt_i_prev);
-            for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_qt);
+            for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_lt);
         }
         // Deliberately NOT preceded by setSimState: q_prev must be the charge
         // the OPERATING POINT saw, so this seeding eval runs in the static
@@ -156,7 +194,7 @@ pub fn simulate(
         simdCopy(q_hist[3], ckt.q_vec[0..n]);
         // Same seeding on the per-state tape, off the same eval.
         if (n_qt > 0) {
-            ckt.snapshotQTape(qt_hist[1]);
+            lteSnap(ckt, qt_hist[1], lte_rows);
             simdCopy(qt_hist[2], qt_hist[1]);
             simdCopy(qt_hist[3], qt_hist[1]);
         }
@@ -381,7 +419,7 @@ pub fn simulate(
             // charge-only pass per converged attempt.
             ckt.evalQ(trial, t + dt);
             simdCopy(q_hist[0], ckt.q_vec[0..n]);
-            if (n_qt > 0) ckt.snapshotQTape(qt_hist[0]);
+            if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_rows);
             // Captured before the ring rotation at the bottom of this block.
             const lh = lte_hist.*;
             const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
@@ -532,7 +570,7 @@ pub fn simulate(
             simdCopy(q_hist[1], ckt.q_vec[0..n]);
             // The per-state tape takes the SAME two writes on the same Δq.
             if (n_qt > 0) {
-                ckt.snapshotQTape(qt_hist[0]);
+                lteSnap(ckt, qt_hist[0], lte_rows);
                 integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], alpha_val);
                 // Swap, not copy: qt_hist[0] is the ring's scratch slot (the
                 // rotation above just parked the stale tail there) and the next

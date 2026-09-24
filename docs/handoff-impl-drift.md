@@ -22,6 +22,7 @@ columns and axis). Base failing set: the 62 decks failing at 0424baf.
 | 2 | Newton failure: dt/8 and order 1, no same-dt BE retry (:815, :823) | 554 | 3 decks |
 | 3 | divided-difference history seeded with the max step (:312) | 554 | 4 decks |
 | 4 | CKTterr on the charge at the published solution | 558 | 69 decks, 4 fixed |
+| 5 | coupled inductors: LTE on INDflux (indload.c:72-76) | 559 | device_kinduc fixed |
 
 ### 1. LTE rejection keeps the integration order
 
@@ -96,3 +97,21 @@ Cost, callgrind Ir, commit 3 -> commit 4 (whole run, parse included):
 No cheaper pass keeps the values: the Jacobian-extrapolated C·dx is not
 q(x) for a nonlinear charge, and the re-read after the commit cannot move
 before the accept.
+
+### 5. Coupled inductors truncate on INDflux
+
+ngspice folds M·i_other into the inductor's flux before INDtrunc and MUT has
+no trunc routine; the q tape kept L·i and every M·i as separate states. With
+a kinduc batch present, `lteSnap` zeroes the inductor and kinduc tape spans
+(a flat zero history never binds) and appends the row plane at every
+current row, where an inductor's branch row sums to INDflux. Picked over
+`n_qt = 0` for K circuits because every other device keeps its per-state
+LTE. Circuits without a K card are byte-identical.
+`tran/device_kinduc` 51.7 -> 0.0013 (PASS), bit-identical to the
+`ZP_NO_QTAPE=1` run. Fixtures 558 -> 559; no other deck changed bytes
+(`reference/coupled_inductors_ac` runs no transient).
+
+Ceiling: every current row is appended, not just the inductors'. A device
+charging its own branch row appears twice with the same value (the min is
+unchanged); V-source rows are zero. Exact inductor rows need the tape's
+`rhs_idx` exposed by Circuit.
