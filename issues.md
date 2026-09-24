@@ -42,6 +42,9 @@ Legend: `[ ]` open, `[x]` fixed this session, `[~]` partially fixed.
 **Re-indexed 2026-09-24: 519/616 pass, 97 fail. Section F is the current
 index; sections A-E below are the audit history it points into.**
 
+**Phase 2b (docs/handoff-impl-conf2.md): 554/616 pass, 62 fail**, from 526 at
+b1054dc; no deck that passed there fails.
+
 FILE-OWNERSHIP NOTE: one `.disto` card must publish THREE plots, and the tree's
 only fan-out mechanism is `prepare.zig queriesFromDirectives` (the same route
 `.noise` already uses to become two jobs). So C7 required two small additive
@@ -70,39 +73,63 @@ fails — but it means the plot schema was never anyone's deliberate choice.
 FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 `docs/conformance-phase2.md`.
 
-- [ ] **F1 — first transient step differs from ngspice dctran.** 6 decks:
-  `tran/bench_medium_rc_ladder_50`, `tran/bench_ngspice_mosamp`,
-  `tran/bench_power_buck_open` (breakpoint clamp drops the `firsttime` /10),
-  `multi_analysis/bench_ngspice_res_array`, `tran/bench_tline_delay_line`,
-  `tran/bench_tline_cpl_ibm2` (charge-free circuits skip the first-step dt
-  repeat).
-- [ ] **F2 — DC sweep axis: ngspice accumulates the step.** ngspice adds `step`
-  (`v += step`, row 400 = 1.4975e-13) where we compute `start + k*step`,
-  and the axis atol is 1e-15. 3 decks: `dc/device_mesfet_transfer`,
-  `dc/device_mesfet_subthreshold`, `dc/device_diode_breakdown`.
-  `dc.zig:123/178/209`.
-- [ ] **F3 — B-source.** See C1. `four/polynomial_2`, `four/polynomial_3`,
-  `convergence/monotonic_cubic_1`, `convergence/monotonic_cubic_1000`.
-- [ ] **F4 — VBIC.** 4 decks. `dc/device_vbic_temp`,
-  `dc/device_vbic_forced_output`: self-heating (RTH) runs on a 4-terminal
-  instance. ngspice ties a missing 5th (temperature) terminal to ground
-  (`inp2q.c:85-87`), so dT = 0 there; our `dt` node floats with `sw_et = 1`.
-  Plus E9 (`i(q1)`).
-  `noise/device_vbic_noise_scale`: noise 17% off at M=2 (mfactor scaling).
-  `multi_analysis/device_vbic_ce_amp`: needs B3.
-- [ ] **F5 — OP reports success after the confirming Newton failed.**
-  `stress/scaling_inverter_chain_4k` (also slow: 308 s against the runner's
-  300 s timeout, so it flips between Timeout and ValueMismatch). `op.zig`
-  rung 5 returns `converged = true`; the stepping rungs run Newton with itl1
-  where ngspice uses itl2.
+- [~] **F1 — first transient step differs from ngspice dctran.** FIXED the
+  step (phase 2b), 3 of 6 decks pass. `tran.zig` keeps the `firsttime` /10
+  after the t = 0 breakpoint clamp (dctran.c:578-586), and every circuit,
+  charge or not, repeats the first accepted dt (no CKTtrunc on the first
+  point). First steps now equal ngspice's on all six decks.
+  Pass: `tran/bench_medium_rc_ladder_50`, `tran/bench_power_buck_open`,
+  `multi_analysis/bench_ngspice_res_array`. Still failing on a later cause:
+  `tran/bench_tline_cpl_ibm2` (8.2e3x -> 2.2e3x), `tran/bench_tline_delay_line`
+  (111x, unchanged), `tran/bench_ngspice_mosamp` (198 points against
+  ngspice's 2316; 2.9e4x -> 2.6e5x, the grid start is right and the gap is
+  the later LTE behaviour, group 14). The `four/*` decks move 0.33x -> 0.34x
+  of tolerance on a grid that is now ngspice's point for point; their
+  residual is the `.four` interpolation, not the grid.
+- [x] **F2 — DC sweep axis: ngspice accumulates the step.** FIXED (phase
+  2b): `dc.zig` accumulates `v += step` at both sweep levels like
+  dctrcurv.c:469, and `temp_sweep.numPoints` takes the same 1e-6-step
+  endpoint nudge as `sweepCount`. `dc/device_mesfet_transfer`,
+  `dc/device_mesfet_subthreshold`, `dc/device_diode_breakdown` pass. The
+  analytic-oracle axes (`dc/diode_reverse`, `diode_reverse_continuation`)
+  move by the accumulated roundoff (0.28x / 0.14x of the 1e-15 atol, still
+  passing): the axis now carries ngspice's bits, not start+k*step.
+- [x] **F3 — B-source.** FIXED (phase 2b), see C1. `four/polynomial_2`,
+  `four/polynomial_3`, `convergence/monotonic_cubic_1`,
+  `convergence/monotonic_cubic_1000` pass, and so do `hb/polynomial_2`,
+  `hb/polynomial_3`, `pss/polynomial_2`, `pss/polynomial_3` (C1 was their
+  only open cause).
+- [~] **F4 — VBIC.** `dc/device_vbic_temp` FIXED (phase 2b): a card
+  without the fifth (thermal) node defaults `sw_et = 0` (ngspice ties the
+  missing node to ground, inp2q.c:85-87, so dT = 0; an explicit SW_ET on the
+  card still wins), and `i(q1)` is aliased to `v(q1#xf2)` when TD > 0 (E9).
+  `dc/device_vbic_forced_output`: MissingColumn -> 1 row at 3.26x (row 25,
+  the Vc = 3.45 V zero crossing of `i(vb)`, ~1e-6 relative; constants,
+  unverified). `noise/device_vbic_noise_scale` 28x unchanged (the VA's
+  double mfactor on noise, recipe 5b, not applied here).
+  `multi_analysis/device_vbic_ce_amp`: MissingColumn -> AC passes, needs B3.
+  `op/device_vbic` moves 0.0033x -> 0.0037x (self-heating now off, as in
+  ngspice).
+- [~] **F5 — OP reported success after the confirming Newton failed.**
+  FIXED the OP (phase 2b). The gmin and source stepping rungs run Newton with
+  itl2 and ngspice's factor rules (cktop.c:207-222), so
+  `stress/scaling_inverter_chain_4k` now follows ngspice's gmin sequence and
+  finishes on the gmin rung: the OP is right (row 0 matches) and the run
+  takes 15 s instead of 308 s, so it no longer flips to Timeout. OPtran
+  reports the confirming Newton's verdict (no deck changed). The deck still
+  fails in the transient (`i(vdd)` 2.3e8x -> 503x), which is F9's class.
 - [ ] **F6 — last transient row lands short of t_stop.**
   `tran_noise/rc_equilibrium` (last row 9.999999999999999e-06 < 1e-5 ->
   MissingTimeCoverage). Clamp the last step to t_stop.
 - [ ] **F7 — OP Newton acceptance too loose.** See E7.
   `tran/bench_tline_ltra1_1_line`, `tran/bench_tline_txl1_1_line`.
-- [ ] **F8 — envelope.** `envelope/sine` (RMS counts both window
-  endpoints, 0.77% low; `i(vin)` labelled `v(2)`),
-  `envelope/rc_startup_0p001` (quasi-static envelope, the capacitor is open).
+- [x] **F8 — envelope.** FIXED (phase 2b). `envelope/sine`: columns are
+  named from the probe labels (`i(vin)` was published as `v(2)`), and the
+  window RMS uses trapezoid endpoint weights (it counted 65 samples over 64
+  steps, sqrt(64/65) low). `envelope/rc_startup_0p001`: every envelope step
+  is now a trapezoid step carrying the charge history (it was quasi-static,
+  the capacitor open); 498x -> 0.14x. `dc_offset`, `negative_offset` go from
+  0.28x to exact, `rc_startup_1e-05` 0.57x -> 0.06x.
 - [ ] **F9 — transient drift once LTE engages.** 21 decks; re-measure after
   F1. Grid divergence: `stress/scaling_parallel_inverters_100`,
   `stress/scaling_parallel_inverters_2000`, `stress/scaling_inverter_chain_256`,
@@ -116,21 +143,27 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `tran/device_mos6_simpleinv`, `tran/bench_bypass_gated_branch`,
   `tran/device_urc`. Also `reference/diode_reverse_recovery` (2 rows in the
   recovery tail).
-- [ ] **F10 — PSS DC offset.** `pss.zig:197` zeroes the trapezoid `i_prev`
-  at every period start. 6 decks: `pss/rc_default`, `pss/rc_minimal_grid`,
-  `pss/rc_negative_amplitude`, `pss/rc_slow_settling`,
-  `pss/bench_pss_rlc_driven`, `pss/diode_clipper`. `pss/polynomial_2`,
-  `pss/polynomial_3` fail on C1 first.
-- [ ] **F11 — oracle defects, a user decision.** 5 decks:
-  `tran/bench_tran_sffm_source` (ngspice's SFFM is wrong),
-  `dc/bench_mosfet_cmos_inverter` (row 50 is metastable),
-  `convergence/bench_ota_cutoff_abstol` (not an accuracy reference),
-  `sens/bench_sens_bridge` (tests ngspice's parameter table, E10),
-  `multi_analysis/bench_sens_diffpair` (ngspice reverses the `.tf` plots).
-  The mesa inverter deck was filed here too, but ngspice at tight tolerance
-  still matches its oracle, so it is under E6.
-- Open features, unchanged: C1 (`hb/polynomial_2`, `hb/polynomial_3`,
-  `pac/ideal_multiplier_1`, `pac/ideal_multiplier_2`,
+- [x] **F10 — PSS DC offset.** FIXED (phase 2b): `pss.zig` seeds the
+  trapezoid `i_prev` at each period start with -f(x0) on rows with a
+  diagonal C entry instead of zeroing it. `pss/rc_default`,
+  `pss/rc_minimal_grid`, `pss/rc_negative_amplitude`,
+  `pss/rc_slow_settling`, `pss/bench_pss_rlc_driven`, `pss/diode_clipper`
+  pass (worst 0.14x). `pss/polynomial_2`, `pss/polynomial_3` pass since
+  F3.
+- [x] **F11 — oracle defects, a user decision.** DECIDED and regenerated
+  (phase 2b, options of docs/conformance-phase2.md group 15):
+  `tran/bench_tran_sffm_source` against the closed form (v(out)/i(v1) atol
+  1e-3 V / 1e-6 A: ngspice and espice at default options both sit 3.1e-4 V
+  off it); `dc/bench_mosfet_cmos_inverter` with LAMBDA=0.01 on both models,
+  oracle ngspice at reltol=1e-9; `convergence/bench_ota_cutoff_abstol` now
+  carries `.options abstol=1e-18 reltol=1e-10 vntol=1e-12` and its oracle is
+  ngspice at them; `sens/bench_sens_bridge` restricted to v(r1..r5), v(vin);
+  `multi_analysis/bench_sens_diffpair` TF plots in deck order, sensitivities
+  restricted to the principal R/V columns and q1/q2 ISE/ISC. The mesa
+  inverter deck is under E6, not here.
+- Open features, unchanged: multi-probe B sources, now rejected with
+  `UnsupportedBsourceExpression` instead of silently wrong
+  (`pac/ideal_multiplier_1`, `pac/ideal_multiplier_2`,
   `pnoise/noise_multiplier_1`, `pnoise/noise_multiplier_2`,
   `qpss/square_mixer` — each with a second open feature); C2
   (`hb/current_driven_rc`, `hb/diode_clipper`, `hb/diode_rectifier_rc`);
@@ -293,23 +326,25 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 
 ## C. Numerical / model gaps — deck runs, answers are wrong
 
-- [ ] **C1 — the B-source compiler SILENTLY compiles unsupported expressions
-  to an open circuit.** CORRECTED 2026-09-24: "polynomial subset" understated
-  it. `builder.zig extractPolyCoeffs` (~:1505) returns with all-zero
-  coefficients whenever `collectTerms` rejects the expression, and a zero
-  bsource is an open circuit, with no diagnostic. Measured: `V(a)^2`,
-  `V(a)**2`, `pow(V(a),2)` and `V(a)*V(a)*V(a)` all compile to 0; only
-  `V(a)*V(a)` reaches `c2`, and there is no `c3` term at all. Fix: `^`/`**`/
-  integer `pow` in `collectTerms`, a `c3` term in `models/bsource.va`, and a
-  hard error for anything still outside the subset (trust boundary). Decks:
-  `four/polynomial_2`, `four/polynomial_3`, `convergence/monotonic_cubic_1`,
-  `monotonic_cubic_1000` fail on this alone; it is one of two causes in
-  `hb/polynomial_*`, `pss/polynomial_*`, `pac/ideal_multiplier_*`,
-  `pnoise/noise_multiplier_*`, `qpss/square_mixer`.
+- [x] **C1 — the B-source compiler SILENTLY compiled unsupported
+  expressions to an open circuit.** FIXED (phase 2b). `extractPolyCoeffs`
+  builds a cubic polynomial in the one control pair: `+ - * /`, unary minus,
+  `^`/`**`/`pow()` with a constant integer exponent 0..3, and one
+  multiplicative `tanh(k*V)` factor; `models/bsource.va` gained `c3`.
+  Anything else (a second V() pair as in `V(a)*V(b)`, `sqrt`, `i()`, degree
+  above 3, a non-constant divisor) is a hard error naming the card and the key
+  (`UnsupportedBsourceExpression`); the model-side all-zero open-circuit
+  backstop is gone, so `v=0` is a 0 V source again. The multi-probe decks
+  (`pac/ideal_multiplier_*`, `pnoise/noise_multiplier_*`,
+  `qpss/square_mixer`) now fail with that error instead of computing
+  `V(a)^2`: a multi-input B source is an open feature.
 
 - [ ] **C2 — HB does not drive from the physical source spectra.** 12 decks
   (`hb/*`, `multi_analysis/bench_hb_tline_guard`). `hb/current_driven_rc`
   additionally fails at dispatch with `AnalysisSourceNotFound`.
+  Phase 2b: the HB and QPSS residuals take the charge term from q(t) at
+  every sample instead of C(t0)*X (the Jacobian keeps C(t0), a quasi-Newton
+  step for nonlinear charge); linear decks move by roundoff only.
 
 - [ ] **C3 — QPSS ignores the physical two-tone source spectra.** 4 decks
   (`qpss/linear_two_tone_*`, `qpss/square_mixer`); all four also fail to
@@ -317,6 +352,9 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 
 - [ ] **C4 — PAC injects a node current instead of honoring the named
   voltage-source excitation.** 5 decks (`pac/*`).
+  Phase 2b: `pac.linearize` and pnoise's sample loops now evaluate under
+  analysis("tran"), so SIN/PULSE sources and the LO move (they gave their
+  DC value); no deck's bytes changed (the pac/pnoise decks are LTI).
 
 - [ ] **C5 — periodic noise counts LTI sidebands as conversion.** 5 decks
   (`pnoise/lti_rc_sidebands_*`, `pnoise/noise_multiplier_*`). Extra sidebands
@@ -511,6 +549,10 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   checked before, because `matex/dc` aborted the runner. Suspect the Arnoldi
   breakdown path (`ar.m == 0` zeroes `x_new` wholesale) and the R-MATEX
   `T = (h/γ)(I − H⁻¹)` reconstruction.
+  Phase 2b fixed two memory bugs on the way, no deck changed: the dense-LU
+  pivot buffer was a fixed [256]u32 against a user m_max, and the posterior
+  check got an n-long scratch for its 7*m^2 need, so it never ran on a small
+  circuit.
 
 - [x] **E4 — a current-swept `.dc` labels its axis `v(v-sweep)`.** 2 decks
   (`dc/current_ascending`, `dc/current_descending` → MissingColumn). The
@@ -561,7 +603,8 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   DEVICE card. The instance spelling `R1 a b 1k tc1=...` — what every current
   deck uses — works, so the corpus does not catch this.
 
-- [ ] **E9 — `i(q1)` in the VBIC oracles is NOT a terminal current.** 2 decks
+- [x] **E9 — `i(q1)` in the VBIC oracles is NOT a terminal current.** FIXED
+  (phase 2b): the builder aliases it to `v(<q>#xf2)` when TD > 0. 2 decks
   (`dc/device_vbic_temp`, `dc/device_vbic_forced_output` → MissingColumn).
   CORRECTED 2026-09-24: the earlier diagnosis (a missing per-device
   terminal-current probe) was wrong. ngspice `vbicsetup.c:510-525` creates

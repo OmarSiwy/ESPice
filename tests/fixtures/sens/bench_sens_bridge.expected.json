@@ -4,7 +4,7 @@
   "purpose": "SENS fixture: Wheatstone bridge tap sensitivity near balance.",
   "oracle": {
     "kind": "ngspice-44.2",
-    "derivation": "Independent ngspice-44.2 run of the preserved benchmark circuit. Stored binary raw doubles, selected by column name. Transient values retain reference accepted times. Large sweeps retain explicit row indices including outer-sweep boundaries.",
+    "derivation": "Independent ngspice-44.2 run of the deck, restricted to the principal sensitivities (the five resistances and the supply). The previous oracle sampled ngspice parameter-table columns that are identically 0 here.",
     "command": "ngspice -n -b -r reference.raw circuit.sp",
     "source_sha256": "f1e44d83b1229eac4950d48fa9fd3014f709b8ccdfebda8286a82414f74652f2"
   },
@@ -16,197 +16,47 @@
         "name": "Sensitivity Analysis",
         "match": "exact",
         "columns": {
-          "v(r5:rsh)": {
+          "v(r1)": {
             "values": [
-              -0.0
+              -0.0023863074552593
             ],
-            "unit": "V",
             "rtol": 0.001,
-            "atol": 2e-06
+            "atol": 1e-12
           },
-          "v(r5:tce)": {
+          "v(r2)": {
             "values": [
-              -0.0
+              0.0023616071909319
             ],
-            "unit": "V",
             "rtol": 0.001,
-            "atol": 2e-06
+            "atol": 1e-12
           },
-          "v(r5:wf)": {
+          "v(r3)": {
             "values": [
-              -0.0
+              -0.00011414997043721
             ],
-            "unit": "V",
             "rtol": 0.001,
-            "atol": 2e-06
+            "atol": 1e-12
           },
-          "v(r5_l)": {
+          "v(r4)": {
             "values": [
-              -0.0
+              0.00011420159864636
             ],
-            "unit": "V",
             "rtol": 0.001,
-            "atol": 2e-06
+            "atol": 1e-12
           },
-          "v(r5_bv_max)": {
+          "v(r5)": {
             "values": [
-              -0.0
+              1.0325641830313e-07
             ],
-            "unit": "V",
             "rtol": 0.001,
-            "atol": 2e-06
+            "atol": 1e-12
           },
-          "v(r4:tc1)": {
+          "v(vin)": {
             "values": [
-              -0.0
+              0.50237395431062
             ],
-            "unit": "V",
             "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r4:r)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r4_temp)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r4_tc)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r3:narrow)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r3:kf)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r3:wf)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r3_w)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r3_bv_max)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r2:tc1)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r2:bv_max)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r2_temp)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r2_tc2)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r1:narrow)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r1:kf)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r1:ef)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r1_w)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(r1_scale)": {
-            "values": [
-              -2.3863074547418
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
-          },
-          "v(vin_phase)": {
-            "values": [
-              -0.0
-            ],
-            "unit": "V",
-            "rtol": 0.001,
-            "atol": 2e-06
+            "atol": 1e-12
           }
         },
         "row_count": 1

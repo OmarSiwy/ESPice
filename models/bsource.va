@@ -7,7 +7,7 @@
 //
 // Spec: docs/passives-and-sources.md §1.6, §3.
 //   vc = V(cp,cn)
-//   f  = (c0 + c1*vc + c2*vc^2) * (th != 0 ? tanh(th*vc) : 1)
+//   f  = (c0 + c1*vc + c2*vc^2 + c3*vc^3) * (th != 0 ? tanh(th*vc) : 1)
 //   V mode (v={...}):  V(p,n) <+ factor*f   (branch-current unknown)
 //   I mode (i={...}):  I(p,n) <+ factor*f
 // The tanh factor covers the MESFET "ungated load" idiom
@@ -19,8 +19,9 @@
 // reciproctc != 0. tc1/tc2/dtemp/reciproctc are ASRC instance parameters
 // (asrc.c ASRCpTable).
 //
-// ponytail: the polynomial subset is the ceiling. Full expression trees need
-// the netlist expression compiled to Verilog-A (or an expression-VM device).
+// ponytail: the polynomial subset is the ceiling; the builder rejects any
+// expression outside it (extractPolyCoeffs). Full expression trees need the
+// netlist expression compiled to Verilog-A (or an expression-VM device).
 module bsource(p, n, cp, cn);
     inout p, n, cp, cn;
     electrical p, n, cp, cn;
@@ -28,6 +29,7 @@ module bsource(p, n, cp, cn);
     parameter real c0    = 0.0;      //         constant term
     parameter real c1    = 0.0;      //         linear term
     parameter real c2    = 0.0;      //         square term
+    parameter real c3    = 0.0;      //         cubic term
     parameter real th    = 0.0;      // 1/V     tanh(th*vc) factor; 0 = none
     parameter real tc1   = 0.0;      // 1/K     linear tempco
     parameter real tc2   = 0.0;      // 1/K^2   quadratic tempco
@@ -39,7 +41,7 @@ module bsource(p, n, cp, cn);
     parameter integer imode      = 0 from [0:1];  // 0 = V output, 1 = I output
 
     real tdev, dt, factor;
-    real k0, k1, k2;
+    real k0, k1, k2, k3;
     real vc, f;
 
     analog begin
@@ -54,22 +56,15 @@ module bsource(p, n, cp, cn);
         k0 = factor * c0;
         k1 = factor * c1;
         k2 = factor * c2;
+        k3 = factor * c3;
 
         vc = V(cp, cn);
-        f = k0 + vc * (k1 + k2 * vc);
+        f = k0 + vc * (k1 + vc * (k2 + k3 * vc));
         if (th != 0.0)
             f = f * tanh(th * vc);
 
         if (imode != 0)
             I(p, n) <+ f;
-        else if (c0 == 0.0 && c1 == 0.0 && c2 == 0.0)
-            // The builder leaves all coefficients at 0 when the expression is
-            // outside the polynomial subset. Open circuit, never a hard short
-            // (§1.1): a floating node fails loudly, a 0 V source is silently
-            // wrong. This costs a literal `v=0` card its short.
-            // ponytail: model-side backstop; the real fix is extractPolyCoeffs
-            // returning error.UnsupportedDevice when collectTerms() fails.
-            I(p, n) <+ 0.0;
         else
             V(p, n) <+ f;
     end

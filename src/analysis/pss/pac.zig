@@ -157,6 +157,10 @@ pub inline fn linearize(
     for (0..settle_steps) |k| {
         if (k != 0 and k % n_samples == 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = k / n_samples });
         t += dt;
+        // §4.6.1: sources only follow their waveform under analysis("tran");
+        // without this every SIN/PULSE card gave its DC value and the LO was
+        // gone. dt stays 0: the settling is quasi-static.
+        ckt.setSimState(.{ .t = t, .kind = .tran });
         _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch |err| switch (err) {
             error.QueryCancelled => return err,
             else => {},
@@ -167,6 +171,7 @@ pub inline fn linearize(
     for (0..n_samples) |k| {
         if (k != 0 and k % 64 == 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = k, .total = n_samples });
         t += dt;
+        ckt.setSimState(.{ .t = t, .kind = .tran });
         _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch |err| switch (err) {
             error.QueryCancelled => return err,
             else => {},
