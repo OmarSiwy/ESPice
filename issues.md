@@ -126,11 +126,13 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   `tran/device_mos6_simpleinv`, `tran/bench_bypass_gated_branch`,
   `tran/device_urc`. Also `reference/diode_reverse_recovery` (2 rows in the
   recovery tail).
-- [ ] **F10 — PSS DC offset.** `pss.zig:197` zeroes the trapezoid `i_prev`
-  at every period start. 6 decks: `pss/rc_default`, `pss/rc_minimal_grid`,
-  `pss/rc_negative_amplitude`, `pss/rc_slow_settling`,
-  `pss/bench_pss_rlc_driven`, `pss/diode_clipper`. `pss/polynomial_2`,
-  `pss/polynomial_3` fail on C1 first.
+- [x] **F10 — PSS DC offset.** FIXED (phase 2b): `pss.zig` seeds the
+  trapezoid `i_prev` at each period start with -f(x0) on rows with a
+  diagonal C entry instead of zeroing it. `pss/rc_default`,
+  `pss/rc_minimal_grid`, `pss/rc_negative_amplitude`,
+  `pss/rc_slow_settling`, `pss/bench_pss_rlc_driven`, `pss/diode_clipper`
+  pass (worst 0.14x). `pss/polynomial_2`, `pss/polynomial_3` fail on C1
+  first.
 - [ ] **F11 — oracle defects, a user decision.** 5 decks:
   `tran/bench_tran_sffm_source` (ngspice's SFFM is wrong),
   `dc/bench_mosfet_cmos_inverter` (row 50 is metastable),
