@@ -59,7 +59,7 @@ list above or was verified against its own oracle by hand. Nothing is marked
 fixed on the strength of "it compiles".
 
 One thing the harness caught on the way out, worth keeping in view: the
-`.noise` change broke `src/problem/tests/problem.zig` "device noise needs no
+`.noise` change broke `src/tests/espice.zig` "device noise needs no
 input source and retains its thermal PSD", which pinned the old
 `noise_density`/`noise_rms` shape. It is updated to the ngspice contract
 (3-column amplitude spectrum, 2-column totals) and `zig build test-problem`
@@ -598,7 +598,7 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
   instance-spelled columns (`v(r5_l)`, `v(r4_temp)`, `v(r3_w)`, `v(r1_scale)`,
   …). VerA emits a FIXED `Instance` struct (`../VerA/src/backend/codegen.zig`
   `emitInstance`) — no Verilog-A `parameter` can land in it — and
-  `src/analysis/eval.zig:1671` narrows Instance further to the allowlist
+  `src/device/eval.zig:1671` narrows Instance further to the allowlist
   `{temperature, mfactor}`. So a `.va` can only ever produce `:`-spelled
   columns, and adding the 9 remaining ngspice model-card names would deliver
   12/24, leave the deck red, and cost 9 dead f64 per resistor instance. Two
@@ -664,7 +664,7 @@ FIRST cause. Fix recipes for F1, F4, F5, F8, F10, F11 and E6 are in
 
 - [ ] **D1 — AGENTS.md cites a path that no longer exists.** "the 2 `disto`
   HD2 failures (tests/analyses.zig:972,1070)" — that file is now
-  `src/problem/tests/analyses.zig`, and the disto assertions are not in it.
+  `src/tests/analyses.zig`, and the disto assertions are not in it.
 
 - [ ] **D3 — `src/analysis/tests/executor.zig` "timed worker excludes paused
   time when cancelled" is flaky, and only under the build runner.** It aborted

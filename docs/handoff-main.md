@@ -24,9 +24,9 @@ the `v(out,2)` change. Then verify the fix and merge.
 
 ## Next steps (user-requested, not started)
 1. Merge the agent branches (va-models, espice-kernels, solvers) after each passes the gate.
-2. Move src/analysis/solvers -> src/solvers (update AGENTS.md DAG rule).
-3. src/device/ (device_ir + device half of eval.zig + model loading), API via /api-design.
-4. src/core/ for shared leaf types (problem_types, numerics, requests, output_types).
+2. Move src/solver -> src/solvers (update AGENTS.md DAG rule).
+3. src/device/ (device ABI + device half of eval.zig + model loading), API via /api-design.
+4. src/core/ for shared leaf types (prepared deck, numerics, queries, results).
 5. Fold problem's request/preparation code into frontend; keep the Problem facade + C ABI thin.
 6. Audit Problem dispatch: one GPU context/probe per session, batch-shaped queries as one
    solve_batch, ParEval pool reused, prerequisite results shared.

@@ -228,7 +228,7 @@ against `converger.zig` directly. §4 — verified against
 `src/analysis/gpu.zig` + `converger.run` dispatch; kernel internals
 paraphrase our ABI (`analysis.gpu_abi`).
 
-**Our implementation:** `src/analysis/solvers/converger.zig`
+**Our implementation:** `src/solver/converger.zig`
 (`newton`, `jfnk`, `finalizeStep`, `dampStep`, `updateAndNorm`,
 `Tolerances`); device limiting in `src/analysis/eval/engine.zig` and compiled models
 (`ckt.applyLimits`); GPU driver `src/analysis/gpu.zig` (`solveNewton`).

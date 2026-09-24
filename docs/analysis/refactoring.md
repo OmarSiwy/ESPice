@@ -1,6 +1,6 @@
 # Analysis ownership and numerical work
 
-Evaluation is in `src/analysis/eval.zig`. Imported as `device_eval` or the
+Evaluation is in `src/device/eval.zig`. Imported as `device_eval` or the
 runtime loader's `dyn` module, it supplies the shared evaluator. Compiled as a
 per-model root, it exports either the host vtable or the GPU entry points.
 Model PODs, scatter tapes, plane layout and the device ABI are unchanged.

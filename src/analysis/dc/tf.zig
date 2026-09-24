@@ -4,9 +4,9 @@
 //! API makes the explicit transpose unnecessary.
 const std = @import("std");
 const root = @import("../types.zig");
-const dense_lu = @import("solvers").dense_lu;
+const dense_lu = @import("solver").dense_lu;
 
-pub const Options = @import("requests").Tf;
+pub const Options = @import("core").query.Tf;
 
 pub const Values = struct {
     gain: f64,

@@ -8,9 +8,9 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
-const num = @import("numerics");
+const num = @import("core").numerics;
 const combinePlanes = @import("../Circuit.zig").combinePlanes;
-const solvers = @import("solvers");
+const solvers = @import("solver");
 
 const DenseLu = solvers.dense_lu.DenseLu(f64);
 const Solver = solvers.direct.Solver;
@@ -19,7 +19,7 @@ const Solver = solvers.direct.Solver;
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
-pub const Options = @import("requests").Matex;
+pub const Options = @import("core").query.Matex;
 
 // ---------------------------------------------------------------------------
 // Sparse CSC matrix-vector product: y = M * x (for n×n CSC M)

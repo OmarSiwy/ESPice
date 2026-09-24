@@ -8,12 +8,12 @@ const std = @import("std");
 const root = @import("../types.zig");
 // ponytail: the shared copy owns SIMD setup; seeded noise sampling stays scalar.
 const simdCopy = root.copySimd;
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
 
 pub const NoiseSource = root.NoiseSource;
 
-pub const Options = @import("requests").TranNoise;
+pub const Options = @import("core").query.TranNoise;
 const Waveform = @import("types.zig").Waveform;
 
 // ============================================================================

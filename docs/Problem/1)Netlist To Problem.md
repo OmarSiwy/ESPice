@@ -18,7 +18,7 @@ try p.print(writer, .{});
 try p.run_all();
 ```
 
-The declarations are in [problem/root.zig](../../src/problem/root.zig).
+The declarations are in [espice.zig](../../src/espice.zig).
 Creation performs source/model preparation and graph validation. It does not
 start a query, allocate its solver workspace, or write the output destination.
 A deck with no analysis requests receives an operating-point query.
@@ -34,14 +34,14 @@ code have process lifetime; multiple-file loading propagates errors.
 
 `frontend.build(session_arena, parse_arena, ast)` resolves nodes,
 parameters, source identities, initial conditions, probes, and query options.
-It creates [Prepared](../../src/problem/types.zig), whose circuit contains
+It creates [Prepared](../../src/core/deck.zig), whose circuit contains
 frozen CSC connectivity, per-type device batches, model/instance template
 storage, gather/scatter bindings, and labels. It contains no solver workspace.
 
 Device construction belongs to frontend. Model definitions live in `models/`;
-VerA supplies their compiled representation. Shared device IR and ABI live in
-[device_ir.zig](../../src/problem/device_ir.zig); numerical evaluation and GPU
-launch policy live under `src/analysis/`. Analysis binds private mutable
+VerA supplies their compiled representation. The device ABI lives in
+[abi.zig](../../src/device/abi.zig) and numerical evaluation in
+`src/device/eval.zig`; GPU launch policy lives under `src/analysis/`. Analysis binds private mutable
 instances from the prepared template when a query starts. Model compilation
 and instance construction are distinct operations.
 

@@ -2,9 +2,9 @@
 //! per point. The circuit pattern and Newton workspace are shared across lanes.
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
-pub const Options = @import("requests").Temp;
+pub const Options = @import("core").query.Temp;
 
 pub fn numPoints(options: Options) u32 {
     if (options.t_step <= 0) return 1;

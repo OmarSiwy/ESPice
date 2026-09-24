@@ -162,36 +162,44 @@ test "dyn vtable: blob init, param set by name, proto add" {
 
     var mblob: [@sizeOf(R.Model)]u8 align(16) = undefined;
     vt.init_model(&mblob);
-    try testing.expect(vt.set_model_param(&mblob, "r", 42));
-    try testing.expect(!vt.set_model_param(&mblob, "bogus", 1));
+    const Status = @TypeOf(vt.bind_model(&mblob, &.{}));
+    const one = struct {
+        fn f(bind: anytype, blob: [*]u8, key: []const u8, value: f64) Status {
+            return bind(blob, &.{.{ .key = key, .value = value }});
+        }
+    }.f;
+    try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "r", 42));
+    try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "bogus", 1)); // unknown keys are ignored
     const m: *R.Model = @ptrCast(@alignCast(&mblob));
     try testing.expectEqual(@as(f32, 42), m.r);
 
-    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 1e300, -1e300 }) |invalid|
-        try testing.expect(!vt.set_model_param(&mblob, "r", invalid));
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64) }) |invalid|
+        try testing.expectEqual(.non_finite_parameter, one(vt.bind_model, &mblob, "r", invalid));
+    for ([_]f64{ 1e300, -1e300 }) |invalid|
+        try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "r", invalid));
     try testing.expectEqual(@as(f32, 42), m.r);
-    for ([_]f64{ -129, 128, 0.5, -0.5, std.math.nan(f64), std.math.inf(f64) }) |invalid|
-        try testing.expect(!vt.set_model_param(&mblob, "mode", invalid));
+    for ([_]f64{ -129, 128, 0.5, -0.5 }) |invalid|
+        try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "mode", invalid));
+    try testing.expectEqual(.non_finite_parameter, one(vt.bind_model, &mblob, "mode", std.math.nan(f64)));
     try testing.expectEqual(@as(i8, 0), m.mode);
     try testing.expect(!m.mode__given);
-    try testing.expect(vt.set_model_param(&mblob, "mode", -128));
+    try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "mode", -128));
     try testing.expectEqual(@as(i8, -128), m.mode);
     try testing.expect(m.mode__given);
-    try testing.expect(vt.set_model_param(&mblob, "mode", 127));
+    try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "mode", 127));
     try testing.expectEqual(@as(i8, 127), m.mode);
-    try testing.expect(!vt.set_model_param(&mblob, "count", -1));
-    try testing.expect(!vt.set_model_param(&mblob, "count", 0x1p64));
-    try testing.expect(vt.set_model_param(&mblob, "count", 0x1p64 - 2048));
+    try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "count", -1));
+    try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "count", 0x1p64));
+    try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "count", 0x1p64 - 2048));
     try testing.expectEqual(@as(u64, 18446744073709549568), m.count);
-    try testing.expect(!vt.set_model_param(&mblob, "wide", 0x1p63));
-    try testing.expect(!vt.set_model_param(&mblob, "wide", -0x1p63 - 2048));
-    try testing.expect(vt.set_model_param(&mblob, "wide", -0x1p63));
+    try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "wide", 0x1p63));
+    try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "wide", -0x1p63 - 2048));
+    try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "wide", -0x1p63));
     try testing.expectEqual(std.math.minInt(i64), m.wide);
-    try testing.expect(!vt.set_model_param(&mblob, "mode__given", std.math.nan(f64)));
 
     var iblob: [@sizeOf(R.Instance)]u8 align(16) = undefined;
     vt.init_instance(&iblob);
-    try testing.expect(!vt.set_instance_param(&iblob, "temp", 1e300));
+    try testing.expectEqual(.parameter_out_of_range, one(vt.bind_instance, &iblob, "temp", 1e300));
     const inst: *R.Instance = @ptrCast(@alignCast(&iblob));
     try testing.expectEqual(@as(f32, 300.15), inst.temp);
 

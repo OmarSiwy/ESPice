@@ -19,15 +19,15 @@
 //!   5. Result: complex transfer (gain + phase) at each sideband frequency.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
-const types = @import("numerics");
-const solvers = @import("solvers");
+const converger = @import("solver").converger;
+const types = @import("core").numerics;
+const solvers = @import("solver");
 const fft_mod = solvers.fft;
 const dense_lu = solvers.dense_lu;
 
 pub const Complex = types.Complex;
 
-pub const Options = @import("requests").Pac;
+pub const Options = @import("core").query.Pac;
 
 /// The LPTV sweep PAC and PXF share: find the periodic steady state,
 /// linearise, then per input frequency build the conversion matrix A(f)

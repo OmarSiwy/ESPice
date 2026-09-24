@@ -16,16 +16,16 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
-const converger = @import("solvers").converger;
-const dense_lu = @import("solvers").dense_lu;
-const types = @import("numerics");
+const converger = @import("solver").converger;
+const dense_lu = @import("solver").dense_lu;
+const types = @import("core").numerics;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
 pub const NoiseSource = root.NoiseSource;
 
-pub const Options = @import("requests").Pnoise;
+pub const Options = @import("core").query.Pnoise;
 
 pub const SweepStatus = struct {
     total_noise: f64,

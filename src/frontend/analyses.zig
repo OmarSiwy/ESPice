@@ -2,13 +2,14 @@
 //! arrive as circuit rows; source and card references resolve by name
 //! against the construction bindings, which outlive the parse.
 const std = @import("std");
-const problem = @import("problem_types");
-const requests = @import("requests");
-const numerics = @import("numerics");
+const core = @import("core");
+const Library = @import("device").Library;
+const requests = @import("core").query;
+const numerics = @import("core").numerics;
 const netlist = @import("netlist");
 const Value = netlist.Value;
 const Job = requests.Query;
-const GROUND = problem.GROUND;
+const GROUND = core.GROUND;
 pub const NO_NODE = netlist.none;
 /// Nodes a deck's output `v(...)` may name; appended cards take one.
 pub const deck_output_nodes = 2;
@@ -16,7 +17,7 @@ pub const deck_output_nodes = 2;
 /// Queries for `cards`, whose nets are circuit rows here, in card order. `.noise` also publishes its
 /// integrated plot, `.disto` its two harmonic vectors. `max_group_args` is
 /// how many nodes an output `v(...)` may name.
-pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, max_group_args: usize, sources: problem.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
+pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, max_group_args: usize, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
     for (cards) |c| {
         const args = c.args;
         const arg: usize = if (c.kind == .four) 1 else 0;
@@ -241,7 +242,7 @@ pub fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
     return null;
 }
 
-fn voltageSource(args: []const Value, i: usize, sources: problem.QueryBindings) !usize {
+fn voltageSource(args: []const Value, i: usize, sources: core.QueryBindings) !usize {
     const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
     return findNameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
 }
@@ -257,10 +258,10 @@ fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !req
         if (!std.ascii.eqlIgnoreCase(c.name, name)) continue;
         // ngspice sweeps a card's PRIMARY value: `dc` on a source, the
         // element value on a passive.
-        const param = std.StaticStringMap([]const u8).initComptime(.{
-            .{ "resistor", "r" }, .{ "capacitor", "c" }, .{ "inductor", "l" },
-        }).get(c.type_name) orelse "dc";
-        return .{ .type_name = c.type_name, .index = c.index, .param_name = param };
+        const param = if (c.type == Library.builtin("resistor")) "r" else if (c.type == Library.builtin("capacitor"))
+            "c"
+        else if (c.type == Library.builtin("inductor")) "l" else "dc";
+        return .{ .type = c.type, .index = c.index, .param_name = param };
     }
     return error.AnalysisSourceNotFound;
 }
@@ -288,7 +289,7 @@ fn frequencySweep(args: []const Value, offset: usize) !numerics.FreqSweep {
     return .{ .f_start = first, .f_stop = last, .points = try count(u32, args, offset + 1, 10), .kind = kind };
 }
 
-pub fn buildJob(a: netlist.Analysis, sources: problem.QueryBindings, cards: []const requests.CardRef) !?Job {
+pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const requests.CardRef) !?Job {
     const args = a.args;
     const id = a.kind;
     const node_id = a.pos;

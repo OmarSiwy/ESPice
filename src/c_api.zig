@@ -1,10 +1,32 @@
 //! C boundary for the owning Problem facade. Build as a separate module so the
 //! facade never imports its own adapter. Public layouts are in include/espice.h.
 const std = @import("std");
-const api = @import("problem");
+const api = @import("espice");
 const allocator = std.heap.smp_allocator;
 const abi_version = 1;
 const no_query = std.math.maxInt(u32);
+const header = @cImport(@cInclude("espice.h"));
+
+// Every enum that crosses the boundary travels as its tag value, so each one is
+// pinned here to include/espice.h by name: a reordered enum fails the build.
+comptime {
+    pin(Code, .{});
+    pin(api.Dialect, .{});
+    pin(api.Request, .{});
+    pin(api.Format, .{});
+    pin(api.Status, .{ .failed = "QUERY_FAILED" });
+    pin(api.requests.Kind, .{});
+    pin(@FieldType(@typeInfo(@FieldType(api.QueryInfo, "progress")).optional.child, "phase"), .{ .dc = "DC_PHASE" });
+}
+
+fn pin(comptime E: type, comptime rename: anytype) void {
+    @setEvalBranchQuota(20_000);
+    for (@typeInfo(E).@"enum".fields) |f| {
+        var upper: [f.name.len]u8 = undefined;
+        const name = if (@hasField(@TypeOf(rename), f.name)) @field(rename, f.name) else std.ascii.upperString(&upper, f.name);
+        if (@field(header, "ESPICE_" ++ name) != f.value) @compileError("include/espice.h ESPICE_" ++ name ++ " != " ++ @typeName(E) ++ "." ++ f.name);
+    }
+}
 
 const Code = enum(u32) {
     ok = 0,
@@ -118,35 +140,13 @@ fn create(options: *const CreateOptions) !*Handle {
             1 => .{ .bytes = .{ .data = source, .origin = origin } },
             else => return error.InvalidArgument,
         },
-        .dialect = switch (options.dialect) {
-            0 => .ngspice,
-            1 => .hspice,
-            2 => .spectre,
-            else => return error.InvalidArgument,
-        },
+        .dialect = std.enums.fromInt(api.Dialect, options.dialect) orelse return error.InvalidArgument,
         .backend = .{
-            .backend = switch (options.backend) {
-                0 => .cpu,
-                1 => .auto,
-                2 => .cuda,
-                3 => .hip,
-                else => return error.InvalidArgument,
-            },
+            .backend = std.enums.fromInt(api.Request, options.backend) orelse return error.InvalidArgument,
             .gpu_explicit = options.explicit_gpu == 1,
         },
         .output = .{
-            .format = switch (options.output_format) {
-                0 => .binary,
-                1 => .ascii,
-                2 => .csv,
-                3 => .touchstone,
-                4 => .psf,
-                5 => .fsdb,
-                6 => .sst2,
-                7 => .citi,
-                8 => .print,
-                else => return error.InvalidArgument,
-            },
+            .format = std.enums.fromInt(api.Format, options.output_format) orelse return error.InvalidArgument,
             .path = if (path.len == 0) null else path,
         },
         .max_parallel = try concurrency(options.max_parallel),
@@ -182,8 +182,8 @@ export fn espice_get_query_info(handle: ?*Handle, id: u32, out: ?*QueryInfo) u32
     const q = h.problem.query_info(@enumFromInt(id)) catch |err| return h.fail(err);
     destination.* = .{
         .id = @intFromEnum(q.id),
-        .kind = kindTag(q.kind),
-        .status = stateTag(q.status),
+        .kind = @intFromEnum(q.kind),
+        .status = @intFromEnum(q.status),
         .dependency = if (q.dependency) |dep| @intFromEnum(dep) else no_query,
         .component = q.component,
         .requested = @intFromBool(q.requested),
@@ -352,17 +352,7 @@ fn writeTruncated(buffer: []u8, text: []const u8) void {
 fn packProgress(p: anytype) Progress {
     const event = p orelse return .{ .phase = 0, .completed = 0, .total = 0 };
     return .{
-        .phase = switch (event.phase) {
-            .prepare => 0,
-            .nonlinear => 1,
-            .dc => 2,
-            .frequency => 3,
-            .transient => 4,
-            .periodic => 5,
-            .harmonic => 6,
-            .sweep => 7,
-            .postprocess => 8,
-        },
+        .phase = @intFromEnum(event.phase),
         .completed = event.completed,
         .total = event.total,
     };
@@ -372,8 +362,8 @@ fn packAdvance(h: *Handle, event: api.Advance) Advance {
     var out: Advance = .{
         .requested = @intFromEnum(event.requested),
         .advanced = @intFromEnum(event.advanced),
-        .status = stateTag(event.status),
-        .target_status = stateTag(event.target_status),
+        .status = @intFromEnum(event.status),
+        .target_status = @intFromEnum(event.target_status),
         .has_progress = @intFromBool(event.progress != null),
         .failure_code = if (event.failure) |err| status(err) else 0,
         .output_error = if (event.delivery_error) |err| status(err) else 0,
@@ -385,46 +375,6 @@ fn packAdvance(h: *Handle, event: api.Advance) Advance {
         writeTruncated(&out.output_error_name, @errorName(err));
     }
     return out;
-}
-
-fn stateTag(state: api.Status) u32 {
-    return switch (state) {
-        .pending => 0,
-        .paused => 1,
-        .complete => 2,
-        .failed => 3,
-        .dependency_failed => 4,
-        .cancelled => 5,
-    };
-}
-
-fn kindTag(kind: api.requests.Kind) u32 {
-    return switch (kind) {
-        .ac => 0,
-        .dc => 1,
-        .dcmatch => 2,
-        .disto => 3,
-        .envelope => 4,
-        .four => 5,
-        .hb => 6,
-        .matex => 7,
-        .mc => 8,
-        .noise => 9,
-        .op => 10,
-        .pac => 11,
-        .pnoise => 12,
-        .pss => 13,
-        .pxf => 14,
-        .pz => 15,
-        .qpss => 16,
-        .sens => 17,
-        .sp => 18,
-        .stb => 19,
-        .temp => 20,
-        .tf => 21,
-        .tran => 22,
-        .tran_noise => 23,
-    };
 }
 
 fn status(err: anyerror) u32 {

@@ -15,9 +15,9 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
-pub const Options = @import("requests").Envelope;
+pub const Options = @import("core").query.Envelope;
 
 pub const SimResult = struct {
     completed: bool,

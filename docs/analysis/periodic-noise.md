@@ -205,7 +205,7 @@ Sequential remains: PSS orbit computation and the ordering of nothing else
 | Phase | Solver doc | Impl |
 |---|---|---|
 | PSS phase (frozen-time Newton per sample) | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md), [klu-pipeline.md](../solvers/klu-pipeline.md) | `converger.run` in `pnoise.runPSS` |
-| Per-(frequency × sideband × sample) admittance factor + per-source back-substitutions | none (dense stacked-real path) | `src/analysis/solvers/dense_lu.zig` (`buildComplexAdmittance`, `factorize`, `solveFactored`) |
+| Per-(frequency × sideband × sample) admittance factor + per-source back-substitutions | none (dense stacked-real path) | `src/solver/dense_lu.zig` (`buildComplexAdmittance`, `factorize`, `solveFactored`) |
 | Adjoint upgrade (one transposed solve per lane replaces the per-source RHS batch) | [klu-pipeline.md](../solvers/klu-pipeline.md) (`solveT` flavor) | target — same shape as `freq_solve.solveRhsT` |
 
 ---

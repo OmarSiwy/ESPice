@@ -110,7 +110,7 @@ Benchmarking against a specific tool is one field change.
 ## 2. Flow explanation
 
 There is exactly one tolerance struct
-(`src/analysis/solvers/converger.zig Tolerances`) and one place
+(`src/solver/converger.zig Tolerances`) and one place
 convergence is decided (`finalizeStep`), used by both the direct-Newton and
 JFNK paths so they cannot drift; the GPU megakernel mirrors the same gates
 so CPU and GPU accept identical iterates. Analyses never construct raw
@@ -197,7 +197,7 @@ never loosens (or blocks) another's acceptance.
 | Phase | Solver doc | Impl |
 |---|---|---|
 | The acceptance gates themselves (reltol/vntol/abstol semantics, residual gate) | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `converger.finalizeStep` / `updateAndNorm` |
-| Solver-accuracy features the bundles lean on (pivot-growth monitor; condition estimation + iterative refinement documented-but-skipped) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/analysis/solvers/direct.zig` |
+| Solver-accuracy features the bundles lean on (pivot-growth monitor; condition estimation + iterative refinement documented-but-skipped) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solver/direct.zig` |
 | `gmin` floor as solver regularization | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | diagonal stamp in `converger.newton`/`jfnk` |
 
 ---
@@ -222,7 +222,7 @@ never loosens (or blocks) another's acceptance.
 
 **Our implementation**
 
-- `src/analysis/solvers/converger.zig` — `Tolerances`, profiles,
+- `src/solver/converger.zig` — `Tolerances`, profiles,
   `newtonOpts`, `finalizeStep`, `updateAndNorm`.
 - `src/analysis/tran/tran.zig` — `chgtol`/`trtol` consumers.
 - `src/analysis/eval/engine.zig` — on-device gate mirror.

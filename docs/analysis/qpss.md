@@ -59,8 +59,8 @@ constraints, as in autonomous HB/shooting.
 | Phase | Solver doc | Impl |
 |---|---|---|
 | QP-HB operator apply (2-D DFT sandwich) | [lptv-block-solves.md](../solvers/lptv-block-solves.md) §"Matrix-free application" | `src/analysis/pss/qpss.zig` |
-| QP-HB preconditioner | [structured-preconditioners.md](../solvers/structured-preconditioners.md) §"Multi-tone generalization" | `src/analysis/solvers/preconditioner.zig`; dominant-tone approximation, full per-mix-product factors remain a target |
-| GMRES core | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/gmres.zig` |
+| QP-HB preconditioner | [structured-preconditioners.md](../solvers/structured-preconditioners.md) §"Multi-tone generalization" | `src/solver/preconditioner.zig`; dominant-tone approximation, full per-mix-product factors remain a target |
+| GMRES core | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/gmres.zig` |
 | MFT: monodromy products per carrier cycle, multi-RHS replay, subspace recycling across cycles | [monodromy-krylov.md](../solvers/monodromy-krylov.md) | requirement — the $2K_2{+}1$ independent cycles are the GPU lane axis |
 
 ---

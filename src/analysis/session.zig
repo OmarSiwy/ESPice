@@ -1,11 +1,11 @@
 //! Query graph and coordinator. Numerical state remains in each Executor.
 const std = @import("std");
-const requests = @import("requests");
-const Prepared = @import("problem_types").Prepared;
+const requests = @import("core").query;
+const Deck = @import("core").Deck;
 const execution = @import("executor.zig");
 const progress = @import("progress.zig");
 const Result = @import("types.zig").Result;
-const validatePrepared = @import("validate.zig").validatePrepared;
+const validateDeck = @import("validate.zig").validateDeck;
 
 pub const QueryId = requests.QueryId;
 const none = requests.invalid_query;
@@ -66,15 +66,16 @@ const Row = struct {
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    prepared: *const Prepared,
+    topology: *const Circuit,
+    deck: *const Deck,
     config: execution.Config,
     rows: std.MultiArrayList(Row) = .empty,
     outputs: std.ArrayList(QueryId) = .empty,
     request_arenas: std.ArrayList(std.heap.ArenaAllocator) = .empty,
     cursor: u32 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, prepared: *const Prepared, config: execution.Config) Session {
-        return .{ .allocator = allocator, .io = io, .prepared = prepared, .config = config };
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, config: execution.Config) Session {
+        return .{ .allocator = allocator, .io = io, .topology = topology, .deck = deck, .config = config };
     }
 
     pub fn deinit(self: *Session) void {
@@ -106,7 +107,7 @@ pub const Session = struct {
         for (0..self.rows.len) |i| candidate.appendAssumeCapacity(self.rows.get(i));
         const new_ids = try a.alloc(QueryId, jobs.len);
         for (jobs, new_ids) |job, *id| {
-            try validatePrepared(job, self.prepared);
+            try validateDeck(job, self.topology.n, self.deck);
             const owned = try copyValue(a, job);
             var dependency = none;
             if (prerequisite(owned)) |op| {
@@ -246,7 +247,8 @@ pub const Session = struct {
         self.rows.items(.executor)[i] = try execution.Executor.create(
             self.allocator,
             self.io,
-            self.prepared,
+            self.topology,
+            self.deck,
             self.rows.items(.job)[i],
             initial,
             self.config,
@@ -473,24 +475,21 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
     }
 }
 
-const output = @import("output_types");
-const ir = @import("device_ir");
+const core = @import("core");
+const ir = @import("device").abi;
+const Circuit = @import("device").Circuit;
+const collectTyped = @import("types.zig").Circuit.collectTyped;
 
-pub fn validateOutputSchema(allocator: std.mem.Allocator, prepared: *const Prepared, query: requests.Query, format: output.Format) !void {
-    if (format == .touchstone or format == .citi) {
-        if (query != .sp) return error.NotSParameterData;
-        if (query.sp.ports.len == 0 and prepared.source_branch == 0) return error.NoPorts;
-    }
-    if (format != .sst2 and format != .fsdb) return;
-    // SST2 has a fixed 64-variable header; FSDB has 16-bit label lengths.
-    const nvars: usize = switch (query) {
-        .op => prepared.probes.len,
+/// The shape `query` publishes over this circuit and deck, before it runs.
+pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *const Deck, query: requests.Query) !core.QuerySchema {
+    const columns: usize = switch (query) {
+        .op => deck.probes.len,
         .tf => 3,
         .noise => |o| if (o.integrated) 1 else 2,
         .four, .disto => 4,
         .pz, .stb, .pnoise => 2,
         .pac => |o| 2 + 2 * @as(usize, o.n_harmonics),
-        .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * prepared.circuit.n,
+        .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,
         .sp => |o| blk: {
             const n = @max(o.ports.len, 1);
             break :blk 1 + try std.math.mul(usize, n, n);
@@ -498,15 +497,14 @@ pub fn validateOutputSchema(allocator: std.mem.Allocator, prepared: *const Prepa
         .sens, .dcmatch => blk: {
             var refs: std.ArrayList(ir.ParamRef) = .empty;
             defer refs.deinit(allocator);
-            for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, allocator, &refs).unwrap();
+            try collectTyped(topology.batches, topology.batch_types, allocator, &refs);
             break :blk refs.items.len + @intFromBool(query == .dcmatch);
         },
-        else => prepared.probes.len + 1,
+        else => deck.probes.len + 1,
     };
-    if (nvars == 0) return error.DataLengthMismatch;
-    if (format == .sst2 and nvars > 64) return error.FormatLimitExceeded;
-    if (format == .fsdb) {
-        if (nvars > std.math.maxInt(u32) or prepared.title.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
-        for (prepared.probe_labels) |label| if (label.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
-    }
+    return .{
+        .kind = query,
+        .columns = columns,
+        .portless = query == .sp and query.sp.ports.len == 0 and deck.source_branch == 0,
+    };
 }

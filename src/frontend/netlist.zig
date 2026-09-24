@@ -13,9 +13,9 @@ pub const lines = @import("lines.zig");
 pub const source = @import("source.zig");
 const csr = @import("csr.zig");
 pub const expr = @import("expr.zig");
-pub const Name = @import("intern.zig").Name;
-pub const InternPool = @import("intern.zig").InternPool;
-const requests = @import("requests");
+pub const Name = @import("core").Name;
+pub const InternPool = @import("core").InternPool;
+const requests = @import("core").query;
 
 pub const Dialect = lines.Dialect;
 pub const VertexId = csr.VertexId;
@@ -1065,6 +1065,5 @@ fn appendSpan(comptime T: type, arena: Allocator, list: *std.ArrayList(T), items
 
 test {
     _ = csr;
-    _ = @import("intern.zig");
     _ = @import("tests/netlist.zig");
 }

@@ -371,9 +371,9 @@ Spectre X on throughput rather than latency.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-step Newton on $G + \alpha C$ (numeric refactor when $\alpha$ changes) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `src/analysis/solvers/direct.zig` via `converger.run` + `TranHook` |
+| Per-step Newton on $G + \alpha C$ (numeric refactor when $\alpha$ changes) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `src/solver/direct.zig` via `converger.run` + `TranHook` |
 | Refactor bypass across steps at constant $\alpha$ (linear circuits) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`, value-memcmp) | `converger.Options.matrix_sig` (E2 factor-once) |
-| Newton gates / JFNK per step | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/converger.zig` |
+| Newton gates / JFNK per step | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/converger.zig` |
 | GPU on-device march (JFNK) vs level-set refactor alternative | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | `src/analysis/eval/engine.zig` (`TranEnv`/`cvec`) |
 
 ---
@@ -403,7 +403,7 @@ Spectre X on throughput rather than latency.
 
 - `src/analysis/tran/tran.zig` — integrator, LTE (`stepBound`),
   order control, breakpoints.
-- `src/analysis/solvers/converger.zig` — per-step Newton.
+- `src/solver/converger.zig` — per-step Newton.
 - `src/analysis/eval/engine.zig` (`TranEnv`, `cvec`) — on-device companion.
 - Bench fixtures: `benchmark/fixtures/tran/{fourbitadder,rc_pulse}`,
   `benchmark/fixtures/tline/*` (breakpoint echoes),

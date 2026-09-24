@@ -16,7 +16,7 @@ const root = @import("../types.zig");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
-pub const Options = @import("requests").Dcmatch;
+pub const Options = @import("core").query.Dcmatch;
 
 pub const Contribution = struct {
     device_name: []const u8,
@@ -70,12 +70,12 @@ fn fdSensitivity(
     const delta = param.get() - orig;
     defer {
         param.set(orig);
-        ckt.recomputeType(param.device_type) catch unreachable; // restores the checked original parameter
+        ckt.recomputeType(param.type) catch unreachable; // restores the checked original parameter
     }
     // Same trap as sens.zig: the +1e-12 floor un-collapses an internal node
     // whose parasitic is nominally 0, and the frozen pattern has no row for
     // it. The derivative is unrepresentable, not small — report 0.
-    ckt.recomputeType(param.device_type) catch |e| switch (e) {
+    ckt.recomputeType(param.type) catch |e| switch (e) {
         error.TopologyChanged => return 0,
     };
 
@@ -156,7 +156,7 @@ pub fn solve(
         total_var += var_contrib;
 
         contrib.* = .{
-            .device_name = ref.device_type,
+            .device_name = ckt.typeName(ref.type),
             .device_index = ref.index,
             .param_name = ref.param_name,
             .sensitivity = sens,

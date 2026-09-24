@@ -4,8 +4,8 @@
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
-const types = @import("numerics");
-const FreqSolver = @import("solvers").freq_solve.FreqSolver;
+const types = @import("core").numerics;
+const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 // ngspice include/ngspice/noisedef.h:105-113.
 const n_minlog = 1e-38;
@@ -14,7 +14,7 @@ const n_intuselog = 1e-10;
 
 pub const NoiseSource = root.NoiseSource;
 
-pub const Options = @import("requests").Noise;
+pub const Options = @import("core").query.Noise;
 
 /// The per-interval geometry `nintegrate` needs, ngspice noisean.c:436-439.
 const Band = struct { del_freq: f64, del_ln_freq: f64, ln_freq: f64, ln_last_freq: f64 };

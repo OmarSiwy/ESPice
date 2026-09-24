@@ -11,7 +11,6 @@ const DcmatchTests = struct {
     test "pelgromSigma — real coefficients" {
         const ref = root.ParamRef{
             .ptr = undefined,
-            .device_type = "nmos",
             .param_name = "vth0",
             .index = 0,
             .is_instance = false,
@@ -27,7 +26,6 @@ const DcmatchTests = struct {
     test "pelgromSigma — unit fallback when pelgrom_ap is zero" {
         const ref = root.ParamRef{
             .ptr = undefined,
-            .device_type = "nmos",
             .param_name = "vth0",
             .index = 0,
             .is_instance = false,
@@ -41,7 +39,6 @@ const DcmatchTests = struct {
     test "pelgromSigma — unit fallback when area_wl is zero" {
         const ref = root.ParamRef{
             .ptr = undefined,
-            .device_type = "nmos",
             .param_name = "vth0",
             .index = 0,
             .is_instance = false,
@@ -55,7 +52,6 @@ const DcmatchTests = struct {
     test "pelgromSigma — both zero gives unit fallback" {
         const ref = root.ParamRef{
             .ptr = undefined,
-            .device_type = "nmos",
             .param_name = "vth0",
             .index = 0,
             .is_instance = false,

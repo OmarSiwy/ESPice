@@ -3,7 +3,7 @@
 //! a power of 2, FFT, and read off harmonic magnitudes, phases, and THD.
 const std = @import("std");
 const root = @import("../types.zig");
-const fft_mod = @import("solvers").fft;
+const fft_mod = @import("solver").fft;
 const tran = @import("../tran/tran.zig");
 
 const math = std.math;
@@ -13,7 +13,7 @@ pub const Harmonic = struct {
     phase_deg: f64,
 };
 
-pub const Options = @import("requests").Four;
+pub const Options = @import("core").query.Four;
 
 /// ngspice prints nine harmonics by default; a deck may ask for more
 /// (`.four 1k v(out) 16`). The table is fixed-size and `n_harmonics` says how

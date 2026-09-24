@@ -40,12 +40,12 @@ pub fn build(b: *std.Build) void {
     const bopts = b.addOptions();
     bopts.addOption([]const u8, "src_root", b.build_root.path orelse ".");
     bopts.addOption([]const u8, "contract_path", vera.builder.pathFromRoot("tools/contract.zig"));
-    bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/analysis/eval.zig"));
-    // The runtime HDL loader rebuilds engine.zig as the .so's `dyn` module,
-    // and engine.zig imports gompute — without this root the generated
-    // device compiled against a moduleless import and every `.hdl` card
-    // died with GeneratedDeviceDoesNotCompile.
-    bopts.addOption([]const u8, "device_ir_path", b.pathFromRoot("src/problem/device_ir.zig"));
+    bopts.addOption([]const u8, "dyn_path", b.pathFromRoot("src/device/eval.zig"));
+    // The runtime HDL loader rebuilds device/eval.zig as the .so's `dyn`
+    // module; it imports device_abi and gompute by these roots. These paths are
+    // the hidden edges of the module graph: move a file, move its path here.
+    bopts.addOption([]const u8, "device_abi_path", b.pathFromRoot("src/device/abi.zig"));
+    bopts.addOption([]const u8, "core_path", b.pathFromRoot("src/core/root.zig"));
     bopts.addOption([]const u8, "gompute_path", gompute.builder.pathFromRoot("src/root.zig"));
 
     // Every module in this tree is (root file, target, optimize) plus imports.
@@ -87,33 +87,25 @@ pub fn build(b: *std.Build) void {
 
     const build_options_mod = bopts.createModule();
 
-    const numerics_mod = M.make(b.path("src/problem/numerics.zig"), &.{});
-    const device_ir_mod = M.make(b.path("src/problem/device_ir.zig"), &.{.{ .name = "contract", .module = contract_mod }});
-    const requests_mod = M.make(b.path("src/problem/requests.zig"), &.{
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-    });
-    const problem_types_mod = M.make(b.path("src/problem/types.zig"), &.{
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-        .{ .name = "requests", .module = requests_mod },
-    });
-    const device_eval_mod = M.make(b.path("src/analysis/eval.zig"), &.{
+    // Shared data every layer speaks. Imports nothing.
+    const core_mod = M.make(b.path("src/core/root.zig"), &.{});
+    const core_import: std.Build.Module.Import = .{ .name = "core", .module = core_mod };
+    const device_abi_mod = M.make(b.path("src/device/abi.zig"), &.{ .{ .name = "contract", .module = contract_mod }, core_import });
+    const device_eval_mod = M.make(b.path("src/device/eval.zig"), &.{
         .{ .name = "contract", .module = contract_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
     });
     device_eval_mod.link_libc = true;
-    const solvers_mod = M.make(b.path("src/analysis/solvers/root.zig"), &.{.{ .name = "numerics", .module = numerics_mod }});
+    const solver_mod = M.make(b.path("src/solver/root.zig"), &.{core_import});
 
-    // Waveform writers. A leaf like `solvers`: it imports nothing but std, so
+    // Waveform writers. A leaf like `solver`: it imports nothing but core, so
     // it is a module rather than a set of files in the app root, and
     // `zig build test-output` runs it without building the simulator.
-    const output_types_mod = M.make(b.path("src/output/types.zig"), &.{});
-    const output_mod = M.make(b.path("src/output/root.zig"), &.{.{ .name = "output_types", .module = output_types_mod }});
+    const output_mod = M.make(b.path("src/output/root.zig"), &.{core_import});
 
     // Netlist lines -> hypergraph + analysis cards. Imports only shared leaves.
-    const netlist_imports: []const std.Build.Module.Import = &.{.{ .name = "requests", .module = requests_mod }};
+    const netlist_imports: []const std.Build.Module.Import = &.{core_import};
     const netlist_mod = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
     const frontend_bench = b.addExecutable(.{
         .name = "frontend-bench",
@@ -129,7 +121,7 @@ pub fn build(b: *std.Build) void {
     //
     // Auto-discovered — drop a source in and it is built, whichever HDL it is
     // written in. `wf` collects every generated aggregate root: one models.zig
-    // re-exporting all devices (what frontend/models.zig reflects over), plus a
+    // re-exporting all devices (what device/root.zig reflects over), plus a
     // one-device models.zig per model, because a GPU kernel root must see
     // exactly the device it compiles (see kernel_roots below).
     // =======================================================================
@@ -144,10 +136,10 @@ pub fn build(b: *std.Build) void {
     const one_models = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
     // One HOST object per model, the CPU counterpart of the per-model GPU
     // kernel roots below. Every `DeviceBatch(D)` used to be instantiated inside
-    // the single `zig build-exe` that also holds solvers/analysis/app, so Zig
+    // the single `zig build-exe` that also holds solver/analysis/app, so Zig
     // cached all 38 whale evals as ONE unit: a one-line solver edit recompiled
     // the lot, single-threaded, on a 32-core box. See
-    // docs/perf/build-split-2026-09-10.md and src/analysis/eval.zig.
+    // docs/perf/build-split-2026-09-10.md and src/device/eval.zig.
     const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len + 1) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
@@ -204,14 +196,21 @@ pub fn build(b: *std.Build) void {
         // `-Ddebug-info=true` every host device object SEGV'd the compiler, so
         // no symbolized profile could be built. Pinned, the symbols survive
         // (callgrind names `DeviceBatch(mos1).eval`) and src/ keeps its lines.
-        const host_mod = GPU.make(b.path("src/analysis/eval.zig"), &.{
+        const host_mod = GPU.make(b.path("src/device/eval.zig"), &.{
             .{ .name = "contract", .module = contract_mod },
             .{ .name = "models", .module = one_models[i] },
-            .{ .name = "device_ir", .module = device_ir_mod },
+            .{ .name = "device_abi", .module = device_abi_mod },
             .{ .name = "gompute", .module = gompute.module("gompute") },
         });
-        // engine.zig's runtime-`.so` half dlopens; matches devices_mod.
+        // The runtime-`.so` half of the evaluator dlopens; matches device_mod.
         host_mod.link_libc = true;
+        // The device vtable is `callconv(.auto)`, and a compilation with error
+        // tracing passes every such function a hidden `*StackTrace`. Stripping
+        // turns tracing off by default, so a Debug exe (traced) called these
+        // stripped objects with a shifted argument list: the allocator
+        // `proto_create` received was garbage and every Debug test that built a
+        // circuit crashed. Pin it to what the unstripped side gets.
+        host_mod.error_tracing = optimize == .Debug;
         host_objs[i] = b.addObject(.{ .name = b.fmt("dev_{s}", .{m.name}), .root_module = host_mod });
         // Same reason the executable does it: the self-hosted backend has no
         // optimizer, whatever the optimize mode claims (see `exe.use_llvm`).
@@ -223,13 +222,14 @@ pub fn build(b: *std.Build) void {
     const native_models_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
     inline for (.{ "ltra_native", "txl_native", "cpl_native_2", "cpl_native_3", "cpl_native_4" }) |name|
         agg_src.appendSlice(b.allocator, b.fmt("pub const {s} = @import(\"native_models\").{s};\n", .{ name, name })) catch @panic("OOM");
-    const native_host_mod = M.make(b.path("src/analysis/eval.zig"), &.{
+    const native_host_mod = M.make(b.path("src/device/eval.zig"), &.{
         .{ .name = "contract", .module = contract_mod },
         .{ .name = "models", .module = native_models_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
     });
     native_host_mod.link_libc = true;
+    native_host_mod.error_tracing = optimize == .Debug; // see host_mod
     host_objs[models.len] = b.addObject(.{ .name = "dev_native_lines", .root_module = native_host_mod });
     host_objs[models.len].use_llvm = optimize != .Debug;
 
@@ -237,65 +237,51 @@ pub fn build(b: *std.Build) void {
     models_mod.addImport("native_models", native_models_mod);
     for (models, dev_mods) |m, dev_mod| models_mod.addImport(m.name, dev_mod);
 
-    const devices_mod = M.make(b.path("src/frontend/models.zig"), &.{
+    // Catalog, runtime HDL loader (dlopen) and the frozen Circuit.
+    const device_mod = M.make(b.path("src/device/root.zig"), &.{
         .{ .name = "models", .module = models_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
+        core_import,
         .{ .name = "fastvaf", .module = vera.module("vera") },
+        .{ .name = "build_options", .module = build_options_mod },
     });
-    // DynDevice dlopens generated .so devices.
-    devices_mod.linkSystemLibrary("c", .{});
+    device_mod.link_libc = true;
 
     const analysis_mod = M.make(b.path("src/analysis/root.zig"), &.{
-        .{ .name = "models", .module = models_mod },
-        .{ .name = "solvers", .module = solvers_mod },
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-        .{ .name = "device_eval", .module = device_eval_mod },
-        .{ .name = "problem_types", .module = problem_types_mod },
-        .{ .name = "requests", .module = requests_mod },
-        .{ .name = "output_types", .module = output_types_mod },
+        .{ .name = "solver", .module = solver_mod },
+        core_import,
+        .{ .name = "device", .module = device_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
     });
     analysis_mod.linkSystemLibrary("c", .{});
 
     // Passive circuit construction is shared by the frontend and its tests.
     const builder_mod = M.make(b.path("src/frontend/builder.zig"), &.{
-        .{ .name = "problem_types", .module = problem_types_mod },
-        .{ .name = "requests", .module = requests_mod },
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-        .{ .name = "devices", .module = devices_mod },
+        core_import,
+        .{ .name = "device", .module = device_mod },
         .{ .name = "netlist", .module = netlist_mod },
     });
     const frontend_mod = M.make(b.path("src/frontend/root.zig"), &.{
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-        .{ .name = "problem_types", .module = problem_types_mod },
-        .{ .name = "requests", .module = requests_mod },
+        core_import,
+        .{ .name = "device", .module = device_mod },
         .{ .name = "netlist", .module = netlist_mod },
         .{ .name = "builder", .module = builder_mod },
-        .{ .name = "device_models", .module = devices_mod },
-        .{ .name = "build_options", .module = build_options_mod },
     });
 
     // The owning facade composes frontend preparation, analysis and output.
-    const problem_imports: []const std.Build.Module.Import = &.{
+    const espice_imports: []const std.Build.Module.Import = &.{
+        core_import,
         .{ .name = "analysis", .module = analysis_mod },
         .{ .name = "frontend", .module = frontend_mod },
-        .{ .name = "requests", .module = requests_mod },
-        .{ .name = "problem_types", .module = problem_types_mod },
         .{ .name = "output", .module = output_mod },
     };
-    const problem_mod = M.make(b.path("src/problem/root.zig"), problem_imports);
+    const espice_mod = M.make(b.path("src/espice.zig"), espice_imports);
 
     // =======================================================================
     // The app
     // =======================================================================
 
-    const app_imports: []const std.Build.Module.Import = &.{
-        .{ .name = "output", .module = output_mod },
-        .{ .name = "problem", .module = problem_mod },
-    };
+    const app_imports: []const std.Build.Module.Import = &.{.{ .name = "espice", .module = espice_mod }};
     const exe = b.addExecutable(.{
         .name = "espice",
         .root_module = M.make(b.path("src/main.zig"), app_imports),
@@ -306,8 +292,7 @@ pub fn build(b: *std.Build) void {
     // espice off it benchmarked 10-40x behind ngspice while the profile showed
     // plain scalar device eval. Debug keeps the fast-iterating self-hosted
     // backend; any Release* goes through LLVM, which is the only backend with
-    // an optimizer. Tests stay self-hosted below — correctness needs no
-    // optimizer and the compile-time win is the whole point there.
+    // an optimizer.
     exe.use_llvm = optimize != .Debug;
     // LLD cannot link Mach-O; macOS keeps Zig's own linker.
     exe.use_lld = optimize != .Debug and !target.result.os.tag.isDarwin();
@@ -336,10 +321,10 @@ pub fn build(b: *std.Build) void {
         if (!gpu_kernels and !std.mem.eql(u8, m.name, smallest_model)) continue;
         if (m.size >= gpu_max_model_bytes) continue;
         const dev_imports = b.allocator.create(DeviceImports) catch @panic("OOM");
-        dev_imports.* = .{ .models = one_mod, .contract = contract_mod, .device_ir = device_ir_mod };
+        dev_imports.* = .{ .models = one_mod, .contract = contract_mod, .device_abi = device_abi_mod };
         roots.append(b.allocator, .{
             .name = m.name,
-            .root = b.path("src/analysis/eval.zig"),
+            .root = b.path("src/device/eval.zig"),
             .imports = &deviceKernelImports,
             .imports_ctx = dev_imports,
             // The compact models are single enormous eval functions; letting
@@ -366,8 +351,9 @@ pub fn build(b: *std.Build) void {
         .optimize = if (optimize == .Debug) .ReleaseFast else optimize,
     });
 
-    const c_api_mod = M.make(b.path("src/problem/c_api.zig"), &.{.{ .name = "problem", .module = problem_mod }});
+    const c_api_mod = M.make(b.path("src/c_api.zig"), &.{.{ .name = "espice", .module = espice_mod }});
     c_api_mod.link_libc = true;
+    c_api_mod.addIncludePath(b.path("include")); // c_api.zig pins its enums to the header
     for (host_objs) |o| c_api_mod.addObject(o);
     const c_api_lib = b.addLibrary(.{ .name = "espice", .linkage = .static, .root_module = c_api_mod });
     c_api_lib.use_llvm = exe.use_llvm;
@@ -389,15 +375,14 @@ pub fn build(b: *std.Build) void {
     // Tests
     //
     // One test root PER MODULE, because `zig test` collects tests only from the
-    // root module's own file set. A `_ = @import("analysis")` inside
-    // A cross-module import crosses a MODULE boundary, so tests are silently
-    // dropped — measured: importing all five modules there added ZERO tests,
-    // which is exactly how a green suite hides a whole engine going untested.
+    // root module's own file set. A cross-module `_ = @import("analysis")`
+    // crosses a MODULE boundary, so its tests are silently dropped — measured:
+    // importing all five modules there added ZERO tests, which is exactly how a green suite hides a whole engine going untested.
     //
     // WITHIN a module, one root is enough: every root.zig ends in a
     // `test { _ = <each sibling>; }` aggregator, so the module root pulls its
     // files in. That is what collapses FastVAF's 17 per-file test binaries into
-    // one, and the tree from 22 test executables to 6.
+    // one. `HostTest` builds each suite; `test` runs them all.
     //
     // The Verilog-A conformance and exhaustive oracles live in VerA with the
     // fixtures they read — they test the compiler, not the simulator:
@@ -405,155 +390,70 @@ pub fn build(b: *std.Build) void {
     //   cd ../VerA && zig build exhaustive
     // =======================================================================
 
-    const test_step = b.step("test", "Run Problem contracts and numeric SPICE fixtures");
+    const test_step = b.step("test", "Run every suite and the numeric SPICE fixtures");
+    const t: HostTest = .{ .b = b, .exe = exe, .objs = host_objs };
 
-    const c_api_test_mod = M.make(b.path("src/problem/tests/c_api.zig"), &.{});
+    const c_api_test_mod = M.make(b.path("src/tests/c_api.zig"), &.{});
     c_api_test_mod.link_libc = true;
     c_api_test_mod.addIncludePath(b.path("include"));
     c_api_test_mod.linkLibrary(c_api_lib);
-    const c_api_tests = b.addTest(.{ .root_module = c_api_test_mod });
-    c_api_tests.use_llvm = exe.use_llvm;
-    c_api_tests.use_lld = exe.use_lld;
-    const run_c_api_tests = b.addRunArtifact(c_api_tests);
-    b.step("test-c-api", "Run C ABI boundary tests").dependOn(&run_c_api_tests.step);
+    const run_c_api_tests = t.run(c_api_test_mod, &.{}, false);
 
-    // The app layer has its own test root:
-    // main.zig and frontend/ used to live in the
-    // executable's root module, and `zig test` only collects from the root
-    // module's file set. Without this the whole app layer — netlist -> jobs ->
-    // results, and the parser's own tests — never ran.
-    //
-    // A FRESH module, not `exe.root_module`: handing addTest a module that
-    // already backs an installed artifact silently produced a binary that ran
-    // zero tests (a deliberately-broken assertion still passed).
-    const exe_tests = b.addTest(.{ .root_module = M.make(b.path("src/main.zig"), app_imports) });
-    // `emitKernels` wires `gompute_kernels` into the HOST artifact's root module
-    // only, and analysis/gpu.zig imports it by name — so a second root module
-    // over the same files needs the same import or it will not compile.
-    // `problem_mod` is declared before emitKernels runs, so it is wired here
-    // too rather than at its declaration.
-    if (exe.root_module.import_table.get("gompute_kernels")) |artifacts| {
-        exe_tests.root_module.addImport("gompute_kernels", artifacts);
-        analysis_mod.addImport("gompute_kernels", artifacts);
-    }
-    exe_tests.use_llvm = exe.use_llvm;
-    exe_tests.use_lld = exe.use_lld;
-    for (host_objs) |o| exe_tests.root_module.addObject(o);
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-    b.step("test-app", "Run the executable's own tests").dependOn(&run_exe_tests.step);
-
-    // The engine does NOT ride the generic suite loop: it drives real solves, so
-    // builder resolves generated devices through `arp_device_*` and the binary
-    // has to link the same host objects the exe does, on the same backend.
-    // A FRESH module, not `problem_mod`: `addObject` MUTATES the module it is
-    // called on, so adding the device objects to the shared one put them in the
-    // exe as well and every `arp_device_*` linked twice. Same reason exe_tests
-    // builds its own root.
-    const problem_test_mod = M.make(b.path("src/problem/tests/problem.zig"), &.{.{ .name = "problem", .module = problem_mod }});
+    // `analysis_mod` is declared before emitKernels runs, so its
+    // `gompute_kernels` import (analysis/gpu.zig) is wired here.
     if (exe.root_module.import_table.get("gompute_kernels")) |artifacts|
-        problem_test_mod.addImport("gompute_kernels", artifacts);
-    const problem_tests = b.addTest(.{ .root_module = problem_test_mod });
-    problem_tests.use_llvm = exe.use_llvm;
-    problem_tests.use_lld = exe.use_lld;
-    for (host_objs) |o| problem_test_mod.addObject(o);
-    const run_problem_tests = b.addRunArtifact(problem_tests);
-    const test_problem_step = b.step("test-problem", "Run Problem, C ABI and numerical contract tests");
-    test_problem_step.dependOn(&run_problem_tests.step);
-    test_problem_step.dependOn(&run_c_api_tests.step);
-    test_step.dependOn(test_problem_step);
-
-    const numerical_tests = b.addTest(.{
-        .root_module = M.make(b.path("src/problem/tests/numerics.zig"), &.{.{ .name = "numerics", .module = numerics_mod }}),
-    });
-    const run_numerical_tests = b.addRunArtifact(numerical_tests);
-    b.step("test-numerics", "Run numerical contract tests").dependOn(&run_numerical_tests.step);
-    test_problem_step.dependOn(&run_numerical_tests.step);
-
-    const prepared_test_mod = M.make(b.path("src/frontend/root.zig"), &.{
-        .{ .name = "netlist", .module = netlist_mod },
-        .{ .name = "builder", .module = builder_mod },
-        .{ .name = "device_models", .module = devices_mod },
-        .{ .name = "problem_types", .module = problem_types_mod },
-        .{ .name = "requests", .module = requests_mod },
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
-        .{ .name = "build_options", .module = build_options_mod },
-    });
-    const prepared_tests = b.addTest(.{ .root_module = prepared_test_mod });
-    prepared_tests.use_llvm = exe.use_llvm;
-    prepared_tests.use_lld = exe.use_lld;
-    for (host_objs) |o| prepared_test_mod.addObject(o);
-    const run_prepared = b.addRunArtifact(prepared_tests);
-    b.step("test-prepared", "Run source and prepared-circuit tests").dependOn(&run_prepared.step);
+        analysis_mod.addImport("gompute_kernels", artifacts);
 
     const limiter_gen = b.addRunArtifact(vera_exe);
     limiter_gen.addArgs(&.{ "--emit-zig", "--allow=W0650", "-o" });
     const limiter_source = limiter_gen.addOutputFileArg("va_limit_state.zig");
     limiter_gen.addFileArg(b.path("tests/fixtures/hdl/veriloga_limit.assets/va_limit_state.va"));
     const limiter_mod = M.make(limiter_source, &.{.{ .name = "contract", .module = contract_mod }});
-    const analysis_test_mod = M.make(b.path("src/analysis/root.zig"), &.{});
-    var analysis_imports = analysis_mod.import_table.iterator();
-    while (analysis_imports.next()) |entry| analysis_test_mod.addImport(entry.key_ptr.*, entry.value_ptr.*);
-    analysis_test_mod.addImport("builder", builder_mod);
-    analysis_test_mod.addImport("limiter_device", limiter_mod);
-    analysis_test_mod.link_libc = true;
-    const analysis_tests = b.addTest(.{ .root_module = analysis_test_mod });
-    for (host_objs) |o| analysis_tests.root_module.addObject(o);
-    const run_analysis = b.addRunArtifact(analysis_tests);
-    b.step("test-analysis", "Run all analysis tests").dependOn(&run_analysis.step);
-    b.step("test-iteration", "Run analysis tests including Newton lifecycle integration").dependOn(&run_analysis.step);
-    test_step.dependOn(&run_analysis.step);
 
-    const native_tests_mod = M.make(b.path("models/native/root.zig"), &.{.{ .name = "contract", .module = contract_mod }});
-    native_tests_mod.link_libc = true;
-    const native_tests = b.addTest(.{ .root_module = native_tests_mod });
-    const run_native = b.addRunArtifact(native_tests);
-    b.step("test-native-lines", "Run native transmission-line oracle tests").dependOn(&run_native.step);
-    test_step.dependOn(&run_native.step);
-
-    const eval_tests_mod = M.make(b.path("src/analysis/tests/eval.zig"), &.{.{ .name = "device_eval", .module = device_eval_mod }});
     // A separate object is essential: Zig error ordinals differ between
     // compilations even when the callback signatures use the same error set.
-    const error_object_mod = M.make(b.path("src/analysis/tests/device_errors_object.zig"), &.{
+    const error_object_mod = M.make(b.path("src/device/tests/device_errors_object.zig"), &.{
         .{ .name = "device_eval", .module = device_eval_mod },
-        .{ .name = "device_ir", .module = device_ir_mod },
+        .{ .name = "device_abi", .module = device_abi_mod },
     });
     error_object_mod.link_libc = true;
     const error_object = b.addObject(.{ .name = "device_errors", .root_module = error_object_mod, .use_llvm = optimize != .Debug });
-    const error_tests_mod = M.make(b.path("src/analysis/tests/device_errors.zig"), &.{.{ .name = "device_ir", .module = device_ir_mod }});
-    error_tests_mod.link_libc = true;
+    const error_tests_mod = M.make(b.path("src/device/tests/device_errors.zig"), &.{.{ .name = "device_abi", .module = device_abi_mod }});
     error_tests_mod.addObject(error_object);
-    const error_tests = b.addTest(.{ .root_module = error_tests_mod, .use_llvm = optimize != .Debug });
-    const run_error_tests = b.addRunArtifact(error_tests);
-    b.step("test-device-errors", "Check separately compiled device callback statuses").dependOn(&run_error_tests.step);
-    test_step.dependOn(&run_error_tests.step);
 
-    const solver_tests_mod = M.make(b.path("src/analysis/tests/solvers.zig"), &.{.{ .name = "solvers", .module = solvers_mod }});
-    solver_tests_mod.link_libc = true;
-
-    const frontend_netlist_tests = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
-    const frontend_builder_tests = M.make(b.path("src/frontend/tests/builder.zig"), &.{
-        .{ .name = "netlist", .module = netlist_mod },
-        .{ .name = "builder", .module = builder_mod },
-        .{ .name = "device_models", .module = devices_mod },
-    });
-    const frontend_model_tests = M.make(b.path("src/frontend/tests/models.zig"), &.{.{ .name = "device_models", .module = devices_mod }});
-
-    for ([_]struct { name: []const u8, desc: []const u8, mod: *std.Build.Module }{
-        .{ .name = "test-output", .desc = "Run waveform writer tests", .mod = output_mod },
-        .{ .name = "test-frontend", .desc = "Run netlist front-end tests", .mod = frontend_netlist_tests },
-        .{ .name = "test-eval", .desc = "Run evaluation tests", .mod = eval_tests_mod },
-        .{ .name = "test-builder", .desc = "Run netlist -> Circuit builder tests", .mod = frontend_builder_tests },
-        .{ .name = "test-solvers", .desc = "Run solver tests", .mod = solver_tests_mod },
-        // Building this at all pulls every models/* through vera.
-        .{ .name = "test-devices", .desc = "Run device tests", .mod = frontend_model_tests },
+    for ([_]struct { []const u8, []const u8, []const *std.Build.Step.Run }{
+        .{ "test-espice", "Run Problem facade, analysis contract and C ABI tests", &.{
+            t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true),
+            run_c_api_tests,
+        } },
+        .{ "test-frontend", "Run netlist, builder and prepared-circuit tests", &.{
+            t.run(netlist_mod, &.{}, false),
+            // build_options: the binder test loads models/diode.va at runtime.
+            t.run(frontend_mod, &.{.{ .name = "build_options", .module = build_options_mod }}, true),
+        } },
+        .{ "test-analysis", "Run all analysis tests", &.{t.run(analysis_mod, &.{
+            .{ .name = "builder", .module = builder_mod },
+            .{ .name = "limiter_device", .module = limiter_mod },
+            .{ .name = "models", .module = models_mod },
+            .{ .name = "device_eval", .module = device_eval_mod },
+        }, true)} },
+        .{ "test-core", "Run shared data and numerics tests", &.{t.run(core_mod, &.{}, false)} },
+        .{ "test-solver", "Run solver tests", &.{t.run(solver_mod, &.{}, false)} },
+        .{ "test-output", "Run waveform writer tests", &.{t.run(output_mod, &.{}, false)} },
+        .{ "test-native-lines", "Run native transmission-line oracle tests", &.{t.run(native_models_mod, &.{}, false)} },
+        .{ "test-device", "Run device catalog, evaluator and ABI tests", &.{
+            t.run(device_mod, &.{}, true),
+            t.run(device_abi_mod, &.{}, false),
+            t.run(M.make(b.path("src/device/tests/eval.zig"), &.{.{ .name = "device_eval", .module = device_eval_mod }}), &.{}, false),
+            // Callback statuses across a separately compiled object.
+            t.run(error_tests_mod, &.{}, false),
+        } },
     }) |suite| {
-        const suite_tests = b.addTest(.{ .root_module = suite.mod });
-        if (suite.mod == frontend_builder_tests)
-            for (host_objs) |obj| suite_tests.root_module.addObject(obj);
-        const run = b.addRunArtifact(suite_tests);
-        b.step(suite.name, suite.desc).dependOn(&run.step);
+        const step = b.step(suite[0], suite[1]);
+        for (suite[2]) |r| step.dependOn(&r.step);
+        test_step.dependOn(step);
     }
+    b.step("test-c-api", "Run C ABI boundary tests").dependOn(&run_c_api_tests.step);
 
     // Both runners receive the same recursively discovered compile-time catalog.
     const fixture_catalog = @import("tests/fixture_catalog.zig").create(b);
@@ -568,8 +468,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_correctness.addArgs(args);
     test_step.dependOn(&run_correctness.step);
 
-    const harness_tests = b.addTest(.{ .root_module = M.make(b.path("tests/test_correctness.zig"), fixture_imports) });
-    const run_harness_tests = b.addRunArtifact(harness_tests);
+    const run_harness_tests = t.run(M.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
     run_harness_tests.setCwd(b.path("."));
     run_correctness.step.dependOn(&run_harness_tests.step);
 
@@ -584,10 +483,41 @@ pub fn build(b: *std.Build) void {
     run_bench.addArg("tests/fixtures");
     if (b.args) |args| run_bench.addArgs(args);
     b.step("bench", "Compare ESPice with ngspice and VACASK (nix develop .#benchmarking)").dependOn(&run_bench.step);
-    const bench_tests = b.addTest(.{ .root_module = M.make(b.path("tests/benchmark/runner.zig"), fixture_imports) });
-    const run_bench_tests = b.addRunArtifact(bench_tests);
+    const run_bench_tests = t.run(M.make(b.path("tests/benchmark/runner.zig"), fixture_imports), &.{}, false);
     b.step("test-benchmark", "Test reference adapters and benchmark comparison").dependOn(&run_bench_tests.step);
+    test_step.dependOn(&run_bench_tests.step);
 }
+
+/// One test binary per module root, linked like the executable. The module is
+/// COPIED: `addObject` mutates the module it is called on, and adding the
+/// device objects to a shared one linked every `arp_device_*` into the exe
+/// twice. A module that already backs an installed artifact also silently
+/// produced a binary that ran zero tests.
+const HostTest = struct {
+    b: *std.Build,
+    exe: *std.Build.Step.Compile,
+    objs: []const *std.Build.Step.Compile,
+
+    fn run(self: HostTest, m: *std.Build.Module, extra: []const std.Build.Module.Import, devices: bool) *std.Build.Step.Run {
+        const mod = self.b.createModule(.{
+            .root_source_file = m.root_source_file,
+            .target = m.resolved_target,
+            .optimize = m.optimize,
+            .strip = m.strip,
+            .link_libc = true,
+        });
+        var it = m.import_table.iterator();
+        while (it.next()) |e| mod.addImport(e.key_ptr.*, e.value_ptr.*);
+        for (extra) |e| mod.addImport(e.name, e.module);
+        // `emitKernels` wires `gompute_kernels` into the exe's root module only.
+        if (self.exe.root_module.import_table.get("gompute_kernels")) |k| mod.addImport("gompute_kernels", k);
+        mod.link_objects.appendSlice(self.b.allocator, m.link_objects.items) catch @panic("OOM");
+        mod.include_dirs.appendSlice(self.b.allocator, m.include_dirs.items) catch @panic("OOM");
+        if (devices) for (self.objs) |o| mod.addObject(o);
+        const t = self.b.addTest(.{ .root_module = mod, .use_llvm = self.exe.use_llvm, .use_lld = self.exe.use_lld });
+        return self.b.addRunArtifact(t);
+    }
+};
 
 // ===========================================================================
 // Model discovery
@@ -730,10 +660,10 @@ fn gpuArch(arch: []const u8) gompute_build.CudaOptions {
 const DeviceImports = struct {
     models: *std.Build.Module,
     contract: *std.Build.Module,
-    device_ir: *std.Build.Module,
+    device_abi: *std.Build.Module,
 };
 
-/// `src/analysis/eval.zig` reaches the device catalog through `models`, and
+/// `src/device/eval.zig` reaches the device catalog through `models`, and
 /// `engine.zig` behind it needs `contract`. gompute adds `gompute` (its device
 /// shim) itself, so those two are the whole delta.
 ///
@@ -750,6 +680,6 @@ fn deviceKernelImports(
     const out = b.allocator.alloc(std.Build.Module.Import, 3) catch @panic("OOM");
     out[0] = .{ .name = "models", .module = di.models };
     out[1] = .{ .name = "contract", .module = di.contract };
-    out[2] = .{ .name = "device_ir", .module = di.device_ir };
+    out[2] = .{ .name = "device_abi", .module = di.device_abi };
     return out;
 }

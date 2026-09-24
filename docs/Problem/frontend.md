@@ -22,7 +22,7 @@ are flattened while reading, and expressions fold to numbers as they are read
 
 File I/O stays separate from dialect splitting, and runtime HDL loading stays
 separate from comptime device selection. The `netlist` module imports only
-the shared `requests` leaf, so tests and `bench-frontend` read decks without
+the shared `core` module, so tests and `bench-frontend` read decks without
 linking numerical device implementations.
 
 Frontend tests live in `src/frontend/tests/`: netlist (the `test-frontend`

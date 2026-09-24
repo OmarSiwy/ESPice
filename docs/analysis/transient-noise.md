@@ -158,7 +158,7 @@ host: cross-lane statistics / batched Welch PSD
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Per-step Newton on $G + C/h$ | [klu-pipeline.md](../solvers/klu-pipeline.md) (refactor per $h$ change), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/analysis/solvers/direct.zig` via `converger.run` + `NoiseHook` |
+| Per-step Newton on $G + C/h$ | [klu-pipeline.md](../solvers/klu-pipeline.md) (refactor per $h$ change), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/direct.zig` via `converger.run` + `NoiseHook` |
 | Refactor bypass when $h$ repeats (constant-step stretches) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `matrix_sig` (applicable; not currently passed by this hook) |
 | GPU per-step JFNK | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) §4 alternatives | `src/analysis/eval/engine.zig` |
 

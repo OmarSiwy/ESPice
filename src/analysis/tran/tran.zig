@@ -3,7 +3,7 @@
 //! is the analytic C plane — nothing is lagged, nothing is dense.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solvers").converger;
+const converger = @import("solver").converger;
 
 // ponytail: platform SIMD width — not hardcoded
 const W = std.simd.suggestVectorLength(f64) orelse 8;
@@ -16,7 +16,7 @@ pub const Options = tran_types.Options;
 pub const Waveform = tran_types.Waveform;
 pub const SimResult = tran_types.SimResult;
 pub const initialCapacity = tran_types.initialCapacity;
-const simdCopy = @import("numerics").copySimd;
+const simdCopy = @import("core").numerics.copySimd;
 
 const integrator = @import("integrator.zig");
 
@@ -580,7 +580,6 @@ pub fn simulate(
         }
 
         if (t >= options.t_start) try waveform.record(t, cur, probes);
-        if (options.step_fn) |f| f(options.step_ctx, t, cur);
 
         // Breakpoint handling: clamp dt to land on the next breakpoint,
         // skipping breaks within min_break of the current time (ngspice
