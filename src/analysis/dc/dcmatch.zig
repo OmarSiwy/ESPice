@@ -156,7 +156,7 @@ pub fn solve(
         total_var += var_contrib;
 
         contrib.* = .{
-            .device_name = ref.device_type,
+            .device_name = ckt.typeName(ref.type),
             .device_index = ref.index,
             .param_name = ref.param_name,
             .sensitivity = sens,

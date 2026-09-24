@@ -19,7 +19,7 @@ b1054dc. Scripts: session scratchpad `e/gate.sh <tag>` and `e/runall.sh`.
 | 4 | Library, one binder, recomputeType by id | done |
 | 5 | src/core/ | done |
 | 6 | src/espice.zig, c_api, delete problem/ | done |
-| 7 | InternPool through Deck/Result/CardRef/ParamRef | todo |
+| 7 | DeviceType identity through CardRef/SweepTarget/AcOverride/ParamRef | done (see below) |
 | 8 | schemaOf, output encoders, Plot | todo |
 | 9 | AGENTS.md, docs paths | todo |
 
@@ -59,3 +59,14 @@ Check: `zig build test-frontend -Dgpu=false -Doptimize=Debug` (was 14 pass /
 - Deferred: analysis tests still import the frontend `builder` module
   (integration.zig builds circuits with Builder). Moving them onto a device
   level assembly API would drop the last analysis->frontend test edge.
+
+## Step 7 scope
+
+Device-type identity is a `core.DeviceType` everywhere: CardRef, Dc.SweepTarget,
+AcOverride and ParamRef (`device_type` string dropped, abi 13); display names
+come from the batch (`analysis.Circuit.typeName`). device_abi imports core, so
+the runtime .so build gets a `core` module (build_options.core_path).
+Not done: interning Deck labels / Result varnames through InternPool. They are
+output strings the writers print verbatim, and every Result already borrows or
+copies them once; an id table would add a pool lookup to every writer for no
+measured win. ParamRef.param_name stays a string for the same reason.

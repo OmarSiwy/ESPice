@@ -15,6 +15,15 @@ fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netli
     return input.build(&lib, sim_arena, parse_arena, nl);
 }
 
+/// Every batch's parameters, stamped with the batch's type as analysis does.
+fn collectTyped(circuit: *const device.Circuit, gpa: std.mem.Allocator, refs: *std.ArrayList(device.abi.ParamRef)) !void {
+    for (circuit.batches, circuit.batch_types) |batch, t| {
+        const first = refs.items.len;
+        try batch.hooks.collect_params(batch.ctx, gpa, refs).unwrap();
+        for (refs.items[first..]) |*ref| ref.type = t;
+    }
+}
+
 fn prepare(io: std.Io, session: std.mem.Allocator, source: input.Source, dialect: input.Dialect) !netlist.Netlist {
     var lib = try device.Library.init(std.testing.allocator);
     defer lib.deinit();
@@ -41,7 +50,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
     defer arena.deinit();
     const a = arena.allocator();
     const sources: core.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
-    const cards: []const requests.CardRef = &.{.{ .type_name = "vsource", .index = 0, .name = "vin" }};
+    const cards: []const requests.CardRef = &.{.{ .type = device.Library.builtin("vsource"), .index = 0, .name = "vin" }};
     const directives = [_][]const u8{
         ".ac dec 2 10 100",                     ".dc vin 0 1 0.1",       ".dcmatch v(out)",
         ".disto dec 2 10 100",                  ".envelope 1m 5m",       ".four 1k v(out)",
@@ -162,7 +171,7 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqual(node, prepared.deck.ic[0].node);
     try std.testing.expectEqual(@as(f64, 0.25), prepared.deck.ic[0].value);
     try std.testing.expectEqual(@as(usize, 1), prepared.deck.ac_overrides.len);
-    try std.testing.expectEqualStrings("resistor", prepared.deck.ac_overrides[0].type_name);
+    try std.testing.expectEqual(device.Library.builtin("resistor"), prepared.deck.ac_overrides[0].type);
     try std.testing.expectEqualStrings("r", prepared.deck.ac_overrides[0].param_name);
     try std.testing.expectEqual(@as(u32, 0), prepared.deck.ac_overrides[0].index);
     try std.testing.expectEqual(@as(f64, 2000), prepared.deck.ac_overrides[0].value);
@@ -177,7 +186,7 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqual(@as(usize, 6), appended.len);
     try std.testing.expectEqual(node, appended[0].tf.output_node.?);
     try std.testing.expectEqual(prepared.deck.probes[1], appended[0].tf.input_branch.?);
-    try std.testing.expectEqualStrings("vsource", appended[1].dc.target.type_name);
+    try std.testing.expectEqual(device.Library.builtin("vsource"), appended[1].dc.target.type);
     try std.testing.expectEqual(@as(u32, 1), appended[1].dc.target.index);
     try std.testing.expectEqual(node, appended[2].noise.out_node);
     try std.testing.expect(appended[3].noise.integrated);
@@ -267,7 +276,7 @@ test "prepared bindings retain model fields and exclude runtime state from param
     defer prepared.deinit();
     _ = parse_arena.reset(.free_all);
     var refs: std.ArrayList(device.abi.ParamRef) = .empty;
-    for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, session.allocator(), &refs).unwrap();
+    try collectTyped(&prepared.circuit, session.allocator(), &refs);
     var saw_pub = false;
     var resistors: u32 = 0;
     for (refs.items) |ref| {
@@ -275,7 +284,7 @@ test "prepared bindings retain model fields and exclude runtime state from param
             try std.testing.expectEqual(@as(f64, 1.25e-18), ref.get());
             saw_pub = true;
         }
-        if (!std.mem.eql(u8, ref.device_type, "resistor")) continue;
+        if (ref.type != device.Library.builtin("resistor")) continue;
         if (ref.is_instance) {
             try std.testing.expect(std.mem.eql(u8, ref.param_name, "temperature") or std.mem.eql(u8, ref.param_name, "mfactor"));
             try std.testing.expect(!ref.primary);
@@ -310,9 +319,9 @@ test "behavioral sources fold constants and extract probes and polynomials" {
         var prepared = try build(a, a, nl);
         defer prepared.deinit();
         var refs: std.ArrayList(device.abi.ParamRef) = .empty;
-        for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
+        try collectTyped(&prepared.circuit, a, &refs);
         var found: u32 = 0;
-        for (refs.items) |ref| if (std.mem.eql(u8, ref.device_type, "bsource")) {
+        for (refs.items) |ref| if (ref.type == device.Library.builtin("bsource")) {
             const want: ?f64 = if (std.mem.eql(u8, ref.param_name, "c0")) c0 else if (std.mem.eql(u8, ref.param_name, "c1")) c1 else if (std.mem.eql(u8, ref.param_name, "c2")) c2 else null;
             const expected = want orelse continue;
             try std.testing.expectApproxEqAbs(expected, ref.get(), 1e-15);
@@ -378,10 +387,10 @@ test "control source binding retains first exact duplicate and distinct mixed-ca
     var prepared = try build(a, a, nl);
     defer prepared.deinit();
     var refs: std.ArrayList(device.abi.ParamRef) = .empty;
-    for (prepared.circuit.batches) |batch| try batch.hooks.collect_params(batch.ctx, a, &refs).unwrap();
+    try collectTyped(&prepared.circuit, a, &refs);
     var found: u32 = 0;
     for (refs.items) |ref| {
-        if (!std.mem.eql(u8, ref.device_type, "cccs") or !std.mem.eql(u8, ref.param_name, "vsense")) continue;
+        if (ref.type != device.Library.builtin("cccs") or !std.mem.eql(u8, ref.param_name, "vsense")) continue;
         try std.testing.expect(ref.index < 2);
         try std.testing.expectEqual(([_]f64{ 2, 3 })[ref.index], ref.get());
         found += 1;

@@ -3,6 +3,7 @@
 //! against the construction bindings, which outlive the parse.
 const std = @import("std");
 const core = @import("core");
+const Library = @import("device").Library;
 const requests = @import("core").query;
 const numerics = @import("core").numerics;
 const netlist = @import("netlist");
@@ -257,10 +258,10 @@ fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !req
         if (!std.ascii.eqlIgnoreCase(c.name, name)) continue;
         // ngspice sweeps a card's PRIMARY value: `dc` on a source, the
         // element value on a passive.
-        const param = std.StaticStringMap([]const u8).initComptime(.{
-            .{ "resistor", "r" }, .{ "capacitor", "c" }, .{ "inductor", "l" },
-        }).get(c.type_name) orelse "dc";
-        return .{ .type_name = c.type_name, .index = c.index, .param_name = param };
+        const param = if (c.type == Library.builtin("resistor")) "r" else if (c.type == Library.builtin("capacitor"))
+            "c"
+        else if (c.type == Library.builtin("inductor")) "l" else "dc";
+        return .{ .type = c.type, .index = c.index, .param_name = param };
     }
     return error.AnalysisSourceNotFound;
 }

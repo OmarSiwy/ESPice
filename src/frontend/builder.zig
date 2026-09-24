@@ -33,13 +33,6 @@ const Proto = batch.Proto;
 // ---------------------------------------------------------------------------
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 
-/// `ParamRef.device_type` is `@typeName(D)` past the last dot; match it.
-fn shortTypeName(comptime D: type) []const u8 {
-    const full = @typeName(D);
-    const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
-    return full[dot + 1 ..];
-}
-
 pub const Builder = struct {
     gpa: std.mem.Allocator,
     lib: *const Library,
@@ -77,7 +70,7 @@ pub const Builder = struct {
     /// is instantiated through `vt.proto_add` into the device object's own
     /// store, which this compilation unit deliberately cannot name. Counted for
     /// EVERY add, card or not, so the ordinal stays in lockstep with the store.
-    card_counts: std.StringHashMapUnmanaged(u32) = .empty,
+    card_counts: std.ArrayList(u32) = .empty,
 
     pub fn init(gpa: std.mem.Allocator, lib: *const Library) !Builder {
         var labels: std.ArrayList([]const u8) = .empty;
@@ -238,23 +231,20 @@ pub const Builder = struct {
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
 
-        {
-            const gop = try self.card_counts.getOrPut(self.gpa, comptime shortTypeName(D));
-            if (!gop.found_existing) gop.value_ptr.* = 0;
-            if (self.card.len != 0) try self.cards.append(self.gpa, .{
-                .type_name = comptime shortTypeName(D),
-                .index = gop.value_ptr.*,
-                .name = self.card,
-            });
-            gop.value_ptr.* += 1;
-        }
-
         // Reach the device through its own object's vtable: naming
         // `D.collapse` or `ProtoStore(D)` here would compile the device body
         // into the executable a second time (device/eval.zig).
         const t = comptime Library.builtin(device.modelName(D) orelse
             @compileError(@typeName(D) ++ " is not a catalog device"));
         const vt = self.lib.vtable(t);
+        {
+            const i = @intFromEnum(t);
+            if (self.card_counts.items.len <= i)
+                try self.card_counts.appendNTimes(self.gpa, 0, i + 1 - self.card_counts.items.len);
+            const ordinal = &self.card_counts.items[i];
+            if (self.card.len != 0) try self.cards.append(self.gpa, .{ .type = t, .index = ordinal.*, .name = self.card });
+            ordinal.* += 1;
+        }
         if (comptime n_u > D.num_ports) {
             var col: [n_u]i32 = @splat(-1);
             if (vt.collapse) |collapse| collapse(@ptrCast(&model), @ptrCast(&instance), &col);

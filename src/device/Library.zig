@@ -93,5 +93,6 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
         .dyn = build_options.dyn_path,
         .gompute = build_options.gompute_path,
         .device_abi = build_options.device_abi_path,
+        .core = build_options.core_path,
     });
 }

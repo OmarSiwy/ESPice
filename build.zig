@@ -45,6 +45,7 @@ pub fn build(b: *std.Build) void {
     // module; it imports device_abi and gompute by these roots. These paths are
     // the hidden edges of the module graph: move a file, move its path here.
     bopts.addOption([]const u8, "device_abi_path", b.pathFromRoot("src/device/abi.zig"));
+    bopts.addOption([]const u8, "core_path", b.pathFromRoot("src/core/root.zig"));
     bopts.addOption([]const u8, "gompute_path", gompute.builder.pathFromRoot("src/root.zig"));
 
     // Every module in this tree is (root file, target, optimize) plus imports.
@@ -89,7 +90,7 @@ pub fn build(b: *std.Build) void {
     // Shared data every layer speaks. Imports nothing.
     const core_mod = M.make(b.path("src/core/root.zig"), &.{});
     const core_import: std.Build.Module.Import = .{ .name = "core", .module = core_mod };
-    const device_abi_mod = M.make(b.path("src/device/abi.zig"), &.{.{ .name = "contract", .module = contract_mod }});
+    const device_abi_mod = M.make(b.path("src/device/abi.zig"), &.{ .{ .name = "contract", .module = contract_mod }, core_import });
     const device_eval_mod = M.make(b.path("src/device/eval.zig"), &.{
         .{ .name = "contract", .module = contract_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },

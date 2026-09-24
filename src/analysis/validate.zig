@@ -235,7 +235,7 @@ pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
 fn dcTargetExists(target: requests.Dc.SweepTarget, deck: *const Deck) !void {
     if (target.is_temp) return;
     for (deck.cards) |card| {
-        if (card.index == target.index and std.mem.eql(u8, card.type_name, target.type_name)) return;
+        if (card.index == target.index and card.type == target.type) return;
     }
     return error.DcSweepSourceNotFound;
 }

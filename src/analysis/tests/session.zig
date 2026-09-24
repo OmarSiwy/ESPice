@@ -1,4 +1,5 @@
 const Deck = @import("core").Deck;
+const builtin = @import("device").Library.builtin;
 const requests = @import("core").query;
 const std = @import("std");
 const validate = @import("../validate.zig").validate;
@@ -40,16 +41,16 @@ test "query boundary checks derived frequencies, dimensions and nested controls"
 test "a dc sweep target resolves against the prepared card table, type included" {
     var deck: Deck = undefined;
     deck.cards = &.{
-        .{ .type_name = "vsource", .index = 0, .name = "v1" },
-        .{ .type_name = "isource", .index = 0, .name = "i1" },
-        .{ .type_name = "resistor", .index = 1, .name = "r2" },
+        .{ .type = builtin("vsource"), .index = 0, .name = "v1" },
+        .{ .type = builtin("isource"), .index = 0, .name = "i1" },
+        .{ .type = builtin("resistor"), .index = 1, .name = "r2" },
     };
-    try validateDeck(.{ .dc = .{} }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") } } }, 4, &deck);
     // Same ordinal, different device type: the two no longer alias.
-    try validateDeck(.{ .dc = .{ .target = .{ .type_name = "isource", .index = 0 } } }, 4, &deck);
-    try validateDeck(.{ .dc = .{ .target = .{ .type_name = "resistor", .index = 1, .param_name = "r" } } }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("isource"), .index = 0 } } }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("resistor"), .index = 1, .param_name = "r" } } }, 4, &deck);
     try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .index = 1 } } }, 4, &deck));
-    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target2 = .{ .type_name = "resistor", .index = 0 } } }, 4, &deck));
+    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") }, .target2 = .{ .type = builtin("resistor"), .index = 0 } } }, 4, &deck));
     // The temperature is not a card and is never looked up.
-    try validateDeck(.{ .dc = .{ .target2 = .{ .is_temp = true } } }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") }, .target2 = .{ .is_temp = true } } }, 4, &deck);
 }

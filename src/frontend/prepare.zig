@@ -94,7 +94,6 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     const cards = try sim_arena.dupe(requests.CardRef, b.cards.items);
     for (cards) |*c| {
         c.name = try sim_arena.dupe(u8, c.name);
-        c.type_name = try sim_arena.dupe(u8, c.type_name);
     }
     var perm: ?[]const u32 = null;
     var circuit = try b.compilePerm(&perm);
@@ -232,7 +231,7 @@ fn acOverrides(
     for (names, values, overrides) |name, value, *override| {
         for (cards) |card| {
             if (!std.mem.eql(u8, card.name, name)) continue;
-            override.* = .{ .type_name = card.type_name, .index = card.index, .param_name = "r", .value = value };
+            override.* = .{ .type = card.type, .index = card.index, .param_name = "r", .value = value };
             break;
         } else return error.InvalidAcOverride;
     }

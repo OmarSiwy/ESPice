@@ -796,6 +796,12 @@ pub const Circuit = struct {
         return self.param_refs.?;
     }
 
+    /// Display name of device type `t` (its batch's short type name).
+    pub fn typeName(self: *const Circuit, t: device_ir.DeviceType) []const u8 {
+        for (self.batches, self.batch_types) |b, bt| if (bt == t) return b.type_name;
+        return "";
+    }
+
     /// Every batch's parameters, each stamped with its batch's Library type.
     pub fn collectTyped(batches: []const Batch, types: []const device_ir.DeviceType, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) !void {
         for (batches, types) |b, t| {

@@ -6,10 +6,7 @@ const contract = @import("contract");
 
 pub const GROUND: u32 = 0;
 
-/// Dense id of a device type in a `Library`: built-ins first, in catalog order,
-/// then runtime-loaded ones. A device never knows its own id; the host stamps
-/// it where it needs one (`ParamRef.type`, `Circuit.batch_types`).
-pub const DeviceType = enum(u16) { unset = std.math.maxInt(u16), _ };
+pub const DeviceType = @import("core").DeviceType;
 
 pub const bind = @import("bind.zig");
 pub const Param = bind.Param;
@@ -42,7 +39,6 @@ pub const ParamRef = struct {
     ptr: Ptr,
     /// Written by the host when it collects the batch's parameters.
     type: DeviceType = .unset,
-    device_type: []const u8,
     param_name: []const u8,
     index: u32,
     is_instance: bool,
@@ -449,8 +445,9 @@ pub const GpuPayload = struct {
 //    `Batch.type_name` is the short type name.
 // 12: `set_model_param`/`set_instance_param` become `bind_model`/`bind_instance`
 //    (one binder for every device, bind.zig); `ParamRef.type`.
-// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 12.
-pub const abi_version: u32 = 12;
+// 13: `ParamRef.device_type` dropped; the host names a type from its batch.
+// GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 13.
+pub const abi_version: u32 = 13;
 
 pub const DeviceVtable = struct {
     name: []const u8,

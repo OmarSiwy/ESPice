@@ -207,10 +207,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     for (refs, params) |ref, *p| {
         p.* = .{
             .ptr = ref,
-            .device_name = if (root.CardRef.lookup(opts.cards, ref.device_type, ref.index)) |card|
+            .device_name = if (root.CardRef.lookup(opts.cards, ref.type, ref.index)) |card|
                 try scratch.dupe(u8, card)
             else
-                try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ref.device_type, ref.index }),
+                try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ctx.circuit.typeName(ref.type), ref.index }),
             .param_name = ref.param_name,
         };
         n_named += 1;
