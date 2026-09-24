@@ -38,6 +38,13 @@ pub const InternPool = struct {
         }
     };
 
+    pub fn deinit(p: *InternPool, gpa: Allocator) void {
+        p.bytes.deinit(gpa);
+        p.offs.deinit(gpa);
+        p.map.deinit(gpa);
+        p.* = undefined;
+    }
+
     /// The id of `s`, added on first sight.
     pub fn intern(p: *InternPool, gpa: Allocator, s: []const u8) Allocator.Error!Name {
         if (p.offs.items.len == 0) try p.offs.append(gpa, 0);
@@ -69,11 +76,7 @@ pub const InternPool = struct {
 test "names intern once, in first-seen order" {
     const gpa = std.testing.allocator;
     var p: InternPool = .{};
-    defer {
-        p.bytes.deinit(gpa);
-        p.offs.deinit(gpa);
-        p.map.deinit(gpa);
-    }
+    defer p.deinit(gpa);
     const a = try p.intern(gpa, "x1.out");
     const b = try p.intern(gpa, "r1");
     for (0..100) |i| {

@@ -196,17 +196,17 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
 }
 
 test "members keep order and repeats; transpose is sorted" {
-    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
     const H = BipartiteHypergraph(struct { name: []const u8 }, struct { year: u16 });
     var b = try H.Builder.init(gpa);
-    errdefer b.deinit(gpa);
     for (0..5) |_| _ = try b.addVertex(gpa, .{ .name = "n" });
     const v: [5]VertexId = .{ .from(0), .from(1), .from(2), .from(3), .from(4) };
     _ = try b.addEdge(gpa, .{ .year = 1 }, &.{ v[2], v[0], v[1] });
     _ = try b.addEdge(gpa, .{ .year = 2 }, &.{ v[3], v[2], v[2], v[2] });
     try std.testing.expectError(error.InvalidVertex, b.addEdge(gpa, .{ .year = 3 }, &.{.from(9)}));
-    var g = try b.finish(gpa);
-    defer g.deinit(gpa);
+    const g = try b.finish(gpa);
     try std.testing.expectEqual(@as(u32, 2), g.edgeCount());
     try std.testing.expectEqualSlices(VertexId, &.{ v[3], v[2], v[2], v[2] }, g.members(.from(1)));
     try std.testing.expectEqualSlices(EdgeId, &.{ .from(0), .from(1), .from(1), .from(1) }, g.incident(v[2]));

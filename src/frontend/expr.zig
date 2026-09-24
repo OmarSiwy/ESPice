@@ -17,7 +17,7 @@ pub const Code = enum(u8) {
     ident,
     /// `v(p[,n])`: a, b are the nets (names before `subst`), `none` if absent.
     vprobe,
-    /// `i(device)`.
+    /// `i(device)`; the device is not kept.
     iprobe,
     neg,
     not,

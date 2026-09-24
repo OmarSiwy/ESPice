@@ -82,7 +82,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: n
     b.nom_temp_c = deck_opts.tnom_c;
     try b.reserveNodes(nl.graph.vertexCount());
 
-    var nb = try builder.NetBuilder.init(parse_arena, &b, &nl);
+    var nb = try builder.NetBuilder.init(parse_arena, &b, nl);
     try nb.build();
     try nb.tagSubcircuitNodes();
     // Runtime-loaded HDL devices, after the built-in ones and before the freeze.
@@ -174,7 +174,7 @@ pub fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: n
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
-        .queries = try analyses.queries(sim_arena, cards_rows, 2, bindings, cards, deck_opts),
+        .queries = try analyses.queries(sim_arena, cards_rows, analyses.deck_output_nodes, bindings, cards, deck_opts),
         .bindings = bindings,
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),

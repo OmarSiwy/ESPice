@@ -111,7 +111,7 @@ pub const Netlist = struct {
         pins: []const VertexId,
         positional: []const Value,
         kv: []const Kv,
-        model: ?*const Model,
+        model: ?Model,
         subckt_type: u16,
         subckt_instance: u32,
     };
@@ -129,7 +129,7 @@ pub const Netlist = struct {
             .pins = nl.graph.members(e),
             .positional = nl.values[d.positional.start..][0..d.positional.len],
             .kv = nl.kvs[d.kv.start..][0..d.kv.len],
-            .model = if (d.model == none) null else &nl.models[d.model],
+            .model = if (d.model == none) null else nl.models[d.model],
             .subckt_type = d.subckt_type,
             .subckt_instance = d.subckt_instance,
         };
@@ -144,8 +144,8 @@ pub const Netlist = struct {
     }
 
     /// First `.model` card named `name`.
-    pub fn findModel(nl: *const Netlist, name: []const u8) ?*const Model {
-        return if (nl.model_ids.get(name)) |i| &nl.models[i] else null;
+    pub fn findModel(nl: *const Netlist, name: []const u8) ?Model {
+        return if (nl.model_ids.get(name)) |i| nl.models[i] else null;
     }
 
     pub fn exprOps(nl: *const Netlist, span: Span) []const expr.Op {
@@ -367,10 +367,7 @@ fn Reader(comptime S: type) type {
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
             try r.modelBins();
 
-            var graph = r.hg.finish(arena) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-            };
-            _ = &graph;
+            const graph = try r.hg.finish(arena);
             const models = try arena.alloc(Model, r.models.items.len);
             for (models, r.models.items) |*m, row| m.* = .{ .name = row.name, .kind = row.kind, .kv = r.kvs.items[row.kv.start..][0..row.kv.len] };
 
@@ -724,6 +721,8 @@ fn Reader(comptime S: type) type {
                             },
                         }
                     },
+                    // The device name is not kept: no consumer reads it.
+                    .iprobe => try r.ops.append(r.arena, .{ .code = .iprobe, .a = none, .b = none }),
                     .vprobe => try r.ops.append(r.arena, .{
                         .code = .vprobe,
                         .a = if (op.a == none) none else (try r.netOf(frame, r.scratch.names.items[op.a])).index(),
