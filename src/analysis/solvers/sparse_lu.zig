@@ -89,6 +89,16 @@ pub fn SparseLu(comptime T: type) type {
         panel_rows: std.ArrayList(u32) = .empty,
         panel_vals: std.ArrayList(T) = .empty,
 
+        // ---- small-matrix refactor tape (see `refactorTape`) ----
+        /// One {dst, l, u} slot triple per flop, `tv[dst] -= tv[l] * tv[u]`,
+        /// in refactor order. Empty when the factor has more than
+        /// `tape_max_flops` flops; `refactor` then runs the column loop.
+        tape: std.ArrayList([3]u32) = .empty,
+        tape_col: []u32, // column k's flops are tape[tape_col[k]..tape_col[k+1]]
+        amap: []u32, // A entry p -> its slot in tv
+        /// Slot values: ux ++ udiag ++ lx ++ one discard slot.
+        tv: std.ArrayList(T) = .empty,
+
         // ---- hot workspace (length n each) ----
         /// Dense accumulator. INVARIANT: all-zero on entry to and exit from
         /// every public entry point, error returns included. `factor` needs it
@@ -138,6 +148,8 @@ pub fn SparseLu(comptime T: type) type {
                 .lend = &.{},
                 .sn_of = &.{},
                 .sn_slot = &.{},
+                .tape_col = &.{},
+                .amap = &.{},
                 .w = &.{},
                 .y = &.{},
                 .rscale = &.{},
@@ -157,6 +169,8 @@ pub fn SparseLu(comptime T: type) type {
             self.lend = try gpa.alloc(u32, n);
             self.sn_of = try gpa.alloc(u32, n);
             self.sn_slot = try gpa.alloc(u32, n);
+            self.tape_col = try gpa.alloc(u32, @as(usize, n) + 1);
+            self.amap = try gpa.alloc(u32, nnz);
             self.w = try gpa.alloc(T, n);
             self.y = try gpa.alloc(T, n);
             self.rscale = try gpa.alloc(T, n);
@@ -180,6 +194,10 @@ pub fn SparseLu(comptime T: type) type {
             gpa.free(self.lend);
             gpa.free(self.sn_of);
             gpa.free(self.sn_slot);
+            gpa.free(self.tape_col);
+            gpa.free(self.amap);
+            self.tape.deinit(gpa);
+            self.tv.deinit(gpa);
             self.panels.deinit(gpa);
             self.panel_rows.deinit(gpa);
             self.panel_vals.deinit(gpa);
@@ -213,6 +231,7 @@ pub fn SparseLu(comptime T: type) type {
             @memset(self.flag, 0);
             @memset(self.void_col, false);
             @memset(self.scaled_pivot, false);
+            self.tv.clearRetainingCapacity(); // no tape until this factor ends
             self.panels.clearRetainingCapacity();
             self.panel_rows.clearRetainingCapacity();
             self.panel_vals.clearRetainingCapacity();
@@ -471,6 +490,8 @@ pub fn SparseLu(comptime T: type) type {
                 }
             }
 
+            try self.buildTape(gpa, col_ptr);
+
             // ZP_LU_STATS: one line per full factor — n, input nnz, fill.
             // link_libc guard: the solvers test module builds without libc,
             // same idiom as direct.zig's ESPICE_NO_BBD.
@@ -680,7 +701,10 @@ pub fn SparseLu(comptime T: type) type {
         /// where a run-vectorized variant lost even in the hot microbench).
         /// Pairing is bit-identical regardless: a column's row indices are
         /// distinct, so the two updates hit different slots.
-        pub const test_access = if (@import("builtin").is_test) .{ .scatterAxpy = scatterAxpy } else {};
+        pub const test_access = if (@import("builtin").is_test) .{
+            .scatterAxpy = scatterAxpy,
+            .refactorColumns = refactorColumns,
+        } else {};
 
         inline fn scatterAxpy(dst: []T, idx: []const u32, src: []const T, p0: u32, p1: u32, f: T) void {
             var p = p0;
@@ -708,6 +732,18 @@ pub fn SparseLu(comptime T: type) type {
             for (self.void_slots.items) |p| {
                 if (vals[p] != 0) return error.SingularMatrix;
             }
+            if (self.tv.items.len != 0) return self.refactorTape(vals, growth_limit);
+            return self.refactorColumns(col_ptr, vals, growth_limit);
+        }
+
+        /// The column-at-a-time replay: the path for matrices too big for a
+        /// tape, and the tape's scalar oracle.
+        fn refactorColumns(
+            self: *Self,
+            col_ptr: []const u32,
+            vals: []const T,
+            growth_limit: T,
+        ) error{SingularMatrix}!void {
             const li = self.li.items;
             const lx = self.lx.items;
             const ui = self.ui.items;
@@ -795,6 +831,116 @@ pub fn SparseLu(comptime T: type) type {
                     }
                 }
             }
+        }
+
+        /// Flops at most this many get the flat tape: 12 bytes each, so the
+        /// tape stays L1-resident between Newton iterates. A large tape
+        /// streams from L2 with no reuse and loses to the column loop
+        /// (refactor-tape-2026-09.md).
+        const tape_max_flops = 2048;
+
+        /// Record the refactor as flat slot operations. Every A entry and
+        /// every flop target of column k is a slot of column k's pattern (U
+        /// rows, the diagonal, L rows), except below-diagonal rows of a void
+        /// column, which has no L: those go to the discard slot.
+        fn buildTape(self: *Self, gpa: Allocator, col_ptr: []const u32) Allocator.Error!void {
+            const n = self.n;
+            const lp = self.lp;
+            const up = self.up;
+            const li = self.li.items;
+            const ui = self.ui.items;
+            self.tape.clearRetainingCapacity();
+            self.tv.clearRetainingCapacity();
+            var flops: usize = 0;
+            for (ui) |i| flops += lp[i + 1] - lp[i];
+            if (flops > tape_max_flops) return;
+            const nu: u32 = @intCast(ui.len);
+            const lx0 = nu + n;
+            const discard: u32 = lx0 + @as(u32, @intCast(li.len));
+            try self.tape.ensureTotalCapacityPrecise(gpa, flops);
+            try self.tv.resize(gpa, discard + 1);
+            const pos = self.flag; // DFS scratch, free until the next factor
+            for (0..n) |k| {
+                const void_k = self.void_col[k];
+                for (up[k]..up[k + 1]) |p| pos[ui[p]] = @intCast(p);
+                pos[k] = nu + @as(u32, @intCast(k));
+                for (lp[k]..lp[k + 1]) |q| pos[li[q]] = lx0 + @as(u32, @intCast(q));
+                self.tape_col[k] = @intCast(self.tape.items.len);
+                for (up[k]..up[k + 1]) |p| {
+                    const i = ui[p];
+                    for (lp[i]..lp[i + 1]) |q| {
+                        const r = li[q];
+                        const dst = if (void_k and r > k) discard else pos[r];
+                        self.tape.appendAssumeCapacity(.{ dst, lx0 + @as(u32, @intCast(q)), @intCast(p) });
+                    }
+                }
+                const c = self.q[k];
+                for (col_ptr[c]..col_ptr[c + 1]) |a| {
+                    const r = self.prow[a];
+                    self.amap[a] = if (void_k and r > k) discard else pos[r];
+                }
+            }
+            self.tape_col[n] = @intCast(self.tape.items.len);
+        }
+
+        /// `refactor` for a matrix with a tape: the same operations per
+        /// slot in the same order, so bitwise the column loop's result, with
+        /// no dense scatter/gather and one flat loop per column. The U values
+        /// are read in place (a U slot is final before any flop reads it).
+        fn refactorTape(self: *Self, vals: []const T, growth_limit: T) error{SingularMatrix}!void {
+            const n = self.n;
+            const tv = self.tv.items;
+            const tape = self.tape.items;
+            const tcol = self.tape_col;
+            const lp = self.lp;
+            const nu = self.ux.items.len;
+            const lx0 = nu + n;
+            fillZero(tv);
+            for (self.amap, vals[0..self.amap.len]) |s, v| tv[s] = v;
+            for (0..n) |k| {
+                for (tape[tcol[k]..tcol[k + 1]]) |f| tv[f[0]] -= tv[f[1]] * tv[f[2]];
+                const lcol = tv[lx0 + lp[k] .. lx0 + lp[k + 1]];
+                if (self.void_col[k]) {
+                    tv[nu + k] = 1;
+                    continue;
+                }
+                const d = tv[nu + k];
+                if (d == 0 or !std.math.isFinite(d)) return error.SingularMatrix;
+                if (growth_limit > 0 and !self.scaled_pivot[k]) {
+                    var cmax: T = @abs(d);
+                    for (lcol) |*v| {
+                        cmax = @max(cmax, @abs(v.*));
+                        v.* /= d;
+                    }
+                    if (@abs(d) < growth_limit * cmax) return error.SingularMatrix;
+                } else {
+                    for (lcol) |*v| v.* /= d;
+                }
+            }
+            copyOut(self.ux.items, tv[0..nu]);
+            copyOut(self.udiag, tv[nu..lx0]);
+            copyOut(self.lx.items, tv[lx0 .. lx0 + self.lx.items.len]);
+        }
+
+        // The tape's buffers are a few hundred bytes: a compiler_rt memset or
+        // memcpy call costs more than the copy (760 Ir per memset on
+        // vacask_mul's 100 slots). LLVM turns a plain zero or copy loop back
+        // into that call, so the lanes are spelled out and the zero is read
+        // through a volatile pointer (refactor-tape-2026-09.md, the memset
+        // loop-idiom hazard).
+        var opaque_zero: T = 0;
+        inline fn fillZero(dst: []T) void {
+            const W = comptime std.simd.suggestVectorLength(T) orelse 1;
+            const z: T = @as(*const volatile T, &opaque_zero).*;
+            var i: usize = 0;
+            while (i + W <= dst.len) : (i += W) dst[i..][0..W].* = @as(@Vector(W, T), @splat(z));
+            while (i < dst.len) : (i += 1) dst[i] = z;
+        }
+        inline fn copyOut(dst: []T, src: []const T) void {
+            const W = comptime std.simd.suggestVectorLength(T) orelse 1;
+            var i: usize = 0;
+            while (i + W <= dst.len) : (i += W) dst[i..][0..W].* = src[i..][0..W].*;
+            while (i < dst.len) : (i += 1) dst[i] = src[i];
         }
 
         // ====================================================================

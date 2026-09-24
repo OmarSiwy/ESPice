@@ -3548,6 +3548,89 @@ const SparseTests = struct {
         }
     }
 
+    test "refactor: the small-matrix tape is bitwise the column replay" {
+        // A random circuit-like matrix small enough for the tape: diagonal
+        // entries, a few off-diagonals per column, a branch row with a
+        // structural zero diagonal (off-diagonal pivot), and a void unknown.
+        // Two factorizations of the same values; one refactors through the
+        // tape, the other through `refactorColumns`, its scalar oracle.
+        inline for (.{ f64, f32 }) |T| {
+            const gpa = testing.allocator;
+            const n = 40;
+            const v = n - 1; // void unknown
+            const br = 7; // branch row: zero diagonal, +-1 couplings
+            var rng = std.Random.DefaultPrng.init(0x7A9E);
+            const r = rng.random();
+            var dense: [n][n]bool = .{.{false} ** n} ** n;
+            for (0..n - 1) |j| {
+                dense[j][j] = j != br;
+                for (0..3) |_| {
+                    const i = r.uintLessThan(usize, n - 1);
+                    dense[i][j] = true;
+                    dense[j][i] = true;
+                }
+            }
+            dense[3][v] = true;
+            dense[v][3] = true;
+            dense[br][2] = true;
+            dense[2][br] = true;
+            var col_ptr: [n + 1]u32 = undefined;
+            var row_idx: std.ArrayList(u32) = .empty;
+            defer row_idx.deinit(gpa);
+            col_ptr[0] = 0;
+            for (0..n) |j| {
+                for (0..n) |i| if (dense[i][j]) try row_idx.append(gpa, @intCast(i));
+                col_ptr[j + 1] = @intCast(row_idx.items.len);
+            }
+            const nnz = row_idx.items.len;
+            const vals = try gpa.alloc(T, nnz);
+            defer gpa.free(vals);
+            var q: [n]u32 = undefined;
+            const ws_buf = try gpa.alloc(u32, order.wsSize(n, col_ptr[n]));
+            defer gpa.free(ws_buf);
+            var ws = order.Ws.init(ws_buf);
+            try order.order(n, &col_ptr, row_idx.items, &q, &ws);
+            var a = try SparseLu(T).init(gpa, n, &col_ptr, row_idx.items, &q);
+            defer a.deinit(gpa);
+            var b = try SparseLu(T).init(gpa, n, &col_ptr, row_idx.items, &q);
+            defer b.deinit(gpa);
+
+            var failed: u32 = 0;
+            for (0..8) |round| {
+                for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
+                    const i = row_idx.items[p];
+                    vals[p] = if (i == v or j == v) 0 else if (i == br or j == br) (if (i < j) 1 else -1) else if (i == j) 5 + r.float(T) else r.float(T) - 0.5;
+                };
+                // Round 5 collapses one pivot, and only that round fails.
+                if (round == 5) for (col_ptr[0]..col_ptr[1]) |p| {
+                    if (row_idx.items[p] == 0) vals[p] = 1e-30;
+                };
+                if (round == 0) {
+                    try a.factor(gpa, &col_ptr, row_idx.items, vals, 1e-3);
+                    try b.factor(gpa, &col_ptr, row_idx.items, vals, 1e-3);
+                    try testing.expect(a.tv.items.len != 0);
+                    try testing.expect(std.mem.indexOfScalar(bool, a.void_col, true) != null);
+                }
+                const ra = a.refactor(&col_ptr, vals, 1e-12);
+                const rb = SparseLu(T).test_access.refactorColumns(&b, &col_ptr, vals, 1e-12);
+                if (ra) |_| {
+                    try rb;
+                    try testing.expectEqualSlices(T, b.lx.items, a.lx.items);
+                    try testing.expectEqualSlices(T, b.ux.items, a.ux.items);
+                    try testing.expectEqualSlices(T, b.udiag, a.udiag);
+                } else |e| {
+                    try testing.expectEqual(5, round);
+                    failed += 1;
+                    try testing.expectError(e, rb);
+                    try a.factor(gpa, &col_ptr, row_idx.items, vals, 1e-3);
+                    try b.factor(gpa, &col_ptr, row_idx.items, vals, 1e-3);
+                }
+                for (a.w) |wi| try testing.expectEqual(@as(T, 0), wi);
+            }
+            try testing.expectEqual(1, failed);
+        }
+    }
+
     test "w is all-zero after factor, after refactor, and after a failed refactor" {
         // `factor` reads 0 out of every fill row it does not scatter, so whatever
         // ran before it must hand `w` back clean — refactor's per-column zeroing
