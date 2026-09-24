@@ -146,7 +146,6 @@ pub const Executor = struct {
         const gpu_context = try self.prepareGpu();
         defer {
             self.circuit.gpu_hook = null;
-            self.circuit.gpu_active = false;
             if (gpu_context) |g| g.deinit();
         }
         const transient = switch (self.job) {
@@ -195,7 +194,6 @@ pub const Executor = struct {
             return null;
         };
         self.circuit.gpu_hook = context.hook();
-        self.circuit.gpu_active = true;
         return context;
     }
 };

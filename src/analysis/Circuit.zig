@@ -59,8 +59,6 @@ pub const BbdInfo = @import("numerics").BbdInfo;
 
 /// Plain hook: assemble = one eval, matrix = G. This IS dc.
 pub const EvalHook = struct {
-    pub const gpu_eligible = true;
-
     pub fn assemble(_: EvalHook, ckt: *Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
     }
@@ -72,12 +70,10 @@ pub const EvalHook = struct {
     }
 };
 
-/// Engine-owned GPU solve surface — persistent context, batch-capable.
-/// Single-solve (backward compat) + batch Newton + batch frequency.
-/// Errors fall back to the CPU path.
+/// Engine-owned GPU context: device eval and limit/state passes on the
+/// device. Errors fall back to the CPU path.
 pub const GpuHook = struct {
     ctx: *anyopaque,
-    solve_newton: *const fn (*anyopaque, x: []f64, t: f64, opts: converger.Options) anyerror!converger.Result,
     simulate_tran: ?*const fn (*anyopaque, x: []f64, probes: []const u32, waveform: *tran.Waveform, options: tran.Options) anyerror!tran.SimResult = null,
     /// N independent Newton solves in one launch (MC/corners/temp/sens).
     /// x_lanes is a flat blob: lane k is x_lanes[k*n..][0..n], overwritten with
@@ -164,9 +160,6 @@ pub const Circuit = struct {
     /// step opens on a residual α·Δq that doubles as dt halves.
     has_state_q: bool,
     has_baseline: bool,
-    /// Set by engine when --gpu is active and circuit is GPU-eligible.
-    /// converger.run reads this to pick JFNK.
-    gpu_active: bool,
 
     // =======================================================================
     // COLD — metadata, memos and handles; off the hot cache lines
@@ -193,8 +186,7 @@ pub const Circuit = struct {
     /// Executor-owned parallel evaluation context. Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
     /// Executor-owned persistent GPU context (mechanism in gpu.zig).
-    /// Provides single-solve, batch
-    /// Newton, batch frequency, and transient dispatch. Null ⇒ CPU only.
+    /// Null ⇒ CPU only.
     gpu_hook: ?GpuHook = null,
     gpa: std.mem.Allocator,
     owns_topology: bool = true,
@@ -295,7 +287,6 @@ pub const Circuit = struct {
             .has_charge = data.has_charge,
             .has_state_q = data.has_state_q,
             .has_baseline = false,
-            .gpu_active = false,
             .g_base = &.{},
             .c_base = &.{},
             .needs_tran_op = data.needs_tran_op,
