@@ -279,28 +279,28 @@ module mesa(d, g, s);
 
         if (level == 4) begin
             // ---- level 4: carrier-concentration-dependent mobility -------
-            vl     = vs / t_mu * l;
-            uu     = 0.5 * vgt / vt - 1.0;
-            tt     = sqrt(deltasqr + uu * uu);
-            vgte   = vt * (2.0 + uu + tt);
             bexp   = exp(vgt / etavth);
             nsm    = 2.0 * n0 * ln(1.0 + 0.5 * bexp);
-            cc     = pow(nsm / nmax, gamma);
-            ns     = nsm / pow(1.0 + cc, 1.0 / gamma);
-            gchi   = gchi0 * ns;
-            gch    = gchi / (1.0 + gchi * rt);
-            gchim  = gchi0 * nsm;
-            hh     = sqrt(1.0 + 2.0 * gchim * rsi + vgte * vgte / (vl * vl));
-            pp     = 1.0 + gchim * t_rsi + hh;
-            isatm  = gchim * vgte / pp;
-            gg     = pow(isatm / imax, gamma);
-            isat   = isatm / pow(1.0 + gg, 1.0 / gamma);
-            knee   = m;
             if (nsm < 1.0e-38) begin
                 cdrain = 0.0;
                 capgs  = cf;
                 capgd  = cf;
             end else begin
+                vl     = vs / t_mu * l;
+                uu     = 0.5 * vgt / vt - 1.0;
+                tt     = sqrt(deltasqr + uu * uu);
+                vgte   = vt * (2.0 + uu + tt);
+                cc     = pow(nsm / nmax, gamma);
+                ns     = nsm / pow(1.0 + cc, 1.0 / gamma);
+                gchi   = gchi0 * ns;
+                gch    = gchi / (1.0 + gchi * rt);
+                gchim  = gchi0 * nsm;
+                hh     = sqrt(1.0 + 2.0 * gchim * rsi + vgte * vgte / (vl * vl));
+                pp     = 1.0 + gchim * t_rsi + hh;
+                isatm  = gchim * vgte / pp;
+                gg     = pow(isatm / imax, gamma);
+                isat   = isatm / pow(1.0 + gg, 1.0 / gamma);
+                knee   = m;
                 vsate  = isat / gch;
                 ratio  = vdsx / vsate;
                 vdse   = vdsx * pow(1.0 + pow(ratio, mc), -1.0 / mc);
