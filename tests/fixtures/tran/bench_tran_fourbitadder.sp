@@ -1,6 +1,4 @@
 4 bit adder
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_tran_fourbitadder.expected.json
 * Origin: benchmark/fixtures/tran/fourbitadder/circuit.sp
 

@@ -2842,8 +2842,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "0595791a29f299da42a628bf2c25f33682ff0bc5cc57693448c459b85f0f012d",
-  "known_gaps": [
-    "nonzero transient output-start time is rejected by the dispatcher"
-  ]
+  "netlist_sha256": "0dfbb752e161f73a5ec839ef3e2989e7bee67e43bb8ffb8b7cb65be2842634e9"
 }

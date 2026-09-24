@@ -322,8 +322,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "26585b5397cce91fc93b672668cd2d6e053f7f202683eeb4822f36c911ac7810",
-  "known_gaps": [
-    "diode transit-time charge is absent from the current diode model"
-  ]
+  "netlist_sha256": "79bd25ca772e94bc9afb68affb76c0a9bea8677603005be6d36f447294415fc0"
 }

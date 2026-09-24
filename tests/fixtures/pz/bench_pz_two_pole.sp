@@ -1,6 +1,4 @@
 * PZ fixture: two cascaded RC sections, two real poles.
-* KNOWN GAP: explicit PZ ports and transfer zeros are not yet exposed by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_pz_two_pole.expected.json
 * Origin: benchmark/fixtures/pz/two_pole/circuit.sp
 Vin in 0 DC 0 AC 1

@@ -28,9 +28,9 @@ export fn testDeviceVtable() *const ir.DeviceVtable {
 fn tooManyInstances() ir.DeviceResult(ir.Batch) {
     if (@sizeOf(usize) <= 4) unreachable;
     var store: eval.ProtoStore(Device) = .{};
-    // Only the count guard may inspect this oversized column; no element is
+    // Only the count guard may inspect this oversized row count; no element is
     // allocated or accessed, and finalize must fail before taking ownership.
-    store.models.items.len = @as(usize, std.math.maxInt(u32)) + 1;
+    store.rows.len = @as(usize, std.math.maxInt(u32)) + 1;
     return eval.ProtoStore(Device).finalize(&store, std.heap.page_allocator, undefined);
 }
 

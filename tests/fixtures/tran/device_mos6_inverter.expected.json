@@ -5879,8 +5879,5 @@
   "notes": [
     "Invalid/ignored legacy model parameters or model-level selectors were corrected during migration; see MIGRATION.json. Reference results use the corrected deck."
   ],
-  "netlist_sha256": "020eea6f8416439211e82514083f9055ffb33dcc16211a15ca3ceb9421c6fbeb",
-  "known_gaps": [
-    "nonzero transient output-start time is rejected by the dispatcher"
-  ]
+  "netlist_sha256": "d3a5f93753ce20b60f5e9b7972024b576e312b6658f90da0260496c75bdffd57"
 }

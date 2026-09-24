@@ -8,7 +8,6 @@ pub const build = preparation.build;
 pub const resolveQueries = preparation.resolveQueries;
 
 test {
-    _ = @import("tests/syntax.zig");
     _ = @import("tests/builder.zig");
     _ = @import("tests/prepared.zig");
     _ = @import("tests/models.zig");

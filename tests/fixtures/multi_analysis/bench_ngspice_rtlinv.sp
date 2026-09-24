@@ -1,6 +1,4 @@
 rtlinv ckt - cascaded rtl inverters
-* KNOWN GAP: nonzero transient output-start time is rejected by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_ngspice_rtlinv.expected.json
 * Origin: benchmark/fixtures/ngspice/rtlinv/circuit.sp
 .width in=72

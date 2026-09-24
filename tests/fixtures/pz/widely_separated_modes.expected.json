@@ -35,9 +35,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "b405957a71cb4262bcc9a53884514e05650859a71ccf107e6808312ac1cd7836",
-  "known_gaps": [
-    "explicit PZ ports and transfer zeros are not yet exposed by the dispatcher",
-    "the pole solver can discard real fast poles using a relative eigenvalue cutoff"
-  ]
+  "netlist_sha256": "4acfd5e41fa8b767766ee648a3d6d36bef2308e6e2dd2fd4715c888e3de58366"
 }

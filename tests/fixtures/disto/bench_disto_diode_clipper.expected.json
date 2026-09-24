@@ -632,8 +632,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "3fc423e63ffe3f9a68a9e34daf1e071015904e08ef1426121794cd46092ec212",
-  "known_gaps": [
-    "full complex second- and third-harmonic distortion output is not yet exposed"
-  ]
+  "netlist_sha256": "8e75f1eac6d33e899b2ecfeec9f2300f55c5f63d82ff81399e9099b249ddf3cf"
 }

@@ -25,6 +25,71 @@ pub fn copySimd(dst: []f64, src: []const f64) void {
     if (dst.ptr != src.ptr) @memcpy(dst[0..n], src[0..n]);
 }
 
+// The analysis drivers' shared vector helpers. Elementwise ones are exact at
+// any width; `dot` fixes one reduction order (W-lane accumulator, one
+// @reduce, scalar tail), so every caller rounds the same way.
+const vw = std.simd.suggestVectorLength(f64) orelse 8;
+const Vf = @Vector(vw, f64);
+
+/// dst[i] += a * src[i] over dst.len; src may alias dst.
+pub fn axpy(dst: []f64, a: f64, src: []const f64) void {
+    const av: Vf = @splat(a);
+    var i: usize = 0;
+    while (i + vw <= dst.len) : (i += vw) dst[i..][0..vw].* = @as(Vf, dst[i..][0..vw].*) + av * @as(Vf, src[i..][0..vw].*);
+    while (i < dst.len) : (i += 1) dst[i] += a * src[i];
+}
+
+/// dst[i] = a * src[i] over dst.len; src may alias dst.
+pub fn scale(dst: []f64, a: f64, src: []const f64) void {
+    const av: Vf = @splat(a);
+    var i: usize = 0;
+    while (i + vw <= dst.len) : (i += vw) dst[i..][0..vw].* = av * @as(Vf, src[i..][0..vw].*);
+    while (i < dst.len) : (i += 1) dst[i] = a * src[i];
+}
+
+/// Σ a[i]·b[i] over a.len.
+pub fn dot(a: []const f64, b: []const f64) f64 {
+    var acc: Vf = @splat(0);
+    var i: usize = 0;
+    while (i + vw <= a.len) : (i += vw) acc += @as(Vf, a[i..][0..vw].*) * @as(Vf, b[i..][0..vw].*);
+    var sum = @reduce(.Add, acc);
+    while (i < a.len) : (i += 1) sum += a[i] * b[i];
+    return sum;
+}
+
+/// max |buf[i]|, 0 for an empty slice; NaN entries are skipped like @max does.
+pub fn normInf(buf: []const f64) f64 {
+    var mx: f64 = 0;
+    var i: usize = 0;
+    while (i + vw <= buf.len) : (i += vw) mx = @max(mx, @reduce(.Max, @abs(@as(Vf, buf[i..][0..vw].*))));
+    while (i < buf.len) : (i += 1) mx = @max(mx, @abs(buf[i]));
+    return mx;
+}
+
+test "vector helpers match their per-element formulas" {
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const r = prng.random();
+    var x: [3 * vw + 1]f64 = undefined;
+    var y: [3 * vw + 1]f64 = undefined;
+    for (0..x.len + 1) |len| {
+        for (x[0..len], y[0..len]) |*u, *v| {
+            u.* = r.float(f64) - 0.5;
+            v.* = r.float(f64) - 0.5;
+        }
+        var got = y;
+        axpy(got[0..len], 0.3, x[0..len]);
+        for (0..len) |i| try std.testing.expectEqual(y[i] + 0.3 * x[i], got[i]);
+        scale(got[0..len], -2.0, x[0..len]);
+        for (0..len) |i| try std.testing.expectEqual(-2.0 * x[i], got[i]);
+        var mx: f64 = 0;
+        for (x[0..len]) |u| mx = @max(mx, @abs(u));
+        try std.testing.expectEqual(mx, normInf(x[0..len]));
+        var sum: f64 = 0;
+        for (x[0..len], y[0..len]) |u, v| sum += u * v;
+        try std.testing.expectApproxEqAbs(sum, dot(x[0..len], y[0..len]), 1e-12);
+    }
+}
+
 // ============================================================================
 // BBD partitioning (moved from root.zig so solver leaves import a leaf,
 // not the module root — keeps the intra-module import graph acyclic)

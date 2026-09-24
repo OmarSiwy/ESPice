@@ -453,8 +453,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "97ad6bb57be7f687311ad8c904b4e23c6a915ee5867517fdc6dd31892a712075",
-  "known_gaps": [
-    "PXF reactive transfer must retain the physical complex phase; the current adjoint extraction conjugates it"
-  ]
+  "netlist_sha256": "a6c0c1e3c1060a35cb698475c7364e7b3097b63fcfd04ae0273ea1d1a08cc86e"
 }

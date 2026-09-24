@@ -1,25 +1,15 @@
+//! Bytes to logical lines to fields, per dialect, plus SPICE numbers.
+//!
+//! A field is a slice of the line. `=`, `(`, `)` and `,` are one-byte
+//! fields; a `{...}` or quoted field keeps its delimiters, so its kind is
+//! its first byte. Every other field is a word.
 const std = @import("std");
 
-// ============================================================================
-// Shared token types
-// ============================================================================
+pub const Dialect = enum { ngspice, hspice, spectre };
 
-pub const Token = union(enum) {
-    word: []const u8,
-    eq,
-    lparen,
-    rparen,
-    comma,
-    braced: []const u8,
-    quoted: []const u8,
-};
-
-pub const NumParts = struct { base: f64, suffix: []const u8 };
-
-pub fn GenTokens(comptime cfg: struct {
-    quotes: []const u8 = "",
-    braces: bool = false,
-}) type {
+/// Split `line` into fields. `quotes` are the quote bytes, `braces` keeps
+/// `{...}` whole.
+pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
     return struct {
         line: []const u8,
         pos: usize = 0,
@@ -30,72 +20,94 @@ pub fn GenTokens(comptime cfg: struct {
             return .{ .line = line };
         }
 
-        pub fn rest(self: *const Self) []const u8 {
+        /// The unread part of the line, blank-trimmed.
+        pub fn rest(self: Self) []const u8 {
             return std.mem.trim(u8, self.line[self.pos..], " \t");
         }
 
-        fn isBreak(c: u8) bool {
-            if (c == ' ' or c == '\t' or c == '=' or c == '(' or c == ')' or c == ',') return true;
-            inline for (cfg.quotes) |q| {
-                if (c == q) return true;
-            }
-            return cfg.braces and c == '{';
+        pub fn peek(self: Self) ?[]const u8 {
+            var copy = self;
+            return copy.next();
         }
 
-        pub fn next(self: *Self) ?Token {
-            while (self.pos < self.line.len and (self.line[self.pos] == ' ' or self.line[self.pos] == '\t'))
-                self.pos += 1;
-            if (self.pos >= self.line.len) return null;
-            const c = self.line[self.pos];
+        /// First byte of the next field.
+        pub fn nextByte(self: *Self) ?u8 {
+            while (self.pos < self.line.len and (self.line[self.pos] == ' ' or self.line[self.pos] == '\t')) self.pos += 1;
+            return if (self.pos < self.line.len) self.line[self.pos] else null;
+        }
+
+        /// Consume a `=` field if one is next: the word just read is a key.
+        pub fn takeEq(self: *Self) bool {
+            if (self.nextByte() != '=') return false;
+            self.pos += 1;
+            return true;
+        }
+
+        pub fn isWord(f: []const u8) bool {
+            return !isBreak(f[0]);
+        }
+
+        const breaks: [256]bool = blk: {
+            var t: [256]bool = @splat(false);
+            for (" \t=(),") |c| t[c] = true;
+            for (quotes) |q| t[q] = true;
+            if (braces) t['{'] = true;
+            break :blk t;
+        };
+
+        fn isBreak(c: u8) bool {
+            return breaks[c];
+        }
+
+        pub fn isQuote(c: u8) bool {
+            inline for (quotes) |q| if (c == q) return true;
+            return false;
+        }
+
+        /// A `{...}` or quoted field without its delimiters.
+        pub fn body(f: []const u8) []const u8 {
+            const close: u8 = if (f[0] == '{') '}' else f[0];
+            return if (f.len >= 2 and f[f.len - 1] == close) f[1 .. f.len - 1] else f[1..];
+        }
+
+        pub fn next(self: *Self) ?[]const u8 {
+            const line = self.line;
+            while (self.pos < line.len and (line[self.pos] == ' ' or line[self.pos] == '\t')) self.pos += 1;
+            if (self.pos >= line.len) return null;
+            const start = self.pos;
+            const c = line[start];
             switch (c) {
-                '=' => {
+                '=', '(', ')', ',' => {
                     self.pos += 1;
-                    return .eq;
-                },
-                '(' => {
-                    self.pos += 1;
-                    return .lparen;
-                },
-                ')' => {
-                    self.pos += 1;
-                    return .rparen;
-                },
-                ',' => {
-                    self.pos += 1;
-                    return .comma;
+                    return line[start..self.pos];
                 },
                 else => {},
             }
-            inline for (cfg.quotes) |q| {
-                if (c == q) {
-                    const end = std.mem.indexOfScalarPos(u8, self.line, self.pos + 1, q) orelse self.line.len;
-                    const body = self.line[self.pos + 1 .. end];
-                    self.pos = @min(end + 1, self.line.len);
-                    return .{ .quoted = body };
-                }
+            if (isQuote(c)) {
+                const end = std.mem.indexOfScalarPos(u8, line, start + 1, c) orelse line.len;
+                self.pos = @min(end + 1, line.len);
+                return line[start..self.pos];
             }
-            if (cfg.braces and c == '{') {
+            if (braces and c == '{') {
                 var depth: usize = 0;
-                var i = self.pos;
-                while (i < self.line.len) : (i += 1) {
-                    if (self.line[i] == '{') depth += 1;
-                    if (self.line[i] == '}') {
+                var i = start;
+                while (i < line.len) : (i += 1) {
+                    if (line[i] == '{') depth += 1;
+                    if (line[i] == '}') {
                         depth -= 1;
                         if (depth == 0) break;
                     }
                 }
-                const body = self.line[self.pos + 1 .. @min(i, self.line.len)];
-                self.pos = @min(i + 1, self.line.len);
-                return .{ .braced = body };
+                self.pos = @min(i + 1, line.len);
+                return line[start..self.pos];
             }
-            const start = self.pos;
-            while (self.pos < self.line.len) : (self.pos += 1) {
-                if (isBreak(self.line[self.pos])) break;
-            }
-            return .{ .word = self.line[start..self.pos] };
+            while (self.pos < line.len and !isBreak(line[self.pos])) self.pos += 1;
+            return line[start..self.pos];
         }
     };
 }
+
+pub const NumParts = struct { base: f64, suffix: []const u8 };
 
 pub fn parseNumBase(text: []const u8) ?NumParts {
     if (text.len == 0) return null;
@@ -152,6 +164,23 @@ inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
     return parsed.base * scale;
 }
 
+/// Copy `src` lowercased into `dst` and count its newlines in one pass.
+/// W=1 is the scalar oracle and tail; byte lanes are independent.
+pub fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
+    const V = @Vector(W, u8);
+    var lines: usize = 0;
+    var i: usize = 0;
+    while (i + W <= src.len) : (i += W) {
+        const v: V = src[i..][0..W].*;
+        const upper = (v >= @as(V, @splat('A'))) & (v <= @as(V, @splat('Z')));
+        dst[i..][0..W].* = v | @select(u8, upper, @as(V, @splat(0x20)), @as(V, @splat(0)));
+        const newlines: std.meta.Int(.unsigned, W) = @bitCast(v == @as(V, @splat('\n')));
+        lines += @popCount(newlines);
+    }
+    if (W > 1) lines += normalize(1, dst[i..], src[i..]);
+    return lines;
+}
+
 /// Append a continuation piece to a logical line, copying `head` on first use.
 fn join(arena: std.mem.Allocator, joined: *?std.ArrayList(u8), head: []const u8, piece: []const u8) !void {
     if (joined.* == null) {
@@ -172,26 +201,21 @@ fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
     return line;
 }
 
-// ============================================================================
-// ngspice tokenizer
-// ============================================================================
-
 pub const ngspice = struct {
-    pub const has_title_line = true;
-    pub const case_normalize = true;
+    pub const title_line = true;
+    pub const fold_case = true;
+    pub const Split = Fields("'", true);
 
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
 
-        pub fn init(arena: std.mem.Allocator, src: []const u8) Lines {
-            return .{ .rest = src, .arena = arena };
-        }
-
+        /// Cut at the first `$` or `;`. One scalar pass: cards are short, and
+        /// two stdlib vector scans cost more in setup than they save.
         fn stripComment(line: []const u8) []const u8 {
-            // ponytail: reuse the first cutoff to bound the second stdlib vector scan.
-            const dollar = std.mem.indexOfScalar(u8, line, '$') orelse line.len;
-            const cut = std.mem.indexOfScalar(u8, line[0..dollar], ';') orelse dollar;
+            const cut = for (line, 0..) |c, i| {
+                if (c == '$' or c == ';') break i;
+            } else line.len;
             return std.mem.trim(u8, line[0..cut], " \t");
         }
 
@@ -212,9 +236,7 @@ pub const ngspice = struct {
                 const t = std.mem.trim(u8, raw, " \t");
                 if (t.len > 0 and t[0] == '+') {
                     try join(self.arena, &joined, head, stripComment(t[1..]));
-                } else if (t.len > 0 and t[0] == '*') {
-                    continue;
-                } else if (t.len == 0) {
+                } else if (t.len == 0 or t[0] == '*') {
                     continue;
                 } else {
                     self.rest = save;
@@ -225,28 +247,19 @@ pub const ngspice = struct {
         }
     };
 
-    pub const Tokens = GenTokens(.{ .quotes = "'", .braces = true });
-
     pub fn parseNum(text: []const u8) ?f64 {
         return parseSpiceNum(text, false);
     }
 };
 
-// ============================================================================
-// HSPICE tokenizer
-// ============================================================================
-
 pub const hspice = struct {
-    pub const has_title_line = true;
-    pub const case_normalize = true;
+    pub const title_line = true;
+    pub const fold_case = true;
+    pub const Split = Fields("'\"", false);
 
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
-
-        pub fn init(arena: std.mem.Allocator, src: []const u8) Lines {
-            return .{ .rest = src, .arena = arena };
-        }
 
         fn stripComment(line: []const u8) []const u8 {
             var cut = line.len;
@@ -291,12 +304,8 @@ pub const hspice = struct {
                         try join(self.arena, &joined, head, stripComment(t[1..]));
                         const bs = stripTrailingBackslash(joined.?.items);
                         trailing_cont = bs.continues;
-                        if (trailing_cont) {
-                            joined.?.shrinkRetainingCapacity(bs.text.len);
-                        }
-                    } else if (t.len > 0 and t[0] == '*') {
-                        continue;
-                    } else if (t.len == 0) {
+                        if (trailing_cont) joined.?.shrinkRetainingCapacity(bs.text.len);
+                    } else if (t.len == 0 or t[0] == '*') {
                         continue;
                     } else {
                         self.rest = save;
@@ -313,28 +322,19 @@ pub const hspice = struct {
         }
     };
 
-    pub const Tokens = GenTokens(.{ .quotes = "'\"" });
-
     pub fn parseNum(text: []const u8) ?f64 {
         return parseSpiceNum(text, true);
     }
 };
 
-// ============================================================================
-// Spectre tokenizer
-// ============================================================================
-
 pub const spectre = struct {
-    pub const has_title_line = false;
-    pub const case_normalize = false;
+    pub const title_line = false;
+    pub const fold_case = false;
+    pub const Split = Fields("\"", false);
 
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
-
-        pub fn init(arena: std.mem.Allocator, src: []const u8) Lines {
-            return .{ .rest = src, .arena = arena };
-        }
 
         fn stripComment(line: []const u8) []const u8 {
             var i: usize = 0;
@@ -347,15 +347,13 @@ pub const spectre = struct {
                     while (i < line.len and line[i] != '"') : (i += 1) {}
                 }
             }
-            if (line.len > 0 and line[0] == '*') {
-                return "";
-            }
+            if (line.len > 0 and line[0] == '*') return "";
             return std.mem.trim(u8, line, " \t");
         }
 
         /// Copies the spans between comments, not byte by byte. An unterminated
         /// `/*` still discards the rest of the line.
-        fn stripBlockComments(arena: std.mem.Allocator, line: []const u8) ![]const u8 {
+        pub fn stripBlockComments(arena: std.mem.Allocator, line: []const u8) ![]const u8 {
             var open = std.mem.indexOf(u8, line, "/*") orelse return line;
             var buf: std.ArrayList(u8) = .empty;
             try buf.appendSlice(arena, line[0..open]);
@@ -374,9 +372,7 @@ pub const spectre = struct {
         }
 
         fn trimContinuation(line: []const u8) []const u8 {
-            if (line.len > 0 and line[line.len - 1] == '\\') {
-                return std.mem.trimEnd(u8, line[0 .. line.len - 1], " \t");
-            }
+            if (hasContinuation(line)) return std.mem.trimEnd(u8, line[0 .. line.len - 1], " \t");
             return line;
         }
 
@@ -385,8 +381,7 @@ pub const spectre = struct {
             var trailing_cont = false;
             while (true) {
                 const raw = nextPhysicalLine(&self.rest) orelse return null;
-                const stripped = stripComment(raw);
-                const clean = try stripBlockComments(self.arena, stripped);
+                const clean = try stripBlockComments(self.arena, stripComment(raw));
                 if (clean.len == 0) continue;
                 trailing_cont = hasContinuation(clean);
                 head = trimContinuation(clean);
@@ -401,25 +396,18 @@ pub const spectre = struct {
                     const save = self.rest;
                     const raw = nextPhysicalLine(&self.rest) orelse break;
                     const t = std.mem.trim(u8, raw, " \t");
-                    if (t.len > 0 and t[0] == '+') {
-                        break :blk t[1..];
-                    } else if (t.len == 0 or (t.len > 0 and t[0] == '*')) {
-                        continue;
-                    } else {
-                        self.rest = save;
-                        break;
-                    }
+                    if (t.len > 0 and t[0] == '+') break :blk t[1..];
+                    if (t.len == 0 or t[0] == '*') continue;
+                    self.rest = save;
+                    break;
                 };
-                const stripped = stripComment(line);
-                const clean = try stripBlockComments(self.arena, stripped);
+                const clean = try stripBlockComments(self.arena, stripComment(line));
                 trailing_cont = hasContinuation(clean);
                 try join(self.arena, &joined, head, trimContinuation(clean));
             }
             return if (joined) |j| j.items else head;
         }
     };
-
-    pub const Tokens = GenTokens(.{ .quotes = "\"" });
 
     pub fn parseNum(text: []const u8) ?f64 {
         const parsed = parseNumBase(text) orelse return null;
@@ -443,7 +431,11 @@ pub const spectre = struct {
     }
 };
 
-// Private implementation access for the frontend test suite.
-pub const test_access = if (@import("builtin").is_test) .{
-    .stripBlockComments = spectre.Lines.stripBlockComments,
-} else {};
+/// The comptime syntax a dialect selects.
+pub fn Syntax(comptime d: Dialect) type {
+    return switch (d) {
+        .ngspice => ngspice,
+        .hspice => hspice,
+        .spectre => spectre,
+    };
+}

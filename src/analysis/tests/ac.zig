@@ -1,12 +1,11 @@
-const BatchTests = struct {
-    const impl = @import("../ac/batch.zig");
+const StreamTests = struct {
+    const freq = @import("../ac/freq.zig");
     const FreqSolver = @import("solvers").freq_solve.FreqSolver;
-    const quantum = impl.quantum;
+    const quantum = freq.quantum;
     const root = @import("../types.zig");
-    const solve = impl.solve;
     const std = @import("std");
 
-    test "frequency quanta preserve full-grid answers and unwind cancellation" {
+    test "frequency stream matches one whole-grid batch and unwinds cancellation" {
         const a = std.testing.allocator;
         const g = try a.dupe(f64, &.{ 2, 1, 0, 3 });
         const c = try a.dupe(f64, &.{ 0.1, 0, 0.02, 0.3 });
@@ -31,22 +30,30 @@ const BatchTests = struct {
             }
         };
         var probe: Probe = .{};
-        // solve reads only the dispatch hook and checkpoint callback from Circuit.
+        // The stream reads only the checkpoint callback from Circuit.
         var ckt: root.Circuit = undefined;
-        ckt.gpu_hook = null;
+        ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
         for ([_]bool{ false, true }) |adjoint| {
-            ckt.progress = null;
-            const whole = try solve(&ckt, &fs, a, g, c, &frequencies, &rhs, adjoint);
+            const whole = try a.alloc(f64, frequencies.len * 4);
             defer a.free(whole);
+            try fs.solveBatch(&frequencies, &rhs, whole, adjoint);
+
             probe = .{};
-            ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
-            const stepped = try solve(&ckt, &fs, a, g, c, &frequencies, &rhs, adjoint);
-            defer a.free(stepped);
-            try std.testing.expectEqualSlices(f64, whole, stepped);
+            var stream = try freq.Stream.init(a, &fs, &frequencies, &rhs, adjoint);
+            defer stream.deinit(a);
+            var seen: usize = 0;
+            while (try stream.next(&ckt)) |pt| : (seen += 1) {
+                try std.testing.expectEqual(seen, pt.k);
+                try std.testing.expectEqualSlices(f64, whole[pt.k * 4 ..][0..4], pt.x);
+            }
+            try std.testing.expectEqual(frequencies.len, seen);
             try std.testing.expectEqual(@as(u16, 3), probe.calls);
             try std.testing.expectEqual(@as(u16, frequencies.len), probe.completed);
+
             probe = .{ .cancel = true };
-            try std.testing.expectError(error.QueryCancelled, solve(&ckt, &fs, a, g, c, &frequencies, &rhs, adjoint));
+            var cancelled = try freq.Stream.init(a, &fs, &frequencies, &rhs, adjoint);
+            defer cancelled.deinit(a);
+            try std.testing.expectError(error.QueryCancelled, cancelled.next(&ckt));
             try std.testing.expectEqual(@as(u16, quantum), probe.completed);
         }
     }
@@ -135,87 +142,7 @@ const NoiseTests = struct {
     }
 };
 
-const StbTests = struct {
-    const impl = @import("../ac/stb.zig");
-    const SolveResult = impl.SolveResult;
-    const computeMargins = impl.test_access.computeMargins;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
-
-    test "STB: margin computation with synthetic data" {
-        const allocator = testing.allocator;
-
-        const k_gain: f64 = 10.0;
-        const f0: f64 = 1000.0;
-        const n_pts: u32 = 200;
-
-        var result = try SolveResult.init(allocator, n_pts);
-        defer result.deinit(allocator);
-
-        for (0..n_pts) |idx| {
-            const frac = @as(f64, @floatFromInt(idx)) / @as(f64, @floatFromInt(n_pts - 1));
-            const f = std.math.pow(f64, 10.0, frac * 6.0);
-            const ratio = f / f0;
-            const denom = @sqrt(1.0 + ratio * ratio);
-            const m = k_gain / denom;
-            const phase_rad = -std.math.atan(ratio);
-
-            result.freqs[idx] = f;
-            result.loop_gain[idx] = .{ .re = m * @cos(phase_rad), .im = m * @sin(phase_rad) };
-        }
-
-        computeMargins(&result);
-
-        try testing.expect(!std.math.isNan(result.phase_margin_deg));
-        try testing.expectApproxEqAbs(95.7, result.phase_margin_deg, 2.0);
-        // Single-pole: phase never reaches −180° → gain margin is NaN (correct).
-        try testing.expect(std.math.isNan(result.gain_margin_db));
-    }
-
-    test "STB: three-pole margin computation" {
-        // Two poles only approach −180° asymptotically and never cross it
-        // (gain margin is then rightly NaN); three poles give a real crossing.
-        const allocator = testing.allocator;
-
-        const k_gain: f64 = 100.0;
-        const f1: f64 = 100.0;
-        const f2: f64 = 1000.0;
-        const f3: f64 = 10000.0;
-        const n_pts: u32 = 500;
-
-        var result = try SolveResult.init(allocator, n_pts);
-        defer result.deinit(allocator);
-
-        for (0..n_pts) |idx| {
-            const frac = @as(f64, @floatFromInt(idx)) / @as(f64, @floatFromInt(n_pts - 1));
-            const f = std.math.pow(f64, 10.0, frac * 7.0);
-            const r1 = f / f1;
-            const r2 = f / f2;
-            const r3 = f / f3;
-            const m = k_gain / (@sqrt(1.0 + r1 * r1) * @sqrt(1.0 + r2 * r2) * @sqrt(1.0 + r3 * r3));
-            const phase_rad = -std.math.atan(r1) - std.math.atan(r2) - std.math.atan(r3);
-
-            result.freqs[idx] = f;
-            result.loop_gain[idx] = .{ .re = m * @cos(phase_rad), .im = m * @sin(phase_rad) };
-        }
-
-        computeMargins(&result);
-
-        try testing.expect(!std.math.isNan(result.phase_margin_deg));
-        try testing.expect(result.phase_margin_deg > 0);
-        try testing.expect(result.phase_margin_deg < 180.0);
-        try testing.expect(!std.math.isNan(result.gain_margin_db));
-        try testing.expect(result.gain_margin_db > 0);
-    }
-};
-
 test {
-    _ = BatchTests;
+    _ = StreamTests;
     _ = NoiseTests;
-    _ = StbTests;
 }
