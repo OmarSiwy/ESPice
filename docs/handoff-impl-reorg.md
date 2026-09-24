@@ -20,7 +20,7 @@ b1054dc. Scripts: session scratchpad `e/gate.sh <tag>` and `e/runall.sh`.
 | 5 | src/core/ | done |
 | 6 | src/espice.zig, c_api, delete problem/ | done |
 | 7 | DeviceType identity through CardRef/SweepTarget/AcOverride/ParamRef | done (see below) |
-| 8 | schemaOf, output encoders, Plot | todo |
+| 8 | schemaOf, output encoders, Plot | done |
 | 9 | AGENTS.md, docs paths | todo |
 
 ## Step 0 findings

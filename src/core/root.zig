@@ -14,6 +14,7 @@ pub const QueryBindings = deck.QueryBindings;
 const result = @import("result.zig");
 pub const Result = result.Result;
 pub const Schema = result.Schema;
+pub const QuerySchema = result.QuerySchema;
 
 const intern = @import("intern.zig");
 pub const InternPool = intern.InternPool;

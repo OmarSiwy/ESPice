@@ -99,4 +99,4 @@ pub const RunCtx = struct {
 // Uniform result — every analysis produces this
 // ---------------------------------------------------------------------------
 
-pub const Result = @import("output_types").Result;
+pub const Result = @import("core").Result;

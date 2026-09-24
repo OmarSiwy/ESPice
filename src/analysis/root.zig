@@ -2,7 +2,7 @@
 pub const session = @import("session.zig");
 pub const ExecutionConfig = @import("executor.zig").Config;
 pub const validateBackend = @import("executor.zig").validateBackend;
-pub const validateOutputSchema = session.validateOutputSchema;
+pub const schemaOf = session.schemaOf;
 
 test {
     _ = @import("tests/ac.zig");

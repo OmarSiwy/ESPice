@@ -102,8 +102,7 @@ pub fn build(b: *std.Build) void {
     // Waveform writers. A leaf like `solver`: it imports nothing but core, so
     // it is a module rather than a set of files in the app root, and
     // `zig build test-output` runs it without building the simulator.
-    const output_types_mod = M.make(b.path("src/output/types.zig"), &.{core_import});
-    const output_mod = M.make(b.path("src/output/root.zig"), &.{ core_import, .{ .name = "output_types", .module = output_types_mod } });
+    const output_mod = M.make(b.path("src/output/root.zig"), &.{core_import});
 
     // Netlist lines -> hypergraph + analysis cards. Imports only shared leaves.
     const netlist_imports: []const std.Build.Module.Import = &.{core_import};
@@ -252,7 +251,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "solver", .module = solver_mod },
         core_import,
         .{ .name = "device", .module = device_mod },
-        .{ .name = "output_types", .module = output_types_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
     });
     analysis_mod.linkSystemLibrary("c", .{});
