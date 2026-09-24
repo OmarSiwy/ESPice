@@ -749,6 +749,7 @@ pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error
     var src: lines.ngspice.Lines = .{ .rest = lower, .arena = arena };
     var out: std.ArrayList(Analysis) = .empty;
     while (try src.next()) |line| {
+        if (line.len == 0) continue;
         if (line[0] != '.') return error.UnsupportedDirectiveMutation;
         var f = lines.ngspice.Split.init(line);
         const card = cardOf(f.next().?[1..]) orelse return error.UnsupportedDirectiveMutation;
@@ -1073,7 +1074,8 @@ fn Reader(comptime S: type) type {
                 split.rest = if (nl < text.len) text[nl + 1 ..] else "";
             }
             try r.lines.ensureTotalCapacity(arena, line_hint);
-            // A line left blank (`\\` glued to a blank line) is no card (#164).
+            // A line left blank (`\\` glued to a blank line, or a lone `\\` at the
+            // end) is no card (#164, #38).
             while (try split.next()) |line| {
                 if (std.mem.trim(u8, line, " \t").len > 0) try r.lines.append(arena, line);
             }

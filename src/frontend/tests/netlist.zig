@@ -976,3 +976,13 @@ fn parseAll(gpa: std.mem.Allocator) !void {
 test "every allocation failure surfaces as OutOfMemory" {
     try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, parseAll, .{});
 }
+
+test "a lone continuation at the end of input is no statement (#38)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]netlist.Dialect{ .hspice, .ngspice }) |dialect| {
+        const nl = try netlist.parse(a, "lone\nV1 a 0 1\nR1 a 0 1k\n.op\n\\\\\n", dialect);
+        try std.testing.expectEqual(@as(usize, 1), nl.deck.analyses.len);
+    }
+}
