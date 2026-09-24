@@ -42,18 +42,10 @@ const TranHook = struct {
     i_prev: []const f64, // read by trap only
     q_prev2: []const f64, // read by gear_2 only
     a_vals: []f64,
-    q_snap: ?[]f64,
-    /// Per-device-state charge snapshot, same cadence as `q_snap` and for the
-    /// same reason: JFNK's matvec re-evals after the converged assemble, so the
-    /// last plane state is not necessarily the solution's. Null ⇒ per-row LTE
-    /// (nothing carries charge, or the GPU owns the stamp).
-    qt_snap: ?[]f64 = null,
     has_charge: bool,
 
     pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
-        if (self.q_snap) |snap| simdCopy(snap, ckt.q_vec[0..ckt.n]);
-        if (self.qt_snap) |snap| ckt.snapshotQTape(snap);
         if (self.has_charge) {
             const n: usize = ckt.n;
             switch (self.method) {
@@ -92,7 +84,7 @@ pub fn simulate(
 
     // Charge state: dynamic current i_prev and a charge-history ring
     // [cur, prev, prev2, prev3] for the companion residual + trap LTE.
-    // Slot 0 receives the Newton snapshot; the solve only reads slots 1..3.
+    // Slot 0 receives the charge at each converged attempt; the solve only reads slots 1..3.
     var a_vals: []f64 = &.{};
     var i_prev: []f64 = &.{};
     var q_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
@@ -314,8 +306,6 @@ pub fn simulate(
             .i_prev = i_prev,
             .q_prev2 = q_hist[2],
             .a_vals = a_vals,
-            .q_snap = if (has_charge) q_hist[0] else null,
-            .qt_snap = if (n_qt > 0) qt_hist[0] else null,
             .has_charge = has_charge,
         };
 
@@ -384,6 +374,14 @@ pub fn simulate(
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         if (has_charge) {
+            // CKTterr reads the charge the published point carries. `newton()`
+            // returns x_k+1 while the planes hold q(x_k) (or a JFNK matvec's
+            // x), one correction back; read them at the solution so the LTE,
+            // advanceCurrent and the next residual all see q(trial). One
+            // charge-only pass per converged attempt.
+            ckt.evalQ(trial, t + dt);
+            simdCopy(q_hist[0], ckt.q_vec[0..n]);
+            if (n_qt > 0) ckt.snapshotQTape(qt_hist[0]);
             // Captured before the ring rotation at the bottom of this block.
             const lh = lte_hist.*;
             const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
@@ -523,48 +521,22 @@ pub fn simulate(
         // assemble's fadd(pq, D) bit for bit. The i_prev correction is the same
         // α·Δq for both methods.
         //
-        // NOT diagnostic, and Δq is NOT a rounding floor — this was gated off
-        // once and had to come back (2026-09-07). `newton()` returns on the
-        // iterate it converged, WITHOUT reassembling: `ckt.q_vec` holds q(x_k)
-        // while `cur` is x_k+1. So Δq is the last Newton correction's charge,
-        // ~C·dx, and α·Δq is 1e-7…7.7e-5 A against abstol 1e-12 — five to eight
-        // decades above the floor. i_prev and q_hist[1] are not diagnostics
-        // either: both are read by the NEXT step's companion residual
-        // (`TranHook.assemble`, rhs += α(q − q_prev) − i_prev) and by
-        // `stepBound`. Skipping this integrates the next step from a point one
-        // Newton correction away from the one that was recorded.
-        // Measured cost of keeping it: +10% devices/mos6_inverter, +14%
-        // tran/fourbitadder, +17% scaling/parallel_inverters_100. Measured cost
-        // of dropping it: 151 -> 149 fixtures passing, parallel_inverters_100
-        // 8.98e-3 -> 1.49e-2 (PASS -> FAIL) while taking 3.4% MORE steps.
-        // The two writes are one correction — applying either alone is worse
-        // than applying neither (3.6e-2 on parallel_inverters_100).
-        // Only the CHARGES are read here — g/c/rhs stay dead until the next
-        // step's first `TranHook.assemble` zeroes and restamps all three — so
-        // this is `evalQ`, the reactive half of the pass, not `eval`, run on a
-        // value-only `S` (`engine.RealFor`) whose arithmetic is `Dual`'s value
-        // half verbatim. Same `D.q`, same scatter, same bits, so `q_vec`/
-        // `q_tape` are what the full pass wrote; it just stops computing the two
-        // Jacobians and the resistive residual it was throwing away.
-        //
-        // It cannot be skipped, and not because of limiting: `newton()` returns
-        // the iterate AFTER the one it assembled, so the accepted `cur` is one
-        // Newton correction past the x the planes hold — always, limited or not.
+        // The charge read before the LTE (above) already put q_hist at
+        // q(cur), so Δq here is only what the commit moved. It is not zero:
+        // dropping this re-read changes the bytes of txl2_3_line,
+        // hfet_inverter, mesa_oscillator and mos6_inverter. `evalQ` is the
+        // charge-only pass: same `D.q`, same scatter, same bits as `eval`.
         if (has_charge and ckt.has_state_q) {
             ckt.evalQ(cur, t);
             integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], alpha_val);
             simdCopy(q_hist[1], ckt.q_vec[0..n]);
-            // The per-state tape is the SAME two writes on the same Δq, off the
-            // same re-read — `stepBound` now reduces over it, so leaving it
-            // uncorrected would reintroduce exactly the "one Newton correction
-            // away from the recorded point" error the row loop above exists to
-            // close, only on the LTE side instead of the residual side.
+            // The per-state tape takes the SAME two writes on the same Δq.
             if (n_qt > 0) {
                 ckt.snapshotQTape(qt_hist[0]);
                 integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], alpha_val);
                 // Swap, not copy: qt_hist[0] is the ring's scratch slot (the
                 // rotation above just parked the stale tail there) and the next
-                // assemble overwrites it via `qt_snap` before anything reads it.
+                // accepted attempt's charge read overwrites it before anything reads it.
                 std.mem.swap([]f64, &qt_hist[0], &qt_hist[1]);
             }
         }
