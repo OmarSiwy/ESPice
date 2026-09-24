@@ -997,14 +997,15 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
 // SoA batch with the AD eval hot loop and cold Hooks vtable.
 // ===========================================================================
 
-/// Build-time staging for the three per-instance columns, before `finalize`
-/// freezes them into the batch. Deliberately NOT the caller's `gpa`.
+/// Build-time staging for the per-instance rows, before `finalize` freezes
+/// them into the batch. Deliberately NOT the caller's `gpa`.
 ///
 /// `gpa` here is the SIM ARENA. `ArenaAllocator.free` and shrink-`resize` are
-/// silent no-ops for anything but the most recent allocation, so an ArrayList
+/// silent no-ops for anything but the most recent allocation, so a list
 /// growing 1.5x at a time leaves every abandoned capacity resident for the
-/// whole run — about 2x the final column size, and the three columns grow
-/// interleaved so none of them is ever the arena's most recent allocation.
+/// whole run — about 2x the final column size, and every device type's store
+/// grows interleaved in netlist order, so none is ever the arena's most recent
+/// allocation.
 /// Measured on `sweep/opamp_wl_5000` (25,000 MOS1): 109.5 MB requested for
 /// 36.5 MB of live columns, i.e. 73 MB — half the deck's entire `.op`
 /// footprint — of dead ArrayList capacity that nothing could ever reclaim.
@@ -1018,19 +1019,15 @@ pub fn ProtoStore(comptime D: type) type {
     // ponytail: the contract owns unknown counting; retain usize for tape offsets.
     const n_u: usize = comptime contract.nU(D);
     return struct {
-        models: std.ArrayList(D.Model) = .empty,
-        instances: std.ArrayList(D.Instance) = .empty,
-        nodes: std.ArrayList([n_u]u32) = .empty,
+        /// One row per device instance. See `staging_gpa` for why the rows
+        /// are not on the caller's allocator.
+        rows: std.MultiArrayList(Row) = .empty,
 
         const Self = @This();
+        const Row = struct { model: D.Model, instance: D.Instance, nodes: [n_u]u32 };
 
-        /// The three columns move in lockstep — one row per device instance —
-        /// so they are appended together and on ONE allocator. See
-        /// `staging_gpa` for why that allocator is not the caller's.
         pub fn append(self: *Self, model: D.Model, instance: D.Instance, nodes: [n_u]u32) !void {
-            try self.models.append(staging_gpa, model);
-            try self.instances.append(staging_gpa, instance);
-            try self.nodes.append(staging_gpa, nodes);
+            try self.rows.append(staging_gpa, .{ .model = model, .instance = instance, .nodes = nodes });
         }
 
         pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) ir.DeviceResult(void) {
@@ -1050,10 +1047,10 @@ pub fn ProtoStore(comptime D: type) type {
                 for (pat) |m| k += @popCount(m & (std.math.maxInt(u64) >> (63 - (n_u - 1))));
                 break :blk k;
             };
-            try pb.reserve(gpa, self.nodes.items.len * nnz);
+            try pb.reserve(gpa, self.rows.len * nnz);
             // Runtime loops: this runs ONCE per batch at setup, and unrolling
             // n_u^2 for 38 devices is a comptime-quota problem, not a speedup.
-            for (self.nodes.items) |nd| {
+            for (self.rows.items(.nodes)) |nd| {
                 for (0..n_u) |ru| for (0..n_u) |cu| {
                     if ((pat[ru] >> @intCast(cu)) & 1 == 0) continue;
                     if (nd[ru] != GROUND and nd[cu] != GROUND)
@@ -1070,12 +1067,12 @@ pub fn ProtoStore(comptime D: type) type {
             const has_q = @hasDecl(D, "q");
             const has_attempt_decl = @hasDecl(D, "attempt");
             const self: *Self = @ptrCast(@alignCast(ctx));
-            const count = std.math.cast(u32, self.models.items.len) orelse return error.TooManyInstances;
+            const count = std.math.cast(u32, self.rows.len) orelse return error.TooManyInstances;
             const store = try gpa.create(DeviceBatch(D));
 
             // BEFORE the tapes are built and before the columns are duped:
-            // this is the only point where all three staging columns can still
-            // be permuted together.
+            // this is the only point where the staged rows can still be
+            // permuted.
             store.count = count;
             store.owns_tapes = true;
             if (comptime canNarrow(D)) store.narrow_count = try self.partitionCollapsed();
@@ -1090,12 +1087,10 @@ pub fn ProtoStore(comptime D: type) type {
             if (comptime @hasDecl(D, "State")) store.states = &.{};
             errdefer DeviceBatch(D).hooks.deinit(store, gpa);
 
-            // Exact-size copy out of staging, then the staged column goes back
-            // to `staging_gpa` at once: the peak carries one type's columns
+            // Exact-size copies out of staging, then the staged rows go back
+            // to `staging_gpa` at the end: the peak carries one type's columns
             // twice, never every type's dead capacity forever.
-            store.models = try gpa.dupe(D.Model, self.models.items);
-            self.models.deinit(staging_gpa);
-            self.models = .empty;
+            store.models = try gpa.dupe(D.Model, self.rows.items(.model));
             if (comptime has_attempt_decl) {
                 store.saved_models = try gpa.alloc(D.Model, count);
                 store.attempt_saved = false;
@@ -1111,14 +1106,12 @@ pub fn ProtoStore(comptime D: type) type {
                 @memset(store.lim_x, 0);
                 store.lim_active = false;
             }
-            store.instances = try gpa.dupe(D.Instance, self.instances.items);
-            self.instances.deinit(staging_gpa);
-            self.instances = .empty;
+            store.instances = try gpa.dupe(D.Instance, self.rows.items(.instance));
 
             store.gath = try gpa.alloc(u32, count * n_u);
             store.rhs_idx = try gpa.alloc(u32, count * n_u);
             store.slots = try gpa.alloc(u32, count * n_u * n_u);
-            const flat_nodes = @as([*]const u32, @ptrCast(self.nodes.items.ptr))[0 .. count * n_u];
+            const flat_nodes = @as([*]const u32, @ptrCast(self.rows.items(.nodes).ptr))[0 .. count * n_u];
             buildTapes(flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
             // Fourth member of the tape family: same (id, ru) index space, one
             // f64 per charge contribution. See Hooks.q_tape.
@@ -1126,8 +1119,8 @@ pub fn ProtoStore(comptime D: type) type {
                 store.q_tape = try gpa.alloc(f64, count * n_u);
                 @memset(store.q_tape, 0);
             }
-            self.nodes.deinit(staging_gpa);
-            self.nodes = .empty;
+            self.rows.deinit(staging_gpa);
+            self.rows = .empty;
 
             if (comptime @hasDecl(D, "State")) {
                 store.states = try gpa.alloc(D.State, count);
@@ -1156,30 +1149,21 @@ pub fn ProtoStore(comptime D: type) type {
         /// `ParamRef.index`) is untouched. Only a genuinely mixed batch is
         /// reordered, and there the alternative is no narrowing at all.
         fn partitionCollapsed(self: *Self) !u32 {
-            const models = self.models.items;
-            const insts = self.instances.items;
-            const nodes = self.nodes.items;
-            const flags = try staging_gpa.alloc(bool, models.len);
+            const flags = try staging_gpa.alloc(bool, self.rows.len);
             defer staging_gpa.free(flags);
             var n: usize = 0;
-            for (models, insts, flags) |*m, *i, *f| {
+            for (self.rows.items(.model), self.rows.items(.instance), flags) |*m, *i, *f| {
                 f.* = std.meta.eql(D.collapse(m, i), D.collapse_full);
                 if (f.*) n += 1;
             }
-            if (n != 0 and n != models.len) {
-                const sm = try staging_gpa.dupe(D.Model, models);
-                defer staging_gpa.free(sm);
-                const si = try staging_gpa.dupe(D.Instance, insts);
-                defer staging_gpa.free(si);
-                const sn = try staging_gpa.dupe([n_u]u32, nodes);
-                defer staging_gpa.free(sn);
+            if (n != 0 and n != self.rows.len) {
+                var src = try self.rows.clone(staging_gpa);
+                defer src.deinit(staging_gpa);
                 var lo: usize = 0;
                 var hi: usize = n;
                 for (flags, 0..) |f, k| {
                     const dst = if (f) &lo else &hi;
-                    models[dst.*] = sm[k];
-                    insts[dst.*] = si[k];
-                    nodes[dst.*] = sn[k];
+                    self.rows.set(dst.*, src.get(k));
                     dst.* += 1;
                 }
             }
@@ -1188,7 +1172,7 @@ pub fn ProtoStore(comptime D: type) type {
 
         pub fn applyPerm(ctx: *anyopaque, perm: []const u32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            for (self.nodes.items) |*nd| {
+            for (self.rows.items(.nodes)) |*nd| {
                 inline for (0..n_u) |u| {
                     if (nd[u] < perm.len) nd[u] = perm[nd[u]];
                 }
@@ -1197,9 +1181,7 @@ pub fn ProtoStore(comptime D: type) type {
 
         pub fn destroy(ctx: *anyopaque, gpa: std.mem.Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            self.models.deinit(staging_gpa);
-            self.instances.deinit(staging_gpa);
-            self.nodes.deinit(staging_gpa);
+            self.rows.deinit(staging_gpa);
             gpa.destroy(self);
         }
     };
