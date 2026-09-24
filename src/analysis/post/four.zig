@@ -13,7 +13,7 @@ pub const Harmonic = struct {
     phase_deg: f64,
 };
 
-pub const Options = @import("requests").Four;
+pub const Options = @import("core").query.Four;
 
 /// ngspice prints nine harmonics by default; a deck may ask for more
 /// (`.four 1k v(out) 16`). The table is fixed-size and `n_harmonics` says how

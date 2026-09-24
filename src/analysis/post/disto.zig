@@ -14,11 +14,11 @@ const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
-const types = @import("numerics");
+const types = @import("core").numerics;
 const solvers = @import("solver");
 const dense_lu = solvers.dense_lu;
 
-pub const Options = @import("requests").Disto;
+pub const Options = @import("core").query.Disto;
 
 /// Everything one sweep can deposit. The four summary columns are always
 /// written, one value per frequency point. `h2`/`h3` are ngspice's own

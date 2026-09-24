@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const device_ir = @import("device").abi;
-const zeroSimd = @import("numerics").zeroSimd;
+const zeroSimd = @import("core").numerics.zeroSimd;
 
 const Batch = device_ir.Batch;
 const Planes = device_ir.Planes;

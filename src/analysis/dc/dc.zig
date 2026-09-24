@@ -5,7 +5,7 @@ const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const op = @import("op.zig");
 
-pub const Options = @import("requests").Dc;
+pub const Options = @import("core").query.Dc;
 
 /// Contract entry: sweep the primary source dc value, one warm-started
 /// solve per point. Swept value restored afterwards so the cached operating

@@ -6,9 +6,8 @@
 //! freezes the pattern; analysis owns numerical execution.
 
 const std = @import("std");
-const problem = @import("problem_types");
-const requests = @import("requests");
-const numerics = @import("numerics");
+const requests = @import("core").query;
+const numerics = @import("core").numerics;
 const devices = @import("spice.zig");
 const device = @import("device");
 pub const spice = devices;
@@ -26,11 +25,11 @@ const castField = batch.bind.castField;
 const markGiven = batch.bind.markGiven;
 
 const GROUND = @as(u32, 0);
-const Circuit = problem.Circuit;
+const Circuit = device.Circuit;
 const Proto = batch.Proto;
 
 // ---------------------------------------------------------------------------
-// Builder: mutable netlist. compile() freezes it into an problem.Circuit.
+// Builder: mutable netlist. compile() freezes it into a device.Circuit.
 // ---------------------------------------------------------------------------
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 

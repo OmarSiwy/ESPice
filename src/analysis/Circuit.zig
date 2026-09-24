@@ -47,8 +47,8 @@ pub const GROUND: u32 = 0;
 // Re-exports from solvers
 // ---------------------------------------------------------------------------
 
-pub const BbdBlock = @import("numerics").BbdBlock;
-pub const BbdInfo = @import("numerics").BbdInfo;
+pub const BbdBlock = @import("core").numerics.BbdBlock;
+pub const BbdInfo = @import("core").numerics.BbdInfo;
 
 // ---------------------------------------------------------------------------
 // Utility types
@@ -170,7 +170,7 @@ pub const Circuit = struct {
 
     // -- cold: structure --
     bbd: ?BbdInfo = null,
-    solver_execution: @import("numerics").Execution = .{},
+    solver_execution: @import("core").numerics.Execution = .{},
     /// Executor-owned parallel evaluation context. Null ⇒ serial eval.
     par_eval: ?*ParEval = null,
     /// Executor-owned persistent GPU context (mechanism in gpu.zig).
@@ -846,8 +846,8 @@ pub fn init(
 // above and below Circuit share one copy. Re-exported for the 50+ callers.
 // ---------------------------------------------------------------------------
 
-pub const zeroSimd = @import("numerics").zeroSimd;
-pub const copySimd = @import("numerics").copySimd;
+pub const zeroSimd = @import("core").numerics.zeroSimd;
+pub const copySimd = @import("core").numerics.copySimd;
 
 /// Independent CSC entries: out = G + alpha*C. W=1 is also the tail and oracle.
 pub fn combinePlanes(comptime W: usize, out: []f64, g: []const f64, c: []const f64, alpha: f64) void {

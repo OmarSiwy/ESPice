@@ -1,8 +1,9 @@
 //! One query's mutable numerical state. Prepared topology and requests are
 //! borrowed for its lifetime; accepted OP products are copied before use.
 const std = @import("std");
-const Prepared = @import("problem_types").Prepared;
-const requests = @import("requests");
+const Circuit = @import("device").Circuit;
+const Deck = @import("core").Deck;
+const requests = @import("core").query;
 const types = @import("types.zig");
 const op = @import("dc/op.zig");
 const gpu = @import("gpu.zig");
@@ -35,7 +36,8 @@ pub fn validateBackend(config: Config) !void {
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    prepared: *const Prepared,
+    topology: *const Circuit,
+    deck: *const Deck,
     job: requests.Query,
     config: Config,
     circuit: types.Circuit,
@@ -47,10 +49,10 @@ pub const Executor = struct {
 
     pub const Outcome = Controller.Outcome;
 
-    pub fn create(allocator: std.mem.Allocator, io: std.Io, prepared: *const Prepared, job: requests.Query, initial: ?*const Executor, config: Config) !*Executor {
+    pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*const Executor, config: Config) !*Executor {
         try validateBackend(config);
         if (initial) |source| {
-            if (source.prepared != prepared or source.operatingPoint() == null)
+            if (source.topology != topology or source.operatingPoint() == null)
                 return error.InvalidOperatingPoint;
         }
         const self = try allocator.create(Executor);
@@ -58,13 +60,14 @@ pub const Executor = struct {
         self.* = .{
             .allocator = allocator,
             .io = io,
-            .prepared = prepared,
+            .topology = topology,
+            .deck = deck,
             .job = job,
             .config = config,
             .circuit = if (initial) |source|
-                try types.Circuit.fromSnapshot(&prepared.circuit, &source.circuit, allocator)
+                try types.Circuit.fromSnapshot(topology, &source.circuit, allocator)
             else
-                try types.Circuit.instantiate(&prepared.circuit, allocator),
+                try types.Circuit.instantiate(topology, allocator),
             .work = std.heap.ArenaAllocator.init(allocator),
             .results = std.heap.ArenaAllocator.init(allocator),
             .controller = undefined,
@@ -74,7 +77,7 @@ pub const Executor = struct {
         errdefer self.results.deinit();
         self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads };
         if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
-        if (prepared.deck_temp) |temp| if (initial == null) {
+        if (deck.deck_temp) |temp| if (initial == null) {
             self.circuit.setCircuitTemp(@floatCast(temp));
             try self.circuit.recompute();
         };
@@ -85,10 +88,10 @@ pub const Executor = struct {
     }
 
     fn bindAcOverrides(self: *Executor) !void {
-        if (self.prepared.ac_overrides.len == 0) return;
+        if (self.deck.ac_overrides.len == 0) return;
         const params = try self.circuit.collectParams();
-        const mapped = try self.work.allocator().alloc(types.AcParam, self.prepared.ac_overrides.len);
-        for (self.prepared.ac_overrides, mapped) |override, *target| {
+        const mapped = try self.work.allocator().alloc(types.AcParam, self.deck.ac_overrides.len);
+        for (self.deck.ac_overrides, mapped) |override, *target| {
             for (params) |param| {
                 if (param.index == override.index and !param.is_instance and
                     std.mem.eql(u8, param.device_type, override.type_name) and
@@ -161,16 +164,16 @@ pub const Executor = struct {
         } else if (self.job == .tran and self.job.tran.uic) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
             @memset(self.x.?, 0);
-            for (self.prepared.ic) |ic| self.x.?[ic.node] = ic.value;
+            for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;
         }
         const run_ctx: types.RunCtx = .{
             .circuit = &self.circuit,
             .x_op = self.x.?,
-            .probes = self.prepared.probes,
-            .probe_labels = self.prepared.probe_labels,
-            .source_node = self.prepared.source_node,
-            .source_branch = self.prepared.source_branch,
-            .ac_drive = self.prepared.ac_drive,
+            .probes = self.deck.probes,
+            .probe_labels = self.deck.probe_labels,
+            .source_node = self.deck.source_node,
+            .source_branch = self.deck.source_branch,
+            .ac_drive = self.deck.ac_drive,
             .allocator = self.results.allocator(),
             .scratch_allocator = self.allocator,
         };
@@ -229,7 +232,7 @@ fn run(ctx: *const types.RunCtx, job: requests.Query) !types.Result {
     }
 }
 
-const Tolerances = @import("numerics").Tolerances;
+const Tolerances = @import("core").numerics.Tolerances;
 
 comptime {
     for (@typeInfo(requests.Kind).@"enum".fields) |field|

@@ -2,9 +2,9 @@
 //! and matex.zig read them without importing tran.zig.
 const std = @import("std");
 
-pub const Method = @import("requests").Method;
+pub const Method = @import("core").query.Method;
 
-pub const Options = @import("requests").Tran;
+pub const Options = @import("core").query.Tran;
 
 /// Waveform capacity heuristic: adaptive dt makes the point count unknown up
 /// front. dt_init is the PRINT step (ngspice tstep), and accepted points run
@@ -19,7 +19,7 @@ pub fn initialCapacity(options: Options) u32 {
     return @intFromFloat(@min(@max(64.0, est), @as(f64, 1 << 22)));
 }
 
-const simdCopy = @import("numerics").copySimd;
+const simdCopy = @import("core").numerics.copySimd;
 
 /// Recorded transient waveform. Flat preallocated storage, probe-major:
 /// values[k * capacity + i] is probe k at point i — probeValues(k) is one

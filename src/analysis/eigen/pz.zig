@@ -20,7 +20,7 @@
 //! The planes are the linearization — one eval() at the op.
 const std = @import("std");
 const root = @import("../types.zig");
-const types = @import("numerics");
+const types = @import("core").numerics;
 const solvers = @import("solver");
 const dense_lu = solvers.dense_lu;
 const qr = @import("qr.zig");
@@ -28,7 +28,7 @@ const qr = @import("qr.zig");
 const Complex = types.Complex;
 const GROUND = root.GROUND;
 
-pub const Options = @import("requests").Pz;
+pub const Options = @import("core").query.Pz;
 
 pub const Roots = struct {
     poles: []Complex,

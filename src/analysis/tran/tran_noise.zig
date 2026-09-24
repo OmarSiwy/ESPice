@@ -13,7 +13,7 @@ const integrator = @import("integrator.zig");
 
 pub const NoiseSource = root.NoiseSource;
 
-pub const Options = @import("requests").TranNoise;
+pub const Options = @import("core").query.TranNoise;
 const Waveform = @import("types.zig").Waveform;
 
 // ============================================================================

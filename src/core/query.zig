@@ -1,20 +1,19 @@
 //! Resolved query descriptions: the analysis contract. Card keywords live in
 //! frontend/netlist.zig `cards`. No parser, driver, or solver imports.
 const std = @import("std");
-const Tolerances = @import("numerics").Tolerances;
-const ir = @import("device_abi");
+const Tolerances = @import("numerics.zig").Tolerances;
 pub const QueryId = enum(u32) { _ };
 pub const invalid_query: QueryId = @enumFromInt(std.math.maxInt(u32));
 pub const Method = enum { backward_euler, trapezoidal, gear_2 };
-pub const FreqSweep = @import("numerics").FreqSweep;
-pub const SweepKind = @import("numerics").SweepKind;
+pub const FreqSweep = @import("numerics.zig").FreqSweep;
+pub const SweepKind = @import("numerics.zig").SweepKind;
 pub const Port = struct { node: u32, branch: u32, z0: f64 = 50.0 };
 pub const CardRef = struct {
     type_name: []const u8,
     index: u32,
     name: []const u8,
-    pub fn lookup(cards: []const CardRef, ref: ir.ParamRef) ?[]const u8 {
-        for (cards) |c| if (c.index == ref.index and std.mem.eql(u8, c.type_name, ref.device_type)) return c.name;
+    pub fn lookup(cards: []const CardRef, type_name: []const u8, index: u32) ?[]const u8 {
+        for (cards) |c| if (c.index == index and std.mem.eql(u8, c.type_name, type_name)) return c.name;
         return null;
     }
 };

@@ -4,12 +4,12 @@
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
-const types = @import("numerics");
+const types = @import("core").numerics;
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 pub const Complex = types.Complex;
 
-pub const Options = @import("requests").Ac;
+pub const Options = @import("core").query.Ac;
 
 /// AC small-signal sweep against `exc`, the whole deck's excitation: a
 /// stacked-real `[re(0..n), im(0..n)]` vector over the circuit unknowns, built

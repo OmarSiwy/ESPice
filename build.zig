@@ -86,32 +86,26 @@ pub fn build(b: *std.Build) void {
 
     const build_options_mod = bopts.createModule();
 
-    const numerics_mod = M.make(b.path("src/problem/numerics.zig"), &.{});
+    // Shared data every layer speaks. Imports nothing.
+    const core_mod = M.make(b.path("src/core/root.zig"), &.{});
+    const core_import: std.Build.Module.Import = .{ .name = "core", .module = core_mod };
     const device_abi_mod = M.make(b.path("src/device/abi.zig"), &.{.{ .name = "contract", .module = contract_mod }});
-    const requests_mod = M.make(b.path("src/problem/requests.zig"), &.{
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "device_abi", .module = device_abi_mod },
-    });
-    const problem_types_mod = M.make(b.path("src/problem/types.zig"), &.{
-        .{ .name = "numerics", .module = numerics_mod },
-        .{ .name = "requests", .module = requests_mod },
-    });
     const device_eval_mod = M.make(b.path("src/device/eval.zig"), &.{
         .{ .name = "contract", .module = contract_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
         .{ .name = "device_abi", .module = device_abi_mod },
     });
     device_eval_mod.link_libc = true;
-    const solver_mod = M.make(b.path("src/solver/root.zig"), &.{.{ .name = "numerics", .module = numerics_mod }});
+    const solver_mod = M.make(b.path("src/solver/root.zig"), &.{core_import});
 
-    // Waveform writers. A leaf like `solver`: it imports nothing but std, so
+    // Waveform writers. A leaf like `solver`: it imports nothing but core, so
     // it is a module rather than a set of files in the app root, and
     // `zig build test-output` runs it without building the simulator.
-    const output_types_mod = M.make(b.path("src/output/types.zig"), &.{});
-    const output_mod = M.make(b.path("src/output/root.zig"), &.{.{ .name = "output_types", .module = output_types_mod }});
+    const output_types_mod = M.make(b.path("src/output/types.zig"), &.{core_import});
+    const output_mod = M.make(b.path("src/output/root.zig"), &.{ core_import, .{ .name = "output_types", .module = output_types_mod } });
 
     // Netlist lines -> hypergraph + analysis cards. Imports only shared leaves.
-    const netlist_imports: []const std.Build.Module.Import = &.{.{ .name = "requests", .module = requests_mod }};
+    const netlist_imports: []const std.Build.Module.Import = &.{core_import};
     const netlist_mod = M.make(b.path("src/frontend/netlist.zig"), netlist_imports);
     const frontend_bench = b.addExecutable(.{
         .name = "frontend-bench",
@@ -127,7 +121,7 @@ pub fn build(b: *std.Build) void {
     //
     // Auto-discovered — drop a source in and it is built, whichever HDL it is
     // written in. `wf` collects every generated aggregate root: one models.zig
-    // re-exporting all devices (what frontend/models.zig reflects over), plus a
+    // re-exporting all devices (what device/root.zig reflects over), plus a
     // one-device models.zig per model, because a GPU kernel root must see
     // exactly the device it compiles (see kernel_roots below).
     // =======================================================================
@@ -247,19 +241,16 @@ pub fn build(b: *std.Build) void {
     const device_mod = M.make(b.path("src/device/root.zig"), &.{
         .{ .name = "models", .module = models_mod },
         .{ .name = "device_abi", .module = device_abi_mod },
-        .{ .name = "numerics", .module = numerics_mod },
+        core_import,
         .{ .name = "fastvaf", .module = vera.module("vera") },
         .{ .name = "build_options", .module = build_options_mod },
     });
     device_mod.link_libc = true;
-    problem_types_mod.addImport("device", device_mod);
 
     const analysis_mod = M.make(b.path("src/analysis/root.zig"), &.{
         .{ .name = "solver", .module = solver_mod },
-        .{ .name = "numerics", .module = numerics_mod },
+        core_import,
         .{ .name = "device", .module = device_mod },
-        .{ .name = "problem_types", .module = problem_types_mod },
-        .{ .name = "requests", .module = requests_mod },
         .{ .name = "output_types", .module = output_types_mod },
         .{ .name = "gompute", .module = gompute.module("gompute") },
     });
@@ -267,27 +258,22 @@ pub fn build(b: *std.Build) void {
 
     // Passive circuit construction is shared by the frontend and its tests.
     const builder_mod = M.make(b.path("src/frontend/builder.zig"), &.{
-        .{ .name = "problem_types", .module = problem_types_mod },
-        .{ .name = "requests", .module = requests_mod },
-        .{ .name = "numerics", .module = numerics_mod },
+        core_import,
         .{ .name = "device", .module = device_mod },
         .{ .name = "netlist", .module = netlist_mod },
     });
     const frontend_mod = M.make(b.path("src/frontend/root.zig"), &.{
-        .{ .name = "numerics", .module = numerics_mod },
+        core_import,
         .{ .name = "device", .module = device_mod },
-        .{ .name = "problem_types", .module = problem_types_mod },
-        .{ .name = "requests", .module = requests_mod },
         .{ .name = "netlist", .module = netlist_mod },
         .{ .name = "builder", .module = builder_mod },
     });
 
     // The owning facade composes frontend preparation, analysis and output.
     const problem_imports: []const std.Build.Module.Import = &.{
+        core_import,
         .{ .name = "analysis", .module = analysis_mod },
         .{ .name = "frontend", .module = frontend_mod },
-        .{ .name = "requests", .module = requests_mod },
-        .{ .name = "problem_types", .module = problem_types_mod },
         .{ .name = "output", .module = output_mod },
     };
     const problem_mod = M.make(b.path("src/problem/root.zig"), problem_imports);
@@ -443,7 +429,6 @@ pub fn build(b: *std.Build) void {
         .{ "test-problem", "Run Problem, C ABI and numerical contract tests", &.{
             t.run(M.make(b.path("src/problem/tests/problem.zig"), &.{.{ .name = "problem", .module = problem_mod }}), &.{}, true),
             run_c_api_tests,
-            t.run(M.make(b.path("src/problem/tests/numerics.zig"), &.{.{ .name = "numerics", .module = numerics_mod }}), &.{}, false),
         } },
         .{ "test-frontend", "Run netlist, builder and prepared-circuit tests", &.{
             t.run(netlist_mod, &.{}, false),
@@ -456,6 +441,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "models", .module = models_mod },
             .{ .name = "device_eval", .module = device_eval_mod },
         }, true)} },
+        .{ "test-core", "Run shared data and numerics tests", &.{t.run(core_mod, &.{}, false)} },
         .{ "test-solver", "Run solver tests", &.{t.run(solver_mod, &.{}, false)} },
         .{ "test-output", "Run waveform writer tests", &.{t.run(output_mod, &.{}, false)} },
         .{ "test-native-lines", "Run native transmission-line oracle tests", &.{t.run(native_models_mod, &.{}, false)} },

@@ -56,7 +56,7 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
 /// builder.zig, at the one place instance ordinals are handed out); `.sens` is
 /// the consumer, because ngspice names a sensitivity column after the CARD and
 /// `resistor#0` resolves to nothing a raw-file reader can use.
-pub const CardRef = @import("requests").CardRef;
+pub const CardRef = @import("core").query.CardRef;
 
 // -- Re-exports for analysis modules + src/ consumers --
 pub const ParamRef = device_ir.ParamRef;

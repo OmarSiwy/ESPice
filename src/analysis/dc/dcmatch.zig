@@ -16,7 +16,7 @@ const root = @import("../types.zig");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
-pub const Options = @import("requests").Dcmatch;
+pub const Options = @import("core").query.Dcmatch;
 
 pub const Contribution = struct {
     device_name: []const u8,

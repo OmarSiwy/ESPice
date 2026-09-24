@@ -11,7 +11,7 @@
 //! all other a_j = 0. Column p of S(ω) follows from S_jk = b_j / a_k.
 const std = @import("std");
 const root = @import("../types.zig");
-const types = @import("numerics");
+const types = @import("core").numerics;
 const solvers = @import("solver");
 const FreqSolver = solvers.freq_solve.FreqSolver;
 
@@ -22,10 +22,10 @@ pub const Complex = types.Complex;
 /// series z0 by adding −z0 to the branch row diagonal (branch equation becomes
 /// v_p − v_n − z0·i_br = V_s), so un-excited ports terminate in z0 instead of
 /// clamping their node.
-pub const Port = @import("requests").Port;
+pub const Port = @import("core").query.Port;
 
 
-pub const Options = @import("requests").Sp;
+pub const Options = @import("core").query.Sp;
 
 /// Caller owns the output: freqs[n_points] and the flat S-matrix stack
 /// s[n_points * n_ports²], point-major — S(row,col) at frequency point fi is

@@ -16,7 +16,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
-const num = @import("numerics");
+const num = @import("core").numerics;
 const converger = @import("solver").converger;
 const solvers = @import("solver");
 const dense_lu = solvers.dense_lu;
@@ -24,7 +24,7 @@ const dense_lu = solvers.dense_lu;
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
-pub const Options = @import("requests").Hb;
+pub const Options = @import("core").query.Hb;
 
 pub const SolveResult = @import("pss.zig").SolveResult;
 

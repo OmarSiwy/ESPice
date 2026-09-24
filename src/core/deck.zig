@@ -1,9 +1,7 @@
-//! Shared prepared data; consumers never import the Problem facade.
-const std = @import("std");
-pub const requests = @import("requests");
-pub const numerics = @import("numerics");
-pub const Circuit = @import("device").Circuit;
-pub const GROUND: u32 = 0;
+//! Everything a deck says besides its topology: probes, sources, options,
+//! queries and the bindings later directives resolve against.
+const requests = @import("query.zig");
+const numerics = @import("numerics.zig");
 
 /// Resolved initial condition, applied together when a query starts with UIC.
 pub const Ic = struct { node: u32, value: f64 };
@@ -31,10 +29,8 @@ pub const QueryBindings = struct {
     ports: []const requests.Port,
 };
 
-/// Session-owned construction result. Parse scratch may be released immediately.
-/// The circuit is immutable once published; analysis clones mutable state.
-pub const Prepared = struct {
-    circuit: Circuit,
+/// Session-owned; every slice lives in the arena that built the circuit.
+pub const Deck = struct {
     probes: []const u32,
     probe_labels: []const []const u8,
     source_node: u32,
@@ -50,10 +46,4 @@ pub const Prepared = struct {
     bindings: QueryBindings,
     cards: []const requests.CardRef,
     ac_overrides: []const AcOverride,
-
-    /// The caller owns the arena containing all remaining metadata slices.
-    pub fn deinit(self: *Prepared) void {
-        self.circuit.deinit();
-        self.* = undefined;
-    }
 };

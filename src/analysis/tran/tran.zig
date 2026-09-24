@@ -16,7 +16,7 @@ pub const Options = tran_types.Options;
 pub const Waveform = tran_types.Waveform;
 pub const SimResult = tran_types.SimResult;
 pub const initialCapacity = tran_types.initialCapacity;
-const simdCopy = @import("numerics").copySimd;
+const simdCopy = @import("core").numerics.copySimd;
 
 const integrator = @import("integrator.zig");
 
