@@ -18,7 +18,7 @@ const max_states = 1 << 20;
 /// overflow the stack.
 const max_depth = 32;
 
-const Error = error{ OutOfMemory, InvalidPattern };
+const Error = error{ OutOfMemory, InvalidPattern, UnsupportedPattern };
 
 /// One component: a b-string's bits, or a nested list, repeated `r` more
 /// times from its `rb`-th element (1-based). `depth` counts the `[ ... ]`
@@ -48,8 +48,9 @@ const Comp = struct {
 };
 
 /// Rewrites, in place, every V/I card in `lines` (lowercased logical lines)
-/// that uses `PAT`. InvalidPattern for an undefined name, a `Z` state, an
-/// 8b/10b K-string, `R=-1` (forever), a pattern past the PWL's 64 points,
+/// that uses `PAT`. UnsupportedPattern for a `Z` (high-impedance) state,
+/// which a V or I source cannot drive; InvalidPattern for an undefined name,
+/// an 8b/10b K-string, `R=-1` (forever), a pattern past the PWL's 64 points,
 /// over a million states long or nested over 32 deep.
 pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
     var defs: std.StringHashMapUnmanaged(Comp) = .empty;
@@ -58,7 +59,11 @@ pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
         const toks = try tokens(arena, line[5..]);
         if (toks.len < 3 or !std.mem.eql(u8, toks[1], "=")) return error.InvalidPattern;
         const def = group(arena, toks[2..], defs) catch |err| {
-            if (err == error.InvalidPattern) std.log.warn("pattern: cannot read '{s}'", .{line});
+            if (!@import("builtin").is_test) switch (err) {
+                error.InvalidPattern => std.log.warn("pattern: cannot read '{s}'", .{line}),
+                error.UnsupportedPattern => std.log.err("pattern: '{s}': a Z (high-impedance) state is not supported", .{line}),
+                error.OutOfMemory => {},
+            };
             return err;
         };
         try defs.put(arena, toks[0], def);
@@ -67,7 +72,11 @@ pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
         if (line.len == 0 or (line.*[0] != 'v' and line.*[0] != 'i')) continue;
         const at = try keyword(arena, line.*) orelse continue;
         line.* = source(arena, line.*, at, defs) catch |err| {
-            if (err == error.InvalidPattern) std.log.warn("pattern: cannot read '{s}'", .{line.*});
+            if (!@import("builtin").is_test) switch (err) {
+                error.InvalidPattern => std.log.warn("pattern: cannot read '{s}'", .{line.*}),
+                error.UnsupportedPattern => std.log.err("pattern: '{s}': a Z (high-impedance) state is not supported", .{line.*}),
+                error.OutOfMemory => {},
+            };
             return err;
         };
     }
@@ -172,6 +181,8 @@ fn sequence(arena: std.mem.Allocator, toks: []const []const u8, i: *usize, defs:
             }
         } else if (t[0] == 'b' and t.len > 1 and std.mem.indexOfNone(u8, t[1..], "01m") == null) {
             try out.append(arena, .{ .bits = t[1..] });
+        } else if (t[0] == 'b' and t.len > 1 and std.mem.indexOfNone(u8, t[1..], "01mz") == null) {
+            return error.UnsupportedPattern;
         } else {
             const def = defs.get(t) orelse return error.InvalidPattern;
             if (depth + def.depth > max_depth) return error.InvalidPattern;
@@ -235,7 +246,7 @@ test "pattern sources expand as the manual's examples" {
     try rewrite(a, &lines);
     try std.testing.expectEqualStrings("v1 1 0 pwl(0 '5' '(1n)+1*(5n)-(2n)/2' '5' '(1n)+1*(5n)+(2n)/2' '0')", lines[0]);
     var z = [_][]const u8{"v1 1 0 pat (5 0 0 1n 1n 5n b1z)"};
-    try std.testing.expectError(error.InvalidPattern, rewrite(a, &z));
+    try std.testing.expectError(error.UnsupportedPattern, rewrite(a, &z));
 }
 
 test "pattern corner cases" {

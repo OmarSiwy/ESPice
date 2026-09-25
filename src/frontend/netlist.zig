@@ -1088,6 +1088,7 @@ fn Reader(comptime S: type) type {
             pattern.rewrite(arena, r.lines.items) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidPattern => return error.ParseError,
+                error.UnsupportedPattern => return error.UnsupportedCard,
             };
             try r.hg.ensureTotalCapacity(arena, line_hint + 1, line_hint, 3 * line_hint);
             try r.pool.reserve(arena, @intCast(@min(2 * line_hint, none - 1)));
@@ -1140,7 +1141,10 @@ fn Reader(comptime S: type) type {
                 };
             }
             for (r.blocks.items) |b| try r.readBlock(b);
-            for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
+            // `.step` cards first, so their swept names are live before any
+            // other directive reads them, wherever they sit in the deck (#63).
+            for (directive_lines.items) |i| if (isStep(r.lines.items[i])) try r.readDirective(r.lines.items[i]);
+            for (directive_lines.items) |i| if (!isStep(r.lines.items[i])) try r.readDirective(r.lines.items[i]);
             try r.foldGlobals();
             // Global models in line order, then each subcircuit's own, kept
             // together: `models_lo..models_hi` is one range per subcircuit,
@@ -1738,6 +1742,13 @@ fn Reader(comptime S: type) type {
             return args.items;
         }
 
+        /// True for a `.step` directive line.
+        fn isStep(line: []const u8) bool {
+            var f = F.init(line);
+            const c = cardOf(f.next().?[1..]) orelse return false;
+            return c == .step;
+        }
+
         fn readDirective(r: *R, line: []const u8) Error!void {
             r.card = line;
             var f = F.init(line);
@@ -1752,7 +1763,7 @@ fn Reader(comptime S: type) type {
             // schedule for an OS-level restore [CR .STORE]; the results do not
             // depend on it.
             if (c == .store) return std.log.warn("netlist: .store: checkpoints are not written; the run is not restartable", .{});
-            const args = try r.readArgs(&f);
+            const args = r.readArgs(&f) catch |err| return r.failed(line, err);
             switch (c) {
                 .step => try r.steps.append(r.arena, r.readStep(args) catch |err| return r.failed(line, err)),
                 .analysis => |kind| {

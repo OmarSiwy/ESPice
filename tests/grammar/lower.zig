@@ -774,6 +774,14 @@ const L = struct {
         return l.field(row, frame, false);
     }
 
+    /// True when `text` names a swept `.param` as a word.
+    fn readsLive(l: *const L, s: []const u8) bool {
+        if (std.mem.indexOfAny(u8, s, "{'") == null) return false;
+        var words = std.mem.tokenizeAny(u8, s, " \t{}'()+-*/^,<>=!?:&|%");
+        while (words.next()) |w| if (l.live.contains(w)) return true;
+        return false;
+    }
+
     fn analysis(l: *L, card: u32) Error!void {
         const kind_text = l.text(l.t.child(card, l.r.kind).?);
         return l.analysisAs(card, analysisName(kind_text) orelse return error.Refused);
@@ -784,6 +792,10 @@ const L = struct {
     /// split off to a marker, and a `.four` naming several outputs split
     /// into one card per output.
     fn analysisAs(l: *L, card: u32, name: []const u8) Error!void {
+        // A swept `.param` read by an analysis card is refused wherever the
+        // `.step` sits: nothing re-reads the card per point (#63).
+        var kids = l.t.children(card);
+        while (kids.next()) |c| if (l.readsLive(l.text(c))) return error.Refused;
         var a = try l.cardArgs(card);
         var swept = false;
         for (a, 0..) |v, i| if (v == .name and std.mem.eql(u8, v.name, "sweep")) {
@@ -1049,6 +1061,8 @@ const L = struct {
             try l.nets.put(l.arena, p, {});
         }
         const w = &l.out.writer;
+        // frontend/pattern.zig refuses a PAT Z (high-impedance) state (#63).
+        if ((letter == 'v' or letter == 'i') and l.patZ(fields.items[n..])) return error.Refused;
         if (l.rewritten(letter, fields.items[n..])) {
             // LAPLACE, POLE and DELAY keep their letter and control nodes;
             // the other forms become a two-terminal B card.
@@ -1161,6 +1175,17 @@ const L = struct {
                 for ([_][]const u8{ "v(", "i(", "time", "temper", "hertz" }) |m| if (std.mem.indexOf(u8, s, m) != null) return true;
             },
             else => {},
+        }
+        return false;
+    }
+
+    /// True when a source's fields hold a PAT b-string with a `z` state.
+    fn patZ(l: *const L, tail: []const u32) bool {
+        for (tail) |t| {
+            var words = std.mem.tokenizeAny(u8, l.text(t), " \t,()[]=");
+            while (words.next()) |w| {
+                if (w.len > 1 and w[0] == 'b' and std.mem.indexOfNone(u8, w[1..], "01mz") == null and std.mem.indexOfScalar(u8, w, 'z') != null) return true;
+            }
         }
         return false;
     }
