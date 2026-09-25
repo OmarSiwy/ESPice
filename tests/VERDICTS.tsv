@@ -232,6 +232,7 @@ PASS	fixtures/envelope/sine.sp
 PASS	fixtures/envelope/zero.sp
 PASS	fixtures/four/dc_only.sp
 PASS	fixtures/four/deck_tran_window.sp
+PASS	fixtures/four/differential_output.sp
 PASS	fixtures/four/harmonic_count_1.sp
 PASS	fixtures/four/harmonic_count_16.sp
 PASS	fixtures/four/harmonic_count_3.sp
@@ -371,6 +372,7 @@ PASS	fixtures/hspice/w_lossless_delay.sp
 PASS	fixtures/hspice/w_settle.sp
 PASS	fixtures/hspice/w_txl.sp
 PASS	fixtures/invalid/ac_fractional_density.sp
+PASS	fixtures/invalid/ac_frequency_overflow.sp
 PASS	fixtures/invalid/ac_negative_frequency.sp
 PASS	fixtures/invalid/ac_zero_density.sp
 PASS	fixtures/invalid/bench_topology_floating_node.sp
@@ -397,6 +399,9 @@ PASS	fixtures/invalid/mc_fractional_trials.sp
 PASS	fixtures/invalid/mc_negative_variation.sp
 PASS	fixtures/invalid/mc_zero_trials.sp
 PASS	fixtures/invalid/model_kind_mismatch_refused.sp
+PASS	fixtures/invalid/netlist_pat_z_state.sp
+PASS	fixtures/invalid/netlist_swept_param_on_analysis.sp
+PASS	fixtures/invalid/netlist_swept_param_on_analysis_order.sp
 PASS	fixtures/invalid/noise_missing_output.sp
 PASS	fixtures/invalid/noise_missing_source.sp
 PASS	fixtures/invalid/noise_zero_frequency.sp
@@ -414,6 +419,7 @@ PASS	fixtures/invalid/qpss_zero_second_frequency.sp
 PASS	fixtures/invalid/sens_unknown_node.sp
 PASS	fixtures/invalid/source_lfsr_refused.sp
 PASS	fixtures/invalid/source_pwl_file_refused.sp
+PASS	fixtures/invalid/source_pwl_repeat_unmatched.sp
 PASS	fixtures/invalid/source_trnoise_refused.sp
 PASS	fixtures/invalid/source_trrandom_refused.sp
 PASS	fixtures/invalid/sp_zero_impedance.sp
@@ -428,6 +434,7 @@ PASS	fixtures/invalid/tran_negative_maxstep.sp
 PASS	fixtures/invalid/tran_negative_stop.sp
 PASS	fixtures/invalid/tran_zero_step.sp
 PASS	fixtures/invalid/trannoise_zero_step.sp
+PASS	fixtures/invalid/unknown_instance_parameter.sp
 PASS	fixtures/invalid/unresolved_parameter.sp
 PASS	fixtures/invalid/vdmos_pchan_refused.sp
 PASS	fixtures/layout/capacitive_divider_tran.sp
@@ -535,10 +542,12 @@ PASS	fixtures/op/device_vbic.sp
 PASS	fixtures/op/device_vdmos.sp
 PASS	fixtures/op/divider_balanced.sp
 PASS	fixtures/op/divider_default.sp
+PASS	fixtures/op/expr_power_ngspice.sp
 PASS	fixtures/op/floating_voltage_source.sp
 PASS	fixtures/op/gigaohm_load.sp
 PASS	fixtures/op/huge_source.sp
 PASS	fixtures/op/inductor_short_dc.sp
+PASS	fixtures/op/isource_multiplier_ngspice.sp
 PASS	fixtures/op/jfet_pjf.sp
 PASS	fixtures/op/kilovolt_supply.sp
 PASS	fixtures/op/ltra_op_series_resistance.sp
@@ -554,6 +563,7 @@ PASS	fixtures/op/parallel_resistors.sp
 PASS	fixtures/op/param_chain_100.sp
 PASS	fixtures/op/ratio_million_to_one.sp
 PASS	fixtures/op/ratio_one_to_million.sp
+PASS	fixtures/op/resistor_negative_ngspice.sp
 PASS	fixtures/op/series_sources.sp
 PASS	fixtures/op/tiny_output.sp
 PASS	fixtures/op/tiny_resistors.sp
@@ -677,6 +687,10 @@ PASS	fixtures/regression/mos1_bulk_forward_series_r.sp
 PASS	fixtures/regression/options_tnom.sp
 PASS	fixtures/regression/ota_buffer_large_step.sp
 PASS	fixtures/regression/ota_buffer_large_step_0p88.sp
+PASS	fixtures/regression/sensed_vsource_ac.sp
+PASS	fixtures/regression/sensed_vsource_dc_sweep.sp
+PASS	fixtures/regression/sensed_vsource_tran.sp
+PASS	fixtures/regression/sensed_vsource_two_sensors.sp
 PASS	fixtures/sens/balanced.sp
 PASS	fixtures/sens/bench_sens_bridge.sp
 PASS	fixtures/sens/bjt_infinite_defaults.sp
@@ -845,6 +859,11 @@ PASS	fixtures/tran/rc_pulse_history_trap.sp
 PASS	fixtures/tran/rc_sinusoidal_startup.sp
 PASS	fixtures/tran/sine.sp
 PASS	fixtures/tran/sine_offset_phase.sp
+PASS	fixtures/tran/source_am_ngspice.sp
+PASS	fixtures/tran/source_exp_defaults_ngspice.sp
+PASS	fixtures/tran/source_pulse_count_ngspice.sp
+PASS	fixtures/tran/source_pulse_zero_edges_ngspice.sp
+PASS	fixtures/tran/source_sin_default_freq_ngspice.sp
 PASS	fixtures/tran/spectre_skipdc_euler.sp
 PASS	fixtures/tran/trap_maxord1_ngspice.sp
 PASS	fixtures/tran/trap_xmu_damping.sp
