@@ -3,10 +3,10 @@
  "analysis": "ac",
  "purpose": "#160: HICUM/L2 AC with every series resistor collapsed and tnode grounded runs instead of failing Singular.",
  "oracle": {
-  "kind": "ngspice-45",
-  "derivation": "ngspice 45 DC sweep of this circuit at V1 = 0.7999, 0.8, 0.8001 with .options reltol=1e-9 abstol=1e-18 vntol=1e-12; gain = (v(d)[2] - v(d)[0]) / 2e-4 = -104.32655335741003 (ESPice's DC sweep gives -104.32655345765484). At 1 kHz the junction capacitances leave the imaginary part below 1e-10.",
-  "command": "ngspice -n -b -r reference.raw circuit_dc.sp",
-  "source_sha256": "65929d354f9ed94364705549b426ff43c41553c1795b7d6ccb7d8cb84344d9c1"
+  "kind": "vacask",
+  "derivation": "VACASK (nix benchmarking shell, vacask-unstable-2026) on the same circuit with hicumL2_v320.va (the build's upstream pin) compiled by openvaf-r: model qm hicuml2va (c10=2e-30 qp0=2e-14), q1 (d g 0 0 0), analysis ac from=1k to=1k. Its DC slope by central difference at reltol 1e-12 is -104.396635, equal to ESPice's to 1e-14.",
+  "command": "openvaf-r hicumL2_v320.va -o hicum320.osdi && vacask hac.sim",
+  "source_sha256": "1187227837d3618604e1b6f8cd07c8d1603d98348d7092c108a5c96953e49070"
  },
  "origin": "tests/fixtures/ac/hicum2_collapsed_resistors.sp",
  "expect": {
@@ -39,13 +39,24 @@
      "v(d)": {
       "values": [
        [
-        -104.32655335741003,
-        0.0
+        -104.4039732869551,
+        2.22255805435773e-11
        ]
       ],
       "unit": "V",
-      "rtol": 0.0001,
-      "atol": 1e-06
+      "rtol": 1e-06,
+      "atol": 1e-09
+     },
+     "i(v1)": {
+      "values": [
+       [
+        -0.0011818219195124462,
+        -2.2567207215101372e-14
+       ]
+      ],
+      "unit": "A",
+      "rtol": 1e-06,
+      "atol": 1e-12
      }
     }
    }
@@ -53,5 +64,5 @@
   "finite_values_required": true,
   "all_requested_analyses_must_complete": true
  },
- "netlist_sha256": "65929d354f9ed94364705549b426ff43c41553c1795b7d6ccb7d8cb84344d9c1"
+ "netlist_sha256": "1187227837d3618604e1b6f8cd07c8d1603d98348d7092c108a5c96953e49070"
 }
