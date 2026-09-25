@@ -932,6 +932,23 @@ test "parseAnalyses reads analysis cards only and resolves their nets" {
     try std.testing.expectEqual(@as(u32, 7), cards[2].pos);
     for ([_][]const u8{ "r1 a 0 1\n", ".temp 27\n", ".options reltol=1e-4\n", ".nosuch\n" }) |text|
         try std.testing.expectError(error.UnsupportedDirectiveMutation, netlist.parseAnalyses(a, text, Lookup{}));
+    // The line as written, and a SWEEP tail read as a deck card reads it (#64).
+    const swept = try netlist.parseAnalyses(a, ".TRAN 1n 10n SWEEP TEMP 0 50 25\n", Lookup{});
+    try std.testing.expectEqualStrings(".TRAN 1n 10n SWEEP TEMP 0 50 25", swept[0].line);
+    try std.testing.expectEqual(@as(usize, 2), swept[0].args.len);
+}
+
+test "subcircuits nest 32 levels, not 33 (#64)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]usize{ 32, 33 }) |levels| {
+        var src: std.ArrayList(u8) = .empty;
+        try src.appendSlice(a, "nest\n.subckt s0 a\nr1 a 0 1k\n.ends\n");
+        for (1..levels) |k| try src.print(a, ".subckt s{d} a\nx1 a s{d}\n.ends\n", .{ k, k - 1 });
+        try src.print(a, "x1 a s{d}\nv1 a 0 1\n.op\n.end\n", .{levels - 1});
+        if (levels == 32) _ = try parse(a, src.items) else try std.testing.expectError(error.ParseError, parse(a, src.items));
+    }
 }
 
 test "a large flat deck parses in one pass" {

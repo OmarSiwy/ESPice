@@ -758,7 +758,9 @@ pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error
         // A single `.temp` is deck configuration, fixed at build.
         if (card.analysis == .temp and args.len == 1) return error.UnsupportedDirectiveMutation;
         const first = out.items.len;
-        try appendAnalysis(arena, &out, .{ .kind = card.analysis, .args = args, .line = line, .sn = isSn(line) });
+        // As readDirective reads a deck's card: its SWEEP tail and the line as written (#64).
+        const swept = try r.readSweep(card.analysis, args);
+        try appendAnalysis(arena, &out, .{ .kind = card.analysis, .args = swept.args, .sweep = swept.sweep, .line = r.written(line), .sn = isSn(line) });
         for (out.items[first..]) |*a| resolve(a, lookup);
     }
     return out.items;
@@ -820,7 +822,8 @@ fn resolve(a: *Analysis, lookup: anytype) void {
 }
 
 const Entry = union(enum) { num: f64, text: []const u8 };
-const Scope = std.StringHashMapUnmanaged(Entry);
+// Insertion-ordered, so a walk over the globals is deck order (#64).
+const Scope = std.StringArrayHashMapUnmanaged(Entry);
 
 /// Where an expanded card is read: the enclosing `X` card's full name, its
 /// port map, and the parameter scopes, outermost first.
@@ -2102,13 +2105,8 @@ fn Reader(comptime S: type) type {
                 if (std.mem.eql(u8, head, opt.name) or std.mem.eql(u8, head, "optrange"))
                     try defs.append(r.arena, .{ .key = e.key_ptr.*, .text = text[paren..] });
             };
+            // `globals` iterates in deck order (`Scope`).
             if (defs.items.len == 0) return error.ParseError;
-            // Deck order: every definition's text is a slice of the deck.
-            std.mem.sort(Def, defs.items, {}, struct {
-                fn less(_: void, a: Def, b: Def) bool {
-                    return @intFromPtr(a.text.ptr) < @intFromPtr(b.text.ptr);
-                }
-            }.less);
             const n = defs.items.len;
             const live = try r.arena.alloc(u32, n);
             const lo = try r.arena.alloc(f64, n);
@@ -3619,7 +3617,11 @@ fn Reader(comptime S: type) type {
         /// Flatten an `X` card: read its subcircuit's lines under a child frame.
         fn expand(r: *R, head: []const u8, frame: *const Frame, kv_text: []const []const u8) Error!void {
             const arena = r.arena;
-            if (frame.depth > 32) return error.ParseError;
+            // A top-level X card expands at depth 0, so 32 levels end at 31.
+            if (frame.depth >= 32) {
+                if (!@import("builtin").is_test) std.log.err("netlist: '{s}': subcircuits nest more than 32 levels", .{head});
+                return error.ParseError;
+            }
             if (r.positional.items.len < 1) return error.ParseError;
             const sname = switch (r.positional.items[r.positional.items.len - 1]) {
                 .name => |n| n,
