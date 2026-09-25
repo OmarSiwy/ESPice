@@ -6,11 +6,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// std reserves a 256 KB alternate signal stack per thread for stack-overflow
-/// traces, as zero-filled TLS: every thread of every compilation unit pays it
-/// (1.5 MB per thread across the device objects before this). Kept in Debug,
-/// where the trace is worth it.
-pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .debug) 1 << 18 else null };
+/// No alternate signal stack, in any mode. std reserves it as a 256 KB
+/// threadlocal per compilation unit, and every per-model object is its own
+/// unit, so Debug's static TLS reached 16.25 MB with 64 models. That exceeds
+/// `Io.Threaded`'s 16 MB default thread stack, and glibc's pthread_create
+/// returns EINVAL for a stack that cannot hold the TLS (#24). This root
+/// spawns no thread, so it never attached the stack; the exe's root keeps
+/// Debug's stack-overflow trace for the threads it does spawn.
+pub const std_options: std.Options = .{ .signal_stack_size = null };
 
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
