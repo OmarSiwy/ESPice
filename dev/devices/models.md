@@ -193,10 +193,11 @@ unknown, an all-zero row and column. The sparse LU pins it
 (`SparseLu.voidUnknown`); the dense path that AC, noise and `.tf` take at
 n <= 16 now does the same (`dense_lu.pinVoid`, called by `freq_solve.zig`
 and `dc/tf.zig`, not by the BBD blocks, where a zero block row can still
-couple through the border). On `ac/hicum2_collapsed_resistors` ngspice 45's
-.ac gain is -102.174, 2% off its own DC slope (-104.3266, central
-difference at reltol 1e-9); ESPice's AC gives -104.3332, so the deck pins
-the DC slope.
+couple through the border). `ac/hicum2_collapsed_resistors` is checked
+against VACASK running the same upstream HICUM/L2 v3.2.0 source (2e-11
+apart), not ngspice 45, which implements 2.4.0: its operating point there
+is 0.8% away, and its own .ac gain (-102.174) is 2% off its own DC slope
+(-104.3266).
 
 hfet1's own test has a quirk the row test cannot reproduce: its cdhat
 leaves out the -ggdpp*delvgdpp term that its cd carries (hfetload.c:211-216

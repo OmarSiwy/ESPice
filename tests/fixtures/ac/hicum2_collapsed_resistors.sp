@@ -1,10 +1,11 @@
 * HICUM/L2 common emitter with RBX = RE = RCX = 0 (all three branches
-* collapsed) and tnode grounded, against ngspice 45 (#160). The disabled
-* thermal branch leaves a void unknown; the dense AC path (n <= 16) gives
-* it a unit pivot as the sparse LU does, instead of reporting Singular.
-* Oracle: ngspice 45's DC central difference of v(d) over V1 = 0.8 +- 1e-4
-* at reltol=1e-9 (-104.32655). ngspice's own .ac gives -102.174, 2% off its
-* DC slope (its HICUM small-signal stamp), so its AC is not the oracle.
+* collapsed) and tnode grounded (#160). The disabled thermal branch leaves
+* a void unknown; the dense AC path (n <= 16) gives it a unit pivot as the
+* sparse LU does, instead of reporting Singular.
+* Oracle: VACASK running the same upstream HICUM/L2 v3.2.0 source
+* (hicumL2_v320.va, compiled by OpenVAF-r) with tnode tied to ground.
+* ngspice 45 implements HICUM/L2 2.4.0, whose operating point here sits
+* 0.8% away, so it is not the oracle for this deck.
 .model qm NPN(LEVEL=8 C10=2e-30 QP0=2e-14)
 VDD vdd 0 3
 V1 g 0 DC 0.8 AC 1
