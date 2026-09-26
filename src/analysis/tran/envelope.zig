@@ -75,7 +75,9 @@ fn newtonAt(
 ) !bool {
     // Devices read Instance.abstime (§9.10 `$abstime`), not the `t`
     // argument, so every step publishes its time.
-    const opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+    var opts = converger.optionsFromTolerances(options.tol, null);
+    // Envelope is not ngspice's NIiter, so ITL4 caps it without the floor.
+    opts.max_iter = options.tol.itl4;
     const nr = if (trap) |tr| blk: {
         ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
         tr.alpha = 2.0 / dt;
