@@ -1,15 +1,14 @@
-//! Builder: netlist hypergraph → frozen device.Circuit.
-//!
-//! Frontend construction owns net-to-row mapping, subcircuit tagging, BBD
-//! permutation and device accumulation through the device ABI. Every device
-//! type, built-in or loaded, is a `device.Library` id; `Circuit.freeze`
-//! freezes the pattern; analysis owns numerical execution.
+//! Netlist hypergraph to frozen `device.Circuit`.
+//! `NetBuilder` maps nets to rows and turns each card into device instances;
+//! `Builder` accumulates them per `device.Library` type, computes the BBD
+//! node permutation and freezes the pattern.
 
 const std = @import("std");
 const requests = @import("core").query;
 const numerics = @import("core").numerics;
 const devices = @import("spice.zig");
 const device = @import("device");
+/// SPICE letter/LEVEL dispatch, re-exported for the frontend tests.
 pub const spice = devices;
 const netlist = @import("netlist");
 const Netlist = netlist.Netlist;
@@ -28,50 +27,49 @@ const GROUND = @as(u32, 0);
 const Circuit = device.Circuit;
 const Proto = batch.Proto;
 
-// ---------------------------------------------------------------------------
-// Builder: mutable netlist. compile() freezes it into a device.Circuit.
-// ---------------------------------------------------------------------------
+/// `node_instance` tag of a node shared by two subcircuit instances.
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 
+/// Mutable circuit under construction: rows, device protos and card
+/// identities. `compilePerm` consumes it into a `Circuit`.
 pub const Builder = struct {
     gpa: std.mem.Allocator,
     lib: *const Library,
+    /// Row count, ground included.
     n: u32,
     /// Per row, the net name it came from ("" for internal unknowns).
     /// Borrowed: copied into the circuit's intern table at the freeze.
     node_labels: std.ArrayList([]const u8),
+    /// One proto (future batch) per device type, in first-use order.
     protos: std.ArrayList(Proto),
     /// Library type of each proto, parallel to `protos`.
     proto_types: std.ArrayList(DeviceType) = .empty,
-    // Per-node subcircuit instance (0 = top-level, MULTI_INSTANCE = coupling).
-    // Populated by tagNodeInstance(); empty if no subcircuit structure.
+    /// Per-row subcircuit instance: 0 is top level, MULTI_INSTANCE a
+    /// coupling node. Empty when the deck has no subcircuits.
     node_instance: std.ArrayList(u32) = .empty,
+    /// Per-row subcircuit definition, parallel to `node_instance`.
     node_type: std.ArrayList(u16) = .empty,
+    /// Some node has no DC path, so the operating point needs the transient fallback.
     needs_tran_op: bool = false,
-    /// `.options tnom` in DEGREES CELSIUS — ngspice's `CKTnomTemp`
-    /// (`cktsopt.c:71-73` converts the card to K; `cktntask.c:127` defaults it
-    /// to 300.15 K = 27 degC): the temperature a model card that gives no
-    /// `TNOM`/`TREF` of its own was extracted at. ONE number per run, so it
-    /// lives here rather than on every Model; `deriveModel` copies it into the
-    /// models that declare they read it.
+    /// `.options tnom` in degrees Celsius, ngspice's `CKTnomTemp`
+    /// (cktsopt.c:71-73, default 27 degC from cktntask.c:127): the temperature
+    /// a model card without its own TNOM/TREF was extracted at. `deriveModel`
+    /// copies it into the models that read it.
     nom_temp_c: f64 = 27.0,
 
-    /// Netlist card currently being expanded, "" outside one. Set once per
-    /// card by NetBuilder.addDevice — the single funnel every card goes
-    /// through — and read by addDevice below.
+    /// Name of the netlist card being expanded, "" outside one. Set by
+    /// `NetBuilder.addDevice`, which every card passes through.
     card: []const u8 = "",
-    /// (device type, instance ordinal) → card name. `ParamRef` identifies a
-    /// device only by its class ordinal (`resistor#0`), which is not resolvable
-    /// to anything in a raw file; `.sens` needs the card. Strings point into
-    /// the PARSE arena, like `NetBuilder.v` — copy before it dies.
+    /// (device type, instance ordinal) to card name, for `.sens` columns: a
+    /// `ParamRef` only knows its ordinal (`resistor#0`). Names borrow the
+    /// parse arena; copy them before it dies.
     cards: std.ArrayList(requests.CardRef) = .empty,
-    /// Per-device-type instance counter — the ordinal `ParamRef.index` carries.
-    /// Kept here rather than read off a `ProtoStore` because a GENERATED device
-    /// is instantiated through `vt.proto_add` into the device object's own
-    /// store, which this compilation unit deliberately cannot name. Counted for
-    /// EVERY add, card or not, so the ordinal stays in lockstep with the store.
+    /// Per-device-type instance count, the ordinal `ParamRef.index` carries.
+    /// Counted here because a generated device's store lives behind its
+    /// vtable. Every add counts, card or not, so it stays in step with the store.
     card_counts: std.ArrayList(u32) = .empty,
 
+    /// An empty circuit with only the ground row. `lib` must outlive the Builder.
     pub fn init(gpa: std.mem.Allocator, lib: *const Library) !Builder {
         var labels: std.ArrayList([]const u8) = .empty;
         try labels.append(gpa, "0");
@@ -84,7 +82,7 @@ pub const Builder = struct {
         };
     }
 
-    /// Only for a Builder that was never compiled.
+    /// Frees the protos and tables. Only for a Builder that was never compiled.
     pub fn deinit(self: *Builder) void {
         for (self.protos.items) |p| p.destroy(p.ctx, self.gpa);
         self.deinitStorage();
@@ -101,8 +99,8 @@ pub const Builder = struct {
         self.* = undefined;
     }
 
-    /// Tag a node as belonging to a subcircuit instance.
-    /// If a node is tagged by multiple instances, it becomes a coupling node.
+    /// Tags a node with a subcircuit instance; a second instance makes it a
+    /// coupling node.
     fn tagNodeInstance(self: *Builder, node: u32, subckt_type: u16, subckt_instance: u32) !void {
         if (node == GROUND) return;
         if (self.node_instance.items.len <= node) {
@@ -134,13 +132,11 @@ pub const Builder = struct {
         const ni = self.node_instance.items;
         const nt = self.node_type.items;
 
-        // Collect unique (instance_id, type_id) pairs for internal nodes in
-        // first-seen node order. instance_id 0 or MULTI_INSTANCE means coupling.
-        // `at` counts the block's nodes here and becomes its write cursor below.
+        // One block per instance, in first-seen node order. `at` counts the
+        // block's nodes here and becomes its write cursor below.
         var instance_list: std.ArrayList(struct { inst: u32, typ: u16, at: u32 }) = .empty;
         defer instance_list.deinit(gpa);
-        // inst -> block index. Replaces the linear first-seen rescan, which was
-        // O(nodes * instances) on a deck with many subcircuit instances.
+        // Instance to block index.
         var index: std.AutoHashMapUnmanaged(u32, u32) = .empty;
         defer index.deinit(gpa);
         const tagged = @min(n, @as(u32, @intCast(ni.len)));
@@ -158,14 +154,14 @@ pub const Builder = struct {
         if (instance_list.items.len < 2)
             return .{ .perm = null, .info = null };
 
-        // Build permutation: internal nodes grouped by instance, then coupling.
+        // Internal nodes grouped by instance, then the coupling block; ground stays 0.
         const perm = try gpa.alloc(u32, n);
         errdefer gpa.free(perm);
-        perm[0] = 0; // ground stays at 0
+        perm[0] = 0;
         var pos: u32 = 1;
 
         // Prefix-sum the counts into block starts, then scatter every tagged
-        // node in one ascending pass — same order the per-block rescan produced.
+        // node in one ascending pass.
         const blocks = try gpa.alloc(numerics.BbdBlock, instance_list.items.len);
         for (instance_list.items, blocks) |*entry, *blk| {
             blk.* = .{
@@ -184,8 +180,8 @@ pub const Builder = struct {
             cursor.* += 1;
         }
 
+        // Coupling, top-level and untagged nodes.
         const coupling_start = pos;
-        // Coupling + top-level + untagged nodes
         for (1..n) |i| {
             if (i >= ni.len or ni[i] == 0 or ni[i] == MULTI_INSTANCE) {
                 perm[i] = pos;
@@ -203,6 +199,7 @@ pub const Builder = struct {
         };
     }
 
+    /// Appends an unlabelled row and returns it.
     pub fn addNode(self: *Builder) !u32 {
         if (self.n == std.math.maxInt(u32)) return error.TooManyNodes;
         const id = self.n;
@@ -211,15 +208,16 @@ pub const Builder = struct {
         return id;
     }
 
-    /// Reserve label capacity ahead of a known net count.
+    /// Reserves label capacity for `expected` rows past ground.
     pub fn reserveNodes(self: *Builder, expected: u32) !void {
         if (expected == std.math.maxInt(u32)) return error.TooManyNodes;
         try self.node_labels.ensureTotalCapacity(self.gpa, expected + 1);
     }
 
-    /// Add one device. Instances of the same type merge into one batch
-    /// (archetype) regardless of call order. Branch unknowns are assigned
-    /// here, so numbering is stable across interleaved adds.
+    /// Adds one instance of built-in `D` on `nodes` (one row per port).
+    /// Instances of one type share a batch whatever the call order. Internal
+    /// unknowns get fresh rows here, in `D.U` order, unless `collapse` maps
+    /// them onto a port.
     pub fn addDevice(
         self: *Builder,
         comptime D: type,
@@ -255,7 +253,7 @@ pub const Builder = struct {
         try vt.proto_add(proto.ctx, self.gpa, @ptrCast(&model), @ptrCast(&instance), &all).unwrap();
     }
 
-    /// Find-or-create the one proto (future batch) of device type `t`.
+    /// Returns the proto of device type `t`, creating it on first use.
     pub fn protoOf(self: *Builder, t: DeviceType) !Proto {
         for (self.protos.items, self.proto_types.items) |p, pt| {
             if (pt == t) return p;
@@ -274,17 +272,16 @@ pub const Builder = struct {
         return self.compilePerm(&perm);
     }
 
-    /// Freeze into a Circuit, consuming the Builder. Protos and labels are
-    /// renumbered by the BBD permutation (old id -> frozen id), which goes to
-    /// `perm_out`, or null when there was none. Any row the caller recorded
-    /// before the call must be mapped through it.
+    /// Freezes into a Circuit, consuming the Builder. Protos and labels are
+    /// renumbered by the BBD permutation (old row to frozen row), returned in
+    /// `perm_out` (allocated with the Builder's allocator), or null when there
+    /// is none. Any row the caller recorded before the call must be mapped
+    /// through it.
     pub fn compilePerm(self: *Builder, perm_out: *?[]const u32) !Circuit {
         const gpa = self.gpa;
         perm_out.* = null;
         const n: usize = self.n;
 
-        // BBD permutation: reorder nodes so subcircuit-internal nodes are
-        // contiguous per instance, coupling nodes at the end.
         var bbd = try self.computeBbd();
         errdefer if (bbd.perm) |p| gpa.free(p);
         errdefer if (bbd.info) |inf| gpa.free(inf.blocks);
@@ -294,11 +291,11 @@ pub const Builder = struct {
             defer gpa.free(old_labels);
             @memcpy(old_labels, self.node_labels.items);
             for (old_labels, perm) |label, new_i| self.node_labels.items[new_i] = label;
-            perm_out.* = perm; // owned by the caller from here
-            bbd.perm = null; // ownership moved; disarm the errdefer
+            perm_out.* = perm;
+            bbd.perm = null; // the caller owns it now
         }
 
-        // Frozen intern table: one byte blob + n+1 offsets.
+        // Frozen intern table: one byte blob and n+1 offsets.
         const labels = self.node_labels.items;
         var total: usize = 0;
         for (labels) |label| total += label.len;
@@ -323,10 +320,6 @@ pub const Builder = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Netlist -> Builder: device selection, card values, waveforms, HDL devices.
-// ---------------------------------------------------------------------------
-
 /// The runtime-loaded (.hdl) module a card's first positional names, directly
 /// or through its `.model` card's kind (`.model psp103n psp103va ...`).
 fn loadedType(lib: *const Library, dev: Device) ?DeviceType {
@@ -334,10 +327,10 @@ fn loadedType(lib: *const Library, dev: Device) ?DeviceType {
     return lib.find(name) orelse if (dev.model) |m| lib.find(m.kind) else null;
 }
 
-/// Write a POSITIONAL card value (`R1 a b 1k`, `F1 … 2.0`) to the named
-/// parameter on whichever of Model/Instance declares it (`applyKv` covers
-/// `name=value`). VerA puts every Verilog-A `parameter` on Model; resolving
-/// both keeps binding if a model moves one. False when neither declares it.
+/// Writes a positional card value (`R1 a b 1k`, `F1 ... 2.0`) to `field` on
+/// whichever of Model/Instance declares it; `applyKv` covers `name=value`.
+/// Checking both keeps the binding if a model moves the parameter. Returns
+/// false when neither declares it.
 fn setParam(comptime D: type, model: *D.Model, instance: *D.Instance, comptime field: []const u8, value: f64) !bool {
     if (comptime @hasField(D.Model, field)) {
         @field(model.*, field) = try castField(@TypeOf(@field(model.*, field)), value);
@@ -349,68 +342,76 @@ fn setParam(comptime D: type, model: *D.Model, instance: *D.Instance, comptime f
     return true;
 }
 
+/// Netlist to Builder: one pass over the cards, recording the source,
+/// branch and port tables the deck's queries resolve against. Rows it
+/// records are pre-permutation; `prepare.build` maps them after the freeze.
 pub const NetBuilder = struct {
+    /// Scratch for everything recorded here; dies after `prepare.build`.
     arena: std.mem.Allocator,
     b: *Builder,
     nl: Netlist,
     /// Circuit row of each net, 0 until a device touches it (ground is 0
     /// anyway). Rows follow stamping order, not net order.
     rows: []u32,
-    /// Borrowed F/H/W control names, sorted case-insensitively for V sensing.
+    /// F/H/W control names, sorted case-insensitively: V cards named here are sensed.
     sensed_sources: []const []const u8,
 
     /// One row per V card.
     v: std.MultiArrayList(VCard) = .empty,
-    /// Branch-current probes that are neither a V card nor an inductor. ngspice
-    /// gives every MNA branch unknown an `i(<card>)` column (vcvsset.c:41-46,
+    /// Branch-current probes other than V and L cards. ngspice gives every
+    /// MNA branch unknown an `i(<card>)` column (vcvsset.c:41-46,
     /// ccvsset.c:41-46, asrcsetup.c:78-83 for a V-mode B); F, G, S and an
-    /// I-mode B stamp no branch and have none.
+    /// I-mode B have no branch.
     br: std.MultiArrayList(struct { name: []const u8, row: u32 }) = .empty,
     /// `R2 2 0 5K ac=15k`: an AC-only resistance (ngspice restemp.c:112-118),
     /// keyed by card because instance ordinals only exist after the freeze.
     ac_res: std.MultiArrayList(struct { name: []const u8, value: f64 }) = .empty,
-    /// One row per I card, nodes `+` then `−`. An I source has no branch row,
-    /// so a `.tf` driven from one excites the node pair.
+    /// One row per I card. An I source has no branch row, so a `.tf` driven
+    /// from one excites the node pair.
     i: std.MultiArrayList(struct { name: []const u8, pos: u32, neg: u32 }) = .empty,
-    /// One row per source carrying an `AC` spec; every row drives the same rhs
-    /// (ngspice CKTacLoad, acan.c:471-490). A card without `AC` has no row.
-    /// An entry subtracts from `pos` and adds to `neg` under Circuit.rhs's
-    /// residual sign. An I card is (n+, n−); a V card drives its branch row
-    /// only (vsrcacld.c:175), so it is (GROUND, branch). GROUND rows are skipped.
+    /// One row per source with an `AC` spec; all rows drive one rhs (ngspice
+    /// CKTacLoad, acan.c:471-490). A row subtracts at `pos` and adds at `neg`
+    /// under Circuit.rhs's residual sign: an I card is (n+, n-), a V card only
+    /// drives its branch row (vsrcacld.c:175), so (GROUND, branch).
     ac: std.MultiArrayList(struct { pos: u32, neg: u32, re: f64, im: f64 }) = .empty,
-    /// One row per L card; `value` is the inductance, for K cards' M = k·√(L1·L2).
+    /// One row per L card; `value` is the inductance, for a K card's M = k*sqrt(L1*L2).
     l: std.MultiArrayList(struct { name: []const u8, branch: u32, value: f64 }) = .empty,
     /// F/H/W/K cards, added after every other card so V and L rows exist.
     deferred: std.ArrayList(Device) = .empty,
 
+    /// First stamped V card's positive node and branch row, the `.op` ladder's anchor.
     source_node: u32 = GROUND,
     source_branch: u32 = GROUND,
 
-    /// Topology diagnosis (ngspice CKTsetup-class checks), one row per
-    /// netlist-named node; internal expansion nodes never enter. `dc`: an
-    /// element stamps a DC path there (all but capacitors and current sources);
-    /// `cur`: an I source touches it. V/L cards are DC shorts: `uf`/`pot` form a
-    /// weighted union-find with `pot` = v(x) − v(parent). A cycle of shorts is an
-    /// error only when its KVL sum is inconsistent (V1=5 ∥ V2=3).
+    /// Topology check (ngspice CKTsetup-class), indexed by row; only rows of
+    /// netlist nets are `seen`. `dc`: some element gives the node a DC path
+    /// (all but capacitors and current sources); `cur`: an I source touches
+    /// it. V and L cards are DC shorts: `uf`/`pot` form a weighted union-find
+    /// with `pot` = v(x) - v(parent), and a loop of shorts is an error only
+    /// when its KVL sum is inconsistent (V1=5 parallel to V2=3).
     topo: std.MultiArrayList(struct { seen: bool, dc: bool, cur: bool, uf: u32, pot: f64 }) = .empty,
 
+    /// A V card as the queries and the F/H/W cards see it.
     pub const VCard = struct {
         name: []const u8,
+        /// `pos`/`neg`: the node pair, which is the control port of an F/H/W sensing it.
         pos: u32,
-        /// F/H/W models take the sensed source's node pair `(cp, cn)`.
         neg: u32,
+        /// Branch-current row; for a sensed source, the sensing model's control branch.
         branch: u32,
-        /// A source sensed by F/H/W is not stamped; the sensing model's own
-        /// `branch (cp,cn) ctrl` drives `vsense` = this value.
+        /// DC value. A sensed source is not stamped; the sensing model's own
+        /// `branch (cp,cn) ctrl` holds this voltage as `vsense`.
         dc: f64,
         /// `DISTOF1 [mag [phase]]`, `.disto`'s F1 drive (ngspice
-        /// cktdisto.c:100-117). `{0, 0}` = not named. Degrees.
+        /// cktdisto.c:100-117), phase in degrees. `{0, 0}` when not given.
         distof1: [2]f64,
-        /// `.sp` port index, 1-based; 0 = not a port (vsrcdefs.h:104-105).
+        /// `.sp` port index, 1-based; 0 when not a port (vsrcdefs.h:104-105).
         portnum: u16,
+        /// Port reference impedance in ohms.
         z0: f64,
     };
 
+    /// A builder over `nl` writing into `b`; both must outlive it.
     pub fn init(arena: std.mem.Allocator, b: *Builder, nl: Netlist) !NetBuilder {
         var sensed: std.ArrayList([]const u8) = .empty;
         for ("fhw") |letter| for (nl.bucket(letter)) |e| {
@@ -428,7 +429,7 @@ pub const NetBuilder = struct {
         return .{ .arena = arena, .b = b, .nl = nl, .rows = rows, .sensed_sources = sensed.items };
     }
 
-    /// The row of net `v`, allocated on first touch.
+    /// Row of net `v`, allocated on first touch.
     fn rowOf(self: *NetBuilder, v: netlist.VertexId) !u32 {
         const row = &self.rows[v.index()];
         if (row.* != 0 or v == netlist.ground) return row.*;
@@ -437,8 +438,8 @@ pub const NetBuilder = struct {
         return row.*;
     }
 
-    /// The row of net index `net` after the freeze; NO row for a net no
-    /// device touched, or for `netlist.none`.
+    /// Row of net index `net`, or `netlist.none` for a net no device touched
+    /// and for `netlist.none` itself.
     pub fn frozenRow(self: *const NetBuilder, net: u32) u32 {
         if (net == netlist.none) return netlist.none;
         if (net == 0) return GROUND;
@@ -446,7 +447,7 @@ pub const NetBuilder = struct {
         return if (r == 0) netlist.none else r;
     }
 
-    /// Tag every net a subcircuit device touches with its instance, for the
+    /// Tags every row a subcircuit device touches with its instance, for the
     /// BBD permutation.
     pub fn tagSubcircuitNodes(self: *NetBuilder) !void {
         const nl = &self.nl;
@@ -460,9 +461,8 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// Runtime (dlopen'd) VA/V devices — card shape `<name> node... <model>`,
-    /// bound through the dyn vtable. Param blobs live on the arena until
-    /// proto_add copies them.
+    /// Adds the runtime-loaded (.hdl) devices, cards shaped `<name> node...
+    /// <model>`, through their vtables. Call after `build`, before the freeze.
     pub fn addDynDevices(self: *NetBuilder) !void {
         const b = self.b;
         const arena = self.arena;
@@ -475,11 +475,11 @@ pub const NetBuilder = struct {
             const mblob = try arena.alignedAlloc(u8, .@"16", vt.model_size);
             vt.init_model(mblob.ptr);
             if (dev.model) |m| try bindKv(vt.bind_model, mblob.ptr, m.kv);
-            // Card kv overrides the .model card. VA parameters are Model fields,
-            // so card values go to the model blob too.
+            // Card pairs override the .model card. VA parameters are Model
+            // fields, so they go to the model blob too.
             try bindKv(vt.bind_model, mblob.ptr, dev.kv);
-            // LRM 6.3.4/3.4.5: recompute dependent parameters and localparams after
-            // the last write and before `collapse`/`proto_add` read the blob.
+            // LRM 6.3.4/3.4.5: derived parameters after the last write, before
+            // `collapse`/`proto_add` read the blob.
             if (vt.derive) |df| df(mblob.ptr);
             const iblob = try arena.alignedAlloc(u8, .@"16", vt.instance_size);
             vt.init_instance(iblob.ptr);
@@ -506,14 +506,11 @@ pub const NetBuilder = struct {
         try self.br.append(self.arena, .{ .name = name, .row = row });
     }
 
-    /// Collapse the AC table into the composite excitation the frequency
-    /// solves take: one stacked-real vector `[re(0..n), im(0..n)]` over the
-    /// circuit unknowns, which is ngspice's post-`CKTacLoad` (CKTrhs, CKTirhs)
-    /// pair. Every source lands in the SAME vector, so a deck with two driven
-    /// V cards and an I card is one solve per frequency, not a special case.
-    /// All-zero when no card named `AC` — the correct zero response.
-    ///
-    /// Rows must already be in post-permutation coordinates (see frontend/prepare.zig).
+    /// The AC excitation as one stacked vector `[re(0..n), im(0..n)]`,
+    /// ngspice's post-CKTacLoad (CKTrhs, CKTirhs) pair. Every AC source lands
+    /// in it, so the sweep is one solve per point. All zero when no card names
+    /// `AC`. `ac` rows must already be post-permutation. Caller owns the
+    /// result, allocated with `gpa`.
     pub fn acExcitation(self: *const NetBuilder, gpa: std.mem.Allocator, n: usize) ![]f64 {
         const exc = try gpa.alloc(f64, 2 * n);
         @memset(exc, 0);
@@ -531,17 +528,16 @@ pub const NetBuilder = struct {
         return exc;
     }
 
-    /// The deck's `.sp` ports, ordered by `portnum` — ngspice sorts
-    /// `CKTrfPorts` the same way (vsrctemp.c:110-124) and rejects a gapped or
-    /// duplicated numbering as "incorrect port ordering" (vsrctemp.c:143-160).
-    /// Empty when no V card carries `portnum`, which leaves `.sp` on its
-    /// one-port fallback.
+    /// The deck's `.sp` ports ordered by `portnum`, as ngspice sorts CKTrfPorts
+    /// (vsrctemp.c:110-124). A gapped or duplicated numbering is an error
+    /// (vsrctemp.c:143-160). Empty when no V card carries `portnum`, which
+    /// leaves `.sp` on its one-port fallback.
     pub fn portList(self: *const NetBuilder, gpa: std.mem.Allocator) ![]requests.Port {
         var n_ports: usize = 0;
         for (self.v.items(.portnum)) |num| n_ports = @max(n_ports, num);
         if (n_ports == 0) return &.{};
         const ports = try gpa.alloc(requests.Port, n_ports);
-        for (ports) |*p| p.branch = std.math.maxInt(u32); // "unset" marker
+        for (ports) |*p| p.branch = std.math.maxInt(u32); // unset
         const v = self.v.slice();
         for (v.items(.portnum), v.items(.pos), v.items(.branch), v.items(.z0)) |num, node, br, z0| {
             if (num == 0) continue;
@@ -553,13 +549,10 @@ pub const NetBuilder = struct {
         return ports;
     }
 
-    /// ngspice TRANinit semantics: PULSE TR/TF default to TSTEP, PW/PER to
-    /// TSTOP — resolvable only once the .tran directive is known. Patches the
-    /// -1 sentinels left by the Model/Instance defaults.
-    ///
-    /// Guarded by @hasField so it can be run over BOTH Model and Instance and
-    /// no-op on the one that does not declare the PULSE block — see
-    /// `bindSource`.
+    /// ngspice TRANinit: PULSE TR/TF default to TSTEP and PW/PER to TSTOP,
+    /// known only from the `.tran` card. Replaces the -1 sentinels the model
+    /// defaults leave. A no-op on a struct without the PULSE fields, so it can
+    /// run over both Model and Instance.
     fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
         const T = @TypeOf(target.*);
         if (comptime !@hasField(T, "pulse_tr")) return;
@@ -575,9 +568,8 @@ pub const NetBuilder = struct {
             tstep = if (a1 != null) a0 orelse tstep else tstop / 100.0;
             break;
         }
-        // Only a PULSE waveform gets the TRANinit fill (ngspice runs it per
-        // PULSE function). Any other waveform parks TD past every tstop so its
-        // unused pulse fields mint no breakpoint.
+        // Only a PULSE waveform gets the TRANinit fill. Any other waveform
+        // parks TD past every tstop so its unused pulse fields make no breakpoint.
         if (comptime @hasField(T, "waveform")) {
             // SFFM's CKTfinalTime defaults: FM = 5/TSTOP when omitted, FC =
             // 500/TSTOP when omitted or 0 (vsrcload.c:237-243, isrcload.c:215-221).
@@ -596,14 +588,13 @@ pub const NetBuilder = struct {
         if (target.pulse_per < 0) target.pulse_per = tstop;
     }
 
-    /// V and L first so F/H/W/K (deferred until the end) can find them.
+    /// Adds every built-in card, then checks the topology. V and L go
+    /// first; F/H/W/K wait until the end so the rows they name exist.
     pub fn build(self: *NetBuilder) !void {
         for ("vlifhwkabcdegjmnopqrstuxyz") |c| for (self.nl.bucket(c)) |e| try self.addDevice(self.nl.device(e));
         try self.resolveDeferred();
         try self.topoCheck();
     }
-
-    // -- Topology diagnosis helpers ---------------------------------------
 
     fn topoEnsure(self: *NetBuilder, id: u32) !void {
         while (self.topo.len <= id) {
@@ -624,10 +615,10 @@ pub const NetBuilder = struct {
         return .{ .root = id, .pot = pot };
     }
 
-    /// Classify one card's nodes. `kind`: .dc marks a DC path, .cap marks
-    /// presence only, .cur marks a current source, .short additionally
-    /// unions the first two nodes as a DC short of value `vshort`
-    /// (v(node0) − v(node1) = vshort) and rejects an INCONSISTENT cycle.
+    /// Classifies one card's nodes. `.dc` marks a DC path, `.cap` presence
+    /// only, `.cur` a current source; `.short` also joins the first two nodes
+    /// as a DC short with v(node0) - v(node1) = `vshort` and rejects a loop
+    /// whose KVL sum disagrees.
     fn topoMark(self: *NetBuilder, dev: Device, kind: enum { dc, cap, cur, short }, vshort: f64) !void {
         var first_two: [2]u32 = .{ GROUND, GROUND };
         for (dev.pins, 0..) |pin, i| {
@@ -655,15 +646,15 @@ pub const NetBuilder = struct {
                 }
             } else {
                 // Attach so every member's potential stays consistent:
-                // v(b) = pot_b + pot[rb] must equal v(a) − vshort.
+                // v(b) = pot_b + pot[rb] must equal v(a) - vshort.
                 self.topo.items(.uf)[b_.root] = a.root;
                 self.topo.items(.pot)[b_.root] = a.pot - vshort - b_.pot;
             }
         }
     }
 
-    /// Current-source cutsets cannot satisfy static KCL. Capacitor-only nodes
-    /// reach the operating-point transient fallback, as in ngspice OPtran.
+    /// Rejects current-source cutsets, which static KCL cannot satisfy. A
+    /// capacitor-only node sets `needs_tran_op`, ngspice's OPtran fallback.
     fn topoCheck(self: *NetBuilder) !void {
         const topo = self.topo.slice();
         for (topo.items(.seen), topo.items(.dc), topo.items(.cur), 0..) |seen, dc, cur, id| {
@@ -677,11 +668,11 @@ pub const NetBuilder = struct {
     }
 
     fn addDevice(self: *NetBuilder, dev: Device) !void {
-        // Attributes every instance this card expands into (URC, CPL) to it.
+        // Every instance the card expands into (URC, CPL) is attributed to it.
         self.b.card = dev.name;
         defer self.b.card = "";
-        // HDL devices are added by addDynDevices after the freeze-order pass.
-        // An opaque model's nodes count as a DC path for the topology check.
+        // HDL devices are added by addDynDevices; their opaque nodes count as
+        // a DC path for the topology check.
         if (loadedType(self.b.lib, dev) != null) {
             try self.topoMark(dev, .dc, 0);
             return;
@@ -718,7 +709,7 @@ pub const NetBuilder = struct {
                 const br = self.b.n;
                 // A source sensed by F/H/W is replaced by the sensing model's
                 // own `branch (cp,cn) ctrl`; stamping both would split the
-                // current between two sources across one node pair.
+                // current between two sources on one node pair.
                 const sensed = std.sort.binarySearch([]const u8, self.sensed_sources, dev.name, std.ascii.orderIgnoreCase) != null;
                 if (!sensed) try self.b.addDevice(devices.vsource, bound[0], bound[1], nodes);
                 const port = if (sensed) null else try sourcePort(dev);
@@ -732,9 +723,8 @@ pub const NetBuilder = struct {
                     .portnum = if (port) |p| p.num else 0,
                     .z0 = if (port) |p| p.z0 else 0,
                 });
-                // A replaced source stamps nothing, so it cannot be the
-                // reference the .op ladder anchors on — nor can it be driven:
-                // `br` is the row the NEXT card got, not one this source owns.
+                // A replaced source stamps nothing, so it can neither anchor
+                // the .op ladder nor be driven: `br` is the next card's row.
                 if (!sensed) {
                     if (self.source_branch == GROUND) {
                         self.source_node = nodes[0];
@@ -754,12 +744,10 @@ pub const NetBuilder = struct {
             'f', 'h', 'w', 'k' => try self.deferred.append(self.arena, dev),
             'b' => {
                 const first = self.b.n;
-                // Only the V-mode B gets a branch: ngspice guards its
-                // `CKTmkCur` on `ASRCtype == ASRC_VOLTAGE` (asrcset.c:81-88),
-                // so an `i=` B card has no branch unknown and no i() column.
-                // espice's 4-port bsource declares the unknown either way; the
-                // I-mode one is left unprobed rather than published as a
-                // permanent zero ngspice never writes.
+                // Only a V-mode B gets an i() column: ngspice makes the branch
+                // only for ASRC_VOLTAGE (asrcset.c:81-88). Our bsource declares
+                // the unknown either way; the I-mode one stays unprobed rather
+                // than published as a column ngspice never writes.
                 if (try addBsource(self, dev))
                     try self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", first));
             },
@@ -776,53 +764,51 @@ pub const NetBuilder = struct {
         }
     }
 
+    /// TXL (Y card) on the native Pade/history line. The RC case inp2y
+    /// expands into 3-pi sections (r/l > 1.6e10) is refused, not approximated.
     fn addTxl(self: *NetBuilder, dev: Device) !void {
-        route: {
-            if (dev.pins.len != 4) return error.InvalidTransmissionLinePorts;
-            var r: f64 = 0;
-            var l: f64 = 0;
-            var g: f64 = 0;
-            var c: f64 = 0;
-            var len: f64 = 0;
-            if (dev.model) |m| {
-                r = try numericParameter(m.kv, "r") orelse 0;
-                l = try numericParameter(m.kv, "l") orelse 0;
-                g = try numericParameter(m.kv, "g") orelse 0;
-                c = try numericParameter(m.kv, "c") orelse 0;
-                len = try numericParameter(m.kv, "length") orelse 0;
-            }
-            if ((try numericParameter(dev.kv, "length")) orelse (try numericParameter(dev.kv, "len"))) |v| len = v;
-            if (!std.math.isFinite(r) or !std.math.isFinite(l) or !std.math.isFinite(g) or !std.math.isFinite(c) or !std.math.isFinite(len) or g < 0) break :route;
-            if (r <= 0 or l <= 0 or c <= 0 or len <= 0) break :route;
-            if (r / l > 1.6e10) break :route; // inp2y's 3-pi RC expansion case
-            if (!std.math.isFinite(r * len) or r * len <= 0) break :route;
-            const fit = devices.txl_native.fitLine(r, l, g, c, len);
-            if (!fit.ok or fit.taul <= 0 or fit.sqtCdL <= 0 or !finiteLineCoefficients(fit)) break :route;
-            const nm: devices.txl_native.Model = .{ .r = r, .l = l, .g = g, .c = c, .len = len };
-            const n1 = try self.rowOf(dev.pins[0]);
-            const n2 = try self.rowOf(dev.pins[2]);
-            try self.b.addDevice(devices.txl_native, nm, .{}, [2]u32{ n1, n2 });
-            // ngspice writes duplicate i(Y) names; the named oracle retains
-            // the final (far-end) branch, as it does for CPL below.
-            try self.addBranchProbe(dev.name, self.b.n - 1);
-            return;
+        if (dev.pins.len != 4) return error.InvalidTransmissionLinePorts;
+        var r: f64 = 0;
+        var l: f64 = 0;
+        var g: f64 = 0;
+        var c: f64 = 0;
+        var len: f64 = 0;
+        if (dev.model) |m| {
+            r = try numericParameter(m.kv, "r") orelse 0;
+            l = try numericParameter(m.kv, "l") orelse 0;
+            g = try numericParameter(m.kv, "g") orelse 0;
+            c = try numericParameter(m.kv, "c") orelse 0;
+            len = try numericParameter(m.kv, "length") orelse 0;
         }
-        return error.UnsupportedTransmissionLineParameters;
+        if ((try numericParameter(dev.kv, "length")) orelse (try numericParameter(dev.kv, "len"))) |v| len = v;
+        // numericParameter already rejected non-finite values.
+        if (g < 0 or r <= 0 or l <= 0 or c <= 0 or len <= 0 or r / l > 1.6e10 or
+            !std.math.isFinite(r * len) or r * len <= 0)
+            return error.UnsupportedTransmissionLineParameters;
+        const fit = devices.txl_native.fitLine(r, l, g, c, len);
+        if (!fit.ok or fit.taul <= 0 or fit.sqtCdL <= 0 or !finiteLineCoefficients(fit))
+            return error.UnsupportedTransmissionLineParameters;
+        const nm: devices.txl_native.Model = .{ .r = r, .l = l, .g = g, .c = c, .len = len };
+        const n1 = try self.rowOf(dev.pins[0]);
+        const n2 = try self.rowOf(dev.pins[2]);
+        try self.b.addDevice(devices.txl_native, nm, .{}, [2]u32{ n1, n2 });
+        // ngspice writes duplicate i(Y) names; the oracle keeps the last
+        // (far-end) branch, as for CPL.
+        try self.addBranchProbe(dev.name, self.b.n - 1);
     }
 
-    /// LTRA (O card). Routing per ngspice LTRAsetup §1.1:
-    ///   RLC (r,l,c > 0, g = 0) and RC (r,c > 0, l = g = 0) → the native
-    ///     recursive-convolution device (devices.ltra_native, ngspice's real
-    ///     h1'/h2/h3' method — history, coefficients, chop, step limit);
-    ///   LC (r = g = 0) → one exact Bergeron ideal line (tline.va);
-    ///   RG and rejects → lossy_tline.va (exact hyperbolic two-port / $error).
+    /// LTRA (O card), routed as ngspice LTRAsetup does:
+    /// RLC (r,l,c > 0, g = 0) and RC (r,c > 0, l = g = 0) go to the native
+    /// recursive-convolution device (ltra_native: history, coefficients, chop,
+    /// step limit); LC (r = g = 0) to one exact Bergeron line (tline.va); a
+    /// static RG line to lossy_tline.va's exact two-port. Anything else is refused.
     fn addLossyLine(self: *NetBuilder, dev: Device) !void {
         if (dev.pins.len != 4) return error.InvalidTransmissionLinePorts;
         var model: devices.lossy_tline.Model = .{};
         if (dev.model) |m| {
             try applyKv(&model, m.kv);
             // TXL model cards spell the line length `length=`; the
-            // lossy_tline field is `len` (same alias addSingleDevice has).
+            // lossy_tline field is `len`.
             if (try numericParameter(m.kv, "length")) |length| model.len = @floatCast(length);
         }
         try applyKv(&model, dev.kv);
@@ -856,8 +842,8 @@ pub const NetBuilder = struct {
                 return error.UnsupportedTransmissionLineParameters;
         }
 
-        // Only the static RG branch of lossy_tline.va is equivalent. Never
-        // let an unsupported dynamic line silently use its RC/RLC approximation.
+        // Only the static RG branch of lossy_tline.va is exact; a dynamic line
+        // must not fall into its RC/RLC approximation.
         if (!wave and !rc) {
             if (model.r > 0 and model.g > 0 and model.l == 0 and model.c == 0) {
                 const rg = model.r * model.g;
@@ -902,15 +888,12 @@ pub const NetBuilder = struct {
         try self.b.addDevice(devices.tline, t_model, .{}, ports);
     }
 
-    /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. ngspice has no
-    /// URC kernel either — URCsetup expands the card at setup into a ladder of
-    /// ordinary R/C lumps (diodes when ISPERL is set), sized geometrically by
-    /// K from both ends toward the middle so the totals telescope to exactly
-    /// L*RPERL and L*CPERL. Same expansion here, at build time, into the
-    /// existing resistor/capacitor/diode batches.
+    /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. Expanded, as
+    /// ngspice URCsetup does, into a ladder of R/C lumps (diodes when ISPERL
+    /// > 0) sized geometrically by K from both ends toward the middle, so the
+    /// totals telescope to L*RPERL and L*CPERL.
     fn addUrc(self: *NetBuilder, dev: Device) !void {
-        // URC model params + defaults (urcsetup.c). A missing .model card is
-        // legal in ngspice (default U model) — all defaults apply.
+        // Model defaults from urcsetup.c; a card without a .model is legal.
         var k: f64 = 1.5;
         var fmax: f64 = 1e9;
         var rperl: f64 = 1000;
@@ -925,8 +908,8 @@ pub const NetBuilder = struct {
             isperl = kvNumber(m.kv, "isperl") orelse isperl;
             rsperl = kvNumber(m.kv, "rsperl") orelse rsperl;
         }
-        // ngspice's URClength default is a calloc'd 0.0, which degenerates to
-        // 0-ohm lumps; 1 m is the sane "unit line" a card without l= means.
+        // ngspice defaults the length to 0 (0-ohm lumps); a card without l=
+        // means a unit line here.
         const len = kvNumber(dev.kv, "l") orelse 1.0;
         const p = k;
         const r0 = len * rperl;
@@ -934,16 +917,14 @@ pub const NetBuilder = struct {
         const is0 = len * isperl;
 
         const lumps: u32 = if (try numericParameter(dev.kv, "n")) |nv|
-            // clamp guards @intFromFloat UB on absurd cards; ngspice's own
-            // comment says "may want to limit lumps to <= 100 or so".
+            // The clamp keeps @intFromFloat defined on absurd cards.
             @intFromFloat(std.math.clamp(nv, 1, 1000))
         else blk: {
-            // URCsetup: lump count from FMAX so the finest lump's pole clears
-            // the highest frequency of interest.
+            // URCsetup: enough lumps that the finest one's pole clears FMAX.
             const wnorm = fmax * r0 * c0 * 2.0 * std.math.pi;
             const est = @log(wnorm * ((p - 1) / p) * ((p - 1) / p)) / @log(p);
-            // `!(est > 3)` also catches the NaN/inf a K<=1 card produces
-            // (@intFromFloat on those is UB; ngspice leaves that hole open).
+            // `!(est > 3)` also catches the NaN a K <= 1 card produces,
+            // which @intFromFloat must not see.
             break :blk if (wnorm < 35 or !(est > 3)) 3 else @intFromFloat(@min(est, 1000));
         };
         const lumps_f: f64 = @floatFromInt(lumps);
@@ -958,10 +939,10 @@ pub const NetBuilder = struct {
         const neg = if (dev.pins.len > 1) try self.rowOf(dev.pins[1]) else GROUND;
         const gnd = if (dev.pins.len > 2) try self.rowOf(dev.pins[2]) else GROUND;
 
-        // ngspice keys the diode form off "ISPERL given" — even ISPERL=0 —
-        // turning every lump into an is=0 diode whose only effect is its
-        // depletion capacitance. ISPERL > 0 is the intended trigger; the
-        // linear capacitor IS the zero-current limit of that diode.
+        // ngspice switches to diodes when ISPERL is merely given, so ISPERL=0
+        // makes is=0 diodes that act only as depletion capacitance. The
+        // linear capacitor is that diode's zero-current limit, so ISPERL > 0
+        // is the trigger here.
         const use_diodes = isperl > 0;
         var prop: f64 = 1; // K^(i-1)
         var lowl = pos; // low-side chain head (walks pos -> middle)
@@ -978,8 +959,8 @@ pub const NetBuilder = struct {
                 const Diode = devices.DeviceId.Type(.diode);
                 if (comptime !@hasDecl(Diode, "eval")) return error.UnsupportedDevice;
                 // ngspice shares one diode model (is=i1, cjo=c1, rs=rd) and
-                // scales per lump with area=prop; diode.va has no area, so
-                // the area scaling is folded into per-lump model values.
+                // scales each lump by area=prop; diode.va has no area, so the
+                // scaling goes into per-lump model values.
                 var dm: Diode.Model = .{};
                 dm.is = @floatCast(is1 * prop);
                 dm.cjo = @floatCast(c1 * prop);
@@ -997,9 +978,9 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// `R1 a b 1k`: the positional value goes to the Verilog-A parameter
-    /// `value_field` (`r`, `c`, `l`). `alias` is a card spelling only
-    /// (`R1 a b resist=1k`), never a field.
+    /// R, C or L card. The value (`R1 a b 1k`) goes to parameter
+    /// `value_field`; `alias` is a card spelling only (`resist=1k`), never a
+    /// field. Returns the row of the device's first internal unknown.
     fn addPassive(
         self: *NetBuilder,
         comptime D: type,
@@ -1013,10 +994,10 @@ pub const NetBuilder = struct {
         var model: D.Model = .{};
         var instance: D.Instance = .{};
         var value = positionalNumber(dev, 0) orelse kvNumber(dev.kv, value_field) orelse kvNumber(dev.kv, alias) orelse blk: {
-            // Semiconductor resistor model card (ngspice restemp.c
-            // RESupdate_conduct): R = RSH·(L−2·SHORT)/(W−2·NARROW), W
-            // defaulting to the model's DEFW. A zero/negative effective
-            // width is ngspice's silent divide — the device reads as open.
+            // Semiconductor resistor (ngspice restemp.c RESupdate_conduct):
+            // R = RSH*(L-2*SHORT)/(W-2*NARROW), W defaulting to the model's
+            // DEFW. A non-positive result reads as open, as ngspice's
+            // unchecked divide leaves it.
             if (comptime D == devices.resistor) {
                 if (dev.model) |m| {
                     const rsh = kvNumber(m.kv, "rsh") orelse 0;
@@ -1033,8 +1014,8 @@ pub const NetBuilder = struct {
             }
             break :blk 0;
         };
-        // ngspice instance factors: conduct = m/(R·scale) — applies to the
-        // explicit-value spelling too (`R5 6 0 10 scale=1K`, `R4 ... m=2`).
+        // ngspice instance factors, conduct = m/(R*scale), apply to an
+        // explicit value too (`R5 6 0 10 scale=1K`, `R4 ... m=2`).
         if (comptime D == devices.resistor) {
             const scale = kvNumber(dev.kv, "scale") orelse 1;
             const mult = kvNumber(dev.kv, "m") orelse 1;
@@ -1042,9 +1023,8 @@ pub const NetBuilder = struct {
             value /= mult;
             // ngspice restemp.c: "resistance too low or not given, set to 1 mOhm"
             if (!(value > 0)) value = 1e-3;
-            // `ac=` is an AC-ONLY resistance (restemp.c:112-118) and takes the
-            // same instance factors as the DC one; the frequency-domain
-            // linearization swaps it in (Circuit.linearizeAc).
+            // `ac=` is an AC-only resistance (restemp.c:112-118) with the same
+            // instance factors; Circuit.linearizeAc swaps it in.
             if (kvNumber(dev.kv, "ac")) |ac_r| {
                 var ac_value = ac_r * scale / mult;
                 if (!(ac_value > 0)) ac_value = 1e-3;
@@ -1060,22 +1040,14 @@ pub const NetBuilder = struct {
         return br;
     }
 
-    /// `V1 a b DC 5 PULSE(0 5 1n 1n 1n 1u 2u)` / the `I` card equivalent —
-    /// everything except the nodes. `V` and `I` differ only in what the caller
-    /// records afterwards, so the binding itself is one function.
+    /// Binds a V or I card (`V1 a b DC 5 PULSE(0 5 1n 1n 1n 1u 2u)`), all but
+    /// the nodes. Each step runs over both Model and Instance behind
+    /// @hasField guards, so a model that moves a parameter keeps binding.
     ///
-    /// Every step runs over BOTH Model and Instance and is @hasField-guarded
-    /// (`setParam`, and the guards inside `applySourceWaveform` /
-    /// `resolvePulseDefaults`), so a model that moves a parameter across the
-    /// Model/Instance line keeps binding. vsource.va / isource.va declare the
-    /// whole waveform set on Model; the hand-written Zig sources they replaced
-    /// had it on Instance.
-    ///
-    /// ORDER MATTERS. Positional `DC <v>` first, then the waveform group (a
-    /// `PULSE(...)` may not carry a DC value), then card `kv` so an explicit
-    /// `pulse_tr=2n` overrides the group, and only then `resolvePulseDefaults`
-    /// — the -1 sentinels must survive everything that could legitimately set
-    /// them before the `.tran` card gets to fill them in.
+    /// The order is fixed: `DC <v>` first, then the waveform group, then the
+    /// card pairs (so `pulse_tr=2n` overrides the group), and only then
+    /// `resolvePulseDefaults`, so the -1 sentinels survive every legitimate
+    /// write before the `.tran` card fills them.
     fn bindSource(self: *const NetBuilder, comptime D: type, dev: Device) !struct { D.Model, D.Instance } {
         var model: D.Model = .{};
         var instance: D.Instance = .{};
@@ -1087,9 +1059,9 @@ pub const NetBuilder = struct {
         try applyKv(&instance, dev.kv);
         self.resolvePulseDefaults(&model);
         self.resolvePulseDefaults(&instance);
-        // ngspice: "the DC value of a source with a transient specification
-        // but no DC value is the transient value at t = 0". Resolved here so
-        // the model reads `dc` unconditionally and a .dc sweep can override it.
+        // ngspice: a source with a transient spec and no DC value has the
+        // t = 0 value as DC. Resolved here so the model reads `dc`
+        // unconditionally and a .dc sweep can override it.
         if (dc == null) {
             dcFromWaveform(&model);
             dcFromWaveform(&instance);
@@ -1098,8 +1070,8 @@ pub const NetBuilder = struct {
     }
 
     fn addByLetter(self: *NetBuilder, letter: u8, dev: Device) !void {
-        // Q cards arrive already normalized (addDevice), so the model name is
-        // positional[0] here for every terminal count.
+        // The netlist moved a Q/M card's model name to positional[0] whatever
+        // its terminal count.
         switch (try resolveDeviceId(letter, dev)) {
             inline else => |comptime_id| {
                 const D = devices.DeviceId.Type(comptime_id);
@@ -1107,7 +1079,7 @@ pub const NetBuilder = struct {
                 try addSingleDevice(self, D, dev);
                 // ngspice's VBIC `i(q1)` is its excess-phase branch, made only
                 // when TD > 0 (vbicsetup.c:510-525). Node xf2 carries only a
-                // 1 ohm load, so that current IS v(xf2): alias the column.
+                // 1 ohm load, so that current equals v(xf2): alias the column.
                 if (comptime_id == .vbic13_4t) {
                     const td = kvNumber(dev.kv, "td") orelse if (dev.model) |m| kvNumber(m.kv, "td") orelse 0 else 0;
                     if (td > 0) try self.addBranchProbe(dev.name, internalRow(D, "xf2", first));
@@ -1116,6 +1088,7 @@ pub const NetBuilder = struct {
         }
     }
 
+    /// Adds the F/H/W/K cards once every V and L row exists.
     fn resolveDeferred(self: *NetBuilder) !void {
         if (self.deferred.items.len == 0) return;
         var source_index: std.StringHashMapUnmanaged(u32) = .empty;
@@ -1139,8 +1112,8 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// CPL keeps ngspice's modal fit and accepted-step convolution for the
-    /// supported dimensions. The two-conductor VA approximation is not a fallback.
+    /// CPL (P card) on the native modal-fit, accepted-step convolution line,
+    /// for 2 to 4 conductors. Anything else is refused, never approximated.
     fn addCpl(self: *NetBuilder, dev: Device) !void {
         if (dev.pins.len < 6 or dev.pins.len % 2 != 0) return error.UnsupportedCoupledLineDimension;
         const n_lines = (dev.pins.len - 2) / 2;
@@ -1182,15 +1155,16 @@ pub const NetBuilder = struct {
         unreachable;
     }
 
+    /// F, H or W card: a device across the sensed V card's node pair that
+    /// takes over that source's branch. `default_gain` null: no gain parameter.
     fn addBranchRef(self: *NetBuilder, comptime D: type, dev: Device, source_index: std.StringHashMapUnmanaged(u32), comptime default_gain: ?f64) !void {
         if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
         const ctrl_name = positionalName(dev, 0) orelse return error.MissingControlSource;
         const ctrl = source_index.get(ctrl_name) orelse return error.UnknownControlSource;
 
         var model: D.Model = .{};
-        // W card: `W n+ n- Vctrl model` — model is positional[1] (positional[0]
-        // is the control source). F/H put a number there, so the orelse falls
-        // back to the plain model-name slot.
+        // W card: `W n+ n- Vctrl model`, model at positional[1] after the
+        // control source. F/H put a number there, so fall back to positional[0].
         if (positionalName(dev, 1) orelse positionalName(dev, 0)) |name| {
             if (self.nl.findModel(name)) |m| try applyKv(&model, m.kv);
         }
@@ -1202,9 +1176,8 @@ pub const NetBuilder = struct {
         _ = try setParam(D, &model, &instance, "vsense", self.v.items(.dc)[ctrl]);
         try applyKv(&instance, dev.kv);
 
-        // (p, n, cp, cn): the control port is the sensed source's own node
-        // pair. The model puts a `branch (cp, cn) ctl` across it and reads
-        // I(ctl), which IS the current through that source.
+        // (p, n, cp, cn): the control port is the sensed source's node pair.
+        // The model's `branch (cp, cn) ctl` across it carries that source's current.
         const nodes = [4]u32{
             if (dev.pins.len > 0) try self.rowOf(dev.pins[0]) else GROUND,
             if (dev.pins.len > 1) try self.rowOf(dev.pins[1]) else GROUND,
@@ -1222,6 +1195,7 @@ pub const NetBuilder = struct {
             try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", first));
     }
 
+    /// K card: mutual inductance between two L cards' branches.
     fn addKinduc(self: *NetBuilder, dev: Device) !void {
         if (comptime !@hasDecl(devices.kinduc, "eval")) return error.UnsupportedDevice;
         const l1_name = positionalName(dev, 0) orelse return error.KinducMissingInductor;
@@ -1234,23 +1208,20 @@ pub const NetBuilder = struct {
         if (positionalNumber(dev, 2)) |k| model.k = try castField(f32, k);
         if (dev.model) |m| try applyKv(&model, m.kv);
         try applyKv(&model, dev.kv);
-        // K card carries the coupling coefficient k; the device stamps mutual
-        // inductance M = k*sqrt(L1*L2) (ngspice INDsetup).
+        // The card gives the coupling k; the device stamps M = k*sqrt(L1*L2)
+        // (ngspice INDsetup).
         model.k = try castField(f32, @as(f64, model.k) *
             @sqrt(self.l.items(.value)[li1] * self.l.items(.value)[li2]));
         try self.b.addDevice(devices.kinduc, model, .{}, [2]u32{ ibr1, ibr2 });
     }
 };
 
-// ---------------------------------------------------------------------------
-// Device resolution
-// ---------------------------------------------------------------------------
-
+/// The built-in device a card letter and its model's LEVEL select.
 fn resolveDeviceId(letter: u8, dev: Device) !devices.DeviceId {
     const level = try modelLevel(dev);
     return switch (letter) {
-        // `.model X VDMOS(...)` carries no LEVEL — the model KIND is the
-        // dispatch (ngspice inpdomod.c does the same for VDMOS).
+        // `.model X VDMOS(...)` has no LEVEL; the model kind selects it, as
+        // in ngspice inpdomod.c.
         'm' => blk: {
             if (dev.model) |mm| {
                 if (std.ascii.eqlIgnoreCase(mm.kind, "vdmos")) break :blk .vdmos;
@@ -1266,6 +1237,8 @@ fn resolveDeviceId(letter: u8, dev: Device) !devices.DeviceId {
     };
 }
 
+/// The device a card with no built-in letter gets from its `.model` kind
+/// (`N1 d g s b nmos_model`); null when the kind names none.
 fn inferDeviceFromModel(dev: Device) !?devices.DeviceId {
     const m = dev.model orelse return null;
     const l = try modelLevel(dev);
@@ -1289,13 +1262,13 @@ fn eqlAny(a: []const u8, candidates: []const []const u8) bool {
     return false;
 }
 
-/// The polarity field, under each name the models spell it. These are VerA
-/// codegen output: Verilog-A `type` is a Zig primitive and becomes `typeZ`, a
+/// Sets P-type polarity under whichever name the model spells it. The names
+/// are VerA output: Verilog-A `type` becomes `typeZ` (a Zig keyword), a
 /// declared `type_` becomes `typeZ5f`. A misspelled `@hasField` is silently
 /// false and runs a P-type card as N-type, so do not rename them.
 fn setPolarity(comptime D: type, model: *D.Model) !void {
     if (comptime @hasField(D.Model, "typeZ")) {
-        model.typeZ = -1; // i64 on most, f64 on mos1/mos2 — `-1` coerces to both
+        model.typeZ = -1; // i64 on most, f64 on mos1/mos2; `-1` coerces to both
         markGiven(model, "typeZ"); // bsim4va: `if (!$param_given(type)) type = NMOS`
     } else if (comptime @hasField(D.Model, "typeZ5f")) {
         model.typeZ5f = -1; // bsim2 declares `type_`
@@ -1310,31 +1283,26 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
         model.TYPE = -1; // bsimsoi/hisim2/hisimhv: `TYPE` +1=NMOS, -1=PMOS
         markGiven(model, "TYPE");
     } else {
-        // ponytail: jfet/jfet2/mes/mesa/vdmos have no polarity
-        // parameter at ALL, so a P-type card on them cannot be honoured.
-        // Refusing is the point: running it N-type is what produced silent NaN.
-        // Upgrade path is model-side — give the .va a `type` parameter the way
-        // mos1 has one — not another branch here.
+        // ponytail: jfet/jfet2/mes/mesa/vdmos have no polarity parameter, so
+        // a P-type card on them is refused rather than run N-type (silent
+        // NaN). Upgrade path: a `type` parameter in the .va, as mos1 has.
         return error.UnsupportedDevice;
     }
 }
 
-/// VerA's reserved Model field for §9.15 `$simparam("tnom")` — the circuit's
+/// VerA's reserved Model field for §9.15 `$simparam("tnom")`: the circuit's
 /// nominal temperature in degC. See `Lower.simparamHostField`.
 const nom_temp_field = "nom_temp__";
 
-/// §6.3.4/§3.4.5 `derive`, through the device's own object when it has one.
-/// Same function either way — calling `D.derive` directly would codegen the
-/// generated body (bsim4's runs to thousands of lines) a second time, inside
-/// the executable, for every model.
+/// Runs §6.3.4/§3.4.5 `derive` through the device's own object: calling
+/// `D.derive` directly would compile the generated body (thousands of lines
+/// for bsim4) into the executable a second time.
 ///
-/// `.options tnom` is published here, immediately before `derive`, because
-/// that is where the two halves meet: VerA turns a `parameter real tnom =
-/// $simparam("tnom")` into `if (!model.tnom__given) model.tnom =
-/// model.nom_temp__`, which is ngspice's `if (!BSIM4tnomGiven) BSIM4tnom =
-/// ckt->CKTnomTemp` (b4set.c:1950). Writing it before the card would let
-/// `derive` overwrite it; after `derive`, nothing would read it. A card
-/// `TNOM`/`TREF` raised `__given` in `applyKv`, so it still wins.
+/// `.options tnom` is written immediately before `derive`: VerA lowers
+/// `parameter real tnom = $simparam("tnom")` to `if (!model.tnom__given)
+/// model.tnom = model.nom_temp__`, ngspice's `if (!BSIM4tnomGiven)
+/// BSIM4tnom = ckt->CKTnomTemp` (b4set.c:1950). A card TNOM/TREF set
+/// `__given` in `applyKv`, so it still wins.
 fn deriveModel(comptime D: type, model: *D.Model, nom_temp_c: f64) void {
     if (comptime @hasField(D.Model, nom_temp_field))
         @field(model, nom_temp_field) = nom_temp_c;
@@ -1343,6 +1311,7 @@ fn deriveModel(comptime D: type, model: *D.Model, nom_temp_c: f64) void {
     } else if (comptime @hasDecl(D, "derive")) D.derive(model);
 }
 
+/// Binds one card onto built-in `D`: model card, polarity, card pairs, derive.
 fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     const b = self.b;
     if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
@@ -1357,32 +1326,23 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     }
     if (dev.model) |m| {
         try applyKv(&model, m.kv);
-        // TXL (y-card) model cards spell the line length `length=`;
-        // the lossy_tline field is `len`.
-        if (comptime D == devices.lossy_tline) {
-            if (kvNumber(m.kv, "length")) |length| model.len = @floatCast(length);
-        }
         // Polarity comes from the model card kind, outside applyKv.
         if (eqlAny(m.kind, &.{ "pmos", "pnp", "pjf", "pmf", "phfet" })) try setPolarity(D, &model);
     }
     _ = try setParam(D, &model, &instance, "gain", positionalNumber(dev, 0) orelse 0);
-    // Card `name=value` goes to both structs: VerA puts every Verilog-A
-    // `parameter` (W, L included) on Model. `model` is a per-device copy, so
-    // this overrides the model card for this instance only.
+    // Card pairs go to both structs: VerA puts every Verilog-A `parameter`
+    // (W and L included) on Model. `model` is a per-device copy, so this
+    // overrides the model card for this instance only.
     try applyKv(&model, dev.kv);
     try applyKv(&instance, dev.kv);
-    // §6.3.4/§3.4.5: recompute dependent parameters and localparams after the
-    // last card write; explicit card values win through `__given`.
+    // §6.3.4/§3.4.5: derived parameters after the last write; explicit card
+    // values win through `__given`.
     deriveModel(D, &model, b.nom_temp_c);
     try b.addDevice(D, model, instance, try deviceNodes(self, D, dev));
 }
 
-// ---------------------------------------------------------------------------
-// B-source expression extraction
-// ---------------------------------------------------------------------------
-
-/// Returns true when the card is a VOLTAGE-mode B — the only kind that owns a
-/// branch-current unknown worth probing (ngspice asrcset.c:81-88).
+/// B card as a polynomial source. Returns true for a voltage-mode B, the
+/// only kind with a branch current worth probing (ngspice asrcset.c:81-88).
 fn addBsource(self: *NetBuilder, dev: Device) !bool {
     if (comptime !@hasDecl(devices.bsource, "eval")) return error.UnsupportedDevice;
     var model: devices.bsource.Model = .{};
@@ -1400,10 +1360,10 @@ fn addBsource(self: *NetBuilder, dev: Device) !bool {
             .expr => |span| {
                 const ops = self.nl.exprOps(span);
                 ctrl_probe = extractVoltageProbe(ops);
-                // Trust boundary: an expression outside the subset used to
-                // compile to all-zero coefficients, a silent open circuit.
+                // An expression outside the subset must fail loudly, not
+                // become all-zero coefficients (a silent open circuit).
                 if (!extractPolyCoeffs(ops, self.nl.consts, &model)) {
-                    // (The test runner fails any test that logs an error.)
+                    // The test runner fails any test that logs an error.
                     if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is outside the supported subset (a polynomial of degree <= 3 in one V(p[,n]) pair, integer powers via ^, ** or pow(), times at most one tanh(k*V) factor)", .{ dev.name, item.key });
                     return error.UnsupportedBsourceExpression;
                 }
@@ -1422,10 +1382,11 @@ fn addBsource(self: *NetBuilder, dev: Device) !bool {
     return model.imode == 0;
 }
 
-/// The first V() probe in the expression: V(p) or differential V(p,n), as
-/// nets. The poly model assumes every probe names the same pair (§1.6 ceiling).
+/// A V(p) or differential V(p,n) probe, as nets; `n` is `netlist.none` when
+/// single-ended. The polynomial model reads one pair per source.
 const Probe = struct { p: u32, n: u32 };
 
+/// The first V() probe in `ops`.
 fn extractVoltageProbe(ops: []const Op) ?Probe {
     // Leaves keep their left-to-right order in postfix, so the first probe op
     // is the first probe a pre-order walk meets.
@@ -1445,6 +1406,8 @@ fn operand(ops: []const Op, end: usize, i: usize) usize {
     return expr.operands(ops, end, &buf)[i];
 }
 
+/// Writes `ops` into the bsource's c0..c3 and th; false when the expression
+/// is outside the supported subset.
 fn extractPolyCoeffs(ops: []const Op, consts: []const f64, model: *devices.bsource.Model) bool {
     // Every V() probe must name the one control pair the model reads.
     const pair = extractVoltageProbe(ops) orelse Probe{ .p = netlist.none, .n = netlist.none };
@@ -1454,10 +1417,10 @@ fn extractPolyCoeffs(ops: []const Op, consts: []const f64, model: *devices.bsour
         else => {},
     };
     const c = poly(ops, consts, ops.len - 1) orelse return false;
-    // A single multiplicative tanh(k*vc) factor rides along as model.th
-    // (the MESFET "ungated load" idiom, Is*tanh(v/Is/R)*(1+lambda*v)).
-    // poly() treated it as the constant 1, so it must be a factor of the
-    // whole expression, exactly once, with a linear argument.
+    // One multiplicative tanh(k*vc) factor rides along as model.th (the
+    // MESFET "ungated load" idiom, Is*tanh(v/Is/R)*(1+lambda*v)). poly()
+    // read it as the constant 1, so it must be a factor of the whole
+    // expression, exactly once, with a linear argument.
     var n_tanh: u32 = 0;
     for (ops) |op| n_tanh += @intFromBool(isCall(op, .tanh));
     if (n_tanh > 1) return false;
@@ -1474,8 +1437,8 @@ fn extractPolyCoeffs(ops: []const Op, consts: []const f64, model: *devices.bsour
 }
 
 /// The argument of a tanh() that is a multiplicative factor of the whole
-/// expression: descend only through products, constant divisors and unary
-/// signs. null if the (sole) tanh sits anywhere else, e.g. additively.
+/// expression, found through products, constant divisors and unary signs.
+/// Null when the tanh sits anywhere else, e.g. in a sum.
 fn tanhFactorArg(ops: []const Op, end: usize) ?usize {
     const op = ops[end];
     return switch (op.code) {
@@ -1578,10 +1541,7 @@ fn numericCoeff(ops: []const Op, consts: []const f64, end: usize) f64 {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Waveform tables
-// ---------------------------------------------------------------------------
-
+/// Source waveform shapes; the tag is the model's `waveform` code (0 is DC only).
 const Wave = enum(u8) { pulse = 1, sin = 2, exp = 3, pwl = 4, sffm = 5, am = 6 };
 
 /// The waveform a source keyword names, case-insensitively.
@@ -1595,30 +1555,27 @@ fn waveKind(name: []const u8) ?Wave {
     return map.get(std.ascii.lowerString(&buf, name));
 }
 
-/// FastVAF flattens `parameter real pwl_times[0:63]` into 63+1 SCALAR Model
-/// fields — there is no array to index — each named with the `naming.sanitize`
-/// escape of its subscript: `[` is `Z5b`, `]` is `Z5d` (`Z` is the escape
-/// marker precisely so a sanitized leaf can never collide, see
-/// modules/FastVAF/src/naming.zig). So the slot has to be picked at comptime.
+/// Field name of slot `k` of a flattened Verilog-A array. FastVAF turns
+/// `parameter real pwl_times[0:63]` into 64 scalar Model fields named with
+/// the escaped subscript (`[` is `Z5b`, `]` is `Z5d`; see
+/// modules/FastVAF/src/naming.zig), so the slot is picked at comptime.
 fn pwlSlot(comptime base: []const u8, comptime k: usize) []const u8 {
-    // 2 arrays x 64 slots, each a comptime std.fmt run — well past the default
-    // 12000 backwards branches on its own.
+    // 2 arrays x 64 slots of comptime std.fmt exceed the default quota.
     @setEvalBranchQuota(200_000);
     return std.fmt.comptimePrint("{s}Z5b{d}Z5d", .{ base, k });
 }
 
-/// Table capacity read off the struct, not hardcoded: `max_pwl` lives in the
-/// .va and this follows it.
+/// PWL table capacity, read off the struct so it follows `max_pwl` in the .va.
 fn pwlCapacity(comptime T: type) usize {
     comptime var n: usize = 0;
     inline while (@hasField(T, pwlSlot("pwl_times", n))) : (n += 1) {}
     return n;
 }
 
+/// Writes the card's waveform (group or parenless spelling) into `target`,
+/// a source Model or Instance; a no-op on a struct without `waveform`.
 fn applySourceWaveform(target: anytype, dev: Device) void {
     const T = @TypeOf(target.*);
-    // Runs over both Model and Instance (see bindSource); the one that does not
-    // declare the waveform set has nothing to do.
     if (comptime !@hasField(T, "waveform")) return;
     var i: usize = 0;
     while (i < dev.positional.len) : (i += 1) {
@@ -1647,9 +1604,9 @@ fn applyWaveArgs(comptime T: type, target: anytype, kind: Wave, args: []const Va
     target.waveform = @intFromEnum(kind);
     switch (kind) {
         // `PWL(T1 V1 T2 V2 ...)`: (time, value) pairs into the flattened
-        // table. Non-numeric args (ngspice's `r=` / `td=` suffixes) leave
-        // their slot at the default; those two are card kv and land through
-        // applyKv on `pwl_repeat` / `pwl_td`.
+        // table. A non-numeric arg leaves its slot at the default; ngspice's
+        // `r=`/`td=` suffixes are card pairs and reach `pwl_repeat`/`pwl_td`
+        // through applyKv.
         .pwl => if (comptime @hasField(T, pwlSlot("pwl_times", 0))) {
             const n_pts = @min(args.len / 2, comptime pwlCapacity(T));
             inline for (0..comptime pwlCapacity(T)) |k| {
@@ -1666,10 +1623,10 @@ fn applyWaveArgs(comptime T: type, target: anytype, kind: Wave, args: []const Va
     }
 }
 
-/// The waveform's t = 0 value, per shape (each pre-TD branch of
-/// vsource.va/isource.va): PULSE/EXP hold their first level, SIN emits
-/// VO + VA*sin(2*pi*phase/360), PWL holds its first point, SFFM its offset,
-/// AM starts at 0 (the `dc` default already).
+/// Sets `dc` to the waveform's t = 0 value (each pre-TD branch of
+/// vsource.va/isource.va): PULSE/EXP hold their first level, SIN is
+/// VO + VA*sin(2*pi*phase/360), PWL its first point. AM starts at 0, the
+/// `dc` default already.
 fn dcFromWaveform(target: anytype) void {
     const T = @TypeOf(target.*);
     if (comptime !@hasField(T, "waveform") or !@hasField(T, "dc")) return;
@@ -1703,6 +1660,8 @@ fn dcFromWaveform(target: anytype) void {
     target.dc = @floatCast(v);
 }
 
+/// Positional waveform args onto fields; arg k goes to `field_pairs[2k]`,
+/// the V-source name, or else `field_pairs[2k + 1]`, the I-source name.
 fn applyGroupArgs(comptime T: type, target: anytype, args: []const Value, comptime field_pairs: []const []const u8) void {
     comptime var i: usize = 0;
     inline while (i < field_pairs.len) : (i += 2) {
@@ -1715,6 +1674,7 @@ fn applyGroupArgs(comptime T: type, target: anytype, args: []const Value, compti
     }
 }
 
+/// (V-source field, I-source field) per positional arg of waveform `w`.
 fn fieldPairs(comptime w: Wave) []const []const u8 {
     return switch (w) {
         .pulse => &.{ "pulse_v1", "pulse_i1", "pulse_v2", "pulse_i2", "pulse_td", "pulse_td", "pulse_tr", "pulse_tr", "pulse_tf", "pulse_tf", "pulse_pw", "pulse_pw", "pulse_per", "pulse_per", "pulse_phase", "pulse_phase" },
@@ -1727,10 +1687,7 @@ fn fieldPairs(comptime w: Wave) []const []const u8 {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Kv / positional utilities
-// ---------------------------------------------------------------------------
-
+/// Rows of `D`'s ports from the card's pins; missing pins are ground.
 fn deviceNodes(nb: *NetBuilder, comptime D: type, dev: Device) ![D.num_ports]u32 {
     var out: [D.num_ports]u32 = undefined;
     inline for (0..D.num_ports) |idx| {
@@ -1739,6 +1696,7 @@ fn deviceNodes(nb: *NetBuilder, comptime D: type, dev: Device) ![D.num_ports]u32
     return out;
 }
 
+/// The model card's LEVEL, 1 when absent.
 fn modelLevel(dev: Device) !u16 {
     if (dev.model) |m| {
         if (try numericParameter(m.kv, "level")) |l| return try castField(u16, l);
@@ -1746,15 +1704,13 @@ fn modelLevel(dev: Device) !u16 {
     return 1;
 }
 
-/// Row `Builder.addDevice` allocated for D's internal unknown `tag`, given the
-/// first internal row (`b.n` sampled before the call — addDevice walks U past
-/// num_ports allocating one row each, in declaration order).
+/// Row `Builder.addDevice` gave `D`'s internal unknown `tag`, where `first`
+/// is `b.n` sampled before the call (internal rows follow `D.U` order).
 ///
-/// VerA mangles a Verilog-A `branch (a, b)` into the U member
-/// `flowZ28aZ2cbZ29` (`(` = Z28, `,` = Z2c, `)` = Z29). Naming the member here
-/// rather than hardcoding `first + 1` makes a wrong branch a COMPILE error
-/// instead of a silently mislabelled current column — ccvs declares two
-/// branches and the sense one comes first.
+/// VerA names a Verilog-A `branch (a, b)` as the U member `flowZ28aZ2cbZ29`
+/// (`(` = Z28, `,` = Z2c, `)` = Z29). Naming the member rather than writing
+/// `first + 1` makes a wrong branch a compile error instead of a mislabelled
+/// current column: ccvs declares two branches, the sense one first.
 fn internalRow(comptime D: type, comptime tag: []const u8, first: u32) u32 {
     const off = comptime blk: {
         for (@typeInfo(D.U).@"enum".fields, 0..) |f, i| {
@@ -1795,9 +1751,11 @@ fn kvNumber(kv: []const Kv, key: []const u8) ?f64 {
     return null;
 }
 
+/// A source card's DC value: `dc=`, `DC v`, `DC(v)` or the first bare
+/// number not owed to AC/DISTOF. Null when the card gives none.
 fn sourceDc(dev: Device) ?f64 {
     if (kvNumber(dev.kv, "dc")) |dc| return dc;
-    // numbers owed to a preceding AC/DISTOF keyword (mag [phase])
+    // Numbers still owed to a preceding AC/DISTOF keyword (mag [phase]).
     var skip: usize = 0;
     for (dev.positional, 0..) |pos, idx| switch (pos) {
         .num => |n| {
@@ -1817,7 +1775,6 @@ fn sourceDc(dev: Device) ?f64 {
             } else if (std.mem.eql(u8, name, "ac") or
                 std.mem.eql(u8, name, "distof1") or std.mem.eql(u8, name, "distof2"))
             {
-                // "AC mag [phase]" / "DISTOF1 mag [phase]": not the DC value.
                 skip = 2;
             }
         },
@@ -1826,19 +1783,10 @@ fn sourceDc(dev: Device) ?f64 {
     return null;
 }
 
-/// The `AC` spec of a source card, as the complex excitation it becomes:
-/// `mag · e^{j·phase·π/180}`. Null when the card names no `AC` — that source
-/// is NOT driven by an .ac run (ngspice `vsrcacld.c:171` / `isrcacld.c:36`).
-///
-/// Defaults follow ngspice `vsrcpar.c:59-72` (which numbers were given) plus
-/// `vsrctemp.c:38-43` (what a missing one becomes): bare `AC` is mag 1 phase 0,
-/// `AC mag` is phase 0, `AC mag phase` is both. Phase is DEGREES —
-/// `vsrctemp.c:68` is `radians = acPhase * M_PI / 180.0`.
-/// `VP1 in 0 DC 0 AC 1 portnum 1 z0 50` — the RF-port spelling of a V card.
-/// ngspice `vsrctemp.c:74-82`: a V source is a port when `portnum` is GIVEN;
-/// `z0` then defaults to 50, and the card counts as a port only while
-/// `z0 > 0 && portnum > 0`. Both spellings are accepted — `portnum 1` (the
-/// positional pair every ngspice IOP is written as on a card) and `portnum=1`.
+/// The RF port of a V card (`VP1 in 0 DC 0 AC 1 portnum 1 z0 50`), null when
+/// `portnum` is not given (ngspice vsrctemp.c:74-82). `z0` defaults to 50 ohm.
+/// Both `portnum 1` and `portnum=1` are accepted. A given `portnum` outside
+/// 1..1024 or a non-positive `z0` is an error, not a plain source.
 fn sourcePort(dev: Device) !?struct { num: u16, z0: f64 } {
     const num_f = blk: {
         if (kvNumber(dev.kv, "portnum")) |v| break :blk v;
@@ -1856,14 +1804,15 @@ fn sourcePort(dev: Device) !?struct { num: u16, z0: f64 } {
         }
         break :blk 50.0;
     };
-    // `portnum` was GIVEN, so the card claims to be a port: a reference
-    // impedance that is not positive, or a port number outside the table, is
-    // a bad deck. Returning null here instead demoted the card to a plain V
-    // source and `sp/zero_impedance` ran a one-port S-parameter sweep on it.
     if (!(num_f >= 1) or num_f > 1024 or !(z0 > 0)) return error.InvalidAnalysisArguments;
     return .{ .num = @intFromFloat(num_f), .z0 = z0 };
 }
 
+/// The `AC` spec of a source card as its complex excitation
+/// mag * e^(j*phase*pi/180); null when the card names no `AC`, so an .ac run
+/// does not drive it (ngspice vsrcacld.c:171, isrcacld.c:36). Bare `AC` is
+/// mag 1 phase 0 and `AC mag` is phase 0 (vsrcpar.c:59-72, vsrctemp.c:38-43).
+/// Phase is in degrees.
 fn sourceAc(dev: Device) ?struct { re: f64, im: f64 } {
     var mag: f64 = 1;
     var phase: f64 = 0;
@@ -1894,10 +1843,9 @@ fn sourceAc(dev: Device) ?struct { re: f64, im: f64 } {
     return .{ .re = mag * @cos(rad), .im = mag * @sin(rad) };
 }
 
-/// `DISTOF1 [mag [phase]]` on a source card, ngspice vsrcpar.c:180-193: the
-/// bare keyword is mag 1 / phase 0, one number sets the magnitude, two set
-/// both. `{0, 0}` = the card never named it — no F1 drive, ngspice's own
-/// `VSRCdF1given` false.
+/// `DISTOF1 [mag [phase]]` on a source card (ngspice vsrcpar.c:180-193): the
+/// bare keyword is mag 1 phase 0, one number sets the magnitude, two set
+/// both. `{0, 0}` when the card never names it, so it is no F1 drive.
 fn sourceDistoF1(dev: Device) [2]f64 {
     if (kvNumber(dev.kv, "distof1")) |mag| return .{ mag, 0 };
     for (dev.positional, 0..) |pos, idx| switch (pos) {
@@ -1910,7 +1858,8 @@ fn sourceDistoF1(dev: Device) [2]f64 {
     return .{ 0, 0 };
 }
 
-/// Cold native-line setup validation, including every nested fitted coefficient.
+/// True when every float in `value`, nested arrays and structs included, is
+/// finite. Setup-time only.
 fn finiteLineCoefficients(value: anytype) bool {
     switch (@typeInfo(@TypeOf(value))) {
         .float => return std.math.isFinite(value),
@@ -1926,7 +1875,9 @@ fn finiteLineCoefficients(value: anytype) bool {
     return true;
 }
 
-/// Packed upper-triangular matrix entries follow the first named value.
+/// Reads the CPL matrix `key` into `out` and returns its entry count: the
+/// packed upper triangle is the `key=` value and the unnamed values after it.
+/// 0 when the card has no `key`.
 fn cplVector(kv: []const Kv, key: []const u8, out: []f64) !usize {
     for (kv, 0..) |entry, start| {
         if (!std.mem.eql(u8, entry.key, key)) continue;
@@ -1951,7 +1902,8 @@ fn valueNumber(value: Value) ?f64 {
     };
 }
 
-/// A recognized numeric field cannot silently fall back to a model default.
+/// The number `key=` gives, null when absent. A present key that is not a
+/// finite number is an error, never a silent fall back to the default.
 fn numericParameter(kv: []const Kv, key: []const u8) !?f64 {
     for (kv) |item| if (std.mem.eql(u8, item.key, key)) {
         const value = valueNumber(item.value) orelse return error.UnresolvedParameter;
@@ -1961,14 +1913,16 @@ fn numericParameter(kv: []const Kv, key: []const u8) !?f64 {
     return null;
 }
 
-/// Card pairs onto a built-in's Model or Instance, through the device's own
-/// binder (`DeviceVtable.bind_model`), the one every loaded device uses too.
+/// Binds card pairs onto a built-in's Model or Instance through the
+/// device's own binder, the one every loaded device uses too.
 fn applyKv(target: anytype, kv: []const Kv) !void {
     const name, const is_model = comptime ownerOf(@TypeOf(target.*));
     const vt = device.vtable(name);
     try bindKv(if (is_model) vt.bind_model else vt.bind_instance, @ptrCast(target), kv);
 }
 
+/// Binds `kv` onto a param blob. A non-numeric value reaches the binder as
+/// null, which it rejects for a key it knows.
 fn bindKv(bind: *const fn ([*]u8, []const batch.Param) batch.BindStatus, blob: [*]u8, kv: []const Kv) !void {
     var fallback = std.heap.stackFallback(4096, std.heap.smp_allocator);
     const a = fallback.get();
@@ -1987,7 +1941,7 @@ fn ownerOf(comptime T: type) struct { []const u8, bool } {
     @compileError(@typeName(T) ++ " is no catalog device's Model or Instance");
 }
 
-// Private implementation access for the frontend test suite.
+/// Private helpers the frontend tests reach; empty outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .applySourceWaveform = applySourceWaveform,
     .pwlSlot = pwlSlot,

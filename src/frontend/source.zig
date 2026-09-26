@@ -1,4 +1,5 @@
-//! SPICE includes and selected .lib sections; paths stay relative to their file.
+//! `.include` and `.lib` expansion, before parsing. Paths resolve against
+//! the directory of the file that names them.
 const std = @import("std");
 const Io = std.Io;
 const Fields = @import("lines.zig").Fields("\"'", false);
@@ -7,6 +8,7 @@ const directives = std.StaticStringMap(Directive).initComptime(.{
     .{ ".include", .include }, .{ ".inc", .include }, .{ ".lib", .lib }, .{ ".endl", .endl },
 });
 
+/// Reads `path` and expands it (see `expand`). The result is allocated in `arena`.
 pub fn load(io: Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
     const src = try Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited);
     errdefer arena.free(src);
@@ -15,8 +17,9 @@ pub fn load(io: Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
     return out;
 }
 
-/// Inline includes and selected .lib sections, resolving paths against
-/// `origin`'s directory. Returns `src` itself when it names none.
+/// Inlines includes and selected .lib sections, resolving paths against
+/// `origin`'s directory; an HDL include stays an `.include` of its resolved
+/// path. Returns `src` itself when it names none, else a copy in `arena`.
 pub fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]const u8 {
     var lines = std.mem.splitScalar(u8, src, '\n');
     _ = lines.next(); // The title is opaque even when it starts with .include.
@@ -45,8 +48,10 @@ fn word(fields: *Fields) !?[]const u8 {
     return if (Fields.isWord(f)) f else error.InvalidInclude;
 }
 
+/// A model file the netlist includes but does not parse.
 pub const ForeignKind = enum { osdi_include, pre_osdi, verilog_a, verilog };
 
+/// The HDL kind a path's extension names; null for a netlist include.
 pub fn foreignKindForPath(path: []const u8) ?ForeignKind {
     const ext = std.fs.path.extension(path);
     for ([_][]const u8{ ".va", ".vams", ".veriloga" }) |e| if (std.ascii.eqlIgnoreCase(ext, e)) return .verilog_a;
@@ -102,7 +107,7 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
             if (!selected) continue;
             const resolved = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", file_or_section });
             defer gpa.free(resolved);
-            // HDL includes are consumed later by the existing runtime loader.
+            // HDL includes are left for the runtime loader.
             if (foreignKindForPath(file_or_section) != null) {
                 try out.appendSlice(gpa, ".include \"");
                 try out.appendSlice(gpa, resolved);

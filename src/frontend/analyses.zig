@@ -1,6 +1,6 @@
 //! Analysis cards and deck options to resolved queries. Node references
-//! arrive as circuit rows; source and card references resolve by name
-//! against the construction bindings, which outlive the parse.
+//! arrive as circuit rows; source and card names resolve against the
+//! construction bindings, which outlive the parse.
 const std = @import("std");
 const core = @import("core");
 const Library = @import("device").Library;
@@ -10,12 +10,14 @@ const netlist = @import("netlist");
 const Value = netlist.Value;
 const Job = requests.Query;
 const GROUND = core.GROUND;
+/// Unresolved or absent node row.
 pub const NO_NODE = netlist.none;
 /// Nodes a deck's output `v(...)` may name; appended cards take one.
 pub const deck_output_nodes = 2;
 
-/// Queries for `cards`, whose nets are circuit rows here, in card order. `.noise` also publishes its
-/// integrated plot, `.disto` its two harmonic vectors. `max_group_args` is
+/// Queries for `cards` (nets already circuit rows), in card order, allocated
+/// in `arena`. `.noise` also yields its integrated plot, `.disto` its two
+/// harmonic vectors; a single-value `.temp` yields none. `max_group_args` is
 /// how many nodes an output `v(...)` may name.
 pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, max_group_args: usize, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
     for (cards) |c| {
@@ -57,21 +59,19 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, max_gr
 /// Parsed `.options` overrides, in deck order: a later card wins.
 pub const DeckOptions = struct {
     tol: numerics.Tolerances = .{},
+    /// `.options method`; null keeps each query's default.
     method: ?requests.Method = null,
+    /// `.temp` or `.options temp` in degrees Celsius; null when not given.
     temp_c: ?f64 = null,
-    /// `.options tnom=<degC>` — ngspice `cktsopt.c:71-73` stores it as
-    /// `TSKnomTemp = val + CONSTCtoK`, so the CARD is Celsius; the default is
-    /// `cktntask.c:127`'s 300.15 K = 27 degC. Independent of `.options temp`
-    /// (`OPT_TEMP`, the same file's next case): nominal is where the model card
-    /// was extracted, `temp` is where the circuit is being run.
-    ///
-    /// Not optional and not applied per job: unlike `temp`, this is not an
-    /// analysis knob — it reaches the devices at BUILD time, before the
-    /// pattern is frozen, so no sweep can move it and `recompute`'s
-    /// topology-change path is never involved.
+    /// `.options tnom=<degC>`: the temperature model cards were extracted at
+    /// (ngspice cktsopt.c:71-73 takes the card in Celsius; default 27 degC
+    /// from cktntask.c:127). Unlike `temp`, where the circuit runs, it reaches
+    /// the devices at build time, so no sweep can move it.
     tnom_c: f64 = 27.0,
 };
 
+/// Folds the deck's `.options` and `.temp` cards; `InvalidAnalysisArguments`
+/// on a value out of range.
 pub fn deckOptions(config: []const netlist.Config) !DeckOptions {
     const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom };
     const names = std.StaticStringMap(Option).initComptime(.{
@@ -138,6 +138,7 @@ pub fn deckOptions(config: []const netlist.Config) !DeckOptions {
     return o;
 }
 
+/// Copies the deck tolerances, temperature and integration method into `job`.
 pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
     switch (job.*) {
         inline else => |*opts| {
@@ -199,7 +200,7 @@ fn keyword(args: []const Value, i: usize, buf: []u8) ![]const u8 {
     return std.ascii.lowerString(buf[0..name.len], name);
 }
 
-/// `uic` is a trailing KEYWORD, not a positional: `.tran 1n 100n uic` and
+/// `uic` is a trailing keyword, not a positional: `.tran 1n 100n uic` and
 /// `.tran 1n 100n 0 1n uic` are both legal, so scan rather than index.
 fn hasUic(args: []const Value) bool {
     for (args) |a| switch (a) {
@@ -247,16 +248,14 @@ fn voltageSource(args: []const Value, i: usize, sources: core.QueryBindings) !us
     return findNameIndex(sources.v_names, name) orelse error.AnalysisSourceNotFound;
 }
 
-/// `.dc <card|TEMP> start stop step`. The card table is the same one the AC
-/// overrides and `.sens` resolve through, so the swept quantity is named by
-/// (device type, instance index, parameter) — which is what `ParamRef` is
-/// keyed on. A batch-local index alone could not tell `V1` from `I1`.
+/// The swept quantity of `.dc <card|TEMP> start stop step`, as the
+/// (device type, instance index, parameter) key `ParamRef` uses.
 fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !requests.Dc.SweepTarget {
     const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
     if (std.ascii.eqlIgnoreCase(name, "temp")) return .{ .is_temp = true };
     for (cards) |c| {
         if (!std.ascii.eqlIgnoreCase(c.name, name)) continue;
-        // ngspice sweeps a card's PRIMARY value: `dc` on a source, the
+        // ngspice sweeps a card's primary value: `dc` on a source, the
         // element value on a passive.
         const param: []const u8 = switch (c.type) {
             Library.builtin("resistor") => "r",
@@ -275,9 +274,8 @@ fn checkStep(start: f64, stop: f64, step: f64) !void {
         intervals >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return error.InvalidAnalysisArguments;
 }
 
-/// `dec|oct|lin N fstart fstop` — the one grid every frequency-domain
-/// directive spells the same way. `lin` is the only kind that admits
-/// fstart = 0 (a geometric grid has no zeroth point to step from).
+/// The `dec|oct|lin N fstart fstop` grid every frequency-domain card shares,
+/// read from `offset`. Only `lin` admits fstart = 0.
 fn frequencySweep(args: []const Value, offset: usize) !numerics.FreqSweep {
     const mode = nameAt(args, offset) orelse return error.InvalidAnalysisArguments;
     const kinds = std.StaticStringMap(numerics.SweepKind).initComptime(.{
@@ -292,6 +290,10 @@ fn frequencySweep(args: []const Value, offset: usize) !numerics.FreqSweep {
     return .{ .f_start = first, .f_stop = last, .points = try count(u32, args, offset + 1, 10), .kind = kind };
 }
 
+/// The query one analysis card asks for; null for a card that only
+/// configures the deck (single-value `.temp`). Errors name the argument
+/// that is wrong: `InvalidAnalysisArguments`, `AnalysisNodeNotFound`,
+/// `AnalysisSourceNotFound`, `UnsupportedFrequencySweep`.
 pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const requests.CardRef) !?Job {
     const args = a.args;
     const id = a.kind;
@@ -323,13 +325,11 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             const grid = try frequencySweep(args, 0);
             if (id == .ac) return .{ .ac = .{ .sweep = grid } };
             var opts: requests.Disto = .{ .sweep = grid };
-            // ngspice cktdisto.c:100-117: the F1 drive is whichever card
-            // carries DISTOF1 — never "the first source" — and it lands on
-            // that card's BRANCH row. `disto/bjt_ce` is the proof: its first V
-            // card is the supply Vcc and the DISTOF1 is on Vin.
+            // ngspice cktdisto.c:100-117: the F1 drive is the card carrying
+            // DISTOF1, not the first source, on that card's branch row
+            // (`disto/bjt_ce`: Vcc comes first, DISTOF1 is on Vin).
             // ponytail: first such card only. ngspice sums every DISTOF1
-            // source into one RHS; no fixture has two, and the loop is the
-            // upgrade when one does.
+            // source into one RHS; sum here when a deck has two.
             for (sources.v_branches, sources.v_distof1) |br, d| {
                 if (d[0] == 0) continue;
                 opts.drive_branch = br;
@@ -342,9 +342,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         .dc => {
             if (args.len != 4 and args.len != 8) return error.InvalidAnalysisArguments;
             var opts: requests.Dc = .{ .target = try dcTarget(args, 0, cards), .start = try number(args, 1), .stop = try number(args, 2), .step = try number(args, 3) };
-            // Only the OUTER variable may be the temperature: the inner march
-            // installs its value through one ParamRef write, and temperature
-            // is a whole-circuit set plus a re-derive.
+            // Only the outer variable may be the temperature: the inner march
+            // writes one ParamRef, and temperature is a whole-circuit set plus
+            // a re-derive.
             if (opts.target.is_temp) return error.UnsupportedTemperatureSweep;
             try checkStep(opts.start, opts.stop, opts.step);
             if (args.len == 8) {
@@ -358,8 +358,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         },
         .noise => {
             // The input reference source does not drive the noise solve, but
-            // it still has to EXIST: accepting a name no card carries turned
-            // `.noise v(out) Missing ...` into a silent success.
+            // a name no card carries is still an error, not a silent success.
             try arity(args, 5, 6);
             const in_branch: ?u32 = if (args.len == 6)
                 sources.v_branches[try voltageSource(args, 1, sources)]
@@ -377,7 +376,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         .tf => {
             try arity(args, 2, 2);
             var opts: requests.Tf = .{};
-            // `.tf i(Vmeasure) ...` measures a BRANCH current.
+            // `.tf i(Vmeasure) ...` measures a branch current.
             if (currentProbeName(args, 0)) |probe| {
                 opts.output_branch = sources.v_branches[findNameIndex(sources.v_names, probe) orelse return error.AnalysisSourceNotFound];
             } else {
@@ -460,7 +459,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .sp = .{ .sweep = try frequencySweep(args, 0), .ports = sources.ports } };
         },
         .stb => {
-            // `.stb Vprobe dec N fstart fstop` — the named 0 V source IS the
+            // `.stb Vprobe dec N fstart fstop`: the named 0 V source is the
             // loop break; the sweep drives its branch row directly.
             try arity(args, 5, 5);
             const probe = try voltageSource(args, 0, sources);
@@ -483,7 +482,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .mc = opts };
         },
         .temp => {
-            // Standard single-temperature card is deck configuration.
+            // A single-temperature card is deck configuration.
             if (args.len == 1) {
                 if (try number(args, 0) <= -273.15) return error.InvalidAnalysisArguments;
                 return null;

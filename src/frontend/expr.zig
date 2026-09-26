@@ -1,15 +1,15 @@
 //! Expressions as flat postfix: compile from text, fold on a value stack.
-//!
-//! `compile` emits syntax only: names and probe arguments are indices into
-//! `Scratch.names`. The netlist splices parameters in and maps probe nets
-//! (netlist.zig `subst`), writing final ops whose `num` operand indexes the
-//! constant pool. A tree is never built; a consumer that needs structure
-//! walks subtrees backwards from their last op (`subtreeStart`).
+//! `compile` emits syntax only, names and probe arguments as indices into
+//! `Scratch.names`; netlist.zig `subst` splices parameters in and maps probe
+//! nets. No tree is built: a consumer walks subtrees backwards from their
+//! last op (`subtreeStart`).
 const std = @import("std");
 
 pub const Error = error{ OutOfMemory, ParseError };
+/// Absent operand.
 pub const none = std.math.maxInt(u32);
 
+/// Postfix opcode; `a`/`b` operands as noted, none for the operators.
 pub const Code = enum(u8) {
     /// a: constant pool index.
     num,
@@ -38,6 +38,7 @@ pub const Code = enum(u8) {
     call,
 };
 
+/// Built-in functions; `other` is any name the table does not know.
 pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, other };
 
 const fns = std.StaticStringMap(Fn).initComptime(.{
@@ -48,6 +49,7 @@ const fns = std.StaticStringMap(Fn).initComptime(.{
     .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .agauss },
 });
 
+/// One postfix op.
 pub const Op = struct { code: Code, a: u32 = 0, b: u32 = 0 };
 
 /// Compile output before parameters are spliced in.
@@ -56,12 +58,14 @@ pub const Scratch = struct {
     consts: std.ArrayList(f64) = .empty,
     names: std.ArrayList([]const u8) = .empty,
 
+    /// Table lengths to roll back to.
     pub const Mark = struct { ops: usize, consts: usize, names: usize };
 
     pub fn mark(s: Scratch) Mark {
         return .{ .ops = s.ops.items.len, .consts = s.consts.items.len, .names = s.names.items.len };
     }
 
+    /// Drops everything appended since `m`.
     pub fn reset(s: *Scratch, m: Mark) void {
         s.ops.shrinkRetainingCapacity(m.ops);
         s.consts.shrinkRetainingCapacity(m.consts);
@@ -69,16 +73,17 @@ pub const Scratch = struct {
     }
 };
 
-/// Compile the expression starting at `text[pos]` and return where it ends.
-/// Grammar: ternary `?:` loosest, then `||`, `&&`, comparisons, `+ -`,
-/// `* /`, `^`/`**` (all left associative); unary `-`/`+` bind below power.
+/// Compiles the expression starting at `text[pos]` into `s` and returns
+/// where it ends. Grammar: ternary `?:` loosest, then `||`, `&&`,
+/// comparisons, `+ -`, `* /`, `^`/`**` (all left associative); unary `-`/`+`
+/// bind below power.
 pub fn compile(comptime parseNum: fn ([]const u8) ?f64, gpa: std.mem.Allocator, s: *Scratch, text: []const u8, pos: usize) Error!usize {
     var p: Compiler(parseNum) = .{ .text = text, .pos = pos, .gpa = gpa, .s = s };
     try p.bin(0);
     return p.pos;
 }
 
-/// `compile` over the whole of `text`.
+/// `compile` over the whole of `text`; trailing input is a ParseError.
 pub fn compileAll(comptime parseNum: fn ([]const u8) ?f64, gpa: std.mem.Allocator, s: *Scratch, text: []const u8) Error!void {
     var p: Compiler(parseNum) = .{ .text = text, .gpa = gpa, .s = s };
     try p.bin(0);
@@ -302,8 +307,8 @@ fn bool01(b: bool) f64 {
     return @floatFromInt(@intFromBool(b));
 }
 
-/// Fold final ops. `geometry` lets model-card `l`/`w`/`mult` vanish behind a
-/// zero switch.
+/// Folds final ops (after `subst`) to a value; `stack` is reused scratch.
+/// `geometry` lets model-card `l`/`w`/`mult` vanish behind a zero switch.
 pub fn fold(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, geometry: bool) Error!Val {
     stack.clearRetainingCapacity();
     for (ops) |op| {

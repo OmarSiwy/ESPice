@@ -1,12 +1,8 @@
-//! Netlist lines in; nets × devices hypergraph, models and analysis cards out.
-//!
-//!     bytes ─fold case─▶ logical lines ─split─▶ fields ─switch(first byte)─▶ tables
-//!
-//! Three walks over the logical lines, each needing what the previous found:
-//! declarations (subcircuit line ranges, `.param`, `.model`, directives),
-//! then devices (an `X` card re-reads its subcircuit's lines under a frame),
-//! then analysis nets. Nothing is a tree: values are rows of flat tables, and
-//! an expression that does not fold is flat postfix (`expr.zig`).
+//! Netlist text to a flat, subcircuit-expanded nets-by-devices hypergraph,
+//! plus models and deck cards. Three walks over the logical lines: declarations
+//! (subcircuit ranges, `.param`, `.model`, directives), devices (an `X` card
+//! re-reads its subcircuit's lines under a frame), then analysis nets. Values
+//! are rows of flat tables; an expression that does not fold stays postfix.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const lines = @import("lines.zig");
@@ -17,20 +13,27 @@ const Name = @import("core").Name;
 const InternPool = @import("core").InternPool;
 const requests = @import("core").query;
 
+/// Input syntax: ngspice, HSPICE or Spectre.
 pub const Dialect = lines.Dialect;
 pub const VertexId = csr.VertexId;
 pub const EdgeId = csr.EdgeId;
+/// Analysis kind, shared with the query layer.
 pub const Kind = requests.Kind;
+/// Net 0; `0`, `gnd` and `ground` all name it.
 pub const ground: VertexId = @enumFromInt(0);
 /// Missing id in every u32 index space here.
 pub const none = std.math.maxInt(u32);
+/// `ParseError`: malformed card; `ModelBinNotFound`: no `.model nm.N` bin
+/// holds an M card's L/W; `CircuitTooLarge`: a table passed u32.
 pub const Error = error{ OutOfMemory, ParseError, ModelBinNotFound, CircuitTooLarge };
 
 /// Rows `start..start+len` of a flat table.
 pub const Span = struct { start: u32 = 0, len: u32 = 0 };
 
+/// One card value after parameter substitution.
 pub const Value = union(enum) {
     num: f64,
+    /// A word no scope defines: a node, model, keyword or source name.
     name: []const u8,
     /// Postfix ops in `Netlist.ops` that did not fold to a number.
     expr: Span,
@@ -38,28 +41,35 @@ pub const Value = union(enum) {
     group: Group,
 };
 
+/// `name(args)`.
 /// ponytail: group arguments are arena slices, not a table: a few per deck.
 pub const Group = struct { name: []const u8, args: []const Value };
 /// `key=value`; a positional model value has an empty key.
 pub const Kv = struct { key: []const u8, value: Value };
 
+/// Vertex payload.
 pub const Net = struct { name: Name };
 
 /// Hyperedge payload. `kind` is the lowercase card letter.
 pub const Device = struct {
     kind: u8,
+    /// Flattened name: `r.x1.r1` for `r1` inside instance `x1`.
     name: Name,
     /// `.model` row the first positional names, `none` otherwise.
     model: u32,
+    /// Rows of `Netlist.values`.
     positional: Span,
+    /// Rows of `Netlist.kvs`.
     kv: Span,
     /// Subcircuit definition + 1 and expansion ordinal, 0 at top level.
     subckt_type: u16,
     subckt_instance: u32,
 };
 
+/// Nets by devices; a device's pins are its member list, in terminal order.
 pub const Hypergraph = csr.BipartiteHypergraph(Net, Device);
 
+/// A `.model` card: `kind` is the type word (`nmos`, `d`, a VA module name).
 pub const Model = struct { name: []const u8, kind: []const u8, kv: []const Kv };
 
 /// An analysis card. `pos`/`neg` are the output `v(a[,b])` nets, `ports` the
@@ -74,8 +84,10 @@ pub const Analysis = struct {
 
 /// `.options` and single-value `.temp` cards, in deck order.
 pub const Config = struct { temp: bool, args: []const Value };
+/// One `.ic v(net)=value` entry on a net some card names.
 pub const Ic = struct { net: VertexId, value: f64 };
 pub const ForeignKind = source.ForeignKind;
+/// An HDL or OSDI include, path as written (relative to the deck).
 pub const Foreign = struct { kind: ForeignKind, path: []const u8 };
 
 /// Deck data: everything that is not circuit topology.
@@ -88,6 +100,7 @@ pub const Deck = struct {
     foreign: []const Foreign,
 };
 
+/// A parsed, flattened deck. Every slice lives in the parse arena.
 pub const Netlist = struct {
     /// Net and device names.
     pool: InternPool,
@@ -96,11 +109,16 @@ pub const Netlist = struct {
     /// letter c's run, [26] is the edge count.
     order: []const EdgeId,
     kind_starts: [27]u32,
+    /// Positional values of every device, addressed by `Device.positional`.
     values: []const Value,
+    /// `key=value` pairs of every device, addressed by `Device.kv`.
     kvs: []const Kv,
+    /// Postfix of every unfolded expression, addressed by `Value.expr`.
     ops: []const expr.Op,
+    /// Constant pool the `num` ops index.
     consts: []const f64,
     models: []const Model,
+    /// Model name to its first `.model` row.
     model_ids: std.StringHashMapUnmanaged(u32),
     deck: Deck,
 
@@ -116,10 +134,12 @@ pub const Netlist = struct {
         subckt_instance: u32,
     };
 
+    /// Devices of card letter `c` (lowercase), in file order.
     pub fn bucket(nl: *const Netlist, c: u8) []const EdgeId {
         return nl.order[nl.kind_starts[c - 'a']..nl.kind_starts[c - 'a' + 1]];
     }
 
+    /// Device `e` with its slices resolved.
     pub fn device(nl: *const Netlist, e: EdgeId) View {
         const i = e.index();
         const d = nl.graph.edges.get(i);
@@ -148,11 +168,13 @@ pub const Netlist = struct {
         return if (nl.model_ids.get(name)) |i| nl.models[i] else null;
     }
 
+    /// The postfix of an unfolded `Value.expr`.
     pub fn exprOps(nl: *const Netlist, span: Span) []const expr.Op {
         return nl.ops[span.start..][0..span.len];
     }
 };
 
+/// True for `0`, `gnd` and `ground`, case-insensitively.
 pub fn isGroundName(name: []const u8) bool {
     return std.mem.eql(u8, name, "0") or
         std.ascii.eqlIgnoreCase(name, "gnd") or
@@ -190,15 +212,17 @@ fn cardOf(head: []const u8) ?Card {
     return cards.get(std.ascii.lowerString(buf[0..head.len], head));
 }
 
-/// Read, fold case and split `src`, then build every table.
+/// Parses `src` in `dialect` into `arena`. The result borrows `src` (paths
+/// keep their original case) and the arena.
 pub fn parse(arena: Allocator, src: []const u8, dialect: Dialect) Error!Netlist {
     return switch (dialect) {
         inline else => |d| Reader(lines.Syntax(d)).run(arena, src, d),
     };
 }
 
-/// Only analysis cards, resolved against `lookup` (`node(name) u32`), for
-/// cards appended to a built circuit. Any other line is refused.
+/// Parses analysis cards appended to a built circuit, resolving nets through
+/// `lookup.node(name) u32`. Any other line, and a single-value `.temp`, is
+/// refused with `UnsupportedDirectiveMutation`.
 pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error || error{UnsupportedDirectiveMutation})![]Analysis {
     const lower = try arena.alloc(u8, text.len);
     _ = lines.normalize(1, lower, text);
@@ -436,7 +460,7 @@ fn Reader(comptime S: type) type {
             }
         };
 
-        // -- walk 1: declarations ---------------------------------------------
+        // Walk 1: declarations.
 
         fn declarations(r: *R, top: *std.ArrayList(u32), models: *std.ArrayList(u32), directives: *std.ArrayList(u32)) Error!void {
             const arena = r.arena;
@@ -596,7 +620,7 @@ fn Reader(comptime S: type) type {
             }
         }
 
-        // -- values ---------------------------------------------------------------
+        // Values.
 
         /// A positional value: number, name, `{expr}`/quoted expression, or
         /// `name(args)`. `subst_names` substitutes a name a scope defines
@@ -738,7 +762,7 @@ fn Reader(comptime S: type) type {
             try r.ops.append(r.arena, .{ .code = .num, .a = @intCast(r.consts.items.len - 1) });
         }
 
-        // -- walk 2: devices --------------------------------------------------------
+        // Walk 2: devices.
 
         /// A name into the pool; a new one maps to no net yet.
         fn internName(r: *R, s: []const u8) Error!Name {
@@ -968,7 +992,7 @@ fn Reader(comptime S: type) type {
             }
         }
 
-        // -- after the walk: model bins ---------------------------------------------
+        // After the walk: model bins.
 
         /// `.option scale` and ngspice model binning (INPgetModBin): an M card
         /// naming `nm` takes the last-declared `nm.<n>` whose L/W bounds
