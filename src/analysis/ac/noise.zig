@@ -1,10 +1,10 @@
-//! Device-generated small-signal noise measured at a circuit node.
-//! Each frequency uses one adjoint solve; source PSDs come from device noisePsd.
-//! Spectra are V^2/Hz and integrated results are V rms.
+//! Small-signal noise of the device generators, measured at an output node.
+//! Each frequency is one adjoint solve (a lane of `freq.Stream`); the source
+//! PSDs come from the devices' noise models. Densities are V^2/Hz internally
+//! and the published plots are V/sqrt(Hz) and V rms.
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
-const types = @import("core").numerics;
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 // ngspice include/ngspice/noisedef.h:105-113.
@@ -12,23 +12,25 @@ const n_minlog = 1e-38;
 const n_intfthresh = 1e-10;
 const n_intuselog = 1e-10;
 
+/// One device noise generator between two nodes, as collected at the op.
 pub const NoiseSource = root.NoiseSource;
 
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Noise;
 
-/// The per-interval geometry `nintegrate` needs, ngspice noisean.c:436-439.
+/// The per-interval geometry `nintegrate` needs (ngspice noisean.c:436-439).
 const Band = struct { del_freq: f64, del_ln_freq: f64, ln_freq: f64, ln_last_freq: f64 };
 
-/// ngspice ninteg.c:24 -- linear past 700 so a steep fit cannot overflow.
+/// `exp`, linear past 700 so a steep fit cannot overflow (ngspice ninteg.c:24).
 inline fn limexp(x: f64) f64 {
     return if (x > 700.0) @exp(@as(f64, 700.0)) * (1.0 + x - 700.0) else @exp(x);
 }
 
-/// ngspice ninteg.c:27-45 Nintegrate: the integral of `a * f^exponent` between
-/// two points of one source's log-log spectrum. A near-flat slope degenerates
-/// to the rectangle rule and a near -1 slope to the logarithmic one, which is
-/// why the fit has to be per source: the sum of two different power laws is
-/// not a power law.
+/// Integral of the power law `a * f^exponent` fitted between two points of one
+/// source's log-log spectrum (ngspice ninteg.c:27-45 Nintegrate). A near-flat
+/// slope degenerates to the rectangle rule and a slope near -1 to the
+/// logarithmic one. The fit has to be per source because a sum of two
+/// different power laws is not a power law.
 fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
     const exponent = (ln_dens - ln_last_dens) / b.del_ln_freq;
     if (@abs(exponent) < n_intfthresh) return dens * b.del_freq;
@@ -38,18 +40,19 @@ fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
     return a * (limexp(e1 * b.ln_freq) - limexp(e1 * b.ln_last_freq)) / e1;
 }
 
-/// Device PSD coefficients evaluated at frequency f.
+/// The source's PSD at `f`: white plus flicker / f^ef, in A^2/Hz.
 inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
     if (src.flicker == 0 or f <= 0) return src.white;
     return src.white + src.flicker / std.math.pow(f64, f, src.ef);
 }
 
-/// Band integrals in V^2 — output-referred and, when the deck named an input
-/// source, referred back through the gain to that source's terminals.
+/// Band integrals in V^2: output-referred, and referred back through the gain
+/// to the input source's terminals (zero when the deck named no input).
 pub const Integrals = struct { onoise: f64, inoise: f64 };
 
-/// Fill the measured PSDs and return their band integrals in V^2.
-/// `in_density` is filled only when `options.in_branch` names a source.
+/// Fills `freqs`, `density` and `in_density` (V^2/Hz, all `sweep.count()`
+/// long) and returns the band integrals. `in_density` is all zeros unless
+/// `options.in_branch` names a source.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -65,10 +68,8 @@ pub fn sweep(
     const n_points = freqs.len;
     std.debug.assert(density.len == n_points);
 
-    // Adjoint: A^H y = e_out per omega (conjugate drops out of |H|^2, so the
-    // stacked-real transpose solve suffices). One shared rhs, lane = frequency:
-    // GPU batch adjoint dispatch orelse the CPU lane solveBatch(adjoint=true).
-    // PSD accumulation stays CPU (cheap).
+    // Adjoint: A^H y = e_out per omega. The conjugate drops out of |H|^2, so
+    // the stacked-real transpose solve is enough.
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
     defer fs.deinit(allocator);
 
@@ -76,9 +77,9 @@ pub fn sweep(
     defer allocator.free(omegas);
     options.sweep.fill(freqs, omegas);
 
-    // RHS: unit excitation at the output (stacked-real, length 2n). A
-    // differential `v(a,b)` output measures the node DIFFERENCE, so its
-    // adjoint excitation is e_pos − e_neg; GROUND is never a matrix row.
+    // Unit excitation at the output. A differential `v(a,b)` output measures
+    // the node difference, so its adjoint excitation is e_pos − e_neg; the
+    // ground row is the v(0) = 0 clamp and never takes one.
     const e = try allocator.alloc(f64, nn);
     defer allocator.free(e);
     root.zeroSimd(e);
@@ -88,19 +89,19 @@ pub fn sweep(
     var stream = try freq.Stream.init(allocator, &fs, omegas, e, true);
     defer stream.deinit(allocator);
 
-    // ln of each source's density at the previous point -- ngspice's
-    // `nVar[LNLSTDENS][i]`, the other half of the per-source fit. Two halves:
-    // output-referred first, then the same fit on the input-referred density,
-    // because dividing by a frequency-dependent gain is not a rescaling of
-    // the integral.
+    // ln of each source's density at the previous point (ngspice's
+    // `nVar[LNLSTDENS][i]`), the other end of the per-source fit. The first
+    // half is output-referred, the second input-referred: dividing by a
+    // frequency-dependent gain does not rescale the integral, so the input
+    // side needs its own fit.
     const ln_last = try allocator.alloc(f64, 2 * noise_sources.len);
     defer allocator.free(ln_last);
     const ln_last_in = ln_last[noise_sources.len..];
 
     var integrated: f64 = 0;
     var integrated_in: f64 = 0;
-    // noisean.c:376 `data->lstFreq = data->freq` BEFORE the loop: the first
-    // point has delFreq == 0 and contributes nothing but history.
+    // noisean.c:376 sets lstFreq = freq before the loop, so the first point
+    // has delFreq == 0 and only seeds the history.
     var prev_freq: f64 = if (n_points != 0) freqs[0] else 0;
     while (try stream.next(ckt)) |pt| {
         const k = pt.k;
@@ -116,10 +117,9 @@ pub fn sweep(
             .del_ln_freq = ln_freq - ln_prev,
         };
 
-        // Gain from the named input source to the output, for free: the
-        // adjoint y already IS the transfer row, so v_out for a unit drive on
-        // the input branch is y[in_branch] (x_out = e_out^T A^-1 e_in =
-        // (A^-T e_out)^T e_in). No second solve.
+        // Gain from the input source to the output without a second solve:
+        // the adjoint y is the transfer row, so a unit drive on the input
+        // branch gives v_out = y[in_branch] (e_out^T A^-1 e_in = (A^-T e_out)^T e_in).
         const gain_sq: f64 = if (options.in_branch) |br| blk: {
             const g_re = y[br];
             const g_im = y[n + br];
@@ -164,11 +164,11 @@ pub fn sweep(
     return .{ .onoise = integrated, .inoise = integrated_in };
 }
 
-/// Measure the device generators at opts.out_node, without a drive source.
+/// Contract entry: the device generators measured at opts.out_node, with no
+/// drive source. Real; either the spectrum (frequency, onoise_spectrum,
+/// inoise_spectrum) or, with `opts.integrated`, one row of rms totals.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    // `defer`-freed below == scratch, and `a` is a results arena that cannot
-    // reclaim it. See RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
     const x_op = ctx.x_op;
 
@@ -185,10 +185,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const integrated = try sweep(ctx.circuit, x_op, srcs, freqs, density, in_density, opts, scratch);
 
     // ngspice's two noise plots, with ngspice's names and units: the curves
-    // are AMPLITUDE spectra (V/sqrt(Hz)) while the accumulator works in
-    // V^2/Hz, and the totals are V rms. `inoise` is the same noise referred
-    // to the named input source's terminals — which is the only thing that
-    // source is for, and why a name no card carries is a rejected deck.
+    // are amplitude spectra (V/sqrt(Hz)) and the totals are V rms. `inoise`
+    // is the same noise referred to the input source's terminals.
     if (opts.integrated) {
         const names = try a.dupe([]const u8, &.{ "v(onoise_total)", "v(inoise_total)" });
         errdefer a.free(names); // entries are literals
@@ -222,7 +220,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .Band = Band,
     .nintegrate = nintegrate,

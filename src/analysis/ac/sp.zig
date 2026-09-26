@@ -1,166 +1,111 @@
-//! S-parameter sweep: one eval() linearizes (the planes are G and C), the
-//! port z0 terminations are stamped into a dense G copy, then every
-//! frequency point is one FreqSolver factor + one solve per port.
+//! S-parameter sweep. One linearization gives G and C, the port z0
+//! terminations go into a dense copy of G, and each frequency is one factor
+//! plus one solve per port.
 //!
 //! Wave variables (Kurokawa power waves):
 //!   a_k = (V_k + z0_k·I_k) / (2√z0_k)
 //!   b_k = (V_k - z0_k·I_k) / (2√z0_k)
-//! where I_k = −i_br_k (branch stamps F_p = +i_br, DUT current is negated).
-//!
-//! Driving port p with unit source voltage (rhs[b_p] = 1) gives a_p = 1/(2√z0_p),
-//! all other a_j = 0. Column p of S(ω) follows from S_jk = b_j / a_k.
+//! where I_k = −i_br_k (branch stamps F_p = +i_br, so the DUT current is
+//! negated). Driving port p with a unit source voltage (rhs[b_p] = 1) gives
+//! a_p = 1/(2√z0_p) and a_j = 0 elsewhere, so column p of S(ω) is b_j / a_p.
 const std = @import("std");
 const root = @import("../types.zig");
-const types = @import("core").numerics;
-const solvers = @import("solver");
-const FreqSolver = solvers.freq_solve.FreqSolver;
+const Complex = @import("core").numerics.Complex;
+const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
-pub const Complex = types.Complex;
+/// A port is a netlist vsource: `node` is its + terminal, `branch` its MNA
+/// branch-current unknown. Adding −z0 to the branch row diagonal turns it into
+/// a Thevenin source with series z0 (v_p − v_n − z0·i_br = V_s), so an
+/// undriven port terminates in z0 instead of clamping its node.
+const Port = @import("core").query.Port;
 
-/// A port is a netlist vsource: `node` its + terminal, `branch` its MNA
-/// branch-current unknown. The sweep turns each into a Thevenin source with
-/// series z0 by adding −z0 to the branch row diagonal (branch equation becomes
-/// v_p − v_n − z0·i_br = V_s), so un-excited ports terminate in z0 instead of
-/// clamping their node.
-pub const Port = @import("core").query.Port;
-
-
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Sp;
 
-/// Caller owns the output: freqs[n_points] and the flat S-matrix stack
-/// s[n_points * n_ports²], point-major — S(row,col) at frequency point fi is
-/// s[fi * n_ports² + row * n_ports + col]. No per-point allocation.
-pub fn sweep(
-    ckt: *root.Circuit,
-    x_op: []const f64,
-    ports: []const Port,
-    freqs: []f64,
-    s: []Complex,
-    options: Options,
-    allocator: std.mem.Allocator,
-) !void {
-    const n: usize = ckt.n;
-    const n_ports: usize = ports.len;
-    const n_points: usize = options.sweep.count();
-    std.debug.assert(freqs.len == n_points);
-    std.debug.assert(s.len == n_points * n_ports * n_ports);
-
-    for (0..n_points) |fi| freqs[fi] = options.sweep.at(@intCast(fi));
-
-    try ckt.linearizeAc(x_op);
-    const g = try allocator.alloc(f64, n * n);
-    ckt.denseG(g);
-    const c = allocator.alloc(f64, n * n) catch |err| {
-        allocator.free(g);
-        return err;
-    };
-    ckt.denseC(c);
-
-    // Series z0 inside each port source: branch row gains −z0·i_br.
-    for (ports) |port| {
-        const br: usize = port.branch;
-        g[br * n + br] -= port.z0;
-    }
-
-    var fs = try FreqSolver.initDense(allocator, @intCast(n), g, c);
-    defer fs.deinit(allocator);
-
-    const nn = 2 * n;
-    const rhs = try allocator.alloc(f64, nn);
-    defer allocator.free(rhs);
-    const x_work = try allocator.alloc(f64, nn);
-    defer allocator.free(x_work);
-
-    for (0..n_points) |fi| {
-        if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = n_points });
-        const f = freqs[fi];
-        try fs.setOmega(2.0 * std.math.pi * f);
-
-        const s_mat = s[fi * n_ports * n_ports ..][0 .. n_ports * n_ports];
-
-        for (0..n_ports) |p| {
-            // Unit source voltage on port p only: a_p = 1/(2√z0_p), a_k = 0 (k≠p).
-            root.zeroSimd(rhs);
-            rhs[ports[p].branch] = 1.0;
-            try fs.solveRhs(rhs, x_work);
-
-            const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
-
-            writeColumn(n, ports, x_work, a_p, s_mat, p);
-        }
-    }
-}
-
-fn writeColumn(n: usize, ports: []const Port, x_work: []const f64, a_p: f64, s_mat: []Complex, p: usize) void {
-    const n_ports = ports.len;
-    for (0..n_ports) |k| {
-        const node_k: usize = ports[k].node;
-        const br_k: usize = ports[k].branch;
-        const z0_k = ports[k].z0;
-
-        const v_k = if (node_k == root.GROUND) Complex.zero else Complex{
-            .re = x_work[node_k],
-            .im = x_work[n + node_k],
-        };
-        // i into the DUT = −i_branch (branch stamps F_p = +i_br).
-        const i_k = Complex{ .re = -x_work[br_k], .im = -x_work[n + br_k] };
-        const b_k = v_k.sub(i_k.scale(z0_k)).scale(1.0 / (2.0 * @sqrt(z0_k)));
-
-        s_mat[k * n_ports + p] = b_k.scale(1.0 / a_p);
-    }
-}
-
-/// Contract entry: opts.ports (or the single drive source as port 1),
-/// full S-matrix per frequency. Data layout: point-major
-/// (frequency, S11, S12, ..., Snn) with (re, im) per variable.
+/// Contract entry: opts.ports (or the deck's drive source as port 1), the
+/// full S-matrix per frequency. Complex, point-major
+/// (frequency, S11, S12, ..., Snn).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    const x_op = ctx.x_op;
+    const scratch = ctx.scratch_allocator;
+    const ckt = ctx.circuit;
+    const n: usize = ckt.n;
 
     const one_port = [_]Port{.{ .node = ctx.source_node, .branch = ctx.source_branch }};
     const ports: []const Port = if (opts.ports.len > 0) opts.ports else &one_port;
     const n_ports = ports.len;
-    const n_s = n_ports * n_ports;
     const n_points: usize = opts.sweep.count();
 
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator;
-    const freqs = try scratch.alloc(f64, n_points);
-    defer scratch.free(freqs);
-    const s = try scratch.alloc(Complex, n_points * n_s);
-    defer scratch.free(s);
-    try sweep(ctx.circuit, x_op, ports, freqs, s, opts, scratch);
-
-    const names = try a.alloc([]const u8, 1 + n_s);
+    const names = try a.alloc([]const u8, 1 + n_ports * n_ports);
     names[0] = "frequency";
     for (0..n_ports) |i| for (0..n_ports) |j| {
-        // ngspice span.c:544-551 names the S-matrix columns `S_<row>_<col>`
-        // (1-based) as UID_OTHER, and its raw writer types every non-current
-        // UID as a voltage — so the column lands in the file spelled
-        // `v(S_1_1)`. That spelling IS the addressable name; anything else is
-        // a column no reader of an ngspice .sp raw will find.
+        // ngspice names the columns `S_<row>_<col>` (1-based) as UID_OTHER
+        // (span.c:544-551), and its raw writer types every non-current UID
+        // as a voltage, so the file spells them `v(S_1_1)`. Readers of an
+        // ngspice raw look them up by that name.
         names[1 + i * n_ports + j] = try std.fmt.allocPrint(a, "v(S_{d}_{d})", .{ i + 1, j + 1 });
     };
-    const ncols = names.len;
-    const data = try a.alloc(f64, n_points * ncols * 2);
+    const row_len = names.len * 2;
+    const data = try a.alloc(f64, n_points * row_len);
+
+    try ckt.linearizeAc(ctx.x_op);
+    const g = try scratch.alloc(f64, n * n);
+    ckt.denseG(g);
+    const c = scratch.alloc(f64, n * n) catch |err| {
+        scratch.free(g);
+        return err;
+    };
+    ckt.denseC(c);
+    // Series z0 inside each port source: the branch row gains −z0·i_br.
+    for (ports) |port| g[@as(usize, port.branch) * n + port.branch] -= port.z0;
+
+    // Takes ownership of g and c.
+    var fs = try FreqSolver.initDense(scratch, @intCast(n), g, c);
+    defer fs.deinit(scratch);
+
+    const work = try scratch.alloc(f64, 4 * n);
+    defer scratch.free(work);
+    const rhs = work[0 .. 2 * n];
+    const x = work[2 * n ..];
+
     for (0..n_points) |fi| {
-        const row = data[fi * ncols * 2 ..][0 .. ncols * 2];
-        row[0] = freqs[fi];
+        if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = n_points });
+        const f = opts.sweep.at(@intCast(fi));
+        try fs.setOmega(2.0 * std.math.pi * f);
+        const row = data[fi * row_len ..][0..row_len];
+        row[0] = f;
         row[1] = 0;
-        for (s[fi * n_s ..][0..n_s], 0..) |sv, k| {
-            row[(1 + k) * 2] = sv.re;
-            row[(1 + k) * 2 + 1] = sv.im;
+        for (ports, 0..) |port, p| {
+            root.zeroSimd(rhs);
+            rhs[port.branch] = 1.0;
+            try fs.solveRhs(rhs, x);
+            writeColumn(n, ports, x, 1.0 / (2.0 * @sqrt(port.z0)), row[2..], p);
         }
     }
 
     return .{
-        // ngspice span.c:599-601 opens the plot under the job name, which is
-        // "SP Analysis" in the raw.
+        // The job name ngspice opens the plot under (span.c:599-601).
         .plotname = "SP Analysis",
         .varnames = names,
         .is_complex = true,
         .npoints = n_points,
         .data = data,
     };
+}
+
+/// Writes column p of S, driven with incident wave `a_p`, into the stacked
+/// (re, im) S-matrix `s_row` of one frequency.
+fn writeColumn(n: usize, ports: []const Port, x: []const f64, a_p: f64, s_row: []f64, p: usize) void {
+    const n_ports = ports.len;
+    for (ports, 0..) |port, k| {
+        const node: usize = port.node;
+        const br: usize = port.branch;
+        const v_k = if (node == root.GROUND) Complex.zero else Complex{ .re = x[node], .im = x[n + node] };
+        const i_k = Complex{ .re = -x[br], .im = -x[n + br] };
+        const b_k = v_k.sub(i_k.scale(port.z0)).scale(1.0 / (2.0 * @sqrt(port.z0)));
+        const s = b_k.scale(1.0 / a_p);
+        const idx = (k * n_ports + p) * 2;
+        s_row[idx] = s.re;
+        s_row[idx + 1] = s.im;
+    }
 }

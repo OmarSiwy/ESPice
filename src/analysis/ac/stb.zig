@@ -3,120 +3,68 @@
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
-const types = @import("core").numerics;
-const solvers = @import("solver");
-const GROUND = root.GROUND;
-const FreqSolver = solvers.freq_solve.FreqSolver;
+const Complex = @import("core").numerics.Complex;
+const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
-const Complex = types.Complex;
-
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Stb;
 
-pub const SolveResult = struct {
-    freqs: []f64,
-    loop_gain: []Complex,
-    n_points: u32,
-
-    pub fn init(allocator: std.mem.Allocator, n_points: u32) !SolveResult {
-        const freqs = try allocator.alloc(f64, n_points);
-        errdefer allocator.free(freqs);
-        return .{
-            .freqs = freqs,
-            .loop_gain = try allocator.alloc(Complex, n_points),
-            .n_points = n_points,
-        };
-    }
-
-    pub fn deinit(self: *SolveResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.freqs);
-        allocator.free(self.loop_gain);
-    }
-};
-
-/// Low-level solve: linearize at `x_op`, inject at the probe, sweep T(ω).
+/// Contract entry: the loop gain at every frequency. Complex, point-major
+/// (frequency, loop_gain).
 ///
-/// The probe is the deck's own 0 V source (`.stb Vprobe ...`), NOT a source
-/// this module adds: its branch equation is already `v_p - v_n - V = 0`, so
-/// driving `rhs[branch] = 1` turns it into the 1 V loop injection and leaves
-/// every other stamp alone. Augmenting to (n+1)² instead put a second 0 V
-/// source across the same node pair as the deck's — two contradictory
-/// constraints on one pair, and the factorization had nothing to say.
+/// The probe is the deck's own 0 V source (`.stb Vprobe ...`), not one this
+/// module adds: its branch equation is already `v_p - v_n - V = 0`, so
+/// `rhs[branch] = 1` makes it the 1 V loop injection and leaves every other
+/// stamp alone. The orientation is ngspice's: the probe's `+` node is where
+/// the signal arrives (the driven side of the break) and `−` is where it
+/// leaves into the rest of the loop, so T = −V(+)/V(−).
 ///
-/// Return ratio, ngspice's orientation: the probe's `+` node is where the
-/// signal ARRIVES (the driven side of the break) and `−` is where it leaves
-/// into the rest of the loop, so `T = −V(+)/V(−)`.
-pub fn solve(
-    ckt: *root.Circuit,
-    options: Options,
-    x_op: []const f64,
-    allocator: std.mem.Allocator,
-) !SolveResult {
-    const n: usize = ckt.n;
-    if (options.probe_branch >= n or options.probe_p >= n or options.probe_n >= n)
-        return error.InvalidProbe;
-    // A probe whose `−` side is ground has no returned voltage to divide by.
-    if (options.probe_n == GROUND) return error.InvalidProbe;
-
-    // --- Linearize at the operating point ------------------------------------
-    try ckt.linearizeAc(x_op);
-
-    // --- Frequency sweep ------------------------------------------------------
-    // Independent (G+jωC)x = e_branch solves: lane axis = frequency.
-    const nn = 2 * n;
-    const n_points = options.sweep.count();
-
-    var fs = try FreqSolver.fromCircuit(allocator, ckt, x_op);
-    defer fs.deinit(allocator);
-
-    var result = try SolveResult.init(allocator, n_points);
-    errdefer result.deinit(allocator);
-
-    const omegas = try allocator.alloc(f64, n_points);
-    defer allocator.free(omegas);
-    options.sweep.fill(result.freqs, omegas);
-
-    // One shared rhs: the 1 V injection on the probe's own branch row.
-    const rhs = try allocator.alloc(f64, nn);
-    defer allocator.free(rhs);
-    root.zeroSimd(rhs);
-    rhs[options.probe_branch] = 1.0;
-
-    var stream = try freq.Stream.init(allocator, &fs, omegas, rhs, false);
-    defer stream.deinit(allocator);
-    while (try stream.next(ckt)) |pt| {
-        const v_p: Complex = .{ .re = pt.x[options.probe_p], .im = pt.x[n + options.probe_p] };
-        const v_n: Complex = .{ .re = pt.x[options.probe_n], .im = pt.x[n + options.probe_n] };
-        result.loop_gain[pt.k] = v_p.div(v_n).scale(-1);
-    }
-
-    return result;
-}
-
-/// Contract entry: sweep the loop gain with the probe at
-/// (opts.probe_p orelse ctx.source_node, opts.probe_n). Point-major
-/// complex data: (frequency, loop_gain) per row.
+/// Returns error.InvalidProbe when a probe index is out of range or the `−`
+/// node is ground (no returned voltage to divide by).
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
-    // `res` is deinit-ed here, so it is scratch, and `a` is a results arena
-    // whose free() is a no-op. See RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
-    var res = try solve(ctx.circuit, opts, ctx.x_op, scratch);
-    defer res.deinit(scratch);
+    const ckt = ctx.circuit;
+    const n: usize = ckt.n;
+    if (opts.probe_branch >= n or opts.probe_p >= n or opts.probe_n >= n)
+        return error.InvalidProbe;
+    if (opts.probe_n == root.GROUND) return error.InvalidProbe;
+
+    try ckt.linearizeAc(ctx.x_op);
+    var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
+    defer fs.deinit(scratch);
+
+    const n_points: usize = opts.sweep.count();
+    const axis = try scratch.alloc(f64, 2 * n_points);
+    defer scratch.free(axis);
+    const freqs = axis[0..n_points];
+    const omegas = axis[n_points..];
+    opts.sweep.fill(freqs, omegas);
+
+    const rhs = try scratch.alloc(f64, 2 * n);
+    defer scratch.free(rhs);
+    root.zeroSimd(rhs);
+    rhs[opts.probe_branch] = 1.0;
 
     const names = try a.dupe([]const u8, &.{ "frequency", "loop_gain" });
     errdefer a.free(names); // entries are literals
-    const data = try a.alloc(f64, res.n_points * 4);
-    for (0..res.n_points) |i| {
-        data[i * 4] = res.freqs[i];
-        data[i * 4 + 1] = 0;
-        data[i * 4 + 2] = res.loop_gain[i].re;
-        data[i * 4 + 3] = res.loop_gain[i].im;
+    const data = try a.alloc(f64, n_points * 4);
+    errdefer a.free(data);
+
+    var stream = try freq.Stream.init(scratch, &fs, omegas, rhs, false);
+    defer stream.deinit(scratch);
+    while (try stream.next(ckt)) |pt| {
+        const v_p: Complex = .{ .re = pt.x[opts.probe_p], .im = pt.x[n + opts.probe_p] };
+        const v_n: Complex = .{ .re = pt.x[opts.probe_n], .im = pt.x[n + opts.probe_n] };
+        const t = v_p.div(v_n).scale(-1);
+        data[pt.k * 4 ..][0..4].* = .{ freqs[pt.k], 0, t.re, t.im };
     }
+
     return .{
         .plotname = "Stability Analysis",
         .varnames = names,
         .is_complex = true,
-        .npoints = res.n_points,
+        .npoints = n_points,
         .data = data,
     };
 }
