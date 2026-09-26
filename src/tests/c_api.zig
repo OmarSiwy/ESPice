@@ -59,6 +59,11 @@ test "C lifecycle copies metadata, advances prerequisites and appends transactio
     defer std.testing.allocator.free(tree);
     try std.testing.expectEqual(@as(u32, 0), c.espice_print(handle, null, tree.ptr, tree.len, &needed));
     try std.testing.expectEqual(@as(u8, 0), tree[needed - 1]);
+    const inherited = try std.testing.allocator.alloc(u8, needed);
+    defer std.testing.allocator.free(inherited);
+    const zeroed = std.mem.zeroes(c.espice_print_options);
+    try std.testing.expectEqual(@as(u32, 0), c.espice_print(handle, &zeroed, inherited.ptr, inherited.len, &needed));
+    try std.testing.expectEqualSlices(u8, tree, inherited);
     try std.testing.expectEqual(@as(u32, 0), c.espice_get_query_info(handle, ac_id, &info));
     try std.testing.expectEqual(@as(u32, 0), info.status); // Preview is pure.
 
@@ -80,6 +85,12 @@ test "C lifecycle copies metadata, advances prerequisites and appends transactio
     defer std.testing.allocator.free(values);
     try std.testing.expectEqual(@as(u32, 0), c.espice_copy_result(handle, ac_id, values.ptr, values.len, &needed));
     for (values) |value| try std.testing.expect(std.math.isFinite(value));
+    var view: [*c]const f64 = null;
+    var view_len: usize = 0;
+    try std.testing.expectEqual(@as(u32, 0), c.espice_result_view(handle, ac_id, &view, &view_len));
+    try std.testing.expectEqualSlices(f64, values, view[0..view_len]);
+    try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_QUERY), c.espice_result_view(handle, c.ESPICE_NO_QUERY, &view, &view_len));
+    try std.testing.expectEqual(@as(usize, 0), view_len);
     var output_column: ?usize = null;
     for (0..result.variable_count) |variable| {
         try std.testing.expectEqual(@as(u32, 0), c.espice_copy_result_name(handle, ac_id, @intCast(variable), &diagnostic, diagnostic.len, &needed));
@@ -92,10 +103,10 @@ test "C lifecycle copies metadata, advances prerequisites and appends transactio
         try std.testing.expectApproxEqAbs(1 / (1 + omega_rc * omega_rc), row[2 * column], 1e-8);
         try std.testing.expectApproxEqAbs(-omega_rc / (1 + omega_rc * omega_rc), row[2 * column + 1], 1e-8);
     }
-    try std.testing.expectEqual(@as(u32, c.ESPICE_BUFFER_TOO_SMALL), c.espice_copy_result_name(handle, ac_id, c.ESPICE_NO_QUERY, null, 0, &needed));
+    try std.testing.expectEqual(@as(u32, c.ESPICE_BUFFER_TOO_SMALL), c.espice_copy_result_name(handle, ac_id, c.ESPICE_PLOT_TITLE, null, 0, &needed));
     const title = try std.testing.allocator.alloc(u8, needed);
     defer std.testing.allocator.free(title);
-    try std.testing.expectEqual(@as(u32, 0), c.espice_copy_result_name(handle, ac_id, c.ESPICE_NO_QUERY, title.ptr, title.len, &needed));
+    try std.testing.expectEqual(@as(u32, 0), c.espice_copy_result_name(handle, ac_id, c.ESPICE_PLOT_TITLE, title.ptr, title.len, &needed));
     try std.testing.expectEqual(@as(u8, 0), title[needed - 1]);
 
     const text = ".ac dec 3 10 100\n";

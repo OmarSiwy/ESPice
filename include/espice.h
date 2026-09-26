@@ -13,6 +13,8 @@ extern "C" {
 /* Must match espice_abi_version() and espice_create_options.abi_version. */
 #define ESPICE_ABI_VERSION 1u
 #define ESPICE_NO_QUERY UINT32_MAX
+/* espice_copy_result_name's variable selecting the plot title. */
+#define ESPICE_PLOT_TITLE UINT32_MAX
 
 typedef struct espice_problem espice_problem;
 typedef uint32_t espice_status;
@@ -87,6 +89,7 @@ typedef struct {
     uint32_t variable_count, is_complex;
     uint64_t point_count, value_count;
 } espice_result_info;
+/* max_parallel 0 inherits the Problem's limit. */
 typedef struct {
     espice_scope scope;
     uint32_t preview, query, ascii, max_parallel;
@@ -96,8 +99,9 @@ typedef struct {
 
 /* All calls on one handle must be serialized, including reads and destroy.
  * Parallelism is selected within advance_ready/run_all. Different handles are
- * independent. Input bytes are copied during create/append. No borrowed result
- * pointers escape. Destroy cancels and joins any paused workers.
+ * independent. Input bytes are copied during create/append. The only borrowed
+ * pointer is espice_result_view's, valid until destroy. Destroy cancels and
+ * joins any paused workers.
  *
  * Buffers must be valid for their capacity; NULL is allowed only at capacity 0.
  * On OK or BUFFER_TOO_SMALL, copy APIs set required; short buffers receive no
@@ -128,10 +132,15 @@ espice_status espice_get_result_info(espice_problem *, uint32_t id, espice_resul
 /* Point-major data; complex values use adjacent real/imaginary doubles. */
 espice_status espice_copy_result(espice_problem *, uint32_t id,
     double *values, size_t capacity, size_t *required);
-/* variable == ESPICE_NO_QUERY selects the plot title; otherwise a column name. */
+/* Zero-copy espice_copy_result: *data points at the *len result values, valid
+ * until espice_destroy and read-only. On failure *data is NULL and *len 0. */
+espice_status espice_result_view(espice_problem *, uint32_t id,
+    const double **data, size_t *len);
+/* variable == ESPICE_PLOT_TITLE selects the plot title; otherwise a column name. */
 espice_status espice_copy_result_name(espice_problem *, uint32_t id, uint32_t variable,
     char *buffer, size_t capacity, size_t *required);
-/* Pure preview. NULL options selects all/run_all/Unicode and the Problem concurrency limit. */
+/* Pure preview. NULL options selects all/run_all/Unicode and the Problem
+ * concurrency limit, as does max_parallel 0. */
 espice_status espice_print(espice_problem *, const espice_print_options *,
     char *buffer, size_t capacity, size_t *required);
 /* The last failing operation's error name; success leaves it unchanged.
