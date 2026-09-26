@@ -315,10 +315,14 @@ test "sensitivity and mismatch keep separate resistor parameters and analytical 
         \\r2 out 0 3k
         \\.sens v(out)
         \\.dcmatch v(out)
+        \\.sens v(in, out)
+        \\.dcmatch v(in, out)
         \\.end
     );
     defer sim.deinit();
-    for (0..2) |ordinal| {
+    for (0..4) |ordinal| {
+        // v(in) is pinned, so v(in, out) moves exactly opposite to v(out).
+        const sign: f64 = if (ordinal < 2) 1 else -1;
         const result = try requestedResult(sim, ordinal);
         for (result.varnames, 0..) |name, i| {
             for (result.varnames[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, name, previous));
@@ -328,8 +332,8 @@ test "sensitivity and mismatch keep separate resistor parameters and analytical 
         const sens_cols = std.mem.eql(u8, result.plotname, "Sensitivity Analysis");
         const r1 = findNameIndex(result.varnames, if (sens_cols) "v(r1)" else "resistor#0.r") orelse return error.MissingSensitivity;
         const r2 = findNameIndex(result.varnames, if (sens_cols) "v(r2)" else "resistor#1.r") orelse return error.MissingSensitivity;
-        try std.testing.expectApproxEqAbs(@as(f64, -0.001875), result.data[r1], 1e-8);
-        try std.testing.expectApproxEqAbs(@as(f64, 0.000625), result.data[r2], 1e-8);
+        try std.testing.expectApproxEqAbs(sign * -0.001875, result.data[r1], 1e-8);
+        try std.testing.expectApproxEqAbs(sign * 0.000625, result.data[r2], 1e-8);
     }
 }
 
