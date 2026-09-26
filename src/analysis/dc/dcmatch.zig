@@ -1,57 +1,46 @@
-//! DC mismatch analysis (Spectre `dcmatch`): Pelgrom-model random offset at
-//! the operating point via adjoint sensitivity.
-//!
-//!   1. OP solve (reuse or cold-start) — keeps the factored J in the workspace.
-//!   2. Adjoint solve J^T * lambda = e_out  (one transpose back-substitution).
-//!   3. Per-parameter FD stamp: perturb p_d, re-eval F(x_op), finite-difference
-//!      dF/dp_d, dot with lambda -> dy/dp_d.
-//!   4. Accumulate sigma^2(y) = sum (dy/dp_d)^2 * sigma^2(dp_d).
-//!   5. Report 3-sigma offset + ranked contribution table.
-//!
-//! Pelgrom sigma^2(dp) = A_P^2 / (W*L).  When a ParamRef carries nonzero
-//! pelgrom_ap and area_wl the real coefficient is used; otherwise falls back
-//! to unit variance.
+//! DC mismatch (Spectre `dcmatch`): the Pelgrom-model random offset of one
+//! output at the operating point, by adjoint sensitivity. One factorization
+//! and one transpose solve give lambda (J^T lambda = e_out); each parameter
+//! then costs one finite-difference re-eval of F(x_op) and a dot with lambda.
+//! The offset is sigma^2(y) = sum (dy/dp)^2 · sigma^2(p), with Pelgrom
+//! sigma^2(p) = A_P^2 / (W·L).
 const std = @import("std");
 const root = @import("../types.zig");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Dcmatch;
 
+/// One parameter's share of the output variance.
 pub const Contribution = struct {
     device_name: []const u8,
     device_index: u32,
     param_name: []const u8,
+    /// dy/dp, in output units per parameter unit.
     sensitivity: f64,
+    /// (dy/dp)^2 · sigma^2(p).
     variance_contrib: f64,
 };
 
+/// The mismatch of one output.
 pub const MismatchResult = struct {
+    /// Sorted by descending variance share; owned by the `solve` allocator.
     contributions: []Contribution,
     total_sigma: f64,
 };
 
-// -------------------------------------------------------------------------
-// Pelgrom variance
-// -------------------------------------------------------------------------
-
-/// Compute per-parameter mismatch sigma from Pelgrom coefficients.
-/// Returns sigma (not sigma^2).
+/// The parameter's mismatch sigma (not sigma^2): A_P / sqrt(W·L).
 inline fn pelgromSigma(ref: root.ParamRef) f64 {
-    if (ref.pelgrom_ap > 0 and ref.area_wl > 0) {
-        // sigma^2 = A_P^2 / (W*L)  =>  sigma = A_P / sqrt(W*L)
-        return ref.pelgrom_ap / @sqrt(ref.area_wl);
-    }
-    // ponytail: unit variance fallback — no Pelgrom data on this param
+    if (ref.pelgrom_ap > 0 and ref.area_wl > 0) return ref.pelgrom_ap / @sqrt(ref.area_wl);
+    // ponytail: unit sigma when the parameter carries no Pelgrom data; wire
+    // a per-model coefficient when a deck needs a real one.
     return 1.0;
 }
 
-// -------------------------------------------------------------------------
-// FD parameter-derivative stamps
-// -------------------------------------------------------------------------
-
-/// Finite-difference dF/dp: perturb p, re-eval F(x_op), compute
-/// (F_pert - F_nom) / delta. Returns the adjoint dot -lambda^T * dF/dp.
+/// dy/dp = -lambda^T · dF/dp, with dF/dp the forward difference of F(x_op)
+/// against `rhs_nom`. Restores the parameter before returning. Returns 0 when
+/// the step rounds away or the perturbation would change the topology.
 fn fdSensitivity(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -63,26 +52,23 @@ fn fdSensitivity(
     const orig: f64 = param.get();
     const delta_req = 1e-6 * @abs(orig) + 1e-12;
 
-    // Only this parameter moves and temperature does not, so re-deriving
-    // its own device type is the whole recompute (Circuit.recomputeType).
+    // Only this parameter moves and temperature does not, so re-deriving its
+    // own device type is the whole recompute (Circuit.recomputeType).
     param.set(orig + delta_req);
-    // The step the parameter ACTUALLY took — an f32-typed field rounds it.
+    // The step the parameter actually took: an f32 field rounds it.
     const delta = param.get() - orig;
     defer {
         param.set(orig);
         ckt.recomputeType(param.type) catch unreachable; // restores the checked original parameter
     }
-    // Same trap as sens.zig: the +1e-12 floor un-collapses an internal node
-    // whose parasitic is nominally 0, and the frozen pattern has no row for
-    // it. The derivative is unrepresentable, not small — report 0.
+    // As in sens.zig: the +1e-12 floor un-collapses an internal node whose
+    // parasitic is nominally 0, and the frozen pattern has no row for it. The
+    // derivative is unrepresentable, not small.
     ckt.recomputeType(param.type) catch |e| switch (e) {
         error.TopologyChanged => return 0,
     };
 
     ckt.eval(x_op, 0);
-
-    // dF/dp = (rhs_pert - rhs_nom) / delta, then dot with -lambda
-    // Sensitivity = -lambda^T * dF/dp
     if (delta == 0) return 0;
 
     const inv_delta = 1.0 / delta;
@@ -105,10 +91,8 @@ fn fdSensitivity(
     return -dot;
 }
 
-// -------------------------------------------------------------------------
-// Core solve
-// -------------------------------------------------------------------------
-
+/// Every collected parameter's contribution to the mismatch of `output_node`
+/// at `x_op`. Leaves the circuit's planes at the last perturbed eval.
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -122,7 +106,6 @@ pub fn solve(
         .total_sigma = 0,
     };
 
-    // ponytail: retain only lambda, e_out and rhs_nom; store dF/dp if a caller needs it.
     const arena = try allocator.alloc(f64, 3 * n);
     defer allocator.free(arena);
     const lambda = arena[0..n];
@@ -132,17 +115,14 @@ pub fn solve(
     const ws = try ckt.workspace();
     ckt.eval(x_op, 0);
 
-    // ponytail: the nominal snapshot is a disjoint bulk copy.
     @memcpy(rhs_nom, ckt.rhs[0..n]);
 
     try ws.slv.factor(ckt.g_vals);
 
-    // Adjoint solve: J^T * lambda = e_out
     root.zeroSimd(e_out[0..n]);
     e_out[output_node] = 1.0;
     ws.slv.solveT(e_out[0..n], lambda[0..n]);
 
-    // Per-parameter FD sensitivity + mismatch accumulation
     const contributions = try allocator.alloc(Contribution, refs.len);
     errdefer allocator.free(contributions);
 
@@ -164,7 +144,6 @@ pub fn solve(
         };
     }
 
-    // Sort contributions descending by variance_contrib (design-actionable ranking)
     std.mem.sort(Contribution, contributions, {}, struct {
         fn lessThan(_: void, a: Contribution, b: Contribution) bool {
             return b.variance_contrib < a.variance_contrib;
@@ -177,10 +156,9 @@ pub fn solve(
     };
 }
 
-// -------------------------------------------------------------------------
-// Contract entry point
-// -------------------------------------------------------------------------
-
+/// Contract entry: one real point, `total_3sigma` followed by each
+/// parameter's sensitivity (`<type>#<index>.<param>`) in descending variance
+/// order. The output defaults to the last probe.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const ckt = ctx.circuit;
@@ -190,8 +168,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         break :blk ctx.probes[ctx.probes.len - 1];
     };
 
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
     const res = try solve(ckt, ctx.x_op, output_node, scratch);
     defer scratch.free(res.contributions);
@@ -222,7 +198,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .pelgromSigma = pelgromSigma,
 } else {};

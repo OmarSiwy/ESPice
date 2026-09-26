@@ -1,31 +1,34 @@
-//! DC sweep: run() sweeps the primary source through its ParamRef, one
-//! warm-started Newton per point on A = G, and records the probes.
+//! DC sweep (`.dc`): steps one parameter (a source value, a device parameter
+//! or the temperature) through its ParamRef, one warm-started Newton per
+//! point, and records the probes. An optional second parameter is the outer
+//! loop.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const op = @import("op.zig");
 
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Dc;
 
-/// Contract entry: sweep the primary source dc value, one warm-started
-/// solve per point. Swept value restored afterwards so the cached operating
-/// point stays valid for later jobs.
+/// Contract entry: real, point-major (sweep value, probes...), outer blocks
+/// concatenated. A point that does not converge records NaN probes. The swept
+/// values are restored afterwards so the cached operating point stays valid
+/// for later jobs. Returns error.DcSweepSourceNotFound when a target names no
+/// parameter.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
-    // `defer`-freed below == scratch; `a` is a results arena that cannot
-    // reclaim it. See RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
 
-    // DCOP flavor for the whole sweep, whatever the deck's shared op left
-    // behind: a deck with a .tran runs its op in the ic phase, where
-    // analysis("tran") is true and sources bias at waveform(0) — which made
-    // this sweep's dc override a no-op again (rtlinv). runSerial inherits this.
+    // DC simulation state for the whole sweep, whatever the shared op left
+    // behind. A deck with a .tran solves its op in the ic phase, where
+    // analysis("tran") is true and sources bias at waveform(0), which would
+    // make the swept dc value a no-op (rtlinv).
     ckt.setSimState(.{ .kind = .dc });
 
-    // Locate the swept parameter. Matching the DEVICE TYPE as well as the
-    // index is what lets a deck hold both a V and an I card (their
-    // batch-local indices overlap) and what lets the sweep name a resistor.
+    // Matching the device type as well as the index lets a deck hold both a
+    // V and an I card (their per-type indices overlap) and lets the sweep
+    // name a resistor.
     const refs = try ckt.collectParams();
     const t = findTarget(refs, opts.target) orelse return error.DcSweepSourceNotFound;
     const saved = t.get();
@@ -41,10 +44,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, npoints * ncols);
     errdefer a.free(data);
 
-    // ngspice's second variable is the OUTER loop: for each src2 value the
-    // whole inner sweep replays, and the raw file concatenates the blocks
-    // (v-sweep restarts per block). The outer install is one ParamRef write
-    // (or a circuit temperature set) followed by the same serial march.
+    // ngspice's second variable is the outer loop: the whole inner sweep
+    // replays for each src2 value and the raw file concatenates the blocks.
+    // The outer install is one ParamRef write or a circuit temperature set.
     if (opts.hasOuter()) {
         const outer = opts.target2.?;
         const t2: ?root.ParamRef = if (outer.is_temp)
@@ -70,9 +72,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
                 }
             }
         };
-        // ngspice accumulates both levels (dctrcurv.c:469 `+= TRCVvStep`),
-        // and its axis carries that roundoff (1.4975e-13 where start+k*step
-        // gives 0); the oracle's axis atol is below it.
+        // Accumulated, not start + k*step: ngspice steps both levels with
+        // `+= TRCVvStep` (dctrcurv.c:469) and its axis carries that roundoff
+        // (1.4975e-13 where start + k*step gives 0), which is above the
+        // oracle's axis tolerance.
         var v2 = opts.start2;
         for (0..n_outer) |po| {
             if (po != 0) v2 += opts.step2;
@@ -86,9 +89,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     return .{
         .plotname = "DC transfer characteristic",
-        // ngspice names the sweep column after the swept QUANTITY, not after
-        // the analysis: a current source sweeps `i(i-sweep)`, a resistance
-        // `res-sweep`, the temperature `temp-sweep`.
         .varnames = try root.probeNames(ctx, sweepColumn(opts.target)),
         .is_complex = false,
         .npoints = npoints,
@@ -96,6 +96,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
+/// The sweep column's name. ngspice names it after the swept quantity: a
+/// current source sweeps `i(i-sweep)`, a resistance `res-sweep`, the
+/// temperature `temp-sweep`.
 fn sweepColumn(target: Options.SweepTarget) []const u8 {
     if (target.is_temp) return "temp-sweep";
     const Library = @import("device").Library;
@@ -117,7 +120,9 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget) ?root.Para
     return null;
 }
 
-/// Serial sweep: warm-start from previous point, cold-restart on failure.
+/// Sweeps `t` over `npoints` values into `data` (row-major, `ncols` wide).
+/// Each point warm-starts from the previous solution; the first point, and
+/// any point whose warm Newton fails, cold-starts through the full OP ladder.
 fn runSerial(
     ctx: *const root.RunCtx,
     ckt: *root.Circuit,
@@ -131,14 +136,10 @@ fn runSerial(
     const x = try a.alloc(f64, ckt.n);
     defer a.free(x);
 
-    // One workspace serves every point — sparsity pattern is frozen, so
-    // symbolic ordering/factorization happens exactly once for the sweep.
+    // The pattern is frozen, so one workspace (one symbolic factorization)
+    // serves every point.
     const ws = try ckt.workspace();
 
-    // First point (and any point whose warm-started Newton fails) goes
-    // through the full OP ladder: seeded Newton -> gmin stepping -> source
-    // stepping -> JFNK. Interior points warm-start from the previous solution
-    // with a plain Newton at ITL2.
     var cold = true;
     var v = opts.start;
     for (0..npoints) |pt| {
@@ -146,24 +147,20 @@ fn runSerial(
         // Accumulated like ngspice (see the outer loop in `run`).
         if (pt != 0) v += opts.step;
         t.set(v);
-        // Per-point: invalidate baseline and recompute device params so
-        // constant-Jacobian stamps reflect the new swept value.
-        //
-        // Only `t`'s device type moved, so every other batch would re-derive
-        // to the value it already holds — measured at 1,811 BJT preamble runs
-        // on a one-instance deck. But that is only true while temperature has
-        // not moved, and the FIRST point of this sweep is exactly where an
-        // outer `.dc ... temp` loop may just have changed it, possibly
-        // re-wiring a device (see `Circuit.recomputeType`). So point 0 takes
-        // the full walk and the rest narrow.
+        // Recompute device params so const-Jacobian stamps see the new value.
+        // Only `t`'s device type moved, so later points re-derive just that
+        // type (a full walk cost 1,811 BJT preamble runs on a one-instance
+        // deck). Point 0 takes the full walk: an outer `.dc ... temp` loop
+        // may just have changed the temperature and re-wired a device (see
+        // `Circuit.recomputeType`).
         if (pt == 0) try ckt.recompute() else try ckt.recomputeType(t.type);
         try ckt.computeBaseline();
 
         var converged = false;
         if (!cold) {
-            // Warm start from previous x. SingularMatrix on a warm-started
-            // point (NaN stamps from a bad extrapolated guess) must not abort
-            // the sweep — demote to the ladder like any non-converged point.
+            // A SingularMatrix here (NaN stamps from a bad warm guess) must
+            // not abort the sweep; the point falls to the ladder like any
+            // other failure.
             if (converger.run(ckt, ws, x, 0, converger.optionsFromTolerances(opts.tol, opts.tol.itl2), root.EvalHook{})) |r| {
                 converged = r.converged;
             } else |e| switch (e) {
@@ -172,13 +169,11 @@ fn runSerial(
             }
         }
         if (!converged) {
-            // Cold restart: zero x, seed junctions, run full OP ladder.
             op.coldStart(ckt, x);
             const lr = try op.solveLadder(ckt, ws, x, .{ .tol = opts.tol });
             converged = lr.converged;
         }
 
-        // Record sweep point: v-sweep value + probe values (or NaN on failure).
         const row = data[pt * ncols ..][0..ncols];
         row[0] = v;
         if (converged) {
@@ -191,12 +186,15 @@ fn runSerial(
     }
 }
 
+/// Points from `start` to `stop` by `step`, endpoint inclusive (ngspice
+/// DCTsetup loops `v <= stop`); 1 for a zero step or one pointing away from
+/// `stop`.
 fn sweepCount(start: f64, stop: f64, step: f64) usize {
     if (step == 0 or (stop - start) * std.math.sign(step) < 0) return 1;
-    // The endpoint is inclusive (ngspice DCTsetup loops `v <= stop`). An
-    // exact-integer ratio arrives just under it in f64 — (0.95−0.3)/0.005 is
-    // 129.9999999 — and a bare floor drops the last point (hicum2_gummel 130
-    // vs ngspice's 131). Nudge by 1e-6 of a step: absorbs the ~1e-13 division
-    // error with room to spare, far below any fractional step a deck means.
+    // An exact-integer ratio arrives just under itself in f64
+    // ((0.95−0.3)/0.005 is 129.9999999), and a bare floor would drop the last
+    // point (hicum2_gummel: 130 vs ngspice's 131). The 1e-6-step nudge
+    // absorbs the ~1e-13 division error and is far below any fractional step
+    // a deck means.
     return @as(usize, @intFromFloat(@floor((stop - start) / step + 1e-6))) + 1;
 }
