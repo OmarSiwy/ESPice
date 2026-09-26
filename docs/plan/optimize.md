@@ -36,6 +36,12 @@ charge separately, while the host q tape keeps one per terminal.
   1e-20 on rows near 1e-13, hicumL2 and the inductor only in signed zeros.
   Exact for bsim4va, the MOS family and VBIC. VerA declined group ids in
   `QStamp`, so this is documented rather than avoided.
+- Status: the host tape and the marks for mos1-9, hfet1, jfet2, BJT, VBIC
+  and the diode (one site) landed. BSIM1-4, B3SOI and HiSIM stay unmarked:
+  their trunc routines check terminal charges (qb, qg, qd) that fold the
+  junction charges in or out by instance flags (`rbodyMod`, HiSIM's
+  `qbd`/`qbs` merge), which a compile-time `q_lte` cannot follow, so they
+  keep every site checked.
 - Then the per-timepoint cache (`stepFill`), on its own pin.
 
 ## G. Native transmission lines to Verilog-A
