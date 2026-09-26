@@ -17,13 +17,14 @@ test "dispatch policy resolves letters and levels" {
     try std.testing.expectEqual(DeviceId.hicumL2_va, try bjtDeviceId(8));
     try std.testing.expectEqual(DeviceId.jfet2, try jfetDeviceId(2));
     try std.testing.expectEqual(DeviceId.mesa, try mesDeviceId(3));
-    // Missing-from-catalog (b3soifd, level 55) and unknown levels are
+    try std.testing.expectEqual(DeviceId.b3soifd, try mosfetDeviceId(55));
+    // Missing-from-catalog (b3soipd, level 57) and unknown levels are
     // unsupported netlists, not panics: the loader turns this into a clean skip.
     // Both warn; the warning is the expected output here, not test noise.
     const level = std.testing.log_level;
     std.testing.log_level = .err;
     defer std.testing.log_level = level;
-    try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(55));
+    try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(57));
     try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(1040));
     // Every tag must resolve to a type: consumers switch `inline else` over
     // the whole enum, so a tag that fails to resolve breaks their build.
