@@ -1,43 +1,28 @@
-//! Periodic AC (PAC) Analysis
-//!
-//! Linearises the circuit around a periodic steady-state (PSS) trajectory and
-//! computes the linear periodically-time-varying (LPTV) transfer function.
-//!
-//! Algorithm:
-//!   1. Obtain the PSS solution x_pss(t) by brute-force settling — run
-//!      (pss_periods − 1) full periods of frozen-time quasi-static Newton
-//!      solves at n_time_samples per period.
-//!   2. Sample G(t_k) and C(t_k) (conductance and capacitance Jacobians) at
-//!      N uniformly-spaced points within one LO period — one ckt.eval per
-//!      sample fills both planes, captured slot-major over the CSC pattern.
-//!   3. Fourier-decompose each pattern slot of G and C into harmonic
-//!      coefficients G_m, C_m via FFT. A structurally zero entry has an
-//!      all-zero series whose FFT is +0 in every bin, and adding +0 into the
-//!      zeroed conversion matrix is a no-op, so the pattern is the whole job.
-//!   4. For each input frequency f_in, build and solve the LPTV conversion
-//!      matrix that couples sidebands f_in + m*f_LO for m in [-M..+M].
-//!   5. Result: complex transfer (gain + phase) at each sideband frequency.
+//! Periodic AC: settle to the LO-driven steady state, Fourier-decompose the
+//! G(t) and C(t) planes over one period, then per input frequency solve the
+//! LPTV conversion matrix that couples sidebands f_in + m*f_LO, m in -M..M.
+//! pxf.zig runs the same sweep on the transposed system.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
-const types = @import("core").numerics;
-const solvers = @import("solver");
-const fft_mod = solvers.fft;
-const dense_lu = solvers.dense_lu;
+const num = @import("core").numerics;
+const fft_mod = @import("solver").fft;
+const dense_lu = @import("solver").dense_lu;
 
-pub const Complex = types.Complex;
+pub const Complex = num.Complex;
 
 pub const Options = @import("core").query.Pac;
 
-/// The LPTV sweep PAC and PXF share: find the periodic steady state,
-/// linearise, then per input frequency build the conversion matrix A(f)
-/// (Aᵀ when `adjoint`), drive unknown `exc_node` of sideband m = 0 with
-/// `exc_val`, and solve. Caller owns freqs[n_freqs] and `out`:
+/// The LPTV sweep PAC and PXF share: linearise about the periodic steady
+/// state, then per input frequency build the conversion matrix A(f) (A^T when
+/// `adjoint`), drive unknown `exc_node` of sideband m = 0 with `exc_val`, and
+/// solve. The caller owns `freqs` (sweep count long) and `out`:
 ///   PAC (adjoint = false): out[fi*n_sb + p] is `probe_node` at sideband
-///     m = p - n_harmonics (output f = f_in + m*f_LO).
+///     m = p - n_harmonics, output frequency f_in + m*f_LO.
 ///   PXF (adjoint = true): out[fi*n_sb*n + sb*n + node] = conj(Y), the
-///     transfer from every node at every sideband to `exc_node`, the output;
+///     transfer from every node at every sideband to the output `exc_node`;
 ///     `probe_node` is unused.
+/// Cost: one dense (2(2M+1)n)^2 LU per frequency.
 pub fn sweep(
     comptime adjoint: bool,
     ckt: *root.Circuit,
@@ -63,17 +48,12 @@ pub fn sweep(
     const linearization = try linearize(ckt, x_init, options, allocator);
     defer linearization.deinit(allocator);
 
-    // The LPTV system couples n_sb sidebands, each of dimension n. For
-    // sideband p (harmonic m_p = p - n_harm) at omega_p = 2*pi*(f_in + m_p*f_LO):
-    //
-    //   sum_{q} [G_{p-q} + j*omega_p * C_{p-q}] * X_q = B_p
-    //
-    // where G_{m}, C_{m} are the m-th Fourier coefficients. The adjoint
-    // A^H Y = e is A^T Y = e here: the real expansion of A is real.
-    //
-    // ponytail: dense (2M+1)n x (2M+1)n real system per frequency, CPU-serial.
-    // A batched dense LU (all n_freqs matrices in one launch) is the upgrade
-    // when PAC/PXF sweeps dominate a multi-harmonic mixer run.
+    // Sideband p (m_p = p - n_harm, w_p = 2*pi*(f_in + m_p*f_LO)) satisfies
+    //   sum_q [G_{p-q} + j*w_p*C_{p-q}] X_q = B_p
+    // with G_m, C_m the m-th Fourier coefficients. The adjoint A^H Y = e is
+    // A^T Y = e here, since the real expansion of A is real.
+    // ponytail: dense and serial per frequency. A batched dense LU over all
+    // frequencies is the upgrade when PAC/PXF sweeps dominate a mixer run.
     const a_work = try allocator.alloc(f64, nn2 * nn2);
     defer allocator.free(a_work);
     const rhs_work = try allocator.alloc(f64, nn2);
@@ -104,8 +84,9 @@ pub fn sweep(
 }
 
 /// Settled G/C Fourier coefficients, bin-major over the circuit's CSC
-/// pattern: g_hat[m * nnz + slot] is slot's m-th coefficient, slot at
-/// (row_idx[slot], col) for col_ptr[col] <= slot < col_ptr[col + 1].
+/// pattern: g_hat[m * nnz + slot] is the slot's m-th coefficient, the slot
+/// being (row_idx[slot], col) for col_ptr[col] <= slot < col_ptr[col + 1].
+/// Owns g_hat and c_hat; the pattern slices borrow the circuit's.
 pub const Linearization = struct {
     g_hat: []const Complex,
     c_hat: []const Complex,
@@ -118,9 +99,10 @@ pub const Linearization = struct {
     }
 };
 
-/// Settled G/C Fourier coefficients shared by PAC and PXF. Caller owns the
-/// coefficient slices; sample/FFT scratch is released before returning.
-pub inline fn linearize(
+/// Settles pss_periods - 1 LO periods from x_init with frozen-time
+/// quasi-static Newton solves, samples G and C over one more period, and
+/// FFTs each pattern slot. The caller owns the result; scratch is freed.
+fn linearize(
     ckt: *root.Circuit,
     x_init: []const f64,
     options: Options,
@@ -136,10 +118,8 @@ pub inline fn linearize(
         .abstol = options.pss_newton_tol,
     };
 
-    // -- Step 1: PSS via brute-force settling (frozen-time quasi-static) ----
     const x_cur = try allocator.alloc(f64, n);
     defer allocator.free(x_cur);
-    // ponytail: reuse the shared copy; slice explicitly to retain the input bound.
     root.copySimd(x_cur, x_init[0..n]);
 
     try ckt.computeBaseline();
@@ -157,9 +137,8 @@ pub inline fn linearize(
     for (0..settle_steps) |k| {
         if (k != 0 and k % n_samples == 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = k / n_samples });
         t += dt;
-        // §4.6.1: sources only follow their waveform under analysis("tran");
-        // without this every SIN/PULSE card gave its DC value and the LO was
-        // gone. dt stays 0: the settling is quasi-static.
+        // Sources follow their waveform only under analysis("tran")
+        // (§4.6.1). dt stays 0: the settling is quasi-static.
         ckt.setSimState(.{ .t = t, .kind = .tran });
         _ = converger.run(ckt, ws, x_cur, t, nr_opts, root.EvalHook{}) catch |err| switch (err) {
             error.QueryCancelled => return err,
@@ -167,7 +146,6 @@ pub inline fn linearize(
         };
     }
 
-    // -- Step 2: capture G(t_k), C(t_k) over the final period --------------
     for (0..n_samples) |k| {
         if (k != 0 and k % 64 == 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = k, .total = n_samples });
         t += dt;
@@ -183,7 +161,8 @@ pub inline fn linearize(
         }
     }
 
-    // -- Step 3: FFT each pattern slot across time samples -----------------
+    // Only pattern slots: a structurally zero entry's series FFTs to +0 in
+    // every bin, which adds nothing to the zeroed conversion matrix.
     const g_hat = try allocator.alloc(Complex, n_samples * nnz);
     errdefer allocator.free(g_hat);
     const c_hat = try allocator.alloc(Complex, n_samples * nnz);
@@ -213,9 +192,10 @@ pub inline fn linearize(
     return .{ .g_hat = g_hat, .c_hat = c_hat, .col_ptr = ckt.col_ptr, .row_idx = ckt.row_idx };
 }
 
-/// Fill the zeroed real-expanded LPTV matrix, optionally storing its transpose.
-/// The transpose is specialized at comptime so PXF needs no extra matrix pass.
-/// Each (p, q, row, col) owns its four entries, so slot order is free.
+/// Adds the real-expanded LPTV matrix into the zeroed `a_work`
+/// (nn2 x nn2 row-major), or its transpose when `transpose`, so PXF needs no
+/// extra pass. Each (p, q, row, col) owns its four entries, so slot order is
+/// free.
 pub inline fn buildConversionMatrix(
     comptime transpose: bool,
     a_work: []f64,
@@ -229,16 +209,14 @@ pub inline fn buildConversionMatrix(
 ) void {
     const n_samples: usize = options.n_time_samples;
     const n_harm: usize = options.n_harmonics;
+    const nnz = lin.g_hat.len / n_samples;
     for (0..n_sb) |p| {
         const m_p: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(n_harm));
         const omega_p = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(m_p)) * options.f_lo);
 
         for (0..n_sb) |q| {
             const m_q: i32 = @as(i32, @intCast(q)) - @as(i32, @intCast(n_harm));
-            const m_diff = m_p - m_q;
-
-            const fft_idx = mapHarmonicToFftBin(m_diff, n_samples) orelse continue;
-            const nnz = lin.g_hat.len / n_samples;
+            const fft_idx = mapHarmonicToFftBin(m_p - m_q, n_samples) orelse continue;
 
             for (0..n) |col| {
                 for (lin.col_ptr[col]..lin.col_ptr[col + 1]) |slot| {
@@ -246,13 +224,10 @@ pub inline fn buildConversionMatrix(
                     const g_coeff = lin.g_hat[fft_idx * nnz + slot];
                     const c_coeff = lin.c_hat[fft_idx * nnz + slot];
 
-                    // (G + j*omega*C) complex coefficient:
-                    // real part: G_re - omega*C_im
-                    // imag part: G_im + omega*C_re
+                    // z = G + j*w*C
                     const z_re = g_coeff.re - omega_p * c_coeff.im;
                     const z_im = g_coeff.im + omega_p * c_coeff.re;
 
-                    // Map into the 2*nn x 2*nn real system:
                     //   | Re  -Im |   | X_re |   | B_re |
                     //   | Im   Re | * | X_im | = | B_im |
                     const gr = if (transpose) q * n + col else p * n + row;
@@ -268,9 +243,8 @@ pub inline fn buildConversionMatrix(
     }
 }
 
-/// Contract entry: PSS-linearised sweep, excitation on ctx.source_node,
-/// output at the last probe. Data layout: point-major complex rows
-/// (frequency, tf_h{-M}..tf_h{+M}) with (re, im) per variable.
+/// Contract entry: drive ctx.source_node, read the last probe. Point-major
+/// complex rows (frequency, tf_h{-M}..tf_h{+M}), (re, im) per variable.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
@@ -279,8 +253,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const n_freqs: usize = opts.sweep.count();
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
     const freqs = try scratch.alloc(f64, n_freqs);
     defer scratch.free(freqs);
@@ -316,14 +288,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// ============================================================================
-// Internal helpers
-// ============================================================================
-
-/// Map a signed harmonic index to an FFT bin. Returns null if out of range.
+/// FFT bin of signed harmonic m: m mod n_samples, or null when |m| >= n_samples.
 pub fn mapHarmonicToFftBin(m: i32, n_samples: usize) ?usize {
     const ns: i32 = @intCast(n_samples);
-    // FFT bin for harmonic m: m mod N (negative harmonics wrap to N+m).
     if (m >= 0 and m < ns) {
         return @intCast(m);
     } else if (m < 0 and m > -ns) {

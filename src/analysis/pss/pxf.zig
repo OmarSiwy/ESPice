@@ -1,26 +1,17 @@
-//! Periodic Transfer Function (PXF) Analysis — adjoint of PAC
-//!
-//! Computes the transfer function from every input node and sideband to a
-//! single output node by solving the adjoint (conjugate-transpose) LPTV system:
-//!
-//!   A(f)^H · Y = e_(out, m=0)
-//!
-//! where A is the same conversion matrix used by PAC. The transfer from input
-//! node i at sideband m is conj(Y_(i,m)).
-//!
-//! Uses: supply/LO feedthrough images, conversion gain from every port at
-//! once, spur tables.
+//! Periodic transfer function, the adjoint of PAC: one solve of
+//! A(f)^H Y = e_(out, m=0) per frequency gives conj(Y_(i,m)), the transfer
+//! from every node i at every sideband m to the output (images, LO
+//! feedthrough, conversion gain from every port at once).
 const std = @import("std");
 const root = @import("../types.zig");
 const pac = @import("pac.zig");
-const types = @import("core").numerics;
 
-pub const Complex = types.Complex;
+const Complex = pac.Complex;
 
 pub const Options = pac.Options;
 
-/// Contract entry: adjoint LPTV sweep from ctx.probes (output) reading all
-/// input nodes at all sidebands. Data layout: point-major complex rows.
+/// Contract entry: output at the last probe. Point-major complex rows
+/// (frequency, pxf_h{m}(node) for every sideband then node), (re, im) each.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
@@ -32,8 +23,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_sb: usize = 2 * @as(usize, opts.n_harmonics) + 1;
     const n_transfers = n_sb * n; // per frequency point
 
-    // `defer`-freed == scratch; `a` is a results arena. See
-    // RunCtx.scratch_allocator.
     const scratch = ctx.scratch_allocator;
     const freqs_buf = try scratch.alloc(f64, n_freqs);
     defer scratch.free(freqs_buf);
@@ -42,7 +31,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     try pac.sweep(true, ctx.circuit, x_op, probe, 1.0, probe, freqs_buf, transfer, opts, scratch);
 
-    // Build varnames: "frequency", then "pxf_h{m}(node_label)" for each sideband × node.
     const ncols = 1 + n_transfers;
     const names = try a.alloc([]const u8, ncols);
     names[0] = "frequency";
@@ -56,10 +44,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const harmonic = @as(i32, @intCast(sb)) - @as(i32, @intCast(n_harm));
         for (0..n) |node| {
             const label = ctx.circuit.nodeName(@intCast(node));
-            // An unlabeled row is a branch/internal unknown, and a deck can
-            // have several — `pxf/two_poles` has two, so a shared "?" placed
-            // the SAME column name twice in one raw file. The row index is
-            // the name those rows actually have.
+            // Unlabeled rows (branch and internal unknowns) take their row
+            // index, so column names stay unique.
             names[1 + sb * n + node] = if (label.len == 0)
                 try std.fmt.allocPrint(a, "pxf_h{d}({d})", .{ harmonic, node })
             else
