@@ -310,40 +310,12 @@ test "selected model integer fields and levels reject out-of-range values" {
     }
 }
 
-test "behavioral sources fold constants and extract probes and polynomials" {
-    inline for (
-        .{ "v=5", "i=1m", "v={2+3}", "i={2*0.0005}", "v={(1+2)*v(out)}", "i=3*v(out)*v(out)+2", "i=v(out)^2", "i=v(out)**3", "i={pow(2*v(out),2)/4}", "i=(v(out)+1)*(v(out)-1)*v(out)" },
-        .{ 5.0, 0.001, 5.0, 0.001, 0, 2, 0, 0, 0, 0 },
-        .{ 0, 0, 0, 0, 3, 0, 0, 0, 0, -1 },
-        .{ 0, 0, 0, 0, 0, 3, 1, 0, 1, 0 },
-        .{ 0, 0, 0, 0, 0, 0, 0, 1, 0, 1 },
-    ) |output, c0, c1, c2, c3| {
+test "behavioral sources the tape cannot express are rejected, not opened" {
+    inline for (.{ "v=v(out)+i(r1)", "i=v(out)*x", "i=foo(v(out))", "i=agauss(1,1,1)", "i=min(v(a))", "v=v(out)+v(a)+v(b)+v(c)+v(d)+v(e)+v(f)+v(g)+v(h)" }) |output| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const nl = try parse(a, "behavioral source\nb1 out 0 " ++ output ++ "\nr1 out 0 1k\n.end\n");
-        var prepared = try build(a, a, nl);
-        defer prepared.deinit();
-        var refs: std.ArrayList(device.abi.ParamRef) = .empty;
-        try collectTyped(&prepared.circuit, a, &refs);
-        var found: u32 = 0;
-        for (refs.items) |ref| if (ref.type == device.Library.builtin("bsource")) {
-            const want: ?f64 = if (std.mem.eql(u8, ref.param_name, "c0")) c0 else if (std.mem.eql(u8, ref.param_name, "c1")) c1 else if (std.mem.eql(u8, ref.param_name, "c2")) c2 else if (std.mem.eql(u8, ref.param_name, "c3")) c3 else null;
-            const expected = want orelse continue;
-            try std.testing.expectApproxEqAbs(expected, ref.get(), 1e-15);
-            found += 1;
-        };
-        try std.testing.expectEqual(@as(u32, 4), found);
-        try std.testing.expectEqual(output[0] == 'v', std.mem.eql(u8, prepared.deck.probe_labels[0], "i(b1)"));
-    }
-}
-
-test "behavioral sources outside the polynomial subset are rejected, not opened" {
-    inline for (.{ "v=v(a)*v(b)", "i=sqrt(v(out))", "i=v(out)^4", "i=v(out)^0.5", "i=1/v(out)", "v=v(out)+i(r1)" }) |output| {
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const nl = try parse(a, "behavioral source\nb1 out 0 " ++ output ++ "\nr1 out 0 1k\nr2 a 0 1k\nr3 b 0 1k\n.end\n");
+        const nl = try parse(a, "behavioral source\nb1 out 0 " ++ output ++ "\nr1 out 0 1k\nr2 a 0 1k\nr3 b 0 1k\nr4 c 0 1\nr5 d 0 1\nr6 e 0 1\nr7 f 0 1\nr8 g 0 1\nr9 h 0 1\n.end\n");
         try std.testing.expectError(error.UnsupportedBsourceExpression, build(a, a, nl));
     }
 }
