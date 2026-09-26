@@ -11,8 +11,8 @@ most 2,048 flops (`solver-perf-2026-09.md`, "Small matrices: the refactor
 tape"). Larger factors keep the scalar column replay this log chose. The
 standalone rig used here (`src/solver/dev_harness.zig` and the
 `ZP_LU_DUMP` pattern capture) was deleted; its differential checks live on
-as `SparseTests` cases in `src/solver/tests.zig`, and the captured
-`src/solver/testdata/fourbitadder_lu.bin` is no longer read by anything.
+as `SparseTests` cases in `src/solver/tests.zig`, and the pattern it
+captured (`src/solver/testdata/fourbitadder_lu.bin`) was deleted with it.
 
 Machine: i9-14900HX (AVX2, no AVX-512; W=4 for f64), zig 0.16.0, ReleaseFast.
 Workload: `tran/fourbitadder` (n=991, nnz=8329, L=9994, U=11404 after
