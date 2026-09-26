@@ -11,9 +11,74 @@ pub const Eigs = struct { count: usize, converged: bool };
 
 /// Writes the eigenvalues of `a` (n×n, destroyed) into `out[0..count]`;
 /// `out` needs n slots. A subdiagonal entry below `tol` relative to its
-/// diagonal pair deflates. `converged` is false when one block exhausted
-/// `max_iter` Francis steps; its eigenvalues are then missing.
+/// diagonal pair, or below eps·max|H|, deflates. `converged` is false when
+/// one block exhausted `max_iter` Francis steps; its eigenvalues are then
+/// missing.
 pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
+    const exact = isolate(n, a, out);
+    const rest = francis(n - exact, a, out[exact..], tol, max_iter);
+    return .{ .count = exact + rest.count, .converged = rest.converged };
+}
+
+/// dgebal's permutation step. A row or column whose off-diagonal part inside
+/// the active block is zero carries its diagonal entry as an exact
+/// eigenvalue; permuting it out of the block leaves the rest block-triangular.
+/// Writes those eigenvalues to `out` and returns how many; the remaining
+/// m×m block is compacted to the front of `a` with stride m.
+///
+/// An MNA pencil needs this: a gm chain makes A = −M⁻¹C triangular with 1e9
+/// off the diagonal next to O(1) eigenvalues. Those eigenvalues are too
+/// ill-conditioned for the QR, which turns four real poles into a complex
+/// pair (`pz/bench_pz_pz2`), and balancing cannot help because it skips a row
+/// with no off-diagonal mass.
+fn isolate(n: usize, a: []f64, out: []Complex) usize {
+    var lo: usize = 0;
+    var hi: usize = n;
+    var count: usize = 0;
+    search: while (lo < hi) {
+        for (lo..hi) |i| {
+            for (lo..hi) |j| {
+                if (j != i and a[i * n + j] != 0) break;
+            } else {
+                swap(n, a, i, hi - 1);
+                hi -= 1;
+                out[count] = .{ .re = a[hi * n + hi], .im = 0 };
+                count += 1;
+                continue :search;
+            }
+        }
+        for (lo..hi) |j| {
+            for (lo..hi) |i| {
+                if (i != j and a[i * n + j] != 0) break;
+            } else {
+                swap(n, a, j, lo);
+                out[count] = .{ .re = a[lo * n + lo], .im = 0 };
+                count += 1;
+                lo += 1;
+                continue :search;
+            }
+        }
+        break;
+    }
+    // Read offsets only grow and never fall behind the write offset, so the
+    // in-place copy never overwrites an entry it has yet to read.
+    const m = hi - lo;
+    for (0..m) |r| {
+        for (0..m) |c| a[r * m + c] = a[(lo + r) * n + lo + c];
+    }
+    return count;
+}
+
+/// Symmetric permutation: swaps rows i, k and columns i, k.
+fn swap(n: usize, a: []f64, i: usize, k: usize) void {
+    if (i == k) return;
+    for (0..n) |j| std.mem.swap(f64, &a[i * n + j], &a[k * n + j]);
+    for (0..n) |r| std.mem.swap(f64, &a[r * n + i], &a[r * n + k]);
+}
+
+/// Balance, Hessenberg reduction and Francis QR on a block with no isolated
+/// eigenvalues left; `eigenvalues` states the contract.
+fn francis(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
     if (n == 0) return .{ .count = 0, .converged = true };
 
     if (n == 1) {
@@ -23,6 +88,14 @@ pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) 
 
     balance(n, a);
     hessenbergReduce(n, a);
+    // The normwise floor deflates what the relative test cannot: a block of
+    // roots at infinity is a cluster of noise eigenvalues around zero, and
+    // its subdiagonal never falls below tol times its own noise-sized
+    // diagonal (`multi_analysis/device_vbic_ce_amp`). Setting an entry below
+    // eps·‖H‖ to zero is within the QR's own backward error.
+    var norm: f64 = 0;
+    for (a[0 .. n * n]) |v| norm = @max(norm, @abs(v));
+    const floor = std.math.floatEps(f64) * norm;
 
     var count: usize = 0;
     var nn = n;
@@ -38,7 +111,7 @@ pub fn eigenvalues(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) 
         while (l > 0) : (l -= 1) {
             const sub = @abs(a[l * n + (l - 1)]);
             const diag = @abs(a[(l - 1) * n + (l - 1)]) + @abs(a[l * n + l]);
-            if (sub <= tol * @max(diag, 1e-30)) {
+            if (sub <= @max(tol * diag, floor)) {
                 a[l * n + (l - 1)] = 0;
                 break;
             }
@@ -238,10 +311,11 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
         t = mag * mag;
     }
 
-    // First column of the implicit double-shift polynomial (H - sigma*I)(H - conj(sigma)*I).
+    // First column of the implicit double-shift polynomial (H - sigma*I)(H - conj(sigma)*I):
+    // (h00² + h01·h10 − s·h00 + t, h10·(h00 + h11 − s), h21·h10).
     var x = a[lo * n + lo] * a[lo * n + lo] + a[lo * n + lo + 1] * a[(lo + 1) * n + lo] - s * a[lo * n + lo] + t;
     var y = a[(lo + 1) * n + lo] * (a[lo * n + lo] + a[(lo + 1) * n + (lo + 1)] - s);
-    var z: f64 = a[(lo + 2) * n + lo] * a[(lo + 1) * n + lo];
+    var z: f64 = a[(lo + 2) * n + lo + 1] * a[(lo + 1) * n + lo];
 
     for (lo..nn - 1) |k| {
         const nr = @sqrt(x * x + y * y + z * z);
