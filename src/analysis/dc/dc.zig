@@ -65,6 +65,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ncols = ctx.probes.len + 1;
     const data = try a.alloc(f64, npoints * ncols);
     errdefer a.free(data);
+    // The last two points, for the predictor. Zero before the second point,
+    // as ngspice's never-written CKTstate2 is, and carried across outer
+    // blocks, as ngspice's state rotation is (dctrcurv.c:290).
+    const hist = try scratch.alloc(f64, 2 * ckt.n);
+    defer scratch.free(hist);
+    @memset(hist, 0);
 
     // ngspice's second variable is the outer loop: the whole inner sweep
     // replays for each src2 value and the raw file concatenates the blocks.
@@ -88,10 +94,10 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             if (po != 0) v2 += opts.step2;
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
-            try runSerial(ctx, ckt, scratch, t, opts, n_inner, ncols, block);
+            try runSerial(ctx, ckt, hist, t, opts, n_inner, ncols, block);
         }
     } else {
-        try runSerial(ctx, ckt, scratch, t, opts, npoints, ncols, data);
+        try runSerial(ctx, ckt, hist, t, opts, npoints, ncols, data);
     }
 
     return .{
@@ -134,27 +140,20 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget.Param) ?roo
 /// a null `t` sweeps the circuit temperature.
 /// Each point warm-starts from the previous solution; the first point, and
 /// any point whose warm Newton fails, cold-starts through the full OP ladder.
+/// `hist` (2 * n) holds the last two points and is left holding this block's
+/// last two, for the next block's predictor.
 fn runSerial(
     ctx: *const root.RunCtx,
     ckt: *root.Circuit,
-    a: std.mem.Allocator,
+    hist: []f64,
     t: ?root.ParamRef,
     opts: Options,
     npoints: usize,
     ncols: usize,
     data: []f64,
 ) !void {
-    const buf = try a.alloc(f64, 2 * ckt.n);
-    defer a.free(buf);
-    // The last two points, for the predictor. Zero before the second point,
-    // as ngspice's never-written CKTstate2 is.
-    // ponytail: restarts at zero on each outer block, where ngspice carries
-    // the previous block's last point; carrying it sends models without a
-    // `$limit` (hisimhv_va) to an unlimited guess that ngspice's own load
-    // would limit (hsmhv2ld.c:924).
-    @memset(buf, 0);
-    const x = buf[0..ckt.n];
-    const x_prev = buf[ckt.n..];
+    const x = hist[0..ckt.n];
+    const x_prev = hist[ckt.n..];
 
     // The pattern is frozen, so one workspace (one symbolic factorization)
     // serves every point.
