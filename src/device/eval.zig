@@ -767,10 +767,8 @@ pub fn ProtoStore(comptime D: type) type {
             const count = std.math.cast(u32, self.rows.len) orelse return error.TooManyInstances;
             const store = try gpa.create(DeviceBatch(D));
 
-            // The staged rows can only be reordered before the copies below.
             store.count = count;
             store.owns_tapes = true;
-            if (comptime canNarrow(D)) store.narrow_count = try self.partitionCollapsed();
             store.models = &.{};
             store.instances = &.{};
             store.gath = &.{};
@@ -781,6 +779,8 @@ pub fn ProtoStore(comptime D: type) type {
             if (comptime @hasDecl(D, "limit")) store.lim_x = &.{};
             if (comptime @hasDecl(D, "State")) store.states = &.{};
             errdefer DeviceBatch(D).hooks.deinit(store, gpa);
+            // The staged rows can only be reordered before the copies below.
+            if (comptime canNarrow(D)) store.narrow_count = try self.partitionCollapsed();
 
             store.models = try gpa.dupe(D.Model, self.rows.items(.model));
             if (comptime has_attempt_decl) {

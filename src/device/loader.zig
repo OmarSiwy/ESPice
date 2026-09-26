@@ -1,67 +1,69 @@
-//! Runtime HDL loading: compile a source to a shared library, dlopen it, and
-//! register its vtable in a `Library`. The library is built from the same
-//! evaluator (eval.zig) as the built-in device objects. Loaded code is never
-//! unmapped: a vtable stays valid for the process.
+//! Runtime HDL loading: compile a Verilog-A source to a shared library built
+//! from the same evaluator (eval.zig) as the built-in devices, dlopen it, and
+//! register its vtable in a `Library`. Loaded libraries are never unloaded, so
+//! a vtable stays valid for the life of the process.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const fastvaf = @import("fastvaf");
 const ir = @import("device_abi");
 
 const DeviceVtable = ir.DeviceVtable;
 const Library = @import("Library.zig");
 
-/// Where the loader may build, and the module roots the generated device needs.
-/// `Library.load` fills these from build_options; tests pass their own.
+/// Where the loader may build, and the module roots the generated device
+/// compiles against. `Library.load` fills these from build options.
 pub const BuildPaths = struct {
-    /// Parent of isolated generated-source build trees and compiler caches.
+    /// Parent of the per-source build trees and compiler caches.
     work_dir: []const u8,
-    /// VerA device contract imported by the generated model.
+    /// VerA's device contract.
     contract: []const u8,
-    /// Evaluator source root (src/device/eval.zig) exposing `exportDevice`.
+    /// The evaluator root, src/device/eval.zig.
     dyn: []const u8,
-    /// gompute's module root — engine.zig imports it (Sink shares the GPU
-    /// math core), so the .so's `dyn` module needs it as a dependency.
+    /// gompute's module root; eval.zig imports it.
     gompute: []const u8,
-    /// Neutral device ABI used by both host and generated evaluator.
+    /// The device ABI, src/device/abi.zig.
     device_abi: []const u8,
-    /// Shared ids the ABI names (`DeviceType`).
+    /// The core module, for the ids the ABI names.
     core: []const u8,
 };
 
-const PreparedDevice = struct { loaded: *const DeviceVtable, owned_name: []const u8 };
+/// A compiled and opened device, not yet registered.
+const Prepared = struct {
+    vtable: *const DeviceVtable,
+    name_buf: [128]u8,
+    name_len: u8,
 
-/// Codegen + compile + dlopen for one file. Reads `lib` only — safe to run
-/// concurrently. Returns null if the device was already registered when checked.
-fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: BuildPaths) !?PreparedDevice {
-    // ponytail: .v/.sv used to come through here via the deleted
-    // fastvaf.fromVerilog; that path belongs to modules/FastVF now and is not
-    // wired yet. Rejected loudly rather than silently ignored.
+    fn name(self: *const Prepared) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+};
+
+/// Compiles and opens one source. Reads `lib` only, so several can run
+/// concurrently. Returns null when the module is already registered.
+fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []const u8, paths: BuildPaths) !?Prepared {
+    // ponytail: Verilog (.v/.sv) models are not wired; reject them loudly.
     if (!std.mem.endsWith(u8, path, ".va")) return error.UnsupportedHdlExtension;
 
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(source);
 
-    // Same two FastVAF calls as tools/compile_va.zig — a netlist-loaded model and
-    // a built-in model are byte-identical devices by construction.
+    // The same FastVAF calls as tools/compile_va.zig, so a loaded model and a
+    // built-in one are the same device.
     var result = try fastvaf.compileSource(gpa, source, .release_fast);
     defer result.deinit();
 
-    var lower_buf: [128]u8 = undefined;
-    if (result.mir.name.len > lower_buf.len) return error.NameTooLong;
-    const lower_name = std.ascii.lowerString(&lower_buf, result.mir.name);
-
-    const already = lib.find(lower_name) != null;
-    // Registered already ⇒ nothing below is wanted, INCLUDING generateDevice.
-    // compileSource still has to run: the registry key is the module name and
-    // only the MIR knows it. Deliberate diagnostic change: a second card for an
-    // already-loaded model no longer reports codegen failures for it, because
-    // the model it would emit is one we are throwing away.
-    if (already) return null;
+    var out: Prepared = .{ .vtable = undefined, .name_buf = undefined, .name_len = undefined };
+    if (result.mir.name.len > out.name_buf.len) return error.NameTooLong;
+    out.name_len = @intCast(std.ascii.lowerString(&out.name_buf, result.mir.name).len);
+    // Only the compiled MIR knows the module name, so `compileSource` must run
+    // before this check; codegen and the build are skipped.
+    if (lib.find(out.name()) != null) return null;
     const zig_source = try result.generateDevice();
 
     std.debug.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ result.mir.name, path });
-    // Order is load-bearing: the orchestrator hashes this list into
-    // `layout_hash`, so it must match what the CLI's --emit-so passes.
+    // The orchestrator hashes this list into its cache key, so the order must
+    // match the CLI's --emit-so.
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
@@ -69,26 +71,21 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
         .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
     };
-    // MATCH THE HOST. The vtable crosses the dlopen boundary with zig
-    // callconv and auto struct layout, neither guaranteed across
-    // backend/mode — ir.layoutHash() hashes both, so a hardcoded
-    // ReleaseFast+llvm .so under a self-hosted host failed
-    // DeviceAbiMismatch on every `.hdl` card since the self-hosted switch.
-    // The one-shot orchestrator only compiles via LLVM, so a self-hosted
-    // (Debug) host cannot load HDL at all — say so instead of tripping the
-    // orchestrator's assert. Release espice is LLVM and just works.
-    if (@import("builtin").zig_backend != .stage2_llvm) return error.HdlNeedsLlvmHost;
+    // The vtable crosses the dlopen boundary with Zig calling convention and
+    // auto layout, so the library must match the host's backend and mode
+    // (`layoutHash` checks both). The orchestrator builds only with LLVM, so a
+    // self-hosted host cannot load HDL.
+    if (builtin.zig_backend != .stage2_llvm) return error.HdlNeedsLlvmHost;
     var options: fastvaf.orchestrator.Options = .{
         .work_dir = paths.work_dir,
         .name = result.mir.name,
-        .optimize = @import("builtin").mode,
+        .optimize = builtin.mode,
         .backend = .llvm,
         .modules = &modules,
     };
-    // VerA's generation versions the LIBRARY, not device.zig or u/*.zig.
-    // Its writer prunes that tree, so unrelated sources must never share it.
-    // Keep a stable tree for Zig's compiler cache; include module roots, compiler
-    // options and the host ABI so different hosts do not overwrite each other.
+    // One build tree per (source, host ABI, module set): VerA's writer prunes
+    // its tree, so unrelated sources must not share one, and a stable path
+    // keeps Zig's compiler cache warm.
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(zig_source);
     const host_layout = ir.layoutHash();
@@ -103,17 +100,17 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     try std.Io.Dir.cwd().createDirPath(io, work_dir);
     const dir = try std.Io.Dir.cwd().openDir(io, work_dir, .{});
     defer dir.close(io);
-    // Independently opened file descriptions serialize same-source threads AND
-    // processes. Keep the lock through dlopen; closing releases it on all paths.
+    // Serializes builds of the same source across threads and processes; held
+    // through dlopen and released on close.
     const lock = try dir.createFile(io, "build.lock", .{ .truncate = false, .lock = .exclusive });
     defer lock.close(io);
 
-    // publish() copies onto this path. Unlink first so it creates a fresh inode:
-    // truncating an inode mapped by another loader can corrupt its live vtable.
-    // POSIX keeps an unlinked mapping alive. Platforms forbidding this unlink
-    // return that error; never fall back to overwriting the mapped file.
+    // Unlink before the build copies onto this path, so it gets a fresh
+    // inode: truncating a library another loader has mapped would corrupt its
+    // live vtable. Platforms that refuse the unlink fail here rather than
+    // overwrite a mapped file.
     const generation = 1;
-    const target = @import("builtin").target;
+    const target = builtin.target;
     const library = try std.fmt.allocPrint(gpa, "{s}{s}.{d}{s}", .{
         target.libPrefix(), result.mir.name, generation, target.dynamicLibSuffix(),
     });
@@ -126,53 +123,25 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     defer built.deinit(gpa);
     const art = switch (built) {
         .ok => |a| a,
-        // The generated device failing to compile is an ENGINE bug, not a bad
-        // model — the model already type-checked upstream to get here. Render
-        // the compiler's own errors: a swallowed bundle turns a one-line type
-        // error into archaeology.
+        // The model already type-checked, so a compile failure here is an
+        // engine bug; show the compiler's own errors.
         .failed => |bundle| {
             bundle.renderToStderr(io, .{}, .off) catch {};
             return error.GeneratedDeviceDoesNotCompile;
         },
     };
-    // The real ABI gate lives in loadDevice: it reads the .so's own
-    // exported `arp_layout_hash` (engine.layoutHash compiled INTO the .so)
-    // and compares against ours. The old pre-dlopen check here compared
-    // `art.layout_hash` — the ORCHESTRATOR's cache key (compiler version +
-    // module list) — against the engine's TYPE-layout hash: two unrelated
-    // formulas that can never agree, which is why every `.hdl` card died
-    // with DeviceAbiMismatch.
-    const loaded = try loadDevice(art.so_path);
-    const owned_name = try gpa.dupe(u8, lower_name);
-    return .{ .loaded = loaded, .owned_name = owned_name };
+    out.vtable = try loadDevice(art.so_path);
+    return out;
 }
 
-fn registerPrepared(lib: *Library, r: PreparedDevice) !void {
-    defer lib.gpa.free(r.owned_name);
-    _ = try lib.register(r.owned_name, r.loaded);
-}
-
-/// Load multiple HDL files in parallel — codegen + zig-build run concurrently,
-/// then results register sequentially into `lib`.
+/// Compiles and loads every source not yet in `lib`, in parallel, then
+/// registers the results in `files` order. The first error wins; nothing is
+/// registered after it.
 pub fn ensureAllLoaded(lib: *Library, io: std.Io, files: []const []const u8, paths: BuildPaths) !void {
     const gpa = lib.gpa;
-    if (files.len <= 1) {
-        for (files) |p| {
-            if (try prepareOne(lib, gpa, io, p, paths)) |r| try registerPrepared(lib, r);
-        }
-        return;
-    }
-    const Result = anyerror!?PreparedDevice;
+    const Result = anyerror!?Prepared;
     const results = try gpa.alloc(Result, files.len);
-    @memset(results, null);
-    defer {
-        for (results) |result| {
-            if (result) |prepared| {
-                if (prepared) |r| gpa.free(r.owned_name);
-            } else |_| {}
-        }
-        gpa.free(results);
-    }
+    defer gpa.free(results);
 
     var group: std.Io.Group = .init;
     defer group.cancel(io);
@@ -185,16 +154,16 @@ pub fn ensureAllLoaded(lib: *Library, io: std.Io, files: []const []const u8, pat
     }
     try group.await(io);
 
-    for (results) |*slot| {
-        if (try slot.*) |prepared| {
-            slot.* = null; // registerPrepared consumes the owned name on every path.
-            try registerPrepared(lib, prepared);
-        }
+    for (results) |result| {
+        if (try result) |prepared| _ = try lib.register(prepared.name(), prepared.vtable);
     }
 }
 
-/// Open a process-lifetime library; its mapping owns the returned vtable.
-pub fn loadDevice(path: []const u8) !*const DeviceVtable {
+/// Opens a device library for the life of the process and returns its
+/// vtable, which the mapping owns. Fails with `NotArpDevice` when a required
+/// symbol is missing, and `WrongAbiVersion`/`LayoutMismatch` when the library
+/// was built against a different ABI.
+fn loadDevice(path: []const u8) !*const DeviceVtable {
     var lib = try std.DynLib.open(path);
     errdefer lib.close();
 
