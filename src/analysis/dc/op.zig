@@ -78,7 +78,7 @@ pub fn solveLadder(
     // an always-on shunt moves every solution off ngspice's (voltage_divider
     // by 2.5e-9) and settles a floating bridge on a common mode ngspice never
     // picks.
-    const plain = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |e| switch (e) {
+    const plain = newtonRun(ckt, ws, x, options.tol, 0.0, null, true) catch |e| switch (e) {
         error.SingularMatrix => null,
         else => return e,
     };
@@ -107,7 +107,7 @@ pub fn solveLadder(
         var have_good = false;
         var solves: u32 = 0;
         while (solves < 100) : (solves += 1) {
-            const r = newtonRun(ckt, ws, x, options.tol, gmin_val, options.tol.itl2) catch |e| switch (e) {
+            const r = newtonRun(ckt, ws, x, options.tol, gmin_val, options.tol.itl2, !have_good) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => return e,
             };
@@ -118,7 +118,7 @@ pub fn solveLadder(
                 if (gmin_val <= gtarget) {
                     // ngspice's dynamic_gmin removes diagGmin for the last
                     // solve: the answer must not carry the shunt.
-                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |err| switch (err) {
+                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0, null, false) catch |err| switch (err) {
                         error.QueryCancelled => return err,
                         else => failed,
                     };
@@ -167,7 +167,7 @@ pub fn solveLadder(
             ckt.applyAttempt(lambda);
             ckt.has_baseline = false;
             try ckt.computeBaseline();
-            const sr = newtonRun(ckt, ws, x, options.tol, 0.0, options.tol.itl2) catch |e| switch (e) {
+            const sr = newtonRun(ckt, ws, x, options.tol, 0.0, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => {
                     ckt.restoreModels();
@@ -200,7 +200,7 @@ pub fn solveLadder(
     ckt.has_baseline = false;
     try ckt.computeBaseline();
 
-    const final = newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |e| switch (e) {
+    const final = newtonRun(ckt, ws, x, options.tol, 0.0, null, false) catch |e| switch (e) {
         error.SingularMatrix => failed,
         else => return e,
     };
@@ -258,7 +258,7 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     try ckt.computeBaseline();
     if (sim == null or !sim.?.completed) return failed;
     if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0 };
-    return newtonRun(ckt, ws, x, options.tol, 0.0, null) catch |err| switch (err) {
+    return newtonRun(ckt, ws, x, options.tol, 0.0, null, false) catch |err| switch (err) {
         error.QueryCancelled => return err,
         else => failed,
     };
@@ -285,8 +285,11 @@ pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
 
 /// `max_iter` null means itl1. The stepping rungs pass itl2 (ngspice's
 /// CKTdcTrcvMaxIter, cktop.c:194 and the source-stepping NIiter calls).
-fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64, max_iter: ?u16) !converger.Result {
+/// `init_fix` marks a solve from the cold start, which ngspice runs in
+/// MODEINITJCT until a rung's first success switches it to continuemode.
+fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64, max_iter: ?u16, init_fix: bool) !converger.Result {
     var copts = converger.optionsFromTolerances(tol, max_iter);
     copts.gmin = gmin;
+    copts.init_fix = init_fix;
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }
