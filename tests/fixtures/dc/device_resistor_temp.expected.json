@@ -149,8 +149,5 @@
   "notes": [
     "Invalid/ignored legacy model parameters or model-level selectors were corrected during migration; see MIGRATION.json. Reference results use the corrected deck."
   ],
-  "netlist_sha256": "d39c52899aa3fd407515f2462e3427dcae2536b00a00054d052762cf36788bad",
-  "known_gaps": [
-    "resistor and primary temperature DC sweep targets are not yet supported"
-  ]
+  "netlist_sha256": "a31a9ef2d6ee1dd15d4f16c3fba84378546a753dcadb889ddd19b5e48ab7839a"
 }
