@@ -1,37 +1,35 @@
-//! Transient data types, a leaf under the transient driver: integrator.zig
-//! and matex.zig read them without importing tran.zig.
+//! Transient data types shared by tran.zig, integrator.zig, matex.zig and
+//! the post-processors, kept apart from the driver so they import no solver.
 const std = @import("std");
 
 pub const Method = @import("core").query.Method;
 
 pub const Options = @import("core").query.Tran;
 
-/// Waveform capacity heuristic: adaptive dt makes the point count unknown up
-/// front. dt_init is the PRINT step (ngspice tstep), and accepted points run
-/// a small factor above t_stop/tmax in practice — 2x covers the LTE-refined
-/// tail on the fixture corpus, and grow() doubles past it when a deck is
-/// edge-heavy. The old 16x prefactor put a 100k-node ladder's waveform at
-/// 16 buffers of slack: preallocation was most of the 2.8 GB peak.
+/// Initial waveform capacity in points: twice the printed window over the
+/// print step, clamped to [64, 2^22]. Adaptive dt makes the real count
+/// unknown; 2x covers the LTE-refined tail on the fixture corpus and
+/// `Waveform.record` doubles past it. Points before t_start are never stored.
 pub fn initialCapacity(options: Options) u32 {
-    // Only the PRINTED window is stored: tstart suppresses output, so the
-    // points before it never reach the waveform.
     const est = 2.0 * (options.t_stop - options.t_start) / options.dt_init;
     return @intFromFloat(@min(@max(64.0, est), @as(f64, 1 << 22)));
 }
 
 const simdCopy = @import("core").numerics.copySimd;
 
-/// Recorded transient waveform. Flat preallocated storage, probe-major:
-/// values[k * capacity + i] is probe k at point i — probeValues(k) is one
-/// contiguous slice (what four.zig / meas.zig consume).
+/// Recorded transient waveform, probe-major so each probe's samples are one
+/// contiguous slice (`probeValues`). Owns both buffers through `allocator`.
 pub const Waveform = struct {
+    /// Sample times, `capacity` long; the first `len` are valid.
     times: []f64,
-    values: []f64, // n_probes * capacity, probe-major
+    /// `n_probes * capacity`; probe k's point i is at `k * capacity + i`.
+    values: []f64,
     len: u32,
     capacity: u32,
     n_probes: u32,
     allocator: std.mem.Allocator,
 
+    /// Allocates room for `capacity` points (at least 1) of `n_probes` probes.
     pub fn init(allocator: std.mem.Allocator, n_probes: u32, capacity: u32) !Waveform {
         const cap: u32 = @max(capacity, 1);
         const times = try allocator.alloc(f64, cap);
@@ -47,6 +45,8 @@ pub const Waveform = struct {
         };
     }
 
+    /// Appends point `t` with `x[probes[k]]` as probe k. A full buffer
+    /// doubles, which invalidates earlier `timeSlice`/`probeValues` slices.
     pub fn record(self: *Waveform, t: f64, x: []const f64, probes: []const u32) !void {
         if (self.len == self.capacity) try self.grow();
         self.times[self.len] = t;
@@ -55,28 +55,26 @@ pub const Waveform = struct {
         self.len += 1;
     }
 
+    /// The recorded times, valid until the next `record`.
     pub fn timeSlice(self: *const Waveform) []const f64 {
         return self.times[0..self.len];
     }
 
+    /// Probe k's recorded samples, valid until the next `record`.
     pub fn probeValues(self: *const Waveform, k: u32) []const f64 {
         return self.values[@as(usize, k) * self.capacity ..][0..self.len];
     }
 
-    /// Caller owns the point-major (time, probes...) result allocation.
-    ///
-    /// 32x32 point/probe tiles. The point-at-a-time version read one element
-    /// of every probe slice per row, and consecutive probes are `capacity`
-    /// f64 apart, so on rc_ladder_100k (100k probes, 320 MB waveform) every
-    /// read was a fresh line and a fresh page. A tile keeps 8 KB of source
-    /// and 8 KB of destination resident, so each 64-byte line is consumed
-    /// whole on both sides. Values, row order, and partial tiles unchanged.
-    /// ponytail: 32x32 measured 1.85 s vs 1.97 s on rc_ladder_100k, and both
-    /// tile dimensions matter — 32 points x ALL probes is *slower* than no
-    /// tiling at all (25 MB of destination in flight). Retune together.
+    /// Transposes to point-major rows (time, probes...) of stride `ncols`.
+    /// The caller owns the returned slice.
     pub fn toRows(self: *const Waveform, allocator: std.mem.Allocator, ncols: usize) ![]f64 {
         const data = try allocator.alloc(f64, @as(usize, self.len) * ncols);
         const times = self.timeSlice();
+        // 32x32 point/probe tiles keep 8 KB of source and 8 KB of destination
+        // resident, so each cache line is consumed whole on both sides.
+        // ponytail: 32x32 measured 1.85 s vs 1.97 s untiled on rc_ladder_100k,
+        // and 32 points x all probes was slower than no tiling. Retune both
+        // dimensions together.
         const tile = 32;
         var p0: usize = 0;
         while (p0 < self.len) : (p0 += tile) {
@@ -94,7 +92,7 @@ pub const Waveform = struct {
         return data;
     }
 
-    // ponytail: doubling fallback, capacity heuristic covers normal runs
+    // ponytail: doubling fallback; initialCapacity covers normal runs.
     fn grow(self: *Waveform) !void {
         const old_cap: usize = self.capacity;
         const new_cap = old_cap * 2;
@@ -122,8 +120,13 @@ pub const Waveform = struct {
     }
 };
 
+/// Outcome of one transient integration.
 pub const SimResult = struct {
+    /// True when t reached t_stop; false when dt fell below dt_min or
+    /// max_steps ran out.
     completed: bool,
+    /// Accepted steps.
     steps: u32,
+    /// Time of the last accepted point, in seconds.
     t_final: f64,
 };
