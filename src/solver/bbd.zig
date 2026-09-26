@@ -67,7 +67,6 @@ pub fn Bbd(comptime T: type) type {
 
         /// Classifies the pattern against `info` and lays out the arena.
         /// Borrows nothing; `col_ptr`/`row_idx` may be freed afterwards.
-
         pub fn init(
             gpa: Allocator,
             n: u32,

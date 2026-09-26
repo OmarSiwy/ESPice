@@ -1,5 +1,5 @@
-//! Linear and nonlinear solvers. Only `analysis` imports this module; build.zig
-//! wires it into no other root.
+//! Linear and nonlinear solvers. Imports only `core`; `analysis` is the only
+//! module build.zig wires it into.
 pub const direct = @import("direct.zig");
 pub const sparse_lu = @import("sparse_lu.zig");
 pub const lane_lu = @import("lane_lu.zig");
@@ -11,11 +11,6 @@ pub const fft = @import("fft.zig");
 pub const gmres = @import("gmres.zig");
 pub const order = @import("order.zig");
 pub const converger = @import("converger.zig");
-pub const types = @import("core").numerics;
-
-// Shared numerical contracts. Solver leaves import numerics directly.
-pub const BbdBlock = types.BbdBlock;
-pub const BbdInfo = types.BbdInfo;
 
 test {
     _ = @import("tests.zig");
