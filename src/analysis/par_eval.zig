@@ -1,5 +1,19 @@
-//! ParEval: persistent-worker CPU threading of the device stamp. Analysis
-//! scheduling, so it lives here and not in the device evaluator.
+//! ParEval: the device stamp threaded over persistent worker lanes. Lane 0
+//! stamps the caller's planes; lanes 1.. stamp private slabs that are summed
+//! into them in a fixed lane order. Zero allocation and no mutex per pass.
+//!
+//! Not bit-identical to the serial stamp: a plane cell becomes
+//! `((S0 + S1) + S2) + ...` over consecutive segments of the serial order.
+//! Lane cuts fall on instance boundaries, so one instance's cancelling
+//! `+g/-g` pair never straddles lanes, but two instances sharing a node can.
+//! Measured serial vs 2..16 lanes: at most 1 ulp (parallel_inverters,
+//! resistor_grid_100x100; rc_ladder_10k bit-identical), deterministic at a
+//! given lane count.
+//!
+//! ponytail: bit-identity would need a per-contribution staging tape and a
+//! segmented reduction (about 8x the plane footprint at mos1 geometry). Build
+//! it, copying the GPU's `Order`, only if a deck shows a thread-count-dependent
+//! trajectory (a point-count change is the tell).
 
 const std = @import("std");
 const device_ir = @import("device").abi;
@@ -8,44 +22,14 @@ const zeroSimd = @import("core").numerics.zeroSimd;
 const Batch = device_ir.Batch;
 const Planes = device_ir.Planes;
 
-// ===========================================================================
-// ParEval — persistent-worker CPU threading. Lane 0 stamps into the caller's
-// planes; lanes 1.. stamp private slabs, SIMD-reduced in fixed order (bit-
-// identical run-to-run at a given n_lanes). Zero-alloc, no-mutex hot path.
-//
-// NOT bit-identical to the serial path, and that is a bounded reassociation,
-// not the GPU's unbounded one. `reduce` walks lanes 1..n in a fixed order, so
-// a cell's sum is `((S0 + S1) + S2) + ...` over CONSECUTIVE segments of the
-// serial sequence — `init` cuts the lane ranges at INSTANCE boundaries and
-// hands them out in ascending order, so no ONE INSTANCE's contributions ever
-// straddle a lane. That keeps the cancelling `+g/-g` pair that makes a
-// high-fan-in cell ill-conditioned (see `GpuContext.reduce`) inside one lane.
-//
-// It does NOT keep a NODE inside one lane. Two instances of the same batch that
-// share a node can land either side of a cut, and then that node's row sum is
-// split — measured on sweep/opamp_wl_5000 at 16 lanes, where the deviation set
-// is exactly the four nodes of OTA #888 (`tail_888` is driven by M1/M2/M5_888,
-// all nch, and the cut falls between them). Still 1 ulp, still deterministic at
-// a given n_lanes; the guarantee is per-instance, not per-node.
-//
-// Measured serial vs
-// n_lanes in {2,4,8,16}, same point count everywhere: parallel_inverters_500
-// and _2000 max 1.1e-16..1.9e-16, resistor_grid_100x100 4.4e-16, rc_ladder_10k
-// bit-identical. One ulp, against a benchmark tolerance of 1e-2.
-//
-// ponytail: bit-identity would need a per-contribution staging tape on the host
-// and a segmented reduction over it — ~8x the plane footprint at mos1 geometry
-// and the same memory traffic twice, to move 1 ulp. Build it only if a deck
-// ever shows a threading-dependent trajectory (a point-count change is the
-// tell); the GPU's `Order` is the design to copy.
-// ===========================================================================
-
-pub const EvalTask = struct {
+/// Instances [first, last) of batch `batch`.
+const EvalTask = struct {
     batch: u32,
     first: u32,
     last: u32,
 };
 
+/// The plane and row index ranges one lane's tasks can write.
 const Window = struct {
     slot_lo: u32,
     slot_hi: u32, // exclusive
@@ -53,15 +37,14 @@ const Window = struct {
     row_hi: u32, // exclusive
 };
 
-/// `.charge` is the transient's post-accept re-read: `q_vec` and the per-batch
-/// `q_tape` only, g/c/rhs left alone. Same tasks, same lane cuts and the same
-/// `reduce` order as `.full`, so the q plane it leaves is bit-for-bit the one
-/// `.full` would have left at this width — which is the property the serial
-/// `Circuit.evalQ` promises against serial `eval`.
+/// Which planes a stamp writes. `.charge` is the transient's post-accept
+/// re-read: `q_vec` and the per-batch `q_tape` only. It uses the same tasks,
+/// lane cuts and reduce order as `.full`, so its q plane is bit-for-bit what
+/// `.full` leaves at the same lane count.
 pub const Mode = enum(u8) { full, newton, charge };
 
-/// Stamp instances [first, last) of one batch. The one per-mode dispatch the
-/// serial path and every lane share.
+/// Stamps instances [first, last) of one batch in `mode`. The one per-mode
+/// dispatch shared by the serial path and every lane.
 pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime mode: Mode) void {
     switch (mode) {
         .full => b.eval(b.ctx, pl, first, last, x, t),
@@ -70,17 +53,23 @@ pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const
     }
 }
 
+/// Persistent-worker threaded stamp. Owned by the executor for one query;
+/// the batch table it was built for must not change shape while it lives.
 pub const ParEval = struct {
     gpa: std.mem.Allocator,
     n_lanes: u32,
 
+    /// Private planes of lanes 1.., `n_lanes - 1` back-to-back copies each.
+    /// c/q are empty without charge.
     g_slab: []f64,
     c_slab: []f64,
     rhs_slab: []f64,
     q_slab: []f64,
 
+    /// Every lane's tasks, lane-major; lane l owns `tasks[task_off[l]..task_off[l+1]]`.
     tasks: []EvalTask,
     task_off: []u32,
+    /// Write window of lanes 1.., indexed `lane - 1`.
     windows: []Window,
 
     nnz1: usize,
@@ -90,14 +79,20 @@ pub const ParEval = struct {
     threads: []std.Thread,
     started: bool,
     quit: std.atomic.Value(bool),
+    /// Bumped once per pass; workers spin on it.
     epoch: std.atomic.Value(u32),
+    /// Workers finished with the current pass.
     done: std.atomic.Value(u32),
+    /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
     job_own_planes: Planes,
     job_x: []const f64,
     job_t: f64,
     job_mode: Mode,
 
+    /// Splits the batches into `n_lanes_req` (at least 1) lanes of roughly
+    /// equal `count * n_u^2` work, cut at instance boundaries in ascending
+    /// order. Threads start lazily on the first `run`.
     pub fn init(
         gpa: std.mem.Allocator,
         batches: []const Batch,
@@ -214,6 +209,7 @@ pub const ParEval = struct {
         };
     }
 
+    /// Stops and joins the workers, then frees every slab.
     pub fn deinit(self: *ParEval) void {
         if (self.started) {
             self.quit.store(true, .release);
@@ -232,8 +228,9 @@ pub const ParEval = struct {
         self.* = undefined;
     }
 
-    /// Stamp every batch into `own_planes` across the lanes. The caller has
-    /// already cleared (or baseline-seeded) the planes `mode` writes.
+    /// Stamps every batch into `own_planes` across the lanes and waits for all
+    /// of them. The caller has already cleared (or baseline-seeded) the planes
+    /// `mode` writes. Spawns the workers on first use; a failed spawn panics.
     pub fn run(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64, mode: Mode) void {
         if (self.n_lanes == 1) {
             runLane(self, batches, own_planes, 0, x, t, mode);
@@ -250,9 +247,8 @@ pub const ParEval = struct {
         runLane(self, batches, own_planes, 0, x, t, mode);
         var spins: u32 = 0;
         while (self.done.load(.acquire) < self.n_lanes - 1) {
-            // Same `pause` the loader's SpinLock uses. A busy waiter should not
-            // hold issue slots its SMT sibling needs to FINISH the job we are
-            // waiting on. Acquire/release and the 4096-spin yield are unchanged.
+            // `pause` frees issue slots for the SMT sibling that may be
+            // running the lane this waits on.
             std.atomic.spinLoopHint();
             spins +%= 1;
             if (spins > 4096) std.Thread.yield() catch {};
@@ -304,9 +300,8 @@ pub const ParEval = struct {
         const pl = self.lanePlanes(own_planes, lane);
         if (lane != 0) {
             const win = self.windows[lane - 1];
-            // `.charge` writes q and nothing else, so it clears q and nothing
-            // else: the other three slabs keep whatever the last `.full` or
-            // `.newton` left, and `reduce` does not read them back.
+            // `.charge` clears only q; `reduce` does not read the other slabs
+            // back in that mode.
             if (mode != .charge) {
                 zeroSimd(pl.g_vals[win.slot_lo..win.slot_hi]);
                 zeroSimd(pl.rhs[win.row_lo..win.row_hi]);
@@ -364,7 +359,7 @@ pub const ParEval = struct {
 
 const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
 
-/// `dst += src`, elementwise.
+/// Adds `src` into `dst` elementwise. `src.len >= dst.len`.
 pub fn addSimd(dst: []f64, src: []const f64) void {
     const W = vec_width;
     const Vv = @Vector(W, f64);

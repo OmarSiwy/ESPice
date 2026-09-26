@@ -1,37 +1,8 @@
-//! analysis/gpu.zig — device evaluation on the GPU, solver on the CPU.
-//!
-//! Analysis owns the numerical workspace and backend execution resources.
-//! Problem construction selects the backend through the analysis API. The
-//! shared evaluator supplies kernels for host, CUDA and HIP through gompute.
-//!
-//! The split is deliberate and it is the whole design:
-//!
-//!   - The CIRCUIT LIVES ON THE GPU. Every batch's models, instances and
-//!     gather/scatter tapes are uploaded ONCE at construction and stay resident
-//!     for the life of the simulation. They are frozen data — the tapes are
-//!     pattern, and the parameter arrays only move when a sweep mutates one,
-//!     which is what `repack` is for.
-//!   - The SOLVER stays on the CPU. Sparse LU, the Newton update, the
-//!     convergence test: all `solvers/`, unchanged, because factorization is
-//!     the part a GPU is worst at and the part this tree already does well.
-//!
-//! So per Newton iteration the bus carries the state vector up and the value
-//! planes down, and nothing else:
-//!
-//!     x  ──H2D──▶  [ resident models · instances · tapes ]
-//!                            │ one arp_eval_<model> launch per batch
-//!                            ▼
-//!     g_vals, rhs  ◀──D2H──  [ atomic-scattered planes ]
-//!                            │
-//!                            ▼  CPU: gmin, LU, dx, convergence
-//!
-//! That round-trip is the floor for a CPU solver, and it is why this pays off
-//! on device COUNT and not on circuit size: a fixture with four resistors moves
-//! the same bytes as one with four hundred thousand, and only the second has
-//! enough eval work to hide the latency. `--gpu` on a small netlist is expected
-//! to LOSE to the CPU path, and the benchmark reports both rather than picking.
-//!
-//! Scope: whole-circuit device eval feeding a CPU Newton solve.
+//! GPU device evaluation feeding the host solver. Every eligible batch's
+//! models, instances and tapes are uploaded once and stay resident; per Newton
+//! iteration the bus carries `x` up and the value planes down, and the sparse
+//! LU, Newton update and convergence test stay on the CPU. That round trip is
+//! the floor, so the GPU pays off on device count, not circuit size.
 
 const std = @import("std");
 const analysis = @import("types.zig");
@@ -42,9 +13,9 @@ const Circuit = analysis.Circuit;
 const GpuHook = analysis.GpuHook;
 const addSimd = @import("par_eval.zig").addSimd;
 
-/// Which backend this binary actually carries images for. Decided at COMPILE
-/// time because `gompute.RawByName(.cuda)` is a compile error in a build that
-/// emitted no CUDA artifacts — a runtime `if` would not save us from naming it.
+/// The backend this binary carries kernel images for. Comptime, because
+/// naming `gompute.RawByName(.cuda)` is a compile error in a build without
+/// CUDA artifacts.
 const artifacts = @import("gompute_kernels");
 const backend: ?gompute.Backend = if (artifacts.has_cuda)
     .cuda
@@ -53,50 +24,40 @@ else if (artifacts.has_hip)
 else
     null;
 
-/// What `--backend` can ask for.
-///
-/// `auto` is the only heuristic mode: it may decline for any reason, including
-/// "this looks too small to pay for the bus", and falls back to the CPU. Every
-/// other GPU request is EXPLICIT — the user named the device — and an explicit
-/// request either runs there or says why not. See `Decline`.
+/// What `--backend` can ask for. `auto` may decline for any reason and fall
+/// back to the CPU; `cuda`/`hip` are explicit and either run there or fail
+/// saying why (see `Decline`).
 pub const Request = enum { cpu, auto, cuda, hip };
 
-/// Why `init` refused, in the only three flavours a caller can act on.
-///
-/// The split is the whole `--gpu` contract, so it lives next to the errors it
-/// classifies rather than in the engine's branch arms:
-///
-///   - `.policy`     a PERFORMANCE guess ("too little work to beat the round
-///                   trip"). An explicit request overrides it — that is what
-///                   makes `--gpu` an override instead of a suggestion. Only
-///                   `auto` can ever see one.
-///   - `.capability` nothing in THIS CIRCUIT can run on the device: no device
-///                   type has a kernel, or every model that does was excluded
-///                   from emission (`gpu_max_model_bytes`). No flag changes
-///                   that, so it stays a fallback — reported, never silent.
-///   - `.machine`    the driver, the hardware or this binary's artifacts said
-///                   no. An explicit request must not paper over that with a
-///                   CPU run; it errors naming what was detected.
-pub const Decline = enum { policy, capability, machine };
+/// Why `init` refused, in the three kinds a caller acts on differently.
+pub const Decline = enum {
+    /// A performance guess (too little work). An explicit request overrides
+    /// it, so only `auto` sees one.
+    policy,
+    /// Nothing in this circuit has a kernel image. A reported CPU fallback,
+    /// whatever the flags.
+    capability,
+    /// The driver, hardware or build said no (including a build with no
+    /// images). An explicit request fails naming what was detected.
+    machine,
+};
 
+/// Classifies an `init` error.
 pub fn declineKind(e: anyerror) Decline {
     return switch (e) {
         Error.NotEnoughGpuWork => .policy,
         Error.CircuitNotEligible => .capability,
-        // `NoGpuArtifacts` included: a build that emitted no device images is
-        // this machine's answer, and `detectedName()` reports it as "none".
         else => .machine,
     };
 }
 
-/// A one-word name for what this binary detected, for the mismatch message.
+/// Returns "cuda", "hip" or "none": the backend this binary carries.
 pub fn detectedName() []const u8 {
     return if (backend) |be| @tagName(be) else "none";
 }
 
-/// Reject a strict `--backend cuda|hip` that this binary cannot honour, BEFORE
-/// any simulation runs. `auto`/`cpu` always pass here — auto falls back at
-/// run time, cpu never touches the GPU.
+/// False for an explicit `cuda`/`hip` this binary cannot serve, so the
+/// request fails before any simulation runs. `auto` and `cpu` always pass.
 pub fn requestSupported(req: Request) bool {
     return switch (req) {
         .cpu, .auto => true,
@@ -105,77 +66,47 @@ pub fn requestSupported(req: Request) bool {
     };
 }
 
-/// `void` in a build with no device images, so nothing below names a type that
-/// does not exist. Every use is behind `comptime backend != null`.
+/// `void` in a build with no device images; every use sits behind
+/// `comptime backend != null`.
 const Raw = if (backend) |be| gompute.RawByName(be) else void;
 const Buffer = if (backend != null) Raw.Buffer else void;
 const Stream = if (backend != null) Raw.Stream else void;
 
-/// Must match the eval.zig build root, which sized the launch when it exported
-/// the kernels: `DeviceKernel(D, block_size)` bakes the block width into
-/// `globalIdX`, so a host that launches a different one indexes wrong.
+/// The kernels bake this block width into `globalIdX` when they are exported,
+/// so every launch must use it.
 const block_size: u32 = device_ir.gpu_block_size;
 
 pub const Error = error{
-    /// This binary carries no GPU images — the arch probe found no device on
-    /// the build machine, so `emitKernels` emitted nothing.
+    /// The build machine had no GPU, so no kernel images were emitted.
     NoGpuArtifacts,
-    /// NO device type in this circuit has a GPU kernel, so there is nothing to
-    /// move. See `eval.gpuEligible`.
+    /// No device in this circuit has a kernel image (see `eval.gpuEligible`).
     CircuitNotEligible,
-    /// The circuit HAS eligible devices, but too few to pay for the round trip.
-    /// See `min_work`.
+    /// Eligible devices exist but do too little work for the round trip.
     NotEnoughGpuWork,
 };
 
-/// Scatter work — `count * n_u^2` summed over the eligible batches — below which
-/// `init` declines before touching the driver.
+/// Weighted scatter work (see `init`) below which `auto` declines before
+/// touching the driver. 200_000 raw `count * n_u^2` atomics, times the x16
+/// nonlinear weight. The per-iteration round trip is ~100 us and 6 atomics x
+/// 200 K instances take 76 us (RTX 4060 Laptop), so fewer atomics cannot win.
 ///
-/// `n_u^2` is the number of `atom.global.add.f64` a batch issues per iteration,
-/// and for the simple devices that are eligible today the atomics ARE the
-/// kernel: measured on an RTX 4060 Laptop, 6 atomics x 20 K instances is 9.5 us
-/// and x 200 K is 76 us, against a ~100 us per-iteration round trip (pageable
-/// upload + 4 plane copies + full-device sync + two downloads). So the GPU does
-/// not start winning until the atomic count clears a few hundred thousand.
+/// Not a break-even: no corpus deck currently wins on the GPU, and fixed
+/// driver setup (~340 ms: cuInit, context retain, module JIT) sinks any deck
+/// whose whole CPU run is shorter. Measured, ReleaseFast, whole process:
 ///
-/// ponytail: an atomic-count proxy, not a cost model. It is exactly right for
-/// the devices `gpuEligible` admits today (linear and algebraic two- and
-/// three-terminal parts, tens of f64 ops each) and it UNDERSTATES a future
-/// nonlinear kernel, which does thousands of f64 ops per instance and would
-/// break even far sooner. Revisit when a compact model becomes eligible; a
-/// per-device cost weight from the emitted PTX size is the upgrade path.
+///   fixture                          work    cpu     gpu
+///   devices/mos6_inverter            82 K    0.02 s  0.38 s
+///   scaling/parallel_inverters_100   205 K   0.05 s  0.50 s
+///   tran/fourbitadder                592 K   0.04 s  0.36 s
+///   scaling/parallel_inverters_2000  4.1 M   0.55 s  0.66 s
+///   sweep/opamp_wl_5000              25.6 M  0.66 s  0.90 s
 ///
-/// Tunable because the break-even moves with the per-iteration overhead: P1
-/// (pinned async copies, device-side baseline) drops it by roughly 5x.
+/// `ESPICE_GPU_MIN_WORK` overrides it; an explicit request skips it.
 ///
-/// 2026-09 RETUNE, 200_000 -> 3_200_000. The threshold was measured against a
-/// RAW `count * n_u^2` atomic count. The nonlinear x16 eval-cost weight was
-/// added to `work` afterwards WITHOUT moving the threshold, so the gate has
-/// since been admitting circuits sixteen times smaller than the number it was
-/// derived from. This restores the original intent (200_000 x 16), and wall
-/// clock on this machine (RTX 4060 Laptop / i9-14900HX, ReleaseFast, 2-5 run
-/// medians, whole-process) says the old line was in the wrong place:
-///
-///   fixture                       work    cpu     gpu     auto should
-///   devices/mos6_inverter          82 K   0.02 s  0.38 s  decline (did)
-///   scaling/parallel_inverters_100 205 K  0.05 s  0.50 s  decline (ADMITTED)
-///   tran/fourbitadder             592 K   0.04 s  0.36 s  decline (ADMITTED)
-///   scaling/parallel_inverters_2000 4.1 M 0.55 s  0.66 s  marginal
-///   sweep/opamp_wl_5000            25.6 M 0.66 s  0.90 s  marginal
-///
-/// The two ADMITTED rows are the `todo.md` "small-circuit --gpu no-decline"
-/// symptom, and the cause is not the resident path: a whole GPU run of
-/// fourbitadder is 0.36 s against a 0.04 s circuit, i.e. essentially all of it
-/// is the one-time driver setup the doc measures at ~340 ms (cuInit 114 ms +
-/// primary-context retain 81 ms + per-model module JIT). No `work` proxy can
-/// see that, because it is fixed cost and `work` is per-iteration — a deck
-/// whose ENTIRE CPU run is under ~350 ms cannot win no matter how wide it is.
-///
-/// Note honestly: at the time of this retune NO fixture in the corpus is a GPU
-/// win, because the CPU path got ~3.5x faster (parallel_inverters_2000 was
-/// 3.33 s in the last GPU write-up and is 0.55 s now). 3.2 M is therefore a
-/// conservative "keep auto out of the decks measured to lose by ~10x" line and
-/// not a break-even; `--gpu` overrides it and `ESPICE_GPU_MIN_WORK` tunes it.
+/// ponytail: an atomic-count proxy, right for the linear and algebraic parts
+/// `gpuEligible` admits today. It understates a compact-model kernel with
+/// thousands of f64 ops per instance; a per-device cost weight from the
+/// emitted PTX size is the upgrade path when one becomes eligible.
 const default_min_work: u64 = 3_200_000;
 
 fn minWork() u64 {
@@ -183,19 +114,13 @@ fn minWork() u64 {
     return std.fmt.parseInt(u64, std.mem.span(s), 10) catch default_min_work;
 }
 
-/// `ESPICE_GPU_STATS` — print the residency decision (which batches went to the
-/// device, which demoted and why, and the work the gate measured). Implied by
-/// an explicit `--gpu`/`--backend cuda|hip`, because a demotion under an
-/// explicit request is exactly the thing the user must not have to guess at.
+/// `ESPICE_GPU_STATS`: print the gate's work figure and the residency split.
 fn statsOn() bool {
     return std.c.getenv("ESPICE_GPU_STATS") != null;
 }
 
-/// A CAPABILITY demotion: this batch had a `gpu_payload` but the build emitted
-/// no image for its model, so it keeps stamping the host planes. Correct, and
-/// silently much slower — the host stamp is a scattered read-modify-write per
-/// Jacobian entry per instance and does not vectorize. Naming the model is the
-/// difference between "the GPU is slow here" and "bsim4 was never on it".
+/// Names a batch that has a GPU payload but no kernel image in this build and
+/// so stays on the host, where it is correct but much slower.
 fn reportDemote(on: bool, model: []const u8, which: []const u8, count: u32) void {
     if (!on) return;
     std.debug.print(
@@ -205,39 +130,37 @@ fn reportDemote(on: bool, model: []const u8, which: []const u8, count: u32) void
     );
 }
 
-/// One batch's resident working set plus the kernel that consumes it.
+/// One batch's resident working set and the kernels that consume it.
 const BatchGpu = struct {
     kernel: Raw,
-    /// `arp_lim_<model>` — the fused limit/state pass (`engine.StateKernel`),
-    /// present iff the device pairs one with its eval kernel.
+    /// `arp_lim_<model>`: the fused limit/state pass, when the device has one.
     lim_kernel: ?Raw,
-    /// `arp_ctl_<model>` — the accepted-step latch pass (`engine.CtlKernel`),
-    /// present iff the device declares `stateCtl`.
+    /// `arp_ctl_<model>`: the accepted-step latch pass, when the device
+    /// declares `stateCtl`.
     ctl_kernel: ?Raw,
-    /// Resident for the life of the simulation. `models`/`instances` are the
-    /// only two `repack` re-uploads; the tapes never change.
+    /// Resident for the simulation. `repack` re-uploads only models and
+    /// instances; the tapes never change.
     d_models: Buffer,
     d_instances: Buffer,
     d_gath: Buffer,
     d_rhs_idx: Buffer,
     d_slots: Buffer,
-    /// Device lim plane (count * n_u f64) and `[]D.State`. 1-byte dummies
-    /// when the device carries neither — every kernel signature is uniform.
+    /// Lim plane (`count * n_u` f64) and `[]D.State`; 1-byte dummies when the
+    /// device has neither, so every kernel signature is uniform.
     d_lim: Buffer,
     d_states: Buffer,
-    /// The batch this came from, so `repack` can re-read its parameter arrays.
+    /// The host batch, so `repack` can re-read its parameter arrays.
     ctx: *anyopaque,
     payload: *const fn (*anyopaque) device_ir.GpuPayload,
     set_limit_active: ?*const fn (*anyopaque, bool) void,
     count: u32,
     grid: gompute.Dim3,
     has_lim: bool,
-    /// Device-era limiting flag: true once the device lim plane holds live
-    /// clamp state (seed upload or first StateKernel launch). Cleared by
-    /// `clearLimits`, mirroring the host batch's `lim_active`.
+    /// The device lim plane holds live clamp state (after a seed upload or a
+    /// limit launch). Mirrors the host batch's `lim_active`.
     lim_active: bool = false,
-    /// A host-side `seedJunctions` wrote fresh seed voltages into the batch's
-    /// host lim plane; upload it before the next launch that reads it.
+    /// Host `seedJunctions` wrote the host lim plane; upload it before the
+    /// next launch that reads it.
     lim_dirty: bool = false,
 
     fn deinit(self: *BatchGpu) void {
@@ -254,99 +177,58 @@ const BatchGpu = struct {
     }
 };
 
+/// The resident device state of one query and the `GpuHook` it installs.
+/// Heap-allocated; the hook and `ckt` hold its address until `deinit`.
 pub const GpuContext = struct {
     gpa: std.mem.Allocator,
     ckt: *Circuit,
     /// The eligible batches, resident on the device.
     batches: []BatchGpu,
-    /// The rest — whatever `eval.gpuEligible` turns down (history, a core
-    /// that reads host-published sim state, `State` without `limit`), plus
-    /// anything eligible whose model the build declined to emit a kernel for
-    /// (`gpu_max_model_bytes`).
-    /// They keep stamping the host planes, and the two sets are summed.
-    ///
-    /// A mixed circuit is the NORMAL case, not a corner: `vsource` declares
-    /// `State`, so an all-or-nothing rule would decline every netlist with a
-    /// voltage source in it — which is all of them. Splitting costs one vector
-    /// add over `nnz` per iteration and no extra bus traffic, because the two
-    /// sides scatter into different planes and only meet on the host.
+    /// Everything else: whatever `eval.gpuEligible` turns down, plus eligible
+    /// batches whose model has no image in this build. They stamp the host
+    /// planes and the two sides are summed there. Mixed circuits are the
+    /// normal case (`vsource` declares `State`), and the split costs one
+    /// vector add per plane and no extra bus traffic.
     cpu_batches: []const device_ir.Batch,
-    /// The two allocations `batches` and `cpu_batches` are sub-slices of.
-    ///
-    /// A batch demoted at load time (no image for its model) moves from one set
-    /// to the other, so neither final length is known when the arrays are sized
-    /// — they are allocated for the worst case and then narrowed. `deinit` frees
-    /// THESE, because an allocator sizes a free by the slice it is handed and
-    /// the narrowed views would under-report.
+    /// Full-length allocations behind `batches` and `cpu_batches`. Demotions
+    /// are only known after loading, so both are sized for the worst case and
+    /// narrowed; `deinit` frees these, not the narrowed views.
     batches_owned: []BatchGpu,
     cpu_owned: []device_ir.Batch,
-    /// Landing area for the device planes, so the download does not clobber
-    /// what the CPU batches stamped — and PAGE-LOCKED, which is what lets the
-    /// download be issued before the CPU batches run instead of after them.
-    ///
-    /// `cuMemcpyDtoHAsync` on pageable memory is asynchronous in name only: the
-    /// driver stages it through an internal pinned buffer and blocks. Pinned,
-    /// the four downloads are queued behind the launches and drain while the
-    /// host is busy, so their latency leaves the critical path entirely. On the
-    /// 100x100 grid that is ~58 us of the ~100 us iteration.
-    ///
-    /// One allocation per plane rather than one block with offsets: pinning is
-    /// an init-time cost either way, and the sizes differ (g/c are `nnz`, rhs/q
-    /// are `n`).
+    /// Page-locked landing area for the device planes. Separate from the host
+    /// planes so the download cannot clobber the CPU batches' stamps, and
+    /// pinned so the copies really are asynchronous and drain while the host
+    /// stamps (~58 us of a ~100 us iteration on the 100x100 grid). c/q are
+    /// empty without `resident_charge`.
     pin_g: []f64,
     pin_rhs: []f64,
     pin_c: []f64,
     pin_q: []f64,
-    /// Staging for the one upload. `x` arrives as ordinary pageable memory from
-    /// the converger, so it is copied here first — a ~2 us `memcpy` against the
-    /// ~13 us the blocking pageable upload used to cost.
+    /// Pinned staging for the `x` upload: a ~2 us memcpy instead of a ~13 us
+    /// blocking pageable upload.
     pin_x: []f64,
 
-    /// Per-iteration traffic, allocated once.
     d_x: Buffer,
     d_g: Buffer,
     d_c: Buffer,
     d_rhs: Buffer,
     d_q: Buffer,
 
-    /// THE DETERMINISTIC SCATTER. The device kernels no longer accumulate into
-    /// the planes: each contribution gets its own staging cell (`d_stage_*`),
-    /// and `arp_reduce_*` sums each plane cell's run of them into the plane.
+    /// Deterministic scatter. Kernels write each contribution to its own
+    /// staging cell (`d_stage_*`), and `arp_reduce_*` sums each plane cell's
+    /// run of cells in the order the serial CPU stamp visits them.
     ///
-    /// Why: `@atomicRmw(.Add)` reduces in whatever order the hardware schedules,
-    /// and it does not promise to repeat the order at the same x. On
-    /// `parallel_inverters_2000`, `rhs[1]` (the Vdd node) takes 8000
-    /// contributions — four per pmos, `{+1.8, 8.2e-21, -1.8, 0}` — that cancel
-    /// to 3.6e-9. Two replays of the SAME pass differed by 2.1e-10, and
-    /// `finalizeStep` rejected every iterate: the LU maps that row 1:1 onto the
-    /// Vdd BRANCH CURRENT, whose delta tolerance comes from its own nanoamp
-    /// magnitude (1.25e-12) rather than from the 0.26 A the rail carries. dt
-    /// halved ~30 times and the run died in `TimestepTooSmall`.
+    /// Atomic accumulation reorders the sum from pass to pass. On
+    /// parallel_inverters_2000 the Vdd row takes 8000 contributions that
+    /// cancel to 3.6e-9; two replays at the same x differed by 2.1e-10, the
+    /// converger rejected every iterate and dt underflowed. In tape order each
+    /// instance's +1.8 meets its own -1.8 two entries later and the sum is
+    /// exact. With this order the GPU transient matches the CPU one to
+    /// 6.0e-16 max over that deck.
     ///
-    /// That is REORDERING, not a race, and the distinction was measured rather
-    /// than assumed. A lost or doubled update moves the sum by a contribution,
-    /// i.e. by 1.8 — nine orders off what was seen. The reordering ceiling is
-    /// `N*eps*max|partial|`, and `max|partial|` is the trap: in TAPE order each
-    /// instance's +1.8 is cancelled by its own -1.8 two entries later, so the
-    /// running sum never leaves 1.8 and the sum is exact to 1.6e-17. Any order
-    /// that separates the pair by W lets the partials reach `W*1.8`: measured
-    /// on that row's own values, a random permutation errs 8.4e-12, and the
-    /// SIMT emission order — a warp issuing its `ru=0` atomic on all W lanes
-    /// before `ru=1` — errs 4.0e-12 at W=32 and 1.6e-11 at W=1024, with the
-    /// whole 8-block grid resident it reaches the 2.1e-10 observed.
-    ///
-    /// The order is the CPU's: contributions are keyed (batch, id, ru, cu) and
-    /// sorted stably by destination, which is exactly the sequence
-    /// `evalRange`'s serial `+=` visits. So this is not merely repeatable, it
-    /// is the CPU's own sum — bit-for-bit for any cell whose run fits one
-    /// level-1 piece, and for a deeper one a fold of in-order pieces that keeps
-    /// the partials where tape order puts them. Measured end to end on
-    /// `parallel_inverters_2000`: the GPU transient agrees with the CPU one to
-    /// 6.0e-16 max / 3.3e-17 rms over 596 points x 2005 variables.
-    ///
-    /// Built here, BESIDE the frozen tapes, never through them: `d_slots` and
-    /// `d_rhs_idx` keep their `[id][ru][cu]` u32 layout and their length, and
-    /// only the VALUES change from "plane index" to "staging index".
+    /// Built beside the frozen tapes, not through them: `d_slots` and
+    /// `d_rhs_idx` keep their `[id][ru][cu]` u32 layout and length; only their
+    /// values change from plane index to staging index.
     reduce: Raw,
     d_seg1_slot: Buffer,
     d_seg1_row: Buffer,
@@ -356,84 +238,60 @@ pub const GpuContext = struct {
     d_stage_c: Buffer,
     d_stage_rhs: Buffer,
     d_stage_q: Buffer,
-    /// Level-1 output. SHARED between g and c (and between rhs and q): the four
-    /// reductions are enqueued on one stream, so each pair's level 2 has
-    /// consumed this before the next pair's level 1 writes it.
+    /// Level-1 reduction output, shared by g and c (and by rhs and q): on one
+    /// stream each pair's level 2 consumes it before the next level 1 writes.
     d_mid_slot: Buffer,
     d_mid_row: Buffer,
-    /// Contribution counts summed over the resident batches — g/c are indexed
-    /// by the slots tape, rhs/q by the rhs_idx tape — and the level-1 piece
-    /// counts derived from them.
+    /// Contribution counts over the resident batches (g/c index the slots
+    /// tape, rhs/q the rhs_idx tape) and the level-1 piece counts.
     n_slot: usize,
     n_row: usize,
     n_vslot: usize,
     n_vrow: usize,
-    /// `applyLimits`-time state vectors: the NEW iterate goes to `d_x2`, the
-    /// previous one to `d_x` (uploaded explicitly — under JFNK the last eval
-    /// was an FD probe, so `d_x`'s residue is NOT x_old). Plus the 4-byte
-    /// limited/reject flag word the StateKernels OR into.
+    /// Limit-pass inputs: the new iterate goes to `d_x2`, the previous one to
+    /// `d_x`, uploaded explicitly because under JFNK the last eval was a
+    /// finite-difference probe. `d_flags` is the word the kernels OR into:
+    /// bit 0 limited, bit 1 reject requested.
     d_x2: Buffer,
     d_flags: Buffer,
     pin_x2: []f64,
     pin_flags: []u8,
-    /// A StateKernel reported a `request_reject_at` the GPU path cannot
-    /// honour (`flags` bit 1) — the class assumption behind `gpuEligible`
-    /// broke. Every later call takes the CPU path, loudly.
+    /// A resident device requested a step reject, which the GPU path cannot
+    /// deliver. Every later call takes the host path.
     poisoned: bool = false,
-    /// Host params mutated (`Circuit.markGpuDirty`); re-upload models and
-    /// instances before the next launch. Lazy so an applyAttempt/restore
-    /// pair costs one repack, not two.
+    /// Host parameters changed; re-upload models and instances before the
+    /// next launch. Lazy, so an applyAttempt/restoreModels pair costs one.
     params_dirty: bool = false,
 
-    /// Every copy and every launch is ordered here, and NOTHING uses the NULL
-    /// stream.
-    ///
-    /// That is not a style preference: the NULL stream implicitly synchronizes
-    /// with every other blocking stream, so leaving the launches on it would
-    /// serialize them against the very copies this is trying to overlap. One
-    /// stream is enough — the work within an iteration is a strict chain
-    /// (upload -> zero -> launch -> download) and the only thing that needs to
-    /// run alongside it is the HOST, which is not on a stream at all.
+    /// Every copy and launch goes on this stream, never the NULL stream,
+    /// which would synchronize with the copies this overlaps. One stream is
+    /// enough: an iteration is a strict chain and only the host runs beside it.
     stream: Stream,
 
-    /// One-shot latches for the CPU-fallback warnings. TWO, not one: an eval
-    /// fault and a limit/state fault are different failures with different
-    /// fixes, and a single latch let whichever fired first silence the other.
+    /// One-shot fallback warnings, one per failure kind so neither silences
+    /// the other.
     warned_eval: bool = false,
     warned_state: bool = false,
 
-    /// `evalCheck` scratch (g ‖ rhs), empty unless `ESPICE_GPU_EVAL_CHECK` is
-    /// set. Non-empty is the flag — no second bool.
+    /// `evalCheck` scratch (g then rhs); non-empty only under
+    /// `ESPICE_GPU_EVAL_CHECK`.
     chk: []f64 = &.{},
-    /// Worst reproducibility gap seen so far, so the probe prints a new record
-    /// instead of every eval.
+    /// Worst reproducibility gap printed so far.
     chk_worst: f64 = 0,
 
-    /// Whether any RESIDENT batch produces charge. Narrower than
-    /// `Circuit.has_charge`, which covers the whole circuit: when every
-    /// charge-producing device stayed on the CPU there is nothing for the
-    /// device C/Q planes to hold, so their clears, downloads and merges are all
-    /// moving zeros. The host planes still follow `Circuit.has_charge`: the CPU
-    /// batches stamp them.
+    /// Some resident batch produces charge. When none does, the device c/q
+    /// planes would only carry zeros, so they are skipped; the host c/q
+    /// planes still follow `Circuit.has_charge`.
     resident_charge: bool,
 
     const Self = @This();
 
-    /// Upload every eligible batch and keep it resident. Fails (and the caller
-    /// classifies with `declineKind`) when NOTHING in the circuit has a kernel,
-    /// or — under `auto` only — when what does have one is too small to pay for
-    /// the bus.
+    /// Uploads every eligible batch and keeps it resident. The caller
+    /// classifies a failure with `declineKind`.
     ///
-    /// `explicit` is "the user named the GPU". It does two things, and they are
-    /// the same promise: it BYPASSES the work gate (a performance guess must not
-    /// overrule a direct instruction), and it turns the residency decision
-    /// verbose, so a batch that demotes for want of a kernel image says so
-    /// instead of quietly costing 61 scattered read-modify-writes on the host.
-    ///
-    /// The work refusal happens BEFORE the first `gompute` call, which is what
-    /// makes `cuInit` lazy: on this machine the driver charges 113.7 ms for
-    /// `cuInit` and 80.7 ms to retain the primary context, and a netlist that was
-    /// never going to the GPU used to pay all of it just for passing `--gpu`.
+    /// `explicit` (the user named the GPU) skips the work gate and reports
+    /// every demotion. The gate runs before the first driver call, so a
+    /// declined deck never pays for cuInit (~114 ms) or the context retain.
     pub fn init(gpa: std.mem.Allocator, ckt: *Circuit, explicit: bool) !*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const report = explicit or statsOn();
@@ -443,27 +301,17 @@ pub const GpuContext = struct {
         for (ckt.batches) |b| {
             const get = b.hooks.gpu_payload orelse continue;
             n_gpu += 1;
-            // Only NONLINEAR batches (a `limit`/`State` device: junction
-            // FETs, BJTs, diodes) count toward the gate. A linear stamp is
-            // ~10 f64 ops on the CPU, so offloading it trades a vectorized
-            // host loop for the same atomics plus the bus — measured on
-            // rc_ladder_100k, the largest all-linear fixture in the corpus
-            // (200k devices, 800k atomic-work): GPU 3276 ms vs CPU 2698 ms.
-            // Bigger only makes the planes' D2H larger. Linear batches still
-            // RIDE ALONG once nonlinear work engages the context; only the
-            // go/no-go decision ignores them.
-            //
-            // The x16 weight is the eval-cost ratio: a limit-class eval runs
-            // its model core in 8-16 wide dual arithmetic (hundreds of f64
-            // ops) against the ~n_u^2 atomics the proxy counts.
+            // Only nonlinear (`limit`/`State`) batches count toward the gate.
+            // A linear stamp is a vectorized host loop that the GPU only
+            // matches (rc_ladder_100k: GPU 3276 ms vs CPU 2698 ms); linear
+            // batches still ride along once the context is up. The x16 weight
+            // is the eval cost of a dual-number model core against the ~n_u^2
+            // scatters the proxy counts.
             if (b.hooks.apply_limits == null and b.hooks.update_state == null) continue;
-            // Host-side read of the batch's own slices. No driver contact.
             const p = get(b.ctx);
             work += @as(u64, p.count) * p.n_u * p.n_u * 16;
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
-        // POLICY, and the ONLY policy decline there is. `explicit` skips it
-        // outright rather than tuning it: `--gpu` means run on the GPU.
         if (!explicit and work < minWork()) return Error.NotEnoughGpuWork;
         if (statsOn()) std.debug.print(
             "gpu-stats: eligible batches={d} nonlinear work={d} (gate {d}{s})\n",
@@ -475,10 +323,8 @@ pub const GpuContext = struct {
 
         const batches = try gpa.alloc(BatchGpu, n_gpu);
         errdefer gpa.free(batches);
-        // Sized for EVERY batch, not `len - n_gpu`: a device can be eligible by
-        // `gpuEligible` and still have no image, because the build declines to
-        // emit a kernel for a model past `gpu_max_model_bytes`. Those demote
-        // into this array below, so its final length is not known up front.
+        // Sized for every batch: an eligible model past `gpu_max_model_bytes`
+        // has no image and demotes into this array below.
         const cpu_batches = try gpa.alloc(device_ir.Batch, ckt.batches.len);
         errdefer gpa.free(cpu_batches);
 
@@ -495,12 +341,9 @@ pub const GpuContext = struct {
             };
             const bg = &batches[n_up];
             const p = get(b.ctx);
-            // A MISSING kernel demotes this batch; it does not fail the context.
-            // The compact models are excluded from GPU emission at build time
-            // (see `gpu_max_model_bytes`), and an all-or-nothing rule here would
-            // mean one BSIM4 in a netlist also pulled its ten thousand resistors
-            // back onto the CPU. Any other driver error is still fatal — that is
-            // a real fault, not a device the build chose to skip.
+            // A missing image demotes only this batch, so one BSIM4 does not
+            // pull ten thousand resistors back to the CPU. Any other driver
+            // error is a real fault and fails the context.
             var kernel = gompute.rawKernelByName(backend.?, p.kernel, 0) catch |e| switch (e) {
                 error.KernelNotFound => {
                     reportDemote(report, b.type_name, "eval", p.count);
@@ -512,9 +355,9 @@ pub const GpuContext = struct {
             };
             errdefer kernel.deinit();
 
-            // The paired limit/state/ctl entry points live in the SAME image,
-            // so "eval found, one missing" can only mean a stale image —
-            // demote the batch whole rather than run it half-resident.
+            // The limit and latch entry points share the eval kernel's image, so
+            // one missing means a stale image: demote the whole batch rather
+            // than run it half-resident.
             var lim_kernel: ?Raw = null;
             if (p.lim_kernel.len > 0) {
                 lim_kernel = gompute.rawKernelByName(backend.?, p.lim_kernel, 0) catch |e| switch (e) {
@@ -555,9 +398,8 @@ pub const GpuContext = struct {
                 .d_gath = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.gath)),
                 .d_rhs_idx = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.rhs_idx)),
                 .d_slots = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.slots)),
-                // The lim plane starts UNWRITTEN on purpose — reads are gated
-                // by `lim_active`, exactly like the host's `lim_x`. 1-byte
-                // dummy for limit-less devices (uniform kernel signature).
+                // Left unwritten: reads are gated by `lim_active`, like the
+                // host's `lim_x`.
                 .d_lim = try kernel.alloc(if (p.lim_x.len > 0) @as(usize, p.count) * p.n_u * @sizeOf(f64) else 1),
                 .d_states = try uploadBytes(&kernel, p.states),
                 .ctx = b.ctx,
@@ -567,24 +409,19 @@ pub const GpuContext = struct {
                 .grid = gompute.Dim3.linear(p.count, block_size),
                 .has_lim = p.lim_x.len > 0,
             };
-            // Decided HERE, after the missing-kernel demotions above: a charge
-            // device that lost its image is a CPU batch and does not count.
             resident_charge = resident_charge or b.has_charge;
             n_up += 1;
         }
 
-        // Every eligible batch demoted for want of an image, so there is nothing
-        // left to launch. CAPABILITY, not policy — `reportDemote` above already
-        // named each one. Ordered before `batches[0]` below, which would
-        // otherwise index an empty array.
+        // Every eligible batch demoted; `batches[0]` below needs one.
         if (n_up == 0) return Error.CircuitNotEligible;
         if (statsOn()) std.debug.print(
             "gpu-stats: resident batches={d} host batches={d} charge planes={s}\n",
             .{ n_up, n_cpu, if (resident_charge) "device" else "host-only" },
         );
 
-        // Any handle allocates from the same primary context, so the planes may
-        // hang off batch 0 and still be valid in every other batch's launch.
+        // Every handle allocates from the same primary context, so buffers
+        // made through batch 0 are valid in every launch.
         const k0 = &batches[0].kernel;
         const g_bytes = ckt.g_vals.len * @sizeOf(f64);
         const rhs_bytes = ckt.rhs.len * @sizeOf(f64);
@@ -592,8 +429,7 @@ pub const GpuContext = struct {
 
         const order = try scatterOrder(gpa, batches[0..n_up], ckt);
         defer order.deinit(gpa);
-        // In the SAME image as the eval kernel, so a miss here means a stale
-        // build, not a model the emitter skipped — fatal, like `lim`/`ctl`.
+        // Same image as the eval kernels, so a miss is a stale build: fatal.
         var reduce = try gompute.rawKernelByName(backend.?, batches[0].payload(batches[0].ctx).reduce_kernel, 0);
         errdefer reduce.deinit();
         try order.upload(batches[0..n_up]);
@@ -644,26 +480,19 @@ pub const GpuContext = struct {
         return self;
     }
 
-    /// The permutation and segment table behind the deterministic scatter.
+    /// The permutation and segment tables behind the deterministic scatter.
     ///
-    /// A "contribution" is one tape entry: `(batch, id, ru, cu)` for the g/c
-    /// planes, `(batch, id, ru)` for rhs/q. Number them in that order — which is
-    /// the order the serial CPU `evalRange` stamps them — and counting-sort them
-    /// STABLY by destination plane cell. `perm[k]` is then k's staging cell, and
-    /// `seg[cell..cell+1]` is that cell's contiguous, ascending-k run.
+    /// A contribution is one tape entry, `(batch, id, ru, cu)` for g/c and
+    /// `(batch, id, ru)` for rhs/q, numbered in the order the serial CPU stamp
+    /// visits them and counting-sorted stably by destination cell. `perm[k]` is
+    /// k's staging cell. g and c share the slots tables, rhs and q the row
+    /// tables.
     ///
-    /// Two tables, not four: g and c are both indexed by `slots`, rhs and q both
-    /// by `rhs_idx`, so each pair shares a permutation and a segment table.
-    ///
-    /// The segments come out in TWO levels, because one thread per plane cell
-    /// puts the whole Vdd row (thousands of contributions) on one lane of a card
-    /// whose f64 rate is 1/64: measured, a single-level reduction cost
-    /// `parallel_inverters_500 --gpu` 0.61 s -> 1.38 s, ALL of it in the
-    /// reduction. Level 1 cuts every run into `chunk`-sized pieces (so a long
-    /// row becomes many threads), level 2 sums a cell's pieces. Same kernel
-    /// both times — this is not a second algorithm, it is one launched twice.
-    /// A run of `chunk` or less becomes a single piece, so short rows are
-    /// summed exactly as the serial CPU stamp sums them.
+    /// Two levels, because one thread per cell put the whole Vdd row on one
+    /// lane (parallel_inverters_500: 0.61 s to 1.38 s, all in the reduction).
+    /// Level 1 sums `chunk`-sized pieces of each run, level 2 sums a cell's
+    /// pieces, with the same kernel. A run of at most `chunk` is one piece and
+    /// sums exactly as the CPU does.
     const Order = struct {
         perm_slot: []u32,
         perm_row: []u32,
@@ -678,9 +507,8 @@ pub const GpuContext = struct {
         n_vslot: usize,
         n_vrow: usize,
 
-        /// Contributions per level-1 piece. Balances the two chains: a
-        /// 8000-deep row becomes 125 threads of 64 and then one thread of 125,
-        /// instead of one thread of 8000.
+        /// Contributions per level-1 piece: an 8000-deep row becomes 125
+        /// threads of 64, then one thread of 125.
         const chunk: u32 = 64;
 
         fn deinit(self: Order, gpa: std.mem.Allocator) void {
@@ -692,10 +520,8 @@ pub const GpuContext = struct {
             gpa.free(self.seg2_row);
         }
 
-        /// Overwrite each batch's resident tapes with its slice of the
-        /// permutation. Same buffers, same length, same `[id][ru][cu]` layout —
-        /// only the meaning of the u32 moves from "plane cell" to "staging
-        /// cell", which is what keeps the frozen boundary frozen.
+        /// Overwrites each batch's resident slot and row tapes with its slice
+        /// of the permutation, keeping their length and layout.
         fn upload(self: Order, batches: []BatchGpu) !void {
             var off_s: usize = 0;
             var off_r: usize = 0;
@@ -721,10 +547,8 @@ pub const GpuContext = struct {
             n_slot += p.slots.len;
             n_row += p.rhs_idx.len;
         }
-        // The tapes are u32 and now index the staging arrays, which are longer
-        // than the planes. A circuit past that would need ~32 GB of staging, so
-        // this is a bound the hardware enforces first — but say so rather than
-        // truncate, and let the caller fall back to the CPU.
+        // The u32 tapes now index staging, which is longer than the planes.
+        // Past u32 (~32 GB of staging) fall back to the CPU, never truncate.
         if (n_slot > std.math.maxInt(u32) or n_row > std.math.maxInt(u32))
             return Error.CircuitNotEligible;
 
@@ -742,8 +566,8 @@ pub const GpuContext = struct {
         };
         errdefer out.deinit(gpa);
 
-        // Cell -> staging range, before it is cut into level-1 pieces. Doubles
-        // as the per-cell write cursor of the counting sort.
+        // Cell -> staging range before the level-1 cut, and the counting
+        // sort's per-cell write cursor.
         const seg_all = try gpa.alloc(u32, @max(n_g, n_rhs) + 1);
         defer gpa.free(seg_all);
         const cursor = try gpa.alloc(u32, @max(n_g, n_rhs) + 1);
@@ -753,12 +577,10 @@ pub const GpuContext = struct {
             const n_cells = if (slots_pass) n_g else n_rhs;
             const seg = seg_all[0 .. n_cells + 1];
             const perm = if (slots_pass) out.perm_slot else out.perm_row;
-            // The TRASH cell is left out of the count, so its run comes out
-            // empty and the reduction writes it a 0 without walking it. That is
-            // not tidiness: `buildTapes` sends every ground row/column AND every
-            // structurally dead (row, col) there, which on a 4000-instance mos1
-            // batch is ~40k of the 64k slot entries — one thread would chew the
-            // whole thing while its neighbours idled. Nothing reads the cell.
+            // The trash cell gets an empty run, so the reduction writes it 0
+            // without walking it. It collects every ground and structurally
+            // dead entry (~40k of 64k slots on a 4000-instance mos1 batch), and
+            // nothing reads it.
             const trash: u32 = if (slots_pass) ckt.trash_slot else ckt.n;
             @memset(seg, 0);
             for (batches) |*bg| {
@@ -773,9 +595,9 @@ pub const GpuContext = struct {
                 s.* = run;
             }
             @memcpy(cursor[0..seg.len], seg);
-            // Trash contributions still need a distinct, in-bounds cell each —
-            // the kernel stores through the tape unconditionally. They get the
-            // tail of the staging array, which no segment covers.
+            // The kernel stores through the tape unconditionally, so trash
+            // contributions still get distinct cells: the staging tail, which
+            // no segment covers.
             var tail: u32 = run;
             var k: usize = 0;
             for (batches) |*bg| {
@@ -792,9 +614,9 @@ pub const GpuContext = struct {
                 }
             }
 
-            // Cut each cell's run into pieces of at most `chunk`. `seg2[i]` is
-            // where cell i's pieces start, `seg1[j]` where piece j's staging
-            // starts — both ascending, so the two sums stay a fixed order.
+            // Cut each run into pieces of at most `chunk`. `seg2[i]` is cell
+            // i's first piece, `seg1[j]` piece j's first staging cell; both
+            // ascend, so both sums keep a fixed order.
             var n_v: usize = 0;
             for (0..n_cells) |i| n_v += (seg[i + 1] - seg[i] + Order.chunk - 1) / Order.chunk;
             const seg1 = try gpa.alloc(u32, n_v + 1);
@@ -821,17 +643,16 @@ pub const GpuContext = struct {
         return out;
     }
 
-    /// Page-locked `[]f64` from the driver. Not the Zig allocator's memory, so
-    /// it is released with `freePinned` and not `gpa.free`.
+    /// Page-locked `[]f64` from the driver; release with `freePinned`.
     fn pinnedF64(kernel: *Raw, n: usize) ![]f64 {
         const bytes = try kernel.allocPinned(n * @sizeOf(f64));
         return @alignCast(std.mem.bytesAsSlice(f64, bytes));
     }
 
+    /// Frees every device and pinned buffer and `self`.
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
-        // Pinned memory first, while batch 0's context handle is still alive —
-        // it is what the driver frees these against.
+        // Pinned memory first, while batch 0's handle that owns it is alive.
         const k0 = &self.batches[0].kernel;
         for ([_][]f64{ self.pin_g, self.pin_rhs, self.pin_c, self.pin_q, self.pin_x, self.pin_x2 }) |p| {
             if (p.len > 0) k0.freePinned(std.mem.sliceAsBytes(p));
@@ -864,39 +685,32 @@ pub const GpuContext = struct {
     }
 
     fn uploadBytes(kernel: *Raw, bytes: []const u8) !Buffer {
-        // A device type with no parameters, or a zero-instance batch, still
-        // needs a valid pointer to pass as a kernel argument; drivers reject a
-        // zero-byte allocation.
+        // Empty arrays still need a valid kernel-argument pointer, and
+        // drivers reject zero-byte allocations.
         var buf = try kernel.alloc(@max(bytes.len, 1));
         errdefer buf.free();
         if (bytes.len > 0) try buf.upload(bytes.ptr, bytes.len);
         return buf;
     }
 
-    /// One full device-eval pass: the GPU half of `Circuit.evalNewton`.
-    ///
-    /// Always the zero-and-restamp form, never the constant-Jacobian baseline
-    /// (an optimization traded for keeping the planes on the device). Limit
-    /// devices eval against their device-resident lim plane exactly like the
-    /// host's `evalInner`: `limiting` mirrors the batch's `lim_active`, which
-    /// `StateKernel` launches arm and `clearLimits` disarms — so outside a
-    /// Newton solve this is the plain eval both ways.
+    /// Stamps all four planes: the resident batches on the device, the rest on
+    /// the host meanwhile, then sums them and adds the ground pin. Always zero
+    /// and restamp, never the constant-Jacobian baseline. Limit devices read
+    /// their resident lim plane while `lim_active`, like the host eval.
     fn evalOnGpu(self: *Self, x: []const f64, t: f64) !void {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         if (self.poisoned) return error.GpuStateReject;
-        if (self.params_dirty) try repack(self);
+        if (self.params_dirty) try self.repack();
         const ckt = self.ckt;
 
         try self.enqueueEval(x, t);
 
-        // The ineligible devices stamp the host planes while the GPU is still
-        // working and the D2H copies are still in flight.
         ckt.clearPlanes(.full);
         const pl = ckt.ownPlanes();
         for (self.cpu_batches) |b| b.eval(b.ctx, &pl, 0, b.count, x, t);
 
-        // One wait, and only on this stream — `cuCtxSynchronize` would stall on
-        // every context on the device, including work this process does not own.
+        // This stream only: a context-wide sync would also wait on work this
+        // process does not own.
         try self.stream.synchronize();
 
         if (self.chk.len > 0) try self.evalCheck(x, t);
@@ -908,18 +722,13 @@ pub const GpuContext = struct {
             addSimd(ckt.q_vec, self.pin_q);
         }
 
-        // The ground pin is not a device, so no kernel emits it.
         ckt.groundStamp(x);
     }
 
-    /// The device half alone: upload x, clear the staging, launch every resident
-    /// batch, reduce, queue the downloads. Enqueue-only — nothing is waited on,
-    /// which is what lets the caller run the host batches underneath it.
-    ///
-    /// Split out of `evalOnGpu` so `evalCheck` can replay the SAME pass at the
-    /// same x. Everything below is enqueued on one stream and the ORDER is the
-    /// whole optimization: the downloads are issued BEFORE the host does its own
-    /// work, so they drain during it instead of after it.
+    /// Enqueues the device half without waiting: upload x, clear staging,
+    /// launch every resident batch, reduce, download into the pinned planes.
+    /// The downloads are queued before the caller's host work so they drain
+    /// during it. Separate so `evalCheck` can replay the same pass.
     fn enqueueEval(self: *Self, x: []const f64, t: f64) !void {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const ckt = self.ckt;
@@ -929,13 +738,9 @@ pub const GpuContext = struct {
         @memcpy(self.pin_x[0..x.len], x);
         try self.d_x.uploadAtAsync(self.pin_x.ptr, 0, x.len * @sizeOf(f64), &self.stream);
 
-        // The STAGING is cleared, not the planes: `arp_reduce_*` writes every
-        // plane cell below. A contribution the structural pattern or the ground
-        // mask skips is never stored, so its cell has to read back as 0.
-        //
-        // Zeroed by the memory controller, not by moving a resident block of
-        // zeros across it. The old D2D copy cost real device bandwidth (~3.8 us
-        // for a 400 KB `g` plane, ~1.9 us for `rhs`) and blocked besides.
+        // Staging, not the planes: the reduction writes every plane cell, but
+        // a contribution the pattern or ground mask skips is never stored and
+        // must read back as 0.
         try self.d_stage_g.fillAsync(0, self.n_slot * @sizeOf(f64), &self.stream);
         try self.d_stage_rhs.fillAsync(0, self.n_row * @sizeOf(f64), &self.stream);
         if (self.resident_charge) {
@@ -946,8 +751,7 @@ pub const GpuContext = struct {
         for (self.batches) |*bg| {
             if (bg.count == 0) continue;
             try syncSeededLim(bg);
-            // Scalars are passed by pointer-to-storage, so these must outlive
-            // the launch call — hence locals in this scope, not a helper's.
+            // Scalars are passed by pointer and must outlive the launch call.
             var count: u64 = bg.count;
             var time: f64 = t;
             var limiting: u64 = @intFromBool(bg.lim_active);
@@ -969,9 +773,6 @@ pub const GpuContext = struct {
             });
         }
 
-        // Every batch has emitted its contributions; fold each plane cell's run
-        // into the plane, in tape order. One launch per plane, ordered on the
-        // same stream, so the sum is a deterministic function of x.
         try self.reducePlane(true, &self.d_stage_g, &self.d_g, ckt.g_vals.len);
         try self.reducePlane(false, &self.d_stage_rhs, &self.d_rhs, ckt.rhs.len);
         if (self.resident_charge) {
@@ -979,9 +780,6 @@ pub const GpuContext = struct {
             try self.reducePlane(false, &self.d_stage_q, &self.d_q, ckt.q_vec.len);
         }
 
-        // Queued behind the launches and ahead of the host work below. Into
-        // pinned staging, not the planes: the CPU batches are about to stamp
-        // those, and a download would overwrite them.
         try self.d_g.downloadAtAsync(self.pin_g.ptr, 0, g_bytes, &self.stream);
         try self.d_rhs.downloadAtAsync(self.pin_rhs.ptr, 0, rhs_bytes, &self.stream);
         if (self.resident_charge) {
@@ -990,10 +788,9 @@ pub const GpuContext = struct {
         }
     }
 
-    /// One plane's staging -> plane, in two fixed-order passes of the SAME
-    /// kernel: pieces first (parallel over a long row), then the pieces of each
-    /// cell. `slot_space` picks which of the two index spaces the plane lives in
-    /// — g/c are indexed by the slots tape, rhs/q by the rhs_idx tape.
+    /// Reduces one plane's staging into the plane: pieces first, then each
+    /// cell's pieces. `slot_space` selects the slots tables (g/c) over the
+    /// row tables (rhs/q).
     fn reducePlane(self: *Self, slot_space: bool, stage: *Buffer, plane: *Buffer, cells: usize) !void {
         const mid = if (slot_space) &self.d_mid_slot else &self.d_mid_row;
         const seg1 = if (slot_space) &self.d_seg1_slot else &self.d_seg1_row;
@@ -1003,9 +800,7 @@ pub const GpuContext = struct {
         try self.launchReduce(seg2, mid, plane, cells);
     }
 
-    /// One `arp_reduce_*` launch: `out[i] = sum(in[seg[i]..seg[i+1]])`.
-    /// `n_cells` is a local because gompute passes scalars by pointer, and
-    /// `cuLaunchKernel` copies them before it returns.
+    /// One `arp_reduce_*` launch: `plane[i] = sum(stage[seg[i]..seg[i+1]])`.
     fn launchReduce(self: *Self, seg: *Buffer, stage: *Buffer, plane: *Buffer, cells: usize) !void {
         if (cells == 0) return;
         var n_cells: u64 = cells;
@@ -1018,21 +813,11 @@ pub const GpuContext = struct {
         );
     }
 
-    /// `ESPICE_GPU_EVAL_CHECK=1` — is the device half a FUNCTION of x?
-    ///
-    /// Newton needs one. `converger.finalizeStep` accepts an iterate by
-    /// comparing it to the previous one, so a stamp that moves while x stands
-    /// still can never converge: dx floors at the wobble and the transient
-    /// halves dt until it underflows. This replays the launches at the same x
-    /// and reports the worst plane entry that moved. The first pass's values are
-    /// restored afterwards, so a checked run stamps exactly what an unchecked
-    /// one would.
-    ///
-    /// It is SILENT now, and staying silent is the point: this is the regression
-    /// guard on the deterministic scatter. Anything that hands a summation order
-    /// back to the hardware — an atomic accumulate, a second stream, a
-    /// permutation that lets two threads share a staging cell — shows up here as
-    /// a printed gap on the highest-fan-in row in the circuit.
+    /// `ESPICE_GPU_EVAL_CHECK`: replays the device pass at the same x and
+    /// prints the worst g/rhs entry that moved, when it beats the last record.
+    /// Newton cannot converge on a stamp that is not a function of x, so any
+    /// output here means the deterministic scatter regressed. Restores the
+    /// first pass, so a checked run stamps what an unchecked one would.
     fn evalCheck(self: *Self, x: []const f64, t: f64) !void {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const ng = self.pin_g.len;
@@ -1075,14 +860,8 @@ pub const GpuContext = struct {
         @memcpy(self.pin_rhs, chk_rhs);
     }
 
-    /// `Circuit.eval` / `Circuit.evalNewton` on the device — the `eval_planes`
-    /// hook, and the single point at which any analysis reaches the GPU.
-    ///
-    /// Swallows the error on purpose. A stamp sits underneath every analysis in
-    /// the tree and none are shaped to unwind from a driver fault mid-solve, so
-    /// a failure re-runs THIS stamp on the CPU and the solve continues with a
-    /// correct answer. Warned once rather than per iteration: a fault that
-    /// repeats would otherwise print thousands of times.
+    /// The `eval_planes` hook. No analysis can unwind from a driver fault
+    /// mid-solve, so a failure restamps on the CPU and warns once.
     fn evalPlanes(ctx: *anyopaque, x: []const f64, t: f64) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.evalOnGpu(x, t) catch |e| {
@@ -1097,9 +876,9 @@ pub const GpuContext = struct {
         };
     }
 
-    /// Host `seedJunctions` left fresh seed voltages in this batch's host lim
-    /// plane — upload them (synchronous, so ordered ahead of whatever launch
-    /// reads them) and arm device-era limiting.
+    /// Uploads seed voltages a host `seedJunctions` left in the batch's lim
+    /// plane and arms device limiting. Synchronous, so it lands before the
+    /// launch that reads it.
     fn syncSeededLim(bg: *BatchGpu) !void {
         if (!bg.lim_dirty) return;
         bg.lim_dirty = false;
@@ -1110,18 +889,16 @@ pub const GpuContext = struct {
         bg.lim_active = true;
     }
 
-    /// The GPU half of `Circuit.applyLimits`, fused with the `updateStates`
-    /// half (`StateKernel` does both; the converger always calls the two
-    /// back-to-back at the same x). Synchronous: `finalizeStep` consumes the
-    /// `limited` answer immediately.
+    /// Limits and state-latches the resident batches in one fused launch (the
+    /// converger calls `applyLimits` and `updateStates` back to back at the
+    /// same x), walking the host batches meanwhile. Synchronous, because the
+    /// converger reads the answer at once.
     fn applyLimitsOnGpu(self: *Self, x: []f64, x_old: []const f64) !bool {
         if (comptime backend == null) return false;
         if (self.poisoned) return error.GpuStateReject;
-        if (self.params_dirty) try repack(self);
+        if (self.params_dirty) try self.repack();
         const n = self.ckt.n;
 
-        // x -> d_x2, x_old -> d_x. Explicit x_old upload rather than trusting
-        // d_x's residue: under JFNK the last eval was an FD probe.
         @memcpy(self.pin_x2[0..n], x[0..n]);
         try self.d_x2.uploadAtAsync(self.pin_x2.ptr, 0, n * @sizeOf(f64), &self.stream);
         @memcpy(self.pin_x[0..n], x_old[0..n]);
@@ -1153,15 +930,14 @@ pub const GpuContext = struct {
         if (launched)
             try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
 
-        // The CPU-side batches run their host walk while the device works.
         var any = Circuit.limitBatches(self.cpu_batches, x, x_old);
 
         if (launched) {
             try self.stream.synchronize();
             const flags = std.mem.readInt(u32, self.pin_flags[0..4], .little);
             if (flags & 2 != 0) {
-                // A resident device asked for a step reject the GPU path
-                // cannot deliver — the gpuEligible class assumption broke.
+                // A step reject the GPU path cannot deliver: `gpuEligible`
+                // admitted a device it should not have.
                 self.poisoned = true;
                 return error.GpuStateReject;
             }
@@ -1170,10 +946,9 @@ pub const GpuContext = struct {
         return any;
     }
 
-    /// `Circuit.applyLimits` hook. A fault falls back to the full HOST walk —
-    /// including the resident batches, whose host lim/state go stale during
-    /// the device era but self-heal: `limitRange` restarts from x_old and
-    /// `updateState` recomputes its latches from the current x alone.
+    /// The `apply_limits` hook. A fault falls back to the host walk over every
+    /// batch; the resident batches' stale host lim/state self-heal, since
+    /// limiting restarts from x_old and the latches recompute from x alone.
     fn applyLimitsHook(ctx: *anyopaque, x: []f64, x_old: []const f64) bool {
         const self: *Self = @ptrCast(@alignCast(ctx));
         return self.applyLimitsOnGpu(x, x_old) catch {
@@ -1182,10 +957,9 @@ pub const GpuContext = struct {
         };
     }
 
-    /// `Circuit.updateStates` hook: the device half already ran inside
-    /// `applyLimitsHook`'s fused launch, so only the CPU-side batches walk.
-    /// The admitted device class never returns a reject time (see
-    /// `StateKernel`), so the GPU half contributes null by construction.
+    /// The `update_states` hook. The resident half already ran in the fused
+    /// limit launch and never returns a reject time, so only the host batches
+    /// walk (all of them once poisoned).
     fn updateStatesHook(ctx: *anyopaque, x: []const f64) ?f64 {
         const self: *Self = @ptrCast(@alignCast(ctx));
         return Circuit.updateBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches, x);
@@ -1200,19 +974,15 @@ pub const GpuContext = struct {
         Circuit.clearLimitBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches);
     }
 
-    /// The GPU half of `Circuit.stateCtl`: the accepted-step latch (path
-    /// commit `pb <- wb, pq += wq`) mutates the device-resident Instance
-    /// blobs, so a host walk cannot stand in for a resident batch. All three
-    /// ops route here; the kernel ORs the real per-instance verdict into
-    /// `d_flags`, so `query` costs one launch + a 4-byte sync per accepted
-    /// step rather than a class assumption.
+    /// Runs the accepted-step latch (path commit `pb <- wb, pq += wq`) on the
+    /// resident instance blobs and the host walk on the rest. The kernels OR
+    /// each instance's verdict into `d_flags`, so `.query` costs one launch
+    /// and a 4-byte sync.
     ///
-    /// Known gauge: a later `repack` (sweep/homotopy param mutation) resets
-    /// device pb__/pq__ to the host's stale copies. That is harmless where
-    /// repacks happen today — pre-tran op ladder and static sweeps, where the
-    /// path integral is either re-seeded or unused — and a mid-TRAN repack
-    /// does not exist (tran mutates no params). ponytail: if one ever does,
-    /// the fix is an instance download-back before repack.
+    /// ponytail: a later `repack` resets device pb/pq to the host's stale
+    /// copies. Harmless today (repacks happen only before a transient or in
+    /// static sweeps); a mid-transient repack would need the instances
+    /// downloaded first.
     fn stateCtlOnGpu(self: *Self, op: device_ir.StateCtlOp) !bool {
         if (comptime backend == null) return false;
         if (self.poisoned) return error.GpuStateReject;
@@ -1233,11 +1003,9 @@ pub const GpuContext = struct {
             });
             launched = true;
         }
-        // Queued ahead of the host walk, like `evalOnGpu` and
-        // `applyLimitsOnGpu`: the flags drain while the CPU hooks run. It also
-        // keeps a failed enqueue on the near side of the host walk — the
-        // `stateCtlHook` fallback re-walks EVERY batch, and the accepted-step
-        // path commit (`pq += wq`) is not idempotent.
+        // Queued before the host walk so it drains meanwhile, and so a failed
+        // enqueue happens before the walk: the fallback re-walks every batch,
+        // and the path commit `pq += wq` is not idempotent.
         if (launched)
             try self.d_flags.downloadAtAsync(self.pin_flags.ptr, 0, 4, &self.stream);
 
@@ -1257,9 +1025,8 @@ pub const GpuContext = struct {
         };
     }
 
-    /// `Circuit.seedJunctions` hook: the host walk runs for EVERY batch (the
-    /// seed writes x, which lives on the host), then each resident lim plane
-    /// is marked for upload at its next launch.
+    /// The `seed_junctions` hook: every batch seeds the host `x`, then each
+    /// resident lim plane is marked for upload before its next launch.
     fn seedJunctionsHook(ctx: *anyopaque, x: []f64) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         Circuit.seedBatches(self.ckt.batches, x);
@@ -1277,11 +1044,12 @@ pub const GpuContext = struct {
         );
     }
 
-    /// Publish authoritative resident device state before an OP dependency is copied.
+    /// Downloads the resident instance, state and lim data into the host
+    /// batches, so dependents copy an OP that matches the device. Fails with
+    /// `error.GpuStateUnavailable` after any fallback, which can leave the two
+    /// sides at different accepted points.
     pub fn syncHostState(self: *Self) !void {
         if (comptime backend == null) return;
-        // A fallback can leave resident and host-private history at different
-        // accepted points. Never publish that uncertainty as a reusable OP.
         if (self.poisoned or self.warned_eval or self.warned_state)
             return error.GpuStateUnavailable;
         try self.stream.synchronize();
@@ -1299,11 +1067,10 @@ pub const GpuContext = struct {
         }
     }
 
-    /// Re-upload the parameter arrays after a sweep mutated them. The tapes are
-    /// pattern and stay put — only `models`/`instances` can have changed.
-    fn repack(ctx: *anyopaque) anyerror!void {
+    /// Re-uploads models and instances after a host parameter change. The
+    /// tapes never change.
+    fn repack(self: *Self) !void {
         if (comptime backend == null) return;
-        const self: *Self = @ptrCast(@alignCast(ctx));
         for (self.batches) |*bg| {
             const p = bg.payload(bg.ctx);
             if (p.models.len > 0) try bg.d_models.upload(p.models.ptr, p.models.len);
@@ -1312,13 +1079,12 @@ pub const GpuContext = struct {
         self.params_dirty = false;
     }
 
-    /// `Circuit.markGpuDirty` lands here: host params changed under us.
     fn markDirty(ctx: *anyopaque) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.params_dirty = true;
     }
 
-    /// What `Circuit.gpu_hook` gets.
+    /// Returns the dispatch table to install as `Circuit.gpu_hook`.
     pub fn hook(self: *Self) GpuHook {
         return .{
             .ctx = self,
@@ -1328,13 +1094,12 @@ pub const GpuContext = struct {
             .clear_limits = clearLimitsHook,
             .seed_junctions = seedJunctionsHook,
             .state_ctl = stateCtlHook,
-            .repack = repack,
             .mark_dirty = markDirty,
         };
     }
 };
 
-// Private implementation access for the analysis test suite.
+/// Private access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .backend = backend,
 } else {};

@@ -1,5 +1,6 @@
-//! One query's mutable numerical state. Prepared topology and requests are
-//! borrowed for its lifetime; accepted OP products are copied before use.
+//! Executor: one query's mutable numerical state and the worker thread that
+//! runs it. Prepared topology and the deck are borrowed; an accepted OP from a
+//! dependency is copied before use. Dispatches to the analysis leaves.
 const std = @import("std");
 const Circuit = @import("device").Circuit;
 const Deck = @import("core").Deck;
@@ -10,21 +11,22 @@ const gpu = @import("gpu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
 const Controller = @import("worker.zig").Worker(types.Result);
 
-// Inputs: a prepared circuit, query and optional accepted OP; output: progress
-// and one retained Result. Cardinality: one controller per active query. All
-// controller fields are cold and used together; numeric planes stay in Circuit.
-// IDs remain in the scheduler; this pinned object's pointers identify callbacks.
-// Work and results have separate query lifetimes. Clones share only immutable
-// topology/tapes; every device history, parameter and solver plane is private.
+/// Per-problem execution settings, shared by every query.
 pub const Config = struct {
     pub const Backend = gpu.Request;
     backend: gpu.Request = .cpu,
+    /// The user named the GPU: bypass the work gate, and fail rather than fall
+    /// back when the machine cannot run it.
     gpu_explicit: bool = false,
     solver_threads: u8 = 1,
+    /// Device-stamp lanes; above 1 each query builds a ParEval.
     device_threads: u32 = 1,
+    /// Print per-query setup and per-checkpoint timing to stderr.
     timing_in_depth: bool = false,
 };
 
+/// Rejects a backend this binary cannot serve (printing what it detected)
+/// and zero thread counts.
 pub fn validateBackend(config: Config) !void {
     if (!gpu.requestSupported(config.backend)) {
         std.debug.print("Error: GPU backend {s} requested; detected artifacts: {s}\n", .{ @tagName(config.backend), gpu.detectedName() });
@@ -33,6 +35,8 @@ pub fn validateBackend(config: Config) !void {
     if (config.solver_threads == 0 or config.device_threads == 0) return error.InvalidThreadCount;
 }
 
+/// One query: its own Circuit instance, work and result arenas, and worker.
+/// Heap-pinned because the worker and the progress callback hold its address.
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -49,6 +53,9 @@ pub const Executor = struct {
 
     pub const Outcome = Controller.Outcome;
 
+    /// Builds the executor without starting it. `initial`, when given, must be
+    /// a completed `.op` query over the same topology; its device state and
+    /// operating point seed this one.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*const Executor, config: Config) !*Executor {
         try validateBackend(config);
         if (initial) |source| {
@@ -105,10 +112,12 @@ pub const Executor = struct {
         self.circuit.ac_params = mapped;
     }
 
+    /// Runs the query up to its next checkpoint or completion, without waiting.
     pub fn start(self: *Executor) !void {
         try self.controller.start();
     }
 
+    /// Waits for the quantum `start` began and publishes a completed result.
     pub fn wait(self: *Executor) !Outcome {
         const outcome = try self.controller.wait();
         if (outcome == .complete) self.published = outcome.complete;
@@ -119,14 +128,17 @@ pub const Executor = struct {
         self.controller.cancel();
     }
 
+    /// Returns the completed result, valid until `destroy`.
     pub fn result(self: *const Executor) ?types.Result {
         return self.published;
     }
 
+    /// Returns the solved operating point of a completed `.op` query.
     pub fn operatingPoint(self: *const Executor) ?[]const f64 {
         return if (self.job == .op and self.published != null) self.x else null;
     }
 
+    /// Cancels and joins the worker, then frees everything the query owns.
     pub fn destroy(self: *Executor) void {
         self.controller.deinit();
         self.circuit.deinit();
@@ -159,7 +171,8 @@ pub const Executor = struct {
             const solved = try op.solve(&self.circuit, self.x.?, self.job.op);
             if (!solved.converged) return error.OpDidNotConverge;
             if (gpu_context) |g| try g.syncHostState();
-            // Host simulation flags are newer than the final device launch.
+            // The OP ladder publishes its own sim state (`initial_step`);
+            // restore the plain one that dependents inherit.
             self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
         } else if (self.job == .tran and self.job.tran.uic) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
@@ -239,13 +252,10 @@ comptime {
         validate(module(@field(requests.Kind, field.name)));
 }
 
-/// Comptime validation: every analysis module is one pure transformation,
-///
-///   run: (*const types.RunCtx, T.Options) !types.Result
-///
-/// Options must carry a `tol: Tolerances` field so preparation can
-/// set accuracy profiles uniformly. Checked by shape so a drifted signature
-/// fails here with a readable error instead of deep in query dispatch.
+/// Checks at comptime that analysis module `T` exposes
+/// `run(*const types.RunCtx, T.Options) !types.Result` and that `Options`
+/// carries `tol: Tolerances`, so a drifted signature fails here with a
+/// readable error instead of deep in dispatch.
 fn validate(comptime T: type) void {
     const name = @typeName(T);
 
