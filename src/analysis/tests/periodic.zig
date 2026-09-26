@@ -439,9 +439,11 @@ const QpssTests = struct {
         }
     }
 
-    test "QPSS: gvProduct matches the scalar sample-major product bit for bit" {
+    test "QPSS: gvProduct over the pattern matches the dense product bit for bit" {
         // nf = 9 and 49 straddle the vector width so both the tiled body and the
         // scalar tail run; each lane must reproduce the ascending-column order.
+        // The oracle is the dense row sum with zeros off the pattern, which
+        // include negative-zero products.
         const alloc = testing.allocator;
         var prng = std.Random.DefaultPrng.init(0x5EED);
         const rnd = prng.random();
@@ -449,8 +451,22 @@ const QpssTests = struct {
         for ([_][2]usize{ .{ 9, 3 }, .{ 49, 13 }, .{ 25, 1 } }) |c| {
             const nf = c[0];
             const n = c[1];
-            const g_td = try alloc.alloc(f64, n * n * nf);
+            // Random pattern with every diagonal, as Circuit.freeze builds.
+            var col_ptr: std.ArrayList(u32) = .empty;
+            defer col_ptr.deinit(alloc);
+            var row_idx: std.ArrayList(u32) = .empty;
+            defer row_idx.deinit(alloc);
+            try col_ptr.append(alloc, 0);
+            for (0..n) |col| {
+                for (0..n) |row| if (row == col or rnd.boolean())
+                    try row_idx.append(alloc, @intCast(row));
+                try col_ptr.append(alloc, @intCast(row_idx.items.len));
+            }
+            const nnz = row_idx.items.len;
+            const g_td = try alloc.alloc(f64, nnz * nf);
             defer alloc.free(g_td);
+            const dense = try alloc.alloc(f64, n * n * nf);
+            defer alloc.free(dense);
             const v_td = try alloc.alloc(f64, n * nf);
             defer alloc.free(v_td);
             const want = try alloc.alloc(f64, n * nf);
@@ -460,16 +476,21 @@ const QpssTests = struct {
 
             for (g_td) |*v| v.* = rnd.float(f64) * 0.02 - 0.01;
             for (v_td) |*v| v.* = rnd.float(f64) * 2000.0 - 1000.0;
+            @memset(dense, 0);
+            for (0..n) |col| for (col_ptr.items[col]..col_ptr.items[col + 1]) |slot| {
+                const row = row_idx.items[slot];
+                @memcpy(dense[(row * n + col) * nf ..][0..nf], g_td[slot * nf ..][0..nf]);
+            };
 
             for (0..nf) |s| {
                 for (0..n) |row| {
                     var acc: f64 = 0;
-                    for (0..n) |col| acc += g_td[(row * n + col) * nf + s] * v_td[col * nf + s];
+                    for (0..n) |col| acc += dense[(row * n + col) * nf + s] * v_td[col * nf + s];
                     want[row * nf + s] = acc;
                 }
             }
-            gvProduct(got, g_td, v_td, n, nf);
-            for (want, got) |e, a| try testing.expectEqual(e, a);
+            gvProduct(got, g_td, v_td, col_ptr.items, row_idx.items, nf);
+            try testing.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
         }
     }
 

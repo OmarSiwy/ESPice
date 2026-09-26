@@ -67,7 +67,7 @@ const OperatorCtx = struct {
 
     /// Time samples of the current iterate, n * nf.
     x_td: []f64,
-    /// Dense G at every sample, (row*n + col) * nf + s.
+    /// G's pattern slots at every sample, slot * nf + s.
     g_td: []f64,
     /// Dense C at sample 0, n * n.
     c_mat: []f64,
@@ -84,8 +84,6 @@ const OperatorCtx = struct {
     basis_sin_t: []f64,
     /// Per-sample eval input, n.
     x_sample: []f64,
-    /// Dense G extraction scratch, n * n.
-    g_buf: []f64,
 
     pub const matvec = jacobianMatvec;
 };
@@ -303,12 +301,7 @@ fn computeResidual(
         // q(t_s) for the charge term; v_td is free until the next matvec.
         for (0..n) |node| ctx.v_td[node * nf + s] = ckt.q_vec[node];
 
-        ckt.denseG(ctx.g_buf[0 .. n * n]);
-        for (0..n) |row| {
-            for (0..n) |col| {
-                ctx.g_td[(row * n + col) * nf + s] = ctx.g_buf[row * n + col];
-            }
-        }
+        for (ckt.g_vals[0..ckt.nnz], 0..) |g, slot| ctx.g_td[slot * nf + s] = g;
 
         if (s == 0) {
             if (ckt.has_charge) {
@@ -349,7 +342,7 @@ fn computeResidual(
 
 /// GMRES matvec: w = DFT(G(t_s) * IDFT(v)) + jW*C*v, stacked real, against
 /// the linearization of the last `computeResidual`.
-/// ponytail: the QPSS hot loop, O(n^2*nf) for the G products plus two
+/// ponytail: the QPSS hot loop, O(nnz*nf) for the G products plus two
 /// O(n*nf^2) transforms per call, all on the CPU. A GPU version would keep
 /// the spectral slab resident and fuse IDFT, the nf batched G*v products and
 /// the DFT into one launch; it needs a gpu_hook entry point for it. Add when
@@ -367,36 +360,34 @@ fn jacobianMatvec(ctx: *OperatorCtx, v: []const f64, w: []f64) void {
 
     idft2D(ctx.v_td, v_re, v_im, ctx.basis_cos_t, ctx.basis_sin_t, n, nf);
 
-    gvProduct(ctx.w_td, ctx.g_td, ctx.v_td, n, nf);
+    gvProduct(ctx.w_td, ctx.g_td, ctx.v_td, ctx.ckt.col_ptr, ctx.ckt.row_idx, nf);
 
     dft2D(w_re, w_im, ctx.w_td, ctx.basis_cos, ctx.basis_sin, n, nf);
 
     addChargeTerms(ctx, v_re, v_im, w_re, w_im);
 }
 
-/// Time-domain Jacobian-vector product w_td[., s] = G(t_s) * v_td[., s].
-/// Samples are contiguous in both g_td and v_td, so W samples ride in one
-/// vector while each lane walks the columns in order. The scalar tail is the
-/// width-one oracle; the test drives both. Overwrites every w_td slot.
-fn gvProduct(w_td: []f64, g_td: []const f64, v_td: []const f64, n: usize, nf: usize) void {
-    for (0..n) |row| {
-        const g_row = g_td[row * n * nf ..][0 .. n * nf];
-        var s: usize = 0;
-        while (s + W <= nf) : (s += W) {
-            var acc: V = @splat(0.0);
-            for (0..n) |col| {
-                const gv: V = g_row[col * nf + s ..][0..W].*;
-                const vv: V = v_td[col * nf + s ..][0..W].*;
-                acc += gv * vv;
+/// Time-domain Jacobian-vector product w_td[., s] = G(t_s) * v_td[., s] over
+/// the CSC pattern; g_td is slot-major, samples contiguous. Each structural
+/// entry is one axpy over its nf samples, W at a time, with the scalar tail
+/// as the width-one oracle. Each row still sums its columns in ascending
+/// order from +0, and an entry outside the pattern could only add ±0, so for
+/// finite v this is bitwise the dense product. Overwrites every w_td slot.
+fn gvProduct(w_td: []f64, g_td: []const f64, v_td: []const f64, col_ptr: []const u32, row_idx: []const u32, nf: usize) void {
+    simdZero(w_td);
+    for (0..col_ptr.len - 1) |col| {
+        const vc = v_td[col * nf ..][0..nf];
+        for (col_ptr[col]..col_ptr[col + 1]) |slot| {
+            const g = g_td[slot * nf ..][0..nf];
+            const w = w_td[@as(usize, row_idx[slot]) * nf ..][0..nf];
+            var s: usize = 0;
+            while (s + W <= nf) : (s += W) {
+                const gv: V = g[s..][0..W].*;
+                const vv: V = vc[s..][0..W].*;
+                const wv: V = w[s..][0..W].*;
+                w[s..][0..W].* = wv + gv * vv;
             }
-            w_td[row * nf + s ..][0..W].* = acc;
-        }
-        while (s < nf) : (s += 1) {
-            var acc: f64 = 0;
-            for (0..n) |col| {
-                acc += g_row[col * nf + s] * v_td[col * nf + s];
-            }
-            w_td[row * nf + s] = acc;
+            while (s < nf) : (s += 1) w[s] += g[s] * vc[s];
         }
     }
 }
@@ -432,7 +423,7 @@ inline fn addChargeTerms(
 
 /// Newton with unpreconditioned GMRES from X = 0; the deck's sources drive
 /// the residual. The caller owns spectra_re/spectra_im, probes.len * nf each,
-/// probe-major in MixGrid order. Memory is O(n^2 * nf) for the dense G samples.
+/// probe-major in MixGrid order. Memory is O(nnz * nf) for the G samples.
 pub fn solve(
     ckt: *root.Circuit,
     probes: []const u32,
@@ -442,6 +433,7 @@ pub fn solve(
     allocator: std.mem.Allocator,
 ) !SolveResult {
     const n: usize = ckt.n;
+    const nnz: usize = ckt.nnz;
     const grid = MixGrid.init(options.k1, options.k2);
     const nf = grid.nf;
     const total_re = n * nf;
@@ -454,15 +446,14 @@ pub fn solve(
         n * nf + // x_td
         n * nf + // v_td
         n * nf + // w_td
-        n * n * nf + // g_td
+        nnz * nf + // g_td
         n * n + // c_mat
         nf * nf + // basis_cos
         nf * nf + // basis_sin
         nf * nf + // basis_cos_t
         nf * nf + // basis_sin_t
         nf + // times
-        n + // x_sample
-        n * n; // g_buf
+        n; // x_sample
 
     const arena = try allocator.alloc(f64, arena_size);
     defer allocator.free(arena);
@@ -480,8 +471,8 @@ pub fn solve(
     off += n * nf;
     const w_td = arena[off..][0 .. n * nf];
     off += n * nf;
-    const g_td = arena[off..][0 .. n * n * nf];
-    off += n * n * nf;
+    const g_td = arena[off..][0 .. nnz * nf];
+    off += nnz * nf;
     const c_mat = arena[off..][0 .. n * n];
     off += n * n;
     const basis_cos = arena[off..][0 .. nf * nf];
@@ -496,8 +487,6 @@ pub fn solve(
     off += nf;
     const x_sample = arena[off..][0..n];
     off += n;
-    const g_buf = arena[off..][0 .. n * n];
-    off += n * n;
     std.debug.assert(off == arena_size);
 
     simdZero(x_hat);
@@ -529,7 +518,6 @@ pub fn solve(
         .basis_cos_t = basis_cos_t,
         .basis_sin_t = basis_sin_t,
         .x_sample = x_sample,
-        .g_buf = g_buf,
     };
 
     // No preconditioner: solver/preconditioner.zig's block-diagonal form is
