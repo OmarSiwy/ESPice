@@ -1,6 +1,4 @@
 * Nonlinear HB spectrum from an independent settled time-domain solution
-* KNOWN GAP: HB does not yet drive the solve from the physical source waveforms and amplitudes.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: diode_rectifier_rc.expected.json
 Vin in 0 SIN(0 2 1k)
 Rsrc in a 100
