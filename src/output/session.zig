@@ -1,6 +1,5 @@
-//! Ordered, idempotent delivery of whole plots to one output selection. The
-//! caller numbers plots with consecutive ordinals, independent of query ids,
-//! and keeps each result alive until `publish` acknowledges it.
+//! Delivery of whole plots to one output selection, in publish order. The
+//! caller keeps each result alive until `publish` returns.
 //! ponytail: whole plots only; add chunked delivery when a writer can frame it.
 const std = @import("std");
 const types = @import("types.zig");
@@ -10,7 +9,7 @@ const dispatch = @import("write.zig");
 pub const Session = struct {
     allocator: std.mem.Allocator,
     selection: types.Selection,
-    /// Plots delivered so far, which is also the next expected ordinal.
+    /// Plots delivered so far; the next one is plot number `published`.
     /// At most maxInt(u32) plots, numbered 0 through maxInt(u32) - 1.
     published: u32 = 0,
     /// `failed` after a writer error; every later call reports it.
@@ -32,18 +31,16 @@ pub const Session = struct {
         self.* = undefined;
     }
 
-    /// Writes plot `ordinal`. Ordinal 0 writes `path`; later ones append to it
+    /// Writes the next plot. Plot 0 writes `path`; later ones append to it
     /// for binary and ASCII raw and `.print` listings, and go to
-    /// `path.<ordinal + 1>` for every other format.
-    /// An already acknowledged ordinal is a no-op. A gap (`OutOfOrder`) or an
-    /// invalid plot fails before any I/O. A writer error is terminal
+    /// `path.<number + 1>` for every other format. An invalid plot fails
+    /// before any I/O and is not counted. A writer error is terminal
     /// (`DeliveryFailed` from then on): a partial append cannot be replayed.
-    pub fn publish(self: *Session, io: std.Io, ordinal: u32, plot: types.Plot) !void {
+    pub fn publish(self: *Session, io: std.Io, plot: types.Plot) !void {
         if (self.state == .failed) return error.DeliveryFailed;
-        if (ordinal < self.published) return;
-        if (ordinal != self.published) return error.OutOfOrder;
         if (self.published == std.math.maxInt(u32)) return error.TooManyPlots;
         try types.validatePlot(self.selection.format, plot);
+        const ordinal = self.published;
 
         if (self.selection.path) |path| {
             const appends = dispatch.concatenates(self.selection.format);
@@ -72,7 +69,7 @@ pub const Session = struct {
     }
 };
 
-test "session: finish and repeated publication preserve raw append order" {
+test "session: finish and later publication preserve raw append order" {
     for ([_]types.Format{ .binary, .ascii }) |format| {
         const io = std.testing.io;
         const a = std.testing.allocator;
@@ -92,14 +89,13 @@ test "session: finish and repeated publication preserve raw append order" {
                 .data = &.{1},
             },
         };
-        try session.publish(io, 0, first);
+        try session.publish(io, first);
         try session.finish();
         const initial = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
         defer a.free(initial);
-        try session.publish(io, 0, first);
         var second = first;
         second.result.plotname = "second";
-        try session.publish(io, 1, second);
+        try session.publish(io, second);
         try session.finish();
         const complete = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
         defer a.free(complete);
@@ -109,7 +105,7 @@ test "session: finish and repeated publication preserve raw append order" {
     }
 }
 
-test "session: owned destination, numbered files and order validation" {
+test "session: owned destination and numbered files" {
     const io = std.testing.io;
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -129,10 +125,9 @@ test "session: owned destination, numbered files and order validation" {
             .data = &.{1},
         },
     };
-    try std.testing.expectError(error.OutOfOrder, session.publish(io, 1, plot));
-    try session.publish(io, 0, plot);
+    try session.publish(io, plot);
     try session.finish();
-    try session.publish(io, 1, plot);
+    try session.publish(io, plot);
     try session.finish();
     const first = try tmp.dir.readFileAlloc(io, "plots.csv", a, .unlimited);
     defer a.free(first);
@@ -161,12 +156,12 @@ test "session: validation preserves destination and permits a corrected publicat
             .data = &.{ 1e9, 0, 1, 0 },
         },
     };
-    try std.testing.expectError(error.NotSParameterData, session.publish(io, 0, plot));
+    try std.testing.expectError(error.NotSParameterData, session.publish(io, plot));
     const old = try tmp.dir.readFileAlloc(io, "plot.s1p", a, .unlimited);
     defer a.free(old);
     try std.testing.expectEqualStrings("existing", old);
     plot.result.varnames = &.{ "frequency", "S(1,1)" };
-    try session.publish(io, 0, plot);
+    try session.publish(io, plot);
     try session.finish();
 }
 
@@ -189,8 +184,8 @@ test "session: writer failure is terminal and does not acknowledge output" {
             .data = &.{1},
         },
     };
-    try std.testing.expectError(error.FileNotFound, session.publish(io, 0, plot));
+    try std.testing.expectError(error.FileNotFound, session.publish(io, plot));
     try std.testing.expectEqual(@as(u32, 0), session.published);
-    try std.testing.expectError(error.DeliveryFailed, session.publish(io, 0, plot));
+    try std.testing.expectError(error.DeliveryFailed, session.publish(io, plot));
     try std.testing.expectError(error.DeliveryFailed, session.finish());
 }

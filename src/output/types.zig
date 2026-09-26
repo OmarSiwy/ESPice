@@ -110,9 +110,10 @@ pub fn validatePlot(format: Format, plot: Plot) ValidationError!void {
         return error.FormatLimitExceeded;
 }
 
-/// Refuses, before it runs, a query whose result `format` cannot encode.
+/// Refuses, before it runs, a query whose result `format` cannot encode
+/// under the deck's `title` and `probe_labels`.
 /// `NoPorts`: a Touchstone or CITI request for an `.sp` with no ports.
-pub fn validateQuery(format: Format, query: core.QuerySchema, deck: *const core.Deck) error{ NotSParameterData, NoPorts, DataLengthMismatch, FormatLimitExceeded }!void {
+pub fn validateQuery(format: Format, query: core.QuerySchema, title: []const u8, probe_labels: []const []const u8) error{ NotSParameterData, NoPorts, DataLengthMismatch, FormatLimitExceeded }!void {
     if (format == .touchstone or format == .citi) {
         if (query.kind != .sp) return error.NotSParameterData;
         if (query.portless) return error.NoPorts;
@@ -121,8 +122,8 @@ pub fn validateQuery(format: Format, query: core.QuerySchema, deck: *const core.
     if (query.columns == 0) return error.DataLengthMismatch;
     if (format == .sst2 and query.columns > 64) return error.FormatLimitExceeded;
     if (format == .fsdb) {
-        if (query.columns > std.math.maxInt(u32) or deck.title.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
-        for (deck.probe_labels) |label| if (label.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
+        if (query.columns > std.math.maxInt(u32) or title.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
+        for (probe_labels) |label| if (label.len > std.math.maxInt(u16)) return error.FormatLimitExceeded;
     }
 }
 
