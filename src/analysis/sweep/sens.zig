@@ -1,49 +1,22 @@
-//! Adjoint DC sensitivity: one nominal OP solve + one transpose solve →
-//! per-parameter cost is a single RHS eval + dot product, not a full Newton.
-//!
-//! Algorithm:
-//!   1. Nominal OP solve → x_op, Jacobian J stays factored in workspace
-//!   2. Adjoint solve: J^T · λ = e_out  (one transpose back-sub)
-//!   3. Per parameter p:
-//!      a. perturb p, re-eval F(x_op) → rhs_pert
-//!      b. dF/dp ≈ (rhs_pert - rhs_nom) / delta   (FD on RHS only)
-//!      c. dy/dp = -λ^T · dF/dp                    (one dot product)
-//!
-//! Cost: O(nnz + N_params * n) vs old O(N_params * Newton_iters * nnz).
+//! Adjoint DC sensitivity (`.sens`): one factorization at the operating point
+//! and one transpose solve give λ (J^T λ = e_out). Each parameter then costs
+//! one re-eval of F(x_op) and a dot product, dy/dp = -λ^T · dF/dp with dF/dp
+//! a forward difference, instead of a Newton solve per parameter.
 const std = @import("std");
 const root = @import("../types.zig");
-const converger = @import("solver").converger;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-pub const SensParam = struct {
-    ptr: root.ParamRef,
-    device_name: []const u8,
-    param_name: []const u8,
-};
-
-pub const SensEntry = struct {
-    device_name: []const u8,
-    param_name: []const u8,
-    sensitivity: f64,
-    /// ngspice's three column spellings hang off these two (cktsens.c:224-238).
-    is_instance: bool = true,
-    principal: bool = false,
-};
-
+/// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Sens;
 
 const copySimd = root.copySimd;
 
-/// λ^T · dF/dp with the difference fused in: dF/dp = (pert - nom) * inv_delta
-/// never leaves registers, so there is no n-element scratch and no reload.
-/// Grouping, lane width, the explicit left-to-right lane fold and the scalar
-/// tail are the ones the separate dot used. dcmatch's per-block `@reduce`
-/// reduction order is deliberately different and must not be substituted here.
+/// λ^T · (pert - nom) · inv_delta with the difference fused into the dot, so
+/// no n-element scratch is written or reloaded. The lane width, the
+/// left-to-right fold of the accumulator and the scalar tail fix the
+/// summation order; dcmatch's per-block `@reduce` order differs and must not
+/// be substituted here.
 inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
     const n = lambda.len;
     const V = @Vector(W, f64);
@@ -56,8 +29,6 @@ inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, in
         const rn: V = nom[i..][0..W].*;
         acc += lv * ((rp - rn) * id);
     }
-    // ponytail: reduce SIMD accumulator to scalar via array extract
-    // (@reduce would work but this is explicit and portable)
     const arr: [W]f64 = acc;
     var s: f64 = 0;
     for (arr) |v| s += v;
@@ -65,173 +36,123 @@ inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, in
     return s;
 }
 
-// ---------------------------------------------------------------------------
-// Core solver — adjoint method
-// ---------------------------------------------------------------------------
-
-/// Adjoint DC sensitivity: nominal solve → transpose solve → per-parameter
-/// RHS perturbation + dot product.
+/// dV(output_node, output_neg)/dp for each of `params` at `x_op`, parallel to
+/// `params` and owned by `allocator`. `x_op` is the executor's operating point
+/// (the full OP ladder; a plain Newton here fails on circuits that need
+/// stepping). Each parameter is restored before the next. Returns
+/// error.ZeroDelta when a parameter's step rounds away entirely.
 ///
-/// No `computeBaseline()`: the baseline would freeze const-Jacobian stamps
-/// (resistors) and mask the very perturbations being measured.
+/// No `computeBaseline()`: the baseline would freeze the const-Jacobian
+/// stamps (resistors) and mask the very perturbations being measured.
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,
-    params: []const SensParam,
+    params: []const root.ParamRef,
     output_node: u32,
     output_neg: u32,
     allocator: std.mem.Allocator,
-) ![]SensEntry {
+) ![]f64 {
     const n: usize = ckt.n;
     const ws = try ckt.workspace();
 
-    // -- 1. Nominal OP: the executor's, which ran the full OP ladder (a cold
-    // plain Newton here failed on circuits whose OP needs gmin or source
-    // stepping). Nominal F(x_op) and the Jacobian at x_op.
     ckt.evalNewton(x_op, 0);
     const rhs_nom = try allocator.alloc(f64, n);
     defer allocator.free(rhs_nom);
     copySimd(rhs_nom, ckt.rhs[0..n]);
     try ws.slv.factor(ckt.g_vals);
 
-    // -- 2. Adjoint solve: J^T · λ = e_out --
     const lambda = try allocator.alloc(f64, n);
     defer allocator.free(lambda);
     root.zeroSimd(lambda);
     lambda[output_node] = 1.0;
-    // `v(a,b)`: the adjoint seed is the node DIFFERENCE.
+    // `v(a,b)`: the adjoint seed is the node difference.
     if (output_neg != root.GROUND) lambda[output_neg] = -1.0;
     ws.slv.solveT(lambda, lambda);
 
-    // -- 3. Per-parameter: perturb, re-eval RHS, FD + adjoint dot --
-    const entries = try allocator.alloc(SensEntry, params.len);
-    errdefer allocator.free(entries);
+    const sens = try allocator.alloc(f64, params.len);
+    errdefer allocator.free(sens);
 
-    for (params, entries, 0..) |p, *entry, index| {
+    for (params, sens, 0..) |p, *out, index| {
         if (index != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = index, .total = params.len });
-        const orig: f64 = p.ptr.get();
+        const orig: f64 = p.get();
         const delta_req = 1e-6 * @abs(orig) + 1e-12;
 
-        // Write the perturbed value, then read it BACK: an f32-typed parameter
-        // rounds the step, and differencing against the requested delta instead
-        // of the stored one is a wrong derivative, not a small one.
         // Only this parameter moves and temperature does not, so re-deriving
         // its own device type is the whole recompute (Circuit.recomputeType).
-        p.ptr.set(orig + delta_req);
+        p.set(orig + delta_req);
         defer {
-            p.ptr.set(orig);
-            ckt.recomputeType(p.ptr.type) catch unreachable; // restores the checked original parameter
+            p.set(orig);
+            ckt.recomputeType(p.type) catch unreachable; // restores the checked original parameter
         }
-        // A parameter whose NOMINAL value collapses an internal node (gummel_poon
-        // RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the +1e-12 floor in
-        // `delta_req`: `collapse` stops folding c' onto c, the builder never
-        // allocated a distinct c', and the batch reports TopologyChanged. The
-        // derivative is not small there, it is not REPRESENTABLE — the
-        // perturbed circuit has a node the frozen matrix pattern does not.
-        // Report 0 rather than failing the whole analysis; ngspice's sens
-        // never perturbs a topology parameter at all (cktsens.c drives the
-        // per-device analytic sensitivity routines, not a generic FD).
-        ckt.recomputeType(p.ptr.type) catch |e| switch (e) {
+        // A parameter whose nominal value collapses an internal node
+        // (gummel_poon RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the
+        // +1e-12 floor in `delta_req`: `collapse` stops folding c' onto c, the
+        // builder never allocated a distinct c', and the batch reports
+        // TopologyChanged. The perturbed circuit has a node the frozen pattern
+        // lacks, so the derivative is not representable; report 0 rather than
+        // fail the analysis. ngspice never perturbs a topology parameter
+        // (cktsens.c uses per-device analytic sensitivities, not a generic FD).
+        ckt.recomputeType(p.type) catch |e| switch (e) {
             error.TopologyChanged => {
-                entry.* = .{
-                    .device_name = p.device_name,
-                    .param_name = p.param_name,
-                    .sensitivity = 0,
-                    .is_instance = p.ptr.is_instance,
-                    .principal = p.ptr.primary,
-                };
+                out.* = 0;
                 continue;
             },
         };
 
-        const delta = p.ptr.get() - orig;
+        // Difference against the step actually stored: an f32 parameter
+        // rounds it, and the requested delta would give a wrong derivative,
+        // not a small one.
+        const delta = p.get() - orig;
         if (delta == 0) return error.ZeroDelta;
 
-        // Evaluate F(x_op) with perturbed parameter (RHS only, no Newton).
         ckt.evalNewton(x_op, 0);
-
-        // dy/dp = -λ^T · (rhs_pert - rhs_nom) / delta
-        entry.* = .{
-            .device_name = p.device_name,
-            .param_name = p.param_name,
-            .sensitivity = -adjointFd(lambda[0..n], ckt.rhs[0..n], rhs_nom, 1.0 / delta),
-            .is_instance = p.ptr.is_instance,
-            // NOT gated on is_instance: ngspice's IF_PRINCIPAL flag lives on
-            // the instance parameter table, but VerA puts every Verilog-A
-            // `parameter` on Model, so `primary` is where that flag ended up.
-            .principal = p.ptr.primary,
-        };
+        out.* = -adjointFd(lambda[0..n], ckt.rhs[0..n], rhs_nom, 1.0 / delta);
     }
 
-    return entries;
+    return sens;
 }
 
-// ---------------------------------------------------------------------------
-// Contract entry: run(*const RunCtx, Options) !Result
-// ---------------------------------------------------------------------------
-
-/// Every collected device parameter becomes one column, one row of dVout/dp.
-/// Column naming is ngspice's, cktsens.c:224-238:
+/// Contract entry: one real point, one column per collected device parameter
+/// holding dVout/dp. Columns carry ngspice's names (cktsens.c:224-238):
 ///   model parameter                  -> `<card>:<param>`   (r1:tc1)
 ///   principal instance parameter     -> `<card>`           (r1)
 ///   any other instance parameter     -> `<card>_<param>`   (r1_scale)
-/// Name strings live on the run arena.
+/// The output defaults to the last probe.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
+    const scratch = ctx.scratch_allocator;
     const output_node = opts.output_node orelse blk: {
         if (ctx.probes.len == 0) return error.NoOutputNode;
         break :blk ctx.probes[ctx.probes.len - 1];
     };
 
-    // `defer`-freed == scratch; `a` is a results arena. The per-column names
-    // built from `entries` below stay on `a` — they ARE the Result. See
-    // RunCtx.scratch_allocator.
-    const scratch = ctx.scratch_allocator;
     const refs = try ctx.circuit.collectParams();
-    const params = try scratch.alloc(SensParam, refs.len);
-    defer scratch.free(params);
+    const sens = try solve(ctx.circuit, ctx.x_op, refs, output_node, opts.output_neg, scratch);
+    defer scratch.free(sens);
 
-    // Track formatted names so we can free on mid-loop failure.
-    var n_named: usize = 0;
-    defer for (params[0..n_named]) |p| scratch.free(p.device_name);
-
-    for (refs, params) |ref, *p| {
-        p.* = .{
-            .ptr = ref,
-            .device_name = if (root.CardRef.lookup(opts.cards, ref.type, ref.index)) |card|
-                try scratch.dupe(u8, card)
-            else
-                try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ctx.circuit.typeName(ref.type), ref.index }),
-            .param_name = ref.param_name,
-        };
-        n_named += 1;
-    }
-
-    const entries = try solve(ctx.circuit, ctx.x_op, params, output_node, opts.output_neg, scratch);
-    defer scratch.free(entries);
-
-    const names = try a.alloc([]const u8, entries.len);
+    const names = try a.alloc([]const u8, refs.len);
     errdefer a.free(names);
-    const data = try a.alloc(f64, entries.len);
-    errdefer a.free(data);
-
     var done: usize = 0;
     errdefer for (names[0..done]) |s| a.free(s);
-    for (entries, names, data) |e, *name, *out| {
-        // The `v(...)` wrapper is ngspice's, not decoration: cktsens.c hands
-        // the raw writer a UID_OTHER name, which types as a voltage, so the
-        // file spells the column `v(r1)`. Without it nothing keyed off an
-        // ngspice sens raw finds the column.
-        name.* = if (e.principal)
-            try std.fmt.allocPrint(a, "v({s})", .{e.device_name})
+    for (refs, names) |ref, *name| {
+        const card = root.CardRef.lookup(opts.cards, ref.type, ref.index);
+        const dev = card orelse try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ctx.circuit.typeName(ref.type), ref.index });
+        defer if (card == null) scratch.free(dev);
+        // `primary` rather than is_instance: ngspice's IF_PRINCIPAL flag lives
+        // on the instance parameter table, but VerA puts every Verilog-A
+        // `parameter` on Model, so `primary` is where that flag ends up. The
+        // `v(...)` wrapper is ngspice's too: cktsens.c hands the raw writer a
+        // UID_OTHER name, which types as a voltage, so readers of an ngspice
+        // raw look the column up as `v(r1)`.
+        name.* = if (ref.primary)
+            try std.fmt.allocPrint(a, "v({s})", .{dev})
         else
-            try std.fmt.allocPrint(a, "v({s}{s}{s})", .{ e.device_name, if (e.is_instance) "_" else ":", e.param_name });
+            try std.fmt.allocPrint(a, "v({s}{s}{s})", .{ dev, if (ref.is_instance) "_" else ":", ref.param_name });
         done += 1;
-        out.* = e.sensitivity;
     }
+    const data = try a.dupe(f64, sens);
 
     return .{
-        // ngspice opens the plot as "Sensitivity Analysis".
         .plotname = "Sensitivity Analysis",
         .varnames = names,
         .is_complex = false,
@@ -240,7 +161,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .W = W,
     .adjointFd = adjointFd,
