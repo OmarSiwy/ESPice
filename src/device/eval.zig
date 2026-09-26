@@ -910,11 +910,25 @@ pub fn ProtoStore(comptime D: type) type {
 // (its contract has no slot for host-only decls yet).
 fn hasAbsdelayState(comptime D: type) bool {
     if (@hasDecl(D, "unrevertible_state")) return D.unrevertible_state;
+    return hasInstanceField(D, "__absdelay__", false);
+}
+
+/// Whether D holds a §5.10 variable across evaluations with no VerA `__acc`
+/// accepted copy, so `stateCtl(.revert)` cannot take its write back.
+fn hasUnrevertibleHeld(comptime D: type) bool {
+    return hasInstanceField(D, "__held__", true);
+}
+
+/// Whether some Instance field of D contains `infix`; with `uncopied`, only
+/// fields without an `__acc` accepted copy count.
+fn hasInstanceField(comptime D: type, comptime infix: []const u8, comptime uncopied: bool) bool {
     if (!@hasDecl(D, "Instance")) return false;
     // hisim Instances have hundreds of long field names.
     @setEvalBranchQuota(2_000_000);
-    for (@typeInfo(D.Instance).@"struct".fields) |f| {
-        if (std.mem.indexOf(u8, f.name, "__absdelay__") != null) return true;
+    inline for (@typeInfo(D.Instance).@"struct".fields) |f| {
+        if (std.mem.indexOf(u8, f.name, infix) != null and
+            !(uncopied and (std.mem.endsWith(u8, f.name, "__acc") or @hasField(D.Instance, f.name ++ "__acc"))))
+            return true;
     }
     return false;
 }
@@ -974,10 +988,11 @@ pub fn DeviceBatch(comptime D: type) type {
             .check_convergence = if (@hasDecl(D, "checkConvergence")) checkConvergence else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
-            // Unrevertible history runs once per accepted step; everything
-            // else per iteration. See `Hooks.commit_state`.
-            .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D)) updateState else null,
+            // Unrevertible state runs once per accepted point; everything
+            // else per converged solve. See `Hooks.commit_state`.
+            .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and !hasUnrevertibleHeld(D)) updateState else null,
             .commit_state = if (@hasDecl(D, "updateState") and hasAbsdelayState(D)) updateState else null,
+            .commit_held = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and hasUnrevertibleHeld(D)) updateState else null,
             .state_ctl = if (@hasDecl(D, "stateCtl")) stateCtl else null,
             // Only `updateState` writes `bound_step`.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step")) boundStep else null,
@@ -1120,7 +1135,7 @@ pub fn DeviceBatch(comptime D: type) type {
         /// Runs `D.updateState` on every instance at `x` and returns the
         /// earliest time any of them asks the step to be rejected at, if any.
         /// Called once per converged solve (or per accepted step for
-        /// `commit_state`), not per Newton iteration.
+        /// `commit_state`/`commit_held`), not per Newton iteration.
         fn updateState(ctx: *anyopaque, x: []const f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var min_reject: ?f64 = null;
@@ -1458,6 +1473,9 @@ pub fn DeviceBatch(comptime D: type) type {
 ///   `checkConvergence`);
 /// - `core_reads_simstate` cores, since sim state is published to the host
 ///   copy only;
+/// - unrevertible held variables (`hasUnrevertibleHeld`), which
+///   `StateKernel` would latch at every converged solve instead of once per
+///   accepted point;
 /// - `State` without `limit` (sources and FSMs whose eval reads host-owned
 ///   per-attempt state).
 /// `State` with `limit` is the path-latch pattern that `StateKernel` and
@@ -1468,6 +1486,7 @@ pub fn DeviceBatch(comptime D: type) type {
 fn gpuEligible(comptime D: type) bool {
     if (@hasDecl(D, "mutable_eval") and D.mutable_eval) return false;
     if (@hasDecl(D, "beginSolve") or @hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
+    if (hasUnrevertibleHeld(D)) return false;
     return !@hasDecl(D, "core_reads_simstate") and
         (@hasDecl(D, "limit") or !@hasDecl(D, "State"));
 }

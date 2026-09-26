@@ -570,11 +570,20 @@ pub const Circuit = struct {
         return updateBatches(self.batches, x);
     }
 
-    /// Accepted-step half of `updateStates`: devices whose state is not
-    /// revertible (no `stateCtl`) and so must not be written speculatively.
-    /// The transient calls this exactly once per accepted point.
+    /// Accepted-point half of `updateStates`: devices whose state
+    /// `stateCtl(.revert)` cannot restore, so it must not be written
+    /// speculatively. The transient calls this once per accepted point,
+    /// before `stateCtl(.commit)`.
     pub fn commitStates(self: *const Circuit, x: []const f64) ?f64 {
-        return minReject(self.batches, "commit_state", x);
+        const a = minReject(self.batches, "commit_state", x);
+        const b = self.commitHeld(x);
+        return if (a != null and b != null) @min(a.?, b.?) else a orelse b;
+    }
+
+    /// The held-variable part of `commitStates`, for the operating point,
+    /// where no `absdelay` ring may be pushed.
+    pub fn commitHeld(self: *const Circuit, x: []const f64) ?f64 {
+        return minReject(self.batches, "commit_held", x);
     }
 
     /// Commits, reverts or queries the accepted device state (switch FSMs,

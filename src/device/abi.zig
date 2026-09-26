@@ -159,14 +159,20 @@ pub const Hooks = struct {
     check_convergence: ?*const fn (*anyopaque, []const f64) bool = null,
     seed: ?*const fn (*anyopaque, []f64) void = null,
     mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
-    /// Runs `updateState` at x once per Newton iteration; returns the earliest
-    /// requested rejection time, if any.
+    /// Runs `updateState` at x once per converged solve; returns the earliest
+    /// requested rejection time, if any. Only for state that
+    /// `state_ctl(.revert)` restores when the step is rejected.
     update_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
-    /// `update_state` for devices whose state cannot be rolled back
-    /// (`absdelay` history): called once per accepted step instead. Pushing
-    /// on every Newton attempt would fill the delay ring with rejected
-    /// iterates, and the delay would read back the newest sample.
+    /// `update_state` for `absdelay` history, which cannot be rolled back:
+    /// called once per accepted transient point instead, before
+    /// `state_ctl(.commit)`. Pushing on every Newton attempt would fill the
+    /// delay ring with rejected iterates.
     commit_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
+    /// `update_state` for held variables with no accepted copy to revert to:
+    /// called once per accepted point, the operating point included, before
+    /// `state_ctl(.commit)`. Per solve it would latch an iterate, or a solve
+    /// the step then rejected.
+    commit_held: ?*const fn (*anyopaque, []const f64) ?f64 = null,
     state_ctl: ?*const fn (*anyopaque, StateCtlOp) bool = null,
     /// Sets every instance's temperature, in Celsius.
     set_temp: ?*const fn (*anyopaque, f32) void = null,
