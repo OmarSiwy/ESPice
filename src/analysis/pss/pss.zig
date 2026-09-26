@@ -176,13 +176,14 @@ const ShootingKrylovCtx = struct {
     x_end_pert: []f64,
     options: Options,
     n: usize,
+
+    pub const matvec = shootingMatvec;
 };
 
 /// w = (Phi - I) v by one FD period integration:
 /// w = (phi(x0 + eps*v) - phi(x0)) / eps. A failed integration returns
 /// w = 0, which GMRES treats as a null direction.
-fn shootingMatvec(v: []const f64, w: []f64, ctx_ptr: *anyopaque) void {
-    const ctx: *ShootingKrylovCtx = @ptrCast(@alignCast(ctx_ptr));
+fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
     const n = ctx.n;
     const inv_eps = 1.0 / ctx.options.fd_epsilon;
 
@@ -289,16 +290,7 @@ fn krylovSolve(
 
     simdZero(dx0[0..n]);
 
-    _ = krylov.solve(
-        &shootingMatvec,
-        @ptrCast(&ctx),
-        null,
-        null,
-        neg_phi[0..n],
-        dx0[0..n],
-        options.gmres_tol,
-        options.gmres_max_restarts,
-    );
+    _ = krylov.solve(&ctx, neg_phi[0..n], dx0[0..n], options.gmres_tol, options.gmres_max_restarts);
 }
 
 /// Shooting Newton from x_dc. A non-empty `wave`, sized
