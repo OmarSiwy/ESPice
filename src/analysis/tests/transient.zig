@@ -1,13 +1,10 @@
+//! Transient-family unit tests: envelope, matex, tran and tran_noise.
+
 const EnvelopeTests = struct {
     const impl = @import("../tran/envelope.zig");
     const Options = @import("core").query.Envelope;
     const maxPoints = impl.maxPoints;
     const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
 
     test "envelope: maxPoints monotone in max_outer_steps" {
@@ -16,15 +13,10 @@ const EnvelopeTests = struct {
         var opts2 = base;
         opts2.max_outer_steps = 100;
         const mp2 = maxPoints(opts2);
-        // Fewer allowed steps → fewer max points
         try testing.expect(mp2 <= mp1);
     }
 
-    test "envelope: coarseAdvance duration tracking uses actual dt" {
-        // Regression: old code used t_elapsed += dt_coarse instead of dt,
-        // which could skip the final partial step. Verified by the fix in
-        // coarseAdvance using dt (the clamped value) for the accumulator.
-        // This test just validates the maxPoints helper doesn't overflow.
+    test "envelope: maxPoints leaves room for DC and one step" {
         const opts: Options = .{
             .t_carrier = 1e-6,
             .t_stop = 1e-3,
@@ -41,11 +33,6 @@ const MatexTests = struct {
     const denseMatMul = impl.test_access.denseMatMul;
     const expmSmall = impl.test_access.expmSmall;
     const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
 
     test "expmSmall: identity" {
@@ -192,10 +179,6 @@ const TranTests = struct {
     const root = @import("../types.zig");
     const simulate = impl.simulate;
     const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
     const testing = std.testing;
 
     test "waveform: doubling fallback keeps probe-major data intact" {
@@ -309,13 +292,13 @@ const TranTests = struct {
         const dt: f64 = 1e-9;
         try testing.expectApproxEqRel(@as(f64, 1e9), integrator.coeffs(.backward_euler, dt, dt).ag0, 1e-12);
         try testing.expectApproxEqRel(@as(f64, 2e9), integrator.coeffs(.trapezoidal, dt, dt).ag0, 1e-12);
-        // r == 1 must reproduce the uniform-step triple that used to be hardcoded.
+        // r == 1 must reproduce the uniform-step BDF2 triple.
         const u = integrator.coeffs(.gear_2, dt, dt);
         try testing.expectApproxEqRel(@as(f64, 1.5e9), u.ag0, 1e-12);
         try testing.expectApproxEqRel(@as(f64, 0.5e9), u.ag2, 1e-12);
-        // Consistency on a NON-uniform grid is the whole point: the corrector must
-        // be exact on constants (sum of coefficients zero, ag1 = -(ag0+ag2)) and on
-        // the linear ramp q(t) = t through the actual node spacing 0, dt1, dt1+dt.
+        // On a non-uniform grid the corrector must be exact on constants (sum of
+        // coefficients zero, ag1 = -(ag0+ag2)) and on the ramp q(t) = t through
+        // the node spacing 0, dt1, dt1+dt.
         for ([_]f64{ 0.25, 0.5, 1.0, 2.0, 4.0 }) |r| {
             const dt1 = dt / r;
             const c = integrator.coeffs(.gear_2, dt, dt1);
@@ -323,18 +306,15 @@ const TranTests = struct {
             // q0 = 0, q1 = -dt, q2 = -(dt+dt1) as offsets from t_n: dq/dt == 1.
             const dqdt = c.ag0 * 0.0 + ag1 * (-dt) + c.ag2 * (-(dt + dt1));
             try testing.expectApproxEqRel(@as(f64, 1.0), dqdt, 1e-12);
-            // and exact on the quadratic too — BDF2 is a 3-point formula, exact
-            // through degree 2, so d/dt(t^2) at t_n must come out 0. The surviving
-            // terms are each O(dt) = 1e-9, so the tolerance below is rounding noise
-            // and not a free pass: 1e-6/dt would have accepted anything.
+            // BDF2 is exact through degree 2, so d/dt(t^2) at t_n is 0. The
+            // surviving terms are O(dt) = 1e-9, so 1e-22 is rounding noise.
             const sq = c.ag0 * 0.0 + ag1 * (dt * dt) + c.ag2 * ((dt + dt1) * (dt + dt1));
             try testing.expectApproxEqAbs(@as(f64, 0.0), sq, 1e-22);
         }
     }
 
-    // cktterr.c:24-34 verbatim. gear_2 used to read trapCoeff[1] (1/12), which is
-    // 8/3 smaller and — through the sqrt at order 2 — a 1.63x LOOSER dt bound than
-    // GEAR's own error control asks for. Pin all three against the C tables.
+    // Matches ngspice cktterr.c:24-34. gear_2 must read gearCoeff[1] (2/9), not
+    // trapCoeff[1] (1/12), which would give a 1.63x looser dt bound.
     test "lteCoeff: ngspice gearCoeff/trapCoeff tables" {
         try testing.expectEqual(@as(f64, 0.5), integrator.lteCoeff(.backward_euler));
         try testing.expectApproxEqRel(@as(f64, 0.08333333333), integrator.lteCoeff(.trapezoidal), 1e-10);
@@ -348,11 +328,10 @@ const TranTests = struct {
         );
     }
 
-    // The whole point of per-device-state LTE, as a pure function. Two charge
-    // contributions that cancel EXACTLY on their shared row: each swings 2 pC over
-    // the step, the row sums to a flat zero. ngspice's CKTterr sees each state and
-    // binds; the summed q plane sees nothing and steps 14 decades too far. Fails
-    // the moment stepBound is fed row-summed charge again.
+    // Per-device-state LTE as a pure function. Two charges cancel exactly on
+    // their shared row: each swings 2 pC over the step, the row sums to zero.
+    // ngspice's CKTterr sees each state and binds; the summed q plane sees
+    // nothing and steps 14 decades too far.
     test "stepBound: per-state min survives what the summed row cancels" {
         const dt: f64 = 1e-9;
         const reltol: f64 = 1e-3;
@@ -404,15 +383,11 @@ const TranTests = struct {
         // The summed row: dd == 0, so the bound collapses to trtol*tol/abstol.
         try testing.expect(del_row > 1e6 * dt);
 
-        // The ground-mirror entries are INERT, which is why the tape needs no
-        // trash-row mask. ngspice terrs one state per instance (captrunc.c:
-        // `CKTterr(here->CAPqcap)`, capdefs.h: CAPnumStates = 2 for q AND its
-        // current, i.e. ONE charge); the tape carries q on one terminal and -q on
-        // the other, and the old per-row path never saw the ground side at all
-        // because stepBound walks q_hist[0..n], excluding the trash cell q_vec[n].
-        // Every CKTterr term is even in q — |q|, |dd|, |i| — so the mirror scores
-        // identically and cannot move the min. Masking it would be work for zero
-        // numerical effect; this assert is what says so.
+        // The ground-mirror entries are inert, so the tape needs no trash-row
+        // mask. ngspice terrs one charge per capacitor (captrunc.c
+        // `CKTterr(here->CAPqcap)`); the tape carries q on one terminal and -q
+        // on the other. Every CKTterr term is even in q (|q|, |dd|, |i|), so the
+        // mirror scores identically and cannot move the min.
         const one_sided = [_]f64{ 3e-12, 0 };
         const one_sided_p = [_]f64{ 1e-12, 0 };
         const mirrored = [_]f64{ 3e-12, -3e-12 };
@@ -436,17 +411,13 @@ const TranTests = struct {
         );
         try testing.expectEqual(del_one, del_mirror);
 
-        // CKTterr is HOMOGENEOUS OF DEGREE ZERO in the charge: tol scales with |q|
-        // (both volttol and chargetol) and so does |dd|, so `del` does not depend on
-        // how big the contribution is — only on its RELATIVE curvature. Away from
-        // the abstol/chgtol floors, scaling a state by 1000 leaves its bound put.
-        //
-        // This is the whole reason per-state LTE is not simply "more conservative":
-        // a contribution 1000x smaller than its row-mates is still a full-strength
-        // truncation candidate once it is its own state. It is what ngspice does
-        // too — and it is exactly why devices/kinduc regressed, since espice gives
-        // a K card its own charge states where ngspice folds the mutual flux into
-        // the inductor's single INDflux (indload.c:70-77, and MUT has no MUTtrunc).
+        // CKTterr is homogeneous of degree zero in the charge: tol and |dd| both
+        // scale with |q|, so away from the abstol/chgtol floors scaling a state
+        // by 1000 leaves its bound unchanged. A contribution 1000x smaller than
+        // its row-mates is still a full-strength truncation candidate. This is
+        // why devices/kinduc steps differently: espice gives a K card its own
+        // charge states, where ngspice folds the mutual flux into the
+        // inductor's single INDflux (indload.c:70-77; MUT has no MUTtrunc).
         const big: [2]f64 = .{ s_cur[0] * 1e3, 0 };
         const big_p: [2]f64 = .{ s_prev[0] * 1e3, 0 };
         const del_big = integrator.stepBound(
@@ -460,10 +431,9 @@ const TranTests = struct {
         try testing.expectApproxEqRel(del_one, del_big, 1e-9);
     }
 
-    // The plumbing invariant: every charge the devices stamped is in the tape
-    // exactly once, and it is stamped PER INSTANCE, not merged onto the node.
-    // Catches a missing scatterQ write, a double write, a stale dedup replay and a
-    // ParEval lane overlap — the failure modes that are otherwise silent.
+    // Every stamped charge is in the tape exactly once, per instance rather
+    // than merged onto the node. Catches a missing or doubled scatterQ write, a
+    // stale dedup replay and a ParEval lane overlap, which are otherwise silent.
     test "q tape: per-device-state charges, one entry each, summing to the q plane" {
         const gpa = testing.allocator;
         const models = @import("models");
@@ -519,8 +489,7 @@ const TranTests = struct {
         for (ckt.q_vec) |v| sum_plane += v;
         try testing.expectApproxEqAbs(sum_plane, sum_tape, 1e-30);
 
-        // And the merge the old controller had to live with: node 1's row is the
-        // sum, whose slope is neither cap's.
+        // Node 1's row is the sum, whose slope is neither cap's.
         try testing.expectApproxEqRel(
             @as(f64, 7.398e-15 * 1.00 + 5.0e-17 * 0.75),
             ckt.q_vec[1],
@@ -528,13 +497,10 @@ const TranTests = struct {
         );
     }
 
-    // The one property the `set_sim_state` plumbing exists for. A generated
-    // device reads `Instance.abstime` (§9.10 `$abstime`), NOT the `t` argument of
-    // eval — with the host never writing that field every SPICE waveform is
-    // pinned at its t=0 value and a PULSE is a flat line at V1. Real generated
-    // vsource + resistor, real Circuit, real integrator: nothing is mocked, so a
-    // regression anywhere on the path (hook, vtable gate, call site, ordering)
-    // fails here.
+    // A generated device reads `Instance.abstime` (VAMS 9.10 `$abstime`), not
+    // eval's `t`; if the host never publishes it, a PULSE is a flat line at V1.
+    // Real generated devices, Circuit and integrator, so a break anywhere on
+    // the `set_sim_state` path (hook, vtable gate, call site, order) fails here.
     test "transient: a PULSE vsource output actually moves with $abstime" {
         const gpa = testing.allocator;
         const models = @import("models");
@@ -605,8 +571,7 @@ const TranTests = struct {
         }, gpa);
         try testing.expect(sim.completed);
 
-        // The waveform must reach BOTH pulse levels. Before the fix every sample
-        // read v1 (abstime stuck at 0), so `hi` was 0 and this failed.
+        // Both pulse levels must be reached.
         const times = wf.timeSlice();
         const vals = wf.probeValues(0);
         var lo: f64 = std.math.inf(f64);
@@ -618,12 +583,11 @@ const TranTests = struct {
         try testing.expectApproxEqAbs(@as(f64, 0.0), lo, 1e-9);
         try testing.expectApproxEqAbs(@as(f64, 5.0), hi, 1e-9);
 
-        // ...and reach them at the RIGHT times: a plumbing bug that fed a stale or
-        // off-by-one-step time would still swing 0..5.
+        // At the right times: a stale or off-by-one-step time would still swing
+        // 0..5.
         for (times, vals) |tt, v| {
             const want: f64 = if (tt < 2e-9 or tt > 6e-9) 0.0 else 5.0;
-            // Skip the 1 ps edges themselves — a sample can legitimately land
-            // mid-ramp there.
+            // A sample may land mid-ramp on the 1 ps edges.
             const on_edge = @abs(tt - 2e-9) < 2e-12 or @abs(tt - 6e-9) < 2e-12;
             if (!on_edge) try testing.expectApproxEqAbs(want, v, 1e-6);
         }
@@ -635,11 +599,6 @@ const TranNoiseTests = struct {
     const Xorshift64 = impl.test_access.Xorshift64;
     const simdCopy = impl.test_access.simdCopy;
     const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
 
     test "tran_noise: xorshift64 produces deterministic sequence" {

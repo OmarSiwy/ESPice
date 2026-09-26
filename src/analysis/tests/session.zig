@@ -1,3 +1,5 @@
+//! Query-boundary validation tests.
+
 const Deck = @import("core").Deck;
 const builtin = @import("device").Library.builtin;
 const requests = @import("core").query;

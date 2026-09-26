@@ -1,3 +1,5 @@
+//! Circuit pattern and plane-kernel tests.
+
 const impl = @import("../Circuit.zig");
 const combinePlanes = impl.combinePlanes;
 const std = @import("std");

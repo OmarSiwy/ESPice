@@ -1,3 +1,5 @@
+//! Worker lifecycle tests: resume, cancel, failure and timing.
+
 const Worker = @import("../worker.zig").Worker;
 const progress = @import("../progress.zig");
 const std = @import("std");

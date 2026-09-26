@@ -1,3 +1,5 @@
+//! Fourier post-processing unit tests.
+
 const impl = @import("../post/four.zig");
 const analyze = impl.analyze;
 const interpolateAt = impl.test_access.interpolateAt;
@@ -5,13 +7,13 @@ const math = std.math;
 const std = @import("std");
 const tran = @import("../tran/tran.zig");
 
-/// Binary-search + linear interpolation on sorted time/value arrays.
+/// Oracle for `interpolateAt`: binary search plus linear interpolation on
+/// sorted time/value arrays, clamped at both ends.
 fn interpolate(times: []const f64, values: []const f64, t: f64) f64 {
     if (times.len == 0) return 0;
     if (t <= times[0]) return values[0];
     if (t >= times[times.len - 1]) return values[values.len - 1];
 
-    // Binary search for the bracketing interval
     var lo: usize = 0;
     var hi: usize = times.len - 1;
     while (hi - lo > 1) {
@@ -40,10 +42,6 @@ fn spectrumOf(samples: []const f64, n_harmonics: usize, allocator: std.mem.Alloc
     @import("solver").fft.fft(re, im);
     return impl.test_access.extractSpectrum(re, im, samples.len, n_harmonics);
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 const testing = std.testing;
 
@@ -104,19 +102,15 @@ test "four: DC offset is reported correctly" {
 }
 
 test "four: square wave THD ~ 48.3%" {
-    // A square wave with harmonics 1,3,5,7,... has
-    // THD = sqrt(1/9 + 1/25 + 1/49 + ...) / 1 * 100
-    // Analytically first 8 odd harmonics:
-    // THD = sqrt(sum(1/(2k+1)^2 for k=1..)) ~= 48.34%
-    // With 9 harmonics (2-9) we capture harmonics 3,5,7,9
+    // An ideal square wave has THD = sqrt(1/9 + 1/25 + 1/49 + ...) ~= 48.3%.
+    // This one is band-limited to the 9th harmonic, so only 3, 5, 7, 9 count.
     const allocator = testing.allocator;
     const n = 1024;
     var samples: [n]f64 = undefined;
 
     for (0..n) |k| {
         const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
-        // Build square wave from Fourier series up to 9th harmonic
-        // to avoid aliasing: sq(t) = (4/pi) * sum_{k=0}^{} sin(2pi(2k+1)t)/(2k+1)
+        // sq(t) = (4/pi) * sum over odd h <= 9 of sin(2*pi*h*t)/h
         var val: f64 = 0;
         var harm: u32 = 1;
         while (harm <= 9) : (harm += 2) {
@@ -133,8 +127,7 @@ test "four: square wave THD ~ 48.3%" {
     // 3rd harmonic = (4/pi)/3 = 0.4244
     try testing.expectApproxEqAbs(@as(f64, 4.0 / (3.0 * math.pi)), result.harmonics[2].mag, 1e-3);
 
-    // THD from harmonics 3,5,7,9 only:
-    // sqrt((1/3)^2 + (1/5)^2 + (1/7)^2 + (1/9)^2) * 100 = ~43.53%
+    // sqrt((1/3)^2 + (1/5)^2 + (1/7)^2 + (1/9)^2) * 100 ~= 43.5%
     const expected_thd = @sqrt(1.0 / 9.0 + 1.0 / 25.0 + 1.0 / 49.0 + 1.0 / 81.0) * 100.0;
     try testing.expectApproxEqAbs(expected_thd, result.thd_percent, 1.0);
 }
@@ -161,14 +154,13 @@ test "four: known amplitude and phase" {
 test "four: analyze waveform from tran data" {
     const allocator = testing.allocator;
 
-    // Build a synthetic waveform as if from transient sim
     const n_points: usize = 512;
     var waveform = try tran.Waveform.init(allocator, 1, n_points);
     defer waveform.deinit();
 
-    const f_fund = 1000.0; // 1 kHz
+    const f_fund = 1000.0;
     const period = 1.0 / f_fund;
-    // Simulate 3 periods worth of data so there is enough for one-period extraction
+    // Three periods, so the last full one can be extracted.
     const t_total = 3.0 * period;
 
     const probes = [_]u32{0};

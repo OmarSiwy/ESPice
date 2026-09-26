@@ -1,13 +1,10 @@
+//! QR eigenvalue unit tests behind the pole-zero analysis.
+
 const qr = @import("../eigen/qr.zig");
 const Complex = @import("core").numerics.Complex;
 const eigenvalues = qr.eigenvalues;
 const hessenbergReduce = qr.hessenbergReduce;
 const std = @import("std");
-
-// ============================================================================
-// Tests
-// ============================================================================
-
 const testing = std.testing;
 
 test "eigenvaluesQR: 2x2 real eigenvalues" {

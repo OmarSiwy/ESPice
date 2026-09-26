@@ -1,12 +1,10 @@
+//! Sweep-family unit tests: dcmatch, sens and temp_sweep.
+
 const DcmatchTests = struct {
     const impl = @import("../dc/dcmatch.zig");
     const pelgromSigma = impl.test_access.pelgromSigma;
     const root = @import("../types.zig");
     const std = @import("std");
-
-    // -------------------------------------------------------------------------
-    // Tests
-    // -------------------------------------------------------------------------
 
     test "pelgromSigma — real coefficients" {
         const ref = root.ParamRef{
@@ -67,15 +65,10 @@ const SensTests = struct {
     const adjointFd = impl.test_access.adjointFd;
     const copySimd = impl.test_access.copySimd;
     const std = @import("std");
-
-    // ---------------------------------------------------------------------------
-    // Tests
-    // ---------------------------------------------------------------------------
-
     const testing = std.testing;
 
-    /// Scalar oracle for adjointFd: the materialize-then-dot form it replaced,
-    /// with the same lane fold (W == 1 degenerates to this loop exactly).
+    /// Scalar oracle for adjointFd: materialize dF/dp, then dot with the same
+    /// lane fold.
     fn adjointFdOracle(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
         var dfdp: [64]f64 = undefined;
         for (0..lambda.len) |i| dfdp[i] = (pert[i] - nom[i]) * inv_delta;
@@ -135,11 +128,6 @@ const TempSweepTests = struct {
     const impl = @import("../sweep/temp_sweep.zig");
     const numPoints = impl.numPoints;
     const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
 
     test "temp_sweep: numPoints calculation" {

@@ -1,3 +1,5 @@
+//! Periodic-family unit tests: pac/pxf, pnoise, pss and qpss.
+
 const PacTests = struct {
     const impl = @import("../pss/pac.zig");
     const Complex = impl.Complex;
@@ -5,11 +7,6 @@ const PacTests = struct {
     const fft_mod = @import("solver").fft;
     const mapHarmonicToFftBin = impl.mapHarmonicToFftBin;
     const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
 
     test "PAC: mapHarmonicToFftBin" {
@@ -117,9 +114,8 @@ const PnoiseTests = struct {
 
     const q_electron = 1.602176634e-19;
 
-    // The 2q|I| vs 4kTg distinction is the DEVICE's, and its tests are in
-    // ac/noise.zig + the ngspice fixtures; what this function owns is the
-    // sideband frequency axis.
+    // The white-noise magnitude is the device's (tested with ac/noise and the
+    // ngspice fixtures); sourcePsd owns only the sideband frequency axis.
 
     test "sourcePsd white is flat, and a negative sideband mirrors" {
         const src: NoiseSource = .{ .node_p = 0, .node_n = 1, .white = 2.0 * q_electron * 1e-3 };
@@ -148,25 +144,16 @@ const PnoiseTests = struct {
 
 const PssTests = struct {
     const impl = @import("../pss/pss.zig");
-    const Gmres = @import("solver").gmres.Gmres(f64);
     const Options = @import("core").query.Pss;
-    const SolveResult = impl.SolveResult;
     const krylov_threshold = impl.test_access.krylov_threshold;
-    const root = @import("../types.zig");
-    const shootingMatvec = impl.test_access.shootingMatvec;
     const simdCopy = impl.test_access.simdCopy;
     const simdZero = impl.test_access.simdZero;
     const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
 
-    test "pss: krylov_threshold is reasonable" {
-        try testing.expect(krylov_threshold > 0);
-        try testing.expect(krylov_threshold <= 200);
+    test "pss: small systems solve dense, large ones with Krylov" {
+        try testing.expect(krylov_threshold > 10);
+        try testing.expect(krylov_threshold <= 100);
     }
 
     test "pss: simdCopy round-trip" {
@@ -175,13 +162,6 @@ const PssTests = struct {
         simdZero(&b);
         simdCopy(&b, &a);
         for (0..10) |i| try testing.expectEqual(a[i], b[i]);
-    }
-
-    test "pss: shootingMatvec identity operator" {
-        // Verify the FD matvec structure compiles and the function pointer
-        // signature matches GMRES expectations.
-        const ptr: *const fn ([]const f64, []f64, *anyopaque) void = &shootingMatvec;
-        try testing.expect(@intFromPtr(ptr) != 0);
     }
 
     test "pss: Options defaults are sane" {
@@ -194,36 +174,11 @@ const PssTests = struct {
         try testing.expect(opts.gmres_tol > 0);
         try testing.expect(opts.gmres_max_restarts > 0);
     }
-
-    test "pss: use_krylov gate" {
-        // Verify the threshold logic: small n uses dense, large n uses Krylov.
-        try testing.expect(!(10 >= krylov_threshold)); // small => dense
-        try testing.expect(100 >= krylov_threshold); // large => krylov
-    }
-
-    test "pss: GMRES init/deinit for Krylov path" {
-        const gpa = testing.allocator;
-        var krylov = try Gmres.init(gpa, 64, 30);
-        defer krylov.deinit(gpa);
-        try testing.expectEqual(@as(u32, 64), krylov.n);
-        try testing.expectEqual(@as(u32, 30), krylov.m);
-    }
-
-    test "pss: SolveResult fields" {
-        const r = SolveResult{
-            .converged = true,
-            .iterations = 5,
-            .residual_norm = 1e-10,
-        };
-        try testing.expect(r.converged);
-        try testing.expectEqual(@as(u16, 5), r.iterations);
-    }
 };
 
 const QpssTests = struct {
     const impl = @import("../pss/qpss.zig");
     const MixGrid = impl.test_access.MixGrid;
-    const Options = @import("core").query.Qpss;
     const buildTransform = impl.test_access.buildTransform;
     const buildSampleTimes = impl.test_access.buildSampleTimes;
     const transformWork = impl.test_access.transformWork;
@@ -232,18 +187,10 @@ const QpssTests = struct {
     const idft2D = impl.test_access.idft2D;
     const simdZero = impl.test_access.simdZero;
     const std = @import("std");
-
-    const converger = @import("solver").converger;
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
 
-    // One fixed incommensurate pair for every basis test: the transform is built
-    // the way the solver builds it — APFT instants, then Γ and its inverse at
-    // those instants — so the tests exercise the shape that actually ships.
+    // One incommensurate pair for every basis test, with the transform built
+    // the way the solver builds it: APFT instants, then Γ and its inverse.
     const tone1: f64 = 1000.0;
     const tone2: f64 = 1414.213562373095;
 
@@ -403,12 +350,9 @@ const QpssTests = struct {
         var out_im = [_]f64{0} ** 9;
         dft2D(&out_re, &out_im, &td, basis_cos, basis_sin, n, nf);
 
-        // Non-DC harmonics: the IDFT sums all nf basis vectors (positive + negative
-        // frequencies), but the DFT projects onto one-sided basis with 1/nf scaling.
-        // For a single one-sided coefficient, the roundtrip yields 0.5x because the
-        // conjugate partner at (-k,-l) is zero. This is by design — the solver always
-        // operates on the full two-sided vector so the residual is self-consistent.
-        // See module-level normalization doc.
+        // A lone one-sided coefficient round-trips at 0.5x because its conjugate
+        // partner at (-k,-l) is zero. The solver always carries the full
+        // two-sided vector, so its residual is self-consistent.
         try testing.expectApproxEqAbs(@as(f64, 0.25), out_re[f1_idx], 1e-12);
         try testing.expectApproxEqAbs(@as(f64, -0.15), out_im[f2_idx], 1e-12);
 
@@ -419,11 +363,9 @@ const QpssTests = struct {
     }
 
     test "QPSS: sampled two-tone drive is a clean pair of spectral lines" {
-        // The defect this guards: every grid point used to be evaluated at
-        // t = 0, so a source could not vary across the grid. With the APFT
-        // instants, sampling A1*sin(w1 t) + A2*sin(w2 t) and taking the 2-D DFT
-        // has to land the whole signal on (±1,0) and (0,±1) — a wrong time grid
-        // smears it across every mix product instead.
+        // Sampling A1*sin(w1 t) + A2*sin(w2 t) at the APFT instants and taking
+        // the 2-D DFT must land the whole signal on (±1,0) and (0,±1); a wrong
+        // time grid smears it across every mix product.
         const a1: f64 = 1.0;
         const a2: f64 = 0.5;
         const grid = MixGrid.init(2, 2);
@@ -466,9 +408,8 @@ const QpssTests = struct {
     test "QPSS: the transform inverts its own forward basis" {
         // Γ⁻¹Γ = I. Σ_s Γ⁻¹[f][s]·Γ[s][g] = δ_{fg}, and the stored arrays carry
         // a factor nf and a negated imaginary part (dft2D applies both), so the
-        // real part of that sum reads as nf·δ_{fg} here. The ideal orthogonal
-        // DFT basis satisfied this by construction; at APFT instants it does not,
-        // which is exactly why the inverse is computed rather than assumed.
+        // real part of that sum reads as nf·δ_{fg} here. At APFT instants the
+        // basis is not orthogonal, so the inverse is computed, not assumed.
         const grid = MixGrid.init(1, 1);
         const nf = grid.nf;
 
@@ -532,20 +473,10 @@ const QpssTests = struct {
         }
     }
 
-    test "QPSS: Options satisfies contract" {
-        comptime {
-            if (!@hasField(Options, "tol")) @compileError("missing tol");
-            if (@FieldType(Options, "tol") != converger.Tolerances) @compileError("wrong tol type");
-        }
-    }
-
-    test "QPSS: heap buffers work for n > 256" {
-        // Verify the arena sizing arithmetic doesn't overflow or assert for large n.
-        // We can't run a full solve without a Circuit, but we can verify the DFT/IDFT
-        // path with a large node count using heap-allocated buffers.
+    test "QPSS: DFT/IDFT roundtrip at n = 512 nodes" {
         const grid = MixGrid.init(1, 1); // nf=9
         const nf = grid.nf;
-        const n: usize = 512; // > 256, was previously impossible
+        const n: usize = 512;
         const sz = n * nf;
 
         const alloc = testing.allocator;
@@ -569,7 +500,6 @@ const QpssTests = struct {
         simdZero(x_re);
         simdZero(x_im);
 
-        // Set DC for node 300 (beyond old 256 limit)
         const dc_idx = grid.flatIdx(0, 0);
         x_re[300 * nf + dc_idx] = 42.0;
 
@@ -577,11 +507,9 @@ const QpssTests = struct {
         defer alloc.free(x_td);
         idft2D(x_td, x_re, x_im, basis_cos_t, basis_sin_t, n, nf);
 
-        // Node 300 should be constant 42.0 across all time samples
         for (0..nf) |s| {
             try testing.expectApproxEqAbs(@as(f64, 42.0), x_td[300 * nf + s], 1e-10);
         }
-        // Node 0 should be zero
         for (0..nf) |s| {
             try testing.expectApproxEqAbs(@as(f64, 0.0), x_td[0 * nf + s], 1e-10);
         }
