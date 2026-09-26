@@ -342,10 +342,6 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         .dc => {
             if (args.len != 4 and args.len != 8) return error.InvalidAnalysisArguments;
             var opts: requests.Dc = .{ .target = try dcTarget(args, 0, cards), .start = try number(args, 1), .stop = try number(args, 2), .step = try number(args, 3) };
-            // Only the outer variable may be the temperature: the inner march
-            // writes one ParamRef, and temperature is a whole-circuit set plus
-            // a re-derive.
-            if (opts.target.is_temp) return error.UnsupportedTemperatureSweep;
             try checkStep(opts.start, opts.stop, opts.step);
             if (args.len == 8) {
                 opts.target2 = try dcTarget(args, 4, cards);
