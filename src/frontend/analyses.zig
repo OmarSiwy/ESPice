@@ -408,8 +408,8 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             try arity(args, 6, 6);
             const drive_kind = std.StaticStringMap(enum { vol, cur })
                 .initComptime(.{ .{ "vol", .vol }, .{ "cur", .cur } });
-            const wanted = std.StaticStringMap(enum { pol, zer, pz })
-                .initComptime(.{ .{ "pol", .pol }, .{ "zer", .zer }, .{ "pz", .pz } });
+            const wanted = std.StaticStringMap(requests.Pz.Want)
+                .initComptime(.{ .{ "pol", .poles }, .{ "zer", .zeros }, .{ "pz", .both } });
             var lower: [4]u8 = undefined;
             const kind = drive_kind.get(try keyword(args, 4, &lower)) orelse return error.InvalidAnalysisArguments;
             const want = wanted.get(try keyword(args, 5, &lower)) orelse return error.InvalidAnalysisArguments;
@@ -418,8 +418,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .in_neg = try outputNeg(ports[1]),
                 .out_pos = try outputNode(ports[2]),
                 .out_neg = try outputNeg(ports[3]),
-                .want_poles = want != .zer,
-                .want_zeros = want != .pol,
+                .want = want,
             };
             // A `vol` transfer is driven by the voltage source the deck already
             // put across the input port: its branch row is the column the

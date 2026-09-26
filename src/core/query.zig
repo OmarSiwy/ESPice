@@ -333,9 +333,10 @@ pub const Pz = struct {
     drive_branch: u32 = 0,
     in_pos: u32 = 0,
     in_neg: u32 = 0,
-    /// `pol` asks for poles, `zer` for zeros, `pz` for both.
-    want_poles: bool = true,
-    want_zeros: bool = false,
+    /// The card's `pol`, `zer` or `pz`.
+    want: Want = .poles,
+
+    pub const Want = enum(u2) { poles, zeros, both };
 };
 
 pub const Four = struct {
