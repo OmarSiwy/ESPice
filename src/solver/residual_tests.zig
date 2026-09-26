@@ -345,3 +345,43 @@ test "scaled residual: bordered block diagonal, block κ controlled" {
     try testing.expect(worst <= ratio_max);
     try testing.expect(worst_lu <= ratio_max_pivoting);
 }
+
+test "scaled residual: block-ill-conditioned systems through the flat LU, replay included (#45, #136)" {
+    // The BBD family's generator at block κ 1e12 and 1e15, handed to the
+    // sparse LU directly. On one such system a demoted LU's replay on
+    // perturbed values reached 1.5e6 in solveT (a fresh factor: 0.019):
+    // the growth monitor keeps pivots down to 1e-12 of their column, and
+    // `direct.Solver.replayHolds` must catch the replay and re-factor.
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xbbd5eed);
+    const r = prng.random();
+    var worst: f64 = 0;
+    for (kappas[3..]) |kappa| for (0..16) |t| {
+        const nb = 8;
+        const s = r.intRangeAtMost(u32, 2, 6);
+        const ncpl = r.intRangeAtMost(u32, 1, 4);
+        const n = 1 + nb * s + ncpl;
+        var sys = try System.initZero(gpa, n);
+        defer sys.deinit(gpa);
+        var groups: [nb][2]u32 = undefined;
+        for (&groups, 0..) |*g, i| g.* = .{ 1 + @as(u32, @intCast(i)) * s, s };
+        givensGroups(r, sys, &groups, kappa, s);
+        if (t % 2 == 1) permuteRows(r, sys, &groups);
+        const cs = 1 + nb * s;
+        sys.at(0, 0).* = 1;
+        for (0..ncpl) |i| sys.at(cs + i, cs + i).* = 2 + r.float(f64);
+        for (groups) |g| for (0..g[1]) |k| {
+            const cp = cs + r.uintLessThan(u32, ncpl);
+            sys.at(g[0] + k, cp).* = 0.25 * (r.float(f64) - 0.5);
+            sys.at(cp, g[0] + k).* = 0.25 * (r.float(f64) - 0.5);
+        };
+        if (t % 4 == 3) scaleBadly(r, sys, 6);
+        try sys.freeze(gpa);
+        const got = try certify(gpa, r, sys, null, .lu, null) orelse {
+            try testing.expect(kappa >= 1e15);
+            continue;
+        };
+        worst = @max(worst, got);
+    };
+    try testing.expect(worst <= ratio_max_pivoting);
+}

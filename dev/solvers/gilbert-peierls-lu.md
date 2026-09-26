@@ -262,6 +262,22 @@ values, one per kind of caller:
   milder spans). At 1e-3 a replay admits exactly the pivots the full
   factor would, and a refused lane peels to the scalar path.
 
+A permissive monitor still lets a bad replay through to a solve that is
+final (a linear operating point, an adjoint `solveT`): on a block-κ 1e15
+system a replay on perturbed values reached a LAWN 41 ratio of 1.5e6 in
+`solveT` where a fresh factor gives 0.019 (#136). So `direct.Solver`
+checks every successful replay (`replayHolds`). Its largest |L| entry is
+the inverse of the smallest accepted pivot ratio, whichever kernel ran the
+replay (L is stored as v / d), so a replay with every multiplier within
+1/pivot_tol passes at the cost of one scan of L. A larger multiplier
+triggers a probe: Higham's alternating right-hand side solved both ways,
+each scaled residual held to 30 / pivot_tol, the residual certificate's
+bar for threshold pivoting. A miss re-factors with full pivoting (still
+under the fill cap). Newton's acceptance is unchanged; it only gets better
+steps. Not measured yet: how often Newton replays probe, and the cost on
+the chain_bsim4 diverging steps, whose kept pivots are exactly the
+marginal ones. The device LU's factors are not probed.
+
 The tridiagonal engine has no replay. It applies the full factor's own
 test, |pivot| >= pivot_tol * |entry below|, and hands anything smaller to
 the pivoting LU.

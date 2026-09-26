@@ -26,7 +26,9 @@ pub const Params = struct {
     /// Permissive for Newton, whose residual gate absorbs an inexact step
     /// and whose diverging iterates (values to 1e60) would otherwise
     /// re-pivot and fill every iteration; `FreqSolver`, whose solves are
-    /// final, raises it to `pivot_tol` (#44). dev/solvers/gilbert-peierls-lu.md,
+    /// final, raises it to `pivot_tol` (#44). A replay that took a pivot
+    /// below `pivot_tol` is probed and re-factored when its solves miss the
+    /// threshold-pivoting bar (`replayHolds`). dev/solvers/gilbert-peierls-lu.md,
     /// "Two replay thresholds".
     refactor_growth_limit: f64 = 1e-12,
     /// A re-pivot whose L plus U outgrows this multiple of the fresh
@@ -105,6 +107,9 @@ pub const Solver = struct {
     /// |A||x| + |b| and the probe's solution, n entries each. Empty on the
     /// other engines.
     refine_buf: []f64 = &.{},
+    /// `replayHolds` scratch, 3n: the probe solution, its residual and the
+    /// row sums of |A|. Empty until a replay first needs the probe.
+    probe: []f64 = &.{},
 
     /// Chooses the engine from the pattern alone: tridiagonal, then BBD
     /// when `bbd` describes a profitable split, else sparse LU (whose AMD
@@ -190,6 +195,7 @@ pub const Solver = struct {
         self.gpa.free(self.q);
         self.gpa.free(self.vcopy);
         self.gpa.free(self.refine_buf);
+        self.gpa.free(self.probe);
         self.* = undefined;
     }
 
@@ -265,11 +271,72 @@ pub const Solver = struct {
         lu.keep_min = self.params.refactor_growth_limit;
         const ptol = self.params.pivot_tol;
         if (self.factored) {
-            if (self.refactorLu(vals, execution)) |_| return else |_| {}
+            if (self.refactorLu(vals, execution)) |_| {
+                if (try self.replayHolds(vals)) return;
+            } else |_| {}
             self.factored = false;
         }
         try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, ptol);
         self.factored = true;
+    }
+
+    /// Whether the replay that just refactored `vals` solves as threshold
+    /// pivoting promises. The growth monitor admits a pivot down to
+    /// `refactor_growth_limit` (1e-12) of its column, for Newton's sake, and
+    /// on an ill-conditioned matrix such a replay reached a LAWN 41 ratio
+    /// of 1.5e6 where a fresh factor gives 0.019 (#45, #136). A replay
+    /// whose multipliers all stay within 1/pivot_tol is one the full factor
+    /// could have laid down and passes at once. Otherwise a probe
+    /// right-hand side is solved both ways and each scaled residual must
+    /// stay within `replay_ratio_max / pivot_tol`, the residual
+    /// certificate's bar for threshold pivoting; a miss sends the caller to
+    /// a full factor. The check sits here, not in `solve`, so one probe
+    /// covers every later `solve`, `solveNeg` and `solveT`, and only a
+    /// fallible call re-factors. O(|L|) per replay for the scan; the probe
+    /// (two solves, two passes over A) runs only after a marginal replay.
+    /// `FreqSolver` replays at pivot_tol, so it never probes. ponytail: a
+    /// device factor (`syncHost`, the device LU's own solve) is not
+    /// probed; check on the host after the sync if that path needs it.
+    fn replayHolds(self: *Self, vals: []const f64) !bool {
+        const lu = &self.engine.lu;
+        const ptol = self.params.pivot_tol;
+        if (!(ptol > 0)) return true;
+        if (maxMultiplier(lu) <= 1 / ptol) return true;
+        const n: usize = self.n;
+        if (self.probe.len == 0) self.probe = try self.gpa.alloc(f64, 3 * n);
+        assert(self.probe.len == 3 * n);
+        const x = self.probe[0..n];
+        const r = self.probe[n..][0..n];
+        const rows = self.probe[2 * n ..][0..n];
+        // ||A||_inf from the row sums, ||A||_1 = ||A^T||_inf from the columns.
+        @memset(rows, 0);
+        var norm_1: f64 = 0;
+        for (0..n) |j| {
+            var col: f64 = 0;
+            for (self.col_ptr[j]..self.col_ptr[j + 1]) |p| {
+                const a = @abs(vals[p]);
+                rows[self.row_idx[p]] += a;
+                col += a;
+            }
+            norm_1 = @max(norm_1, col);
+        }
+        const norm_inf = maxAbs(rows);
+        const nf: f64 = @floatFromInt(n);
+        inline for (.{ false, true }) |transpose| {
+            probeRhs(r);
+            if (transpose) lu.solveT(r, x) else lu.solve(r, x);
+            probeRhs(r);
+            // r = b - A x, or b - A^T x.
+            for (0..n) |j| for (self.col_ptr[j]..self.col_ptr[j + 1]) |p| {
+                const i = self.row_idx[p];
+                if (transpose) r[j] -= vals[p] * x[i] else r[i] -= vals[p] * x[j];
+            };
+            const a_norm = if (transpose) norm_1 else norm_inf;
+            const ratio = maxAbs(r) / (a_norm * maxAbs(x) * nf * std.math.floatEps(f64));
+            // Negated, so a NaN ratio fails too.
+            if (!(ratio <= replay_ratio_max / ptol)) return false;
+        }
+        return true;
     }
 
     /// `lu.refactor`, on `execution.lu_threads` workers when the flop-count
@@ -431,6 +498,52 @@ fn parWorthIt(lu: *const sparse_lu.SparseLu, knobs: Knobs) bool {
     if (knobs.par_stats)
         std.debug.print("lu-par: n={d} F={d} F/n={d} admit={}\n", .{ lu.n, flops, flops / @max(lu.n, 1), ok });
     return ok;
+}
+
+/// LAPACK's LAWN 41 bar for a backward-stable solve. `replayHolds` divides
+/// it by `pivot_tol`, as the residual certificate does for threshold
+/// pivoting (residual_tests.zig `ratio_max_pivoting`): multipliers up to
+/// 1/pivot_tol are the full factor's own.
+const replay_ratio_max = 30.0;
+
+/// The largest |L| entry over the steps the refactor's growth monitor
+/// covers. A replay writes L as v / d, so its smallest accepted pivot
+/// ratio is 1 / max(1, this), whichever kernel ran it (tape, columns,
+/// threads). Scale-accepted steps are left out: their pivots sit decades
+/// below the raw column by design. Runs on every replay, so it is the
+/// vector `normInf`, which skips NaN; a NaN multiplier reaches the solve,
+/// whose NaN the Newton gates refuse.
+fn maxMultiplier(lu: *const sparse_lu.SparseLu) f64 {
+    const lx = lu.lx.items;
+    if (std.mem.indexOfScalar(bool, lu.scaled_pivot, true) == null) return num.normInf(lx);
+    var m: f64 = 0;
+    for (0..lu.n) |k| {
+        if (lu.scaled_pivot[k]) continue;
+        m = @max(m, num.normInf(lx[lu.lp[k]..lu.lp[k + 1]]));
+    }
+    return m;
+}
+
+/// max |s[i]|, 0 for an empty slice; NaN when any entry is NaN, unlike
+/// `numerics.normInf`, which skips NaN. The probe's norms, cold.
+fn maxAbs(s: []const f64) f64 {
+    var m: f64 = 0;
+    for (s) |v| {
+        if (std.math.isNan(v)) return v;
+        m = @max(m, @abs(v));
+    }
+    return m;
+}
+
+/// Higham's alternating probe, b[i] = (-1)^i (1 + i / (n - 1)): no
+/// structure a circuit matrix shares, the right-hand side LAPACK's
+/// condition estimators use (dlacn2's last vector).
+fn probeRhs(b: []f64) void {
+    const den: f64 = @floatFromInt(@max(b.len, 2) - 1);
+    for (b, 0..) |*v, i| {
+        const mag = 1 + @as(f64, @floatFromInt(i)) / den;
+        v.* = if (i % 2 == 0) mag else -mag;
+    }
 }
 
 /// Measured on the post-layout and stress decks, 2 to 8 threads

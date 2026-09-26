@@ -33,6 +33,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.sens` reports 0 for a parameter at its "infinite" default of 0 (BJT VAF, VAR, IKF, IKR), as ngspice does, instead of a huge value whose sign followed line order (#91).
 - `.acmatch`, `.dcmatch` and `.sens` step a parameter by 1e-6 of its value (1e-12 only at 0), so a diode IS column no longer flips sign from a 100x step (#85).
 - Debug builds load `.hdl` Verilog and Verilog-A devices instead of panicking in `Thread.spawn` (#24).
+- A sparse LU replay that kept a pivot below 1e-3 of its column is checked with a probe solve and re-factored when its scaled residual misses the threshold-pivoting bar (a block-κ 1e15 replay reached 1.5e6, a fresh factor 0.019) (#45, #136).
 - C API: a destroyed or foreign `espice_problem` returns the new `ESPICE_INVALID_HANDLE` instead of undefined behaviour; `espice_destroy` returns a status (#143).
 - `--backend cuda` evaluates BSIM4 (LEVEL 14/54, sky130), VBIC and MOS levels 1/2/3/6/9 on the GPU: held variables and limiting now live in device state; device ABI 27 (#140).
 - API: `Options.hdl_toolchain.cache_dir` sets where `.hdl` builds are cached, in place of `$ESPICE_CACHE` and its fallbacks.
