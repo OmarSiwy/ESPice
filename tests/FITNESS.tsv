@@ -30,9 +30,11 @@ else	tests/benchmark/vacask.zig	2
 else	tests/fitness.zig	5
 else	tests/grammar/data.zig	1
 else	tests/grammar/data_check.zig	2
+else	tests/grammar/gen.zig	1
 else	tests/grammar/include_check.zig	1
 else	tests/grammar/lower.zig	9
 else	tests/grammar/lower_spectre.zig	3
 else	tests/grammar/peg.zig	4
 else	tests/grammar/vec_check.zig	5
+else	tests/metamorphic.zig	3
 else	tests/test_correctness.zig	1

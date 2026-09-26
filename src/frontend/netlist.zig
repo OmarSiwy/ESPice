@@ -2268,7 +2268,7 @@ fn Reader(comptime S: type) type {
         fn sigmaExpr(r: *R, t: []const u8, line: []const u8) Error!Span {
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
-            try expr.compileAll(S.parseNum, r.arena, &r.scratch, if (F.isWord(t)) t else F.body(t));
+            try expr.compileAll(S, r.arena, &r.scratch, if (F.isWord(t)) t else F.body(t));
             const slot = std.StaticStringMap(u32).initComptime(.{ .{ "w", 0 }, .{ "l", 1 }, .{ "m", 2 }, .{ "mult", 2 } });
             for (r.scratch.ops.items[mark.ops..]) |*op| if (op.code == .ident) {
                 if (slot.get(r.scratch.names.items[op.a])) |k| op.* = .{ .code = .live, .a = k };
