@@ -65,9 +65,11 @@ module tline(p1, n1, p2, n2);
             V(br2) <+ V(p1, n1) + zg * I(br1);
         end else begin
             // I(br) enters the near port, so V(p,n) + z0*I(br) is that port's
-            // outgoing wave.
-            V(br1) <+ absdelay(V(p2, n2) + z0 * I(br2), td);
-            V(br2) <+ absdelay(V(p1, n1) + z0 * I(br1), td);
+            // outgoing wave. vera_interp = 2 reads the history the way
+            // traload.c:88-141 does: a 3-point Lagrange fit over the two
+            // samples bracketing t-Td and the one before them.
+            V(br1) <+ absdelay (* vera_interp = 2 *) (V(p2, n2) + z0 * I(br2), td);
+            V(br2) <+ absdelay (* vera_interp = 2 *) (V(p1, n1) + z0 * I(br1), td);
         end
     end
 endmodule
