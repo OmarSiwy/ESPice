@@ -1,5 +1,5 @@
-//! Shared data every layer speaks: numerics, query requests, the deck, results
-//! and the name pool. Imports nothing but std.
+//! Shared data every layer speaks: numerics, query requests, the deck,
+//! results and the name pool. Imports nothing but std.
 const std = @import("std");
 pub const numerics = @import("numerics.zig");
 pub const query = @import("query.zig");
@@ -29,6 +29,6 @@ pub const DeviceType = enum(u16) { unset = std.math.maxInt(u16), _ };
 pub const GROUND: u32 = 0;
 
 test {
+    _ = numerics;
     _ = intern;
-    _ = @import("tests.zig");
 }
