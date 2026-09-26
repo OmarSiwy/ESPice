@@ -82,8 +82,5 @@
   "notes": [
     "Invalid/ignored legacy model parameters or model-level selectors were corrected during migration; see MIGRATION.json. Reference results use the corrected deck."
   ],
-  "netlist_sha256": "b928740b52ff7073cc4576883f881db71562d54e3063692d3f3645edc40922ea",
-  "known_gaps": [
-    "the BSIM3SOI FD/DD model families are absent from the current device catalog"
-  ]
+  "netlist_sha256": "c50fa08c2c68961af2125df1d18afab4f3835210a2d9b22269617ae662135d93"
 }

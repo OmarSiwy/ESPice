@@ -1,6 +1,4 @@
 * BSIM3SOI-DD output characteristics: Ids vs Vds at multiple Vgs.
-* KNOWN GAP: the BSIM3SOI FD/DD model families are absent from the current device catalog.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: device_b3soidd_output.expected.json
 * Origin: benchmark/fixtures/devices/b3soidd_output/circuit.sp
 * Tests dynamic depletion SOI self-consistent body potential.
