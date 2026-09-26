@@ -49,6 +49,7 @@ pub const DeviceId = enum {
     soi3,
     hisim2_va,
     hisimhv_va,
+    psp103,
     vdmos,
     // Q card levels.
     gummel_poon,
@@ -150,6 +151,9 @@ const mos_levels = [_]Level{
     .{ .level = 60, .model = .soi3 },
     .{ .level = 68, .model = .hisim2_va },
     .{ .level = 73, .model = .hisimhv_va },
+    // ngspice-45 has no PSP LEVEL (PSP103 is OSDI only there); 1040 is the
+    // number the VACASK-derived corpus decks use.
+    .{ .level = 1040, .model = .psp103 },
 };
 
 const bjt_levels = [_]Level{
