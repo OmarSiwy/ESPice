@@ -140,7 +140,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     // Probes: branch currents first, then every named node. ngspice gives every
     // MNA branch-current unknown an `i(<card>)` column (V, L, E, H, V-mode B);
     // F, G, S and I-mode B stamp no branch. Branch-first, unlike ngspice,
-    // because tf/sens/dcmatch/pxf/pac/disto default their output to the last
+    // because tf/sens/dcmatch/disto default their output to the last
     // probe, which must stay the last named node. Named nodes and branch rows
     // are disjoint, so circuit.n bounds the total.
     const probe_buf = try sim_arena.alloc(u32, circuit.n);
@@ -162,9 +162,18 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         }
     }
 
+    // `.pac`/`.pxf` name no output: they measure the last net the deck
+    // introduces. The last probe will not do, since the BBD permutation
+    // reorders node rows.
+    var last_net: u32 = 0;
+    for (nb.rows, 0..) |row, net| if (row != GROUND) {
+        last_net = @intCast(net);
+    };
+
     // Analysis nets to circuit rows.
     const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.deck.analyses);
     for (cards_rows) |*a| {
+        if (a.kind == .pac or a.kind == .pxf) a.pos = last_net;
         a.pos = nb.frozenRow(a.pos);
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);

@@ -1,16 +1,14 @@
-//! Periodic noise: fixed-point shooting to the periodic steady state, then a
-//! frozen-time LPTV sweep that averages |H|^2 * PSD over the period at each
-//! sideband and folds the sidebands. Source PSDs come from the devices'
-//! `noisePsd`, re-sampled along the orbit (cyclostationary modulation).
+//! Periodic noise: shoot to the periodic steady state, linearize about it
+//! (pac.zig), and per output frequency solve the transposed LPTV conversion
+//! matrix once. That gives every node's transfer from each input sideband
+//! f_out + m*f_fundamental to the output at f_out. Source PSDs come from the
+//! devices' `noisePsd`, re-sampled along the orbit (cyclostationary
+//! modulation).
 const std = @import("std");
 const root = @import("../types.zig");
-const simdZero = root.zeroSimd;
-const simdCopy = root.copySimd;
-const converger = @import("solver").converger;
-const dense_lu = @import("solver").dense_lu;
+const pac = @import("pac.zig");
 
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
+const Complex = pac.Complex;
 
 pub const NoiseSource = root.NoiseSource;
 
@@ -33,13 +31,16 @@ inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
     return white + flicker / std.math.pow(f64, f_abs, ef);
 }
 
-/// Periodic noise density at `options.out_node`, frozen-time approximation:
-///   1. Shoot to the periodic orbit x(t_k), k = 0..N-1, T = 1/f_fundamental.
-///   2. At each t_k take dense G_k, C_k and each source's PSD coefficients.
-///   3. For each f_out and sideband f_m = f_out + m*f_fundamental, factor
-///      Y_k = G_k + j*2*pi*|f_m|*C_k per sample, solve the adjoint once for
-///      every source, and average |H_k|^2 * S(f_m, t_k) over k.
-///   4. Sum the sidebands into S_v(f_out), in V^2/Hz.
+/// Periodic noise density at `options.out_node`, in V^2/Hz.
+///
+/// Each source is a stationary unit noise n(t) scaled by a periodic
+/// amplitude a(t) = sqrt(PSD(t)) (white and flicker parts separately), so
+/// its spectrum at sideband m is sum_k A_k N(f + (m-k)f0), A_k the Fourier
+/// coefficients of a. With H_m the transfer from sideband m to the output at
+/// f_out, the output density is
+///   sum_j S_n(f_out + j*f0) * |sum_m H_m A_{m-j}|^2,
+/// which for a time-invariant circuit and source is |H_0|^2 * S(f_out): an
+/// LTI network converts no sideband.
 /// The caller owns freqs and density, both sweep-count long. Returns
 /// error.NoiseTopologyChanged if the sources differ along the orbit.
 pub fn sweep(
@@ -52,150 +53,97 @@ pub fn sweep(
     allocator: std.mem.Allocator,
 ) !SweepStatus {
     const n: usize = ckt.n;
-    const period = 1.0 / options.f_fundamental;
-    const n_samples = options.pss_n_samples;
-    const n_samples_f: f64 = @floatFromInt(n_samples);
-    const dt = period / n_samples_f;
     const n_srcs = noise_sources.len;
+    const m_max: usize = options.n_sidebands;
+    const n_sb = 2 * m_max + 1;
     std.debug.assert(freqs.len == density.len);
+    // The FFT needs a power of two; 2*n_sb bins keep |m - j| <= 2M alias-free.
+    const n_samples: usize = std.math.ceilPowerOfTwoAssert(usize, @max(options.pss_n_samples, 2 * n_sb));
 
-    const pss_traj = try allocator.alloc(f64, n_samples * n);
-    defer allocator.free(pss_traj);
+    const orb = try pac.orbit(ckt, x_dc, .{
+        .tol = options.tol,
+        .period = 1.0 / options.f_fundamental,
+        .n_samples = @intCast(n_samples),
+        .max_shooting_iter = options.pss_shoot_max_iter,
+        .shooting_tol = options.pss_shoot_tol,
+        .max_newton_iter = options.pss_newton_max_iter,
+        .newton_tol = options.pss_newton_tol,
+    }, allocator);
+    defer allocator.free(orb.wave);
+    const lin = try pac.linearize(ckt, orb, allocator);
+    defer lin.deinit(allocator);
 
-    const pss_converged = try runPSS(ckt, x_dc, pss_traj, n, n_samples, period, options, allocator);
-
-    const g_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(g_mats);
-    const c_mats = try allocator.alloc(f64, n_samples * n * n);
-    defer allocator.free(c_mats);
-
-    // Per-sample source coefficients, SoA and sample-major:
-    // src_white[k * n_srcs + s].
-    const terms = @as(usize, n_samples) * n_srcs;
-    const source_planes = try allocator.alloc(f64, 3 * terms);
-    defer allocator.free(source_planes);
-    const src_white = source_planes[0..terms];
-    const src_flicker = source_planes[terms..][0..terms];
-    const src_exponent = source_planes[2 * terms ..];
+    // Source amplitudes along the orbit, source-major time series (white
+    // then flicker): amp[s * n_samples + k], and their spectra, bin-major.
+    const terms = n_samples * n_srcs;
+    const amp = try allocator.alloc(f64, 2 * terms);
+    defer allocator.free(amp);
+    const amp_hat = try allocator.alloc(Complex, 2 * terms);
+    defer allocator.free(amp_hat);
+    const exponent = try allocator.alloc(f64, n_srcs);
+    defer allocator.free(exponent);
 
     for (0..n_samples) |k| {
-        const x_k = pss_traj[k * n .. (k + 1) * n];
-        const t_k = @as(f64, @floatFromInt(k)) * dt;
-        // The time the sample was solved at (integrateOnePeriod).
-        ckt.setSimState(.{ .t = t_k, .kind = .tran });
-        ckt.eval(x_k, t_k);
-        ckt.denseG(g_mats[k * n * n ..][0 .. n * n]);
-        ckt.denseC(c_mats[k * n * n ..][0 .. n * n]);
-
-        const srcs_k = try ckt.collectNoiseSources(x_k, allocator);
+        const srcs_k = try ckt.collectNoiseSources(orb.state(k, n), allocator);
         defer allocator.free(srcs_k);
-
-        const w_row = src_white[k * n_srcs ..][0..n_srcs];
-        const f_row = src_flicker[k * n_srcs ..][0..n_srcs];
-        const e_row = src_exponent[k * n_srcs ..][0..n_srcs];
         if (srcs_k.len != n_srcs) return error.NoiseTopologyChanged;
-        for (srcs_k, noise_sources, w_row, f_row, e_row) |src, original, *white, *flicker, *exponent| {
+        for (srcs_k, noise_sources, 0..) |src, original, s| {
             if (src.node_p != original.node_p or src.node_n != original.node_n)
                 return error.NoiseTopologyChanged;
-            white.* = src.white;
-            flicker.* = src.flicker;
-            exponent.* = src.ef;
+            amp[s * n_samples + k] = @sqrt(src.white);
+            amp[terms + s * n_samples + k] = @sqrt(src.flicker);
+            // ponytail: the flicker exponent is a model constant in every
+            // device, so sample 0 stands for the period.
+            if (k == 0) exponent[s] = src.ef;
         }
     }
+    try pac.spectra(amp[0..terms], n_samples, amp_hat[0..terms], allocator);
+    try pac.spectra(amp[terms..], n_samples, amp_hat[terms..], allocator);
+    const white_hat = amp_hat[0..terms];
+    const flicker_hat = amp_hat[terms..];
 
-    const nn = 2 * n;
-    const a_work = try allocator.alloc(f64, nn * nn);
-    defer allocator.free(a_work);
-    const piv = try allocator.alloc(u32, nn);
-    defer allocator.free(piv);
-    const rhs_work = try allocator.alloc(f64, nn);
-    defer allocator.free(rhs_work);
-    simdZero(rhs_work);
-    if (options.out_node != root.GROUND) rhs_work[options.out_node] = 1;
-    const x_work = try allocator.alloc(f64, nn);
-    defer allocator.free(x_work);
-    // Per-source sum over samples of |H|^2 * PSD at one sideband.
-    const h_sq_acc = try allocator.alloc(f64, n_srcs);
-    defer allocator.free(h_sq_acc);
+    // Adjoint transfers of every node and sideband to out_node at f_out.
+    const nn = n_sb * n;
+    const transfer = try allocator.alloc(Complex, freqs.len * nn);
+    defer allocator.free(transfer);
+    const drive = try allocator.alloc(f64, 2 * n);
+    defer allocator.free(drive);
+    @memset(drive, 0);
+    if (options.out_node != root.GROUND) drive[options.out_node] = 1;
+    const pac_opts: pac.Options = .{
+        .f_lo = options.f_fundamental,
+        .out_node = options.out_node,
+        .n_harmonics = options.n_sidebands,
+        .sweep = options.sweep,
+    };
+    try pac.sweep(true, ckt, lin, drive, 0, freqs, transfer, pac_opts, allocator);
 
     var integrated_noise: f64 = 0;
-    var prev_freq: f64 = 0;
-    var prev_density: f64 = 0;
-
-    const m_max: i32 = @intCast(options.n_sidebands);
-    const inv_n_samples = 1.0 / n_samples_f;
-
-    var sw = options.sweep.iter();
-    var pt: usize = 0;
-    while (sw.next()) |f_out| : (pt += 1) {
-        if (pt != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = pt, .total = freqs.len });
-        var total_density: f64 = 0;
-
-        var m: i32 = -m_max;
-        while (m <= m_max) : (m += 1) {
-            const f_sb = f_out + @as(f64, @floatFromInt(m)) * options.f_fundamental;
-            // |H(f)| = |H(-f)| for a real network, so fold to |f|.
-            const f_phys = @abs(f_sb);
-            if (f_phys < 1e-30) continue;
-            const omega = 2.0 * std.math.pi * f_phys;
-
-            simdZero(h_sq_acc);
-
-            for (0..n_samples) |k| {
-                const g_offset = k * n * n;
-                const g_mat = g_mats[g_offset .. g_offset + n * n];
-                const c_mat = c_mats[g_offset .. g_offset + n * n];
-                const w_row = src_white[k * n_srcs ..][0..n_srcs];
-                const f_row = src_flicker[k * n_srcs ..][0..n_srcs];
-                const e_row = src_exponent[k * n_srcs ..][0..n_srcs];
-
-                //   | G  -wC | | v_re |   | i_re |
-                //   | wC   G | | v_im | = | i_im |
-                dense_lu.buildComplexAdmittance(n, nn, g_mat, c_mat, omega, a_work);
-                try dense_lu.factorize(nn, a_work, piv);
-
-                // One adjoint solve gives every source's transfer.
-                dense_lu.solveFactoredT(nn, a_work, piv, rhs_work, x_work);
-                for (noise_sources, 0..) |src, s| {
-                    const h_re = (if (src.node_p != root.GROUND) x_work[src.node_p] else 0) -
-                        (if (src.node_n != root.GROUND) x_work[src.node_n] else 0);
-                    const h_im = (if (src.node_p != root.GROUND) x_work[n + src.node_p] else 0) -
-                        (if (src.node_n != root.GROUND) x_work[n + src.node_n] else 0);
-                    const h_sq = h_re * h_re + h_im * h_im;
-
-                    // A 1/f shape is evaluated at the unfolded sideband f_sb.
-                    const psd = sourcePsd(w_row[s], f_row[s], e_row[s], f_sb);
-                    h_sq_acc[s] += h_sq * psd;
+    for (freqs, density, 0..) |f_out, *total, fi| {
+        const h = transfer[fi * nn ..][0..nn];
+        total.* = 0;
+        for (noise_sources, exponent, 0..) |src, ef, s| {
+            for (0..n_sb) |j| {
+                // Input sideband j: sum_m H_m A_{m-j}, white and flicker.
+                var w: Complex = .zero;
+                var fl: Complex = .zero;
+                for (0..n_sb) |m| {
+                    const bin = pac.mapHarmonicToFftBin(@as(i32, @intCast(m)) - @as(i32, @intCast(j)), n_samples) orelse continue;
+                    const hp = if (src.node_p != root.GROUND) h[m * n + src.node_p] else Complex.zero;
+                    const hn = if (src.node_n != root.GROUND) h[m * n + src.node_n] else Complex.zero;
+                    const hm = Complex.sub(hp, hn);
+                    w = Complex.add(w, Complex.mul(hm, white_hat[bin * n_srcs + s]));
+                    fl = Complex.add(fl, Complex.mul(hm, flicker_hat[bin * n_srcs + s]));
                 }
+                const f_sb = f_out + (@as(f64, @floatFromInt(j)) - @as(f64, @floatFromInt(m_max))) * options.f_fundamental;
+                // A 1/f shape is evaluated at the unfolded sideband f_sb.
+                total.* += sourcePsd(w.magSq(), fl.magSq(), ef, f_sb);
             }
-
-            // Sideband density = (1/N) * sum over sources of h_sq_acc.
-            var sb_density: f64 = 0;
-            var si: usize = 0;
-            const splat_inv: V = @splat(inv_n_samples);
-            while (si + W <= n_srcs) : (si += W) {
-                const hv: V = h_sq_acc[si..][0..W].*;
-                const psd_v = splat_inv * hv;
-                sb_density += @reduce(.Add, psd_v);
-            }
-            while (si < n_srcs) : (si += 1) {
-                sb_density += inv_n_samples * h_sq_acc[si];
-            }
-
-            total_density += sb_density;
         }
-
-        freqs[pt] = f_out;
-        density[pt] = total_density;
-
-        if (pt > 0) {
-            integrated_noise += 0.5 * (prev_density + total_density) * (f_out - prev_freq);
-        }
-        prev_freq = f_out;
-        prev_density = total_density;
+        if (fi > 0) integrated_noise += 0.5 * (density[fi - 1] + total.*) * (f_out - freqs[fi - 1]);
     }
 
-    return .{ .total_noise = @sqrt(integrated_noise), .pss_converged = pss_converged };
+    return .{ .total_noise = @sqrt(integrated_noise), .pss_converged = orb.converged };
 }
 
 /// Contract entry: device noise sources at ctx.x_op, LPTV sweep. Point-major
@@ -204,11 +152,6 @@ pub fn sweep(
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const x_op = ctx.x_op;
-
-    // ponytail: no lane batching. Every PSS sample has its own (G_k, C_k),
-    // so FreqSolver.solveBatch (one G, C, many omegas) does not fit the
-    // (freq x sideband x sample) loop. The upgrade is a batched variant
-    // taking N (G, C, omega) triples.
 
     const scratch = ctx.scratch_allocator;
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
@@ -237,92 +180,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = n_points,
         .data = data,
     };
-}
-
-/// Fixed-point shooting: integrate one period from x0 and repeat from x(T)
-/// until max|x(T) - x0| < pss_shoot_tol. Fills pss_traj with n_samples
-/// states over [0, T), from the last attempt when it does not converge.
-/// Returns whether it converged.
-fn runPSS(
-    ckt: *root.Circuit,
-    x_dc: []const f64,
-    pss_traj: []f64,
-    n: usize,
-    n_samples: u32,
-    period: f64,
-    options: Options,
-    allocator: std.mem.Allocator,
-) !bool {
-    const ws = try ckt.workspace();
-    const x0 = try allocator.alloc(f64, n);
-    defer allocator.free(x0);
-    const x_end = try allocator.alloc(f64, n);
-    defer allocator.free(x_end);
-
-    simdCopy(x0, x_dc);
-
-    var shoot_iter: u16 = 0;
-    while (shoot_iter < options.pss_shoot_max_iter) : (shoot_iter += 1) {
-        if (shoot_iter != 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = shoot_iter });
-        try integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
-
-        var max_residual: f64 = 0;
-        var j: usize = 0;
-        while (j + W <= n) : (j += W) {
-            const ev: V = x_end[j..][0..W].*;
-            const xv: V = x0[j..][0..W].*;
-            max_residual = @max(max_residual, @reduce(.Max, @abs(ev - xv)));
-        }
-        while (j < n) : (j += 1) {
-            max_residual = @max(max_residual, @abs(x_end[j] - x0[j]));
-        }
-
-        if (max_residual < options.pss_shoot_tol) return true;
-
-        simdCopy(x0, x_end);
-    }
-
-    try integrateOnePeriod(ckt, x0, x_end, pss_traj, n, n_samples, period, options, ws);
-
-    return false;
-}
-
-/// Walks one period from x0 with frozen-time quasi-static Newton solves at
-/// n_samples uniform points, storing each state in pss_traj (sample 0 is
-/// x0) and leaving the last in x_end. Newton failures are ignored.
-fn integrateOnePeriod(
-    ckt: *root.Circuit,
-    x0: []const f64,
-    x_end: []f64,
-    pss_traj: []f64,
-    n: usize,
-    n_samples: u32,
-    period: f64,
-    options: Options,
-    ws: *converger.Workspace,
-) !void {
-    const dt = period / @as(f64, @floatFromInt(n_samples));
-    const nr_opts = converger.Options{
-        .max_iter = options.pss_newton_max_iter,
-        .abstol = options.pss_newton_tol,
-    };
-
-    simdCopy(x_end, x0);
-    simdCopy(pss_traj[0..n], x0);
-
-    for (1..n_samples) |k| {
-        const t_k = @as(f64, @floatFromInt(k)) * dt;
-        // Sources follow their waveform only under analysis("tran")
-        // (§4.6.1). dt stays 0: these solves are quasi-static.
-        ckt.setSimState(.{ .t = t_k, .kind = .tran });
-        _ = converger.run(ckt, ws, x_end, t_k, nr_opts, root.EvalHook{}) catch |err| switch (err) {
-            error.QueryCancelled => return err,
-            else => {},
-        };
-
-        const offset = k * n;
-        simdCopy(pss_traj[offset .. offset + n], x_end);
-    }
 }
 
 // Private implementation access for the analysis test suite.
