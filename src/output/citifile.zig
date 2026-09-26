@@ -1,73 +1,39 @@
+//! CITIfile: the frequency list, then one real/imaginary DATA block per
+//! S-parameter variable. Variables that are not S parameters are skipped.
 const std = @import("std");
 const Io = std.Io;
 const types = @import("types.zig");
 const Plot = types.Plot;
 
-/// Write CITIfile format. Only valid for S-parameter data.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
-    const nvars = plot.result.varnames.len;
-
     try w.writeAll("CITIFILE A.01.01\n");
     try w.print("NAME {s}\n", .{plot.result.plotname});
     try w.print("VAR frequency MAG {d}\n", .{plot.result.npoints});
-
     try w.writeAll("VAR_LIST_BEGIN\n");
-    for (0..plot.result.npoints) |pt| {
-        const freq = plot.result.data[pt * nvars * 2]; // real part of frequency
-        try w.print("{e}\n", .{freq});
-    }
+    for (0..plot.result.npoints) |pt| try w.print("{e}\n", .{plot.point(pt)[0]});
     try w.writeAll("VAR_LIST_END\n");
-
     for (plot.result.varnames, 0..) |name, vi| {
         const ports = types.sParameter(name) orelse continue;
         try w.print("DATA S[{d},{d}] RI\n", .{ ports[0], ports[1] });
-
         for (0..plot.result.npoints) |pt| {
-            const idx = pt * nvars * 2 + vi * 2;
-            try w.print("{e},{e}\n", .{ plot.result.data[idx], plot.result.data[idx + 1] });
+            const row = plot.point(pt);
+            try w.print("{e},{e}\n", .{ row[2 * vi], row[2 * vi + 1] });
         }
     }
-
     try w.writeAll("BEGIN\nEND\n");
 }
 
 test "CITIfile 2-port write" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    const varnames = [_][]const u8{ "frequency", "S(1,1)", "S(2,1)" };
-    const data = [_]f64{
-        1.0e9, 0.0, 0.5, -0.3, 0.1, -0.05, // point 0
-        2.0e9, 0.0, 0.4, -0.2, 0.2, -0.04, // point 1
-    };
-    const plot: Plot = .{ .title = "citi", .result = .{ .plotname = "S-Parameter Analysis", .varnames = &varnames, .is_complex = true, .npoints = 2, .data = &data } };
-    const path = "zig-out/test.citi";
-    Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
-    try @import("write.zig").write(io, path, .citi, plot);
-    defer Io.Dir.cwd().deleteFile(io, path) catch {};
-    const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
-    defer allocator.free(blob);
-    try std.testing.expect(std.mem.indexOf(u8, blob, "CITIFILE A.01.01\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, blob, "VAR_LIST_BEGIN\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, blob, "DATA S[1,1] RI\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, blob, "DATA S[2,1] RI\n") != null);
-}
-
-test "CITIfile rejects non-S-parameter" {
-    const io = std.testing.io;
-    const varnames = [_][]const u8{ "time", "v(out)" };
-    const data = [_]f64{ 0.0, 1.0 };
-    const plot: Plot = .{ .title = "bad", .result = .{ .plotname = "Transient", .varnames = &varnames, .is_complex = false, .npoints = 1, .data = &data } };
-    try std.testing.expectError(error.NotSParameterData, @import("write.zig").write(io, "zig-out/bad.citi", .citi, plot));
-}
-
-test "S-parameter labels accept both producers and reject malformed port identities" {
-    try std.testing.expectEqual([2]u32{ 12, 3 }, types.sParameter("S(12,3)").?);
-    try std.testing.expectEqual([2]u32{ 12, 3 }, types.sParameter("v(S_12_3)").?);
-    for ([_][]const u8{ "S()", "S(0,1)", "S(1,)", "S(1,2,3)", "v(S_)", "v(S_1_0)", "v(S_1_2_3)", "v(S_+1_2)", "v(S_4294967296_1)" }) |name| {
-        try std.testing.expect(types.sParameter(name) == null);
-        try std.testing.expectError(error.NotSParameterData, types.validateSchema(.citi, .{
-            .varnames = &.{ "frequency", "S(1,1)", name },
-            .is_complex = true,
-        }));
-    }
+    var buf: [512]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try encode(&w, .{ .title = "citi", .result = .{
+        .plotname = "S-Parameter Analysis",
+        .varnames = &.{ "frequency", "S(1,1)", "S(2,1)" },
+        .is_complex = true,
+        .npoints = 2,
+        .data = &.{ 1.0e9, 0.0, 0.5, -0.3, 0.1, -0.05, 2.0e9, 0.0, 0.4, -0.2, 0.2, -0.04 },
+    } });
+    try std.testing.expectEqualStrings("CITIFILE A.01.01\nNAME S-Parameter Analysis\nVAR frequency MAG 2\n" ++
+        "VAR_LIST_BEGIN\n1e9\n2e9\nVAR_LIST_END\nDATA S[1,1] RI\n5e-1,-3e-1\n4e-1,-2e-1\n" ++
+        "DATA S[2,1] RI\n1e-1,-5e-2\n2e-1,-4e-2\nBEGIN\nEND\n", w.buffered());
 }

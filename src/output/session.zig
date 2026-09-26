@@ -1,18 +1,22 @@
-//! Ordered whole-result delivery. The coordinator supplies consecutive ordinals,
-//! independent of query IDs, and retains results until this call acknowledges them.
-//! ponytail: whole plots only; add chunk delivery when writer framing supports it.
+//! Ordered, idempotent delivery of whole plots to one output selection. The
+//! caller numbers plots with consecutive ordinals, independent of query ids,
+//! and keeps each result alive until `publish` acknowledges it.
+//! ponytail: whole plots only; add chunked delivery when a writer can frame it.
 const std = @import("std");
 const types = @import("types.zig");
 const dispatch = @import("write.zig");
 
+/// One output destination and the count of plots delivered to it.
 pub const Session = struct {
     allocator: std.mem.Allocator,
     selection: types.Selection,
+    /// Plots delivered so far, which is also the next expected ordinal.
     /// At most maxInt(u32) plots, numbered 0 through maxInt(u32) - 1.
     published: u32 = 0,
+    /// `failed` after a writer error; every later call reports it.
     state: enum(u8) { ready, failed } = .ready,
 
-    /// Own the path; init performs no destination I/O.
+    /// Copies `selection.path`; performs no I/O.
     pub fn init(allocator: std.mem.Allocator, selection: types.Selection) !Session {
         return .{
             .allocator = allocator,
@@ -28,8 +32,11 @@ pub const Session = struct {
         self.* = undefined;
     }
 
-    /// Acknowledged ordinals are no-ops. Gaps and invalid plots fail before I/O.
-    /// A writer error is terminal: a partial append cannot safely be replayed.
+    /// Writes plot `ordinal`. Ordinal 0 writes `path`; later ones append to it
+    /// for binary raw and go to `path.<ordinal + 1>` for every other format.
+    /// An already acknowledged ordinal is a no-op. A gap (`OutOfOrder`) or an
+    /// invalid plot fails before any I/O. A writer error is terminal
+    /// (`DeliveryFailed` from then on): a partial append cannot be replayed.
     pub fn publish(self: *Session, io: std.Io, ordinal: u32, plot: types.Plot) !void {
         if (self.state == .failed) return error.DeliveryFailed;
         if (ordinal < self.published) return;
@@ -55,8 +62,9 @@ pub const Session = struct {
         self.published += 1;
     }
 
-    /// Every publish already flushes/closes its writer. Finish checks delivery
-    /// without sealing the session; later appended queries may publish more plots.
+    /// Reports whether delivery has failed. Does not seal the session: every
+    /// `publish` already closed its file, and queries appended later may
+    /// publish more plots.
     pub fn finish(self: Session) error{DeliveryFailed}!void {
         if (self.state == .failed) return error.DeliveryFailed;
     }

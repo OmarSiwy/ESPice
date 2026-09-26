@@ -1,88 +1,42 @@
+//! A minimal FSDB-style analog container, little-endian: "FSDB", version,
+//! variable and point counts, complex flag, u16-length-prefixed title,
+//! plotname and variable names, then the samples as raw f64.
+//! ponytail: FSDB proper is a closed Synopsys format; vendor tools need
+//! libfsdb. Link it when real FSDB interchange is required.
 const std = @import("std");
 const Io = std.Io;
-const types = @import("types.zig");
-const Plot = types.Plot;
+const Plot = @import("types.zig").Plot;
 
-// ponytail: FSDB is proprietary (Synopsys). This implements a minimal analog FSDB
-// structure based on publicly documented format. Full vendor tool compatibility
-// requires linking against libfsdb.so — this covers the open subset.
+const magic = "FSDB";
+const version: u32 = 0x0300;
 
-const FSDB_MAGIC = "FSDB";
-const FSDB_VERSION: u32 = 0x0300; // v3.0
-
-/// Write FSDB (Fast Signal Database) format for analog simulation data.
+/// Expects the u32/u16 limits `types.validatePlot` enforces for fsdb.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
-    const nvars = plot.result.varnames.len;
-
-    try w.writeAll(FSDB_MAGIC);
-    try w.writeInt(u32, FSDB_VERSION, .little);
-    try w.writeInt(u32, @intCast(nvars), .little);
+    try w.writeAll(magic);
+    try w.writeInt(u32, version, .little);
+    try w.writeInt(u32, @intCast(plot.result.varnames.len), .little);
     try w.writeInt(u32, @intCast(plot.result.npoints), .little);
-    try w.writeInt(u32, if (plot.result.is_complex) @as(u32, 1) else @as(u32, 0), .little);
-
-    // Section 2: Title and plotname (length-prefixed strings)
-    try w.writeInt(u16, @intCast(plot.title.len), .little);
-    try w.writeAll(plot.title);
-    try w.writeInt(u16, @intCast(plot.result.plotname.len), .little);
-    try w.writeAll(plot.result.plotname);
-
-    for (plot.result.varnames) |name| {
-        try w.writeInt(u16, @intCast(name.len), .little);
-        try w.writeAll(name);
-    }
-
-    // Section 4: Data block — point-major f64, same layout as Plot.data
+    try w.writeInt(u32, @intFromBool(plot.result.is_complex), .little);
+    try writeString(w, plot.title);
+    try writeString(w, plot.result.plotname);
+    for (plot.result.varnames) |name| try writeString(w, name);
     try w.writeAll(std.mem.sliceAsBytes(plot.result.data));
-
 }
 
-fn verifyHeader(blob: []const u8) !struct { nvars: u32, npoints: u32 } {
-    if (blob.len < 20) return error.TooShort;
-    if (!std.mem.startsWith(u8, blob, FSDB_MAGIC)) return error.BadMagic;
-    const nvars = std.mem.readInt(u32, blob[8..12], .little);
-    const npoints = std.mem.readInt(u32, blob[12..16], .little);
-    return .{ .nvars = nvars, .npoints = npoints };
+fn writeString(w: *Io.Writer, s: []const u8) !void {
+    try w.writeInt(u16, @intCast(s.len), .little);
+    try w.writeAll(s);
 }
 
-test "FSDB write and read back header" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    const varnames = [_][]const u8{ "time", "v(out)" };
-    const data = [_]f64{ 0.0, 1.0, 0.5, 2.0 };
-    const plot: Plot = .{ .title = "fsdb test", .result = .{ .plotname = "Transient Analysis", .varnames = &varnames, .is_complex = false, .npoints = 2, .data = &data } };
-    const path = "zig-out/test.fsdb";
-    Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
-    try @import("write.zig").write(io, path, .fsdb, plot);
-    defer Io.Dir.cwd().deleteFile(io, path) catch {};
-    const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
-    defer allocator.free(blob);
-    const hdr = try verifyHeader(blob);
-    try std.testing.expectEqual(@as(u32, 2), hdr.nvars);
-    try std.testing.expectEqual(@as(u32, 2), hdr.npoints);
-}
-
-test "FSDB complex data" {
-    const io = std.testing.io;
-    const allocator = std.testing.allocator;
-    const varnames = [_][]const u8{ "frequency", "v(out)" };
+test "FSDB header, strings and samples" {
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
     const data = [_]f64{ 1.0, 0.0, 0.5, -0.5 };
-    const plot: Plot = .{ .title = "ac", .result = .{ .plotname = "AC", .varnames = &varnames, .is_complex = true, .npoints = 1, .data = &data } };
-    const path = "zig-out/test_ac.fsdb";
-    Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
-    try @import("write.zig").write(io, path, .fsdb, plot);
-    defer Io.Dir.cwd().deleteFile(io, path) catch {};
-    const blob = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
-    defer allocator.free(blob);
-    const hdr = try verifyHeader(blob);
-    try std.testing.expectEqual(@as(u32, 2), hdr.nvars);
-    const complex_flag = std.mem.readInt(u32, blob[16..20], .little);
-    try std.testing.expectEqual(@as(u32, 1), complex_flag);
-}
-
-test "FSDB data length mismatch" {
-    const io = std.testing.io;
-    const varnames = [_][]const u8{ "v(a)", "v(b)" };
-    const data = [_]f64{ 1.0, 2.0, 3.0 };
-    const plot: Plot = .{ .title = "bad", .result = .{ .plotname = "bad", .varnames = &varnames, .is_complex = false, .npoints = 2, .data = &data } };
-    try std.testing.expectError(error.DataLengthMismatch, @import("write.zig").write(io, "zig-out/bad.fsdb", .fsdb, plot));
+    try encode(&w, .{ .title = "ac", .result = .{ .plotname = "AC", .varnames = &.{ "frequency", "v(out)" }, .is_complex = true, .npoints = 1, .data = &data } });
+    const blob = w.buffered();
+    try std.testing.expectEqualStrings(magic, blob[0..4]);
+    const counts = [_]u32{ version, 2, 1, 1 };
+    for (counts, 0..) |c, i| try std.testing.expectEqual(c, std.mem.readInt(u32, blob[4 + 4 * i ..][0..4], .little));
+    try std.testing.expectEqualStrings("\x02\x00ac\x02\x00AC\x09\x00frequency\x06\x00v(out)", blob[20..][0..27]);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&data), blob[47..]);
 }

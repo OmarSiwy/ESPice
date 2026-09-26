@@ -1,18 +1,20 @@
 //! The one file write every format goes through: validate, encode, and
-//! replace the destination atomically, so it holds the old bytes or the whole
-//! new plot, never a torn one.
+//! replace the destination atomically, so it holds the old bytes or the
+//! whole new plot, never a torn one.
 const std = @import("std");
 const Io = std.Io;
 const types = @import("types.zig");
 
-/// Replace `path` with `plot` encoded as `format`.
+/// Replaces `path` with `plot` encoded as `format`. Validation errors leave
+/// the destination untouched.
 pub fn write(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !void {
     return put(io, path, format, plot, false);
 }
 
-/// Binary raw only: ngspice appends every plot of a deck to ONE raw file and
-/// readers take the concatenation. The existing plots are copied into the
-/// replacement first, so the append is atomic too.
+/// Appends `plot` to the binary raw file at `path`, creating it if missing.
+/// ngspice writes every plot of a deck into one raw file and readers take
+/// the concatenation. The old plots are copied into the replacement, so the
+/// append is atomic too.
 pub fn append(io: Io, path: []const u8, plot: types.Plot) !void {
     return put(io, path, .binary, plot, true);
 }
@@ -47,4 +49,19 @@ fn put(io: Io, path: []const u8, format: types.Format, plot: types.Plot, keep: b
     };
     try w.flush();
     try atomic.replace(io);
+}
+
+test "every format refuses a plot whose data length disagrees with its shape" {
+    const plot: types.Plot = .{ .title = "bad", .result = .{
+        .plotname = "bad",
+        .varnames = &.{ "v(a)", "v(b)" },
+        .is_complex = false,
+        .npoints = 2,
+        .data = &.{ 1.0, 2.0, 3.0 },
+    } };
+    inline for (@typeInfo(types.Format).@"enum".fields) |f| {
+        const format: types.Format = @enumFromInt(f.value);
+        const expected = if (format == .touchstone or format == .citi) error.NotSParameterData else error.DataLengthMismatch;
+        try std.testing.expectError(expected, write(std.testing.io, "zig-out/should_not_exist", format, plot));
+    }
 }
