@@ -263,8 +263,8 @@ pub const Circuit = struct {
     }
 
     /// Returns the length of the per-device-state charge tape: one entry per
-    /// (instance, unknown) of every charge-carrying batch, batch-major and
-    /// indexed like each batch's `rhs_idx`.
+    /// (instance, LTE charge site) of every charge-carrying batch,
+    /// batch-major.
     ///
     /// Zero when nothing carries charge, and zero under a GPU plane hook,
     /// whose eval never runs the host batches that write the tapes. The
@@ -273,7 +273,7 @@ pub const Circuit = struct {
         if (self.gpu_hook != null) return 0;
         var total: u32 = 0;
         for (self.batches) |b| {
-            if (b.hooks.q_tape != null) total += b.count * b.n_u;
+            if (b.hooks.q_tape) |f| total += @intCast(f(b.ctx).len);
         }
         return total;
     }

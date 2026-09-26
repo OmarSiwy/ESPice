@@ -222,6 +222,9 @@ module diode(a, c);
         // shot-noise models in the tree share this ceiling.
         I(ai, c) <+ white_noise(2.0 * 1.602176634e-19 * abs(ihi), "id");
 
+        // One junction charge, depletion plus diffusion, in one ddt site:
+        // ngspice truncates it as the single state DIOcapCharge (diotrunc.c).
+        qj = 0.0;
         // Depletion charge, CJO(T)/VJ(T)/M(T). Below fc*vj(T) it is the exact
         // integral of cjo(T)*(1-v/vj(T))^-M(T); above it the linearized
         // f1/f2/f3 continuation (diotemp.c) avoids the singularity at v = vj.
@@ -236,12 +239,12 @@ module diode(a, c);
                 qj = cjo_t * (f1 + (1.0 / f2) *
                      (f3 * (vd - vfc) + (mt / (2.0 * vj_t)) * (vd * vd - vfc * vfc)));
             end
-            I(ai, c) <+ ddt(qj);
         end
 
         // Diffusion charge TT*cd (dioload.c), cd the whole junction current
         // including the gmin shunt, so its small-signal cap is TT*gd.
-        if (tt > 0.0) I(ai, c) <+ ddt(tt * (ihi + gmin * vd));
+        if (tt > 0.0) qj = qj + tt * (ihi + gmin * vd);
+        I(ai, c) <+ ddt(qj);
 
         // Guard on the raw rs: node collapse is a topology decision and must
         // not depend on temperature. rs_t is floored above.

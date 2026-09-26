@@ -100,9 +100,10 @@ pub fn simulate(
     // The LTE runs per device charge state, as ngspice's CKTterr does
     // (ckttrunc.c and the per-device trunc routines), not per matrix row:
     // charges that share a node add their divided differences, so a row's
-    // slope belongs to no real state. The device tape (`buildTapes`,
-    // rhs_idx[id*n_u + ru]) indexes the states, and the host keeps a second
-    // history over it. The companion residual still integrates the row plane.
+    // slope belongs to no real state. The device `q_tape` holds one charge
+    // per `ddt()` site the model leaves in the LTE (`vera_lte`), and the host
+    // keeps a second history over it. The companion residual still
+    // integrates the row plane.
     //
     // n_qt == 0 (no charge, or a GPU plane-stamp hook that bypasses the host
     // batches) runs the same kernel over the row plane. ZP_NO_QTAPE forces
@@ -137,8 +138,8 @@ pub fn simulate(
             if (rows.len == 0) return;
             var off: usize = 0;
             for (c.batches) |b| {
-                if (b.hooks.q_tape == null) continue;
-                const len = b.count * b.n_u;
+                const f = b.hooks.q_tape orelse continue;
+                const len = f(b.ctx).len;
                 if (std.mem.eql(u8, b.type_name, "inductor") or std.mem.eql(u8, b.type_name, "kinduc"))
                     @memset(dst[off..][0..len], 0);
                 off += len;

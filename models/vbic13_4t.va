@@ -1710,9 +1710,11 @@ analog begin : analogBlock
         I(b_be)  <+ ddt(Qbeo);
         I(b_bc)  <+ ddt(Qbco);
             I(b_bcp) <+ ddt(Qbcp);
-        I(c_xf1) <+ ddt(Qxf1);
-        I(c_xf2) <+ ddt(Qxf2);
-        Pwr(b_rth) <+ ddt(Qcth);
+        // vbictrunc.c truncates the eight junction charges above, not the
+        // excess-phase or thermal ones.
+        (* vera_lte = 0 *) I(c_xf1) <+ ddt(Qxf1);
+        (* vera_lte = 0 *) I(c_xf2) <+ ddt(Qxf2);
+        (* vera_lte = 0 *) Pwr(b_rth) <+ ddt(Qcth);
     end // loadDynamic
 
     //

@@ -187,8 +187,10 @@ module jfet2(d, g, s);
 
         // Trap filters: tau*dV/dt = v - V, i.e. V -> v (h = 0) in DC and AC.
         htr = analysis("tran") ? 1.0 : 0.0;
-        I(ntgs) <+ (V(ntgs) - vgs) * 1.0 + htr * ddt(taug * V(ntgs));
-        I(ntgd) <+ (V(ntgd) - vgd) * 1.0 + htr * ddt(taug * V(ntgd));
+        // jfet2trun.c truncates qgs and qgd only: the trap and thermal
+        // lowpasses and the drain-source cap join no LTE check.
+        (* vera_lte = 0 *) I(ntgs) <+ (V(ntgs) - vgs) * 1.0 + htr * ddt(taug * V(ntgs));
+        (* vera_lte = 0 *) I(ntgd) <+ (V(ntgd) - vgd) * 1.0 + htr * ddt(taug * V(ntgd));
         vgsf = V(ntgs);
         vgdf = V(ntgd);
 
@@ -245,7 +247,7 @@ module jfet2(d, g, s);
         if (vgt <= 0.0) idclm = 0.0;
 
         // Self-heating: filtered dissipation, then the thermal reduction.
-        I(ntp) <+ (V(ntp) - vdse * idclm) * 1.0 + htr * ddt(taud * V(ntp));
+        (* vera_lte = 0 *) I(ntp) <+ (V(ntp) - vdse * idclm) * 1.0 + htr * ddt(taud * V(ntp));
         pbar = V(ntp);
         id   = mode * idclm / (1.0 + pbar * delta / aeff);
 
@@ -287,7 +289,7 @@ module jfet2(d, g, s);
         // jtype on every terminal contribution (JFET2type in the reference).
         I(g, si) <+ jtype * gjunc(vgs, isat, nvt, ibrk, vbd, gmin) + ddt(jtype * qgs);
         I(g, di) <+ jtype * gjunc(vgd, isat, nvt, ibrk, vbd, gmin) + ddt(jtype * qgd);
-        I(di, si) <+ jtype * id + gmin * V(di, si) + ddt(cds * aeff * V(di, si));
+        I(di, si) <+ jtype * id + gmin * V(di, si) + ddt (* vera_lte = 0 *) (cds * aeff * V(di, si));
 
         // ---- noise (jfet2noi.c): RD/RS thermal, channel thermal 2/3|gm|,
         // flicker KF|Id|^AF/f. Raising V(g) raises vgs and vgd together, so

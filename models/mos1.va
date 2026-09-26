@@ -360,8 +360,9 @@ module mos1(d, g, s, b);
         I(di, si) <+ type * mode * id;
         I(b, di) <+ type * ibd;
         I(b, si) <+ type * ibs;
-        I(b, di) <+ type * ddt(qbd);
-        I(b, si) <+ type * ddt(qbs);
+        // qbd/qbs join no LTE check: mos1trun.c truncates qgs, qgd, qgb only.
+        (* vera_lte = 0 *) I(b, di) <+ type * ddt(qbd);
+        (* vera_lte = 0 *) I(b, si) <+ type * ddt(qbs);
         // Meyer caps are capacitance-based, not charge-conserving: ngspice
         // advances q_gs = q_gs_prev + capgs*(vgs - vgs_prev), so the Jacobian
         // entry is exactly capgs. ddt(capgs*vgs) would add vgs*dcapgs/dv and

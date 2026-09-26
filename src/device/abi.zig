@@ -181,10 +181,10 @@ pub const Hooks = struct {
     /// accepted step.
     bound_step: ?*const fn (*anyopaque) f64 = null,
     next_breakpoint: ?*const fn (*anyopaque, f64) ?f64 = null,
-    /// Charge per instance and row from the last eval: `q_tape()[id * n_u +
-    /// ru]` went to row `rhs_idx[id * n_u + ru]`. Lets the transient run its
-    /// LTE per charge state, as ngspice's CKTterr does, instead of per summed
-    /// matrix row. Null when the device has no `q`.
+    /// Charge per instance and LTE site (`ddt()` sites not marked
+    /// `vera_lte = 0`) from the last eval, instance-major. Lets the transient
+    /// run its LTE per charge state, as ngspice's CKTterr does, instead of
+    /// per summed matrix row. Null when the device has no `q`.
     q_tape: ?*const fn (*anyopaque) []const f64 = null,
     /// Restamps `q_vec` and `q_tape` for instances `[first, last)` at x,
     /// leaving the other planes alone. Null when the device has no `q`.

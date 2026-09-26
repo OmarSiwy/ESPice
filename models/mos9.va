@@ -431,8 +431,9 @@ module mos9(d, g, s, b);
         I(di, si) <+ type * mode * id;
         I(b, di) <+ type * ibd;
         I(b, si) <+ type * ibs;
-        I(b, di) <+ type * ddt(qbd);
-        I(b, si) <+ type * ddt(qbs);
+        // qbd/qbs join no LTE check: mos9trun.c truncates qgs, qgd, qgb only.
+        (* vera_lte = 0 *) I(b, di) <+ type * ddt(qbd);
+        (* vera_lte = 0 *) I(b, si) <+ type * ddt(qbs);
         // Meyer caps are capacitance-based (q advanced as C*dv), which is
         // exactly C(v)*ddt(V) here: not charge conserving, matching ngspice.
         I(g, si) <+ capgs * ddt(V(g, si));

@@ -480,8 +480,9 @@ module mos3(d, g, s, b);
         I(di, si) <+ type * m * mode * id;
         I(b, di) <+ type * ibd;
         I(b, si) <+ type * ibs;
-        I(b, di) <+ type * ddt(qbd);
-        I(b, si) <+ type * ddt(qbs);
+        // qbd/qbs join no LTE check: mos3trun.c truncates qgs, qgd, qgb only.
+        (* vera_lte = 0 *) I(b, di) <+ type * ddt(qbd);
+        (* vera_lte = 0 *) I(b, si) <+ type * ddt(qbs);
         I(g, si) <+ capgs * ddt(V(g, si));
         I(g, di) <+ capgd * ddt(V(g, di));
         I(g, b)  <+ capgb * ddt(V(g, b));
