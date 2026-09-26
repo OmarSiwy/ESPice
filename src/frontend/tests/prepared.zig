@@ -81,6 +81,10 @@ test "analysis directives dispatch every implemented capability and reject malfo
             return error.AcceptedInvalidAnalysis;
         } else |_| {}
     }
+    // HB and QPSS drive from whatever sources the deck stamps, current ones
+    // included, so a deck without a V card is valid.
+    const no_v: core.QueryBindings = .{ .v_names = &.{}, .i_names = &.{}, .v_branches = &.{}, .v_pos = &.{}, .v_neg = &.{}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{}, .ports = &.{} };
+    for ([_][]const u8{ ".hb 1k", ".qpss 1k 1414 1 1" }) |directive| _ = try analyses.buildJob(try card(a, directive), no_v, cards);
     // A single `.temp` is deck configuration, not a query.
     try std.testing.expectEqual(null, try analyses.buildJob(try card(a, ".temp 50"), sources, cards));
 }
