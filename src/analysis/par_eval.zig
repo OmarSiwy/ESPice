@@ -231,7 +231,9 @@ pub const ParEval = struct {
     /// Stamps every batch into `own_planes` across the lanes and waits for all
     /// of them. The caller has already cleared (or baseline-seeded) the planes
     /// `mode` writes. Spawns the workers on first use; a failed spawn panics.
+    /// `.charge` on a circuit without charge is a no-op: there is no q plane.
     pub fn run(self: *ParEval, batches: []const Batch, own_planes: Planes, x: []const f64, t: f64, mode: Mode) void {
+        if (mode == .charge and !self.has_charge) return;
         if (self.n_lanes == 1) {
             runLane(self, batches, own_planes, 0, x, t, mode);
             return;
