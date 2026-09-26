@@ -55,6 +55,16 @@ pub const Waveform = struct {
         self.len += 1;
     }
 
+    /// `record` of the point `(1 - f) * a + f * b` at time `t`, per probe;
+    /// grows and invalidates like `record`.
+    pub fn recordLerp(self: *Waveform, t: f64, a: []const f64, b: []const f64, f: f64, probes: []const u32) !void {
+        if (self.len == self.capacity) try self.grow();
+        self.times[self.len] = t;
+        const cap: usize = self.capacity;
+        for (probes, 0..) |node, k| self.values[k * cap + self.len] = a[node] + f * (b[node] - a[node]);
+        self.len += 1;
+    }
+
     /// The recorded times, valid until the next `record`.
     pub fn timeSlice(self: *const Waveform) []const f64 {
         return self.times[0..self.len];
