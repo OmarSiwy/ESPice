@@ -1,5 +1,6 @@
-//! ESPice: the owning Problem facade over frontend, analysis and output.
-//! main.zig and c_api.zig import only this module.
+//! The `Problem` facade: one netlist prepared once, a DAG of analysis queries
+//! run over it, and their results delivered to one output. main.zig and
+//! c_api.zig import only this module.
 const std = @import("std");
 const frontend = @import("frontend");
 const analysis = @import("analysis");
@@ -10,6 +11,7 @@ pub const Query = requests.Query;
 pub const Source = frontend.Source;
 pub const Dialect = frontend.Dialect;
 pub const parseDialect = frontend.parseDialect;
+/// Requested compute backend; `Problem.init` rejects one the hardware lacks.
 pub const Request = analysis.ExecutionConfig.Backend;
 pub const Status = analysis.session.Status;
 pub const Scope = analysis.session.Scope;
@@ -22,21 +24,31 @@ pub const Result = output.Result;
 pub const Format = output.Format;
 pub const Selection = output.Selection;
 pub const parseFormat = output.parseFormat;
+
+/// Everything `Problem.init` needs. Its slices are copied during init.
 pub const Options = struct {
     source: Source,
     dialect: Dialect = .ngspice,
-    output: output.Selection = .{},
+    output: Selection = .{},
     backend: analysis.ExecutionConfig = .{},
+    /// Queries `run_all` advances concurrently. Zero is `error.InvalidConcurrency`.
     max_parallel: u16 = 1,
+    /// Print per-phase wall times to stderr.
     timing_in_depth: bool = false,
 };
 
-/// Serialize external calls, including reads and destruction. Retained result
-/// views stay valid until deinit; copy-out is available for foreign callers.
+/// A prepared circuit, its query DAG and the output its results go to.
+///
+/// Not thread-safe: the caller serializes every call, reads and `deinit`
+/// included. Parallelism lives inside `advance_ready` and `run_all`. Result
+/// slices stay valid until `deinit`; `copy_result` copies for callers that
+/// cannot hold them.
 pub const Problem = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    /// Serializes `allocator` for query workers; see `workerAllocator`.
     allocation_mutex: std.Io.Mutex = .init,
+    /// Owns the prepared circuit and deck for the Problem's lifetime.
     arena: std.heap.ArenaAllocator,
     /// Every device type this problem can instantiate; outlives `prepared`.
     library: frontend.Library,
@@ -44,10 +56,19 @@ pub const Problem = struct {
     session: analysis.session.Session,
     delivery: output.Session,
     limits: Limits,
+    /// Index into `session.outputs` of the next result to publish. Results
+    /// publish in request order, so a finished query waits for earlier ones.
     next_output: usize = 0,
+    /// First output failure. Once set, nothing else is published.
     delivery_error: ?anyerror = null,
     timing_in_depth: bool = false,
 
+    /// Parses and prepares `options.source`, then queues the deck's analyses
+    /// (a lone `.op` when the deck names none). Nothing runs yet.
+    ///
+    /// Fails on a netlist error, a backend the hardware lacks, zero
+    /// `max_parallel`, or a query the output format cannot hold. The caller
+    /// frees the result with `deinit`.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Problem {
         var lap = if (options.timing_in_depth) std.Io.Timestamp.now(io, .awake) else null;
         if (options.max_parallel == 0) return error.InvalidConcurrency;
@@ -90,6 +111,8 @@ pub const Problem = struct {
         return self;
     }
 
+    /// Cancels and joins any paused query workers, then frees everything.
+    /// Invalidates every result slice handed out.
     pub fn deinit(self: *Problem) void {
         const a = self.allocator;
         self.session.deinit();
@@ -100,6 +123,7 @@ pub const Problem = struct {
         a.destroy(self);
     }
 
+    /// The deck's title line.
     pub fn title(self: *const Problem) []const u8 {
         return self.prepared.deck.title;
     }
@@ -108,10 +132,12 @@ pub const Problem = struct {
         return self.prepared.deck.n_devices;
     }
 
+    /// The output failure that stopped publication, if any.
     pub fn output_error(self: *const Problem) ?anyerror {
         return self.delivery_error;
     }
 
+    /// Queries in the DAG, prerequisites included. IDs run `0..query_count()`.
     pub fn query_count(self: *const Problem) u32 {
         return self.session.count();
     }
@@ -120,10 +146,19 @@ pub const Problem = struct {
         return self.session.info(id);
     }
 
+    /// Writes the queries in `scope` that can advance now into `ids` and
+    /// returns how many there are. If that exceeds `ids.len`, `ids` is untouched.
     pub fn ready_queries(self: *const Problem, scope: Scope, ids: []QueryId) !usize {
         return self.session.readyQueries(scope, ids);
     }
 
+    /// Adds `queries` and their prerequisites to the DAG, writing each one's
+    /// ID into `ids`. Returns `queries.len`.
+    ///
+    /// When `ids` is too short this is a sizing call: nothing is validated or
+    /// added. Otherwise the append is all-or-nothing: a query the output
+    /// format cannot hold, or any other failure, leaves the DAG and `ids`
+    /// unchanged. An existing identical query returns its old ID.
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
         for (queries) |query|
@@ -131,7 +166,9 @@ pub const Problem = struct {
         return self.session.append(queries, ids);
     }
 
-    /// Analysis directives only, resolved against the immutable prepared bindings.
+    /// `append_queries` for SPICE analysis directives (`.ac dec 10 1 1meg`),
+    /// resolved against the prepared circuit. A device card is
+    /// `error.UnsupportedDirectiveMutation`.
     pub fn append_directives(self: *Problem, text: []const u8, ids: []QueryId) !usize {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
@@ -139,6 +176,9 @@ pub const Problem = struct {
         return self.append_queries(jobs, ids);
     }
 
+    /// Runs one quantum of `id`, or of its first unfinished prerequisite, then
+    /// publishes whatever completed. A numerical failure is reported in the
+    /// event, not as an error.
     pub fn advance(self: *Problem, id: QueryId) !Advance {
         var event = try self.session.advance(id);
         self.deliver();
@@ -146,6 +186,9 @@ pub const Problem = struct {
         return event;
     }
 
+    /// Advances every query in `ids` by one quantum, up to
+    /// `limits.max_parallel` at a time, writing one event per query.
+    /// `ids` must be ready and distinct; a bad frontier starts nothing.
     pub fn advance_ready(self: *Problem, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
         const n = try self.session.advanceReady(ids, limits, events);
         self.deliver();
@@ -153,6 +196,10 @@ pub const Problem = struct {
         return n;
     }
 
+    /// Runs every query to completion, publishes the results and finishes
+    /// the output. Returns the first query failure, else
+    /// `error.DeliveryFailed` if output failed. Calling it again is a no-op
+    /// for finished queries and publishes nothing twice.
     pub fn run_all(self: *Problem) !void {
         var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &lap, "run total (analysis, scheduling, output)");
@@ -163,7 +210,7 @@ pub const Problem = struct {
         while (!self.session.finished()) {
             const n = try self.ready_queries(.all, ids);
             if (n == 0) return error.SchedulingFailure;
-            // Select the same bounded frontier that print(run_all) marks NEXT.
+            // The same bounded frontier `print` marks NEXT for a run_all preview.
             const selected = @min(n, events.len);
             _ = try self.advance_ready(ids[0..selected], self.limits, events);
         }
@@ -175,23 +222,30 @@ pub const Problem = struct {
         try self.delivery.finish();
     }
 
+    /// Writes the query DAG with the frontier `options.preview` would run
+    /// next. Changes no state. A null `options.limits` uses the Problem's.
     pub fn print(self: *const Problem, writer: *std.Io.Writer, options: PrintOptions) !void {
         var resolved = options;
         if (resolved.limits == null) resolved.limits = self.limits;
         try self.session.print(writer, resolved);
     }
 
+    /// A completed query's result, valid until `deinit`.
+    /// `error.ResultUnavailable` until the query completes.
     pub fn result(self: *const Problem, id: QueryId) !Result {
         return self.session.result(id);
     }
 
-    /// Required scalar count; no partial copy when the destination is too small.
+    /// Copies a result's data into `buffer` and returns its length. A buffer
+    /// shorter than that receives nothing.
     pub fn copy_result(self: *const Problem, id: QueryId, buffer: []f64) !usize {
         const data = (try self.result(id)).data;
         if (buffer.len >= data.len) @memcpy(buffer[0..data.len], data);
         return data.len;
     }
 
+    /// Publishes completed results in request order, stopping at the first
+    /// unfinished query or the first output failure.
     fn deliver(self: *Problem) void {
         if (self.delivery_error != null) return;
         while (self.next_output < self.session.outputs.items.len) {
@@ -211,8 +265,8 @@ pub const Problem = struct {
         }
     }
 
-    // Serialize backing allocator calls across query-owned arenas. The caller
-    // need not supply a concurrent allocator just to enable parallel queries.
+    /// `allocator` behind a mutex, so parallel query arenas can share it
+    /// without the caller having to supply a thread-safe allocator.
     fn workerAllocator(self: *Problem) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
@@ -246,6 +300,8 @@ pub const Problem = struct {
     }
 };
 
+/// Prints the time since `start.*` under `label` and restarts the lap.
+/// A null `start` means timing is off.
 fn timingLap(io: std.Io, start: *?std.Io.Timestamp, label: []const u8) void {
     const before = start.* orelse return;
     const now = std.Io.Timestamp.now(io, .awake);

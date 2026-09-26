@@ -1,4 +1,6 @@
-//! CLI policy only; Problem owns preparation, query execution and delivery.
+//! The `espice` command line: flags in, one `Problem` per netlist file, a
+//! one-line summary per result on stderr. Exit 1 if any file fails, 2 on a
+//! usage error.
 const std = @import("std");
 const problem = @import("espice");
 
@@ -112,12 +114,14 @@ pub fn main(init: std.process.Init) !u8 {
     return if (failed) 1 else 0;
 }
 
+/// A positive thread count from the environment, 1 when unset or unparsable.
 fn envThreads(comptime name: [:0]const u8) u32 {
     const value = std.c.getenv(name) orelse return 1;
     return @max(1, std.fmt.parseInt(u32, std.mem.span(value), 10) catch 1);
 }
 
-/// Outer optional means not this flag; inner null means missing value.
+/// The value of `short`/`long` given as `-r X`, `--rawfile X` or `--rawfile=X`.
+/// Outer null: `arg` is not this flag. Inner null: the value is missing.
 fn optionValue(arg: []const u8, short: []const u8, long: []const u8, args: anytype) ??[]const u8 {
     if ((short.len != 0 and std.mem.eql(u8, arg, short)) or std.mem.eql(u8, arg, long))
         return @as(?[]const u8, args.next());

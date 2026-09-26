@@ -1,14 +1,17 @@
-//! C boundary for the owning Problem facade. Build as a separate module so the
-//! facade never imports its own adapter. Public layouts are in include/espice.h.
+//! The C ABI over `Problem`, built as libespice.a. include/espice.h is the
+//! contract: every export's behaviour and every struct layout is documented
+//! there, and the comptime block below fails the build if the enums drift.
 const std = @import("std");
 const api = @import("espice");
 const allocator = std.heap.smp_allocator;
+/// Bumped on any layout or semantics change; `espice_create` rejects a mismatch.
 const abi_version = 1;
+/// ESPICE_NO_QUERY: "no dependency" in `QueryInfo`, "plot title" in `espice_copy_result_name`.
 const no_query = std.math.maxInt(u32);
 const header = @cImport(@cInclude("espice.h"));
 
-// Every enum that crosses the boundary travels as its tag value, so each one is
-// pinned here to include/espice.h by name: a reordered enum fails the build.
+// Enums cross the boundary as tag values, so each is pinned to the header's
+// ESPICE_<NAME> constants: a reordered or renamed tag fails the build.
 comptime {
     pin(Code, .{});
     pin(api.Dialect, .{});
@@ -19,6 +22,8 @@ comptime {
     pin(@FieldType(@typeInfo(@FieldType(api.QueryInfo, "progress")).optional.child, "phase"), .{ .dc = "DC_PHASE" });
 }
 
+/// Checks every tag of `E` against `ESPICE_<TAG>` in the header. `rename`
+/// maps a tag to its header name where the upper-cased tag would clash.
 fn pin(comptime E: type, comptime rename: anytype) void {
     @setEvalBranchQuota(20_000);
     for (@typeInfo(E).@"enum".fields) |f| {
@@ -28,6 +33,7 @@ fn pin(comptime E: type, comptime rename: anytype) void {
     }
 }
 
+/// `espice_status` values; `status` maps Zig errors onto them.
 const Code = enum(u32) {
     ok = 0,
     invalid_argument = 1,
@@ -88,11 +94,15 @@ const PrintOptions = extern struct {
     ready_count: usize,
 };
 
-// The handle owns identity-bearing Io and Problem objects for one lifetime.
-// Control records are cold AoS: every field is read together at the boundary.
+// The extern records above are AoS on purpose: each crosses the boundary
+// whole, once per call.
+
+/// What `espice_problem *` points at. `threaded` lives here, at a stable
+/// address, because the Problem's Io points into it.
 const Handle = struct {
     threaded: std.Io.Threaded,
     problem: *api.Problem,
+    /// Read by `espice_error_message`; set by every failing call.
     last_error: ?anyerror = null,
 
     fn fail(self: *Handle, err: anyerror) u32 {
@@ -153,8 +163,9 @@ fn create(options: *const CreateOptions) !*Handle {
     };
     const handle = try allocator.create(Handle);
     errdefer allocator.destroy(handle);
-    // Query workers use std.Thread; this Io still supplies real futexes, while
-    // avoiding Threaded.init's process-wide signal-handler installation.
+    // Query workers use std.Thread directly. The single-threaded Io still
+    // supplies real futexes, and unlike Threaded.init it installs no
+    // process-wide signal handlers inside the host application.
     handle.threaded = .init_single_threaded;
     errdefer handle.threaded.deinit();
     handle.last_error = null;
@@ -308,6 +319,7 @@ export fn espice_query_error_message(handle: ?*Handle, id: u32, buffer: ?[*]u8, 
     return copyString(h, if (q.failure) |err| @errorName(err) else "", buffer, capacity, required);
 }
 
+/// A C (pointer, length) pair as a slice. NULL is allowed only at length 0.
 fn constSlice(comptime T: type, ptr: ?[*]const T, len: usize) ![]const T {
     if (len == 0) return &.{};
     return (ptr orelse return error.InvalidArgument)[0..len];
@@ -318,6 +330,7 @@ fn mutableSlice(comptime T: type, ptr: ?[*]T, len: usize) ![]T {
     return (ptr orelse return error.InvalidArgument)[0..len];
 }
 
+/// A C `max_parallel` as the facade's u16, rejecting 0 and overflow.
 fn concurrency(n: u32) !u16 {
     if (n == 0 or n > std.math.maxInt(u16)) return error.InvalidConcurrency;
     return @intCast(n);
@@ -332,6 +345,8 @@ fn decodeScope(scope: Scope) !api.Scope {
     };
 }
 
+/// Copies `text` NUL-terminated into the caller's buffer. Sets `required`
+/// first; a short buffer receives nothing and fails with BUFFER_TOO_SMALL.
 fn copyString(h: *Handle, text: []const u8, ptr: ?[*]u8, capacity: usize, required: ?*usize) u32 {
     const count = required orelse return h.fail(error.InvalidArgument);
     count.* = std.math.add(usize, text.len, 1) catch |err| return h.fail(err);
@@ -342,6 +357,7 @@ fn copyString(h: *Handle, text: []const u8, ptr: ?[*]u8, capacity: usize, requir
     return 0;
 }
 
+/// Copies as much of `text` as fits, always NUL-terminated. No-op on an empty buffer.
 fn writeTruncated(buffer: []u8, text: []const u8) void {
     if (buffer.len == 0) return;
     const n = @min(buffer.len - 1, text.len);
@@ -358,6 +374,7 @@ fn packProgress(p: anytype) Progress {
     };
 }
 
+/// An output failure carried by the event also becomes the handle's last error.
 fn packAdvance(h: *Handle, event: api.Advance) Advance {
     var out: Advance = .{
         .requested = @intFromEnum(event.requested),
@@ -377,6 +394,8 @@ fn packAdvance(h: *Handle, event: api.Advance) Advance {
     return out;
 }
 
+/// Collapses a Zig error into an `espice_status`; the name survives in
+/// `last_error` for `espice_error_message`.
 fn status(err: anyerror) u32 {
     const code: Code = switch (err) {
         error.InvalidArgument, error.InvalidConcurrency, error.InvalidComponent, error.QueryNotReady, error.DuplicateQuery => .invalid_argument,
