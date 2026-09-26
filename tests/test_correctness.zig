@@ -548,13 +548,13 @@ fn sample(p: Plot, axis: usize, col: usize, t: f64, rtol: f64, atol: f64) !Compl
     return .init(x.re + fraction * (y.re - x.re), x.im + fraction * (y.im - x.im));
 }
 
-const Check = enum { selected_values, fourier_thd, sample_moments, repeatability, pole_zero_sets, axis_bounds, time_weighted_moments };
+const Check = enum { selected_values, fourier_thd, sample_moments, repeatability, pole_zero_sets, axis_bounds, time_weighted_moments, oscillation };
 fn checkKind(check: Json) !Check {
     const kinds = std.StaticStringMap(Check).initComptime(.{
         .{ "selected_values", .selected_values },             .{ "fourier_thd", .fourier_thd },
         .{ "sample_moments", .sample_moments },               .{ "repeatability", .repeatability },
         .{ "pole_zero_sets", .pole_zero_sets },               .{ "axis_bounds", .axis_bounds },
-        .{ "time_weighted_moments", .time_weighted_moments },
+        .{ "time_weighted_moments", .time_weighted_moments }, .{ "oscillation", .oscillation },
     });
     return kinds.get(try string(try field(check, "kind"))) orelse error.UnknownCheck;
 }
@@ -565,6 +565,14 @@ fn between(value: f64, minimum: f64, maximum: f64) !void {
     if (minimum > maximum) return error.InvalidOracle;
     if (std.math.isFinite(value) and value >= minimum and value <= maximum) return;
     diagnostic("  value {e} outside [{e}, {e}]\n", .{ value, minimum, maximum });
+    return error.StatisticMismatch;
+}
+
+/// |got - expected| <= rtol * |expected| for a quantity measured off a waveform.
+fn measured(name: []const u8, got: f64, expected: f64, rtol: f64) !void {
+    try tolerance(rtol, 0);
+    if (std.math.isFinite(got) and close(.init(got, 0), .init(expected, 0), rtol, 0)) return;
+    diagnostic("  {s}: expected {e}, got {e}; rtol={e}\n", .{ name, expected, got, rtol });
     return error.StatisticMismatch;
 }
 
@@ -675,6 +683,48 @@ fn compareCheck(a: Allocator, check: Json, plots: []const Plot) !void {
             const mean = integral / (stop - start);
             try between(@abs(mean), 0, try nfield(check, "mean_abs_max"));
             try between(square / (stop - start) - mean * mean, try nfield(check, "variance_min"), try nfield(check, "variance_max"));
+        },
+        .oscillation => {
+            // Period: mean spacing of the rising `level` crossings inside the
+            // window, each crossing linearly interpolated. Swing: max - min of
+            // the samples inside the window.
+            const col = try p.column(try string(try field(check, "column")));
+            const axis = try p.column("time");
+            try increasing(p, axis);
+            const window = try array(try field(check, "time_window"));
+            if (window.len != 2) return error.InvalidOracle;
+            const start = try number(window[0]);
+            const stop = try number(window[1]);
+            const level = try nfield(check, "level");
+            if (stop <= start) return error.InvalidOracle;
+            var first: ?f64 = null;
+            var last: f64 = 0;
+            var crossings: u32 = 0;
+            var lo = std.math.inf(f64);
+            var hi = -std.math.inf(f64);
+            for (0..p.rows) |r| {
+                const t = p.value(r, axis).re;
+                const v = p.value(r, col);
+                if (v.im != 0) return error.ExpectedRealStatistic;
+                if (t < start or t > stop) continue;
+                lo = @min(lo, v.re);
+                hi = @max(hi, v.re);
+                if (r == 0 or p.value(r - 1, axis).re < start) continue;
+                const v0 = p.value(r - 1, col).re;
+                if (!(v0 < level and v.re >= level)) continue;
+                const t0 = p.value(r - 1, axis).re;
+                const tc = t0 + (level - v0) / (v.re - v0) * (t - t0);
+                if (first == null) first = tc;
+                last = tc;
+                crossings += 1;
+            }
+            if (crossings < 3) {
+                diagnostic("  {s}: {d} rising crossings of {e} in the window, need 3\n", .{ p.names[col], crossings, level });
+                return error.StatisticMismatch;
+            }
+            const period = (last - first.?) / @as(f64, @floatFromInt(crossings - 1));
+            try measured("period", period, try nfield(check, "period"), try nfield(check, "period_rtol"));
+            try measured("swing", hi - lo, try nfield(check, "swing"), try nfield(check, "swing_rtol"));
         },
         .pole_zero_sets => {
             const rtol = try nfield(check, "rtol");
@@ -821,6 +871,27 @@ test "deadline kills a simulator that closes output streams before hanging" {
     const a = arena.allocator();
     const app = try tmp.dir.realPathFileAlloc(io, "simulator", a);
     try std.testing.expectError(error.Timeout, simulate(a, io, app, "tests/fixtures/op/divider_default.sp", "/dev/null", 1));
+}
+
+test "oscillation check measures period and swing and rejects a slow or stalled waveform" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A 0..1 V triangle with a 2 s period: rising 0.5 V crossings at 0.5, 2.5, 4.5, 6.5.
+    const tri: Plot = .{ .name = "Transient Analysis", .names = &.{ "time", "v(1)" }, .rows = 8, .complex = false, .data = &.{ 0, 0, 1, 1, 2, 0, 3, 1, 4, 0, 5, 1, 6, 0, 7, 1 } };
+    const check = try std.json.parseFromSliceLeaky(Json, a,
+        \\{"kind":"oscillation","plot":"Transient Analysis","column":"v(1)","level":0.5,"time_window":[0,7],"period":2,"period_rtol":1e-3,"swing":1,"swing_rtol":1e-3}
+    , .{});
+    try compareCheck(a, check, &.{tri});
+    var slow = tri;
+    slow.data = &.{ 0, 0, 1, 1, 2, 0, 3, 1, 4, 0, 5, 1, 6.2, 0, 6.9, 1 };
+    try std.testing.expectError(error.StatisticMismatch, compareCheck(a, check, &.{slow}));
+    var small = tri;
+    small.data = &.{ 0, 0.1, 1, 1, 2, 0.1, 3, 1, 4, 0.1, 5, 1, 6, 0.1, 7, 1 };
+    try std.testing.expectError(error.StatisticMismatch, compareCheck(a, check, &.{small}));
+    var stalled = tri;
+    stalled.data = &.{ 0, 0.7, 1, 0.7, 2, 0.7, 3, 0.7, 4, 0.7, 5, 0.7, 6, 0.7, 7, 0.7 };
+    try std.testing.expectError(error.StatisticMismatch, compareCheck(a, check, &.{stalled}));
 }
 
 test "time statistics, phase wrap, THD, axis bounds and root sets are enforced" {
