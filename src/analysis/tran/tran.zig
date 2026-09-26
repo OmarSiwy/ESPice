@@ -115,35 +115,38 @@ pub fn simulate(
     // INDflux does not. With a K card, `lteSnap` zeroes the inductor and
     // kinduc tape spans (a flat zero history never binds) and appends the row
     // plane at every current row, since an inductor's branch row sums exactly
-    // its INDflux.
+    // its INDflux. Both are resolved here, once: `lte_zero` holds the
+    // [offset, end) tape spans to clear.
     // ponytail: every current row is appended (V-source rows carry no charge
     // and stay inert); take only the inductors' rows once Circuit exposes the
     // tape's rhs_idx.
-    const lte_rows: []u32 = rows: {
-        if (n_qt == 0) break :rows &.{};
-        for (ckt.batches) |b| {
-            if (!std.mem.eql(u8, b.type_name, "kinduc")) continue;
-            var list: std.ArrayList(u32) = .empty;
-            for (ckt.current_row[0..n], 0..) |is_cur, r| if (is_cur) try list.append(allocator, @intCast(r));
-            break :rows try list.toOwnedSlice(allocator);
-        }
-        break :rows &.{};
-    };
+    var lte_rows: []u32 = &.{};
+    var lte_zero: [][2]u32 = &.{};
     defer allocator.free(lte_rows);
+    defer allocator.free(lte_zero);
+    if (n_qt > 0) for (ckt.batches) |kb| {
+        if (!std.mem.eql(u8, kb.type_name, "kinduc")) continue;
+        var rows: std.ArrayList(u32) = .empty;
+        for (ckt.current_row[0..n], 0..) |is_cur, r| if (is_cur) try rows.append(allocator, @intCast(r));
+        lte_rows = try rows.toOwnedSlice(allocator);
+        var spans: std.ArrayList([2]u32) = .empty;
+        var off: u32 = 0;
+        for (ckt.batches) |b| {
+            const f = b.hooks.q_tape orelse continue;
+            const end = off + @as(u32, @intCast(f(b.ctx).len));
+            if (std.mem.eql(u8, b.type_name, "inductor") or std.mem.eql(u8, b.type_name, "kinduc"))
+                try spans.append(allocator, .{ off, end });
+            off = end;
+        }
+        lte_zero = try spans.toOwnedSlice(allocator);
+        break;
+    };
     const n_lt = n_qt + lte_rows.len;
     const lteSnap = struct {
-        fn call(c: *root.Circuit, dst: []f64, rows: []const u32) void {
+        fn call(c: *root.Circuit, dst: []f64, zero: []const [2]u32, rows: []const u32) void {
             const n_tape = dst.len - rows.len;
             c.snapshotQTape(dst[0..n_tape]);
-            if (rows.len == 0) return;
-            var off: usize = 0;
-            for (c.batches) |b| {
-                const f = b.hooks.q_tape orelse continue;
-                const len = f(b.ctx).len;
-                if (std.mem.eql(u8, b.type_name, "inductor") or std.mem.eql(u8, b.type_name, "kinduc"))
-                    @memset(dst[off..][0..len], 0);
-                off += len;
-            }
+            for (zero) |z| @memset(dst[z[0]..z[1]], 0);
             for (rows, dst[n_tape..]) |r, *d| d.* = c.q_vec[r];
         }
     }.call;
@@ -184,7 +187,7 @@ pub fn simulate(
         simdCopy(q_hist[2], ckt.q_vec[0..n]);
         simdCopy(q_hist[3], ckt.q_vec[0..n]);
         if (n_qt > 0) {
-            lteSnap(ckt, qt_hist[1], lte_rows);
+            lteSnap(ckt, qt_hist[1], lte_zero, lte_rows);
             simdCopy(qt_hist[2], qt_hist[1]);
             simdCopy(qt_hist[3], qt_hist[1]);
         }
@@ -370,7 +373,7 @@ pub fn simulate(
             // the next residual all see q(trial).
             ckt.evalQ(trial, t + dt);
             simdCopy(q_hist[0], ckt.q_vec[0..n]);
-            if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_rows);
+            if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
             // Taken before the ring rotation below.
             const lh = lte_hist.*;
             const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
@@ -491,7 +494,7 @@ pub fn simulate(
             integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
             simdCopy(q_hist[1], ckt.q_vec[0..n]);
             if (n_qt > 0) {
-                lteSnap(ckt, qt_hist[0], lte_rows);
+                lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
                 integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
                 // Swap, not copy: slot 0 is the ring's scratch slot, and the
                 // next accepted attempt overwrites it before any read.
