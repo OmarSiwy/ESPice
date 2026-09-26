@@ -188,9 +188,11 @@ pub fn LaneLu(comptime W: usize) type {
             const up = b.up;
             const lx = self.lx;
             const ux = self.ux;
+            const udiag = self.udiag;
             const y = self.y;
+            const pinv = b.pinv;
 
-            for (b_in, 0..) |bi, r| y[b.pinv[r]] = bi;
+            for (b_in, 0..) |bi, r| y[pinv[r]] = bi;
 
             for (0..self.n) |k| {
                 const yk = y[k];
@@ -200,7 +202,7 @@ pub fn LaneLu(comptime W: usize) type {
             var k = self.n;
             while (k > 0) {
                 k -= 1;
-                const zk = y[k] / self.udiag[k];
+                const zk = y[k] / udiag[k];
                 y[k] = zk;
                 for (up[k]..up[k + 1]) |p| y[ui[p]] -= ux[p] * zk;
             }
@@ -222,14 +224,16 @@ pub fn LaneLu(comptime W: usize) type {
             const up = b.up;
             const lx = self.lx;
             const ux = self.ux;
+            const udiag = self.udiag;
             const y = self.y;
+            const pinv = b.pinv;
 
             for (b.q, 0..) |c, k| y[k] = b_in[c];
 
             for (0..self.n) |k| {
                 var yk = y[k];
                 for (up[k]..up[k + 1]) |p| yk -= ux[p] * y[ui[p]];
-                y[k] = yk / self.udiag[k];
+                y[k] = yk / udiag[k];
             }
 
             var k = self.n;
@@ -240,7 +244,7 @@ pub fn LaneLu(comptime W: usize) type {
                 y[k] = yk;
             }
 
-            for (0..self.n) |r| x[r] = y[b.pinv[r]];
+            for (0..self.n) |r| x[r] = y[pinv[r]];
         }
 
         /// Lane l of `m` -> bit l.
