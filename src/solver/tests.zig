@@ -1182,6 +1182,32 @@ const PivotTests = struct {
         try testing.expect(lawnRatio(4, @ptrCast(&a), &x, &b) <= 30);
     }
 
+    test "a replay that kept a 1e-9 pivot is probed and re-factored to threshold quality (#45, #136)" {
+        // Factored on a dominant diagonal, then replayed on 1e-9 diagonals:
+        // the growth monitor (1e-12) takes the first pivot, a 1e9
+        // multiplier, the classic unstable elimination of [eps 1; 1 1].
+        const gpa = testing.allocator;
+        const a0 = [3][3]f64{ .{ 4, 1, 1 }, .{ 1, 4, 1 }, .{ 1, 1, 4 } };
+        const a1 = [3][3]f64{ .{ 1e-9, 1, 1 }, .{ 1, 1e-9, 1 }, .{ 1, 1, 1e-9 } };
+        var csc = DenseCsc(3).from(a0);
+        var s = try Solver.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], null, .{});
+        defer s.deinit();
+        try testing.expect(s.engine == .lu);
+        try s.factor(csc.vals[0..csc.nnz()], .{});
+        csc = DenseCsc(3).from(a1);
+        try s.factor(csc.vals[0..csc.nnz()], .{});
+        var at: [3][3]f64 = undefined;
+        for (0..3) |i| for (0..3) |j| {
+            at[i][j] = a1[j][i];
+        };
+        const b = [3]f64{ 1, -2, 0.5 };
+        var x: [3]f64 = undefined;
+        s.solve(&b, &x);
+        try testing.expect(lawnRatio(3, @ptrCast(&a1), &x, &b) <= 30);
+        s.solveT(&b, &x);
+        try testing.expect(lawnRatio(3, @ptrCast(&at), &x, &b) <= 30);
+    }
+
     test "a zero pivot tolerance still refuses a zero pivot (#45)" {
         const gpa = testing.allocator;
         // [0 1; 1 1]; the zero diagonal is structural, as the MNA pattern keeps it.
