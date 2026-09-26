@@ -1,6 +1,6 @@
 # Ensemble Sweeps: Monte Carlo / Corners / Temperature
 
-Lane batching, seed policy, statistics, what parallelizes.
+Structural sweep lanes, seed policy, statistics, what parallelizes.
 
 ## 1. Mathematical specification
 
@@ -15,11 +15,12 @@ $$
 
 differing only in how $\{p_\ell\}$ is generated:
 
-**Monte Carlo** — random draws per varied parameter:
-uniform $p = p_0(1 + \tau(2u - 1))$ or Gaussian
-$p = p_0(1 + \tau\, z)$, $z \sim \mathcal N(0,1)$, with $\tau$ the relative
-tolerance. Outputs are sample statistics over the $N_c \le L$ converged
-trials:
+**Monte Carlo**: random draws per varied parameter. The implementation
+draws Gaussian $p = p_0(1 + \tau\, z)$, $z \sim \mathcal N(0,1)$, with $\tau$
+the relative variation (`variation`), for every device's nonzero primary
+parameter. It publishes one row per converged trial (`run`, then the
+probes); the statistics below are for the consumer to compute and are not
+built in. Over the $N_c \le L$ converged trials:
 
 $$
 \bar y = \frac{1}{N_c}\sum y_\ell, \qquad
@@ -28,125 +29,110 @@ s^2 = \frac{1}{N_c - 1}\sum (y_\ell - \bar y)^2
 $$
 
 plus min/max and **yield**
-$\Pr[y \in [y_{lo}, y_{hi}]] \approx N_{\text{pass}}/N_c$. Monte-Carlo
-error decays as $s/\sqrt{N_c}$ — dimension-independent, which is why MC
+$\Pr[y \in [y_{lo}, y_{hi}]] \approx N_{\text{pass}}/N_c$. Monte Carlo
+error decays as $s/\sqrt{N_c}$, independent of dimension, which, which is why MC
 beats grid corners past a handful of varied parameters.
 
-**Corners** — deterministic $\{p_\ell\}$ at specification extremes
-(process/voltage/temperature combinations); worst-case, not statistical.
+**Corners**: deterministic $\{p_\ell\}$ at specification extremes
+(process/voltage/temperature combinations); worst case, not statistical.
+There is no dedicated corner analysis; corner decks such as
+`tran/bench_ensemble_pvt_corners` spell the corners out in the netlist.
 
-**Temperature sweep** — a 1-D deterministic ensemble with the SPICE
+**Temperature sweep**: a 1-D deterministic ensemble with the SPICE
 temperature model applied per point:
 
 $$
 R(T) = R(T_{\text{nom}})\big(1 + tc_1 (T - T_{\text{nom}}) + tc_2 (T - T_{\text{nom}})^2\big)
 $$
 
-(and device-internal temperature scaling via the engine's `setCircuitTemp`
-path).
+(and device-internal temperature scaling through
+`Circuit.setCircuitTemp`).
 
 ### Seed policy
 
 The RNG is deterministic and seed-parameterized
 (`std.Random.DefaultPrng.init(seed)`, default seed 42): the same netlist +
-seed + trial count reproduces the ensemble bit-exactly — a *requirement*
-for regression benchmarking and for debugging individual failed trials
-(re-run trial $k$ = re-derive its draws from the seed). Lane-parallel
-execution must preserve this: either one stream consumed in trial order, or
-a counter-based per-trial substream (`hash(seed, trial)`) so trial $k$'s
-draws are independent of scheduling — the latter is the GPU-safe policy.
+seed + trial count reproduces the ensemble bit-exactly: a *requirement*
+for regression benchmarking and for debugging individual failed trials.
+The implementation consumes one stream in trial order and reseeds it on
+trial 0, so every run draws the same sequence. A parallel lane executor would
+need a counter-based per-trial substream (`hash(seed, trial)`) so trial $k$'s
+draws do not depend on scheduling.
 
 ### Convergence bookkeeping
 
 A non-converged trial is **dropped, not zeroed**: samples pack converged
 trials contiguously, statistics divide by $N_c$, and yield is conditional
-on convergence. (A high non-convergence rate is itself a result — it shows
-up as `n_converged` in the stats.)
+on convergence. A high non-convergence rate is itself a result: it shows as
+fewer rows than `n_trials`.
 
 ## 2. Flow explanation
 
-**Monte Carlo** (`src/analysis/sweep/mc.zig`): collect primary
-instance parameters (`collectParams`, skipping unset zeros), wrap each in a
-`ParamVar` (raw f32 pointer + nominal + distribution). Per trial: perturb
-all parameters, `recompute()`, cold DC solve at ITL2 (any error counts as
-non-convergence, never aborts the ensemble), record probes / update
-running min-max / yield counters, restore nominals. One `Workspace` serves
-every trial (frozen pattern). Statistics finalized after the loop; nominals
-+ `recompute()` restored on every exit path.
+Both sweeps run on the structural-lane driver `solveLanes`
+(`src/analysis/sweep/lanes.zig`): $N$ independent cold DC solves, each after
+one parameter install, sharing the circuit pattern and one Newton workspace.
+The caller supplies `apply(k)` (install lane $k$'s parameters, called in lane
+order) and `restore()`; the driver recomputes after each and restores the
+nominals on success and on error. Lanes run serially: this is the
+"structural lanes" axis of the lane-axis doctrine in AGENTS.md, not SIMD.
 
-**Temperature** (`sweep/temp_sweep.zig`): each `solveLanes` lane applies
-`setCircuitTemp` and recomputes device-native temperature coefficients before
-a cold DC solve at ITL2. Converged points are recorded; failed points are
-skipped. The lane driver restores `t_nom` and recomputes after the sweep.
-The unused serial sweep with external `TempCoeff` overrides is retired.
+**Monte Carlo** (`src/analysis/sweep/mc.zig`): collect every device's
+nonzero primary parameter (`collectParams`); lane $k$ sets each to
+`nominal * (1 + variation * N(0,1))`, then a cold DC solve at ITL2. Any
+solver error counts as non-convergence and never aborts the ensemble.
 
-**Corners** ride the same primitives — a corner is a deterministic
-`ParamVar` assignment; multi-lane machinery below executes them.
+**Temperature** (`sweep/temp_sweep.zig`): each lane applies
+`setCircuitTemp` and recomputes device-native temperature coefficients
+before a cold DC solve at ITL2. Converged points are recorded; failed points
+are skipped. `numPoints` uses the same $10^{-6}$-step endpoint nudge as the DC
+sweep. The driver restores `t_nom` and recomputes after the sweep.
 
-**Multi-lane execution** (`analysis/par_eval.zig`, `device/eval.zig`): within
-one solve, device evaluation is lane-parallel over private plane slabs
-with fixed partition and fixed reduction order — **bit-identical results
-run-to-run at a given lane count** (differs from serial by reassociation
-only). This is the same determinism contract the seed policy makes at the
-ensemble level. Fixtures: `ensemble/{opamp_mc,pvt_corners,sweep_lanes,corner_pathological}`.
+**Within-solve parallelism** (`src/analysis/par_eval.zig`): device
+evaluation can split instances across `ParEval` worker threads with private
+plane slabs, a fixed partition and a fixed reduction order, so results are
+bit-identical run to run at a given thread count (they differ from serial by
+reassociation only). It is off by default (`ESPICE_THREADS`, default 1).
 
-Knobs: `n_trials`, `seed`, `variation` ($\tau$), distributions per
-parameter; temperature triple + `t_nom`; tolerance bundle per solve.
+Knobs: `n_trials`, `seed`, `variation`; temperature start/stop/step and
+`t_nom`; the tolerance bundle per solve.
 
 ## 3. Pseudo-code, CPU sequential
 
 ```
-mc(ckt, param_vars, probes, N, seed):
-    rng = prng(seed); ws = workspace(ckt)      # pattern frozen once
-    for trial in 0..N:
-        for pv in param_vars:
-            pv.set(draw(rng, pv.dist, pv.nominal, pv.rel_tol))
-        ckt.recompute()
-        x = cold_newton(ckt, ws, itl2)          # error => not converged
-        if converged:
-            pack samples[probe][n_conv] = x[probe]; update min/max/yield
-            n_conv += 1
-        restore nominals
-    stats: mean, bessel std, min, max, yield% over n_conv
+mc(ckt, probes, N, seed, variation):
+    vars = nonzero primary params of every device
+    solve_lanes(ckt, N, apply = |k|:
+        if k == 0: rng = prng(seed)
+        for v in vars: v.set(v.nominal * (1 + variation * rng.normal())))
+    for each lane k that converged: emit row (k_conv, x_k[probes])
+
+solve_lanes(ckt, N, apply):
+    ws = workspace(ckt)                      # pattern frozen once
+    for k in 0..N:
+        apply(k); ckt.recompute()
+        x_k = cold_newton(ckt, ws, itl2)     # error => not converged
+    restore nominals; ckt.recompute()
 
 temp_sweep(ckt, T0..T1 step dT, t_nom):
-    for T in range:
-        set_circuit_temp(T); ckt.recompute()
-        x = cold_dc(ckt)                        # fail -> count, skip point
-        if converged: record(T, x[probes])
-    set_circuit_temp(t_nom); ckt.recompute()
+    solve_lanes over the temperatures (apply = set_circuit_temp)
+    emit converged points only
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. Parallel execution
 
-The ensemble axis is the **cleanest GPU axis in the whole engine** —
-trials are independent, identical-pattern, identical-code problems:
+The ensemble axis is the cleanest parallel axis in the simulator: trials are
+independent problems with the same pattern and the same code. Today the lanes
+run one after another on the host, and each solve can use `ParEval` threads
+for device evaluation.
 
-- **lane batching**: $L$ trials = $L$ blob instances (same batch
-  descriptors, per-lane parameter values and state vectors); one
-  cooperative launch runs $L$ Newton solves as independent block clusters
-  — the megakernel's batched SoA eval already iterates instance-major, so
-  the lane axis multiplies instance count, keeping occupancy high on small
-  circuits (the classic "small circuit × many corners" GPU win);
-- **per-trial draws** on-device via counter-based RNG
-  (`philox/hash(seed, trial, param)`) — reproducible independent of
-  scheduling, no stream serialization;
-- non-converged lanes raise a flag and idle (or get reassigned);
-  statistics are grid reductions over the converged mask;
-- temperature/corners: identical, with deterministic per-lane parameter
-  fill instead of RNG.
-
-```
-host: upload blob + per-lane param table (or seed for on-device draws)
-kernel ensemble(lanes = trials):
-    lane-local: draw/apply params -> lane's model values
-    newton/jfnk per lane (block cluster; gates as in converger)
-    write y[lane], converged[lane]
-host or kernel epilogue: masked reductions -> mean/std/min/max/yield
-```
-
-Within-trial lane parallelism (`par.zig`) and across-trial lane batching
-compose: big circuits use the former, small circuits the latter.
+Not implemented (design note): run $L$ trials as $L$ lanes with the same batch
+descriptors and per-lane parameter values and state vectors, so the lane axis
+multiplies the instance count and keeps occupancy high on small circuits (the
+"small circuit, many corners" GPU case). Draws would come from a
+counter-based RNG (`hash(seed, trial, param)`), non-converged lanes would
+raise a flag, and statistics would be reductions over the converged mask.
+Within-trial and across-trial parallelism compose: big circuits use the
+former, small circuits the latter.
 
 ## Solvers used
 
@@ -154,9 +140,9 @@ compose: big circuits use the former, small circuits the latter.
 |---|---|---|
 | Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/direct.zig` via `converger.run` |
 | Workspace/pattern reuse; memcmp/sig refactor bypass for lanes where values repeat | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()`, `converger.Options.matrix_sig` |
-| Ladder fallback for hard corners | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig solveLadder` (dc-sweep style demotion; MC currently records non-convergence instead — upgrade knob) |
-| Batched GPU solves | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) + megakernel JFNK | `src/analysis/eval/engine.zig` |
-| Within-solve lane-parallel eval | none (eval-side, not solver) | `src/analysis/eval/engine.zig` |
+| Ladder fallback for hard corners | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | not used: a lane that fails plain Newton is recorded as non-converged; `dc/op.zig solveLadder` is the upgrade |
+| Batched GPU solves (not implemented) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) | none |
+| Within-solve parallel eval | none (eval-side, not solver) | `src/analysis/par_eval.zig` |
 
 ---
 
@@ -169,17 +155,14 @@ compose: big circuits use the former, small circuits the latter.
 
 **Per-section verification**
 
-- §1 distributions, stats, seed policy, drop-not-zero: verified against
-  `mc.zig` source. Counter-based substream policy: design note (current
-  impl is one sequential stream — correct for the sequential loop, flagged
-  as the thing to change for lane parallelism).
-- §2/§3: direct transcription of `mc.zig`/`temp_sweep.zig`/`par.zig`
-  header contract. §4: prospective (per-point GPU solve exists; lane
-  batching not yet).
+- §1 distributions, seed policy, drop-not-zero: verified against `mc.zig`.
+  The statistics formulas are standard and not implemented in the analysis.
+- §2/§3: transcribed from `mc.zig`, `temp_sweep.zig`, `lanes.zig` and
+  `par_eval.zig`. §4: design note.
 
 **Our implementation**
 
-- `src/analysis/sweep/mc.zig`, `sweep/temp_sweep.zig`,
-  `analysis/par_eval.zig` (+ `device/eval.zig` SoA batches).
-- Bench fixtures: `benchmark/fixtures/ensemble/{opamp_mc,pvt_corners,sweep_lanes,corner_pathological}`,
-  `benchmark/fixtures/sweep/*`.
+- `src/analysis/sweep/lanes.zig` (`solveLanes`), `sweep/mc.zig`,
+  `sweep/temp_sweep.zig`, `analysis/par_eval.zig`.
+- Fixtures: `tests/fixtures/mc/`, `tests/fixtures/temp/`,
+  `tests/fixtures/tran/bench_ensemble_*`, `tests/fixtures/dc/bench_ensemble_sweep_lanes`.

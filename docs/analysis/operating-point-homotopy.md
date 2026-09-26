@@ -55,7 +55,7 @@ i.e. the device is evaluated at $\tilde v$ and linearly extrapolated back to
 the actual node voltage. This changes the *system being solved* per iteration
 (Xyce math doc §4.2: "voltage limiting directly changes the right hand side
 vector... it changes the set of equations to be solved"), which is why it is
-incompatible with line-search/backtracking globalization — limiting depends on
+incompatible with line-search/backtracking globalization: limiting depends on
 the path taken, so a monotone-$\|F\|$ safeguard on top of it double-limits.
 Any iteration in which some device limited forces at least one more Newton
 iteration.
@@ -77,8 +77,10 @@ $$
 |F_i(x^k)| \le \max\!\big(\texttt{residual\_tol},\; 10\,|A_{ii}|\,(\texttt{reltol}\,|x_i| + \texttt{vntol})\big)\quad \forall i .
 $$
 
-The tolerance floors at `residual_tol` on branch rows (near-zero diagonal),
-which catches a silently-singular solve returning $\Delta x = 0$ at $x = 0$.
+Rows with a zero diagonal (voltage-defined branches) skip the residual gate,
+since an exact solution still leaves O(gain * eps) residual there; the delta
+test alone governs them. See [tolerance-system.md](tolerance-system.md) for
+how this gate diverges from ngspice's `NIconvTest`.
 Iteration 1 is never accepted (ngspice `niiter.c`: `iterno != 1`); a device
 state flip (switch) or a limiting event also rejects the iterate.
 
@@ -105,11 +107,18 @@ Dynamic gmin (Gillespie's algorithm, ngspice `cktop.c` `dynamic_gmin`):
 descend $g_{k+1} = g_k / \phi$ with an adaptive factor $\phi$:
 
 - start $\phi = 10$, $g_0 = g_{\text{start}}/\phi$ with $g_{\text{start}} = 10^{-2}$;
-- easy rung (iterations $\le$ ITL1/4): accelerate $\phi \leftarrow \min(\phi\sqrt\phi, \phi_{\max})$;
-- hard rung (iterations $> 3\cdot$ITL1/4): decelerate $\phi \leftarrow \sqrt\phi$;
+- every rung's Newton runs with the ITL2 budget (ngspice `CKTdcTrcvMaxIter`,
+  `cktop.c:194`);
+- easy rung (iterations $\le$ ITL2/4): accelerate $\phi \leftarrow \min(\phi\sqrt\phi, 10)$;
+- hard rung (iterations $> 3\cdot$ITL2/4): decelerate $\phi \leftarrow \max(\sqrt\phi, 1.00005)$;
+- when the next step would pass the target, set $\phi = g/g_{\text{target}}$
+  and $g = g_{\text{target}}$ (`cktop.c:207-222`);
 - failed rung: back up toward last good $g$ with $\phi \leftarrow \phi^{1/4}$,
   restart from last converged $x$;
-- give up when $\phi < 1.00005$ (wedged against the last good rung).
+- give up when $\phi < 1.00005$ (wedged against the last good rung);
+- after converging at $g_{\text{target}}$, one more Newton with no diagonal
+  gmin gives the answer, as ngspice's `dynamic_gmin` removes `diagGmin` for
+  the last solve.
 
 ### Source stepping
 
@@ -123,13 +132,15 @@ $$
 $\lambda = 0$ gives the trivially solvable dead circuit, $\lambda = 1$ the
 target. Adaptive ramp: step $\Delta\lambda$ grows $\times 1.5$ on success,
 halves on failure with restart from the last good $(\lambda, x)$; abort when
-$\Delta\lambda < 10^{-4}$. (ngspice's dynamic variant uses raise $\in$
+$\Delta\lambda < 10^{-4}$, after 100 solves, or at once when the
+$\lambda = 0$ solve itself fails (a retry would repeat the same cold solve).
+Newton runs with the ITL2 budget. (ngspice's dynamic variant uses raise $\in$
 $[10^{-7}, 10^{-2}]$ with $\times1.5 / \times0.5 / \div10$ rules; ours is the
 same shape with different constants.)
 
 ### Pseudo-transient continuation (PTC)
 
-*(derived, not source-verified — Kelley & Keyes, SIAM J. Numer. Anal. 35(2),
+*(derived, not source-verified: Kelley & Keyes, SIAM J. Numer. Anal. 35(2),
 1998, is paywalled)*
 
 PTC solves $F(x)=0$ by integrating the artificial ODE $\dot x = -F(x)$ to
@@ -141,7 +152,7 @@ $$
 $$
 
 with $M$ a scaling matrix (identity, or the physical $C$ matrix for circuit
-PTC — Xyce's PTRAN uses the actual charge Jacobian so the trajectory is the
+PTC: Xyce's PTRAN uses the actual charge Jacobian so the trajectory is the
 physical turn-on transient). Switched evolution relaxation (SER) step
 control:
 
@@ -150,79 +161,118 @@ $$
 $$
 
 so $\delta \to \infty$ as the residual falls and PTC degenerates into full
-Newton with local quadratic convergence. Kelley–Keyes prove global
+Newton with local quadratic convergence. Kelley-Keyes prove global
 convergence to the stable steady state under: $F$ smooth, the ODE trajectory
 converging to a root $x^\ast$ with $J(x^\ast)$ nonsingular, and $\delta_0$
-small enough — PTC follows the physical trajectory when Newton's domain of
+small enough: PTC follows the physical trajectory when Newton's domain of
 attraction is missed. Advantage over gmin/source stepping: it does not
 require the homotopy branch to be fold-free; the ODE flow goes where the
 circuit would physically go.
 
-**Implementation status:** not implemented as a ladder rung in this repo
-(ladder is plain → gmin → source → JFNK). The transient engine
-(`tran.zig` with a ramped source and growing dt) is the manual PTC
-workaround; a dedicated rung would reuse `TranHook` with SER dt control.
+**Implementation status:** SER-controlled PTC is not implemented. The
+closest rung is OPtran (rung 5 below): a real transient with full sources,
+which lets the device capacitances do the conditioning. A dedicated PTC rung
+would reuse `TranHook` with SER dt control.
 
 ## 2. Flow explanation
 
-Every analysis converges through one module,
-`src/solver/converger.zig`; the strategies differ only in a
-comptime hook that decides what is assembled and which matrix plane is
-factored. The OP flow (`src/analysis/dc/op.zig`) is a four-rung
-ladder; each rung is attempted in full before falling to the next, and every
-rung restarts cold (zeroed $x$ plus SPICE `MODEINITJCT` junction seeds:
-iteration 1 linearizes at $v_{\text{crit}}$/vto instead of 0).
+Every analysis converges through `src/solver/converger.zig`; the strategies
+differ only in a comptime hook that decides what is assembled and which
+matrix plane is factored. The OP flow (`src/analysis/dc/op.zig
+solveLadder`) is a five-rung ladder over one `Workspace`, so the ordering
+and symbolic factorization happen once. Each rung is attempted in full before
+the next; the stepping rungs restart cold (zeroed $x$ plus SPICE
+`MODEINITJCT` junction seeds, so iteration 1 linearizes at
+$v_{\text{crit}}$/vto instead of 0).
 
-**Rung 1 — plain Newton.** Assemble → gmin-regularize (fixed target gmin) →
-factor (KLU-class: BTF + AMD + Gilbert-Peierls, symbolic work done once) →
-solveNeg → damp → limits/state gates → convergence test. `SingularMatrix` is
-a plain failure, not an abort. A `matrix_sig` fast path skips refactoring
-when the assembled matrix provably didn't change (linear circuit at fixed
-$\alpha$/gmin).
+**Floating nodes.** When a node has no DC path to ground
+(`Circuit.needs_tran_op`, a capacitor-only island), the static operating
+point is not unique. Under a transient's own OP the ladder goes straight to
+OPtran and reports the settled state, as ngspice does under TRANOP. A
+standalone `.op`, `.ac` or `.pz` fails with `error.FloatingNode`.
 
-**Rung 2 — dynamic gmin.** The factor-adaptation loop above, up to 100
-rungs. Convergence at $g \le g_{\text{target}}$ ends the analysis with
-`method_used = .gmin`.
+**Rung 1: plain Newton** with no diagonal gmin and the ITL1 budget.
+ngspice's `NIiter` loads a diagonal gmin only during gmin stepping (junction
+gmin lives in the device models); an always-on shunt moved `voltage_divider`
+by 2.5e-9 and settled a floating bridge on a common mode ngspice never picks.
+Assemble, factor (BTF + AMD + Gilbert-Peierls, symbolic work done once),
+`solveNeg`, damp, limiting and state gates, convergence test.
+`SingularMatrix` is a plain failure, not an abort. A `matrix_sig` fast path
+skips refactoring when the assembled matrix provably did not change.
 
-**Rung 3 — source stepping.** Devices implement `attempt(lambda)`; the
-engine recomputes the constant baseline per $\lambda$, and restores true
-models afterwards regardless of outcome, followed by one final solve at the
-true parameters.
+**Rung 2: dynamic gmin.** The factor-adaptation loop of §1, up to 100
+solves at ITL2 each, then a clean ITL1 solve with no shunt.
 
-**Rung 4 — JFNK guarantee rung.** The same Jacobian-free Newton–Krylov the
-GPU kernel runs (so CPU convergence is a superset of GPU convergence by
-construction). Its different globalization (Krylov least-squares step +
-damping) catches circuits where the factored direct step wedges.
+**Rung 3: source stepping.** Devices implement `attempt(lambda)`; the
+engine recomputes the constant baseline per $\lambda$, restores the true
+models afterwards whatever the outcome, and finishes with one ITL1 solve at
+the true parameters.
 
-**Failure handling.** Nothing throws mid-ladder except allocation/logic
-errors; numerical failures (singular factor, NaN stamps) demote to the next
-rung. `ZP_OPDBG=1` traces iterations and rungs.
+**Rung 4: JFNK.** `converger.jfnk` from a cold start: restarted GMRES(30)
+with finite-difference Jacobian products, right-preconditioned by the
+factored Jacobian (Jacobi under `ESPICE_SOLVER=jfnk-nolu`). Its Krylov
+least-squares step catches some circuits where the factored direct step
+wedges.
 
-**Tolerance knobs** (see [tolerance-system.md](tolerance-system.md) for the
-bundle view): `reltol`, `abstol`, `vntol`, `residual_tol` gate acceptance;
-`gmin`, `gmin_start` set the regularization target and ladder start; `itl1`
-is the per-rung Newton budget and also drives the gmin factor adaptation
-(easy/hard rung thresholds at ITL1/4 and 3·ITL1/4); `dx_clamp` is the
-direction-preserving damping bound (default off, $\infty$).
+**Rung 5: OPtran** (ngspice `optran.c`). A real transient with full sources,
+$dt$ 10 ns up to 1 µs, no ramp and no extra regularization, so the device
+capacitances do the conditioning the static rungs could not. The settled
+state only seeds a clean Newton, and that Newton's verdict is the answer.
+ngspice 44.2 runs this rung only when `optran` is given (`cktop.c:94-97`);
+here it is always the last rung.
+
+**Failure handling.** Numerical failures (singular factor, NaN stamps)
+demote to the next rung; only allocation errors and cancellation abort.
+`ZP_OPDBG=1` traces iterations and rungs.
+
+**Tolerance knobs** (see [tolerance-system.md](tolerance-system.md)):
+`reltol`, `abstol`, `vntol`, `residual_tol` gate acceptance; `gmin` and
+`gmin_start` set the gmin-stepping target and start; `itl1` is the budget of
+the plain and final clean solves, `itl2` of the stepping rungs and of the
+gmin factor thresholds; `dx_clamp` is the direction-preserving damping bound
+(default off, $\infty$).
+
+### Conformance history: the 4k inverter chain
+
+`stress/scaling_inverter_chain_4k` exposed three ladder defects (issues.md
+F5, recipes in [conformance-phase2.md](../conformance-phase2.md) group 6).
+ngspice solves this OP with dynamic gmin (768 iterations). The stepping rungs
+ran Newton with the ITL1 cap (100) and thresholds, so at a fold where ngspice
+slowed down, espice kept its factor, accepted a 79-iteration wandering solve
+with $|F| = 0.44$ A, and built every later gmin step on it. Source stepping
+then retried the same failing $\lambda = 0$ cold solve 12 times, and OPtran
+reported the settled transient as success.
+
+Fixed in `557d833` (ITL2 caps and the `cktop.c` factor rules, early break on
+a failed $\lambda = 0$) and `ee748c7` (OPtran returns the confirming
+Newton's verdict). The 4k chain now follows ngspice's gmin sequence and
+finishes on the gmin rung with the right OP, in 15 s instead of 308 s. The
+deck still fails in its transient.
 
 ## 3. Pseudo-code, CPU sequential
 
 ```
 solve_op(ckt, x, tol):
+    if ckt.needs_tran_op:
+        if !tran_op: error FloatingNode
+        return optran(ckt, x)
     cold_start(x)                          # zero + junction seeds (vcrit)
-    # rung 1: plain newton
-    if newton(ckt, x, gmin=tol.gmin) converged: return .plain
+    # rung 1: plain newton, no diagonal gmin
+    if newton(ckt, x, gmin=0, ITL1) converged: return
 
     # rung 2: dynamic gmin
-    cold_start(x); phi = 10; g_good = 1e-2; g = g_good/phi; have_good = false
+    cold_start(x); phi = 10; g_good = gmin_start; g = g_good/phi; have_good = false
     repeat up to 100 solves:
-        r = newton(ckt, x, gmin=g)         # SingularMatrix == not converged
+        r = newton(ckt, x, gmin=g, ITL2)   # SingularMatrix == not converged
         if r.converged:
-            if g <= tol.gmin: return .gmin
+            if g <= tol.gmin:
+                if newton(ckt, x, gmin=0, ITL1) converged: return
+                break
             x_good = x; g_good = g; have_good = true
-            if r.iters <= ITL1/4:      phi = min(phi*sqrt(phi), 10)
-            elif r.iters > 3*ITL1/4:   phi = sqrt(phi)
-            g = max(g/phi, tol.gmin-snap)
+            if r.iters <= ITL2/4:      phi = min(phi*sqrt(phi), 10)
+            elif r.iters > 3*ITL2/4:   phi = max(sqrt(phi), 1.00005)
+            if g < phi*tol.gmin: phi = g/tol.gmin; g = tol.gmin
+            else: g /= phi
         else:
             if phi < 1.00005: break        # wedged
             phi = phi^(1/4); g = g_good/phi
@@ -232,23 +282,25 @@ solve_op(ckt, x, tol):
     cold_start(x); lam = 0; lam_good = -1; dlam = 0.25
     repeat up to 100 solves:
         apply_attempt(lam); recompute_baseline()
-        if newton(ckt, x, gmin=tol.gmin) converged:
+        if newton(ckt, x, gmin=0, ITL2) converged:
             if lam >= 1: break
             lam_good = lam; x_good = x; dlam *= 1.5
             lam = min(lam + dlam, 1)
         else:
             dlam *= 0.5
-            if dlam < 1e-4: break
-            (x, lam) = (x_good, min(lam_good + dlam, 1)) if lam_good >= 0
-                       else (cold_start(x), 0)
+            if dlam < 1e-4 or lam_good < 0: break
+            x = x_good; lam = min(lam_good + dlam, 1)
     restore_models(); recompute_baseline()
-    if newton(ckt, x, gmin=tol.gmin) converged: return .source
+    if newton(ckt, x, gmin=0, ITL1) converged: return
 
-    # rung 4: JFNK guarantee
+    # rung 4: JFNK
     cold_start(x)
-    return jfnk(ckt, x, gmin=tol.gmin)     # GMRES(30), FD J·v
+    if jfnk(ckt, x) converged: return      # GMRES(30), FD J*v, LU preconditioner
 
-newton(ckt, x, gmin):
+    # rung 5: OPtran
+    return optran(ckt, x)                  # settle, then a clean Newton decides
+
+newton(ckt, x, gmin, max_iter):
     for iter in 0..max_iter:
         assemble(x)                        # devices stamp F(x), J(x) w/ limiting
         J_diag += gmin; rhs += gmin*x
@@ -264,66 +316,25 @@ newton(ckt, x, gmin):
     return not_converged
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. Parallel execution
 
-Repo flavor (`src/analysis/eval/engine.zig` +
-`converger.zig` jfnk path): the *entire* Newton/JFNK solve is one
-cooperative kernel launch — outer Newton loop, inner GMRES(m), device
-residual evals, and the exact same acceptance gates as the CPU (gate-for-gate
-mirror, so CPU and GPU accept identical iterates). Host uploads the problem
-blob once and reads back `x` + one result header.
+The ladder is sequential: rungs are causally ordered, and each rung's
+Newton iterates depend on the previous one. Inside an iterate, device
+evaluation runs in parallel: `ParEval` worker threads on the CPU, or the GPU
+through `Circuit.gpu_hook.eval_planes` (`src/analysis/gpu.zig`), which ships
+`x` up and the value planes down. The factorization, solve, limiting
+decisions, gates and the ladder itself run on the host.
 
-What parallelizes:
-- **Device evaluation** — devices are grouped into homogeneous batches
-  (SoA `BatchDesc` per model kind); each batch is a grid-stride loop, one
-  thread per device instance, gather $x$ via index tables, stamp
-  RHS/diagonal with atomics.
-- **Limiting** — a parallel pass per limited batch mirrors `batch.zig
-  applyLimits`: `lim = D.limit(cur, old)` per instance, with the companion
-  correction $i(\tilde v) + J(\tilde v)(x - \tilde v)$ making $F$ piecewise
-  *linear* in $x$ through limited devices — the finite-difference $J\cdot v$
-  is then exact, not approximate.
-- **All GMRES vector ops** — axpy, dot (block partials + atomicAdd),
-  norms, preconditioner apply: grid-stride over $n$.
+Not implemented (design note): a whole-solve GPU kernel would run the outer
+Newton loop, inner GMRES(m), device residual evaluation and the same
+acceptance gates in one cooperative launch, with thread-0 scalar GMRES
+bookkeeping between grid barriers. The limiting companion correction makes
+$F$ piecewise linear through limited devices, so the finite-difference
+$J\cdot v$ is exact there. An earlier cooperative-kernel prototype of this was
+deleted; the GPU evaluates device planes only.
 
-What stays sequential:
-- The homotopy ladder itself (rungs are causally ordered; the host walks
-  gmin/lambda and re-launches).
-- Scalar GMRES bookkeeping — Givens rotations, Hessenberg update,
-  back-substitution — runs on global thread 0 with decisions published
-  through workspace scalar slots; the grid idles for $O(m^2)$ flops
-  (irrelevant next to device evals). Software grid barrier between phases
-  (`cuLaunchCooperativeKernel`).
-
-```
-kernel newton_jfnk(blob, x, t, opts):            # ONE cooperative launch
-    for iter in 0..max_iter:                      # sequential (thread-0 steers)
-        parallel assemble F(x): zero rhs; for each batch: grid-stride
-            instance eval -> stamp rhs (+gmin*x)  # SoA gather/scatter, atomics
-        grid_barrier
-        parallel reduce |F|; thread0 publishes
-        # GMRES(m): J·v by finite difference over the SAME parallel assemble
-        for j in 0..m:                            # sequential Krylov sweep
-            parallel: x_pert = x + eps*v_j
-            parallel assemble F(x_pert); w = (F(x_pert)-F(x))/eps
-            parallel precondition w (diag Jacobi on-device)
-            parallel MGS dots vs v_0..v_j          # block partials + atomicAdd
-            thread0: Givens, Hessenberg, residual check -> publish break
-            grid_barrier
-        thread0: back-substitute y; parallel dx = V·y; parallel damp
-        parallel limit pass over limited batches; reduce limited-flag
-        parallel update x, weighted dx norm; thread0 applies the CPU gates
-        if converged: write ResultHeader; return
-host:
-    upload blob once
-    launch newton_jfnk                            # rung 0: GPU megakernel
-    if !converged: run CPU jfnk warm-started from GPU iterate
-    if !converged: run CPU direct newton          # strongest factorable rung
-```
-
-Multiple-RHS parallelism (the other GPU axis) does not apply to a single OP
-solve but does to ensembles: Monte-Carlo / corner sweeps batch independent
-OP problems as independent blob instances (`benchmark/fixtures/ensemble/*`).
+Independent OP problems (Monte Carlo, corners) form a separate parallel axis;
+see [ensemble-sweeps.md](ensemble-sweeps.md).
 
 ## Solvers used
 
@@ -333,8 +344,8 @@ OP problems as independent blob instances (`benchmark/fixtures/ensemble/*`).
 | Convergence gates, device limiting, JFNK/GMRES(m) + preconditioning | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/converger.zig` |
 | gmin/source ladder (Gillespie controllers, exact ngspice rules) | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `src/analysis/dc/op.zig solveLadder` |
 | Factor-once bypass on linear circuits | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig` / memcmp) | `converger.Options.matrix_sig` |
-| GPU whole-solve megakernel; level-set refactor alternative | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | `src/analysis/eval/engine.zig` |
-| BBD/diagonal right preconditioner for JFNK | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `direct.Solver` factors, `src/solver/bbd.zig` |
+| LU (or Jacobi, under `ESPICE_SOLVER=jfnk-nolu`) right preconditioner for JFNK | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `direct.Solver` factors, `converger.jfnk` |
+| GPU level-set refactor (not implemented) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | none |
 
 ---
 
@@ -342,22 +353,22 @@ OP problems as independent blob instances (`benchmark/fixtures/ensemble/*`).
 
 | Source | Status |
 |---|---|
-| ngspice `cktop.c` (raw.githubusercontent.com/ngspice/ngspice/master) | fetched, verified — dynamic gmin factor rules, source stepping constants |
-| Xyce Math Formulation PDF (xyce.sandia.gov) | fetched, verified — MNA/DAE, §4.2 voltage limiting semantics; this doc revision has no gmin/PTC section |
-| Kelley & Keyes, PTC convergence theory | **paywalled — derived, not source-verified** (SER rule + convergence conditions from knowledge) |
+| ngspice `cktop.c` (raw.githubusercontent.com/ngspice/ngspice/master) | fetched, verified: dynamic gmin factor rules, source stepping constants |
+| Xyce Math Formulation PDF (xyce.sandia.gov) | fetched, verified: MNA/DAE, §4.2 voltage limiting semantics; this doc revision has no gmin/PTC section |
+| Kelley & Keyes, PTC convergence theory | paywalled; derived, not source-verified (SER rule and convergence conditions) |
 
 **Per-section verification**
 
 - §1 MNA/Newton/limiting: verified vs Xyce math doc + our `converger.zig` (ngspice-exact limiting per source comments).
-- §1 dynamic gmin / source stepping: verified vs fetched `cktop.c` summary; our constants match ngspice's dynamic variants (ours: source $\Delta\lambda_0 = 0.25$, ngspice: raise$_0 = 0.001$ — flavor difference, noted).
-- §1 PTC: derived, not source-verified; not implemented here.
-- §3/§4: direct transcription of repo source.
+- §1 dynamic gmin / source stepping: verified against `cktop.c`; the gmin constants match ngspice's dynamic variant. Source stepping differs in its start step (ours $\Delta\lambda_0 = 0.25$, ngspice raise$_0 = 0.001$).
+- §1 PTC: derived, not source-verified; not implemented.
+- §2/§3: transcribed from `op.zig` and `converger.zig`.
 
 **Our implementation**
 
-- `src/analysis/dc/op.zig` — ladder (`solveLadder`), cold start, junction seeding.
-- `src/solver/converger.zig` — Newton, JFNK, gates, damping, `Tolerances`.
-- `src/analysis/eval/engine.zig` — GPU megakernel (assemble/limit/JFNK on device).
-- Bench fixtures: `benchmark/fixtures/op/voltage_divider`,
-  `benchmark/fixtures/convergence/{diode_bridge,high_gain_fb,schmitt}`,
-  plus every fixture's implicit OP phase.
+- `src/analysis/dc/op.zig`: ladder (`solveLadder`), `transientOp`, cold
+  start, junction seeding.
+- `src/solver/converger.zig`: `newton`, `jfnk`, `run`, the acceptance gates,
+  damping. `Tolerances` is defined in `src/core/numerics.zig`.
+- Fixtures: `tests/fixtures/op/`, `tests/fixtures/convergence/`, plus every
+  deck's implicit OP phase.

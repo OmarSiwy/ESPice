@@ -1,6 +1,6 @@
 # Matrix-Exponential Integrators (MATEX)
 
-Exponential time differencing with Krylov-subspace $e^{Ah}v$ — larger
+Exponential time differencing with Krylov-subspace $e^{Ah}v$: larger
 stable steps than BDF/trap for large linear(ized) networks.
 
 The explicit `.matex` query implements a fixed-matrix R-MATEX path in
@@ -35,7 +35,7 @@ x(t+h) = e^{hA}\Big(x(t) + A^{-1}b(t) + A^{-2}\tfrac{b(t+h)-b(t)}{h}\Big)
 - \Big(A^{-1}b(t+h) + A^{-2}\tfrac{b(t+h)-b(t)}{h}\Big).
 $$
 
-No truncation error in time — the only errors are the PWL input assumption
+No truncation error in time: the only errors are the PWL input assumption
 and the approximation of $e^{hA}v$. Consequently $h$ is bounded by input
 **transition spots** (source slope breaks), not by stability or LTE:
 between two transition spots the step can be the whole interval.
@@ -50,7 +50,7 @@ $$
 e^{hA} v \;\approx\; \|v\|\, V_m\, e^{h H_m} e_1 ,
 $$
 
-with $H_m$ ($m \times m$, $m \sim 10\text{–}100$) exponentiated densely
+with $H_m$ ($m \times m$, $m \sim 10\text{-}100$) exponentiated densely
 (Padé/scaling-squaring). Posterior error estimate (MATEX eq. 7):
 
 $$
@@ -58,13 +58,13 @@ $$
 $$
 
 grow $m$ until $\|r_m\| < \epsilon$. Key reuse property: $H_m$ is
-$h$-independent — **one subspace serves every $h$ in the reuse window** by
+$h$-independent: **one subspace serves every $h$ in the reuse window** by
 rescaling $e^{hH_m}$, which is what makes adaptive stepping nearly free.
 
 ### Stiffness: inverted and rational Krylov
 
 Standard Krylov approximates the *large*-magnitude eigenvalues of $A$
-first — exactly the components $e^{hA}$ kills — so stiff circuits need
+first: exactly the components $e^{hA}$ kills: so stiff circuits need
 large $m$. Two spectral transforms fix this (MATEX §3.3):
 
 - **I-MATEX (inverted)**: build $K_m(A^{-1}, v)$ (i.e. $-G^{-1}C$;
@@ -73,18 +73,18 @@ large $m$. Two spectral transforms fix this (MATEX §3.3):
   $e^{hA}v \approx \|v\| V_m e^{h H'^{-1}_m} e_1$. Small-magnitude
   eigenvalues of $A$ (the slow, behavior-defining ones) become dominant.
 - **R-MATEX (rational / shift-and-invert)**: basis
-  $K_m\big((I - \gamma A)^{-1}, v\big)$ — factor $(C + \gamma G)$ once;
+  $K_m\big((I - \gamma A)^{-1}, v\big)$: factor $(C + \gamma G)$ once;
   $\gamma$ set near the order of the intended timestep, and the method is
   insensitive to its exact value. Confines the whole spectrum into the
   unit disk; smallest $m$ of the three, works with singular $C$
-  (no explicit $A$, factor $C + \gamma G$ directly — regularization-free).
+  (no explicit $A$, factor $C + \gamma G$ directly: regularization-free).
 
 Cost model per step: $m$ sparse triangular solves on a **once-factored**
-matrix + one small dense exponential — vs BDF/trap's refactor-per-$h$-change
+matrix + one small dense exponential: vs BDF/trap's refactor-per-$h$-change
 (or fixed-$h$ lockstep). MATEX reports ~13× over fixed-step trap on IBM
 power-grid benchmarks. Further axis (the paper's framework): decompose the
 input sources into groups by transition-spot pattern, simulate each group
-independently (superposition, linear system), sum — turns breakpoint-dense
+independently (superposition, linear system), sum: turns breakpoint-dense
 inputs into per-group sparse ones.
 
 ### Nonlinear extension
@@ -103,7 +103,7 @@ $\varphi_2, \varphi_3$; the $\varphi$-functions evaluate on the same Krylov
 subspace (augmented-matrix trick: exponentiating
 $\tilde A = \left(\begin{smallmatrix} A & v \\ 0 & 0 \end{smallmatrix}\right)$
 yields $\varphi_1(A)v$ in its upper-right block). Device-limiting and the SPICE acceptance gates do not
-transfer directly — error control is by embedded stages, which is the main
+transfer directly: error control is by embedded stages, which is the main
 open engineering question for a SPICE-grade nonlinear MATEX.
 
 **Implementation status:** `src/analysis/tran/matex.zig` factors
@@ -118,7 +118,7 @@ nonlinear circuit to a different integrator.
 (R-MATEX flow; reuse and adaptive recovery below are extensions.)
 
 **Eligibility.** MATEX applies when the dynamic part is linear (or per-step
-linearized): power grids, interconnect, RC/RLC reduction targets — the
+linearized): power grids, interconnect, RC/RLC reduction targets: the
 `rc_ladder`-class fixtures where the matrix never changes. Automatic
 eligibility detection is a target; `has_charge` alone does not establish
 linearity.
@@ -141,7 +141,19 @@ The implementation uses the retained basis at $m_{\max}$ and has a local
 forward-Euler fallback when the projected matrix is singular; it does not
 implement the adaptive recovery described above.
 
-**Knobs.** $\epsilon$ (Krylov posterior tolerance — plays the role of
+**Implementation notes.**
+- The Arnoldi scratch, the pivot arrays and the posterior-estimate workspace
+  (`max(n, 7*m_max^2)`) are all sized from $m_{\max}$, so any $m_{\max}$ works;
+  they were once fixed at 256 and overflowed above it (commit `c9b25b2`, no
+  deck bytes changed).
+- $b(t+h)$ of one step is reused as $b(t)$ of the next, and the $C + \gamma G$
+  values are built with `Circuit.combinePlanes` (operands swapped relative to
+  the transient's $G + \alpha C$), with per-run scratch in one arena
+  (commit `bd698f3`). Callgrind Ir: a 200-stage RC ladder at `.matex 1u 5m`
+  454.1M to 292.1M (-35.7%, peak RSS 20.6 to 22.1 MB of arena slack),
+  `matex/sine` 26.13M to 18.75M (-28.2%).
+
+**Knobs.** $\epsilon$ (Krylov posterior tolerance: plays the role of
 reltol on the exponential), $m_{\max}$, $\gamma$ (insensitive; order of
 typical $h$), output resolution cap on $h$. Spectre-bundle mapping:
 $\epsilon$ scales with `reltol`; there is no `trtol` analogue because
@@ -168,48 +180,26 @@ matex_transient(G, C, sources, t_stop, eps, gamma):
         # reuse: any t' in (t, next TS) needs only a rescaled expm(h'*Hm)
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. Parallel execution
 
-What parallelizes:
+Everything runs on the host today. Not implemented (design notes):
 
 - **Arnoldi kernels**: SpMV ($C v_j$), triangular solves on the fixed
-  factors (level-scheduled or replaced by a few Jacobi-preconditioned GMRES
-  sweeps to stay GPU-native), MGS dots/axpys — all grid-stride over $n$,
-  same building blocks as the repo's JFNK kernel (`kernel.zig`: block
-  partial reductions, thread-0 scalar Hessenberg bookkeeping, grid
-  barriers).
-- **The small dense $e^{hH_m}$** ($m \le 100$): thread-0/single-block
-  scaling-and-squaring — negligible.
+  factors (level-scheduled, or replaced by a few Jacobi-preconditioned GMRES
+  sweeps), MGS dots and axpys, all data-parallel over $n$ with thread-0
+  scalar Hessenberg bookkeeping between barriers.
+- **The small dense $e^{hH_m}$** ($m \le 100$): single-block
+  scaling-and-squaring, negligible.
 - **Superposition decomposition** (the MATEX framework's own axis): input
-  source groups are independent complete simulations of the same matrix →
-  one group per GPU/stream/lane, summed at output points. This is the
-  multiple-RHS axis at its coarsest and maps directly onto the repo's
-  batched-problem style.
-- **Step-parallelism within a reuse window**: all output points sharing one
-  Krylov subspace evaluate $\|v\| V_m e^{h_i H_m} e_1$ for many $h_i$ in
-  parallel (a batch of tiny dense ops + one tall-skinny GEMM).
+  source groups are independent complete simulations of the same matrix, one
+  group per device, stream or lane, summed at output points.
+- **Step parallelism within a reuse window**: all output points sharing one
+  Krylov subspace evaluate $\|v\| V_m e^{h_i H_m} e_1$ for many $h_i$ at once
+  (a batch of tiny dense ops and one tall-skinny GEMM).
 
-What stays sequential: the outer march across transition spots (each step's
-$v$ depends on the previous $x$) — but the sequential axis has one step per
-*input transition*, not per LTE-limited timestep.
-
-```
-host:
-    factor (C + gamma*G) once; upload factors + batches
-    partition sources into groups by transition-spot similarity
-    for each group (parallel lanes / devices):
-kernel matex_lane:
-    while t < t_stop:                               # sequential per lane
-        thread0: h = next transition spot - t
-        for j in 1..m:                              # sequential Krylov sweep
-            parallel: w = tri_solve(L,U, C*v_j)     # grid-stride / level-sched
-            parallel MGS dots -> H (thread0 bookkeeping)
-            thread0: posterior error check -> break
-        thread0: expm(h*Hm) (m x m)
-        parallel: x = ||v|| * V_m * (expm*e1) - P   # tall-skinny GEMV
-        parallel: batch-evaluate all output h_i in the reuse window
-host: sum group results (superposition) at output grid
-```
+The outer march across transition spots stays sequential (each step's $v$
+depends on the previous $x$), but it has one step per input transition, not
+per LTE-limited timestep.
 
 ## Solvers used and extensions
 
@@ -225,7 +215,7 @@ host: sum group results (superposition) at output grid
 
 | Source | Status |
 |---|---|
-| Zhuang, Weng, Lin, Cheng, "MATEX: A Distributed Framework for Transient Simulation of Power Distribution Networks", arXiv:1511.04519 | **fetched, verified** — eqs. 1–8, Algorithms 1–2, I-MATEX/R-MATEX relations, transition-spot stepping, subspace-reuse property, 13× claim |
+| Zhuang, Weng, Lin, Cheng, "MATEX: A Distributed Framework for Transient Simulation of Power Distribution Networks", arXiv:1511.04519 | **fetched, verified**: eqs. 1-8, Algorithms 1-2, I-MATEX/R-MATEX relations, transition-spot stepping, subspace-reuse property, 13× claim |
 | arXiv:1505.06699 (exponential integration for power delivery, journal version) | located via search, not separately fetched |
 | Nonlinear exponential-Rosenbrock extension | **derived, not source-verified** ($\varphi$-function formulation from knowledge) |
 
@@ -234,9 +224,9 @@ host: sum group results (superposition) at output grid
 - §1 exact update, PWL closed form, Arnoldi relation, posterior error,
   I-/R-MATEX: verified against fetched arXiv text (equation-level).
 - §1 nonlinear extension: derived, marked.
-- §2–§3: R-MATEX design, partly implemented as described above; subspace
+- §2-§3: R-MATEX design, partly implemented as described above; subspace
   reuse and adaptive recovery remain targets.
-- §4: prospective GPU design.
+- §4: design notes.
 
 **Our implementation**
 
@@ -244,6 +234,5 @@ host: sum group results (superposition) at output grid
   collection, rational Arnoldi, and the projected matrix exponential.
 - `src/solver/direct.zig`: retained sparse factors;
   `src/solver/dense_lu.zig`: projected dense solves.
-- Bench fixtures that would judge it: `benchmark/fixtures/scaling/*`
-  (rc_ladder class), `benchmark/fixtures/power/*`,
-  `benchmark/fixtures/basic/*` linear RC/RLC.
+- Fixtures: `tests/fixtures/matex/`; `tests/fixtures/stress/scaling_rc_ladder_*`
+  are the rc_ladder-class decks that would judge it at scale.

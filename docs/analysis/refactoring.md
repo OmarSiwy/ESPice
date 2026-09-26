@@ -1,132 +1,120 @@
-# Analysis ownership and numerical work
+# Analysis module: ownership and engine notes
 
-Evaluation is in `src/device/eval.zig`. Imported as `device_eval` or the
-runtime loader's `dyn` module, it supplies the shared evaluator. Compiled as a
+How `src/analysis/` is split, what each file owns, and the design decisions
+that are not obvious from the code. The per-analysis pages in this directory
+cover the numerics.
+
+## Ownership
+
+| File | Owns |
+|---|---|
+| `root.zig` | The public seam: `session`, `ExecutionConfig`, `validateBackend`, `schemaOf`. The numerical leaves stay private. Its `test` block imports the suites in `tests/` and, for semantic analysis only, the `pss/` leaves the test step does not otherwise reach. |
+| `session.zig` | The query graph and its cooperative scheduler: one row per query plus its implicit OP prerequisite, query publication, output-schema validation. |
+| `executor.zig` | One query's mutable numerical state and the worker thread that runs it; dispatch is one exhaustive `requests.Kind` switch with compile-time checks on every analysis module's `Options` and `run` signature. Prepared topology and the deck are borrowed; an accepted OP from a dependency is copied before use. |
+| `worker.zig` | `Worker(Product)`: runs one analysis on its own thread and parks it at every progress checkpoint until the coordinator resumes or cancels it. Embedded in its pinned executor, so there is no separate allocation. Suppressed inner Newton checkpoints poll an atomic cancellation flag without the scheduler mutex; published boundaries stay locked. |
+| `validate.zig` | Query validation at the analysis boundary: every numeric option a driver would otherwise trust, checked once before any allocation. `requests.Kind.transient()` is the single list of transient kinds. |
+| `types.zig` | The shared context every leaf needs (`Circuit`, `RunCtx`, `Result`, hooks). Leaves import it, never `root.zig`. File DAG: `Circuit.zig` to `types.zig` to leaves and `executor.zig` to `root.zig`. |
+| `Circuit.zig` | The mutable analysis-side circuit over the frozen `device.Circuit`: plane evaluation, `clearPlanes(mode)`, `groundStamp`, `combinePlanes`, parameter recompute, noise collection, the GPU hook. |
+| `par_eval.zig` | `ParEval`: the device stamp threaded over persistent worker lanes (below). |
+| `gpu.zig` | GPU device evaluation feeding the host solver (below). |
+| `progress.zig` | Checkpoint phases and counters. |
+
+Evaluation itself lives in `src/device/eval.zig`. Imported as `device_eval`
+or by the runtime loader, it supplies the shared evaluator; compiled as a
 per-model root, it exports either the host vtable or the GPU entry points.
-Model PODs, scatter tapes, plane layout and the device ABI are unchanged.
 
-`executor.zig` owns dispatch, signature validation, query numerical state and
-its embedded worker controller. `session.zig` owns query publication, request
-validation and output-schema validation. These replace separate forwarding
-files. The numerical leaves still import `types.zig`, never the public root.
-Solver-independent contracts come directly from `numerics`; the former
-`solvers/types.zig` forwarding file is removed. The solver root retains its
-`types` alias for existing callers.
+## Plane evaluation
 
-The controller is embedded in its pinned executor, eliminating a separate
-allocation. Suppressed inner Newton checkpoints poll an atomic cancellation
-flag without taking the scheduler mutex; published boundaries remain locked.
-Frequency solvers retain their lane scratch across batch calls;
-only a changed LU shape rebuilds the factor storage. GPU frequency hooks write
-into the same caller-owned destination used by CPU fallback. A failed GPU call
-is followed by a complete CPU overwrite of that batch.
+`Circuit.clearPlanes(mode)` is the one plane reset and one batch walk for
+the serial path, `ParEval` and the GPU host half; the stamp mode is comptime
+on the serial path. `Circuit.combinePlanes(W, out, g, c, alpha)` forms
+$G + \alpha C$ in one pass (the transient Jacobian) and serves MATEX with the
+operands swapped ($C + \gamma G$). W = 1 is its scalar oracle and tail; the
+differential case is mirrored in the standalone
+`ref/SIMD-Strategies/verify.zig`, covering vector boundaries and aliased
+output.
 
-## Data layout
+**ParEval.** Lane 0 stamps the caller's planes; lanes 1 and up stamp private
+slabs that are summed into them in a fixed lane order, with no allocation and
+no mutex per pass. Lane cuts fall on instance boundaries, so one instance's
+cancelling `+g/-g` pair never straddles lanes, but two instances sharing a
+node can. The result is therefore not bit-identical to the serial stamp: a
+plane cell becomes `((S0 + S1) + S2) + ...` over consecutive segments of the
+serial order. Measured serial against 2 to 16 lanes: at most 1 ulp
+(`parallel_inverters`, `resistor_grid_100x100`; `rc_ladder_10k`
+bit-identical), and deterministic at a given lane count. It is off by
+default: `ESPICE_THREADS` sets the device thread count (default 1).
 
-1. Inputs are prepared circuit planes, model-generated PSDs and query requests;
-   outputs are solver states and retained analysis results.
-2. Numerical collections span devices, unknowns, sparse entries and frequencies.
-   There is one execution controller per active query.
-3. Circuit/tape indices remain u32. Array offsets and allocation lengths use
-   usize. SIMD lane width follows the target's f64 width.
-4. G/C and RHS/solution planes are contiguous; frequency scratch stores one
-   vector per matrix entry. Control state is outside these streamed arrays.
-5. Prepared topology lives with Problem. Scratch lives with its solver/query;
-   published results live until Problem destruction.
-6. Frequencies and independent queries are parallel axes. Newton iterations
-   and transient timesteps remain sequential.
+**GPU.** Every eligible batch's models, instances and tapes are uploaded once
+and stay resident. Per Newton iteration the bus carries `x` up and the value
+planes down (`Circuit.gpu_hook.eval_planes`); the sparse LU, Newton update
+and convergence test stay on the CPU. That round trip is the floor, so the
+GPU pays off on device count, not circuit size. A GPU plane stamp bypasses
+the host batches, so the transient LTE falls back to per-row charge (see
+[transient-integration.md](transient-integration.md)). Devices with
+iteration hooks are excluded from GPU residency
+([iteration lifecycle](../devices/iteration-lifecycle.md)). The earlier
+GPU Newton, JFNK, transient and batched-solve routes were deleted; the
+GPU reaches Newton only through `eval_planes`.
 
-## Device noise
+## Decisions kept on purpose
 
-Devices still declare generators and compute `noisePsd`. Analysis measures
-those sources through the circuit. `.noise v(node) dec N start stop` has no
-input-source requirement. A legacy source token remains accepted syntactically
-but has no numerical role. The request has no input branch or gain field.
+These came out of the engine cleanup (branch history `9df71ed` to
+`199e9bf`; measured cost of the whole series +0.03% Ir on
+`tran/device_mos6_inverter` and +0.02% on
+`stress/scaling_parallel_inverters_100`, no speed claim):
 
-The spectrum has `frequency` and `noise_density` columns (V^2/Hz). A separate
-integrated result has one `noise_rms` column (V rms). Input/output-referred
-columns and the input-gain solve are removed intentionally. Consumers of the
-old column names must use this schema; there is no referred-noise fallback.
-
-Every declared generator retains its position even at zero power, so periodic
-sampling cannot shift a later generator into its slot. Periodic noise uses one
-adjoint solve per sample and sideband to measure all generators. The existing
-frozen-time approximation and independent-generator assumption remain;
-transient noise still samples only the white component at operating-point PSD.
+- `ProtoStore` stages one `MultiArrayList` per device type and keeps its own
+  `staging_gpa` (`std.heap.smp_allocator`). The arena waste it avoids comes
+  from every type's store growing interleaved in netlist order, and one
+  buffer per store does not change that.
+- `Worker(Product)` stays generic: the executor tests instantiate it with
+  `u64`, `u32` and `void`.
+- `saved_models` (the source-stepping snapshot in `device/eval.zig`) is
+  allocated eagerly. `applyAttempt` is a void hook with no allocator, so a
+  lazy allocation would need a stored allocator and would fail silently on
+  OOM.
+- `limitRange` keeps its `f64` flag: a `bool` cost +0.1% Ir on
+  `device_mos6_inverter`.
 
 ## Retired paths
 
-The unused serial temperature sweep and its external `TempCoeff` overrides
-are removed. Query execution already uses `temp_sweep.run`, with one
-`solveLanes` lane per temperature and device-native temperature coefficients.
-The lane driver's serial Newton solve remains the CPU fallback; nominal
-temperature is restored after the sweep. External coefficient overrides were
-never supplied by query preparation and are no longer a separate analysis API.
+- The serial temperature sweep with external `TempCoeff` overrides. Query
+  execution uses `temp_sweep.run`, one `solveLanes` lane per temperature
+  with device-native temperature coefficients; overrides were never supplied
+  by query preparation.
+- The OP-f64 / transient-f32 derivative-width experiment and its environment
+  switch. CPU derivative width follows `jac_f32_host`; GPU derivative width
+  follows the model's `jac_f32` permission. Reintroducing a phase-dependent
+  width needs fresh numerical and benchmark evidence, not a dormant branch.
+- Device ABI 11 dropped `Batch.thread_safe`, `Hooks.record_history` /
+  `inject_history` and the GPU kernel-name/PTX/AMDGCN vtable fields
+  (history next to `abi_version` in `src/device/abi.zig`).
+- `mc` statistics (`Stats`/`YieldSpec`), `.four`'s `analyzeBuffer`, the
+  envelope `extractPeak`/`extractRMS` helpers and the `stb` margin
+  extraction had no callers and were deleted.
 
-Native TXL/LTRA/CPL registration is retained through the same neutral CPU
-vtable boundary as generated models. O cards use native LTRA convolution for
-RLC/RC, the ideal line for LC, and the static Verilog-A two-port for RG. Y
-cards use native TXL for its supported parameter range. P cards use native CPL
-for two, three, or four conductors. Unsupported parameter sets and dimensions
-fail explicitly at initial construction; the approximate RLC/RC and coupled Verilog-A models are not
-fallbacks. These native routes remain until equivalent AMS replacements pass
-the numerical oracles; restoration is not a completed migration or a claim of
-full ngspice compatibility.
+## Native transmission lines
 
-The native devices commit their own histories through `commit_state`, with
-step bounds and breakpoints using the existing hooks. The unused
-`record_history` and `inject_history` hook slots were removed in ABI 11. Native history capacities, interpolation choices, fit limitations and
-non-transient behavior still need separate compatibility coverage. Runtime
-parameter-sweep recomputation also needs a failure path for newly invalid fits.
+O, Y and P cards stay on the native Zig devices (`models/native/`), registered
+through the same neutral CPU vtable boundary as generated models: O cards use
+native LTRA convolution for RLC/RC, the ideal line for LC and the static
+Verilog-A two-port for RG; Y cards use native TXL; P cards use native CPL for
+two, three or four conductors. Unsupported parameter sets and dimensions
+fail at construction; the approximate Verilog-A RLC/RC and coupled models are
+not fallbacks. The natives commit their own histories through `commit_state`,
+with step bounds and breakpoints through the existing hooks. They stay until a
+Verilog-A replacement passes the same numerical oracles (see
+[vera-gaps.md](../vera-gaps.md)). Native history capacities, interpolation
+choices, fit limits and non-transient behavior still need their own
+compatibility coverage, and runtime parameter sweeps need a failure path for
+newly invalid fits.
 
-The disabled OP-f64/transient-f32 experiment and its environment switch are
-removed. CPU derivative width follows `jac_f32_host`; GPU derivative width
-follows the model's `jac_f32` permission. Reduced derivative bases remain.
-Reintroducing a phase-dependent width requires fresh numerical and benchmark
-evidence rather than reactivating a dormant branch.
+## Tests
 
-## Verification
-
-All analysis tests and their fixtures live under `src/analysis/tests/`.
-`root.zig` explicitly imports the 13 suites in its `test` block: circuit,
-evaluation, executor, session, GPU policy, AC, transient, periodic, sweep,
-Fourier, poles/zeros, solvers and integration. Related cases share a suite;
-unrelated runtime implementations remain separate. Private test access is
-compiled only when `builtin.is_test` is true.
-
-`zig build test-analysis` runs the complete suite; `test-eval` and
-`test-solvers` retain focused entry points. The analysis test module owns its
-builder/limiter imports and generated-device object links. All 229 named tests
-survived the move; the complete suite passes 235 checks, including registration
-blocks. Worker tests use the production stack setting because the combined
-test executable's thread-local storage exceeds their former 1 MiB override.
-
-`Circuit.combinePlanes(W)` uses W=1 for its oracle and tail. Its differential
-case is mirrored in the standalone `ref/SIMD-Strategies/verify.zig`, covering
-vector boundaries and aliased output. Solver tests cover retained scratch with
-changed RHS values and forward/adjoint calls. Device tests cover zero-power
-source identity; Problem tests cover generated thermal noise without an input
-source. No throughput claim is made by this refactor.
-
-### Recorded checks (2026-09-16)
-
-- `zig build` passed, including the per-model host/GPU export roots.
-- Debug unit suites: analysis 103/103, evaluator 7/7, solvers 117/117,
-  frontend preparation 11/11, Problem 20/21. The Problem failure is
-  `output validation rejects an entire append before publishing IDs`:
-  analysis emits `v(S_1_1)` while output validation expects `S(1,1)`.
-  The new generated-device thermal-noise regression passed.
-- ReleaseSafe direct solver tests passed 79/79. Standalone SIMD verification
-  and the Circuit differential case passed; the ReleaseFast assembly contains
-  `vmulpd` and `vaddpd` on ymm registers.
-- The noise fixture runner against the completed executable selected 28 cases:
-  5 passed, 23 failed. Fifteen still expect `Noise Spectral Density Curves`
-  instead of the new device-noise schema; two require unsupported differential
-  probes; five report periodic-noise value mismatches (sideband invariance and
-  noise multipliers); one transient case lacks the requested time coverage.
-  These fixture checks are not green. Their expectations were left untouched.
-
-Concurrent frontend edits caused one initial compilation to report
-`file contents changed during update`; the Debug preparation/Problem results
-above are from the subsequent run. A duplicate optimized unit compilation was
-stopped after these results were available. No benchmark was run.
+The analysis suites live in `src/analysis/tests/` (AC, circuit, executor,
+Fourier, GPU policy, integration, periodic, pole-zero, session, sweep,
+transient) and run with `zig build test-analysis`. Private test access is
+compiled only when `builtin.is_test` is true. Worker tests use the production
+stack setting because the combined test executable's thread-local storage
+exceeds a 1 MiB override.

@@ -1,4 +1,11 @@
-# Device evaluation profile — 2026-09-16
+# Device evaluation profile
+
+Where a transient run's instructions go, measured twice (2026-09-16 and
+2026-09-23), and the kernel changes that came out of it. Function names in
+the tables are the ones at the profiled commit; some have since been renamed
+or inlined.
+
+## Profile of 2026-09-16
 
 Callgrind 3.26.0 measured CPU execution of the existing ReleaseFast executable
 with Zig 0.16.0. These are instruction counts, not elapsed-time percentages.
@@ -38,8 +45,9 @@ The executable is stripped. Attribution used a direct assembly emission of
 the MOS6 host object and matching function bytes/entry structure against the
 profiled executable. Entry addresses were `0x2675a70` (evaluation),
 `0x2681fe0` (limiting), `0x2680ec0` (state staging), and `0x26826b0`
-(charge evaluation). A separate `-Ddebug-info=true -Dgpu=false` profiling
-build failed with compiler SIGSEGVs in host device roots; it supplied no data.
+(charge evaluation). A `-Ddebug-info=true -Dgpu=false` profiling build
+failed with compiler SIGSEGVs in host device roots at the time; `e5634f7`
+fixed that (see below).
 
 ## Reproduction
 
@@ -62,13 +70,14 @@ mask lowered through `vpermps`/`vpslld`/`vpmovsxdq`/`vmovmskpd`) is now
 `anyNonzero`, an integer shift-and-test with the same predicate. See the
 2026-09-23 section below for its differential case and numbers.
 
-## Host-pass profile — 2026-09-23
+## Host-pass profile of 2026-09-23
 
 Callgrind 3.26.0, Zig 0.16.0, base `bcc13b3`. Attribution comes from a
 `-Ddebug-info=true -Dgpu=false` build, now buildable (`e5634f7` pins the host
 device objects stripped; before that every one SEGV'd the compiler). Its
 whole-process Ir is within 0.001% of the shipped default build, whose totals
-are the before/after numbers. Self Ir except where marked inclusive.
+are the before/after numbers. Self Ir except where marked inclusive; symbol
+names are as profiled at `bcc13b3`, and some have since been renamed.
 
 | Pass | mos6_inverter | share | parallel_inverters_100 | share |
 |---|---:|---:|---:|---:|
@@ -86,7 +95,7 @@ are the before/after numbers. Self Ir except where marked inclusive.
 | `integrator.advanceCurrent` | 1.15M | 0.9% | 5.65M | 1.5% |
 | `converger.finalizeStep` self | 1.29M | 1.0% | 4.57M | 1.2% |
 | `stateCtl` (Meyer latch commit) | 1.02M | 0.8% | 3.23M | 0.9% |
-| DC operating point, inclusive | 5.39M | 4.3% | — | — |
+| DC operating point, inclusive | 5.39M | 4.3% | n/a | n/a |
 | Parse + prepare (`Problem.init`, inclusive) | 5.03M | 4.0% | 6.36M | 1.7% |
 
 Inside `DeviceBatch(mos1).eval`, instruction-level attribution (`--dump-instr`)
@@ -127,3 +136,8 @@ needs VACASK, which is not on PATH outside `nix develop .#benchmarking`.
   only where one operand is a non-NaN constant (`chgtol`, `abstol`): about
   4 of ~54 instructions per 4 states, ~0.25% of parallel_inverters_100.
   The data-data maxes would change NaN propagation, so they stay.
+- `builder.applyKv`'s `mem.eql` scan over parameter names: 1.4% of
+  `mos6_inverter`, preparation only.
+- The rest of the time is generated physics (eval, limit, `updateState`,
+  `evalQ`) and the solver (see
+  [solver-perf-2026-09.md](../solvers/solver-perf-2026-09.md)).
