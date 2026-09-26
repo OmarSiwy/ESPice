@@ -47,16 +47,16 @@ pub fn Bbd(comptime T: type) type {
         blk_start: []u32, // first global row/col
         blk_s: []u32, // block size s
         blk_m: []u32, // border footprint m
-        blk_a_off: []usize, // arena offsets of A_i, W_i, F_i
-        blk_w_off: []usize,
-        blk_f_off: []usize,
-        blk_piv_off: []usize, // offset into `piv`, s entries
-        blk_loc_off: []usize, // offset into `loc`, m entries
+        blk_a_off: []u32, // arena offsets of A_i, W_i, F_i
+        blk_w_off: []u32,
+        blk_f_off: []u32,
+        blk_piv_off: []u32, // offset into `piv`, s entries
+        blk_loc_off: []u32, // offset into `loc`, m entries
 
         b: u32, // border size, >= 1 (ground)
         nb: u32,
         arena: []T,
-        s_off: usize, // arena offset of S
+        s_off: u32, // arena offset of S
         piv: []u32,
         s_piv: []u32,
         loc: []u32, // footprint slot -> border position
@@ -131,39 +131,45 @@ pub fn Bbd(comptime T: type) type {
             errdefer gpa.free(blk_s);
             const blk_m = try gpa.alloc(u32, nb);
             errdefer gpa.free(blk_m);
-            const blk_a_off = try gpa.alloc(usize, nb);
+            const blk_a_off = try gpa.alloc(u32, nb);
             errdefer gpa.free(blk_a_off);
-            const blk_w_off = try gpa.alloc(usize, nb);
+            const blk_w_off = try gpa.alloc(u32, nb);
             errdefer gpa.free(blk_w_off);
-            const blk_f_off = try gpa.alloc(usize, nb);
+            const blk_f_off = try gpa.alloc(u32, nb);
             errdefer gpa.free(blk_f_off);
-            const blk_piv_off = try gpa.alloc(usize, nb);
+            const blk_piv_off = try gpa.alloc(u32, nb);
             errdefer gpa.free(blk_piv_off);
-            const blk_loc_off = try gpa.alloc(usize, nb);
+            const blk_loc_off = try gpa.alloc(u32, nb);
             errdefer gpa.free(blk_loc_off);
 
+            // `dst` and the offsets are u32; a larger arena falls back to the
+            // flat LU. Every offset is below the running `arena_len`.
+            const arena_max = std.math.maxInt(u32);
             var arena_len: usize = 0;
-            var piv_len: usize = 0;
-            var loc_len: usize = 0;
+            // Blocks are disjoint row ranges and each footprint slot comes
+            // from a CSC entry, so both sums stay below n and nnz.
+            var piv_len: u32 = 0;
+            var loc_len: u32 = 0;
             for (info.blocks, sets, 0..) |ib, s, bi| {
                 const sz: usize = ib.size;
                 const m: usize = s.items.len;
+                const a_off = arena_len;
+                arena_len += sz * sz + 2 * sz * m;
+                if (arena_len > arena_max) return error.NotApplicable;
                 blk_start[bi] = ib.start;
                 blk_s[bi] = ib.size;
                 blk_m[bi] = @intCast(m);
-                blk_a_off[bi] = arena_len;
-                blk_w_off[bi] = arena_len + sz * sz;
-                blk_f_off[bi] = arena_len + sz * sz + sz * m;
+                blk_a_off[bi] = @intCast(a_off);
+                blk_w_off[bi] = @intCast(a_off + sz * sz);
+                blk_f_off[bi] = @intCast(a_off + sz * sz + sz * m);
                 blk_piv_off[bi] = piv_len;
                 blk_loc_off[bi] = loc_len;
-                arena_len += sz * sz + 2 * sz * m;
-                piv_len += sz;
-                loc_len += m;
+                piv_len += ib.size;
+                loc_len += @intCast(m);
             }
-            const s_off = arena_len;
+            const s_off: u32 = @intCast(arena_len);
             arena_len += @as(usize, b) * b;
-            // `dst` is u32; a larger arena falls back to the flat LU.
-            if (arena_len > std.math.maxInt(u32)) return error.NotApplicable;
+            if (arena_len > arena_max) return error.NotApplicable;
 
             const arena = try gpa.alloc(T, arena_len);
             errdefer gpa.free(arena);
