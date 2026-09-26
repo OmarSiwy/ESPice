@@ -171,13 +171,8 @@ module hfet2(d, g, s);
         // fetlim(TVTO) pass that follows it in hfet2load.c is documented in the
         // header (no limvds for this device).
         vcrit = vth * ln(vth / (1.4142135623730951 * 1e-11));
-        if (type_nfet > 0) begin
-            vgsr = $limit(V(g, sp), "pnjlim", vth, vcrit);
-            vgdr = $limit(V(g, dp), "pnjlim", vth, vcrit);
-        end else begin
-            vgsr = $limit(V(sp, g), "pnjlim", vth, vcrit);
-            vgdr = $limit(V(dp, g), "pnjlim", vth, vcrit);
-        end
+        vgsr = type_nfet * $limit(V(g, sp), "pnjlim", vth, vcrit, type_nfet);
+        vgdr = type_nfet * $limit(V(g, dp), "pnjlim", vth, vcrit, type_nfet);
         vdsr = vgsr - vgdr;
         vds  = max(abs(vdsr), 1e-30);
 

@@ -50,7 +50,7 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
 
     // The same FastVAF calls as tools/compile_va.zig, so a loaded model and a
     // built-in one are the same device.
-    var result = try fastvaf.compileSource(gpa, source, .release_fast);
+    var result = try fastvaf.compileSource(gpa, source, .build);
     defer result.deinit();
 
     var out: Prepared = .{ .vtable = undefined, .name_buf = undefined, .name_len = undefined };

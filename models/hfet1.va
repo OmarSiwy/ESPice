@@ -14,19 +14,19 @@
 // (fet_eval spine). §1.4 defers the HFET1 equations to ngspice, so the algebra
 // below is transcribed from hfetload.c/hfettemp.c.
 //
-// Topology (hfetload.c:443-470 stamp rows): d--RD--di, s--RS--si, g--RG--gi;
-// gate leakage gi-si / gi-di, channel di-si. RDI/RSI are not RD/RS: they are
+// Topology (hfetload.c:443-470 stamp rows): d--RD--dp, s--RS--sp, g--RG--gp;
+// gate leakage gp-sp / gp-dp, channel dp-sp. RDI/RSI are not RD/RS: they are
 // folded into the channel conductance as `rt` (hfeta()). ngspice's RI/RF gate
 // access nodes (s''/d'') are not modelled; with their default RI=RF=0 they
-// collapse onto si/di, which is where the Meyer caps land here.
+// collapse onto sp/dp, which is where the Meyer caps land here.
 module hfet1(d, g, s);
     inout d, g, s;
     electrical d, g, s;
-    electrical di, si, gi;                        // behind RD / RS / RG
+    electrical dp, sp, gp;                        // behind RD / RS / RG
 
-    branch (d, di) brd;
-    branch (s, si) brs;
-    branch (g, gi) brg;
+    branch (d, dp) brd;
+    branch (s, sp) brs;
+    branch (g, gp) brg;
 
     // --- instance geometry / temperature ---
     parameter real w     = 20e-6 from (0:inf);    // gate width [m]
@@ -263,8 +263,8 @@ module hfet1(d, g, s);
         // host owns the algorithm ($limit is the identity inside eval). The
         // MODEINITJCT seed (vgs = vgd = -1) is a solver initial guess, not
         // expressible here.
-        vgs = type * $limit(V(gi, si), "fetlim", vto_t);
-        vgd = type * $limit(V(gi, di), "fetlim", vto_t);
+        vgs = type * $limit(V(gp, sp), "fetlim", vto_t);
+        vgd = type * $limit(V(gp, dp), "fetlim", vto_t);
         vds = vgs - vgd;
 
         // ==== normal/inverse mode (hfetload.c:298-311) ====================
@@ -416,17 +416,17 @@ module hfet1(d, g, s);
         end
 
         // ==== §3 stamps, all scaled by the instance multiplicity ==========
-        I(gi, si) <+ mult * type * igs;
-        I(gi, di) <+ mult * type * igd;
-        I(di, si) <+ mult * type * idrain;
+        I(gp, sp) <+ mult * type * igs;
+        I(gp, dp) <+ mult * type * igd;
+        I(dp, sp) <+ mult * type * idrain;
 
         // Incremental Meyer capacitances: ngspice integrates dq = C*dv, so the
         // branch current is C*dv/dt — not d(C*v)/dt, which would add a spurious
         // v*dC/dv term (hfetload.c:326-336, 360-369).
-        I(gi, si) <+ mult * capgs * ddt(V(gi, si));
-        I(gi, di) <+ mult * capgd * ddt(V(gi, di));
+        I(gp, sp) <+ mult * capgs * ddt(V(gp, sp));
+        I(gp, dp) <+ mult * capgd * ddt(V(gp, dp));
         // hfettrunc.c truncates qgs and qgd, not qds.
-        (* vera_lte = 0 *) I(di, si) <+ mult * cds   * ddt(V(di, si));
+        (* vera_lte = 0 *) I(dp, sp) <+ mult * cds   * ddt(V(dp, sp));
 
         // Series parasitics; R == 0 stays an exact short, which is ngspice not
         // creating the internal node at all.  m parallel devices divide them.
