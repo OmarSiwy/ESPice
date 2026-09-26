@@ -115,9 +115,9 @@ same Problem operations.
 ## Output delivery and recovery
 
 Output publishes only completed plots, in request order, so a completed query
-can wait behind earlier unfinished work. Binary raw appends to one file;
-other formats write numbered destinations. Finishing current work leaves the
-session open to appended requests.
+can wait behind earlier unfinished work. Binary and ASCII raw and `print`
+append to one file; other formats write numbered destinations. Finishing
+current work leaves the session open to appended requests.
 
 A writer error is terminal for its destination, because replaying a partial
 append could duplicate or corrupt output. Numerical results stay readable;
