@@ -447,9 +447,18 @@ module mos2(d, g, s, b);
         chgs = (mode > 0.0) ? cgs_f : cgd_f;             // unswap gs/gd
         chgd = (mode > 0.0) ? cgd_f : cgs_f;
         chgb = cgb_f;
-        capgs = cgsov + 0.5*(chgs + $prev(chgs));
-        capgd = cgdov + 0.5*(chgd + $prev(chgd));
-        capgb = cgbov + 0.5*(chgb + $prev(chgb));
+        // At the operating point $prev is not latched yet, and ngspice's
+        // MODETRANOP charge, which the transient's charge history starts
+        // from, is (2*half + overlap)*v (mos2load.c).
+        if (analysis("static")) begin
+            capgs = cgsov + chgs;
+            capgd = cgdov + chgd;
+            capgb = cgbov + chgb;
+        end else begin
+            capgs = cgsov + 0.5*(chgs + $prev(chgs));
+            capgd = cgdov + 0.5*(chgd + $prev(chgd));
+            capgb = cgbov + 0.5*(chgb + $prev(chgb));
+        end
 
         // ============ contributions =======================================
         I(di, si) <+ type*mode*id;

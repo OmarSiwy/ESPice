@@ -383,9 +383,18 @@ module mos6(d, g, s, b);
             chgd = cgsm;
         end
         // Constant overlap + averaged Meyer intrinsic.
-        capgs = cgso * weff * m + 0.5 * (chgs + $prev(chgs));
-        capgd = cgdo * weff * m + 0.5 * (chgd + $prev(chgd));
-        capgb = cgbo * leff * m + 0.5 * (cgbm + $prev(cgbm));
+        // At the operating point $prev is not latched yet, and ngspice's
+        // MODETRANOP charge, which the transient's charge history starts
+        // from, is (2*half + overlap)*v (mos6load.c).
+        if (analysis("static")) begin
+            capgs = cgso * weff * m + chgs;
+            capgd = cgdo * weff * m + chgd;
+            capgb = cgbo * leff * m + cgbm;
+        end else begin
+            capgs = cgso * weff * m + 0.5 * (chgs + $prev(chgs));
+            capgd = cgdo * weff * m + 0.5 * (chgd + $prev(chgd));
+            capgb = cgbo * leff * m + 0.5 * (cgbm + $prev(cgbm));
+        end
 
         // ============ contributions =======================================
         I(di, si) <+ ty * mode * id;
