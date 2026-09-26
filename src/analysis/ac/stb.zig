@@ -30,7 +30,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         return error.InvalidProbe;
     if (opts.probe_n == root.GROUND) return error.InvalidProbe;
 
-    try ckt.linearizeAc(ctx.x_op);
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
     defer fs.deinit(scratch);
 
