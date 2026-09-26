@@ -255,6 +255,30 @@ const TranTests = struct {
         }
     }
 
+    test "stepBound: vector kernel is bit-identical to its w=1 oracle" {
+        var prng = std.Random.DefaultPrng.init(0x5b0d);
+        const r = prng.random();
+        const L = 3 * W + 2;
+        var q: [4][L]f64 = undefined;
+        var ip: [L]f64 = undefined;
+        for (&q) |*h| for (h) |*v| {
+            v.* = (r.float(f64) - 0.5) * 1e-12;
+        };
+        for (&ip) |*v| v.* = (r.float(f64) - 0.5) * 1e-3;
+        const lte: integrator.LteIn = .{ .dt = 1.3e-9, .dt1 = 0.7e-9, .dt2 = 2.1e-9, .reltol = 1e-3, .abstol = 1e-12, .chgtol = 1e-14, .trtol = 7 };
+        const c: integrator.Coeffs = .{ .ag0 = 1.1e9, .ag2 = 0.3e9 };
+        // Lengths straddle the vector width so every tail length runs; the
+        // min can land in the vector body or the tail.
+        for (1..L + 1) |len| {
+            const s: [4][]const f64 = .{ q[0][0..len], q[1][0..len], q[2][0..len], q[3][0..len] };
+            for ([_]impl.Method{ .backward_euler, .trapezoidal, .gear_2 }) |m| for ([_]impl.Method{ .backward_euler, .trapezoidal, .gear_2 }) |cm| {
+                const vec = integrator.stepBound(W, m, cm, s, ip[0..len], c, lte);
+                const ora = integrator.stepBound(1, m, cm, s, ip[0..len], c, lte);
+                try testing.expectEqual(@as(u64, @bitCast(ora)), @as(u64, @bitCast(vec)));
+            };
+        }
+    }
+
     test "companionAt: every method, both modes, matches its per-element formula bit for bit" {
         var prng = std.Random.DefaultPrng.init(0xc0a1);
         const r = prng.random();
@@ -356,6 +380,7 @@ const TranTests = struct {
         const row: [W + 1]f64 = @splat(0);
 
         const del_state = integrator.stepBound(
+            W,
             .backward_euler,
             .backward_euler,
             .{ &s_cur, &s_prev, &s_zero, &s_zero },
@@ -364,6 +389,7 @@ const TranTests = struct {
             .{ .dt = dt, .dt1 = dt, .dt2 = dt, .reltol = reltol, .abstol = abstol, .chgtol = chgtol, .trtol = trtol },
         );
         const del_row = integrator.stepBound(
+            W,
             .backward_euler,
             .backward_euler,
             .{ &row, &row, &row, &row },
@@ -394,6 +420,7 @@ const TranTests = struct {
         const mirrored_p = [_]f64{ 1e-12, -1e-12 };
         const pair_zero = [_]f64{ 0, 0 };
         const del_one = integrator.stepBound(
+            W,
             .backward_euler,
             .backward_euler,
             .{ &one_sided, &one_sided_p, &pair_zero, &pair_zero },
@@ -402,6 +429,7 @@ const TranTests = struct {
             .{ .dt = dt, .dt1 = dt, .dt2 = dt, .reltol = reltol, .abstol = abstol, .chgtol = chgtol, .trtol = trtol },
         );
         const del_mirror = integrator.stepBound(
+            W,
             .backward_euler,
             .backward_euler,
             .{ &mirrored, &mirrored_p, &pair_zero, &pair_zero },
@@ -421,6 +449,7 @@ const TranTests = struct {
         const big: [2]f64 = .{ s_cur[0] * 1e3, 0 };
         const big_p: [2]f64 = .{ s_prev[0] * 1e3, 0 };
         const del_big = integrator.stepBound(
+            W,
             .backward_euler,
             .backward_euler,
             .{ &big, &big_p, &pair_zero, &pair_zero },

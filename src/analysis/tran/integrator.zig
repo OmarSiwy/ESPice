@@ -133,93 +133,62 @@ pub const LteIn = struct { dt: f64, dt1: f64, dt2: f64, reltol: f64, abstol: f64
 /// probe (dctran.c:901-913) it is the method being probed. `cur_method` and
 /// `c` are what the step integrated with. `q` is the charge history
 /// [cur, prev, prev2, prev3] over one index space (per state or per row).
-pub fn stepBound(method: Method, cur_method: Method, q: [4][]const f64, i_prev: []const f64, c: Coeffs, lte: LteIn) f64 {
+/// Each state rounds as cktterr.c does, divisions included, so every `w`
+/// gives the same bits; `w == 1` is the scalar oracle (tests/transient.zig).
+pub fn stepBound(comptime w: usize, method: Method, cur_method: Method, q: [4][]const f64, i_prev: []const f64, c: Coeffs, lte: LteIn) f64 {
     // Both methods comptime: a runtime switch stayed inside the vector loop.
-    return switch (method) {
+    const min_del = switch (method) {
         inline else => |m| switch (cur_method) {
-            inline else => |cm| stepBoundAt(m, cm, q, i_prev, c, lte),
+            inline else => |cm| minDel(w, m, cm, q, i_prev, c, lte),
         },
     };
+    // sqrt is monotone, so one sqrt of the min equals the min of the sqrts.
+    return if (method == .backward_euler) min_del else @sqrt(min_del);
 }
 
-fn stepBoundAt(comptime method: Method, comptime cur_method: Method, q: [4][]const f64, i_prev: []const f64, c: Coeffs, lte: LteIn) f64 {
-    const q_cur = q[0];
-    const q_prev = q[1];
-    const q_prev2 = q[2];
-    const q_prev3 = q[3];
-    const dt = lte.dt;
-    const dt1 = lte.dt1;
-    const dt2 = lte.dt2;
-    const reltol = lte.reltol;
-    const abstol = lte.abstol;
-    const chgtol = lte.chgtol;
-    const trtol = lte.trtol;
-    const order2 = method != .backward_euler;
-    const lc = lteCoeff(method);
-    const V = @Vector(W, f64);
-    const inv_dt: V = @splat(1.0 / dt);
-    const inv_dt1: V = @splat(1.0 / dt1);
-    const inv_sum01: V = @splat(1.0 / (dt + dt1));
+/// The min over the states of del_j, before the order-2 root.
+fn minDel(comptime w: usize, comptime method: Method, comptime cur_method: Method, q: [4][]const f64, i_prev: []const f64, c: Coeffs, lte: LteIn) f64 {
+    const V = @Vector(w, f64);
+    const dt: V = @splat(lte.dt);
+    const dt1: V = @splat(lte.dt1);
+    const dt2: V = @splat(lte.dt2);
+    // cktterr.c's deltmp sums: d0+d1, d1+d2, then (d1+d2)+d0.
+    const sum01: V = @splat(lte.dt + lte.dt1);
+    const sum12: V = @splat(lte.dt1 + lte.dt2);
+    const sum012: V = @splat(lte.dt + (lte.dt1 + lte.dt2));
     const av: V = @splat(c.ag0);
     const a2: V = @splat(c.ag2);
-    const v_abstol: V = @splat(abstol);
-    const v_reltol: V = @splat(reltol);
-    const v_chgtol: V = @splat(chgtol);
-    const v_trtol: V = @splat(trtol);
-    const coeff: V = @splat(lc);
+    const abstol: V = @splat(lte.abstol);
+    const reltol: V = @splat(lte.reltol);
+    const chgtol: V = @splat(lte.chgtol);
+    const trtol: V = @splat(lte.trtol);
+    const coeff: V = @splat(lteCoeff(method));
     var vmin: V = @splat(std.math.inf(f64));
     var i: usize = 0;
-
-    while (i + W <= q_cur.len) : (i += W) {
-        const qc: V = q_cur[i..][0..W].*;
-        const qp: V = q_prev[i..][0..W].*;
-        const ip: V = i_prev[i..][0..W].*;
-        const qp2: V = q_prev2[i..][0..W].*;
+    while (i + w <= q[0].len) : (i += w) {
+        const qc: V = q[0][i..][0..w].*;
+        const qp: V = q[1][i..][0..w].*;
+        const qp2: V = q[2][i..][0..w].*;
+        const ip: V = i_prev[i..][0..w].*;
         const i_new = switch (cur_method) {
             .trapezoidal => av * (qc - qp) - ip,
             .gear_2 => av * (qc - qp) - a2 * (qp - qp2),
             .backward_euler => av * (qc - qp),
         };
-        const volttol = v_abstol + v_reltol * @max(@abs(i_new), @abs(ip));
-        const chargetol = v_reltol * @max(@max(@abs(qc), @abs(qp)), v_chgtol) * inv_dt;
+        const volttol = abstol + reltol * @max(@abs(i_new), @abs(ip));
+        const chargetol = reltol * @max(@max(@abs(qc), @abs(qp)), chgtol) / dt;
         const tol = @max(volttol, chargetol);
-
-        const f01 = (qc - qp) * inv_dt;
-        const f12 = (qp - qp2) * inv_dt1;
-        const f012 = (f01 - f12) * inv_sum01;
-        var dd = f012;
-        if (order2) {
-            const qp3: V = q_prev3[i..][0..W].*;
-            const f23 = (qp2 - qp3) * @as(V, @splat(1.0 / dt2));
-            const f123 = (f12 - f23) * @as(V, @splat(1.0 / (dt1 + dt2)));
-            dd = (f012 - f123) * @as(V, @splat(1.0 / (dt + dt1 + dt2)));
+        const f12 = (qp - qp2) / dt1;
+        var dd = ((qc - qp) / dt - f12) / sum01;
+        if (method != .backward_euler) {
+            const qp3: V = q[3][i..][0..w].*;
+            const f123 = (f12 - (qp2 - qp3) / dt2) / sum12;
+            dd = (dd - f123) / sum012;
         }
-        const del = v_trtol * tol / @max(v_abstol, coeff * @abs(dd));
-        vmin = @min(vmin, del);
+        vmin = @min(vmin, trtol * tol / @max(abstol, coeff * @abs(dd)));
     }
-    var min_del = @reduce(.Min, vmin);
-    while (i < q_cur.len) : (i += 1) {
-        const d = c.ag0 * (q_cur[i] - q_prev[i]);
-        const i_new = switch (cur_method) {
-            .trapezoidal => d - i_prev[i],
-            .gear_2 => d - c.ag2 * (q_prev[i] - q_prev2[i]),
-            .backward_euler => d,
-        };
-        const volttol = abstol + reltol * @max(@abs(i_new), @abs(i_prev[i]));
-        const chargetol = reltol * @max(@max(@abs(q_cur[i]), @abs(q_prev[i])), chgtol) / dt;
-        const tol = @max(volttol, chargetol);
-        const f01 = (q_cur[i] - q_prev[i]) / dt;
-        const f12 = (q_prev[i] - q_prev2[i]) / dt1;
-        const f012 = (f01 - f12) / (dt + dt1);
-        var dd = f012;
-        if (order2) {
-            const f23 = (q_prev2[i] - q_prev3[i]) / dt2;
-            const f123 = (f12 - f23) / (dt1 + dt2);
-            dd = (f012 - f123) / (dt + dt1 + dt2);
-        }
-        const del = trtol * tol / @max(abstol, lc * @abs(dd));
-        min_del = @min(min_del, del);
-    }
-    // sqrt is monotone, so one sqrt of the min equals the min of the sqrts.
-    return if (order2) @sqrt(min_del) else min_del;
+    const min_del = @reduce(.Min, vmin);
+    if (comptime w == 1) return min_del;
+    const tail: [4][]const f64 = .{ q[0][i..], q[1][i..], q[2][i..], q[3][i..] };
+    return @min(min_del, minDel(1, method, cur_method, tail, i_prev[i..], c, lte));
 }
