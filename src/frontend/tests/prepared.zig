@@ -281,7 +281,8 @@ test "prepared bindings retain model fields and exclude runtime state from param
     var resistors: u32 = 0;
     for (refs.items) |ref| {
         if (std.mem.eql(u8, ref.param_name, "pubZ")) {
-            try std.testing.expectEqual(@as(f64, 1.25e-18), ref.get());
+            // 125 * 1e-20: ngspice INPevaluate bits for `1.25e-18`.
+            try std.testing.expectEqual(@as(f64, 125) * @as(f64, 1e-20), ref.get());
             saw_pub = true;
         }
         if (ref.type != device.Library.builtin("resistor")) continue;
