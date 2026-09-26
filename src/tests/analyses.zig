@@ -205,8 +205,7 @@ test "branch currents: op emits i(<card>) with ngspice's sign, last probe stays 
     const il = findNameIndex(res.varnames, "i(l1)") orelse return error.NoBranchColumn;
     try std.testing.expectApproxEqAbs(@as(f64, -2e-3), res.data[iv], 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 2e-3), res.data[il], 1e-9);
-    // Branch probes come first: tf/sens/dcmatch/pxf/pac/disto default their
-    // output to probes[len-1], which must stay the last named node.
+    // Branch probes come first, so the last probe is a named node.
     try std.testing.expect(std.mem.startsWith(u8, res.varnames[res.varnames.len - 1], "v("));
 }
 

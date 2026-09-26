@@ -124,14 +124,13 @@ pub const Tf = struct {
     input_nodes: ?[2]u32 = null,
     /// Branch row of the input V source. Null means `Deck.source_branch`.
     input_branch: ?u32 = null,
-    /// Null means the last probe row.
-    output_node: ?u32 = null,
+    /// Output row; unused when `output_branch` is set.
+    output_node: u32,
 };
 
 pub const Dcmatch = struct {
     tol: Tolerances = .{},
-    /// Null means the last probe row.
-    output_node: ?u32 = null,
+    output_node: u32,
 };
 
 pub const Pss = struct {
@@ -310,8 +309,7 @@ pub const Temp = struct {
 
 pub const Sens = struct {
     tol: Tolerances = .{},
-    /// Null means the last probe row.
-    output_node: ?u32 = null,
+    output_node: u32,
     /// `v(a,b)` reference node for the output; GROUND is single-ended.
     output_neg: u32 = 0,
     /// Card names for the result columns, so they match ngspice's. Empty
@@ -368,8 +366,9 @@ pub const Disto = struct {
     /// `DISTOF1 <mag> [<phase deg>]` off the card (ngspice vsrcpar.c:180-193).
     ac_magnitude: f64 = 1.0,
     ac_phase: f64 = 0.0,
-    /// GROUND means the last probe row.
-    output_node: u32 = 0,
+    /// Row the summary plot measures. The frontend passes
+    /// `Deck.output_node`, since the card names none.
+    output_node: u32,
     fd_eps: f64 = 1e-6,
     /// Which of the card's three plots this query publishes. The frontend
     /// fans one `.disto` card out into all three.

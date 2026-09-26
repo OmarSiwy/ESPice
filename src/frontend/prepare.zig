@@ -139,10 +139,8 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
 
     // Probes: branch currents first, then every named node. ngspice gives every
     // MNA branch-current unknown an `i(<card>)` column (V, L, E, H, V-mode B);
-    // F, G, S and I-mode B stamp no branch. Branch-first, unlike ngspice,
-    // because tf/sens/dcmatch/disto default their output to the last
-    // probe, which must stay the last named node. Named nodes and branch rows
-    // are disjoint, so circuit.n bounds the total.
+    // F, G, S and I-mode B stamp no branch. Branch-first, unlike ngspice.
+    // Named nodes and branch rows are disjoint, so circuit.n bounds the total.
     const probe_buf = try sim_arena.alloc(u32, circuit.n);
     const label_buf = try sim_arena.alloc([]const u8, circuit.n);
     var n_probes: u32 = 0;
@@ -162,19 +160,19 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         }
     }
 
-    // `.pac`/`.pxf` name no output: they measure the last net the deck
-    // introduces. The last probe will not do, since the BBD permutation
-    // reorders node rows.
+    // Cards that name no output measure the last net the deck introduces.
+    // The last probe will not do, since the BBD permutation reorders node rows.
     var last_net: u32 = 0;
     for (nb.rows, 0..) |row, net| if (row != GROUND) {
         last_net = @intCast(net);
     };
+    const output_node = nb.frozenRow(last_net);
 
     // Analysis nets to circuit rows.
     const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.deck.analyses);
     for (cards_rows) |*a| {
-        if (a.kind == .pac or a.kind == .pxf) a.pos = last_net;
         a.pos = nb.frozenRow(a.pos);
+        if (namesNoOutput(a.kind)) a.pos = output_node;
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
@@ -183,6 +181,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         .probe_labels = label_buf[0..n_probes],
         .source_node = nb.source_node,
         .source_branch = nb.source_branch,
+        .output_node = output_node,
         .ac_drive = try nb.acExcitation(sim_arena, circuit.n),
         .title = try sim_arena.dupe(u8, nl.deck.title),
         .n_devices = nl.deviceCount(),
@@ -195,6 +194,11 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
     } };
+}
+
+/// Cards whose output is `Deck.output_node` because they name none.
+fn namesNoOutput(kind: netlist.Kind) bool {
+    return kind == .pac or kind == .pxf or kind == .disto;
 }
 
 fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
@@ -230,6 +234,9 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
     const nodes: NodeIndex = try .init(arena, &prepared.circuit);
     const cards = try netlist.parseAnalyses(arena, directive_text, nodes);
     if (cards.len == 0) return error.InvalidAnalysisArguments;
+    for (cards) |*a| if (namesNoOutput(a.kind)) {
+        a.pos = prepared.deck.output_node;
+    };
     // Appended queries accept only single-ended outputs.
     return analyses.queries(arena, cards, 1, prepared.deck.bindings, prepared.deck.cards, .{
         .tol = prepared.deck.deck_tol,

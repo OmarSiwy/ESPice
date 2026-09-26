@@ -90,17 +90,11 @@ fn outputOf(x: []const f64, options: Options, output_node: u32, output_neg: u32)
 }
 
 /// Contract entry: one real point (transfer_function, input_resistance,
-/// output_resistance) at ctx.x_op. The output defaults to the last probe.
+/// output_resistance) at ctx.x_op.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const input_branch = opts.input_branch orelse ctx.source_branch;
-    const output_node = opts.output_node orelse blk: {
-        if (opts.output_branch != null) break :blk root.GROUND;
-        if (ctx.probes.len == 0) return error.NoOutputNode;
-        break :blk ctx.probes[ctx.probes.len - 1];
-    };
-
-    const res = try solve(ctx.circuit, ctx.x_op, opts, input_branch, output_node, opts.output_neg, ctx.scratch_allocator);
+    const res = try solve(ctx.circuit, ctx.x_op, opts, input_branch, opts.output_node, opts.output_neg, ctx.scratch_allocator);
 
     const names = try a.dupe([]const u8, &.{ "transfer_function", "input_resistance", "output_resistance" });
     errdefer a.free(names); // entries are literals

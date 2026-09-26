@@ -367,7 +367,7 @@ fn contract(s: []const f64, w: []const f64, scale: f64, dst: []f64) void {
 }
 
 /// Contract entry: drive the `DISTOF1` card's branch (opts.drive_branch,
-/// resolved from the deck) and measure at opts.output_node, or the last probe.
+/// resolved from the deck) and measure at opts.output_node.
 ///
 /// One `.disto` card publishes three plots, one query each (`opts.plot`):
 /// ngspice's `DISTORTION - 2nd harmonic` and `- 3rd harmonic`, complex and
@@ -384,10 +384,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // fixture wants ngspice's zeros.
     if (o.drive_branch == root.GROUND and o.ac_source_node == root.GROUND)
         o.drive_branch = ctx.source_branch;
-    if (o.output_node == root.GROUND) {
-        if (ctx.probes.len == 0) return error.NoProbes;
-        o.output_node = ctx.probes[ctx.probes.len - 1];
-    }
 
     const n_points: usize = o.sweep.count();
     const scratch = ctx.scratch_allocator;
