@@ -1,6 +1,4 @@
 Multistage filter
-* KNOWN GAP: explicit PZ ports and transfer zeros are not yet exposed by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_pz_filt_multistage.expected.json
 * Origin: benchmark/fixtures/pz/filt_multistage/circuit.sp
 v1 1 0 0 ac 1.0

@@ -1,6 +1,4 @@
 BRIDGE-T FILTER
-* KNOWN GAP: explicit PZ ports and transfer zeros are not yet exposed by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_pz_filt_bridge_t.expected.json
 * Origin: benchmark/fixtures/pz/filt_bridge_t/circuit.sp
 V1 1 0 12 AC 1

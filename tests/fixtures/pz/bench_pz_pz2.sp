@@ -1,6 +1,4 @@
 test pz
-* KNOWN GAP: explicit PZ ports and transfer zeros are not yet exposed by the dispatcher.
-* This correctness test should currently fail; implement support to match the expected output.
 * Expected results: bench_pz_pz2.expected.json
 * Origin: benchmark/fixtures/pz/pz2/circuit.sp
 iin	1	0	ac
