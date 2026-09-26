@@ -135,7 +135,6 @@ pub const tline = DeviceId.Type(.tline);
 pub const lossy_tline = DeviceId.Type(.lossy_tline);
 pub const ltra_native = byName("ltra_native");
 pub const txl_native = byName("txl_native");
-pub const coupled_tlines = DeviceId.Type(.coupled_tlines);
 
 /// `.model` LEVEL tables, per ngspice src/spicelib/parser/inpdomod.c.
 const Level = struct { level: u16, model: DeviceId };

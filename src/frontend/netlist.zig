@@ -13,8 +13,8 @@ pub const lines = @import("lines.zig");
 pub const source = @import("source.zig");
 const csr = @import("csr.zig");
 pub const expr = @import("expr.zig");
-pub const Name = @import("core").Name;
-pub const InternPool = @import("core").InternPool;
+const Name = @import("core").Name;
+const InternPool = @import("core").InternPool;
 const requests = @import("core").query;
 
 pub const Dialect = lines.Dialect;
@@ -126,7 +126,7 @@ pub const Netlist = struct {
         return .{
             .name = nl.pool.str(d.name),
             .kind = d.kind,
-            .pins = nl.graph.members(e),
+            .pins = nl.graph.pins(e),
             .positional = nl.values[d.positional.start..][0..d.positional.len],
             .kv = nl.kvs[d.kv.start..][0..d.kv.len],
             .model = if (d.model == none) null else nl.models[d.model],
@@ -166,7 +166,7 @@ fn an(kind: Kind) Card {
 }
 
 /// Every dot card the three dialects accept, looked up lowercased.
-pub const cards = std.StaticStringMap(Card).initComptime(.{
+const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "end", .end },         .{ "ends", .ends },                 .{ "subckt", .subckt },
     .{ "param", .param },     .{ "model", .model },               .{ "include", .include },
     .{ "hdl", .include },     .{ "osdi_include", .osdi_include }, .{ "pre_osdi", .pre_osdi },
@@ -184,7 +184,7 @@ pub const cards = std.StaticStringMap(Card).initComptime(.{
 });
 
 /// The card a `.keyword` names, case-insensitively; null for any other card.
-pub fn cardOf(head: []const u8) ?Card {
+fn cardOf(head: []const u8) ?Card {
     var buf: [16]u8 = undefined;
     if (head.len > buf.len) return null;
     return cards.get(std.ascii.lowerString(buf[0..head.len], head));
@@ -243,7 +243,7 @@ fn nodeText(value: Value, buf: *[24]u8) ?[]const u8 {
 }
 
 /// Output and `.pz` nets of `a`, through `lookup.node(name) u32`.
-pub fn resolve(a: *Analysis, lookup: anytype) void {
+fn resolve(a: *Analysis, lookup: anytype) void {
     const arg: usize = if (a.kind == .four) 1 else 0;
     var buf: [24]u8 = undefined;
     if (arg < a.args.len) {

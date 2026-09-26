@@ -107,9 +107,9 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
     };
 }
 
-pub const NumParts = struct { base: f64, suffix: []const u8 };
+const NumParts = struct { base: f64, suffix: []const u8 };
 
-pub fn parseNumBase(text: []const u8) ?NumParts {
+fn parseNumBase(text: []const u8) ?NumParts {
     if (text.len == 0) return null;
     var end: usize = 0;
     var seen_digit = false;

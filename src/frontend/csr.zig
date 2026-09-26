@@ -2,12 +2,12 @@
 //! Adapted from cktImg src/csr.zig, Copyright (c) 2026 Omar El-Sawy, MIT License.
 //!
 //! An edge's member list is its pin list: order is the terminal role and
-//! repeats are kept (bulk tied to source). Topology is two CSR arrays, one per
-//! direction; payload is SoA in `MultiArrayList`s. Every reference is a typed
-//! `u32`. An append-only `Builder` freezes into an immutable `Graph`.
+//! repeats are kept (bulk tied to source). Topology is one edge-major CSR;
+//! payload is SoA in `MultiArrayList`s.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// Index of a net.
 pub const VertexId = enum(u32) {
     _,
     pub inline fn from(i: usize) VertexId {
@@ -18,6 +18,7 @@ pub const VertexId = enum(u32) {
     }
 };
 
+/// Index of a device.
 pub const EdgeId = enum(u32) {
     _,
     pub inline fn from(i: usize) EdgeId {
@@ -28,70 +29,17 @@ pub const EdgeId = enum(u32) {
     }
 };
 
-/// One side's adjacency: row r's neighbours are cols[offsets[r]..offsets[r+1]].
-pub fn Csr(comptime Row: type, comptime Col: type) type {
-    return struct {
-        const Self = @This();
-
-        offsets: []u32,
-        cols: []Col,
-
-        pub fn deinit(self: *Self, gpa: Allocator) void {
-            gpa.free(self.offsets);
-            gpa.free(self.cols);
-            self.* = undefined;
-        }
-
-        pub inline fn rowCount(self: Self) usize {
-            return self.offsets.len - 1;
-        }
-
-        pub inline fn rowAt(self: Self, r: usize) []const Col {
-            return self.cols[self.offsets[r]..self.offsets[r + 1]];
-        }
-
-        pub inline fn row(self: Self, r: Row) []const Col {
-            return self.rowAt(r.index());
-        }
-
-        /// Counting-sort transpose, O(rows + cols + nnz). Rows are visited in
-        /// order, so every output row comes out sorted.
-        pub fn transpose(self: Self, gpa: Allocator, col_count: usize) !Csr(Col, Row) {
-            const offsets = try gpa.alloc(u32, col_count + 1);
-            errdefer gpa.free(offsets);
-            const cols = try gpa.alloc(Row, self.cols.len);
-            errdefer gpa.free(cols);
-            @memset(offsets, 0);
-            for (self.cols) |c| offsets[c.index()] += 1;
-            var running: u32 = 0;
-            for (offsets) |*o| {
-                const count = o.*;
-                o.* = running;
-                running += count;
-            }
-            for (0..self.rowCount()) |r| {
-                for (self.rowAt(r)) |c| {
-                    const slot = &offsets[c.index()];
-                    cols[slot.*] = Row.from(r);
-                    slot.* += 1;
-                }
-            }
-            std.mem.copyBackwards(u32, offsets[1..], offsets[0..col_count]);
-            offsets[0] = 0;
-            return .{ .offsets = offsets, .cols = cols };
-        }
-    };
-}
-
+/// Hypergraph over vertex payload `VertexData` and edge payload `EdgeData`.
+/// ponytail: edge-major only; add the vertex-major transpose when a pass
+/// needs the devices on a net.
 pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) type {
     return struct {
-        pub const EdgeMajor = Csr(EdgeId, VertexId);
-        pub const VertexMajor = Csr(VertexId, EdgeId);
-
+        /// Why `addVertex`/`addEdge` refused: a member that is no vertex, or a
+        /// count past u32.
         pub const Error = error{ InvalidVertex, TooManyVertices, TooManyEdges, TooManyIncidences } || Allocator.Error;
 
-        /// Append-only. Each edge arrives with its full member list, so the
-        /// edge-major CSR grows as edges are added; `finish` transposes it.
+        /// Append-only. Each edge arrives with its full member list; `finish`
+        /// freezes the tables into a `Graph`.
         pub const Builder = struct {
             vertices: std.MultiArrayList(VertexData) = .empty,
             edges: std.MultiArrayList(EdgeData) = .empty,
@@ -104,14 +52,7 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
                 return b;
             }
 
-            pub fn deinit(self: *Builder, gpa: Allocator) void {
-                self.vertices.deinit(gpa);
-                self.edges.deinit(gpa);
-                self.edge_offsets.deinit(gpa);
-                self.edge_members.deinit(gpa);
-                self.* = undefined;
-            }
-
+            /// Reserves room for the given totals so the adds below do not reallocate.
             pub fn ensureTotalCapacity(self: *Builder, gpa: Allocator, vertex_count: usize, edge_count: usize, incidence_count: usize) Allocator.Error!void {
                 try self.vertices.ensureTotalCapacity(gpa, vertex_count);
                 try self.edges.ensureTotalCapacity(gpa, edge_count);
@@ -126,7 +67,7 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
                 return id;
             }
 
-            /// Members are stored in the given order, repeats included.
+            /// Stores `members` in the given order, repeats included.
             /// All-or-nothing: on error the builder is unchanged.
             pub fn addEdge(self: *Builder, gpa: Allocator, data: EdgeData, members: []const VertexId) Error!EdgeId {
                 for (members) |v| if (v.index() >= self.vertices.len) return error.InvalidVertex;
@@ -142,60 +83,45 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
                 return id;
             }
 
-            /// Consumes the builder.
+            /// Consumes the builder; the graph owns its tables in `gpa`.
             pub fn finish(self: *Builder, gpa: Allocator) Allocator.Error!Graph {
-                const edge_offsets = try self.edge_offsets.toOwnedSlice(gpa);
-                errdefer gpa.free(edge_offsets);
-                const edge_members = try self.edge_members.toOwnedSlice(gpa);
-                errdefer gpa.free(edge_members);
-                const by_edge: EdgeMajor = .{ .offsets = edge_offsets, .cols = edge_members };
+                const offsets = try self.edge_offsets.toOwnedSlice(gpa);
+                errdefer gpa.free(offsets);
                 const g: Graph = .{
                     .vertices = self.vertices,
                     .edges = self.edges,
-                    .by_edge = by_edge,
-                    .by_vertex = try by_edge.transpose(gpa, self.vertices.len),
+                    .offsets = offsets,
+                    .members = try self.edge_members.toOwnedSlice(gpa),
                 };
                 self.* = undefined;
                 return g;
             }
         };
 
+        /// Frozen hypergraph. Edge `e`'s pins are `members[offsets[e]..offsets[e + 1]]`.
         pub const Graph = struct {
             vertices: std.MultiArrayList(VertexData),
             edges: std.MultiArrayList(EdgeData),
-            by_edge: EdgeMajor,
-            by_vertex: VertexMajor,
-
-            pub fn deinit(self: *Graph, gpa: Allocator) void {
-                self.vertices.deinit(gpa);
-                self.edges.deinit(gpa);
-                self.by_edge.deinit(gpa);
-                self.by_vertex.deinit(gpa);
-                self.* = undefined;
-            }
+            offsets: []const u32,
+            members: []const VertexId,
 
             pub inline fn vertexCount(self: Graph) u32 {
-                return @intCast(self.by_vertex.rowCount());
+                return @intCast(self.vertices.len);
             }
 
             pub inline fn edgeCount(self: Graph) u32 {
-                return @intCast(self.by_edge.rowCount());
+                return @intCast(self.edges.len);
             }
 
             /// Pins of `e`, in terminal order.
-            pub inline fn members(self: Graph, e: EdgeId) []const VertexId {
-                return self.by_edge.row(e);
-            }
-
-            /// Edges touching `v`, sorted, once per pin on `v`.
-            pub inline fn incident(self: Graph, v: VertexId) []const EdgeId {
-                return self.by_vertex.row(v);
+            pub inline fn pins(self: Graph, e: EdgeId) []const VertexId {
+                return self.members[self.offsets[e.index()]..self.offsets[e.index() + 1]];
             }
         };
     };
 }
 
-test "members keep order and repeats; transpose is sorted" {
+test "members keep order and repeats" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -208,8 +134,8 @@ test "members keep order and repeats; transpose is sorted" {
     try std.testing.expectError(error.InvalidVertex, b.addEdge(gpa, .{ .year = 3 }, &.{.from(9)}));
     const g = try b.finish(gpa);
     try std.testing.expectEqual(@as(u32, 2), g.edgeCount());
-    try std.testing.expectEqualSlices(VertexId, &.{ v[3], v[2], v[2], v[2] }, g.members(.from(1)));
-    try std.testing.expectEqualSlices(EdgeId, &.{ .from(0), .from(1), .from(1), .from(1) }, g.incident(v[2]));
-    try std.testing.expectEqual(@as(usize, 0), g.incident(v[4]).len);
+    try std.testing.expectEqual(@as(u32, 5), g.vertexCount());
+    try std.testing.expectEqualSlices(VertexId, &.{ v[2], v[0], v[1] }, g.pins(.from(0)));
+    try std.testing.expectEqualSlices(VertexId, &.{ v[3], v[2], v[2], v[2] }, g.pins(.from(1)));
     try std.testing.expectEqual(@as(u16, 2), g.edges.items(.year)[1]);
 }

@@ -160,7 +160,7 @@ fn nameAt(args: []const Value, i: usize) ?[]const u8 {
     };
 }
 
-pub fn numberAt(args: []const Value, i: usize) ?f64 {
+fn numberAt(args: []const Value, i: usize) ?f64 {
     if (i >= args.len) return null;
     return switch (args[i]) {
         .num => |n| n,
@@ -237,7 +237,7 @@ fn currentProbeName(args: []const Value, i: usize) ?[]const u8 {
     };
 }
 
-pub fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
+fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
     for (names, 0..) |n, i| if (std.mem.eql(u8, n, target)) return i;
     return null;
 }
@@ -258,9 +258,12 @@ fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !req
         if (!std.ascii.eqlIgnoreCase(c.name, name)) continue;
         // ngspice sweeps a card's PRIMARY value: `dc` on a source, the
         // element value on a passive.
-        const param = if (c.type == Library.builtin("resistor")) "r" else if (c.type == Library.builtin("capacitor"))
-            "c"
-        else if (c.type == Library.builtin("inductor")) "l" else "dc";
+        const param: []const u8 = switch (c.type) {
+            Library.builtin("resistor") => "r",
+            Library.builtin("capacitor") => "c",
+            Library.builtin("inductor") => "l",
+            else => "dc",
+        };
         return .{ .type = c.type, .index = c.index, .param_name = param };
     }
     return error.AnalysisSourceNotFound;
