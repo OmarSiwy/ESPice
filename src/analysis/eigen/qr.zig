@@ -87,7 +87,8 @@ fn francis(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
     }
 
     balance(n, a);
-    hessenbergReduce(n, a);
+    // `out` holds 2n f64s and nothing is written to it before the QR runs.
+    hessenbergReduce(n, a, std.mem.bytesAsSlice(f64, std.mem.sliceAsBytes(out)));
     // The normwise floor deflates what the relative test cannot: a block of
     // roots at infinity is a cluster of noise eigenvalues around zero, and
     // its subdiagonal never falls below tol times its own noise-sized
@@ -205,8 +206,10 @@ fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
 
 /// Reduces `a` (n×n, row-major) in place to upper Hessenberg form by
 /// Householder similarities; the eigenvalues are unchanged and every entry
-/// below the subdiagonal is an exact zero.
-pub fn hessenbergReduce(n: usize, a: []f64) void {
+/// below the subdiagonal is an exact zero. `v_buf` is scratch of at least n
+/// entries: a contiguous copy of each reflector, so its reads are vector
+/// loads rather than stride-n gathers.
+pub fn hessenbergReduce(n: usize, a: []f64, v_buf: []f64) void {
     if (n <= 2) return;
 
     for (0..n - 2) |k| {
@@ -224,61 +227,47 @@ pub fn hessenbergReduce(n: usize, a: []f64) void {
         a[(k + 1) * n + k] += sigma;
         const beta = 1.0 / (sigma * a[(k + 1) * n + k]);
 
+        // The reflector v = a[k+1.., k]. Column j = k of the left update
+        // rewrites it in place (to Hv, -v up to rounding), and every later
+        // column and the right update read that rewritten copy, so the
+        // buffer is refreshed after j = k.
+        const m = n - (k + 1);
+        const v = v_buf[0..m];
+        for (v, k + 1..) |*x, row| x.* = a[row * n + k];
+
         // Apply from the left: A := (I - beta * v * v^T) * A
         for (k..n) |j| {
+            if (j == k + 1) for (v, k + 1..) |*x, row| {
+                x.* = a[row * n + k];
+            };
             var dot_acc: V = @splat(0.0);
-            var row: usize = k + 1;
-            while (row + W <= n) : (row += W) {
-                var vv: V = undefined;
+            var i: usize = 0;
+            while (i + W <= m) : (i += W) {
                 var av: V = undefined;
-                inline for (0..W) |wi| {
-                    vv[wi] = a[(row + wi) * n + k];
-                    av[wi] = a[(row + wi) * n + j];
-                }
-                dot_acc += vv * av;
+                inline for (0..W) |wi| av[wi] = a[(k + 1 + i + wi) * n + j];
+                dot_acc += @as(V, v[i..][0..W].*) * av;
             }
             var dot: f64 = @reduce(.Add, dot_acc);
-            while (row < n) : (row += 1) {
-                dot += a[row * n + k] * a[row * n + j];
-            }
+            while (i < m) : (i += 1) dot += v[i] * a[(k + 1 + i) * n + j];
             dot *= beta;
-            row = k + 1;
-            while (row < n) : (row += 1) {
-                a[row * n + j] -= a[row * n + k] * dot;
-            }
+            for (v, k + 1..) |x, row| a[row * n + j] -= x * dot;
         }
 
         // Apply from the right: A := A * (I - beta * v * v^T)
         for (0..n) |row| {
+            const ar = a[row * n + k + 1 ..][0..m];
             var dot_acc: V = @splat(0.0);
-            var col: usize = k + 1;
-            while (col + W <= n) : (col += W) {
-                var vv: V = undefined;
-                var av: V = undefined;
-                inline for (0..W) |wi| {
-                    vv[wi] = a[(col + wi) * n + k];
-                    av[wi] = a[row * n + (col + wi)];
-                }
-                dot_acc += av * vv;
-            }
+            var i: usize = 0;
+            while (i + W <= m) : (i += W)
+                dot_acc += @as(V, ar[i..][0..W].*) * @as(V, v[i..][0..W].*);
             var dot: f64 = @reduce(.Add, dot_acc);
-            while (col < n) : (col += 1) {
-                dot += a[row * n + col] * a[col * n + k];
-            }
+            while (i < m) : (i += 1) dot += ar[i] * v[i];
             dot *= beta;
-            col = k + 1;
-            while (col + W <= n) : (col += W) {
-                var vv: V = undefined;
-                inline for (0..W) |wi| {
-                    vv[wi] = a[(col + wi) * n + k];
-                }
-                inline for (0..W) |wi| {
-                    a[row * n + (col + wi)] -= dot * vv[wi];
-                }
-            }
-            while (col < n) : (col += 1) {
-                a[row * n + col] -= dot * a[col * n + k];
-            }
+            const dv: V = @splat(dot);
+            i = 0;
+            while (i + W <= m) : (i += W)
+                ar[i..][0..W].* = @as(V, ar[i..][0..W].*) - dv * @as(V, v[i..][0..W].*);
+            while (i < m) : (i += 1) ar[i] -= dot * v[i];
         }
 
         // The reflector maps its own storage v to -v (Hv = -v), leaving
