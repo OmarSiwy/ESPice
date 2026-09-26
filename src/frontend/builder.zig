@@ -268,8 +268,11 @@ pub const Builder = struct {
 
     /// `compilePerm` for callers that recorded no node or branch row.
     pub fn compile(self: *Builder) !Circuit {
-        var perm: ?[]const u32 = undefined;
-        return self.compilePerm(&perm);
+        const gpa = self.gpa;
+        var perm: ?[]const u32 = null;
+        const circuit = try self.compilePerm(&perm);
+        if (perm) |p| gpa.free(p);
+        return circuit;
     }
 
     /// Freezes into a Circuit, consuming the Builder. Protos and labels are
