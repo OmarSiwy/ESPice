@@ -13,8 +13,8 @@
             .hash = "stdpp-0.1.0-feSLszWHCgBFofBxuzGduFgLOXmIz_cjyGj4WSgsAZUU",
         },
         .gompute = .{
-            .url = "git+https://github.com/OmarSiwy/Gompute#4c158ef351af529c3fb71a6d9544948111afffe1",
-            .hash = "gompute-1.0.0-YJVc1q7-BwCB519sKbZmapwJN82ncs_tjYv1C-HRKWw1",
+            .url = "git+https://github.com/OmarSiwy/Gompute#bb539c838f0b113ea5e7cbd8013cbaf55b2b0d7f",
+            .hash = "gompute-1.0.0-YJVc1oT_BwAsI7woCyOlBlUCCE-8Vr8FARSrgJ5oguP6",
         },
     },
     .paths = .{
