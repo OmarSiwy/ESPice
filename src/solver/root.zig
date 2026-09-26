@@ -9,10 +9,8 @@ pub const bbd = @import("bbd.zig");
 pub const freq_solve = @import("freq_solve.zig");
 pub const fft = @import("fft.zig");
 pub const gmres = @import("gmres.zig");
-pub const preconditioner = @import("preconditioner.zig");
 pub const order = @import("order.zig");
 pub const converger = @import("converger.zig");
-pub const newton_core = @import("newton_core.zig");
 pub const types = @import("core").numerics;
 
 // Shared numerical contracts. Solver leaves import numerics directly.

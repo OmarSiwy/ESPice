@@ -1,41 +1,39 @@
+//! Dense row-major LU with partial pivoting and SIMD row operations, for the
+//! small dense systems: HB/PSS Jacobians, BBD blocks and the dense AC path.
+//! From n = 40 elimination runs in rank-8 panels; the unblocked loops are its
+//! bitwise oracle.
+
 const std = @import("std");
 
-// ponytail: single SIMD-accelerated dense LU, replaces 7 copy-pasted solveDense functions.
-// Rank-8 panel updates from n = 40 up; the next step would be 2-D register
-// tiling of the trailing update if dense solves dominate again.
+// ponytail: rank-8 panels are the only blocking; 2-D register tiling of the
+// trailing update is next if dense solves dominate again.
 
+/// A pivot fell below eps(T)^2.
 pub const Error = error{Singular};
 
-/// Dense LU over element type T (f32 or f64). Monomorphizes per T:
-/// vector width, singular threshold, and all kernels specialize at comptime.
+/// Dense LU kernels over f32 or f64. Matrices are n x n, row-major, stride n.
 pub fn DenseLu(comptime T: type) type {
     return struct {
         const W = std.simd.suggestVectorLength(T) orelse 1;
         const V = @Vector(W, T);
-        /// Pivot magnitudes below eps²(T) are numerical noise
-        /// (4.9e-32 for f64 — within a decade of the historical 1e-30).
+        /// Pivot magnitudes below eps(T)^2 (4.9e-32 for f64) count as zero.
         const singular_tol: T = std.math.floatEps(T) * std.math.floatEps(T);
 
-        // ====================================================================
-        // Public API
-        // ====================================================================
-
-        /// Fused factorize + forward-solve + back-substitute. x = A \ b.
-        /// Destroys `a`. `b` and `x` must not alias.
+        /// x = A^-1 b in one elimination pass. Destroys `a`; `b` and `x`
+        /// must not alias.
         pub fn factorizeSolve(n: usize, a: []T, b: []const T, x: []T) Error!void {
             return factorizeSolveImpl(n, a, b, x, false);
         }
 
-        /// Fused factorize + forward-solve + back-substitute. x = A \ (-b).
-        /// Destroys `a`. `b` and `x` must not alias.
+        /// x = -A^-1 b, the Newton step. Destroys `a`; `b` and `x` must not
+        /// alias.
         pub fn factorizeSolveNeg(n: usize, a: []T, b: []const T, x: []T) Error!void {
             return factorizeSolveImpl(n, a, b, x, true);
         }
 
-        /// PA = LU factorization with partial pivoting.
-        /// `a` is overwritten with L (unit lower, stored below diagonal) and U
-        /// (upper, stored on and above diagonal). `piv[k]` records the row
-        /// swapped with row k at step k.
+        /// PA = LU in place: unit-lower L below the diagonal, U on and above
+        /// it. `piv[k]` is the row swapped with row k at step k (LAPACK
+        /// convention). On error `a` and `piv` are partial.
         pub fn factorize(n: usize, a: []T, piv: []u32) Error!void {
             if (n >= blocked_min) return eliminateBlocked(n, a, piv, &.{}, .factor);
             for (0..n) |k| {
@@ -49,56 +47,48 @@ pub fn DenseLu(comptime T: type) type {
                 const row_k = a[k * n ..][0..n];
                 for (k + 1..n) |ii| {
                     const factor = a[ii * n + k] * inv_pivot;
-                    a[ii * n + k] = factor; // store L multiplier
+                    a[ii * n + k] = factor;
                     const row_i = a[ii * n ..][0..n];
                     elimRowSimd(row_i, row_k, factor, k + 1, n);
                 }
             }
         }
 
-        /// Solve Ax = b given PA = LU from factorize().
-        /// Forward substitution (apply P then L), then back substitution (U).
-        /// `b` and `x` may alias.
+        /// x = A^-1 b from `factorize` output. `b` and `x` may alias.
         pub fn solveFactored(n: usize, lu: []const T, piv: []const u32, b: []const T, x: []T) void {
             if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
-            // Apply row permutations (forward order, LAPACK convention).
-            // All swaps first, then forward elimination — interleaving is wrong
-            // when a later pivot touches a row used by an earlier column.
+            // All swaps first: interleaving them with the elimination is
+            // wrong when a later pivot touches a row an earlier column used.
             for (0..n) |k| {
                 if (piv[k] != k) std.mem.swap(T, &x[k], &x[piv[k]]);
             }
 
-            // Forward substitution: L y = P b (L has unit diagonal, multipliers below)
             for (0..n) |k| {
                 const xk = x[k];
-                if (xk == 0) continue; // ponytail: skip zero RHS — common in sparse-ish systems
+                if (xk == 0) continue; // sparse right-hand sides are common
                 fmsSolveSimd(lu, x, n, k, xk);
             }
 
             backSubstitute(n, lu, x);
         }
 
-        /// Solve A^T x = b given PA = LU from factorize().
-        /// A = P^T L U  =>  A^T = U^T L^T P.
-        /// Forward-sub U^T (lower tri), back-sub L^T (unit upper), then P^{-1}.
-        /// `b` and `x` may alias.
+        /// x = A^-T b from `factorize` output: A^T = U^T L^T P, so forward
+        /// through U^T, back through L^T, then undo the swaps. `b` and `x`
+        /// may alias.
         pub fn solveFactoredT(n: usize, lu: []const T, piv: []const u32, b: []const T, x: []T) void {
             if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
-            // Forward-sub U^T z = b: U^T[i][j] = lu[j*n+i] for j <= i
             for (0..n) |i| {
                 x[i] = subtractColumnDot(n, lu, x, i, 0, i) / lu[i * n + i];
             }
 
-            // Back-sub L^T w = z: unit diagonal, L^T[i][j] = lu[j*n+i] for j > i
             var i = n;
             while (i > 0) {
                 i -= 1;
                 x[i] = subtractColumnDot(n, lu, x, i, i + 1, n);
             }
 
-            // Reverse permutation: undo swaps k = n-1 .. 0
             var k = n;
             while (k > 0) {
                 k -= 1;
@@ -106,10 +96,8 @@ pub fn DenseLu(comptime T: type) type {
             }
         }
 
-        /// Assemble the 2n x 2n stacked-real complex admittance matrix:
-        ///   [ G,  -ωC ]
-        ///   [ ωC,   G  ]
-        /// Layout: row-major in `a` with stride `nn` (= 2n).
+        /// Writes the stacked-real admittance [G, -ωC; ωC, G] into `a`
+        /// (row-major, stride nn = 2n) from n x n row-major G and C.
         pub fn buildComplexAdmittance(
             n: usize,
             nn: usize,
@@ -124,8 +112,8 @@ pub fn DenseLu(comptime T: type) type {
             for (0..n) |row| {
                 const g_row = g_dense[row * n ..][0..n];
                 const c_row = c_mat[row * n ..][0..n];
-                const a_tl = a[row * nn ..]; // top-left quadrant row
-                const a_bl = a[(n + row) * nn ..]; // bottom-left quadrant row
+                const a_tl = a[row * nn ..];
+                const a_bl = a[(n + row) * nn ..];
 
                 var col: usize = 0;
                 while (col + W <= n) : (col += W) {
@@ -152,17 +140,13 @@ pub fn DenseLu(comptime T: type) type {
             }
         }
 
-        // ====================================================================
-        // Internal kernels
-        // ====================================================================
-
-        /// Subtract a strided column dot product, preserving vector reduction
-        /// followed by scalar subtraction for both transpose substitutions.
+        /// x[i] - sum over j in [start, end) of lu[j*n + i] * x[j]: W-lane
+        /// partial sums, one reduce, then the scalar tail.
         inline fn subtractColumnDot(n: usize, lu: []const T, x: []const T, i: usize, start: usize, end: usize) T {
             var acc: V = @splat(0.0);
             var j = start;
-            // ponytail: strided column access; gather for moderate n, scalar tail for small n.
-            // Upgrade to a transposed factor layout if column gathers become the bottleneck.
+            // ponytail: strided column gather; keep a transposed factor copy
+            // if this ever shows up in a profile.
             while (j + W <= end) : (j += W) {
                 var col_vals: [W]T = undefined;
                 inline for (0..W) |w| col_vals[w] = lu[(j + w) * n + i];
@@ -175,10 +159,9 @@ pub fn DenseLu(comptime T: type) type {
             return sum;
         }
 
-        /// Fused factorize + solve: carries the RHS through elimination (no piv storage).
+        /// Carries x through the elimination instead of recording pivots.
         fn factorizeSolveImpl(n: usize, a: []T, b: []const T, x: []T, comptime negate: bool) Error!void {
             if (negate) {
-                // SIMD negate copy
                 var i: usize = 0;
                 while (i + W <= n) : (i += W) {
                     const bv: V = b[i..][0..W].*;
@@ -216,25 +199,20 @@ pub fn DenseLu(comptime T: type) type {
             backSubstitute(n, a, x);
         }
 
-        /// Pivot columns per panel of `eliminateBlocked`.
+        /// Pivot columns per panel.
         const block = 8;
-        /// Below this order the unblocked loops above win: the panel
-        /// bookkeeping costs more than the row traffic it saves (Ir crossover
-        /// between n = 32 and 48).
+        /// Below this order the unblocked loops win: panel bookkeeping costs
+        /// more than the row traffic it saves (Ir crossover between 32 and 48).
         const blocked_min = 5 * block;
 
         const Mode = enum { factor, solve };
 
-        /// PA = LU with partial pivoting, blocked right-looking: a panel of
-        /// `block` columns is factored as in the unblocked loops, then each
-        /// trailing row takes the panel's updates in ONE pass instead of
-        /// `block`, so it streams through memory once per panel while the
-        /// panel's U rows stay in L1. Every entry still receives
-        /// `a -= l * u` in increasing k, as a separate multiply and subtract,
-        /// with the same reciprocal-pivot multipliers, so the factors, pivots
-        /// and fused solution are bitwise those of the unblocked loops (the
-        /// test oracle). `.factor` records swaps in `piv`; `.solve` carries
-        /// `x` through instead, as `factorizeSolveImpl` does.
+        /// Blocked right-looking elimination. A panel of `block` columns is
+        /// factored as in the unblocked loops, then each trailing row takes
+        /// all the panel's updates in one pass while the panel's U rows stay
+        /// in L1. Every entry still gets `a -= l * u` in increasing k with the
+        /// same multipliers, so results are bitwise the unblocked loops'.
+        /// `.factor` records swaps in `piv`; `.solve` carries `x` instead.
         fn eliminateBlocked(n: usize, a: []T, piv: []u32, x: []T, comptime mode: Mode) Error!void {
             var k0: usize = 0;
             while (k0 < n) : (k0 += block) {
@@ -251,10 +229,9 @@ pub fn DenseLu(comptime T: type) type {
             }
         }
 
-        /// Pivot step k of `eliminateBlocked`: the unblocked loop body with
-        /// the row update stopped at the panel edge `kb`, and the multiplier
-        /// always stored because `panelUpdate` reads it. False on a singular
-        /// pivot.
+        /// Pivot step k of `eliminateBlocked`: the unblocked body with the
+        /// row update stopped at the panel edge `kb`. Always stores the
+        /// multiplier, which `panelUpdate` reads. False on a singular pivot.
         inline fn panelStep(n: usize, a: []T, piv: []u32, x: []T, k: usize, kb: usize, comptime mode: Mode) bool {
             const max_row = pivotRow(n, a, k);
             if (mode == .factor) piv[k] = @intCast(max_row);
@@ -274,11 +251,10 @@ pub fn DenseLu(comptime T: type) type {
             return true;
         }
 
-        /// row[kb..n] -= sum over kk in [k0, kb) of row[kk] * a[kk, kb..n],
-        /// term by term in increasing kk (the rounding of `kb - k0` separate
-        /// `elimRowSimd` calls). Four vectors are in flight per pass: each
-        /// one's subtracts form a dependent chain, and a single chain stalls
-        /// on the subtract latency.
+        /// row[kb..n] -= row[kk] * a[kk, kb..n] for kk in [k0, kb), term by
+        /// term in increasing kk, which rounds like `kb - k0` separate
+        /// `elimRowSimd` calls. Four independent vector chains hide the
+        /// subtract latency.
         inline fn panelUpdate(row: []T, a: []const T, n: usize, k0: usize, kb: usize) void {
             var j = kb;
             while (j + 4 * W <= n) : (j += 4 * W) {
@@ -311,7 +287,7 @@ pub fn DenseLu(comptime T: type) type {
             }
         }
 
-        /// argmax |a[i*n+k]| over i in k..n (partial-pivot row for column k).
+        /// First row i in [k, n) maximizing |a[i*n + k]|.
         fn pivotRow(n: usize, a: []const T, k: usize) usize {
             var max_val: T = @abs(a[k * n + k]);
             var max_row: usize = k;
@@ -325,8 +301,8 @@ pub fn DenseLu(comptime T: type) type {
             return max_row;
         }
 
-        /// Back substitution: solve U x = y in place. x[n-1] down to x[0].
-        /// SIMD vector accumulator with single horizontal reduce per row.
+        /// U x = y in place: per row, W-lane partial sums, one reduce, the
+        /// scalar tail, then the divide.
         fn backSubstitute(n: usize, a: []const T, x: []T) void {
             var ki: usize = n;
             while (ki > 0) {
@@ -345,7 +321,7 @@ pub fn DenseLu(comptime T: type) type {
             }
         }
 
-        /// SIMD row elimination: row_i[start..n] -= factor * row_k[start..n]
+        /// row_i[start..n] -= factor * row_k[start..n].
         inline fn elimRowSimd(row_i: []T, row_k: []const T, factor: T, start: usize, n: usize) void {
             const fv: V = @splat(factor);
             var j = start;
@@ -358,7 +334,6 @@ pub fn DenseLu(comptime T: type) type {
             while (j < n) : (j += 1) row_i[j] -= factor * row_k[j];
         }
 
-        /// SIMD row swap: exchange rows r1 and r2 in matrix a (stride n).
         fn swapRowsSimd(a: []T, n: usize, r1: usize, r2: usize) void {
             var j: usize = 0;
             while (j + W <= n) : (j += W) {
@@ -371,14 +346,11 @@ pub fn DenseLu(comptime T: type) type {
             while (j < n) : (j += 1) std.mem.swap(T, &a[r1 * n + j], &a[r2 * n + j]);
         }
 
-        /// Forward-sub helper for solveFactored: x[k+1..n] -= xk * lu[i*n+k] (strided column access).
+        /// x[i] -= xk * lu[i*n + k] for i in (k, n), gathering column k.
         fn fmsSolveSimd(lu: []const T, x: []T, n: usize, k: usize, xk: T) void {
             const xkv: V = @splat(xk);
-            // ponytail: the start is always k + 1; parameterize if another range is needed.
             var ii = k + 1;
             while (ii + W <= n) : (ii += W) {
-                // lu[ii*n+k] .. lu[(ii+W-1)*n+k] — strided access (column k).
-                // x[ii..ii+W] — contiguous. Gather the column, fma into x.
                 var lv: [W]T = undefined;
                 inline for (0..W) |w| lv[w] = lu[(ii + w) * n + k];
                 const lvu: V = lv;
@@ -391,7 +363,7 @@ pub fn DenseLu(comptime T: type) type {
     };
 }
 
-// f64 instantiation re-exported as the module-level API (existing callers).
+// The f64 kernels, which every analysis caller uses.
 const F64 = DenseLu(f64);
 pub const factorizeSolve = F64.factorizeSolve;
 pub const factorizeSolveNeg = F64.factorizeSolveNeg;

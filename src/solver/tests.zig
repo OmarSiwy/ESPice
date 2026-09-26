@@ -134,7 +134,7 @@ const BbdTests = struct {
         var flat = try direct.Solver.init(gpa, sy.n, sy.col_ptr, sy.row_idx, null);
         defer flat.deinit();
         try flat.factor(sy.vals);
-        try eng.factor(sy.vals);
+        try eng.factorWithExecution(sy.vals, .{});
 
         const b_rhs = try sy.rhs(gpa);
         defer gpa.free(b_rhs);
@@ -189,7 +189,7 @@ const BbdTests = struct {
         defer sy.free(gpa);
         var eng = try Bbd(f64).init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info, relaxed);
         defer eng.deinit();
-        try testing.expectError(error.SingularMatrix, eng.factor(sy.vals));
+        try testing.expectError(error.SingularMatrix, eng.factorWithExecution(sy.vals, .{}));
     }
 
     test "bbd: cross-block entry -> NotApplicable" {
@@ -219,7 +219,7 @@ const BbdTests = struct {
         var eng = try Bbd(f64).init(gpa, sy.n, sy.col_ptr, sy.row_idx, sy.info, relaxed);
         defer eng.deinit();
 
-        try eng.factor(sy.vals);
+        try eng.factorWithExecution(sy.vals, .{});
         const snap_arena = try gpa.dupe(f64, eng.arena);
         defer gpa.free(snap_arena);
         const snap_piv = try gpa.dupe(u32, eng.piv);
@@ -247,7 +247,7 @@ const BbdTests = struct {
                 @memcpy(expected, rhs);
                 @memcpy(actual, rhs);
                 if (transpose) eng.solveTInPlace(actual) else eng.solveInPlace(actual);
-                try eng.factor(sy.vals);
+                try eng.factorWithExecution(sy.vals, .{});
                 if (transpose) eng.solveTInPlace(expected) else eng.solveInPlace(expected);
                 try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(expected), std.mem.sliceAsBytes(actual));
                 try eng.factorWithExecution(sy.vals, execution);
@@ -342,35 +342,7 @@ const ConvergerTests = struct {
     const jfnk = impl.jfnk;
     const newton = impl.newton;
     const std = @import("std");
-
-    fn vecNorm(v: []const f64) f64 {
-        var s: f64 = 0;
-        for (v) |vi| s += vi * vi;
-        return @sqrt(s);
-    }
-
-    fn dot(a: []const f64, b: []const f64) f64 {
-        var s: f64 = 0;
-        for (a, b) |ai, bi| s += ai * bi;
-        return s;
-    }
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
     const testing = std.testing;
-
-    test "vecNorm: unit vector" {
-        const v = [_]f64{ 3.0, 4.0 };
-        try testing.expectApproxEqAbs(@as(f64, 5.0), vecNorm(&v), 1e-15);
-    }
-
-    test "dot: inner product" {
-        const a = [_]f64{ 1.0, 2.0, 3.0 };
-        const b = [_]f64{ 4.0, 5.0, 6.0 };
-        try testing.expectApproxEqAbs(@as(f64, 32.0), dot(&a, &b), 1e-15);
-    }
 
     /// Scalar oracle for converger.updateAndNorm (the pre-vector loop).
     fn updateAndNormOracle(x: []f64, dx: []const f64, x_old: []f64, cur: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
@@ -546,6 +518,47 @@ const ConvergerTests = struct {
             }
         };
     };
+
+    /// F0 = x0 + x1 - 3, F1 = x0^2 + x1^2 - 5: roots (2, 1) and (1, 2).
+    const CircleSystem = struct {
+        n: u32 = 2,
+        nnz: u32 = 4,
+        diag_slots: [2]u32 = .{ 0, 3 },
+        current_row: []const bool = &.{ true, true },
+        rhs: []f64,
+        g_vals: [4]f64 = @splat(0),
+
+        const Hook = struct {
+            pub fn assemble(_: @This(), sys: *CircleSystem, x: []const f64, _: f64) void {
+                sys.rhs[0] = x[0] + x[1] - 3.0;
+                sys.rhs[1] = x[0] * x[0] + x[1] * x[1] - 5.0;
+                sys.g_vals = .{ 1, 2 * x[0], 1, 2 * x[1] };
+            }
+            pub fn vals(_: @This(), sys: *CircleSystem) []f64 {
+                return &sys.g_vals;
+            }
+            pub fn diagAt(_: @This(), sys: *CircleSystem, slot: u32) f64 {
+                return sys.g_vals[slot];
+            }
+        };
+    };
+
+    test "JFNK: converges on a nonlinear 2x2 system, refuses under a 1-iteration cap" {
+        const a = std.testing.allocator;
+        var rhs = [_]f64{ 0, 0 };
+        var sys: CircleSystem = .{ .rhs = &rhs };
+        var ws = try Workspace.init(a, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null);
+        defer ws.deinit(a);
+        var x = [_]f64{ 3, 3 };
+        const r = try jfnk(&sys, &ws, &x, 0, .{ .gmin = 0 }, CircleSystem.Hook{});
+        try testing.expect(r.converged);
+        try testing.expectApproxEqAbs(@as(f64, 2), x[0], 1e-8);
+        try testing.expectApproxEqAbs(@as(f64, 1), x[1], 1e-8);
+
+        x = .{ 3, 3 };
+        const capped = try jfnk(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 1 }, CircleSystem.Hook{});
+        try testing.expect(!capped.converged);
+    }
 
     test "residual gate: a branch row with no diagonal is not gated on an absolute floor" {
         const a = std.testing.allocator;
@@ -884,7 +897,7 @@ const DirectTests = struct {
     test "solver construction releases storage on every allocation failure" {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
             fn run(gpa: Allocator) !void {
-                var solver = try Solver.initParams(gpa, 3, &.{ 0, 1, 2, 3 }, &.{ 0, 1, 2 }, null, .{ .iter_refine_steps = 1 });
+                var solver = try Solver.init(gpa, 4, &.{ 0, 2, 3, 4, 6 }, &.{ 0, 3, 1, 2, 0, 3 }, null);
                 defer solver.deinit();
             }
         }.run, .{});
@@ -2254,155 +2267,6 @@ const LaneLuTests = struct {
     }
 };
 
-const NewtonCoreTests = struct {
-    const impl = @import("root.zig").newton_core;
-    const PostStep = impl.PostStep;
-    const Result = impl.Result;
-    const Tol = impl.Tol;
-    const Vecs = impl.Vecs;
-    const inf_f64 = impl.inf_f64;
-    const newtonSolve = impl.newtonSolve;
-
-    // ===========================================================================
-    // Tests — a self-contained serial Env (no std, no libc, no LU) exercising the
-    // full outer-Newton + GMRES(m) core on a known analytic system. This mirrors
-    // the CPU CpuEnv contract in converger.zig but stays libc-free so it runs in
-    // the solvers module suite. Jacobi preconditioner from the analytic diagonal.
-    // ===========================================================================
-
-    const std = @import("std");
-
-    // Analytic 2x2 nonlinear system, root at (2, 1):
-    //   F0 = x0 + x1 - 3
-    //   F1 = x0^2 + x1^2 - 5
-    // Diagonal of J for the Jacobi preconditioner: {1, 2*x1}.
-    const TestEnv = struct {
-        const Self = @This();
-        n: u32,
-        x_cur: [*]f64, // outer x, for the preconditioner diagonal
-        rhs_buf: [8]f64 = @splat(0),
-        diag_buf: [8]f64 = @splat(0),
-        scal: [16]f64 = @splat(0),
-
-        pub const F64 = [*]f64;
-        pub const backtrack = false;
-        pub const exact_jv = true;
-
-        pub inline fn tid(_: *Self) u32 {
-            return 0;
-        }
-        pub inline fn stride(_: *Self) u32 {
-            return 1;
-        }
-        pub inline fn isLead(_: *Self) bool {
-            return true;
-        }
-        pub inline fn sync(_: *Self) void {}
-        pub inline fn reduceAdd(_: *Self, p: f64) f64 {
-            return p;
-        }
-        pub inline fn reduceMax(_: *Self, p: f64) f64 {
-            return p;
-        }
-        pub inline fn publish(self: *Self, slot: usize, val: f64) void {
-            self.scal[slot] = val;
-        }
-        pub inline fn read(self: *Self, slot: usize) f64 {
-            return self.scal[slot];
-        }
-        pub inline fn limiting(_: *Self) bool {
-            return false;
-        }
-
-        // Fill rhs with F(x_eval); the core adds nothing else on the CPU path.
-        pub fn assemble(self: *Self, comptime _: bool, x_eval: [*]f64, _: [*]f64, _: f64, _: bool) void {
-            self.rhs_buf[0] = x_eval[0] + x_eval[1] - 3.0;
-            self.rhs_buf[1] = x_eval[0] * x_eval[0] + x_eval[1] * x_eval[1] - 5.0;
-        }
-
-        // Jacobi diagonal from the current outer x: J = [[1,1],[2x0,2x1]] -> {1, 2x1}.
-        pub fn precondBuild(self: *Self) void {
-            const d0 = 1.0;
-            const d1 = 2.0 * self.x_cur[1];
-            self.diag_buf[0] = if (@abs(d0) > 1e-30) 1.0 / d0 else 1.0;
-            self.diag_buf[1] = if (@abs(d1) > 1e-30) 1.0 / d1 else 1.0;
-        }
-        pub fn precondApply(self: *Self, r: [*]f64) void {
-            r[0] *= self.diag_buf[0];
-            r[1] *= self.diag_buf[1];
-        }
-        pub fn postStep(_: *Self, _: [*]f64, _: [*]f64, _: bool) PostStep {
-            return .{ .limited = false, .flipped = false };
-        }
-        pub fn gateScale(self: *Self, i: u32) f64 {
-            // |J_ii| — the residual-gate row scale.
-            return if (i == 0) 1.0 else 2.0 * self.x_cur[1];
-        }
-        pub fn currentRow(_: *Self, _: u32) bool {
-            return true;
-        }
-    };
-
-    fn runTestSolve(x: *[2]f64, max_iter: u32) Result {
-        const n: u32 = 2;
-        const m: u32 = 2; // gmres restart = min(30, n)
-        var env = TestEnv{ .n = n, .x_cur = x };
-        // Vecs backing storage, sized for (n=2, m=2).
-        var v_basis: [(m + 1) * n]f64 = @splat(0);
-        var h: [(m + 1) * m]f64 = @splat(0);
-        var cs: [m]f64 = @splat(0);
-        var sn: [m]f64 = @splat(0);
-        var g_vec: [m + 1]f64 = @splat(0);
-        var y_vec: [m]f64 = @splat(0);
-        var r: [n]f64 = @splat(0);
-        var w: [n]f64 = @splat(0);
-        var x_pert: [n]f64 = @splat(0);
-        var f0: [n]f64 = @splat(0);
-        var x_old: [n]f64 = @splat(0);
-        const vecs: Vecs([*]f64) = .{
-            .v_basis = &v_basis,
-            .h = &h,
-            .cs = &cs,
-            .sn = &sn,
-            .g_vec = &g_vec,
-            .y_vec = &y_vec,
-            .r = &r,
-            .w = &w,
-            .x_pert = &x_pert,
-            .f0 = &f0,
-            .f0_shift = &f0, // aliased, unused with exact_jv
-            .diag = &env.diag_buf,
-            .x_old = &x_old,
-            .rhs = &env.rhs_buf,
-        };
-        const tol: Tol = .{
-            .reltol = 1e-3,
-            .abstol = 1e-12,
-            .vntol = 1e-6,
-            .residual_tol = 1e-9,
-            .gmin = 0,
-            .dx_clamp = inf_f64,
-            .max_iter = max_iter,
-            .gmres_m = m,
-        };
-        return newtonSolve(&env, vecs, x, 0, tol, n, m);
-    }
-
-    test "newton_core: JFNK converges to known root of analytic 2x2 system" {
-        var x = [2]f64{ 3.0, 3.0 };
-        const res = runTestSolve(&x, 100);
-        try std.testing.expect(res.converged);
-        try std.testing.expectApproxEqAbs(@as(f64, 2.0), x[0], 1e-8);
-        try std.testing.expectApproxEqAbs(@as(f64, 1.0), x[1], 1e-8);
-    }
-
-    test "newton_core: reports not-converged (not a wrong root) under a 1-iter cap" {
-        var x = [2]f64{ 3.0, 3.0 };
-        const res = runTestSolve(&x, 1);
-        try std.testing.expect(!res.converged);
-    }
-};
-
 const OrderTests = struct {
     const impl = @import("root.zig").order;
     const Ws = impl.Ws;
@@ -2659,374 +2523,6 @@ const OrderTests = struct {
         try expectPermutation(&q, n);
         // Hub 0 should be last or second-to-last
         try testing.expect(q[n - 1] == 0 or q[n - 2] == 0);
-    }
-};
-
-const PreconditionerTests = struct {
-    const impl = @import("root.zig").preconditioner;
-    const Allocator = std.mem.Allocator;
-    const Preconditioner = impl.Preconditioner;
-    const averageSamples = impl.test_access.averageSamples;
-    const buildStackedRealPattern = @import("root.zig").freq_solve.buildStackedRealPattern;
-    const fillStackedReal = impl.test_access.fillStackedReal;
-    const std = @import("std");
-
-    // ============================================================================
-    // Tests
-    // ============================================================================
-
-    const testing = std.testing;
-
-    /// Helper: build a 2×2 CSC pattern for [diag + off-diag] circuit.
-    fn testPattern2x2() struct { col_ptr: [3]u32, row_idx: [4]u32 } {
-        // Full 2×2: col 0 has rows {0,1}, col 1 has rows {0,1}
-        return .{
-            .col_ptr = .{ 0, 2, 4 },
-            .row_idx = .{ 0, 1, 0, 1 },
-        };
-    }
-
-    test "Preconditioner: LTI system, averaged_circulant is exact inverse" {
-        // 2×2 diagonal G = [[2,0],[0,3]], C = [[0.1,0],[0,0.2]]
-        // With constant G/C (LTI), the averaged preconditioner is the exact operator,
-        // so P^{-1} * (operator * x) = x for any x.
-        const gpa = testing.allocator;
-        var pat = testPattern2x2();
-
-        const num_harmonics: u32 = 1; // M=1, sidebands = 3 (p=-1,0,+1)
-        const num_samples: u32 = 4;
-        const omega0: f64 = 2.0 * std.math.pi * 1e3; // 1kHz fundamental
-
-        // G = [2, 0; 0, 3] stored in CSC: vals = [2, 0, 0, 3]
-        const g_vals = [_]f64{ 2.0, 0.0, 0.0, 3.0 };
-        // C = [0.1, 0; 0, 0.2]
-        const c_vals = [_]f64{ 0.1, 0.0, 0.0, 0.2 };
-
-        // All samples identical (LTI)
-        const g_slices = [_][]const f64{&g_vals} ** num_samples;
-        const c_slices = [_][]const f64{&c_vals} ** num_samples;
-
-        var prec = try Preconditioner(f64).init(
-            gpa,
-            2,
-            &pat.col_ptr,
-            &pat.row_idx,
-            num_harmonics,
-            num_samples,
-            &g_slices,
-            &c_slices,
-            omega0,
-            .averaged_circulant,
-        );
-        defer prec.deinit(gpa);
-
-        // Build a test RHS: for sideband p, set up (G + jωpC) * x_known and verify
-        // that apply recovers x_known.
-        const ns: usize = 3; // 2*1+1
-        const n: usize = 2;
-        const vec_len = 2 * ns * n; // 12
-
-        // Known solution: x_p = [1, 1] for all sidebands (re and im)
-        var rhs: [vec_len]f64 = undefined;
-
-        // For each sideband p, compute b_p = (G + jωpC) * [1;1]
-        // In stacked-real: [G, -ωC; ωC, G] * [1;1;1;1]
-        //   re = G*[1;1] - ωC*[1;1] = [2-0.1ω; 3-0.2ω]  (per sideband p)
-        //   im = ωC*[1;1] + G*[1;1] = [0.1ω+2; 0.2ω+3]
-        const M: i32 = 1;
-        for (0..ns) |pi| {
-            const p_signed: f64 = @floatFromInt(@as(i32, @intCast(pi)) - M);
-            const wp = p_signed * omega0;
-
-            // re part
-            rhs[pi * n + 0] = 2.0 - 0.1 * wp; // G[0,0]*1 + G[0,1]*1 - wp*(C[0,0]*1 + C[0,1]*1) = 2 - 0.1*wp
-            rhs[pi * n + 1] = 3.0 - 0.2 * wp;
-
-            // im part
-            rhs[ns * n + pi * n + 0] = 0.1 * wp + 2.0;
-            rhs[ns * n + pi * n + 1] = 0.2 * wp + 3.0;
-        }
-
-        prec.apply(&rhs);
-
-        // Should recover x = [1, 1, 1, 1, 1, 1 | 1, 1, 1, 1, 1, 1]
-        for (0..vec_len) |i| {
-            try testing.expectApproxEqAbs(@as(f64, 1.0), rhs[i], 1e-8);
-        }
-    }
-
-    test "Preconditioner: dc_sample produces valid solve" {
-        const gpa = testing.allocator;
-        var pat = testPattern2x2();
-
-        const g_vals = [_]f64{ 1.0, 0.0, 0.0, 1.0 }; // identity G
-        const c_vals = [_]f64{ 0.0, 0.0, 0.0, 0.0 }; // zero C
-
-        const g_slices = [_][]const f64{&g_vals} ** 2;
-        const c_slices = [_][]const f64{&c_vals} ** 2;
-
-        var prec = try Preconditioner(f64).init(
-            gpa,
-            2,
-            &pat.col_ptr,
-            &pat.row_idx,
-            1, // M=1
-            2,
-            &g_slices,
-            &c_slices,
-            1.0,
-            .dc_sample,
-        );
-        defer prec.deinit(gpa);
-
-        // With G=I, C=0: P = I for all sidebands. apply should be identity.
-        const ns: usize = 3;
-        const n: usize = 2;
-        var rhs: [2 * ns * n]f64 = undefined;
-        for (&rhs, 0..) |*v, i| v.* = @floatFromInt(i + 1);
-
-        var expected: [2 * ns * n]f64 = undefined;
-        @memcpy(&expected, &rhs);
-
-        prec.apply(&rhs);
-
-        for (0..rhs.len) |i| {
-            try testing.expectApproxEqAbs(expected[i], rhs[i], 1e-10);
-        }
-    }
-
-    test "Preconditioner: applyT matches apply on symmetric system" {
-        // Symmetric G, symmetric C → the stacked-real matrix is symmetric
-        // (since [G, -ωC; ωC, G] with symmetric G,C is NOT symmetric — but
-        // the LU factors give the same result when G is symmetric and C=0).
-        const gpa = testing.allocator;
-        var pat = testPattern2x2();
-
-        // Symmetric G, zero C (so the stacked-real block is [G,0;0,G] = symmetric)
-        const g_vals = [_]f64{ 2.0, 0.5, 0.5, 3.0 }; // symmetric 2×2
-        const c_vals = [_]f64{ 0.0, 0.0, 0.0, 0.0 };
-
-        const g_slices = [_][]const f64{&g_vals} ** 2;
-        const c_slices = [_][]const f64{&c_vals} ** 2;
-
-        var prec = try Preconditioner(f64).init(
-            gpa,
-            2,
-            &pat.col_ptr,
-            &pat.row_idx,
-            1,
-            2,
-            &g_slices,
-            &c_slices,
-            0.0, // ω=0 so C doesn't matter → purely symmetric
-            .averaged_circulant,
-        );
-        defer prec.deinit(gpa);
-
-        const ns: usize = 3;
-        const n: usize = 2;
-
-        // Apply and applyT to same input should give same result (symmetric system)
-        var rhs1: [2 * ns * n]f64 = undefined;
-        var rhs2: [2 * ns * n]f64 = undefined;
-        for (&rhs1, &rhs2, 0..) |*v1, *v2, i| {
-            const val: f64 = @floatFromInt(i + 1);
-            v1.* = val;
-            v2.* = val;
-        }
-
-        prec.apply(&rhs1);
-        prec.applyT(&rhs2);
-
-        for (0..rhs1.len) |i| {
-            try testing.expectApproxEqAbs(rhs1[i], rhs2[i], 1e-10);
-        }
-    }
-
-    test "Preconditioner: non-trivial modulation, averaged vs dc_sample" {
-        // Time-varying G: two samples with different conductances.
-        // Both dc_sample and averaged_circulant should produce valid (finite) results
-        // but they differ because they use different Jacobian approximations.
-        const gpa = testing.allocator;
-        var pat = testPattern2x2();
-
-        // Sample 0: G = [1,0;0,2], Sample 1: G = [3,0;0,4]
-        const g0 = [_]f64{ 1.0, 0.0, 0.0, 2.0 };
-        const g1 = [_]f64{ 3.0, 0.0, 0.0, 4.0 };
-        const c0 = [_]f64{ 0.1, 0.0, 0.0, 0.1 };
-        const c1 = [_]f64{ 0.1, 0.0, 0.0, 0.1 };
-
-        const g_slices = [_][]const f64{ &g0, &g1 };
-        const c_slices = [_][]const f64{ &c0, &c1 };
-
-        // Averaged: G_bar = [2,0;0,3]
-        var prec_avg = try Preconditioner(f64).init(
-            gpa,
-            2,
-            &pat.col_ptr,
-            &pat.row_idx,
-            1,
-            2,
-            &g_slices,
-            &c_slices,
-            1.0,
-            .averaged_circulant,
-        );
-        defer prec_avg.deinit(gpa);
-
-        // DC-sample: uses G(t_0) = [1,0;0,2]
-        var prec_dc = try Preconditioner(f64).init(
-            gpa,
-            2,
-            &pat.col_ptr,
-            &pat.row_idx,
-            1,
-            2,
-            &g_slices,
-            &c_slices,
-            1.0,
-            .dc_sample,
-        );
-        defer prec_dc.deinit(gpa);
-
-        const ns: usize = 3;
-        const n: usize = 2;
-        var rhs_avg: [2 * ns * n]f64 = undefined;
-        var rhs_dc: [2 * ns * n]f64 = undefined;
-        for (&rhs_avg, &rhs_dc, 0..) |*va, *vd, i| {
-            const val: f64 = @floatFromInt(i + 1);
-            va.* = val;
-            vd.* = val;
-        }
-
-        prec_avg.apply(&rhs_avg);
-        prec_dc.apply(&rhs_dc);
-
-        // Both should produce finite results
-        for (rhs_avg) |v| try testing.expect(std.math.isFinite(v));
-        for (rhs_dc) |v| try testing.expect(std.math.isFinite(v));
-
-        // They should differ (different Jacobian approximations with ω≠0)
-        var any_diff = false;
-        for (rhs_avg, rhs_dc) |a, d| {
-            if (@abs(a - d) > 1e-12) {
-                any_diff = true;
-                break;
-            }
-        }
-        try testing.expect(any_diff);
-    }
-
-    test "Preconditioner: block_banded initializes and applies" {
-        // Smoke test: block_banded should at least produce finite results.
-        const gpa = testing.allocator;
-        var pat = testPattern2x2();
-
-        const g0 = [_]f64{ 2.0, 0.1, 0.1, 3.0 };
-        const g1 = [_]f64{ 2.5, 0.2, 0.2, 3.5 };
-        const g2 = [_]f64{ 1.5, 0.05, 0.05, 2.5 };
-        const g3 = [_]f64{ 2.0, 0.15, 0.15, 3.0 };
-        const c_vals = [_]f64{ 0.1, 0.0, 0.0, 0.1 };
-
-        const g_slices = [_][]const f64{ &g0, &g1, &g2, &g3 };
-        const c_slices = [_][]const f64{ &c_vals, &c_vals, &c_vals, &c_vals };
-
-        var prec = try Preconditioner(f64).init(
-            gpa,
-            2,
-            &pat.col_ptr,
-            &pat.row_idx,
-            1,
-            4,
-            &g_slices,
-            &c_slices,
-            1.0,
-            .block_banded,
-        );
-        defer prec.deinit(gpa);
-
-        const ns: usize = 3;
-        const n: usize = 2;
-        var rhs: [2 * ns * n]f64 = undefined;
-        for (&rhs, 0..) |*v, i| v.* = @floatFromInt(i + 1);
-
-        prec.apply(&rhs);
-
-        for (rhs) |v| try testing.expect(std.math.isFinite(v));
-    }
-
-    test "Preconditioner: stacked-real pattern matches freq_solve layout" {
-        // Verify the 2n×2n CSC pattern has the expected structure.
-        var pat = testPattern2x2();
-        const n: u32 = 2;
-        const nnz = pat.col_ptr[n]; // 4
-        var sr_col_ptr: [5]u32 = undefined; // 2n+1
-        var sr_row_idx: [16]u32 = undefined; // 4*nnz
-
-        buildStackedRealPattern(n, &pat.col_ptr, &pat.row_idx, &sr_col_ptr, &sr_row_idx);
-
-        // Column 0 should have 4 entries: rows 0,1 (G block) then 2,3 (C block)
-        try testing.expectEqual(@as(u32, 0), sr_col_ptr[0]);
-        try testing.expectEqual(@as(u32, 4), sr_col_ptr[1]);
-        try testing.expectEqual(@as(u32, 0), sr_row_idx[0]);
-        try testing.expectEqual(@as(u32, 1), sr_row_idx[1]);
-        try testing.expectEqual(@as(u32, 2), sr_row_idx[2]);
-        try testing.expectEqual(@as(u32, 3), sr_row_idx[3]);
-
-        // Total nnz should be 4 * original nnz
-        try testing.expectEqual(@as(u32, 4 * nnz), sr_col_ptr[4]);
-    }
-
-    test "Preconditioner: averageSamples correctness" {
-        const s0 = [_]f64{ 1.0, 2.0, 3.0 };
-        const s1 = [_]f64{ 3.0, 4.0, 5.0 };
-        const samples = [_][]const f64{ &s0, &s1 };
-        var dst: [3]f64 = undefined;
-
-        averageSamples(f64, &dst, &samples, 2, 3);
-
-        try testing.expectApproxEqAbs(@as(f64, 2.0), dst[0], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 3.0), dst[1], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 4.0), dst[2], 1e-15);
-    }
-
-    test "Preconditioner: fillStackedReal correctness" {
-        // 2×2 diagonal: G=[2,3], C=[0.1,0.2] (diagonal only, nnz=2)
-        const col_ptr = [_]u32{ 0, 1, 2 };
-        const g = [_]f64{ 2.0, 3.0 };
-        const c = [_]f64{ 0.1, 0.2 };
-        const omega: f64 = 10.0;
-        var vals: [8]f64 = undefined; // 4*nnz = 8
-
-        fillStackedReal(f64, &vals, &g, &c, &col_ptr, 2, omega);
-
-        // Col 0 (< n): [G[0], ω*C[0]] = [2, 1.0]
-        try testing.expectApproxEqAbs(@as(f64, 2.0), vals[0], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 1.0), vals[1], 1e-15);
-        // Col 1 (< n): [G[1], ω*C[1]] = [3, 2.0]
-        try testing.expectApproxEqAbs(@as(f64, 3.0), vals[2], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 2.0), vals[3], 1e-15);
-        // Col 2 (≥ n): [-ω*C[0], G[0]] = [-1.0, 2.0]
-        try testing.expectApproxEqAbs(@as(f64, -1.0), vals[4], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 2.0), vals[5], 1e-15);
-        // Col 3 (≥ n): [-ω*C[1], G[1]] = [-2.0, 3.0]
-        try testing.expectApproxEqAbs(@as(f64, -2.0), vals[6], 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 3.0), vals[7], 1e-15);
-    }
-
-    test "Preconditioner construction releases storage on every allocation failure" {
-        for (std.enums.values(Preconditioner(f64).Kind)) |kind| {
-            try testing.checkAllAllocationFailures(testing.allocator, struct {
-                fn run(gpa: Allocator, k: Preconditioner(f64).Kind) !void {
-                    var prec = try Preconditioner(f64).init(gpa, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, 1, 1, &.{&.{ 2, -1, -1, 2 }}, &.{&.{ 0.1, 0, 0, 0.1 }}, 1, k);
-                    defer prec.deinit(gpa);
-                }
-            }.run, .{kind});
-        }
-    }
-
-    test "Preconditioner releases banded storage when factorization fails" {
-        try testing.expectError(error.SingularMatrix, Preconditioner(f64).init(testing.allocator, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, 1, 1, &.{&.{ 1, 1, 1, 1 }}, &.{&.{ 0, 0, 0, 0 }}, 1, .block_banded));
     }
 };
 
@@ -4013,9 +3509,7 @@ test {
     _ = FreqSolveTests;
     _ = GmresTests;
     _ = LaneLuTests;
-    _ = NewtonCoreTests;
     _ = OrderTests;
-    _ = PreconditionerTests;
     _ = SparseTests;
     _ = TridiagTests;
 }

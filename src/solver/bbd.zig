@@ -1,42 +1,17 @@
-//! Bordered-block-diagonal dense LU.
-//!
-//! The Builder's BBD permutation (subckt-expanded netlists) groups each
-//! subcircuit instance's internal nodes into a contiguous block, with all
-//! coupling/top-level nodes trailing. This solver exploits that:
+//! Bordered-block-diagonal LU for subcircuit-expanded netlists, whose
+//! builder permutation puts each instance's internal nodes in one block and
+//! the coupling nodes last:
 //!
 //!   [ A_1        E_1 ] [x_1]   [b_1]
 //!   [     ...    ... ] [...] = [...]
 //!   [        A_k E_k ] [x_k]   [b_k]
 //!   [ F_1 ... F_k S  ] [x_g]   [b_g]
 //!
-//! Each block is extracted into DENSE per-block records in one contiguous
-//! arena (blocks are small — dense LU with partial pivoting beats sparse GP
-//! at that size, and the fixed layout is a future GPU batched-LU substrate).
-//! Per block i: A_i (s×s row-major), W_i (s×m_i COLUMN-major; holds E_i,
-//! then A_i^-1 E_i in place after factor), F_i (m_i×s row-major).
-//! m_i is the block's LOCAL border footprint —
-//! the set of border nodes it actually couples to — mapped by loc_i.
-//!
-//! Border set = {ground row 0} ∪ [coupling_start, n): row/col 0 is OUTSIDE
-//! computeBbd's blocks and carries only the gmin'd diagonal, so it is
-//! treated as a border node. Border membership is therefore an index list
-//! (border_node), not a contiguous range.
-//!
-//! factor(vals): scatter flat CSC vals via a precomputed tape (src→dst
-//! index pairs built once at init, the batch.zig `slots` idiom); per block
-//! dense-LU A_i, solve W_i in place, reduce F_i·W_i directly into s_dense
-//! in fixed block order; dense-LU s_dense. No refactor/pivot replay:
-//! dense re-factor per Newton iteration is trivially cheap at these sizes.
-//! Independent block factors may run through std.Io; reductions stay fixed-order.
-//!
-//! init returns error.NotApplicable unless the structure is profitable AND
-//! provably clean (every CSC nnz classifiable as block-interior / E / F /
-//! border-border; a cross-block entry — impossible by computeBbd
-//! construction, checked defensively — disqualifies).
-//!
-//! DOD layout: block metadata stored as SoA (parallel slabs of start, s, m,
-//! offsets). Per-block pivot and loc arrays packed into contiguous slabs
-//! indexed by cumulative offsets. Single arena[] for all dense data.
+//! Blocks are small, so each is factored dense (partial pivoting) and the
+//! Schur complement S - sum F_i A_i^-1 E_i is reduced in fixed block order,
+//! which keeps two factors of the same values byte-identical. Every factor
+//! is a full dense factor; there is no pivot replay. Row/col 0 (ground)
+//! sits outside every block and joins the border.
 
 const std = @import("std");
 const root = @import("core").numerics;
@@ -45,16 +20,22 @@ const dense_lu = @import("dense_lu.zig");
 const Allocator = std.mem.Allocator;
 const NONE: u32 = std.math.maxInt(u32);
 
+/// `NotApplicable`: the split is unprofitable under `Limits`, or some CSC
+/// entry couples two blocks (the builder never emits one).
 pub const InitError = error{ NotApplicable, OutOfMemory };
 
-/// Activation thresholds. Defaults are the production gates used by
-/// direct.SolverT; tests relax them to exercise small synthetic systems.
+/// Activation thresholds. The defaults are the production gates; tests relax
+/// them to exercise small systems.
 pub const Limits = struct {
     min_blocks: usize = 8,
     max_block: u32 = 64,
     max_border: u32 = 512,
 };
 
+/// BBD engine over f32 or f64. All dense data lives in one arena:
+/// per block i, A_i (s x s row-major), W_i (s x m column-major; E_i, then
+/// A_i^-1 E_i after factor) and F_i (m x s row-major), then S (b x b). m is
+/// the block's border footprint, the border nodes it touches, mapped by `loc`.
 pub fn Bbd(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -62,27 +43,30 @@ pub fn Bbd(comptime T: type) type {
         const VecLen = std.simd.suggestVectorLength(T) orelse 1;
         const Vec = @Vector(VecLen, T);
 
-        // -- SoA block metadata (parallel arrays, nb entries each) --
-        blk_start: []u32, // global index of first block row/col
-        blk_s: []u32, // block size
-        blk_m: []u32, // local border footprint (|loc_i|)
-        blk_a_off: []usize, // A_i offset in arena: s×s row-major
-        blk_w_off: []usize, // W_i offset: s×m col-major (E, then A^-1 E)
-        blk_f_off: []usize, // F_i offset: m×s row-major
-        blk_piv_off: []usize, // offset into piv slab, s entries
-        blk_loc_off: []usize, // offset into loc slab, m entries
+        // Per-block metadata, nb entries each.
+        blk_start: []u32, // first global row/col
+        blk_s: []u32, // block size s
+        blk_m: []u32, // border footprint m
+        blk_a_off: []usize, // arena offsets of A_i, W_i, F_i
+        blk_w_off: []usize,
+        blk_f_off: []usize,
+        blk_piv_off: []usize, // offset into `piv`, s entries
+        blk_loc_off: []usize, // offset into `loc`, m entries
 
-        b: u32, // border size (>= 1: ground)
-        nb: u32, // number of blocks
-        arena: []T, // [A_i|W_i|F_i]* ++ s_dense
-        s_off: usize, // s_dense (b×b row-major) offset in arena
-        piv: []u32, // per-block pivot rows (contiguous slab)
-        s_piv: []u32, // border pivot rows (b)
-        loc: []u32, // local border col -> border position, per block
-        border_node: []u32, // border position -> global node index (b)
-        dst: []u32, // scatter tape: nnz p -> arena index
-        bg: []T, // border gather scratch (b)
+        b: u32, // border size, >= 1 (ground)
+        nb: u32,
+        arena: []T,
+        s_off: usize, // arena offset of S
+        piv: []u32,
+        s_piv: []u32,
+        loc: []u32, // footprint slot -> border position
+        border_node: []u32, // border position -> global node
+        dst: []u32, // CSC entry p -> arena index it accumulates into
+        bg: []T, // border scratch, b entries
         gpa: Allocator,
+
+        /// Classifies the pattern against `info` and lays out the arena.
+        /// Borrows nothing; `col_ptr`/`row_idx` may be freed afterwards.
 
         pub fn init(
             gpa: Allocator,
@@ -98,7 +82,7 @@ pub fn Bbd(comptime T: type) type {
             if (b > @min(limits.max_border, n / 2)) return error.NotApplicable;
             if (info.coupling_start + info.coupling_size != n) return error.NotApplicable;
 
-            // ---- node classification: block id / border position ----
+            // Node -> block id, and node -> border position.
             const node_block = try gpa.alloc(u32, n);
             defer gpa.free(node_block);
             @memset(node_block, NONE);
@@ -119,7 +103,7 @@ pub fn Bbd(comptime T: type) type {
                 if (node_block[i] == NONE and border_pos[i] == NONE) return error.NotApplicable; // gap
             }
 
-            // ---- pass 1: structural scan + per-block border footprints ----
+            // Pass 1: per-block border footprints.
             const sets = try gpa.alloc(std.ArrayList(u32), nb);
             defer {
                 for (sets) |*s| s.deinit(gpa);
@@ -142,7 +126,6 @@ pub fn Bbd(comptime T: type) type {
             }
             for (sets) |*s| std.mem.sort(u32, s.items, {}, std.sort.asc(u32));
 
-            // ---- layout: SoA block metadata ----
             const blk_start = try gpa.alloc(u32, nb);
             errdefer gpa.free(blk_start);
             const blk_s = try gpa.alloc(u32, nb);
@@ -180,7 +163,7 @@ pub fn Bbd(comptime T: type) type {
             }
             const s_off = arena_len;
             arena_len += @as(usize, b) * b;
-            // dst is u32-indexed; degenerate giant systems fall back to flat.
+            // `dst` is u32; a larger arena falls back to the flat LU.
             if (arena_len > std.math.maxInt(u32)) return error.NotApplicable;
 
             const arena = try gpa.alloc(T, arena_len);
@@ -202,7 +185,7 @@ pub fn Bbd(comptime T: type) type {
             for (0..info.coupling_size) |j| border_node[j + 1] = info.coupling_start + @as(u32, @intCast(j));
             for (0..nb) |bi| @memcpy(loc[blk_loc_off[bi]..][0..blk_m[bi]], sets[bi].items);
 
-            // ---- pass 2: scatter tape ----
+            // Pass 2: the scatter tape.
             for (0..n) |c| {
                 for (col_ptr[c]..col_ptr[c + 1]) |p| {
                     const r = row_idx[p];
@@ -210,25 +193,21 @@ pub fn Bbd(comptime T: type) type {
                     const cb = node_block[c];
                     var d: usize = undefined;
                     if (rb != NONE and cb != NONE) {
-                        // block interior: A_i[r-start, c-start]
-                        const bi = rb;
+                        const bi = rb; // A_i
                         const st = blk_start[bi];
                         const sz = blk_s[bi];
                         d = blk_a_off[bi] + @as(usize, r - st) * sz + (c - st);
                     } else if (rb != NONE) {
-                        // block row, border col: E -> W (col-major)
-                        const bi = rb;
+                        const bi = rb; // E_i, stored column-major in W_i
                         const st = blk_start[bi];
                         const lc = localIdx(loc[blk_loc_off[bi]..][0..blk_m[bi]], border_pos[c]);
                         d = blk_w_off[bi] + @as(usize, lc) * blk_s[bi] + (r - st);
                     } else if (cb != NONE) {
-                        // border row, block col: F
-                        const bi = cb;
+                        const bi = cb; // F_i
                         const st = blk_start[bi];
                         const lr = localIdx(loc[blk_loc_off[bi]..][0..blk_m[bi]], border_pos[r]);
                         d = blk_f_off[bi] + @as(usize, lr) * blk_s[bi] + (c - st);
                     } else {
-                        // border-border: S
                         d = s_off + @as(usize, border_pos[r]) * b + border_pos[c];
                     }
                     dst_tape[p] = @intCast(d);
@@ -278,15 +257,12 @@ pub fn Bbd(comptime T: type) type {
             self.* = undefined;
         }
 
-        /// Full numeric factor. gmin arrives already added to `vals` by
-        /// newton.zig and flows through the tape. Serial fixed order —
-        /// two factors of the same values are byte-identical.
-        pub fn factor(self: *Self, vals: []const T) error{SingularMatrix}!void {
-            return self.factorWithExecution(vals, .{});
-        }
-
+        /// Full numeric factor of `vals` (CSC order). Block factors may run
+        /// on `execution.io`; the Schur reduction is always serial in block
+        /// order, so the result does not depend on the schedule. Fails when a
+        /// block or S is singular; the arena is then unusable until the next
+        /// successful factor.
         pub fn factorWithExecution(self: *Self, vals: []const T, execution: root.Execution) error{SingularMatrix}!void {
-            // Scatter: zero arena, then accumulate through tape.
             simdZero(self.arena);
             for (vals, self.dst) |v, d| self.arena[d] += v;
 
@@ -295,15 +271,13 @@ pub fn Bbd(comptime T: type) type {
             const nblocks = self.nb;
             const bsz: usize = self.b;
             const sd = self.arena[self.s_off..][0 .. bsz * bsz];
-            // Reduce S -= F·W in block order after all independent work joins.
             for (0..nblocks) |bi| {
-                // Keep freshly factored W hot for its reduction on the serial path.
+                // Serially, factor each block right before its reduction so W is hot.
                 if (tasks == 1) try self.factorBlock(bi);
                 const s: usize = self.blk_s[bi];
                 const m: usize = self.blk_m[bi];
                 const w = self.arena[self.blk_w_off[bi]..][0 .. s * m];
 
-                // Fixed-order Schur reduction; each dot product is consumed once.
                 const f = self.arena[self.blk_f_off[bi]..][0 .. m * s];
                 const lo = self.loc[self.blk_loc_off[bi]..][0..m];
                 for (lo, 0..) |gr, r| {
@@ -340,14 +314,14 @@ pub fn Bbd(comptime T: type) type {
         }
 
         fn factorBlocksScheduled(self: *const Self, io: std.Io, tasks: usize) error{SingularMatrix}!void {
-            // ponytail: at most 16 equal block ranges; use weighted ranges if
-            // mixed block sizes make measured worker imbalance significant.
+            // ponytail: at most 16 equal block ranges; weight them by block
+            // cost if mixed sizes ever show measurable worker imbalance.
             var futures: [16]std.Io.Future(error{SingularMatrix}!void) = undefined;
             for (0..tasks) |i| {
                 futures[i] = io.async(factorBlocks, .{ self, self.nb * i / tasks, self.nb * (i + 1) / tasks });
             }
-            // All tasks must finish before a failure permits the caller to
-            // release these slabs and switch to the scalar pivoting ladder.
+            // Join every task before reporting a failure: the caller frees
+            // these slabs when it demotes to the flat LU.
             var result: error{SingularMatrix}!void = {};
             for (futures[0..tasks]) |*future| future.await(io) catch |err| {
                 result = err;
@@ -355,17 +329,14 @@ pub fn Bbd(comptime T: type) type {
             return result;
         }
 
-        /// x := A^-1 x. Block back-solves touch disjoint x slices; the
-        /// border gather/scatter is serial fixed-order.
+        /// x = A^-1 x after a successful factor.
         pub fn solveInPlace(self: *Self, x: []T) void {
             self.solve(false, x);
         }
 
-        /// x := A^-T x, via the stored factors. The transposed system's
-        /// Schur complement is S^T, so the border solve is S^-T through
-        /// dense_lu.solveFactoredT; W^T = E^T A^-T plays F's role and vice
-        /// versa. Border reduction happens BEFORE block solves (uses raw
-        /// b_i, not A^-T b_i — W already contains A^-1 E).
+        /// x = A^-T x after a successful factor. The transposed Schur
+        /// complement is S^T, and W^T = E^T A^-T takes F's role, so the
+        /// border reduction reads the raw b_i before any block solve.
         pub fn solveTInPlace(self: *Self, x: []T) void {
             self.solve(true, x);
         }
@@ -425,9 +396,7 @@ pub fn Bbd(comptime T: type) type {
             }
         }
 
-        // ---- SIMD kernels ----
-
-        // Hot arena: vector stores beat builtin memset here; see the skills audit.
+        // Vector stores beat the memset call on this per-factor arena.
         inline fn simdZero(buf: []T) void {
             const zero: Vec = @splat(0);
             var i: usize = 0;
@@ -437,7 +406,6 @@ pub fn Bbd(comptime T: type) type {
             for (buf[i..]) |*v| v.* = 0;
         }
 
-        /// SIMD dot product of two contiguous slices of equal length.
         fn dotSimd(a: []const T, c: []const T) T {
             std.debug.assert(a.len == c.len);
             var acc: Vec = @splat(0);
@@ -452,7 +420,7 @@ pub fn Bbd(comptime T: type) type {
             return sum;
         }
 
-        /// SIMD x[i] -= w[i] * scalar (axpy with negation).
+        /// x[i] -= w[i] * scalar.
         fn axpySimdNeg(x: []T, w: []const T, scalar: T) void {
             std.debug.assert(x.len == w.len);
             const sv: Vec = @splat(scalar);
@@ -467,18 +435,16 @@ pub fn Bbd(comptime T: type) type {
     };
 }
 
-/// Insert `v` into `s` if not already present (set semantics). Block
-/// border footprints are tiny (handful of entries), so linear scan is fine.
+/// Appends `v` unless present.
 fn addToSet(gpa: Allocator, s: *std.ArrayList(u32), v: u32) error{OutOfMemory}!void {
-    // ponytail: stdlib lookup suffices for tiny footprints; use a bitset if they grow.
+    // ponytail: linear scan over a few border nodes; a bitset if they grow.
     if (std.mem.findScalar(u32, s.items, v) != null) return;
     try s.append(gpa, v);
 }
 
-/// Find position of `v` in a small sorted slice. Precondition: `v` is
-/// present (ensured by pass 1 collecting every E/F border position).
+/// Position of `v` in a block footprint; pass 1 guarantees it is present.
 fn localIdx(sorted: []const u32, v: u32) u32 {
-    // ponytail: linear scan; m is tiny (handful of border nodes per block).
-    // Upgrade path: binary search if max_border grows past ~64.
+    // ponytail: linear scan over a few border nodes; binary search if
+    // footprints grow past ~64.
     return @intCast(std.mem.findScalar(u32, sorted, v) orelse unreachable);
 }
