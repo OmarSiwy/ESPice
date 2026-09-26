@@ -80,6 +80,11 @@ pub fn simulate(
     const ws = try ckt.workspace();
     const x_try = try allocator.alloc(f64, n);
     defer allocator.free(x_try);
+    // The accepted point before `cur`, for the predictor. Equal to `cur`
+    // until the first step is accepted, so that step starts from the OP.
+    const x_prev = try allocator.alloc(f64, n);
+    defer allocator.free(x_prev);
+    simdCopy(x_prev, x);
 
     // Row-plane charge state: the dynamic current and the charge ring
     // [cur, prev, prev2, prev3]. Slot 0 takes the charge of each converged
@@ -243,6 +248,7 @@ pub fn simulate(
 
     var cur: []f64 = x;
     var trial: []f64 = x_try;
+    var prev: []f64 = x_prev;
     var t: f64 = 0;
     // ngspice's first step: min(tstep, tstop/100)/10 clamped to tmax outside
     // the min (dctran.c:134), then the t = 0 breakpoint clamp 0.1*breaks[1]
@@ -305,7 +311,12 @@ pub fn simulate(
             .has_charge = has_charge,
         };
 
-        simdCopy(trial, cur);
+        // MODEINITPRED (dctran.c:794, DEVpred in dioload.c/mos1load.c): the
+        // first iterate extrapolates the last two accepted points by
+        // dt/dt_prev and is limited against the last accepted one.
+        const xfact = dt / dt_prev;
+        for (trial, cur, prev) |*xt, xc, xp| xt.* = xc + xfact * (xc - xp);
+        _ = ckt.applyLimits(trial, cur);
         var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         nr_opts.dx_clamp = std.math.inf(f64);
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
@@ -417,12 +428,15 @@ pub fn simulate(
             // [cur, prev, prev2, prev3] -> [stale, cur, prev, prev2].
             std.mem.rotate([]f64, &q_hist, 3);
             if (n_qt > 0) std.mem.rotate([]f64, &qt_hist, 3);
-            dt_prev2 = dt_prev;
-            dt_prev = dt;
         }
+        dt_prev2 = dt_prev;
+        dt_prev = dt;
 
-        // ponytail: swap the slices; accepted states need no copy.
-        std.mem.swap([]f64, &cur, &trial);
+        // Rotate the slices; accepted states need no copy.
+        const stale = prev;
+        prev = cur;
+        cur = trial;
+        trial = stale;
         t += dt;
         steps += 1;
         _ = ckt.stateCtl(.commit);
@@ -489,11 +503,11 @@ pub fn simulate(
             // ngspice does not step onto TSTART (dctran.c records the first
             // accepted t >= TSTART), and landing there would shift the whole
             // accepted grid. The first printed point is still TSTART itself,
-            // interpolated from the step that crosses it (`trial` holds the
-            // previous accepted state after the swap).
+            // interpolated from the step that crosses it (`prev` holds the
+            // previous accepted state after the rotation).
             const t_prev = t - dt;
             if (t_prev < options.t_start and t > options.t_start)
-                try waveform.recordLerp(options.t_start, trial, cur, (options.t_start - t_prev) / dt, probes);
+                try waveform.recordLerp(options.t_start, prev, cur, (options.t_start - t_prev) / dt, probes);
             try waveform.record(t, cur, probes);
         }
 
