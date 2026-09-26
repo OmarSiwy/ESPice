@@ -39,8 +39,10 @@ pub const num_ports: usize = 4;
 pub const contract_abi: u32 = 4;
 const n_u = contract.nU(Self);
 
+/// The branch rows carry currents, but ngspice creates them with CKTmkVolt
+/// (ltraset.c:176, :182), so NIconvTest holds them to vntol, not abstol.
 pub const u_kinds = [n_u]contract.UnknownKind{
-    .voltage, .voltage, .voltage, .voltage, .current, .current,
+    .voltage, .voltage, .voltage, .voltage, .voltage, .voltage,
 };
 pub const u_abstol = [n_u]f64{ 1e-6, 1e-6, 1e-6, 1e-6, 1e-12, 1e-12 };
 
