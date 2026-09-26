@@ -4,7 +4,8 @@
 //! node permutation and freezes the pattern.
 
 const std = @import("std");
-const requests = @import("core").query;
+const core = @import("core");
+const requests = core.query;
 const numerics = @import("core").numerics;
 const devices = @import("spice.zig");
 const device = @import("device");
@@ -57,9 +58,6 @@ pub const Builder = struct {
     /// copies it into the models that read it.
     nom_temp_c: f64 = 27.0,
 
-    /// Name of the netlist card being expanded, "" outside one. Set by
-    /// `NetBuilder.addDevice`, which every card passes through.
-    card: []const u8 = "",
     /// (device type, instance ordinal) to card name, for `.sens` columns: a
     /// `ParamRef` only knows its ordinal (`resistor#0`). Names borrow the
     /// parse arena; copy them before it dies.
@@ -214,13 +212,15 @@ pub const Builder = struct {
         try self.node_labels.ensureTotalCapacity(self.gpa, expected + 1);
     }
 
-    /// Adds one instance of built-in `D` on `nodes` (one row per port).
-    /// Instances of one type share a batch whatever the call order. Internal
-    /// unknowns get fresh rows here, in `D.U` order, unless `collapse` maps
-    /// them onto a port.
+    /// Adds one instance of built-in `D` on `nodes` (one row per port),
+    /// attributed to netlist card `card` in `cards`; "" records no card.
+    /// `card` is borrowed like the card table. Instances of one type share a
+    /// batch whatever the call order. Internal unknowns get fresh rows here,
+    /// in `D.U` order, unless `collapse` maps them onto a port.
     pub fn addDevice(
         self: *Builder,
         comptime D: type,
+        card: []const u8,
         model: D.Model,
         instance: D.Instance,
         nodes: anytype,
@@ -240,7 +240,7 @@ pub const Builder = struct {
             if (self.card_counts.items.len <= i)
                 try self.card_counts.appendNTimes(self.gpa, 0, i + 1 - self.card_counts.items.len);
             const ordinal = &self.card_counts.items[i];
-            if (self.card.len != 0) try self.cards.append(self.gpa, .{ .type = t, .index = ordinal.*, .name = self.card });
+            if (card.len != 0) try self.cards.append(self.gpa, .{ .type = t, .index = ordinal.*, .name = card });
             ordinal.* += 1;
         }
         if (comptime n_u > D.num_ports) {
@@ -382,6 +382,11 @@ pub const NetBuilder = struct {
     /// F/H/W/K cards, added after every other card so V and L rows exist.
     deferred: std.ArrayList(Device) = .empty,
 
+    /// The first `.tran` card's TSTEP and TSTOP, ngspice's TRANinit values
+    /// for `resolvePulseDefaults`; 1 ns and 1e30 s without one.
+    tran_step: f64 = 1e-9,
+    tran_stop: f64 = 1e30,
+
     /// First stamped V card's positive node and branch row, the `.op` ladder's anchor.
     source_node: u32 = GROUND,
     source_branch: u32 = GROUND,
@@ -429,7 +434,18 @@ pub const NetBuilder = struct {
         }.less);
         const rows = try arena.alloc(u32, nl.graph.vertexCount());
         @memset(rows, 0);
-        return .{ .arena = arena, .b = b, .nl = nl, .rows = rows, .sensed_sources = sensed.items };
+        var nb: NetBuilder = .{ .arena = arena, .b = b, .nl = nl, .rows = rows, .sensed_sources = sensed.items };
+        for (nl.deck.analyses) |dir| {
+            if (dir.kind != .tran) continue;
+            const a0 = argNumber(dir.args, 0);
+            const a1 = argNumber(dir.args, 1);
+            if (a1 orelse a0) |ts| nb.tran_stop = ts;
+            // A malformed card (`.tran xyz 1u`) keeps the default step; the
+            // query check rejects it after the build.
+            nb.tran_step = if (a1 != null) a0 orelse nb.tran_step else nb.tran_stop / 100.0;
+            break;
+        }
+        return nb;
     }
 
     /// Row of net `v`, allocated on first touch.
@@ -505,6 +521,84 @@ pub const NetBuilder = struct {
         }
     }
 
+    /// What the deck keeps of the cards, in frozen rows.
+    pub const Published = struct {
+        bindings: core.QueryBindings,
+        /// Branch currents first, then every named node; parallel to `probe_labels`.
+        probes: []const u32,
+        probe_labels: []const []const u8,
+        /// `acExcitation` over the frozen rows.
+        ac_drive: []const f64,
+        source_node: u32,
+        source_branch: u32,
+        /// Row of the last net the deck introduces.
+        output_node: u32,
+    };
+
+    /// Maps every row recorded so far through `perm`, the BBD permutation
+    /// `Builder.compilePerm` returned (null: none), then copies the deck's
+    /// tables into `arena`. Call once, after the freeze: `frozenRow` answers
+    /// in frozen rows from then on. `circuit` is the frozen result.
+    pub fn publish(self: *NetBuilder, arena: std.mem.Allocator, circuit: *const Circuit, perm: ?[]const u32) !Published {
+        if (perm) |p| for ([_][]u32{
+            self.v.items(.branch),       self.v.items(.pos),    self.v.items(.neg),  self.i.items(.pos),  self.i.items(.neg),
+            self.br.items(.row),         self.l.items(.branch), self.ac.items(.pos), self.ac.items(.neg), (&self.source_node)[0..1],
+            (&self.source_branch)[0..1], self.rows,
+        }) |rows| for (rows) |*row| {
+            if (row.* < p.len) row.* = p[row.*];
+        };
+
+        // Probes: branch currents first, then every named node. ngspice gives every
+        // MNA branch-current unknown an `i(<card>)` column (V, L, E, H, V-mode B);
+        // F, G, S and I-mode B stamp no branch. Branch-first, unlike ngspice.
+        // Named nodes and branch rows are disjoint, so circuit.n bounds the total.
+        const probe_buf = try arena.alloc(u32, circuit.n);
+        const label_buf = try arena.alloc([]const u8, circuit.n);
+        var n_probes: u32 = 0;
+        for ([_][]const []const u8{ self.v.items(.name), self.l.items(.name), self.br.items(.name) }, [_][]const u32{ self.v.items(.branch), self.l.items(.branch), self.br.items(.row) }) |names, rows| {
+            for (names, rows) |name, br| {
+                probe_buf[n_probes] = br;
+                label_buf[n_probes] = try std.fmt.allocPrint(arena, "i({s})", .{name});
+                n_probes += 1;
+            }
+        }
+        for (1..circuit.n) |i| {
+            const label = circuit.nodeName(@intCast(i));
+            if (label.len != 0) {
+                probe_buf[n_probes] = @intCast(i);
+                label_buf[n_probes] = try std.fmt.allocPrint(arena, "v({s})", .{label});
+                n_probes += 1;
+            }
+        }
+
+        // The last probe will not do for `output_node`, since the BBD
+        // permutation reorders node rows.
+        var last_net: u32 = 0;
+        for (self.rows, 0..) |row, net| if (row != GROUND) {
+            last_net = @intCast(net);
+        };
+
+        return .{
+            .bindings = .{
+                .v_names = try copyNames(arena, self.v.items(.name)),
+                .i_names = try copyNames(arena, self.i.items(.name)),
+                .v_branches = try arena.dupe(u32, self.v.items(.branch)),
+                .v_pos = try arena.dupe(u32, self.v.items(.pos)),
+                .v_neg = try arena.dupe(u32, self.v.items(.neg)),
+                .i_pos = try arena.dupe(u32, self.i.items(.pos)),
+                .i_neg = try arena.dupe(u32, self.i.items(.neg)),
+                .v_distof1 = try arena.dupe([2]f64, self.v.items(.distof1)),
+                .ports = try self.portList(arena),
+            },
+            .probes = probe_buf[0..n_probes],
+            .probe_labels = label_buf[0..n_probes],
+            .ac_drive = try self.acExcitation(arena, circuit.n),
+            .source_node = self.source_node,
+            .source_branch = self.source_branch,
+            .output_node = self.frozenRow(last_net),
+        };
+    }
+
     fn addBranchProbe(self: *NetBuilder, name: []const u8, row: u32) !void {
         try self.br.append(self.arena, .{ .name = name, .row = row });
     }
@@ -512,10 +606,9 @@ pub const NetBuilder = struct {
     /// The AC excitation as one stacked vector `[re(0..n), im(0..n)]`,
     /// ngspice's post-CKTacLoad (CKTrhs, CKTirhs) pair. Every AC source lands
     /// in it, so the sweep is one solve per point. All zero when no card names
-    /// `AC`. `ac` rows must already be post-permutation. Caller owns the
-    /// result, allocated with `gpa`.
-    pub fn acExcitation(self: *const NetBuilder, gpa: std.mem.Allocator, n: usize) ![]f64 {
-        const exc = try gpa.alloc(f64, 2 * n);
+    /// `AC`. `ac` rows must already be post-permutation.
+    fn acExcitation(self: *const NetBuilder, arena: std.mem.Allocator, n: usize) ![]f64 {
+        const exc = try arena.alloc(f64, 2 * n);
         @memset(exc, 0);
         const ac = self.ac.slice();
         for (ac.items(.pos), ac.items(.neg), ac.items(.re), ac.items(.im)) |pos, neg, re, im| {
@@ -535,11 +628,11 @@ pub const NetBuilder = struct {
     /// (vsrctemp.c:110-124). A gapped or duplicated numbering is an error
     /// (vsrctemp.c:143-160). Empty when no V card carries `portnum`, which
     /// leaves `.sp` on its one-port fallback.
-    pub fn portList(self: *const NetBuilder, gpa: std.mem.Allocator) ![]requests.Port {
+    fn portList(self: *const NetBuilder, arena: std.mem.Allocator) ![]requests.Port {
         var n_ports: usize = 0;
         for (self.v.items(.portnum)) |num| n_ports = @max(n_ports, num);
         if (n_ports == 0) return &.{};
-        const ports = try gpa.alloc(requests.Port, n_ports);
+        const ports = try arena.alloc(requests.Port, n_ports);
         for (ports) |*p| p.branch = std.math.maxInt(u32); // unset
         const v = self.v.slice();
         for (v.items(.portnum), v.items(.pos), v.items(.branch), v.items(.z0)) |num, node, br, z0| {
@@ -559,18 +652,8 @@ pub const NetBuilder = struct {
     fn resolvePulseDefaults(self: *const NetBuilder, target: anytype) void {
         const T = @TypeOf(target.*);
         if (comptime !@hasField(T, "pulse_tr")) return;
-        var tstep: f64 = 1e-9;
-        var tstop: f64 = 1e30;
-        for (self.nl.deck.analyses) |dir| {
-            if (dir.kind != .tran) continue;
-            const a0 = argNumber(dir.args, 0);
-            const a1 = argNumber(dir.args, 1);
-            if (a1 orelse a0) |ts| tstop = ts;
-            // A malformed card (`.tran xyz 1u`) keeps the default step; the
-            // query check rejects it after the build.
-            tstep = if (a1 != null) a0 orelse tstep else tstop / 100.0;
-            break;
-        }
+        const tstep = self.tran_step;
+        const tstop = self.tran_stop;
         // Only a PULSE waveform gets the TRANinit fill. Any other waveform
         // parks TD past every tstop so its unused pulse fields make no breakpoint.
         if (comptime @hasField(T, "waveform")) {
@@ -671,9 +754,6 @@ pub const NetBuilder = struct {
     }
 
     fn addDevice(self: *NetBuilder, dev: Device) !void {
-        // Every instance the card expands into (URC, CPL) is attributed to it.
-        self.b.card = dev.name;
-        defer self.b.card = "";
         // HDL devices are added by addDynDevices; their opaque nodes count as
         // a DC path for the topology check.
         if (loadedType(self.b.lib, dev) != null) {
@@ -714,7 +794,7 @@ pub const NetBuilder = struct {
                 // own `branch (cp,cn) ctrl`; stamping both would split the
                 // current between two sources on one node pair.
                 const sensed = std.sort.binarySearch([]const u8, self.sensed_sources, dev.name, std.ascii.orderIgnoreCase) != null;
-                if (!sensed) try self.b.addDevice(devices.vsource, bound[0], bound[1], nodes);
+                if (!sensed) try self.b.addDevice(devices.vsource, dev.name, bound[0], bound[1], nodes);
                 const port = if (sensed) null else try sourcePort(dev);
                 try self.v.append(self.arena, .{
                     .name = dev.name,
@@ -740,7 +820,7 @@ pub const NetBuilder = struct {
                 if (comptime !@hasDecl(devices.isource, "eval")) return error.UnsupportedDevice;
                 const bound = try self.bindSource(devices.isource, dev);
                 const nodes = try deviceNodes(self, devices.isource, dev);
-                try self.b.addDevice(devices.isource, bound[0], bound[1], nodes);
+                try self.b.addDevice(devices.isource, dev.name, bound[0], bound[1], nodes);
                 if (sourceAc(dev)) |ac| try self.ac.append(self.arena, .{ .pos = nodes[0], .neg = nodes[1], .re = ac.re, .im = ac.im });
                 try self.i.append(self.arena, .{ .name = dev.name, .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND });
             },
@@ -794,7 +874,7 @@ pub const NetBuilder = struct {
         const nm: devices.txl_native.Model = .{ .r = r, .l = l, .g = g, .c = c, .len = len };
         const n1 = try self.rowOf(dev.pins[0]);
         const n2 = try self.rowOf(dev.pins[2]);
-        try self.b.addDevice(devices.txl_native, nm, .{}, [2]u32{ n1, n2 });
+        try self.b.addDevice(devices.txl_native, dev.name, nm, .{}, [2]u32{ n1, n2 });
         // ngspice writes duplicate i(Y) names; the oracle keeps the last
         // (far-end) branch, as for CPL.
         try self.addBranchProbe(dev.name, self.b.n - 1);
@@ -857,7 +937,7 @@ pub const NetBuilder = struct {
                 if (gl <= 0 or !finiteLineCoefficients(.{ gl, sinhc, std.math.cosh(gl), zs, zs * (1.0 + 1e-12) }))
                     return error.UnsupportedTransmissionLineParameters;
                 deriveModel(devices.lossy_tline, &model, self.b.nom_temp_c);
-                return self.b.addDevice(devices.lossy_tline, model, .{}, try deviceNodes(self, devices.lossy_tline, dev));
+                return self.b.addDevice(devices.lossy_tline, dev.name, model, .{}, try deviceNodes(self, devices.lossy_tline, dev));
             }
             return error.UnsupportedTransmissionLineParameters;
         }
@@ -878,7 +958,7 @@ pub const NetBuilder = struct {
                 .steplimit = if (model.nosteplimit != 0) 0 else 1,
                 .truncdontcut = @floatFromInt(model.truncdontcut),
             };
-            return self.b.addDevice(devices.ltra_native, nm, .{}, ports);
+            return self.b.addDevice(devices.ltra_native, dev.name, nm, .{}, ports);
         }
 
         // Lossless LC: one exact Bergeron ideal line.
@@ -888,7 +968,7 @@ pub const NetBuilder = struct {
         };
         if (!finiteLineCoefficients(.{ t_model.z0, t_model.td }) or t_model.z0 <= 0 or t_model.td <= 0)
             return error.UnsupportedTransmissionLineParameters;
-        try self.b.addDevice(devices.tline, t_model, .{}, ports);
+        try self.b.addDevice(devices.tline, dev.name, t_model, .{}, ports);
     }
 
     /// URC (U card): `Uxxx n1 n2 ngnd model [l=len] [n=lumps]`. Expanded, as
@@ -955,8 +1035,8 @@ pub const NetBuilder = struct {
             // The chains meet at the last hi node.
             const lowr = if (last) hil else try self.b.addNode();
             const r: f64 = prop * r1;
-            try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r) }, .{}, [2]u32{ lowl, lowr });
-            try self.b.addDevice(devices.resistor, .{ .r = @floatCast(r) }, .{}, [2]u32{ hil, hir });
+            try self.b.addDevice(devices.resistor, dev.name, .{ .r = @floatCast(r) }, .{}, [2]u32{ lowl, lowr });
+            try self.b.addDevice(devices.resistor, dev.name, .{ .r = @floatCast(r) }, .{}, [2]u32{ hil, hir });
             if (use_diodes) {
                 const Diode = devices.DeviceId.Type(.diode);
                 if (comptime !@hasDecl(Diode, "eval")) return error.UnsupportedDevice;
@@ -969,12 +1049,12 @@ pub const NetBuilder = struct {
                 dm.is = @floatCast(@max(is1, 1e-28) * prop);
                 dm.cjo = @floatCast(c1 * prop);
                 dm.rs = @floatCast(rd / prop);
-                try self.b.addDevice(Diode, dm, .{}, [2]u32{ lowr, gnd });
-                if (!last) try self.b.addDevice(Diode, dm, .{}, [2]u32{ hil, gnd });
+                try self.b.addDevice(Diode, dev.name, dm, .{}, [2]u32{ lowr, gnd });
+                if (!last) try self.b.addDevice(Diode, dev.name, dm, .{}, [2]u32{ hil, gnd });
             } else {
                 const cm: devices.capacitor.Model = .{ .c = @floatCast(prop * c1) };
-                try self.b.addDevice(devices.capacitor, cm, .{}, [2]u32{ lowr, gnd });
-                if (!last) try self.b.addDevice(devices.capacitor, cm, .{}, [2]u32{ hil, gnd });
+                try self.b.addDevice(devices.capacitor, dev.name, cm, .{}, [2]u32{ lowr, gnd });
+                if (!last) try self.b.addDevice(devices.capacitor, dev.name, cm, .{}, [2]u32{ hil, gnd });
             }
             prop *= p;
             lowl = lowr;
@@ -1040,7 +1120,7 @@ pub const NetBuilder = struct {
         try applyKv(&instance, dev.kv);
         const nodes = try deviceNodes(self, D, dev);
         const br = self.b.n;
-        try self.b.addDevice(D, model, instance, nodes);
+        try self.b.addDevice(D, dev.name, model, instance, nodes);
         return br;
     }
 
@@ -1104,8 +1184,6 @@ pub const NetBuilder = struct {
             }
         }
         for (self.deferred.items) |dev| {
-            self.b.card = dev.name;
-            defer self.b.card = "";
             switch (dev.kind) {
                 'f' => try self.addBranchRef(devices.cccs, dev, source_index, 1.0),
                 'h' => try self.addBranchRef(devices.ccvs, dev, source_index, 0.0),
@@ -1151,7 +1229,7 @@ pub const NetBuilder = struct {
                 var nodes: [2 * N]u32 = undefined;
                 for (0..N) |i| nodes[i] = try self.rowOf(dev.pins[i]);
                 for (0..N) |i| nodes[N + i] = try self.rowOf(dev.pins[N + 1 + i]);
-                try self.b.addDevice(D, model, instance, nodes);
+                try self.b.addDevice(D, dev.name, model, instance, nodes);
                 try self.addBranchProbe(dev.name, self.b.n - 1);
                 return;
             }
@@ -1189,7 +1267,7 @@ pub const NetBuilder = struct {
             self.v.items(.neg)[ctrl],
         };
         const first = self.b.n;
-        try self.b.addDevice(D, model, instance, nodes);
+        try self.b.addDevice(D, dev.name, model, instance, nodes);
 
         // The sensed source's current lives on this model's control branch;
         // its `i(v...)` column reads that row (ngspice cccsset.c:47).
@@ -1204,8 +1282,8 @@ pub const NetBuilder = struct {
         if (comptime !@hasDecl(devices.kinduc, "eval")) return error.UnsupportedDevice;
         const l1_name = positionalName(dev, 0) orelse return error.KinducMissingInductor;
         const l2_name = positionalName(dev, 1) orelse return error.KinducMissingInductor;
-        const li1 = findNameIndex(self.l.items(.name), l1_name) orelse return error.KinducUnknownInductor;
-        const li2 = findNameIndex(self.l.items(.name), l2_name) orelse return error.KinducUnknownInductor;
+        const li1 = netlist.nameIndex(self.l.items(.name), l1_name) orelse return error.KinducUnknownInductor;
+        const li2 = netlist.nameIndex(self.l.items(.name), l2_name) orelse return error.KinducUnknownInductor;
         const ibr1 = self.l.items(.branch)[li1];
         const ibr2 = self.l.items(.branch)[li2];
         var model: devices.kinduc.Model = .{};
@@ -1216,7 +1294,7 @@ pub const NetBuilder = struct {
         // (ngspice INDsetup).
         model.k = try castField(f32, @as(f64, model.k) *
             @sqrt(self.l.items(.value)[li1] * self.l.items(.value)[li2]));
-        try self.b.addDevice(devices.kinduc, model, .{}, [2]u32{ ibr1, ibr2 });
+        try self.b.addDevice(devices.kinduc, dev.name, model, .{}, [2]u32{ ibr1, ibr2 });
     }
 };
 
@@ -1342,7 +1420,7 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     // §6.3.4/§3.4.5: derived parameters after the last write; explicit card
     // values win through `__given`.
     deriveModel(D, &model, b.nom_temp_c);
-    try b.addDevice(D, model, instance, try deviceNodes(self, D, dev));
+    try b.addDevice(D, dev.name, model, instance, try deviceNodes(self, D, dev));
 }
 
 /// B card as an expression tape (models/native/bsource.zig). Returns true for
@@ -1384,7 +1462,7 @@ fn addBsource(self: *NetBuilder, dev: Device) !bool {
             else => return error.UnresolvedParameter,
         }
     }
-    try self.b.addDevice(B, model, instance, nodes);
+    try self.b.addDevice(B, dev.name, model, instance, nodes);
     return !model.imode;
 }
 
@@ -1653,9 +1731,10 @@ fn internalRow(comptime D: type, comptime tag: []const u8, first: u32) u32 {
     return first + @as(u32, @intCast(off));
 }
 
-fn findNameIndex(names: []const []const u8, target: []const u8) ?usize {
-    for (names, 0..) |n, i| if (std.mem.eql(u8, n, target)) return i;
-    return null;
+fn copyNames(arena: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
+    const copied = try arena.alloc([]const u8, names.len);
+    for (names, copied) |name, *copy| copy.* = try arena.dupe(u8, name);
+    return copied;
 }
 
 fn positionalNumber(dev: Device, index: usize) ?f64 {
