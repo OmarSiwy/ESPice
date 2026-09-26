@@ -6,7 +6,9 @@ data; analysis consumes that data without importing parsers or construction
 policy.
 
 ```zig
-const p = try problem.Problem.init(allocator, io, .{
+const espice = @import("espice");
+
+const p = try espice.Problem.init(allocator, io, .{
     .source = .{ .file = "circuit.cir" },
     .dialect = .ngspice,
     .backend = .{ .backend = .cpu },
@@ -25,32 +27,37 @@ A deck with no analysis requests receives an operating-point query.
 
 ## Source and construction
 
-`frontend.prepare(io, arena, source, dialect)` reads a file or copies supplied
-bytes, expands SPICE includes and selected library sections, parses the chosen
-dialect, and loads referenced HDL models. Byte input includes an `origin` real
-or virtual filename; relative paths use its directory. Spectre uses its parser
-without the SPICE include-expansion pass. Model registry bindings and loaded
-code have process lifetime; multiple-file loading propagates errors.
+`frontend.prepare(io, &library, arena, source, dialect)` reads a file or
+copies supplied bytes, expands SPICE includes and selected library sections,
+parses the chosen dialect into a `Netlist`, and loads referenced HDL models
+into the Problem's device `Library`. Byte input includes an `origin` real or
+virtual filename; relative paths use its directory. Spectre uses its parser
+without the SPICE include-expansion pass. The `Library` lives as long as the
+Problem; loaded shared libraries are never unloaded, so their code has process
+lifetime. Loading several files propagates the first error.
 
-`frontend.build(session_arena, parse_arena, ast)` resolves nodes,
-parameters, source identities, initial conditions, probes, and query options.
-It creates [Prepared](../../src/core/deck.zig), whose circuit contains
-frozen CSC connectivity, per-type device batches, model/instance template
-storage, gather/scatter bindings, and labels. It contains no solver workspace.
+`frontend.build(&library, session_arena, parse_arena, netlist)` resolves
+nodes, parameters, source identities, initial conditions, probes and query
+options. It returns [`Prepared`](../../src/frontend/prepare.zig): a frozen
+[`device.Circuit`](../../src/device/Circuit.zig) (CSC connectivity, per-type
+device batches, model/instance template storage, gather/scatter bindings,
+labels) and a [`core.Deck`](../../src/core/deck.zig). It contains no solver
+workspace.
 
-Device construction belongs to frontend. Model definitions live in `models/`;
-VerA supplies their compiled representation. The device ABI lives in
-[abi.zig](../../src/device/abi.zig) and numerical evaluation in
-`src/device/eval.zig`; GPU launch policy lives under `src/analysis/`. Analysis binds private mutable
-instances from the prepared template when a query starts. Model compilation
-and instance construction are distinct operations.
+The frontend decides which device a card names and binds the card
+(`spice.zig`, `builder.zig`). Model definitions live in `models/`; VerA
+compiles them. The device ABI is [abi.zig](../../src/device/abi.zig),
+evaluation is `src/device/eval.zig`, and GPU launch policy is
+`src/analysis/gpu.zig`. Analysis binds private mutable instances from the
+prepared template when a query starts. Model compilation and instance
+construction are distinct operations.
 
 Preserve the GPU contract: `u32` connectivity/tape indices, Model/Instance POD
 layouts, layout hashes, and `f64` numerical planes. Host callback pointers are
 execution bindings, not a portable serialized circuit representation.
 
-The [frontend file map and measurements](frontend.md) describe the tokenizer,
-AST, elaboration and device-binding boundaries.
+The [frontend page](../frontend.md) describes line splitting, the netlist
+tables, subcircuit flattening and device binding.
 
 ## Ownership
 
@@ -84,7 +91,8 @@ before writing.
 
 Analysis results are point-major `f64` arrays with names, point count, and a
 real/complex flag. Complex values use adjacent real/imaginary scalars.
-[output/types.zig](../../src/output/types.zig) owns this shared schema. Encoding
+[core/result.zig](../../src/core/result.zig) owns this shared schema;
+`output` re-exports it. Encoding
 does not change numerical algorithms.
 
 The output session publishes whole completed plots in request order. Binary raw

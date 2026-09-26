@@ -1,174 +1,132 @@
 # Migration notes
 
-## Problem file boundaries
+Deliberate limitations of the Problem design, the paths it retired, and what
+replaces each one. Module boundaries are in
+[Module APIs and main](<4)Module APIs and main.md>); the device boundary is in
+[devices/abi.md](../devices/abi.md).
 
-`src/problem/` is gone. `src/espice.zig` owns orchestration and
-`src/c_api.zig` adapts the C ABI. The prepared data split in two: the frozen
-`Circuit` is in `src/device/Circuit.zig` and the deck data in
-`src/core/deck.zig`. Queries (`query.zig`) and `numerics.zig` are in
-`src/core/`; the device ABI is `src/device/abi.zig`. Facade tests live in
-`src/tests/` (lifecycle, analysis regressions, C ABI).
+## Source layout
 
-S-parameter delivery accepts the analysis producer's `v(S_m_n)` labels as well
-as `S(m,n)` labels used by direct writer callers. One shared parser supplies
-port identities to validation and CITI serialization; raw result names remain
-unchanged. Problem validates requested output once before committing an append.
+`src/espice.zig` owns orchestration and `src/c_api.zig` adapts it to C. The
+prepared data is two values: the frozen `Circuit` (`src/device/Circuit.zig`)
+and the deck (`src/core/deck.zig`). Queries (`src/core/query.zig`) and
+numerics (`src/core/numerics.zig`) are shared through `core`. Model sources
+are in `models/`, HDL loading in `src/device/loader.zig`, device evaluation in
+`src/device/eval.zig`, GPU policy in `src/analysis/gpu.zig`, and solvers in
+`src/solver/`. Facade tests live in `src/tests/` (lifecycle, analysis
+regressions, C ABI).
 
-### Allocation-error regression at the device boundary
-
-CPU device ABI version 10 repairs a boundary defect exposed by allocation-failure
-tests. Zig error ordinals are local to each compilation: a device object's
-`OutOfMemory` could arrive at the host as `PermissionDenied`, even with matching
-compiler and optimization settings. Restricting a callback to a singleton Zig
-error set does not make its ordinal portable.
-
-Fallible neutral callbacks now return `DeviceResult(T)`, with explicit byte
-statuses `ok=0`, `out_of_memory=1`, and `too_many_instances=2`. The producer
-converts only its closed local error set; the consumer reconstructs its own Zig
-error. Successful payload ownership is unchanged. The recompute callback returns
-whether the frozen topology is still valid, and its owner raises a local
-`TopologyChanged` on false. No arbitrary error is reclassified as allocation
-failure.
-
-The ABI version and layout hash reject old shared-library callbacks and re-key
-compiled device caches. Model/Instance PODs, CSC, scatter tapes, and GPU planes
-retain their layouts. All device objects must be rebuilt with the host.
-
-`zig build test-device-errors` compiles a real evaluator into a separate object
-and injects failures through construction, pattern creation, finalization,
-instantiation, snapshots, parameter collection, and noise collection. It also
-checks the real `TooManyInstances` count guard. `zig build test-problem` retains
-the constructor allocation sweep and direct compiled-device allocation tests.
-
-The implementation starts from `fc7b115`. Existing benchmark edits and document
-deletions in the working tree are outside this migration.
+S-parameter delivery accepts both the analysis producer's `v(S_m_n)` labels
+and the `S(m,n)` labels direct writer callers use. One parser
+(`output.types.sParameter`) gives port identities to validation and to CITI
+serialization; raw result names are unchanged. Problem validates the
+requested output once, before it commits an append.
 
 ## Prepared circuit and request contracts
 
-The data-design answers for the first extraction are:
+1. Construction turns resolved device prototypes into frozen CSC and tapes,
+   device templates, labels and query requests. Analysis creates its mutable
+   execution state from that.
+2. A circuit has many unknowns, nonzeros and instances; a session has many
+   requests. No per-instance objects exist.
+3. Circuit and tape indices are `u32`, numerical planes `f64`. Query ids are
+   distinct `u32` values with `maxInt(u32)` reserved as invalid; allocation
+   and count arithmetic is checked.
+4. CSC and batch storage are separate from labels and request metadata.
+   Numerical loops stream their own arrays.
+5. Prepared data and retained source live for the session. Each query owns
+   its mutable device state, numerical planes and scratch. Templates outlive
+   every instantiated query. Construction scratch dies after preparation.
+6. Independent queries share immutable topology and keep separate mutable
+   state.
 
-1. Construction transforms resolved device prototypes into frozen CSC/tapes,
-   initial device templates, labels, and query requests. Analysis creates its
-   mutable execution state from that representation.
-2. There are many unknowns/nonzeros/instances per circuit and many requests per
-   session. Collections keep their existing layouts; no per-instance objects
-   are introduced.
-3. Preserve the existing u32 circuit/tape indices, f64 planes and request field
-   widths. New query IDs are distinct u32 indices, with maxInt(u32) reserved
-   as invalid and checked allocation/count arithmetic.
-4. Keep CSC and batch storage separate from labels/request metadata. The
-   prepared aggregate is a cold collection of slices; numerical loops still
-   stream their existing arrays. No new numerical kernel is introduced here.
-5. Prepared data and retained source live for the session. Query instances own
-   mutable device state, numerical planes and scratch. Templates outlive all
-   instantiated queries. Construction scratch ends after preparation.
-6. Independent queries share immutable topology but have separate mutable
-   state. Existing frequency/device lanes and sequential integration semantics
-   remain intact.
+## Query scheduler storage
 
-Source relocation is not evidence of a performance improvement. No performance
-claim is made for this migration without the repository's benchmark evidence.
+1. Resolved requests and completed prerequisites become progress events,
+   terminal results and a read-only DAG projection.
+2. A session holds up to `maxInt(u32) - 1` queries. Each analysis has zero or
+   one shared OP prerequisite. Requested outputs are a separate ordered id
+   list.
+3. Query and component ids are `u32`; status, kind and phase are byte enums;
+   concurrency is `u16`. Progress counters are `u64` across nested attempts.
+4. Graph columns are a `MultiArrayList`, so status and readiness scans skip
+   the request payloads. Worker handles and errors are cold columns. Ids
+   survive appends.
+5. Prepared data and completed products live for the session. Each accepted
+   append owns an arena; a rejected candidate frees its arena and publishes
+   nothing. Each worker owns its numerical state and output arena until the
+   session ends.
+6. The coordinator validates a frontier before starting workers, then starts
+   every worker of a bounded batch before waiting. Queries share only the
+   immutable topology and completed prerequisite snapshots.
 
-### Query scheduler storage
+## Resumption and the memory ceiling
 
-1. Resolved request descriptions and completed prerequisites become progress events,
-   terminal results, and a read-only DAG projection.
-2. A session contains up to `u32::MAX - 1` queries; each current analysis has zero
-   or one shared OP prerequisite. Requested outputs form a separate ordered ID list.
-3. Query/component identities are u32; status/kind/phase are byte enums; concurrency
-   is u16. Array lengths are usize. Progress counters are u64 across nested attempts.
-4. Graph columns use MultiArrayList (SoA); status/readiness scans avoid large request
-   payloads. Worker handles and errors are cold columns. IDs survive appends.
-5. Prepared data and completed products live for the session. Each accepted append
-   owns an arena; a rejected candidate frees its arena without publishing anything.
-   Each worker owns its numerical state and output arena until session destruction.
-6. The coordinator validates a frontier before starting workers, then starts all
-   workers in each bounded batch before waiting. Queries share only immutable
-   prepared topology and completed prerequisite snapshots.
+A started query keeps its stack on its worker thread
+(`src/analysis/worker.zig`), which requests 512 MiB, the size the old
+whole-simulation worker used for stack headroom. This is a virtual-address
+reservation, not 512 MiB of committed memory. Paused queries keep their stack
+and numerical allocations; terminal workers join, and completed results and
+dependency state stay session-owned.
 
-## Source ownership after the move
+`max_parallel = 1` (the default) and explicit query selection bound active
+work, not the total retained state. If retained stacks become the capacity
+limit, replace them with explicit per-phase state or a measured smaller stack.
+Do not silently restart queries on every call. No performance claim is made
+for this design.
 
-`src/devices/models/` moved to `models/`; frontend construction lives under
-`src/frontend/` and model loading under `src/device/`. The old engine became
-the owning API in `src/espice.zig`. Device evaluation is in `src/device/eval.zig`,
-GPU policy in `src/analysis/gpu.zig`, and solver implementations under
-`src/solver/`. Shared passive contracts prevent consumers importing
-frontend or the owning Problem facade.
+An OP whose GPU run fell back to the host fails publication with
+`error.GpuStateUnavailable` (`syncHostState` in `src/analysis/gpu.zig`): host
+and resident state may differ, so it cannot become a dependency snapshot.
+Rerun that work on the CPU backend.
 
-## Resumption and memory ceiling
+Envelope queries fail with `error.EnvelopeDidNotConverge` when Newton fails at
+the minimum outer step or the step budget ends before the requested time.
 
-The first resumable implementation preserves each started query's stack on its
-worker thread. Its default stack request is 512 MiB, inherited from the previous
-whole-simulation worker because large numerical phases need stack headroom.
-This is a virtual-address reservation, not an assertion that every query
-immediately commits 512 MiB of physical memory. Paused queries retain their
-stack and numerical allocations; terminal workers join, while completed
-results and dependency state remain session-owned.
+Only OP prerequisites are graph nodes. PAC, PXF and periodic noise prepare
+their periodic state inside their own query; sharing it needs a complete
+state and trajectory contract first. The graph supports automatic
+prerequisites and append-only requests, not caller-defined dependency edges.
 
-The fallback is the default `max_parallel=1` and explicit query selection.
-That limits active work, not total retained state. If retained stacks become
-the capacity limit, replace them with explicit algorithm-phase state or a
-measured smaller stack policy; do not silently restart queries at every call.
-No performance improvement is claimed for this design.
+## No streaming output
 
-An OP that encountered a GPU runtime fallback fails publication with
-`GpuStateUnavailable`: host and resident histories may differ, so it cannot
-become a dependency snapshot; select the CPU backend to rerun that work.
+The old CLI special-cased a single binary transient into a streaming raw
+writer. That bypass is gone, and so is the streaming writer: Problem retains
+complete results and publishes every query through one output session, which
+keeps result access and append/resume semantics the same for every query.
 
-Envelope queries now fail with `EnvelopeDidNotConverge` when Newton fails at
-the minimum outer step or the configured step count ends before the requested
-time, replacing an infinite retry or publication of an incomplete result.
+Long transient results therefore stay in memory until the query completes.
+Restoring streaming needs partial committed-result ranges and writer framing
+in the Problem contract first. Do not claim bounded-memory transient output
+for Problem or the CLI.
 
-Only OP prerequisites are graph nodes today. PAC, PXF and periodic-noise
-preparation remain inside their existing algorithms; shared periodic products
-need a complete state/trajectory contract before graph reuse is introduced.
-The implemented graph supports automatic prerequisites and append-only query
-requests, not caller-defined dependency edges.
+## CLI flags
 
-## Retired CLI streaming shortcut
-
-The old CLI special-cased a single binary transient into `runTransient` plus
-`rawfile.Stream`. That bypass no longer belongs to the owning Problem path.
-Problem now retains complete results and uses one publication session for all
-queries, preserving result access and append/resume semantics consistently.
-
-This increases retained memory for long transient results. The fallback is
-whole-result delivery through Problem; low-level `output.Stream` and transient
-recorder support remain available to direct internal callers. Add partial
-committed-result ranges and writer framing to the shared Problem contract
-before restoring streaming through the public API. Do not claim bounded-memory
-transient output for Problem or the CLI.
-
-## Retired placeholder CLI flags
-
-The old CLI parsed interactive/server/pipe modes without implementing those
-services. It also accepted ignored or incomplete compatibility flags, including
-`--autorun`, `--no-spiceinit`, `--define`, `--output` log selection,
-`--completion`, `--soa-log`, and `--term`. The new CLI rejects unsupported flags
-rather than implying those features run.
-
-Batch execution remains the default, with `--plan`, `--print-dag`, and `--jobs`
-for graph inspection and concurrency. Embedders use the Zig/C Problem API for
-manual advancement and query append. Shell redirection handles log capture;
-netlist parameters replace the unsupported CLI definition mechanism. A future
-interactive frontend must use these same Problem operations.
+The CLI rejects any option it does not implement ("unsupported option")
+instead of accepting it silently. The old interactive, server and pipe modes
+and the compatibility flags `--autorun`, `--no-spiceinit`, `--define`,
+`--output`, `--completion`, `--soa-log` and `--term` are gone. Batch
+execution is the only mode, with `--plan`, `--print-dag` and `--jobs` for
+graph inspection and concurrency. Embedders use the Zig or C Problem API for
+manual advancement and appends. Shell redirection replaces log capture, and
+netlist parameters replace `--define`. An interactive frontend must use the
+same Problem operations.
 
 ## Output delivery and recovery
 
-Output publishes only completed plots, in requested order. A later completed
-query can wait behind earlier unfinished work. Binary raw uses append; other
-formats use numbered destinations. Finishing current work leaves the session
-open to appended requests.
+Output publishes only completed plots, in request order, so a completed query
+can wait behind earlier unfinished work. Binary raw appends to one file;
+other formats write numbered destinations. Finishing current work leaves the
+session open to appended requests.
 
-A writer error is terminal for that destination because replaying a partial
-append can duplicate or corrupt output. Numerical results remain accessible;
-copy them out or invoke a direct writer at a new destination. No automatic
-retry, output retargeting, or partial-result publication is claimed.
+A writer error is terminal for its destination, because replaying a partial
+append could duplicate or corrupt output. Numerical results stay readable;
+copy them out or call a writer directly at a new destination. There is no
+automatic retry, retargeting or partial-result publication.
 
-## Retired global memory accounting
+## Memory accounting
 
-The unused `mem_stats.zig` module and its build wiring were removed. Its global
-current-label allocator assumed one simulation owner; it has no callers after
-the engine migration and does not describe concurrent query lifetimes. Use
-process memory measurements until per-Problem allocation accounting is added.
-`ZP_MEM_STATS` no longer produces a report.
+There is no allocation accounting inside ESPice. The old global `mem_stats`
+allocator assumed one simulation owner and could not describe concurrent query
+lifetimes, so it was removed along with `ZP_MEM_STATS`. Use process-level
+memory measurements until per-Problem accounting exists.
