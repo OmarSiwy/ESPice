@@ -59,9 +59,12 @@ pub fn dot(a: []const f64, b: []const f64) f64 {
 
 /// max |buf[i]|, 0 for an empty slice; NaN entries are skipped like @max does.
 pub fn normInf(buf: []const f64) f64 {
-    var mx: f64 = 0;
+    // Max is exact, so one lane accumulator reduced once equals the scalar
+    // fold bit for bit.
+    var acc: Vf = @splat(0);
     var i: usize = 0;
-    while (i + vw <= buf.len) : (i += vw) mx = @max(mx, @reduce(.Max, @abs(@as(Vf, buf[i..][0..vw].*))));
+    while (i + vw <= buf.len) : (i += vw) acc = @max(acc, @abs(@as(Vf, buf[i..][0..vw].*)));
+    var mx = @reduce(.Max, acc);
     while (i < buf.len) : (i += 1) mx = @max(mx, @abs(buf[i]));
     return mx;
 }
@@ -88,6 +91,12 @@ test "vector helpers match their per-element formulas" {
         for (x[0..len], y[0..len]) |u, v| sum += u * v;
         try std.testing.expectApproxEqAbs(sum, dot(x[0..len], y[0..len]), 1e-12);
     }
+    // NaN lanes are skipped in the vector body and the tail alike.
+    var with_nan: [2 * vw + 1]f64 = @splat(1);
+    with_nan[1] = std.math.nan(f64);
+    with_nan[2 * vw] = std.math.nan(f64);
+    with_nan[vw] = -4;
+    try std.testing.expectEqual(@as(f64, 4), normInf(&with_nan));
 }
 
 /// One diagonal block of a bordered-block-diagonal (BBD) row partition.
