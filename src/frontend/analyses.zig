@@ -245,7 +245,7 @@ fn voltageSource(args: []const Value, i: usize, sources: core.QueryBindings) !us
 /// (device type, instance index, parameter) key `ParamRef` uses.
 fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !requests.Dc.SweepTarget {
     const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
-    if (std.ascii.eqlIgnoreCase(name, "temp")) return .{ .is_temp = true };
+    if (std.ascii.eqlIgnoreCase(name, "temp")) return .temp;
     for (cards) |c| {
         if (!std.ascii.eqlIgnoreCase(c.name, name)) continue;
         // ngspice sweeps a card's primary value: `dc` on a source, the
@@ -256,7 +256,7 @@ fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !req
             Library.builtin("inductor") => "l",
             else => "dc",
         };
-        return .{ .type = c.type, .index = c.index, .param_name = param };
+        return .{ .device = .{ .type = c.type, .index = c.index, .param_name = param } };
     }
     return error.AnalysisSourceNotFound;
 }

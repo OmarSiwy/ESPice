@@ -190,8 +190,8 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqual(@as(usize, 6), appended.len);
     try std.testing.expectEqual(node, appended[0].tf.output_node);
     try std.testing.expectEqual(prepared.deck.probes[1], appended[0].tf.input_branch.?);
-    try std.testing.expectEqual(device.Library.builtin("vsource"), appended[1].dc.target.type);
-    try std.testing.expectEqual(@as(u32, 1), appended[1].dc.target.index);
+    try std.testing.expectEqual(device.Library.builtin("vsource"), appended[1].dc.target.device.type);
+    try std.testing.expectEqual(@as(u32, 1), appended[1].dc.target.device.index);
     try std.testing.expectEqual(node, appended[2].noise.out_node);
     try std.testing.expect(appended[3].noise.integrated);
     try std.testing.expectEqual(requests.Method.backward_euler, appended[4].tran.method);

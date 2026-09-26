@@ -241,9 +241,12 @@ pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
 /// The same (type, ordinal) lookup `dc.run` does, made before anything is
 /// allocated for the sweep.
 fn dcTargetExists(target: requests.Dc.SweepTarget, deck: *const Deck) !void {
-    if (target.is_temp) return;
+    const d = switch (target) {
+        .temp => return,
+        .device => |d| d,
+    };
     for (deck.cards) |card| {
-        if (card.index == target.index and card.type == target.type) return;
+        if (card.index == d.index and card.type == d.type) return;
     }
     return error.DcSweepSourceNotFound;
 }

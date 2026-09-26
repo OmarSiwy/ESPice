@@ -47,12 +47,12 @@ test "a dc sweep target resolves against the prepared card table, type included"
         .{ .type = builtin("isource"), .index = 0, .name = "i1" },
         .{ .type = builtin("resistor"), .index = 1, .name = "r2" },
     };
-    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") } } }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .device = .{ .type = builtin("vsource") } } } }, 4, &deck);
     // Same ordinal, different device type: the two no longer alias.
-    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("isource"), .index = 0 } } }, 4, &deck);
-    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("resistor"), .index = 1, .param_name = "r" } } }, 4, &deck);
-    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .index = 1 } } }, 4, &deck));
-    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") }, .target2 = .{ .type = builtin("resistor"), .index = 0 } } }, 4, &deck));
+    try validateDeck(.{ .dc = .{ .target = .{ .device = .{ .type = builtin("isource"), .index = 0 } } } }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .device = .{ .type = builtin("resistor"), .index = 1, .param_name = "r" } } } }, 4, &deck);
+    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .device = .{ .index = 1 } } } }, 4, &deck));
+    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .device = .{ .type = builtin("vsource") } }, .target2 = .{ .device = .{ .type = builtin("resistor"), .index = 0 } } } }, 4, &deck));
     // The temperature is not a card and is never looked up.
-    try validateDeck(.{ .dc = .{ .target = .{ .type = builtin("vsource") }, .target2 = .{ .is_temp = true } } }, 4, &deck);
+    try validateDeck(.{ .dc = .{ .target = .{ .device = .{ .type = builtin("vsource") } }, .target2 = .temp } }, 4, &deck);
 }
