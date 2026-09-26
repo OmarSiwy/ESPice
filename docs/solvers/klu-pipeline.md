@@ -135,7 +135,7 @@ refactor(col_ptr, vals, growth_limit):        # requires factored == true
     else:
       lx[p] = w[li[p]] / d for all p
 
-caller (SolverT.factorInner in direct.zig):
+caller (Solver.factorInner in direct.zig):
   if factored: refactor(...) catch { factored = false; full factor(...) }
   else: full factor(...)
 
@@ -216,7 +216,7 @@ diagnostic; noted as such). §4: derived, not source-verified (design
 aligned with GLU3.0's host-pivoting assumption).
 
 **Our implementation:** `src/solver/direct.zig` (`Params`
-{execution, pivot_tol, refactor_growth_limit}, the `SolverT.factor` bypass
+{execution, pivot_tol, refactor_growth_limit}, the `Solver.factor` bypass
 and fallback chain), `src/solver/sparse_lu.zig` (`factor`, `refactor`,
 `solve`, `solveT`); Newton caller `src/solver/converger.zig` (`newton()`,
 `matrix_sig` factor-once). Condition estimation and iterative refinement:

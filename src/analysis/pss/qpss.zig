@@ -543,7 +543,7 @@ pub fn solve(
     // with one sparse (G0 + j*w_kl*C0) factor per mix product.
     const want_m: usize = if (total <= 512) total else options.gmres_restart;
     const gmres_m: u32 = @intCast(@min(want_m, total));
-    var gmres = try gmres_mod.Gmres(f64).init(allocator, @intCast(total), gmres_m);
+    var gmres = try gmres_mod.Gmres.init(allocator, @intCast(total), gmres_m);
     defer gmres.deinit(allocator);
 
     var iter: u16 = 0;

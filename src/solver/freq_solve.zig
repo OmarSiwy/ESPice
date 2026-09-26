@@ -14,338 +14,330 @@ const Allocator = std.mem.Allocator;
 // of its run in dense 82^3/3 factors per omega; the sparse refactor is O(nnz).
 const DENSE_THRESHOLD: u32 = 16;
 
-/// Frequency-domain solver over f32 or f64. Solution and right-hand side
+/// Frequency-domain solver. Solution and right-hand side
 /// vectors are length 2n: real parts, then imaginary parts.
-pub fn FreqSolverT(comptime T: type) type {
-    return struct {
-        const Self = @This();
-        const DL = dense_lu.DenseLu(T);
-        const W = std.simd.suggestVectorLength(T) orelse 1;
+pub const FreqSolver = struct {
+    const Self = @This();
+    const W = std.simd.suggestVectorLength(f64) orelse 1;
 
-        n: u32,
-        nn: u32,
-        strategy: Strategy,
+    n: u32,
+    nn: u32,
+    strategy: Strategy,
 
-        const Strategy = union(enum) {
-            dense: Dense,
-            sp: Sparse,
-        };
-
-        /// n <= DENSE_THRESHOLD: owned n x n row-major G and C, assembled per
-        /// frequency into the reused 2n x 2n LU slab.
-        const Dense = struct {
-            g_dense: []T,
-            c_mat: []T,
-            a_lu: []T,
-            piv: []u32,
-        };
-
-        /// Owns the 2n stacked-real CSC, its solver and a snapshot of the
-        /// circuit's G and C planes; borrows only the frozen source pattern.
-        const Sparse = struct {
-            g_vals: []T,
-            c_vals: []T,
-            src_col_ptr: []const u32,
-            col_ptr: []u32,
-            row_idx: []u32,
-            vals: []T,
-            slv: direct.SolverT(T),
-            /// Lane scratch: one vector per structural entry, then the RHS
-            /// and solution planes. Allocated by the first `solveBatch`.
-            lane_work: []@Vector(W, T) = &.{},
-            lanes: if (T == f64) ?lane_lu.LaneLu(W) else void = if (T == f64) null else {},
-        };
-
-        /// Linearizes `ckt` at `x_op` (one eval; its G and C planes are the
-        /// linearization) and builds the solver from copies of them, so the
-        /// circuit may be re-evaluated afterwards. The sparse path borrows
-        /// the circuit's CSC pattern for the solver's lifetime.
-        pub fn fromCircuit(allocator: Allocator, ckt: anytype, x_op: []const T) !Self {
-            try ckt.linearizeAc(x_op);
-            const n: u32 = @intCast(ckt.n);
-
-            if (n <= DENSE_THRESHOLD) {
-                const nu: usize = n;
-                const g = try allocator.alloc(T, nu * nu);
-                ckt.denseG(g);
-                const c = allocator.alloc(T, nu * nu) catch |err| {
-                    allocator.free(g);
-                    return err;
-                };
-                ckt.denseC(c);
-                return initDense(allocator, n, g, c);
-            }
-
-            return initSparse(allocator, n, ckt);
-        }
-
-        fn initSparse(allocator: Allocator, n: u32, ckt: anytype) !Self {
-            const nn: u32 = 2 * n;
-            const src_nnz: usize = ckt.nnz;
-            const total_nnz: usize = 4 * src_nnz;
-
-            const col_ptr = try allocator.alloc(u32, @as(usize, nn) + 1);
-            errdefer allocator.free(col_ptr);
-            const row_idx = try allocator.alloc(u32, total_nnz);
-            errdefer allocator.free(row_idx);
-            const vals = try allocator.alloc(T, total_nnz);
-            errdefer allocator.free(vals);
-            const g_vals = try allocator.dupe(T, ckt.g_vals[0..src_nnz]);
-            errdefer allocator.free(g_vals);
-            const c_vals = try allocator.dupe(T, ckt.c_vals[0..src_nnz]);
-            errdefer allocator.free(c_vals);
-
-            buildStackedRealPattern(n, ckt.col_ptr, ckt.row_idx, col_ptr, row_idx);
-
-            var slv = try direct.SolverT(T).init(allocator, nn, col_ptr, row_idx, null);
-            errdefer slv.deinit();
-
-            return .{
-                .n = n,
-                .nn = nn,
-                .strategy = .{ .sp = .{
-                    .g_vals = g_vals,
-                    .c_vals = c_vals,
-                    .src_col_ptr = ckt.col_ptr,
-                    .col_ptr = col_ptr,
-                    .row_idx = row_idx,
-                    .vals = vals,
-                    .slv = slv,
-                } },
-            };
-        }
-
-        /// Dense solver over row-major n x n `g` and `c`, allocated with
-        /// `allocator`; takes ownership of both, also on error.
-        pub fn initDense(allocator: Allocator, n: u32, g: []T, c: []T) !Self {
-            errdefer allocator.free(g);
-            errdefer allocator.free(c);
-            const nn: u32 = 2 * n;
-            const nnu: usize = nn;
-            const a_lu = try allocator.alloc(T, nnu * nnu);
-            errdefer allocator.free(a_lu);
-            const piv = try allocator.alloc(u32, nnu);
-
-            return .{
-                .n = n,
-                .nn = nn,
-                .strategy = .{ .dense = .{
-                    .g_dense = g,
-                    .c_mat = c,
-                    .a_lu = a_lu,
-                    .piv = piv,
-                } },
-            };
-        }
-
-        pub fn deinit(self: *Self, allocator: Allocator) void {
-            switch (self.strategy) {
-                .dense => |*d| {
-                    allocator.free(d.g_dense);
-                    allocator.free(d.c_mat);
-                    allocator.free(d.a_lu);
-                    allocator.free(d.piv);
-                },
-                .sp => |*s| {
-                    if (comptime T == f64) if (s.lanes) |*l| l.deinit(allocator);
-                    allocator.free(s.lane_work);
-                    s.slv.deinit();
-                    allocator.free(s.col_ptr);
-                    allocator.free(s.row_idx);
-                    allocator.free(s.vals);
-                    allocator.free(s.g_vals);
-                    allocator.free(s.c_vals);
-                },
-            }
-        }
-
-        /// `setOmega` then `solveRhs`.
-        pub fn solve(self: *Self, omega: T, rhs: []const T, x_out: []T) !void {
-            try self.setOmega(omega);
-            try self.solveRhs(rhs, x_out);
-        }
-
-        /// Assembles and factors G + jωC. Right-hand sides at this ω then
-        /// need only `solveRhs`/`solveRhsT`.
-        pub fn setOmega(self: *Self, omega: T) !void {
-            switch (self.strategy) {
-                .dense => |*d| try setOmegaDense(self.n, self.nn, d, omega),
-                .sp => |*s| try setOmegaSparse(self.n, s, omega),
-            }
-        }
-
-        /// Solves with the current factorization. `rhs` and `x_out` may alias.
-        pub fn solveRhs(self: *Self, rhs: []const T, x_out: []T) !void {
-            switch (self.strategy) {
-                .dense => |*d| DL.solveFactored(self.nn, d.a_lu, d.piv, rhs, x_out),
-                .sp => |*s| s.slv.solve(rhs, x_out),
-            }
-        }
-
-        /// Adjoint solve A^T x = rhs with the current factorization.
-        pub fn solveRhsT(self: *Self, rhs: []const T, x_out: []T) !void {
-            switch (self.strategy) {
-                .dense => |*d| DL.solveFactoredT(self.nn, d.a_lu, d.piv, rhs, x_out),
-                .sp => |*s| s.slv.solveT(rhs, x_out),
-            }
-        }
-
-        /// Solves every ω in `omegas` against one shared `rhs` (length 2n),
-        /// W frequencies per LaneLu pass; `x_out[k*2n..][0..2n]` receives ω_k.
-        /// `adjoint` selects A^T. The dense strategy, f32, a non-LU engine and
-        /// any lane whose refactor fails take the per-ω scalar path.
-        /// The scalar factorization afterwards holds some ω of the batch.
-        pub fn solveBatch(self: *Self, omegas: []const T, rhs: []const T, x_out: []T, adjoint: bool) !void {
-            const nn: usize = self.nn;
-            std.debug.assert(rhs.len >= nn);
-            std.debug.assert(x_out.len == omegas.len * nn);
-            if (omegas.len == 0) return;
-            const use_lanes = comptime (T == f64);
-            const sp: *Sparse = switch (self.strategy) {
-                .sp => |*s| s,
-                .dense => return self.solveBatchSerial(omegas, rhs, x_out, adjoint),
-            };
-            if (!use_lanes) return self.solveBatchSerial(omegas, rhs, x_out, adjoint);
-
-            const gpa = sp.slv.gpa;
-            const LL = lane_lu.LaneLu(W);
-            const nnz2 = sp.vals.len; // structural entries in the 2n CSC
-            if (sp.lane_work.len == 0)
-                sp.lane_work = try gpa.alloc(@Vector(W, T), nnz2 + 2 * nn);
-            const vplane = sp.lane_work[0..nnz2];
-            const b_plane = sp.lane_work[nnz2..][0..nn];
-            const x_plane = sp.lane_work[nnz2 + nn ..];
-            for (rhs[0..nn], b_plane) |value, *lane| lane.* = @splat(value);
-
-            var base: usize = 0;
-            while (base < omegas.len) : (base += W) {
-                const cnt = @min(W, omegas.len - base);
-                // Pad a ragged tail by repeating its last ω.
-                var ow: [W]T = undefined;
-                for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
-                const omega_vec: @Vector(W, T) = ow;
-
-                // The lanes replay the current pivot sequence; only the first
-                // chunk, or one after a failed factor, pays a scalar factor.
-                // A lane whose pivots decay fails the scalar growth monitor,
-                // and its serial full factor repivots for the next chunk.
-                if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
-                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
-                    continue;
-                };
-                // LaneLu replays SparseLu only, not the tridiagonal engine.
-                const lu = if (sp.slv.lu) |*l| l else {
-                    try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
-                    continue;
-                };
-
-                // A full factor can change the L/U lengths; rebuild then.
-                if (sp.lanes) |*l| {
-                    if (l.lx.len != lu.lx.items.len or l.ux.len != lu.ux.items.len) {
-                        l.deinit(gpa);
-                        sp.lanes = null;
-                    }
-                }
-                if (sp.lanes == null) sp.lanes = try LL.init(gpa, lu);
-                sp.lanes.?.base = lu;
-
-                fillLanePlane(self.n, sp, omega_vec, vplane);
-                const growth: T = @floatCast(sp.slv.params.refactor_growth_limit);
-                const bad = sp.lanes.?.refactor(sp.col_ptr, vplane, growth);
-
-                if (adjoint) sp.lanes.?.solveT(b_plane, x_plane) else sp.lanes.?.solve(b_plane, x_plane);
-
-                for (0..cnt) |l| {
-                    if ((bad & (@as(u64, 1) << @intCast(l))) != 0) {
-                        try self.solveBatchSerial(omegas[base + l ..][0..1], rhs, x_out[(base + l) * nn ..][0..nn], adjoint);
-                        continue;
-                    }
-                    const dst = x_out[(base + l) * nn ..][0..nn];
-                    for (0..nn) |i| {
-                        const row: [W]T = x_plane[i];
-                        dst[i] = row[l];
-                    }
-                }
-            }
-        }
-
-        pub const test_access = if (@import("builtin").is_test) .{ .solveBatchSerial = solveBatchSerial } else {};
-
-        /// The lane path's oracle: `setOmega` and a solve per ω.
-        fn solveBatchSerial(self: *Self, omegas: []const T, rhs: []const T, x_out: []T, adjoint: bool) !void {
-            const nn: usize = self.nn;
-            for (omegas, 0..) |omega, k| {
-                try self.setOmega(omega);
-                if (adjoint)
-                    try self.solveRhsT(rhs[0..nn], x_out[k * nn ..][0..nn])
-                else
-                    try self.solveRhs(rhs[0..nn], x_out[k * nn ..][0..nn]);
-            }
-        }
-
-        /// `setOmegaSparse`'s fill for W frequencies at once, in the same
-        /// entry order and with the same products, so each lane is bitwise
-        /// the scalar fill.
-        fn fillLanePlane(n: u32, s: *Sparse, omega: @Vector(W, T), out: []@Vector(W, T)) void {
-            const nu: usize = n;
-            const neg_omega = -omega;
-            var p: usize = 0;
-            for (0..nu) |j| {
-                const cs = s.src_col_ptr[j];
-                const len: usize = s.src_col_ptr[j + 1] - cs;
-                for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
-                p += len;
-                for (0..len) |q| out[p + q] = omega * @as(@Vector(W, T), @splat(s.c_vals[cs + q]));
-                p += len;
-            }
-            for (0..nu) |j| {
-                const cs = s.src_col_ptr[j];
-                const len: usize = s.src_col_ptr[j + 1] - cs;
-                for (0..len) |q| out[p + q] = neg_omega * @as(@Vector(W, T), @splat(s.c_vals[cs + q]));
-                p += len;
-                for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
-                p += len;
-            }
-        }
-
-        fn setOmegaDense(n: u32, nn: u32, d: *Dense, omega: T) !void {
-            DL.buildComplexAdmittance(n, nn, d.g_dense, d.c_mat, omega, d.a_lu);
-            try DL.factorize(nn, d.a_lu, d.piv);
-        }
-
-        /// Fills the 2n stacked-real values, column j < n as [G | ωC] and
-        /// column n + j as [-ωC | G], then factors.
-        fn setOmegaSparse(n: u32, s: *Sparse, omega: T) !void {
-            const nu: usize = n;
-            const neg_omega = -omega;
-            var p: usize = 0;
-
-            for (0..nu) |j| {
-                const cs = s.src_col_ptr[j];
-                const len = s.src_col_ptr[j + 1] - cs;
-                const lenu: usize = len;
-                @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
-                p += lenu;
-                scaleCopy(T, s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], omega);
-                p += lenu;
-            }
-            for (0..nu) |j| {
-                const cs = s.src_col_ptr[j];
-                const len = s.src_col_ptr[j + 1] - cs;
-                const lenu: usize = len;
-                scaleCopy(T, s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], neg_omega);
-                p += lenu;
-                @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
-                p += lenu;
-            }
-
-            try s.slv.factor(s.vals);
-        }
+    const Strategy = union(enum) {
+        dense: Dense,
+        sp: Sparse,
     };
-}
 
-/// The f64 solver every analysis uses.
-pub const FreqSolver = FreqSolverT(f64);
+    /// n <= DENSE_THRESHOLD: owned n x n row-major G and C, assembled per
+    /// frequency into the reused 2n x 2n LU slab.
+    const Dense = struct {
+        g_dense: []f64,
+        c_mat: []f64,
+        a_lu: []f64,
+        piv: []u32,
+    };
+
+    /// Owns the 2n stacked-real CSC, its solver and a snapshot of the
+    /// circuit's G and C planes; borrows only the frozen source pattern.
+    const Sparse = struct {
+        g_vals: []f64,
+        c_vals: []f64,
+        src_col_ptr: []const u32,
+        col_ptr: []u32,
+        row_idx: []u32,
+        vals: []f64,
+        slv: direct.Solver,
+        /// Lane scratch: one vector per structural entry, then the RHS
+        /// and solution planes. Allocated by the first `solveBatch`.
+        lane_work: []@Vector(W, f64) = &.{},
+        lanes: ?lane_lu.LaneLu(W) = null,
+    };
+
+    /// Linearizes `ckt` at `x_op` (one eval; its G and C planes are the
+    /// linearization) and builds the solver from copies of them, so the
+    /// circuit may be re-evaluated afterwards. The sparse path borrows
+    /// the circuit's CSC pattern for the solver's lifetime.
+    pub fn fromCircuit(allocator: Allocator, ckt: anytype, x_op: []const f64) !Self {
+        try ckt.linearizeAc(x_op);
+        const n: u32 = @intCast(ckt.n);
+
+        if (n <= DENSE_THRESHOLD) {
+            const nu: usize = n;
+            const g = try allocator.alloc(f64, nu * nu);
+            ckt.denseG(g);
+            const c = allocator.alloc(f64, nu * nu) catch |err| {
+                allocator.free(g);
+                return err;
+            };
+            ckt.denseC(c);
+            return initDense(allocator, n, g, c);
+        }
+
+        return initSparse(allocator, n, ckt);
+    }
+
+    fn initSparse(allocator: Allocator, n: u32, ckt: anytype) !Self {
+        const nn: u32 = 2 * n;
+        const src_nnz: usize = ckt.nnz;
+        const total_nnz: usize = 4 * src_nnz;
+
+        const col_ptr = try allocator.alloc(u32, @as(usize, nn) + 1);
+        errdefer allocator.free(col_ptr);
+        const row_idx = try allocator.alloc(u32, total_nnz);
+        errdefer allocator.free(row_idx);
+        const vals = try allocator.alloc(f64, total_nnz);
+        errdefer allocator.free(vals);
+        const g_vals = try allocator.dupe(f64, ckt.g_vals[0..src_nnz]);
+        errdefer allocator.free(g_vals);
+        const c_vals = try allocator.dupe(f64, ckt.c_vals[0..src_nnz]);
+        errdefer allocator.free(c_vals);
+
+        buildStackedRealPattern(n, ckt.col_ptr, ckt.row_idx, col_ptr, row_idx);
+
+        var slv = try direct.Solver.init(allocator, nn, col_ptr, row_idx, null);
+        errdefer slv.deinit();
+
+        return .{
+            .n = n,
+            .nn = nn,
+            .strategy = .{ .sp = .{
+                .g_vals = g_vals,
+                .c_vals = c_vals,
+                .src_col_ptr = ckt.col_ptr,
+                .col_ptr = col_ptr,
+                .row_idx = row_idx,
+                .vals = vals,
+                .slv = slv,
+            } },
+        };
+    }
+
+    /// Dense solver over row-major n x n `g` and `c`, allocated with
+    /// `allocator`; takes ownership of both, also on error.
+    pub fn initDense(allocator: Allocator, n: u32, g: []f64, c: []f64) !Self {
+        errdefer allocator.free(g);
+        errdefer allocator.free(c);
+        const nn: u32 = 2 * n;
+        const nnu: usize = nn;
+        const a_lu = try allocator.alloc(f64, nnu * nnu);
+        errdefer allocator.free(a_lu);
+        const piv = try allocator.alloc(u32, nnu);
+
+        return .{
+            .n = n,
+            .nn = nn,
+            .strategy = .{ .dense = .{
+                .g_dense = g,
+                .c_mat = c,
+                .a_lu = a_lu,
+                .piv = piv,
+            } },
+        };
+    }
+
+    pub fn deinit(self: *Self, allocator: Allocator) void {
+        switch (self.strategy) {
+            .dense => |*d| {
+                allocator.free(d.g_dense);
+                allocator.free(d.c_mat);
+                allocator.free(d.a_lu);
+                allocator.free(d.piv);
+            },
+            .sp => |*s| {
+                if (s.lanes) |*l| l.deinit(allocator);
+                allocator.free(s.lane_work);
+                s.slv.deinit();
+                allocator.free(s.col_ptr);
+                allocator.free(s.row_idx);
+                allocator.free(s.vals);
+                allocator.free(s.g_vals);
+                allocator.free(s.c_vals);
+            },
+        }
+    }
+
+    /// `setOmega` then `solveRhs`.
+    pub fn solve(self: *Self, omega: f64, rhs: []const f64, x_out: []f64) !void {
+        try self.setOmega(omega);
+        try self.solveRhs(rhs, x_out);
+    }
+
+    /// Assembles and factors G + jωC. Right-hand sides at this ω then
+    /// need only `solveRhs`/`solveRhsT`.
+    pub fn setOmega(self: *Self, omega: f64) !void {
+        switch (self.strategy) {
+            .dense => |*d| try setOmegaDense(self.n, self.nn, d, omega),
+            .sp => |*s| try setOmegaSparse(self.n, s, omega),
+        }
+    }
+
+    /// Solves with the current factorization. `rhs` and `x_out` may alias.
+    pub fn solveRhs(self: *Self, rhs: []const f64, x_out: []f64) !void {
+        switch (self.strategy) {
+            .dense => |*d| dense_lu.solveFactored(self.nn, d.a_lu, d.piv, rhs, x_out),
+            .sp => |*s| s.slv.solve(rhs, x_out),
+        }
+    }
+
+    /// Adjoint solve A^T x = rhs with the current factorization.
+    pub fn solveRhsT(self: *Self, rhs: []const f64, x_out: []f64) !void {
+        switch (self.strategy) {
+            .dense => |*d| dense_lu.solveFactoredT(self.nn, d.a_lu, d.piv, rhs, x_out),
+            .sp => |*s| s.slv.solveT(rhs, x_out),
+        }
+    }
+
+    /// Solves every ω in `omegas` against one shared `rhs` (length 2n),
+    /// W frequencies per LaneLu pass; `x_out[k*2n..][0..2n]` receives ω_k.
+    /// `adjoint` selects A^T. The dense strategy, a non-LU engine and
+    /// any lane whose refactor fails take the per-ω scalar path.
+    /// The scalar factorization afterwards holds some ω of the batch.
+    pub fn solveBatch(self: *Self, omegas: []const f64, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
+        const nn: usize = self.nn;
+        std.debug.assert(rhs.len >= nn);
+        std.debug.assert(x_out.len == omegas.len * nn);
+        if (omegas.len == 0) return;
+        const sp: *Sparse = switch (self.strategy) {
+            .sp => |*s| s,
+            .dense => return self.solveBatchSerial(omegas, rhs, x_out, adjoint),
+        };
+
+        const gpa = sp.slv.gpa;
+        const LL = lane_lu.LaneLu(W);
+        const nnz2 = sp.vals.len; // structural entries in the 2n CSC
+        if (sp.lane_work.len == 0)
+            sp.lane_work = try gpa.alloc(@Vector(W, f64), nnz2 + 2 * nn);
+        const vplane = sp.lane_work[0..nnz2];
+        const b_plane = sp.lane_work[nnz2..][0..nn];
+        const x_plane = sp.lane_work[nnz2 + nn ..];
+        for (rhs[0..nn], b_plane) |value, *lane| lane.* = @splat(value);
+
+        var base: usize = 0;
+        while (base < omegas.len) : (base += W) {
+            const cnt = @min(W, omegas.len - base);
+            // Pad a ragged tail by repeating its last ω.
+            var ow: [W]f64 = undefined;
+            for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
+            const omega_vec: @Vector(W, f64) = ow;
+
+            // The lanes replay the current pivot sequence; only the first
+            // chunk, or one after a failed factor, pays a scalar factor.
+            // A lane whose pivots decay fails the scalar growth monitor,
+            // and its serial full factor repivots for the next chunk.
+            if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
+                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                continue;
+            };
+            // LaneLu replays SparseLu only, not the tridiagonal engine.
+            const lu = if (sp.slv.lu) |*l| l else {
+                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                continue;
+            };
+
+            // A full factor can change the L/U lengths; rebuild then.
+            if (sp.lanes) |*l| {
+                if (l.lx.len != lu.lx.items.len or l.ux.len != lu.ux.items.len) {
+                    l.deinit(gpa);
+                    sp.lanes = null;
+                }
+            }
+            if (sp.lanes == null) sp.lanes = try LL.init(gpa, lu);
+            sp.lanes.?.base = lu;
+
+            fillLanePlane(self.n, sp, omega_vec, vplane);
+            const growth = sp.slv.params.refactor_growth_limit;
+            const bad = sp.lanes.?.refactor(sp.col_ptr, vplane, growth);
+
+            if (adjoint) sp.lanes.?.solveT(b_plane, x_plane) else sp.lanes.?.solve(b_plane, x_plane);
+
+            for (0..cnt) |l| {
+                if ((bad & (@as(u64, 1) << @intCast(l))) != 0) {
+                    try self.solveBatchSerial(omegas[base + l ..][0..1], rhs, x_out[(base + l) * nn ..][0..nn], adjoint);
+                    continue;
+                }
+                const dst = x_out[(base + l) * nn ..][0..nn];
+                for (0..nn) |i| {
+                    const row: [W]f64 = x_plane[i];
+                    dst[i] = row[l];
+                }
+            }
+        }
+    }
+
+    pub const test_access = if (@import("builtin").is_test) .{ .solveBatchSerial = solveBatchSerial } else {};
+
+    /// The lane path's oracle: `setOmega` and a solve per ω.
+    fn solveBatchSerial(self: *Self, omegas: []const f64, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
+        const nn: usize = self.nn;
+        for (omegas, 0..) |omega, k| {
+            try self.setOmega(omega);
+            if (adjoint)
+                try self.solveRhsT(rhs[0..nn], x_out[k * nn ..][0..nn])
+            else
+                try self.solveRhs(rhs[0..nn], x_out[k * nn ..][0..nn]);
+        }
+    }
+
+    /// `setOmegaSparse`'s fill for W frequencies at once, in the same
+    /// entry order and with the same products, so each lane is bitwise
+    /// the scalar fill.
+    fn fillLanePlane(n: u32, s: *Sparse, omega: @Vector(W, f64), out: []@Vector(W, f64)) void {
+        const nu: usize = n;
+        const neg_omega = -omega;
+        var p: usize = 0;
+        for (0..nu) |j| {
+            const cs = s.src_col_ptr[j];
+            const len: usize = s.src_col_ptr[j + 1] - cs;
+            for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
+            p += len;
+            for (0..len) |q| out[p + q] = omega * @as(@Vector(W, f64), @splat(s.c_vals[cs + q]));
+            p += len;
+        }
+        for (0..nu) |j| {
+            const cs = s.src_col_ptr[j];
+            const len: usize = s.src_col_ptr[j + 1] - cs;
+            for (0..len) |q| out[p + q] = neg_omega * @as(@Vector(W, f64), @splat(s.c_vals[cs + q]));
+            p += len;
+            for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
+            p += len;
+        }
+    }
+
+    fn setOmegaDense(n: u32, nn: u32, d: *Dense, omega: f64) !void {
+        dense_lu.buildComplexAdmittance(n, nn, d.g_dense, d.c_mat, omega, d.a_lu);
+        try dense_lu.factorize(nn, d.a_lu, d.piv);
+    }
+
+    /// Fills the 2n stacked-real values, column j < n as [G | ωC] and
+    /// column n + j as [-ωC | G], then factors.
+    fn setOmegaSparse(n: u32, s: *Sparse, omega: f64) !void {
+        const nu: usize = n;
+        const neg_omega = -omega;
+        var p: usize = 0;
+
+        for (0..nu) |j| {
+            const cs = s.src_col_ptr[j];
+            const len = s.src_col_ptr[j + 1] - cs;
+            const lenu: usize = len;
+            @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
+            p += lenu;
+            scaleCopy(s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], omega);
+            p += lenu;
+        }
+        for (0..nu) |j| {
+            const cs = s.src_col_ptr[j];
+            const len = s.src_col_ptr[j + 1] - cs;
+            const lenu: usize = len;
+            scaleCopy(s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], neg_omega);
+            p += lenu;
+            @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
+            p += lenu;
+        }
+
+        try s.slv.factor(s.vals);
+    }
+};
 
 /// Writes the 2n x 2n stacked-real CSC pattern: each column j and n + j gets
 /// column j's rows r followed by r + n. `sr_col_ptr` has 2n + 1 entries,
@@ -379,15 +371,15 @@ inline fn buildStackedRealPattern(
 }
 
 /// dst[i] = s * src[i].
-fn scaleCopy(comptime T: type, dst: []T, src: []const T, s: T) void {
-    const W = std.simd.suggestVectorLength(T) orelse 1;
-    const VT = @Vector(W, T);
+fn scaleCopy(dst: []f64, src: []const f64, s: f64) void {
+    const W = std.simd.suggestVectorLength(f64) orelse 1;
+    const VT = @Vector(W, f64);
     const sv: VT = @splat(s);
 
     var i: usize = 0;
     while (i + W <= src.len) : (i += W) {
         const v: VT = src[i..][0..W].*;
-        const p: *[W]T = dst[i..][0..W];
+        const p: *[W]f64 = dst[i..][0..W];
         p.* = sv * v;
     }
     while (i < src.len) : (i += 1) {

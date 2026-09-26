@@ -187,7 +187,7 @@ has a related per-device "bypass" option but no matrix-level equivalent).
 not source-verified.
 
 **Our implementation:** `src/solver/direct.zig` (engine dispatch,
-`SolverT.factor` vcopy bypass, BBD and tridiagonal demotion),
+`Solver.factor` vcopy bypass, BBD and tridiagonal demotion),
 `src/solver/tridiag.zig` (`isTridiag`, `TriDiag`), `src/solver/bbd.zig`,
 `src/solver/converger.zig` (`Options.matrix_sig`, `Workspace.factored_sig`).
 Fixtures in `tests/fixtures/stress/`: `scaling_rc_ladder_{1k,100k}`

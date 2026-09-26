@@ -1,4 +1,4 @@
-//! W sparse LU factorizations at once, replaying one frozen SparseLu(f64)
+//! W sparse LU factorizations at once, replaying one frozen SparseLu
 //! pattern and pivot sequence with values as `@Vector(W, f64)` per structural
 //! entry. The walks and operation order are SparseLu's, so lane l's factors
 //! are bitwise a scalar SparseLu replay of lane l's values; LaneLu(1) is
@@ -11,11 +11,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sparse_lu = @import("sparse_lu.zig");
 
-/// W numeric factorizations sharing one SparseLu(f64) pattern.
+/// W numeric factorizations sharing one SparseLu pattern.
 pub fn LaneLu(comptime W: usize) type {
     return struct {
         const Self = @This();
-        const Base = sparse_lu.SparseLu(f64);
+        const Base = sparse_lu.SparseLu;
         pub const V = @Vector(W, f64);
 
         /// Borrowed factored pattern and pivot sequence; must outlive self.

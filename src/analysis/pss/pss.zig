@@ -10,7 +10,7 @@ const num = @import("core").numerics;
 const converger = @import("solver").converger;
 const integrator = @import("../tran/integrator.zig");
 const dense_lu = @import("solver").dense_lu;
-const Gmres = @import("solver").gmres.Gmres(f64);
+const Gmres = @import("solver").gmres.Gmres;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
