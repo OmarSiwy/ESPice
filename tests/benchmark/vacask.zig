@@ -1,45 +1,29 @@
-//! SPICE deck -> VACASK deck, so the VACASK column can answer for the whole
-//! fixture suite instead of the nine decks someone hand-translated.
+//! VACASK adapter for the benchmark: translates each SPICE fixture into
+//! VACASK's own netlist language, a different language rather than a dialect.
 //!
-//! VACASK reads its own netlist language, not SPICE — a different language,
-//! not a dialect. For most of this suite's history that meant VACASK ran on the
-//! fixtures that shipped a hand-written `vacask/runme.sim` beside `circuit.sp`
-//! and skipped the other 281, so "vc" was a column that agreed with us on 3% of
-//! the table and said SKIP on the rest.
+//! The rule is translate or refuse. A card this file does not fully
+//! understand refuses the whole deck by name, and the fixture skips with that
+//! reason under its row: a wrong translation that runs is indistinguishable
+//! from a right one in the results table.
 //!
-//! The rule this whole file is built around is TRANSLATE OR REFUSE. A card it
-//! does not fully understand refuses the DECK, by name, and the fixture skips
-//! with that reason printed under its row. Guessing would turn a third opinion
-//! into a fourth wrong answer, and a wrong answer that RUNS is indistinguishable
-//! from a right one in every column of RESULTS.md — a skip is at least legible.
+//! Two facts make a mechanical translation trustworthy:
+//!   1. `spice/*.osdi` is VACASK's build of the SPICE device set, with the
+//!      same equations and parameter names ngspice's `.model` cards take, so
+//!      `.model DMOD D(IS=1e-14 N=1)` becomes
+//!      `model dmod sp_diode (is=1e-14 n=1)` unchanged.
+//!   2. VACASK hard-errors on an unknown parameter instead of defaulting it,
+//!      so model parameters can pass through without a whitelist.
 //!
-//! Two facts make that rule enforceable rather than aspirational:
-//!
-//!   1. `spice/*.osdi` is VACASK's own build of the SPICE device set: the same
-//!      equations, under the same parameter names ngspice's `.model` cards
-//!      take. So `.model DMOD D(IS=1e-14 N=1)` transcribes to
-//!      `model dmod sp_diode (is=1e-14 n=1)` with no reinterpretation of any
-//!      parameter — the only reason a mechanical translation can be trusted.
-//!
-//!   2. VACASK hard-errors on an unknown instance or model parameter
-//!      ("Parameter 'bogusparam' not found") rather than defaulting it. A name
-//!      that got past this file but does not exist over there is therefore a
-//!      loud per-fixture skip carrying VACASK's own message, never a silent
-//!      substitution. That is what lets the model parameters below be a
-//!      pass-through instead of a whitelist that would go stale.
-//!
-//! Everything is lowercased on the way through. SPICE is case-insensitive and
-//! VACASK is not, so `.model DMOD` and `D1 a 0 dmod` only meet if both ends are
-//! folded; the runner already lowercases raw-file column names, so node
-//! spelling costs nothing downstream.
+//! Everything is lowercased: SPICE is case-insensitive and VACASK is not.
+//! compare.zig already lowercases raw-file column names.
 
 const std = @import("std");
 const common = @import("job.zig");
-pub const executable = "vacask";
 pub const version_flag = "-h";
 
-/// Translate the same SPICE input the other engines receive. Translation and
-/// staging occur before timing; no independently maintained native deck is used.
+/// Translates `netlist` into `scratch`/runme.sim and returns the job that runs
+/// it there, or a refused job naming the untranslatable card. Translation is
+/// not timed.
 pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []const u8, scratch: []const u8) common.Error!common.Job {
     const spice = std.Io.Dir.cwd().readFileAlloc(io, netlist, a, .limited(1 << 26)) catch return error.DeckFailed;
     const sim = switch (try translate(a, spice)) {
@@ -71,13 +55,7 @@ pub fn translate(gpa: std.mem.Allocator, spice: []const u8) error{OutOfMemory}!O
     return .{ .sim = try x.render() };
 }
 
-// ============================================================================
-// Device modules
-// ============================================================================
-
-/// SPICE primitives VACASK ships an OSDI build of under `spice/`. The module
-/// name is always `sp_<tag>` and the load path always `spice/<tag>.osdi`, which
-/// is why this is an enum and not a table.
+/// SPICE primitives VACASK ships as `spice/<tag>.osdi`, module `sp_<tag>`.
 const Module = enum {
     resistor,
     capacitor,
@@ -99,16 +77,13 @@ const Module = enum {
 /// Devices built into the simulator: no `load`, but still a `model` line.
 const Builtin = enum { vsource, isource, vcvs, vccs, cccs, ccvs, mutual };
 
-/// R, C and L carry their value on the INSTANCE in SPICE, so most decks never
-/// write a `.model` for them. VACASK has no anonymous instances — every device
-/// names a model — so those decks need one synthesised. `xlat_` is reserved: a
-/// deck that spells a `.model` with that prefix is refused rather than silently
-/// shadowed.
+/// Prefix of the models this file synthesizes: every VACASK instance names a
+/// model, while SPICE R/C/L cards and sources usually have none. A deck that
+/// uses the prefix itself is refused rather than shadowed.
 const auto_prefix = "xlat_";
 
-/// SPICE MOSFET LEVEL -> the VACASK module that implements it. A level not here
-/// is refused: picking "the nearest model" would compare two different sets of
-/// equations and report the difference as an espice error.
+/// SPICE MOSFET LEVEL -> VACASK module. Any other level is refused: a nearby
+/// model would compare different equations.
 fn mosModule(level: u32) ?Module {
     return switch (level) {
         1 => .mos1,
@@ -124,24 +99,13 @@ fn mosModule(level: u32) ?Module {
 
 const ModelType = struct { module: Module, sign: i8 };
 
-/// `.model` TYPE -> module, for the types whose parameter sets transcribe
-/// name-for-name AT LEVEL 1. `nmos`/`pmos` are absent on purpose: their level
-/// selects between six different modules, so they are handled separately.
+/// `.model` TYPE -> module, valid at LEVEL 1 only. `modelCard` refuses other
+/// levels: `NPN(LEVEL=4)` is VBIC and `NPN(LEVEL=8)` is HICUM, not
+/// Gummel-Poon. `nmos`/`pmos` go through `mosModule` instead.
 ///
-/// Every type here is LEVEL-checked all the same, and that check is not
-/// cosmetic. `.model vb1 NPN(LEVEL=4 ...)` is VBIC and `.model hic2 NPN(LEVEL=8
-/// ...)` is HICUM — two different sets of equations wearing the same `NPN`
-/// keyword as a Gummel-Poon card. Mapping on the keyword alone put both on
-/// `sp_bjt`; VACASK happened to catch them on a parameter name it did not know
-/// (`ibei`, `c10`), but a VBIC card that used only Gummel-Poon parameter
-/// spellings would have RUN, and produced a plausible wrong answer.
-///
-/// R, C and L model cards are absent on purpose too, and they are the one place
-/// the "same parameter names" premise fails: `sp_resistor` renames the model
-/// card's `tc1`/`tc2`/`r` to `model_tc1`/`model_tc2`/`model_r` to keep them
-/// apart from the INSTANCE parameters of the same name. Transcribing those
-/// name-for-name would set the instance parameter and quietly change the
-/// device, so `.model ... R` is refused instead.
+/// R, C and L model cards are refused: `sp_resistor` names its model
+/// parameters `model_tc1`/`model_r`/..., so a name-for-name copy would set
+/// the instance parameters instead.
 const model_types = std.StaticStringMap(ModelType).initComptime(.{
     .{ "d", ModelType{ .module = .diode, .sign = 0 } },
     .{ "npn", ModelType{ .module = .bjt, .sign = 1 } },
@@ -153,31 +117,23 @@ const model_types = std.StaticStringMap(ModelType).initComptime(.{
     .{ "vdmos", ModelType{ .module = .vdmos, .sign = 1 } },
 });
 
-/// SPICE `.options` keys that only steer ngspice's own bookkeeping or printing.
-/// Dropping one cannot change a number in the raw file, which is the ONLY
-/// reason a key is allowed on this list — an unlisted key refuses the deck
-/// rather than being dropped on the assumption that it was cosmetic too.
+/// `.options` keys that cannot change a number in the raw file, so they are
+/// dropped. Any unlisted key refuses the deck.
 const cosmetic_options = std.StaticStringMap(void).initComptime(.{
     .{ "noacct", {} }, .{ "acct", {} },   .{ "list", {} },
     .{ "node", {} },   .{ "post", {} },   .{ "trans", {} },
     .{ "nopage", {} }, .{ "nomod", {} },  .{ "lvlcod", {} },
-    // Solver SELECTION, not solver tolerance: KLU and the default sparse
-    // solver factor the same matrix to the same answer.
+    // Solver selection, not tolerance: both factor the same matrix.
     .{ "klu", {} },    .{ "sparse", {} },
 });
 
-/// `.options KEY=VALUE` whose VACASK spelling is the same word and whose
-/// meaning is the same quantity. Probed against the binary, not assumed —
-/// `itl1` and `maxord` are absent because VACASK rejects them.
+/// `.options KEY=VALUE` with the same name and meaning in VACASK, probed
+/// against the binary (it rejects `itl1` and `maxord`).
 const numeric_options = std.StaticStringMap(void).initComptime(.{
     .{ "reltol", {} }, .{ "abstol", {} }, .{ "vntol", {} },
     .{ "chgtol", {} }, .{ "gmin", {} },   .{ "temp", {} },
     .{ "tnom", {} },
 });
-
-// ============================================================================
-// Translator
-// ============================================================================
 
 const Fail = error{ Refused, OutOfMemory };
 const Buf = std.ArrayList(u8);
@@ -191,10 +147,9 @@ const Xlat = struct {
     autos: std.EnumSet(Module) = .initEmpty(),
     builtins: std.EnumSet(Builtin) = .initEmpty(),
 
-    /// Every `.model` and `.subckt` name in the deck, collected before any card
-    /// is emitted. A device card names its model positionally and SPICE lets the
-    /// `.model` come after it, so this set is what tells `q1 c b e sub qmod`
-    /// (four nodes) from `q1 c b e qmod 2.0` (three nodes and an area).
+    /// Every `.model` and `.subckt` name, collected in pass 1 because a card
+    /// may precede its model. It tells `q1 c b e sub qmod` (four nodes) from
+    /// `q1 c b e qmod 2.0` (three nodes and an area).
     names: std.StringHashMapUnmanaged(void) = .empty,
 
     models: Buf = .empty,
@@ -207,13 +162,11 @@ const Xlat = struct {
     in_subckt: bool = false,
     analyses: usize = 0,
 
-    /// Does the deck ask for anything other than a transient? Collected in
-    /// pass 1 because it decides whether a device card is translatable at all —
-    /// see `source` for the `dc` value VACASK drops on the floor.
+    /// Whether the deck has an `.op`, `.dc`, `.ac` or `.noise`. A source with
+    /// both a DC value and a waveform is untranslatable then; see `source`.
     static_analysis: bool = false,
     /// The first `.tran` card's TSTEP and TSTOP, as written. SPICE defaults
-    /// every omitted PULSE time to one of them, so a source card cannot be
-    /// finished until the analysis card has been seen.
+    /// omitted PULSE times from them.
     tran_step: ?[]const u8 = null,
     tran_stop: ?[]const u8 = null,
 
@@ -230,9 +183,8 @@ const Xlat = struct {
         try b.appendSlice(x.gpa, text);
     }
 
-    /// Where instance lines go. A `.subckt` body must be emitted before the
-    /// top-level instance that calls it, and SPICE permits the definition to
-    /// come after the call.
+    /// Where instance lines go. Subcircuit bodies render before the top level,
+    /// since SPICE may define one after its call.
     fn body(x: *Xlat) *Buf {
         return if (x.in_subckt) &x.subs else &x.net;
     }
@@ -246,9 +198,8 @@ const Xlat = struct {
         var cards: std.ArrayList(Card) = .empty;
         try lex(x.gpa, spice, &x.title, &cards);
 
-        // Pass 1. Nothing is emitted here: a device card cannot be parsed at all
-        // until every model and subcircuit name is known, and cannot be
-        // FINISHED until the analysis cards are known either.
+        // Pass 1 emits nothing: device cards need every model and subcircuit
+        // name, and the analysis cards, before they can be translated.
         for (cards.items) |c| {
             const kw = c.tok(0) orelse continue;
             if (eqlAny(kw, &.{ ".op", ".dc", ".ac", ".noise" })) x.static_analysis = true;
@@ -274,10 +225,6 @@ const Xlat = struct {
         return x.device(c, kw);
     }
 
-    // ------------------------------------------------------------------
-    // Devices
-    // ------------------------------------------------------------------
-
     fn device(x: *Xlat, c: Card, kw: []const u8) Fail!void {
         switch (kw[0]) {
             'r' => try x.passive(c, .resistor, "r"),
@@ -299,11 +246,9 @@ const Xlat = struct {
         }
     }
 
-    /// `R1 in out 1k`, `C1 out 0 1n`, `L1 a b 1u`. The value is positional and
-    /// may also be spelled `r=`/`c=`/`l=`, which is the name VACASK uses too.
-    ///
-    /// A model-form passive (`R1 a b RMOD 10k`) is refused: see `model_types`
-    /// for why an `.model R` card cannot be transcribed name-for-name.
+    /// `R1 in out 1k`, `C1 out 0 1n`, `L1 a b 1u`. The value may also be
+    /// `r=`/`c=`/`l=`, VACASK's names too. A model-form passive is refused
+    /// (see `model_types`).
     fn passive(x: *Xlat, c: Card, m: Module, key: []const u8) Fail!void {
         const name = c.tok(0).?;
         const n1 = c.tok(1) orelse return x.refuse("{s}: missing nodes", .{name});
@@ -336,8 +281,8 @@ const Xlat = struct {
         try x.raw(w, "\n");
     }
 
-    /// `V1 in 0 DC 10 AC 1 PULSE(0 5 1n 1n 1n 1u 2u)`. ngspice's grammar here is
-    /// positional-with-keywords, so this walks the tail rather than indexing it.
+    /// `V1 in 0 DC 10 AC 1 PULSE(0 5 1n 1n 1n 1u 2u)`: keywords followed by
+    /// positional values, so the tail is walked rather than indexed.
     fn source(x: *Xlat, c: Card, b: Builtin) Fail!void {
         const name = c.tok(0).?;
         const n1 = c.tok(1) orelse return x.refuse("{s}: missing nodes", .{name});
@@ -373,30 +318,17 @@ const Xlat = struct {
                 }
                 try x.value(w, "mag", mag);
             } else if (waveform(t)) |wf| {
-                // A source can carry BOTH a DC value and a waveform, and the
-                // two simulators then disagree about which one a non-transient
-                // analysis sees. ngspice uses the DC value for `.op`/`.dc`/
-                // `.ac` and the waveform only for `.tran`. VACASK ignores `dc`
-                // outright once `type=` is set and biases at the waveform's
-                // t=0 value instead.
-                //
-                // The result RUNS and is wrong, which is the one outcome this
-                // file exists to prevent: on `ngspice/rtlinv` (`vin ... pulse(0
-                // 5 ...)` swept by `.dc vin 0 2.5 0.025`) VACASK returns 101
-                // plausible points that are a CONSTANT, because the sweep sets
-                // a `dc` it is not reading. There is no VACASK spelling that
-                // separates the two, so the deck refuses.
-                //
-                // Transient-only decks are unaffected and are the common case:
-                // 86 fixtures drive a waveform, and only 5 of them also ask for
-                // a static analysis.
+                // ngspice's static analyses read a source's DC value. VACASK
+                // ignores `dc` once `type=` is set and biases at the
+                // waveform's t=0 value (ngspice/rtlinv's `.dc` sweep came back
+                // constant). No VACASK spelling separates the two, so only a
+                // transient-only deck translates.
                 if (x.static_analysis)
                     return x.refuse("{s}: a {s} source cannot also hold the DC value a static analysis needs", .{ name, t });
                 i = try x.waveformArgs(w, c, i + 1, name, wf);
             } else if (eqlAny(t, &.{ "distof1", "distof2" })) {
-                // Distortion-analysis drive, with an optional magnitude and
-                // phase. It feeds `.disto` and nothing else, and `.disto` is
-                // refused, so the source itself is unchanged by dropping it.
+                // Distortion drive with optional magnitude and phase. Only
+                // `.disto` reads it, and `.disto` is refused.
                 while (c.tok(i + 1)) |v| {
                     if (!isNumber(v)) break;
                     i += 1;
@@ -424,23 +356,16 @@ const Xlat = struct {
 
     const Waveform = enum { pulse, sine, exp, pwl, fm };
 
-    /// Argument order for each waveform, in VACASK parameter names, positional
-    /// exactly as SPICE writes them. A trailing argument SPICE omits is left
-    /// UNSET so VACASK's own default applies — writing a zero instead would be
-    /// this file inventing a stimulus. Returns the index of the last argument
-    /// consumed, so the caller's loop resumes after it.
+    /// Emits a waveform's positional arguments under VACASK's names. Omitted
+    /// trailing arguments stay unset so VACASK's defaults apply, except PULSE
+    /// times, which take SPICE's `.tran` defaults. Returns the index of the
+    /// last field consumed.
     fn waveformArgs(x: *Xlat, w: *Buf, c: Card, start: usize, name: []const u8, wf: Waveform) Fail!usize {
         try x.put(w, " type=\"{s}\"", .{@tagName(wf)});
 
-        // PWL is refused rather than emitted. `type="pwl" wave=[t0,v0,...]` is
-        // the documented spelling and VACASK does parse the list — dropping
-        // `wave` changes the error to "Pwl waveform needs at least one point" —
-        // but every form tried on this build (two points, three, a completely
-        // flat table, with and without `maxstep`, with and without a reactive
-        // element) aborts with "Timestep too small", and one variant ran away
-        // and wrote a 3.3 GB raw file before it was killed. A named refusal
-        // costs the same ten fixtures as a guaranteed abort does, without the
-        // disk hazard and without this file claiming support it does not have.
+        // VACASK parses `type="pwl" wave=[...]`, but every form tried on this
+        // build aborts with "Timestep too small", and one wrote a 3.3 GB raw
+        // file first.
         if (wf == .pwl)
             return x.refuse("{s}: PWL is not translated (VACASK's `type=\"pwl\"` aborts on this build)", .{name});
 
@@ -448,11 +373,8 @@ const Xlat = struct {
             .pulse => &.{ "val0", "val1", "delay", "rise", "fall", "width", "period" },
             .sine => &.{ "sinedc", "ampl", "freq", "delay", "theta", "sinephase" },
             .exp => &.{ "val0", "val1", "delay", "tau1", "td2", "tau2" },
-            // `offset` is a real vsource parameter, which is exactly why this
-            // was wrong and silent: VACASK accepts `offset=2` on a `type="fm"`
-            // source and ignores it. The FM pedestal is `sinedc`, same as the
-            // sine's. Measured: `offset=2` gives a mean of 0.0001, `sinedc=2`
-            // gives 2.0001.
+            // The FM pedestal is `sinedc`. VACASK also accepts `offset` on an
+            // fm source but ignores it (measured mean 0.0001 instead of 2).
             .fm => &.{ "sinedc", "ampl", "freq", "modindex", "modfreq" },
             .pwl => unreachable,
         };
@@ -461,27 +383,16 @@ const Xlat = struct {
         while (c.tok(i)) |t| : (i += 1) {
             if (!isNumber(t)) break;
             if (n >= order.len) return x.refuse("{s}: {s} with more than {d} arguments", .{ name, @tagName(wf), order.len });
-            // The one argument that is not a plain rename. SPICE's EXP TD2 is
-            // an ABSOLUTE time — "start falling at t = TD2" — while VACASK
-            // measures its `td2` from `delay`. Passed straight through, the
-            // fall starts TD1 late: on `tran/exp_source` that left VACASK still
-            // RISING a microsecond after the other two engines had turned over,
-            // which reads as an integration disagreement rather than as this
-            // file having asked for a different waveform. `td2 = TD2 - TD1`
-            // reproduces the closed form to every digit it prints.
+            // SPICE's EXP TD2 is absolute; VACASK measures `td2` from
+            // `delay`, so it is emitted as TD2 - TD1.
             if (wf == .exp and n == 4) {
                 const td1 = parseSpice(c.tok(start + 2) orelse "0") orelse 0;
                 const td2 = parseSpice(t) orelse return x.refuse("{s}: EXP TD2 '{s}' is not a number", .{ name, t });
                 if (td2 < td1) return x.refuse("{s}: EXP TD2 ({s}) precedes TD1", .{ name, t });
                 try x.put(w, " td2={e}", .{td2 - td1});
             } else if (wf == .sine and n == 5) {
-                // VACASK ACCEPTS `sinephase` and does not apply it: the
-                // waveform is byte-identical for 0, 45 and 90 degrees, and
-                // fitting its output back recovers a phase of exactly zero.
-                // `delay` and `theta` beside it ARE honoured and match ngspice,
-                // which is what makes this one worth refusing rather than
-                // rounding off — a 90-degree SIN would run and sit 1.414 V away
-                // from ngspice on a 1 V source.
+                // VACASK accepts `sinephase` but ignores it: 0, 45 and 90
+                // degrees give byte-identical output.
                 return x.refuse("{s}: SIN phase ({s} deg) is accepted but ignored by VACASK", .{ name, t });
             } else {
                 try x.value(w, order[n], t);
@@ -490,23 +401,13 @@ const Xlat = struct {
         }
         if (n < 2) return x.refuse("{s}: {s} with {d} arguments", .{ name, @tagName(wf), n });
 
-        // SPICE fills in every omitted PULSE time from the `.tran` card: TR and
-        // TF default to TSTEP, PW and PER to TSTOP. VACASK's defaults are its
-        // own constants and none of them agree. On `ngspice/rc` (`pulse (0 1)`
-        // under `.tran 0.1 7.0`) the untranslated version gave a 1 ns edge
-        // against ngspice's 0.1 s one, and once the edge was fixed the pulse
-        // collapsed to a spike because the width defaulted short too — a full
-        // 1.0 V disagreement on a 1 V source.
+        // SPICE defaults omitted PULSE times from `.tran`: TR and TF to TSTEP,
+        // PW and PER to TSTOP. VACASK's own defaults (1 ns edges) disagree.
         //
-        // PER gets one full cycle rather than TSTOP, because VACASK rejects a
-        // period shorter than rise+fall+width ("Period of pulse transient must
-        // be greater than...") while ngspice's own PER = PW = TSTOP default
-        // violates exactly that. The next edge lands past TSTOP either way, so
-        // inside the simulated window it is the same waveform.
-        //
-        // The margin is not cosmetic: VACASK wants STRICTLY greater, and
-        // `7.0 + 0.1 + 0.1` summed here came out one ulp BELOW the same sum
-        // computed over there, so the exact value was rejected outright.
+        // PER is one full cycle instead of TSTOP: VACASK requires PER strictly
+        // greater than TR+TF+PW, which ngspice's PER = PW = TSTOP violates, and
+        // the next edge lands past TSTOP either way. The 1e-7 margin covers a
+        // one-ulp difference between this sum and VACASK's.
         if (wf == .pulse and n < 7) {
             const step = x.tran_step orelse
                 return x.refuse("{s}: PULSE omits a time and there is no .tran card to default it from", .{name});
@@ -527,9 +428,8 @@ const Xlat = struct {
     }
 
     /// `D1 a c DMOD 2.0`, `Q1 c b 0 sub QMOD`, `M1 d g s b NM W=2u L=1u`.
-    /// `min_nodes` is the arity SPICE requires; the model name is located by
-    /// LOOKUP rather than by position, which is what makes the optional
-    /// substrate node on a BJT unambiguous.
+    /// The model is found by name, not position, so one optional extra node
+    /// (a BJT substrate) is unambiguous. `min_nodes` is SPICE's arity.
     fn modelled(x: *Xlat, c: Card, min_nodes: usize) Fail!void {
         const name = c.tok(0).?;
         const mi = for (1..c.len()) |i| {
@@ -553,8 +453,7 @@ const Xlat = struct {
                 // The one positional tail SPICE gives these devices.
                 try x.value(w, "area", t);
             } else if (std.mem.eql(u8, t, "off")) {
-                // An OP starting hint, not a device parameter: VACASK reaches
-                // the same operating point by its own homotopy.
+                // An OP starting hint, not a device parameter.
                 continue;
             } else {
                 return x.refuse("{s}: unhandled field '{s}'", .{ name, t });
@@ -563,8 +462,8 @@ const Xlat = struct {
         try x.raw(w, "\n");
     }
 
-    /// `X1 in out INVERTER W=2u`. Same lookup trick as `modelled`: everything
-    /// before the subcircuit name is a node.
+    /// `X1 in out INVERTER W=2u`. As in `modelled`, everything before the
+    /// subcircuit name is a node.
     fn subcall(x: *Xlat, c: Card) Fail!void {
         const name = c.tok(0).?;
         const si = for (1..c.len()) |i| {
@@ -583,10 +482,9 @@ const Xlat = struct {
         try x.raw(w, "\n");
     }
 
-    /// `E1 out 0 in 0 10` (voltage-controlled) and `F1 out 0 VSENSE 2`
-    /// (current-controlled). VACASK's node and argument order matches SPICE's on
-    /// both shapes; the current-controlled pair names its sensing device with
-    /// `ctlinst` instead of taking it as a node.
+    /// `E1 out 0 in 0 10` and `F1 out 0 VSENSE 2`. Node order matches SPICE;
+    /// a current-controlled source names its sensing device with `ctlinst`.
+    /// POLY/VALUE/TABLE forms are refused.
     fn ctlSource(x: *Xlat, c: Card, b: Builtin) Fail!void {
         const name = c.tok(0).?;
         const vc = b == .vcvs or b == .vccs;
@@ -609,8 +507,7 @@ const Xlat = struct {
         try x.raw(w, "\n");
     }
 
-    /// `K1 L1 L2 0.99`. VACASK's mutual inductance is a device with no nodes
-    /// that names the two inductors it couples.
+    /// `K1 L1 L2 0.99`: a node-less VACASK device naming the two inductors.
     fn mutual(x: *Xlat, c: Card) Fail!void {
         const name = c.tok(0).?;
         if (c.len() != 4) return x.refuse("{s}: {d} fields, expected 4", .{ name, c.len() });
@@ -621,14 +518,9 @@ const Xlat = struct {
         try x.raw(w, "\n");
     }
 
-    // ------------------------------------------------------------------
-    // Dot cards
-    // ------------------------------------------------------------------
-
     fn dotCard(x: *Xlat, c: Card, kw: []const u8) Fail!void {
         const tail = kw[1..];
-        // Output control only. The benchmark reads the raw file, so what a
-        // reference would have printed to its own listing changes nothing.
+        // Listing output only; the benchmark reads the raw file.
         if (eqlAny(tail, &.{ "end", "print", "plot", "width", "probe", "title" })) return;
         if (std.mem.eql(u8, tail, "model")) return x.modelCard(c);
         if (std.mem.eql(u8, tail, "subckt")) return x.subcktCard(c);
@@ -765,12 +657,8 @@ const Xlat = struct {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Analyses
-    // ------------------------------------------------------------------
-
-    /// One analysis, named `<kind><N>`. VACASK writes one raw file per analysis,
-    /// named after it, so the names have to be distinct within a deck.
+    /// One analysis named `<kind><N>`. VACASK writes a raw file per analysis
+    /// named after it, so names must be distinct.
     fn analysis(x: *Xlat, kind: []const u8, verb: []const u8, args: []const u8) Fail!void {
         x.analyses += 1;
         try x.put(&x.ctl, "  analysis {s}{d} {s}{s}\n", .{ kind, x.analyses, verb, args });
@@ -778,18 +666,10 @@ const Xlat = struct {
 
     /// `.tran TSTEP TSTOP [TSTART [TMAX]] [UIC]`.
     ///
-    /// TMAX is the subtle one, and leaving it off was a real mistranslation.
-    /// The two simulators do not mean the same thing by `step`: ngspice's TSTEP
-    /// is the OUTPUT interval and it also caps the internal step, because SPICE
-    /// defaults TMAX to `min(TSTEP, (TSTOP-TSTART)/50)`. VACASK's `step` is only
-    /// a starting step, with `maxstep` as the separate bound — which is why
-    /// upstream's own decks always pass both.
-    ///
-    /// Translate `step` alone and VACASK is free to take strides ngspice never
-    /// would: on `tran/rc_pulse` it produced 115 points against ngspice's 408
-    /// and the two waveforms parted company by 3.4e-2 V mid-edge. Nothing about
-    /// that is a disagreement between the engines — it is this file having
-    /// asked them for different accuracy and then reported the difference.
+    /// `maxstep` is always emitted. SPICE caps the internal step at TMAX,
+    /// default min(TSTEP, (TSTOP-TSTART)/50), while VACASK's `step` is only the
+    /// first step; without the cap VACASK strides further (115 points against
+    /// ngspice's 408 on tran/rc_pulse).
     fn tranCard(x: *Xlat, c: Card) Fail!void {
         const step = c.tok(1) orelse return x.refuse(".tran with no step", .{});
         const stop = c.tok(2) orelse return x.refuse(".tran with no stop time", .{});
@@ -801,9 +681,7 @@ const Xlat = struct {
         var tmax: ?[]const u8 = null;
         if (c.tok(i)) |tstart| {
             if (isNumber(tstart)) {
-                // TSTART delays when ngspice starts SAVING, not when it starts
-                // solving. VACASK always saves from zero, so a nonzero TSTART
-                // would compare two different windows of the same waveform.
+                // TSTART delays saving, not solving; VACASK always saves from 0.
                 if ((parseSpice(tstart) orelse 0) != 0)
                     return x.refuse(".tran TSTART={s} has no VACASK counterpart", .{tstart});
                 i += 1;
@@ -831,21 +709,13 @@ const Xlat = struct {
         return x.analysis("tran", "tran", args.items);
     }
 
-    /// `.dc SRC START STOP STEP [SRC2 START STOP STEP]`. VACASK has no `.dc`: a
-    /// DC sweep is a `sweep` block wrapped around an operating point.
+    /// `.dc SRC START STOP STEP [SRC2 START STOP STEP]` as `sweep` blocks
+    /// around an operating point.
     ///
-    /// `points` counts INTERVALS, not points, so `.dc V1 0 10 0.5` (21 samples)
-    /// is `points=20`. Off by one here and every sample lands between two of
-    /// ngspice's, and the whole column reads as a phantom error.
-    ///
-    /// The inner sweep variable is named `vsweep` because VACASK identifiers
-    /// cannot contain `-`: it is the same scale ngspice spells `v(v-sweep)`,
-    /// and the runner's `scale_aliases` maps the one onto the other.
-    ///
-    /// ngspice's FIRST source is the fast one and VACASK's LAST `sweep` is,
-    /// so a two-source card emits its blocks in the opposite order. Both write
-    /// one plot of outer x inner points, ordered inner-fastest, which is what
-    /// lets the two be compared sample for sample.
+    /// The inner scale is `vsweep` (VACASK identifiers cannot contain `-`);
+    /// compare.zig aliases it to ngspice's `v(v-sweep)`. ngspice's first
+    /// source is the fast one and VACASK's last `sweep` is, so the blocks are
+    /// emitted in reverse.
     fn dcCard(x: *Xlat, c: Card) Fail!void {
         if (c.len() != 5 and c.len() != 9)
             return x.refuse(".dc with {d} fields, expected 4 or 8", .{c.len() - 1});
@@ -856,31 +726,21 @@ const Xlat = struct {
         try x.put(&x.ctl, "    analysis dc{d} op\n", .{x.analyses});
     }
 
-    /// One `sweep` block. The endpoint is RECOMPUTED rather than copied, which
-    /// matters whenever the step does not divide the range evenly.
-    ///
-    /// ngspice walks from START by STEP and stops before passing STOP, so
-    /// `.dc Vgs 0 1.1 0.2` is six samples ending at 1.0 — 1.1 is never reached.
-    /// VACASK's `sweep` divides `from`..`to` into `points` equal intervals and
-    /// always lands ON `to`. Copying STOP across and rounding the interval count
-    /// gave seven samples on a DIFFERENT grid (0, 0.1833, ... 1.1), where only
-    /// the first one agreed with ngspice. Emitting ngspice's own last value
-    /// makes the two grids identical.
+    /// One `sweep` block. `points` counts intervals, not samples. The endpoint
+    /// is ngspice's last sample rather than STOP: ngspice stops before passing
+    /// STOP (`.dc Vgs 0 1.1 0.2` ends at 1.0), while VACASK always lands on `to`.
     fn sweepBlock(x: *Xlat, c: Card, at: usize, scale: []const u8) Fail!void {
         const src = c.tok(at).?;
         const from = parseSpice(c.tok(at + 1).?) orelse return x.refuse(".dc: '{s}' is not a number", .{c.tok(at + 1).?});
         const to = parseSpice(c.tok(at + 2).?) orelse return x.refuse(".dc: '{s}' is not a number", .{c.tok(at + 2).?});
         const step = parseSpice(c.tok(at + 3).?) orelse return x.refuse(".dc: '{s}' is not a number", .{c.tok(at + 3).?});
         if (step == 0) return x.refuse(".dc with a zero step", .{});
-        // `.dc TEMP -40 125 55` sweeps the ambient, not a device parameter, and
-        // VACASK reaches it through a different mechanism entirely.
+        // `.dc TEMP ...` sweeps the ambient, which VACASK does differently.
         if (src[0] != 'v' and src[0] != 'i')
             return x.refuse(".dc sweeps '{s}', which is not an independent source", .{src});
 
-        // Truncate, do not round: the last sample ngspice takes is the last one
-        // that has not passed STOP. The relative epsilon keeps an exact division
-        // exact — 1.1/0.2 is 5.500000000000001 in binary and 0.9/0.1 is
-        // 8.999999999999998, and only one of those should move.
+        // Truncate: ngspice's last sample has not passed STOP. The epsilon
+        // keeps an exact division exact (0.9/0.1 is 8.999999999999998).
         const span = @abs((to - from) / step);
         const n = @floor(span + 1e-9 * @max(1.0, span));
         if (!(n >= 1) or n > 1e7) return x.refuse(".dc {s} covers {d} intervals", .{ src, n });
@@ -889,9 +749,7 @@ const Xlat = struct {
         try x.put(&x.ctl, "  sweep {s} instance=\"{s}\" parameter=\"dc\" from=", .{ scale, src });
         try x.number(&x.ctl, c.tok(at + 1).?);
         try x.raw(&x.ctl, " to=");
-        // Only when the step genuinely truncates. An evenly-dividing sweep
-        // keeps the deck's own spelling, so the generated file still reads like
-        // the SPICE card it came from and `1meg` does not become `1e6`.
+        // An evenly dividing sweep keeps the deck's own spelling of STOP.
         if (@abs(last - to) <= 1e-12 * @max(1.0, @abs(to))) {
             try x.number(&x.ctl, c.tok(at + 2).?);
         } else {
@@ -908,10 +766,8 @@ const Xlat = struct {
         return x.freqSweep("ac", "ac", c.tok(1).?, c.tok(2).?, c.tok(3).?, c.tok(4).?, "");
     }
 
-    /// `.noise V(OUT) SRC DEC N FSTART FSTOP [PTS_PER_SUMMARY]`. The trailing
-    /// field asks ngspice for a second, per-device plot; VACASK writes its
-    /// per-device noise contributions unconditionally, so dropping it changes
-    /// nothing that gets compared.
+    /// `.noise V(OUT) SRC DEC N FSTART FSTOP [PTS_PER_SUMMARY]`. The summary
+    /// count only adds an ngspice per-device plot, so it is dropped.
     fn noiseCard(x: *Xlat, c: Card) Fail!void {
         // `v(out)` has already been flattened to two fields by the lexer.
         const b: usize = if (std.mem.eql(u8, c.tok(1) orelse "", "v")) 2 else 1;
@@ -943,19 +799,14 @@ const Xlat = struct {
         return x.analysis(kind, verb, args.items);
     }
 
-    // ------------------------------------------------------------------
-
-    /// One ` key=value` field, with the value RESPELLED rather than passed
-    /// through. See `Num.scale` for why passing it through is not safe.
+    /// One ` key=value` field, the value respelled (see `Num.scale`).
     fn value(x: *Xlat, w: *Buf, key: []const u8, v: []const u8) Fail!void {
         try x.put(w, " {s}=", .{key});
         return x.number(w, v);
     }
 
-    /// A bare value. Anything that parses as a SPICE number is re-emitted in
-    /// VACASK's spelling; anything else (a `.param` name the deck references)
-    /// goes through untouched, minus the expression syntax this file does not
-    /// translate.
+    /// A SPICE number in VACASK's spelling, or a `.param` name unchanged.
+    /// Expressions are refused.
     fn number(x: *Xlat, w: *Buf, v: []const u8) Fail!void {
         if (parseNum(v)) |n| return x.put(w, "{s}{s}", .{ n.mantissa, n.scale });
         if (std.mem.indexOfAny(u8, v, "{}'\"()*/+") != null)
@@ -1002,10 +853,6 @@ const Xlat = struct {
     }
 };
 
-// ============================================================================
-// Lexing
-// ============================================================================
-
 /// One logical SPICE card: continuations joined, comments gone, lowercased, and
 /// split into whitespace-delimited fields.
 const Card = struct {
@@ -1048,13 +895,9 @@ fn lex(gpa: std.mem.Allocator, spice: []const u8, title: *[]const u8, out: *std.
     try flush(gpa, &joined, out);
 }
 
-/// `(`, `)` and `,` become whitespace. Nothing in the subset this file accepts
-/// uses a paren for anything but grouping a waveform's or a `.model`'s
-/// arguments, so flattening them means `PULSE(0 5 1n)`, `PULSE (0,5,1n)` and
-/// `pulse 0 5 1n` all tokenize identically instead of needing three cases.
-///
-/// Whitespace around `=` is eaten on BOTH sides, because ngspice accepts
-/// `W = 2u`, `W= 2u` and `W =2u` and all three have to arrive as one field.
+/// Lowercases the joined card and splits it into fields. `(`, `)` and `,`
+/// are whitespace, so `PULSE(0 5 1n)`, `PULSE (0,5,1n)` and `pulse 0 5 1n`
+/// agree; whitespace around `=` is dropped, so `W = 2u` is one field.
 fn flush(gpa: std.mem.Allocator, joined: *Buf, out: *std.ArrayList(Card)) error{OutOfMemory}!void {
     defer joined.clearRetainingCapacity();
     if (joined.items.len == 0) return;
@@ -1094,10 +937,6 @@ fn stripComment(line: []const u8) []const u8 {
     return upto;
 }
 
-// ============================================================================
-// Field helpers
-// ============================================================================
-
 const Kv = struct { key: []const u8, val: []const u8 };
 
 fn splitKv(t: []const u8) ?Kv {
@@ -1132,37 +971,23 @@ const Num = struct {
     value: f64,
     /// The numeric part, exactly as the deck wrote it.
     mantissa: []const u8,
-    /// VACASK's spelling of the SPICE suffix, `""` when there is none.
-    ///
-    /// This is the reason values are respelled instead of passed through, and
-    /// it is the one place a translation could have been silently wrong rather
-    /// than loudly refused. SPICE's suffixes are case-INSENSITIVE; VACASK's are
-    /// not, and the two sets disagree, as probed against the binary:
-    ///
-    ///   * `M` is MILLI in SPICE and MEGA in VACASK — a factor of 1e9 between
-    ///     what the deck said and what would have run, with nothing to notice
-    ///     it. Folding to `m` is what makes the two agree.
-    ///   * `T`/`G` exist only uppercase in VACASK, so `1G` folded to `1g` is a
-    ///     parse error. That one was loud, and it is how the rest was found.
-    ///   * `U`/`N`/`P`/`F`/`A` exist only lowercase there, so SPICE's uppercase
-    ///     spellings need folding the other way.
-    ///
-    /// A trailing unit (`5V`, `1kohm`) is dropped, which SPICE also does.
+    /// VACASK's spelling of the SPICE suffix, `""` when there is none. SPICE
+    /// suffixes are case-insensitive and VACASK's are not: `M` is milli in
+    /// SPICE but mega in VACASK, `T`/`G` exist only uppercase there and
+    /// `u`/`n`/`p`/`f`/`a` only lowercase. A trailing unit (`5V`) is dropped,
+    /// as SPICE does.
     scale: []const u8,
 };
 
-/// SPICE's number-with-scale-suffix.
-///
-/// `meg` before `m` matters: `1meg` is 1e6 and `1m` is 1e-3, and taking the
-/// shorter match first turns a megohm into a milliohm.
+/// A SPICE number with optional scale suffix and unit. `meg` and `mil` are
+/// tried before `m`.
 fn parseNum(t: []const u8) ?Num {
     if (t.len == 0) return null;
     var end: usize = 0;
     while (end < t.len) : (end += 1) {
         const c = t[end];
         if (std.ascii.isDigit(c) or c == '.' or c == '+' or c == '-') continue;
-        // An exponent's `e` belongs to the number, not to the suffix — but only
-        // when a sign or a digit follows it, so a bare `1e` is still `1 exa`.
+        // `e` is an exponent only when a digit or sign follows it.
         if ((c == 'e' or c == 'E') and end + 1 < t.len and
             (std.ascii.isDigit(t[end + 1]) or t[end + 1] == '+' or t[end + 1] == '-')) continue;
         break;
@@ -1186,14 +1011,9 @@ fn parseNum(t: []const u8) ?Num {
     return .{ .value = mantissa, .mantissa = t[0..end], .scale = "" };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 const testing = std.testing;
 
-/// An arena per test: `translate` hands back a deck plus every intermediate it
-/// built, and freeing them one by one would be more test than translator.
+/// Test harness: `translate` into an arena freed at `deinit`.
 const Probe = struct {
     arena: std.heap.ArenaAllocator,
 
@@ -1231,8 +1051,7 @@ fn has(haystack: []const u8, needle: []const u8) !void {
 }
 
 test "the divider translates to what the hand-written deck says, line for line" {
-    // The circuit of fixtures/op/voltage_divider, whose hand translation this
-    // has to reproduce the MEANING of before that file can be deleted.
+    // The circuit of fixtures/op/voltage_divider.
     var p: Probe = .init();
     defer p.deinit();
     const out = try p.sim(
@@ -1255,8 +1074,7 @@ test "the divider translates to what the hand-written deck says, line for line" 
 }
 
 test "a DC sweep counts intervals, not points" {
-    // `.dc V1 0 10 0.5` is 21 ngspice samples. Emitting points=21 shifts every
-    // one of them by half a step and the whole column reads as an error.
+    // `.dc V1 0 10 0.5` is 21 samples, 20 intervals.
     var p: Probe = .init();
     defer p.deinit();
     const out = try p.sim(
@@ -1271,7 +1089,7 @@ test "a DC sweep counts intervals, not points" {
 }
 
 test "AC lin counts intervals while dec counts per decade" {
-    // The asymmetry is real: SPICE's LIN N is a TOTAL and its DEC N is a rate.
+    // SPICE's LIN N is a total and its DEC N a rate.
     var p: Probe = .init();
     defer p.deinit();
     try has(try p.sim(
@@ -1307,8 +1125,7 @@ test "a BJT's substrate node is optional and found by model lookup" {
     try has(three, "q1 (c b 0) qmod\n");
     try has(three, "model qmod sp_bjt ( type=1 is=1e-16 bf=100 )");
 
-    // The same card with a substrate node: `sub` is not a model name, so it is
-    // a node. Counting positions alone could not tell these two apart.
+    // With a substrate node: `sub` is not a model name, so it is a node.
     const four = try p.sim(
         \\bjt
         \\Q1 c b 0 sub QMOD 2.5
@@ -1339,9 +1156,7 @@ test "MOSFET LEVEL picks the module and never leaks into the parameters" {
     try has(out, "load \"spice/mos3.osdi\"");
     try testing.expect(std.mem.indexOf(u8, out, "level=") == null);
 
-    // A level with no module refuses, rather than falling back to the nearest
-    // model: that would compare two different sets of equations and print the
-    // difference as an espice error.
+    // A level with no module refuses rather than picking a nearby one.
     try has(try p.why(
         \\mos
         \\M1 d g 0 0 NM W=2u L=1u
@@ -1365,8 +1180,7 @@ test "waveforms map positionally and stop where SPICE stopped" {
         \\.end
     );
     try has(out, "v1 (a 0) xlat_vsource type=\"pulse\" val0=0 val1=5 delay=1n rise=2n fall=3n width=10n period=20n\n");
-    // Three arguments given, three emitted: an omitted TD is VACASK's own
-    // default, not a zero this file invented.
+    // Three arguments given, three emitted; the rest take VACASK's defaults.
     try has(out, "v2 (b 0) xlat_vsource type=\"sine\" sinedc=0 ampl=1 freq=1k\n");
     try has(out, "analysis tran1 tran step=1n stop=100n maxstep=");
 }
@@ -1456,8 +1270,7 @@ test "options that change the answer are translated; the rest are refused" {
     try has(out, "temp=55");
     try testing.expect(std.mem.indexOf(u8, out, "klu") == null);
 
-    // `maxord` has no VACASK spelling. Dropping it would silently integrate at
-    // a different order than the deck asked ngspice for.
+    // `maxord` has no VACASK spelling, and dropping it changes the integration order.
     try has(try p.why(
         \\opts
         \\V1 in 0 1
@@ -1492,9 +1305,8 @@ test "a card with no faithful translation refuses the whole deck, by name" {
 }
 
 test "a nested .dc emits VACASK's sweeps in the opposite order" {
-    // ngspice's FIRST source is the fast one; VACASK's LAST sweep block is.
-    // Emit them in deck order and the 255 samples come out transposed, which
-    // compares an output characteristic against its own mirror image.
+    // ngspice's first source is the fast one; VACASK's last sweep block is.
+    // In deck order the samples would come out transposed.
     var p: Probe = .init();
     defer p.deinit();
     const out = try p.sim(
@@ -1513,8 +1325,7 @@ test "a nested .dc emits VACASK's sweeps in the opposite order" {
 }
 
 test "scale suffixes are respelled into VACASK's, which are not SPICE's" {
-    // The silent one: SPICE `M` is milli, VACASK `M` is mega. Passing the
-    // token through unchanged is a factor of 1e9 with nothing to notice it.
+    // SPICE `M` is milli, VACASK `M` is mega.
     var p: Probe = .init();
     defer p.deinit();
     const out = try p.sim(
@@ -1551,11 +1362,8 @@ test "a model with no parameters gets no empty parameter list" {
 }
 
 test "a source cannot hold both a DC value and a waveform when a static analysis asks" {
-    // ngspice reads the DC value for `.op`/`.dc`/`.ac` and the waveform only
-    // for `.tran`; VACASK ignores `dc` outright once `type=` is set and biases
-    // at the waveform's t=0 value. The deck RUNS either way — `ngspice/rtlinv`
-    // came back as 101 plausible points that were a constant — which is why
-    // this refuses rather than picking one.
+    // ngspice's static analyses read the DC value; VACASK biases at the
+    // waveform's t=0 value once `type=` is set.
     var p: Probe = .init();
     defer p.deinit();
     try has(try p.why(
@@ -1566,9 +1374,7 @@ test "a source cannot hold both a DC value and a waveform when a static analysis
         \\.end
     ), "DC value");
 
-    // A transient-only deck never consults the DC value, so it translates.
-    // That is the common case: 86 fixtures drive a waveform and only 5 of them
-    // also ask for a static analysis.
+    // A transient-only deck never reads the DC value, so it translates.
     try has(try p.sim(
         \\tran only
         \\vin 1 0 DC 3 PULSE(0 5 2n 2n 2n 80n 160n)
@@ -1579,10 +1385,7 @@ test "a source cannot hold both a DC value and a waveform when a static analysis
 }
 
 test "a .dc step that does not divide the range stops where ngspice stops" {
-    // ngspice walks from START by STEP and stops before passing STOP, so
-    // `.dc Vgs 0 1.1 0.2` is six samples ending at 1.0 and never reaches 1.1.
-    // Copying STOP across and rounding the interval count gave seven samples on
-    // a grid where only the first one agreed.
+    // ngspice stops before passing STOP: six samples ending at 1.0.
     var p: Probe = .init();
     defer p.deinit();
     try has(try p.sim(
@@ -1604,9 +1407,7 @@ test "a .dc step that does not divide the range stops where ngspice stops" {
 }
 
 test "PULSE without rise/fall takes SPICE's TSTEP default, not VACASK's 1ns" {
-    // SPICE defaults an omitted TR/TF to TSTEP; VACASK defaults both to a flat
-    // 1 ns whatever `step` says. On a `.tran 0.1 7.0` deck that is a 0.1 s edge
-    // against a 1 ns one, and the two engines never rejoin.
+    // SPICE defaults TR/TF to TSTEP and PW to TSTOP; VACASK uses 1 ns edges.
     var p: Probe = .init();
     defer p.deinit();
     try has(try p.sim(
@@ -1622,9 +1423,7 @@ test "PULSE without rise/fall takes SPICE's TSTEP default, not VACASK's 1ns" {
 test "waveform arguments VACASK accepts but ignores are refused" {
     var p: Probe = .init();
     defer p.deinit();
-    // `sinephase` is accepted and does nothing: 0, 45 and 90 degrees give a
-    // byte-identical waveform. `delay` and `theta` beside it ARE honoured,
-    // which is what makes silently dropping this one plausible and wrong.
+    // `sinephase` is accepted and ignored.
     try has(try p.why(
         \\phase
         \\V1 in 0 SIN(0 1 1k 0 0 90)
@@ -1644,9 +1443,7 @@ test "waveform arguments VACASK accepts but ignores are refused" {
 }
 
 test "SFFM's pedestal is sinedc; `offset` is a parameter VACASK takes and ignores" {
-    // Measured: `offset=2` on a `type="fm"` source gives a mean of 0.0001,
-    // `sinedc=2` gives 2.0001. `offset` IS a valid vsource parameter, so the
-    // wrong spelling raised no error at all.
+    // `offset` is accepted on an fm source and ignored; `sinedc` is the pedestal.
     var p: Probe = .init();
     defer p.deinit();
     try has(try p.sim(

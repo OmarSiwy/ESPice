@@ -1,10 +1,12 @@
-//! ngspice invocation and optional KLU preprocessing. Resolve binaries via PATH
-//! in `nix develop .#benchmarking`; the flake lock owns package versions.
+//! ngspice adapter for the benchmark: the batch command line, plus an
+//! optional `.options klu` copy of the deck. The binary comes from PATH in
+//! `nix develop .#benchmarking`, whose flake lock pins its version.
 const std = @import("std");
 const common = @import("job.zig");
-pub const executable = "ngspice";
 pub const version_flag = "--version";
 
+/// A batch job writing `raw_path`. With `klu`, a deck that lacks the option
+/// runs from a copy beside `raw_path` with `.options klu` inserted.
 pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []const u8, raw_path: []const u8, klu: bool) common.Error!common.Job {
     const source = std.Io.Dir.cwd().realPathFileAlloc(io, netlist, a) catch return error.DeckFailed;
     const raw_dir = std.Io.Dir.cwd().realPathFileAlloc(io, std.fs.path.dirname(raw_path) orelse ".", a) catch return error.ScratchFailed;
@@ -25,7 +27,8 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []con
     };
 }
 
-pub fn deckHasKlu(text: []const u8) bool {
+/// Whether any `.option(s)` card after the title names `klu`.
+fn deckHasKlu(text: []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     _ = lines.next(); // SPICE title is never an option card.
     while (lines.next()) |line| {

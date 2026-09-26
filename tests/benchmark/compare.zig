@@ -1,9 +1,15 @@
-//! Cross-simulator waveform comparison; fixture correctness uses the numeric
-//! oracles in test_correctness.zig instead of this relative waveform metric.
+//! Cross-simulator waveform agreement for the benchmark table: pairs plots
+//! by name and scores each shared signal by relative error. Fixture
+//! correctness uses the numeric oracles in test_correctness.zig instead.
 const std = @import("std");
 const Io = std.Io;
+
+/// Worst agreement over every paired signal. `complete` is false when a
+/// reference plot or signal had no counterpart; such a result never passes.
 pub const Accuracy = struct { complete: bool = true, max_rel: f64, rms_rel: f64, pass: bool };
 
+/// One raw-file plot with lowercased, normalized variable names.
+/// `data` is row-major, (re, im) interleaved when `is_complex`.
 pub const Plot = struct {
     plotname: []const u8,
     varnames: []const []const u8,
@@ -13,11 +19,14 @@ pub const Plot = struct {
     data: []const f64,
 };
 
+/// `parseRawBlob` over a file; null if it cannot be read.
 pub fn parseRawFile(io: Io, gpa: std.mem.Allocator, path: []const u8) ?[]const Plot {
     const blob = Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch return null;
     return parseRawBlob(gpa, blob);
 }
 
+/// Every plot of a binary raw file, or null if any plot is malformed or
+/// truncated: a partial read would silently drop an analysis.
 pub fn parseRawBlob(gpa: std.mem.Allocator, blob: []const u8) ?[]const Plot {
     var plots: std.ArrayList(Plot) = .empty;
     var rest = blob;
@@ -101,6 +110,8 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
     };
 }
 
+/// Maps each simulator's signal spelling onto `v(node)`/`i(device)`; scales
+/// are left bare.
 fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
     if (scale_names.has(lower)) return lower;
     if (scale_aliases.get(lower)) |canonical| return canonical;
@@ -110,12 +121,9 @@ fn normalizeVarName(gpa: std.mem.Allocator, lower: []const u8) []const u8 {
     return std.fmt.allocPrint(gpa, "v({s})", .{lower}) catch lower;
 }
 
-fn compareRawFiles(io: Io, gpa: std.mem.Allocator, ng_path: []const u8, zp_path: []const u8, rtol: f64) ?Accuracy {
-    const ng = parseRawFile(io, gpa, ng_path) orelse return null;
-    const zp = parseRawFile(io, gpa, zp_path) orelse return null;
-    return compareRaws(gpa, ng, zp, rtol);
-}
-
+/// Scores candidate plots `zp` against reference plots `ng`. Plots pair by
+/// exact name first, then by `plot_classes` alias; a candidate-only plot is
+/// ignored. Null when nothing was comparable.
 pub fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, rtol: f64) ?Accuracy {
     var worst: Accuracy = .{ .max_rel = 0, .rms_rel = 0, .pass = true };
     var scored: usize = 0;
@@ -159,6 +167,11 @@ pub fn compareRaws(gpa: std.mem.Allocator, ng: []const Plot, zp: []const Plot, r
     return worst;
 }
 
+/// Relative error of each shared signal, normalized by max(peak, peak-to-peak,
+/// 1). Transient plots are compared on the reference's time points, with the
+/// candidate interpolated and allowed a local time shift so an edge placed one
+/// step apart is not scored as an amplitude error. Null when the plots are not
+/// comparable or share no signal.
 fn comparePlots(gpa: std.mem.Allocator, ng: Plot, zp: Plot, rtol: f64) ?Accuracy {
     if (ng.is_complex != zp.is_complex) return null;
     var ng_name_buf: [128]u8 = undefined;
@@ -293,6 +306,8 @@ fn plotLower(buf: []u8, plotname: []const u8) []const u8 {
     return std.ascii.lowerString(buf[0..plotname.len], plotname);
 }
 
+/// Device-internal nodes (`m1#drain`, `d1:a_int`) are simulator-specific and
+/// never scored.
 fn isInternalNode(name: []const u8) bool {
     return std.mem.indexOfAny(u8, name, "#:!") != null;
 }
@@ -356,7 +371,6 @@ test "accuracy requires signals and complete real samples" {
     const partial = comparePlots(a, with_current, reference, 1e-3).?;
     try std.testing.expect(!partial.complete and !partial.pass);
     try std.testing.expectEqual(@as(f64, 0), partial.max_rel);
-    try std.testing.expect(!partial.complete and !partial.pass);
     var candidate = reference;
     candidate.varnames = &.{"time"};
     candidate.nvars = 1;
@@ -395,10 +409,9 @@ test "one signal spelling across four simulators" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // Left column is what each simulator writes (already lowercased by the raw
-    // parser); right column is the single spelling everything must collapse to.
-    // Get this wrong and VACASK matches zero columns, then reports a vacuous
-    // N/A that reads like "validated".
+    // What each simulator writes (lowercased by the parser) -> the one
+    // spelling it must collapse to. A miss here leaves VACASK with zero
+    // matched columns.
     inline for (.{
         .{ "v(out)", "v(out)" }, // ngspice / espice
         .{ "i(vin)", "i(vin)" },
@@ -428,12 +441,10 @@ test "VACASK names a `.dc` scale after the deck, and calls the plot an operating
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // What VACASK writes for a translated `.dc`: a plot it calls an Operating
-    // Point (a sweep IS a sweep of operating points there) whose scale is the
-    // sweep block's own identifier. ngspice calls the same plot a DC transfer
-    // characteristic and the same scale `v(v-sweep)`. Without the class map and
-    // the scale alias this pair is N/A on both counts while agreeing to the
-    // last bit.
+    // VACASK writes a translated `.dc` as an "Operating Point" plot whose scale
+    // is the sweep block's identifier; ngspice calls it a DC transfer
+    // characteristic with scale `v(v-sweep)`. The class map and scale alias
+    // make the two comparable.
     const vc: Plot = .{
         .plotname = "Operating Point",
         .varnames = &.{ normalizeVarName(a, "vsweep"), normalizeVarName(a, "in"), normalizeVarName(a, "out"), normalizeVarName(a, "vin:flow(br)") },
@@ -468,10 +479,7 @@ test "VACASK names a `.dc` scale after the deck, and calls the plot an operating
 
 test "VACASK's AC plotname is not ngspice's, and the class map knows it" {
     // ngspice writes "AC Analysis"; VACASK writes "AC Small Signal Analysis".
-    // Same analysis, same columns. The translator made this reachable for the
-    // first time: before it, no VACASK deck in the suite ran an `.ac` at all,
-    // so the two labels had never met and every translated AC fixture would
-    // have reported a coverage N/A over a spelling.
+    // Same analysis, same columns.
     var buf_a: [128]u8 = undefined;
     var buf_b: [128]u8 = undefined;
     try std.testing.expectEqualStrings(
@@ -492,12 +500,9 @@ test "the raw parser reads every plot, and still refuses a truncated one" {
     const a = arena.allocator();
     const raw = "Plotname: Operating Point\nNo. Variables: 1\nNo. Points: 1\nVariables:\n\t0\tv(out)\tvoltage\nBinary:\n" ++ "\x00" ** 8;
     try std.testing.expectEqual(@as(usize, 1), parseRawBlob(a, raw).?.len);
-    // Used to be `== null`: a second plot meant the whole raw was thrown away,
-    // which is branch P5 and 19 of the 64 N/A fixtures.
     try std.testing.expectEqual(@as(usize, 2), parseRawBlob(a, raw ++ raw).?.len);
     try std.testing.expect(parseRawBlob(a, raw[0 .. raw.len - 1]) == null);
-    // A raw whose FIRST plot is whole and whose second is truncated is still
-    // null: a partially-read raw silently drops an analysis.
+    // A whole first plot does not excuse a truncated second one.
     try std.testing.expect(parseRawBlob(a, raw ++ raw[0 .. raw.len - 1]) == null);
 }
 
@@ -515,9 +520,8 @@ test "a complex plot is scored re and im separately, not as a magnitude" {
         .data = &.{ 1, 0, 3, 4, 2, 0, 5, 6 },
     };
     try std.testing.expect(comparePlots(a, reference, reference, 1e-3).?.pass);
-    // Same magnitude at every point, re and im swapped — a phase-convention
-    // error. Collapsing to |z| first would call this a PASS, which is the one
-    // thing an AC comparison exists to catch.
+    // Same magnitude, re and im swapped: a phase error that comparing |z|
+    // would pass.
     var swapped = reference;
     swapped.data = &.{ 1, 0, 4, 3, 2, 0, 6, 5 };
     try std.testing.expect(!comparePlots(a, reference, swapped, 1e-3).?.pass);
@@ -543,9 +547,8 @@ test "multi-analysis plots are matched by name, never by index" {
         .nvars = 1,
         .data = &.{7},
     };
-    // ngspice writes AC first, espice writes Operating Point first, on every
-    // multi-analysis deck. Index matching would score the AC sweep against the
-    // operating point and report a failure.
+    // ngspice writes AC first and espice writes the operating point first, so
+    // pairing by index would score AC against OP.
     try std.testing.expect(compareRaws(a, &.{ ac, op }, &.{ op, ac }, 1e-3).?.pass);
     // A CANDIDATE-only plot is not evidence of anything: espice writes a
     // `Fourier Analysis` plot where ngspice prints `.four` to stdout.
@@ -554,7 +557,6 @@ test "multi-analysis plots are matched by name, never by index" {
     try std.testing.expect(compareRaws(a, &.{ac}, &.{ four, ac }, 1e-3).?.pass);
     // A REFERENCE plot with no counterpart is a coverage gap -> N/A, not a pass.
     const gap = compareRaws(a, &.{ ac, op }, &.{ac}, 1e-3).?;
-    try std.testing.expect(!gap.complete and !gap.pass);
     try std.testing.expect(!gap.complete and !gap.pass);
     // One bad plot out of two loses the whole fixture: worst pair wins.
     var wrong_op = op;
@@ -568,11 +570,9 @@ test "an exact plotname beats an aliased one, whatever the order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // `plot_classes` aliases both of these to "dc" so that a one-point DC
-    // sweep can answer for an ngspice `.op`. That alias also makes them
-    // interchangeable, so a deck carrying BOTH — `devices/jfet_vds_vgs` — must
-    // still pair each with its namesake or the point counts collide and a
-    // fixture that agrees to 3e-6 reads N/A.
+    // `plot_classes` aliases both to "dc", so a deck with both (e.g.
+    // devices/jfet_vds_vgs) must still pair each with its namesake or the
+    // point counts collide.
     const sweep: Plot = .{
         .plotname = "DC transfer characteristic",
         .varnames = &.{ "v(v-sweep)", "v(out)" },
@@ -591,8 +591,7 @@ test "an exact plotname beats an aliased one, whatever the order" {
     };
     try std.testing.expect(compareRaws(a, &.{ sweep, op }, &.{ op, sweep }, 1e-3).?.pass);
     try std.testing.expect(compareRaws(a, &.{ op, sweep }, &.{ sweep, op }, 1e-3).?.pass);
-    // The alias still does its job when there IS no namesake: VACASK spells a
-    // DC sweep "Operating Point" and must still match ngspice's own label.
+    // With no namesake, the alias applies.
     var vc_dc = op;
     vc_dc.plotname = "DC transfer characteristic";
     try std.testing.expect(compareRaws(a, &.{op}, &.{vc_dc}, 1e-3).?.pass);

@@ -1,6 +1,11 @@
-//! Build-time filesystem discovery becomes shared compile-time fixture arrays.
+//! Build-time half of the fixture catalog, imported by build.zig. Walks
+//! tests/fixtures once at configure time and generates the module both the
+//! correctness and benchmark runners import.
 const std = @import("std");
 
+/// A generated module with `spice_files`, `expected_files` and the embedded
+/// `expected_outputs`, sorted by path. Panics on a deck without its
+/// `.expected.json` or on an empty fixture tree.
 pub fn create(b: *std.Build) *std.Build.Module {
     const io = b.graph.io;
     var dir = b.build_root.handle.openDir(io, "tests/fixtures", .{ .iterate = true }) catch
