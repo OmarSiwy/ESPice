@@ -4,9 +4,13 @@ Monodromy matrix-vector products via sensitivity propagation, GMRES on the
 shooting Jacobian, Krylov recycling. Serves PSS shooting, MFT-QPSS, PXF's
 time-domain adjoint.
 
-**Status: not implemented** — `pss/pss.zig` builds the shooting Jacobian
-by finite differences (one period integration per column, dense LU). This
-doc is the spec for the Krylov replacement (RESEARCH.md checklist item 3).
+**Status: partly implemented.** `src/analysis/pss/pss.zig` builds the
+shooting Jacobian by finite differences (one period integration per column,
+dense LU) below 50 unknowns. From 50 unknowns up it runs `gmres.zig` on
+(Phi - I) matrix-free, but each product is a finite-difference period
+integration (`shootingMatvec`), not the sensitivity recurrence over saved
+step factors described here, and GMRES runs unpreconditioned. The
+recurrence, the adjoint replay and GCRO-DR recycling are not implemented.
 
 ## 1. Mathematical specification
 
@@ -125,9 +129,9 @@ Integration into the existing code:
 2. Shooting iteration: integrate (filling the tape) → $\phi$ → GMRES on
    $(\Phi - I)$ where each $\Phi v$ replays the tape forward
    (`solve` per step) and each adjoint product replays backward
-   (`solveT` per step). The GMRES core is `converger.zig`'s existing
-   Givens/MGS machinery — reuse it, do not re-implement (it needs only an
-   operator callback where `jvProduct` currently sits).
+   (`solveT` per step). The GMRES core is `gmres.zig`, which pss.zig
+   already drives with the finite-difference `shootingMatvec`; the
+   recurrence replaces only that operator callback.
 3. Convergence/tolerances: outer shooting tol unchanged; inner GMRES tol
    tied to the outer residual (inexact-Newton forcing, e.g.
    $\eta = \min(0.1, \|\phi\|)$ — cheap Eisenstat–Walker flavor, derived).
@@ -175,8 +179,7 @@ pss_krylov(x0):
 - **Within one $\Phi v$**: the step loop is sequential (recurrence), but
   each step is a sparse triangular solve + SpMV — level-scheduled solves
   per [gpu-sparse-lu.md](gpu-sparse-lu.md), or keep the whole replay
-  on-device with the tape resident in GPU memory (it was produced there if
-  the period integration ran in the megakernel).
+  on-device with the tape resident in GPU memory.
 - **Across Krylov vectors**: block-GMRES — propagate all $m$ basis
   candidates (or the $2K{+}1$ MFT cycles' vectors) through the recurrence
   as a multiple-RHS blocked triangular solve per step; this is the axis
@@ -185,8 +188,7 @@ pss_krylov(x0):
 - **FD-column fallback** (today's method) parallelizes as independent
   period-integration lanes — worth keeping as the batched oracle.
 - Recycling bookkeeping ($U$ updates, small Ritz eigenproblems) is
-  thread-0/host scalar work, same policy as the megakernel's GMRES
-  bookkeeping.
+  thread-0/host scalar work.
 
 ```
 kernel monodromy_block_apply(tape, V[m]):      # all Krylov vectors at once
@@ -214,18 +216,18 @@ kernel monodromy_block_apply(tape, V[m]):      # all Krylov vectors at once
   verified against source); the trap dynamic-current chain matches the
   implemented `i_prev` update rule.
 - §1 Floquet clustering, GCRO-DR, checkpointing: derived, marked.
-- §2–§4: design spec; existing pieces verified (`converger.zig` GMRES
-  core, `direct.zig` solve/solveT, `pss.zig` FD path as oracle).
+- §2–§4: design spec; existing pieces verified (`gmres.zig`,
+  `direct.zig` solve/solveT, `pss.zig` FD path as oracle).
 
 **Our implementation**
 
-- Exists: `src/analysis/pss/pss.zig` (FD-dense shooting — the
-  oracle), `src/solver/converger.zig` (GMRES core to
-  reuse), `src/solver/direct.zig` (`solve`/`solveT` on frozen
-  factors).
+- Exists: `src/analysis/pss/pss.zig` (FD-dense shooting, the oracle,
+  and FD matrix-free GMRES shooting above 50 unknowns),
+  `src/solver/gmres.zig` (the Krylov core), `src/solver/direct.zig`
+  (`solve`/`solveT` on frozen factors).
 - Consumers: [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md)
   Krylov upgrade, [qpss](../analysis/qpss.md) MFT (future),
   [pxf](../analysis/pxf.md) time-domain adjoint (future),
   [periodic-noise](../analysis/periodic-noise.md) adjoint upgrade.
-- Bench fixtures: `benchmark/fixtures/pss/*` (correctness vs the FD
-  oracle is the acceptance test).
+- Fixtures: `tests/fixtures/pss/` (correctness against the FD oracle is
+  the acceptance test).

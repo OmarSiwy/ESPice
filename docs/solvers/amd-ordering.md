@@ -187,8 +187,9 @@ the thesis describes these only at survey level). §2/§3 — verified against
 judgment; no source parallelizes MD on GPU).
 
 **Our implementation:** `src/solver/order.zig` (`amd()`, `DegLists`,
-`Ws`, `wsSize`); consumed per BTF block by `order()` and by
-`src/solver/direct.zig` `Lu.init` (`Params.ordering = .amd`).
-Scaling fixtures: `benchmark/fixtures/scaling/rc_mesh_{1k,10k}` and
-`resistor_grid_{32x32,100x100}` (2-D patterns where ordering quality
-dominates fill), `rc_ladder_100k` (chain — near-zero fill sanity bound).
+`Ws`, `wsSize`); consumed per BTF block by `order()`, which
+`src/solver/direct.zig` (`computeOrdering`) always calls: BTF + AMD is the
+only ordering, with no natural-order option. Scaling fixtures:
+`tests/fixtures/stress/scaling_resistor_grid_{32x32,100x100}` (2-D patterns
+where ordering quality dominates fill) and `scaling_rc_ladder_100k` (a chain,
+the near-zero-fill sanity bound).

@@ -101,14 +101,38 @@ strongly diagonally dominant so the frozen pivot sequence is at its
 safest exactly when the homotopy needs cheap steps. gmin loading also
 guards MNA's zero-diagonal rows during early rungs.
 
-Ours (`converger.Tolerances`): `gmin_start = 1e-2` (matches ngspice's
-dynamic ladder origin), `source_steps = 7` (spice3-style ramp; ltspice
-profile bumps it to 25), the per-analysis ladder living in the dc/op
-drivers with `ZP_OPDBG=1` tracing rungs. The gmin knob feeds
-`Options.gmin`, applied at assembly time as $J_{ii} \mathrel{+}= g$,
-$F_i \mathrel{+}= g x_i$ — note this is the *residual-consistent* form
-(the regularized system's true residual), which keeps the acceptance gates
-honest across rungs.
+Ours: `solveLadder` in `src/analysis/dc/op.zig`, traced with `ZP_OPDBG=1`.
+It runs five rungs in order:
+
+1. Plain Newton with no diagonal gmin, capped at itl1.
+2. Dynamic gmin stepping (cktop.c `dynamic_gmin`) from
+   `Tolerances.gmin_start = 1e-2` down to `Tolerances.gmin`, factor 10.
+   Each solve is capped at itl2, and the accelerate/slow-down thresholds,
+   the 1.00005 floor and the final clamp follow cktop.c:207-222 on that
+   itl2 budget. A converged step at the target gmin is re-solved with no
+   shunt, since the answer must not carry it.
+3. Adaptive source stepping through the devices' `attempt(lambda)`:
+   lambda starts at 0 with delta = 0.25; delta grows 1.5x on success and
+   halves on failure (retrying from the last good lambda and x); the rung
+   gives up when delta falls below 1e-4, after 100 solves, or at once when
+   the lambda = 0 start fails (a retry would repeat the same cold solve).
+   Each solve is capped at itl2. There is no fixed step count: the old
+   `source_steps` tolerance is gone.
+4. JFNK (`converger.jfnk`) from a cold start.
+5. OPtran: a real transient with full sources (dt 10 ns, t_stop 1 us, UIC),
+   whose settled state only seeds a clean Newton; the answer is that
+   Newton's verdict. ngspice 44.2 runs this rung only when `optran` is
+   given (cktop.c:94-97).
+
+The gmin knob feeds `Options.gmin`, applied at assembly time as
+$J_{ii} \mathrel{+}= g$, $F_i \mathrel{+}= g x_i$. This is the
+*residual-consistent* form (the regularized system's true residual), which
+keeps the acceptance gates honest across rungs.
+
+Divergences from cktop.c: our source stepping is not gillespie_src (it
+starts from delta = 0.25 rather than raise = 1e-3 and has no gmin bootstrap
+at lambda = 0), and the JFNK and OPtran rungs have no ngspice counterpart
+in a default run.
 
 When each rung wins: gmin — floating/high-impedance nodes, exponential
 stiffness; source — circuits whose difficulty *is* the bias (latches,
@@ -181,40 +205,11 @@ pseudo_transient (the rung below the ladder):
     stop when ||F|| < tol (steady state = DC op)
 ```
 
-## 4. Pseudo-code, GPU parallel
+## 4. GPU
 
-The ladder is outer-loop control — milliseconds of host logic around
-device-heavy Newton solves. The correct GPU design keeps the ladder on the
-host and the solves on the device; the interesting parallel angle is
-*rung-level* concurrency:
-
-```
-gpu_ladder(ckt):
-  # rung knobs are header fields: our staged prefix already carries
-  # Tol.gmin per solve (gpu_solver.zig patches it) — a gmin rung is a
-  # header-only HtoD + relaunch, no repack; alpha likewise scales source
-  # params through the ParamRef repack path.
-  x_dev persists across rungs             # warm start = free (stays on device)
-  for rung in ladder:
-    patch header {gmin | srcFact}; upload header (bytes, not MBs)
-    launch arp_solve (whole Newton on device); read ResultHeader
-    host controller: accelerate/decelerate/retreat exactly as in §3
-    checkpoints: device-to-device copy of x into a shadow buffer
-                 (restore = pointer swap; never round-trips the host)
-
-speculative parallel ladder (when the device is underutilized by one solve):
-  parfor candidate steps {g/f1, g/f2, g/f3} in one batched launch:
-    independent Newton solves from the same checkpoint      # batch dim
-  take the deepest converged rung; discard the rest
-  # trades wasted flops for ladder latency — profitable exactly when a
-  # single solve can't fill the GPU (small n, our common case)
-
-what fundamentally serializes: the homotopy path itself — rung k+1's warm
-start IS rung k's solution; speculation shortens the chain by a constant
-factor, never removes it. PTC serializes identically (pseudo-time is a
-chain by construction) but each step is a plain device Newton solve, so it
-inherits whatever the megakernel already does.
-```
+None. The ladder and every Newton solve run on the host; the GPU only
+evaluates device planes. A speculative ladder (several candidate gmin steps
+solved in one batch from the same checkpoint) remains an idea, not code.
 
 ---
 
@@ -230,17 +225,15 @@ against fetched cktop.c. §1 homotopy/IFT framing — derived, not
 source-verified (standard continuation theory). §1/§3 PTC and the SER
 controller — derived, not source-verified (Kelley & Keyes paywalled; the
 form given is their published controller as commonly cited). §2 — verified
-against `converger.zig` (`Tolerances.gmin_start/source_steps`, gmin
-residual-consistent loading in `newton()`); the dc/op ladder drivers live in
-`src/analysis/dc/`. §4 — our design, not from a source.
+against `src/analysis/dc/op.zig` (`solveLadder`, `transientOp`) and
+`converger.zig` (gmin loading in `newton()`).
 
-**Our implementation:** `src/solver/converger.zig`
-(`Tolerances.{gmin_start, source_steps}`, `Options.gmin`, gmin loading in
-`newton()`/`jfnk()`); ladder drivers `src/analysis/dc/{op,dc}.zig`;
-GPU header patching `src/analysis/gpu.zig` (`solveNewton` writes `Tol.gmin`
-per solve — the rung-as-header-patch mechanism exists today). PTC: not
-implemented as a DC fallback (transient exists; wiring it as an OP rung is
-an open item — see README). Fixtures:
-`benchmark/fixtures/convergence/{diode_bridge,schmitt,high_gain_fb}`
-(ladder rungs actually exercised), `benchmark/fixtures/op/`,
-`benchmark/fixtures/adversarial/`.
+**Our implementation:** ladder in `src/analysis/dc/op.zig` (`solveLadder`,
+`transientOp`, `newtonRun`), reused per point by `src/analysis/dc/dc.zig`;
+`Tolerances.{gmin, gmin_start, itl1, itl2}` in `src/core/numerics.zig`;
+`Options.gmin` and gmin loading in `src/solver/converger.zig`. PTC in the
+Kelley-Keyes form is not implemented; OPtran (rung 5) is the pseudo-time
+fallback. Fixtures: `tests/fixtures/convergence/` (`bench_diode_bridge`,
+`bench_schmitt`, `bench_high_gain_fb`), `tests/fixtures/op/`, and
+`tests/fixtures/stress/scaling_inverter_chain_4k` (finishes on the gmin
+rung, following ngspice's gmin sequence).

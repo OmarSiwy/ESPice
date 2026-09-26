@@ -3,7 +3,16 @@
 Branch `simd-refactor`. Verdict: **refactor stays scalar in global
 coordinates**. Every vector/restructured variant was bit-identical to the
 oracle and faster in the hot microbenchmark — and the best one still lost
-19% wall end-to-end. This log is the evidence and the rerunnable rig.
+19% wall end-to-end. This log is the evidence.
+
+Since then: the "tiny n, the tape fits in L1" reopen case below was taken
+up, and `SparseLu.refactor` now replays a flat slot tape for factors with at
+most 2,048 flops (`solver-perf-2026-09.md`, "Small matrices: the refactor
+tape"). Larger factors keep the scalar column replay this log chose. The
+standalone rig used here (`src/solver/dev_harness.zig` and the
+`ZP_LU_DUMP` pattern capture) was deleted; its differential checks live on
+as `SparseTests` cases in `src/solver/tests.zig`, and the captured
+`src/solver/testdata/fourbitadder_lu.bin` is no longer read by anything.
 
 Machine: i9-14900HX (AVX2, no AVX-512; W=4 for f64), zig 0.16.0, ReleaseFast.
 Workload: `tran/fourbitadder` (n=991, nnz=8329, L=9994, U=11404 after
@@ -66,7 +75,7 @@ also carries 17.3% of all D1 read misses — partly memory-bound already.
 
 ## Step 1: run-length distribution (measure before vectorizing)
 
-`dev_harness.zig` on a `ZP_LU_DUMP` capture of the fixture:
+The (since deleted) `dev_harness.zig` on a `ZP_LU_DUMP` capture of the fixture:
 
 - Global coordinates, L columns sorted ascending: **7.9%** of flop-weighted
   elements are covered by 4-runs. Direct SIMD on `w[li[p]] -= lx[p]*uki` is
@@ -149,29 +158,28 @@ normalize intact. Applies to any short variable-length fill in a hot loop;
   grids): run coverage → contiguous and the per-op overhead amortizes.
 - AVX-512 (scatter/gather + mask registers): MTape's blend tax disappears.
 - Workloads where the tape fits and stays in L1 (tiny n, refactor-dominant
-  loops with no device eval between solves).
+  loops with no device eval between solves). Taken up: see the note at the
+  top.
 - **A workload that actually drives the flat `SparseLu.refactor` path.** As of
   spice-audit, `tran/fourbitadder` goes BBD (dense blocks, no replay), so it
   is no longer the fixture to profile for this kernel. Pick one the BBD
-  partitioner leaves as a single large block, or force the flat path, before
-  re-racing.
+  partitioner leaves as a single large block, or force the flat path with
+  `ESPICE_NO_BBD=1`, before re-racing.
 
-Reopen = rerun the rig, not re-argue: the harness differential-checks every
-variant (bit-identical) before racing, so only the timing question reopens.
-Confirm the fixture still dispatches `SparseLu.refactor` (grep the callgrind
-out for the symbol; on fourbitadder post-BBD-fix it is 0) — else the race
-times a cold path.
+Reopening means rebuilding a rig: add each variant as a differential case
+against the column replay in `src/solver/tests.zig` (bit-identical first),
+then race. Confirm the fixture still dispatches `SparseLu.refactor` (grep
+the callgrind output for the symbol; on fourbitadder after the BBD fix it
+is 0), else the race times a cold path.
 
 ## Reproduce
 
+The capture and race steps are gone with the harness. The profile step
+still works:
+
 ```sh
-# capture a pattern from any run (libc builds only; last full factor wins)
-ZP_LU_DUMP=/tmp/zplu.bin zig-out/bin/espice -b -r /tmp/o.raw \
-    benchmark/fixtures/tran/fourbitadder/circuit.sp
-# stats + differential checks + race (fixture copy lives in testdata/)
-zig run -OReleaseFast -fllvm -mcpu=native src/solver/dev_harness.zig -- \
-    src/solver/testdata/fourbitadder_lu.bin 2000
 # symbolized profile (Release strips DWARF; ~3x LLVM time)
 zig build -Ddebug-info=true -p zig-out-di
-valgrind --tool=callgrind --cache-sim=yes zig-out-di/bin/espice -b ...
+ESPICE_NO_BBD=1 valgrind --tool=callgrind --cache-sim=yes \
+    zig-out-di/bin/espice -b -r /tmp/o.raw tests/fixtures/tran/bench_tran_fourbitadder.sp
 ```

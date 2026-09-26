@@ -175,8 +175,8 @@ condensation DAG — topological depth of the block graph is a hard lower
 bound on solve steps, exactly like column levels inside one block. Factor
 time, by contrast, is embarrassingly parallel across blocks; BTF is
 therefore *more* valuable on GPU than on CPU (it manufactures coarse-grain
-independent work that level sets alone cannot). For our megakernel: blocks
-map to independent thread-block groups inside one cooperative launch, grid
+independent work that level sets alone cannot). In a single cooperative
+launch, blocks would map to independent thread-block groups, with a grid
 barrier only between solve levels of the condensation.
 
 ---
@@ -195,8 +195,8 @@ reasoning; GLU papers do per-matrix, not per-block, GPU scheduling).
 
 **Our implementation:** `src/solver/order.zig` (`order()` = iterative
 Tarjan + per-block AMD; workspace `Ws`), consumed by
-`src/solver/direct.zig` `Lu.init`. Scaling fixtures:
-`benchmark/fixtures/scaling/divider_chain` (deep condensation),
-`parallel_inverters_{100,500,2000}` (many independent blocks),
-`resistor_grid_32x32` vs `resistor_grid_100x100` (single irreducible block —
-BTF-neutral baseline).
+`computeOrdering` in `src/solver/direct.zig`. Scaling fixtures in
+`tests/fixtures/stress/`: `scaling_divider_chain` (deep condensation),
+`scaling_parallel_inverters_{100,2000}` (many independent blocks),
+`scaling_resistor_grid_32x32` vs `scaling_resistor_grid_100x100` (single
+irreducible block, the BTF-neutral baseline).

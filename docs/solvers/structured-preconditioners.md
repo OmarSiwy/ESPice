@@ -3,10 +3,15 @@
 Block-circulant (averaged-Jacobian) preconditioning, FFT diagonalization,
 degradation modes, fallback hierarchy, multi-tone generalization.
 
-**Status: not implemented** — the JFNK path (`converger.zig`) has
-diagonal-Jacobi and factored-LU right preconditioning for the *time-domain*
-Newton systems; nothing structured exists yet for spectral (HB/conversion-
-matrix) systems. Required by Krylov-HB, matrix-free PAC/PXF, and QPSS.
+**Status: not implemented.** JFNK (`converger.zig`) has diagonal-Jacobi
+and factored-LU right preconditioning for the time-domain Newton systems.
+No spectral preconditioner exists: HB solves its dense Jacobian with
+`dense_lu`, and QPSS and matrix-free PSS shooting run `gmres.zig` with no
+preconditioner (QPSS uses an unrestarted basis below 512 unknowns instead).
+An earlier `src/solver/preconditioner.zig` with DC-sample, averaged-circulant
+and block-banded variants was removed unused: its sideband-major indexing
+did not fit the node-major QPSS system (see the comment in
+`src/analysis/pss/qpss.zig`). This page is the design for a replacement.
 
 ## 1. Mathematical specification
 
@@ -197,21 +202,19 @@ kernel precond_apply(v):                       # inside per-lane GMRES
   so GMRES must converge in 1 iteration on any `ac/*`-class fixture — the
   natural unit test).
 - §1 degradation analysis: derived (perturbation bound is standard).
-- §2 plug-in point: callback-based GMRES supports these preconditioners.
-  Spectral primitives now exist in `src/solver/preconditioner.zig`.
+- §2 plug-in point: `gmres.zig` takes a right-preconditioner callback.
 - §3/§4: design spec; full multidimensional and GPU paths remain targets.
 
 **Our implementation**
 
-- Exists: `src/solver/preconditioner.zig` (DC-sample,
-  averaged-circulant, and block-banded variants),
-  `src/solver/gmres.zig` (callback-based Krylov solve), and
-  `src/solver/direct.zig` (per-sideband factors).
+- Exists: `src/solver/gmres.zig` (callback-based Krylov solve) and
+  `src/solver/direct.zig` (the factor a per-sideband block would use).
 - Consumers: Krylov-HB in
   [pss-shooting-harmonic-balance](../analysis/pss-shooting-harmonic-balance.md),
   [pac](../analysis/pac.md)/[pxf](../analysis/pxf.md) matrix-free path,
-  [qpss](../analysis/qpss.md) (implemented dominant-tone approximation;
-  full multidimensional preconditioning remains a target),
+  [qpss](../analysis/qpss.md) (unpreconditioned today; a node-major
+  block preconditioner with one sparse (G0 + j w_kl C0) factor per mix
+  product is the named upgrade),
   [mpde-envelope](../analysis/mpde-envelope.md) Fourier-envelope steps.
-- Bench fixtures: `benchmark/fixtures/hb/*` (iteration-count acceptance),
-  `benchmark/fixtures/ac/*` (LTI 1-iteration check).
+- Fixtures: `tests/fixtures/hb/` (iteration-count acceptance),
+  `tests/fixtures/ac/` (LTI 1-iteration check).

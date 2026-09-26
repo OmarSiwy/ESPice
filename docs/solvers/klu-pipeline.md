@@ -92,19 +92,24 @@ lifecycle (thesis §3.2: pattern fixed once, values change every iteration):
    the same values; only if *that* fails does the caller see
    `SingularMatrix` (and answers with its own ladder — gmin retry etc., see
    `homotopy-continuation.md`).
-5. **solve(+refinement):** permuted forward/back substitution; optional 1–2
-   refinement steps against the caller's live `vals` slice.
+5. **solve:** permuted forward/back substitution. KLU's optional
+   iterative refinement is not implemented.
 
 Layer-cake of matrix-change frequency (ours): identical values → `factor`
 is a no-op (`vcopy` memcmp bypass); same pattern/new values → refactor;
 pivot decay → full factor; pattern change → impossible by construction
-(pattern frozen at compile). One notable deviation from KLU: we do not
-implement row scaling $R$ (MNA + gmin keeps rows adequately balanced;
-`iter_refine_steps` is the recovery knob if a fixture proves otherwise).
+(pattern frozen at compile). Deviations from KLU: no row scaling $R$
+(MNA + gmin keeps rows adequately balanced) and no iterative refinement.
+Either is the recovery option if a fixture shows a conditioning failure;
+none has so far.
 
 ## 3. Pseudo-code, CPU sequential
 
-Refactor (matches `direct.zig Lu.refactor` exactly):
+Refactor, equivalent to `SparseLu.refactor` in `sparse_lu.zig`. The code
+zeroes each `w` slot as it consumes it instead of zeroing the pattern
+first, and factors with at most 2,048 flops replay a flat slot tape
+instead (`refactor-tape-2026-09.md`, `solver-perf-2026-09.md`); both give
+the same bits as this loop.
 
 ```
 refactor(col_ptr, vals, growth_limit):        # requires factored == true
@@ -130,15 +135,15 @@ refactor(col_ptr, vals, growth_limit):        # requires factored == true
     else:
       lx[p] = w[li[p]] / d for all p
 
-caller (Solver.factorInner):
+caller (SolverT.factorInner in direct.zig):
   if factored: refactor(...) catch { factored = false; full factor(...) }
   else: full factor(...)
 
-solve_with_refinement(rhs, x, steps):
-  x = rawSolve(rhs)
+solve_with_refinement(rhs, x, steps):   # KLU reference; not implemented
+  x = solve(rhs)
   repeat steps times:
-    r = rhs - A x            # CSC SpMV against the LIVE vals slice
-    d = rawSolve(r)
+    r = rhs - A x            # CSC SpMV against the live vals
+    d = solve(r)
     x += d
 
 condition_estimate(factors):                  # Hager/Higham, KLU §4.2.9
@@ -186,13 +191,12 @@ what fundamentally serializes:
     that later reach sets depend on -> symbolic+pivot stays on CPU, full stop
 ```
 
-Fit with our engine: `src/analysis/gpu.zig` currently ships whole-Newton
-megakernel solves (JFNK/GMRES — no factorization on device, see
-`newton-raphson-convergence.md`); a device level-set refactor+solve is the
-alternative "direct Newton on GPU" path and reuses the exact arrays
-`direct.zig` already stores (`up/ui` in topological order is the enabling
-invariant). Host↔device traffic per iteration: `vals` up, `x` down —
-same shape as the existing staged-prefix protocol.
+Fit with our engine: `src/analysis/gpu.zig` evaluates device planes and
+every solve runs on the host (see `newton-raphson-convergence.md` §4). A
+device level-set refactor+solve would be the "direct Newton on GPU" path,
+reusing the arrays `sparse_lu.zig` already stores (`up`/`ui` in topological
+order is the enabling invariant). Host-device traffic per iteration would
+be `vals` up and `x` down. Not implemented.
 
 ---
 
@@ -212,12 +216,13 @@ diagnostic; noted as such). §4 — derived, not source-verified (design
 aligned with GLU3.0's host-pivoting assumption).
 
 **Our implementation:** `src/solver/direct.zig` (`Params`
-{pivot_tol, refactor_growth_limit, iter_refine_steps}, `Solver.factor`
-bypass + fallback chain, `Lu.refactor`, `refine()`); Newton caller
-`src/solver/converger.zig` (`newton()`, `matrix_sig`
-factor-once). Condition estimation: not implemented (documented here as the
-KLU reference design). Scaling fixtures:
-`benchmark/fixtures/scaling/inverter_chain_{256,1k,4k}` (refactor per Newton
-iteration), `rc_ladder_100k` (factor-bypass on linear circuits),
-`benchmark/fixtures/convergence/{diode_bridge,schmitt,high_gain_fb}`
-(pivot-collapse → full-factor fallback).
+{execution, pivot_tol, refactor_growth_limit}, the `SolverT.factor` bypass
+and fallback chain), `src/solver/sparse_lu.zig` (`factor`, `refactor`,
+`solve`, `solveT`); Newton caller `src/solver/converger.zig` (`newton()`,
+`matrix_sig` factor-once). Condition estimation and iterative refinement:
+not implemented (documented here as the KLU reference design). Fixtures:
+`tests/fixtures/stress/scaling_inverter_chain_{256,4k}` (refactor per
+Newton iteration), `scaling_rc_ladder_100k` (factor bypass on linear
+circuits), `tests/fixtures/convergence/` (`bench_diode_bridge`,
+`bench_schmitt`, `bench_high_gain_fb`; pivot collapse to full-factor
+fallback).
