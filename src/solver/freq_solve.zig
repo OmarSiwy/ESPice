@@ -188,15 +188,34 @@ pub const FreqSolver = struct {
         }
     }
 
-    /// Solves every ω in `omegas` against one shared `rhs` (length 2n),
-    /// W frequencies per LaneLu pass; `x_out[k*2n..][0..2n]` receives ω_k.
-    /// `adjoint` selects A^T. The dense strategy, a non-LU engine and
-    /// any lane whose refactor fails take the per-ω scalar path.
-    /// The scalar factorization afterwards holds some ω of the batch.
+    /// Adds `v` to entry (i, i) of the solver's copy of G; the circuit is
+    /// untouched. Call it before the first solve: a factorization already
+    /// held does not see it.
+    pub fn addDiagG(self: *Self, i: u32, v: f64) void {
+        switch (self.strategy) {
+            .dense => |*d| d.g_dense[@as(usize, i) * self.n + i] += v,
+            .sp => |*s| {
+                // Stacked column i opens with source column i's rows.
+                const cs = s.src_col_ptr[i];
+                const rows = s.row_idx[s.col_ptr[i]..][0 .. s.src_col_ptr[i + 1] - cs];
+                // Circuit.freeze guarantees every diagonal is in the pattern.
+                s.g_vals[cs + std.mem.indexOfScalar(u32, rows, i).?] += v;
+            },
+        }
+    }
+
+    /// Solves every ω in `omegas` against each right-hand side in `rhs`
+    /// (nr stacked 2n vectors), W frequencies per LaneLu pass;
+    /// `x_out[(k*nr + r)*2n..][0..2n]` receives ω_k for rhs r, so one
+    /// factorization serves every rhs. `adjoint` selects A^T. The dense
+    /// strategy, a non-LU engine and any lane whose refactor fails take the
+    /// per-ω scalar path. The scalar factorization afterwards holds some ω
+    /// of the batch.
     pub fn solveBatch(self: *Self, omegas: []const f64, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
-        std.debug.assert(rhs.len >= nn);
-        std.debug.assert(x_out.len == omegas.len * nn);
+        const m = rhs.len;
+        std.debug.assert(m > 0 and m % nn == 0);
+        std.debug.assert(x_out.len == omegas.len * m);
         if (omegas.len == 0) return;
         const sp: *Sparse = switch (self.strategy) {
             .sp => |*s| s,
@@ -211,7 +230,6 @@ pub const FreqSolver = struct {
         const vplane = sp.lane_work[0..nnz2];
         const b_plane = sp.lane_work[nnz2..][0..nn];
         const x_plane = sp.lane_work[nnz2 + nn ..];
-        for (rhs[0..nn], b_plane) |value, *lane| lane.* = @splat(value);
 
         var base: usize = 0;
         while (base < omegas.len) : (base += W) {
@@ -226,12 +244,12 @@ pub const FreqSolver = struct {
             // A lane whose pivots decay fails the scalar growth monitor,
             // and its serial full factor repivots for the next chunk.
             if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
-                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * m ..][0 .. cnt * m], adjoint);
                 continue;
             };
             // LaneLu replays SparseLu only, not the tridiagonal engine.
             const lu = if (sp.slv.lu) |*l| l else {
-                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * nn ..][0 .. cnt * nn], adjoint);
+                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * m ..][0 .. cnt * m], adjoint);
                 continue;
             };
 
@@ -249,19 +267,23 @@ pub const FreqSolver = struct {
             const growth = sp.slv.params.refactor_growth_limit;
             const bad = sp.lanes.?.refactor(sp.col_ptr, vplane, growth);
 
-            if (adjoint) sp.lanes.?.solveT(b_plane, x_plane) else sp.lanes.?.solve(b_plane, x_plane);
-
-            for (0..cnt) |l| {
-                if ((bad & (@as(u64, 1) << @intCast(l))) != 0) {
-                    try self.solveBatchSerial(omegas[base + l ..][0..1], rhs, x_out[(base + l) * nn ..][0..nn], adjoint);
-                    continue;
-                }
-                const dst = x_out[(base + l) * nn ..][0..nn];
-                for (0..nn) |i| {
-                    const row: [W]f64 = x_plane[i];
-                    dst[i] = row[l];
+            var r: usize = 0;
+            while (r < m) : (r += nn) {
+                for (rhs[r..][0..nn], b_plane) |value, *lane| lane.* = @splat(value);
+                if (adjoint) sp.lanes.?.solveT(b_plane, x_plane) else sp.lanes.?.solve(b_plane, x_plane);
+                for (0..cnt) |l| {
+                    if ((bad & (@as(u64, 1) << @intCast(l))) != 0) continue;
+                    const dst = x_out[(base + l) * m + r ..][0..nn];
+                    for (0..nn) |i| {
+                        const row: [W]f64 = x_plane[i];
+                        dst[i] = row[l];
+                    }
                 }
             }
+            // After every lane solve: a failed lane's full factor may
+            // repivot the tape the lanes replay.
+            for (0..cnt) |l| if ((bad & (@as(u64, 1) << @intCast(l))) != 0)
+                try self.solveBatchSerial(omegas[base + l ..][0..1], rhs, x_out[(base + l) * m ..][0..m], adjoint);
         }
     }
 
@@ -270,12 +292,15 @@ pub const FreqSolver = struct {
     /// The lane path's oracle: `setOmega` and a solve per ω.
     fn solveBatchSerial(self: *Self, omegas: []const f64, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
+        const m = rhs.len;
         for (omegas, 0..) |omega, k| {
             try self.setOmega(omega);
-            if (adjoint)
-                try self.solveRhsT(rhs[0..nn], x_out[k * nn ..][0..nn])
-            else
-                try self.solveRhs(rhs[0..nn], x_out[k * nn ..][0..nn]);
+            var r: usize = 0;
+            while (r < m) : (r += nn) {
+                const b = rhs[r..][0..nn];
+                const x = x_out[k * m + r ..][0..nn];
+                if (adjoint) try self.solveRhsT(b, x) else try self.solveRhs(b, x);
+            }
         }
     }
 

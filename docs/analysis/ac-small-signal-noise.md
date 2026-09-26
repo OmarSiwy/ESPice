@@ -151,7 +151,7 @@ declaration, so an omitted declaration removes the device from the analysis.
 That is why a resistor-only `.noise` deck returned exactly 0 until
 2026-09-13.
 
-**Frequency lanes.** `ac`, `noise` and `stb` share one driver,
+**Frequency lanes.** `ac`, `noise`, `stb` and `sp` share one driver,
 `freq.Stream` (`src/analysis/ac/freq.zig`): it solves `quantum` = 64
 frequencies per `FreqSolver.solveBatch` call (W lanes per `LaneLu` replay of
 one pivot tape) and hands them out in order, so at most 64 solutions of
@@ -161,9 +161,8 @@ calls. Measured (commit `8bd084e`) on a 1k-stage RC ladder with
 `.noise dec 200 1 1g` (1601 points): 3.191G to 3.183G Ir and peak RSS
 70.1 MB to 16.6 MB. The same ladder under `.ac dec 200 1 1g` with every node
 probed stays at 67 MB, since the all-node result dominates the peak. `sp`
-keeps its dense per-port, per-point solve: a Stream per port would multiply
-the factorizations, and a per-lane-rhs `solveBatch` (a solver change) would
-be needed first.
+hands the Stream one right-hand side per port; `solveBatch` solves all of
+them against each lane factorization.
 
 Related small-signal analyses share the machinery: `ac/sp.zig`
 (S-parameters), `ac/stb.zig` (stability/loop gain), `dc/tf.zig` (DC transfer

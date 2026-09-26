@@ -60,18 +60,17 @@ etc.); the analysis outputs $S$ directly.
 
 `src/analysis/ac/sp.zig`:
 
-1. One `eval()` at $x_{op}$; dense copies of the analytic $G$/$C$ planes.
-   The port termination is an *analysis-side* modification, so it is
-   stamped on the copy ($-z_0$ on each port's branch diagonal), never on
-   the circuit planes.
-2. `FreqSolver.initDense` over the modified pair (stacked-real
-   $2n \times 2n$; the dense path here since terminations densify the
-   branch rows anyway and port counts are small: the sparse pipeline
-   remains the path for large $n$ via `fromCircuit`, see the solver note
-   below).
-3. Sweep (log or linear, `n_points`): per frequency set $\omega$, then per
-   port $p$: unit RHS on branch $b_p$, solve, extract all $b_k/a_p$ →
-   column $p$ of $S(\omega)$.
+1. `FreqSolver.fromCircuit`: one `eval()` at $x_{op}$ and the solver's own
+   copies of the $G$/$C$ planes (dense for $n \le 16$, the sparse
+   stacked-real CSC above). The port termination is an *analysis-side*
+   modification, so `addDiagG` stamps it on the copy ($-z_0$ on each
+   port's branch diagonal, a slot every pattern has), never on the circuit
+   planes.
+2. One unit RHS per port $p$ on branch $b_p$, stacked into one
+   `n_ports`·$2n$ right-hand side.
+3. Sweep (log or linear, `n_points`) through `freq.Stream`, as ac does:
+   each frequency is one `LaneLu` lane, factored once and solved for every
+   port. Column $p$ of $S(\omega)$ is $b_k/a_p$ from port $p$'s solution.
 
 Defaults: with no explicit port list, the drive source becomes port 1 (a
 1-port $S_{11}$ measurement). Failure: singular factorization at a
@@ -83,9 +82,8 @@ Knobs: the shared `sweep` grid (`f_start`/`f_stop`/`points`/`kind`), per-port `z
 
 ```
 sp_sweep(ckt, x_op, ports):
-    eval(x_op); G, C = dense planes (copies)
-    for k in ports: G[b_k, b_k] -= z0_k          # Thevenin termination
-    fs = FreqSolver(G, C)                        # stacked-real 2n
+    fs = FreqSolver(eval(x_op))                  # stacked-real 2n, own G, C copies
+    for k in ports: fs.G[b_k, b_k] -= z0_k       # Thevenin termination
     for f in sweep:
         fs.set_omega(2*pi*f)
         for p in ports:                          # one solve per driven port
@@ -97,16 +95,16 @@ sp_sweep(ckt, x_op, ports):
                 S[k][p](f) = b_k / a_p
 ```
 
-## 4. Parallel design notes (not implemented)
+## 4. Parallel design notes
 
 Same shape as AC ([ac-small-signal-noise.md](ac-small-signal-noise.md) §4)
 with one extra inner axis:
 
 - **frequency points**: independent lanes (shared symbolic, per-lane
-  values);
-- **driven ports**: the $P$ RHS per frequency are a multiple-RHS block
-  solve on one factorization (blocked triangular solves; $P$ is small so
-  this rides along free);
+  values), implemented as `LaneLu` lanes through `freq.Stream`;
+- **driven ports**: the $P$ RHS per frequency share one factorization
+  (implemented as $P$ lane solves per lane refactor; a blocked
+  triangular solve is not);
 - wave extraction is a trivial per-lane epilogue.
 
 ```
@@ -120,13 +118,16 @@ kernel sp(lanes = freq points):
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `src/solver/freq_solve.zig` (`initDense` here; `DENSE_THRESHOLD = 16` governs the `fromCircuit` route) |
+| Stacked-real frequency solves | [klu-pipeline.md](../solvers/klu-pipeline.md) (sparse path), dense below threshold | `src/solver/freq_solve.zig` (`fromCircuit`, `addDiagG`, `solveBatch`; `DENSE_THRESHOLD = 16`) |
 | Dense factorization per point | none (dense path) | `src/solver/dense_lu.zig` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `dc/op.zig` |
 
-Note: the termination stamp densifies only port branch diagonals: a
-sparse-path variant would stamp $-z_0$ into the CSC copy and keep the KLU
-pipeline; documented upgrade for many-node DUTs.
+Note: sp used to run every deck through a dense $2n$ LU per frequency and
+one solve per port, whatever $n$. A 300-stage two-port RC ladder (302
+nodes, `.sp dec 50 1k 1g`, 301 points) took 25.26G Ir and 2.6 s that way;
+the sparse lane path takes 37.9M Ir and 0.01 s, and the S-matrix moves by
+roundoff only (5.2e-14 absolute). Every corpus sp deck has $n \le 16$,
+stays dense, and is byte-identical.
 
 ---
 
