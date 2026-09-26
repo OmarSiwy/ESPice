@@ -438,8 +438,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .pss = .{ .period = 1 / try positive(args, 0), .n_samples = try count(u32, args, 1, 256) } };
         },
         .hb => {
+            // HB drives from whatever sources the deck has, current ones
+            // included, so it names none.
             try arity(args, 1, 2);
-            if (sources.v_names.len == 0) return error.AnalysisSourceNotFound;
             return .{ .hb = .{ .f0 = try positive(args, 0), .n_harmonics = try count(u16, args, 1, 8) } };
         },
         .qpss => {
