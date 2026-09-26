@@ -155,10 +155,12 @@ pub const Netlist = struct {
         };
     }
 
+    /// Device count after subcircuit expansion.
     pub fn deviceCount(nl: *const Netlist) u32 {
         return nl.graph.edgeCount();
     }
 
+    /// Name of net `v`: `x1.mid` for `mid` inside instance `x1`.
     pub fn netName(nl: *const Netlist, v: VertexId) []const u8 {
         return nl.pool.str(nl.graph.vertices.items(.name)[v.index()]);
     }

@@ -5,6 +5,7 @@
 //! last op (`subtreeStart`).
 const std = @import("std");
 
+/// `ParseError`: malformed expression text.
 pub const Error = error{ OutOfMemory, ParseError };
 /// Absent operand.
 pub const none = std.math.maxInt(u32);
