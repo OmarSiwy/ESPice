@@ -1,3 +1,5 @@
+//! Tests that callbacks of a device compiled as a separate object
+//! (device_errors_object.zig) report failures correctly across the boundary.
 const std = @import("std");
 const ir = @import("device_abi");
 const t = std.testing;

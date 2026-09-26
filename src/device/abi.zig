@@ -1,47 +1,39 @@
-//! Device IR shared by construction and analysis. These declarations contain
-//! prepared topology and evaluator bindings, without evaluation or scheduling.
+//! The neutral device ABI shared by the host, the per-model device objects
+//! and runtime-loaded `.so` devices: construction (`Proto`, `PatternBuilder`),
+//! the frozen per-type `Batch` with its `Hooks`, and the `DeviceVtable`.
+//! Everything that crosses a separately compiled boundary is in `layoutHash`.
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("contract");
+const core = @import("core");
 
-pub const GROUND: u32 = 0;
-
-pub const DeviceType = @import("core").DeviceType;
+pub const GROUND = core.GROUND;
+pub const DeviceType = core.DeviceType;
 
 pub const bind = @import("bind.zig");
 pub const Param = bind.Param;
 pub const BindStatus = bind.BindStatus;
 
-/// Launch width shared by the kernel export shim and analysis GPU launcher.
+/// Threads per GPU block, shared by the kernel exports and the launcher.
 pub const gpu_block_size: u32 = 256;
 
 pub const StateCtlOp = contract.StateCtlOp;
 pub const SimState = contract.SimState;
-pub const LimitResult = contract.LimitResult;
-pub const Constant = contract.Constant;
 
-// ===========================================================================
-// Circuit-facing types
-// ===========================================================================
-
+/// A handle to one scalar parameter of one instance or model, for sweeps,
+/// Monte Carlo and sensitivity. Points into the batch's Model/Instance
+/// storage, which must outlive it. Values move as f64 whatever the field's
+/// width; use `get`/`set` rather than switching on `ptr`.
 pub const ParamRef = struct {
-    /// Tagged because BOTH widths are live: VerA emits `f64` parameters, while
-    /// hand-written devices (tests/testdev.zig, and any device written straight
-    /// against the contract) still use `f32`. A single-width `*f32` here is what
-    /// silently emptied `collectParams` for every generated device and took
-    /// `.dc` sweep, Monte Carlo, sensitivity and dcmatch down with it — those
-    /// four read the circuit's parameters through this and got nothing back.
-    ///
-    /// The accessors below are the whole interface; nothing outside should
-    /// switch on the tag. Values move as `f64` because that is what the callers
-    /// compute in — an `f32` field round-trips through `@floatCast`, which is
-    /// exactly the precision the device declared.
+    /// Tagged: VerA emits f64 parameters, hand-written devices may use f32.
     ptr: Ptr,
-    /// Written by the host when it collects the batch's parameters.
+    /// Filled by the host when it collects the batch's parameters.
     type: DeviceType = .unset,
     param_name: []const u8,
+    /// Instance index within the batch.
     index: u32,
     is_instance: bool,
+    /// The device's principal parameter: its `mc_param`, else its first.
     primary: bool,
     pelgrom_ap: f64 = 0,
     area_wl: f64 = 0,
@@ -58,7 +50,8 @@ pub const ParamRef = struct {
         };
     }
 
-    /// Low-level write; call Circuit.recompute before solving to validate topology and caches.
+    /// Writes the parameter, rounding to f32 fields. The caller must run the
+    /// batch's `recompute` hook before the next solve.
     pub fn set(self: ParamRef, v: f64) void {
         switch (self.ptr) {
             .f32 => |p| p.* = @floatCast(v),
@@ -67,22 +60,10 @@ pub const ParamRef = struct {
     }
 };
 
-/// One generator's branch and its PSD, in the contributed nature's units² per
-/// Hz: `S(f) = white + flicker / f^ef`.
-///
-/// A DENSITY, NOT A KIND TAG, and the kind is not recoverable from one.
-/// Verilog-A §4.6.4.1 states the density outright as the call's argument, so
-/// `white_noise(2q|I|)` (shot) and `white_noise(4kT/R)` (thermal) are the same
-/// call. ngspice agrees at the analysis boundary: `NevalSrc`
-/// (nevalsrc.c:105-113) collapses SHOTNOISE and THERMNOISE into one
-/// `noise = gain * <density>` the instant it is called, and its THERMNOISE
-/// `param` is not even always a conductance (mos1noi.c:140-142 passes the
-/// channel's `Sid`). Every 1/f source is an `N_GAIN` call (nevalsrc.c:115-117)
-/// the device then multiplies by its OWN `KF·I^AF/f^EF` — dionoise.c:99-104
-/// and bjtnoise.c:112-118 at EF = 1, mos1noi.c:175-181 at `pow(freq, fNexp)`.
-/// Which physics produced the density is the device's business;
-/// `contract.PsdTerm` is the same shape on the device side and `collectNoise`
-/// copies it across.
+/// One noise generator between two nodes, with PSD
+/// `S(f) = white + flicker / f^ef` in the contributed nature's units² per Hz.
+/// A density, not a kind: shot and thermal sources both arrive as a white
+/// density, as in ngspice's NevalSrc (nevalsrc.c:105-113).
 pub const NoiseSource = struct {
     node_p: u32,
     node_n: u32,
@@ -92,13 +73,14 @@ pub const NoiseSource = struct {
 };
 
 pub const NoiseGenKind = enum { thermal, shot, flicker };
+/// A device's generator declaration: local rows `row`/`col` and its kind.
 pub const NoiseGen = struct { row: usize, col: usize, kind: NoiseGenKind };
-/// What a device's `noisePsd` returns, one per `noise_gens` row. Same type the
-/// VerA-generated devices use; re-exported so a hand-written device can name it.
+/// A device's `noisePsd` result, one per `noise_gens` entry.
 pub const PsdTerm = contract.PsdTerm;
 
-/// Target value planes for one eval pass. Circuit.eval points this at its own
-/// slices; parallel eval points lanes 1.. at private slabs and reduces after.
+/// The value planes one eval pass stamps into. The serial path points them at
+/// the circuit's own slices; each ParEval lane gets private slabs, reduced
+/// afterwards.
 pub const Planes = struct {
     g_vals: []f64,
     c_vals: []f64,
@@ -106,12 +88,12 @@ pub const Planes = struct {
     q_vec: []f64,
 };
 
-/// Per-type device batch vtable. One entry per device TYPE, created by
-/// ProtoStore(D).finalize(). eval/eval_newton stamp [first..last) into `pl` —
-/// the caller picks the target planes, so the same entry point serves the
-/// serial path and a ParEval lane's private slab.
+/// One device type's frozen batch, made by `Proto.finalize`. `eval` and
+/// `eval_newton` stamp instances `[first, last)` into the given planes, so the
+/// same entry serves the serial path and a ParEval lane; `eval_newton` skips
+/// a constant Jacobian half.
 pub const Batch = struct {
-    // -- hot --
+    // hot
     ctx: *anyopaque,
     eval: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64) void,
     eval_newton: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64) void,
@@ -120,17 +102,18 @@ pub const Batch = struct {
     has_charge: bool,
     has_const_jacobian: bool,
 
-    // -- cold --
+    // cold
+    /// The device type's name without its namespace.
     type_name: []const u8,
     hooks: *const Hooks,
 };
 
-/// Stable CPU callback status. Zig error ordinals belong to one compilation
-/// unit and must never cross a separately compiled object or shared library.
+/// Callback status that is safe across separately compiled objects, unlike
+/// Zig error values, whose numbering is per compilation.
 pub const DeviceStatus = enum(u8) { ok = 0, out_of_memory = 1, too_many_instances = 2 };
 
-/// By-value callback result; a successful payload retains its existing owner.
-/// The closed error set makes adding a producer error an explicit ABI decision.
+/// A callback result carried by value across the object boundary. A
+/// successful payload keeps its existing owner.
 pub fn DeviceResult(comptime T: type) type {
     return union(DeviceStatus) {
         ok: T,
@@ -154,110 +137,76 @@ pub fn DeviceResult(comptime T: type) type {
     };
 }
 
-/// Cold per-device-type vtable. Null entry ⇒ device type lacks the hook.
+/// Per-type hooks, one static table per device type. A null entry means the
+/// device lacks the feature.
 pub const Hooks = struct {
-    /// Fresh mutable evaluator state from an unevaluated prepared template.
-    /// The template and its frozen tapes must outlive every instance.
+    /// A fresh mutable batch from an unevaluated template. The template and
+    /// its tapes must outlive every instance made from it.
     instantiate: *const fn (*const anyopaque, std.mem.Allocator) DeviceResult(Batch),
-    /// Copy an accepted dependency state, preserving all mutable POD histories.
+    /// A copy of an accepted batch, mutable history included.
     snapshot: *const fn (*const anyopaque, std.mem.Allocator) DeviceResult(Batch),
-    /// Synchronize the host limiting flag after downloading GPU state.
+    /// Syncs the host limiting flag after GPU state is downloaded.
     set_limit_active: ?*const fn (*anyopaque, bool) void = null,
+    /// `{slot_lo, slot_hi, row_lo, row_hi}` touched by instances
+    /// `[first, last)`, the trash slot and row excluded.
     scatter_bounds: *const fn (*anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32,
     apply_limits: ?*const fn (*anyopaque, []f64, []const f64) bool = null,
     clear_limits: ?*const fn (*anyopaque) void = null,
     begin_solve: ?*const fn (*anyopaque) void = null,
-    /// Advance only between evaluated Newton iterates, using the previous x.
+    /// Advances Newton-history state between evaluated iterates, given the
+    /// previous x.
     advance_iteration: ?*const fn (*anyopaque, []const f64) void = null,
     check_convergence: ?*const fn (*anyopaque, []const f64) bool = null,
     seed: ?*const fn (*anyopaque, []f64) void = null,
     mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
+    /// Runs `updateState` at x once per Newton iteration; returns the earliest
+    /// requested rejection time, if any.
     update_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
-    /// `updateState` for a device that declares NO `stateCtl` — one whose
-    /// accepted-step state cannot be rolled back. Called once per ACCEPTED
-    /// step instead of once per Newton iteration.
-    ///
-    /// §4.5.2 calls this "accepted-step bookkeeping" and it has to be taken
-    /// literally. VerA lowers `absdelay` to a `zHistPush` into a fixed
-    /// 32-entry ring INSIDE `updateState`. Driven per Newton iteration —
-    /// rejected attempts included — a transmission line took ~10 pushes per
-    /// timestep, so the ring spanned a fraction of one timestep instead of
-    /// 32 of them; every delay lookup fell off the end, `zHistAt` returned
-    /// the NEWEST sample, and the line behaved as if it had no delay.
-    ///
-    /// That fed back into the solver: the bogus residual stopped Newton
-    /// converging, dt halved, and more attempts meant more pushes.
-    /// devices/lossy_tline ran 51,847 step attempts — 25,624 rejected, mean
-    /// 9.9 iterations against a cap of 10 — to emit 600 requested points.
-    ///
-    /// Only HISTORY devices defer. Everything else keeps the per-iteration
-    /// call: either `stateCtl` makes its updates undoable, or its
-    /// `request_reject_at` is a breakpoint that must be seen per attempt for
-    /// a source edge to land sharply.
+    /// `update_state` for devices whose state cannot be rolled back
+    /// (`absdelay` history): called once per accepted step instead. Pushing
+    /// on every Newton attempt would fill the delay ring with rejected
+    /// iterates, and the delay would read back the newest sample.
     commit_state: ?*const fn (*anyopaque, []const f64) ?f64 = null,
     state_ctl: ?*const fn (*anyopaque, StateCtlOp) bool = null,
+    /// Sets every instance's temperature, in Celsius.
     set_temp: ?*const fn (*anyopaque, f32) void = null,
-    /// Host-owned Instance fields (`$abstime`, timestep, `analysis()`,
-    /// `initial_step`/`final_step`). A generated device READS these and never
-    /// writes them, so nothing else in the engine can supply them — without
-    /// this hook `$abstime` is pinned at its default 0 and every SPICE
-    /// waveform degenerates to its t=0 value.
-    ///
-    /// Contract with the analyses: call it once per SOLVE ATTEMPT (before
-    /// eval/updateState run for that attempt), never per Newton iteration —
-    /// it walks every instance, so it is O(count) per timepoint by design.
+    /// Publishes the host-owned Instance fields (`$abstime`, timestep,
+    /// `analysis()`, initial/final step), which devices read and never write.
+    /// Call once per solve attempt, before eval; it walks every instance.
     set_sim_state: ?*const fn (*anyopaque, SimState) void = null,
+    /// The model's smallest static delay (`D.delays`).
     min_delay: ?*const fn (*anyopaque) f64 = null,
-    /// §9.17.2 `$bound_step`: the tightest NEXT-step bound any instance of
-    /// this device type asked for, or `inf`. Written by the device's
-    /// `updateState`, so it is only meaningful after one has run — the
-    /// transient reads it per accepted step, which is what §9.17.2 says.
-    ///
-    /// Distinct from `min_delay`, which is a static property of the MODEL
-    /// (`D.delays`). A generated device has no `delays` decl at all, so
-    /// `min_delay` is null for every VerA model and the transmission lines
-    /// were running completely unbounded: tline's `$bound_step(0.25*td)` was
-    /// computed, stored, and read by nothing.
+    /// The tightest LRM §9.17.2 `$bound_step` any instance requested for the
+    /// next step, or `inf`. Valid after `updateState` has run for the
+    /// accepted step.
     bound_step: ?*const fn (*anyopaque) f64 = null,
     next_breakpoint: ?*const fn (*anyopaque, f64) ?f64 = null,
-    /// Per-device-STATE charge tape: `q_tape()[id * n_u + ru]` is the charge
-    /// THIS instance put on row `rhs_idx[id * n_u + ru]` at the last eval —
-    /// the same index space `gath`/`rhs_idx`/`slots` already use, so it adds
-    /// no new handle type. Null when the device declares no `q`.
-    ///
-    /// Exists because ngspice runs CKTterr once per device charge STATE and
-    /// mins over states, then over devices (ckttrunc.c -> DEVtrunc ->
-    /// cktterr.c), where this engine ran it once per matrix ROW off the summed
-    /// q plane. Summing co-moving charges first adds their divided differences
-    /// and loses the binding state (docs/analysis/transient-integration.md).
-    /// Host-only and additive: the four `[]f64` planes, the u32 tapes, the CSC
-    /// pattern, the Model/Instance PODs and `DeviceKernel.run`'s parameter
-    /// list are all unchanged.
+    /// Charge per instance and row from the last eval: `q_tape()[id * n_u +
+    /// ru]` went to row `rhs_idx[id * n_u + ru]`. Lets the transient run its
+    /// LTE per charge state, as ngspice's CKTterr does, instead of per summed
+    /// matrix row. Null when the device has no `q`.
     q_tape: ?*const fn (*anyopaque) []const f64 = null,
-    /// Charges only, instances `[first, last)`: restamp `q_vec` + `q_tape` at
-    /// `x` and leave g/c/rhs alone. Null when the device declares no `q`. See
-    /// `evalQRange` — this is the transient's post-accept re-read, not a second
-    /// eval path. Ranged for the same reason `eval` is: ParEval's `.charge`
-    /// mode hands each lane the same instance range it gets in `.full`.
+    /// Restamps `q_vec` and `q_tape` for instances `[first, last)` at x,
+    /// leaving the other planes alone. Null when the device has no `q`.
     eval_q: ?*const fn (*anyopaque, *const Planes, u32, u32, []const f64, f64) void = null,
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) DeviceResult(void),
-    /// Every generator this batch declares, with its PSD, at a state vector the
-    /// caller hands in. No temperature argument: `$temperature` is the
-    /// INSTANCE's, and the device already applied it inside `noisePsd`.
+    /// Appends every declared noise generator with its PSD at x. Temperature
+    /// is the instance's own, already applied by the device.
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) DeviceResult(void) = null,
-    /// False means parameter changes invalidate the frozen topology.
+    /// Reruns parameter-derived state; false means the new parameters need
+    /// a different topology than the frozen one.
     recompute: ?*const fn (*anyopaque) bool = null,
-    /// This batch's device-resident working set, or null when the device type
-    /// is not `gpuEligible` — the launcher reads a null here as "this batch
-    /// stays on the CPU" and declines the whole circuit rather than splitting a
-    /// solve across both, which would cost a plane round-trip per iteration to
-    /// merge.
+    /// The batch's GPU working set, or null when the type is not
+    /// GPU-eligible, in which case the launcher keeps the whole circuit on
+    /// the CPU.
     gpu_payload: ?*const fn (*anyopaque) GpuPayload = null,
     apply_attempt: ?*const fn (*anyopaque, f64) void = null,
     restore_models: ?*const fn (*anyopaque) void = null,
     deinit: *const fn (*anyopaque, std.mem.Allocator) void,
 };
 
+/// A device type's construction-time store. `pattern` adds its matrix
+/// entries, `finalize` freezes it into a `Batch`, `destroy` frees it.
 pub const Proto = struct {
     ctx: *anyopaque,
     type_name: []const u8,
@@ -267,12 +216,15 @@ pub const Proto = struct {
     apply_perm: *const fn (*anyopaque, []const u32) void,
 };
 
+/// A read-only CSC sparsity pattern. `trash_slot` (= nnz) is the slot ground
+/// entries scatter into.
 pub const PatternView = struct {
     col_ptr: []const u32,
     row_idx: []const u32,
     n: u32,
     trash_slot: u32,
 
+    /// Binary search in column `col`; asserts `col < n`.
     pub fn findSlot(self: PatternView, row: u32, col: u32) ?u32 {
         var lo = self.col_ptr[col];
         var hi = self.col_ptr[col + 1];
@@ -285,17 +237,10 @@ pub const PatternView = struct {
     }
 };
 
-/// Union sparsity accumulator: one `(col << 32 | row)` key per stamp site
-/// BEFORE dedup, sorted and uniqued into CSC by `toCsc`.
-///
-/// The `gpa` its methods take is build-time SCRATCH, not the circuit's owner:
-/// `keys` and the radix ping-pong buffer die inside `Circuit.freeze`, and only
-/// `col_ptr`/`row_idx` — which `toCsc` takes a separate allocator for —
-/// outlive it. Passing the sim arena here left the pre-dedup key array and the
-/// sort scratch resident for the whole run (measured 14.6 MB on
-/// `sweep/opamp_wl_5000`, where 650,017 keys dedup to 115,017 nonzeros),
-/// because `ArenaAllocator.free` is a no-op for anything but its most recent
-/// allocation.
+/// Accumulates `(col << 32 | row)` keys, duplicates included, and turns them
+/// into CSC with `toCsc`. Pass a scratch allocator, not the circuit's arena:
+/// the keys and sort buffers die in `Circuit.freeze`, and an arena would keep
+/// them (measured 14.6 MB on a 25,000-MOSFET deck).
 pub const PatternBuilder = struct {
     keys: std.ArrayList(u64) = .empty,
 
@@ -311,7 +256,7 @@ pub const PatternBuilder = struct {
         self.keys.deinit(gpa);
     }
 
-    /// LSD radix sort (16-bit digits): O(n) on the bounded (col,row) keys.
+    /// LSD radix sort on 16-bit digits, O(n), skipping digits no key uses.
     fn radixSort(gpa: std.mem.Allocator, sort_keys: []u64) !void {
         if (sort_keys.len < 64) {
             std.mem.sortUnstable(u64, sort_keys, {}, std.sort.asc(u64));
@@ -330,8 +275,8 @@ pub const PatternBuilder = struct {
         var shift: u6 = 0;
         while (true) {
             const digit_bound: u16 = @truncate(used_bits >> shift);
-            // Packed u32 node ids leave zero digits between row and column
-            // when n < 65536. The OR also bounds every occupied bucket.
+            // With n < 65536 the digits between row and column are all zero.
+            // The OR of all keys also bounds every occupied bucket.
             if (digit_bound != 0) {
                 const buckets = counts[0 .. @as(usize, digit_bound) + 1];
                 @memset(buckets, 0);
@@ -357,8 +302,9 @@ pub const PatternBuilder = struct {
         if (src.ptr != sort_keys.ptr) @memcpy(sort_keys, src);
     }
 
-    /// `gpa` owns the returned CSC; `scratch` owns the radix ping-pong buffer
-    /// and dies with the caller's frame.
+    /// Sorts and dedups the keys into an `n`-column CSC pattern and returns
+    /// nnz. `gpa` owns `col_ptr_out`/`row_idx_out`; `scratch` is only used
+    /// during the call. Reorders `keys` in place.
     pub fn toCsc(self: *PatternBuilder, gpa: std.mem.Allocator, scratch: std.mem.Allocator, n: u32, col_ptr_out: *[]u32, row_idx_out: *[]u32) !u32 {
         const all = self.keys.items;
         try radixSort(scratch, all);
@@ -386,69 +332,61 @@ pub const PatternBuilder = struct {
     }
 };
 
-/// One batch's device-resident working set, type-erased.
-///
-/// Everything here is written by the builder and then FROZEN for the life of
-/// the solve, which is what lets the launcher upload it once and leave it on
-/// the GPU: the tapes are pattern, and `models`/`instances` only change when a
-/// sweep mutates a parameter (see the `repack` hook). Per Newton iteration the
-/// launcher moves `x` in and the value planes out, and nothing else.
+/// One batch's GPU-resident working set, type-erased. Frozen for the solve:
+/// the launcher uploads it once and afterwards moves only x in and the value
+/// planes out per Newton iteration. `models`/`instances` change only when a
+/// sweep writes a parameter.
 pub const GpuPayload = struct {
-    /// `arp_eval_<model>`, from `kernelName`.
+    /// `arp_eval_<model>`.
     kernel: []const u8,
-    /// Instances in this batch — one GPU thread each.
+    /// Instances in the batch, one GPU thread each.
     count: u32,
-    /// Unknowns per instance. Fixes the tape strides below.
+    /// Unknowns per instance; the tape stride.
     n_u: u32,
-    /// `[]D.Model` / `[]D.Instance` as bytes. POD by contract (§5 rule 3), so a
-    /// byte copy is the whole upload.
+    /// `[]D.Model` and `[]D.Instance` as bytes. POD by contract, so a byte
+    /// copy is the whole upload.
     models: []const u8,
     instances: []const u8,
-    /// count * n_u — global row each local unknown gathers x from.
+    /// count * n_u: the global row each local unknown gathers x from.
     gath: []const u32,
-    /// count * n_u — residual row each local unknown scatters to.
+    /// count * n_u: the residual row each local unknown scatters to.
     rhs_idx: []const u32,
-    /// count * n_u * n_u — CSC slot each Jacobian entry scatters to.
+    /// count * n_u * n_u: the CSC slot each local Jacobian entry scatters to.
     slots: []const u32,
-    /// `arp_lim_<model>` when the device pairs a `StateKernel` with its eval
-    /// kernel (`hasStateKernel`), else "".
+    /// `arp_lim_<model>`, or "" when the device has no state kernel.
     lim_kernel: []const u8,
-    /// `arp_ctl_<model>` when the device latches accepted-step state
-    /// (`hasCtlKernel`), else "".
+    /// `arp_ctl_<model>`, or "" when the device has no accepted-step latch.
     ctl_kernel: []const u8,
-    /// `arp_reduce_<model>` — the segmented sum that turns this pass's staging
-    /// cells back into plane values. Device-independent body; see
-    /// `reduceKernelName` for why it carries a per-device symbol anyway.
+    /// `arp_reduce_<model>`, the segmented sum from staging cells to planes.
     reduce_kernel: []const u8,
-    /// Host lim plane (count * n_u), for the seed-era upload; empty when the
-    /// device has no `limit`. Once the device StateKernel runs, the resident
-    /// copy is authoritative and this is stale by design.
+    /// Host lim plane (count * n_u) for the initial upload, empty without
+    /// `limit`. Stale once the device-side state kernel has run.
     lim_x: []const f64,
-    /// `[]D.State` as bytes (POD), uploaded once; empty when no `State`.
+    /// `[]D.State` as bytes, uploaded once; empty without `State`.
     states: []const u8,
-    /// Host-side lim_active at call time — only consulted until the device
-    /// takes the lim plane over (seed → first eval).
+    /// Host `lim_active`, used only until the device owns the lim plane.
     lim_active: bool,
 };
 
-// Runtime device ABI version, mixed into `layoutHash`. `hashType` sees only
-// sizes, alignments and offsets, so a change that moves none of them (a tape
-// semantic, a fn-pointer signature) has to bump this number.
-//
+/// Runtime ABI version, mixed into `layoutHash`. `hashType` sees only sizes,
+/// alignments and offsets, so a change that moves none of them (a tape's
+/// meaning, a function signature) must bump this.
 // 7: the slot tape's cleared entries are the device's structural Jacobian
 //    zeros, not just ground; `addPattern` no longer reserves them.
 // 8: `Hooks.eval_q` takes an instance range.
 // 10: CPU callbacks return `DeviceResult`/`DeviceStatus` instead of Zig error
-//    unions, whose ordinals differ between separately compiled objects.
-// 11: dead fields dropped: `Batch.thread_safe`, `Hooks.record_history` and
-//    `inject_history`, `DeviceVtable.gpu_kernel_name`/`gpu_ptx`/`gpu_amdgcn`;
-//    `Batch.type_name` is the short type name.
-// 12: `set_model_param`/`set_instance_param` become `bind_model`/`bind_instance`
-//    (one binder for every device, bind.zig); `ParamRef.type`.
-// 13: `ParamRef.device_type` dropped; the host names a type from its batch.
+//    unions.
+// 11: dropped `Batch.thread_safe`, `Hooks.record_history`/`inject_history`,
+//    `DeviceVtable.gpu_kernel_name`/`gpu_ptx`/`gpu_amdgcn`; `Batch.type_name`
+//    is the short type name.
+// 12: `set_model_param`/`set_instance_param` became `bind_model`/
+//    `bind_instance`; `ParamRef.type`.
+// 13: dropped `ParamRef.device_type`.
 // GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 13.
 pub const abi_version: u32 = 13;
 
+/// A device type's construction entry points, exported by each device object
+/// and by runtime-loaded `.so` devices.
 pub const DeviceVtable = struct {
     name: []const u8,
     n_u: u32,
@@ -457,23 +395,24 @@ pub const DeviceVtable = struct {
     instance_size: usize,
     init_model: *const fn ([*]u8) void,
     init_instance: *const fn ([*]u8) void,
-    /// Card pairs onto the Model / Instance blob (bind.zig).
+    /// Binds card pairs onto a Model / Instance blob (bind.zig).
     bind_model: *const fn ([*]u8, []const Param) BindStatus,
     bind_instance: *const fn ([*]u8, []const Param) BindStatus,
-    /// LRM 6.3.4 / 3.4.5: a parameter whose value is an expression over OTHER
-    /// parameters, plus every localparam. The Model is a flat struct, so a host
-    /// write to a base parameter cannot reach what was declared over it — the
-    /// device closes that gap here, and the contract requires the host to call it
-    /// once after the last `bind_model` and before anything READS the model.
-    /// Null when the module has no such parameter, which is the common case.
+    /// Recomputes parameters declared as expressions of other parameters, and
+    /// localparams (LRM 6.3.4, 3.4.5). The host must call it after the last
+    /// `bind_model` and before anything reads the model. Null when the module
+    /// has none.
     derive: ?*const fn (model: [*]u8) void,
+    /// Writes, for each internal unknown in `[num_ports, n_u)`, the unknown
+    /// it aliases, or -1.
     collapse: ?*const fn (model: [*]const u8, instance: [*]const u8, out: [*]i32) void,
     proto_create: *const fn (std.mem.Allocator) DeviceResult(Proto),
     proto_add: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) DeviceResult(void),
 };
 
-/// Layout guard over every type that crosses the boundary + the compiler
-/// version. Both sides compile this same source; equal hashes ⇒ compatible.
+/// Hash of every type that crosses the object boundary, the compiler
+/// version, backend and mode, and `abi_version`. Both sides compile this same
+/// source, so equal hashes mean compatible layouts.
 pub fn layoutHash() u64 {
     return comptime blk: {
         @setEvalBranchQuota(100_000);
@@ -490,10 +429,6 @@ pub fn layoutHash() u64 {
             std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
             DeviceResult(Batch), DeviceResult(Proto), Param,
         }) |T| h = hashType(h, T);
-        // Not a type: the SEMANTICS of the slot tape. A `.so` built before
-        // `jac_pattern` reserves every (ru, cu) in the matrix and fills every
-        // one; this host reserves only the device's structural pattern. Same
-        // struct layouts, incompatible tapes — so the hash has to move.
         h = mix(h, abi_version);
         break :blk h;
     };

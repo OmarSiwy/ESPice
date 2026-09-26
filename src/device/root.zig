@@ -1,20 +1,18 @@
-//! Devices: the build-time catalog, runtime HDL loading, and the frozen
-//! `Circuit` every analysis runs on. `abi` is the neutral construction and
-//! evaluation ABI (device_abi); `eval.zig` implements it per device type.
-const std = @import("std");
+//! The device module: the build-time model catalog, runtime HDL loading, the
+//! per-Problem `Library` of device types, and the frozen `Circuit`. `abi` is
+//! the neutral device ABI; eval.zig implements it for every device type.
 pub const abi = @import("device_abi");
 pub const Circuit = @import("Circuit.zig");
 pub const loader = @import("loader.zig");
 pub const Library = @import("Library.zig");
 pub const DeviceType = abi.DeviceType;
-/// Every build-time device, keyed by its binding name. `models.NAME` is
-/// the contract-shaped device type.
+/// Every build-time device type, one decl per binding name.
 pub const models = @import("models");
 
 pub const Entry = struct { name: []const u8, type: type };
 
-/// The full device set, reflected from `models` — no hand list. Adding a
-/// models/NAME.va makes `catalog` grow automatically.
+/// Every decl of `models`, reflected at comptime; a new models/NAME.va
+/// appears here without a hand-kept list.
 pub const catalog: []const Entry = blk: {
     const decls = @typeInfo(models).@"struct".decls;
     var list: [decls.len]Entry = undefined;
@@ -23,7 +21,7 @@ pub const catalog: []const Entry = blk: {
     break :blk &frozen;
 };
 
-/// Linked binding name for a generated or native model definition.
+/// The binding name of device type D, or null when D is not in the catalog.
 pub fn modelName(comptime D: type) ?[]const u8 {
     @setEvalBranchQuota(100_000);
     inline for (catalog) |e| {
@@ -32,18 +30,13 @@ pub fn modelName(comptime D: type) ?[]const u8 {
     return null;
 }
 
-/// The device's own object, reached through the runtime ABI it already
-/// defines. build.zig compiles `device/eval.zig` once per model into
-/// `arp_device_<stem>`; everything the host needs from a generated device —
-/// `derive`, `collapse`, the `Proto`, and behind that `DeviceBatch(D).eval`
-/// and `Hooks` — hangs off this one symbol, so the executable's own
-/// compilation never instantiates a device body.
-///
-/// ponytail: no ABI/layout check across the boundary, unlike `loadDevice`'s
-/// `arp_layout_hash` gate. These objects are built from this tree, by this
-/// build graph, at the same target and optimize mode — the two sides cannot
-/// disagree without the build itself being wrong. Upgrade path if that ever
-/// stops being true is the same exported hash the `.so` path uses.
+/// The vtable of built-in model `name`, from the `arp_device_<name>` symbol
+/// its separately compiled object exports. Everything the host needs from a
+/// generated device is reached through it, so the executable never
+/// instantiates a device body itself.
+// ponytail: no layout-hash check here, unlike loader.zig's `.so` path. These
+// objects come from this build graph at the same target and mode; add the
+// exported hash check if that ever stops being true.
 pub fn vtable(comptime name: []const u8) *const abi.DeviceVtable {
     const get = @extern(*const fn () callconv(.c) *const abi.DeviceVtable, .{
         .name = "arp_device_" ++ name,
@@ -51,13 +44,13 @@ pub fn vtable(comptime name: []const u8) *const abi.DeviceVtable {
     return get();
 }
 
-/// Resolve a device type by model name (comptime — `catalog` carries `type`).
+/// The device type registered as `name`; a compile error when there is none.
 pub fn byName(comptime name: []const u8) type {
     if (!has(name)) @compileError("devices: no model named '" ++ name ++ "'");
     return @field(models, name);
 }
 
-/// True at comptime if a model of this name is registered.
+/// Whether a model named `name` is registered.
 pub fn has(comptime name: []const u8) bool {
     return @hasDecl(models, name);
 }

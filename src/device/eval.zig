@@ -1,52 +1,27 @@
-//! Analysis-owned device execution: AD, batched evaluation, CPU workers and
-//! shared host/GPU kernels. Construction uses the neutral device_ir bindings.
+//! Device evaluation shared by the host, the GPU kernels and runtime-loaded
+//! devices: forward-mode AD scalars, the per-type SoA batch behind the
+//! `Batch`/`Hooks` ABI, and the one `evalRange` body both backends run.
+//! Also the build root of every per-model object, GPU image and HDL `.so`.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("contract");
-const gompute = @import("gompute"); // GPU: RawKernel build/launch (shared core)
-// NVPTX/AMDGCN emit no libcalls, so `@exp`/`@log`/`@sin`/`@cos` and
-// std.math's sinh/cosh/pow are hard codegen errors in device compilation.
-// gompute.math is the drop-in that also forwards to libm on the host.
-//
-// `expm1` and `atan` are on it too, for a reason worth knowing before reaching
-// back to std here: they need no libcall, but std's ports raise the subnormal
-// underflow flag through `std.mem.doNotOptimizeAway` -- `asm volatile ("" ::
-// "rm" (v))` -- which AMDGCN cannot lower. They assemble to PTX cleanly, so an
-// NVIDIA-only check never sees it. `log1p` happens not to carry the idiom and
-// is still std's.
+const gompute = @import("gompute");
+const ir = @import("device_abi");
+// NVPTX/AMDGCN have no libm, so `@exp`/`@log`/`@sin` and std's pow/sinh/cosh
+// do not compile there; gompute.math forwards to libm on the host instead.
+// `expm1` and `atan` also come from it: std's versions use
+// `doNotOptimizeAway`, which AMDGCN cannot lower.
 const dmath = gompute.math;
-// eval.zig is the SHARED device core: the app compiles it at comptime for
-// builtins, and the FastVAF `.so` compiles this SAME source at runtime for
-// dynamics — identical format by construction. Deps: device_ir + contract + gompute
-// (both app and .so provide gompute). The frontend loader owns FastVAF.
 
-// ===========================================================================
-// Derivative scalar (moved out of contract.zig — the engine is the only thing
-// that instantiates device physics with a concrete S).
-// ===========================================================================
-
-/// FMA contraction for the Dual derivative propagation, WITHOUT fast-math.
-///
-/// `@mulAdd` is the contraction `@setFloatMode(.optimized)` would license and
-/// nothing else: no `nnan`, no `ninf`. That matters because `Dual.div` divides
-/// by an unguarded `b.v`, and Verilog-A deliberately PERMITS that to be zero
-/// (VerA proof.zig:33 — "`/` by zero is not an error […] rejecting it would
-/// refuse `I <+ V/r`, the plain resistor"). A `ninf` assertion there would be
-/// silent Release-only UB in the one place SparseLu's isFinite check exists to
-/// catch (solvers/sparse_lu.zig:263,444).
-///
-/// A float mode on the CALLER cannot do this job: LLVM fast-math flags are
-/// per-instruction, emitted from the callee's lexical scope, and inlining
-/// copies them intact — measured, `evalRange`'s `@setFloatMode(.optimized)`
-/// yields 0 `vfmadd` for a `mul` inlined out of this type.
-///
-/// GATED because on a target without the feature `@mulAdd` lowers to a libm
-/// `fma()` CALL PER LANE — measured 14 calls for one `Dual(14).mul` on
-/// `-mcpu=baseline`, i.e. catastrophically slower than the two-rounding form
-/// it replaces.
-/// ponytail: arch switch, not a build option; every target this ships to is
-/// listed. Add a `-Dfma` knob only if a real target needs to override it.
+/// Whether `@mulAdd` is a native instruction. Without the feature it lowers to
+/// a libm `fma()` call per lane, far slower than the two-rounding form.
+/// It is `@mulAdd` rather than `@setFloatMode(.optimized)` on purpose: that
+/// mode also grants `nnan`/`ninf`, and `Dual.div` must be allowed to divide by
+/// zero (Verilog-A permits `V/r` with r = 0) so SparseLu's isFinite check can
+/// catch the result.
+// ponytail: an arch switch covers every shipped target; add a `-Dfma` option
+// only when a target needs to override it.
 const fma_ok = switch (builtin.cpu.arch) {
     .x86_64 => std.Target.x86.featureSetHas(builtin.cpu.features, .fma),
     .aarch64, .aarch64_be => true,
@@ -54,20 +29,13 @@ const fma_ok = switch (builtin.cpu.arch) {
     else => false,
 };
 
-/// Forward-mode dual satisfying the device scalar interface S: one eval pass
-/// yields residual + all analytic partials. Lane u carries ∂/∂x[u].
+/// Forward-mode dual number implementing the contract's device scalar `S`:
+/// one eval pass yields the residual and every partial. Lane u holds ∂/∂x[u].
 ///
-/// MIXED PRECISION. `F` is the width of the DERIVATIVE half only; the value
-/// half is always f64 and every boundary of the contract's S protocol
-/// (`con`/`scale`/`addC`/`val`/`ddxAt`) is f64, so a device never sees `F`.
-/// `F = f32` is the inexact-Newton construction: Newton converges to the
-/// accuracy of the RESIDUAL, and an approximate Jacobian costs iteration count
-/// rather than the answer. It exists because sm_89 runs f32 at 69x its f64 rate
-/// (docs/gpu-device-eval.md §1), which is the only route by which a compact
-/// model beats this CPU. The permission is the device's `jac_f32`, because only
-/// the physics knows whether its unknowns fit in f32's ~7 digits — but taking
-/// it is per INSTANTIATION, not per device: `gpuJacFloat` takes it in the GPU
-/// kernel, `jacFloat` declines it on the host, one binary.
+/// `F` is the float width of the derivative half only. The value half and
+/// every `S` boundary (`con`/`scale`/`addC`/`val`/`ddxAt`) stay f64, so the
+/// residual is identical at either width. `F = f32` trades Newton iterations
+/// for GPU throughput; see `jacFloat` and `gpuJacFloat` for who takes it.
 pub fn Dual(comptime N: usize, comptime F: type) type {
     return DualFor(N, F, false);
 }
@@ -75,20 +43,13 @@ pub fn Dual(comptime N: usize, comptime F: type) type {
 fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
     return struct {
         v: f64,
-        /// A vector's natural ABI alignment is its SIZE — 64 bytes at N=8,
-        /// F=f64 — which pads this struct to 128 bytes to carry 72 of payload
-        /// and makes every array of duals 44% padding. `evalQ`'s
-        /// `struct{res:[8]S, q:[8]S}` return is 2048 bytes for 1152 of payload,
-        /// of which only 384 can be nonzero. Nothing reads `d` through a raw
-        /// pointer — every consumer widens through `grad()`/`ddxAt()` into a
-        /// plain f64 — so the alignment buys nothing and costs at most a
-        /// `movaps`->`movups` swap, which is free on any AVX2 part.
-        /// Measured on generated mos1 evalQ: sizeOf 128 -> 72, return struct
-        /// 2048 -> 1152 B, 1727 -> 1631 static instructions (-95 of them moves,
-        /// +2 FP), 920 -> 900 callgrind Ir per instance-eval.
+        /// Derivative lanes. Aligned to the element, not the vector: natural
+        /// vector alignment pads `Dual(8, f64)` from 72 to 128 bytes, and
+        /// nothing reads `d` through a pointer that needs it.
         d: V align(@alignOf(F)),
 
-        // Builders apply D.collapse before freezing the shared scatter tapes.
+        /// Read by the generated device: the builder already applied
+        /// `D.collapse` to the scatter tapes.
         pub const collapse_applied = collapsed;
         const V = @Vector(N, F);
         const Self = @This();
@@ -96,7 +57,6 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         inline fn splat(c: f64) V {
             return @splat(@floatCast(c));
         }
-        /// a*b + c on the derivative vector, fused where the hardware has it.
         inline fn mulAddV(a: V, b: V, c: V) V {
             return if (fma_ok) @mulAdd(V, a, b, c) else a * b + c;
         }
@@ -108,16 +68,13 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         pub fn con(c: f64) Self {
             return .{ .v = c, .d = splat(0) };
         }
-        /// One of the three places the Jacobian widens back to f64 — the
-        /// solver's `g_vals` is `[]f64` and feeds a sparse LU. The other two are
-        /// `evalRange`'s scatter and its limiting correction.
+        /// Partial with respect to lane `col`, widened to f64.
         pub fn ddxAt(a: Self, col: usize) f64 {
             const lanes: [N]F = a.d;
             return lanes[col];
         }
-        /// The whole derivative, widened. Callers that need f64 partials (the
-        /// scatter, the limiting correction, noise) go through this rather than
-        /// reading `.d`, so `F` stays private to the arithmetic.
+        /// The whole derivative widened to f64, so `F` never leaks past the
+        /// arithmetic.
         pub inline fn grad(a: Self) @Vector(N, f64) {
             return if (F == f64) a.d else @floatCast(a.d);
         }
@@ -151,8 +108,7 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         pub fn log(a: Self) Self {
             return .{ .v = dmath.log(a.v), .d = a.d * splat(1.0 / a.v) };
         }
-        /// Pure Zig libm forms preserve tiny arguments and the full f64 range.
-        /// VerA's precompute scalar uses these same value operations.
+        /// Same value operation as VerA's precompute scalar, so the two agree.
         pub fn expm1(a: Self) Self {
             return .{ .v = dmath.expm1(a.v), .d = a.d * splat(dmath.exp(a.v)) };
         }
@@ -182,17 +138,11 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         pub fn maxC(a: Self, c: f64) Self {
             return if (a.v < c) con(c) else a;
         }
-        /// c·x^(c−1) = c·p/x — one `pow`, and algebraically exact for x != 0
-        /// including §4.3.1's negative-base integral-c clause.
-        ///
-        /// x == 0 keeps the second `pow`, and is NOT a rounding nicety: at
-        /// c == 1 the true slope is 1, but c·p/x is 0/0 = NaN, the isFinite
-        /// gate below would drop it, and the Jacobian row goes flat. `mjs`
-        /// defaults to 0 in gummel_poon.va, so `1 - mjs` is exactly that exponent and
-        /// the substrate base `1 - v/ps` reaches exactly 0 at v == ps. The
-        /// branch is never taken at a normal bias, so the hot path is still
-        /// one `pow`. Same rule VerA's `zPow` applies — codegen now routes a
-        /// solve-constant exponent here instead, so the two must agree.
+        /// `x^c`, slope `c·x^c/x`: one `pow`, exact for x != 0 (LRM §4.3.1
+        /// negative bases included). At x == 0 the slope takes a second `pow`
+        /// because `c·p/x` is 0/0 there and c == 1 must still give slope 1
+        /// (gummel_poon's `1 - mjs` exponent at its default mjs = 0). A
+        /// non-finite slope becomes 0. Must match VerA's `zPow`.
         pub fn pow(a: Self, c: f64) Self {
             const p = dmath.pow(a.v, c);
             const slope = if (a.v != 0.0) c * p / a.v else c * dmath.pow(a.v, c - 1.0);
@@ -217,12 +167,9 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
             return a.v;
         }
 
-        // Relational + select, required by VerA's contract decl set
-        // (../VerA/tools/contract.zig: "max","lt","le","eq","sel","val",
-        // "ddxAt"). A comparison is an indicator: value 0 or 1, derivative
-        // zero almost everywhere, so `con` is the right constructor — the
-        // branch carries no sensitivity of its own. Semantics match VerA's
-        // reference lowering (../VerA/src/backend/tb.zig).
+        // Comparisons return a 0/1 indicator with zero derivative; the
+        // derivative follows whichever operand `sel` picks. Semantics match
+        // VerA's reference lowering (backend/tb.zig).
         pub fn lt(a: Self, b: Self) Self {
             return con(@floatFromInt(@intFromBool(a.v < b.v)));
         }
@@ -232,29 +179,19 @@ fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
         pub fn eq(a: Self, b: Self) Self {
             return con(@floatFromInt(@intFromBool(a.v == b.v)));
         }
-        /// `c` is such an indicator (or any 0/1-valued expression): picks `a`
-        /// when nonzero. Derivatives ride with the taken branch, which is
-        /// what keeps a lowered ternary differentiable.
+        /// Returns `a` when the indicator `c` is nonzero, else `b`, derivative
+        /// included.
         pub fn sel(c: Self, a: Self, b: Self) Self {
             return if (c.v != 0.0) a else b;
         }
     };
 }
 
-/// `Dual` with the derivative half deleted: the same S protocol, so the same
-/// `D.eval`/`D.q` body compiles against it, and every method here is the `.v`
-/// line of the matching `Dual` method VERBATIM — `div`'s reciprocal-multiply,
-/// `abs`'s sign test (not `@abs`, which differs at -0), `min`/`max`'s tie rule.
-/// That is the whole contract of this type: value-for-value identical to a Dual
-/// pass, so a caller that only reads `.v` may substitute it freely.
-///
-/// For `evalQRange`, the transient's post-accept charge re-read: it throws both
-/// Jacobians away, and computing the 8-lane gradient of a mos1 core to discard
-/// it is the bulk of what that pass costs.
-///
-/// VerA emits an equivalent `R` inside every stateful device (codegen.zig
-/// `rscalar_txt`) for `updateState`/`limit`/`collapse`, but the contract keeps
-/// it private, so a host that wants one declares its own.
+/// Value-only device scalar for `evalQRange`. Every method is the `.v` line of
+/// the matching `Dual` method verbatim (reciprocal-multiply `div`, sign-test
+/// `abs`, the same min/max tie rule), so any pass that reads only `.v` gets
+/// bit-identical values without paying for the gradient. VerA's own `R`
+/// scalar is private to each generated device, hence this copy.
 fn RealFor(comptime collapsed: bool) type {
     return struct {
         v: f64,
@@ -271,8 +208,7 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn val(a: Self) f64 {
             return a.v;
         }
-        /// A value-only pass has no derivative; the contract still requires the
-        /// accessor. Same answer VerA's `R` gives.
+        /// Always 0; the contract requires the accessor.
         pub fn ddxAt(_: Self, _: usize) f64 {
             return 0.0;
         }
@@ -288,10 +224,7 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn mul(a: Self, b: Self) Self {
             return .{ .v = a.v * b.v };
         }
-        /// `Dual.div` computes `a.v * (1/b.v)`, not `a.v / b.v`, because it
-        /// needs the reciprocal for the derivative anyway. The two differ in
-        /// the last bit; this pass has to match the Dual one, so it keeps the
-        /// reciprocal.
+        // Reciprocal-multiply, not `/`: matches `Dual.div` to the last bit.
         pub fn div(a: Self, b: Self) Self {
             return .{ .v = a.v * (1.0 / b.v) };
         }
@@ -334,7 +267,7 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn atan(a: Self) Self {
             return .{ .v = dmath.atan(a.v) };
         }
-        /// NOT `@abs`: `Dual.abs` is a sign test, which returns -0 unchanged.
+        // Sign test, not `@abs`: matches `Dual.abs`, which keeps -0.
         pub fn abs(a: Self) Self {
             return if (a.v < 0) a.neg() else a;
         }
@@ -368,67 +301,39 @@ fn RealFor(comptime collapsed: bool) type {
     };
 }
 
-// ===========================================================================
-// Constants + contract re-exports
-// ===========================================================================
-
-/// Width of the derivative half of `Dual` for device D **on the CPU**.
-///
-/// `pub const jac_f32` is VerA's `--jac-f32` PERMISSION (contract.zig, "THE
-/// WIDTHS INSIDE S ARE THE HOST'S"). A permission is not an order, and the
-/// width is a property of the INSTANTIATION rather than of the device: the two
-/// sides want opposite answers and both are right.
-///
-/// - **GPU takes it** (`gpuJacFloat`). sm_89 runs f32 at 69x its f64 rate;
-///   measured on `arp_eval_mos1`, 2028 → 1074 f64-pipe ops and 248 → 183
-///   registers, **1.21x** end to end on `parallel_inverters_2000`, values
-///   agreeing with the f64 build to 3.9e-10.
-/// - **CPU declines it by default.** On AVX2 the same narrowing is worth
-///   −6.4% on a gate deck and *costs* +13.7% on `ngspice/mosmem`, where the
-///   f32 Jacobian knocks plain Newton off the operating point and the whole
-///   gmin ladder gets paid (`docs/perf/jac-f32-2026-09-10.md`). Same answer
-///   both times — this is an economics call, not a safety one.
-///
-/// `pub const jac_f32_host` (VerA's `--jac-f32-host`, ESPice's
-/// `-Djac-f32=<stems>`) is how the CPU is told to take the permission anyway.
-/// It implies `jac_f32`, so this predicate is the whole host-side story.
-/// See `docs/perf/jac-width-2026-09-10.md`.
+/// Derivative width of `Dual` for device D on the host. f32 only when the
+/// device declares `jac_f32_host`: the f32 Jacobian helps some CPU decks and
+/// costs others extra gmin-ladder steps (docs/perf/jac-width-2026-09-10.md).
 pub fn jacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32_host") and D.jac_f32_host) f32 else f64;
 }
 
-/// Width of the derivative half of `Dual` for device D **in its GPU kernel** —
-/// the permission itself, taken wherever the physics grants it. A device that
-/// must stay f64 declares nothing and stays f64 on both paths.
+/// Derivative width of `Dual` for device D in its GPU kernel: f32 whenever the
+/// device permits it with `jac_f32`, since GPUs run f32 many times faster.
 pub fn gpuJacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32") and D.jac_f32) f32 else f64;
 }
 
-const ir = @import("device_abi");
-pub const GROUND = ir.GROUND;
-pub const StateCtlOp = ir.StateCtlOp;
-pub const SimState = ir.SimState;
-pub const LimitResult = ir.LimitResult;
-pub const Constant = ir.Constant;
-pub const ParamRef = ir.ParamRef;
 pub const NoiseSource = ir.NoiseSource;
-pub const NoiseGenKind = ir.NoiseGenKind;
 pub const NoiseGen = ir.NoiseGen;
 pub const PsdTerm = ir.PsdTerm;
 pub const Planes = ir.Planes;
 pub const Batch = ir.Batch;
-pub const Hooks = ir.Hooks;
 pub const Proto = ir.Proto;
-pub const PatternView = ir.PatternView;
-pub const PatternBuilder = ir.PatternBuilder;
-pub const GpuPayload = ir.GpuPayload;
-pub const abi_version = ir.abi_version;
-pub const DeviceVtable = ir.DeviceVtable;
-pub const layoutHash = ir.layoutHash;
+const GROUND = ir.GROUND;
+const StateCtlOp = ir.StateCtlOp;
+const SimState = ir.SimState;
+const ParamRef = ir.ParamRef;
+const Hooks = ir.Hooks;
+const PatternView = ir.PatternView;
+const PatternBuilder = ir.PatternBuilder;
+const GpuPayload = ir.GpuPayload;
+const DeviceVtable = ir.DeviceVtable;
 
-/// Scatter window over precomputed tapes: min/max slot and rhs row touched,
-/// trash slot / trash row (ground writes) excluded.
-pub fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, trash_row: u32) [4]u32 {
+/// Returns `{slot_lo, slot_hi, row_lo, row_hi}`: the half-open slot and row
+/// ranges the tapes touch, ignoring the trash slot and row. Empty ranges come
+/// back as `lo == hi`.
+fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, trash_row: u32) [4]u32 {
     var slot_lo: u32 = std.math.maxInt(u32);
     var slot_hi: u32 = 0;
     var row_lo: u32 = std.math.maxInt(u32);
@@ -448,14 +353,12 @@ pub fn tapeBounds(slots: []const u32, rhs_idx: []const u32, trash_slot: u32, tra
     return .{ slot_lo, slot_hi, row_lo, row_hi };
 }
 
-/// Precompute the gather/scatter tapes for one batch from its flat node
-/// list ([id * n_u + u] layout). Ground rows/cols land in the trash slot, and
-/// so do the STRUCTURALLY zero (row, col) pairs `pat` clears — `addPattern`
-/// did not reserve a matrix entry for them and `evalRange` never reads them
-/// back, so the trash slot is the one answer that keeps the tape's frozen
-/// `[id][ru][cu]` shape while the matrix carries only the entries a device
-/// can actually fill.
-pub fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
+/// Fills the gather, residual-row and Jacobian-slot tapes from the flat node
+/// list (`[id * n_u + u]`). Ground rows go to row `pv.n`; ground entries and
+/// the structural zeros `pat` clears go to `pv.trash_slot`, which keeps the
+/// frozen `[id][ru][cu]` tape shape without reserving matrix entries.
+/// Asserts every other (row, col) is in the pattern.
+fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternView, gath: []u32, rhs_idx: []u32, slots: []u32) void {
     const count = nodes.len / n_u;
     for (0..count) |id| {
         const nd = nodes[id * n_u ..][0..n_u];
@@ -471,18 +374,11 @@ pub fn buildTapes(nodes: []const u32, n_u: usize, pat: []const u64, pv: PatternV
     }
 }
 
-/// D's structural Jacobian, resistive OR reactive: bit `cu` of row `ru` is set
-/// when this device can put anything at all in local matrix entry (ru, cu).
-///
-/// VerA emits `jac_pattern`/`q_pattern` (see its `emitPattern`); a device that
-/// declares neither gets all ones, which is the dense behaviour every host had
-/// before the declaration existed — runtime `.so` devices built by an older
-/// generator included.
+/// D's structural Jacobian, resistive and reactive combined: bit `cu` of row
+/// `ru` is set when the device can write local entry (ru, cu).
 fn jacPattern(comptime D: type) [contract.nU(D)]u64 {
     var out = rowPattern(D, "jac_pattern");
-    // A device with no reactive residual has no charge columns to reserve;
-    // asking `rowPattern` for the missing half would answer "dense" and undo
-    // the whole reservation.
+    // Without `q` there is no reactive half; `rowPattern` would call it dense.
     if (@hasDecl(D, "q")) {
         const q = rowPattern(D, "q_pattern");
         for (&out, q) |*o, qm| o.* |= qm;
@@ -490,33 +386,20 @@ fn jacPattern(comptime D: type) [contract.nU(D)]u64 {
     return out;
 }
 
-/// One half of it. An undeclared half is all ones — the dense behaviour every
-/// host had before the declaration existed, which is also what a runtime `.so`
-/// device from an older generator gets.
+/// The pattern decl `name` (`jac_pattern` or `q_pattern`), or all ones (dense)
+/// when D does not declare it.
 fn rowPattern(comptime D: type, comptime name: []const u8) [contract.nU(D)]u64 {
     if (!@hasDecl(D, name)) return @splat(std.math.maxInt(u64));
     return @field(D, name);
 }
 
-/// Which residual rows D's `eval` (`jac_rows`) or `q` (`q_rows`) EVER WRITES.
-/// Everything else is `S.con(0.0)` at every bias, so the whole row — residual
-/// stamp, charge-plane add, `q_tape` slot, Jacobian columns — is deletable at
-/// comptime rather than being `+= 0.0`'d once per instance per Newton iterate.
+/// Which residual rows D's `eval` (`jac_rows`) or `q` (`q_rows`) ever writes;
+/// all rows when undeclared. The others are zero at every bias, so their
+/// stamps are dropped at comptime.
 ///
-/// THIS IS NOT `rowPattern(...)[ru] != 0` AND MUST NEVER BE DERIVED FROM IT.
-/// The patterns answer for the DERIVATIVE: VerA ORs `unknownDeps(value)` into
-/// the row at every `res[...]` it emits, so a term whose value depends on no
-/// unknown leaves the row's column mask CLEAR while writing the row. `isource`
-/// is exactly that — `jac_pattern = {0, 0}` with `eval` stamping the DC current
-/// into both rows — so inferring "row dead" from "columns dead" deletes every
-/// independent current source in the netlist. On the reactive half the same
-/// mistake is quieter: a `ddt()` of something varying in `t` and not in `x`
-/// would freeze that state's `q_tape` entry at zero and silently drop a real
-/// LTE bound. Only the generator knows which rows it wrote, and it now says so.
-///
-/// Undeclared is all-true — the dense behaviour every host had before the
-/// declaration existed, hand-written devices (tests/testdev.zig) and runtime
-/// `.so` devices from an older generator included.
+/// Never derive this from `rowPattern(...)[ru] != 0`. A row can be written
+/// with a value that depends on no unknown: `isource` has `jac_pattern =
+/// {0, 0}` and still stamps its current into both rows.
 fn writtenRows(comptime D: type, comptime name: []const u8) [contract.nU(D)]bool {
     if (!@hasDecl(D, name)) return @splat(true);
     const mask: u64 = @field(D, name);
@@ -525,27 +408,16 @@ fn writtenRows(comptime D: type, comptime name: []const u8) [contract.nU(D)]bool
     return out;
 }
 
-/// The DERIVATIVE BASIS `evalRange` seeds — `w` lanes and, per unknown, the
-/// lane it seeds and whether it is the lane's Jacobian representative.
+/// The derivative basis `evalRange` seeds: `w` lanes, and the lane each
+/// unknown seeds into.
 ///
-/// Wide form (`narrow = false`): the identity, one lane per unknown, which is
-/// what every device and every non-collapsed instance gets.
-///
-/// Narrow form: for an instance whose `collapse` is MAXIMAL (`collapse_full`),
-/// each merged set is ONE circuit node. Its members share a gather index, so
-/// their Jacobian columns share a matrix slot and the entry the solver sees is
-/// the SUM over the set — which is exactly what one shared seed lane computes.
-/// mos1/mos6 go 8 lanes to 4: `di ≡ d`, `si ≡ s`, and both branch-flow
-/// unknowns ride along (VerA aliases them onto the far node unconditionally).
-/// `@Vector(4, f64)` is one ymm where `@Vector(8, f64)` is two.
-///
-/// Sharing a lane means the members' stamps must not be written twice, so
-/// exactly one member per lane — the lowest set column in that row — carries
-/// the stamp. Residual ROWS are untouched: those are distinct values that
-/// genuinely sum into one row, and they already did.
+/// Wide: one lane per unknown. Narrow, for an instance whose collapse is
+/// maximal (`collapse_full`): every merged set is one circuit node, its
+/// columns share a matrix slot, and one shared lane computes the summed entry
+/// the solver sees. mos1 goes from 8 lanes to 4, one ymm instead of two.
 const Basis = struct {
     w: usize,
-    /// lane[u] — the basis lane unknown u seeds into.
+    /// `lane[u]` is the lane unknown `u` seeds.
     lane: []const u8,
 };
 
@@ -557,9 +429,8 @@ fn basisOf(comptime D: type, comptime narrow: bool) Basis {
         for (&lane, 0..) |*l, u| l.* = @intCast(u);
         w = n_u;
     } else {
-        // `collapse_full` is fully resolved and aliases downward (the contract
-        // checks both), so the root is one lookup and roots are seen in
-        // ascending order — lane numbering falls out of the same walk.
+        // The contract guarantees `collapse_full` is resolved and aliases
+        // downward, so each root precedes its aliases.
         var of_root: [n_u]u8 = @splat(0);
         for (0..n_u) |u| {
             if (D.collapse_full[u]) |r| {
@@ -575,28 +446,15 @@ fn basisOf(comptime D: type, comptime narrow: bool) Basis {
     return .{ .w = w, .lane = &l };
 }
 
-/// One pattern half with every non-representative column cleared: of the
-/// columns a row stamps that share a lane, exactly one survives. Per HALF,
-/// because `g_vals` and `c_vals` are different planes — the two need not agree
-/// on which member carries the stamp, and requiring them to would drop a stamp
-/// whose lane-mate is live on the other half only.
+/// One pattern half with a single representative column kept per lane, so a
+/// shared lane is stamped once. Computed per half because `g_vals` and
+/// `c_vals` are separate planes.
 ///
-/// WHICH member is not cosmetic, and it is the difference between byte-identical
-/// output and a 1-ulp drift. A lane group's columns all resolve to ONE matrix
-/// slot, but so can an unrelated column (gate tied to drain, bulk tied to
-/// source — every current mirror in the corpus), and then the slot's `+=` order
-/// decides the last bit. So the representative is the one the WIDE kernel put
-/// its nonzero on: the lowest ALIAS, never the root. Under maximal collapse the
-/// root is the port the physics stopped reading — that structural zero is
-/// exactly what makes the merge exact — and the alias is where the derivative
-/// actually lands. Picking the root instead moves the stamp from column `di` to
-/// column `d`, i.e. across `g` and `b`, and the shared slot sums in a different
-/// order. Measured: lowest-column drifted `ngspice/mosamp` and the three
-/// `sweep/opamp_wl_*` decks (max 3.4e-9 absolute, all four still PASS);
-/// lowest-alias is byte-identical on all 256.
-///
-/// `alias[cu]` is `collapse_full[cu] != null`. All-false (the wide basis, or a
-/// device with no collapse) makes every group a singleton and this the identity.
+/// The representative is the lowest alias, not the root: that is the column
+/// the wide kernel stamps, so a slot shared with an unrelated column (a gate
+/// tied to its drain) sums in the same order and the output stays
+/// byte-identical. `alias[cu]` is `collapse_full[cu] != null`; all-false makes
+/// this the identity.
 fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]bool, comptime pat: [n_u]u64) [n_u]u64 {
     var out: [n_u]u64 = @splat(0);
     for (&out, pat) |*m, row| {
@@ -614,33 +472,16 @@ fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]boo
     return out;
 }
 
-/// Can D's fully-collapsed instances run on a reduced basis, and is it worth a
-/// second instantiation of the kernel?
+/// Whether D gets a second `evalRange` instantiation on the narrow basis for
+/// its fully collapsed instances. It pays only when it saves a register on
+/// AVX2 (docs/perf/remaining-2026-09-10.md): the wide dual spans two ymm
+/// (4 < n_u <= 8) and the narrow one fits in one (w <= 4). That admits
+/// mos1/2/3/6/9, bsim1, bsim3, hfet2, jfet and mes.
 ///
-/// Three gates, all from `docs/perf/remaining-2026-09-10.md`'s settled table.
-/// On AVX2 every width from 1 to 4 is ONE ymm, so the only thing that pays is
-/// crossing a register boundary:
-///
-/// - `w <= 4` — the narrow side must fit in one ymm. `@Vector(6, f64)` lowers
-///   to ymm+xmm and measured a **21% loss**.
-/// - `n_u > 4` — the wide side must NOT already fit in one. That is the
-///   settled "narrowing popcount-2 values from 4 lanes to 2 saves zero" row,
-///   and it is why `diode` (n_u = 4, rank 2) is excluded: a real narrowing, no
-///   register saved, a second instantiation for nothing.
-/// - `n_u <= 8` — "the wide dual is at most two ymm", the regime the 488-Ir
-///   measurement and the k=4/k=6 rows were taken in. Wider devices (bsim4 at
-///   n_u = 18, the hisim family) would narrow further on paper, but nothing
-///   prices them today and each one doubles a very large kernel's compile.
-///   ponytail: lift the bound when a whale is on a gate deck.
-///
-/// Today that admits mos1/2/3/6/9, bsim1 and bsim3 (n_u = 8 → rank 4) and
-/// hfet2/jfet/mes (n_u = 7 → rank 3). `gummel_poon`, `jfet2`, `vdmos`, `bsim4va`,
-/// `bsimsoi`, `hicum` and the hisim pair stay wide.
-///
-/// The limit guard is correctness, not economics: `evalRange` builds the
-/// limiting correction as one entry per LANE, so two unknowns sharing a lane
-/// must not both be corrected — they would need two different corrections in
-/// one slot. mos1/mos6 write `{di, si}`, one per lane, and pass.
+/// Limiting adds a correctness gate: the correction is stored per lane, so no
+/// two unknowns `limit` writes may share one.
+// ponytail: n_u <= 8 keeps bsim4 and hisim wide because nothing prices them
+// yet; lift the bound when one of them sits on a benchmark deck.
 fn canNarrow(comptime D: type) bool {
     if (!@hasDecl(D, "collapse_full")) return false;
     const n_u = contract.nU(D);
@@ -658,26 +499,14 @@ fn canNarrow(comptime D: type) bool {
     return true;
 }
 
-// ===========================================================================
-// Sink-parameterized eval — the ONE physics body. `sink` (comptime-known)
-// owns all memory access, so the same loop serves both instantiations of the
-// ONE `Sink` type (CPU `+=`, GPU atomic-scatter). Always AD (Dual): residual +
-// Jacobian in one pass.
-//
-// `narrow` picks the DERIVATIVE BASIS and nothing else — same body, same
-// device call, same `S` type constructor, one comptime width apart. It is only
-// sound on instances whose `collapse` is maximal, which is what
-// `ProtoStore.finalize`'s partition guarantees for `[0, narrow_count)`.
-//
-// `F` is the derivative half's FLOAT WIDTH, and it is the same shape of
-// parameter for the same reason: one comptime width, nothing else moves. It is
-// a parameter rather than `jacFloat(D)` because the two instantiations of this
-// body want different answers — `gpuJacFloat(D)` in `DeviceKernel.run`,
-// `jacFloat(D)` on the host — which is the whole of
-// `docs/perf/jac-width-2026-09-10.md`. A width is not kernel logic; AGENTS.md's
-// "no GPU-only kernel logic" is about bodies, and there is still exactly one.
-// ===========================================================================
-
+/// Evaluates instances `[first, end)` of D and stamps residual, charge and
+/// both Jacobians through `sink`. The one physics body: the host sink adds
+/// into the planes, the GPU sink writes per-contribution staging cells.
+///
+/// `narrow` selects the reduced derivative basis (see `Basis`) and is sound
+/// only on maximally collapsed instances, which `ProtoStore.finalize` sorts to
+/// `[0, narrow_count)`. `F` is the derivative width: `jacFloat(D)` on the
+/// host, `gpuJacFloat(D)` in `DeviceKernel`.
 fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
@@ -704,64 +533,44 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
     const S = DualFor(W, F, @hasDecl(D, "collapse"));
     const use_lim = if (comptime has_limit) limiting else false;
     const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
-    // BRANCHLESS GROUND on the host. A ground row/column already resolves to
-    // `trash_row`/`trash_slot` in the tape, so `+= v` there is architecturally
-    // a no-op — the predicate only saves one add on a line that is L1-resident
-    // by construction (every instance in the batch shares it), and costs a test
-    // per stamp plus the `active` array itself in the frame.
-    //
-    // NOT on the GPU, and that is measured: there the skipped add is a
-    // CONTENDED ATOMIC on one address across the whole grid, worth 2x on
-    // 40,000 instances (docs/device-evaluation-audit-2026-09.md, "Ground
-    // scatter"). Same body, opposite right answer, so it is a comptime split
-    // on the sink's own `device` flag.
+    const has_q = comptime @hasDecl(D, "q");
+    // `evalQ` computes both halves from one call into the model core; calling
+    // `eval` and `q` separately runs the core twice.
+    const fuse = comptime has_q and @hasDecl(D, "evalQ");
+    // Ground predicates only on the GPU. On the host a ground stamp lands in
+    // the shared trash slot/row, so the add is cheaper than the test. On the
+    // GPU that add is a contended write on one address, measured 2x on 40,000
+    // instances (docs/device-evaluation-audit-2026-09.md).
     const mask_ground = comptime SinkT.on_device;
 
     var id: u32 = first;
     while (id < end) : (id += 1) {
-        // Gather the local eval point; corr = local(x) − lx (zero unless limiting).
         var lx: [n_u]f64 = undefined;
         var active: [n_u]bool = undefined;
-        // LANE-indexed, like the gradient it multiplies. `canNarrow` refuses a
-        // basis where two corrected unknowns share a lane, so this write is
-        // never a collision.
+        // x minus its limited image, per lane. `canNarrow` guarantees no two
+        // corrected unknowns share a lane.
         var corr: @Vector(W, f64) = @splat(0);
         inline for (0..n_u) |u| {
             const gi = sink.gath(id, u);
             active[u] = gi != GROUND;
             const xg = sink.x(gi);
             lx[u] = xg;
-            // ONLY the unknowns `limit` can write have a limited image. The
-            // rest were never corrected, so `lim_x` held a copy of `x` and
-            // `corr` a structural zero — read `x` and leave the lane at the
-            // `@splat(0)` it was born with, which also shrinks both reductions
-            // below to the live lanes.
+            // Only unknowns `limit` writes have a limited image; the other
+            // lanes of `corr` stay zero.
             if (use_lim and comptime (lim_writes >> u) & 1 != 0) {
                 const l = sink.lim(id, u);
                 lx[u] = l;
                 corr[lane[u]] = xg - l;
             }
         }
-        // Limiting being ARMED is not the same as any unknown having moved:
-        // `lim_x` equals `x` on every instance the limiter left alone, which
-        // near convergence is nearly all of them. One vector compare replaces
-        // `2 * n_u` masked dot products of a zero vector.
+        // Near convergence the limiter leaves almost every instance alone, so
+        // one test skips the correction dot products.
         const corr_live = use_lim and anyNonzero(W, corr);
 
-        // The VALUE half stays per unknown — `lx[d]` and `lx[di]` are the same
-        // node but not the same number once the limiter has moved `di`. Only
-        // the DERIVATIVE basis merges.
+        // Values stay per unknown even when lanes merge: a limited `di` and
+        // its node `d` hold different numbers.
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(lx[u], lane[u]);
-
-        // `eval` and `q` each open their own call to the device's shared model
-        // core, so asking for both ran the whole model TWICE — measured at 2x
-        // the core entries per instance eval (158,556 for 79,278 on a 6-MOS
-        // transient), against device eval that is 92% of the run. `evalQ` is
-        // the same physics off ONE core call; VerA's generated testbench gates
-        // it against `eval`/`q` bit-for-bit, value and derivative.
-        const has_q = comptime @hasDecl(D, "q");
-        const fuse = comptime has_q and @hasDecl(D, "evalQ");
 
         var out: [n_u]S = undefined;
         var qo: if (has_q) [n_u]S else void = undefined;
@@ -774,44 +583,17 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
             if (comptime has_q) qo = D.q(S, xv, sink.model(id), sink.inst(id), t);
         }
 
-        // Ground matrix/residual stamps are discarded. Keep their AD lanes
-        // for limiting; charge rows still feed per-state tapes and conservation.
-        //
-        // `jac_pat`/`q_pat` are the DEVICE's structural Jacobian: a clear bit
-        // is an entry the physics can never fill, so the stamp goes away at
-        // comptime instead of adding 0.0 to a matrix slot once per instance per
-        // Newton iteration. mos1 keeps 21 of 64 resistive and 16 of 64 reactive
-        // columns; the cleared ones also never reached `addPattern`, so there
-        // is no matrix entry behind them to add to.
-        //
-        // TWO passes over the rows, and `rhs_idx[id * n_u + ru]` is read in
-        // each of them. That is not an oversight: fusing them into one pass is
-        // bit-identical (the four planes are disjoint arrays and the write
-        // order within each stays `ru`/`cu` ascending) and it does save the
-        // reload plus the `slots + (id*n_u+ru)*n_u` base the two halves share
-        // — 387 -> 360 Ir per instance on the standalone stamp rig at mos1
-        // geometry. It was built and measured on the real kernel and it does
-        // not pay: fusing keeps `out` live across the charge stamps as well,
-        // and inside a 1460-Ir body with 8 duals of each residual already in
-        // the frame the extra pressure costs more than the addressing saves.
-        // mos6_inverter 248.51M -> 246.67M Ir, but parallel_inverters_100
-        // 704.92M -> 706.92M with the whole delta inside the mos1 kernel
-        // (+2.39M). Device-dependent codegen, not a lever. Reverted.
-        //
-        // `jac_row`/`q_row` are the OTHER predicate, and the one that decides
-        // whether the row runs at all: "does this half ever write `res[ru]`".
-        // A row it clears is `S.con(0.0)` at every bias, so `+= 0.0` into the
-        // plane is a no-op — the accumulator started at a `+0.0` memset and
-        // only ever grew by addition, so it cannot be `-0.0` and the skipped
-        // add cannot even flip a sign bit. See `writtenRows` for why this is a
-        // DECLARATION and not `jac_pat[ru] != 0`.
+        // Rows the device never writes (`jac_row`) and entries it can never
+        // fill (`jac_pat`) are dropped at comptime; the planes start at +0.0,
+        // so a skipped `+= 0.0` cannot even change a sign bit. Resistive and
+        // reactive halves stay in separate passes: fusing them measured
+        // slower on the mos1 kernel from register pressure.
         inline for (0..n_u) |ru| if (comptime jac_row[ru]) if (!mask_ground or active[ru]) {
             const row = sink.rhsRow(id, ru);
             var val = out[ru].v;
             if (comptime has_limit) {
-                // Widened FIRST: this term lands on the residual, which stays
-                // f64 whatever the Jacobian is carried in. An empty row has an
-                // identically zero gradient, so the correction is zero too.
+                // The correction lands on the f64 residual. An empty pattern
+                // row has zero gradient, so it has no correction either.
                 if (corr_live and comptime jac_pat[ru] != 0) val += @reduce(.Add, out[ru].grad() * corr);
             }
             sink.scatterRes(row, val);
@@ -824,29 +606,10 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
         };
 
         if (comptime has_q) {
-            // A CLEAR PATTERN ROW IS STILL NOT A LICENCE TO SKIP THE STAMP —
-            // here or on the resistive half, and the resistive version of that
-            // mistake is one you would never see in a diff. VerA builds the
-            // pattern masks by ORing `unknownDeps(value)` into the row at every
-            // `res[...]` it emits (codegen.zig `patRow`), so a term whose value
-            // depends on no unknown leaves the row's mask CLEAR while writing
-            // the row. `isource` is exactly that — `jac_pattern = {0, 0}` with
-            // `eval` stamping the DC current into both rows — so gating
-            // `scatterRes` on `jac_pat[ru] != 0` deletes every independent
-            // current source in the netlist. On the reactive half the same
-            // mistake is quieter and worse: a `ddt()` of something varying in
-            // `t` and not in `x` would leave `q_tape` holding a frozen 0 for a
-            // state that is actually moving, and `stepBound` would drop a real
-            // LTE bound and run the step long.
-            //
-            // `q_row` is the declaration that earns the skip instead of
-            // guessing at it: the generator says which rows `q` writes.
-            // Skipping the 4-of-8 dead mos1 charge rows also leaves their
-            // `q_tape` slots untouched, which is correct BY CONSTRUCTION and
-            // not by luck — the tape is `@memset` to 0 once in
-            // `ProtoStore.finalize` and `scatterQ` is its only writer, so a row
-            // nothing writes reads 0 forever, which is exactly the value the
-            // skipped store would have put there.
+            // Gated on `q_row`, never on `q_pat`: a `ddt()` of something that
+            // varies in t but not in x has a clear pattern row and a live
+            // charge the LTE must see. A skipped row's `q_tape` slot keeps the
+            // zero `finalize` wrote, which is the value the store would write.
             inline for (0..n_u) |ru| if (comptime q_row[ru]) {
                 const row = sink.rhsRow(id, ru);
                 var qv = qo[ru].v;
@@ -867,37 +630,21 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
     }
 }
 
-/// `@reduce(.Or, v != 0)` — any lane nonzero or NaN, ±0 not — tested on the
-/// BITS: shifting out the sign leaves zero only for ±0. The float compare
-/// lowered its i1 mask through vpermps/vpslld/vpmovsxdq/vmovmskpd; this is
-/// vpaddq + vptest. Oracle and differential case: tests/eval.zig.
+/// `@reduce(.Or, v != 0)` computed on the bits: true when any lane is nonzero
+/// or NaN, false for ±0. Lowers to vpaddq + vptest instead of a mask shuffle.
+/// Differential test against the float compare: tests/eval.zig.
 inline fn anyNonzero(comptime w: usize, v: @Vector(w, f64)) bool {
     return @reduce(.Or, @as(@Vector(w, u64), @bitCast(v)) << @splat(1)) != 0;
 }
 
-/// `evalRange`'s REACTIVE half, alone — same seed, same `D.q`, same `scatterQ`,
-/// and an `S` whose value arithmetic is `Dual`'s verbatim, so `q_vec` and
-/// `q_tape` come out bit-for-bit what a full eval would leave there. Host only.
+/// Restamps `q_vec` and `q_tape` for instances `[first, end)` and leaves the
+/// other planes alone. Host only. With `S = RealFor(...)` the charges are
+/// bit-identical to a full `evalRange` pass, at no gradient cost.
 ///
-/// `S` is a PARAMETER because the caller passes `RealFor`, and this pass reads
-/// only `.v`. Measured: LLVM dead-codes `Dual`'s gradient here for a small core
-/// (mos1/parallel_inverters_100 is a wash, +0.01%) and does NOT for a larger one
-/// (mos6_inverter 204.14M -> 199.43M Ir, -2.3%), so the value-only `S` is what
-/// makes "computes no derivatives" a property of the type instead of a property
-/// of the optimizer — which is the half of it that scales to bsim4/hicum.
-///
-/// The transient re-reads the charges once per ACCEPTED step, because `newton()`
-/// returns on the iterate it converged without reassembling: the planes hold
-/// q(x_k) while the accepted point is x_k+1 (tran.zig, post-accept block). It
-/// used a whole `Circuit.eval` for that — 595 extra full device passes on
-/// scaling/parallel_inverters_100, 16% of the program — and threw g/c/rhs away,
-/// since the next step's first assemble restamps all three.
-///
-/// Everything `evalRange` does that this drops is dead at that call site:
-/// `D.eval`'s residual and both Jacobians (restamped) and the limiting
-/// correction (`converger` clears limits before it returns, so `corr` is
-/// identically zero). What survives is the charge, which is exactly what the
-/// caller reads.
+/// The transient calls this once per accepted step: Newton returns without
+/// reassembling at the accepted iterate, so the planes still hold the
+/// previous iterate's charge. The limiting correction is skipped because
+/// limits are cleared before Newton returns.
 fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, t: f64) void {
     @setEvalBranchQuota(1_000_000);
     @setFloatMode(.optimized);
@@ -908,84 +655,45 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(sink.x(sink.gath(id, u)), u);
         const qo = D.q(S, xv, sink.model(id), sink.inst(id), t);
-        // Every charge row `q` WRITES, cleared pattern included — the same
-        // `q_row` gate `evalRange` uses, and it has to be the same one or this
-        // pass stops being bit-for-bit what a full eval leaves behind.
+        // Same `q_row` gate as `evalRange`, or the two passes would differ.
         inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(id, ru, sink.rhsRow(id, ru), qo[ru].v);
     }
 }
 
-/// SPICE-style limiting pass: cur = local(x); old = lim (on the unknowns the
-/// device corrects, once engaged) else local(x_old); lim = D.limit(cur, old).
-/// Returns 1.0 if any instance reported `converged = false` — the DEVICE
-/// decides whether its clamp was significant enough to force another Newton
-/// iteration (pnjlim says yes, a cosmetic fetlim/limvds clamp says no). This
-/// replaces the old `limit_flag_unknowns` table, which could only answer that
-/// positionally and so could not tell a large clamp from a small one on the
-/// same unknown.
+/// SPICE-style limiting over instances `[first, end)`: `lim = D.limit(cur,
+/// old)`, where `cur` is the local x and `old` is the previous limited value
+/// (once limiting is active) or the local `x_old`. Returns 1.0 when any
+/// instance reports `converged = false`, which forces another Newton
+/// iteration; the device decides whether its clamp was large enough.
 ///
-/// THE ONE PLACE THIS IS NOT BIT-NEUTRAL, stated rather than buried: an
-/// unknown the device READS but never WRITES now takes its previous value from
-/// `x_old` instead of from the copy `lim_x` used to carry. Those are the same
-/// number on every path where `postStep` runs once per `x_old` update — every
-/// CPU path, because `finalizeStep` latches `x_old = x` immediately before
-/// `x += dx`. `newton_core`'s monotone-residual retreat calls `postStep` a
-/// SECOND time against the same `x_old`, so there the two differ; it is
-/// `backtrack = true`, which both CPU envs set false (converger.zig:351,
-/// newton_core.zig:417) and only a GPU solve turns on.
+/// Unknowns `limit` reads but never writes take `old` from `x_old`. That
+/// equals the previous limited copy whenever `postStep` runs once per `x_old`
+/// update, which holds on every CPU path (only GPU backtracking calls it
+/// twice).
 fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) f64 {
     const n_u = comptime contract.nU(D);
-    // The device's own live sets. A MOS ladder reads four of eight unknowns
-    // and writes two: `d`, `s` and the two branch-flow unknowns are gathered,
-    // copied through `limit`'s frame and stored back into `lim_x` to arrive at
-    // the value they already had. ngspice keeps its limiter memory as the
-    // three BRANCH voltages in `CKTstate0` and has no such traffic; these two
-    // masks are how a `[n_u]f64` ABI gets the same result. Absent (a
-    // hand-written device), both read as ALL and the walk is the old one.
+    // The device's read and write sets; a MOS ladder reads 4 of its 8
+    // unknowns and writes 2. All ones when the device does not declare them.
     const reads = comptime contract.limitReads(D);
     const writes = comptime contract.limitWrites(D);
-    // f64, not bool: the bool version measured +0.1% Ir on
-    // device_mos6_inverter (callgrind 118.29M -> 118.42M), from codegen in
-    // this inlined loop alone.
+    // f64 rather than bool: measured +0.1% instructions with a bool here.
     var flag: f64 = 0;
     var id: u32 = first;
     while (id < end) : (id += 1) {
-        // Lanes outside `reads` stay undefined and that is sound, not sloppy:
-        // `limit` does not read them by the mask's construction, and the only
-        // thing they can reach is `lm.x[u]` for a `u` outside `writes`, which
-        // the scatter below drops. Nothing undefined reaches a stored value.
+        // Lanes outside `reads` stay undefined: `limit` never reads them, and
+        // their outputs fall outside `writes`, so nothing stores them.
         var cur: [n_u]f64 = undefined;
         var old: [n_u]f64 = undefined;
         inline for (0..n_u) |u| if (comptime (reads >> u) & 1 != 0) {
             const gi = sink.gath(id, u);
             cur[u] = sink.x(gi);
-            // `lim_x` only ever held a limited value on `writes`. Elsewhere it
-            // held this pass's own copy of `x` from the PREVIOUS iterate —
-            // which is `x_old` now, bit for bit: `finalizeStep` takes
-            // `x_old = x` before it applies `dx`, so the x this pass saw last
-            // time is the x_old it is handed this time. So read it from there
-            // and stop maintaining a second copy.
             old[u] = if (lim_active and comptime (writes >> u) & 1 != 0)
                 sink.lim(id, u)
             else
                 sink.xOld(gi);
         };
-        // NOT `@call(.always_inline, ...)`, and that is measured, not an
-        // oversight. `limit`'s contract signature is `[n_u]f64` BY VALUE twice
-        // in and a `LimitResult(n_u)` out, so a real call boundary here would
-        // cost 2*n_u stores plus n_u+1 loads of pure ABI per instance per
-        // Newton iterate — but there is no call boundary: one call site and a
-        // small leaf body mean LLVM already inlines it. Forcing the same
-        // decision explicitly only takes it away from the inliner's own
-        // ordering, and it is a LOSS: same tree, two builds, raw byte-identical,
-        // scaling/parallel_inverters_100 504.35M -> 505.78M Ir (+0.28%),
-        // devices/mos6_inverter 175.54M -> 175.89M (+0.20%).
-        //
-        // An env-gated A/B of the two call forms INSIDE one binary says the
-        // opposite (-3.9%/-3.0%) and is wrong: keeping a non-inlined arm alive
-        // forces `D.limit` to be emitted out of line, so that experiment prices
-        // the cost of DEFEATING the inliner, not the benefit of helping it.
-        // Inlining questions need two builds.
+        // A plain call on purpose. LLVM inlines it anyway; forcing
+        // `.always_inline` measured 0.2-0.3% slower.
         const lm = D.limit(sink.model(id), sink.inst(id), cur, old);
         if (!lm.converged) flag = 1;
         inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
@@ -995,35 +703,19 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
     return flag;
 }
 
-// ===========================================================================
-// ProtoStore(D) + DeviceBatch(D): comptime device accumulation and the frozen
-// SoA batch with the AD eval hot loop and cold Hooks vtable.
-// ===========================================================================
-
-/// Build-time staging for the per-instance rows, before `finalize` freezes
-/// them into the batch. Deliberately NOT the caller's `gpa`.
-///
-/// `gpa` here is the SIM ARENA. `ArenaAllocator.free` and shrink-`resize` are
-/// silent no-ops for anything but the most recent allocation, so a list
-/// growing 1.5x at a time leaves every abandoned capacity resident for the
-/// whole run — about 2x the final column size, and every device type's store
-/// grows interleaved in netlist order, so none is ever the arena's most recent
-/// allocation.
-/// Measured on `sweep/opamp_wl_5000` (25,000 MOS1): 109.5 MB requested for
-/// 36.5 MB of live columns, i.e. 73 MB — half the deck's entire `.op`
-/// footprint — of dead ArrayList capacity that nothing could ever reclaim.
-///
-/// A real allocator hands the intermediates back as they are abandoned;
-/// `finalize` then makes ONE exact-size copy into `gpa`, which is what the
-/// frozen ABI owns and what `hooks.deinit` frees.
+/// Allocator for `ProtoStore` staging rows. Not the caller's allocator, which
+/// is usually an arena: an arena keeps every abandoned `MultiArrayList`
+/// capacity alive, measured at 73 MB on a 25,000-MOSFET deck. `finalize`
+/// copies the rows once, at exact size, into the caller's allocator.
 const staging_gpa = std.heap.smp_allocator;
 
+/// Construction-time rows for one device type: each instance's Model,
+/// Instance and nodes, staged until `finalize` freezes them into a
+/// `DeviceBatch(D)`. Reached through the type-erased `Proto`.
 pub fn ProtoStore(comptime D: type) type {
-    // ponytail: the contract owns unknown counting; retain usize for tape offsets.
     const n_u: usize = comptime contract.nU(D);
     return struct {
-        /// One row per device instance. See `staging_gpa` for why the rows
-        /// are not on the caller's allocator.
+        /// One row per instance, owned by `staging_gpa`.
         rows: std.MultiArrayList(Row) = .empty,
 
         const Self = @This();
@@ -1033,17 +725,16 @@ pub fn ProtoStore(comptime D: type) type {
             try self.rows.append(staging_gpa, .{ .model = model, .instance = instance, .nodes = nodes });
         }
 
+        /// `Proto.pattern`: adds every (row, col) the device's structural
+        /// Jacobian can fill, ground excluded. Reserving only the structural
+        /// entries (25 of 64 for mos1) keeps fill-in out of every
+        /// factorization.
         pub fn addPattern(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) ir.DeviceResult(void) {
             return ir.DeviceResult(void).fromLocal(addPatternLocal(ctx, gpa, pb));
         }
 
         fn addPatternLocal(ctx: *anyopaque, gpa: std.mem.Allocator, pb: *PatternBuilder) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            // The device's structural Jacobian, not n_u^2: an entry no device
-            // can fill is still a matrix nonzero once it is reserved, and it
-            // costs fill-in and float work in every factorization for the rest
-            // of the run. ngspice reserves exactly its 22 MOS1 stamps; this is
-            // how espice reserves 25 instead of 64.
             const pat = comptime jacPattern(D);
             const nnz = comptime blk: {
                 var k: usize = 0;
@@ -1051,8 +742,8 @@ pub fn ProtoStore(comptime D: type) type {
                 break :blk k;
             };
             try pb.reserve(gpa, self.rows.len * nnz);
-            // Runtime loops: this runs ONCE per batch at setup, and unrolling
-            // n_u^2 for 38 devices is a comptime-quota problem, not a speedup.
+            // Runtime loops: this runs once per batch, and unrolling n_u^2
+            // for every device only costs comptime quota.
             for (self.rows.items(.nodes)) |nd| {
                 for (0..n_u) |ru| for (0..n_u) |cu| {
                     if ((pat[ru] >> @intCast(cu)) & 1 == 0) continue;
@@ -1062,6 +753,9 @@ pub fn ProtoStore(comptime D: type) type {
             }
         }
 
+        /// `Proto.finalize`: copies the staged rows into a new batch owned by
+        /// `gpa`, builds its tapes against `pv`, and frees the staging rows.
+        /// Fails with `TooManyInstances` past `maxInt(u32)` rows.
         pub fn finalize(ctx: *anyopaque, gpa: std.mem.Allocator, pv: PatternView) ir.DeviceResult(Batch) {
             return ir.DeviceResult(Batch).fromLocal(finalizeLocal(ctx, gpa, pv));
         }
@@ -1073,9 +767,7 @@ pub fn ProtoStore(comptime D: type) type {
             const count = std.math.cast(u32, self.rows.len) orelse return error.TooManyInstances;
             const store = try gpa.create(DeviceBatch(D));
 
-            // BEFORE the tapes are built and before the columns are duped:
-            // this is the only point where the staged rows can still be
-            // permuted.
+            // The staged rows can only be reordered before the copies below.
             store.count = count;
             store.owns_tapes = true;
             if (comptime canNarrow(D)) store.narrow_count = try self.partitionCollapsed();
@@ -1090,21 +782,15 @@ pub fn ProtoStore(comptime D: type) type {
             if (comptime @hasDecl(D, "State")) store.states = &.{};
             errdefer DeviceBatch(D).hooks.deinit(store, gpa);
 
-            // Exact-size copies out of staging, then the staged rows go back
-            // to `staging_gpa` at the end: the peak carries one type's columns
-            // twice, never every type's dead capacity forever.
             store.models = try gpa.dupe(D.Model, self.rows.items(.model));
             if (comptime has_attempt_decl) {
                 store.saved_models = try gpa.alloc(D.Model, count);
                 store.attempt_saved = false;
             }
             if (comptime @hasDecl(D, "limit")) {
-                // ZEROED, and the layout stays full width. Only the
-                // `limit_writes` slots are ever written or read now, but
-                // the engine's GPU launcher uploads the whole plane, and uploading bytes
-                // nothing ever wrote is how a clean run grows a valgrind
-                // report. Keeping the stride at n_u keeps the scatter-tape
-                // ABI and `layout_hash` untouched.
+                // Full n_u stride and zeroed, although only `limitWrites`
+                // slots are used: the GPU uploads the whole plane, and the
+                // stride is part of the frozen tape layout.
                 store.lim_x = try gpa.alloc(f64, count * n_u);
                 @memset(store.lim_x, 0);
                 store.lim_active = false;
@@ -1116,8 +802,6 @@ pub fn ProtoStore(comptime D: type) type {
             store.slots = try gpa.alloc(u32, count * n_u * n_u);
             const flat_nodes = @as([*]const u32, @ptrCast(self.rows.items(.nodes).ptr))[0 .. count * n_u];
             buildTapes(flat_nodes, n_u, &jacPattern(D), pv, store.gath, store.rhs_idx, store.slots);
-            // Fourth member of the tape family: same (id, ru) index space, one
-            // f64 per charge contribution. See Hooks.q_tape.
             if (comptime has_q) {
                 store.q_tape = try gpa.alloc(f64, count * n_u);
                 @memset(store.q_tape, 0);
@@ -1136,21 +820,11 @@ pub fn ProtoStore(comptime D: type) type {
             return DeviceBatch(D).binding(store);
         }
 
-        /// Stable-partition the staging columns so every instance whose node
-        /// collapse is MAXIMAL comes first, and return how many that is.
-        /// `evalRange`'s narrow basis is only sound on those, and it is a
-        /// comptime width, so the range it runs over has to be uniform.
-        ///
-        /// `D.collapse` is the same call `Builder.addDevice` already makes per
-        /// instance; it is pure in (model, instance) and runs once more here,
-        /// at setup, rather than being threaded through `append` and the
-        /// type-erased `.so` path as a fourth column.
-        ///
-        /// A UNIFORM batch — every deck in the fixture corpus — takes the
-        /// early return and nothing moves, so instance order (and with it the
-        /// order contributions accumulate into a shared matrix slot, and
-        /// `ParamRef.index`) is untouched. Only a genuinely mixed batch is
-        /// reordered, and there the alternative is no narrowing at all.
+        /// Stable-partitions the rows so maximally collapsed instances come
+        /// first, and returns their count; the narrow basis is a comptime
+        /// width and needs a uniform range. A uniform batch is left in place,
+        /// so instance order (and slot summation order) only changes in a
+        /// genuinely mixed batch.
         fn partitionCollapsed(self: *Self) !u32 {
             const flags = try staging_gpa.alloc(bool, self.rows.len);
             defer staging_gpa.free(flags);
@@ -1173,6 +847,8 @@ pub fn ProtoStore(comptime D: type) type {
             return @intCast(n);
         }
 
+        /// `Proto.apply_perm`: renumbers staged nodes through `perm`; nodes
+        /// past its end are left alone.
         pub fn applyPerm(ctx: *anyopaque, perm: []const u32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.rows.items(.nodes)) |*nd| {
@@ -1182,6 +858,7 @@ pub fn ProtoStore(comptime D: type) type {
             }
         }
 
+        /// `Proto.destroy`: frees the staging rows and the store itself.
         pub fn destroy(ctx: *anyopaque, gpa: std.mem.Allocator) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.rows.deinit(staging_gpa);
@@ -1190,27 +867,16 @@ pub fn ProtoStore(comptime D: type) type {
     };
 }
 
-/// Does this device carry §4.5 `absdelay` state — a ring buffer its
-/// `updateState` pushes into and CANNOT take back?
-///
-/// Detected from the Instance field name because VerA's naming is a stable,
-/// injective encoding (naming.zig: role-tagged `<module>__analog_op__absdelay__*`,
-/// deliberately insert-tolerant so `zig -fincremental` can track it), so this
-/// is reading a documented ABI rather than guessing.
-///
-/// ponytail: the honest home for this is a VerA decl — something like
-/// `pub const unrevertible_state = true` beside `lane_clean`/`jac_f32` — so
-/// the host asks a question instead of pattern-matching an answer. Upgrade
-/// there; this predicate is the shim until then.
+/// Whether D's `updateState` pushes history it cannot take back (LRM §4.5
+/// `absdelay`). Native devices declare `unrevertible_state`; VerA devices are
+/// recognized by the `__absdelay__` infix its naming scheme puts on the
+/// Instance fields.
+// ponytail: field-name matching until VerA can emit `unrevertible_state`
+// (its contract has no slot for host-only decls yet).
 fn hasAbsdelayState(comptime D: type) bool {
-    // Native engine devices say it outright (the upgrade path the comment
-    // above names); VerA-generated ones are detected from the Instance field
-    // naming ABI below, because the contract's allowed_pub_decls has no slot
-    // for a host-only marker.
     if (@hasDecl(D, "unrevertible_state")) return D.unrevertible_state;
     if (!@hasDecl(D, "Instance")) return false;
-    // hisim-class Instances carry hundreds of long field names; the substring
-    // scan is comptime O(fields × name len) and blows the default 1000 quota.
+    // hisim Instances have hundreds of long field names.
     @setEvalBranchQuota(2_000_000);
     for (@typeInfo(D.Instance).@"struct".fields) |f| {
         if (std.mem.indexOf(u8, f.name, "__absdelay__") != null) return true;
@@ -1218,31 +884,30 @@ fn hasAbsdelayState(comptime D: type) bool {
     return false;
 }
 
+/// The frozen per-type batch: SoA columns for every instance of D plus the
+/// shared tapes, reached through `Batch` and the comptime `hooks` table. A
+/// hook is null when D lacks the decl it needs.
 pub fn DeviceBatch(comptime D: type) type {
     const n_u: usize = comptime contract.nU(D);
     const has_state = @hasDecl(D, "State");
     const has_q = @hasDecl(D, "q");
     const has_attempt = @hasDecl(D, "attempt");
     const has_limit = @hasDecl(D, "limit");
-    // A device that reads none of the host-owned fields gets a null hook, so
-    // the analyses' per-timepoint sweep skips it entirely.
+    // A device that reads no host-owned field gets a null `set_sim_state`, so
+    // the per-timepoint sweep skips it.
     const has_sim_state = @hasField(D.Instance, "abstime") or
         @hasField(D.Instance, "dt") or
         @hasField(D.Instance, "analysis_kind") or
         @hasField(D.Instance, "is_initial_step") or
         @hasField(D.Instance, "is_final_step");
-
-    // Does this device get a second, narrower instantiation of `evalRange`
-    // for its fully-collapsed instances? See `canNarrow`.
     const narrowable = canNarrow(D);
 
     return struct {
         count: u32,
-        /// Prepared templates own tapes; query instances borrow them.
+        /// Prepared templates own the tapes; instances made from them borrow.
         owns_tapes: bool = true,
-        /// Instances `[0, narrow_count)` collapse maximally — `ProtoStore.finalize`
-        /// sorted them to the front — so their derivative basis is the reduced
-        /// one. The rest run at full width.
+        /// Instances `[0, narrow_count)` collapse maximally and run on the
+        /// narrow basis; `ProtoStore.finalize` sorted them to the front.
         narrow_count: if (narrowable) u32 else void,
         models: []D.Model,
         saved_models: if (has_attempt) []D.Model else void,
@@ -1254,10 +919,9 @@ pub fn DeviceBatch(comptime D: type) type {
         gath: []u32,
         rhs_idx: []u32,
         slots: []u32,
-        /// Per-device-state charge, indexed `id * n_u + ru` — the fourth
-        /// member of the tape family above, written by `Sink.scatterQ` on the
-        /// host path only. The transient keeps its LTE history over this
-        /// instead of the summed q plane. See `Hooks.q_tape`.
+        /// Charge per instance and row, indexed `id * n_u + ru` like the
+        /// tapes. Written by `Sink.scatterQ` on the host only; see
+        /// `Hooks.q_tape`.
         q_tape: if (has_q) []f64 else void,
 
         const Self = @This();
@@ -1276,25 +940,19 @@ pub fn DeviceBatch(comptime D: type) type {
             .check_convergence = if (@hasDecl(D, "checkConvergence")) checkConvergence else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
-            // Split on `absdelay` state — the one thing a speculative update
-            // cannot take back. Everything else keeps the per-iteration call:
-            // `stateCtl` reverts it, or its `request_reject_at` is a
-            // breakpoint that must be seen per attempt for a source edge to
-            // land sharply. See `Hooks.commit_state`.
+            // Unrevertible history runs once per accepted step; everything
+            // else per iteration. See `Hooks.commit_state`.
             .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D)) updateState else null,
             .commit_state = if (@hasDecl(D, "updateState") and hasAbsdelayState(D)) updateState else null,
             .state_ctl = if (@hasDecl(D, "stateCtl")) stateCtl else null,
-            // Only devices with an accepted-step FSM can write it.
+            // Only `updateState` writes `bound_step`.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step")) boundStep else null,
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
             .set_sim_state = if (has_sim_state) setSimState else null,
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint")) nextBreakpointFn else null,
             .collect_params = collectParams,
-            // Both decls or neither: a `noise_gens` table without `noisePsd` is
-            // a branch nobody can price. It used to fall back to 4kT off the
-            // Jacobian, which is where the 2x on every shot generator came
-            // from; declining the declaration outright is the honest failure.
+            // A generator is only priced by the device's own `noisePsd`.
             .collect_noise = if (@hasDecl(D, "noise_gens")) blk: {
                 if (!@hasDecl(D, "noisePsd")) @compileError(@typeName(D) ++
                     " declares noise_gens without noisePsd; see docs/devices/noise-contract.md §3");
@@ -1318,13 +976,8 @@ pub fn DeviceBatch(comptime D: type) type {
         fn evalQOnly(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var sink = Sink(D, false, false).host(self, pl, x, undefined);
-            // `always_inline` is not decoration. This used to pass the literal
-            // `0, self.count`, and LLVM inlined the loop here off the constant
-            // start; with `first` runtime it stopped, put mos6's charge core out
-            // of line and cost devices/mos6_inverter 145.34M -> 146.66M Ir
-            // (+0.91%) for the same work. Forcing the old shape gives 145.35M,
-            // +0.010% — noise. Device-dependent codegen, same class as the note
-            // in `evalRange`; the range itself costs nothing.
+            // Without `always_inline` LLVM moves mos6's charge core out of
+            // line, measured +0.9% on devices/mos6_inverter.
             @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, t });
         }
 
@@ -1344,11 +997,7 @@ pub fn DeviceBatch(comptime D: type) type {
             var sink = Sink(D, false, skip_const).host(self, pl, x, undefined);
             const F = jacFloat(D);
             if (comptime narrowable) {
-                // Two calls, ONE body: same `evalRange` at two comptime
-                // derivative BASES. The split point is the partition
-                // boundary clamped into this worker's range, so a ParEval
-                // slice that straddles it still runs each instance under the
-                // basis its own collapse earned.
+                // A ParEval slice may straddle the partition boundary.
                 const split = std.math.clamp(self.narrow_count, first, last);
                 if (split > first) evalRange(D, true, F, &sink, first, split, t, limiting);
                 if (last > split) evalRange(D, false, F, &sink, split, last, t, limiting);
@@ -1385,8 +1034,7 @@ pub fn DeviceBatch(comptime D: type) type {
         fn seedFn(ctx: *anyopaque, x: []f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             if (comptime has_limit) {
-                // Same live set `limitRange` maintains — a slot outside it is
-                // never read back, so seeding it would only go stale.
+                // Only the slots `limitRange` maintains are ever read back.
                 const writes = comptime contract.limitWrites(D);
                 for (0..self.count) |id| {
                     const sv = D.seed(&self.models[id], &self.instances[id]);
@@ -1398,6 +1046,8 @@ pub fn DeviceBatch(comptime D: type) type {
             }
         }
 
+        /// Marks the rows of non-voltage unknowns (branch currents) unless the
+        /// same node is also one of the instance's voltage unknowns.
         fn markCurrentRows(ctx: *anyopaque, mask: []bool) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
@@ -1419,8 +1069,8 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn applyLimits(ctx: *anyopaque, x: []f64, x_old: []const f64) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            // limitRange never scatters to the planes; an empty Planes keeps the
-            // sink's plane .ptr reads valid (undefined would trap in Debug).
+            // `limitRange` never touches the planes, but `host` reads their
+            // pointers, and `undefined` would trap in Debug.
             const no_planes: Planes = .{ .g_vals = &.{}, .c_vals = &.{}, .rhs = &.{}, .q_vec = &.{} };
             var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr);
             const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active);
@@ -1433,35 +1083,10 @@ pub fn DeviceBatch(comptime D: type) type {
             self.lim_active = false;
         }
 
-        /// Re-enters the device's model core at `R` (value-only) to restage the
-        /// `ddt`/`idt` arguments at the accepted x. `converger.checkConverged`
-        /// runs it once per CONVERGED solve, not per Newton iterate, so the
-        /// denominator here is `attempts`, not `nr_iters`.
-        ///
-        /// WHY MOS6 COSTS 2.6x MOS1 PER INSTANCE. Not slot count and not the
-        /// model card. Ablated (double this loop, idempotent, raw unchanged):
-        /// mos1 ~200 Ir/instance/call on scaling/parallel_inverters_100 (22.3M
-        /// over 613 attempts x 200) AND on devices/mos6_inverter re-carded to
-        /// LEVEL 1 (5.56M over 323 x 80 = 215 Ir) — same circuit, same
-        /// CJ/CJSW/CGSO/CGDO/TOX — against 556 Ir for LEVEL 6 on that same
-        /// deck. Slots are 13 vs 9 (1.44x) and the cards are identical, so
-        /// neither explains it.
-        ///
-        /// What does: the staged set is the Meyer capacitances, and mos6's
-        /// Meyer partition needs the Sakurai-Newton saturation voltage. Its
-        /// core carries `KV*(Vgs-Vth)^NV` and `KC*(Vgs-Vth)^NC` with NV/NC
-        /// non-integer, so the DCE'd closure of the staged values contains TWO
-        /// `std.math.pow` calls; mos1's `Vdsat = Vgs - Vth` is a subtract and
-        /// its closure contains none. Standalone rig at this deck's parameters,
-        /// 100k calls each: exactly 2 pow per mos6 call and 0 per mos1, 593 of
-        /// mos6's 819 Ir. Generic `pow` is `exp(y*ln x)` + frexp/ldexp, ~300 Ir.
-        /// The junction charges are NOT it — these decks give no AD/AS/PD/PS,
-        /// so `czbd`/`czbs` are zero and those arms are already branch-dead.
-        ///
-        /// Nothing here can fix that: the two `pow`s are inside VerA's emitted
-        /// core. The host-side lever would be to stage the `ddt` arguments from
-        /// the eval pass that already computed them at the same x, which needs
-        /// the generator to expose them.
+        /// Runs `D.updateState` on every instance at `x` and returns the
+        /// earliest time any of them asks the step to be rejected at, if any.
+        /// Called once per converged solve (or per accepted step for
+        /// `commit_state`), not per Newton iteration.
         fn updateState(ctx: *anyopaque, x: []const f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var min_reject: ?f64 = null;
@@ -1495,27 +1120,22 @@ pub fn DeviceBatch(comptime D: type) type {
             return dirty;
         }
 
-        /// §9.10 `$temperature` is KELVIN; the host speaks Celsius (the SPICE
-        /// `.temp` card), hence the conversion. Recompute device-native
-        /// temperature physics after publishing the instance temperature.
+        /// Sets every instance's temperature from Celsius (`.temp`) to the
+        /// Kelvin `$temperature` reads (LRM §9.10), then reruns `precompute`.
         fn setTemp(ctx: *anyopaque, temp_c: f32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.instances) |*inst| inst.temperature = @as(f64, temp_c) + 273.15;
             self.reprep();
         }
 
-        /// Write the host-owned Instance block. Field-by-field `@hasField` so a
-        /// device that reads only `$abstime` pays for exactly that store.
-        /// No `reprep()`: FastVAF hoists nothing time-dependent into
-        /// `precompute` — it is derived from Model/Instance parameters, which
-        /// this does not touch — so there is no derived state to invalidate.
+        /// Writes the host-owned Instance fields a device declares. No
+        /// `precompute` rerun: it depends only on parameters, never on these.
         fn setSimState(ctx: *anyopaque, st: SimState) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.instances) |*inst| {
                 if (comptime @hasField(D.Instance, "abstime")) inst.abstime = st.t;
                 if (comptime @hasField(D.Instance, "dt")) inst.dt = st.dt;
-                // Devices declare their own AnalysisKind; ordinal-convert like
-                // stateCtl does for StateCtlOp.
+                // The device declares its own AnalysisKind enum; convert by ordinal.
                 if (comptime @hasField(D.Instance, "analysis_kind"))
                     inst.analysis_kind = @enumFromInt(@intFromEnum(st.kind));
                 if (comptime @hasField(D.Instance, "is_initial_step")) inst.is_initial_step = st.initial_step;
@@ -1541,14 +1161,12 @@ pub fn DeviceBatch(comptime D: type) type {
             self.reprep();
         }
 
-        /// Hand the launcher this batch's working set. Slices, not copies —
-        /// the batch keeps owning them; the launcher only reads them to stage
-        /// device memory (and re-reads `models`/`instances` on `repack`).
+        /// This batch's GPU working set. The slices stay owned by the batch.
         fn gpuPayload(ctx: *anyopaque) GpuPayload {
             const self: *Self = @ptrCast(@alignCast(ctx));
             return .{
                 .kernel = comptime kernelName(D),
-                .count = @intCast(self.count),
+                .count = self.count,
                 .n_u = n_u,
                 .models = std.mem.sliceAsBytes(self.models),
                 .instances = std.mem.sliceAsBytes(self.instances),
@@ -1564,6 +1182,8 @@ pub fn DeviceBatch(comptime D: type) type {
             };
         }
 
+        /// Reruns `precompute` and returns false when `collapse` now asks for
+        /// a node aliasing the frozen tapes do not have.
         fn recomputePrecomputed(ctx: *anyopaque) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
             self.reprep();
@@ -1575,7 +1195,7 @@ pub fn DeviceBatch(comptime D: type) type {
                         if (col[u]) |target| {
                             if (nd[u] != nd[target]) return false;
                         } else if (std.mem.indexOfScalar(u32, nd[0..u], nd[u]) != null) {
-                            // Builder allocated a distinct node for every unaliased internal.
+                            // The builder gave every unaliased internal its own node.
                             return false;
                         }
                     }
@@ -1613,8 +1233,7 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn collectParamsLocal(ctx: *anyopaque, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) error{OutOfMemory}!void {
-            // Scales with the field count: `paramField` runs per field at
-            // comptime, and txl.va's scalarized history has ~10k of them.
+            // `paramField` runs per field; txl's history has ~10k fields.
             @setEvalBranchQuota(100_000 + 100 * (@typeInfo(D.Instance).@"struct".fields.len + @typeInfo(D.Model).@"struct".fields.len));
             const self: *Self = @ptrCast(@alignCast(ctx));
             try appendParams(D.Instance, self.instances, true, gpa, list);
@@ -1648,18 +1267,17 @@ pub fn DeviceBatch(comptime D: type) type {
             }
         }
 
+        /// Whether `field` of T is a sweepable parameter: a float with a
+        /// finite default that is not a VerA-internal or runtime-state field.
         fn paramField(comptime T: type, comptime field: std.builtin.Type.StructField) bool {
             if (field.type != f32 and field.type != f64) return false;
-            // `<name>__` is VerA's own namespace, not a §3.4 parameter: no
-            // sanitized Verilog-A identifier ends in `_` (naming.zig escapes
-            // it), so the suffix is an exact test. `nom_temp__` — the host's
-            // `.options tnom` — is one of these, and letting `.mc`/`.sens`
-            // perturb a simulation global as if it were a model parameter is
-            // both wrong and a silent change to every existing draw sequence.
+            // A trailing `__` is VerA's own namespace (no escaped Verilog-A
+            // name ends in `_`), e.g. `nom_temp__` from `.options tnom`,
+            // which `.mc`/`.sens` must not perturb.
             if (comptime std.mem.endsWith(u8, field.name, "__")) return false;
             if (@hasDecl(D, "AnalysisKind") and T == D.Instance) {
-                // VerA's emitModel owns VA parameters; Instance owns runtime
-                // state. Never perturb timers, timestep fields or prep caches.
+                // A VerA Instance holds runtime state; only these two are
+                // parameters.
                 const knobs = std.StaticStringMap(void).initComptime(.{
                     .{ "temperature", {} }, .{ "mfactor", {} },
                 });
@@ -1669,17 +1287,9 @@ pub fn DeviceBatch(comptime D: type) type {
             return dflt > -1e30 and dflt < 1e30;
         }
 
-        /// Every generator this batch declares, with its PSD, at state vector
-        /// `x`. Pure in `x`, so `.noise` calls it once at the operating point
-        /// and `.pnoise` once per PSS sample (cyclostationary for free).
-        ///
-        /// The device's `noisePsd` IS the PSD, and nothing outside the device
-        /// can be: §4.6.4's `white_noise(p)` says `S(f) = p`, where `p` is a
-        /// model expression over the bias AND the model card. Reading a
-        /// conductance off the Jacobian and calling it `4kT·g` — what this did
-        /// until `noisePsd` landed — is a different number on every generator
-        /// that is not literally a resistor, and exactly 2x on a junction
-        /// (g = I/(N·Vt) ⇒ 4kT·g = (2/N)·2q·I).
+        /// Appends one `NoiseSource` per declared generator per instance, with
+        /// the PSD `D.noisePsd` gives at `x`. Pure in `x`, so `.pnoise` can
+        /// call it once per PSS sample.
         fn collectNoise(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) ir.DeviceResult(void) {
             return ir.DeviceResult(void).fromLocal(collectNoiseLocal(ctx, x, gpa, list));
         }
@@ -1689,15 +1299,12 @@ pub fn DeviceBatch(comptime D: type) type {
             for (0..self.count) |id| {
                 const terms = D.noisePsd(self.localX(x, id), &self.models[id], &self.instances[id]);
                 inline for (D.noise_gens, 0..) |gen, k| {
-                    // Position k IS generator k (noise-contract.md §3). `@abs`
-                    // is ngspice's own read of a signed density argument
-                    // (nevalsrc.c:106 `fabs(param)`): a negative PSD would
-                    // subtract power from the sum and hand `run` a sqrt of a
-                    // negative. `corr_with`/`corr` are not transported yet —
-                    // NoiseSource has no partner field, so every generator is
-                    // independent here (noise-contract.md §2(c)).
+                    // Term k belongs to generator k (noise-contract.md §3).
+                    // `@abs` matches ngspice nevalsrc.c:106. Correlation is
+                    // not transported, so generators are independent here.
+                    // Zero-power generators stay: their ordinal identifies
+                    // them across PSS samples.
                     const t = terms[k];
-                    // Keep zero-power generators: their ordinal identifies them across PSS samples.
                     try list.append(gpa, .{
                         .node_p = self.gath[id * n_u + gen.row],
                         .node_n = self.gath[id * n_u + gen.col],
@@ -1716,7 +1323,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 .ctx = self,
                 .eval = eval,
                 .eval_newton = evalNewton,
-                .count = @intCast(self.count),
+                .count = self.count,
                 .n_u = n_u,
                 .has_charge = has_q,
                 .has_const_jacobian = const_g and (!has_q or const_c),
@@ -1738,6 +1345,9 @@ pub fn DeviceBatch(comptime D: type) type {
             self.lim_active = active;
         }
 
+        /// A new batch sharing the template's tapes with private copies of
+        /// all mutable state. `accepted` copies the template's history
+        /// (`snapshot`); otherwise history starts fresh (`instantiate`).
         fn duplicate(ctx: *const anyopaque, gpa: std.mem.Allocator, comptime accepted: bool) !Batch {
             const template: *const Self = @ptrCast(@alignCast(ctx));
             const self = try gpa.create(Self);
@@ -1757,9 +1367,7 @@ pub fn DeviceBatch(comptime D: type) type {
             }
             errdefer destroy(self, gpa);
 
-            // Model/Instance are POD. An unevaluated template supplies initial
-            // parameters and empty history; an accepted snapshot supplies the
-            // complete dependency history, without sharing mutable storage.
+            // Model/Instance are POD, so a byte copy is a deep copy.
             self.models = try gpa.dupe(D.Model, template.models);
             self.instances = try gpa.dupe(D.Instance, template.instances);
             if (comptime has_attempt) {
@@ -1804,114 +1412,73 @@ pub fn DeviceBatch(comptime D: type) type {
     };
 }
 
-// ===========================================================================
-// GPU path — the SAME evalRange body, driven by a gompute RawKernel with an
-// atomic-scatter sink. One kernel per device type; builtins register at comptime
-// (this file's root `comptime` block), a dynamic `.so` registers its one
-// device from this same template. Buffers are flat SoA uploaded before launch
-// (host mirrors of the batch tapes/planes). First cut targets simple devices (no state / history /
-// limiting); richer devices stay CPU until their GPU state is added.
-// ===========================================================================
-
-/// Devices eligible for a GPU kernel. History still needs device-side state
-/// not yet wired; those run CPU-only.
-///
-/// `limit` devices (the diode/FET/BJT class — the models that actually carry
-/// eval work) run with a device-resident `lim_x` plane maintained by
-/// `StateKernel`, which fuses the `applyLimits` clamp pass and the
-/// `updateState` latch refresh into one per-instance launch.
-///
-/// `State` is admitted ONLY alongside `limit`. For that class, State is the
-/// path-latch pattern: `updateState` stages `inst.wb__/wq__`, `stateCtl`
-/// commits them into the `pb__/pq__` latches eval reads (CtlKernel runs that
-/// on the device), and `updateState` returns `.ok` unconditionally. A
-/// State-WITHOUT-limit device is a waveform source or FSM (vsource,
-/// isource, vswitch, mes) whose eval reads host-owned per-attempt state the
-/// device copy would never see.
-///
-/// `core_reads_simstate` is the VerA-emitted decl for a core that reads a
-/// host-published sim-state Instance field (analysis()/$abstime/ddt-family
-/// dt). The host republishes those on the HOST blob only, so such a core
-/// (jfet2's analysis() gate today) evals stale device-resident — excluded.
-/// ponytail: for the rest it is decl-correlation, not proof — StateKernel
-/// still flags a non-.ok updateState result so a future model that breaks
-/// the assumption degrades loudly into the CPU fallback.
-pub fn gpuEligible(comptime D: type) bool {
-    // First-call table snapshots require exclusive mutable evaluation. Keep
-    // these instances on the host until the resident path shares that lifecycle.
+/// Whether D gets GPU kernels. Excluded, and kept on the host:
+/// - `mutable_eval` devices, whose first-call snapshots need exclusive
+///   evaluation;
+/// - Newton-history devices (`beginSolve`/`advanceIteration`/
+///   `checkConvergence`);
+/// - `core_reads_simstate` cores, since sim state is published to the host
+///   copy only;
+/// - `State` without `limit` (sources and FSMs whose eval reads host-owned
+///   per-attempt state).
+/// `State` with `limit` is the path-latch pattern that `StateKernel` and
+/// `CtlKernel` run on the device.
+// ponytail: the State-with-limit rule is decl correlation, not proof;
+// `StateKernel` flags any non-`.ok` `updateState` so a device that breaks it
+// falls back to the CPU instead of running wrong.
+fn gpuEligible(comptime D: type) bool {
     if (@hasDecl(D, "mutable_eval") and D.mutable_eval) return false;
-    // ponytail: keep Newton-history devices on the host until resident kernels
-    // implement beginSolve/advanceIteration/checkConvergence with the same ordering.
     if (@hasDecl(D, "beginSolve") or @hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
     return !@hasDecl(D, "core_reads_simstate") and
         (@hasDecl(D, "limit") or !@hasDecl(D, "State"));
 }
 
-/// Does device D pair its eval kernel with a `StateKernel`?
-pub fn hasStateKernel(comptime D: type) bool {
+/// Whether D's GPU eval kernel is paired with a `StateKernel`.
+fn hasStateKernel(comptime D: type) bool {
     return gpuEligible(D) and (@hasDecl(D, "limit") or @hasDecl(D, "State"));
 }
 
-/// Does device D also need a `CtlKernel`? Accepted-step latches (stateCtl's
-/// commit/revert) mutate the device-resident Instance/State blobs, so the
-/// host walk cannot stand in for it once the batch is resident.
-pub fn hasCtlKernel(comptime D: type) bool {
+/// Whether D also needs a `CtlKernel`: `stateCtl` mutates the resident
+/// Instance/State blobs, which the host cannot reach.
+fn hasCtlKernel(comptime D: type) bool {
     return hasStateKernel(D) and @hasDecl(D, "stateCtl");
 }
 
-/// Device D's type name without its namespace (`vsource.Vsource` -> `Vsource`):
-/// the batch `type_name` and every kernel symbol
-/// suffix.
-pub fn baseName(comptime D: type) []const u8 {
+/// D's type name without its namespace (`vsource.Vsource` gives `Vsource`).
+/// Used as the batch `type_name` and the kernel symbol suffix.
+fn baseName(comptime D: type) []const u8 {
     const full = @typeName(D);
     const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
     return full[dot + 1 ..];
 }
 
-/// The kernel symbol for device D — `arp_eval_<model>`.
-///
-/// Derived from the TYPE, and called by both sides: the build root to export the
-/// symbol into the GPU image, and `gpuPayload` below to name the symbol the
-/// launcher looks up. One function so the two cannot drift into a green build
-/// that fails with `error.KernelNotFound` on a machine with a GPU.
-pub fn kernelName(comptime D: type) [:0]const u8 {
+// Kernel symbols, derived from the type so the build root that exports them
+// and `gpuPayload` that names them for the launcher cannot drift apart.
+
+fn kernelName(comptime D: type) [:0]const u8 {
     return "arp_eval_" ++ comptime baseName(D);
 }
 
-/// The limit/state kernel symbol for device D — `arp_lim_<model>`. Same
-/// derive-from-the-type rule (and reason) as `kernelName`.
-pub fn stateKernelName(comptime D: type) [:0]const u8 {
+fn stateKernelName(comptime D: type) [:0]const u8 {
     return "arp_lim_" ++ comptime baseName(D);
 }
 
-/// The accepted-step latch kernel symbol — `arp_ctl_<model>`.
-pub fn ctlKernelName(comptime D: type) [:0]const u8 {
+fn ctlKernelName(comptime D: type) [:0]const u8 {
     return "arp_ctl_" ++ comptime baseName(D);
 }
 
-/// The segmented-reduction symbol — `arp_reduce_<model>`.
-///
-/// The BODY is device-independent (see `ReduceKernel`), but the symbol is keyed
-/// on D anyway: the build root compiles once per device and gompute requires
-/// kernel names to be unique across roots, so a single shared `arp_reduce` would
-/// collide once per catalog entry. The launcher uses whichever resident batch's
-/// copy it finds first — they are the same code.
-pub fn reduceKernelName(comptime D: type) [:0]const u8 {
+/// The reduce body is device-independent, but gompute needs kernel names
+/// unique across the per-device build roots, so each device exports a copy.
+fn reduceKernelName(comptime D: type) [:0]const u8 {
     return "arp_reduce_" ++ comptime baseName(D);
 }
 
-/// The ONE sink `evalRange`/`limitRange` consume. `device` picks the two axes
-/// that differ between CPU and GPU and NOTHING else — the gather/index/eval body
-/// is identical:
-///   - memory access: host reads plain slices (GlobalPtr(T) == [*]T), device
-///     casts the `.global` kernel params to generic addrspace (one cvta.global
-///     on NVPTX) so the contract's generic-addrspace `eval` can read them.
-///   - scatter: host `p[i] +=`; device `@atomicRmw(.Add)` (many threads stamp
-///     one matrix slot; the atomic lowers to a global-space reduction).
-/// The ABI-table fields are GlobalPtr both ways — one type, one body, two
-/// backends. Host-only state hangs off `b: *DeviceBatch(D)` and is `void`
-/// under `device`, so a device compilation never sees it.
-pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type {
+/// Memory access for `evalRange`/`limitRange`. `device` changes only how
+/// pointers are reached: the host indexes plain slices (`GlobalPtr(T)` is
+/// `[*]T`), the GPU casts `.global` kernel arguments to the generic address
+/// space the contract's `eval` takes. Host-only state is `void` under
+/// `device`. `skip_const` drops stamps of a constant Jacobian half.
+fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) type {
     const n_u: usize = comptime contract.nU(D);
     const const_g = @hasDecl(D, "constant") and D.constant.g;
     const const_c = @hasDecl(D, "constant") and D.constant.c;
@@ -1927,28 +1494,18 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         c_vals: gompute.GlobalPtr(f64),
         rhs: gompute.GlobalPtr(f64),
         q_vec: gompute.GlobalPtr(f64),
-
-        /// The lim plane (count * n_u) and x_old — device-resident buffers on
-        /// the GPU, the batch's own `lim_x` / the caller's x_old on the host.
-        /// One pointer type both ways so `evalRange`/`limitRange` compile for
-        /// either sink; `undefined` when the device has no `limit` (never
-        /// dereferenced — every access is behind `has_limit`).
+        /// The lim plane (count * n_u). Undefined, and never read, when D has
+        /// no `limit`.
         lim_: gompute.GlobalPtr(f64),
-        xo: gompute.GlobalPtr(f64), // x_old (limit pass only)
-
-        /// The batch's `q_tape`, the one host-side table with no device
-        /// mirror: `scatterQ` writes it per (id, ru) and the transient's LTE
-        /// reads it. `void` under `device`, so a GPU compilation never names a
-        /// host slice. The bare pointer, not the owning `*BatchT`: through the
-        /// batch, every plane store could alias the slice header, so LLVM
-        /// reloaded `b.q_tape.ptr` (3 instructions) before each of the 4 mos1
-        /// charge-row stores, per instance, in both `evalRange` and `evalQRange`.
+        /// `x_old`; read only by `limitRange`.
+        xo: gompute.GlobalPtr(f64),
+        /// The batch's `q_tape`, host only. Held as a bare pointer: through
+        /// the batch, every plane store might alias the slice header, and
+        /// LLVM reloaded it before each charge store.
         q_tape: if (device or !@hasDecl(D, "q")) void else [*]f64,
 
         pub const skip_g = skip_const and const_g;
         pub const skip_c = skip_const and const_c;
-        /// Is this the atomic-scatter (GPU) sink? `evalRange` reads it to keep
-        /// the ground predicates there and drop them on the host.
         pub const on_device = device;
 
         const Sk = @This();
@@ -1971,11 +1528,9 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         pub inline fn setLim(s: *const Sk, id: u32, u: usize, v: f64) void {
             s.lim_[@as(usize, id) * n_u + u] = v;
         }
-        // The contract's eval takes generic-addrspace pointers; on device the
-        // `.global` param is cast here rather than copying the whole
-        // Model/Instance per thread (a compact model's Model is hundreds of
-        // params wide and would blow the register budget). On host the cast is
-        // a no-op.
+        // An address-space cast, not a copy: a compact model's Model has
+        // hundreds of fields and would not fit in GPU registers. A no-op on
+        // the host.
         pub inline fn model(s: *const Sk, id: u32) *const D.Model {
             return @addrSpaceCast(&s.models_[id]);
         }
@@ -1985,24 +1540,11 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         inline fn slot(s: *const Sk, id: u32, ru: usize, cu: usize) u32 {
             return s.slots_[(@as(usize, id) * n_u + ru) * n_u + cu];
         }
-        /// PLAIN, NON-ATOMIC, on the device too — and that is a contract with
-        /// the launcher, not a shortcut. On the device the tape does not index
-        /// the plane, it indexes a per-contribution STAGING cell that exactly
-        /// one thread ever touches; the engine's GPU launcher builds that permutation and
-        /// then sums each plane cell's run of staging cells in tape order.
-        ///
-        /// An `@atomicRmw(.Add)` here would hand the summation order back to the
-        /// hardware, which does not promise to repeat it. That was the defect:
-        /// on `parallel_inverters_2000` the Vdd row takes 8000 contributions of
-        /// ±1.8 that cancel to 3.6e-9, so two replays of the SAME pass differed
-        /// by 2.1e-10 — reordering, not a race (a lost update would move the sum
-        /// by 1.8) — but the LU maps that row 1:1 onto the Vdd BRANCH CURRENT
-        /// and Newton's delta gate there is 1.25e-12. Every iterate rejected.
-        /// `GpuContext.reduce` carries the measurement.
-        ///
-        /// Still `+=` and not `=`: the staging is zeroed per pass, so this is
-        /// `0 + v`, which is what keeps signed zero and NaN quieting identical
-        /// to the host stamp (tests/devices.zig pins that).
+        // Plain `+=` on the GPU too. There the tape indexes a staging cell
+        // only this thread writes, and `ReduceKernel` sums each plane cell's
+        // cells in tape order; an atomic add would make the order, and so
+        // the rounding, vary between runs. The staging is zeroed per pass,
+        // so `0 + v` keeps signed zeros and NaNs as the host stamp does.
         inline fn add(p: gompute.GlobalPtr(f64), i: u32, v: f64) void {
             p[i] += v;
         }
@@ -2012,12 +1554,8 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
         pub inline fn scatterJac(s: *const Sk, id: u32, ru: usize, cu: usize, val: f64) void {
             add(s.g_vals, s.slot(id, ru, cu), val);
         }
-        /// Scatter one charge contribution. Two destinations, one value: the
-        /// summed q plane (what the companion residual integrates) and — on the
-        /// host only — the per-device-state tape (what CKTterr must run over).
-        /// `id`/`ru` mirror `scatterQJac`'s signature; on a device build the
-        /// tape write is comptime-dead and the extra params vanish, so
-        /// `DeviceKernel.run`'s ABI is untouched.
+        /// Adds a charge to the q plane and, on the host, records it in
+        /// `q_tape` for the per-state LTE.
         pub inline fn scatterQ(s: *const Sk, id: u32, ru: usize, row: u32, qv: f64) void {
             add(s.q_vec, row, qv);
             if (comptime !device and @hasDecl(D, "q"))
@@ -2027,13 +1565,11 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
             add(s.c_vals, s.slot(id, ru, cu), val);
         }
 
-        // Host constructor: flatten the batch's slices to the GlobalPtr fields
-        // (GlobalPtr(T) == [*]T here) so the shared body indexes them the same
-        // way the device does. `has_limit` guards `xo`/lim state, unused off the
-        // limit pass.
+        /// Host sink over batch `b`, writing into `pl`. `xo` may be undefined
+        /// outside `limitRange`.
         pub fn host(b: *BatchT, pl: *const Planes, xs: []const f64, xo: [*]const f64) Sk {
             return .{
-                .xs = @constCast(xs.ptr), // read-only here; GlobalPtr carries no const
+                .xs = @constCast(xs.ptr), // GlobalPtr has no const form; never written
                 .gath_ = b.gath.ptr,
                 .rhs_idx_ = b.rhs_idx.ptr,
                 .slots_ = b.slots.ptr,
@@ -2051,11 +1587,9 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool) 
     };
 }
 
-/// One-thread-per-instance GPU kernel for device D — the gompute RawKernel entry.
-/// Body is the SHARED `evalRange`; only the sink differs from the CPU path.
-/// `exportRaw`'d by the build root (builtins) or the `.so` shim (dynamics), so it
-/// is analyzed only in device compilation (globalIdX is device-only).
-pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
+/// GPU eval kernel for D, one thread per instance, running the same
+/// `evalRange` as the host through a device `Sink`.
+fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
     return struct {
         pub fn run(
             count: u64,
@@ -2087,36 +1621,26 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
                 .rhs = rhs,
                 .q_vec = q_vec,
                 .lim_ = lim,
-                .xo = undefined, // limit pass only; never read in evalRange
+                .xo = undefined, // read only by limitRange
                 .q_tape = {},
             };
             const id: u32 = @intCast(tid);
-            // FULL WIDTH on the device, deliberately. The narrow basis is a
-            // per-instance property and this kernel's ABI carries no partition
-            // boundary; adding one is a kernel-argument change across a frozen
-            // GPU boundary for a win nobody has priced on a GPU.
-            // ponytail: pass `narrow_count` and branch here when it is.
-            //
-            // ...but the FLOAT width is `gpuJacFloat(D)`, not the host's. It is
-            // a comptime type, so it moves no kernel argument and no byte of
-            // the frozen boundary — the residual, the `[]f64` planes and the
-            // u32 tapes are all untouched. See `jacFloat`.
+            // Always the wide basis here: the kernel arguments carry no
+            // `narrow_count`, and they are part of the frozen GPU boundary.
+            // ponytail: pass `narrow_count` once narrowing is measured on a GPU.
             evalRange(D, false, gpuJacFloat(D), &sink, id, id + 1, t, limiting != 0);
         }
     };
 }
 
-/// Per-instance limit + state-latch kernel — the device half of
-/// `Circuit.applyLimits`/`Circuit.updateStates` for a resident batch, fused
-/// into one launch (the converger always calls the two back-to-back at the
-/// same x, `finalizeStep`).
+/// GPU limit and state-latch kernel, one thread per instance: the device side
+/// of `applyLimits` followed by `updateState`, fused because the converger
+/// always runs the two back to back at the same x.
 ///
-/// Bit 0 of `flags[0]`: some instance's clamp said "not converged" (pnjlim) —
-/// the host's `limited` answer. Bit 1: some `updateState` returned a
-/// non-`.ok` result the GPU path cannot honour (a `request_reject_at` time);
-/// the launcher treats that as a fault and falls back to the CPU, so the
-/// class assumption in `gpuEligible` degrades loudly, not silently.
-pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
+/// Sets bit 0 of `flags[0]` when a clamp reports not converged, and bit 1
+/// when an `updateState` returns anything but `.ok`, which the launcher
+/// treats as a fault and answers by falling back to the CPU.
+fn StateKernel(comptime D: type, comptime block_size: u32) type {
     const n_u: usize = comptime contract.nU(D);
     const has_limit = @hasDecl(D, "limit");
     const has_state = @hasDecl(D, "State");
@@ -2139,13 +1663,11 @@ pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
             const id: usize = @intCast(tid);
             const model: *const D.Model = @addrSpaceCast(&models[id]);
             var flag: u32 = 0;
-            // Raw local x: `limit` clamps it, `updateState` latches at it.
             var cur: [n_u]f64 = undefined;
             inline for (0..n_u) |u| cur[u] = xs[gath[id * n_u + u]];
             if (comptime has_limit) {
-                // Same live sets as `limitRange`, and they have to be: host
-                // and device share ONE `lim_x` plane, so a slot one side
-                // stopped maintaining is one the other must stop reading.
+                // Must use the same write set as `limitRange`: host and
+                // device share one `lim_x` plane.
                 const writes = comptime contract.limitWrites(D);
                 const inst_c: *const D.Instance = @addrSpaceCast(&instances[id]);
                 var old: [n_u]f64 = undefined;
@@ -2173,36 +1695,17 @@ pub fn StateKernel(comptime D: type, comptime block_size: u32) type {
     };
 }
 
-/// Segmented sum: one plane cell per thread, `plane[i] = sum(stage[seg[i]..seg[i+1]])`.
+/// Segmented sum, one plane cell per thread: `plane[i] = sum(stage[seg[i] ..
+/// seg[i + 1]])`. The launcher lays each cell's staging contributions out
+/// contiguously in tape order, so this sums them in the order the host stamp
+/// does, on every launch. The plane is overwritten, not accumulated.
 ///
-/// This is the second half of the deterministic scatter. `Sink.add` on the
-/// device writes each contribution to its OWN staging cell, and the engine's
-/// GPU launcher
-/// ordered those cells so that a plane cell's contributors sit contiguously and
-/// in tape order — so this loop reduces them in the SAME order the serial CPU
-/// stamp accumulates them, every launch, forever. (Exactly, for a segment the
-/// launcher did not have to cut; see `Order.chunk`.) Left-to-right and strict
-/// on purpose: no `@setFloatMode(.optimized)` here, because `reassoc` is
-/// exactly the freedom being taken away.
-///
-/// The plane is WRITTEN, not accumulated, so the launcher no longer clears it.
-///
-/// ONE accumulator, not several. Interleaved chains would be deterministic too,
-/// but not in the order that matters: the tape emits a device's rows in `ru`
-/// order, so an `l`-lane interleave hands lane `l` every instance's row `l` —
-/// on `parallel_inverters_2000` that is one lane taking every +1.8 and another
-/// taking every -1.8, and the partial sums grow to `chunk/n_u * 1.8` instead of
-/// staying at 1.8. Measured on that row's 8000 contributions: tape order errs
-/// 1.6e-17 against the exactly-rounded sum, an order that separates the
-/// cancelling pair by W errs 4.0e-12 (W=32) to 1.6e-11 (W=1024). The whole
-/// point of this kernel is not to do that.
-///
-/// The launcher keeps the chain short instead (two levels, this kernel twice),
-/// so no thread walks more than `Order.chunk` before the f64 latency is hidden
-/// by other threads. Measured on this card, lanes 4 -> 1 is free:
-/// parallel_inverters_2000 --gpu 0.78/0.80/0.92 s -> 0.78/0.79/0.80 s,
-/// parallel_inverters_500 0.55/0.57/0.58 s -> 0.55/0.56/0.57 s.
-pub fn ReduceKernel(comptime _: type, comptime block_size: u32) type {
+/// Strict left-to-right with one accumulator on purpose: no `.optimized`
+/// float mode, and no interleaved partial sums. The tape emits rows in `ru`
+/// order, so interleaving would group all the +1.8 contributions of a supply
+/// row in one lane and all the -1.8 in another, measured at 4e-12 error
+/// against 1.6e-17 in order. The launcher bounds the chain length instead.
+fn ReduceKernel(comptime _: type, comptime block_size: u32) type {
     return struct {
         pub fn run(
             n_cells: u64,
@@ -2222,14 +1725,10 @@ pub fn ReduceKernel(comptime _: type, comptime block_size: u32) type {
     };
 }
 
-/// Accepted-step latch kernel — the device half of `Circuit.stateCtl` for a
-/// resident batch. For the admitted class this is the path-integration
-/// protocol: `commit` folds the staged `wb__/wq__` into the `pb__/pq__`
-/// latches eval reads, `revert` is a no-op, `query` answers false. All three
-/// ops route here anyway (no class assumption): the kernel ORs the real
-/// stateCtl verdict into `flags[0]`, so a future device with a live query
-/// answers honestly instead of by decree.
-pub fn CtlKernel(comptime D: type, comptime block_size: u32) type {
+/// GPU accepted-step kernel, one thread per instance: runs `D.stateCtl` with
+/// `op` on the resident Instance/State blobs and ORs its result into bit 0
+/// of `flags[0]`.
+fn CtlKernel(comptime D: type, comptime block_size: u32) type {
     const StateT = if (@hasDecl(D, "State")) D.State else u8;
     return struct {
         pub fn run(
@@ -2253,52 +1752,28 @@ pub fn CtlKernel(comptime D: type, comptime block_size: u32) type {
     };
 }
 
-// ===========================================================================
-// Runtime device ABI (dlopen'd .so). Crosses the boundary PER BATCH: the .so
-// compiles this same ProtoStore(D)/DeviceBatch(D) and hands back the same
-// type-erased Proto the builtin path uses. layoutHash() guards ABI drift; the
-// version history sits beside `abi_version` in device_ir.zig.
-// ===========================================================================
-// The host half of the contract (CONSUMING §4.2)
-// ===========================================================================
-
-/// This simulator's VPI application, and it deliberately has no `systf`.
-///
-/// §2.8.3 lets a `.va` call a `$name` no compiler defines, to be supplied
-/// through §12.32 `vpi_register_analog_systf`. ESPice registers none, so the
-/// right answer is to say so ONCE, in a type, and let `validateHost` turn a
-/// model that needs one into a build error naming the function — instead of a
-/// null `Instance.systf` reached at the first Newton step, or worse a value
-/// invented out of thin air inside the residual.
-///
-/// A named empty struct rather than `DeviceBatch(D)`: `validateHost` only ever
-/// looks for a `systf` decl, and routing the check through the batch type would
-/// instantiate every model's SoA store at comptime just to ask that question.
-///
-/// ponytail: no VPI application until a model wants one. The day `checkHost`
-/// errors, declare `pub fn systf(*const Model) ?*const contract.SystfHost` here
-/// and fill EVERY partial (§12.22.1) — a slot left alone is a derivative
-/// claimed and not computed.
-pub const VpiHost = struct {
+/// What this simulator offers devices, checked by `contract.validateHost`.
+/// It supports Newton iteration hooks and mutable evaluation, and registers
+/// no VPI `$systf` functions (LRM §12.32), so a model that calls one fails
+/// to build instead of reading a null `Instance.systf` at run time.
+// ponytail: add `pub fn systf(*const Model) ?*const contract.SystfHost` when a
+// model needs one, and fill every partial (LRM §12.22.1).
+const VpiHost = struct {
     pub const iteration_hooks = true;
     pub const mutable_eval = true;
 };
 
-/// Assert this host can supply everything `D` calls. A no-op for a device that
-/// names no `$systf`, so every device site carries it unconditionally.
-///
-/// `contract.validate(D)` cannot ask this: it runs where the DEVICE is defined,
-/// and a `.va` compiled to a `.so` does not know which simulator loads it. The
-/// requirement only exists where the two meet — here.
+/// Compile error unless this host provides everything D requires. The check
+/// lives here rather than in `contract.validate` because a device compiled to
+/// a `.so` cannot know which simulator will load it.
 pub fn checkHost(comptime D: type) void {
     contract.validateHost(VpiHost, D);
 }
 
-/// Export a contract-shaped device under the runtime ABI. The generated shim
-/// is one line: `comptime { @import("dyn").exportDevice(@import("device"), "name"); }`.
+/// Exports D under the runtime device ABI (`arp_abi_version`,
+/// `arp_layout_hash`, `arp_device`). The generated `.so` shim calls this:
+/// `comptime { @import("dyn").exportDevice(@import("device"), "name"); }`.
 pub fn exportDevice(comptime D: type, comptime device_name: []const u8) void {
-    // Builtins are checked in the build root's `comptime` block; this covers
-    // loaded models.
     comptime checkHost(D);
     const impl = Impl(D, device_name);
     @export(&impl.abiVersion, .{ .name = "arp_abi_version" });
@@ -2306,7 +1781,7 @@ pub fn exportDevice(comptime D: type, comptime device_name: []const u8) void {
     @export(&impl.getVtable, .{ .name = "arp_device" });
 }
 
-/// In-process vtable (tests, embedding without dlopen).
+/// D's vtable without going through a shared library.
 pub fn deviceVtable(comptime D: type, comptime device_name: []const u8) *const DeviceVtable {
     return &Impl(D, device_name).vtable;
 }
@@ -2317,10 +1792,10 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
         const n_u: usize = contract.nU(D);
 
         fn abiVersion() callconv(.c) u32 {
-            return abi_version;
+            return ir.abi_version;
         }
         fn layoutHashC() callconv(.c) u64 {
-            return layoutHash();
+            return ir.layoutHash();
         }
         fn getVtable() callconv(.c) *const DeviceVtable {
             return &vtable;
@@ -2385,11 +1860,8 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             } };
         }
 
-        fn protoAdd(ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) ir.DeviceResult(void) {
-            // `gpa` stays in the ABI signature (this is the dlopen'd device's
-            // entry point) but the staged columns own their own allocator —
-            // see `staging_gpa`.
-            _ = gpa;
+        // The rows live on `staging_gpa`, not the ABI's allocator.
+        fn protoAdd(ctx: *anyopaque, _: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) ir.DeviceResult(void) {
             const store: *Store = @ptrCast(@alignCast(ctx));
             const m: *const D.Model = @ptrCast(@alignCast(model));
             const i: *const D.Instance = @ptrCast(@alignCast(instance));
@@ -2398,10 +1870,11 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
     };
 }
 
-// This file is also the per-model build root. Imported as device_eval/dyn it
-// only supplies the shared evaluator; root compilation exports the catalog.
 fn placeholder(_: u64) callconv(gompute.kernel_callconv) void {}
 
+// As the build root, export every model in `models`: its GPU kernels (or a
+// no-op placeholder when it is not GPU-eligible) in a device compilation, and
+// its `arp_device_<name>` vtable getter on the host.
 comptime {
     if (@import("root") == @This() and !builtin.is_test) {
         for (@typeInfo(@import("models")).@"struct".decls) |decl| {
@@ -2430,7 +1903,7 @@ comptime {
     }
 }
 
-// Private implementation access for the analysis test suite.
+/// Private decls exposed to the test suites.
 pub const test_access = if (@import("builtin").is_test) .{
     .DualFor = DualFor,
     .RealFor = RealFor,

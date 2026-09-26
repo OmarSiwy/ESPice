@@ -1,3 +1,4 @@
+//! Tests for the model catalog and HDL loader error propagation.
 const std = @import("std");
 const device = @import("../root.zig");
 

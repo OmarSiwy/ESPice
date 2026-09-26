@@ -1,20 +1,28 @@
-//! The frozen circuit: CSC pattern, device batches and node labels. `freeze`
-//! consumes the construction protos; analysis instantiates mutable state from it.
+//! The frozen circuit: CSC matrix pattern, one device batch per type, and node
+//! names. `freeze` builds it from the construction protos; analysis
+//! instantiates its mutable state from it.
 const std = @import("std");
 const abi = @import("device_abi");
 const numerics = @import("core").numerics;
 const Circuit = @This();
 
+/// Owns every slice below.
 allocator: std.mem.Allocator,
+/// Matrix dimension; every node id is below it.
 n: u32,
+/// Structural nonzeros; also the trash slot ground stamps land in.
 nnz: u32,
 col_ptr: []u32,
 row_idx: []u32,
+/// CSC slot of each diagonal entry.
 diag_slots: []u32,
 batches: []abi.Batch,
 /// The Library type of each batch, parallel to `batches`.
 batch_types: []abi.DeviceType,
+/// Rows whose unknown is a branch current rather than a node voltage.
 current_row: []bool,
+/// Node names, concatenated; name i is `intern_bytes[intern_offs[i]..
+/// intern_offs[i + 1]]`.
 intern_bytes: []u8,
 intern_offs: []u32,
 bbd: ?numerics.BbdInfo,
@@ -22,6 +30,11 @@ has_charge: bool,
 has_state_q: bool,
 needs_tran_op: bool = false,
 
+/// Builds the pattern from every proto and finalizes each into a batch
+/// allocated with `allocator`. On success it destroys the protos and takes
+/// ownership of `intern_bytes`, `intern_offs` and `bbd`; on failure the caller
+/// keeps all of them. Fails with `InvalidCircuit` when `n` is 0, the tables
+/// do not match, or a diagonal is missing.
 pub fn freeze(
     allocator: std.mem.Allocator,
     n: u32,
@@ -110,11 +123,14 @@ pub fn deinit(self: *Circuit) void {
     self.* = undefined;
 }
 
+/// The name of `node`, or "" when out of range.
 pub fn nodeName(self: Circuit, node: u32) []const u8 {
     if (node >= self.n) return "";
     return self.intern_bytes[self.intern_offs[node]..self.intern_offs[node + 1]];
 }
 
+/// The CSC slot of (row, col), or null when it is out of range or not in the
+/// pattern.
 pub fn findSlot(self: Circuit, row: u32, col: u32) ?u32 {
     if (row >= self.n or col >= self.n) return null;
     return (abi.PatternView{
