@@ -1,15 +1,17 @@
-# ESPice (espice) — SPICE circuit simulator in Zig
+# ESPice: a SPICE circuit simulator in Zig
 
-Analog circuit simulator: SPICE netlists in, DC/AC/tran/PSS/noise/sweep
-analyses out. Devices are compiled from Verilog-A at build time (VerA),
-GPU compute goes through gompute. Siblings this tree depends on by path:
-`../gompute`, `../VerA`, `benchmark/` (see build.zig.zon).
+SPICE netlists in; DC, AC, transient, periodic, noise and sweep analyses
+out. Device models are Verilog-A compiled at build time by VerA, and GPU
+device evaluation goes through Gompute. Both are pinned git dependencies in
+`build.zig.zon`; to co-develop one, point its entry at a local `.path` and
+restore the pin before pushing. The benchmark runner lives in
+`tests/benchmark/`.
 
 ## Skills: load these before implementing, every session
 
-Before writing or reviewing any code in this repo, load these skills via the
-Skill tool. This is not optional and not "when relevant". The order matters:
-design constraints first, code-minimization last.
+Load these skills with the Skill tool before writing or reviewing any code
+here, every time. The order matters: design constraints first, code
+minimization last.
 
 1. `/data-oriented-design`. Answer the six questions in writing before any new
    struct or table. SoA by default, indices not pointers, arena by lifetime,
@@ -19,15 +21,15 @@ design constraints first, code-minimization last.
    read the asm. Every kernel adds a differential case against its scalar
    oracle: in `ref/SIMD-Strategies/verify.zig` when the kernel is
    self-contained (that file runs standalone under `zig run`, so it can
-   import nothing from `src/`), otherwise in the matching `src/analysis/tests/` suite with a
-   pointer to it from verify.zig — LaneLu is the worked example.
+   import nothing from `src/`), otherwise in the owning module's test suite
+   (`src/solver/tests.zig`, `src/analysis/tests/`) with a pointer to it from
+   verify.zig. LaneLu is the worked example.
 3. `/ponytail`. After the data layout and kernel strategy are fixed, write the
    least code that satisfies them. YAGNI applies to everything except
    correctness at trust boundaries and the conformance gates.
-4. Clean code: there is no `/unslop` skill installed; the equivalent here is
-   `/code-review` before merging and `/simplify` after a phase lands, plus the
-   org writing rules for docs and comments. If an `unslop` skill gets
-   installed later, load it here.
+4. Clean code: `/code-review` before merging, `/simplify` after a phase
+   lands, `/doc-comments` for every `pub` declaration, and `/humanizer` for
+   docs and comments.
 
 Conflict rule: data layout beats code brevity. Ponytail decides how little
 code we write, never what shape the data takes.
@@ -40,10 +42,11 @@ A module can only import what build.zig hands it, so the wiring is the DAG:
 core     src/core/          std only: ids (DeviceType, QueryId, Name), InternPool,
                             numerics, query requests, Deck, Result/Schema, GROUND
 solver   src/solver/        core
-device   src/device/        core, plus the device_abi (abi.zig) and device_eval
-                            (eval.zig) modules, models, fastvaf, build_options
+device   src/device/        core, device_abi (abi.zig), models, fastvaf (VerA),
+                            build_options; eval.zig also builds standalone as
+                            device_eval
 frontend src/frontend/      core, device
-analysis src/analysis/      core, device, solver
+analysis src/analysis/      core, device, solver, gompute
 output   src/output/        core
 espice   src/espice.zig     core, frontend, analysis, output (the Problem facade)
 main     src/main.zig       espice only; src/c_api.zig likewise
@@ -83,17 +86,18 @@ in, not retrofitted per-loop:
 
 | Axis | Mechanism |
 |---|---|
-| Frequency points (ac/noise/sp/stb/pac/pnoise/pxf) | SIMD lanes: `LaneLu(W)` replay of one SparseLu pivot tape; `FreqSolver.solveBatch` |
+| Frequency points (ac, noise, stb through `ac/freq.zig`) | SIMD lanes: `LaneLu(W)` replay of one SparseLu pivot tape; `FreqSolver.solveBatch`. sp, pac, pxf and pnoise still solve per point |
 | Sweep points (mc/temp/sens/dcmatch) | Structural lanes: `sweep/lanes.zig solveLanes` (serial over lanes) |
 | Device derivatives | `Dual(N, F)` forward AD (device/eval.zig) |
 | Device instances | ParEval worker threads |
 
-NOT lanes (do not try): tran timesteps (sequential in t), Newton iterations,
-HB harmonics (coupled through the nonlinearity), pss shooting.
+Not lanes, do not try: transient timesteps (sequential in t), Newton
+iterations, HB harmonics (coupled through the nonlinearity), PSS shooting.
 
-Scalar oracle = the `W == 1` instantiation of the same kernel, never a
-second code path. Lane kernels return per-lane failure masks; bad lanes are
-peeled to the scalar full-factor ladder (see solver/direct.zig fallback).
+The scalar oracle is the `W == 1` instantiation of the same kernel, never a
+second code path. Lane kernels return per-lane failure masks, and failed
+lanes peel to the scalar path, whose full factor re-pivots (see
+`solver/freq_solve.zig` and the `solver/direct.zig` fallback).
 
 ## CPU/GPU sharing
 
@@ -111,27 +115,28 @@ FROZEN at the GPU boundary (ABI + layout_hash): scatter tapes
 
 ## Call conventions (zero-cost by choice)
 
-- Immutable input → by value `T` (Zig passes big structs by hidden reference
-  itself; by-value is the zero-cost default and states immutability).
-- Callee mutates → `*T`. Large + identity matters → `*const T`. Never
+- Immutable input: by value `T`. Zig passes big structs by hidden reference
+  itself, so by-value costs nothing and states immutability.
+- Callee mutates: `*T`. Large and identity matters: `*const T`. Never
   `*const` on small PODs.
 - Non-mutating methods take `self: Self` (or `*const Self` when large).
 - Cross-object references are u32 indices into tables, never stored
-  pointers. Allowed pointers: fn-pointer dispatch tables (Batch vtable —
-  O(device types) indirect calls per eval), slices into owned storage,
-  ParamRef.ptr (frozen-storage contract), and `Circuit.lin.x_ptr` — an
-  identity key, never dereferenced, comparing the arena slice x_op was
-  built from. Every plane or parameter writer clears it (`Circuit.eval`
-  included), so a freed-and-reused address cannot read as a cache hit.
+  pointers. Allowed pointers: function-pointer dispatch tables (the Batch
+  vtable, O(device types) indirect calls per eval), slices into owned
+  storage, `ParamRef.ptr` (frozen-storage contract), and
+  `Circuit.lin.x_ptr` (`analysis/Circuit.zig`). That last one is an identity
+  key comparing the arena slice x_op was built from, never dereferenced.
+  Every plane or parameter writer clears it, `Circuit.eval` included, so a
+  freed and reused address cannot read as a cache hit.
 
 ## Zig idioms, mandatory
 
 - `std.StaticStringMap` for every fixed string set (the card keyword map
   `cards` in frontend/netlist.zig is the template).
-- SoA with explicit hot/cold splits for hot tables (SparseLu, DeviceList are
-  the templates). AoS only when all fields are read together per iteration
-  (Batch is the documented exception).
-- `enum`-typed / u32 handles for every index space; narrowest integer the
+- SoA with explicit hot/cold splits for hot tables (`SparseLu` and the
+  `frontend/csr.zig` hypergraph are the templates). AoS only when all fields
+  are read together per iteration (Batch is the documented exception).
+- Enum-typed or u32 handles for every index space; the narrowest integer the
   stated range allows.
 - Arenas by lifetime: parse scratch (dies after preparation), session arena
   (prepared template/source), per-query work and result arenas. Completed
@@ -141,32 +146,45 @@ FROZEN at the GPU boundary (ABI + layout_hash): scatter tapes
 
 ## The proof rule
 
-Every performance claim ships with a `zig build bench` before/after in the
-commit message. Every intentional divergence or retired experiment is noted
-in docs/ with its fallback. "It feels cleaner" proves nothing. Deliberate
+Every performance claim ships with a measured before/after in the commit
+message: `zig build bench` for wall time, callgrind instruction counts when
+the machine is too noisy for wall time. Every intentional divergence from
+ngspice or VACASK, and every retired experiment, is recorded in `docs/` with
+its measurements and fallback. "It feels cleaner" proves nothing. Deliberate
 shortcuts carry a `ponytail:` comment naming the ceiling and upgrade path.
+Session notes and handoffs do not go in `docs/`: fold their durable facts
+into the topical page before the branch merges.
 
 ## Verification
 
-- `zig build && zig build test` after every step. Historical baseline: 305/307 —
-  the 2 `disto` HD2 failures pre-date the refactor (verified on clean HEAD
-  285e7e7 in a worktree). Their assertions moved with the module split; the
-  analysis-contract suite is `src/tests/analyses.zig` now, and the
-  remaining distortion gap is tracked as C7 in `issues.md`.
-- The numeric deck corpus is `tests/fixtures/**`. A deck that a feature does
-  not cover yet says so IN THE DECK (`* KNOWN GAP: ...`) and is expected to
-  fail until the feature lands — `issues.md` is the audited index of them.
-- New SIMD kernels: differential test vs the scalar oracle in
-  `ref/SIMD-Strategies/verify.zig`, plus an asm spot-check that the expected
-  vector instruction is emitted. The build has no backend flag any more (the
-  native backend is always on), so read the asm off a direct invocation:
+- `zig build && zig build test` after every step. `zig build test` runs the
+  unit suites and then the numeric corpus. Baseline at `321044c`: every
+  unit test passes (295 across the eight per-area steps, plus the corpus
+  harness's own tests), and the corpus scores 560/616. The step exits
+  nonzero while any deck fails, so compare the failing set, not the exit
+  code: no deck on the pass list may start failing. All `disto` decks pass;
+  the analysis-contract suite is `src/tests/analyses.zig`.
+- The numeric corpus is `tests/fixtures/**`. A deck whose feature is
+  missing says so in the deck (`* KNOWN GAP: ...`) and is expected to fail
+  until the feature lands. `issues.md` is the audited index of failing
+  decks and their causes.
+- Timing-sensitive decks (`stress/scaling_inverter_chain_4k`) can time out
+  on a loaded machine; check the failure reason before calling it a
+  regression.
+- A CPU-only build (`-Dgpu=false`) compiles much faster and is enough for
+  host-only changes. Anything that touches the device ABI, the Circuit GPU
+  hooks or `analysis/gpu.zig` also needs the default build, which compiles
+  the device kernels. `--backend cuda` on absent hardware must fail with an
+  error naming what was detected.
+- New SIMD kernels: a differential test against the scalar oracle (see the
+  skills list), plus an asm spot-check that the expected vector instruction
+  is emitted. Read the asm off a direct invocation:
   `zig build-obj -OReleaseFast -fllvm -femit-asm=/tmp/k.s --dep core -Mroot=src/solver/direct.zig -Mcore=src/core/root.zig`.
-- GPU: default build compiles device kernels; `--backend cuda` on absent
-  hardware must error naming what was detected.
 
 ## Git rules
 
-- **NEVER `git stash`.** For baselines use a worktree:
-  `git worktree add ../espice-base <rev>` (relative-path deps require the
-  worktree to sit beside `../gompute`/`../VerA`, NOT in /tmp).
-- One step per commit; tests green at every commit.
+- **Never `git stash`.** For a baseline, use a worktree:
+  `git worktree add ../espice-base <rev>`. With the pinned dependencies a
+  worktree builds anywhere; one that points a dependency at a local `.path`
+  must keep that relative path valid.
+- One step per commit, tests green at every commit.
