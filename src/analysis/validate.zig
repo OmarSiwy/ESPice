@@ -4,18 +4,12 @@ const std = @import("std");
 const requests = @import("core").query;
 const Deck = @import("core").Deck;
 
-/// True when every float reachable from `value` is finite. `dx_clamp` is the
-/// exception: +inf means "no clamp", so it only has to be positive.
+/// True when every float reachable from `value` is finite.
 fn finite(value: anytype) bool {
     return switch (@typeInfo(@TypeOf(value))) {
         .float => std.math.isFinite(value),
         .@"struct" => |s| blk: {
-            inline for (s.fields) |field| {
-                const v = @field(value, field.name);
-                if (comptime std.mem.eql(u8, field.name, "dx_clamp")) {
-                    if (std.math.isNan(v) or v <= 0) break :blk false;
-                } else if (!finite(v)) break :blk false;
-            }
+            inline for (s.fields) |field| if (!finite(@field(value, field.name))) break :blk false;
             break :blk true;
         },
         .optional => if (value) |v| finite(v) else true,

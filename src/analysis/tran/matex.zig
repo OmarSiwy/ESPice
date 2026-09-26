@@ -12,7 +12,7 @@ const combinePlanes = @import("../Circuit.zig").combinePlanes;
 const solvers = @import("solver");
 const Waveform = @import("types.zig").Waveform;
 
-const DenseLu = solvers.dense_lu.DenseLu(f64);
+const dense_lu = solvers.dense_lu;
 const Solver = solvers.direct.Solver;
 
 // ponytail: platform SIMD width, not hardcoded.
@@ -130,7 +130,7 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) voi
     }
 
     const piv = piv_buf[0..m];
-    DenseLu.factorize(m, H, piv) catch {
+    dense_lu.factorize(m, H, piv) catch {
         @memset(out[0..mm], 0);
         for (0..m) |i| out[i * m + i] = 1;
         return;
@@ -140,7 +140,7 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) voi
     const col_buf = H2;
     for (0..m) |j| {
         for (0..m) |i| col_buf[i] = out[i * m + j];
-        DenseLu.solveFactored(m, H, piv, col_buf[0..m], col_buf[0..m]);
+        dense_lu.solveFactored(m, H, piv, col_buf[0..m], col_buf[0..m]);
         for (0..m) |i| out[i * m + j] = col_buf[i];
     }
 
@@ -388,13 +388,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var slv = try Solver.init(ctx.scratch_allocator, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer slv.deinit();
-    try slv.factor(combined_vals);
+    try slv.factor(combined_vals, ckt.solver_execution);
 
     // G alone carries the particular solution: the source terms of eq. 5
     // are A^-1 C^-1 b = -G^-1 b and A^-2 C^-1 b = G^-1 C G^-1 b.
     var slv_g = try Solver.init(ctx.scratch_allocator, nn, ckt.col_ptr, ckt.row_idx, ckt.bbd);
     defer slv_g.deinit();
-    try slv_g.factor(ckt.g_vals);
+    try slv_g.factor(ckt.g_vals, ckt.solver_execution);
 
     const spots = try collectTransitionSpots(scratch, ckt, opts.t_stop);
 
@@ -549,12 +549,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
             // Singular only for a DAE of index > 1, which this path cannot
             // integrate.
-            try DenseLu.factorize(m, H_copy[0..msq], piv);
+            try dense_lu.factorize(m, H_copy[0..msq], piv);
 
             for (0..m) |j| {
                 root.zeroSimd(arnoldi_tmp1[0..m]);
                 arnoldi_tmp1[j] = 1.0;
-                DenseLu.solveFactored(m, H_copy[0..msq], piv, arnoldi_tmp1[0..m], arnoldi_tmp1[0..m]);
+                dense_lu.solveFactored(m, H_copy[0..msq], piv, arnoldi_tmp1[0..m], arnoldi_tmp1[0..m]);
                 for (0..m) |i| H_inv[i * m + j] = arnoldi_tmp1[i];
             }
 

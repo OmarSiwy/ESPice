@@ -104,8 +104,6 @@ pub const BbdBlock = struct {
     /// First row; the block owns rows `[start, start + size)`.
     start: u32,
     size: u32,
-    type_id: u16,
-    instance_id: u32,
 };
 
 /// Bordered-block-diagonal partition of the MNA rows: independent diagonal
@@ -247,9 +245,6 @@ pub const Tolerances = struct {
     gmin: f64 = 1e-12,
     /// Absolute floor of the per-row Newton residual test.
     residual_tol: f64 = 1e-9,
-    /// Largest Newton update (max-norm) taken unscaled; infinity disables
-    /// damping.
-    dx_clamp: f64 = std.math.inf(f64),
     /// First rung of the DC gmin-stepping ladder, in siemens.
     gmin_start: f64 = 1e-2,
     /// Newton iteration limits named after the SPICE options: DC operating

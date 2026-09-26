@@ -229,8 +229,8 @@ demote to the next rung; only allocation errors and cancellation abort.
 `reltol`, `abstol`, `vntol`, `residual_tol` gate acceptance; `gmin` and
 `gmin_start` set the gmin-stepping target and start; `itl1` is the budget of
 the plain and final clean solves, `itl2` of the stepping rungs and of the
-gmin factor thresholds; `dx_clamp` is the direction-preserving damping bound
-(default off, $\infty$).
+gmin factor thresholds. Newton takes the full step: device limiting is the
+globalization.
 
 ### Conformance history: the 4k inverter chain
 
@@ -306,7 +306,6 @@ newton(ckt, x, gmin, max_iter):
         J_diag += gmin; rhs += gmin*x
         factor(J) unless matrix_sig unchanged
         dx = solve(J, -F)
-        damp_whole_step(dx, dx_clamp)      # scale, never per-component clamp
         x_old = x; x += dx
         limited = apply_device_limits(x, x_old)    # pnjlim/fetlim/limvds
         if state_flipped(x) or limited or iter == 0: continue

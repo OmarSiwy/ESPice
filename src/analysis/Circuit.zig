@@ -151,7 +151,6 @@ pub const Circuit = struct {
     /// Returns the shared Newton/JFNK workspace, building it on first use.
     pub fn workspace(self: *Circuit) !*converger.Workspace {
         if (self.ws == null) self.ws = try converger.Workspace.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.bbd);
-        self.ws.?.slv.params.execution = self.solver_execution;
         return &self.ws.?;
     }
 

@@ -13,6 +13,7 @@
 const std = @import("std");
 const direct = @import("direct.zig");
 const BbdInfo = @import("core").numerics.BbdInfo;
+const Execution = @import("core").numerics.Execution;
 
 /// `ESPICE_SOLVER` overrides `run`'s choice: direct, jfnk (LU-preconditioned
 /// GMRES) or jfnk-nolu (Jacobi-preconditioned, no factorization at all).
@@ -75,6 +76,12 @@ fn Deref(comptime P: type) type {
     return if (@typeInfo(P) == .pointer) @typeInfo(P).pointer.child else P;
 }
 
+/// The BBD factor scheduler `sys` carries as `solver_execution`; serial
+/// for a system without one.
+fn executionOf(sys: anytype) Execution {
+    return if (comptime @hasField(Deref(@TypeOf(sys)), "solver_execution")) sys.solver_execution else .{};
+}
+
 /// The user-facing accuracy profile (SPICE .options).
 pub const Tolerances = @import("core").numerics.Tolerances;
 
@@ -92,7 +99,6 @@ pub fn optionsFromTolerances(tol: Tolerances, max_iter_override: ?u16) Options {
         // Diagonal gmin is opt-in (the op gmin-stepping rung). ngspice's
         // NIiter loads none; junction gmin lives in the device models.
         .gmin = 0,
-        .dx_clamp = tol.dx_clamp,
     };
 }
 
@@ -108,8 +114,6 @@ pub const Options = struct {
     residual_tol: f64 = 1e-9,
     /// Conductance added to every diagonal (and gmin * x to the residual).
     gmin: f64 = 1e-12,
-    /// Largest allowed |dx| component; the step is scaled down to it.
-    dx_clamp: f64 = std.math.inf(f64),
     /// Nonzero when the caller knows the matrix is unchanged since the last
     /// factor with this signature, so `newton` skips the factor.
     matrix_sig: u64 = 0,
@@ -170,7 +174,7 @@ pub fn newton(
         if (newtonDbg())
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
         if (opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig) {
-            slv.factor(v) catch |e| {
+            slv.factor(v, executionOf(sys)) catch |e| {
                 if (opdbg()) {
                     var nan_cnt: usize = 0;
                     var max_x: f64 = 0;
@@ -185,7 +189,6 @@ pub fn newton(
             ws.factored_sig = opts.matrix_sig;
         }
         slv.solveNeg(sys.rhs, dx);
-        dampStep(dx[0..sys.n], opts.dx_clamp);
         const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, opts);
         if (opdbg()) {
             var fi: usize = 0;
@@ -215,17 +218,6 @@ fn sysNodeName(sys: anytype, idx: u32) []const u8 {
 }
 
 const Step = struct { converged: bool, scaled: f64, flipped: bool = false, why: Reject = .converged };
-
-/// Scales `dx` so its largest component is at most `clamp`.
-fn dampStep(dx: []f64, clamp: f64) void {
-    if (!std.math.isFinite(clamp)) return;
-    var mdx: f64 = 0;
-    for (dx) |d| mdx = @max(mdx, @abs(d));
-    if (mdx > clamp) {
-        const s = clamp / mdx;
-        for (dx) |*d| d.* *= s;
-    }
-}
 
 /// Applies `dx` and runs the acceptance gates in order: device limiting,
 /// first iterate, per-row delta, row-scaled residual, device convergence,
@@ -336,7 +328,7 @@ pub fn jfnk(
             if (opts.gmin > 0) {
                 for (0..n) |i| v[sys.diag_slots[i]] += opts.gmin;
             }
-            s.factor(v) catch {};
+            s.factor(v, executionOf(sys)) catch {};
         }
 
         // r = -M^-1 f0, beta = ||r||.
@@ -435,13 +427,6 @@ pub fn jfnk(
             var dxi: f64 = 0;
             for (0..jj) |kk| dxi += y[kk] * v_basis[kk * n + i];
             ri.* = dxi;
-        }
-
-        var mdx: f64 = 0;
-        for (r) |ri| mdx = @max(mdx, @abs(ri));
-        if (mdx > opts.dx_clamp) {
-            const s = opts.dx_clamp / mdx;
-            for (r) |*ri| ri.* *= s;
         }
 
         // x_old = x; x += dx; per-row delta test. A non-finite iterate scores

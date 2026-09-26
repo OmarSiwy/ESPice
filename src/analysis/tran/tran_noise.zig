@@ -165,8 +165,7 @@ pub fn simulate(
         // targets (§9.10 `$abstime`); a rejected step retries from here.
         ckt.setSimState(.{ .t = t + dt, .dt = dt, .kind = .tran, .initial_step = steps == 0 });
         simdCopy(x_try, x);
-        var tn_nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
-        tn_nr_opts.dx_clamp = std.math.inf(f64);
+        const tn_nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         const nr = converger.run(ckt, ws, x_try, t + dt, tn_nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled => return err,
             else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 },

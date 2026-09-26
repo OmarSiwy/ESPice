@@ -59,7 +59,7 @@ pub fn solve(
     const rhs_nom = try allocator.alloc(f64, n);
     defer allocator.free(rhs_nom);
     copySimd(rhs_nom, ckt.rhs[0..n]);
-    try ws.slv.factor(ckt.g_vals);
+    try ws.slv.factor(ckt.g_vals, ckt.solver_execution);
 
     const lambda = try allocator.alloc(f64, n);
     defer allocator.free(lambda);
