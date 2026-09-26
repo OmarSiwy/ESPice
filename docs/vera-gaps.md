@@ -7,10 +7,10 @@ the O, Y and P cards still route to the native Zig devices. Each gap is
 labelled `VERA-GAP:` in the .va file, in the header and at the construct that
 needs it.
 
-`build.zig.zon` pins VerA at `297e97d`. The fixes marked below are on VerA's
-local HEAD and have not been pinned here yet, so this tree's build still sees
-every gap. Once they are pinned, the `VERA-GAP:` labels for the fixed items
-can come out of the .va files.
+`build.zig.zon` pins VerA at `b56b06cb` (device ABI 4), which carries the
+fixes marked below. The `VERA-GAP:` labels for the fixed items can come out
+of the .va files; since none of the three is built, nothing here checks that
+they now compile.
 
 ## Status
 

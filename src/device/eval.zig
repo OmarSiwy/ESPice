@@ -574,13 +574,17 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
 
         var out: [n_u]S = undefined;
         var qo: if (has_q) [n_u]S else void = undefined;
+        // ponytail: `q` returns one charge per ddt site; `qRows` sums them
+        // back into rows, so the tape and LTE stay per row and `q_lte` is
+        // unread (no model sets `vera_lte`). Tape per site when a model needs
+        // mos1trun/bjttrunc-style split truncation checks.
         if (comptime fuse) {
             const both = @call(.always_inline, D.evalQ, .{ S, xv, sink.model(id), sink.inst(id), t });
             out = both.res;
-            qo = both.q;
+            qo = contract.qRows(D, S, both.q);
         } else {
             out = D.eval(S, xv, sink.model(id), sink.inst(id), t);
-            if (comptime has_q) qo = D.q(S, xv, sink.model(id), sink.inst(id), t);
+            if (comptime has_q) qo = contract.qRows(D, S, D.q(S, xv, sink.model(id), sink.inst(id), t));
         }
 
         // Rows the device never writes (`jac_row`) and entries it can never
@@ -654,7 +658,7 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
     while (id < end) : (id += 1) {
         var xv: [n_u]S = undefined;
         inline for (0..n_u) |u| xv[u] = S.seed(sink.x(sink.gath(id, u)), u);
-        const qo = D.q(S, xv, sink.model(id), sink.inst(id), t);
+        const qo = contract.qRows(D, S, D.q(S, xv, sink.model(id), sink.inst(id), t));
         // Same `q_row` gate as `evalRange`, or the two passes would differ.
         inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(id, ru, sink.rhsRow(id, ru), qo[ru].v);
     }
@@ -809,6 +813,11 @@ pub fn ProtoStore(comptime D: type) type {
             self.rows.deinit(staging_gpa);
             self.rows = .empty;
 
+            // `setup` before `initState`: both read the card, and only the
+            // former fills `Instance.su`.
+            if (comptime @hasDecl(D, "setup")) {
+                for (0..count) |i| D.setup(Dual(1, f64), &store.models[i], &store.instances[i]);
+            }
             if (comptime @hasDecl(D, "State")) {
                 store.states = try gpa.alloc(D.State, count);
                 for (0..count) |i| store.states[i] = D.initState(&store.models[i], &store.instances[i]);
@@ -958,7 +967,7 @@ pub fn DeviceBatch(comptime D: type) type {
                     " declares noise_gens without noisePsd; see docs/devices/noise-contract.md §3");
                 break :blk collectNoise;
             } else null,
-            .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute")) recomputePrecomputed else null,
+            .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute") or @hasDecl(D, "setup")) recomputePrecomputed else null,
             .gpu_payload = if (gpuEligible(D)) gpuPayload else null,
             .apply_attempt = if (has_attempt) applyAttempt else null,
             .restore_models = if (has_attempt) restoreAttempt else null,
@@ -1121,7 +1130,7 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         /// Sets every instance's temperature from Celsius (`.temp`) to the
-        /// Kelvin `$temperature` reads (LRM §9.10), then reruns `precompute`.
+        /// Kelvin `$temperature` reads (LRM §9.10), then reruns `setup` and `precompute`.
         fn setTemp(ctx: *anyopaque, temp_c: f32) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.instances) |*inst| inst.temperature = @as(f64, temp_c) + 273.15;
@@ -1129,7 +1138,7 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         /// Writes the host-owned Instance fields a device declares. No
-        /// `precompute` rerun: it depends only on parameters, never on these.
+        /// `setup`/`precompute` rerun: they depend only on parameters, never on these.
         fn setSimState(ctx: *anyopaque, st: SimState) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (self.instances) |*inst| {
@@ -1182,7 +1191,7 @@ pub fn DeviceBatch(comptime D: type) type {
             };
         }
 
-        /// Reruns `precompute` and returns false when `collapse` now asks for
+        /// Reruns `setup` and `precompute` and returns false when `collapse` now asks for
         /// a node aliasing the frozen tapes do not have.
         fn recomputePrecomputed(ctx: *anyopaque) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
@@ -1205,6 +1214,9 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         fn reprep(self: *Self) void {
+            if (comptime @hasDecl(D, "setup")) {
+                for (self.instances, self.models) |*inst, *mdl| D.setup(Dual(1, f64), mdl, inst);
+            }
             if (comptime @hasDecl(D, "precompute")) {
                 for (self.instances, self.models) |*inst, *mdl| D.precompute(inst, mdl);
             }
@@ -1273,8 +1285,10 @@ pub fn DeviceBatch(comptime D: type) type {
             if (field.type != f32 and field.type != f64) return false;
             // A trailing `__` is VerA's own namespace (no escaped Verilog-A
             // name ends in `_`), e.g. `nom_temp__` from `.options tnom`,
-            // which `.mc`/`.sens` must not perturb.
-            if (comptime std.mem.endsWith(u8, field.name, "__")) return false;
+            // which `.mc`/`.sens` must not perturb. So is `<flow>__retained`,
+            // the retention flag `derive` writes (contract `JacWhen`).
+            if (comptime std.mem.endsWith(u8, field.name, "__") or
+                std.mem.endsWith(u8, field.name, "__retained")) return false;
             if (@hasDecl(D, "AnalysisKind") and T == D.Instance) {
                 // A VerA Instance holds runtime state; only these two are
                 // parameters.
@@ -1760,6 +1774,10 @@ fn CtlKernel(comptime D: type, comptime block_size: u32) type {
 // model needs one, and fill every partial (LRM §12.22.1).
 const VpiHost = struct {
     pub const iteration_hooks = true;
+    /// The batch runs `setup` once before `initState` (after `.options tnom`
+    /// is on the card), and `reprep` reruns it after every parameter or
+    /// temperature write.
+    pub const calls_setup = true;
     pub const mutable_eval = true;
 };
 

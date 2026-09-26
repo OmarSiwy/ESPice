@@ -339,6 +339,7 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
 test "mutable evaluation captures per-instance data without GPU residency" {
     const D = struct {
         pub const mutable_eval = true;
+        pub const contract_abi: u32 = 4;
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
         pub const Model = struct {};

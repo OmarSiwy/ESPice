@@ -541,6 +541,8 @@ pub fn CoupledLtra(comptime N: usize) type {
             break :vals &frozen;
         });
         pub const num_ports: usize = 2 * N;
+        /// Hand-written against VerA's device ABI 4 (`contract.abi_version`); review on a bump.
+        pub const contract_abi: u32 = 4;
         const n_u = NU;
 
         inline fn p2(k: usize) usize {
