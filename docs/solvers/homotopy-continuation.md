@@ -13,7 +13,7 @@ Convergence of the ladder rests on the implicit function theorem: while
 $\partial H/\partial x$ stays nonsingular along the path, $x(\lambda)$ is
 continuous and a small enough step keeps the start inside Newton's basin.
 (Folds/bifurcations on the path are exactly where fixed-step ladders fail
-and adaptive/arc-length ones survive — derived, not source-verified.)
+and adaptive/arc-length ones survive: derived, not source-verified.)
 
 **gmin stepping.** Homotopy through diagonal regularization:
 
@@ -22,11 +22,11 @@ $$H(x, g) = F(x) + g\,\Pi\,x, \qquad \Pi = \text{diag mask of device nodes},$$
 $g$ from $g_0$ (large, e.g. $10^{-2}$) down to $g_{\text{target}} =
 \max(\mathrm{gmin}, \mathrm{gshunt})$. Large $g$ makes every node see a
 conductance to ground: $J + gI$ is diagonally dominant hence well
-conditioned, and the DC solution is pulled toward 0 — an easy problem.
+conditioned, and the DC solution is pulled toward 0: an easy problem.
 ngspice (cktop.c, fetched) implements the diagonal loading as
 `CKTdiagGmin`, distinct from the model parameter gmin. Two variants:
 
-- *spice3_gmin:* fixed geometric ladder — start at $g_{\text{target}} \cdot
+- *spice3_gmin:* fixed geometric ladder: start at $g_{\text{target}} \cdot
   f^{N}$ ($N$ = `CKTnumGminSteps`, $f$ = `CKTgminFactor`, default 10),
   divide by $f$ per converged step, abort on the first failure, finish with
   one Newton at the true gmin.
@@ -45,7 +45,7 @@ ngspice (cktop.c, fetched) implements the diagonal loading as
 
 $$H(x, \alpha) = F_\alpha(x), \quad \text{all independent sources scaled by } \alpha \in [0,1].$$
 
-At $\alpha = 0$ the circuit is source-free — $x = 0$ solves it (ngspice
+At $\alpha = 0$ the circuit is source-free: $x = 0$ solves it (ngspice
 literally zeros `rhsOld` and the state vector as the start). Variants:
 
 - *spice3_src:* fixed ramp $\alpha = i/N$, $i = 0..N$; any failure aborts
@@ -59,7 +59,7 @@ literally zeros `rhsOld` and the state vector as the start). Variants:
   < 10^{-8}$). Bootstrap: if even $\alpha = 0$ fails, run a 10-decade gmin
   ladder *inside* the source stepper to get the first point.
 
-**Pseudo-transient continuation (PTC).** Homotopy through time — solve the
+**Pseudo-transient continuation (PTC).** Homotopy through time: solve the
 ODE-augmented system
 
 $$\left(\frac{1}{\Delta t_k} D + J(x_k)\right)\Delta x = -F(x_k), \qquad
@@ -69,14 +69,14 @@ i.e. take *implicit-Euler pseudo-timesteps* toward the DC steady state
 instead of Newton steps. For small $\Delta t$ the iteration matrix is
 dominated by $D/\Delta t$ (well conditioned, damped, globally contractive
 toward the transient flow); as $\Delta t \to \infty$ it *becomes* Newton
-and inherits quadratic convergence. Kelley–Keyes prove convergence for the
+and inherits quadratic convergence. Kelley-Keyes prove convergence for the
 standard controller "switched evolution/relaxation" $\Delta t_{k+1} =
 \Delta t_k \cdot \|F(x_{k-1})\| / \|F(x_k)\|$ (grow the step as the
-residual falls) under smoothness + stable-steady-state assumptions —
+residual falls) under smoothness + stable-steady-state assumptions:
 paywalled: derived, not source-verified. In SPICE practice PTC is a real
 transient run with sources held at DC values and capacitors/inductors kept
 (ngspice's OP fallback to `DOING_TRAN`, ramping supplies), used when both
-ladders fail; its win is physical damping — oscillator-prone feedback
+ladders fail; its win is physical damping: oscillator-prone feedback
 circuits follow an actual settling trajectory instead of Newton chaos.
 
 **Order of attack (ngspice CKTop):** plain Newton (`NIiter`) → gmin ladder
@@ -90,12 +90,12 @@ and converges in fewer total Newton iterations on mildly-stiff circuits.
 
 The homotopy ladder is *solver-level*: it wraps the Newton driver, mutating
 one scalar knob ($g$, $\alpha$, or $\Delta t$) between full Newton solves,
-and owns checkpoint/restore of $(x, \text{device state})$ — the essential
+and owns checkpoint/restore of $(x, \text{device state})$: the essential
 piece that fixed ladders (spice3 variants) skip and adaptive ones
 (Gillespie variants) rely on for retreat.
 
 Interaction with the linear solver: every rung change mutates matrix values
-only (diagonal loading or RHS scaling) on the frozen pattern — the whole
+only (diagonal loading or RHS scaling) on the frozen pattern: the whole
 ladder runs on numeric refactors (`klu-pipeline.md`); large-$g$ rungs are
 strongly diagonally dominant so the frozen pivot sequence is at its
 safest exactly when the homotopy needs cheap steps. gmin loading also
@@ -134,10 +134,10 @@ starts from delta = 0.25 rather than raise = 1e-3 and has no gmin bootstrap
 at lambda = 0), and the JFNK and OPtran rungs have no ngspice counterpart
 in a default run.
 
-When each rung wins: gmin — floating/high-impedance nodes, exponential
-stiffness; source — circuits whose difficulty *is* the bias (latches,
+When each rung wins: gmin: floating/high-impedance nodes, exponential
+stiffness; source: circuits whose difficulty *is* the bias (latches,
 high-gain feedback: the solution branch at full excitation is far from any
-zero-state guess, but continuously connected to $x(0) = 0$); PTC —
+zero-state guess, but continuously connected to $x(0) = 0$); PTC:
 multistable/oscillatory DC landscapes where both parameter ladders jump
 branches.
 
@@ -213,18 +213,18 @@ solved in one batch from the same checkpoint) remains an idea, not code.
 
 ---
 
-**Sources fetched:** ngspice `src/spicelib/analysis/cktop.c` (fetched raw —
+**Sources fetched:** ngspice `src/spicelib/analysis/cktop.c` (fetched raw:
 CKTop, dynamic_gmin, spice3_gmin, gillespie_src, spice3_src read in full);
 Kelley & Keyes, *Convergence Analysis of Pseudo-Transient Continuation*
-(paywalled — not fetched).
+(paywalled, not fetched).
 
 **Verification status:** §1/§3 gmin + source stepping, all constants
 (1e-2 origin, factor^(1/4) retreat, 1.00005 floor, raise 1e-3/1.5×/0.5×/÷10,
-1e-7/1e-8 stops, 10-decade bootstrap), order of attack — source-verified
-against fetched cktop.c. §1 homotopy/IFT framing — derived, not
+1e-7/1e-8 stops, 10-decade bootstrap), order of attack: source-verified
+against fetched cktop.c. §1 homotopy/IFT framing: derived, not
 source-verified (standard continuation theory). §1/§3 PTC and the SER
-controller — derived, not source-verified (Kelley & Keyes paywalled; the
-form given is their published controller as commonly cited). §2 — verified
+controller: derived, not source-verified (Kelley & Keyes paywalled; the
+form given is their published controller as commonly cited). §2: verified
 against `src/analysis/dc/op.zig` (`solveLadder`, `transientOp`) and
 `converger.zig` (gmin loading in `newton()`).
 

@@ -35,7 +35,7 @@ No package below closes merely because its unit tests pass. The compiler, genera
 device, standalone runner, simulator, and public interfaces involved must agree.
 Every package requires a build, appropriate unit and behavioral tests, and the
 relevant regression suites. Broader failures remain visible rather than being
-reclassified as successes. See Q01–Q04 for the final conformance gate.
+reclassified as successes. See Q01-Q04 for the final conformance gate.
 
 ## Recorded status and dependencies
 
@@ -55,7 +55,7 @@ compiler side; this table is not re-verified on every change.
 | A07 | Reference algorithms, guarded errors and host overrides integrated; paramset skipped-arm folding under implementation; fractional counts and lifecycle open |
 | Q03 | Loader isolation and the portable device error status (device ABI 10, now 13) integrated; separate-object allocation tests pass (`zig build test-device`) |
 | X01 | Native routes and setup guards restored; prescribed ngspice-grid replay passes; full waveform comparisons are tracked in `issues.md` |
-| Q01–Q03 | Compiler build, 404 units and 1,323/1,323 strict fixtures passed when recorded. ESPice host counts are in AGENTS.md "Verification" |
+| Q01-Q03 | Compiler build, 404 units and 1,323/1,323 strict fixtures passed when recorded. ESPice host counts are in AGENTS.md "Verification" |
 | D03 | Net state, independent drivers, §7.9 wired-logic resolution, `assign` and one-dimensional memories integrated; drive strengths remain open |
 | P01 | `vpi_user.h`, the elaborated object model and eleven handle/traversal/property routines integrated; a compiled C application walks a three-deep design. P02/P03 values and callbacks remain open |
 | A06 | `noise_table`/`noise_table_log` export as `noise_tables` with linear and log-log interpolation; ARPice host spectral integration remains open |
@@ -67,14 +67,14 @@ The main dependencies are:
 
 - D01 → D02/D03 → D04/D05 → D06/D07/D08/D09.
 - D04/D05 plus analog lifecycle A09/A10 → M01/M02.
-- D03/D07 plus hierarchy H01–H04 → M03/M04.
+- D03/D07 plus hierarchy H01-H04 → M03/M04.
 - The elaborated object model and scheduler → P01/P02/P03.
 - A04/A09/A10/P03 plus a separate compatibility study → X01.
-- Q01–Q04 apply throughout and finish after all mandatory requirements close.
+- Q01-Q04 apply throughout and finish after all mandatory requirements close.
 
 ## Digital language and execution
 
-### D01 — Four-state literals and values
+### D01: Four-state literals and values
 
 Known gap: the analog integer representation cannot retain digital X/Z states,
 arbitrary packed widths, and all signedness information.
@@ -94,7 +94,7 @@ The initial-process runner preserves packed runtime values. Complete expression
 sizing, additional storage kinds and legal analog case comparisons still need
 D02, D03 and M01.
 
-### D02 — Digital expression semantics
+### D02: Digital expression semantics
 
 Packed value helpers implement addition, subtraction, multiplication, division,
 remainder, integral power and unary minus, including multiword wraparound and X/Z
@@ -121,7 +121,7 @@ Selects, general functions and complete unsized rules remain open.
 - Test independent truth tables, signed boundary values, X/Z propagation, shift
   counts, mixed-width operands, select direction and out-of-range behavior.
 
-### D03 — Digital declarations, memories, ports and drivers
+### D03: Digital declarations, memories, ports and drivers
 
 - Represent packed nets/registers, integer/time/real/realtime/event declarations,
   arrays and memories, declaration assignments, port types and connections.
@@ -132,7 +132,7 @@ Selects, general functions and complete unsized rules remain open.
 - Test multi-driver truth/strength tables, arrays, bidirectional connections,
   width mismatches, initialization and hierarchical port connectivity.
 
-### D04 — Procedural execution
+### D04: Procedural execution
 
 The shared-frontend `.v --run` path executes initial and always processes with
 sequential blocks, whole-variable blocking/NBA assignments, integral delays,
@@ -163,7 +163,7 @@ uses its restricted constant-initial path.
 - Test suspension/resumption, process lifetime, scope, edge tables, RHS sampling
   versus LHS update timing, and process cancellation.
 
-### D05 — Event scheduler and time
+### D05: Event scheduler and time
 
 Reference: AMS §8.5 and inherited Verilog scheduling rules.
 
@@ -187,7 +187,7 @@ rounds real delays locally before integer global scaling.
 - Test observable region traces, NBA and zero-delay interactions, repeated
   delta cycles, time rounding, far-future events and removal during dispatch.
 
-### D06 — Continuous assignment and delay semantics
+### D06: Continuous assignment and delay semantics
 
 - Execute continuous assignments and reevaluate their dependencies.
 - Implement net/assignment delays, rise/fall/turn-off delay choices, delay
@@ -195,7 +195,7 @@ rounds real delays locally before integer global scaling.
 - Test delayed pulses, input changes before delivery, multiple simultaneous
   assignments, strength changes and propagation across hierarchy.
 
-### D07 — Elaboration of the inherited digital language
+### D07: Elaboration of the inherited digital language
 
 - Complete digital module instances, instance arrays, parameter and defparam
   binding, generate constructs and hierarchical names.
@@ -205,7 +205,7 @@ rounds real delays locally before integer global scaling.
 - Test multi-file designs, parameterized widths, recursive/invalid elaboration,
   generated hierarchies, configurations and name collisions.
 
-### D08 — Gates, switches and UDPs
+### D08: Gates, switches and UDPs
 
 - Implement built-in logic/buffer/tri-state/MOS/CMOS/pass-switch families,
   primitives' delays and strengths, bidirectional switch networks and charge.
@@ -214,7 +214,7 @@ rounds real delays locally before integer global scaling.
 - Test each primitive's truth tables, X/Z transitions, opposing drivers,
   bidirectional networks, strength reduction and sequential UDP history.
 
-### D09 — Timing constructs and digital system facilities
+### D09: Timing constructs and digital system facilities
 
 - Implement specify blocks, path delays, timing checks, specparams and notifier
   effects, including timing annotation facilities required by the target.
@@ -224,7 +224,7 @@ rounds real delays locally before integer global scaling.
 - Audit the complete inherited system-task list rather than inferring it from
   today's analog allowlist. Test actual outputs, file effects and timing events.
 
-The inherited facility inventory below comes from IEEE 1364-2005 §§17–18,
+The inherited facility inventory below comes from IEEE 1364-2005 §§17-18,
 checked against AMS §9's context tables. Every row remains open. Existing analog
 implementations are reusable components, not evidence of digital execution.
 The standalone digital runner currently dispatches only `$display`, `$finish`,
@@ -232,26 +232,26 @@ The standalone digital runner currently dispatches only `$display`, `$finish`,
 
 | Inherited clause | Digital implementation and behavioral evidence still needed |
 |---|---|
-| 17.1 — output | Complete display/write radix families and formatting; strobe/monitor scheduling, argument sampling, activation and suppression. |
-| 17.2.1–17.2.8 — files/strings | Descriptor and multichannel handling; file display/write/strobe/monitor variants; string formatting/scanning; character, line and binary input; seek/tell/rewind, flush, EOF and errors. |
-| 17.2.9 — memory loading | `$readmemb`/`$readmemh`: comments, addresses, ranges, direction, X/Z and malformed or excess data. Requires memories from D03. |
-| 17.2.10 — annotation | `$sdf_annotate`: annotation targets, delays, timing checks and applicable SDF/version rules; coordinate with D07/D09. |
-| 17.3 and 17.7 — time | `$printtimescale`, `$timeformat`, `$time`, `$stime`, `$realtime`: scope, rounding, return width and formatted output. Queue ticks alone do not implement these calls. |
-| 17.4 — control | Complete `$finish` options and `$stop` host behavior; prove scheduler and resource cleanup. |
-| 17.5 — PLA | All sixteen combinations of `$async`/`$sync`, `$and`/`$nand`/`$or`/`$nor`, and `$array`/`$plane`; personality data, four-state logic and update timing. |
-| 17.6 — stochastic queues | `$q_initialize`, `$q_add`, `$q_remove`, `$q_full`, `$q_exam`: queue discipline, status codes, capacity and time statistics. |
-| 17.8 — conversions | Digital real/integer and bit-pattern conversions, argument/result typing, X/Z and overflow handling; casts alone do not close this row. |
-| 17.9 — distributions | Digital `$random` and `$dist_*`: typed inout seeds, exact reference sequence, default streams and call-order behavior. Analog kernel tests remain separate. |
-| 17.10–17.11 — inputs/math | Both plusarg functions; `$clog2` and real math functions with digital typing, argument conversion, domain behavior and actual host inputs. |
-| 18.1–18.2 — VCD | `$dumpfile`, `$dumpvars`, `$dumpoff`, `$dumpon`, `$dumpall`, `$dumplimit`, `$dumpflush`; scopes, identifiers, four-state values, timestamps and scheduling. |
-| 18.3–18.4 — extended VCD | `$dumpports`, `$dumpportsoff`, `$dumpportson`, `$dumpportsall`, `$dumpportslimit`, `$dumpportsflush`; port direction, strengths and extended file encoding. |
+| 17.1: output | Complete display/write radix families and formatting; strobe/monitor scheduling, argument sampling, activation and suppression. |
+| 17.2.1-17.2.8: files/strings | Descriptor and multichannel handling; file display/write/strobe/monitor variants; string formatting/scanning; character, line and binary input; seek/tell/rewind, flush, EOF and errors. |
+| 17.2.9: memory loading | `$readmemb`/`$readmemh`: comments, addresses, ranges, direction, X/Z and malformed or excess data. Requires memories from D03. |
+| 17.2.10: annotation | `$sdf_annotate`: annotation targets, delays, timing checks and applicable SDF/version rules; coordinate with D07/D09. |
+| 17.3 and 17.7: time | `$printtimescale`, `$timeformat`, `$time`, `$stime`, `$realtime`: scope, rounding, return width and formatted output. Queue ticks alone do not implement these calls. |
+| 17.4: control | Complete `$finish` options and `$stop` host behavior; prove scheduler and resource cleanup. |
+| 17.5: PLA | All sixteen combinations of `$async`/`$sync`, `$and`/`$nand`/`$or`/`$nor`, and `$array`/`$plane`; personality data, four-state logic and update timing. |
+| 17.6: stochastic queues | `$q_initialize`, `$q_add`, `$q_remove`, `$q_full`, `$q_exam`: queue discipline, status codes, capacity and time statistics. |
+| 17.8: conversions | Digital real/integer and bit-pattern conversions, argument/result typing, X/Z and overflow handling; casts alone do not close this row. |
+| 17.9: distributions | Digital `$random` and `$dist_*`: typed inout seeds, exact reference sequence, default streams and call-order behavior. Analog kernel tests remain separate. |
+| 17.10-17.11: inputs/math | Both plusarg functions; `$clog2` and real math functions with digital typing, argument conversion, domain behavior and actual host inputs. |
+| 18.1-18.2: VCD | `$dumpfile`, `$dumpvars`, `$dumpoff`, `$dumpon`, `$dumpall`, `$dumplimit`, `$dumpflush`; scopes, identifiers, four-state values, timestamps and scheduling. |
+| 18.3-18.4: extended VCD | `$dumpports`, `$dumpportsoff`, `$dumpportson`, `$dumpportsall`, `$dumpportslimit`, `$dumpportsflush`; port direction, strengths and extended file encoding. |
 
 IEEE 1364 Annex C is informative. Its additional utilities must be classified
 separately; their presence in other simulators does not by itself make them
 mandatory. AMS additions to digital system facilities still need their own
 audit. This inventory does not close the broader inherited clause audit.
 
-### D10 — Compiler directive semantics
+### D10: Compiler directive semantics
 
 Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
 `unconnected_drive` and `nounconnected_drive` are accepted-and-ignored entries.
@@ -264,7 +264,7 @@ Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
 
 ## Analog operators and simulator behavior
 
-### A01 — Analog expressions, functions and numeric conversions
+### A01: Analog expressions, functions and numeric conversions
 
 - Audit every operator/function signature, argument domain, constant-folding rule
   and derivative against the standard, including exceptional values.
@@ -277,7 +277,7 @@ Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
 - Test finite-difference derivatives where appropriate, branch-sensitive errors,
   conversion boundaries and computed indexes. Avoid approximate replacements.
 
-### A02 — Branch equations and topology
+### A02: Branch equations and topology
 
 - Complete implicit-flow equations and reactive branch-current/port-current
   probes; each introduced unknown needs a defining equation.
@@ -288,7 +288,7 @@ Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
 - Test unconstrained circuit solves, KCL, measured capacitor/inductor currents,
   alias identity and invalid/hierarchical targets.
 
-### A03 — Analog control flow and held state
+### A03: Analog control flow and held state
 
 - Implement the permitted event-controlled `disable` cases and correct named-block
   exit without accidentally exiting a caller's loop or block.
@@ -299,7 +299,7 @@ Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
 - Test event order, events before/after lexical trigger positions, shadowed names,
   nested exits and unchanged values between events.
 
-### A04 — Stateful analog operators
+### A04: Stateful analog operators
 
 - Audit `ddt`, `idt`, `idtmod`, `ddx`, delay, transition, slew, last-crossing,
   Laplace and Z-transform variants for all defined arguments and analyses.
@@ -310,7 +310,7 @@ Known gap: `default_nettype`, `celldefine`, `endcelldefine`,
 - Record resource failures explicitly; silently forgetting history is not a
   valid implementation-defined limit.
 
-### A05 — Table-model lookup
+### A05: Table-model lookup
 
 Existing linear and nearest-point modes do not close the whole operator.
 
@@ -327,7 +327,7 @@ Existing linear and nearest-point modes do not close the whole operator.
 - Test mixed interpolation dimensions, asymmetric grids, endpoints, ties,
   derivatives, file errors, multiple instances and repeated/rejected evaluations.
 
-### A06 — Small-signal and noise behavior
+### A06: Small-signal and noise behavior
 
 - Implement `noise_table` and `noise_table_log` through emitted source metadata
   and host spectral integration. Preserve existing source correlation support.
@@ -336,7 +336,7 @@ Existing linear and nearest-point modes do not close the whole operator.
 - Test analytic circuits and independent spectrum values across interpolation
   intervals, limits, correlated sources and zero/off-analysis behavior.
 
-### A07 — Random distributions
+### A07: Random distributions
 
 The 4096-degree/stage substitution is removed. Supported integral counts follow
 the IEEE reference listing, with independent C value/seed checks. Runtime
@@ -351,7 +351,7 @@ in Debug/ReleaseFast.
   with a normal approximation. Test seeds, invalid domains, boundaries, moments
   and distribution properties using justified statistical acceptance bounds.
 
-### A08 — Initialization and parameter-dependent execution
+### A08: Initialization and parameter-dependent execution
 
 - Deliver analog net initialization/node-set requests to the host; the parser
   currently discards net initializer expressions.
@@ -360,7 +360,7 @@ in Debug/ReleaseFast.
 - Test illegal domains, dependent parameters, new instances and separate analysis
   runs. Do not infer success from a single DC residual evaluation.
 
-### A09 — Accepted/rejected state lifecycle
+### A09: Accepted/rejected state lifecycle
 
 Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hooks.
 
@@ -372,7 +372,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
   across rejection and re-entry according to each operator's specified behavior.
 - Keep unsupported GPU execution excluded until it obeys the same semantics.
 
-### A10 — Analog event scheduling and host queries
+### A10: Analog event scheduling and host queries
 
 - Honor dynamically changing timer start/period/enable controls, crossing
   tolerances, breakpoint requests and step bounds in host scheduling.
@@ -383,7 +383,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 
 ## Hierarchy and mixed-signal integration
 
-### H01 — Parameters, paramsets and elaborated identity
+### H01: Parameters, paramsets and elaborated identity
 
 - Constant string overrides now honor `from`/`exclude` sets. Extend validation
   to the remaining final-value paths below.
@@ -404,7 +404,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Test valid/invalid overrides, exclusions overriding inclusion, aliases,
   defparams, string case/NUL semantics, nested hierarchy and collisions.
 
-### H02 — Port and hierarchy completeness
+### H02: Port and hierarchy completeness
 
 - Audit ordered/named/concatenated/vector ports, range expressions depending on
   parameters, inherited connectivity rules and hierarchical access.
@@ -413,7 +413,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Test distinct instances, opposite index directions, nonliteral bounds and
   reconnecting the same logical signal through several hierarchy levels.
 
-### H03 — Discipline resolution
+### H03: Discipline resolution
 
 - Complete basic/detail propagation algorithms, coercion of declared
   interconnects, defaults, incompatible connections and unresolved segments.
@@ -421,7 +421,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Test cases where basic and detailed resolution differ, declared overrides,
   `resolveto`/`exclude`, and multiple disciplines sharing a node.
 
-### H04 — SPICE interoperability
+### H04: SPICE interoperability
 
 - Audit Annex E naming, binding, standard primitive interfaces, port disciplines,
   model-card parameters and netlist boundaries against the chosen documented
@@ -430,7 +430,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Separate implementation-defined SPICE behavior from mandated language behavior
   and the ngspice compatibility target in X01.
 
-### M01 — Reading and triggering across domains
+### M01: Reading and triggering across domains
 
 - Implement legal discrete values read by analog expressions, X/Z-sensitive
   case constructs, analog probes read by digital expressions and domain ownership.
@@ -439,7 +439,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Test conversion tables, event timing, interpolation and illegal cross-domain
   assignments/function calls using an executing digital engine.
 
-### M02 — Mixed-signal synchronization
+### M02: Mixed-signal synchronization
 
 - Iterate DC and time-zero digital activity to the required initial state.
 - Coordinate analog candidate times, digital ticks, A2D quantization, D2A wakeups,
@@ -449,7 +449,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Test comparator/DAC feedback, closely spaced crossings, half-tick boundaries,
   repeated delta cycles, event cancellation and rejected analog steps.
 
-### M03 — Connectmodule insertion
+### M03: Connectmodule insertion
 
 - Select and insert bridges at the correct hierarchy boundaries; implement
   direction/discipline overrides and parameter passing.
@@ -459,7 +459,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Test insertion counts, topology, overrides and numerical/logical behavior;
   parsing a `connectrules` declaration does not establish insertion support.
 
-### M04 — Driver/receiver access and real nets
+### M04: Driver/receiver access and real nets
 
 - Implement driver/receiver segregation and access from connectmodules, including
   updates that occur without a change to the resolved signal value.
@@ -470,7 +470,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 
 ## Standard I/O and programming interfaces
 
-### S01 — Formatting, strings and files
+### S01: Formatting, strings and files
 
 - Add numeric `%s` with correct operand width, leading-zero and embedded-byte
   behavior through display/write/string/file variants; integer path is assigned.
@@ -481,7 +481,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Audit all file/memory read/write/seek/descriptor tasks, scratch-buffer limits,
   per-instance isolation and errors. Test observable bytes and file positions.
 
-### P01 — VPI object model and public C interface
+### P01: VPI object model and public C interface
 
 - Provide the required C headers, constants, structs, startup registration and
   exported ABI; a custom value/partials callback is not a VPI implementation.
@@ -490,7 +490,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Test compiled C applications against nested digital/analog designs and real
   object lifetimes, including invalid handles and unsupported property requests.
 
-### P02 — VPI values, scheduling and system tasks
+### P02: VPI values, scheduling and system tasks
 
 - Implement get/put value and time formats, delays, force/release, delayed writes,
   callback registration/removal/info, simulation control, printing and MCD APIs.
@@ -501,7 +501,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Audit inherited PLI/VPI requirements explicitly; do not silently narrow the
   full language target to the current `SystfHost` bridge.
 
-### P03 — Analog VPI and accepted-point callbacks
+### P03: Analog VPI and accepted-point callbacks
 
 - Implement analog values, time/frequency/delta queries, derivative objects,
   analog callbacks and partial-derivative propagation through the host.
@@ -512,7 +512,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 
 ## Evidence and release gates
 
-### Q01 — Complete requirement inventory
+### Q01: Complete requirement inventory
 
 - Expand every mandatory AMS clause and inherited Verilog requirement into
   individually reviewable obligations, including syntax and semantic exceptions.
@@ -529,7 +529,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
   8-worker runner. Until a fixture's result depends only on the tree, no count
   from this suite is evidence for or against any conformance row.
 
-### Q02 — Independent behavioral oracles
+### Q02: Independent behavioral oracles
 
 - Add digital trace and mixed-signal circuit suites, C VPI programs, mathematical
   operator oracles, negative semantic tests and adversarial resource cases.
@@ -539,7 +539,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - Audit every rejection fixture: distinguish illegal source from legal-but-
   unsupported source. Assert runtime output and exit status, not emitted text alone.
 
-### Q03 — Host and backend qualification
+### Q03: Host and backend qualification
 
 - Test standalone, ARPice direct/JFNK, transient/AC/noise and other supported
   analysis paths with the same generated model requirements.
@@ -548,7 +548,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 - GPU acceleration is an implementation choice, not a separate AMS language
   requirement; any advertised GPU path must preserve the supported semantics.
 
-### Q04 — Final conformance review
+### Q04: Final conformance review
 
 - All mandatory requirement rows need executable evidence and independent review.
 - All published support statements and implementation-defined choices must match
@@ -560,7 +560,7 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 
 ## Separate required outcome: exact native-device migration
 
-### X01 — LTRA, TXL and coupled transmission lines
+### X01: LTRA, TXL and coupled transmission lines
 
 The native source files remain under `models/native/`. The routing audit found
 that O/Y/P paths selected approximate generated models. Native LTRA/TXL/CPL

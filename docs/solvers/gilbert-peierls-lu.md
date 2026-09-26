@@ -1,4 +1,4 @@
-# Gilbert–Peierls Left-Looking Sparse LU with Symbolic DFS Reachability
+# Gilbert-Peierls Left-Looking Sparse LU with Symbolic DFS Reachability
 
 ## 1. Mathematical specification
 
@@ -8,7 +8,7 @@ triangular, and $P$ a row permutation from partial pivoting. Then
 
 $$Ly = Pb, \qquad Ux = y.$$
 
-**Left-looking column formulation.** Partition (thesis eq. 2–9, at step $k$
+**Left-looking column formulation.** Partition (thesis eq. 2-9, at step $k$
 with $A_{11}$ the leading $(k{-}1)\times(k{-}1)$ block already factored):
 
 $$
@@ -26,7 +26,7 @@ $$L_{11}\,\mathbf{u_{12}} = \mathbf{a_{12}}, \qquad
 u_{22} = a_{22} - \mathbf{l_{21}}\,\mathbf{u_{12}}, \qquad
 \mathbf{l_{32}} = \frac{1}{u_{22}}\left(\mathbf{a_{32}} - L_{31}\,\mathbf{u_{12}}\right),$$
 
-which collapse into ONE sparse lower-triangular solve (thesis eq. 2–21):
+which collapse into ONE sparse lower-triangular solve (thesis eq. 2-21):
 
 $$
 \begin{bmatrix} L_{11} & 0 & 0 \\ \mathbf{l_{21}} & 1 & 0 \\ L_{31} & 0 & I \end{bmatrix}
@@ -37,7 +37,7 @@ $$
 $$
 
 Column $k$ of both factors is therefore obtained by solving $Lx = A(:,k)$
-against the $k{-}1$ columns of $L$ already computed — hence *left-looking*.
+against the $k{-}1$ columns of $L$ already computed: hence *left-looking*.
 
 **Symbolic reachability (the core theorem).** With partial pivoting the
 pattern of $L,U$ is unknowable ahead of numeric work, so the pattern of each
@@ -45,7 +45,7 @@ $x$ must be computed *per column* in time proportional to its size. Let
 $G(L_k)$ be the directed graph on the $k{-}1$ factored columns with edge
 $j \to i$ iff $l_{ij} \ne 0$, and let $\beta = \{i : b_i \ne 0\}$ be the
 pattern of $b = A(:,k)$. Then the nonzero pattern $X = \{i : x_i \ne 0\}$
-of the triangular solve satisfies (Gilbert–Peierls; thesis eq. 2–22, no
+of the triangular solve satisfies (Gilbert-Peierls; thesis eq. 2-22, no
 numerical cancellation assumed):
 
 $$X = \mathrm{Reach}_{G(L)}(\beta).$$
@@ -54,22 +54,22 @@ Justification: $b_j \ne 0 \Rightarrow x_j \ne 0$, and $x_j \ne 0 \wedge
 l_{ij} \ne 0 \Rightarrow x_i \ne 0$ (the update $x_i \mathrel{-}= l_{ij} x_j$
 introduces a nonzero). Closure of these two rules is exactly graph
 reachability. A depth-first search from every vertex in $\beta$ computes $X$
-in time proportional to the number of vertices visited plus edges traversed
-— i.e. proportional to the numeric flops that follow.
+in time proportional to the number of vertices visited plus edges traversed,
+i.e. proportional to the numeric flops that follow.
 
 **Topological elimination order.** The unknowns of $Lx=b$ need not be
 eliminated in increasing row-index order (sorting would break the complexity
 bound); any *topological order* of $X$ w.r.t. $G(L)$ works, because $x_i$
 only needs all $x_j$ with $j \to i$ finalized first. DFS finish order,
-reversed, is such a topological order for free — DFS finishes $i$ before
+reversed, is such a topological order for free: DFS finishes $i$ before
 every $j$ from which $i$ was reached.
 
 **Complexity.** Let $\eta(A) = \mathrm{nnz}(A)$ and $\mathrm{flops}(LU)$ the
-number of multiply–adds in the product $L \cdot U$. Gilbert–Peierls factors in
+number of multiply-adds in the product $L \cdot U$. Gilbert-Peierls factors in
 
 $$O\!\left(\eta(A) + \mathrm{flops}(LU)\right),$$
 
-i.e. total time proportional to arithmetic actually performed — the defining
+i.e. total time proportional to arithmetic actually performed: the defining
 property of the algorithm. A naive column solve costing $O(n)$ per column
 would add an $O(n^2)$ term; the reachability computation removes it.
 
@@ -92,7 +92,7 @@ Three phases, run per column inside one left-to-right sweep:
   visited rows with a per-column epoch (no clearing between columns), pushes
   finished vertices onto a topological list. Data: an explicit vertex stack
   plus a parallel "position stack" holding each frame's resume offset into
-  the adjacency (thesis §2.13 — iterative DFS avoids stack overflow on
+  the adjacency (thesis §2.13: iterative DFS avoids stack overflow on
   dense columns; our `pstack` is exactly this).
 - **Numeric (sparse triangular solve):** scatter $A(:,c)$ into a dense
   workspace `w[n]`, then walk the topological list in reverse finish order;
@@ -104,7 +104,7 @@ Three phases, run per column inside one left-to-right sweep:
   candidates by the pivot, append to $L$, clear `w` along the pattern.
 
 Data structures: $A$ in compressed sparse column (CSC: `col_ptr`,
-`row_idx`, `vals` — thesis §2.2); $L$ and $U$ as growing per-column CSC
+`row_idx`, `vals`: thesis §2.2); $L$ and $U$ as growing per-column CSC
 arrays; `pinv` maps original row → pivot step (rows of $L$ are stored in
 *permuted* coordinates once the sweep completes). Storing $U$'s per-column
 rows **in the topological order used by the solve** is what makes numeric
@@ -114,7 +114,7 @@ When it wins: circuit matrices are extremely sparse with little fill, so
 flops(LU) ≈ nnz(L+U) ≈ small multiple of nnz(A); the non-supernodal,
 BLAS-free formulation beats supernodal codes (SuperLU, UMFPACK) that
 amortize their overhead on dense sub-blocks circuit matrices don't have
-(thesis ch. 3: KLU 1.5–3× faster than SuperLU, ~1000× vs Sparse1.3 on
+(thesis ch. 3: KLU 1.5-3× faster than SuperLU, ~1000× vs Sparse1.3 on
 circuit matrices). For matrices with large dense fill, supernodal/multifrontal
 methods win instead.
 
@@ -180,15 +180,15 @@ gather mode ($U^T$ lower, $L^T$ unit upper).
 ## 4. Pseudo-code, GPU parallel
 
 What fundamentally serializes: column $k$'s triangular solve consumes
-finished columns $\{i : u_{ik} \ne 0\}$ — a data dependence chain whose
+finished columns $\{i : u_{ik} \ne 0\}$: a data dependence chain whose
 depth is the height of the column dependency DAG (the elimination-tree
 height for symmetric patterns). No scheduling removes it; GPU factorization
 therefore parallelizes *within* levels of that DAG, never across the chain
-(GLU-style level sets — details and kernel modes in `gpu-sparse-lu.md`).
+(GLU-style level sets: details and kernel modes in `gpu-sparse-lu.md`).
 
 The symbolic DFS itself is inherently sequential per column (stack-ordered)
 and is kept on the CPU / done once; the GPU replays numeric work on a frozen
-pattern — which is exactly our refactor discipline.
+pattern, which is exactly our refactor discipline.
 
 ```
 # one-time on CPU: factor() as above, then levelize the column DAG:
@@ -235,18 +235,18 @@ Notes tying to our code:
 
 ---
 
-**Sources fetched:** Palamadai Natarajan, *KLU — A High Performance Sparse
+**Sources fetched:** Palamadai Natarajan, *KLU: A High Performance Sparse
 Linear Solver for Circuit Simulation Problems*, M.S. thesis, U. Florida 2005
-(fetched: https://ufdcimages.uflib.ufl.edu/UF/E0/01/17/21/00001/palamadai_e.pdf
-— §§2.1–2.4, 2.9, 2.13, 3.2 read in full); GLU3.0 paper arXiv:1908.00204
+(fetched: https://ufdcimages.uflib.ufl.edu/UF/E0/01/17/21/00001/palamadai_e.pdf;
+§§2.1-2.4, 2.9, 2.13, 3.2 read in full); GLU3.0 paper arXiv:1908.00204
 (fetched, for the level-set framing in §4).
 
-**Verification status:** §1 factorization/reach/topological-order/complexity —
-source-verified against thesis §§2.3–2.4 (eqs. 2–9..2–22). §1 growth bound
-$|l| \le 1/\tau$ — derived, not source-verified (standard threshold-pivoting
-result; thesis §2.9 states the rule, not the bound). §2 — source-verified
-(thesis §§2.2, 2.13, ch. 3 benchmarks). §3 — verified against our
-implementation directly. §4 — level-set structure source-verified against
+**Verification status:** §1 factorization/reach/topological-order/complexity:
+source-verified against thesis §§2.3-2.4 (eqs. 2-9..2-22). §1 growth bound
+$|l| \le 1/\tau$: derived, not source-verified (standard threshold-pivoting
+result; thesis §2.9 states the rule, not the bound). §2: source-verified
+(thesis §§2.2, 2.13, ch. 3 benchmarks). §3: verified against our
+implementation directly. §4: level-set structure source-verified against
 GLU3.0 paper; the batched-solve section is our own design, not from a source.
 
 **Our implementation:** `src/solver/sparse_lu.zig` (`SparseLu.factor`,

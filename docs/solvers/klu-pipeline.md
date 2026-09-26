@@ -25,7 +25,7 @@ x_{kk} & \text{if } |x_{kk}| \ge \tau \, a_{\max} \\
 \qquad \tau = 0.001 \text{ (KLU default)}.$$
 
 Multipliers obey $|l_{ik}| \le 1/\tau$. Diagonal preference exists because
-the ordering was computed for the diagonal pivot sequence — an off-diagonal
+the ordering was computed for the diagonal pivot sequence: an off-diagonal
 pivot perturbs $P$ away from AMD's assumption and can add fill (thesis
 §2.8); circuit matrices are close to diagonally dominant after gmin, so a
 loose $\tau$ almost always keeps the diagonal while retaining an escape
@@ -36,16 +36,16 @@ $A'$ with the same pattern (Newton iterations, timesteps): reuse $P, Q$,
 the L/U patterns, and the pivot sequence; recompute only values. No DFS, no
 pivot search, no pruning. This is valid because the reach sets depend only
 on the pattern and pivot order, both frozen. Cost drops to a pure replay of
-flops(LU); thesis table 3–6 measures refactor ≈ 3–4× cheaper than factor
+flops(LU); thesis table 3-6 measures refactor ≈ 3-4× cheaper than factor
 and ≈ 8× cheaper than analysis+factor. The risk: the frozen pivot sequence
-can become numerically bad for the new values — hence monitoring.
+can become numerically bad for the new values: hence monitoring.
 
 **Pivot-growth monitoring (thesis §2.11).** Growth factor
 $\rho = \max_k \max_{ij} |a^{(k)}_{ij}| / \max_{ij} |a_{ij}|$ bounds the
 backward error of Gaussian elimination ($\|E\| \le c(n)\, u\, \rho
-\|A\|$ in the standard Wilkinson analysis — derived, not source-verified);
+\|A\|$ in the standard Wilkinson analysis: derived, not source-verified);
 large $\rho$ = unstable elimination. KLU computes the cheap reciprocal
-per-column variant (thesis eq. 2–35, column-scaling invariant):
+per-column variant (thesis eq. 2-35, column-scaling invariant):
 
 $$\frac{1}{\rho} = \min_j \frac{\max_i |a_{ij}|}{\max_i |u_{ij}|}.$$
 
@@ -61,7 +61,7 @@ Hager's optimization of $F(x) = \|A^{-1}x\|_1$ over $\|x\|_1 \le 1$, each
 iteration solving $Ax=b$ and $A^Tx=b$ with the existing factors, refined
 per Higham (≤ 5 iterations, plus the alternating-sign probe
 $b_i = (-1)^{i+1}(1 + \tfrac{i-1}{n-1})$, final estimate the max of both).
-Cost: a few solves — cheap diagnostics for "is this Newton matrix
+Cost: a few solves: cheap diagnostics for "is this Newton matrix
 trustworthy".
 
 **Iterative refinement.** Given the computed $\hat x$: repeat
@@ -69,7 +69,7 @@ $r = b - A\hat x$ (in the *original* values, not the factors),
 $Ad = r$ via the existing factorization, $\hat x \mathrel{+}= d$. Each step
 multiplies the error by roughly $u\,\kappa(A)$ (derived, not
 source-verified); one or two steps recover solve accuracy lost to a loose
-$\tau$ or a marginal reused pivot — the standard companion of threshold
+$\tau$ or a marginal reused pivot: the standard companion of threshold
 pivoting.
 
 ## 2. Flow explanation
@@ -79,18 +79,18 @@ lifecycle (thesis §3.2: pattern fixed once, values change every iteration):
 
 1. **init (once per pattern):** BTF+AMD → `q`; allocate all factor/solve
    workspaces; nothing numeric yet.
-2. **first factor:** full Gilbert–Peierls with threshold pivoting; stores
+2. **first factor:** full Gilbert-Peierls with threshold pivoting; stores
    L/U patterns *and* the topological solve order of each U column, plus
    `prow = pinv ∘ row_idx` so refactor scatters $A$'s values directly into
    permuted coordinates.
-3. **steady state — refactor per Newton iteration:** straight-line replay:
+3. **steady state: refactor per Newton iteration:** straight-line replay:
    zero the stored pattern, scatter new values through `prow`, replay the
    stored U order (saxpy per entry), divide the stored L pattern by the new
    diagonal. Zero allocation, zero search. Fails loudly on pivot
    collapse/growth.
 4. **fallback:** any refactor failure → full factor (fresh pivot order) on
    the same values; only if *that* fails does the caller see
-   `SingularMatrix` (and answers with its own ladder — gmin retry etc., see
+   `SingularMatrix` (and answers with its own ladder: gmin retry etc., see
    `homotopy-continuation.md`).
 5. **solve:** permuted forward/back substitution. KLU's optional
    iterative refinement is not implemented.
@@ -158,7 +158,7 @@ condition_estimate(factors):                  # Hager/Higham, KLU §4.2.9
 
 ## 4. Pseudo-code, GPU parallel
 
-Refactor is the piece of the pipeline that maps to the GPU — it is exactly
+Refactor is the piece of the pipeline that maps to the GPU: it is exactly
 the "numeric factorization on a frozen pattern" that GLU-style level-set
 kernels assume (they too pivot on the host once; see `gpu-sparse-lu.md`).
 
@@ -200,19 +200,19 @@ be `vals` up and `x` down. Not implemented.
 
 ---
 
-**Sources fetched:** Palamadai Natarajan thesis (fetched — §§2.9–2.12, 3.2,
-3.6.2 [table 3–6 phase timings], 4.2.6 klu_refactor, 4.2.8
+**Sources fetched:** Palamadai Natarajan thesis (fetched: §§2.9-2.12, 3.2,
+3.6.2 [table 3-6 phase timings], 4.2.6 klu_refactor, 4.2.8
 klu_rec_pivot_growth, 4.2.9 klu_estimate_cond_number); ngspice sources for
 the caller-side retry ladder (see `homotopy-continuation.md`).
 
 **Verification status:** §1 pipeline equations, threshold rule + default
-τ=0.001, refactor semantics, reciprocal growth eq. 2–35, Hager/Higham
-estimator incl. probe vector — source-verified against thesis. §1 Wilkinson
-backward-error form and refinement convergence factor — derived, not
+τ=0.001, refactor semantics, reciprocal growth eq. 2-35, Hager/Higham
+estimator incl. probe vector: source-verified against thesis. §1 Wilkinson
+backward-error form and refinement convergence factor: derived, not
 source-verified (standard numerical analysis; Davis book is the paywalled
-reference). §2/§3 — verified against `direct.zig` (the growth monitor as a
+reference). §2/§3: verified against `direct.zig` (the growth monitor as a
 *refactor-time* per-pivot test is our variant, not KLU's post-hoc
-diagnostic; noted as such). §4 — derived, not source-verified (design
+diagnostic; noted as such). §4: derived, not source-verified (design
 aligned with GLU3.0's host-pivoting assumption).
 
 **Our implementation:** `src/solver/direct.zig` (`Params`

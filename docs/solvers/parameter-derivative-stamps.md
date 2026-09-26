@@ -4,7 +4,7 @@ Analytic parameter Jacobians through the device contract: interface,
 adjoint accumulation, SoA layout, GPU variant. Serves dcmatch, adjoint
 DC/AC sensitivity, and (later) optimization loops.
 
-**Status: not implemented** — today's sensitivity is finite-difference
+**Status: not implemented**: today's sensitivity is finite-difference
 re-solve (`sweep/sens.zig`) and Monte-Carlo perturbs raw f32 params.
 This doc specs the analytic route the contract already almost supports.
 
@@ -24,16 +24,16 @@ $$
 where $\partial F/\partial p \in \mathbb{R}^n$ is **sparse with the
 device's own footprint**: only the $n_u$ rows device $d$ stamps are
 nonzero. So the deliverable per (instance, parameter) is an $n_u$-vector
-$\partial F_{\text{local}}/\partial p$ — a *residual derivative stamp* —
+$\partial F_{\text{local}}/\partial p$ (a *residual derivative stamp*)
 and the analysis-side operation is one $n_u$-wide dot against the gathered
 adjoint values $\lambda_{\text{local}}$. Nothing is ever assembled into a
 matrix; no $\partial J/\partial p$ is needed for first-order sensitivity
-(it appears only in second-order/Hessian work — out of scope, YAGNI).
+(it appears only in second-order/Hessian work: out of scope, YAGNI).
 
 For AC sensitivity the same stamp evaluated on the charge function gives
 $\partial Q_{\text{local}}/\partial p$, and the frequency-domain
 derivative is $\partial A/\partial p = \partial G/\partial p + j\omega\,
-\partial C/\partial p$ acting on the known $X$ — still only
+\partial C/\partial p$ acting on the known $X$: still only
 residual-level derivatives contracted with known vectors:
 $\lambda^{\mathsf H} (\partial F/\partial p + j\omega\, \partial q/\partial p)\big|_{\text{directional through } X}$.
 
@@ -43,7 +43,7 @@ Device physics is value-form, generic over an opaque scalar `S` (VerA's
 `contract` module). In the text below `AdScalar(N)` stands for the
 evaluator's `Dual(N, F)` (`src/device/eval.zig`); the batch instantiates
 `S = AdScalar(n_u)` seeding the
-$n_u$ unknowns — one pass yields residual + full local Jacobian. The
+$n_u$ unknowns: one pass yields residual + full local Jacobian. The
 parameter derivative is the **same mechanism with one more seed lane**:
 
 $$
@@ -52,21 +52,21 @@ d\text{-vector} = (\underbrace{e_0 \dots e_{n_u-1}}_{\text{unknowns}},\ \underbr
 $$
 
 so `out[ru].d[0..n_u]` is the Jacobian row (unchanged) and
-`out[ru].d[n_u]` is $\partial F_{ru}/\partial p$ — exact, one eval, no FD.
+`out[ru].d[n_u]` is $\partial F_{ru}/\partial p$: exact, one eval, no FD.
 
 The catch: physics currently reads parameters as plain f64 **constants**
 (`x.scale(model.g)`, `S.con(model.c)`), so the seed has nowhere to enter.
 Two contract-compatible hook designs:
 
-- **(a) `evalp` wrapper (chosen)** — optional device decl
+- **(a) `evalp` wrapper (chosen)**: optional device decl
   `pub fn evalp(comptime S, x: [n_u]S, p: S, m: *const Model, i: *const Instance, t: f64) [n_u]S`
   that re-expresses `eval` with ONE named parameter routed through `S`
   (which parameter: the device's `mc_param`, already a validated contract
   decl naming the principal f32 field). Hand-written devices add a
   few-line wrapper; VAF/VF-generated devices get it emitted for free
   (the generator knows every parameter's dataflow). Multiple parameters =
-  multiple seed lanes `AdScalar(n_u + n_p)` with `p: [n_p]S` — same shape.
-- **(b) seed-vector substitution** — no signature change: promote the
+  multiple seed lanes `AdScalar(n_u + n_p)` with `p: [n_p]S`: same shape.
+- **(b) seed-vector substitution**: no signature change: promote the
   *Model/Instance field itself* to a dual by instantiating the whole
   Model over S. Rejected: Model fields are plain f64/f32 by contract
   (`validateDefaultedStruct` enforces value types), temperature/geometry
@@ -77,9 +77,9 @@ Two contract-compatible hook designs:
 
 FD fallback stays: devices without `evalp` get the existing
 perturb-and-re-solve path (`sens.zig`) or a *stamp-level* FD
-(perturb $p$, re-eval the one device, difference the local residual —
+(perturb $p$, re-eval the one device, difference the local residual:
 $O(1)$ evals per device, no extra Newton solves; strictly better than
-today's global FD and needing no contract change at all — the honest
+today's global FD and needing no contract change at all: the honest
 first rung).
 
 ### Adjoint accumulation
@@ -99,13 +99,13 @@ $\sigma^2(\delta p_d)$ and reduces.
 
 Batches are SoA per device type (`src/device/eval.zig`): `models[]`, `instances[]`,
 `gath[count × n_u]`, `rhs_idx[count × n_u]`. The stamp pass needs **no new
-persistent arrays** in the common case — it is a streaming
+persistent arrays** in the common case: it is a streaming
 eval-gather-dot-reduce with one output scalar per (instance, param):
 
 - output: `dydp[count]` per batch (or accumulate variance in-place:
   `var_acc[count]` → one grid/loop reduction), instance-major;
 - if stamps must be *stored* (AC sweep reusing them per frequency):
-  `dfdp[count × n_u]` instance-major — same stride discipline as `gath`,
+  `dfdp[count × n_u]` instance-major: same stride discipline as `gath`,
   memory = one extra plane row per parameter, allocated per analysis, not
   per circuit.
 
@@ -116,10 +116,10 @@ eval-gather-dot-reduce with one output scalar per (instance, param):
    `mc_param` names the default parameter, an explicit param-id argument
    generalizes later. Devices without it: stamp-level FD fallback.
 2. **Batch hook**: a cold-path method on `DeviceBatch` (next to the noise
-   collector, which already does exactly this gather-and-report shape —
-   see `collectNoiseSources` flow): for each instance, gather
+   collector, which already does exactly this gather-and-report shape:
+see `collectNoiseSources` flow): for each instance, gather
    $x_{\text{local}}$ and $\lambda_{\text{local}}$, instantiate
-   `S = AdScalar(n_u + 1)` (comptime, per device type — same comptime
+   `S = AdScalar(n_u + 1)` (comptime, per device type: same comptime
    dispatch as everything else), call `evalp`, dot lane $n_u$ against
    $\lambda$, emit.
 3. **Analysis side** (dcmatch / adjoint sens): OP solve → keep factors →
@@ -127,7 +127,7 @@ eval-gather-dot-reduce with one output scalar per (instance, param):
    AC variant: per frequency, `freq_solve.solveRhsT` (exists) for the
    complex adjoint, batch pass with the $j\omega\,\partial q/\partial p$
    term added.
-4. **Failure handling**: none new — the pass is post-solve, read-only on
+4. **Failure handling**: none new: the pass is post-solve, read-only on
    circuit state; a device lacking both `evalp` and a finite nominal
    (FD-able) parameter reports zero sensitivity *explicitly flagged*, not
    silently (ngspice's zero-param skip, surfaced).
@@ -178,7 +178,7 @@ kernel param_stamp_pass(blob, x, lambda):
   vector) or, matrix-free, a transposed GMRES on the device with the
   transposed-scatter eval (the machinery sketched in
   [lptv-block-solves.md](lptv-block-solves.md) §4; none of it exists).
-- The extra dual lane costs one more `@Vector` lane in registers — on GPU
+- The extra dual lane costs one more `@Vector` lane in registers: on GPU
   the `AdScalar` vector width already rounds up; for most devices
   $n_u + 1$ stays within the same occupancy bucket (measure per model, as
   with everything ptx).
@@ -191,8 +191,8 @@ kernel param_stamp_pass(blob, x, lambda):
 
 | Source | Status |
 |---|---|
-| Director & Rohrer adjoint sensitivity | **paywalled — derived, not source-verified** (standard; identity restated from [sensitivity](../analysis/sensitivity.md)) |
-| Forward-mode AD for parameter derivatives (Griewank & Walther) | **book — derived, not source-verified** (extra-seed-lane construction is elementary forward AD) |
+| Director & Rohrer adjoint sensitivity | **paywalled: derived, not source-verified** (standard; identity restated from [sensitivity](../analysis/sensitivity.md)) |
+| Forward-mode AD for parameter derivatives (Griewank & Walther) | **book: derived, not source-verified** (extra-seed-lane construction is elementary forward AD) |
 
 **Per-section verification**
 
@@ -205,7 +205,7 @@ kernel param_stamp_pass(blob, x, lambda):
   `seed` that sets `d[u] = 1`, `evalRange`, `gath` tables, `mc_param`);
   the VerA-side names (`validateMcParam`, `validateDefaultedStruct`,
   `evalValues`) live in VerA and were not rechecked.
-- §2–§4: design spec (nothing implemented).
+- §2-§4: design spec (nothing implemented).
 
 **Our implementation**
 
@@ -213,7 +213,7 @@ kernel param_stamp_pass(blob, x, lambda):
   `mc_param`), `src/device/eval.zig` (`Dual(N, F)` forward AD, SoA batches,
   gathers), `src/solver/direct.zig` `solveT`,
   `src/solver/freq_solve.zig` `solveRhsT`.
-- Consumers: [dcmatch](../analysis/dcmatch.md) (future — hard
+- Consumers: [dcmatch](../analysis/dcmatch.md) (future: hard
   requirement), [sensitivity](../analysis/sensitivity.md) adjoint + AC
   upgrade, later optimization/tuning loops.
 - Fixtures: `tests/fixtures/sens/` (the FD path is the oracle the
