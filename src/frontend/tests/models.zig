@@ -18,6 +18,7 @@ test "dispatch policy resolves letters and levels" {
     try std.testing.expectEqual(DeviceId.jfet2, try jfetDeviceId(2));
     try std.testing.expectEqual(DeviceId.mesa, try mesDeviceId(3));
     try std.testing.expectEqual(DeviceId.b3soifd, try mosfetDeviceId(55));
+    try std.testing.expectEqual(DeviceId.b3soidd, try mosfetDeviceId(56));
     // Missing-from-catalog (b3soipd, level 57) and unknown levels are
     // unsupported netlists, not panics: the loader turns this into a clean skip.
     // Both warn; the warning is the expected output here, not test noise.
