@@ -1251,7 +1251,7 @@ module bsim4va(d, g, s, b);
     `MPRnb( ltvfbsdoff  ,0.0              ,""                                ,"")
     `MPRnb( ptvfbsdoff  ,0.0              ,""                                ,"")
 
-    `MPIcc( gidlmod ,1              ,""            ,0             ,1          ,"")
+    `MPIcc( gidlmod ,0              ,""            ,0             ,1          ,"")
     `MPRcc( aigs  ,1.36e-2              ,""            ,0.0           ,1.0       ,"")
     `MPRcc( waigs  ,0.0              ,""            ,0.0           ,1.0      ,"")
     `MPRcc( laigs  ,0.0              ,""            ,0.0           ,1.0      ,"")
