@@ -14,9 +14,11 @@ pub fn build(b: *std.Build) void {
     //
     // `-Djac-f32-gpu` permits an f32 Jacobian: vera's `--jac-f32` sets
     // `jac_f32`, which the GPU kernel takes and the host declines. Default is
-    // the measured set, mos1 (1.21x on GPU, agrees to 3.9e-10) and mos6 (same
-    // unknowns and accuracy). diode and bsim4va measured worse and stay f64.
-    const jac_f32_gpu_list = b.option([]const u8, "jac-f32-gpu", "Comma-separated model stems whose physics permits an f32 Jacobian (GPU kernel takes it)") orelse "mos1,mos6";
+    // none: with mos1 resident (VerA ABI 5), its f32 Jacobian fails four
+    // corpus decks under `--backend cuda` that pass in f64 (disto
+    // bench_disto_mos_cs, the inverter chains, parallel_inverters_2000).
+    // diode and bsim4va measured worse and stay f64.
+    const jac_f32_gpu_list = b.option([]const u8, "jac-f32-gpu", "Comma-separated model stems whose physics permits an f32 Jacobian (GPU kernel takes it)") orelse "";
     // `-Djac-f32` also runs the listed stems in f32 on the CPU (vera's
     // `--jac-f32-host`, which implies the permission).
     const jac_f32_list = b.option([]const u8, "jac-f32", "Comma-separated model stems to ALSO build with an f32 Jacobian on the CPU path") orelse "";

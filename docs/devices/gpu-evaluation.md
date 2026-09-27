@@ -16,13 +16,13 @@ A batch is resident when it has a GPU payload (`eval.gpuEligible`) and its
 model has a kernel image in this build. Everything else stamps on the host,
 on top of the downloaded planes.
 
-- `gpuEligible` refuses `mutable_eval`, Newton-history hooks,
-  `core_reads_simstate` cores and `State` without `limit`. It admits
-  held-variable devices without `limit` (bsim4va, psp103, vbic13_4t). Their
-  state kernel runs once per accepted point, through `GpuHook.commit_held`,
-  never per converged solve.
-- The MOS models (mos1/2/3/6/9) read `analysis()` in their cores and stay on
-  the host until VerA ABI 5 passes `SimState` to the kernel.
+- `gpuEligible` refuses `mutable_eval`, Newton-history hooks and `State`
+  without `limit`. It admits held-variable devices without `limit` (bsim4va,
+  psp103, vbic13_4t). Their state kernel runs once per accepted point,
+  through `GpuHook.commit_held`, never per converged solve.
+- VerA ABI 5 passes `SimState` to every kernel by value (eval, state, charge
+  tape), so the cores that read `analysis()` or `$abstime` are resident too:
+  the Meyer MOS models (mos1/2/3/6/9) and jfet2.
 - `build.zig` emits images for every model up to 1 MB of source, so every
   model in `models/` gets one. The cold JIT costs and the reason for the
   limit are in the comment on `gpu_max_model_bytes`.
@@ -162,8 +162,8 @@ cards) and 73, a 10 fF load per output, `.tran 0.1n 20n`.
 | stress/sweep_opamp_wl_5000 | 1.7 | 0.68 | 0.70 | 0.85 | | CPU |
 | stress/vacask_ring | 4.3 | 4.5 | 2.5 | 23.8 | | CPU |
 
-With the MOS models off the device until ABI 5, the mos1 decks put only
-their capacitors on the GPU, so `cuda` there only adds the round trip, and
+These were measured before ABI 5, with the MOS models off the device: the
+mos1 decks put only their capacitors on the GPU, so `cuda` there only adds the round trip, and
 `auto` declines. Heavy compact models are where the GPU wins today: 2.5-5x
 over one host thread and 1.2-1.7x over eight.
 
@@ -194,8 +194,12 @@ Raw outputs of the whole corpus on both backends (CPU against CUDA):
   way on both backends.
 - Everything else agrees to 5.3e-12 or better.
 
-mos1 and mos6 take the f32 Jacobian on the GPU (`-Djac-f32-gpu`) once they
-are resident: 9e-7 relative on mos1_2000.
+mos1 and mos6 no longer take the f32 Jacobian on the GPU by default. Once
+they were resident (VerA ABI 5), `-Djac-f32-gpu=mos1,mos6` failed four decks
+under `--backend cuda` that pass in f64: `disto/bench_disto_mos_cs` (2nd
+harmonic off 0.8%), `stress/scaling_inverter_chain_256` and `_4k` (~1%) and
+`stress/scaling_parallel_inverters_2000` (`i(vdd)[1]` off 10%). The option
+stays for experiments.
 
 ## Limits
 
