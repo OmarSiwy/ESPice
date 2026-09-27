@@ -578,6 +578,10 @@ the rule that one state is evaluated per iteration.
   pass set must be at least today's. The common values in
   `tests/fixtures/**/*.expected.json` are rtol 1e-3 or 3e-3, and atol
   2e-6 V or 1e-11 to 1e-15 A.
+  §10.1 found that nine of these oracles encode ngspice's per-step Newton
+  error: publishing the more accurate x_k+1 fails them. A mode that changes
+  the published iterate, the Newton test or the grid cannot meet this rule
+  as written.
 - The final Newton solution must meet ngspice-level tolerances (reltol,
   vntol, abstol), and the error per step must stay LTE-controlled at trtol.
   The mode may control error differently, but not loosely.
@@ -1128,6 +1132,158 @@ MOSFETs are active per evaluation. Nonlinear elimination drops below rank 8
 except as a three-deck prototype. MATEX routing is dropped until `.matex`
 handles fast edges and `uic`. Mixed precision stays at rank 5, pending the
 GPU measurement and an f64 fallback.
+
+## 10. Retired experiment: modified Newton (§7.1)
+
+**Status: retired, not on `main`.** The code is commit `29ac189` on branch
+`worktree-agent-aba74880aa128df91` (also kept as branch
+`retired/native-modified-newton`), measured on top of `29ae485`. It added a
+`--solver=conformant|native` switch, a matching C API field and
+`converger.modifiedNewton`. None of these exist on `main`. The experiment
+was retired under the proof rule: it is not a net win, and it fails 9 decks
+the conformant mode passes.
+
+### 10.1 The constraint it found: the oracles encode ngspice's Newton truncation
+
+This finding binds any future GPU-native mode, whatever its mechanism.
+
+ngspice publishes x_k, the last linearization point, once the step x_k+1 − x_k
+is within one Newton tolerance. It does not publish the more accurate x_k+1.
+A throwaway build of the conformant Newton that published x_k+1 instead
+(same iterates, same time grid, one step closer to the root) fails 10 corpus
+decks that pass today. Nine of them are the decks the modified-Newton mode
+failed, and its values match that mode's to three or four digits:
+
+| Deck | Worst row, modified Newton | Same row, conformant publishing x_k+1 |
+|---|---|---|
+| `tran/bench_bypass_idle_ladder` | i(vin) −1.06899e-4 (oracle −1.06460e-4) | −1.06902e-4 |
+| `tran/bench_ngspice_schmitt` | v(6) −0.22191 (oracle −0.22334) | −0.22154 |
+| `tran/bench_tran_fourbitadder` | i(vin4b) −5.2463e-6 (oracle −5.2081e-6) | −5.2492e-6 |
+| `tran/bench_tline_ltra1_1_line` | i(vs) 1.9548e-8 (oracle 1.7764e-8) | 1.9568e-8 |
+| `tran/device_mos1_large_signal` | i(vdd) −8.7688e-8 (oracle −8.7157e-8) | −8.7666e-8 |
+| `stress/scaling_parallel_inverters_100` | v(out3) 1.8294e-4 (oracle 1.7974e-4) | 1.8291e-4 |
+| `multi_analysis/bench_ngspice_rca3040` | v(1) 9.5273e-2 (oracle 9.5585e-2) | 9.5276e-2 |
+| `multi_analysis/bench_ngspice_rtlinv` | v(2) row 113, 0.13801 (oracle 0.13843) | fails at row 109 |
+| `tran/device_mos6_simpleinv` | v(11) 0.376 (oracle 0.914), an edge moved in time | fails, i(vin) row 92 |
+
+The tenth, `reference/diode_reverse_recovery`, fails only in the x_k+1
+build. The x_k/x_k+1 difference is up to one Newton tolerance per step.
+Trap does not damp it, and it lands on quantities with cancellation, such
+as a source current through a small resistor.
+
+So these oracles check ngspice's answer *including* its per-step Newton
+error, at rtol 3e-3. A solver that is more accurate per step than ngspice
+fails them, and no convergence-test setting fixes that. §6's contract,
+"the pass set must be at least today's", cannot hold for any mode that
+changes the published iterate, the Newton test or the time grid on these
+decks. A future GPU-native mode needs one of:
+
+- a gate that compares against a tighter reference (for example ngspice at
+  reltol 1e-6) on these decks rather than ngspice's default-tolerance
+  output;
+- an explicit, recorded exemption list for decks shown to fail the
+  x_k+1 build;
+- or a mechanism that leaves the Newton test, the published iterate and
+  the grid alone, as bypass (§7.3) can.
+
+### 10.2 What was built
+
+The mode swapped `converger.run` for `modifiedNewton` inside `tran.simulate`
+only (`.tran`, `.four` and the operating point's pseudo-transient rung).
+Every other Newton solve stayed conformant.
+
+- The LU of G + ag0·C was kept across steps and refactored after 20 solves,
+  when |ag0/ag0_LU − 1| > 0.3, after a failed solve, when an iterate
+  contracted by less than 0.3, or on a non-finite step.
+- Acceptance was CVODE's rate test, rate · scaled step ≤ 0.03, the rate
+  decaying by at most CRDOWN = 0.3 per iterate and starting at 1 in every
+  solve. Iterate 0 could be accepted when its own scaled step was ≤ 0.03.
+  The corrected iterate x_k+1 was published.
+- Full Newton that stopped contracting (fresh LU, rate ≥ 0.9, scaled step
+  < 1) fell back to NIiter's delta test. `vacask_graetz` needed this: at
+  t = 0.746 s its bridge cycles at a scaled step of 0.116, which a 0.03
+  test never accepts.
+- Device limiting, the residual gate, device convergence, state staging and
+  MODEINITPRED's linear predictor were ngspice's.
+
+The conformant path stayed byte-identical on all 616 decks. Native mode
+passed 594 of 616 (`--backend cpu`, oracle tolerances) against conformant's
+603: the 13 conformant failures plus the 9 decks of §10.1.
+
+### 10.3 Measurements
+
+Counts are per transient attempt, from `ZP_TRAN_STATS` plus a numeric
+factorization counter on `direct.Solver` (calls the unchanged-values bypass
+skips are not counted). Cost is callgrind Ir for one run, ReleaseFast,
+`-Dgpu=false`, `--backend cpu`, on a shared machine. The last two columns
+are the slow-rate fallbacks §7.1 proposed in place of a refactor:
+GMRES(10) on the freshly assembled J, right-preconditioned by the stale LU,
+to relative residual 1e-3 (refactor when it fails), and Anderson(1) mixing
+over the chord iterates (refactor on a second slow iterate).
+
+| Deck | Newton iterations per attempt, conformant / native | Factors per attempt | Ir conformant (1e9) | Ir native / conformant | GMRES fallback | Anderson fallback |
+|---|---|---|---|---|---|---|
+| `scaling_inverter_chain_256` | 3.98 / 4.84 | 3.982 / 1.760 | 3.86 | 1.11 | 1.19 | 1.27 |
+| `scaling_inverter_chain_4k` | 3.98 / 4.83 | 3.981 / 1.752 | 62.19 | 1.10 | 1.17 | 1.26 |
+| `scaling_parallel_inverters_100` | 2.23 / 1.82 | 1.679 / 0.316 | 0.46 | 0.85 | 0.86 | 0.87 |
+| `scaling_parallel_inverters_2000` | 2.24 / 1.85 | 1.693 / 0.323 | 9.31 | 0.84 | 0.86 | 0.87 |
+| `scaling_rc_ladder_1k` | 2.00 / 2.33 | 0.191 / 0.174 | 0.11 | 1.06 | 1.07 | 1.06 |
+| `scaling_rc_ladder_100k` | 2.00 / 2.33 | 0.191 / 0.174 | 10.07 | 1.06 | 1.06 | 1.06 |
+| `vacask_graetz` | 2.00 / 1.16 | 2.000 / 0.049 | 16.04 | 0.55 | 0.56 | 0.56 |
+| `vacask_mul` | 2.04 / 2.51 | 2.037 / 0.417 | 8.40 | 0.94 | 1.11 | 0.97 |
+| `vacask_rc` | 2.00 / 1.01 | 0.008 / 0.007 | 4.47 | 0.67 | 0.68 | 0.68 |
+| `vacask_ring` | 3.05 / 5.49 | 3.049 / 0.969 | 28.35 | 1.54 | 1.65 | 1.67 |
+| `bench_ngspice_mosamp` | 2.03 / 2.20 | 2.027 / 0.050 | 20.35 | 0.97 | 0.97 | 0.97 |
+| `bench_ngspice_schmitt` | 2.01 / 1.43 | 2.010 / 0.074 | 0.11 | 0.71 | 0.72 | 0.72 |
+| `bench_tran_fourbitadder` | 2.14 / 3.19 | 2.138 / 0.379 | 0.17 | 1.14 | 1.18 | 1.16 |
+
+Factors per attempt fell 2 to 40 times on every nonlinear deck, as §9.1
+predicted. Newton iterations did not follow. They fell where iterate 0
+passes (quiescent decks: graetz, `vacask_rc`, schmitt, the parallel
+inverters) and rose where every step moves (chains +22%, ring +80%, adder
++49%). On the chains a factor is about 12% of an iteration's cost (fitting
+Ir against the two count sets gives 0.70 M Ir per evaluation and solve and
+0.10 M per factor), so the saved factors could not pay for the extra
+evaluations. The mode won on factor-heavy and quiescent decks (0.55 to
+0.97) and lost on evaluation-bound, always-active ones (1.06 to 1.54), the
+decks §9 named as the targets.
+
+### 10.4 What didn't work
+
+- **GMRES and Anderson fallbacks.** Both cut factors further on the chains
+  and the ring (GMRES: 1,022 factors on the 256 chain instead of 2,112, at
+  6,762 Krylov steps) but never cut Newton iterations, and each cost more
+  Ir than a plain refactor on 12 of the 13 decks (tie on `vacask_rc`).
+- **A 0.1 acceptance coefficient** (§7.1's value). `scaling_rc_ladder_1k`
+  and `_100k` fail: i(vin) sits about 1e-8 A off on the whole decaying
+  tail, the size of a 0.1-tolerance error per step that trap carries along.
+  Carrying CVODE's rate estimate across steps failed the same decks, since
+  a rate learned under one ag0 then accepted iterate 0 under another.
+- **Relaxing iterates past 0 to 0.3**, tried together with a refresh at the
+  start of every solve after a slow one. It saved 12 to 21% of iterations
+  on the chains and the ring and added 6 failures: both RC ladders,
+  `vacask_mul`, `bench_bypass_burst_clock`, `bench_bypass_gated_branch`,
+  `bench_digital_clamp`.
+- **Quadratic predictor** (Lagrange through the last three accepted points,
+  trap steps only). It cut `vacask_mul` from 1.26 M to 0.59 M iterations
+  and from 209 k to 26 k factors, and mosamp, schmitt and the adder by 8 to
+  15%. It failed `bench_power_buck_open` (i(l1) 0.45% off) and `vacask_mul`
+  (i(vs) 0.5% off) at every coefficient tried (0.003 to 0.1), and moved
+  `vacask_mul`'s time grid from row 9 on. It lacked a guard for points
+  straddling a source edge.
+- **No stall fallback.** `vacask_graetz` ends in TimestepTooSmall.
+
+### 10.5 Conclusion
+
+A lagged LU saves factors, but on the decks that motivated the GPU-native
+work (chains, ring, adder) the cost is device evaluation, and chord
+iterations add evaluations. Bypass (§7.3) is the next candidate: §9.2 found
+0.5% of the 4k chain's MOSFETs active per evaluation, so it attacks that
+cost directly. It leaves the Newton test and the published iterate as
+ngspice has them, which §10.1 shows the corpus requires, though its stamp
+error still has to pass the same gate. If modified Newton is revisited, it
+should come after bypass, with the quadratic predictor's edge guard and a
+gate that settles §10.1 first.
 
 ## Sources
 
