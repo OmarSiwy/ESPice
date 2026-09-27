@@ -69,8 +69,13 @@ const OperatorCtx = struct {
     x_td: []f64,
     /// G's pattern slots at every sample, slot * nf + s.
     g_td: []f64,
-    /// Dense C at sample 0, n * n.
-    c_mat: []f64,
+    /// C at sample 0 in row order over the pattern: row r owns entries
+    /// c_row_ptr[r]..c_row_ptr[r + 1], columns ascending, and entry k is
+    /// C's CSC slot c_slot[k].
+    c_csr: []f64,
+    c_row_ptr: []const u32,
+    c_col: []const u32,
+    c_slot: []const u32,
     /// Matvec scratch, n * nf each.
     v_td: []f64,
     w_td: []f64,
@@ -269,7 +274,7 @@ fn buildSampleTimes(times: []f64, grid: MixGrid, f1: f64, f2: f64) void {
 }
 
 /// F(X) = DFT(f(IDFT(X))) + jW*DFT(q(IDFT(X))), stacked real. Also refreshes
-/// the linearization the matvec reads: g_td at every sample and c_mat at
+/// the linearization the matvec reads: g_td at every sample and c_csr at
 /// sample 0.
 fn computeResidual(
     ctx: *OperatorCtx,
@@ -305,9 +310,9 @@ fn computeResidual(
 
         if (s == 0) {
             if (ckt.has_charge) {
-                ckt.denseC(ctx.c_mat);
+                for (ctx.c_csr, ctx.c_slot) |*c, slot| c.* = ckt.c_vals[slot];
             } else {
-                simdZero(ctx.c_mat);
+                simdZero(ctx.c_csr);
             }
         }
     }
@@ -409,8 +414,9 @@ inline fn addChargeTerms(
         for (0..n) |row| {
             var sum_re: f64 = 0;
             var sum_im: f64 = 0;
-            for (0..n) |col| {
-                const c_val = ctx.c_mat[row * n + col];
+            const lo = ctx.c_row_ptr[row];
+            const hi = ctx.c_row_ptr[row + 1];
+            for (ctx.c_csr[lo..hi], ctx.c_col[lo..hi]) |c_val, col| {
                 if (c_val == 0) continue;
                 sum_re += c_val * (-x_im[col * nf + f_idx]);
                 sum_im += c_val * x_re[col * nf + f_idx];
@@ -419,6 +425,26 @@ inline fn addChargeTerms(
             res_im[row * nf + f_idx] += omega_f * sum_im;
         }
     }
+}
+
+/// Row-major view of a CSC pattern: row r's entries are
+/// col[row_ptr[r]..row_ptr[r + 1]], columns ascending (a counting sort over
+/// the columns in order), and slot[k] is entry k's CSC slot.
+fn transposePattern(col_ptr: []const u32, row_idx: []const u32, row_ptr: []u32, col: []u32, slot: []u32) void {
+    const n = row_ptr.len - 1;
+    @memset(row_ptr, 0);
+    for (row_idx) |r| row_ptr[r + 1] += 1;
+    for (1..n + 1) |r| row_ptr[r] += row_ptr[r - 1];
+    // row_ptr[r] is row r's cursor, and ends at row r + 1's start.
+    for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
+        const r = row_idx[p];
+        col[row_ptr[r]] = @intCast(j);
+        slot[row_ptr[r]] = @intCast(p);
+        row_ptr[r] += 1;
+    };
+    var r = n;
+    while (r > 0) : (r -= 1) row_ptr[r] = row_ptr[r - 1];
+    row_ptr[0] = 0;
 }
 
 /// Newton with unpreconditioned GMRES from X = 0; the deck's sources drive
@@ -447,7 +473,7 @@ pub fn solve(
         n * nf + // v_td
         n * nf + // w_td
         nnz * nf + // g_td
-        n * n + // c_mat
+        nnz + // c_csr
         nf * nf + // basis_cos
         nf * nf + // basis_sin
         nf * nf + // basis_cos_t
@@ -473,8 +499,8 @@ pub fn solve(
     off += n * nf;
     const g_td = arena[off..][0 .. nnz * nf];
     off += nnz * nf;
-    const c_mat = arena[off..][0 .. n * n];
-    off += n * n;
+    const c_csr = arena[off..][0..nnz];
+    off += nnz;
     const basis_cos = arena[off..][0 .. nf * nf];
     off += nf * nf;
     const basis_sin = arena[off..][0 .. nf * nf];
@@ -490,6 +516,15 @@ pub fn solve(
     std.debug.assert(off == arena_size);
 
     simdZero(x_hat);
+
+    // Row-order view of the pattern for the charge term, which sums each
+    // row's columns in ascending order as the dense product did.
+    const c_idx = try allocator.alloc(u32, n + 1 + 2 * nnz);
+    defer allocator.free(c_idx);
+    const c_row_ptr = c_idx[0 .. n + 1];
+    const c_col = c_idx[n + 1 ..][0..nnz];
+    const c_slot = c_idx[n + 1 + nnz ..][0..nnz];
+    transposePattern(ckt.col_ptr, ckt.row_idx[0..nnz], c_row_ptr, c_col, c_slot);
 
     buildSampleTimes(times, grid, options.f1, options.f2);
     {
@@ -509,7 +544,10 @@ pub fn solve(
         .f2 = options.f2,
         .x_td = x_td,
         .g_td = g_td,
-        .c_mat = c_mat,
+        .c_csr = c_csr,
+        .c_row_ptr = c_row_ptr,
+        .c_col = c_col,
+        .c_slot = c_slot,
         .v_td = v_td,
         .w_td = w_td,
         .times = times,
@@ -640,6 +678,7 @@ pub const test_access = if (@import("builtin").is_test) .{
     .transformWork = transformWork,
     .dft2D = dft2D,
     .gvProduct = gvProduct,
+    .transposePattern = transposePattern,
     .idft2D = idft2D,
     .buildSampleTimes = buildSampleTimes,
     .simdZero = simdZero,
