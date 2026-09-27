@@ -32,9 +32,19 @@ pub fn concatenates(format: types.Format) bool {
 
 fn put(io: Io, path: []const u8, format: types.Format, plot: types.Plot, keep: bool) !void {
     try types.validatePlot(format, plot);
+    var buf: [8192]u8 = undefined;
+    // A device or FIFO (`-r /dev/null`) cannot be renamed over: write to it
+    // directly. Appending to one is writing the new plot.
+    const stat = Io.Dir.cwd().statFile(io, path, .{}) catch null;
+    if (stat != null and stat.?.kind != .file) {
+        const file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .write_only });
+        defer file.close(io);
+        var fw = file.writer(io, &buf);
+        try encode(&fw.interface, format, plot);
+        return fw.interface.flush();
+    }
     var atomic = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
     defer atomic.deinit(io);
-    var buf: [8192]u8 = undefined;
     var fw = atomic.file.writer(io, &buf);
     const w = &fw.interface;
     if (keep) copy: {
@@ -47,7 +57,13 @@ fn put(io: Io, path: []const u8, format: types.Format, plot: types.Plot, keep: b
         var reader = old.reader(io, &rbuf);
         _ = try reader.interface.streamRemaining(w);
     }
-    try switch (format) {
+    try encode(w, format, plot);
+    try w.flush();
+    try atomic.replace(io);
+}
+
+fn encode(w: *Io.Writer, format: types.Format, plot: types.Plot) !void {
+    return switch (format) {
         .binary => @import("rawfile.zig").encode(w, plot),
         .ascii => @import("ascii_raw.zig").encode(w, plot),
         .csv => @import("csv.zig").encode(w, plot),
@@ -58,8 +74,18 @@ fn put(io: Io, path: []const u8, format: types.Format, plot: types.Plot, keep: b
         .citi => @import("citifile.zig").encode(w, plot),
         .print => @import("spice_print.zig").encode(w, plot),
     };
-    try w.flush();
-    try atomic.replace(io);
+}
+
+test "a character device is written in place, not renamed over" {
+    const plot: types.Plot = .{ .title = "t", .result = .{
+        .plotname = "p",
+        .varnames = &.{"v(a)"},
+        .is_complex = false,
+        .npoints = 1,
+        .data = &.{1.0},
+    } };
+    try write(std.testing.io, "/dev/null", .binary, plot);
+    try append(std.testing.io, "/dev/null", .binary, plot);
 }
 
 test "every format refuses a plot whose data length disagrees with its shape" {
