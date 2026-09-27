@@ -11,6 +11,8 @@ pub const Format = types.Format;
 pub const Result = types.Result;
 pub const Plot = types.Plot;
 pub const validateQuery = types.validateQuery;
+/// `.meas` results in ngspice's print format.
+pub const printMeasures = @import("measure.zig").print;
 
 /// Resolves a user-facing format name or alias to a `Format`. Returns null
 /// for an unknown name so the caller owns the diagnostic.
@@ -46,4 +48,5 @@ test {
     _ = @import("psf.zig");
     _ = @import("sst2.zig");
     _ = @import("fsdb.zig");
+    _ = @import("measure.zig");
 }

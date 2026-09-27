@@ -67,4 +67,50 @@ pub const Deck = struct {
     /// Card name of every device instance, for result labels.
     cards: []const requests.CardRef,
     ac_overrides: []const AcOverride,
+    /// `.meas` cards, in deck order, evaluated over finished results.
+    measures: []const Measure = &.{},
+};
+
+/// What a `.meas` card computes, after ngspice com_measure2.c. `deriv` is
+/// parsed but, as in ngspice 45, not supported.
+pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv };
+
+/// Event count not given (ngspice MEASURE_DEFAULT).
+pub const measure_unset: i32 = -1;
+/// `RISE=LAST` and friends (ngspice MEASURE_LAST_TRANSITION).
+pub const measure_last: i32 = -2;
+/// `AT` not given.
+pub const measure_no_at: f64 = 1e99;
+
+/// One clause of a `.meas` card: ngspice's `struct measure`, with its
+/// defaults. For `.meas dc`, `from`/`to` default to -1e99/1e99.
+pub const MeasureClause = struct {
+    /// Result variable name as the result labels it (`v(out)`).
+    vec: []const u8 = "",
+    /// Right side of `WHEN vec=vec2`; empty when the level is `val`.
+    vec2: []const u8 = "",
+    /// How an AC value is read: `m`, `p`, `r`, `i`, `d` from `vm(..)` and
+    /// the like, 0 for the real part.
+    vectype: u8 = 0,
+    val: f64 = 0,
+    rise: i32 = measure_unset,
+    fall: i32 = measure_unset,
+    cross: i32 = measure_unset,
+    td: f64 = 0,
+    from: f64 = 0,
+    to: f64 = 0,
+    at: f64 = measure_no_at,
+};
+
+/// A parsed `.meas` card.
+pub const Measure = struct {
+    /// `tran`, `ac` or `dc`: the results it is evaluated over.
+    analysis: requests.Kind,
+    name: []const u8,
+    func: MeasureFunc,
+    /// TRIG, FIND's vector, WHEN's condition, or the vector a window
+    /// function (AVG, MIN, RMS, ...) reads.
+    first: MeasureClause,
+    /// TARG, or FIND's WHEN clause.
+    second: MeasureClause = .{},
 };

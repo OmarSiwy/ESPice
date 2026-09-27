@@ -9,6 +9,7 @@ pub const lines = @import("lines.zig");
 pub const source = @import("source.zig");
 const csr = @import("csr.zig");
 pub const expr = @import("expr.zig");
+const measure = @import("measure.zig");
 const core = @import("core");
 const Name = core.Name;
 const InternPool = @import("core").InternPool;
@@ -98,6 +99,8 @@ pub const Deck = struct {
     config: []const Config,
     ic: []const Ic,
     foreign: []const Foreign,
+    /// `.meas` cards; their strings borrow the parse arena.
+    measures: []const core.Measure,
 };
 
 /// A parsed, flattened deck. Every slice lives in the parse arena.
@@ -188,7 +191,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
     return null;
 }
 
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, meas, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -233,7 +236,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "stb", an(.stb) },     .{ "temp", an(.temp) },             .{ "tf", an(.tf) },
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
-    .{ "endif", cond(.endif) },
+    .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
 });
 
 /// The card a `.keyword` names, case-insensitively; null for any other card.
@@ -368,6 +371,7 @@ fn Reader(comptime S: type) type {
         config: std.ArrayList(Config) = .empty,
         ic_cards: std.ArrayList([]const Value) = .empty,
         foreign: std.ArrayList(Foreign) = .empty,
+        measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
         // Per-card scratch.
         nodes: std.ArrayList([]const u8) = .empty,
@@ -476,6 +480,7 @@ fn Reader(comptime S: type) type {
                     .config = r.config.items,
                     .ic = ic.items,
                     .foreign = r.foreign.items,
+                    .measures = r.measures.items,
                 },
             };
         }
@@ -676,6 +681,14 @@ fn Reader(comptime S: type) type {
         fn readDirective(r: *R, line: []const u8) Error!void {
             var f = F.init(line);
             const card = cardOf(f.next().?[1..]);
+            if (card != null and card.? == .meas) {
+                // ngspice reports a bad `.meas` and simulates anyway.
+                const m = measure.parse(r.arena, f.rest(), r) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return std.log.warn("netlist: ignoring malformed card '{s}'", .{line}),
+                };
+                return r.measures.append(r.arena, m);
+            }
             const args = try r.readArgs(&f);
             const c = card orelse return;
             switch (c) {
@@ -752,6 +765,17 @@ fn Reader(comptime S: type) type {
             try r.scratch.names.append(r.arena, name);
             try r.scratch.ops.append(r.arena, .{ .code = .ident, .a = @intCast(mark.names) });
             return r.fold(mark.ops, frame, geometry);
+        }
+
+        /// A `.meas` value: a number or a global parameter expression.
+        pub fn measureValue(r: *R, text: []const u8) Error!f64 {
+            if (S.parseNum(text)) |n| return n;
+            const body = if (text[0] == '{' or F.isQuote(text[0])) F.body(text) else text;
+            const top: Frame = .{ .scopes = &r.global_scopes };
+            return switch (try r.exprValue(body, &top, false)) {
+                .num => |n| n,
+                else => error.ParseError,
+            };
         }
 
         fn exprValue(r: *R, text: []const u8, frame: *const Frame, geometry: bool) Error!Value {
@@ -1164,5 +1188,6 @@ fn appendSpan(comptime T: type, arena: Allocator, list: *std.ArrayList(T), items
 
 test {
     _ = csr;
+    _ = measure;
     _ = @import("tests/netlist.zig");
 }

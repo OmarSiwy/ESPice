@@ -10,6 +10,12 @@ pub const Deck = deck.Deck;
 pub const Ic = deck.Ic;
 pub const AcOverride = deck.AcOverride;
 pub const QueryBindings = deck.QueryBindings;
+pub const Measure = deck.Measure;
+pub const MeasureClause = deck.MeasureClause;
+pub const MeasureFunc = deck.MeasureFunc;
+pub const measure_unset = deck.measure_unset;
+pub const measure_last = deck.measure_last;
+pub const measure_no_at = deck.measure_no_at;
 
 const result = @import("result.zig");
 pub const Result = result.Result;
