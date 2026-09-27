@@ -476,9 +476,10 @@ pub const Netlist = struct {
         const R = Reader(lines.ngspice);
         const bins = live.bins;
         const model_of = nl.graph.edges.items(.model);
+        const kv_of = nl.graph.edges.items(.kv);
+        const positional_of = nl.graph.edges.items(.positional);
         for (bins.edges, bins.per_finger, 0..) |e, per_finger, k| {
-            const d = nl.graph.edges.get(e);
-            const kv = nl.kvs[d.kv.start..][0..d.kv.len];
+            const kv = nl.kvs[kv_of[e].start..][0..kv_of[e].len];
             const l = R.number(kv, "l") orelse return error.ParseError;
             const nf = if (per_finger) R.number(kv, "nf") orelse 1 else 1;
             const w = (R.number(kv, "w") orelse return error.ParseError) / nf;
@@ -489,7 +490,7 @@ pub const Netlist = struct {
             } else return error.ModelBinNotFound;
             changed = changed or model_of[e] != row;
             model_of[e] = row;
-            @constCast(nl.values)[d.positional.start] = .{ .name = nl.models[row].name };
+            @constCast(nl.values)[positional_of[e].start] = .{ .name = nl.models[row].name };
         }
         return changed;
     }
