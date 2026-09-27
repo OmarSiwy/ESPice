@@ -188,6 +188,13 @@ class Deck:
         ])
 
 
+def window(size, ps):
+    """`.tran` card: a 2 ps step cap, and a stop time cut 2x at 10k and 5x
+    at 100k so one benchmark pass stays in minutes. The SRAM keeps its 1 ns
+    write/precharge/read sequence."""
+    return f"2p {ps // (1 if size < 5000 else 2 if size < 50000 else 5)}p"
+
+
 def pulse(vdd, delay, width, period):
     return f"PULSE(0 {vdd} {delay}p 20p 20p {width}p {period}p)"
 
@@ -206,7 +213,7 @@ def chain(d, size):
             inp = pins[-1]
             if c in (0, n - 1) and s in (9, 24, 49):
                 saves.append(pins[0])
-    return [f"Vclk clk_0 0 {pulse(d.t['vdd'], 20, 230, 500)}"], "2p 1n", saves
+    return [f"Vclk clk_0 0 {pulse(d.t['vdd'], 20, 230, 500)}"], window(size, 1000), saves
 
 
 def ring(d, size):
@@ -222,7 +229,7 @@ def ring(d, size):
             d.inst(f"r{g}s{s}", "inv", [pins[s - 1][1], pins[s][0], *place(g * stages + s)])
         if g in (0, n - 1):
             saves += [pins[0][0], pins[stages // 2][0]]
-    return [f"Ven en_0 0 {pulse(d.t['vdd'], 50, 5000, 10000)}"], "2p 2n", saves
+    return [f"Ven en_0 0 {pulse(d.t['vdd'], 50, 5000, 10000)}"], window(size, 2000), saves
 
 
 def logic(d, size):
@@ -265,7 +272,7 @@ def logic(d, size):
             ins = [pin[(src, (l, j))] for src in fanin[l][j]]
             d.inst(f"g{l}_{j}", kinds[l][j], [*ins, outs[(l, j)], *place(l * width + j)])
     saves = [outs[(levels - 1, j)] for j in range(min(width, 8))]
-    return sources, "2p 1n", saves
+    return sources, window(size, 1000), saves
 
 
 def sram(d, size):
@@ -299,10 +306,11 @@ def sram(d, size):
 
 
 FAMILIES = {"chain": chain, "ring": ring, "logic": logic, "sram": sram}
-# No 100k logic block: its LU fill (45 entries a row at 10k, 1.8M) grows
-# past what a benchmark run can factor a few thousand times.
+# No 100k logic block or SRAM: their LU grows past what a benchmark run can
+# factor a few thousand times (the 100k SRAM: 16.6x fill, 3.5e9
+# multiply-adds a refactor). `gen.py DIR sram bsim4 100k` still writes one.
 SUITE = [(f, m, s) for m, sizes in (("bsim4", ("1k", "10k", "100k")), ("psp103", ("1k", "10k")))
-         for f in FAMILIES for s in sizes if (f, s) != ("logic", "100k")]
+         for f in FAMILIES for s in sizes if (f, s) not in (("logic", "100k"), ("sram", "100k"))]
 
 
 def generate(root, family, model, size, seed=1):
