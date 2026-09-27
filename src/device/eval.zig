@@ -47,8 +47,10 @@ const Layout = struct {
     /// `Of(m)` carries only the lanes of `m`'s unknowns, and a binary
     /// operation joins its operands' lanes.
     dense: bool,
-    /// Rounds each value's lane count up to a multiple of 4. The pad lanes
-    /// hold zeros (or a NaN from a 0/0) that nothing reads.
+    /// Rounds each value's lane count up to a power of two: LLVM splits a
+    /// 12- or 26-wide vector into shuffles and spills (gummel_poon's eval
+    /// body doubled). The pad lanes hold zeros (or a NaN from a 0/0) that
+    /// nothing reads.
     pad: bool = false,
 };
 
@@ -93,7 +95,7 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
 
         fn width(comptime ls: u64) usize {
             const n = @popCount(ls);
-            return if (layout.pad) std.mem.alignForward(usize, n, 4) else n;
+            return if (layout.pad and n != 0) std.math.ceilPowerOfTwoAssert(usize, n) else n;
         }
 
         fn unknownBit(comptime u: usize) u64 {
@@ -617,8 +619,9 @@ fn canNarrow(comptime D: type) bool {
 /// `narrow` selects the reduced derivative basis (see `Basis`) and is sound
 /// only on maximally collapsed instances, which `ProtoStore.finalize` sorts to
 /// `[0, narrow_count)`. `F` is the derivative width: `jacFloat(D)` on the
-/// host, `gpuJacFloat(D)` in `DeviceKernel`.
-fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
+/// host, `gpuJacFloat(D)` in `DeviceKernel`. `layout` is `hostLayout` on the
+/// host and dense in `DeviceKernel`.
+fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime layout: Layout, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
     @setFloatMode(.optimized);
@@ -642,7 +645,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
     };
     const jac_rep = comptime repMask(n_u, lane, alias, jac_pat);
     const q_rep = comptime repMask(n_u, lane, alias, q_pat);
-    const S = DualFor(F, &lane, .{ .dense = true, .pad = !SinkT.on_device and padsLanes(D, narrow) }, @hasDecl(D, "collapse"));
+    const S = DualFor(F, &lane, layout, @hasDecl(D, "collapse"));
     // Every lane of the basis: the layout the limiting correction sums in.
     const full = comptime S.Of(reads).lanes;
     const use_lim = if (comptime has_limit) limiting else false;
@@ -757,28 +760,17 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
     }
 }
 
-/// Host models whose derivative lanes pad to a multiple of 4, mapped to
-/// whether the narrow (collapsed) basis pads too. Opt-in, because no rule on
-/// W or n_u predicts the sign. Callgrind Ir, padded/unpadded, 100-instance
-/// DC sweeps with/without series resistances: gummel_poon 0.65/0.60,
-/// vbic13_4t 0.65, vdmos 0.73/0.68, bsim2 0.82, mes 0.78 (narrow basis
-/// unpadded: 1.00), jfet 0.76/1.02 (both on the wide basis). Losers left out:
-/// bsim4va and bsimsoi_va 1.05, b3soidd 1.09, hfet1 and jfet2 1.06,
-/// hisim2_va 1.03; every other model measured 1.00.
-/// Pad lanes carry zero partials (or NaN from a 0/0) that no stamp reads,
-/// so the output is byte-identical either way.
-const pad_lanes = std.StaticStringMap(bool).initComptime(.{
-    .{ "gummel_poon", true },
-    .{ "vbic13_4t", true },
-    .{ "vdmos", true },
-    .{ "jfet", false },
-    .{ "mes", false },
-    .{ "bsim2", true },
-});
-
-fn padsLanes(comptime D: type, comptime narrow: bool) bool {
-    const both = pad_lanes.get(comptime baseName(D)) orelse return false;
-    return both or !narrow;
+/// The host's lane layout: sparse and padded to a power of two on the wide
+/// basis, dense on the narrow one (at most 4 lanes, one ymm). Callgrind Ir
+/// per instance, dense exact / sparse pow2, 100-instance DC sweeps:
+/// hisimhv_va 23.7M/6.8M, hisim2_va 37.1M/13.7M, bsimsoi_va 7.36M/3.95M,
+/// vbic13_4t 7.74M/3.83M, b3soidd 4.95M/3.02M, bsim4va 4.14M/2.32M,
+/// hicumL2_va 4.53M/3.82M, gummel_poon 3.46M/1.96M, mesa 2.03M/1.58M, mos1
+/// with RD/RS 1.33M/1.14M, bsim2 1.35M/0.99M, jfet 0.48M/0.37M, mes
+/// 0.46M/0.34M; no wide model lost. On the narrow basis sparse lost up to
+/// 2.8% (bsim1, mos2/3/9).
+fn hostLayout(comptime narrow: bool) Layout {
+    return if (narrow) .{ .dense = true } else .{ .dense = false, .pad = true };
 }
 
 /// The first `w` lanes of `v`: the unpadded basis, so the correction dot
@@ -1208,10 +1200,10 @@ pub fn DeviceBatch(comptime D: type) type {
             if (comptime narrowable) {
                 // A ParEval slice may straddle the partition boundary.
                 const split = std.math.clamp(self.narrow_count, first, last);
-                if (split > first) evalRange(D, true, F, &sink, first, split, sim, limiting);
-                if (last > split) evalRange(D, false, F, &sink, split, last, sim, limiting);
+                if (split > first) evalRange(D, true, F, hostLayout(true), &sink, first, split, sim, limiting);
+                if (last > split) evalRange(D, false, F, hostLayout(false), &sink, split, last, sim, limiting);
             } else {
-                evalRange(D, false, F, &sink, first, last, sim, limiting);
+                evalRange(D, false, F, hostLayout(false), &sink, first, last, sim, limiting);
             }
         }
 
@@ -1864,7 +1856,7 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
             // Always the wide basis here: the kernel arguments carry no
             // `narrow_count`, and they are part of the frozen GPU boundary.
             // ponytail: pass `narrow_count` once narrowing is measured on a GPU.
-            evalRange(D, false, gpuJacFloat(D), &sink, id, id + 1, sim, limiting != 0);
+            evalRange(D, false, gpuJacFloat(D), .{ .dense = true }, &sink, id, id + 1, sim, limiting != 0);
         }
     };
 }
@@ -2188,5 +2180,7 @@ comptime {
 /// Private decls exposed to the test suites.
 pub const test_access = if (@import("builtin").is_test) .{
     .Real = Real,
+    .Sparse = DualFor(f64, &.{ 0, 1 }, hostLayout(false), false),
+    .SparseF32 = DualFor(f32, &.{ 0, 1 }, hostLayout(false), false),
     .anyNonzero = anyNonzero,
 } else {};

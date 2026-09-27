@@ -75,9 +75,11 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
     }
 }
 
-test "Dual is the contract's arithmetic, at both lane widths" {
+test "Dual is the contract's arithmetic, dense and sparse, at both lane widths" {
     try contract.expectFamily(Dual(2, f64));
     try contract.expectFamily(Dual(2, f32));
+    try contract.expectFamily(impl.test_access.Sparse);
+    try contract.expectFamily(impl.test_access.SparseF32);
     contract.checkFamily(Real);
 }
 
