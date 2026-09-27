@@ -75,6 +75,12 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
     }
 }
 
+test "Dual is the contract's arithmetic, at both lane widths" {
+    try contract.expectFamily(Dual(2, f64));
+    try contract.expectFamily(Dual(2, f32));
+    contract.checkFamily(Real);
+}
+
 test "jac width: one device, two instantiations" {
     // `jac_f32` is a permission the GPU kernel takes and the host declines;
     // `jac_f32_host` makes the host take it too.
