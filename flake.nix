@@ -134,6 +134,7 @@
               pkgs.coreutils
               pkgs.time
               pkgs.gnucap
+              pkgs.python3 # tests/benchmark/postlayout/gen.py
               openvafPkg
               vacaskPkg
               pkgs.perf

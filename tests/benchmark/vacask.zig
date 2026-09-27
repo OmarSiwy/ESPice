@@ -55,7 +55,8 @@ pub fn translate(gpa: std.mem.Allocator, spice: []const u8) error{OutOfMemory}!O
     return .{ .sim = try x.render() };
 }
 
-/// SPICE primitives VACASK ships as `spice/<tag>.osdi`, module `sp_<tag>`.
+/// SPICE primitives VACASK ships as `spice/<tag>.osdi`, module `sp_<tag>`,
+/// plus PSP103, which VACASK ships as `psp103v4.osdi` (module `psp103va`).
 const Module = enum {
     resistor,
     capacitor,
@@ -72,6 +73,17 @@ const Module = enum {
     bsim3v3,
     bsim4v8,
     vdmos,
+    psp103,
+
+    fn osdi(m: Module) []const u8 {
+        return if (m == .psp103) "psp103v4" else @tagName(m);
+    }
+    fn name(m: Module) []const u8 {
+        return if (m == .psp103) "psp103va" else @tagName(m);
+    }
+    fn prefix(m: Module) []const u8 {
+        return if (m == .psp103) "" else "spice/";
+    }
 };
 
 /// Devices built into the simulator: no `load`, but still a `model` line.
@@ -93,6 +105,8 @@ fn mosModule(level: u32) ?Module {
         9 => .mos9,
         49 => .bsim3v3,
         54 => .bsim4v8,
+        // espice's PSP103 level (frontend/spice.zig); ngspice-45 has none.
+        1040 => .psp103,
         else => null,
     };
 }
@@ -158,6 +172,8 @@ const Xlat = struct {
     net: Buf = .empty,
     opts: Buf = .empty,
     ctl: Buf = .empty,
+    /// `.save` outputs, rendered ahead of every analysis as SPICE applies them.
+    saves: Buf = .empty,
 
     in_subckt: bool = false,
     analyses: usize = 0,
@@ -530,6 +546,7 @@ const Xlat = struct {
             return x.raw(&x.subs, "ends\n\n");
         }
         if (std.mem.eql(u8, tail, "param")) return x.paramCard(c);
+        if (std.mem.eql(u8, tail, "save")) return x.saveCard(c);
         if (eqlAny(tail, &.{ "options", "option", "opt" })) return x.optionsCard(c);
         if (std.mem.eql(u8, tail, "temp")) {
             if (c.len() != 2) return x.refuse(".temp with {d} values (a temperature sweep is not one analysis)", .{c.len() - 1});
@@ -574,7 +591,7 @@ const Xlat = struct {
 
         x.loads.insert(module);
         const w = &x.models;
-        try x.put(w, "model {s} sp_{s}", .{ name, @tagName(module) });
+        try x.put(w, "model {s} {s}{s}", .{ name, if (module == .psp103) "" else "sp_", module.name() });
 
         // An empty `( )` is a VACASK syntax error, so the list is opened only
         // once there is something to put in it.
@@ -594,6 +611,22 @@ const Xlat = struct {
             try x.value(w, kv.key, kv.val);
         }
         try x.raw(w, if (open) " )\n" else "\n");
+    }
+
+    /// `.save v(a) i(v1)` keeps the same spelling in VACASK; `.save all`
+    /// (or no card) is VACASK's default.
+    /// The lexer splits `v(a)` into `v a`, so the fields come in pairs.
+    fn saveCard(x: *Xlat, c: Card) Fail!void {
+        if (c.len() == 2 and std.mem.eql(u8, c.tok(1).?, "all")) return;
+        if (c.len() % 2 != 1) return x.refuse(".save with an odd field", .{});
+        try x.raw(&x.saves, "  save");
+        var i: usize = 1;
+        while (i < c.len()) : (i += 2) {
+            const kind = c.tok(i).?;
+            if (!eqlAny(kind, &.{ "v", "i" })) return x.refuse(".save {s}(...) is not translated", .{kind});
+            try x.put(&x.saves, " {s}({s})", .{ kind, c.tok(i + 1).? });
+        }
+        try x.raw(&x.saves, "\n");
     }
 
     fn subcktCard(x: *Xlat, c: Card) Fail!void {
@@ -827,7 +860,7 @@ const Xlat = struct {
         );
 
         var loads = x.loads.iterator();
-        while (loads.next()) |m| try x.put(&out, "load \"spice/{s}.osdi\"\n", .{@tagName(m)});
+        while (loads.next()) |m| try x.put(&out, "load \"{s}{s}.osdi\"\n", .{ m.prefix(), m.osdi() });
         try x.raw(&out, "\n");
 
         var autos = x.autos.iterator();
@@ -847,6 +880,7 @@ const Xlat = struct {
         try x.raw(&out, "\ncontrol\n  options rawfile=\"binary\"");
         try x.raw(&out, x.opts.items);
         try x.raw(&out, "\n");
+        try x.raw(&out, x.saves.items);
         try x.raw(&out, x.ctl.items);
         try x.raw(&out, "endc\n");
         return out.items;
@@ -1161,10 +1195,25 @@ test "MOSFET LEVEL picks the module and never leaks into the parameters" {
         \\mos
         \\M1 d g 0 0 NM W=2u L=1u
         \\V1 d 0 5
-        \\.model NM NMOS(LEVEL=1040)
+        \\.model NM NMOS(LEVEL=73)
         \\.op
         \\.end
-    ), "LEVEL=1040");
+    ), "LEVEL=73");
+
+    // PSP103 is VACASK's own psp103v4.osdi; `.save` comes before the analyses.
+    const psp = try p.sim(
+        \\psp
+        \\M1 d g 0 0 NP W=1u L=0.2u
+        \\V1 d 0 1.2
+        \\V2 g 0 1.2
+        \\.save v(d) i(v1)
+        \\.model NP PMOS(LEVEL=1040 TOXO=1.5e-9)
+        \\.op
+        \\.end
+    );
+    try has(psp, "load \"psp103v4.osdi\"");
+    try has(psp, "model np psp103va ( type=-1 toxo=1.5e-9 )");
+    try has(psp, "  save v(d) i(v1)\n  analysis op1 op");
 }
 
 test "waveforms map positionally and stop where SPICE stopped" {

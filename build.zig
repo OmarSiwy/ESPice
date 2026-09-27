@@ -403,7 +403,7 @@ pub fn build(b: *std.Build) void {
 
     const bench_runner = b.addExecutable(.{
         .name = "bench-runner",
-        .root_module = M.make(b.path("tests/benchmark/runner.zig"), fixture_imports),
+        .root_module = M.make(b.path("tests/benchmark/runner.zig"), &.{}),
     });
     const run_bench = b.addRunArtifact(bench_runner);
     run_bench.stdio = .inherit;
@@ -412,7 +412,19 @@ pub fn build(b: *std.Build) void {
     run_bench.addArg("tests/fixtures");
     if (b.args) |args| run_bench.addArgs(args);
     b.step("bench", "Compare ESPice with ngspice and VACASK (nix develop .#benchmarking)").dependOn(&run_bench.step);
-    const run_bench_tests = t.run(M.make(b.path("tests/benchmark/runner.zig"), fixture_imports), &.{}, false);
+    // Synthetic post-layout decks (no oracles, so not fixtures): generated
+    // into zig-out/postlayout, then timed like `bench`.
+    const gen_postlayout = b.addSystemCommand(&.{ "python3", "tests/benchmark/postlayout/gen.py", "zig-out/postlayout" });
+    gen_postlayout.setCwd(b.path("."));
+    const run_postlayout = b.addRunArtifact(bench_runner);
+    run_postlayout.stdio = .inherit;
+    run_postlayout.setCwd(b.path("."));
+    run_postlayout.addArtifactArg(exe);
+    run_postlayout.addArgs(&.{ "zig-out/postlayout", "--out", "zig-out/postlayout-results.md" });
+    if (b.args) |args| run_postlayout.addArgs(args);
+    run_postlayout.step.dependOn(&gen_postlayout.step);
+    b.step("bench-postlayout", "Time ESPice on synthetic post-layout decks against ngspice and VACASK").dependOn(&run_postlayout.step);
+    const run_bench_tests = t.run(M.make(b.path("tests/benchmark/runner.zig"), &.{}), &.{}, false);
     b.step("test-benchmark", "Test reference adapters and benchmark comparison").dependOn(&run_bench_tests.step);
     test_step.dependOn(&run_bench_tests.step);
 }
