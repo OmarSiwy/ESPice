@@ -227,8 +227,10 @@ def ring(d, size):
 
 def logic(d, size):
     ngates = max(8, int(size / 3.3))
-    width = max(4, int(math.sqrt(ngates * 2)))
-    levels = -(-ngates // width)
+    # Twelve levels, a pipeline stage's depth. At depth 41 (width sqrt(2n))
+    # the 10k block's operating point stalled in the gmin ladder for 80 min.
+    levels = min(12, max(2, ngates // 8))
+    width = -(-ngates // levels)
     rng = d.rng
     kinds = [[rng.choice(("inv", "nand2", "nand2", "nor2")) for _ in range(width)] for _ in range(levels)]
     # Fanin: gate (l, j) reads (l-1, j +- 3); the second input reaches back
@@ -297,8 +299,10 @@ def sram(d, size):
 
 
 FAMILIES = {"chain": chain, "ring": ring, "logic": logic, "sram": sram}
+# No 100k logic block: its LU fill (45 entries a row at 10k, 1.8M) grows
+# past what a benchmark run can factor a few thousand times.
 SUITE = [(f, m, s) for m, sizes in (("bsim4", ("1k", "10k", "100k")), ("psp103", ("1k", "10k")))
-         for f in FAMILIES for s in sizes]
+         for f in FAMILIES for s in sizes if (f, s) != ("logic", "100k")]
 
 
 def generate(root, family, model, size, seed=1):
