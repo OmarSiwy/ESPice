@@ -29,187 +29,289 @@ const fma_ok = switch (builtin.cpu.arch) {
     else => false,
 };
 
-/// Forward-mode dual number implementing the contract's device scalar `S`:
-/// one eval pass yields the residual and every partial. Lane u holds ∂/∂x[u].
-///
-/// `F` is the float width of the derivative half only. The value half and
-/// every `S` boundary (`con`/`scale`/`addC`/`val`/`ddxAt`) stay f64, so the
-/// residual is identical at either width. `F = f32` trades Newton iterations
-/// for GPU throughput; see `jacFloat` and `gpuJacFloat` for who takes it.
+/// A `Dual` family over lanes `0..n` with unknown u on lane u, every value
+/// carrying all n lanes. For tests and one-off evaluations; `evalRange`
+/// builds its families from a device's `Basis`.
 pub fn Dual(comptime N: usize, comptime F: type) type {
-    return DualFor(N, F, false);
+    const lane = comptime blk: {
+        var l: [N]u8 = undefined;
+        for (&l, 0..) |*e, u| e.* = u;
+        break :blk l;
+    };
+    return DualFor(F, &lane, .{ .dense = true }, false);
 }
 
-fn DualFor(comptime N: usize, comptime F: type, comptime collapsed: bool) type {
-    return struct {
-        v: f64,
-        /// Derivative lanes. Aligned to the element, not the vector: natural
-        /// vector alignment pads `Dual(8, f64)` from 72 to 128 bytes, and
-        /// nothing reads `d` through a pointer that needs it.
-        d: V align(@alignOf(F)),
+/// How a `DualFor` family lays out a value's derivative lanes.
+const Layout = struct {
+    /// Every `Of(m)` is one type carrying every lane of the basis. Otherwise
+    /// `Of(m)` carries only the lanes of `m`'s unknowns, and a binary
+    /// operation joins its operands' lanes.
+    dense: bool,
+    /// Rounds each value's lane count up to a multiple of 4. The pad lanes
+    /// hold zeros (or a NaN from a 0/0) that nothing reads.
+    pad: bool = false,
+};
 
+/// Number of lanes `lane` maps unknowns onto.
+fn laneCount(comptime lane: []const u8) usize {
+    var n: usize = 0;
+    for (lane) |l| if (l != contract.no_lane) {
+        n = @max(n, @as(usize, l) + 1);
+    };
+    return n;
+}
+
+/// Forward-mode AD family: the contract's scalar family `S`
+/// (`contract.family_fns`, numerics per `contract.expectFamily`). One eval
+/// pass yields the residual and every partial.
+///
+/// `lane[u]` is the derivative lane unknown `u` seeds, or
+/// `contract.no_lane`; several unknowns may share one (the narrow basis).
+/// `F` is the float width of the derivative half only. The value half and
+/// every boundary (`con`/`scale`/`addC`/`val`/`ddxAt`) stay f64, so the
+/// residual is identical at either width. `F = f32` trades Newton iterations
+/// for GPU throughput; see `jacFloat` and `gpuJacFloat` for who takes it.
+fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout, comptime collapsed: bool) type {
+    const n_lanes = laneCount(lane);
+    if (n_lanes > 64) @compileError("Dual: more than 64 derivative lanes");
+    const all: u64 = if (n_lanes == 64) ~@as(u64, 0) else (@as(u64, 1) << n_lanes) - 1;
+    return struct {
         /// Read by the generated device: the builder already applied
         /// `D.collapse` to the scatter tapes.
         pub const collapse_applied = collapsed;
-        const V = @Vector(N, F);
-        const Self = @This();
+        pub const V = f64;
 
-        inline fn splat(c: f64) V {
-            return @splat(@floatCast(c));
-        }
-        inline fn mulAddV(a: V, b: V, c: V) V {
-            return if (fma_ok) @mulAdd(V, a, b, c) else a * b + c;
-        }
-        pub fn seed(value: f64, comptime u: usize) Self {
-            var d: V = @splat(0);
-            d[u] = 1;
-            return .{ .v = value, .d = d };
-        }
-        pub fn con(c: f64) Self {
-            return .{ .v = c, .d = splat(0) };
-        }
-        /// Partial with respect to lane `col`, widened to f64.
-        pub fn ddxAt(a: Self, col: usize) f64 {
-            const lanes: [N]F = a.d;
-            return lanes[col];
-        }
-        /// The whole derivative widened to f64, so `F` never leaks past the
-        /// arithmetic.
-        pub inline fn grad(a: Self) @Vector(N, f64) {
-            return if (F == f64) a.d else @floatCast(a.d);
-        }
-        pub fn add(a: Self, b: Self) Self {
-            return .{ .v = a.v + b.v, .d = a.d + b.d };
-        }
-        pub fn sub(a: Self, b: Self) Self {
-            return .{ .v = a.v - b.v, .d = a.d - b.d };
-        }
-        pub fn neg(a: Self) Self {
-            return .{ .v = -a.v, .d = -a.d };
-        }
-        pub fn mul(a: Self, b: Self) Self {
-            return .{ .v = a.v * b.v, .d = mulAddV(b.d, splat(a.v), a.d * splat(b.v)) };
-        }
-        pub fn div(a: Self, b: Self) Self {
-            const inv_b = 1.0 / b.v;
-            const quot = a.v * inv_b;
-            return .{ .v = quot, .d = mulAddV(b.d, splat(-quot), a.d) * splat(inv_b) };
-        }
-        pub fn scale(a: Self, c: f64) Self {
-            return .{ .v = a.v * c, .d = a.d * splat(c) };
-        }
-        pub fn addC(a: Self, c: f64) Self {
-            return .{ .v = a.v + c, .d = a.d };
-        }
-        pub fn exp(a: Self) Self {
-            const e = dmath.exp(a.v);
-            return .{ .v = e, .d = a.d * splat(e) };
-        }
-        pub fn log(a: Self) Self {
-            return .{ .v = dmath.log(a.v), .d = a.d * splat(1.0 / a.v) };
-        }
-        /// Same value operation as VerA's precompute scalar, so the two agree.
-        pub fn expm1(a: Self) Self {
-            return .{ .v = dmath.expm1(a.v), .d = a.d * splat(dmath.exp(a.v)) };
-        }
-        pub fn log1p(a: Self) Self {
-            return .{ .v = std.math.log1p(a.v), .d = a.d * splat(1.0 / (1.0 + a.v)) };
-        }
-        pub fn sqrt(a: Self) Self {
-            const s = @sqrt(a.v);
-            return .{ .v = s, .d = a.d * splat(if (s > 0.0) 0.5 / s else 0.0) };
-        }
-        pub fn sin(a: Self) Self {
-            return .{ .v = dmath.sin(a.v), .d = a.d * splat(dmath.cos(a.v)) };
-        }
-        pub fn cos(a: Self) Self {
-            return .{ .v = dmath.cos(a.v), .d = a.d * splat(-dmath.sin(a.v)) };
-        }
-        pub fn tanh(a: Self) Self {
-            const th = dmath.tanh(a.v);
-            return .{ .v = th, .d = a.d * splat(1.0 - th * th) };
-        }
-        pub fn abs(a: Self) Self {
-            return if (a.v < 0) a.neg() else a;
-        }
-        pub fn minC(a: Self, c: f64) Self {
-            return if (a.v > c) con(c) else a;
-        }
-        pub fn maxC(a: Self, c: f64) Self {
-            return if (a.v < c) con(c) else a;
-        }
-        /// `x^c`, slope `c·x^c/x`: one `pow`, exact for x != 0 (LRM §4.3.1
-        /// negative bases included). At x == 0 the slope takes a second `pow`
-        /// because `c·p/x` is 0/0 there and c == 1 must still give slope 1
-        /// (gummel_poon's `1 - mjs` exponent at its default mjs = 0). A
-        /// non-finite slope becomes 0. Must match VerA's `zPow`.
-        pub fn pow(a: Self, c: f64) Self {
-            const p = dmath.pow(a.v, c);
-            const slope = if (a.v != 0.0) c * p / a.v else c * dmath.pow(a.v, c - 1.0);
-            return .{ .v = p, .d = a.d * splat(if (std.math.isFinite(slope)) slope else 0.0) };
-        }
-        pub fn atan(a: Self) Self {
-            return .{ .v = dmath.atan(a.v), .d = a.d * splat(1.0 / (1.0 + a.v * a.v)) };
-        }
-        pub fn sinh(a: Self) Self {
-            return .{ .v = dmath.sinh(a.v), .d = a.d * splat(dmath.cosh(a.v)) };
-        }
-        pub fn cosh(a: Self) Self {
-            return .{ .v = dmath.cosh(a.v), .d = a.d * splat(dmath.sinh(a.v)) };
-        }
-        pub fn max(a: Self, b: Self) Self {
-            return if (a.v >= b.v) a else b;
-        }
-        pub fn min(a: Self, b: Self) Self {
-            return if (a.v <= b.v) a else b;
-        }
-        pub fn val(a: Self) f64 {
-            return a.v;
+        /// The lanes the unknowns in `m` occupy, one bit per lane.
+        fn lanesOf(comptime m: u64) u64 {
+            if (layout.dense) return all;
+            var s: u64 = 0;
+            for (lane, 0..) |l, u| {
+                if (u < 64 and (m >> u) & 1 != 0 and l != contract.no_lane) s |= @as(u64, 1) << l;
+            }
+            return s;
         }
 
-        // Comparisons return a 0/1 indicator with zero derivative; the
-        // derivative follows whichever operand `sel` picks. Semantics match
-        // VerA's reference lowering (backend/tb.zig).
-        pub fn lt(a: Self, b: Self) Self {
-            return con(@floatFromInt(@intFromBool(a.v < b.v)));
+        fn width(comptime ls: u64) usize {
+            const n = @popCount(ls);
+            return if (layout.pad) std.mem.alignForward(usize, n, 4) else n;
         }
-        pub fn le(a: Self, b: Self) Self {
-            return con(@floatFromInt(@intFromBool(a.v <= b.v)));
+
+        fn unknownBit(comptime u: usize) u64 {
+            return if (u < 64) @as(u64, 1) << u else ~@as(u64, 0);
         }
-        pub fn eq(a: Self, b: Self) Self {
-            return con(@floatFromInt(@intFromBool(a.v == b.v)));
+
+        pub fn Of(comptime m: u64) type {
+            return Val(lanesOf(m));
         }
-        /// Returns `a` when the indicator `c` is nonzero, else `b`, derivative
-        /// included.
-        pub fn sel(c: Self, a: Self, b: Self) Self {
-            return if (c.v != 0.0) a else b;
+        pub fn con(c: f64) Of(0) {
+            return .{ .v = c, .d = @splat(0) };
+        }
+        pub fn probe(comptime u: usize, v: f64) Of(unknownBit(u)) {
+            const T = Of(unknownBit(u));
+            var d: T.Lanes = @splat(0);
+            if (comptime lane[u] != contract.no_lane) d[comptime T.pos(lane[u])] = 1;
+            return .{ .v = v, .d = d };
+        }
+        /// `a` where the indicator `c` is nonzero, else `b`, lanes included.
+        pub fn sel(c: anytype, a: anytype, b: anytype) Val(@TypeOf(a).lanes | @TypeOf(b).lanes) {
+            const r = @TypeOf(a).lanes | @TypeOf(b).lanes;
+            return if (c.v != 0.0) a.toLanes(r) else b.toLanes(r);
+        }
+
+        /// A value carrying the lanes in `ls`, in ascending lane order.
+        fn Val(comptime ls: u64) type {
+            return struct {
+                v: f64,
+                /// Aligned to the element, not the vector: natural vector
+                /// alignment pads 8 f64 lanes from 72 to 128 bytes, and
+                /// nothing reads `d` through a pointer that needs it.
+                d: Lanes align(@alignOf(F)),
+
+                pub const lanes = ls;
+                const Lanes = @Vector(width(ls), F);
+                const T = @This();
+
+                /// Where lane `l` sits in `d`.
+                fn pos(comptime l: usize) usize {
+                    return @popCount(ls & ((@as(u64, 1) << l) - 1));
+                }
+                inline fn k(c: f64) Lanes {
+                    return @splat(@floatCast(c));
+                }
+                inline fn map(a: T, v: f64, c: f64) T {
+                    return .{ .v = v, .d = a.d * k(c) };
+                }
+                /// These lanes laid out as `to_ls`'s. New and pad lanes are +0.
+                inline fn spread(a: T, comptime to_ls: u64) @Vector(width(to_ls), F) {
+                    if (ls & ~to_ls != 0) @compileError("Dual: lanes do not widen");
+                    if (ls == to_ls) return a.d;
+                    if (ls == 0) return @splat(0);
+                    const idx = comptime blk: {
+                        var idx: [width(to_ls)]i32 = @splat(-1);
+                        var j: usize = 0;
+                        for (0..64) |l| if ((to_ls >> l) & 1 != 0) {
+                            if ((ls >> l) & 1 != 0) idx[j] = pos(l);
+                            j += 1;
+                        };
+                        break :blk idx;
+                    };
+                    return @shuffle(F, a.d, @as(@Vector(1, F), @splat(0)), idx);
+                }
+                fn toLanes(a: T, comptime to_ls: u64) Val(to_ls) {
+                    return .{ .v = a.v, .d = a.spread(to_ls) };
+                }
+
+                pub fn to(a: T, comptime m: u64) Of(m) {
+                    return a.toLanes(Of(m).lanes);
+                }
+                pub fn val(a: T) f64 {
+                    return a.v;
+                }
+                /// The partial with respect to unknown `u`, widened to f64.
+                pub fn ddxAt(a: T, comptime u: usize) f64 {
+                    const l = lane[u];
+                    if (comptime l == contract.no_lane or (ls >> l) & 1 == 0) return 0.0;
+                    return a.d[comptime pos(l)];
+                }
+                /// Every lane widened to f64, pad lanes included, so `F`
+                /// never leaks past the arithmetic.
+                pub inline fn grad(a: T) @Vector(width(ls), f64) {
+                    return if (F == f64) a.d else @floatCast(a.d);
+                }
+
+                pub fn add(a: T, b: anytype) Val(ls | @TypeOf(b).lanes) {
+                    const r = ls | @TypeOf(b).lanes;
+                    return .{ .v = a.v + b.v, .d = a.spread(r) + b.spread(r) };
+                }
+                pub fn sub(a: T, b: anytype) Val(ls | @TypeOf(b).lanes) {
+                    const r = ls | @TypeOf(b).lanes;
+                    return .{ .v = a.v - b.v, .d = a.spread(r) - b.spread(r) };
+                }
+                pub fn neg(a: T) T {
+                    return .{ .v = -a.v, .d = -a.d };
+                }
+                pub fn mul(a: T, b: anytype) Val(ls | @TypeOf(b).lanes) {
+                    const B = @TypeOf(b);
+                    const J = Val(ls | B.lanes);
+                    if (B.lanes == 0) return .{ .v = a.v * b.v, .d = a.spread(J.lanes) * J.k(b.v) };
+                    if (ls == 0) return .{ .v = a.v * b.v, .d = b.spread(J.lanes) * J.k(a.v) };
+                    return .{ .v = a.v * b.v, .d = mulAddV(J.Lanes, b.spread(J.lanes), J.k(a.v), a.spread(J.lanes) * J.k(b.v)) };
+                }
+                pub fn div(a: T, b: anytype) Val(ls | @TypeOf(b).lanes) {
+                    const B = @TypeOf(b);
+                    const J = Val(ls | B.lanes);
+                    const inv = 1.0 / b.v;
+                    const q = a.v * inv;
+                    if (B.lanes == 0) return .{ .v = q, .d = a.spread(J.lanes) * J.k(inv) };
+                    return .{ .v = q, .d = mulAddV(J.Lanes, b.spread(J.lanes), J.k(-q), a.spread(J.lanes)) * J.k(inv) };
+                }
+                pub fn scale(a: T, c: f64) T {
+                    return map(a, a.v * c, c);
+                }
+                pub fn addC(a: T, c: f64) T {
+                    return .{ .v = a.v + c, .d = a.d };
+                }
+                pub fn exp(a: T) T {
+                    const e = dmath.exp(a.v);
+                    return map(a, e, e);
+                }
+                pub fn log(a: T) T {
+                    return map(a, dmath.log(a.v), 1.0 / a.v);
+                }
+                /// Same value operation as VerA's precompute scalar, so the
+                /// two agree.
+                pub fn expm1(a: T) T {
+                    return map(a, dmath.expm1(a.v), dmath.exp(a.v));
+                }
+                pub fn log1p(a: T) T {
+                    return map(a, std.math.log1p(a.v), 1.0 / (1.0 + a.v));
+                }
+                pub fn sqrt(a: T) T {
+                    const s = @sqrt(a.v);
+                    return map(a, s, if (s > 0.0) 0.5 / s else 0.0);
+                }
+                pub fn sin(a: T) T {
+                    return map(a, dmath.sin(a.v), dmath.cos(a.v));
+                }
+                pub fn cos(a: T) T {
+                    return map(a, dmath.cos(a.v), -dmath.sin(a.v));
+                }
+                pub fn tanh(a: T) T {
+                    const th = dmath.tanh(a.v);
+                    return map(a, th, 1.0 - th * th);
+                }
+                /// `x^c`, slope `c·x^c/x`: one `pow`, exact for x != 0 (LRM
+                /// §4.3.1 negative bases included). At x == 0 the slope takes
+                /// a second `pow` because `c·p/x` is 0/0 there and c == 1
+                /// must still give slope 1. A non-finite slope becomes 0.
+                pub fn pow(a: T, c: f64) T {
+                    const p = dmath.pow(a.v, c);
+                    const slope = if (a.v != 0.0) c * p / a.v else c * dmath.pow(a.v, c - 1.0);
+                    return map(a, p, if (std.math.isFinite(slope)) slope else 0.0);
+                }
+                pub fn atan(a: T) T {
+                    return map(a, dmath.atan(a.v), 1.0 / (1.0 + a.v * a.v));
+                }
+                pub fn sinh(a: T) T {
+                    return map(a, dmath.sinh(a.v), dmath.cosh(a.v));
+                }
+                pub fn cosh(a: T) T {
+                    return map(a, dmath.cosh(a.v), dmath.sinh(a.v));
+                }
+                // Comparisons return a 0/1 indicator without lanes; `sel`
+                // carries the lanes of the operand it picks.
+                pub fn lt(a: T, b: anytype) Of(0) {
+                    return con(@floatFromInt(@intFromBool(a.v < b.v)));
+                }
+                pub fn le(a: T, b: anytype) Of(0) {
+                    return con(@floatFromInt(@intFromBool(a.v <= b.v)));
+                }
+                pub fn eq(a: T, b: anytype) Of(0) {
+                    return con(@floatFromInt(@intFromBool(a.v == b.v)));
+                }
+            };
         }
     };
 }
 
-/// Value-only device scalar for `evalQRange`. Every method is the `.v` line of
-/// the matching `Dual` method verbatim (reciprocal-multiply `div`, sign-test
-/// `abs`, the same min/max tie rule), so any pass that reads only `.v` gets
-/// bit-identical values without paying for the gradient. VerA's own `R`
-/// scalar is private to each generated device, hence this copy.
+inline fn mulAddV(comptime Vec: type, a: Vec, b: Vec, c: Vec) Vec {
+    return if (fma_ok) @mulAdd(Vec, a, b, c) else a * b + c;
+}
+
+/// Value-only family for the paths that read no partial: `evalQRange`, the
+/// charge-tape kernel and every value entry point (`setup`, `limit`,
+/// `updateState`, ...). Every method is the `.v` line of the matching
+/// `DualFor` method verbatim, so it computes the bits `eval` computes
+/// without paying for the gradient.
 fn RealFor(comptime collapsed: bool) type {
     return struct {
         v: f64,
 
         const Self = @This();
         pub const collapse_applied = collapsed;
+        pub const V = f64;
+        pub const lanes: u64 = 0;
 
-        pub fn seed(value: f64, comptime _: usize) Self {
-            return .{ .v = value };
+        pub fn Of(comptime _: u64) type {
+            return Self;
         }
         pub fn con(c: f64) Self {
             return .{ .v = c };
+        }
+        pub fn probe(comptime _: usize, v: f64) Self {
+            return .{ .v = v };
+        }
+        pub fn sel(c: Self, a: Self, b: Self) Self {
+            return if (c.v != 0.0) a else b;
+        }
+        pub fn to(a: Self, comptime _: u64) Self {
+            return a;
         }
         pub fn val(a: Self) f64 {
             return a.v;
         }
         /// Always 0; the contract requires the accessor.
-        pub fn ddxAt(_: Self, _: usize) f64 {
+        pub fn ddxAt(_: Self, comptime _: usize) f64 {
             return 0.0;
         }
         pub fn add(a: Self, b: Self) Self {
@@ -224,7 +326,7 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn mul(a: Self, b: Self) Self {
             return .{ .v = a.v * b.v };
         }
-        // Reciprocal-multiply, not `/`: matches `Dual.div` to the last bit.
+        // Reciprocal-multiply, not `/`: matches `DualFor.div` to the last bit.
         pub fn div(a: Self, b: Self) Self {
             return .{ .v = a.v * (1.0 / b.v) };
         }
@@ -267,24 +369,8 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn atan(a: Self) Self {
             return .{ .v = dmath.atan(a.v) };
         }
-        // Sign test, not `@abs`: matches `Dual.abs`, which keeps -0.
-        pub fn abs(a: Self) Self {
-            return if (a.v < 0) a.neg() else a;
-        }
-        pub fn minC(a: Self, c: f64) Self {
-            return if (a.v > c) con(c) else a;
-        }
-        pub fn maxC(a: Self, c: f64) Self {
-            return if (a.v < c) con(c) else a;
-        }
         pub fn pow(a: Self, c: f64) Self {
             return .{ .v = dmath.pow(a.v, c) };
-        }
-        pub fn max(a: Self, b: Self) Self {
-            return if (a.v >= b.v) a else b;
-        }
-        pub fn min(a: Self, b: Self) Self {
-            return if (a.v <= b.v) a else b;
         }
         pub fn lt(a: Self, b: Self) Self {
             return con(@floatFromInt(@intFromBool(a.v < b.v)));
@@ -295,11 +381,11 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn eq(a: Self, b: Self) Self {
             return con(@floatFromInt(@intFromBool(a.v == b.v)));
         }
-        pub fn sel(c: Self, a: Self, b: Self) Self {
-            return if (c.v != 0.0) a else b;
-        }
     };
 }
+
+/// The value-only family every non-eval entry point runs on.
+const Real = RealFor(false);
 
 /// Derivative width of `Dual` for device D on the host. f32 only when the
 /// device declares `jac_f32_host`: the f32 Jacobian helps some CPU decks and
@@ -429,56 +515,54 @@ fn lteSites(comptime D: type) []const usize {
 /// The derivative basis `evalRange` seeds: `w` lanes, and the lane each
 /// unknown seeds into.
 ///
-/// Wide: one lane per unknown. Narrow, for an instance whose collapse is
+/// Only the unknowns in `contract.derivReads` get a lane: the device reads
+/// the others as constants and `jac_const` holds their exact partials. Wide:
+/// one lane per read unknown. Narrow, for an instance whose collapse is
 /// maximal (`collapse_full`): every merged set is one circuit node, its
 /// columns share a matrix slot, and one shared lane computes the summed entry
-/// the solver sees. mos1 goes from 8 lanes to 4, one ymm instead of two.
+/// the solver sees. mos1 goes from 6 lanes to 4, one ymm instead of two.
 const Basis = struct {
     w: usize,
-    /// `lane[u]` is the lane unknown `u` seeds.
+    /// `lane[u]` is the lane unknown `u` seeds, or `contract.no_lane`.
     lane: []const u8,
 };
 
 fn basisOf(comptime D: type, comptime narrow: bool) Basis {
     const n_u = contract.nU(D);
-    var lane: [n_u]u8 = undefined;
+    const reads = contract.derivReads(D);
+    var lane: [n_u]u8 = @splat(contract.no_lane);
+    var of_root: [n_u]u8 = @splat(contract.no_lane);
     var w: usize = 0;
-    if (!narrow) {
-        for (&lane, 0..) |*l, u| l.* = @intCast(u);
-        w = n_u;
-    } else {
-        // The contract guarantees `collapse_full` is resolved and aliases
-        // downward, so each root precedes its aliases.
-        var of_root: [n_u]u8 = @splat(0);
-        for (0..n_u) |u| {
-            if (D.collapse_full[u]) |r| {
-                lane[u] = of_root[r];
-            } else {
-                of_root[u] = @intCast(w);
-                lane[u] = @intCast(w);
-                w += 1;
-            }
+    for (0..n_u) |u| {
+        if (u < 64 and (reads >> u) & 1 == 0) continue;
+        // The contract guarantees `collapse_full` is resolved.
+        const root = if (narrow) D.collapse_full[u] orelse u else u;
+        if (of_root[root] == contract.no_lane) {
+            of_root[root] = @intCast(w);
+            w += 1;
         }
+        lane[u] = of_root[root];
     }
     const l = lane;
     return .{ .w = w, .lane = &l };
 }
 
 /// One pattern half with a single representative column kept per lane, so a
-/// shared lane is stamped once. Computed per half because `g_vals` and
+/// shared lane is stamped once; columns without a lane are dropped (their
+/// partials come from `jac_const`). Computed per half because `g_vals` and
 /// `c_vals` are separate planes.
 ///
 /// The representative is the lowest alias, not the root: that is the column
 /// the wide kernel stamps, so a slot shared with an unrelated column (a gate
 /// tied to its drain) sums in the same order and the output stays
 /// byte-identical. `alias[cu]` is `collapse_full[cu] != null`; all-false makes
-/// this the identity.
+/// this the identity on the laned columns.
 fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]bool, comptime pat: [n_u]u64) [n_u]u64 {
     var out: [n_u]u64 = @splat(0);
     for (&out, pat) |*m, row| {
         var rep: [n_u]?usize = @splat(null);
         for (0..n_u) |cu| {
-            if ((row >> @intCast(cu)) & 1 == 0) continue;
+            if ((row >> @intCast(cu)) & 1 == 0 or lane[cu] == contract.no_lane) continue;
             const cur = rep[lane[cu]];
             // First column of the lane wins, then any alias beats a root.
             if (cur == null or (!alias[cur.?] and alias[cu])) rep[lane[cu]] = cu;
@@ -490,10 +574,18 @@ fn repMask(comptime n_u: usize, comptime lane: [n_u]u8, comptime alias: [n_u]boo
     return out;
 }
 
+/// The `jac_const` entry for local (row `ru`, column `cu`), if any.
+fn constEntry(comptime D: type, comptime ru: usize, comptime cu: usize) ?contract.JacConst(D.U) {
+    for (contract.jacConst(D)) |e| {
+        if (@intFromEnum(e.row) == ru and @intFromEnum(e.col) == cu) return e;
+    }
+    return null;
+}
+
 /// Whether D gets a second `evalRange` instantiation on the narrow basis for
 /// its fully collapsed instances. It pays only when it saves a register on
 /// AVX2 (docs/perf/remaining-2026-09-10.md): the wide dual spans two ymm
-/// (4 < n_u <= 8) and the narrow one fits in one (w <= 4). That admits
+/// (4 < w <= 8) and the narrow one fits in one (w <= 4). That admits
 /// mos1/2/3/6/9, bsim1, bsim3, hfet2, jfet and mes.
 ///
 /// Limiting adds a correctness gate: the correction is stored per lane, so no
@@ -505,7 +597,7 @@ fn canNarrow(comptime D: type) bool {
     const n_u = contract.nU(D);
     if (n_u > 8 or n_u <= 4) return false;
     const b = comptime basisOf(D, true);
-    if (b.w > 4 or b.w >= n_u) return false;
+    if (b.w > 4 or b.w >= comptime basisOf(D, false).w) return false;
     if (@hasDecl(D, "limit")) {
         var seen: [n_u]bool = @splat(false);
         const writes = contract.limitWrites(D);
@@ -525,12 +617,13 @@ fn canNarrow(comptime D: type) bool {
 /// only on maximally collapsed instances, which `ProtoStore.finalize` sorts to
 /// `[0, narrow_count)`. `F` is the derivative width: `jacFloat(D)` on the
 /// host, `gpuJacFloat(D)` in `DeviceKernel`.
-fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: anytype, first: u32, end: u32, t: f64, limiting: bool) void {
+fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
     @setFloatMode(.optimized);
     const n_u = comptime contract.nU(D);
     const has_limit = comptime @hasDecl(D, "limit");
+    const reads = comptime contract.derivReads(D);
     const jac_pat = comptime rowPattern(D, "jac_pattern");
     const q_pat = comptime rowPattern(D, "q_pattern");
     const jac_row = comptime writtenRows(D, "jac_rows");
@@ -548,7 +641,9 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
     };
     const jac_rep = comptime repMask(n_u, lane, alias, jac_pat);
     const q_rep = comptime repMask(n_u, lane, alias, q_pat);
-    const S = DualFor(if (!SinkT.on_device and padsLanes(D, narrow)) std.mem.alignForward(usize, W, 4) else W, F, @hasDecl(D, "collapse"));
+    const S = DualFor(F, &lane, .{ .dense = true, .pad = !SinkT.on_device and padsLanes(D, narrow) }, @hasDecl(D, "collapse"));
+    // Every lane of the basis: the layout the limiting correction sums in.
+    const full = comptime S.Of(reads).lanes;
     const use_lim = if (comptime has_limit) limiting else false;
     const lim_writes = comptime if (has_limit) contract.limitWrites(D) else 0;
     const has_q = comptime @hasDecl(D, "q");
@@ -584,45 +679,45 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
         // Near convergence the limiter leaves almost every instance alone, so
         // one test skips the correction dot products.
         const corr_live = use_lim and anyNonzero(W, corr);
+        const model = sink.model(id);
 
-        // Values stay per unknown even when lanes merge: a limited `di` and
-        // its node `d` hold different numbers.
-        var xv: [n_u]S = undefined;
-        inline for (0..n_u) |u| xv[u] = S.seed(lx[u], lane[u]);
-
-        var out: [n_u]S = undefined;
         // `q` returns one charge per ddt site. The planes take the rows
         // (`qRows`); the host `q_tape` takes the LTE sites.
-        var qs: if (has_q) [contract.nQ(D)]S else void = undefined;
-        var qo: if (has_q) [n_u]S else void = undefined;
+        var out: contract.Rows(D, S) = undefined;
+        var qs: if (has_q) contract.Sites(D, S) else void = undefined;
         if (comptime fuse) {
-            const both = @call(.always_inline, D.evalQ, .{ S, xv, sink.model(id), sink.inst(id), t });
+            const both = @call(.always_inline, D.evalQ, .{ S, &lx, model, sink.inst(id), sim });
             out = both.res;
             qs = both.q;
         } else {
-            out = D.eval(S, xv, sink.model(id), sink.inst(id), t);
-            if (comptime has_q) qs = D.q(S, xv, sink.model(id), sink.inst(id), t);
+            out = D.eval(S, &lx, model, sink.inst(id), sim);
+            if (comptime has_q) qs = D.q(S, &lx, model, sink.inst(id), sim);
         }
-        if (comptime has_q) qo = contract.qRows(D, S, qs);
+        const qo = if (comptime has_q) contract.qRows(D, S, qs) else {};
 
         // Rows the device never writes (`jac_row`) and entries it can never
         // fill (`jac_pat`) are dropped at comptime; the planes start at +0.0,
         // so a skipped `+= 0.0` cannot even change a sign bit. Resistive and
         // reactive halves stay in separate passes: fusing them measured
-        // slower on the mos1 kernel from register pressure.
+        // slower on the mos1 kernel from register pressure. A column without
+        // a lane stamps its `jac_const` partial in the same (row, column)
+        // order, so a shared slot sums as the tape orders it.
         inline for (0..n_u) |ru| if (comptime jac_row[ru]) if (!mask_ground or active[ru]) {
             const row = sink.rhsRow(id, ru);
             var val = out[ru].v;
-            if (comptime has_limit) {
-                // The correction lands on the f64 residual. An empty pattern
-                // row has zero gradient, so it has no correction either.
-                if (corr_live and comptime jac_pat[ru] != 0) val += @reduce(.Add, head(W, out[ru].grad()) * corr);
+            if (comptime has_limit and @TypeOf(out[ru]).lanes != 0) {
+                // The correction lands on the f64 residual. A row without
+                // lanes has zero gradient, so it has no correction either.
+                if (corr_live) val += @reduce(.Add, head(W, out[ru].toLanes(full).grad()) * corr);
             }
             sink.scatterRes(row, val);
             if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
-                const g = out[ru].grad();
-                inline for (0..n_u) |cu| if (comptime (jac_rep[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
-                    sink.scatterJac(id, ru, cu, g[lane[cu]]);
+                inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
+                    if (comptime (jac_rep[ru] >> cu) & 1 != 0) {
+                        sink.scatterJac(id, ru, cu, out[ru].ddxAt(cu));
+                    } else if (comptime constEntry(D, ru, cu)) |e| {
+                        if (comptime e.g != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterJac(id, ru, cu, e.g);
+                    }
                 };
             }
         };
@@ -634,23 +729,26 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, sink: an
             inline for (0..n_u) |ru| if (comptime q_row[ru]) {
                 const row = sink.rhsRow(id, ru);
                 var qv = qo[ru].v;
-                if (comptime has_limit) {
-                    if (corr_live and comptime q_pat[ru] != 0) qv += @reduce(.Add, head(W, qo[ru].grad()) * corr);
+                if (comptime has_limit and @TypeOf(qo[ru]).lanes != 0) {
+                    if (corr_live) qv += @reduce(.Add, head(W, qo[ru].toLanes(full).grad()) * corr);
                 }
                 sink.scatterQ(row, qv);
                 if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
                     if (!mask_ground or active[ru]) {
-                        const gq = qo[ru].grad();
-                        inline for (0..n_u) |cu| if (comptime (q_rep[ru] >> cu) & 1 != 0) if (!mask_ground or active[cu]) {
-                            sink.scatterQJac(id, ru, cu, gq[lane[cu]]);
+                        inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
+                            if (comptime (q_rep[ru] >> cu) & 1 != 0) {
+                                sink.scatterQJac(id, ru, cu, qo[ru].ddxAt(cu));
+                            } else if (comptime constEntry(D, ru, cu)) |e| {
+                                if (comptime e.c != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterQJac(id, ru, cu, e.c);
+                            }
                         };
                     }
                 }
             };
             if (comptime !SinkT.on_device) inline for (comptime lteSites(D), 0..) |k, j| {
                 var qv = qs[k].v;
-                if (comptime has_limit) {
-                    if (corr_live) qv += @reduce(.Add, head(W, qs[k].grad()) * corr);
+                if (comptime has_limit and @TypeOf(qs[k]).lanes != 0) {
+                    if (corr_live) qv += @reduce(.Add, head(W, qs[k].toLanes(full).grad()) * corr);
                 }
                 sink.tapeQ(id, j, qv);
             };
@@ -703,16 +801,16 @@ inline fn anyNonzero(comptime w: usize, v: @Vector(w, f64)) bool {
 /// reassembling at the accepted iterate, so the planes still hold the
 /// previous iterate's charge. The limiting correction is skipped because
 /// limits are cleared before Newton returns.
-fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, t: f64) void {
+fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, sim: SimState) void {
     @setEvalBranchQuota(1_000_000);
     @setFloatMode(.optimized);
     const n_u = comptime contract.nU(D);
     const q_row = comptime writtenRows(D, "q_rows");
     var id: u32 = first;
     while (id < end) : (id += 1) {
-        var xv: [n_u]S = undefined;
-        inline for (0..n_u) |u| xv[u] = S.seed(sink.x(sink.gath(id, u)), u);
-        const qs = D.q(S, xv, sink.model(id), sink.inst(id), t);
+        var lx: [n_u]f64 = undefined;
+        inline for (0..n_u) |u| lx[u] = sink.x(sink.gath(id, u));
+        const qs = D.q(S, &lx, sink.model(id), sink.inst(id), sim);
         const qo = contract.qRows(D, S, qs);
         // Same `q_row` gate as `evalRange`, or the two passes would differ.
         inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(sink.rhsRow(id, ru), qo[ru].v);
@@ -730,7 +828,7 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
 /// equals the previous limited copy whenever `postStep` runs once per `x_old`
 /// update, which holds on every CPU path (only GPU backtracking calls it
 /// twice).
-fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool) f64 {
+fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool, sim: SimState) f64 {
     const n_u = comptime contract.nU(D);
     // The device's read and write sets; a MOS ladder reads 4 of its 8
     // unknowns and writes 2. All ones when the device does not declare them.
@@ -754,7 +852,7 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
         };
         // A plain call on purpose. LLVM inlines it anyway; forcing
         // `.always_inline` measured 0.2-0.3% slower.
-        const lm = D.limit(sink.model(id), sink.inst(id), cur, old);
+        const lm = D.limit(Real, sink.model(id), sink.inst(id), cur, old, sim);
         if (!lm.converged) flag = 1;
         inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
             sink.setLim(id, u, lm.x[u]);
@@ -828,6 +926,7 @@ pub fn ProtoStore(comptime D: type) type {
             const store = try gpa.create(DeviceBatch(D));
 
             store.count = count;
+            store.sim = .{};
             store.owns_tapes = true;
             store.models = &.{};
             store.instances = &.{};
@@ -873,7 +972,7 @@ pub fn ProtoStore(comptime D: type) type {
             // `setup` before `initState`: both read the card, and only the
             // former fills `Instance.su`.
             if (comptime @hasDecl(D, "setup")) {
-                for (0..count) |i| D.setup(Dual(1, f64), &store.models[i], &store.instances[i]);
+                for (0..count) |i| D.setup(Real, &store.models[i], &store.instances[i]);
             }
             if (comptime @hasDecl(D, "State")) {
                 store.states = try gpa.alloc(D.State, count);
@@ -896,7 +995,7 @@ pub fn ProtoStore(comptime D: type) type {
             defer staging_gpa.free(flags);
             var n: usize = 0;
             for (self.rows.items(.model), self.rows.items(.instance), flags) |*m, *i, *f| {
-                f.* = std.meta.eql(D.collapse(m, i), D.collapse_full);
+                f.* = std.meta.eql(D.collapse(Real, m, i), D.collapse_full);
                 if (f.*) n += 1;
             }
             if (n != 0 and n != self.rows.len) {
@@ -998,13 +1097,6 @@ pub fn DeviceBatch(comptime D: type) type {
     const has_q = @hasDecl(D, "q");
     const has_attempt = @hasDecl(D, "attempt");
     const has_limit = @hasDecl(D, "limit");
-    // A device that reads no host-owned field gets a null `set_sim_state`, so
-    // the per-timepoint sweep skips it.
-    const has_sim_state = @hasField(D.Instance, "abstime") or
-        @hasField(D.Instance, "dt") or
-        @hasField(D.Instance, "analysis_kind") or
-        @hasField(D.Instance, "is_initial_step") or
-        @hasField(D.Instance, "is_final_step");
     const narrowable = canNarrow(D);
     // Only timer-only models: their breakpoints are pure in (model, t).
     // Native lines rewrite `Model.brk` as they step, so theirs are not.
@@ -1027,6 +1119,9 @@ pub fn DeviceBatch(comptime D: type) type {
         bp: if (has_bp) struct { lo: f64, hi: f64 } else void,
         lim_x: if (has_limit) []f64 else void,
         lim_active: if (has_limit) bool else void,
+        /// The analysis state every device call receives; `eval` takes `t`
+        /// from its own argument.
+        sim: SimState = .{},
         instances: []D.Instance,
         states: if (has_state) []D.State else void,
         gath: []u32,
@@ -1047,7 +1142,6 @@ pub fn DeviceBatch(comptime D: type) type {
             .eval_q = if (has_q) evalQOnly else null,
             .apply_limits = if (has_limit) applyLimits else null,
             .clear_limits = if (has_limit) clearLimits else null,
-            .begin_solve = if (@hasDecl(D, "beginSolve")) beginSolve else null,
             .advance_iteration = if (@hasDecl(D, "advanceIteration")) advanceIteration else null,
             .check_convergence = if (@hasDecl(D, "checkConvergence")) checkConvergence else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
@@ -1061,7 +1155,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // Only `updateState` writes `bound_step`.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step") and !skipsTimerState(D)) boundStep else null,
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
-            .set_sim_state = if (has_sim_state) setSimState else null,
+            .set_sim_state = setSimState,
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
             .next_breakpoint = if (@hasDecl(D, "nextBreakpoint")) nextBreakpointFn else null,
             .collect_params = collectParams,
@@ -1091,7 +1185,7 @@ pub fn DeviceBatch(comptime D: type) type {
             var sink = Sink(D, false, false).host(self, pl, x, undefined);
             // Without `always_inline` LLVM moves mos6's charge core out of
             // line, measured +0.9% on devices/mos6_inverter.
-            @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, t });
+            @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, self.simAt(t) });
         }
 
         fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {
@@ -1109,14 +1203,22 @@ pub fn DeviceBatch(comptime D: type) type {
             const limiting = if (comptime has_limit) self.lim_active else false;
             var sink = Sink(D, false, skip_const).host(self, pl, x, undefined);
             const F = jacFloat(D);
+            const sim = self.simAt(t);
             if (comptime narrowable) {
                 // A ParEval slice may straddle the partition boundary.
                 const split = std.math.clamp(self.narrow_count, first, last);
-                if (split > first) evalRange(D, true, F, &sink, first, split, t, limiting);
-                if (last > split) evalRange(D, false, F, &sink, split, last, t, limiting);
+                if (split > first) evalRange(D, true, F, &sink, first, split, sim, limiting);
+                if (last > split) evalRange(D, false, F, &sink, split, last, sim, limiting);
             } else {
-                evalRange(D, false, F, &sink, first, last, t, limiting);
+                evalRange(D, false, F, &sink, first, last, sim, limiting);
             }
+        }
+
+        /// The stored analysis state at eval time `t`.
+        fn simAt(self: *const Self, t: f64) SimState {
+            var sim = self.sim;
+            sim.t = t;
+            return sim;
         }
 
         fn localX(self: *Self, x: []const f64, id: usize) [n_u]f64 {
@@ -1125,21 +1227,16 @@ pub fn DeviceBatch(comptime D: type) type {
             return out;
         }
 
-        fn beginSolve(ctx: *anyopaque) void {
-            const self: *Self = @ptrCast(@alignCast(ctx));
-            for (self.instances) |*inst| D.beginSolve(inst);
-        }
-
         fn advanceIteration(ctx: *anyopaque, previous_x: []const f64) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id|
-                D.advanceIteration(&self.models[id], &self.instances[id], self.localX(previous_x, id));
+                D.advanceIteration(Real, &self.models[id], &self.instances[id], self.localX(previous_x, id), self.sim);
         }
 
         fn checkConvergence(ctx: *anyopaque, x: []const f64) bool {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
-                if (!D.checkConvergence(&self.models[id], &self.instances[id], self.localX(x, id))) return false;
+                if (!D.checkConvergence(Real, &self.models[id], &self.instances[id], self.localX(x, id), self.sim)) return false;
             }
             return true;
         }
@@ -1150,7 +1247,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 // Only the slots `limitRange` maintains are ever read back.
                 const writes = comptime contract.limitWrites(D);
                 for (0..self.count) |id| {
-                    const sv = D.seed(&self.models[id], &self.instances[id]);
+                    const sv = D.seed(Real, &self.models[id], &self.instances[id], self.sim);
                     inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
                         self.lim_x[id * n_u + u] = sv[u] orelse x[self.gath[id * n_u + u]];
                     };
@@ -1186,7 +1283,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // pointers, and `undefined` would trap in Debug.
             const no_planes: Planes = .{ .g_vals = &.{}, .c_vals = &.{}, .rhs = &.{}, .q_vec = &.{} };
             var sink = Sink(D, false, false).host(self, &no_planes, x, x_old.ptr);
-            const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active);
+            const any = limitRange(D, &sink, 0, @intCast(self.count), self.lim_active, self.sim);
             self.lim_active = true;
             return any != 0;
         }
@@ -1205,7 +1302,7 @@ pub fn DeviceBatch(comptime D: type) type {
             var min_reject: ?f64 = null;
             for (0..self.count) |id| {
                 const lx = self.localX(x, id);
-                switch (D.updateState(&self.models[id], &self.instances[id], lx, &self.states[id])) {
+                switch (D.updateState(Real, &self.models[id], &self.instances[id], lx, &self.states[id], self.sim)) {
                     .ok => {},
                     .request_reject_at => |tr| {
                         min_reject = if (min_reject) |cur| @min(cur, tr) else tr;
@@ -1241,19 +1338,9 @@ pub fn DeviceBatch(comptime D: type) type {
             self.reprep();
         }
 
-        /// Writes the host-owned Instance fields a device declares. No
-        /// `setup`/`precompute` rerun: they depend only on parameters, never on these.
         fn setSimState(ctx: *anyopaque, st: SimState) void {
             const self: *Self = @ptrCast(@alignCast(ctx));
-            for (self.instances) |*inst| {
-                if (comptime @hasField(D.Instance, "abstime")) inst.abstime = st.t;
-                if (comptime @hasField(D.Instance, "dt")) inst.dt = st.dt;
-                // The device declares its own AnalysisKind enum; convert by ordinal.
-                if (comptime @hasField(D.Instance, "analysis_kind"))
-                    inst.analysis_kind = @enumFromInt(@intFromEnum(st.kind));
-                if (comptime @hasField(D.Instance, "is_initial_step")) inst.is_initial_step = st.initial_step;
-                if (comptime @hasField(D.Instance, "is_final_step")) inst.is_final_step = st.final_step;
-            }
+            self.sim = st;
         }
 
         fn applyAttempt(ctx: *anyopaque, lambda: f64) void {
@@ -1303,7 +1390,7 @@ pub fn DeviceBatch(comptime D: type) type {
             self.reprep();
             if (comptime @hasDecl(D, "collapse")) {
                 for (self.models, self.instances, 0..) |*model, *inst, id| {
-                    const col = D.collapse(model, inst);
+                    const col = D.collapse(Real, model, inst);
                     const nd = self.gath[id * n_u ..][0..n_u];
                     inline for (D.num_ports..n_u) |u| {
                         if (col[u]) |target| {
@@ -1321,7 +1408,7 @@ pub fn DeviceBatch(comptime D: type) type {
         fn reprep(self: *Self) void {
             if (comptime has_bp) self.bp.lo = std.math.inf(f64);
             if (comptime @hasDecl(D, "setup")) {
-                for (self.instances, self.models) |*inst, *mdl| D.setup(Dual(1, f64), mdl, inst);
+                for (self.instances, self.models) |*inst, *mdl| D.setup(Real, mdl, inst);
             }
             if (comptime @hasDecl(D, "precompute")) {
                 for (self.instances, self.models) |*inst, *mdl| D.precompute(inst, mdl);
@@ -1372,7 +1459,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (comptime paramField(T, field)) {
                     const primary = comptime if (@hasDecl(D, "mc_param"))
                         std.mem.eql(u8, field.name, D.mc_param)
-                    else if (@hasDecl(D, "AnalysisKind"))
+                    else if (isVera(D))
                         !is_instance and field_idx == 0
                     else
                         is_instance and field_idx == 0;
@@ -1403,7 +1490,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // the retention flag `derive` writes (contract `JacWhen`).
             if (comptime std.mem.endsWith(u8, field.name, "__") or
                 std.mem.endsWith(u8, field.name, "__retained")) return false;
-            if (@hasDecl(D, "AnalysisKind") and T == D.Instance) {
+            if (isVera(D) and T == D.Instance) {
                 // A VerA Instance holds runtime state; only these two are
                 // parameters.
                 const knobs = std.StaticStringMap(void).initComptime(.{
@@ -1425,7 +1512,7 @@ pub fn DeviceBatch(comptime D: type) type {
         fn collectNoiseLocal(ctx: *anyopaque, x: []const f64, gpa: std.mem.Allocator, list: *std.ArrayList(NoiseSource)) error{OutOfMemory}!void {
             const self: *Self = @ptrCast(@alignCast(ctx));
             for (0..self.count) |id| {
-                const terms = D.noisePsd(self.localX(x, id), &self.models[id], &self.instances[id]);
+                const terms = D.noisePsd(Real, self.localX(x, id), &self.models[id], &self.instances[id], self.sim);
                 inline for (D.noise_gens, 0..) |gen, k| {
                     // Term k belongs to generator k (noise-contract.md §3).
                     // `@abs` matches ngspice nevalsrc.c:106. Correlation is
@@ -1538,6 +1625,13 @@ pub fn DeviceBatch(comptime D: type) type {
             gpa.destroy(self);
         }
     };
+}
+
+/// Whether VerA generated D (every VerA device declares `lane_masks`; the
+/// hand-written ones do not). A VerA Instance holds runtime state beside its
+/// two parameters.
+fn isVera(comptime D: type) bool {
+    return @hasDecl(D, "lane_masks");
 }
 
 /// Whether D gets GPU kernels. Excluded, and kept on the host:
@@ -1734,7 +1828,7 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
     return struct {
         pub fn run(
             count: u64,
-            t: f64,
+            sim: SimState,
             xs: gompute.GlobalPtr(f64),
             gath: gompute.GlobalPtr(u32),
             rhs_idx: gompute.GlobalPtr(u32),
@@ -1769,7 +1863,7 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
             // Always the wide basis here: the kernel arguments carry no
             // `narrow_count`, and they are part of the frozen GPU boundary.
             // ponytail: pass `narrow_count` once narrowing is measured on a GPU.
-            evalRange(D, false, gpuJacFloat(D), &sink, id, id + 1, t, limiting != 0);
+            evalRange(D, false, gpuJacFloat(D), &sink, id, id + 1, sim, limiting != 0);
         }
     };
 }
@@ -1798,6 +1892,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
             states: gompute.GlobalPtr(StateT),
             lim_active: u64,
             flags: gompute.GlobalPtr(u32),
+            sim: SimState,
         ) callconv(gompute.kernel_callconv) void {
             const tid = gompute.globalIdX(block_size);
             if (tid >= count) return;
@@ -1817,7 +1912,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
                 } else {
                     old[u] = x_old[gath[id * n_u + u]];
                 };
-                const lm = D.limit(model, inst_c, cur, old);
+                const lm = D.limit(Real, model, inst_c, cur, old, sim);
                 if (!lm.converged) flag |= 1;
                 inline for (0..n_u) |u| if (comptime (writes >> u) & 1 != 0) {
                     lim[id * n_u + u] = lm.x[u];
@@ -1826,7 +1921,7 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
             if (comptime has_state) {
                 const inst_m: *D.Instance = @addrSpaceCast(&instances[id]);
                 const st: *StateT = @addrSpaceCast(&states[id]);
-                switch (D.updateState(model, inst_m, cur, st)) {
+                switch (D.updateState(Real, model, inst_m, cur, st, sim)) {
                     .ok => {},
                     else => flag |= 2,
                 }
@@ -1886,7 +1981,7 @@ fn QTapeKernel(comptime D: type, comptime block_size: u32) type {
     return struct {
         pub fn run(
             count: u64,
-            t: f64,
+            sim: SimState,
             xs: gompute.GlobalPtr(f64),
             gath: gompute.GlobalPtr(u32),
             models: gompute.GlobalPtr(D.Model),
@@ -1898,9 +1993,9 @@ fn QTapeKernel(comptime D: type, comptime block_size: u32) type {
             if (tid >= count) return;
             const id: usize = @intCast(tid);
             const S = RealFor(@hasDecl(D, "collapse"));
-            var xv: [n_u]S = undefined;
-            inline for (0..n_u) |u| xv[u] = S.seed(xs[gath[id * n_u + u]], u);
-            const qs = D.q(S, xv, @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), t);
+            var lx: [n_u]f64 = undefined;
+            inline for (0..n_u) |u| lx[u] = xs[gath[id * n_u + u]];
+            const qs = D.q(S, &lx, @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), sim);
             inline for (sites, 0..) |k, j| tape[id * sites.len + j] = qs[k].v;
         }
     };
@@ -2021,13 +2116,13 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
 
         fn deriveFn(model: [*]u8) void {
             const m: *D.Model = @ptrCast(@alignCast(model));
-            D.derive(m);
+            D.derive(Real, m);
         }
 
         fn collapseFn(model: [*]const u8, instance: [*]const u8, out: [*]i32) void {
             const m: *const D.Model = @ptrCast(@alignCast(model));
             const i: *const D.Instance = @ptrCast(@alignCast(instance));
-            const col = D.collapse(m, i);
+            const col = D.collapse(Real, m, i);
             inline for (D.num_ports..n_u) |u|
                 out[u] = if (col[u]) |p| @intCast(p) else -1;
         }
@@ -2091,7 +2186,6 @@ comptime {
 
 /// Private decls exposed to the test suites.
 pub const test_access = if (@import("builtin").is_test) .{
-    .DualFor = DualFor,
-    .RealFor = RealFor,
+    .Real = Real,
     .anyNonzero = anyNonzero,
 } else {};

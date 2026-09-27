@@ -35,8 +35,8 @@ extern "c" fn erfc(x: f64) f64;
 
 pub const U = enum(u8) { p1, n1, p2, n2, br1, br2 };
 pub const num_ports: usize = 4;
-/// Hand-written against VerA's device ABI 4 (`contract.abi_version`); review on a bump.
-pub const contract_abi: u32 = 4;
+/// Hand-written against VerA's device ABI 5 (`contract.abi_version`); review on a bump.
+pub const contract_abi: u32 = 5;
 const n_u = contract.nU(Self);
 
 /// The branch rows carry currents, but ngspice creates them with CKTmkVolt
@@ -45,8 +45,6 @@ pub const u_kinds = [n_u]contract.UnknownKind{
     .voltage, .voltage, .voltage, .voltage, .voltage, .voltage,
 };
 pub const u_abstol = [n_u]f64{ 1e-6, 1e-6, 1e-6, 1e-6, 1e-12, 1e-12 };
-
-pub const AnalysisKind = enum(u8) { static, ic, nodeset, dc, tran, ac, noise };
 
 /// The engine's commit_state gate: history pushed by `updateState` cannot be
 /// rolled back, so it must run once per ACCEPTED step, never per Newton
@@ -108,10 +106,7 @@ pub const Model = struct {
 pub const mc_param = "len";
 
 pub const Instance = struct {
-    // Host-owned (engine set_sim_state / bound_step channels).
-    abstime: f64 = 0,
-    dt: f64 = 0,
-    analysis_kind: AnalysisKind = .dc,
+    // Host-owned (engine bound_step channel).
     bound_step: f64 = inf,
 
     // Per-timepoint cache (frozen across Newton iterations; the line is
@@ -721,8 +716,10 @@ pub fn rebuildRc(model: anytype, inst: anytype, t: f64) void {
 // solver the exact Jacobian, including the per-timepoint first coefficients.
 // ---------------------------------------------------------------------------
 
-pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Instance, t: f64) [n_u]S {
-    var res: [n_u]S = undefined;
+pub fn eval(comptime S: type, xv: *const [n_u]S.V, model: *const Model, inst: *const Instance, sim: contract.SimState) contract.Rows(Self, S) {
+    const x = contract.probes(Self, S, xv);
+    const t = sim.t;
+    var res: @TypeOf(x) = undefined;
     const ib1 = x[@intFromEnum(U.br1)];
     const ib2 = x[@intFromEnum(U.br2)];
     res[@intFromEnum(U.p1)] = ib1;
@@ -732,13 +729,13 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Insta
     const v1 = x[@intFromEnum(U.p1)].sub(x[@intFromEnum(U.n1)]);
     const v2 = x[@intFromEnum(U.p2)].sub(x[@intFromEnum(U.n2)]);
 
-    if (inst.dt <= 0.0 or inst.analysis_kind != .tran) {
+    if (sim.dt <= 0.0 or sim.kind != .tran) {
         // ngspice MODEDC: i1 + i2 = 0; v1 − v2 = R·len·i1. (The reference row
         // reads pos1 − pos2 without the negs; the fixtures ground both negs,
         // and the full port difference is the correct generalization.)
         res[@intFromEnum(U.br1)] = ib1.add(ib2);
         res[@intFromEnum(U.br2)] = v1.sub(v2).sub(ib1.scale(model.r * model.len));
-        return res;
+        return contract.rows(Self, S, res);
     }
 
     // The per-timepoint stamp is frozen across Newton iterations (the line is
@@ -764,7 +761,7 @@ pub fn eval(comptime S: type, x: [n_u]S, model: *const Model, inst: *const Insta
                 .sub(ib1.scale(ii.c1h2)).sub(v1.scale(ii.c1h3)).addC(-ii.in2);
         },
     }
-    return res;
+    return contract.rows(Self, S, res);
 }
 
 // ---------------------------------------------------------------------------
@@ -810,9 +807,9 @@ pub fn initState(_: *const Model, _: *Instance) State {
     return .{};
 }
 
-pub fn updateState(model: *Model, inst: *Instance, x: [n_u]f64, _: *State) contract.UpdateResult {
-    if (inst.analysis_kind != .tran) return .ok;
-    const t = inst.abstime;
+pub fn updateState(comptime _: type, model: *Model, inst: *Instance, x: [n_u]f64, _: *State, sim: contract.SimState) contract.UpdateResult {
+    if (sim.kind != .tran) return .ok;
+    const t = sim.t;
     // pushHistory resets on a t=0 commit: the transient seeds histories with
     // one commit at (t=0, dt=0, kind=tran) before stepping, so a fresh t=0
     // commit is a fresh transient.
@@ -914,25 +911,8 @@ pub fn compact(model: anytype, inst: anytype) void {
 // Rs/RL terminations — no engine, so the module stays a leaf.
 // ---------------------------------------------------------------------------
 
-const TestScalar = struct {
-    v: f64,
-    const T = @This();
-    pub fn add(a: T, b: T) T {
-        return .{ .v = a.v + b.v };
-    }
-    pub fn sub(a: T, b: T) T {
-        return .{ .v = a.v - b.v };
-    }
-    pub fn neg(a: T) T {
-        return .{ .v = -a.v };
-    }
-    pub fn scale(a: T, c: f64) T {
-        return .{ .v = a.v * c };
-    }
-    pub fn addC(a: T, c: f64) T {
-        return .{ .v = a.v + c };
-    }
-};
+/// Values only: the contract's reference family with no lanes.
+const TestScalar = contract.RefFamily(f64, &(.{contract.no_lane} ** n_u), .{ .dense = true });
 
 test "matched RLC line: delayed attenuated replica, exact DC settle" {
     // Z0 = 50, td = 10 ns, R·len = 1 Ω (β·td = 0.01): matched 50 Ω source and
@@ -949,12 +929,9 @@ test "matched RLC line: delayed attenuated replica, exact DC settle" {
     const rl = 50.0;
 
     // DC operating point (v = 0 source): everything 0.
-    inst.analysis_kind = .tran;
     var st: State = .{};
-    inst.abstime = 0;
-    inst.dt = 0;
     var xacc = [_]f64{0} ** n_u;
-    _ = updateState(&model, &inst, xacc, &st); // seeds history at t=0
+    _ = updateState(TestScalar, &model, &inst, xacc, &st, .{ .kind = .tran }); // seeds history at t=0
 
     // Step to 35 ns on a fixed grid. Per point: given (in1, in2) solve the
     // 2×2 affine system of line + terminations:
@@ -966,10 +943,9 @@ test "matched RLC line: delayed attenuated replica, exact DC settle" {
     var v2_at_15n: f64 = 0;
     var v2_final: f64 = 0;
     while (t <= 35e-9 + 1e-15) : (t += dt) {
-        inst.dt = dt;
-        inst.abstime = t;
-        var x = [_]TestScalar{.{ .v = 0 }} ** n_u;
-        const r0 = eval(TestScalar, x, &model, &inst, t);
+        const sim: contract.SimState = .{ .t = t, .dt = dt, .kind = .tran };
+        var x = [_]f64{0} ** n_u;
+        const r0 = eval(TestScalar, &x, &model, &inst, sim);
         // res_br1 = yc·v1 − i1 − in1 with x=0 gives −in1.
         const in1 = -r0[@intFromEnum(U.br1)].v;
         const in2 = -r0[@intFromEnum(U.br2)].v;
@@ -979,16 +955,16 @@ test "matched RLC line: delayed attenuated replica, exact DC settle" {
         const v1 = vs - rs * ib1;
         const v2 = -rl * ib2;
         // Sanity: the solved point satisfies the residual.
-        x[0] = .{ .v = v1 };
-        x[4] = .{ .v = ib1 };
-        x[2] = .{ .v = v2 };
-        x[5] = .{ .v = ib2 };
-        const rchk = eval(TestScalar, x, &model, &inst, t);
+        x[0] = v1;
+        x[4] = ib1;
+        x[2] = v2;
+        x[5] = ib2;
+        const rchk = eval(TestScalar, &x, &model, &inst, sim);
         try std.testing.expectApproxEqAbs(@as(f64, 0), rchk[@intFromEnum(U.br1)].v, 1e-9);
         try std.testing.expectApproxEqAbs(@as(f64, 0), rchk[@intFromEnum(U.br2)].v, 1e-9);
 
         xacc = .{ v1, 0, v2, 0, ib1, ib2 };
-        _ = updateState(&model, &inst, xacc, &st);
+        _ = updateState(TestScalar, &model, &inst, xacc, &st, sim);
         if (@abs(t - 5e-9) < dt * 0.5) v2_at_half_td = v2;
         if (@abs(t - 15e-9) < dt * 0.5) v2_at_15n = v2;
         v2_final = v2;
@@ -1033,12 +1009,8 @@ test "LTRA residual on the ngspice LTRA1 accepted grid" {
             value.* = @bitCast(std.mem.readInt(u64, bytes[offset..][0..8], .little));
         }
         const x: [n_u]f64 = .{ row[1], 0, row[2], 0, row[3], row[4] };
-        var sx: [n_u]TestScalar = undefined;
-        for (x, &sx) |value, *scalar| scalar.* = .{ .v = value };
-        inst.abstime = row[0];
-        inst.dt = row[0] - previous;
-        inst.analysis_kind = .tran;
-        const residual = eval(TestScalar, sx, &model, &inst, row[0]);
+        const sim: contract.SimState = .{ .t = row[0], .dt = row[0] - previous, .kind = .tran };
+        const residual = eval(TestScalar, &x, &model, &inst, sim);
         if (sample > 0) {
             errdefer std.debug.print("LTRA accepted-grid sample {d}, t={e}\n", .{ sample, row[0] });
             try std.testing.expect(row[0] > previous);
@@ -1047,7 +1019,7 @@ test "LTRA residual on the ngspice LTRA1 accepted grid" {
             try std.testing.expectApproxEqAbs(@as(f64, 0), residual[@intFromEnum(U.br1)].v, u_abstol[@intFromEnum(U.br1)]);
             try std.testing.expectApproxEqAbs(@as(f64, 0), residual[@intFromEnum(U.br2)].v, u_abstol[@intFromEnum(U.br2)]);
         } else try std.testing.expectEqual(@as(f64, 0), row[0]);
-        _ = updateState(&model, &inst, x, &state);
+        _ = updateState(TestScalar, &model, &inst, x, &state, sim);
         previous = row[0];
     }
     try std.testing.expectEqual(@as(u32, 498), inst.n_hist);

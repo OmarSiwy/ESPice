@@ -6,20 +6,22 @@ solver from accepting a point while the limited value differs materially from
 the access-function value. These affect the convergence path, not the circuit's
 constitutive equation. See the [Accellera language reference](https://www.accellera.org/images/downloads/standards/v-ams/VAMS-LRM-2023.pdf).
 
-VerA emits optional `beginSolve`, `advanceIteration`, and `checkConvergence`
-functions. ARPice exposes them through the device-type hook table:
+VerA emits optional `advanceIteration` and `checkConvergence` functions;
+the host owns the iteration counter (`SimState.iteration`, VerA contract ABI
+5). ARPice exposes the hooks through the device-type hook table:
 
 1. Begin each direct Newton or JFNK solve, including continuation attempts and
-   fallback solves, with `beginSolve`. This resets the iteration counter; it
-   preserves limiter history and accepted-time state.
+   fallback solves, with `Circuit.beginSolve`. This sets the iteration to 1;
+   it preserves limiter history and accepted-time state.
 2. Before every subsequent outer iteration, call `advanceIteration` with the
    previous evaluated vector. Never advance on a finite-difference evaluation
    or after the final accepted iteration.
 3. Check `checkConvergence` against the proposed accepted vector, after applying
    the Newton correction and before staging accepted-time state. JFNK's
    zero-residual path performs this check too.
-4. Keep timestep commit/revert separate. VerA's `stateCtl` snapshots both the
-   limiter history and iteration counter; a new solve resets the counter again.
+4. Keep timestep commit/revert separate. VerA's `stateCtl` snapshots the
+   limiter history (`limiter_previous`, which stays in the Instance); a new
+   solve resets the host's counter again.
 
 Iteration hooks do not write the integration or event history managed by
 `updateState`. Both CPU solvers stage that history only after their numerical

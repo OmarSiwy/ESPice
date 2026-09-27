@@ -3,6 +3,7 @@
 const std = @import("std");
 const ir = @import("device_abi");
 const eval = @import("device_eval");
+const contract = @import("contract");
 
 const Device = struct {
     pub const U = enum(u8) { p, n };
@@ -10,15 +11,16 @@ const Device = struct {
     pub const Model = struct { r: f64 = 1000 };
     pub const Instance = struct { temp: f64 = 300.15 };
     pub const noise_gens = [_]ir.NoiseGen{.{ .row = 0, .col = 1, .kind = .thermal }};
-    pub fn noisePsd(_: [2]f64, _: *const Model, _: *const Instance) [1]ir.PsdTerm {
+    pub fn noisePsd(comptime _: type, _: [2]f64, _: *const Model, _: *const Instance, _: contract.SimState) [1]ir.PsdTerm {
         return .{.{ .white = 1 }};
     }
-    pub fn collapse(model: *const Model, _: *const Instance) [2]?u8 {
+    pub fn collapse(comptime _: type, model: *const Model, _: *const Instance) [2]?u8 {
         return .{ null, if (model.r < 0) 0 else null };
     }
-    pub fn eval(comptime S: type, x: [2]S, model: *const Model, _: *const Instance, _: f64) [2]S {
+    pub fn eval(comptime S: type, xv: *const [2]S.V, model: *const Model, _: *const Instance, _: contract.SimState) contract.Rows(@This(), S) {
+        const x = contract.probes(@This(), S, xv);
         const current = x[0].sub(x[1]).scale(1 / model.r);
-        return .{ current, current.neg() };
+        return contract.rows(@This(), S, .{ current, current.neg() });
     }
 };
 

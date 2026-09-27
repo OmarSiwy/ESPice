@@ -515,10 +515,10 @@ const TranTests = struct {
         );
     }
 
-    // A generated device reads `Instance.abstime` (VAMS 9.10 `$abstime`), not
-    // eval's `t`; if the host never publishes it, a PULSE is a flat line at V1.
+    // A generated device reads `$abstime` (VAMS 9.10) from the `SimState` it
+    // is handed; if the host never delivers it, a PULSE is a flat line at V1.
     // Real generated devices, Circuit and integrator, so a break anywhere on
-    // the `set_sim_state` path (hook, vtable gate, call site, order) fails here.
+    // the SimState path (hook, call site, order) fails here.
     test "transient: a PULSE vsource output actually moves with $abstime" {
         const gpa = testing.allocator;
         const models = @import("models");

@@ -141,6 +141,9 @@ pub const Circuit = struct {
     par_eval: ?*ParEval = null,
     /// Executor-owned GPU context; null means CPU only.
     gpu_hook: ?GpuHook = null,
+    /// The analysis state every device call receives (`setSimState`), with
+    /// the Newton iteration `beginSolve`/`advanceIteration` count.
+    sim: device_ir.SimState = .{},
     gpa: std.mem.Allocator,
     /// False when the pattern, tapes and names are borrowed from a template.
     owns_topology: bool = true,
@@ -201,7 +204,9 @@ pub const Circuit = struct {
             target.* = try original.hooks.snapshot(original.ctx, allocator).unwrap();
             count += 1;
         }
-        return allocate(template.*, allocator, batches, false);
+        var ckt = try allocate(template.*, allocator, batches, false);
+        ckt.sim = source.sim;
+        return ckt;
     }
 
     fn allocate(data: Prepared, allocator: std.mem.Allocator, batches: []Batch, owns_topology: bool) !Circuit {
@@ -571,16 +576,20 @@ pub const Circuit = struct {
         clearLimitBatches(self.batches);
     }
 
-    /// Tells every device a nonlinear solve is starting.
+    /// Starts a nonlinear solve: `$simparam("iteration")` reads 1.
     pub fn beginSolve(self: *Circuit) void {
         self.lin.valid = false;
-        for (self.batches) |b| if (b.hooks.begin_solve) |f| f(b.ctx);
+        self.sim.iteration = 1;
+        self.publishSim();
     }
 
-    /// Hands every device the previous Newton iterate.
+    /// Hands every device the previous Newton iterate, then counts the
+    /// iteration.
     pub fn advanceIteration(self: *Circuit, previous_x: []const f64) void {
         self.lin.valid = false;
         for (self.batches) |b| if (b.hooks.advance_iteration) |f| f(b.ctx, previous_x);
+        self.sim.iteration +|= 1;
+        self.publishSim();
     }
 
     /// Returns false when any device vetoes convergence at `x`.
@@ -663,13 +672,20 @@ pub const Circuit = struct {
         if (self.gpu_hook) |gh| gh.mark_dirty(gh.ctx);
     }
 
-    /// Publishes host simulation state (`$abstime`, timestep, `analysis()`,
-    /// `initial_step`/`final_step`) to every device that reads it. Must run
-    /// before the eval it describes: generated devices read
-    /// `Instance.abstime`, not eval's `t`. O(instances), so call it per solve
-    /// attempt, never per Newton iteration.
-    pub fn setSimState(self: *const Circuit, st: device_ir.SimState) void {
-        for (self.batches) |b| if (b.hooks.set_sim_state) |f| f(b.ctx, st);
+    /// Publishes the analysis state (`$abstime`, timestep, `analysis()`,
+    /// `initial_step`/`final_step`) every later device call receives; `eval`
+    /// takes `$abstime` from its own `t`. Keeps the Newton iteration count.
+    /// Must run before the eval it describes.
+    pub fn setSimState(self: *Circuit, st: device_ir.SimState) void {
+        const iteration = self.sim.iteration;
+        self.sim = st;
+        self.sim.iteration = iteration;
+        self.publishSim();
+    }
+
+    /// Copies `sim` into every batch: one store each.
+    fn publishSim(self: *const Circuit) void {
+        for (self.batches) |b| b.hooks.set_sim_state(b.ctx, self.sim);
     }
 
     /// Re-derives every batch's numeric parameters. `error.TopologyChanged`
