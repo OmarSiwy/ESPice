@@ -8,6 +8,11 @@ from an earlier run recorded in the sources named beside it. Every number
 marked *model* is arithmetic on those measurements, and the experiments in
 §5 exist to replace it.
 
+Part I (§1-§5) keeps ngspice's iterate sequence and time grid. Part II
+(§6-§8) is an opt-in GPU-native mode that keeps only each deck's oracle
+tolerance and ngspice-level accuracy, and re-ranks the options under that
+contract.
+
 The question: the GPU can evaluate many circuit states per launch (device
 evaluation batched over instances, and potentially over several candidate
 states at once). Which nonlinear algorithm makes the best use of that? We
@@ -553,6 +558,365 @@ decks: `stress/sweep_opamp_wl_200` and a bsim4 500-inverter deck under
 the pivot-tape mismatches that explain any bit difference from the serial
 path.
 
+# Part II: GPU-native mode
+
+Part I keeps ngspice's iterate sequence and time grid. Part II drops that
+promise and asks what the GPU could do. The cross-field sources behind it
+are in [gpu-convergence-fields.md](gpu-convergence-fields.md); this part
+re-ranks them for the new contract. Everything here is a proposal. Items
+marked **speculative** have no source that does them in a circuit simulator.
+
+## 6. The contract of GPU-native mode
+
+**Relaxed.** Bitwise iterates, the NIiter gates, the ngspice time grid, and
+the rule that one state is evaluated per iteration.
+
+**Kept.**
+
+- Every deck must pass its oracle at the deck's own tolerances, and the
+  pass set must be at least today's. The common values in
+  `tests/fixtures/**/*.expected.json` are rtol 1e-3 or 3e-3, and atol
+  2e-6 V or 1e-11 to 1e-15 A.
+- The final Newton solution must meet ngspice-level tolerances (reltol,
+  vntol, abstol), and the error per step must stay LTE-controlled at trtol.
+  The mode may control error differently, but not loosely.
+- The same answers on the CPU and GPU backends. Every algorithm below is
+  backend-agnostic, and most of them help the CPU too.
+
+**Figure of merit.** Wall time at equal accuracy, measured by the proof rule
+(`zig build bench`, before and after).
+
+**What a different time grid costs in the gate.** The corpus harness
+compares transients at the oracle's accepted times, interpolating our
+waveform linearly (`tests/test_correctness.zig`). A mode that takes much
+larger steps can be accurate at its own points and still fail between them.
+It needs dense output: evaluate the integration polynomial at the reference
+times, or cap dt by the waveform's curvature. That is a real constraint on
+multirate, exponential and parallel-in-time methods below.
+
+Wall time is roughly
+
+    steps × (Newton iterations per step) × (cost per iteration) / (problems per launch)
+
+and each lever attacks one factor:
+
+| Lever | Factor it cuts | Where it pays |
+|---|---|---|
+| Modified Newton, rate test, one-iteration acceptance | iterations and factors per step | every deck |
+| Nonlinear elimination of internal nodes | iterations per step | devices with series resistances and internal networks |
+| Activity-driven evaluation, multirate | cost per step, then steps for latent parts | chains, adders, digital-like decks |
+| Lanes (ensembles, dt candidates, speculative retries) | problems per launch, rejected steps | Monte Carlo, corners, sweeps, rejection-heavy decks |
+| Mixed precision, one sync | cost per iteration | GPU-path decks |
+| Exponential, Rosenbrock, parallel in time | steps, or span of steps | linear-dominated or long periodic decks |
+
+## 7. Re-ranked candidates
+
+| Rank | Candidate | Mechanism | Fit to our structure | Regime (model, to be measured) |
+|---|---|---|---|---|
+| 1 | Modified Newton with CVODE's rules (§7.1) | lagged LU, rate test, accept at iteration 0, stale-LU-preconditioned Newton-Krylov as the fallback | strong: J comes with F, and factors are reusable | evals per step ~3 → ~1.5; factors per step → ≤0.3 |
+| 2 | Activity-driven evaluation → multirate (§7.3) | bypass latent instances, compact the active ones, then per-partition steps | strong on chains and adders, nil on parallel inverters | eval work ∝ active fraction |
+| 3 | Lanes as a first-class axis (§7.4) | ensembles with per-lane dt and GPU batched LU; dt-candidate lanes | strong for ensembles; single decks need free lanes (E2) | k× throughput up to the E2 knee |
+| 4 | Nonlinear elimination of internal nodes, then blocks (§7.2) | fixed-count inner Newton on the device; multilevel Newton, ASPIN/RASPEN | good if internal nodes lead the Newton error | fewer global iterations, pending census |
+| 5 | Mixed precision planes and LU (§7.5) | f32 g/c on the bus, f32 host LU; Newton corrects | good: fixed point set by the f64 residual | bus bytes ÷2, LU bandwidth ÷2 |
+| 6 | Exponential integrators (§7.8) | MATEX, exponential Rosenbrock-Euler | good for RC-dominated decks, weak with strong devices | one LU per step; large steps between input edges |
+| 7 | Consensus multi-start OP (§7.6) | k perturbed starts in lanes, accept on agreement | OP only; multistability is the risk | ladder time on hard OPs |
+| 8 | Rosenbrock/W-methods (§7.7) | linearly implicit, fixed stages, no Newton loop | nowhere to apply `$limit`; good for ensembles of small circuits | uniform lane work |
+| 9 | Parallel in time at tolerance (§7.9) | parareal with slices as lanes; WavePipe | poor on oscillators and switching; fair on RC and smooth decks | ≤ P/K |
+| not ranked | Finite-difference JFNK (§7.1, last paragraph) | residual-only matvecs | still dominated: the assembled J is free | none |
+
+### 7.1 Modified Newton with CVODE's rules (rank 1)
+
+**Mechanism.** From CVODE (SUNDIALS docs) and RADAU5 (Hairer and Wanner
+1999), with W-method theory (Steihaug and Wolfbrandt 1979) justifying a
+stale matrix:
+
+- Keep the LU of G + ag0·C and refactor only after 20 steps, when
+  |ag0/ag0_LU − 1| > 0.3, or after a failure.
+- Test convergence by the estimated contraction rate R, with
+  R·‖δ‖ < 0.1·tol, instead of NIiter's delta test.
+- Accept at iteration 0 when the predictor's first correction already
+  passes. The `iter == 0` floor exists only for ngspice parity; CVODE caps
+  Newton at 3 iterations and has no minimum.
+- Use a better predictor: the integration polynomial through the last
+  k + 1 points instead of MODEINITPRED's linear extrapolation.
+- Iterations with a stale matrix need only F, which on the GPU means a
+  residual-only download (n + 1 doubles).
+- When the rate degrades (R > 0.3) but the LU is otherwise fine, run a
+  few GMRES steps on the fresh assembled J, preconditioned by the stale
+  LU, instead of refactoring. That is "JFNK with a physics-based
+  preconditioner" in its useful form: an SpMV on the already-assembled
+  values, never a finite-difference evaluation. Anderson acceleration over
+  the chord iterates (Walker and Ni 2011; KINSOL; DEQ solvers) is the
+  cheaper alternative, and both can be tried behind one pin.
+
+**Fit.** Circuits deliver J with F, so a fresh J costs nothing extra; only
+the factor is worth saving. Device limiting still applies per iteration.
+MAPS (Ye et al. 2008) measured 20-34× from successive chord on clock meshes
+and a convergence failure on an adder. The rate test plus refactor-on-failure
+is what makes chord safe, and the MAPS failure is the case it must catch.
+
+**Regime.** Eval-bound decks (heavy models, GPU path) gain from fewer evals
+per step. LU-bound decks (RC meshes, post-layout, `scaling_rc_ladder_100k`,
+`scaling_resistor_grid_100x100`) gain from fewer factors.
+
+**Cheap falsifiable experiments.**
+
+1. *Zero code.* The `ZP_OPDBG` trace prints `scaled` and the reject reason
+   for each iterate. Count the transient solves where iteration 0 already
+   had scaled < 1 and a passing residual, so only `first_iter` forced a
+   second evaluation. Decks: `stress/scaling_inverter_chain_256`,
+   `stress/vacask_ring`, `stress/scaling_parallel_inverters_2000`,
+   `tran/bench_tran_fourbitadder`. If that share is under 20%, drop
+   one-iteration acceptance.
+2. *Small code.* An `ESPICE_SOLVER=modnewton` host pin, measured on the same
+   decks plus the two LU-bound ones. Metrics: evals per accepted step,
+   factors per accepted step, wall, and the full-corpus pass set at oracle
+   tolerance. The claim fails if evals per step stay above 2 or the pass
+   set shrinks.
+
+**Finite-difference JFNK, for the record.** Physics-based preconditioning
+(Knoll and Keyes 2004) needs a cheap approximate operator, and our stale LU
+is a better one than any simplified physics. With that preconditioner, the
+finite-difference matvec's only advantage (no assembled J) is worth nothing
+here. No circuit simulator using JFNK turned up in the literature pass
+either; Xyce uses assembled Jacobians with block-Jacobi, BTF and Schur
+preconditioners.
+
+### 7.2 Nonlinear elimination: internal nodes, then subcircuit blocks (rank 4)
+
+**Mechanism.** Multilevel Newton (Rabbat, Sangiovanni-Vincentelli and Hsieh
+1979) is the circuit form of nonlinear elimination: an inner Newton solves
+each subcircuit, an outer Newton solves the interface, and local quadratic
+convergence holds. ASPIN (Cai and Keyes 2002) and RASPEN (Dolean et al.
+2016) are the modern subdomain forms. RASPEN applies Newton to the fixed
+point of nonlinear restricted additive Schwarz, which converges on its own
+and so preconditions better. The GPU form (fields page §3.1): each thread
+takes a fixed 2-3 Newton steps on its instance's internal unknowns with the
+AD local Jacobian, then stamps. The second level runs the same on BBD blocks,
+batched dense per block (at most 64 wide), with the host solving the border.
+
+**Fit.** Internal nodes are the one place our coupled instances become the
+independent cells of chemistry codes. The pattern and the tapes are
+unchanged. The risk is that terminal coupling (feedback, latches), not
+internal lag, dominates the iteration count.
+
+**Regime.** Decks whose Newton steps are led by internal nodes: diodes with
+RS, MOS source and drain resistances, bsim4 gate and body networks.
+
+**Cheap falsifiable experiment.** The zero-code census of fields page §3.1:
+count the non-final iterates whose largest step is on an internal unknown.
+If that is under 20% on `convergence/`, `op/` and the gpu-gen decks,
+demote this below rank 8.
+
+### 7.3 Activity-driven evaluation, then multirate (rank 2)
+
+**Mechanism.** Three steps, each usable on its own.
+
+1. *Latency bypass.* Evaluate only instances whose gathered voltages moved
+   more than a tolerance since their last evaluation. The deterministic
+   staging buffer keeps the latent instances' contributions (fields page
+   §3.2). Unlike ngspice's bypass, the threshold is part of the accuracy
+   contract: a skipped instance's stamp error must stay under the Newton
+   tolerance, which a first-order bound from its local Jacobian times its
+   voltage change can check.
+2. *Compaction.* Launch only the active instances: a scan over one flag
+   per instance, then an index list. That pays once the active set is
+   under one GPU wave.
+3. *Multirate.* Latent partitions take long steps and active ones short
+   ones, coupled by interpolation. Options include Gear and Wells (1984),
+   multirate partitioned RK (Günther, Kværnø and Rentrop 2001), a multirate
+   W-method for circuits (Bartel and Günther 2002), and BDF slowest-first
+   with automatic partitioning (Verhoeven et al. 2007, stable when the
+   partitions are weakly coupled).
+
+**Precedent.** Iterated timing analysis (SPLICE1, Saleh, Kleckner and Newton
+1983) and relaxation-based simulation (Newton and Sangiovanni-Vincentelli
+1984, "up to two orders of magnitude") are circuit precedents. Commercial
+fast-SPICE partitions with event-driven multirate behind accuracy knobs.
+Reservoir active sets (Jiang 2020) held 6.5-10% of cells with unchanged
+Newton counts.
+
+**Fit.** This is the only lever that changes the work per step in
+proportion to circuit activity, and its winners are the decks the GPU cannot
+help: `stress/scaling_inverter_chain_4k` (7.5 s on one CPU thread, and
+timing-sensitive in the corpus) switches one stage at a time. It does
+nothing for parallel inverters, where every instance switches together.
+Multirate needs its own error control per partition, plus dense output for
+the harness (§6).
+
+**Cheap falsifiable experiment.** The activity census of fields page §3.2: a
+host counter of the fraction of instances whose voltages moved more than
+reltol·|v| + vntol, per Newton iteration and per step. Decks:
+`stress/scaling_inverter_chain_4k`, `stress/scaling_inverter_chain_256`,
+`tran/bench_tran_fourbitadder`, `stress/vacask_ring`. If the median active
+fraction on the chains is over 30%, steps 1 and 2 cannot beat 3×; drop
+multirate and keep bypass as a minor item.
+
+### 7.4 Lanes as a first-class axis (rank 3)
+
+**Mechanism.** Part I's lanes without the exactness constraint:
+
+- **Ensembles.** Monte Carlo, corners, temperature and sweeps, with a
+  per-lane dt and `SimState`, since lockstep costs up to 4× in steps
+  (torchode). Planes stay on the GPU and are factored there by cuDSS
+  uniform batch, following batched power flow: Zhou et al. report up to 76×
+  over KLU, and Wang et al. (2021) more than 100× over pandapower.
+- **dt-candidate lanes** (speculative). Solve step n at dt, 2dt, 4dt and
+  8dt at once and accept the largest that passes LTE. That removes LTE
+  rejections and ngspice's 2× growth cap after breakpoints: regrowing from
+  0.1·dt after an edge takes about 4 serial steps, and would take 1-2.
+- **Speculative retries** from Part I §2.3, now free to commit any passing
+  candidate rather than the serial one.
+- **WavePipe-style time-point pipelining** (Dong, Li and Ye 2008,
+  speculative on the GPU). Lanes solve steps n+1 and n+2 from predicted
+  histories while step n converges, then repair with one correction
+  iteration when the prediction was close.
+
+**Fit.** Ensembles are the textbook batched-independent case. On a single
+deck, dt lanes and pipelining only pay when lanes are free (E2's knee) and
+the host LU is lane-cheap (LaneLu, or on-device batched LU).
+
+**Cheap falsifiable experiments.** E2 and E3 from §5. Plus a zero-code count
+from `ZP_TRAN_STATS` (attempts, rej_lte, rej_newton) and one counter of
+steps where the LTE wanted more than 2× growth. If rejected and
+growth-capped steps together are under 10% of accepted steps on the stress
+decks, drop dt lanes and keep ensembles.
+
+### 7.5 Mixed precision (rank 5)
+
+**Mechanism.** Newton's fixed point is set by the f64 residual, so the
+Jacobian's precision affects only the rate. f32 derivative lanes already
+ship (`gpuJacFloat`, commit `4853197`: 1.16× on `parallel_inverters_2000`,
+Newton count 1356 → 1354). Two extensions:
+
+- Download g and c as f32 after the ordered f64 reduction (fields page
+  §3.4).
+- Factor in f32 on the host. The Newton loop corrects the error, in the
+  role that iterative refinement plays for a linear solve.
+
+**Fit.** Good, except for ill-conditioned MNA systems. A 1e9-gain E source
+row, as the residual-gate comment in `converger.zig` notes, would lose
+digits in an f32 LU. So the pivot guard must fall back to f64, lane by lane.
+
+**Experiment.** CPU-only: round g and c through f32 under an env flag, run
+the corpus, and compare the pass set and Newton counts. Then the same for an
+f32 LaneLu refactor on the stress matrices.
+
+### 7.6 Consensus multi-start OP (rank 7, speculative)
+
+**Mechanism.** When plain Newton fails, run k lanes from perturbed cold
+starts: seeded junctions plus random node voltages inside the supply range.
+Accept only if at least two lanes that started far apart converge to the
+same x within tolerance. Agreement is evidence of a unique operating point.
+Disagreement falls back to the conformant ladder, which is the only
+defensible choice for a latch.
+
+**Fit.** OP is a small share of a transient's wall time, but it dominates
+DC sweeps of hard circuits, which fall back to the ladder per point. GPU
+polynomial homotopy tracks many paths at once (Verschelde; HomotopyContinuation.jl),
+and batched power flow solves many cases with one pattern. We found no GPU
+multi-start Newton for DC operating points.
+
+**Experiment.** A 30-line env-flag driver in `op.zig` (the frontend has no
+`.nodeset`, so decks cannot seed starts). Run it on the `convergence/` decks
+that reach gmin stepping. Metric: the fraction where consensus matches the
+oracle, the fraction that falls back, and the ladder time saved. It fails
+if consensus ever accepts a solution the oracle rejects.
+
+### 7.7 Rosenbrock and W-methods (rank 8)
+
+**Mechanism.** A linearly implicit step: one Jacobian and s stage solves,
+with no Newton loop. W-methods allow a stale Jacobian. CHORAL, a
+charge-oriented ROW method, ran in Infineon's TITAN simulator and did well
+on oscillators (Günther et al. 1997). The multirate W-method of Bartel and
+Günther (2002) is its latency-exploiting form. DiffEqGPU picked Rosenbrock
+for GPU ensembles because every lane then does the same work.
+
+**Fit.** Stage evaluations are sequential, so there is no batching gain on
+one deck. There is also no iteration to apply `$limit` in, so strong
+junction nonlinearity is left to step rejection. The regime is small-circuit
+ensembles fully on the GPU, which would be a separate analysis.
+
+**Experiment.** None cheap inside ESPice. The smallest test is a
+DiffEqGPU ensemble of a hand-written diode-RC cell against our `.mc` on the
+same cell, only if §7.4's ensembles leave a gap.
+
+### 7.8 Exponential integrators (rank 6)
+
+**Mechanism.** `.matex` implements R-MATEX for fixed-matrix (linear)
+circuits: one factorization, rational Krylov for e^{hA}v, and steps bounded
+by input transition points rather than LTE. MATEX reports about 13× over
+fixed-step trapezoidal on IBM power grids (DAC 2014), and R-MATEX up to 14.4×
+(TCAD 2016). Exponential Rosenbrock-Euler extends it to nonlinear circuits
+with one LU per step and no refactor on a step change (Zhuang et al. DAC
+2015). Its reported speedups conflict between sources, so they are not
+quoted here.
+
+**Fit.** RC-dominated decks. The Krylov basis is sequential and small, so
+the GPU adds little beyond device evaluation.
+
+**Experiment.** Available now: run `stress/scaling_rc_ladder_100k`,
+`stress/scaling_rc_ladder_1k` and `stress/scaling_resistor_grid_100x100` as
+`.matex` and as `.tran`, and compare wall time and oracle agreement. A clear
+win on the linear decks justifies a GPU-native rule that routes linear
+circuits to `.matex`. That is detection, not a new solver.
+
+### 7.9 Parallel in time at a tolerance (rank 9)
+
+**Mechanism.** Parareal: a cheap coarse propagator (BE with large steps, or
+MATEX for linear parts) runs serially, and fine GPU-native transients run
+per slice as lanes. They correct each other until the slice boundaries
+agree to the tolerance. Speedup is at most P/K. Power-system parareal has
+reported 5-7× in practice, and about 20× with cheap coarse solvers, at
+0.01 rad (ORNL report, excerpt only). MGRIT gave up to 10× on EMT (Energies
+2022).
+
+**Fit.** Poor on oscillators, where phase error accumulates across slices
+(`vacask_ring`), and on switching decks, where the coarse level needs
+smoothed sources (Gander et al. 2019). Fair on long smooth or RC decks, which
+MATEX already serves. Slices as lanes reuse §7.4's machinery.
+
+**Experiment.** A script, no code: split `stress/vacask_ring` and
+`stress/scaling_rc_ladder_1k` into P = 8 slices with `.ic` and `uic`, run a
+coarse `.tran` with a large maximum step, iterate parareal outside the
+simulator, and count K to reach the oracle tolerance. K ≥ P/2 falsifies it
+for that deck class.
+
+## 8. Top-3 GPU-native program, and how it coexists with the default
+
+1. **Modified Newton (§7.1).** Every deck, CPU and GPU, lowest risk. It
+   comes first because it changes only `converger.zig`, behind a pin, and
+   the corpus gates it at once.
+2. **Activity-driven evaluation (§7.3)**, taken in order: bypass with a
+   checked stamp-error bound, then compaction on the GPU, then multirate
+   only if the census shows latent partitions. It targets the chain and
+   adder decks that neither the GPU nor Part I helps.
+3. **Lanes (§7.4).** Ensembles with per-lane dt and on-device batched LU
+   first, then dt-candidate lanes where E2 shows free lanes.
+
+Nonlinear elimination (§7.2) and mixed precision (§7.5) join the program as
+soon as their zero-code censuses come back positive. Both are small changes
+inside the eval launch.
+
+**Coexistence.**
+
+- **Switch.** `--solver=conformant|gpu-native`. The default stays
+  conformant, with Part I's exact improvements.
+- **Pins.** Each GPU-native feature has its own `ESPICE_SOLVER`-style pin
+  for A/B runs. The switch is a named bundle of them, so a regression can be
+  bisected to one feature.
+- **Backends.** The mode is backend-agnostic: `--backend cpu --solver
+  gpu-native` must pass the same gate. That keeps the scalar-oracle rule
+  (every lane kernel's W = 1 instance is the CPU path) and stops the mode
+  from becoming GPU-only logic.
+- **Gate.** The full corpus under `--solver=gpu-native`, at each deck's
+  oracle rtol/atol, with the pass set a superset of the conformant pass set,
+  and `zig build bench` wall time before and after per feature. A deck that
+  passes conformant but fails GPU-native blocks the feature, not the deck.
+- **Record.** Every divergence from ngspice this mode introduces (grid,
+  iterate count, OP selection rule) is recorded in `docs/` with its
+  measurement and fallback, per the proof rule.
+
 ## Sources
 
 Code, read at `fa9f0b4` unless marked: `src/solver/converger.zig` (`newton`,
@@ -566,6 +930,31 @@ session notes, not in this repo). GPU status notes and `gbase.txt` for
 `ee66e0b` (session notes).
 
 Papers and documentation:
+
+Part II additions:
+
+- SUNDIALS CVODE Newton-matrix update rules and convergence test. <https://sundials.readthedocs.io/en/latest/cvode/Mathematics_link.html>
+- Hairer, Wanner. Stiff differential equations solved by Radau methods. J. Comput. Appl. Math. 111, 1999. <https://www.sciencedirect.com/science/article/pii/S037704279900134X>
+- Steihaug, Wolfbrandt. An attempt to avoid exact Jacobian and nonlinear equations in the numerical solution of stiff differential equations. Math. Comp. 33, 1979. DOI 10.1090/S0025-5718-1979-0521273-8
+- Ye, Dong, Li, Nassif. MAPS: multi-algorithm parallel circuit simulation. ICCAD 2008. <https://www.cecs.uci.edu/~papers/iccad08/PDFs/Papers/01D.1.pdf>
+- Dong, Li, Ye. WavePipe: parallel transient simulation of analog and digital circuits on multi-core shared-memory machines. DAC 2008. <https://ieeexplore.ieee.org/document/4555816>
+- Rabbat, Sangiovanni-Vincentelli, Hsieh. A multilevel Newton algorithm with macromodeling and latency for the analysis of large-scale nonlinear circuits in the time domain. IEEE Trans. Circuits Syst. 26, 1979. <https://ieeexplore.ieee.org/document/1084693/>
+- Dolean, Gander, Kheriji, Kwok, Masson. Nonlinear preconditioning: how to use a nonlinear Schwarz method to precondition Newton's method (RASPEN). SIAM J. Sci. Comput. 38, 2016. <https://arxiv.org/abs/1605.04419>
+- Gear, Wells. Multirate linear multistep methods. BIT 24, 1984. <https://link.springer.com/article/10.1007/BF01934907>
+- Günther, Kværnø, Rentrop. Multirate partitioned Runge-Kutta methods. BIT 41, 2001. <https://link.springer.com/article/10.1023/A:1021967112503>
+- Bartel, Günther. A multirate W-method for electrical networks in state-space formulation. J. Comput. Appl. Math. 147, 2002. <https://www.sciencedirect.com/science/article/pii/S0377042702004764>
+- Verhoeven, Beelen, El Guennouni, ter Maten, Mattheij, Tasić. Stability analysis of the BDF slowest-first multirate methods. Int. J. Comput. Math. 84, 2007. <https://www.tandfonline.com/doi/full/10.1080/00207160701458641>; Verhoeven et al. Automatic partitioning for multirate methods. SCEE 2006. <https://link.springer.com/chapter/10.1007/978-3-540-71980-9_24>
+- Saleh, Kleckner, Newton. Iterated timing analysis in SPLICE1. ICCAD 1983 (citation from <https://www2.eecs.berkeley.edu/Pubs/Faculty/newton.html>; paper not opened).
+- Newton, Sangiovanni-Vincentelli. Relaxation-based electrical simulation. IEEE TCAD 3, 1984. <https://ieeexplore.ieee.org/document/1270089/>
+- Günther, Hoschek, Rentrop. ROW methods adapted to electric circuit simulation packages (CHORAL). J. Comput. Appl. Math., 1997. <https://www.sciencedirect.com/science/article/pii/S0377042797000435>
+- Utkarsh et al. Automated translation and accelerated solving of differential equations on multiple GPU platforms (DiffEqGPU). CMAME 419, 2024. <https://arxiv.org/html/2304.06835v3>
+- Lienen, Günnemann. torchode. 2022. <https://arxiv.org/abs/2210.12375>
+- Zhou et al. GPU-based batch LU-factorization solver for concurrent analysis of massive power flows. IEEE Trans. Power Syst. 32, 2017. <https://ieeexplore.ieee.org/document/7837762/>
+- Wang, Wende-von Berg, Braun. Fast parallel Newton-Raphson power flow solver for large number of system calculations with CPU and GPU. SEGAN, 2021. <https://arxiv.org/abs/2101.02270>
+- Zhuang, Weng, Lin, Cheng. MATEX. DAC 2014. <https://arxiv.org/abs/1511.04519>; Zhuang et al. Simulation algorithms with exponential integration for time-domain analysis of large-scale power delivery networks. IEEE TCAD, 2016. <https://arxiv.org/abs/1505.06699>
+- Zhuang, Yu, Kang, Wang, Cheng. An algorithmic framework for efficient large-scale circuit simulation using exponential integrators. DAC 2015. <https://arxiv.org/abs/1511.04515>
+- ORNL, parareal for power-system dynamics (numbers from an excerpt only). <https://www.osti.gov/biblio/1265734>
+- Verschelde. GPU Newton for polynomial homotopy. <https://homepages.math.uic.edu/~jan/gpunewton2.pdf>
 
 - Knoll, Keyes. Jacobian-free Newton-Krylov methods: a survey. J. Comput. Phys. 193, 2004. <https://doi.org/10.1016/j.jcp.2003.08.010>
 - Dembo, Eisenstat, Steihaug. Inexact Newton methods. SIAM J. Numer. Anal. 19, 1982. <https://doi.org/10.1137/0719025>
