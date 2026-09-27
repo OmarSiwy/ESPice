@@ -1119,9 +1119,11 @@ pub const SparseLu = struct {
         const y = self.y;
         const lp = self.lp;
         const up = self.up;
+        const pinv = self.pinv;
+        const udiag = self.udiag;
 
         // y = P b
-        for (b, 0..) |bi, r| y[self.pinv[r]] = bi;
+        for (b, 0..) |bi, r| y[pinv[r]] = bi;
 
         // Forward through unit-lower L.
         if (self.tv.items.len != 0) {
@@ -1141,7 +1143,7 @@ pub const SparseLu = struct {
         var k = self.n;
         while (k > 0) {
             k -= 1;
-            const zk = y[k] / self.udiag[k];
+            const zk = y[k] / udiag[k];
             y[k] = zk;
             if (zk == 0) continue;
             scatterAxpy(y, ui, ux, up[k], up[k + 1], zk);
@@ -1162,23 +1164,33 @@ pub const SparseLu = struct {
         const lx = self.lx.items;
         const ui = self.ui.items;
         const ux = self.ux.items;
+        // Locals for the same aliasing reason as `refactorColumns`; the
+        // running `yk` does the same subtractions in the same order.
+        const y = self.y;
+        const lp = self.lp;
+        const up = self.up;
+        const pinv = self.pinv;
+        const udiag = self.udiag;
 
-        for (self.q, 0..) |c, k| self.y[k] = b[c];
+        for (self.q, 0..) |c, k| y[k] = b[c];
 
         // Forward through U^T, gathering.
         for (0..self.n) |k| {
-            for (self.up[k]..self.up[k + 1]) |p| self.y[k] -= ux[p] * self.y[ui[p]];
-            self.y[k] /= self.udiag[k];
+            var yk = y[k];
+            for (up[k]..up[k + 1]) |p| yk -= ux[p] * y[ui[p]];
+            y[k] = yk / udiag[k];
         }
 
         // Back through unit-upper L^T, gathering.
         var k = self.n;
         while (k > 0) {
             k -= 1;
-            for (self.lp[k]..self.lp[k + 1]) |p| self.y[k] -= lx[p] * self.y[li[p]];
+            var yk = y[k];
+            for (lp[k]..lp[k + 1]) |p| yk -= lx[p] * y[li[p]];
+            y[k] = yk;
         }
 
-        for (0..self.n) |r| x[r] = self.y[self.pinv[r]];
+        for (0..self.n) |r| x[r] = y[pinv[r]];
     }
 };
 
