@@ -442,7 +442,11 @@ Open:
 **Per-section verification**
 
 - §1 BE/trap/Gear-2 and LTE formulas: verified against `integrator.zig`
-  (trtol 7, $c_p \in \{1/2, 1/12, 2/9\}$, 0.9h acceptance, 2x growth cap).
+  (trtol 7, $c_p \in \{.5, .08333333333, .2222222222\}$, 0.9h acceptance,
+  2x growth cap). The coefficients are cktterr.c's truncated decimals, not
+  1/12 and 2/9: the 4e-11 relative gap moved every LTE-chosen step by
+  2e-11: only 50 of the 187 `stress/scaling_rc_ladder_1k` oracle times hit
+  our grid within 1e-13, and now all 187 do.
 - §1 TR-BDF2: derived, not source-verified; not implemented.
 - §1 charge conservation: derived (standard Ward-Dutton argument); the exact
   $q$ residual satisfies it by construction.

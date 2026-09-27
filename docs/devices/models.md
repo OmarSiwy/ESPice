@@ -110,6 +110,7 @@ current deck status is in `issues.md`.
 | hisim2_va | LP defaults to 15 nm when CODEP = 0 (HiSIM 2.80, which ngspice 44.2 forces) | hsm2set.c:236 |
 | bsim2 | Vc is not clamped at 0; only the sqrt argument is guarded | b2eval.c |
 | mesa | CODATA constants of ngspice 44 `const.h`; PHIB default 0.5 * CHARGE | const.h, mesasetup.c:126 |
+| mos1 | ngspice's `const.h` k and q (CODATA 2014) and vt = T * (k/q); gmbs = gm * gamma / (2 * sarg) also above vbs = 0, where AD of the Taylor-continued root would give gamma / (2 * sqrt(phi)) | const.h, main.c:501, mos1load.c:478-491 |
 | vdmos | d'-s' leakage is m/RDS, or 1e-15 S without RDS; gmin goes on the body diode only | vdmosset.c:292-299, vdmosload.c:808 |
 | vsource, isource | SFFM reads (VO VA FM MDI FC TD PHASEM PHASEC) and limits MDI to FC/FM | vsrcload.c:228-282, isrcload.c:206-254 |
 

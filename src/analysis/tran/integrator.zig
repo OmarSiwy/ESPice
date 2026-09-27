@@ -36,13 +36,17 @@ pub fn coeffs(method: Method, dt: f64, dt_prev: f64) Coeffs {
 }
 
 /// LTE divided-difference coefficient, ngspice `CKTterr` (cktterr.c:24-34)
-/// indexed by order: gearCoeff = {.5, 2/9, ...}, trapCoeff = {.5, 1/12}. The
-/// order here is fixed by the method (BE 1, trap and gear-2 2).
+/// indexed by order: gearCoeff = {.5, .2222222222, ...}, trapCoeff = {.5,
+/// .08333333333}. The order here is fixed by the method (BE 1, trap and
+/// gear-2 2).
 pub fn lteCoeff(method: Method) f64 {
+    // ngspice's decimals, not 2/9 and 1/12: the 4e-11 relative gap moves
+    // every LTE-chosen step by 2e-11, which a 256-stage inverter chain
+    // amplifies past tolerance.
     return switch (method) {
         .backward_euler => 0.5, // gearCoeff[0] == trapCoeff[0]
-        .trapezoidal => 1.0 / 12.0, // trapCoeff[1]
-        .gear_2 => 2.0 / 9.0, // gearCoeff[1]
+        .trapezoidal => 0.08333333333, // trapCoeff[1]
+        .gear_2 => 0.2222222222, // gearCoeff[1]
     };
 }
 
