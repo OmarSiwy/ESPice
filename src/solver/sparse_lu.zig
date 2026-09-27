@@ -443,8 +443,9 @@ pub const SparseLu = struct {
 
         try self.buildTape(gpa, col_ptr);
 
-        // ZP_LU_STATS=1 prints n, nnz and fill per full factor. The test
-        // module builds without libc, hence the guard.
+        // ZP_LU_STATS=1 prints n, nnz and fill per full factor, then the
+        // structural census of docs/solvers/gpu-lu.md E1. The test module
+        // builds without libc, hence the guard.
         if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) {
             std.debug.print("lu-stats: n={d} nnz={d} L={d} U={d} fill={d:.1}x\n", .{
                 n,                 col_ptr[n],
@@ -452,9 +453,87 @@ pub const SparseLu = struct {
                 @as(f64, @floatFromInt(self.li.items.len + self.ui.items.len)) /
                     @as(f64, @floatFromInt(col_ptr[n])),
             });
+            self.census(gpa, col_ptr, row_idx) catch {};
         };
 
         self.factored = true;
+    }
+
+    /// E1's census (docs/solvers/gpu-lu.md §5) of the factor just built,
+    /// all O(nnz(L+U)): F, the refactor's multiply-adds (one per U entry
+    /// (j, k) and row of L[:,j]); `S_r`, the §4.2 span of the sync-free
+    /// column kernel; the level count; the solve spans `S_L`/`S_U` as
+    /// longest dependency paths; the widest U column; the share of F in
+    /// levels narrower than 64 columns; A's rows and columns above 1,000
+    /// entries (rails); and the §4.1 epoch bytes.
+    fn census(self: *const Self, gpa: Allocator, col_ptr: []const u32, row_idx: []const u32) Allocator.Error!void {
+        const n = self.n;
+        const scratch = try gpa.alloc(u32, 4 * @as(usize, n));
+        defer gpa.free(scratch);
+        const finish = scratch[0..n];
+        const level = scratch[n .. 2 * n];
+        const span = scratch[2 * n .. 3 * n];
+        const width = scratch[3 * n ..];
+        var flops: u64 = 0;
+        var s_r: u32 = 0;
+        var levels: u32 = 0;
+        var widest: u32 = 0;
+        for (0..n) |k| {
+            var t: u32 = 0;
+            var lv: u32 = 0;
+            const col = self.ui.items[self.up[k]..self.up[k + 1]];
+            for (col) |j| {
+                t = @max(t, finish[j]) + 1;
+                lv = @max(lv, level[j] + 1);
+                flops += self.lp[j + 1] - self.lp[j];
+            }
+            finish[k] = t + 1;
+            level[k] = lv;
+            s_r = @max(s_r, t + 1);
+            levels = @max(levels, lv + 1);
+            widest = @max(widest, @as(u32, @intCast(col.len)));
+        }
+        @memset(width, 0);
+        for (level) |lv| width[lv] += 1;
+        var narrow: u64 = 0;
+        for (0..n) |k| if (width[level[k]] < 64) {
+            for (self.ui.items[self.up[k]..self.up[k + 1]]) |j| narrow += self.lp[j + 1] - self.lp[j];
+        };
+        // Forward solve: y[r] waits on y[k] for each L[r, k], k < r.
+        @memset(span, 0);
+        var s_l: u32 = 0;
+        for (0..n) |k| for (self.li.items[self.lp[k]..self.lp[k + 1]]) |r| {
+            span[r] = @max(span[r], span[k] + 1);
+            s_l = @max(s_l, span[r]);
+        };
+        // Back solve: z[i] waits on z[k] for each U[i, k], i < k.
+        @memset(span, 0);
+        var s_u: u32 = 0;
+        var k = n;
+        while (k > 0) {
+            k -= 1;
+            for (self.ui.items[self.up[k]..self.up[k + 1]]) |i| {
+                span[i] = @max(span[i], span[k] + 1);
+                s_u = @max(s_u, span[i]);
+            }
+        }
+        @memset(width, 0);
+        var rail_cols: u32 = 0;
+        for (0..n) |c| {
+            rail_cols += @intFromBool(col_ptr[c + 1] - col_ptr[c] > 1000);
+            for (row_idx[col_ptr[c]..col_ptr[c + 1]]) |r| width[r] += 1;
+        }
+        var rail_rows: u32 = 0;
+        for (width) |w| rail_rows += @intFromBool(w > 1000);
+        const nl: u64 = self.li.items.len;
+        const nu: u64 = self.ui.items.len;
+        const epoch = 8 * (nu + n + nl + 1) + 4 * (2 * (n + 1) + nu + (nu + 1) + flops + col_ptr[n]) + n +
+            4 * (2 * (n + 1) + 2 * nl + 2 * nu) + 8 * @as(u64, n);
+        std.debug.print("lu-census: F={d} S_r={d} levels={d} S_L={d} S_U={d} widest_U={d} narrow_F={d:.1}% rails={d}r/{d}c epoch={d:.1}MB\n", .{
+            flops,                                                                           s_r,       levels,    s_l, s_u, widest,
+            100 * @as(f64, @floatFromInt(narrow)) / @as(f64, @floatFromInt(@max(flops, 1))), rail_rows, rail_cols,
+            @as(f64, @floatFromInt(epoch)) / 1e6,
+        });
     }
 
     /// Step k just stored L[:,k] and pivoted row `piv`. Compares L[:,k-1]
