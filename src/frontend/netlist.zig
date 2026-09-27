@@ -98,6 +98,9 @@ pub const Deck = struct {
     analyses: []const Analysis,
     config: []const Config,
     ic: []const Ic,
+    /// `.save` outputs as lowercased `v(net)`/`i(name)` labels. Empty: save
+    /// everything, as with no `.save` card or a `.save all`.
+    saves: []const []const u8,
     foreign: []const Foreign,
     /// `.meas` cards; their strings borrow the parse arena.
     measures: []const core.Measure,
@@ -191,7 +194,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
     return null;
 }
 
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, meas, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, save, meas, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -237,6 +240,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
+    .{ "save", .save },
 });
 
 /// The card a `.keyword` names, case-insensitively; null for any other card.
@@ -387,6 +391,8 @@ fn Reader(comptime S: type) type {
         analyses: std.ArrayList(Analysis) = .empty,
         config: std.ArrayList(Config) = .empty,
         ic_cards: std.ArrayList([]const Value) = .empty,
+        saves: std.ArrayList([]const u8) = .empty,
+        save_all: bool = false,
         foreign: std.ArrayList(Foreign) = .empty,
         measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
@@ -503,6 +509,7 @@ fn Reader(comptime S: type) type {
                     .analyses = r.analyses.items,
                     .config = r.config.items,
                     .ic = ic.items,
+                    .saves = if (r.save_all) &.{} else r.saves.items,
                     .foreign = r.foreign.items,
                     .measures = r.measures.items,
                 },
@@ -771,6 +778,18 @@ fn Reader(comptime S: type) type {
                 },
                 .options => try r.config.append(r.arena, .{ .temp = false, .args = args }),
                 .ic => try r.ic_cards.append(r.arena, args),
+                .save => for (args) |a| switch (a) {
+                    .group => |g| if (g.args.len == 1 and (std.ascii.eqlIgnoreCase(g.name, "v") or std.ascii.eqlIgnoreCase(g.name, "i"))) {
+                        var buf: [24]u8 = undefined;
+                        const name = nodeText(g.args[0], &buf) orelse continue;
+                        const label = try std.fmt.allocPrint(r.arena, "{c}({s})", .{ std.ascii.toLower(g.name[0]), name });
+                        try r.saves.append(r.arena, std.ascii.lowerString(label, label));
+                    },
+                    .name => |n| if (std.ascii.eqlIgnoreCase(n, "all")) {
+                        r.save_all = true;
+                    },
+                    else => {},
+                },
                 else => {},
             }
         }

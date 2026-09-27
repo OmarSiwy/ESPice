@@ -152,6 +152,32 @@ test "an N card on a psp103va model runs the built-in PSP 103, as ngspice with O
     try std.testing.expect(std.mem.indexOfScalar(@TypeOf(psp), prepared.circuit.batch_types, psp) != null);
 }
 
+test ".save narrows the outputs; .save all keeps them" {
+    var session = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer session.deinit();
+    var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer parse_arena.deinit();
+    const deck =
+        \\save
+        \\V1 in 0 1
+        \\R1 in Mid 1k
+        \\R2 mid out 1k
+        \\R3 out 0 1k
+        \\.save v(OUT) i(v1) v(nowhere)
+        \\
+    ;
+    const nl = try parse(parse_arena.allocator(), deck ++ ".op\n.end\n");
+    var saved = try build(session.allocator(), parse_arena.allocator(), nl);
+    defer saved.deinit();
+    try std.testing.expectEqual(@as(usize, 2), saved.deck.probe_labels.len);
+    try std.testing.expectEqualStrings("i(v1)", saved.deck.probe_labels[0]);
+    try std.testing.expectEqualStrings("v(out)", saved.deck.probe_labels[1]);
+    const all = try parse(parse_arena.allocator(), deck ++ ".save all\n.op\n.end\n");
+    var every = try build(session.allocator(), parse_arena.allocator(), all);
+    defer every.deinit();
+    try std.testing.expectEqual(@as(usize, 4), every.deck.probe_labels.len);
+}
+
 test "prepared metadata and query identities outlive parse storage" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
