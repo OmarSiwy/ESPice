@@ -6,7 +6,8 @@
 wall-clock benchmark held the machine. Every number marked *measured* comes
 from an earlier run recorded in the sources named beside it. Every number
 marked *model* is arithmetic on those measurements, and the experiments in
-§5 exist to replace it.
+§5 exist to replace it. §9 is the exception: census counts measured at
+`52a5903` for the cheap experiments of §7.
 
 Part I (§1-§5) keeps ngspice's iterate sequence and time grid. Part II
 (§6-§8) is an opt-in GPU-native mode that keeps only each deck's oracle
@@ -916,6 +917,217 @@ inside the eval launch.
 - **Record.** Every divergence from ngspice this mode introduces (grid,
   iterate count, OP selection rule) is recorded in `docs/` with its
   measurement and fallback, per the proof rule.
+
+## 9. Census results
+
+Measured at `52a5903` plus two instrumentation commits (`ESPICE_CENSUS`,
+`ESPICE_CENSUS_ACT`, `ESPICE_F32_PLANES`, and a `lu_trig` counter in
+`ZP_TRAN_STATS`) that stay off `main`. CPU backend, `-Dgpu=false`, every
+deck in `tran/`, `stress/`, `convergence/` and `op/` (166 decks). Other
+builds shared the machine (load average 11 to 120), so every figure here
+is a count except the MATEX wall times, which are marked. The gpu-gen
+decks named in §7.2 are not in the tree and were not run.
+
+### 9.1 Modified Newton (§7.1)
+
+Transient solves only (t > 0). "Iterate 0 passes" means iterate 0 cleared
+every gate except the first-iterate floor: not limited, scaled step < 1,
+row-scaled residual, device convergence (state staging not replayed, so
+an upper bound). Every such solve converged at iterate 1, so this is also
+the share whose second evaluation exists only because of the floor.
+"CVODE m=0" is CVODE's own test with a fresh LU (crate = 1): scaled step
+≤ 0.1, not limited, publishing x0 + dx0. Factor calls split into exact
+reuse (values bitwise equal to the last factor, already skipped by
+`Solver.factor`) and numeric refactors on the stored pivot order.
+"CVODE trigger" counts the factors CVODE's rules would take (refresh
+after 20 attempts, on |ag0/ag0_LU − 1| > 0.3, or after a failure). It is
+a floor, because a stale LU can also cost iterations.
+
+| Decks | Solves | Iterate 0 passes | CVODE m=0 | Iterations 2 / 3 / 4 / ≥5 | Mean | Exact reuse | Factors per attempt | CVODE trigger per attempt |
+|---|---|---|---|---|---|---|---|---|
+| tran/ (69) | 457,717 | 64.9% | 11.7% | 99.8 / 0.1 / 0.1 / 0.0% | 2.00 | 75.3% | 0.50 | 0.06 |
+| stress/ (16) | 2,531,043 | 95.1% | 87.0% | 98.4 / 1.5 / 0.1 / 0.0% | 2.02 | 39.3% | 1.23 | 0.05 |
+| scaling_inverter_chain_256 | 1,209 | 0.5% | 0.5% | 3.3 / 5.6 / 87.4 / 3.6% | 3.91 | 0% | 3.91 | 0.19 |
+| scaling_inverter_chain_4k | 1,202 | 0.5% | 0.5% | 3.4 / 5.4 / 87.5 / 3.7% | 3.91 | 0% | 3.91 | 0.19 |
+| scaling_parallel_inverters_2000 | 589 | 65.7% | 63.2% | 84.2 / 9.3 / 5.6 / 0.8% | 2.23 | 26.2% | 1.65 | 0.19 |
+| vacask_ring | 20,936 | 0.2% | 0.2% | 0.5 / 94.0 / 5.4 / 0.0% | 3.05 | 0% | 3.05 | 0.07 |
+| vacask_mul | 500,027 | 85.6% | 63.1% | 96.4 / 3.6 / 0.0 / 0.0% | 2.04 | 0% | 2.04 | 0.05 |
+| scaling_rc_ladder_100k | 235 | 12.8% | 0.4% | 100 / 0 / 0 / 0% | 2.00 | 90.4% | 0.19 | 0.20 |
+| bench_tran_fourbitadder | 58 | 1.7% | 0% | 86.2 / 13.8 / 0 / 0% | 2.14 | 0% | 2.14 | 0.17 |
+| bench_ngspice_mosamp | 100,248 | 0% | 0% | 99.8 / 0.2 / 0 / 0% | 2.00 | 0% | 2.00 | 0.05 |
+| bench_ngspice_schmitt | 2,018 | 88.2% | 75.2% | 99.2 / 0.6 / 0.2 / 0% | 2.01 | 0% | 2.01 | 0.06 |
+
+No solve ever took a single iteration (the floor), and in 2.99 M solves no
+refactor lost its pivot order: the re-pivot count is zero. Over the 41
+nonlinear decks with at least 50 steps, the per-deck median share of
+iterate-0 passes is 62%, and 13 of them are under 20%. Summed over every
+nonlinear deck's evaluations, acceptance at iterate 0 would remove 42% of
+them, but most of that comes from `vacask_graetz` and `vacask_mul`. Of
+the CVODE m=0 acceptances, 4 (all on `vacask_mul`) published an x1 that
+the next delta test would have refused.
+
+**Verdict: build.** It passes the §7.1 gate on the corpus as a whole but
+fails it on three of the four named decks, so the win is split. Accepting
+at iterate 0 costs one gate and saves up to half the evaluations on
+quiescent decks (parallel inverters between edges, `vacask_mul`,
+`schmitt`), and does nothing for the chains, the ring and the adder, which
+take 3 to 3.9 iterations every step. Those need the lagged-LU half. There,
+the CVODE trigger fires on 5-20% of attempts against 1.1-3.9 factors per
+attempt today, and the pivot order never goes stale, so a kept LU is
+cheap to keep valid. Whether chord iterations cost more evaluations than
+they save in factors is the `ESPICE_SOLVER=modnewton` experiment (§7.1
+item 2), which should run next on the chains and the ring.
+
+### 9.2 Activity (§7.3)
+
+Per host Newton evaluation, the share of model instances (linear element
+types excluded) that bypass would still evaluate. An instance is active
+when any gathered unknown moved more than 1e-3·max(|v|, |v_ref|) + 1e-6 V
+(1e-12 A on a current row) from v_ref, its value at the instance's own
+last active evaluation. This is ngspice's bypass reference, not the
+previous iterate, so slow drift accumulates until it trips.
+
+| Deck | Evals | Model instances | Median active | p10 / p90 | Mean | Evals under 20% active |
+|---|---|---|---|---|---|---|
+| scaling_inverter_chain_4k | 4,705 | 8,000 | 0.5% | 0.1 / 1.1% | 0.5% | 100% |
+| scaling_inverter_chain_256 | 4,732 | 512 | 6.6% | 2.0 / 10.9% | 6.4% | 100% |
+| scaling_parallel_inverters_2000 | 1,314 | 4,000 | 0% | 0 / 100% | 26.9% | 73% |
+| bench_tran_fourbitadder | 124 | 288 | 30.6% | 2.8 / 61.1% | 32.0% | 44% |
+| vacask_ring | 63,841 | 18 | 100% | 66.7 / 100% | 91.6% | 0.2% |
+| vacask_mul | 1,018,425 | 4 | 50% | 0 / 100% | 45.0% | 48% |
+| bench_ngspice_mosamp | 200,688 | 27 | 0% | 0 / 0% | 1.2% | 99% |
+| bench_ngspice_mosmem | 332 | 12 | 8.3% | 0 / 91.7% | 34.8% | 50% |
+| bench_ngspice_schmitt | 4,057 | 4 | 0% | 0 / 50% | 12.4% | 77% |
+
+**Verdict: build bypass, host first.** The §7.3 gate (median active under
+30% on the chains) passes by a wide margin: 0.5% on the 4k chain and 6.6%
+on the 256 chain. On the 4k chain, the deck that motivated this, a
+bypass that skips latent instances would evaluate about one MOSFET in
+200. The adder sits right at the 3× line, and the ring is always active,
+as expected. The parallel inverters are latent between edges and fully
+active on them, which suits bypass and not multirate. The next test is
+correctness, not headroom: a host bypass behind a pin, with §7.3's
+first-order stamp-error bound, gated on the full corpus. GPU compaction
+and multirate wait for that result.
+
+### 9.3 Internal nodes (§7.2)
+
+For every non-final Newton iterate, operating points included: the kind
+of unknown with the largest step. "Scaled" ranks by |dx|/(reltol·|x| +
+atol), which is what decides convergence. "Raw" ranks by |dx| alone, which
+is what the `ZP_OPDBG` trace prints and which mixes volts with amperes.
+Internal means unnamed and not a current row: a device's prime or
+internal node.
+
+| Decks | Non-final iterates | Scaled: named / internal / current | Raw: named / internal / current |
+|---|---|---|---|
+| convergence/ (31, all OP) | 841 | 79.1 / 8.6 / 12.4% | 86.1 / 11.3 / 2.6% |
+| op/ (50) | 186 | 38.7 / 25.3 / 36.0% | 61.8 / 35.5 / 2.7% |
+| stress/, transient | 2,576,266 | 31.5 / 19.5 / 49.1% | 69.2 / 28.8 / 2.0% |
+| tran/, transient | 459,295 | 8.8 / 0.3 / 91.0% | 80.4 / 0.8 / 18.8% |
+
+Decks where internal unknowns lead most often (scaled): `op/device_b3soidd`
+80% (30 iterates), `convergence/bench_mos_series_r` 66%, `vacask_ring` 53%,
+`vacask_graetz` 40%, `bench_tran_fourbitadder` 38%, `bench_ngspice_schmitt`
+35%. Only 8 of the 86 decks with at least 20 non-final iterates cross 20%.
+
+**Verdict: demote below rank 8, with one narrow exception.** The §7.2 gate
+fails where it was set: on `convergence/`, internal nodes lead 8.6% of
+iterates (11.3% by raw step), so terminal coupling, not internal lag,
+drives the hard operating points. `op/` reaches 25%, but on 186 iterates
+from single-device decks. The exception is the series-resistance regime
+the idea was built for: `vacask_ring` (PSP103, 3.05 iterations per step),
+`vacask_graetz` and `bench_mos_series_r`. A host prototype on those three
+decks alone is the better test. It is only worth running if §9.1's
+modified Newton leaves the ring at 3 iterations per step.
+
+### 9.4 MATEX routing (§7.8)
+
+Every linear transient deck (R, C, L, K and independent sources only)
+run as `.tran` and with its `.tran` card rewritten to `.matex tstep
+tstop`. Accuracy is the harness metric: our waveform interpolated at the
+oracle's accepted times, worst err/(atol + rtol·|ref|) over every checked
+column, so 1 is the pass line. Cost is callgrind instructions (Ir) for one
+run. `stress/scaling_resistor_grid_100x100` is `.op` only and has no
+transient to route.
+
+| Deck (selected rows) | Worst err/tol, `.tran` | Worst err/tol, `.matex` | Ir `.matex` / `.tran` |
+|---|---|---|---|
+| scaling_rc_ladder_100k | 1.7e-7 | 965 | 2.12 |
+| scaling_rc_ladder_1k | 1.7e-7 | 965 | 2.04 |
+| vacask_rc | 5.9e-7 | 54 | 0.82 |
+| bench_medium_rc_ladder_50 | 1.4e-5 | 89,080 | 3.15 |
+| bench_tran_rc_pulse | 4.5e-8 | 2,058 | 0.80 |
+| bench_digital_buffer_rc | 6.0e-8 | 673 | 0.81 |
+| bench_digital_rc_filter_chain, exp_source, sffm_source, device_kinduc | ≤ 1.3e-3 | 3 to 2,788 | |
+| sine, sine_offset_phase | 3.9e-3, 7.8e-3 | 3.4e-11, 2.9e-13 | 0.67, 0.67 |
+| pwl_triangle, output_start_time | 1.6e-12, 3.9e-3 | 2.1e-12, 4.4e-11 | 0.65, 0.66 |
+| finite_rise_positive, rc_pulse_history_trap | 1.9e-2, 1.9e-2 | 5.0e-10, 1.6e-10 | 0.80, 0.78 |
+| rc_sinusoidal_startup, device_inductor, device_vsource | ≤ 1.4e-4 | ≤ 6.3e-5 | 0.85, 0.65, 0.67 |
+| 14 `uic` decks (`ic_*`, `rc_discharge_*`, `lc_energy_*`) | ≤ 0.59 | 250 to 1,992 | |
+
+On the two ladders, five alternating runs each (load 11 rising to 97):
+the 100k ladder took 5.67 s wall / 5.24 s CPU as `.tran` and 8.19 s /
+7.77 s as `.matex`, and the 1k ladder 0.046 s and 0.076 s. A first
+five-run pass at load 75 to 120 showed the reverse on the 100k ladder,
+so treat the earlier wall medians as noise; the Ir ratios are the record.
+
+The failures are real, not an output-density effect. On
+`bench_medium_rc_ladder_50`, `.matex` puts v(n3) at −0.178 V at t = 1 ns,
+in the middle of a 1 ns input edge, where the oracle has 3.6e-14 V. Every
+pulse-driven RC deck fails the same way. `.matex` also ignores `.ic` and
+`uic` and starts from the operating point, so the `uic` decks cannot be
+routed at all.
+
+**Verdict: drop the routing rule.** On the decks the rule was meant for
+(the RC ladders and pulse-driven meshes), `.matex` is up to 3× more work
+and fails the oracle by 50 to 89,000×. It is exact and about a third
+cheaper on smooth sources (sine, PWL, finite rise), but those decks are
+already cheap. Revisit after `.matex` handles a fast source edge and
+`uic`; until then detection would only route decks to a slower, wrong
+answer.
+
+### 9.5 f32 planes (§7.5)
+
+`ESPICE_F32_PLANES=1` rounds `g_vals` and `c_vals` through f32 after every
+host Newton stamp; rhs and q stay f64, and `Circuit.eval` (used for
+linearizations) is untouched. Full corpus, same build, flag off then on.
+
+| | Flag off | Flag on |
+|---|---|---|
+| Corpus | 598 / 616 (failing set identical to `cur-decks.txt`) | 596 / 616 |
+| New failures | | `disto/bench_disto_bjt_ce` (3rd-harmonic i(vcc) 1.35% off, rtol 1e-3), `stress/vacask_graetz` (TimestepTooSmall) |
+| Newton iterations, whole corpus | 7,472,838 | 5,486,139 (graetz aborts early) |
+| Newton iterations without graetz | 5,472,814 | 5,485,108 (+0.22%) |
+| Decks whose iteration count moved | | 58: 44 up, 14 down |
+
+Largest increases: `multi_analysis/device_vbic_ce_amp` 224 → 579
+(non-converged solves 1 → 5, still passes), `reference/bridge_capacitor_transient`
++16%, `vacask_ring` +7%. Several hard OPs improved:
+`convergence/bench_mos_latch_ladder` −41%, `dc/device_vbic_temp` −33%.
+
+**Verdict: needs a better test.** Where Newton converges, an f32 Jacobian
+is nearly free (+0.22% iterations, the rate argument of §7.5 holds). But
+the pass set shrinks by two, for two different reasons, and both need a
+guard before a GPU version. `vacask_graetz` is the ill-conditioned case
+§7.5 predicted: the diode bridge no longer converges, so the guard is
+f64 fallback on a Newton failure, not only on a pivot check. `disto_bjt_ce`
+is subtler, because disto linearizes with `Circuit.eval` and never sees an
+f32 plane. The f32 Jacobian moves the converged OP within reltol, and the
+third-harmonic finite difference amplifies that past the deck's 1e-3.
+Neither this census nor any other CPU run can measure the payoff (bus
+bytes), so the next test is §5 E1's sync census on the GPU decks, with
+f32 download and f64 fallback, gated on the full corpus.
+
+### 9.6 What changes in the ranking
+
+Modified Newton stays first, but the census moves its value from the
+iterate-0 acceptance to the lagged LU on the chain, ring and adder decks.
+Bypass stays second and now has a number: 0.5% of the 4k chain's
+MOSFETs are active per evaluation. Nonlinear elimination drops below rank 8
+except as a three-deck prototype. MATEX routing is dropped until `.matex`
+handles fast edges and `uic`. Mixed precision stays at rank 5, pending the
+GPU measurement and an f64 fallback.
 
 ## Sources
 
