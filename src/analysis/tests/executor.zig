@@ -119,12 +119,12 @@ test "independent workers enter concurrently and preserve separate state" {
     defer two.deinit();
     first.callback = one.callback();
     second.callback = two.callback();
-    try one.start();
-    try two.start();
+    try one.start(.checkpoint);
+    try two.start(.checkpoint);
     try std.testing.expectEqual(@as(u64, 10), (try one.wait()).progress.completed);
     try std.testing.expectEqual(@as(u64, 20), (try two.wait()).progress.completed);
-    try two.start();
-    try one.start();
+    try two.start(.checkpoint);
+    try one.start(.checkpoint);
     try std.testing.expectEqual(@as(u32, 11), (try one.wait()).complete);
     try std.testing.expectEqual(@as(u32, 21), (try two.wait()).complete);
 }
@@ -166,7 +166,7 @@ test "suppressed nonlinear checkpoints still observe cancellation" {
     var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
-    try worker.start();
+    try worker.start(.checkpoint);
     ctx.entered.waitUncancelable(std.testing.io);
     worker.cancel();
     try std.testing.expect((try worker.wait()) == .cancelled);

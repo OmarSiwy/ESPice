@@ -10,6 +10,7 @@ const op = @import("dc/op.zig");
 const gpu = @import("gpu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
 const Controller = @import("worker.zig").Worker(types.Result);
+const Quantum = @import("worker.zig").Quantum;
 
 /// Per-problem execution settings, shared by every query.
 pub const Config = struct {
@@ -112,9 +113,9 @@ pub const Executor = struct {
         self.circuit.ac_params = mapped;
     }
 
-    /// Runs the query up to its next checkpoint or completion, without waiting.
-    pub fn start(self: *Executor) !void {
-        try self.controller.start();
+    /// Runs the query up to where `quantum` lets it stop, without waiting.
+    pub fn start(self: *Executor, quantum: Quantum) !void {
+        try self.controller.start(quantum);
     }
 
     /// Waits for the quantum `start` began and publishes a completed result.

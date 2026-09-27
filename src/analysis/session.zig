@@ -35,8 +35,10 @@ pub const Status = enum(u8) {
 /// A query selection: everything, one query with its prerequisite, or one
 /// connected component (a shared OP and its dependents).
 pub const Scope = union(enum) { all, query: QueryId, component: u32 };
-/// How many ready queries one scheduling round may run at once.
-pub const Limits = struct { max_parallel: u16 = 1 };
+/// How many ready queries one scheduling round may run at once, and how far
+/// each runs.
+pub const Limits = struct { max_parallel: u16 = 1, quantum: Quantum = .checkpoint };
+const Quantum = @import("worker.zig").Quantum;
 /// Which advancement `print` previews.
 pub const Preview = union(enum) { run_all, advance: QueryId, advance_ready: []const QueryId };
 pub const PrintOptions = struct {
@@ -305,7 +307,7 @@ pub const Session = struct {
                     self.rows.items(.failure)[i] = err;
                     continue;
                 };
-                self.rows.items(.executor)[i].?.start() catch |err| {
+                self.rows.items(.executor)[i].?.start(limits.quantum) catch |err| {
                     self.rows.items(.status)[i] = .failed;
                     self.rows.items(.failure)[i] = err;
                 };
