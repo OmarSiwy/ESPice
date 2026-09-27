@@ -94,7 +94,7 @@ module mos6(d, g, s, b);
     real betac, lam0, sqd, sqs, gdrain, gsource;
     // bias-dependent
     real vcrits, vcritd, vgs, vds, vbs, vbd, vgd, ibs, ibd;
-    real mode, vgsx, vbx, vdsx, sbody, von, vgst, lvgon, vdsat, vdsatm;
+    real mode, vgsx, vbx, vdsx, sbody, vonp, von, vgst, lvgon, vdsat, vdsatm;
     real idsat, lam, clm, u, fu, id, gmch, qbs, qbd;
     real cgsm, cgdm, cgbm, cbase, vdd, vdd1, chgs, chgd, capgs, capgd, capgb;
 
@@ -267,18 +267,32 @@ module mos6(d, g, s, b);
 
         // ============ bias and limiting (mos6load.c) ======================
         // As in mos1.va: "fetlimds" on both gate legs + "limvds" emits
-        // ngspice's old-vds swap (mos6load.c:353-366); pnjlim stays on both
-        // bulk junctions. vgd's $limit result is overwritten but the call
-        // registers the gate-drain leg. Trailing `ty` = VerA frame sign (PMOS
-        // limits ty*v).
+        // ngspice's old-vds swap (mos6load.c:353-366). vgd's $limit result is
+        // overwritten but the call registers the gate-drain leg. Trailing `ty`
+        // = VerA frame sign (PMOS limits ty*v). pnjlimds on both bulk legs:
+        // ngspice's rung limits one junction, picked by the LIMITED vds, and
+        // moves only the bulk. The argument after the frame sign is the
+        // MODEINITJCT seed: vgs = type*tVto, vds = 0, vbs = -1.
+        // fetlim's threshold is the von the previous load stored (:343, :550),
+        // the formula at :483 below; VerA evaluates a solve-dependent limiter
+        // argument at that iterate.
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
-        vgs = ty * $limit(V(g, si), "fetlimds", ty * vtox, ty);
-        vgd = ty * $limit(V(g, di), "fetlimds", ty * vtox, ty);
-        vds = ty * $limit(V(di, si), "limvds", ty);
+        vdsx = ty * V(di, si);
+        if (vdsx >= 0.0) vbx = ty * V(b, si);
+        else begin
+            vbx  = ty * V(b, di);
+            vdsx = -vdsx;
+        end
+        if (vbx <= 0.0) sbody = sqrt(max(phit - vbx, 0.0));
+        else sbody = max(0.0, sqphi - vbx / (2.0 * sqphi));
+        vonp = ty * vbit + gammax * sbody - gamma1 * vbx - sigma * vdsx;
+        vgs = ty * $limit(V(g, si), "fetlimds", vonp, ty, ty * vbit + gammax * sqphi);
+        vgd = ty * $limit(V(g, di), "fetlimds", vonp, ty);
+        vds = ty * $limit(V(di, si), "limvds", ty, 0.0);
         vgd = vgs - vds;
-        vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
-        vbd = ty * $limit(V(b, di), "pnjlim", vt, vcritd, ty);
+        vbs = ty * $limit(V(b, si), "pnjlimds", vt, vcrits, ty, -1.0);
+        vbd = ty * $limit(V(b, di), "pnjlimds", vt, vcritd, ty);
 
         // ============ bulk junctions ======================================
         ibs = jcur(vbs, isats, vt, gmin);

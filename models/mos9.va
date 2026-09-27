@@ -244,17 +244,24 @@ module mos9(d, g, s, b);
 
         // ============ bias and limiting (mos9load.c) ======================
         // As in mos1.va: "fetlimds" on both gate legs + "limvds" emits
-        // ngspice's old-vds swap (mos9load.c:351-364); pnjlim stays on both
-        // bulk junctions. Trailing `ty` = VerA frame sign (PMOS limits
-        // type*v).
+        // ngspice's old-vds swap (mos9load.c:351-364). Trailing `ty` = VerA
+        // frame sign (PMOS limits type*v).
         vcrits = vt * ln(vt / (1.4142135623730951 * isats));
         vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
-        vgs = ty * $limit(V(g, si), "fetlimds", ty * (vtox + delvto), ty);
+        // pnjlimds on both bulk legs: ngspice's rung limits one junction,
+        // picked by the LIMITED vds, and moves only the bulk. The argument
+        // after the frame sign is the MODEINITJCT seed: vgs = type*tVto,
+        // vds = 0, vbs = -1.
+        // ponytail: fetlim's threshold is the static tVto, where mos9load.c:341
+        // uses the previous load's von; porting the von chain ahead of the
+        // limits (as mos1.va does) is the upgrade if a deck needs it.
+        vgs = ty * $limit(V(g, si), "fetlimds", ty * (vtox + delvto), ty,
+                          ty * vbit + gammax * sqrt(phit));
         vgd = ty * $limit(V(g, di), "fetlimds", ty * (vtox + delvto), ty);
-        vds = ty * $limit(V(di, si), "limvds", ty);
+        vds = ty * $limit(V(di, si), "limvds", ty, 0.0);
         vgd = vgs - vds;
-        vbs = ty * $limit(V(b, si), "pnjlim", vt, vcrits, ty);
-        vbd = ty * $limit(V(b, di), "pnjlim", vt, vcritd, ty);
+        vbs = ty * $limit(V(b, si), "pnjlimds", vt, vcrits, ty, -1.0);
+        vbd = ty * $limit(V(b, di), "pnjlimds", vt, vcritd, ty);
 
         // ============ bulk junctions ======================================
         ibs = jcur(vbs, isats, vt, gmin);
