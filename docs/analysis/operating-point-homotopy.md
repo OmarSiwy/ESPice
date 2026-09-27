@@ -120,6 +120,20 @@ descend $g_{k+1} = g_k / \phi$ with an adaptive factor $\phi$:
   gmin gives the answer, as ngspice's `dynamic_gmin` removes `diagGmin` for
   the last solve.
 
+Where $g$ lands matters for the path. ngspice's `LoadGmin` (spsmp.c) adds it
+to the diagonal Sparse holds after `spMNA_Preorder` (sputils.c), which swaps
+each column with no diagonal element (a voltage-source branch) for a
+symmetric pair of $\pm 1$ entries. A grounded source $V = E$ therefore
+solves $(1 + g)V = E$ during the stepping, and its node's own diagonal gets
+no $g$. `op.zig` `gminStamps` replays the preorder on the assembled values
+and hands the placement to the converger. Loading $g$ on every diagonal
+instead (branch rows included) moved the rung-1e-3 solution of
+`stress/scaling_inverter_chain_256` from ngspice's 0.1385278 V to 0.1389463 V;
+from there the 1e-4 rung "converged" on a 4.7e12 A supply current, where
+ngspice's rung fails and backs off. The multi-twin tie (a floating source)
+takes the lower row index, which follows ngspice's node numbering only when
+the two agree.
+
 ### Source stepping
 
 Homotopy in the source amplitude $\lambda \in [0,1]$:
@@ -246,8 +260,10 @@ reported the settled transient as success.
 Fixed in `557d833` (ITL2 caps and the `cktop.c` factor rules, early break on
 a failed $\lambda = 0$) and `ee748c7` (OPtran returns the confirming
 Newton's verdict). The 4k chain now follows ngspice's gmin sequence and
-finishes on the gmin rung with the right OP, in 15 s instead of 308 s. The
-deck still fails in its transient.
+finishes on the gmin rung with the right OP, in 15 s instead of 308 s. Its
+transient passes since the mos1 gmbs and LTE-coefficient fixes
+([transient-integration.md](transient-integration.md) §1,
+[models.md](../devices/models.md)).
 
 ## 3. Pseudo-code, CPU sequential
 
