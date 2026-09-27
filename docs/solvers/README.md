@@ -38,6 +38,7 @@ parameter stamps and any GPU factorization remain targets.
 | [monodromy-krylov.md](monodromy-krylov.md) | Matrix-free shooting: Φ·v via sensitivity recurrence over saved step factors, GMRES on (Φ−I), adjoint replay, GCRO-DR recycling | rf-sim.pdf §4.1.4 (fetched); Telichevesky DAC'95 + Parks GCRO-DR (paywalled, derived) |
 | [structured-preconditioners.md](structured-preconditioners.md) | Block-circulant averaged-Jacobian preconditioner, FFT diagonalization, degradation + fallback hierarchy, d-dim multi-tone generalization | rf-sim.pdf HB sections (fetched); Krylov-HB preconditioning practice derived |
 | [parameter-derivative-stamps.md](parameter-derivative-stamps.md) | Analytic ∂F/∂p via one extra AD dual lane (`evalp` hook), adjoint accumulation, SoA layout | VerA contract + `src/device/eval.zig`; Director & Rohrer adjoint (derived) |
+| [gpu-convergence.md](gpu-convergence.md) | Which nonlinear algorithm fits a batch-evaluating GPU: sync census, lanes over independent problems, exact speculation, why not JFNK; ranked options and first experiments | Knoll & Keyes, Thornquist et al., GLU, parareal/MGRIT literature (links in page) |
 | [gpu-sparse-lu.md](gpu-sparse-lu.md) | GLU 3.0 level sets, double-U relaxed dependency detection, three kernel modes; NICSLU cluster/pipeline modes; refactor-replay port spec | GLU3.0 arXiv:1908.00204 (fetched), NICSLU README (fetched) |
 
 ## Consumers: which analyses use which solver doc
