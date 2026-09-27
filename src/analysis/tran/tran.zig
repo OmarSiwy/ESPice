@@ -320,6 +320,7 @@ pub fn simulate(
         // dt/dt_prev and is limited against the last accepted one.
         const xfact = dt / dt_prev;
         for (trial, cur, prev) |*xt, xc, xp| xt.* = xc + xfact * (xc - xp);
+        ckt.evalFollows(trial, t + dt, false);
         _ = ckt.applyLimits(trial, cur);
         const nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         const nr = converger.run(ckt, ws, trial, t + dt, nr_opts, hook) catch |err| switch (err) {
@@ -351,6 +352,7 @@ pub fn simulate(
         // A device state flipped inside this step (a switch crossed its
         // threshold): reject and shrink so the conductance step lands within
         // state_eps of the crossing instead of smeared across dt.
+        if (has_charge) ckt.evalFollows(trial, t + dt, true);
         if (dt > state_eps and ckt.stateCtl(.query)) {
             st.rej_state += 1;
             _ = ckt.stateCtl(.revert);

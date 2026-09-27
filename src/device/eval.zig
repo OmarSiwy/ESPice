@@ -1547,22 +1547,25 @@ pub fn DeviceBatch(comptime D: type) type {
 ///   `checkConvergence`);
 /// - `core_reads_simstate` cores, since sim state is published to the host
 ///   copy only;
-/// - unrevertible held variables (`hasUnrevertibleHeld`), which
-///   `StateKernel` would latch at every converged solve instead of once per
-///   accepted point;
-/// - `State` without `limit` (sources and FSMs whose eval reads host-owned
-///   per-attempt state).
+/// - unrevertible held variables (`hasUnrevertibleHeld`) together with
+///   `limit`: the launcher runs a held device's `StateKernel` only at
+///   accepted points (`commit_held`), so it could not also limit per solve;
+/// - otherwise, `State` without `limit` (sources and FSMs whose eval reads
+///   host-owned per-attempt state).
 /// `State` with `limit` is the path-latch pattern that `StateKernel` and
-/// `CtlKernel` run on the device.
+/// `CtlKernel` run on the device; a held device's `State` is that latch plus
+/// its held variables, all in the resident Instance.
 // ponytail: the State-with-limit rule is decl correlation, not proof;
 // `StateKernel` flags any non-`.ok` `updateState` so a device that breaks it
 // falls back to the CPU instead of running wrong.
 fn gpuEligible(comptime D: type) bool {
     if (@hasDecl(D, "mutable_eval") and D.mutable_eval) return false;
     if (@hasDecl(D, "beginSolve") or @hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
-    if (hasUnrevertibleHeld(D)) return false;
-    return !@hasDecl(D, "core_reads_simstate") and
-        (@hasDecl(D, "limit") or !@hasDecl(D, "State"));
+    if (@hasDecl(D, "core_reads_simstate")) return false;
+    // ponytail: no model holds variables and limits; split `StateKernel`
+    // into its two halves when one does.
+    if (hasUnrevertibleHeld(D)) return !@hasDecl(D, "limit");
+    return @hasDecl(D, "limit") or !@hasDecl(D, "State");
 }
 
 /// Whether D's GPU eval kernel is paired with a `StateKernel`.
@@ -1603,6 +1606,12 @@ fn ctlKernelName(comptime D: type) [:0]const u8 {
 /// unique across the per-device build roots, so each device exports a copy.
 fn reduceKernelName(comptime D: type) [:0]const u8 {
     return "arp_reduce_" ++ comptime baseName(D);
+}
+
+/// Not carried in the frozen `GpuPayload`: the host derives it from
+/// `kernelName`, so the prefix swap there must match this.
+fn qTapeKernelName(comptime D: type) [:0]const u8 {
+    return "arp_qtp_" ++ comptime baseName(D);
 }
 
 /// Memory access for `evalRange`/`limitRange`. `device` changes only how
@@ -1827,16 +1836,20 @@ fn StateKernel(comptime D: type, comptime block_size: u32) type {
     };
 }
 
-/// Segmented sum, one plane cell per thread: `plane[i] = sum(stage[seg[i] ..
-/// seg[i + 1]])`. The launcher lays each cell's staging contributions out
+/// Segmented sum, one output cell per thread: `out[i] = sum(in[seg[2i] ..
+/// seg[2i + 1]])`. The launcher lays each cell's staging contributions out
 /// contiguously in tape order, so this sums them in the order the host stamp
-/// does, on every launch. The plane is overwritten, not accumulated.
+/// does, on every launch. Explicit ends let ranges skip the staging cells
+/// that no plane cell reads (ground and structural-zero contributions). The
+/// output is overwritten, not accumulated.
 ///
 /// Strict left-to-right with one accumulator on purpose: no `.optimized`
 /// float mode, and no interleaved partial sums. The tape emits rows in `ru`
 /// order, so interleaving would group all the +1.8 contributions of a supply
 /// row in one lane and all the -1.8 in another, measured at 4e-12 error
 /// against 1.6e-17 in order. The launcher bounds the chain length instead.
+/// The loads go out eight at a time ahead of the in-order adds, so a thread
+/// waits on memory once per eight contributions, not once per contribution.
 fn ReduceKernel(comptime _: type, comptime block_size: u32) type {
     return struct {
         pub fn run(
@@ -1847,12 +1860,48 @@ fn ReduceKernel(comptime _: type, comptime block_size: u32) type {
         ) callconv(gompute.kernel_callconv) void {
             const tid = gompute.globalIdX(block_size);
             if (tid >= n_cells) return;
-            const i: u32 = @intCast(tid);
+            const i: usize = @intCast(tid);
             var sum: f64 = 0;
-            var k = seg[i];
-            const end = seg[i + 1];
+            var k = seg[2 * i];
+            const end = seg[2 * i + 1];
+            while (k + 8 <= end) : (k += 8) {
+                var v: [8]f64 = undefined;
+                inline for (&v, 0..) |*e, j| e.* = stage[k + j];
+                inline for (v) |e| sum += e;
+            }
             while (k < end) : (k += 1) sum += stage[k];
             plane[i] = sum;
+        }
+    };
+}
+
+/// GPU charge-tape kernel, one thread per instance: the LTE charges
+/// `evalQRange` records on the host, at `xs`, into `tape` (`count *
+/// lteSites(D).len`). Same `RealFor` basis, so the charges match the host
+/// tape to the device's rounding. The launcher runs it lazily, once per
+/// transient step, instead of widening the frozen eval kernel's arguments.
+fn QTapeKernel(comptime D: type, comptime block_size: u32) type {
+    const n_u: usize = comptime contract.nU(D);
+    const sites = comptime lteSites(D);
+    return struct {
+        pub fn run(
+            count: u64,
+            t: f64,
+            xs: gompute.GlobalPtr(f64),
+            gath: gompute.GlobalPtr(u32),
+            models: gompute.GlobalPtr(D.Model),
+            instances: gompute.GlobalPtr(D.Instance),
+            tape: gompute.GlobalPtr(f64),
+        ) callconv(gompute.kernel_callconv) void {
+            @setFloatMode(.optimized);
+            const tid = gompute.globalIdX(block_size);
+            if (tid >= count) return;
+            const id: usize = @intCast(tid);
+            const S = RealFor(@hasDecl(D, "collapse"));
+            var xv: [n_u]S = undefined;
+            inline for (0..n_u) |u| xv[u] = S.seed(xs[gath[id * n_u + u]], u);
+            const qs = D.q(S, xv, @addrSpaceCast(&models[id]), @addrSpaceCast(&instances[id]), t);
+            inline for (sites, 0..) |k, j| tape[id * sites.len + j] = qs[k].v;
         }
     };
 }
@@ -2021,6 +2070,7 @@ comptime {
                     gompute.exportRaw(kernelName(D), &DeviceKernel(D, block_size).run);
                     if (hasStateKernel(D)) gompute.exportRaw(stateKernelName(D), &StateKernel(D, block_size).run);
                     if (hasCtlKernel(D)) gompute.exportRaw(ctlKernelName(D), &CtlKernel(D, block_size).run);
+                    if (@hasDecl(D, "q")) gompute.exportRaw(qTapeKernelName(D), &QTapeKernel(D, block_size).run);
                     gompute.exportRaw(reduceKernelName(D), &ReduceKernel(D, block_size).run);
                 } else gompute.exportRaw("arp_nop_" ++ decl.name, &placeholder);
             } else {
