@@ -146,8 +146,11 @@ fn keepSaved(scratch: std.mem.Allocator, probes: *[]u32, labels: *[][]const u8, 
     const p = probes.*;
     const l = labels.*;
     var kept: usize = 0;
+    // One buffer for every lowercased label, not an allocation per label.
+    var lower: std.ArrayList(u8) = .empty;
     for (p, l) |row, label| {
-        if (!wanted.contains(try std.ascii.allocLowerString(scratch, label))) continue;
+        try lower.resize(scratch, label.len);
+        if (!wanted.contains(std.ascii.lowerString(lower.items, label))) continue;
         p[kept] = row;
         l[kept] = label;
         kept += 1;
