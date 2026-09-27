@@ -351,7 +351,7 @@ test "prepared bindings retain model fields and exclude runtime state from param
 }
 
 test "selected model integer fields and levels reject out-of-range values" {
-    for ([_][]const u8{ "level=-1", "level=65536", "level=54 tnoimod=1e40", "level=54 tnoimod=1.5" }) |parameters| {
+    for ([_][]const u8{ "level=-1", "level=65536", "level=54 tnoimod=1e40" }) |parameters| {
         var session = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer session.deinit();
         var parse_arena = std.heap.ArenaAllocator.init(std.testing.allocator);

@@ -97,8 +97,9 @@ fn isScalar(comptime T: type) bool {
     };
 }
 
-/// Converts a card value to field type `T`. Integers must be exact and in
-/// range, floats must stay finite after narrowing, and bools are `value != 0`.
+/// Converts a card value to field type `T`. Integers round half up and must
+/// land in range, floats must stay finite after narrowing, and bools are
+/// `value != 0`.
 pub fn castField(comptime T: type, value: f64) !T {
     if (!std.math.isFinite(value)) return error.NonFiniteParameter;
     return switch (@typeInfo(T)) {
@@ -111,9 +112,11 @@ pub fn castField(comptime T: type, value: f64) !T {
             // A power-of-two bound is exact in f64; maxInt(i64) is not.
             const upper: f64 = comptime std.math.pow(f64, 2, info.bits - @intFromBool(info.signedness == .signed));
             const lower: f64 = if (info.signedness == .signed) -upper else 0;
-            const truncated = @trunc(value);
-            if (truncated != value or truncated < lower or truncated >= upper) return error.ParameterOutOfRange;
-            break :blk @intFromFloat(value);
+            // Rounds half up like ngspice inpgval.c:31 (`floor(0.5 + x)`): PDK
+            // cards write integer parameters as reals (IHP's `level = 103.60`).
+            const rounded = @floor(0.5 + value);
+            if (rounded < lower or rounded >= upper) return error.ParameterOutOfRange;
+            break :blk @intFromFloat(rounded);
         },
         .bool => value != 0,
         else => @compileError("unsupported numeric field type"),

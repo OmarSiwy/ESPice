@@ -178,7 +178,7 @@ test "dyn vtable: blob init, param set by name, proto add" {
     for ([_]f64{ 1e300, -1e300 }) |invalid|
         try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "r", invalid));
     try testing.expectEqual(@as(f32, 42), m.r);
-    for ([_]f64{ -129, 128, 0.5, -0.5 }) |invalid|
+    for ([_]f64{ -129, 128, 127.5, -128.6 }) |invalid|
         try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "mode", invalid));
     try testing.expectEqual(.non_finite_parameter, one(vt.bind_model, &mblob, "mode", std.math.nan(f64)));
     try testing.expectEqual(@as(i8, 0), m.mode);
@@ -188,6 +188,8 @@ test "dyn vtable: blob init, param set by name, proto add" {
     try testing.expect(m.mode__given);
     try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "mode", 127));
     try testing.expectEqual(@as(i8, 127), m.mode);
+    try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "mode", -0.5));
+    try testing.expectEqual(@as(i8, 0), m.mode);
     try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "count", -1));
     try testing.expectEqual(.parameter_out_of_range, one(vt.bind_model, &mblob, "count", 0x1p64));
     try testing.expectEqual(.ok, one(vt.bind_model, &mblob, "count", 0x1p64 - 2048));
