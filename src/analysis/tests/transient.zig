@@ -295,8 +295,7 @@ const TranTests = struct {
                 }
                 const c: integrator.Coeffs = .{ .ag0 = 2.0 / (r.float(f64) * 1e-9 + 1e-12), .ag2 = r.float(f64) * 1e9 };
                 var ora = out;
-                // The vector body sums (out + d) - h, the scalar tail out + (d - h).
-                const body = len - len % W;
+                // Every element, vector body and tail alike, sums (out + d) - h.
                 for (0..len) |j| {
                     const d = c.ag0 * (q[0][j] - q[1][j]);
                     const h: f64 = switch (m) {
@@ -304,7 +303,7 @@ const TranTests = struct {
                         .gear_2 => c.ag2 * (q[1][j] - q[2][j]),
                         else => 0,
                     };
-                    ora[j] = if (!acc) d - h else if (j < body) (ora[j] + d) - h else ora[j] + (d - h);
+                    ora[j] = if (!acc) d - h else (ora[j] + d) - h;
                 }
                 integrator.companionAt(m, acc, out[0..len], q[0][0..len], q[1][0..len], q[2][0..len], ip[0..len], c);
                 try testing.expectEqualSlices(u64, @ptrCast(ora[0..len]), @ptrCast(out[0..len]));
