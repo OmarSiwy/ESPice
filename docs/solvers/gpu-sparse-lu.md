@@ -3,7 +3,8 @@
 **Status: not implemented.** ESPice factors every matrix on the host; the
 GPU only evaluates device planes. This page is the research and port spec
 for a level-set refactor, kept for the day a matrix size in the corpus
-justifies it.
+justifies it. The design built on it, with the experiments that decide
+it, is `gpu-lu.md`.
 
 ## 1. Mathematical specification
 
