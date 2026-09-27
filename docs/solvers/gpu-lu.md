@@ -27,8 +27,10 @@ Ranked recommendation:
    iteration instead of the planes. The result is bitwise the host's
    `refactorColumns` and `solve`, so a pivot failure peels to the host's
    full factor and the run continues exactly as a host-only run would.
-   Staged: (1) kernels fed by host-uploaded values, (2) resident values,
-   (3) the companion on the device, one sync per iteration.
+   Each iteration's device work is one captured graph, replayed with a
+   single launch (§4.3). Staged: (1) kernels fed by host-uploaded values,
+   (2) resident values, (3) the companion on the device, one sync per
+   iteration, (4) k iterations per launch with the gates on the device.
 2. **BBD blocks on the device** (option d), only if the census (E1) finds
    post-layout decks that take the BBD engine. Flat extracted netlists
    probably do not: RC parasitics couple the subcircuit blocks, and
@@ -37,9 +39,10 @@ Ranked recommendation:
    the host too. Run on worker threads with the same tickets, it is a
    multicore refactor (NICSLU's pipeline mode) with identical bits. It is
    the yardstick the GPU must beat, and a fallback where no GPU exists.
-4. **cuDSS** (option c): a measurement reference on NVIDIA, not a
-   dependency. It has no HIP counterpart, it is not bitwise with the host,
-   and it would put vendor-only numerics on the device.
+4. **cuDSS** (option c): not an option. Every kernel goes through gompute,
+   written once in our Zig and compiled for CUDA and HIP; there is no
+   vendor library and no C shim. cuDSS serves only as a performance
+   reference in E2.
 5. **Iterative solves** (option e): not in the default mode. An inexact
    linear solve changes the Newton iterates, and §10.1 of
    `gpu-convergence.md` shows the corpus oracles encode ngspice's exact
@@ -53,6 +56,12 @@ circuit matrices a GPU solve lost 3.16x to one CPU core (Chen, TPDS 2015).
 It stays on the device anyway because the alternative is
 **movement-bound**: downloading the factors costs more than solving where
 they live.
+
+Determinism is a hard constraint: no float atomics anywhere. The only sum
+in assembly is today's staged plane reduce, reused as is; the scatter into
+the factor's slots is injective, so it needs neither atomics nor coloring.
+The kernels use integer atomics only for tickets, which order the schedule
+and never touch a value.
 
 GLU's right-looking kernel is rejected outright. It accumulates subcolumn
 updates with atomics, so the operation order changes from run to run. The
@@ -74,7 +83,7 @@ device solve what `SparseLu.solve` produces. Three reasons:
   its inputs.
 - The oracle. The lane-axis doctrine makes the host path the oracle. A
   bitwise target makes every device refactor checkable with `==`
-  (`ESPICE_GPU_LU_CHECK`, §4.5), the way `ESPICE_GPU_EVAL_CHECK` checks the
+  (`ESPICE_GPU_LU_CHECK`, §4.6), the way `ESPICE_GPU_EVAL_CHECK` checks the
   eval.
 
 What bitwise requires of the kernels:
@@ -103,8 +112,8 @@ than the host's direct solve (§3e).
 **Mutated state.** While the device owns the factors, the host `SparseLu`
 keeps a valid pattern but stale values; `direct.Solver`'s bypass copy must
 not match, so a later host factor refactors rather than trusting it
-(§4.5). The device owns L/U values, the done stamps, three tickets and a
-fail word per iteration.
+(§4.6). The device owns L/U values, the done stamps, three tickets and a
+per-column fail byte.
 
 ## 2. When the GPU can win
 
@@ -188,7 +197,7 @@ host's refactor semantics exactly, including its permissive growth limit
 instability" and recommends `klu_rcond`, `klu_rgrowth` or `klu_condest`;
 Chen's DATE 2015 paper calls refactor "faster but not stable" and checks
 each reused pivot against its column. Our growth monitor is that per-column
-check. A failure peels (§4.4).
+check. A failure peels (§4.5).
 
 **Why sync-free rather than level sets.** Level scheduling needs a launch
 or a grid barrier per level: 145 to 1,626 levels on GLU3.0's circuit
@@ -202,6 +211,14 @@ running, tickets increase in pivot order, and a column depends only on
 lower pivot steps, which blocks already running hold. That holds for any
 grid size, the argument CUB's decoupled look-back scan relies on.
 rocSPARSE's `csrsv` spins on done flags the same way.
+
+Tickets need a u32 `atomicAdd` and the waits need acquire loads and release
+stores, none of which gompute has today (§7). A static column-per-block
+assignment without the ticket can deadlock, because neither vendor
+promises to dispatch blocks in index order. Plan B, if the atomics stall:
+one kernel per level, captured into a graph (§4.3). It is deterministic
+and needs nothing gompute lacks except graphs, and its span becomes the
+level count times one graph node's launch latency.
 
 **Memory.** Dominated by `dmap`: 4 bytes per flop. A factor with 5x10^7
 flops needs 200 MB. Ceiling and upgrade in §4.1.
@@ -228,7 +245,7 @@ L and U down costs 8 bytes per factor entry per iteration, more than the
 planes cost today. Batched right-hand sides (sweeps, sp ports, a lane
 axis) are where device solves win outright.
 
-### (c) cuDSS and the vendor libraries
+### (c) cuDSS and the vendor libraries (reference only)
 
 cuDSS runs reordering on the host, then symbolic and numeric factorization
 and solve phases on the device. Its REFACTORIZATION phase differs from
@@ -248,11 +265,12 @@ and calls rocSPARSE `csrilu0` (ILU(0) on the filled pattern is exact LU
 with frozen pivots), and `csrrf_solve` calls `csrsm`. That is option (a)'s
 architecture in vendor code.
 
-Taking either as a dependency would give two vendor code paths with two
-sets of numerics, neither bitwise with the host, so a peel would fork the
-run. It breaks the rule that kernel logic lives once in the shared path,
-and adds a closed 0.x binary for NVIDIA only. Use cuDSS in E2 as a
-speed-of-light reference on dumped matrices, from an out-of-tree harness.
+Neither is an option: the project routes every kernel through gompute,
+with no vendor library and no C shim. They would also give two vendor
+code paths with two sets of numerics, neither bitwise with the host, so a
+peel would fork the run. cuDSS appears only in E2, as a speed-of-light
+reference on dumped matrices from an out-of-tree harness that nothing in
+the build depends on.
 
 ### (d) BBD blocks on the device
 
@@ -318,6 +336,12 @@ and uploads the final values, which replace (not add to) the device's.
 Replacing keeps the host's summation order, so the result stays bitwise.
 The ground pin's slot joins the overlay.
 
+None of this adds a reduction. Contributions are summed once, by the
+existing staged reduce (`gpu.zig` `Order`, two levels in the serial CPU
+order). The scatter from plane index to factor slot is injective (distinct
+entries of a column have distinct rows), and the overlay replaces distinct
+slots, so no two threads write one value and no coloring is needed.
+
 For decks whose devices all evaluate on the host (the common case: `auto`
 keeps light models on the CPU), the same overlay works with the constant
 Jacobian: `g_base` and `c_base` are uploaded once, and each iteration
@@ -325,16 +349,16 @@ uploads only the final g and c values at the slots non-constant batches
 touch. In a post-layout deck that is the transistor slots, a small share
 of nnz.
 
-The effect on round trips is in §4.3. Syncs per iteration stay at one or
+The effect on round trips is in §4.4. Syncs per iteration stay at one or
 two. Bytes per iteration fall from O(nnz) to O(n + overlay).
 
 ### Comparison
 
 | Option | Wins when | Pivoting | Device memory | Deterministic | Bitwise with host | Frozen boundary | CUDA + HIP via gompute |
 |---|---|---|---|---|---|---|---|
-| (a) tape replay | many flops per nnz, short critical path, n above ~10^5 | host full factor; device replays and monitors growth | 4 B per flop plus values | yes | yes | untouched: reads plane indices, owns new tables | yes, given atomics and acquire/release (§4.5) |
+| (a) tape replay | many flops per nnz, short critical path, n above ~10^5 | host full factor; device replays and monitors growth | 4 B per flop plus values | yes | yes | untouched: reads plane indices, owns new tables | yes, given u32 atomics and acquire/release (§7) |
 | (b) sync-free solves | factors already on the device; batched rhs | none needed | row lists, 8 B per factor entry | yes | yes, with the zero skip | untouched | yes, with level-packed waves |
-| (c) cuDSS / rocSOLVER | NVIDIA, large matrices | cuDSS's own; rocSOLVER needs host P, Q | library-managed | cuDSS: per arch | no | untouched | no: two vendor paths |
+| (c) cuDSS / rocSOLVER (reference only) | NVIDIA, large matrices | cuDSS's own; rocSOLVER needs host P, Q | library-managed | cuDSS: per arch | no | untouched | no: vendor code, outside gompute |
 | (d) BBD | hierarchical decks that pass `Bbd.init` | dense, on device | 32 KB panel per block | yes | only with a fixed vector width | untouched | yes |
 | (e) iterative | never in default mode | preconditioner only | Krylov basis | only with ordered reductions | no | untouched | yes |
 | (f) resident assembly | the eval is resident, or the constant Jacobian is large | n/a | the planes, already resident | yes | yes, with overlay replace | untouched | yes |
@@ -395,7 +419,9 @@ SoA, all u32 unless noted:
 | `urow_ptr`, `urow_col`, `urow_slot` | n + 1, nnz(U), nnz(U) | U by rows, columns descending |
 | `lorder`, `uorder` | n, padded to wave width | rows sorted by solve level, each wave within one level |
 | `pinv`, `q` | n | the host permutations |
-| `done_r`, `done_l`, `done_u` | n | epoch-stamped completion flags |
+| `done_r`, `done_l`, `done_u` | n | completion flags stamped with the iteration number |
+| `fail` (u8) | n | per-column refactor failure, cleared by a fill node each iteration |
+| `params` | one small struct | every per-iteration scalar the LU kernels read (ag0, gmin, growth limit, iteration stamp), so their graph nodes never change (§4.3) |
 
 Epoch size is about 4F + 16 nnz(L+U) + 8 nnz(U) + 4 nnz(A) + 53n bytes.
 `dmap` dominates once F exceeds a few flops per factor entry.
@@ -406,14 +432,14 @@ not a flag) when E2 shows dmap traffic above 30% of refactor bytes.`
 
 ### 4.2 Kernel plan
 
-Five kernels in one image (`arp_lu_*`), one launch each per iteration on
-the eval's stream, no host wait between them:
+Six kernels in one image (`arp_lu_*`), one node each in the iteration's
+graph (§4.3), on the eval's stream, no host wait between them:
 
 ```
 scatter      one thread per plane entry p:
                A = g[p] + ag0 * c[p]          (overlay values replace g, c)
                val[amap[p]] = A; a_copy[p] = A
-             one thread per void slot: A != 0 -> fail = 0
+             one thread per void slot: A != 0 -> vfail = 1
              equality with the last factored A (the host's simdEql rule:
                -0 == +0, NaN != NaN), and-reduced into a skip flag
              (val is zeroed by a fill before the scatter, as fillZero does)
@@ -430,8 +456,12 @@ refactor     one 64-thread block per column; k = atomicAdd(ticket_r, 1)
              void: d = 1. Else zero or non-finite fails; unless scaled,
                cmax = block max of |d| and |L slots|; L slots /= d;
                |d| < growth_limit * cmax fails
-             failure: atomicMin(fail, k)
+             failure: fail[k] = 1 (a byte per column, no atomic)
              barrier; thread 0 stores done_r[k] = epoch (release)
+
+status       one block: the lowest k with fail[k] != 0 (or 0 when
+             vfail), as a block-wide min in shared memory in a fixed tree
+             order; writes the status word the solves and the host read
 
 lsolve       permute in: y[pinv[r]] = -rhs[r]   (solveNeg negates first)
              one thread per row in lorder, waves ticketed in level order:
@@ -443,7 +473,8 @@ lsolve       permute in: y[pinv[r]] = -rhs[r]   (solveNeg negates first)
 usolve       same over uorder, k descending, then z[i] = acc / val[diag(i)]
              permute out: dx[q[j]] = z[j]
 
-A failure (fail != NONE) or the skip flag makes later blocks exit at once.
+Refactor blocks check vfail and the skip flag on entry and exit at once.
+Solve blocks exit when the status word says a step failed.
 ```
 
 The span of the refactor is not its level count. A column walks its U
@@ -463,11 +494,109 @@ The upgrade, if E2 confirms it, is a gather form for wide columns only
 DAG level-scheduled), chosen per column at epoch build.
 
 Block width 64 is one AMD wave64 or two NVIDIA warps, and the kernel needs
-nothing beyond gompute's block `barrier()` for intra-column sync. The
+nothing beyond gompute's block `barrier()` and shared memory for
+intra-column sync and the column max. The bypass equality test and the
+status min are our own block reductions with a fixed tree, not
+`gompute.reduce`, which folds its partials on the host and so cannot sit
+inside a captured graph. The
 refactor's discard slot takes concurrent garbage writes from void columns;
 it is never read.
 
-### 4.3 Per-iteration flow and round trips
+### 4.3 Launch: one captured graph per iteration
+
+Today an iteration is a chain of separately submitted copies and launches
+on one stream: the x upload, the staging fill, one eval kernel per resident
+batch, two reduces, the plane download, and the limit pass. The device LU
+adds a fill, the scatter, the refactor, the status kernel and two solves.
+Every submission costs host time and leaves a gap on the device.
+`gpu-convergence.md` §1.2 measured a fixed 150 µs per Newton iteration on
+small MOS decks (launches, two syncs, the limit pass, at `ee66e0b`), and
+`gpu.zig` still books about 40 µs of launch and wait around 111 µs of device
+work per eval on `mos1_2000`. On small decks that overhead is most of the
+iteration.
+
+ZINC (MIT licensed, a Zig GPU LLM engine) removes the same overhead with
+stream capture. It records a decode step's kernel chain on its stream,
+instantiates the graph once, and replays it with one launch per step
+(`src/cuda/cuda_shim.c`, `cuda_graph_begin` and `cuda_graph_end_launch`;
+the hipGraph twin is in `src/rocm/rocm_shim.c`). Every per-step scalar is
+read from a device buffer uploaded before the launch, never passed as a
+kernel argument, so the topology and the node parameters stay the same and
+`cuGraphExecUpdate` is a cheap no-op. When the driver rejects an update,
+ZINC re-instantiates. The replay runs the same kernels in the same order on
+one stream, so it is bit-identical to the uncaptured chain
+(`src/compute/forward_cuda.zig`, `decodeBatchGraph`). The brief reports
++6.7% on an RTX 4090, where launches dominated, and -2.9% on a Radeon R9700,
+where they did not. I did not find those measurements in the ZINC checkout.
+
+Rules that make an espice iteration capturable:
+
+- Nothing inside the captured region waits on the host: no stream sync, no
+  host fold (so no `gompute.reduce`), no readback that decides what runs
+  next. Data-dependent control stays on the device as early exits: the
+  bypass flag and the status word make later kernels return at once.
+- Every scalar our kernels read per iteration comes from the `params`
+  block. Its upload, the x upload and the downloads are copy nodes inside
+  the graph. A copy node reads and writes pinned host memory when the graph
+  runs, not when it was captured, so fixed pinned addresses are all it
+  needs.
+- Grid sizes depend on n, nnz and the pivot epoch only.
+- Buffers keep their addresses for a pivot epoch. A new epoch (after a
+  peel) reallocates the tables, and the context captures and instantiates
+  again. Epochs are rare.
+- The eval kernels are the exception. Their arguments are frozen at the GPU
+  boundary and carry `SimState` (t and the Newton iteration count) and
+  `limiting` by value, so those nodes change every iteration. Graph update
+  accepts new parameter values on an unchanged topology, so the context
+  re-captures each iteration (host-side recording, no device work) and
+  updates in place. E2 prices that against plain launches; if it loses,
+  the eval launches go ahead of the graph on the same stream.
+
+Capture changes no numbers: same kernels, same order, one stream. Outputs
+must be bitwise equal with `ESPICE_GPU_NOGRAPH` set.
+
+Graphs and waits per Newton iteration, by stage:
+
+| Stage | Graph launches | Waits | Host work between |
+|---|---|---|---|
+| today, resident eval | none (one submission per copy and kernel) | 1 | host batches, combine, factor, solve |
+| 1: host eval, device LU | 1 | 1 | none inside the iteration |
+| 2: resident values, host companion | 2 | 2 | overlay stamps, companion |
+| 3: companion on the device | 1 | 1 | none |
+| 4: k iterations per launch | 1 per k iterations | 1 per k iterations | none |
+
+Graph replay removes submission cost and the gaps between kernels. It does
+not remove the wait itself, about 15 µs each (`gpu-evaluation.md`). Only
+stage 4 removes waits.
+
+**Stage 4: k iterations per launch.** With the Newton gates on the device,
+one graph can hold k unrolled iterations: eval, reduce, scatter, refactor,
+solves, update and limit, then the gate, which writes a `done` word that
+every later node checks on entry. Iterations past convergence or a failure
+cost one empty kernel per node, a few microseconds on the device. One
+small download per launch brings back the converged flag, the iteration
+count and the norms. Graph conditional (while) nodes would avoid the empty
+kernels, but HIP parity for them is not established, so the design
+unrolls. k follows the deck's measured iterations per solve: 2.0 to 4.0 on
+the corpus (`gpu-convergence.md` §10.3). Preconditions, all of which must
+hold:
+
+- Every batch is resident, so there is no overlay. `gpuEligible` already
+  excludes Newton-history hooks.
+- The gate code (`updateAndNorm`, the first-iterate and `init_fix` rules,
+  the row-scaled residual gate, `checkConvergence`) compiles once for
+  host and device, per the no-GPU-only-logic rule, never as a device copy.
+  The norms are block reductions with a fixed tree; `updateAndNorm`'s max
+  is exact in any order.
+- The published iterate stays x_k, the last linearization point, as
+  `newton` publishes it today.
+- A peel inside the k iterations stops the rest, and the host resumes at
+  that iteration.
+
+This is the only stage that removes waits, and the largest change. It
+comes after stage 3 and only on E3's numbers.
+
+### 4.4 Per-iteration flow and round trips
 
 n unknowns, nnz plane entries, m overlay slots:
 
@@ -494,17 +623,17 @@ Do it only if E3 shows the second sync or the q download matters.
 The converger's gates read the residual and `diagAt`, both n-vectors in
 every stage. `x` updates and host-side limiting stay on the host.
 
-### 4.4 Fallback and peel
+### 4.5 Fallback and peel
 
 The device mirrors the host's refactor decisions exactly, so a device
 failure is a host failure. The peel:
 
-1. The solve's download carries the fail word. `fail = k` means pivot step
-   k failed. `atomicMin` gives the lowest failing step whatever the
-   schedule, and every step below it computed the host's exact values, so
-   k is the step at which the host refactor would have stopped. `fail = 0`
-   from the scatter means a void slot turned nonzero, which the host checks
-   before any column.
+1. The solve's download carries the status word. Status k means pivot
+   step k failed. The status kernel takes the lowest failing step, which
+   does not depend on the schedule, and every step below it computed the
+   host's exact values, so k is the step at which the host refactor would
+   have stopped. A void-slot failure from the scatter reports before any
+   column, as the host checks it first.
 2. The host downloads the combined A (`a_copy`, 8 nnz; one more sync), runs
    `SparseLu.factor` (full re-pivot) through the ordinary `direct.Solver`
    path, and solves on the host. That iteration is bitwise a host-only
@@ -530,7 +659,7 @@ The other paths out:
   `LaneLu`, and failed lanes peel to the scalar host path as in
   `freq_solve.zig`'s `solveBatch`.
 
-### 4.5 What changes where
+### 4.6 What changes where
 
 **`src/solver/sparse_lu.zig`.** Numerics untouched.
 
@@ -564,7 +693,9 @@ refactors. Nothing else.
 `deviceSolve` (comptime `@hasDecl`, like `evalFollows`), it calls
 `sys.deviceSolve(ws, rhs, dx)` instead of `slv.factor` plus
 `slv.solveNeg`. A false return (declined or peeled) runs the host pair.
-The gates are unchanged.
+The gates are unchanged. Stage 4 only: the gate code of `finalizeStep`
+moves into a body compiled for host and device, and `newton` calls that
+body on the host, so there is still one implementation.
 
 **`src/analysis/Circuit.zig`, `GpuHook`.** New entries:
 
@@ -588,22 +719,23 @@ resident eval is a plane writer and clears it like every other.
   that becomes "neither the eval nor the LU was admitted".
 - `Cost` gains the LU terms of §2, with `h_r`, `h_s` and the bandwidth
   measured in E2 and recorded next to the existing constants.
-- Epoch upload, the five launches, the overlay gather and replace, the
+- Epoch upload, the six kernels, the overlay gather and replace, the
   peel download.
+- The graph cache of §4.3: one exec per graph shape, re-captured per
+  iteration only while the eval nodes' by-value arguments change, updated
+  in place, re-instantiated on a new pivot epoch or a rejected update.
+  `ESPICE_GPU_NOGRAPH` launches the same chain uncaptured for A/B, as
+  `ESPICE_GPU_NOFUSE` does for the fused waits.
 - `ESPICE_GPU_LU_CHECK`: after each device refactor, refactor on the host
   from `a_copy` and compare `val` and dx bitwise, printing the first
   mismatch.
 - `ESPICE_GPU_STATS`: epochs, peels, skips and per-kernel time.
 
-**gompute.** The kernels need what the eval kernels never did: u32
-`atomicAdd` and `atomicMin` on global memory, acquire loads and release
-stores at device scope, and optionally a sleep in the spin loop
-(`nanosleep` on sm_70 and up, `s_sleep` on AMD). If Zig's `@atomicRmw`,
-`@atomicLoad` and `@atomicStore` lower on `addrspace(.global)` for both
-NVPTX and AMDGCN, gompute adds nothing. Otherwise they become builtins
-beside `barrier()`. gompute's own notes say its AMDGCN path has never run
-on AMD hardware, so HIP support means "compiles" until someone runs E2 on
-an AMD card.
+**gompute.** The requests are in §7, in priority order: device u32
+atomics with acquire/release, graphs with capture, events, async
+device-to-device copies, stream query. gompute's own notes say its AMDGCN
+path has never run on AMD hardware, so HIP support means "compiles" until
+someone runs E2 on an AMD card.
 
 **The frozen boundary.** Untouched. The scatter reads plane indices in the
 frozen CSC order; every LU table is new and sits beside the tapes. The
@@ -641,8 +773,8 @@ bidiagonal chain (pure span, gives `h_r` and `h_s`) and a block-diagonal
 matrix of many independent small blocks (pure bandwidth, gives BW).
 Measure µs per refactor and per solve pair; the same body on 1 and 8 host
 threads (rank 3); cuDSS on the same matrices, with our ordering if it
-accepts a user permutation (reference only); and `ESPICE_GPU_LU_CHECK` mismatches, which must
-be zero on every iteration. Check the PTX and the AMDGPU asm for `fma` in
+accepts a user permutation (reference only); and `ESPICE_GPU_LU_CHECK`
+mismatches, which must be zero on every iteration. Check the PTX and the AMDGPU asm for `fma` in
 the refactor and solve bodies; there must be none.
 
 - Continue to E3 if device refactor plus solve is at least 2x faster than
@@ -652,6 +784,17 @@ the refactor and solve bodies; there must be none.
   alone behind `ESPICE_SOLVER_THREADS`.
 - If cuDSS beats our kernel by more than 3x, look at the gap (supernodes,
   ordering) before tuning ours.
+
+E2 also measures the launch strategy, and this part needs no LU kernel:
+capture today's eval chain (x upload, staging fill, one eval kernel per
+resident batch, two reduces, the plane download) and replay it. On
+`mos1_2000` and `stress/scaling_parallel_inverters_2000`, record µs per
+iteration outside device kernel time, with and without capture, and the
+host cost of re-capture plus `update` when the eval's by-value arguments
+change. Outputs must be bitwise equal with and without capture.
+
+- Keep the eval nodes in the graph if re-capture plus update costs less
+  than the launches it replaces; otherwise launch them ahead of the graph.
 
 **E3. End to end with resident values (stage 2).** Per deck: syncs and
 bytes per Newton iteration, peels per 1,000 refactors, wall time against
@@ -665,20 +808,160 @@ construction, so any difference is a bug).
   set and no deck where `auto` picks a slower path.
 - Build stage 3 only if the second sync or the q download is at least 10%
   of the device iteration.
+- Build stage 4 (k iterations per launch) only if, after stage 3, the one
+  remaining wait per iteration is still at least 20% of the iteration on
+  the decks that motivate it.
 
 ## 6. Rejected and deferred
 
 | Idea | Status | Reason |
 |---|---|---|
 | GLU's right-looking kernel | rejected | atomic accumulation is not deterministic (`gpu.zig` `Order`: 2.1e-10 drift, dt underflow) |
-| Level-set launches per level | rejected | 145 to 1,626 levels times a launch; gompute has no grid barrier |
-| cuDSS or rocSOLVER as a dependency | rejected | vendor-only, not bitwise, two code paths, NVIDIA one closed and 0.x |
+| Level-set launches per level | plan B only | 145 to 1,626 levels times a launch; captured as graph nodes it is the fallback if device atomics stall (§3a) |
+| cuDSS, rocSOLVER, or any vendor library or C shim | rejected | project rule: every kernel through gompute; also not bitwise, two code paths |
+| Float atomics in assembly or LU | rejected | nondeterministic sums; the staged reduce and injective scatters cover every write |
+| Graph conditional (while) nodes | deferred | stage 4 unrolls k iterations with early exits instead; HIP parity unknown |
 | Iterative default solve | rejected | §10.1 conformance; Chen's GMRES numbers; our §10.4 result |
 | f32 factors plus refinement | rejected for default | f32 Jacobians already failed four decks; LU is bandwidth bound, so f32 saves at most 2x of the traffic |
 | MC64 static pivoting (GLU) | rejected | replaces the host's threshold pivoting, so no host oracle |
 | Supernodal refactor on the device | deferred | pays on extracted power meshes (the grid's 97% supernodal axpy); after E2 |
 | Partial refactor of changed columns only | deferred | `README.md` open question 6; host and device alike |
 | Batched lanes on the device (sweeps, MC, AC) | deferred | the same kernel with W values per slot; fixes the narrow tail; after stage 2 |
+
+## 7. gompute feature requests
+
+Everything in this design goes through gompute. This section lists what
+gompute lacks at `67f1983`, per the gompute session's inventory and a read
+of `src/runtime/cuda.zig`, `src/host/raw.zig` and `src/device/builtins.zig`.
+gompute already has streams (`createStream`, flags 0), `launchOn`, async
+upload, download and fill on the per-backend `Buffer`, pinned host memory,
+the block `barrier()` and `addrspace(.shared)` scratch. It has no graphs,
+events, async device-to-device copy, stream query or device atomics.
+
+Every host-side shape below goes into `runtime/cuda.zig` and
+`runtime/hip.zig` with identical signatures, and is re-exported through
+`RawByName(be)` beside `Buffer` and `Stream`. The driver entry points join
+the existing dlsym table. Priority order:
+
+**R1. Device atomics and memory order** (`src/device/builtins.zig`). This
+blocks the sync-free kernels; plan B (§3a) avoids it at a span cost.
+
+```zig
+/// Returns the old value. Device (agent) scope, relaxed. Integer only:
+/// no float atomics, by design.
+pub inline fn atomicAddU32(ptr: *addrspace(.global) u32, v: u32) u32;
+/// Device-scope acquire: later loads see every write the releasing thread
+/// made before its `storeRelease`.
+pub inline fn loadAcquire(ptr: *addrspace(.global) const u32) u32;
+/// Device-scope release.
+pub inline fn storeRelease(ptr: *addrspace(.global) u32, v: u32) void;
+/// Backoff in a spin loop: `nanosleep` on sm_70 and up, `s_sleep` on AMDGCN,
+/// nothing elsewhere.
+pub inline fn spinPause() void;
+```
+
+If Zig's `@atomicRmw`, `@atomicLoad` and `@atomicStore` lower correctly on
+`addrspace(.global)` for NVPTX and AMDGCN, these are one-line wrappers; the
+request is also for the compile check on both targets. For the host
+instance, the same names on plain pointers use Zig's atomics directly.
+
+**R2. Graphs with capture.**
+
+```zig
+pub const CaptureMode = enum { global, thread_local, relaxed };
+
+// Context
+/// CU_STREAM_NON_BLOCKING / hipStreamNonBlocking: a captured stream must
+/// not synchronize implicitly with the legacy default stream.
+pub fn createStreamNonBlocking(self: *Context) Error!Stream;
+
+// Stream
+pub fn beginCapture(self: *Stream, mode: CaptureMode) Error!void;
+/// Ends the capture begun on this stream and returns the recorded graph.
+pub fn endCapture(self: *Stream) Error!Graph;
+/// For Debug asserts that nothing synchronizes inside a capture.
+pub fn isCapturing(self: *Stream) Error!bool;
+
+pub const Graph = struct {
+    pub fn instantiate(self: *const Graph) Error!GraphExec;
+    pub fn deinit(self: *Graph) void;
+};
+
+pub const GraphExec = struct {
+    /// Enqueues one replay on `stream` and returns without waiting.
+    pub fn launch(self: *GraphExec, stream: *Stream) Error!void;
+    /// Updates this exec in place from `graph`, which must have the same
+    /// topology. Returns false, leaving the exec unchanged, when the driver
+    /// rejects the update; the caller then instantiates `graph` instead.
+    pub fn update(self: *GraphExec, graph: *const Graph) Error!bool;
+    pub fn deinit(self: *GraphExec) void;
+};
+```
+
+`Error` gains `CaptureFailed` and `GraphFailed`. Driver calls: CUDA
+`cuStreamCreate(CU_STREAM_NON_BLOCKING)`, `cuStreamBeginCapture`,
+`cuStreamEndCapture`, `cuStreamIsCapturing`, `cuGraphInstantiate`,
+`cuGraphExecUpdate`, `cuGraphLaunch`, `cuGraphExecDestroy`,
+`cuGraphDestroy`. HIP `hipStreamCreateWithFlags(hipStreamNonBlocking)`,
+`hipStreamBeginCapture`, `hipStreamEndCapture`, `hipStreamIsCapturing`,
+`hipGraphInstantiate`, `hipGraphExecUpdate` (whose out-parameters are an
+error node and a result enum, as ZINC's `rocm_shim.c` uses them),
+`hipGraphLaunch`, `hipGraphExecDestroy`, `hipGraphDestroy`. The existing
+`uploadAtAsync`, `downloadAtAsync`, `fillAsync` and `launchOn` must be
+legal under capture; they are, as long as the host side is pinned.
+
+**R3. Events.**
+
+```zig
+// Context
+/// `timing` false sets CU_EVENT_DISABLE_TIMING / hipEventDisableTiming.
+pub fn createEvent(self: *Context, timing: bool) Error!Event;
+
+// Stream
+/// Later work on this stream waits for `event`, without the host waiting.
+pub fn waitEvent(self: *Stream, event: *const Event) Error!void;
+
+pub const Event = struct {
+    pub fn record(self: *Event, stream: *Stream) Error!void;
+    pub fn synchronize(self: *Event) Error!void;
+    /// True once the recorded work is done (CUDA_ERROR_NOT_READY and
+    /// hipErrorNotReady map to false).
+    pub fn query(self: *Event) Error!bool;
+    /// Both events need `timing` true.
+    pub fn elapsedUs(start: *const Event, end: *const Event) Error!f32;
+    pub fn deinit(self: *Event) void;
+};
+```
+
+`Error` gains `EventFailed`. Uses: the epoch upload after a peel runs on a
+second stream and the next graph waits on its event; `Prof.phases` times
+phases with events instead of synchronizing the stream after each one.
+
+**R4. Async device-to-device copy.**
+
+```zig
+// Buffer
+pub fn copyFromAsync(self: *Buffer, src: *const Buffer, src_offset: usize, dst_offset: usize, n: usize, stream: *Stream) Error!void;
+```
+
+`cuMemcpyDtoDAsync_v2` / `hipMemcpyDtoDAsync`. Today's `copyFrom` is
+synchronous and cannot sit in a graph. Use: snapshotting the factored A
+for the value bypass inside the graph.
+
+**R5. Stream query.**
+
+```zig
+// Stream
+pub fn query(self: *Stream) Error!bool;
+```
+
+`cuStreamQuery` / `hipStreamQuery`. Lets the host stamp overlay batches
+while it polls, instead of blocking in `synchronize`. Lowest priority.
+
+Not requested: device-resident reductions. The design's reductions (status
+min, bypass equality, stage 4's norms) are ordinary kernels built from
+`barrier()` and shared memory, written once in our shared path. Also not
+requested: warp shuffles, conditional graph nodes, cooperative launch.
 
 ## Sources
 
@@ -689,7 +972,11 @@ Our code and docs, read at `96807bd`: `src/solver/sparse_lu.zig`
 `src/analysis/gpu.zig` (`Cost` constants, `Order`, `enqueueEval`),
 `src/analysis/Circuit.zig` (`GpuHook`, `combinePlanes`),
 `src/analysis/tran/tran.zig` (`TranHook`), `src/device/eval.zig` (the
-`@mulAdd` note), gompute `src/device/builtins.zig`,
+`@mulAdd` note); gompute at `67f1983` (`src/device/builtins.zig`,
+`src/runtime/cuda.zig`, `src/host/raw.zig`) and the gompute session's
+inventory of it; ZINC (MIT), `src/cuda/cuda_shim.c` (graph capture, update
+and launch), `src/rocm/rocm_shim.c` (the hipGraph twin),
+`src/compute/forward_cuda.zig` (`decodeBatchGraph` and the capture notes);
 `docs/devices/gpu-evaluation.md`, `docs/solvers/gpu-convergence.md`,
 `docs/solvers/solver-perf-2026-09.md`, `docs/solvers/gpu-sparse-lu.md`.
 
