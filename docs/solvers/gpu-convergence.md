@@ -61,6 +61,13 @@ are free (the §5 E2 knee). None of these moves a result beyond pivot-order
 rounding, so the corpus agreement question stays the one the GPU path already
 has (CPU vs GPU planes). Options 4 to 6 would be named opt-in modes.
 
+The cross-field scan in [gpu-convergence-fields.md](gpu-convergence-fields.md)
+confirms this split: chemistry, power flow and SUNDIALS all keep control on
+the host and batch independent problems. It adds one opt-in candidate ahead
+of chord: nonlinear elimination of instance-private internal nodes inside
+the eval launch, which is on-device work with no round trip. It also gives
+chord CVODE's lagging triggers as its specification.
+
 ## 1. Where an iteration's time goes today
 
 ### 1.1 The chain
@@ -297,9 +304,10 @@ lane alone, the rhs/q staging alone, and n + 1 doubles down instead of
 some of the lost rate.
 
 **Iteration counts.** The chord method converges linearly, so I_c ≥ I and
-each extra iteration is one more sync. Li and Shi report more than an order
-of magnitude over SPICE3 on parasitic-heavy transient, where the factor
-dominates. Our GPU decks are the opposite case: parallel inverters have a
+each extra iteration is one more sync. CVODE's triggers and rate test
+(gpu-convergence-fields.md §3.3) are the concrete rules to start from.
+Li and Shi report more than an order of magnitude over SPICE3 on
+parasitic-heavy transient, where the factor dominates. Our GPU decks are the opposite case: parallel inverters have a
 nearly block-diagonal matrix and a cheap factor.
 
 **Conformance.** Changes the iterate sequence, and it breaks the delta test's
