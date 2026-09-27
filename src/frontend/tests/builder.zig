@@ -170,6 +170,35 @@ test "held variables without an accepted copy commit once per accepted point" {
     }
 }
 
+test "source breakpoints match an uncached walk, forward and backward" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nl = try netlist.parse(a, "* breakpoint cache\n" ++
+        "V1 a 0 PULSE(0 1 1n 1n 1n 5n 20n)\nV2 b 0 PWL(0 0 3n 1 7n 0)\nR1 a b 1k\n.end\n", .ngspice);
+    const lib = try device.Library.init(a);
+    var b = try Builder.init(a, &lib);
+    var compiled = false;
+    defer if (!compiled) b.deinit();
+    var nb = try builder.NetBuilder.init(a, &b, nl);
+    try nb.build();
+    var circuit = try b.compile();
+    compiled = true;
+    defer circuit.deinit();
+    const src = for (circuit.batches) |bt| {
+        if (bt.hooks.next_breakpoint != null) break bt;
+    } else return error.TestUnexpectedResult;
+    // Timer-only sources run no per-step state pass.
+    try std.testing.expect(src.hooks.update_state == null and src.hooks.bound_step == null);
+    const next = src.hooks.next_breakpoint.?;
+    const ts = [_]f64{ 0, 0.5e-9, 1e-9, 1.5e-9, 2e-9, 3e-9, 2.5e-9, 6.9e-9, 7e-9, 30e-9, 1e-9, 100e-9, 0 };
+    for (ts) |t| {
+        const cached = next(src.ctx, t);
+        _ = src.hooks.recompute.?(src.ctx); // empties the cache
+        try std.testing.expectEqual(next(src.ctx, t), cached);
+    }
+}
+
 test "unsupported transmission-line cards never select approximate fallbacks" {
     const cases = .{
         .{ "P1 a b c d e 0 f g h i j 0 line\n.model line CPL length=1\n", error.UnsupportedCoupledLineDimension },
