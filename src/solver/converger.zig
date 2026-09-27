@@ -160,12 +160,15 @@ pub fn newton(
     var iter: u16 = 0;
     var init_fix = opts.init_fix;
     if (comptime @hasDecl(S, "beginSolve")) sys.beginSolve();
+    const prof = &ws.prof;
 
     while (iter < opts.max_iter) : (iter += 1) {
         if (comptime @hasDecl(S, "checkpoint")) if (iter != 0)
             try sys.checkpoint(.{ .phase = .nonlinear, .completed = iter, .total = opts.max_iter });
         if (comptime @hasDecl(S, "advanceIteration")) if (iter != 0) sys.advanceIteration(x_old);
+        prof.start();
         hook.assemble(sys, x, t);
+        prof.lap(.eval);
         const v = hook.vals(sys);
         if (opts.gmin > 0) {
             if (opts.gmin_stamps.len > 0) {
@@ -184,6 +187,7 @@ pub fn newton(
         }
         if (newtonDbg())
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
+        prof.lap(.load);
         if (opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig) {
             slv.factor(v, executionOf(sys)) catch |e| {
                 if (opdbg()) {
@@ -198,9 +202,12 @@ pub fn newton(
                 return e;
             };
             ws.factored_sig = opts.matrix_sig;
+            prof.lap(.factor);
         }
         slv.solveNeg(sys.rhs, dx);
+        prof.lap(.solve);
         const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts);
+        prof.lap(.update);
         if (opdbg()) {
             var fi: usize = 0;
             var di: usize = 0;
@@ -611,6 +618,36 @@ fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const b
     return worst;
 }
 
+/// `--timing-in-depth` wall-time split of `newton`, summed over every solve
+/// on one workspace. Off (no clock reads) until `io` is set.
+pub const Prof = struct {
+    io: ?std.Io = null,
+    /// Nanoseconds per phase, indexed by `Phase`.
+    ns: [5]u64 = @splat(0),
+    /// Newton iterations and the factorizations among them.
+    counts: [2]u64 = @splat(0),
+    last: std.Io.Timestamp = .zero,
+
+    /// eval: device evaluation plus companion stamps (`hook.assemble`).
+    /// load: the combined G + ag0*C matrix and gmin. update: the step,
+    /// limiting and the convergence gates.
+    pub const Phase = enum(u3) { eval, load, factor, solve, update };
+
+    fn start(p: *Prof) void {
+        const io = p.io orelse return;
+        p.last = .now(io, .awake);
+        p.counts[0] += 1;
+    }
+
+    fn lap(p: *Prof, phase: Phase) void {
+        const io = p.io orelse return;
+        const now: std.Io.Timestamp = .now(io, .awake);
+        p.ns[@intFromEnum(phase)] += @intCast(p.last.durationTo(now).nanoseconds);
+        p.last = now;
+        if (phase == .factor) p.counts[1] += 1;
+    }
+};
+
 /// Per-circuit Newton scratch: the direct solver on the circuit pattern plus
 /// step vectors. GMRES and combined-matrix buffers grow on first use.
 pub const Workspace = struct {
@@ -621,6 +658,7 @@ pub const Workspace = struct {
     a_vals: []f64 = &.{},
     /// `Options.matrix_sig` of the current factorization; 0 = none.
     factored_sig: u64 = 0,
+    prof: Prof = .{},
 
     /// Borrows `col_ptr` and `row_idx` for the workspace's lifetime.
     pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?BbdInfo) !Workspace {
