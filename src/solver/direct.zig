@@ -9,6 +9,7 @@ const tridiag_mod = @import("tridiag.zig");
 const order_mod = @import("order.zig");
 const bbd_mod = @import("bbd.zig");
 const lu_kernels = @import("lu_kernels.zig");
+const fast_lu = @import("fast_lu.zig");
 const root = @import("core").numerics;
 
 const Allocator = std.mem.Allocator;
@@ -24,6 +25,10 @@ pub const Params = struct {
     /// A re-pivot whose L plus U outgrows this multiple of the fresh
     /// factor's restarts on the previous pivots (`SparseLu.fill_cap`).
     repivot_fill_cap: f64 = 3,
+    /// Newton refactors in f32 on the f64 pivot tape and refines each
+    /// solve to f64 backward error (`fastSolveNeg`, fast_lu.zig). Not
+    /// bitwise the default path; false changes nothing.
+    fast_mode: bool = false,
 };
 
 /// Sparse direct solver on one frozen CSC pattern.
@@ -58,6 +63,10 @@ pub const Solver = struct {
     par: ?lu_kernels.HostRefactor = null,
     /// Pivot epoch the cost model last judged.
     par_epoch: u32 = 0,
+    /// `fast_mode`'s f32 factors of the current pivot epoch.
+    fast: ?fast_lu.FastLu = null,
+    /// `fast`'s counters from earlier epochs.
+    fast_stats: fast_lu.Stats = .{},
     /// A device factored `vcopy` and `lu` still holds older values. The
     /// next host use refactors from `vcopy` first (bitwise the device's).
     host_stale: bool = false,
@@ -101,6 +110,16 @@ pub const Solver = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.fast) |*f| {
+            self.fast_stats.add(f.ref.stats);
+            f.deinit(self.gpa);
+        }
+        if (self.params.fast_mode) {
+            if (comptime @import("builtin").link_libc) if (std.c.getenv("ESPICE_LU_FAST_STATS") != null) {
+                const st = self.fast_stats;
+                std.debug.print("lu-fast: refactors={d} refactor_fails={d} solves={d} iterations={d} gmres={d} fallbacks={d}\n", .{ st.refactors, st.refactor_fails, st.solves, st.iterations, st.gmres, st.fallbacks });
+            };
+        }
         if (self.par) |*p| p.deinit(self.gpa);
         if (self.lu) |*lu| lu.deinit(self.gpa);
         if (self.tri) |*tri| tri.deinit(self.gpa);
@@ -198,6 +217,35 @@ pub const Solver = struct {
         }
         const p = if (self.par) |*p| p else return lu.refactor(self.col_ptr, vals, growth);
         return p.run(lu, vals, io, threads);
+    }
+
+    /// `fast_mode`'s Newton step: x = -A^-1 rhs with `vals` refactored in
+    /// f32 on the current pivot tape (when `need` and they changed) and the
+    /// solve refined to f64 backward error. False when the caller must run
+    /// the exact `factor` and `solveNeg`: fast mode off, no general LU
+    /// factor yet, or a failed f32 refactor or refinement. Leaves the f64
+    /// factors and `vcopy` alone.
+    pub fn fastSolveNeg(self: *Self, vals: []const f64, rhs: []const f64, x: []f64, need: bool, execution: root.Execution) bool {
+        if (!self.params.fast_mode) return false;
+        if (self.tri != null or self.bbd_eng != null or !self.factored) return false;
+        const lu = if (self.lu) |*l| l else return false;
+        if (!lu.factored) return false;
+        if (self.fast) |*f| if (f.hf.epoch != lu.pattern_epoch) {
+            self.fast_stats.add(f.ref.stats);
+            f.deinit(self.gpa);
+            self.fast = null;
+        };
+        if (self.fast == null) {
+            self.fast = fast_lu.FastLu.init(self.gpa, lu, self.col_ptr, self.row_idx) catch return false;
+            const threads = execution.lu_threads;
+            if (threads > 1 and execution.io != null and parWorthIt(lu)) self.fast.?.threads = threads;
+        }
+        const f = &self.fast.?;
+        const nnz = self.vcopy.len;
+        if (!f.valid or (need and !simdEql(f.ref.fa, vals[0..nnz]))) {
+            if (!f.refactor(lu, vals, execution.io)) return false;
+        }
+        return f.solveNeg(self.gpa, rhs, x);
     }
 
     /// Solves in place with whichever engine is live.

@@ -26,6 +26,8 @@ pub const Config = struct {
     device_threads: u32 = 1,
     /// Print per-query setup and per-checkpoint timing to stderr.
     timing_in_depth: bool = false,
+    /// `direct.Params.fast_mode` for every Newton solve (`--lu-fast`).
+    lu_fast: bool = false,
 };
 
 /// Rejects a backend this binary cannot serve (printing what it detected)
@@ -89,6 +91,7 @@ pub const Executor = struct {
         // solver's own count is set (ESPICE_SOLVER_THREADS).
         const lu_threads: u8 = @intCast(@min(if (config.solver_threads > 1) config.solver_threads else config.device_threads, 16));
         self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads };
+        self.circuit.lu_fast = config.lu_fast;
         if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
         if (deck.deck_temp) |temp| if (initial == null) {
             self.circuit.setCircuitTemp(@floatCast(temp));

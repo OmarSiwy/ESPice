@@ -17,6 +17,7 @@ pub fn main(init: std.process.Init) !u8 {
     var show_plan = false;
     var plan_only = false;
     var timing_in_depth = false;
+    var lu_fast = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             std.debug.print(
@@ -30,6 +31,7 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --print-dag             Print the next query frontier before running
                 \\      --plan                  Print the DAG without running analyses
                 \\      --timing-in-depth       Time preparation, queries, and individual steps
+                \\      --lu-fast               Newton LU in f32, refined to f64 accuracy (not bit-identical)
                 \\      --tokenizer=FMT         ngspice|hspice|spectre
                 \\  -v, --version               Version
                 \\
@@ -48,6 +50,8 @@ pub fn main(init: std.process.Init) !u8 {
             show_plan = true;
         } else if (std.mem.eql(u8, arg, "--timing-in-depth")) {
             timing_in_depth = true;
+        } else if (std.mem.eql(u8, arg, "--lu-fast")) {
+            lu_fast = true;
         } else if (optionValue(arg, "-r", "--rawfile", &args)) |value| {
             selection.path = value orelse return usageFail();
         } else if (optionValue(arg, "", "--format", &args)) |value| {
@@ -81,6 +85,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .gpu_explicit = explicit_gpu,
                 .solver_threads = @intCast(@min(envThreads("ESPICE_SOLVER_THREADS"), 16)),
                 .device_threads = envThreads("ESPICE_THREADS"),
+                .lu_fast = lu_fast,
             },
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,

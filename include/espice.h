@@ -68,6 +68,9 @@ typedef struct {
     uint32_t source_kind, dialect, backend, explicit_gpu;
     uint32_t output_format, max_parallel;
     espice_bytes source, origin, output_path;
+    /* 1: Newton LU in f32 refined to f64 accuracy, not bit-identical to 0.
+     * Optional: a struct_size that stops before it reads as 0. */
+    uint32_t lu_fast, reserved;
 } espice_create_options;
 typedef struct { uint32_t kind, id; } espice_scope;
 typedef struct {
