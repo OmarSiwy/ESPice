@@ -23,15 +23,16 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         const arg: usize = if (c.kind == .four) 1 else 0;
         if (arg < args.len) switch (args[arg]) {
             .group => |g| if (g.args.len > @as(usize, if (appended) 1 else 2) or (appended and g.args.len == 0))
-                return error.UnsupportedAnalysisOutput,
+                return cardError(c.line, error.UnsupportedAnalysisOutput),
             else => {},
         };
     }
     // Fan-out ceiling: `.disto` is the widest card at three plots per line.
-    const jobs = try arena.alloc(Job, cards.len * 3);
+    const temps = @max(deck_opts.temp_list.len, 1);
+    const jobs = try arena.alloc(Job, cards.len * 3 * (temps + 1));
     var n: usize = 0;
     for (cards) |c| {
-        var job = (try buildJob(c, sources, card_refs)) orelse continue;
+        var job = (buildJob(c, sources, card_refs) catch |err| return cardError(c.line, err)) orelse continue;
         applyDeckOptions(&job, deck_opts);
         jobs[n] = job;
         n += 1;
@@ -51,7 +52,33 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
             }
         }
     }
-    return jobs[0..n];
+    if (temps == 1) return jobs[0..n];
+    // An HSPICE `.temp` list runs every query once per temperature [CR .TEMP].
+    const base = n;
+    n = 0;
+    for (deck_opts.temp_list) |t| {
+        const temp = switch (t) {
+            .num => |v| v,
+            else => return error.InvalidAnalysisArguments,
+        };
+        if (!(temp > -273.15) or !std.math.isFinite(temp)) return error.InvalidAnalysisArguments;
+        for (jobs[0..base]) |job| {
+            var copy = job;
+            switch (copy) {
+                inline else => |*opts| opts.tol.temp_c = temp,
+            }
+            jobs[base + n] = copy;
+            n += 1;
+        }
+    }
+    return jobs[base..][0..n];
+}
+
+/// Logs the card a query could not be built from, then returns `err`.
+fn cardError(line: []const u8, err: anytype) @TypeOf(err) {
+    // The test runner fails any test that logs an error.
+    if (!@import("builtin").is_test) std.log.err("analysis: {s}: {s}", .{ line, @errorName(err) });
+    return err;
 }
 
 /// Parsed `.options` overrides, in deck order: a later card wins.
@@ -61,6 +88,11 @@ pub const DeckOptions = struct {
     method: ?requests.Method = null,
     /// `.temp` or `.options temp` in degrees Celsius; null when not given.
     temp_c: ?f64 = null,
+    /// An HSPICE `.temp t1 t2 ...` list: every query runs at each.
+    temp_list: []const Value = &.{},
+    /// `.options delmax`: the transient step cap when the `.tran` card sets
+    /// none.
+    delmax: ?f64 = null,
     /// `.options tnom=<degC>`: the temperature model cards were extracted at
     /// (ngspice cktsopt.c:71-73 takes the card in Celsius; default 27 degC
     /// from cktntask.c:127). Unlike `temp`, where the circuit runs, it reaches
@@ -68,25 +100,37 @@ pub const DeckOptions = struct {
     tnom_c: f64 = 27.0,
 };
 
+/// Option names outside this list are not simulated; the HSPICE dialect
+/// warns about each. `gshunt` and `cshunt` are read by the netlist.
+const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, gshunt, cshunt };
+
 /// Folds the deck's `.options` and `.temp` cards; `InvalidAnalysisArguments`
-/// on a value out of range.
-pub fn deckOptions(config: []const netlist.Config) !DeckOptions {
-    const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom };
+/// on a value out of range. The HSPICE dialect defaults TNOM to 25 degC and
+/// runs the circuit at TNOM [SA Ch.20]; ngspice defaults both to 27 degC.
+pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !DeckOptions {
+    // HSPICE spellings: ABSV/RELV/ABSI are VNTOL/RELTOL/ABSTOL, GMINDC the DC
+    // gmin (ESPice has one gmin), METHOD=BDF its Gear.
     const names = std.StaticStringMap(Option).initComptime(.{
         .{ "method", .method }, .{ "reltol", .reltol }, .{ "abstol", .abstol },
         .{ "vntol", .vntol },   .{ "gmin", .gmin },     .{ "trtol", .trtol },
         .{ "chgtol", .chgtol }, .{ "itl1", .itl1 },     .{ "itl2", .itl2 },
         .{ "itl4", .itl4 },     .{ "maxord", .maxord }, .{ "temp", .temp },
-        .{ "tnom", .tnom },
+        .{ "tnom", .tnom },     .{ "absv", .vntol },    .{ "relv", .reltol },
+        .{ "absi", .abstol },   .{ "gmindc", .gmin },   .{ "delmax", .delmax },
+        .{ "gshunt", .gshunt }, .{ "cshunt", .cshunt },
     });
     const methods = std.StaticStringMap(requests.Method).initComptime(.{
-        .{ "gear", .gear_2 }, .{ "trap", .trapezoidal }, .{ "trapezoidal", .trapezoidal },
+        .{ "gear", .gear_2 }, .{ "trap", .trapezoidal }, .{ "trapezoidal", .trapezoidal }, .{ "bdf", .gear_2 },
     });
-    var o: DeckOptions = .{};
+    var o: DeckOptions = .{ .tnom_c = if (dialect == .hspice) 25 else 27 };
     var maxord: ?f64 = null;
     for (config) |card| {
         const args = card.args;
         if (card.temp) {
+            if (args.len > 1) {
+                o.temp_list = args;
+                continue;
+            }
             o.temp_c = try number(args, 0);
             if (o.temp_c.? <= -273.15) return error.InvalidAnalysisArguments;
             continue;
@@ -96,7 +140,10 @@ pub fn deckOptions(config: []const netlist.Config) !DeckOptions {
         while (i < args.len) : (i += 1) {
             const key = nameAt(args, i) orelse continue;
             if (key.len > lower.len) continue;
-            const option = names.get(std.ascii.lowerString(lower[0..key.len], key)) orelse continue;
+            const option = names.get(std.ascii.lowerString(lower[0..key.len], key)) orelse {
+                if (dialect == .hspice) std.log.warn("options: ignoring unsupported option '{s}'", .{key});
+                continue;
+            };
             i += 1;
             if (option == .method) {
                 const method = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
@@ -125,6 +172,11 @@ pub fn deckOptions(config: []const netlist.Config) !DeckOptions {
                     if (value < 1 or value != @trunc(value)) return error.InvalidAnalysisArguments;
                     maxord = value;
                 },
+                .delmax => {
+                    if (!(value > 0)) return error.InvalidAnalysisArguments;
+                    o.delmax = value;
+                },
+                .gshunt, .cshunt => if (value < 0) return error.InvalidAnalysisArguments,
                 inline else => |field| {
                     if (value < 0) return error.InvalidAnalysisArguments;
                     @field(o.tol, @tagName(field)) = value;
@@ -133,6 +185,7 @@ pub fn deckOptions(config: []const netlist.Config) !DeckOptions {
         }
     }
     if (o.method == .gear_2 and maxord != null and maxord.? < 2) o.method = .backward_euler;
+    if (dialect == .hspice and o.temp_c == null and o.temp_list.len == 0) o.temp_c = o.tnom_c;
     return o;
 }
 
@@ -145,10 +198,12 @@ pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
         },
     }
     if (job.* == .temp) job.temp.t_nom = o.temp_c orelse 27;
-    if (o.method) |m| switch (job.*) {
-        .tran => |*t| t.method = m,
-        else => {},
-    };
+    if (job.* == .tran) {
+        const t = &job.tran;
+        if (o.method) |m| t.method = m;
+        // ngspice's default tmax, min(tstep, tstop / 50).
+        t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, t.t_stop / 50);
+    }
 }
 
 fn nameAt(args: []const Value, i: usize) ?[]const u8 {
@@ -283,6 +338,57 @@ fn frequencySweep(args: []const Value, offset: usize) !numerics.FreqSweep {
     return .{ .f_start = first, .f_stop = last, .points = try count(u32, args, offset + 1, 10), .kind = kind };
 }
 
+/// HSPICE `.tran tstep1 tstop1 [tstep2 tstop2 ...] [START=t] [UIC]` [CR
+/// .TRAN]: one run to the last tstop. A double-point card whose tstep2 and
+/// tstop2 are both below tstop1, with no START=, is the SPICE form
+/// `tstep tstop tstart delmax`, as is a three-number card.
+fn hspiceTran(args: []const Value) !requests.Tran {
+    var nums: [32]f64 = undefined;
+    var n: usize = 0;
+    var start: ?f64 = null;
+    var uic = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        var lower: [8]u8 = undefined;
+        switch (args[i]) {
+            .num => |v| {
+                if (n == nums.len or !std.math.isFinite(v)) return error.InvalidAnalysisArguments;
+                nums[n] = v;
+                n += 1;
+            },
+            .name => {
+                const word = try keyword(args, i, &lower);
+                if (std.mem.eql(u8, word, "uic")) {
+                    uic = true;
+                } else if (std.mem.eql(u8, word, "start")) {
+                    i += 1;
+                    start = try number(args, i);
+                } else return error.InvalidAnalysisArguments;
+            },
+            else => return error.InvalidAnalysisArguments,
+        }
+    }
+    if (n < 2 or !(nums[0] > 0) or !(nums[1] > 0)) return error.InvalidAnalysisArguments;
+    var t: requests.Tran = .{ .t_stop = nums[1], .dt_init = nums[0], .uic = uic, .dt_max = null };
+    if (n == 3 or (n == 4 and start == null and nums[2] < nums[1] and nums[3] < nums[1])) {
+        t.t_start = nums[2];
+        if (n == 4) t.dt_max = if (nums[3] > 0) nums[3] else return error.InvalidAnalysisArguments;
+    } else {
+        if (n % 2 != 0) return error.InvalidAnalysisArguments;
+        // ponytail: the finest tstep caps the whole run; a per-segment cap
+        // would save steps in the coarse segments.
+        var k: usize = 2;
+        while (k < n) : (k += 2) {
+            if (!(nums[k] > 0) or !(nums[k + 1] > nums[k - 1])) return error.InvalidAnalysisArguments;
+            t.dt_init = @min(t.dt_init, nums[k]);
+            t.t_stop = nums[k + 1];
+        }
+    }
+    t.t_start = start orelse t.t_start;
+    if (!(t.t_start >= 0) or t.t_start >= t.t_stop) return error.InvalidAnalysisArguments;
+    return t;
+}
+
 /// The query one analysis card asks for; null for a card that only
 /// configures the deck (single-value `.temp`). Errors name the argument
 /// that is wrong: `InvalidAnalysisArguments`, `AnalysisNodeNotFound`,
@@ -299,6 +405,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .op = .{} };
         },
         .tran, .tran_noise, .matex => {
+            if (id == .tran and a.dialect == .hspice) return .{ .tran = try hspiceTran(args) };
             try arity(args, 2, if (id == .tran) 5 else 2);
             const step = try positive(args, 0);
             const stop = try positive(args, 1);
@@ -311,7 +418,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             // ngspice tstart: suppresses OUTPUT before it, never the solve.
             const t_start = if (numeric_end > 2) try number(args, 2) else 0;
             if (!(t_start >= 0) or t_start >= stop) return error.InvalidAnalysisArguments;
-            return .{ .tran = .{ .t_stop = stop, .dt_init = step, .t_start = t_start, .dt_max = if (numeric_end > 3) try positive(args, 3) else @min(step, stop / 50), .uic = uic } };
+            return .{ .tran = .{ .t_stop = stop, .dt_init = step, .t_start = t_start, .dt_max = if (numeric_end > 3) try positive(args, 3) else null, .uic = uic } };
         },
         .ac, .disto => {
             try arity(args, 4, 4);

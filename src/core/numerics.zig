@@ -259,6 +259,9 @@ pub const Tolerances = struct {
     chgtol: f64 = 1e-14,
     /// Factor by which the truncation-error estimate is assumed to overshoot.
     trtol: f64 = 7.0,
+    /// `.options temp` for this query alone, in degC (one entry of an HSPICE
+    /// `.temp` list); null runs at the deck temperature.
+    temp_c: ?f64 = null,
 };
 
 test "bulk buffers preserve bits, common prefixes and exact aliases" {

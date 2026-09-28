@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "An HSPICE-only element letter is rejected in the HSPICE dialect.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "An HSPICE-only element letter is rejected in the HSPICE dialect."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "edd4a7dcebd9e83798b05d9aca50681185e0211200e72a90eaca4fc2cad44384"
+}

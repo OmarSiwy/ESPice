@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": ".nodeset selects the operating point of a bistable circuit.",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice -b of the same deck."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(q)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-09,
+            "values": [
+              4.619881064311253
+            ]
+          },
+          "v(qb)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-09,
+            "values": [
+              0.07358231091307293
+            ]
+          },
+          "i(vcc)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.0053065366247756745
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3cefd41d8401eea398a4003ddf7c1581efe89d9a6ba50a69d3246dff3ef1effb"
+}

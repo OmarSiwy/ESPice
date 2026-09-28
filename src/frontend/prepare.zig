@@ -101,7 +101,7 @@ fn keepSaved(scratch: std.mem.Allocator, probes: *[]u32, labels: *[][]const u8, 
 /// outlive the result, as must `lib` when the deck uses loaded devices.
 pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
     if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
-    const deck_opts = try analyses.deckOptions(nl.deck.config);
+    const deck_opts = try analyses.deckOptions(nl.deck.config, nl.deck.dialect);
     var b = try Builder.init(sim_arena, lib);
     var compiled_ok = false;
     errdefer if (!compiled_ok) b.deinit();
@@ -130,15 +130,6 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     var out = try nb.publish(sim_arena, &circuit, perm);
     if (nl.deck.saves.len > 0) try keepSaved(parse_arena, &out.probes, &out.probe_labels, nl.deck.saves);
 
-    var ic: std.ArrayList(Ic) = .empty;
-    for (nl.deck.ic) |item| {
-        // An `.ic` on a node no device touches is dropped, like every other
-        // unresolvable directive name.
-        const row = nb.frozenRow(item.net.index());
-        if (row == NO_NODE or row == GROUND) continue;
-        try ic.append(sim_arena, .{ .node = row, .value = item.value });
-    }
-
     // Analysis nets to circuit rows.
     const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.deck.analyses);
     for (cards_rows) |*a| {
@@ -156,7 +147,8 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
         .ac_drive = out.ac_drive,
         .title = try sim_arena.dupe(u8, nl.deck.title),
         .n_devices = nl.deviceCount(),
-        .ic = ic.items,
+        .ic = try nodeRows(sim_arena, &nb, nl.deck.ic),
+        .nodeset = try nodeRows(sim_arena, &nb, nl.deck.nodeset),
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
@@ -168,11 +160,24 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     } };
 }
 
+/// `.ic`-style values on circuit rows. A node no device touches is dropped,
+/// like every other unresolvable directive name.
+fn nodeRows(arena: std.mem.Allocator, nb: *const builder.NetBuilder, items: []const netlist.Ic) ![]const Ic {
+    var out: std.ArrayList(Ic) = .empty;
+    for (items) |item| {
+        const row = nb.frozenRow(item.net.index());
+        if (row == NO_NODE or row == GROUND) continue;
+        try out.append(arena, .{ .node = row, .value = item.value });
+    }
+    return out.items;
+}
+
 /// `.meas` cards with their strings copied out of the parse arena.
 fn measures(arena: std.mem.Allocator, cards: []const core.Measure) ![]const core.Measure {
     const out = try arena.dupe(core.Measure, cards);
     for (out) |*m| {
         m.name = try arena.dupe(u8, m.name);
+        m.expr = try arena.dupe(core.MeasureOp, m.expr);
         for ([_]*core.MeasureClause{ &m.first, &m.second }) |c| {
             c.vec = try arena.dupe(u8, c.vec);
             c.vec2 = try arena.dupe(u8, c.vec2);

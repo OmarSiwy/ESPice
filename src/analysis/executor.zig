@@ -93,7 +93,7 @@ pub const Executor = struct {
         self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads };
         self.circuit.lu_fast = config.lu_fast;
         if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
-        if (deck.deck_temp) |temp| if (initial == null) {
+        if (queryTemp(job) orelse deck.deck_temp) |temp| if (initial == null) {
             self.circuit.setCircuitTemp(@floatCast(temp));
             try self.circuit.recompute();
         };
@@ -194,7 +194,7 @@ pub const Executor = struct {
         if (self.job == .op) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
             @memset(self.x.?, 0);
-            const solved = try op.solve(&self.circuit, self.x.?, self.job.op);
+            const solved = try op.solve(&self.circuit, self.x.?, self.job.op, self.deck.nodeset);
             if (!solved.converged) return error.OpDidNotConverge;
             if (gpu_context) |g| try g.syncHostState();
             // The OP ladder publishes its own sim state (`initial_step`);
@@ -216,7 +216,10 @@ pub const Executor = struct {
             .allocator = self.results.allocator(),
             .scratch_allocator = self.allocator,
         };
-        return run(&run_ctx, self.job);
+        var res = try run(&run_ctx, self.job);
+        // Copies of one card at several temperatures keep apart by name.
+        if (queryTemp(self.job)) |temp| res.plotname = try std.fmt.allocPrint(self.results.allocator(), "{s} (temp={d})", .{ res.plotname, temp });
+        return res;
     }
 
     /// The device LU: `ESPICE_GPU_LU=1` forces it on under a GPU backend,
@@ -265,6 +268,13 @@ pub const Executor = struct {
 /// LU. ponytail: the E2 decks start at 17k; measure a data-center card
 /// before trusting the bar.
 const gpu_lu_min_n = 10_000;
+
+/// The temperature `job` runs at when it overrides the deck's.
+fn queryTemp(job: requests.Query) ?f64 {
+    return switch (job) {
+        inline else => |o| o.tol.temp_c,
+    };
+}
 
 /// `--timing-in-depth`: where the query's Newton time went.
 /// The matrix size and the flat LU's fill (L + U + diagonal) close the line.

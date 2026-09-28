@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "CSHUNT loads every node; DELMAX is accepted.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "1 mA step into 1 kOhm || 1 nF: v = 1 - exp(-t / 1 us)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-05,
+            "values": [
+              0.6321205588285577,
+              0.8646647167633873,
+              0.950212931632136,
+              0.9932620530009145,
+              0.9996645373720975
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-06,
+            2e-06,
+            3e-06,
+            5e-06,
+            8e-06
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5bd4c6d6ce8a8958baeabc154c40f9f246bc9bbec64e3168d5a261c91b3e1878"
+}

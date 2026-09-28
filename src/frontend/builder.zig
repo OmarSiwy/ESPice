@@ -1075,7 +1075,10 @@ pub const NetBuilder = struct {
             @compileError(@typeName(D) ++ ": no parameter `" ++ value_field ++ "` on Model or Instance");
         var model: D.Model = .{};
         var instance: D.Instance = .{};
-        var value = positionalNumber(dev, 0) orelse kvNumber(dev.kv, value_field) orelse kvNumber(dev.kv, alias) orelse blk: {
+        // A value that did not fold (an undefined parameter) is an error, not
+        // the 1 mOhm or zero that a missing value defaults to.
+        if (dev.positional.len > 0 and dev.model == null and positionalNumber(dev, 0) == null) return error.UnresolvedParameter;
+        var value = positionalNumber(dev, 0) orelse try numericParameter(dev.kv, value_field) orelse try numericParameter(dev.kv, alias) orelse blk: {
             // Semiconductor resistor (ngspice restemp.c RESupdate_conduct):
             // R = RSH*(L-2*SHORT)/(W-2*NARROW), W defaulting to the model's
             // DEFW. A non-positive result reads as open, as ngspice's
@@ -1560,7 +1563,7 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
     return switch (f) {
         .ternary => .sel,
         .ln, .log => .ln,
-        .agauss, .other => error.UnsupportedFunction,
+        .agauss, .limit, .other => error.UnsupportedFunction,
         inline else => |g| @field(tape.Code, @tagName(g)),
     };
 }

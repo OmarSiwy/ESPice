@@ -40,14 +40,18 @@ pub const Code = enum(u8) {
 };
 
 /// Built-in functions; `other` is any name the table does not know.
-pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, other };
+/// `agauss` stands for every statistical distribution (`agauss`, `gauss`,
+/// `unif`, `aunif`) and `limit` for HSPICE's `limit(nom, var)`: outside
+/// Monte Carlo each folds to its nominal, the first argument.
+pub const Fn = enum(u8) { sqrt, abs, min, max, pow, exp, ln, log, log10, sin, cos, tan, atan, floor, ceil, ternary, tanh, agauss, limit, other };
 
 const fns = std.StaticStringMap(Fn).initComptime(.{
     .{ "sqrt", .sqrt },   .{ "abs", .abs },       .{ "min", .min },      .{ "max", .max },
     .{ "pow", .pow },     .{ "exp", .exp },       .{ "ln", .ln },        .{ "log", .log },
     .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },      .{ "tan", .tan },
     .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },    .{ "ternary", .ternary },
-    .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .agauss },
+    .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .agauss },  .{ "unif", .agauss },
+    .{ "aunif", .agauss }, .{ "limit", .limit },
 });
 
 /// One postfix op.
@@ -284,7 +288,7 @@ pub fn isOperator(c: u8) bool {
 
 /// A folded value. `nominal` records, for an unknown value, whether a zero
 /// multiplier may still erase it: finite constants, declared model geometry
-/// (`l`, `w`, `mult`) and well-formed `agauss`/`gauss` draws, combined by
+/// (`l`, `w`, `mult`) and distributions (`agauss(...)`) whose nominal did not fold, combined by
 /// arithmetic and math calls (the nominal PDK corner `0*agauss(...)`).
 pub const Val = struct {
     num: f64 = 0,
@@ -369,7 +373,9 @@ fn call(f: Fn, args: []const Val) Val {
     }
     const want: usize = switch (f) {
         .tanh, .other => return .unknown(false),
-        .agauss => return .unknown(args.len == 3 and all_known and all_nominal),
+        // ponytail: nominal only; Monte Carlo sampling (C3) draws here.
+        .agauss => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
+        .limit => return if (args.len == 2 and args[0].known) args[0] else .unknown(false),
         .ternary => 3,
         .pow, .min, .max => 2,
         else => 1,
@@ -397,7 +403,7 @@ fn call(f: Fn, args: []const Val) Val {
         .atan => std.math.atan(a),
         .floor => @floor(a),
         .ceil => @ceil(a),
-        .ternary, .tanh, .agauss, .other => unreachable,
+        .ternary, .tanh, .agauss, .limit, .other => unreachable,
     });
 }
 

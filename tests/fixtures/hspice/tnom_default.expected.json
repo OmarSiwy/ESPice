@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "The HSPICE dialect runs at TNOM = 25 degC by default.",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice -b with .options tnom=25 temp=25."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-09,
+            "values": [
+              0.7859038965696223
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9396e25a86a3a0ba0beb3898a5e2b8e67088a37355c737886fe0a1eeccc93ccf"
+}

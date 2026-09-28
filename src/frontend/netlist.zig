@@ -26,8 +26,10 @@ pub const ground: VertexId = @enumFromInt(0);
 /// Missing id in every u32 index space here.
 pub const none = std.math.maxInt(u32);
 /// `ParseError`: malformed card; `ModelBinNotFound`: no `.model nm.N` bin
-/// holds an M card's L/W; `CircuitTooLarge`: a table passed u32.
-pub const Error = error{ OutOfMemory, ParseError, ModelBinNotFound, CircuitTooLarge };
+/// holds an M card's L/W; `CircuitTooLarge`: a table passed u32;
+/// `UnsupportedCard`: a card or element form ESPice cannot simulate, logged
+/// with the line.
+pub const Error = error{ OutOfMemory, ParseError, ModelBinNotFound, CircuitTooLarge, UnsupportedCard };
 
 /// Rows `start..start+len` of a flat table.
 pub const Span = struct { start: u32 = 0, len: u32 = 0 };
@@ -78,13 +80,22 @@ pub const Model = struct { name: []const u8, kind: []const u8, kv: []const Kv };
 pub const Analysis = struct {
     kind: Kind,
     args: []const Value,
+    /// The card as written, for diagnostics.
+    line: []const u8 = "",
+    /// The syntax the card is read in (`.tran` segments, for one).
+    dialect: Dialect = .ngspice,
     pos: u32 = none,
     neg: u32 = none,
     ports: [4]u32 = @splat(none),
 };
 
 /// `.options` and single-value `.temp` cards, in deck order.
-pub const Config = struct { temp: bool, args: []const Value };
+pub const Config = struct {
+    temp: bool,
+    args: []const Value,
+    /// The card as written, for diagnostics.
+    line: []const u8 = "",
+};
 /// One `.ic v(net)=value` entry on a net some card names.
 pub const Ic = struct { net: VertexId, value: f64 };
 pub const ForeignKind = source.ForeignKind;
@@ -98,6 +109,8 @@ pub const Deck = struct {
     analyses: []const Analysis,
     config: []const Config,
     ic: []const Ic,
+    /// `.nodeset` guesses, on nets some card names.
+    nodeset: []const Ic,
     /// `.save` outputs as lowercased `v(net)`/`i(name)` labels. Empty: save
     /// everything, as with no `.save` card or a `.save all`.
     saves: []const []const u8,
@@ -197,7 +210,9 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
     return null;
 }
 
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, save, meas, analysis: Kind, cond: CondCard };
+/// `ignored`: a card that only shapes printed output, which ESPice writes
+/// in full anyway.
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, meas, ignored, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -243,7 +258,21 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
-    .{ "save", .save },
+    .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
+    .{ "global", .global },     .{ "connect", .connect },
+    .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
+    .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
+    .{ "protect", .ignored },   .{ "unprotect", .ignored },         .{ "prot", .ignored },
+    .{ "unprot", .ignored },
+});
+
+/// Words that open a behavioural E/F/G/H form in the first control-node
+/// slot (ngspice inpcom.c, HSPICE's E/G element keywords). None is built.
+const behavioural = std.StaticStringMap(void).initComptime(.{
+    .{"poly"},  .{"value"},  .{"vol"},   .{"cur"},  .{"table"},       .{"laplace"}, .{"pole"},
+    .{"freq"},  .{"vcr"},    .{"vccap"}, .{"delay"}, .{"opamp"},      .{"npwl"},    .{"ppwl"},
+    .{"pwl"},   .{"and"},    .{"nand"},  .{"or"},   .{"nor"},         .{"vcvs"},    .{"vccs"},
+    .{"ccvs"},  .{"cccs"},   .{"transformer"},
 });
 
 /// The card a `.keyword` names, case-insensitively; null for any other card.
@@ -279,7 +308,7 @@ pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error
         const args = try r.readArgs(&f);
         // A single `.temp` is deck configuration, fixed at build.
         if (card.analysis == .temp and args.len == 1) return error.UnsupportedDirectiveMutation;
-        var a: Analysis = .{ .kind = card.analysis, .args = args };
+        var a: Analysis = .{ .kind = card.analysis, .args = args, .line = line };
         resolve(&a, lookup);
         try out.append(arena, a);
     }
@@ -397,6 +426,10 @@ fn Reader(comptime S: type) type {
         analyses: std.ArrayList(Analysis) = .empty,
         config: std.ArrayList(Config) = .empty,
         ic_cards: std.ArrayList([]const Value) = .empty,
+        nodeset_cards: std.ArrayList([]const Value) = .empty,
+        meas_lines: std.ArrayList([]const u8) = .empty,
+        /// `.global` names: one net at every subcircuit level.
+        global_nets: std.StringHashMapUnmanaged(void) = .empty,
         saves: std.ArrayList([]const u8) = .empty,
         save_all: bool = false,
         foreign: std.ArrayList(Foreign) = .empty,
@@ -459,6 +492,8 @@ fn Reader(comptime S: type) type {
             for (directive_lines.items) |i| try r.readDirective(r.lines.items[i]);
 
             for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
+            try r.shunts();
+            try r.readMeasures();
             try r.modelBins();
 
             const graph = try r.hg.finish(arena);
@@ -479,24 +514,6 @@ fn Reader(comptime S: type) type {
 
             const nets: NetLookup = .{ .pool = &r.pool, .net_of = r.net_of.items };
             for (r.analyses.items) |*a| resolve(a, nets);
-            var ic: std.ArrayList(Ic) = .empty;
-            for (r.ic_cards.items) |args| {
-                var buf: [24]u8 = undefined;
-                var i: usize = 0;
-                while (i + 1 < args.len) : (i += 2) {
-                    const name = switch (args[i]) {
-                        .group => |g| if (std.ascii.eqlIgnoreCase(g.name, "v") and g.args.len > 0) nodeText(g.args[0], &buf) else null,
-                        else => null,
-                    } orelse continue;
-                    const value = switch (args[i + 1]) {
-                        .num => |n| n,
-                        else => continue,
-                    };
-                    const id = nets.node(name);
-                    if (id == none or id == 0) continue;
-                    try ic.append(arena, .{ .net = .from(id), .value = value });
-                }
-            }
 
             return .{
                 .pool = r.pool,
@@ -514,12 +531,37 @@ fn Reader(comptime S: type) type {
                     .dialect = dialect,
                     .analyses = r.analyses.items,
                     .config = r.config.items,
-                    .ic = ic.items,
+                    .ic = try nodeValues(arena, r.ic_cards.items, nets),
+                    .nodeset = try nodeValues(arena, r.nodeset_cards.items, nets),
                     .saves = if (r.save_all) &.{} else r.saves.items,
                     .foreign = r.foreign.items,
                     .measures = r.measures.items,
                 },
             };
+        }
+
+        /// `v(net)=value` pairs (or bare `net value`, as `.dcvolt` allows) of
+        /// `.ic`-style cards; a net no card names is dropped.
+        fn nodeValues(arena: Allocator, cards_args: []const []const Value, nets: NetLookup) Error![]const Ic {
+            var out: std.ArrayList(Ic) = .empty;
+            for (cards_args) |args| {
+                var buf: [24]u8 = undefined;
+                var i: usize = 0;
+                while (i + 1 < args.len) : (i += 2) {
+                    const name = switch (args[i]) {
+                        .group => |g| if (std.ascii.eqlIgnoreCase(g.name, "v") and g.args.len > 0) nodeText(g.args[0], &buf) else null,
+                        else => nodeText(args[i], &buf),
+                    } orelse continue;
+                    const value = switch (args[i + 1]) {
+                        .num => |n| n,
+                        else => continue,
+                    };
+                    const id = nets.node(name);
+                    if (id == none or id == 0) continue;
+                    try out.append(arena, .{ .net = .from(id), .value = value });
+                }
+            }
+            return out.items;
         }
 
         const NetLookup = struct {
@@ -767,23 +809,37 @@ fn Reader(comptime S: type) type {
         fn readDirective(r: *R, line: []const u8) Error!void {
             var f = F.init(line);
             const card = cardOf(f.next().?[1..]);
-            if (card != null and card.? == .meas) {
-                // ngspice reports a bad `.meas` and simulates anyway.
-                const m = measure.parse(r.arena, f.rest(), r) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => return std.log.warn("netlist: ignoring malformed card '{s}'", .{line}),
-                };
-                return r.measures.append(r.arena, m);
-            }
+            // Read once every analysis card is: HSPICE's untyped `.meas`
+            // takes the last one.
+            if (card != null and card.? == .meas) return r.meas_lines.append(r.arena, line);
+            const c = card orelse return r.unsupported(line, "unsupported card");
+            if (c == .ignored) return;
             const args = try r.readArgs(&f);
-            const c = card orelse return;
             switch (c) {
                 .analysis => |kind| {
-                    try r.analyses.append(r.arena, .{ .kind = kind, .args = args });
-                    if (kind == .temp and args.len == 1) try r.config.append(r.arena, .{ .temp = true, .args = args });
+                    // HSPICE's `.temp t1 t2 ...` lists run temperatures; ngspice's
+                    // three-number form is a sweep.
+                    const temp_list = kind == .temp and args.len > 1 and r.dialect == .hspice;
+                    if (!temp_list) try r.analyses.append(r.arena, .{ .kind = kind, .args = args, .line = r.written(line), .dialect = r.dialect });
+                    if (kind == .temp and (args.len == 1 or temp_list)) try r.config.append(r.arena, .{ .temp = true, .args = args, .line = r.written(line) });
                 },
-                .options => try r.config.append(r.arena, .{ .temp = false, .args = args }),
+                .options => try r.config.append(r.arena, .{ .temp = false, .args = args, .line = r.written(line) }),
                 .ic => try r.ic_cards.append(r.arena, args),
+                .nodeset => try r.nodeset_cards.append(r.arena, args),
+                .global => for (args) |a| {
+                    var buf: [24]u8 = undefined;
+                    const name = nodeText(a, &buf) orelse return error.ParseError;
+                    try r.global_nets.put(r.arena, try r.arena.dupe(u8, name), {});
+                },
+                .connect => {
+                    if (args.len != 2) return error.ParseError;
+                    // ponytail: top level only; a subcircuit's `.connect` needs
+                    // per-instance aliases.
+                    for (r.subckts.items) |s| for (r.lines.items[s.first..s.end]) |l| if (l.ptr == line.ptr)
+                        return r.unsupported(line, ".connect inside a subcircuit");
+                    var bufs: [2][24]u8 = undefined;
+                    try r.connect(nodeText(args[0], &bufs[0]) orelse return error.ParseError, nodeText(args[1], &bufs[1]) orelse return error.ParseError);
+                },
                 .save => for (args) |a| switch (a) {
                     .group => |g| if (g.args.len == 1 and (std.ascii.eqlIgnoreCase(g.name, "v") or std.ascii.eqlIgnoreCase(g.name, "i"))) {
                         var buf: [24]u8 = undefined;
@@ -798,6 +854,21 @@ fn Reader(comptime S: type) type {
                 },
                 else => {},
             }
+        }
+
+        /// `line` as the deck spells it: the original case when `line` is a
+        /// slice of the parsed text, else the joined continuation as read.
+        fn written(r: *const R, line: []const u8) []const u8 {
+            const at = @intFromPtr(line.ptr);
+            const base = @intFromPtr(r.text.ptr);
+            return if (at >= base and at + line.len <= base + r.text.len) r.orig[at - base ..][0..line.len] else line;
+        }
+
+        /// Logs `line` as `what` and fails the parse with `UnsupportedCard`.
+        fn unsupported(r: *const R, line: []const u8, what: []const u8) Error {
+            // The test runner fails any test that logs an error.
+            if (!@import("builtin").is_test) std.log.err("netlist: {s}: {s}", .{ what, r.written(line) });
+            return error.UnsupportedCard;
         }
 
         // Values.
@@ -863,6 +934,57 @@ fn Reader(comptime S: type) type {
             try r.scratch.names.append(r.arena, name);
             try r.scratch.ops.append(r.arena, .{ .code = .ident, .a = @intCast(mark.names) });
             return r.fold(mark.ops, frame, geometry);
+        }
+
+        /// Parses the `.meas` cards in deck order. ngspice reports a bad one
+        /// and simulates anyway.
+        fn readMeasures(r: *R) Error!void {
+            var last: ?Kind = null;
+            if (r.dialect == .hspice) for (r.analyses.items) |a| switch (a.kind) {
+                .tran, .ac, .dc => last = a.kind,
+                else => {},
+            };
+            for (r.meas_lines.items) |line| {
+                var f = F.init(line);
+                _ = f.next();
+                const m = measure.parse(r.arena, f.rest(), r, last) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        std.log.warn("netlist: ignoring malformed card '{s}'", .{line});
+                        continue;
+                    },
+                };
+                try r.measures.append(r.arena, m);
+            }
+        }
+
+        /// A `PARAM=` measure expression in postfix: names of earlier `.meas`
+        /// cards read their results, global parameters fold to numbers.
+        /// Arithmetic only; anything else is a ParseError.
+        pub fn measureExpr(r: *R, text: []const u8) Error![]const core.MeasureOp {
+            const body = if (text.len > 0 and (text[0] == '{' or F.isQuote(text[0]))) F.body(text) else text;
+            const mark = r.scratch.mark();
+            defer r.scratch.reset(mark);
+            try expr.compileAll(S.parseNum, r.arena, &r.scratch, body);
+            // Copies: folding a parameter below reuses the scratch.
+            const ops = try r.arena.dupe(expr.Op, r.scratch.ops.items[mark.ops..]);
+            const names = try r.arena.dupe([]const u8, r.scratch.names.items);
+            const consts = try r.arena.dupe(f64, r.scratch.consts.items);
+            const out = try r.arena.alloc(core.MeasureOp, ops.len);
+            for (ops, out) |op, *o| o.* = switch (op.code) {
+                .num => .{ .num = consts[op.a] },
+                .ident => for (r.measures.items, 0..) |m, i| {
+                    if (std.mem.eql(u8, m.name, names[op.a])) break .{ .measure = @intCast(i) };
+                } else .{ .num = try r.measureValue(names[op.a]) },
+                .neg => .neg,
+                .add => .add,
+                .sub => .sub,
+                .mul => .mul,
+                .div => .div,
+                .pow => .pow,
+                else => return error.ParseError,
+            };
+            return out;
         }
 
         /// A `.meas` value: a number or a global parameter expression.
@@ -976,6 +1098,21 @@ fn Reader(comptime S: type) type {
             return .from(slot.*);
         }
 
+        /// Makes nets `a` and `b` one net, before any device card is read.
+        /// Two names that are already distinct nets (an alias chain closing
+        /// on itself through different roots) are refused.
+        fn connect(r: *R, a: []const u8, b: []const u8) Error!void {
+            var slots: [2]?*u32 = .{ null, null };
+            var ids: [2]u32 = .{ 0, 0 };
+            for ([_][]const u8{ a, b }, 0..) |name, k| if (!isGroundName(name)) {
+                const n = try r.internName(try r.arena.dupe(u8, name));
+                slots[k] = &r.net_of.items[n.index()];
+                ids[k] = slots[k].?.*;
+            };
+            if (ids[0] == none and ids[1] == none) ids[0] = (try r.intern(try r.arena.dupe(u8, a))).index();
+            if (ids[0] == none) slots[0].?.* = ids[1] else if (ids[1] == none) slots[1].?.* = ids[0] else if (ids[0] != ids[1]) return error.ParseError;
+        }
+
         /// `parts` joined, in reused scratch.
         fn joined(r: *R, parts: []const []const u8) Error![]const u8 {
             r.name_buf.clearRetainingCapacity();
@@ -988,7 +1125,7 @@ fn Reader(comptime S: type) type {
         fn netOf(r: *R, frame: *const Frame, node: []const u8) Error!VertexId {
             const path = frame.path orelse return r.intern(node);
             for (frame.ports, frame.actuals) |p, a| if (std.mem.eql(u8, p, node)) return a;
-            if (std.mem.eql(u8, node, "0") or std.mem.eql(u8, node, "gnd")) return r.intern(node);
+            if (std.mem.eql(u8, node, "0") or std.mem.eql(u8, node, "gnd") or r.global_nets.contains(node)) return r.intern(node);
             return r.intern(try r.joined(&.{ path, ".", node }));
         }
 
@@ -1009,6 +1146,18 @@ fn Reader(comptime S: type) type {
             const head = f.next() orelse return error.ParseError;
             if (!F.isWord(head) or !std.ascii.isAlphabetic(head[0])) return error.ParseError;
             const letter = std.ascii.toLower(head[0]);
+            // HSPICE reads these letters as lossy lines, S-parameter blocks,
+            // IBIS buffers and ports, none of which is built.
+            if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bpsuw", letter) != null)
+                return r.unsupported(line, "unsupported HSPICE element");
+            if (std.mem.indexOfScalar(u8, "efgh", letter) != null) {
+                var probe = f;
+                _ = probe.next();
+                _ = probe.next();
+                var buf: [16]u8 = undefined;
+                if (probe.next()) |t| if (t.len <= buf.len and behavioural.has(std.ascii.lowerString(&buf, t)))
+                    return r.unsupported(line, "unsupported controlled-source form");
+            }
             r.nodes.clearRetainingCapacity();
             r.positional.clearRetainingCapacity();
             r.card_kv.clearRetainingCapacity();
@@ -1196,7 +1345,43 @@ fn Reader(comptime S: type) type {
             if (branches.depth != 0) return error.ParseError;
         }
 
-        // After the walk: model bins.
+        // After the walk: shunts and model bins.
+
+        /// `.options gshunt=G cshunt=C` [CR Ch.3]: a conductance and a
+        /// capacitance from every net to ground, added as R and C cards
+        /// named `r.gshunt.<net>` and `c.cshunt.<net>`.
+        fn shunts(r: *R) Error!void {
+            const nets = r.hg.vertices.len;
+            inline for (.{ .{ "gshunt", 'r' }, .{ "cshunt", 'c' } }) |s| if (r.option(s[0])) |v| if (v > 0) {
+                for (1..nets) |net| {
+                    const value: Value = .{ .num = if (s[1] == 'r') 1 / v else v };
+                    const pins = [2]VertexId{ .from(net), ground };
+                    const net_name = r.pool.str(r.hg.vertices.items(.name)[net]);
+                    const name = try r.internName(try std.fmt.allocPrint(r.arena, "{c}.{s}.{s}", .{ s[1], s[0], net_name }));
+                    _ = r.hg.addEdge(r.arena, .{
+                        .kind = s[1],
+                        .name = name,
+                        .model = none,
+                        .positional = try appendSpan(Value, r.arena, &r.values, &.{value}),
+                        .kv = .{},
+                        .subckt_instance = 0,
+                    }, &pins) catch |err| return switch (err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => error.CircuitTooLarge,
+                    };
+                }
+            };
+        }
+
+        /// The last `.options name=value` number in the deck, null when none
+        /// sets it.
+        fn option(r: *const R, name: []const u8) ?f64 {
+            var out: ?f64 = null;
+            for (r.config.items) |c| if (!c.temp) for (c.args, 0..) |a, i| {
+                if (a == .name and std.ascii.eqlIgnoreCase(a.name, name) and i + 1 < c.args.len and c.args[i + 1] == .num) out = c.args[i + 1].num;
+            };
+            return out;
+        }
 
         /// `.option scale` and ngspice model binning (INPgetModBin): an M card
         /// naming `nm` takes the last-declared `nm.<n>` whose L/W bounds

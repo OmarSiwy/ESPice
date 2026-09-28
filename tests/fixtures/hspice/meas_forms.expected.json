@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "HSPICE .measure forms are evaluated.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(out) = 1 - exp(-t / 1 us): t50 = ln2 us, integral over 0..5 us = 5 us - (1 - e^-5) us, slope at 1 us = e^-1 / 1 us, twice = 2 t50; (M - 0.9 M) / M = 0.1 at every point for ERR1 and ERR2."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 1e-05,
+            "values": [
+              0.6321205588285577,
+              0.8646647167633873,
+              0.9932620530009145
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-06,
+            2e-06,
+            5e-06
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "t50",
+        "value": 6.931471805599452e-07,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "area",
+        "value": 4.006737946999086e-06,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "slope",
+        "value": 367879.44117144233,
+        "rtol": 0.01,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "twice",
+        "value": 1.3862943611198905e-06,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "e1",
+        "value": 0.1,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "e2",
+        "value": 0.1,
+        "rtol": 1e-06,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "5f7c1c8312d2b90cbf2d4cc174492614fad92aa06ab16db1063523d84a77a19d"
+}
