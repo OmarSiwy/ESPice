@@ -34,6 +34,11 @@ PAC and PXF queries build and factor their own matrices.
 
 ## 2. Flow
 
+`.hbxf v(out) sweep [f0 [K]]` (HSPICE `.HBXF`) is the same adjoint sweep
+about the HB orbit (see [pac.md](pac.md) §2 for `.hbac`); fixtures
+`hbxf/rc` and `hbxf/two_poles_hspice`. HSPICE's `i(Vxx)` output form is not
+accepted.
+
 1. Same front end as PAC: periodic orbit, $\hat G_m$, $\hat C_m$.
 2. Per output frequency: assemble $\mathcal A$ (or reuse PAC's), solve the
    conjugate-transposed system with the output selector, read all

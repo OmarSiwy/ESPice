@@ -31,10 +31,11 @@ implemented.
 | [fourier-thd.md](fourier-thd.md) | `.four` harmonic extraction: final-period resample, FFT, THD | implemented |
 | [ensemble-sweeps.md](ensemble-sweeps.md) | Monte Carlo and temperature sweeps on structural lanes, seed policy | implemented |
 | [transient-noise.md](transient-noise.md) | Time-domain noise synthesis ($\sigma = \sqrt{S/2h}$), BE rationale | implemented (white part only) |
-| [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) | Shooting Newton (dense FD or FD-matvec GMRES), harmonic balance | implemented (saved-factor Krylov shooting: not implemented) |
-| [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary sources | implemented (frozen-time approximation; true LPTV: not implemented) |
-| [pac.md](pac.md) | Periodic AC: harmonic conversion matrix over the PSS orbit | implemented (settling PSS front end) |
-| [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC) | implemented (dense adjoint) |
+| [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) | Shooting Newton (dense FD or FD-matvec GMRES), harmonic balance, autonomous oscillators (`.snosc`, `.hbosc`) | implemented (saved-factor Krylov shooting: not implemented) |
+| [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary sources; `.pnoise` on the shooting orbit, `.hbnoise` on the HB orbit | implemented (dense conversion matrix) |
+| [pac.md](pac.md) | Periodic AC: harmonic conversion matrix over the PSS or HB orbit (`.pac`, `.hbac`) | implemented |
+| [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC; `.pxf`, `.hbxf`) | implemented (dense adjoint) |
+| [phase-noise.md](phase-noise.md) | Oscillator phase noise by the PPV (`.phasenoise`, HSPICE METHOD=0) | implemented (white sources only) |
 | [qpss.md](qpss.md) | Quasi-periodic steady state (QP-HB, MFT shooting) | implemented (two-tone QP-HB, unpreconditioned GMRES; MFT: not implemented) |
 | [mpde-envelope.md](mpde-envelope.md) | MPDE, Fourier-envelope, sample-envelope following | partial (sample envelope with trapezoid inner steps) |
 | [matex-exponential-integrators.md](matex-exponential-integrators.md) | Exponential integrators, Krylov $e^{Ah}v$, I-/R-MATEX | implemented (explicit linear R-MATEX) |

@@ -59,13 +59,13 @@ the ngspice-45 source (`src/spicelib/analysis/*.c`) and covers analyses only.
 | Transient noise | white and flicker, ZOH (Voss-McCartney) or SDE (Lorentzian sums) (`lib/tdn*.cpp`) | white only, BE (`tran/tran_noise.zig`) | noise sources on V/I |
 | Exponential integrator | no | `.matex`, linear circuits (`tran/matex.zig`) | no |
 | Envelope | no | `.envelope`, sample-envelope following (`tran/envelope.zig`) | no |
-| PSS | `pss`: single shooting with the monodromy matrix integrated alongside, driven and autonomous (oscillator, period solved) (`lib/corepss.cpp`) | `.pss`: shooting, dense FD monodromy below 50 unknowns, matrix-free GMRES above; driven only (`pss/pss.zig`) | `.pss`, experimental |
+| PSS | `pss`: single shooting with the monodromy matrix integrated alongside, driven and autonomous (oscillator, period solved) (`lib/corepss.cpp`) | `.pss`: shooting, dense FD monodromy below 50 unknowns, matrix-free GMRES above; driven, and autonomous with the period solved and one node pinned (`.pss v(osc)`, `.snosc`) (`pss/pss.zig`) | `.pss`, experimental |
 | Harmonic balance | `hb`: any number of tones, box/diamond/hybrid truncation, APFT collocation, sparse block Jacobian on KLU or SuperLU_MT (`lib/corehb*.cpp`) | `.hb`: one tone, dense Jacobian, magnitudes only (`pss/hb.zig`) | no |
 | Quasi-periodic steady state | `hb` with two or more tones | `.qpss`: two tones, GMRES without a preconditioner (`pss/qpss.zig`) | no |
-| Periodic AC | `pac` (shooting) and `hbac` (HB, multi-tone) | `.pac` (shooting, dense conversion matrix) | no |
-| Periodic transfer function | no | `.pxf` (`pss/pxf.zig`) | no |
+| Periodic AC | `pac` (shooting) and `hbac` (HB, multi-tone) | `.pac` (shooting) and `.hbac` (one-tone HB), dense conversion matrix | no |
+| Periodic transfer function | no | `.pxf` (shooting) and `.hbxf` (HB) | no |
 | Periodic noise | `hbnoise` (HB, multi-tone) | `.pnoise` (shooting) | no |
-| HB noise | `hbnoise` | no | no |
+| HB noise | `hbnoise` | `.hbnoise` (one tone; `pss/hb_lptv.zig`) | no |
 | Monte Carlo | `mc ... endmc` loop around any analyses; `gauss`/`agauss`/`unif`/`aunif` in expressions; Latin hypercube by default (`docs/cmd-analysis-mc.md`) | `.mc`: Gaussian on each device's primary value, DC only (`sweep/mc.zig`) | via control scripts |
 | Temperature sweep | `sweep option="temp"` | `.temp` lanes, `.dc TEMP` | `.dc TEMP` |
 | Stored solutions | `store=`/`nodeset=`/`ic=` across analyses; `opsolve=0` linearizes at a stored point | no; one OP per Problem is shared by the queries that need it | no |
