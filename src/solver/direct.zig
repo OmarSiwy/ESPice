@@ -49,6 +49,12 @@ pub const Solver = struct {
     q: []u32 = &.{},
     /// Values of the last factorization, for the unchanged-matrix bypass.
     vcopy: []f64 = &.{},
+    /// Bumped whenever `vcopy` changes, by `factor` or by a device factor,
+    /// so a device copy of the factors knows whether it is current.
+    gen: u32 = 0,
+    /// A device factored `vcopy` and `lu` still holds older values. The
+    /// next host use refactors from `vcopy` first (bitwise the device's).
+    host_stale: bool = false,
 
     /// Chooses the engine from the pattern alone: tridiagonal, then BBD
     /// when `bbd` describes a profitable split, else sparse LU.
@@ -105,9 +111,26 @@ pub const Solver = struct {
     /// schedules the BBD block factors; `.{}` runs them serially.
     pub fn factor(self: *Self, vals: []const f64, execution: root.Execution) !void {
         const nnz = self.vcopy.len;
-        if (self.factored and simdEql(self.vcopy, vals[0..nnz])) return;
+        if (self.factored and !self.host_stale and simdEql(self.vcopy, vals[0..nnz])) return;
         try self.factorInner(vals, execution);
+        self.host_stale = false;
         @memcpy(self.vcopy, vals[0..nnz]);
+        self.gen +%= 1;
+    }
+
+    /// True when `vals` equal the last factored values (the bypass test).
+    pub fn unchanged(self: *const Self, vals: []const f64) bool {
+        return self.factored and simdEql(self.vcopy, vals[0..self.vcopy.len]);
+    }
+
+    /// Brings `lu` up to `vcopy` after a device factor. The device ran
+    /// this refactor's exact operations and passed its tests, so it cannot
+    /// fail here.
+    fn syncHost(self: *Self) void {
+        if (!self.host_stale) return;
+        self.lu.?.refactor(self.col_ptr, self.vcopy, self.params.refactor_growth_limit) catch
+            @panic("device LU passed a refactor the host fails");
+        self.host_stale = false;
     }
 
     fn factorInner(self: *Self, vals: []const f64, execution: root.Execution) !void {
@@ -154,6 +177,7 @@ pub const Solver = struct {
 
     /// Solves in place with whichever engine is live.
     fn solveInPlace(self: *Self, x: []f64) void {
+        self.syncHost();
         if (self.tri) |*tri| return tri.solve(x[0..self.n]);
         if (self.bbd_eng) |*eng| return eng.solveInPlace(x[0..self.n]);
         self.lu.?.solve(x[0..self.n], x[0..self.n]);
@@ -174,6 +198,7 @@ pub const Solver = struct {
     /// x = A^-T rhs, for adjoint analyses. `rhs` and `x` may alias.
     pub fn solveT(self: *Self, rhs: []const f64, x: []f64) void {
         if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
+        self.syncHost();
         if (self.tri) |*tri| return tri.solveT(x[0..self.n]);
         if (self.bbd_eng) |*eng| return eng.solveTInPlace(x[0..self.n]);
         self.lu.?.solveT(x[0..self.n], x[0..self.n]);

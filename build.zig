@@ -264,6 +264,9 @@ pub fn build(b: *std.Build) void {
             .heavy = m.size >= heavy_model_bytes,
         }) catch @panic("OOM");
     }
+    // The device LU (docs/solvers/gpu-lu.md): std and gompute only, so it
+    // builds whenever any kernel does, `-Dgpu=false` included.
+    roots.append(b.allocator, .{ .name = "lu", .root = b.path("src/solver/lu_device.zig") }) catch @panic("OOM");
     // HIP is pinned: `.auto` probes the BUILD machine, and a box without an
     // AMD card would compile `--backend hip` out of every binary it ships.
     // gfx1100 (RDNA3) is the claimed baseline. Release CI has no GPU and must

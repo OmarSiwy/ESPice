@@ -188,7 +188,12 @@ pub fn newton(
         if (newtonDbg())
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
         prof.lap(.load);
-        if (opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig) {
+        const need = opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig;
+        // The device LU (docs/solvers/gpu-lu.md) is bitwise this factor and
+        // solve; false leaves both to the host.
+        const on_device = if (comptime @hasDecl(S, "deviceSolve")) sys.deviceSolve(slv, v, dx, need) else false;
+        if (on_device and need) ws.factored_sig = opts.matrix_sig;
+        if (!on_device and need) {
             slv.factor(v, executionOf(sys)) catch |e| {
                 if (opdbg()) {
                     var nan_cnt: usize = 0;
@@ -204,7 +209,7 @@ pub fn newton(
             ws.factored_sig = opts.matrix_sig;
             prof.lap(.factor);
         }
-        slv.solveNeg(sys.rhs, dx);
+        if (!on_device) slv.solveNeg(sys.rhs, dx);
         prof.lap(.solve);
         const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts);
         prof.lap(.update);
