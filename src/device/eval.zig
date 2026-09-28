@@ -1135,6 +1135,14 @@ fn idtUnknowns(comptime D: type) []const u32 {
     }
 }
 
+/// Whether the host reads D's live per-instance timer schedule
+/// (`pendingBreakpoint`, which holds §5.10.3.3 start times computed during
+/// the solve). Not for timer-only models, whose `updateState` never runs so
+/// `__next` is stale, nor for GPU-resident types, whose host Instance is.
+fn walksPending(comptime D: type) bool {
+    return @hasDecl(D, "pendingBreakpoint") and !skipsTimerState(D) and !hasCtlKernel(D);
+}
+
 /// Whether D's history is §5.10 held variables and no analog operator (no
 /// cross/above FSM, delay line or timer).
 fn holdsOnlyHeld(comptime D: type) bool {
@@ -1227,7 +1235,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
             .set_sim_state = setSimState,
             .min_delay = if (@hasDecl(D, "delays")) minDelay else null,
-            .next_breakpoint = if (@hasDecl(D, "nextBreakpoint")) nextBreakpointFn else null,
+            .next_breakpoint = if (@hasDecl(D, "nextBreakpoint") or walksPending(D)) nextBreakpointFn else null,
             .collect_params = collectParams,
             // A generator is only priced by the device's own `noisePsd`.
             .collect_noise = if (@hasDecl(D, "noise_gens")) blk: {
@@ -1521,12 +1529,13 @@ pub fn DeviceBatch(comptime D: type) type {
             return min_td;
         }
 
-        /// The earliest model breakpoint strictly after `t`. The transient
-        /// asks once per step; for a timer-only model (`has_bp`) the answer
-        /// only moves when `t` reaches it, so the walk (68 timers per vsource
-        /// model, ~425 Ir) runs once per breakpoint instead. A PULSE source
-        /// rounds its corner from the accepted time `sim.t` (the transient
-        /// asks right after accepting it), as ngspice's VSRCaccept does.
+        /// The earliest model or instance breakpoint strictly after `t`. The
+        /// transient asks once per step; for a timer-only model (`has_bp`)
+        /// the answer only moves when `t` reaches it, so the walk (68 timers
+        /// per vsource model, ~425 Ir) runs once per breakpoint instead. A
+        /// PULSE source rounds its corner from the accepted time `sim.t` (the
+        /// transient asks right after accepting it), as ngspice's VSRCaccept
+        /// does.
         fn nextBreakpointFn(ctx: *anyopaque, t: f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             if (comptime has_bp) {
@@ -1534,7 +1543,7 @@ pub fn DeviceBatch(comptime D: type) type {
             }
             const t_acc = if (self.sim.kind == .tran and self.sim.t <= t) self.sim.t else t;
             var best: f64 = std.math.inf(f64);
-            for (self.models, 0..) |*m, i| {
+            if (comptime @hasDecl(D, "nextBreakpoint")) for (self.models, 0..) |*m, i| {
                 if (comptime has_pulse) {
                     const b = &self.pulse_brk[i];
                     if (t < b.req or t >= b.at)
@@ -1543,7 +1552,12 @@ pub fn DeviceBatch(comptime D: type) type {
                     continue;
                 }
                 if (D.nextBreakpoint(m, t)) |bp| best = @min(best, bp);
-            }
+            };
+            // §5.10.3.3 re-armed fire times exist only in the committed
+            // Instance, so every commit can move them: no cache.
+            if (comptime walksPending(D)) for (self.instances) |*inst| {
+                if (D.pendingBreakpoint(inst, t)) |bp| best = @min(best, bp);
+            };
             if (comptime has_bp) self.bp = .{ .lo = t, .hi = best };
             return if (best == std.math.inf(f64)) null else best;
         }

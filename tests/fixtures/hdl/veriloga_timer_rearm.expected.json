@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A timer whose start time is computed during the solve exists only in the instance's live schedule (pendingBreakpoint); the transient must land on every re-armed fire.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "VAMS-2023 5.10.3.3 and 4.5.8: tnext starts at per = 1 us and each fire toggles lvl and re-arms tnext += per, so lvl flips at 1, 2, 3 and 4 us, and transition(lvl, 0, 100 ns) slews V(out) linearly over the 100 ns after each fire. A fire landed late shifts the whole ramp: without the per-instance breakpoints the first fire lands at the step after 1 us (1.028 us) and V(out) at 1.05 us reads 0.22."
+  },
+  "netlist_sha256": "81fc4a841c7ad335b727afe9e84eca62da2fd4bef6759af0e92dc91651e842c4",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-07,
+            1.05e-06,
+            1.5e-06,
+            2.05e-06,
+            2.5e-06,
+            3.02e-06,
+            3.5e-06,
+            4.05e-06,
+            4.6e-06
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-04,
+            "atol": 1e-04,
+            "values": [
+              0.0,
+              0.5,
+              1.0,
+              0.5,
+              0.0,
+              0.2,
+              1.0,
+              0.5,
+              0.0
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  }
+}

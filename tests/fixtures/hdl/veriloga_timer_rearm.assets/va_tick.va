@@ -1,0 +1,22 @@
+`include "disciplines.vams"
+// VAMS-2023 5.10.3.3: a timer whose start time the event itself re-arms.
+// Each fire toggles lvl and schedules the next one per later; transition
+// slews V(out) over tr from each fire.
+module va_tick(out);
+    output out;
+    electrical out;
+    parameter real per = 1e-6;
+    parameter real tr = 1e-7;
+    real tnext, lvl;
+    analog begin
+        @(initial_step) begin
+            tnext = per;
+            lvl = 0;
+        end
+        @(timer(tnext)) begin
+            lvl = 1 - lvl;
+            tnext = tnext + per;
+        end
+        V(out) <+ transition(lvl, 0, tr);
+    end
+endmodule
