@@ -57,6 +57,8 @@ pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const
 /// the batch table it was built for must not change shape while it lives.
 pub const ParEval = struct {
     gpa: std.mem.Allocator,
+    /// Parks idle workers on `epoch` (futex) between passes.
+    io: std.Io,
     n_lanes: u32,
 
     /// Private planes of lanes 1.., `n_lanes - 1` back-to-back copies each.
@@ -79,8 +81,11 @@ pub const ParEval = struct {
     threads: []std.Thread,
     started: bool,
     quit: std.atomic.Value(bool),
-    /// Bumped once per pass; workers spin on it.
+    /// Bumped once per pass; workers spin on it, then park on it.
     epoch: std.atomic.Value(u32),
+    /// Workers parked (or about to park) on `epoch`. `run` pays for the wake
+    /// syscall only when this is nonzero.
+    sleepers: std.atomic.Value(u32),
     /// Workers finished with the current pass.
     done: std.atomic.Value(u32),
     /// The current pass's arguments, published before `epoch` is bumped.
@@ -95,6 +100,7 @@ pub const ParEval = struct {
     /// order. Threads start lazily on the first `run`.
     pub fn init(
         gpa: std.mem.Allocator,
+        io: std.Io,
         batches: []const Batch,
         nnz: u32,
         n: u32,
@@ -185,6 +191,7 @@ pub const ParEval = struct {
 
         return .{
             .gpa = gpa,
+            .io = io,
             .n_lanes = n_lanes,
             .g_slab = g_slab,
             .c_slab = c_slab,
@@ -200,6 +207,7 @@ pub const ParEval = struct {
             .started = false,
             .quit = .init(false),
             .epoch = .init(0),
+            .sleepers = .init(0),
             .done = .init(0),
             .job_batches = batches,
             .job_own_planes = undefined,
@@ -213,7 +221,8 @@ pub const ParEval = struct {
     pub fn deinit(self: *ParEval) void {
         if (self.started) {
             self.quit.store(true, .release);
-            _ = self.epoch.fetchAdd(1, .release);
+            _ = self.epoch.fetchAdd(1, .seq_cst);
+            self.io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
             for (self.threads) |th| th.join();
         }
         const gpa = self.gpa;
@@ -245,7 +254,11 @@ pub const ParEval = struct {
         self.job_t = t;
         self.job_mode = mode;
         self.done.store(0, .monotonic);
-        _ = self.epoch.fetchAdd(1, .release);
+        // seq_cst pairs with the worker's `sleepers` increment and epoch
+        // re-check: either it sees the new epoch or this sees it parking.
+        _ = self.epoch.fetchAdd(1, .seq_cst);
+        if (self.sleepers.load(.seq_cst) != 0)
+            self.io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
         runLane(self, batches, own_planes, 0, x, t, mode);
         var spins: u32 = 0;
         while (self.done.load(.acquire) < self.n_lanes - 1) {
@@ -273,9 +286,21 @@ pub const ParEval = struct {
             var spins: u32 = 0;
             var e = self.epoch.load(.acquire);
             while (e == last) {
-                std.atomic.spinLoopHint();
-                spins +%= 1;
-                if (spins > 4096) std.Thread.yield() catch {};
+                if (spins < park_spins) {
+                    std.atomic.spinLoopHint();
+                    spins += 1;
+                } else if (spins < park_spins + park_yields) {
+                    std.Thread.yield() catch {};
+                    spins += 1;
+                } else {
+                    // Spinning (or `yield`, which returns at once on an idle
+                    // core) through the host solve kept every worker at
+                    // 100% CPU. The futex rechecks `epoch == last` itself.
+                    _ = self.sleepers.fetchAdd(1, .seq_cst);
+                    if (self.epoch.load(.seq_cst) == last)
+                        self.io.futexWaitUncancelable(u32, &self.epoch.raw, last);
+                    _ = self.sleepers.fetchSub(1, .seq_cst);
+                }
                 e = self.epoch.load(.acquire);
             }
             last = e;
@@ -358,6 +383,12 @@ pub const ParEval = struct {
         }
     }
 };
+
+/// Pause-loop iterations a worker spins on `epoch` before it parks: long
+/// enough to catch the next pass across a short solve, short enough that a
+/// long LU solve does not burn the cores.
+const park_spins: u32 = 4096;
+const park_yields: u32 = 64;
 
 const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
 
