@@ -85,7 +85,10 @@ pub const Executor = struct {
         errdefer self.circuit.deinit();
         errdefer self.work.deinit();
         errdefer self.results.deinit();
-        self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads };
+        // The multicore refactor follows the device threads unless the
+        // solver's own count is set (ESPICE_SOLVER_THREADS).
+        const lu_threads: u8 = @intCast(@min(if (config.solver_threads > 1) config.solver_threads else config.device_threads, 16));
+        self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads };
         if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
         if (deck.deck_temp) |temp| if (initial == null) {
             self.circuit.setCircuitTemp(@floatCast(temp));
@@ -174,15 +177,17 @@ pub const Executor = struct {
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
-        self.circuit.setSimState(.{ .kind = switch (self.job) {
-            // Small-signal linearizations run as analysis("ac") or ("noise"),
-            // LRM Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC
-            // for ac, noise, pz and disto (osdiload.c:165). It is what gives a
-            // host-integrated idt its 1/(jw) instead of its DC form.
-            .ac, .sp, .stb, .pz, .disto => .ac,
-            .noise => .noise,
-            else => if (transient) .ic else .dc,
-        } });
+        self.circuit.setSimState(.{
+            .kind = switch (self.job) {
+                // Small-signal linearizations run as analysis("ac") or ("noise"),
+                // LRM Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC
+                // for ac, noise, pz and disto (osdiload.c:165). It is what gives a
+                // host-integrated idt its 1/(jw) instead of its DC form.
+                .ac, .sp, .stb, .pz, .disto => .ac,
+                .noise => .noise,
+                else => if (transient) .ic else .dc,
+            },
+        });
         if (self.job == .op) {
             self.x = try self.work.allocator().alloc(f64, self.circuit.n);
             @memset(self.x.?, 0);
@@ -211,18 +216,27 @@ pub const Executor = struct {
         return run(&run_ctx, self.job);
     }
 
-    /// The device LU, on only for `ESPICE_GPU_LU=1` and a GPU backend: E2
-    /// found no deck where it beats 8 host threads by 2x, so nothing admits
-    /// it by default (docs/solvers/gpu-lu.md). A driver that refuses leaves
-    /// the host LU.
+    /// The device LU: `ESPICE_GPU_LU=1` forces it on under a GPU backend,
+    /// `=0` off; otherwise it runs only where the card's FP64 is fast
+    /// (`GpuLu.fp64Fast`) and the matrix is big enough to be worth asking
+    /// the driver. On a consumer card it lost to 8 host threads on every
+    /// E2 deck (docs/solvers/gpu-lu.md). A driver that refuses leaves the
+    /// host LU.
     fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
         if (self.config.backend == .cpu) return null;
-        const env = std.c.getenv("ESPICE_GPU_LU") orelse return null;
-        if (!std.mem.eql(u8, std.mem.span(env), "1")) return null;
+        var forced = false;
+        if (std.c.getenv("ESPICE_GPU_LU")) |env| {
+            if (!std.mem.eql(u8, std.mem.span(env), "1")) return null;
+            forced = true;
+        } else if (self.circuit.n < gpu_lu_min_n) return null;
         const context = gpu_lu.GpuLu.init(self.allocator, self.circuit.n, self.circuit.nnz) catch |err| {
-            std.debug.print("warning: device LU unavailable ({s})\n", .{@errorName(err)});
+            if (forced) std.debug.print("warning: device LU unavailable ({s})\n", .{@errorName(err)});
             return null;
         };
+        if (!forced and !context.fp64Fast()) {
+            context.deinit();
+            return null;
+        }
         self.circuit.lu_hook = .{ .ctx = context, .solve = gpu_lu.GpuLu.solve };
         return context;
     }
@@ -244,6 +258,11 @@ pub const Executor = struct {
     }
 };
 
+/// Below this many unknowns `auto` never asks the driver about the device
+/// LU. ponytail: the E2 decks start at 17k; measure a data-center card
+/// before trusting the bar.
+const gpu_lu_min_n = 10_000;
+
 /// `--timing-in-depth`: where the query's Newton time went.
 /// The matrix size and the flat LU's fill (L + U + diagonal) close the line.
 fn printNewtonSplit(ws: *const converger.Workspace, job: requests.Query) void {
@@ -254,7 +273,7 @@ fn printNewtonSplit(ws: *const converger.Workspace, job: requests.Query) void {
         }
     }.f;
     std.debug.print("timing: {s} newton: iterations={d} factors={d} eval={d:.3}ms load={d:.3}ms factor={d:.3}ms solve={d:.3}ms update={d:.3}ms n={d} lu_nnz={d}\n", .{
-        @tagName(job),                                   p.counts[0], p.counts[1], ms(p.ns[0]), ms(p.ns[1]), ms(p.ns[2]), ms(p.ns[3]), ms(p.ns[4]), ws.dx.len,
+        @tagName(job),                                                       p.counts[0], p.counts[1], ms(p.ns[0]), ms(p.ns[1]), ms(p.ns[2]), ms(p.ns[3]), ms(p.ns[4]), ws.dx.len,
         if (ws.slv.lu) |lu| lu.li.items.len + lu.ui.items.len + lu.n else 0,
     });
 }

@@ -2814,6 +2814,56 @@ const LuKernelTests = struct {
         try testing.expectEqual(3, failed);
     }
 
+    test "lu kernels: HostRefactor on io tasks is bitwise refactor, failures included" {
+        const gpa = testing.allocator;
+        var c = try circuit(gpa, 300, 0x7A5C);
+        defer c.deinit(gpa);
+        const vals = try gpa.alloc(f64, c.col_ptr[c.n]);
+        defer gpa.free(vals);
+        var rng = std.Random.DefaultPrng.init(0xB17);
+        const r = rng.random();
+        var a = try SparseLu.init(gpa, c.n, c.col_ptr, c.row_idx, c.q);
+        defer a.deinit(gpa);
+        var b = try SparseLu.init(gpa, c.n, c.col_ptr, c.row_idx, c.q);
+        defer b.deinit(gpa);
+        values(c, r, vals);
+        try a.factor(gpa, c.col_ptr, c.row_idx, vals, 1e-3);
+        try b.factor(gpa, c.col_ptr, c.row_idx, vals, 1e-3);
+        var hr = try K.HostRefactor.init(gpa, &a, c.col_ptr, 1e-12);
+        defer hr.deinit(gpa);
+        // Inline tasks (no async threads) and four real ones.
+        for ([_]std.Io.Limit{ .nothing, .limited(4) }) |limit| {
+            var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = limit });
+            defer threaded.deinit();
+            for (0..4) |round| {
+                values(c, r, vals);
+                if (round == 2) {
+                    // A column with an entry below its pivot grows 1e20.
+                    var k: u32 = 40;
+                    while (true) : (k += 1) {
+                        var hit = false;
+                        for (c.col_ptr[c.q[k]]..c.col_ptr[c.q[k] + 1]) |p| if (a.prow[p] > k) {
+                            vals[p] *= 1e20;
+                            hit = true;
+                        };
+                        if (hit) break;
+                    }
+                }
+                const ref = b.refactor(c.col_ptr, vals, 1e-12);
+                const got = hr.run(&a, vals, threaded.io(), 4);
+                if (ref) |_| {
+                    try got;
+                    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(b.ux.items), std.mem.sliceAsBytes(a.ux.items));
+                    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(b.udiag), std.mem.sliceAsBytes(a.udiag));
+                    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(b.lx.items), std.mem.sliceAsBytes(a.lx.items));
+                } else |e| {
+                    try testing.expectEqual(2, round);
+                    try testing.expectError(e, got);
+                }
+            }
+        }
+    }
+
     test "lu kernels: a scale-accepted pivot skips the growth monitor on the device too" {
         const gpa = testing.allocator;
         // The BSIMSOI body block of "atto-siemens row keeps its own diagonal".

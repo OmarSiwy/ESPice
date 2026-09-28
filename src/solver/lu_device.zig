@@ -5,7 +5,6 @@
 //! `solve_block` lanes each). The bodies are `lu_kernels.zig`'s, shared with
 //! the host threads.
 
-const builtin = @import("builtin");
 const gompute = @import("gompute");
 const lu = @import("lu_kernels.zig");
 
@@ -14,28 +13,13 @@ const Sy = struct {
     pub inline fn barrier() void {
         gompute.builtins.barrier();
     }
-    pub inline fn pause() void {
+    pub inline fn pause(_: u32) void {
         gompute.builtins.spinPause();
     }
-    /// Device-scope acquire and release. Zig's atomics lower to system
-    /// scope on NVPTX (stronger than a kernel needs, and slower); the done
-    /// stamps never leave the device.
-    /// ponytail: inline PTX until gompute has scoped acquire/release.
-    pub inline fn acquire(p: *addrspace(.global) const u32) u32 {
-        if (comptime builtin.cpu.arch != .nvptx64) return @atomicLoad(u32, p, .acquire);
-        return asm volatile ("ld.acquire.gpu.global.u32 %[r], [%[p]];"
-            : [r] "=r" (-> u32),
-            : [p] "l" (p),
-            : .{ .memory = true });
-    }
-    pub inline fn release(p: *addrspace(.global) u32, v: u32) void {
-        if (comptime builtin.cpu.arch != .nvptx64) return @atomicStore(u32, p, v, .release);
-        asm volatile ("st.release.gpu.global.u32 [%[p]], %[v];"
-            :
-            : [p] "l" (p),
-              [v] "r" (v),
-            : .{ .memory = true });
-    }
+    /// Device scope: the done stamps never leave the device, and Zig's own
+    /// atomics lower to system scope on NVPTX (7.1 vs 3.7 ms on a refactor).
+    pub const acquire = gompute.builtins.loadAcquireDevice;
+    pub const release = gompute.builtins.storeReleaseDevice;
 };
 const P = gompute.GlobalPtr;
 

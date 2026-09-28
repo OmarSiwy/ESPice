@@ -115,7 +115,7 @@ pub const Tab = extern struct {
 };
 
 /// The kernel bodies over the pointer type `Sy.P` (a global pointer on the
-/// device, a plain one on the host), `Sy.barrier`/`Sy.pause` and the done
+/// device, a plain one on the host), `Sy.barrier`/`Sy.pause(spins)` and the done
 /// stamps' `Sy.acquire`/`Sy.release`. `sh` is
 /// the block's shared scratch (a `*Shared`, in the shared address space on
 /// the device); `tid`/`nt` are the lane and lane count (0 and 1 on the
@@ -133,7 +133,8 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
         pub const SolveShared = struct { y: [tail_max]f64 };
 
         inline fn wait(p: anytype, stamp: u32) void {
-            while (Sy.acquire(p) != stamp) Sy.pause();
+            var spins: u32 = 0;
+            while (Sy.acquire(p) != stamp) : (spins +%= 1) Sy.pause(spins);
         }
 
         inline fn takeTicket(sy: P(u32), which: u32, sh: anytype, tid: u32) u32 {
@@ -505,8 +506,11 @@ pub const HostSy = struct {
         return [*]T;
     }
     pub inline fn barrier() void {}
-    pub inline fn pause() void {
-        std.atomic.spinLoopHint();
+    /// Spins briefly, then yields: on a loaded machine the thread holding
+    /// the awaited column may be the one descheduled (chain_psp103_10k at
+    /// load 98: 16.7 s of pure spinning became 149 s).
+    pub inline fn pause(spins: u32) void {
+        if (spins < 256) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
     }
     pub inline fn acquire(p: *const u32) u32 {
         return @atomicLoad(u32, p, .acquire);
@@ -544,9 +548,8 @@ pub fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u
     const x = @constCast(b.idx.ptr);
     const Worker = struct {
         fn work(tt: Tab, bb: HostBufs, st: u32) void {
-            const sh = std.heap.page_allocator.create(H.Shared) catch @panic("OOM");
-            defer std.heap.page_allocator.destroy(sh);
-            while (H.refactor(tt, @constCast(bb.idx.ptr), bb.val.ptr, @constCast(bb.a.ptr), bb.sync.ptr, st, sh, 0, 1)) {}
+            var sh: H.Shared = undefined;
+            while (H.refactor(tt, @constCast(bb.idx.ptr), bb.val.ptr, @constCast(bb.a.ptr), bb.sync.ptr, st, &sh, 0, 1)) {}
         }
     };
     var pool: [63]std.Thread = undefined;
@@ -566,6 +569,74 @@ pub fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u
 // Tables, built on the host from a factored SparseLu.
 
 const SparseLu = @import("sparse_lu.zig").SparseLu;
+
+/// The refactor kernel body as a multicore host refactor (docs/solvers/
+/// gpu-lu.md option 3): one pivot epoch's tables and buffers. Its factors
+/// are bitwise `SparseLu.refactor`'s, so callers may pick it by speed.
+pub const HostRefactor = struct {
+    /// `SparseLu.pattern_epoch` the tables were built from.
+    epoch: u32,
+    tb: Tables,
+    val: []f64,
+    sync: []u32,
+    stamp: u32 = 0,
+
+    /// Builds the tables for `lu`'s current factor (4 bytes per flop).
+    /// Caller owns the result; free with `deinit`.
+    pub fn init(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64) !HostRefactor {
+        var tb = try build(gpa, lu, col_ptr, growth, .{});
+        errdefer tb.deinit(gpa);
+        const val = try gpa.alloc(f64, tb.tab.n_val);
+        errdefer gpa.free(val);
+        const sync = try gpa.alloc(u32, tb.tab.syncLen());
+        @memset(sync, 0);
+        return .{ .epoch = lu.pattern_epoch, .tb = tb, .val = val, .sync = sync };
+    }
+
+    pub fn deinit(self: *HostRefactor, gpa: std.mem.Allocator) void {
+        self.tb.deinit(gpa);
+        gpa.free(self.val);
+        gpa.free(self.sync);
+        self.* = undefined;
+    }
+
+    /// `lu.refactor(col_ptr, vals, growth)` on the caller plus
+    /// `threads - 1` tasks of `io`, then the factors copied into `lu`.
+    /// Fails exactly when `refactor` would, and `lu`'s factors are then
+    /// unusable, as after a failed `refactor`. Requires `epoch` to match.
+    pub fn run(self: *HostRefactor, lu: *SparseLu, vals: []const f64, io: std.Io, threads: u32) error{SingularMatrix}!void {
+        std.debug.assert(lu.factored and lu.pattern_epoch == self.epoch);
+        for (lu.void_slots.items) |p| {
+            if (vals[p] != 0) return error.SingularMatrix;
+        }
+        const H = Kernels(HostSy, col_max, 1);
+        const W = struct {
+            fn work(t: Tab, x: [*]u32, val: [*]f64, a: [*]f64, sy: [*]u32, stamp: u32) void {
+                var sh: H.Shared = undefined;
+                while (H.refactor(t, x, val, a, sy, stamp, &sh, 0, 1)) {}
+            }
+        };
+        const t = self.tb.tab;
+        self.stamp +%= 1;
+        @memset(self.sync[0..sync_header], 0);
+        const args = .{ t, self.tb.idx.ptr, self.val.ptr, @constCast(vals.ptr), self.sync.ptr, self.stamp };
+        var futures: [15]std.Io.Future(void) = undefined;
+        const extra = @min(@max(threads, 1) - 1, futures.len);
+        for (futures[0..extra]) |*f| f.* = io.async(W.work, args);
+        @call(.auto, W.work, args);
+        for (futures[0..extra]) |*f| f.await(io);
+        if (self.sync[1] != 0) return error.SingularMatrix;
+        const x = self.tb.idx;
+        for (0..t.n) |k| {
+            const base = x[t.coff + k];
+            const nuk = lu.up[k + 1] - lu.up[k];
+            const nlk = lu.lp[k + 1] - lu.lp[k];
+            @memcpy(lu.ux.items[lu.up[k]..][0..nuk], self.val[base..][0..nuk]);
+            lu.udiag[k] = self.val[base + nuk];
+            @memcpy(lu.lx.items[lu.lp[k]..][0..nlk], self.val[base + nuk + 1 ..][0..nlk]);
+        }
+    }
+};
 
 /// Flop-latency units per barrier (plus the done wait) in the per-column
 /// cost that picks the gather form: a U entry of the stored-order form

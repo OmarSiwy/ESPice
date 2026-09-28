@@ -8,6 +8,7 @@ const sparse_lu = @import("sparse_lu.zig");
 const tridiag_mod = @import("tridiag.zig");
 const order_mod = @import("order.zig");
 const bbd_mod = @import("bbd.zig");
+const lu_kernels = @import("lu_kernels.zig");
 const root = @import("core").numerics;
 
 const Allocator = std.mem.Allocator;
@@ -52,6 +53,11 @@ pub const Solver = struct {
     /// Bumped whenever `vcopy` changes, by `factor` or by a device factor,
     /// so a device copy of the factors knows whether it is current.
     gen: u32 = 0,
+    /// The multicore refactor of the current pivot epoch, when the cost
+    /// model admitted it (`refactorLu`).
+    par: ?lu_kernels.HostRefactor = null,
+    /// Pivot epoch the cost model last judged.
+    par_epoch: u32 = 0,
     /// A device factored `vcopy` and `lu` still holds older values. The
     /// next host use refactors from `vcopy` first (bitwise the device's).
     host_stale: bool = false,
@@ -95,6 +101,7 @@ pub const Solver = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.par) |*p| p.deinit(self.gpa);
         if (self.lu) |*lu| lu.deinit(self.gpa);
         if (self.tri) |*tri| tri.deinit(self.gpa);
         if (self.bbd_eng) |*eng| eng.deinit();
@@ -166,13 +173,31 @@ pub const Solver = struct {
         const lu = &self.lu.?;
         lu.fill_cap = self.params.repivot_fill_cap;
         const ptol = self.params.pivot_tol;
-        const growth = self.params.refactor_growth_limit;
         if (self.factored) {
-            if (lu.refactor(self.col_ptr, vals, growth)) |_| return else |_| {}
+            if (self.refactorLu(vals, execution)) |_| return else |_| {}
             self.factored = false;
         }
         try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, ptol);
         self.factored = true;
+    }
+
+    /// `lu.refactor`, on `execution.lu_threads` workers when the flop-count
+    /// model below prices that faster. Bitwise the same either way.
+    fn refactorLu(self: *Self, vals: []const f64, execution: root.Execution) error{SingularMatrix}!void {
+        const lu = &self.lu.?;
+        const growth = self.params.refactor_growth_limit;
+        const threads = execution.lu_threads;
+        const io = execution.io orelse return lu.refactor(self.col_ptr, vals, growth);
+        if (threads < 2) return lu.refactor(self.col_ptr, vals, growth);
+        if (self.par_epoch != lu.pattern_epoch) {
+            self.par_epoch = lu.pattern_epoch;
+            if (self.par) |*p| p.deinit(self.gpa);
+            self.par = null;
+            // Out of memory for the tables: stay serial this epoch.
+            if (parWorthIt(lu)) self.par = lu_kernels.HostRefactor.init(self.gpa, lu, self.col_ptr, growth) catch null;
+        }
+        const p = if (self.par) |*p| p else return lu.refactor(self.col_ptr, vals, growth);
+        return p.run(lu, vals, io, threads);
     }
 
     /// Solves in place with whichever engine is live.
@@ -204,6 +229,33 @@ pub const Solver = struct {
         self.lu.?.solveT(x[0..self.n], x[0..self.n]);
     }
 };
+
+/// The multicore refactor's admission: enough flops per refactor to pay
+/// for the handoffs, and enough per column that the columns are not a
+/// dependent chain. `ESPICE_LU_PAR=0/1` forces it off or on.
+fn parWorthIt(lu: *const sparse_lu.SparseLu) bool {
+    var flops: u64 = 0;
+    for (lu.ui.items) |i| flops += lu.lp[i + 1] - lu.lp[i];
+    // Tape-sized factors refactor in microseconds.
+    var ok = lu.tv.items.len == 0 and flops >= par_min_flops and flops >= par_min_per_col * @as(u64, lu.n) and flops <= par_max_flops;
+    if (comptime @import("builtin").link_libc) {
+        if (std.c.getenv("ESPICE_LU_PAR")) |v| ok = v[0] == '1';
+        if (std.c.getenv("ESPICE_LU_PAR_STATS") != null)
+            std.debug.print("lu-par: n={d} F={d} F/n={d} admit={}\n", .{ lu.n, flops, flops / @max(lu.n, 1), ok });
+    }
+    return ok;
+}
+
+/// Measured on the post-layout and stress decks, 2 to 8 threads
+/// (docs/solvers/gpu-lu.md, "Multicore host refactor"): F/n = 445 and up
+/// wins at every thread count from F = 0.78M (sram_bsim4_1k); F/n = 152
+/// breaks even at 4 and 8 threads and loses at 2; F/n <= 95 loses up to 12x
+/// (the columns form a chain, and every handoff is a wait). ponytail: one
+/// F/n bar for every thread count; fit per count if a deck lands between.
+const par_min_flops = 500_000;
+const par_min_per_col = 300;
+/// 4 bytes of tables per flop.
+const par_max_flops = 400_000_000;
 
 /// BTF + AMD column ordering; caller owns the result.
 fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) ![]u32 {
