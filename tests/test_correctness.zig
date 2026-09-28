@@ -33,7 +33,9 @@ const Expectation = struct {
     checks: []const Json = &.{},
     category: ?[]const u8 = null,
 };
-const Oracle = struct { schema_version: u8, netlist_sha256: []const u8, expect: Expectation };
+/// `tokenizer`: the `--tokenizer` dialect the deck is read in; null keeps
+/// espice's default (ngspice).
+const Oracle = struct { schema_version: u8, netlist_sha256: []const u8, expect: Expectation, tokenizer: ?[]const u8 = null };
 /// One plot of a binary raw file, borrowing the file's row-major data.
 const Plot = struct {
     name: []const u8,
@@ -179,17 +181,18 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
     const raw = try Io.Dir.cwd().realPathFileAlloc(io, scratch, a);
     const output = try std.fmt.allocPrint(a, "{s}/result.raw", .{raw});
     const executable = try Io.Dir.cwd().realPathFileAlloc(io, app, a);
-    const result = try simulate(a, io, executable, netlist, output, timeout_seconds);
+    const result = try simulate(a, io, executable, netlist, output, timeout_seconds, oracle.tokenizer);
     if (oracle.expect.status == .@"error") return checkRejection(oracle.expect.category.?, result);
     try requireSuccess(result);
     const bytes = try Io.Dir.cwd().readFileAlloc(io, output, a, .unlimited);
     const plots = try parseRaw(a, bytes);
     try compare(a, oracle.expect, plots);
+    for (oracle.expect.checks) |check| if (try checkKind(check) == .measure) try measureLine(result.stdout, check);
     for (oracle.expect.checks) |check| {
         if (!equal(try string(try field(check, "kind")), "repeatability")) continue;
         // Remove the first output so a missing second result cannot reuse it.
         try Io.Dir.cwd().deleteFile(io, output);
-        try requireSuccess(try simulate(a, io, executable, netlist, output, timeout_seconds));
+        try requireSuccess(try simulate(a, io, executable, netlist, output, timeout_seconds, oracle.tokenizer));
         const repeated = try parseRaw(a, try Io.Dir.cwd().readFileAlloc(io, output, a, .unlimited));
         try repeatable(plots, repeated);
     }
@@ -197,7 +200,7 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
 
 /// Runs espice on `netlist` from its own directory, so relative includes
 /// resolve. `error.Timeout` after `timeout_seconds`.
-fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: []const u8, timeout_seconds: u32) !std.process.RunResult {
+fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: []const u8, timeout_seconds: u32, tokenizer: ?[]const u8) !std.process.RunResult {
     // A total deadline also covers a child that closes its streams then hangs.
     const Event = union(enum) { process: std.process.RunError!std.process.RunResult, timeout: Io.Cancelable!void };
     var events: [2]Event = undefined;
@@ -205,9 +208,9 @@ fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: 
     defer select.cancelDiscard();
     const options: std.process.RunOptions = .{
         .argv = if (lu_fast)
-            &.{ app, "--backend", backend_name, "--lu-fast", "--format=binary", "-b", "-r", output, std.fs.path.basename(netlist) }
+            &.{ app, "--backend", backend_name, "--lu-fast", "--format=binary", "-b", "-r", output, "--tokenizer", tokenizer orelse "ngspice", std.fs.path.basename(netlist) }
         else
-            &.{ app, "--backend", backend_name, "--format=binary", "-b", "-r", output, std.fs.path.basename(netlist) },
+            &.{ app, "--backend", backend_name, "--format=binary", "-b", "-r", output, "--tokenizer", tokenizer orelse "ngspice", std.fs.path.basename(netlist) },
         .cwd = .{ .path = std.fs.path.dirname(netlist).? },
         .stdout_limit = .limited(1024 * 1024),
         .stderr_limit = .limited(1024 * 1024),
@@ -245,6 +248,9 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
         .{ "invalid_analysis_arguments", "invalid_analysis_arguments" },
         .{ "nonunique_operating_point", "nonunique_operating_point" },
         .{ "inconsistent_circuit", "inconsistent_circuit" },
+        .{ "UnsupportedCard", "unsupported_input" },
+        .{ "UnresolvedParameter", "unsupported_input" },
+        .{ "unsupported_input", "unsupported_input" },
     });
     var lines = std.mem.splitScalar(u8, result.stderr, '\n');
     while (lines.next()) |text| {
@@ -560,15 +566,37 @@ fn sample(p: Plot, axis: usize, col: usize, t: f64, rtol: f64, atol: f64) !Compl
     return .init(x.re + fraction * (y.re - x.re), x.im + fraction * (y.im - x.im));
 }
 
-const Check = enum { selected_values, fourier_thd, sample_moments, repeatability, pole_zero_sets, axis_bounds, time_weighted_moments, oscillation };
+const Check = enum { selected_values, fourier_thd, sample_moments, repeatability, pole_zero_sets, axis_bounds, time_weighted_moments, oscillation, measure };
 fn checkKind(check: Json) !Check {
     const kinds = std.StaticStringMap(Check).initComptime(.{
         .{ "selected_values", .selected_values },             .{ "fourier_thd", .fourier_thd },
         .{ "sample_moments", .sample_moments },               .{ "repeatability", .repeatability },
         .{ "pole_zero_sets", .pole_zero_sets },               .{ "axis_bounds", .axis_bounds },
         .{ "time_weighted_moments", .time_weighted_moments }, .{ "oscillation", .oscillation },
+        .{ "measure", .measure },
     });
     return kinds.get(try string(try field(check, "kind"))) orelse error.UnknownCheck;
+}
+/// A `.meas` result on stdout, `name = value ...` as ngspice prints it:
+/// |value - expected| <= atol + rtol * |expected|.
+fn measureLine(stdout: []const u8, check: Json) !void {
+    const name = try string(try field(check, "name"));
+    const expected = try nfield(check, "value");
+    const rtol = try nfield(check, "rtol");
+    const atol = try nfield(check, "atol");
+    try tolerance(rtol, atol);
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    while (lines.next()) |text| {
+        const eq = std.mem.indexOfScalar(u8, text, '=') orelse continue;
+        if (!equal(std.mem.trim(u8, text[0..eq], " \t"), name)) continue;
+        var fields = std.mem.tokenizeAny(u8, text[eq + 1 ..], " \t");
+        const got = std.fmt.parseFloat(f64, fields.next() orelse return error.MissingMeasure) catch return error.MissingMeasure;
+        if (close(.init(got, 0), .init(expected, 0), rtol, atol)) return;
+        diagnostic("  measure {s}: expected {e}, got {e}\n", .{ name, expected, got });
+        return error.MeasureMismatch;
+    }
+    diagnostic("  measure {s} not printed\n", .{name});
+    return error.MissingMeasure;
 }
 fn nfield(value: Json, key: []const u8) !f64 {
     return number(try field(value, key));
@@ -590,6 +618,7 @@ fn measured(name: []const u8, got: f64, expected: f64, rtol: f64) !void {
 
 fn compareCheck(a: Allocator, check: Json, plots: []const Plot) !void {
     const kind = try checkKind(check);
+    if (kind == .measure) return; // runCase reads it off stdout.
     if (kind == .repeatability) {
         if ((try field(check, "same_netlist")) != .bool or !(try field(check, "same_netlist")).bool or
             !equal(try string(try field(check, "comparison")), "bitwise_numeric_results")) return error.InvalidOracle;
@@ -597,7 +626,7 @@ fn compareCheck(a: Allocator, check: Json, plots: []const Plot) !void {
     }
     const p = try findPlot(plots, if (kind == .fourier_thd) "Fourier Analysis" else try string(try field(check, "plot")));
     switch (kind) {
-        .repeatability => unreachable,
+        .repeatability, .measure => unreachable,
         .axis_bounds => {
             const col = try p.column(try string(try field(check, "axis")));
             const minimum = try nfield(check, "minimum");
@@ -882,7 +911,7 @@ test "deadline kills a simulator that closes output streams before hanging" {
     defer arena.deinit();
     const a = arena.allocator();
     const app = try tmp.dir.realPathFileAlloc(io, "simulator", a);
-    try std.testing.expectError(error.Timeout, simulate(a, io, app, "tests/fixtures/op/divider_default.sp", "/dev/null", 1));
+    try std.testing.expectError(error.Timeout, simulate(a, io, app, "tests/fixtures/op/divider_default.sp", "/dev/null", 1, null));
 }
 
 test "oscillation check measures period and swing and rejects a slow or stalled waveform" {
