@@ -12,6 +12,7 @@ extern "C" {
 
 /* Must match espice_abi_version() and espice_create_options.abi_version. */
 #define ESPICE_ABI_VERSION 1u
+/* espice_query_info.dependency of a query with no prerequisite. */
 #define ESPICE_NO_QUERY UINT32_MAX
 /* espice_copy_result_name's variable selecting the plot title. */
 #define ESPICE_PLOT_TITLE UINT32_MAX
@@ -20,18 +21,23 @@ typedef struct espice_problem espice_problem;
 typedef uint32_t espice_status;
 /* espice_status. INVALID_ARGUMENT also covers malformed analysis text:
  * no analysis card, bad query options, or an unsupported directive edit
- * (espice_error_message names which), and a NULL problem. FAILED is a
- * numerical or I/O failure. INVALID_HANDLE is a problem that
- * espice_destroy already released, or a value espice_create never returned;
- * the call does nothing else. OUT_OF_MEMORY also covers create with 4095
- * problems already live (diagnostic "TooManyProblems"). */
+ * (espice_error_message names which), a NULL problem, a max_parallel of 0
+ * or above 65535 where one is required, a query advanced before it is ready
+ * or listed twice, and a set_params name that is not live. INVALID_QUERY is
+ * an id outside 0..query_count. RESULT_UNAVAILABLE is a query that has not
+ * completed. FAILED is a numerical, I/O or output failure.
+ * INVALID_HANDLE is a problem that espice_destroy already released, or a
+ * value espice_create never returned; the call does nothing else.
+ * OUT_OF_MEMORY also covers create with 4095 problems already live
+ * (diagnostic "TooManyProblems"). */
 enum {
     ESPICE_OK = 0, ESPICE_INVALID_ARGUMENT = 1, ESPICE_BUFFER_TOO_SMALL = 2,
     ESPICE_OUT_OF_MEMORY = 3, ESPICE_INVALID_QUERY = 4,
     ESPICE_RESULT_UNAVAILABLE = 5, ESPICE_FAILED = 6, ESPICE_ABI_MISMATCH = 7,
     ESPICE_INVALID_HANDLE = 8
 };
-/* espice_create_options.source_kind: a path, or netlist text named by origin. */
+/* espice_create_options.source_kind: source holds a path (origin unused),
+ * or netlist text named by origin. */
 enum { ESPICE_FILE = 0, ESPICE_BYTES = 1 };
 /* espice_create_options.dialect */
 enum { ESPICE_NGSPICE = 0, ESPICE_HSPICE = 1, ESPICE_SPECTRE = 2 };
@@ -121,7 +127,8 @@ typedef struct {
     uint32_t variable_count, is_complex;
     uint64_t point_count, value_count;
 } espice_result_info;
-/* max_parallel 0 inherits the Problem's limit. */
+/* max_parallel 0 inherits the Problem's limit. preview ADVANCE previews
+ * espice_advance(query); READY previews espice_advance_ready(ready_ids). */
 typedef struct {
     espice_scope scope;
     uint32_t preview, query, ascii, max_parallel;
@@ -136,9 +143,11 @@ typedef struct {
  * address; every call checks it under a lock held for O(1) work. A destroyed
  * handle returns INVALID_HANDLE from every call, destroy included, and is
  * never handed out again; a value create never returned is rejected the same
- * way unless its bits happen to equal a live handle's. Input bytes are copied during create/append. The only borrowed
- * pointer is espice_result_view's, valid until destroy. Destroy cancels and
- * joins any paused workers.
+ * way unless its bits happen to equal a live handle's. No call keeps a
+ * pointer the caller passed once it returns, except the display callback and
+ * display_user. The only pointer the library hands out is
+ * espice_result_view's, valid until destroy. Destroy cancels and joins any
+ * paused workers.
  *
  * Buffers must be valid for their capacity; NULL is allowed only at capacity 0.
  * On OK or BUFFER_TOO_SMALL, copy APIs set required; short buffers receive no
@@ -146,27 +155,50 @@ typedef struct {
  * append_directives does not append anything. Query IDs survive appends.
  */
 uint32_t espice_abi_version(void);
-/* Initializes defaults, including struct_size and max_parallel=1. */
+/* Zeroes *options and sets abi_version, struct_size and max_parallel=1.
+ * NULL is a no-op. */
 void espice_default_options(espice_create_options *options);
-/* On failure, *out is NULL; diagnostic is NUL-terminated when capacity > 0
- * and may be truncated. A successful create consumes its source immediately. */
+/* Reads and prepares the netlist and queues its analyses; nothing runs yet.
+ * On failure, *out is NULL; diagnostic holds the error name, NUL-terminated
+ * when capacity > 0 and truncated if necessary. ABI_MISMATCH for an
+ * abi_version other than ESPICE_ABI_VERSION or a struct_size that ends
+ * before zig_path. INVALID_ARGUMENT for an empty source, an unknown enum
+ * value, explicit_gpu above 1, or max_parallel 0 or above 65535. A
+ * successful create consumes its source immediately. */
 espice_status espice_create(const espice_create_options *options,
     espice_problem **out, char *diagnostic, size_t diagnostic_capacity);
 /* OK, or INVALID_HANDLE for a handle already destroyed (it changes nothing).
  * NULL is a no-op returning OK. */
 espice_status espice_destroy(espice_problem *problem);
 espice_status espice_query_count(espice_problem *, uint32_t *out);
+/* failure_code is the espice_status of the query's failure, or OK. */
 espice_status espice_get_query_info(espice_problem *, uint32_t id, espice_query_info *out);
 espice_status espice_ready_queries(espice_problem *, espice_scope,
     uint32_t *ids, size_t capacity, size_t *required);
-/* OK means the operation returned an event. Inspect its numerical status and
+/* Runs one quantum of id, or of its first unfinished prerequisite, then
+ * writes whatever completed to the output. A terminal id returns its status
+ * without running anything. The first call also runs the deck's .model OPT
+ * optimization and MOSRA stress run, if any.
+ * OK means the operation returned an event. Inspect its numerical status and
  * output_error separately; a failed query still produces a valid event.
  * output_error is an espice_status; INVALID_QUERY or RESULT_UNAVAILABLE there
  * means the library's query bookkeeping broke (a bug), reported, not aborted. */
 espice_status espice_advance(espice_problem *, uint32_t id, espice_advance_event *out);
+/* Advances each of ids by one quantum, at most max_parallel at a time, one
+ * event per id in ids order, then writes results as espice_advance does.
+ * Every id must be ready and distinct, else INVALID_ARGUMENT and nothing
+ * runs. max_parallel 0 is INVALID_ARGUMENT here (unlike
+ * espice_print_options). *required is count; events needs that many. */
 espice_status espice_advance_ready(espice_problem *, const uint32_t *ids, size_t count,
     uint32_t max_parallel, espice_advance_event *events, size_t capacity, size_t *required);
+/* Runs every query to the end and writes its result. Returns the first
+ * query failure's status, else FAILED when writing the output failed
+ * (espice_error_message names the error). After a failure the .save and
+ * .stim files are not written. A second call runs nothing twice. */
 espice_status espice_run_all(espice_problem *);
+/* Appends the analysis cards in directives and writes each one's id to ids.
+ * A card identical to an existing query gets the old id. All-or-nothing: on
+ * any failure, the DAG and ids are unchanged. */
 espice_status espice_append_directives(espice_problem *, espice_bytes directives,
     uint32_t *ids, size_t capacity, size_t *required);
 /* Sets names[i] (a live_params name, case-insensitive but in Spectre) to
@@ -187,15 +219,18 @@ espice_status espice_copy_result(espice_problem *, uint32_t id,
  * included, *data is NULL and *len 0. */
 espice_status espice_result_view(espice_problem *, uint32_t id,
     const double **data, size_t *len);
-/* variable == ESPICE_PLOT_TITLE selects the plot title; otherwise a column name. */
+/* variable == ESPICE_PLOT_TITLE selects the plot title; otherwise the name
+ * of column variable, INVALID_ARGUMENT past variable_count. */
 espice_status espice_copy_result_name(espice_problem *, uint32_t id, uint32_t variable,
     char *buffer, size_t capacity, size_t *required);
 /* Pure preview. NULL options selects all/run_all/Unicode and the Problem
  * concurrency limit, as does max_parallel 0. */
 espice_status espice_print(espice_problem *, const espice_print_options *,
     char *buffer, size_t capacity, size_t *required);
-/* The last failing operation's error name; success leaves it unchanged.
- * An output error from advance also updates this diagnostic. */
+/* The last failing operation's error name, or an empty string; success
+ * leaves it unchanged, and a failure of this call itself does not replace
+ * it. An output error from advance also updates this diagnostic. A call
+ * rejected for its handle records nothing. */
 espice_status espice_error_message(espice_problem *, char *, size_t, size_t *required);
 /* A query's persistent numerical error name, or an empty string. */
 espice_status espice_query_error_message(espice_problem *, uint32_t id,
