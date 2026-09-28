@@ -108,6 +108,7 @@ module mos3(d, g, s, b);
     real gdsat, emax, delxl, clfact, gmch;
     real ibs, ibd, qbs, qbd;
     real vgst, vdsp, cgsh, cgdh, cgbh, chgs, chgd, capgs, capgd, capgb;
+    real pcapgs, pcapgd, pcapgb, vgsf, vgdf, vgbf;
 
     // Bulk junction current: MOS3's reverse branch is the (3Vt/(v*e))^3 form
     // (mos3load.c), not MOS1's flat -Isat. The forward exp is tangent-continued
@@ -495,6 +496,39 @@ module mos3(d, g, s, b);
             capgd = chgd + $prev(chgd) + cgdov;
             capgb = cgbh + $prev(cgbh) + cgbov;
         end
+        // The first Newton iteration of a transient step (mos3load.c:1128-1170).
+        // MODEINITPRED extrapolates the gate charges from the last two
+        // accepted points. On the host's linear predictor that is the
+        // increment since the last accept at that accept's capacitance.
+        // MODEINITTRAN, the first step, stamps no gate-cap current or
+        // conductance; $abstime > 0 leaves out the t = 0 commit.
+        // ngspice's geq keeps the present capacitance, so the extrapolation
+        // is a second ddt() site per cap on a frozen copy of the voltage:
+        // (pcap - cap)*(V - V_accept) in value, no Jacobian, zero at every
+        // accepted point.
+        pcapgs = $prev(capgs);
+        pcapgd = $prev(capgd);
+        pcapgb = $prev(capgb);
+        (* vera_nodiff *) begin
+            vgsf = V(g, si);
+            vgdf = V(g, di);
+            vgbf = V(g, b);
+        end
+        if (analysis("static") || $simparam("iteration") != 1) begin
+            pcapgs = capgs;
+            pcapgd = capgd;
+            pcapgb = capgb;
+        end
+        @(initial_step("tran")) begin
+            if ($abstime > 0.0 && $simparam("iteration") == 1) begin
+                capgs = 0.0;
+                capgd = 0.0;
+                capgb = 0.0;
+                pcapgs = 0.0;
+                pcapgd = 0.0;
+                pcapgb = 0.0;
+            end
+        end
 
         // ============ contributions =======================================
         I(di, si) <+ type * m * mode * id;
@@ -506,6 +540,9 @@ module mos3(d, g, s, b);
         I(g, si) <+ capgs * ddt(V(g, si));
         I(g, di) <+ capgd * ddt(V(g, di));
         I(g, b)  <+ capgb * ddt(V(g, b));
+        (* vera_lte = 0 *) I(g, si) <+ (pcapgs - capgs) * ddt(vgsf);
+        (* vera_lte = 0 *) I(g, di) <+ (pcapgd - capgd) * ddt(vgdf);
+        (* vera_lte = 0 *) I(g, b) <+ (pcapgb - capgb) * ddt(vgbf);
         if (gdrain > 0.0) I(d, di) <+ gdrain * V(d, di);
         else V(d, di) <+ 0.0;
         if (gsource > 0.0) I(s, si) <+ gsource * V(s, si);
