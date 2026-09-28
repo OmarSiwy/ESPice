@@ -1,5 +1,7 @@
-//! Variant planning: `.alter` splitting, the live-value fast path against
-//! its rebuild oracle, and Monte Carlo draws.
+//! Variant planning tests: deck → variant rows and rebuilt runs. Oracles:
+//! `.alter` splitting against hand-written decks, the live-value fast path
+//! against a full rebuild at the same point, and Monte Carlo draws against
+//! their seed/trial/site independence and LHS stratum coverage.
 const std = @import("std");
 const t = std.testing;
 const input = @import("../prepare.zig");

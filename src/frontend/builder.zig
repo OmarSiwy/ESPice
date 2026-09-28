@@ -2,6 +2,12 @@
 //! `NetBuilder` maps nets to rows and turns each card into device instances;
 //! `Builder` accumulates them per `device.Library` type, computes the BBD
 //! node permutation and freezes the pattern.
+//!
+//! Cites ngspice's setup, load and parameter sources (file:line at each use:
+//! vsrcload.c, vsrctemp.c, resparam.c, asrcset.c, b4set.c, ...) for what a
+//! card means, the HSPICE manuals ([SA], [SI]) for the HSPICE elements, and
+//! the Verilog-A LRM (§) for the `$simparam`, `derive` and `$port_connected`
+//! hooks the generated models expose.
 
 const std = @import("std");
 const core = @import("core");
@@ -2374,9 +2380,6 @@ fn readsCurrent(nl: Netlist, dev: Device) bool {
     return false;
 }
 
-/// Translates a postfix card expression into the bsource tape, giving each
-/// distinct probed row (a net, or the branch an i() reads) a control port in
-/// `nodes`. Fails on anything the tape cannot express or hold.
 /// `ops` with every constant subtree folded to one `.num`, the consts it
 /// reads renumbered into a fresh pool. A parameter spliced into a B
 /// expression arrives as its own postfix (sky130's `rbody` carries
@@ -2425,6 +2428,9 @@ fn foldConstants(arena: std.mem.Allocator, ops: []const Op, consts: []const f64)
     return .{ .ops = out.items, .consts = pool.items };
 }
 
+/// Translates a postfix card expression into the bsource tape, giving each
+/// distinct probed row (a net, or the branch an i() reads) a control port in
+/// `nodes`. Fails on anything the tape cannot express or hold.
 fn compileTape(self: *NetBuilder, ops: []const Op, consts: []const f64, model: *Tape, nodes: []u32) !void {
     var rows: [tape.max_probes]u32 = undefined;
     var n_rows: usize = 0;
@@ -2594,10 +2600,10 @@ fn waveKind(name: []const u8) ?Wave {
     return map.get(std.ascii.lowerString(&buf, name));
 }
 
-/// Field name of slot `k` of a flattened Verilog-A array. FastVAF turns
+/// Field name of slot `k` of a flattened Verilog-A array. VerA turns
 /// `parameter real pwl_times[0:63]` into 64 scalar Model fields named with
-/// the escaped subscript (`[` is `Z5b`, `]` is `Z5d`; see
-/// modules/FastVAF/src/naming.zig), so the slot is picked at comptime.
+/// the escaped subscript (`[` is `Z5b`, `]` is `Z5d`; see VerA
+/// lib/backend/naming.zig), so the slot is picked at comptime.
 fn pwlSlot(comptime base: []const u8, comptime k: usize) []const u8 {
     // 2 arrays x 64 slots of comptime std.fmt exceed the default quota.
     @setEvalBranchQuota(200_000);

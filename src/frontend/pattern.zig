@@ -48,10 +48,12 @@ const Comp = struct {
 };
 
 /// Rewrites, in place, every V/I card in `lines` (lowercased logical lines)
-/// that uses `PAT`. UnsupportedPattern for a `Z` (high-impedance) state,
-/// which a V or I source cannot drive; InvalidPattern for an undefined name,
-/// an 8b/10b K-string, `R=-1` (forever), a pattern past the PWL's 64 points,
-/// over a million states long or nested over 32 deep.
+/// that uses `PAT`; a rewritten line lives in `arena`. UnsupportedPattern
+/// for a `Z` (high-impedance) state, which a V or I source cannot drive;
+/// InvalidPattern for a malformed PAT form or `.pat` line, an undefined
+/// name, an 8b/10b K-string, `R=-1` (forever), a pattern past the PWL's 64
+/// points, over a million states long or nested over 32 deep. Lines before
+/// the failing card are already rewritten when it fails.
 pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
     var defs: std.StringHashMapUnmanaged(Comp) = .empty;
     for (lines) |line| {

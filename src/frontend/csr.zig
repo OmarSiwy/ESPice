@@ -1,4 +1,6 @@
-//! Bipartite hypergraph: nets are vertices, devices are hyperedges.
+//! Bipartite hypergraph: nets are vertices, devices are hyperedges. In:
+//! vertices and edges with their member lists, appended one at a time. Out:
+//! a frozen edge-major CSR `Graph` with SoA payload columns.
 //! Adapted from cktImg src/csr.zig, Copyright (c) 2026 Omar El-Sawy, MIT License.
 //!
 //! An edge's member list is its pin list: order is the terminal role and
@@ -38,9 +40,18 @@ pub const EdgeId = enum(u32) {
 /// needs the devices on a net.
 pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) type {
     return struct {
-        /// Why `addVertex`/`addEdge` refused: a member that is no vertex, or a
-        /// count past u32.
-        pub const Error = error{ InvalidVertex, TooManyVertices, TooManyEdges, TooManyIncidences } || Allocator.Error;
+        /// Why `addVertex`/`addEdge` refused. The builder is unchanged after
+        /// any of them.
+        pub const Error = error{
+            /// An edge member is not a vertex added so far.
+            InvalidVertex,
+            /// The vertex count would pass maxInt(u32).
+            TooManyVertices,
+            /// The edge count would pass maxInt(u32).
+            TooManyEdges,
+            /// The total member count of all edges would pass maxInt(u32).
+            TooManyIncidences,
+        } || Allocator.Error;
 
         /// Append-only. Each edge arrives with its full member list; `finish`
         /// freezes the tables into a `Graph`.
@@ -91,7 +102,8 @@ pub fn BipartiteHypergraph(comptime VertexData: type, comptime EdgeData: type) t
                 return id;
             }
 
-            /// Consumes the builder; the graph owns its tables in `gpa`.
+            /// Consumes the builder; the graph owns its tables in `gpa`. On
+            /// error the builder is no longer usable.
             pub fn finish(self: *Builder, gpa: Allocator) Allocator.Error!Graph {
                 const offsets = try self.edge_offsets.toOwnedSlice(gpa);
                 errdefer gpa.free(offsets);

@@ -1,5 +1,6 @@
-//! Frontend: source preparation and model-to-circuit construction. Leaves
-//! never import this root; it only re-exports what the facade calls.
+//! Frontend: netlist source in, a frozen `device.Circuit` and resolved
+//! queries out (prepare.zig is the spine). Leaves never import this root; it
+//! only re-exports what the facade calls. Cites nothing itself.
 const preparation = @import("prepare.zig");
 pub const Source = preparation.Source;
 pub const Dialect = preparation.Dialect;

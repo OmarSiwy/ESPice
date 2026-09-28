@@ -1,6 +1,8 @@
 //! SPICE device selection: netlist letter and `.model` LEVEL to a device
-//! name, following ngspice conventions. The types behind the names come
-//! from the device catalog.
+//! name, following ngspice conventions (the LEVEL tables cite ngspice
+//! src/spicelib/parser/inpdomod.c) and HSPICE's level numbers where
+//! ngspice has none. The types behind the names come from the device
+//! catalog.
 
 const std = @import("std");
 const device = @import("device");

@@ -3,9 +3,16 @@
 //! `Scratch.names`; netlist.zig `subst` splices parameters in and maps probe
 //! nets. No tree is built: a consumer walks subtrees backwards from their
 //! last op (`subtreeStart`).
+//!
+//! Cites dev/research/ngspice-syntax.md §2.2 and ngspice xpressn.c for
+//! numparam's operators and built-ins, and Star-Hspice Table 10-1 for the
+//! HSPICE dialect's sqrt, log and pow (#39).
 const std = @import("std");
 
-/// `ParseError`: malformed expression text.
+/// `ParseError`: malformed expression text, or nesting past `max_depth`.
+/// On either error `compile` leaves what it appended in the `Scratch`;
+/// roll it back with `Scratch.mark` and `Scratch.reset`. `fold` and `eval`
+/// fail only with `OutOfMemory`.
 pub const Error = error{ OutOfMemory, ParseError };
 /// Absent operand.
 pub const none = std.math.maxInt(u32);
@@ -14,8 +21,9 @@ pub const none = std.math.maxInt(u32);
 pub const Code = enum(u8) {
     /// a: constant pool index.
     num,
-    /// A name no scope defines. Final ops: a = 1 for `l`, `w`, `mult`,
-    /// 2 for `time`, 3 for `temper`, 0 otherwise.
+    /// A name no scope defines. As compiled, a is its index into
+    /// `Scratch.names`; in final ops a = 1 for `l`, `w`, `mult`, 2 for
+    /// `time`, 3 for `temper`, 0 otherwise.
     ident,
     /// A swept global parameter kept symbolic: a indexes the live table
     /// (`fold`'s `live`). Only netlist.zig `subst` emits it.
@@ -349,7 +357,8 @@ pub fn numberLen(text: []const u8) usize {
     return i;
 }
 
-/// A byte that continues an expression after an operand.
+/// A byte that continues an expression after an operand: the binary and
+/// ternary operator bytes, except `%` and `\`.
 pub fn isOperator(c: u8) bool {
     return switch (c) {
         '|', '&', '<', '>', '=', '!', '+', '-', '*', '/', '^', '?' => true,
@@ -386,7 +395,8 @@ fn bool01(b: bool) f64 {
 /// Folds final ops (after `subst`) to a value; `stack` is reused scratch
 /// in `gpa`. `geometry` lets model-card `l`/`w`/`mult` vanish behind a zero
 /// switch; `live` holds the current value of each `.live` operand. Asserts
-/// `ops` is one complete postfix expression, as `compile` emits.
+/// `ops` is one complete postfix expression, as `compile` emits. Fails only
+/// with `OutOfMemory`, growing `stack` to `ops.len`.
 pub fn fold(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, geometry: bool, live: []const f64) Error!Val {
     stack.clearRetainingCapacity();
     // Every op pushes at most one value: one reserve, no per-op growth check.
@@ -459,7 +469,8 @@ fn call(f: Fn, args: []const Val) Val {
     }
     const want: usize = switch (f) {
         .table, .other => return .unknown(false),
-        // ponytail: nominal only; Monte Carlo sampling (C3) draws here.
+        // Folding keeps the nominal; a Monte Carlo trial draws through
+        // `eval`'s `draw` instead.
         .agauss, .gauss, .unif, .aunif => return if (args.len >= 2 and args.len <= 4 and args[0].known) args[0] else .unknown(args.len >= 2 and all_nominal),
         .limit => return if (args.len == 2 and args[0].known) args[0] else .unknown(false),
         .ternary => 3,
@@ -548,7 +559,9 @@ pub fn subtreeStart(ops: []const Op, end: usize) usize {
     }
 }
 
-/// Last op of each operand of `ops[end]`, left to right.
+/// Last op of each operand of `ops[end]`, left to right, written into
+/// `out`. An op with more operands than `out` holds returns only the
+/// leftmost `out.len`. O(size of the subtree at `end`).
 pub fn operands(ops: []const Op, end: usize, out: []usize) []usize {
     const n = arity(ops[end]);
     var i: usize = n;

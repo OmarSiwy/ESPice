@@ -13,11 +13,15 @@ const lines = @import("lines.zig");
 /// form ESPice does not read (logged with the line).
 pub const Error = error{ OutOfMemory, ParseError, UnsupportedCard };
 
-/// The device letter of each rewritten card, by the card's address.
+/// The device letter of each rewritten card, keyed by `@intFromPtr` of the
+/// card's first byte: valid only for the slices `translate` returned, and
+/// only while their arena lives.
 pub const Kinds = std.AutoHashMapUnmanaged(usize, u8);
 
 /// Rewrites Spectre logical lines (the title already taken) into SPICE cards
-/// in `arena`; `kinds` receives each device card's letter.
+/// in `arena`; `kinds` receives each device card's letter. A failing
+/// statement is logged with its line; `ParseError` also when a `subckt` or
+/// block is still open at the end.
 pub fn translate(arena: Allocator, in: []const []const u8, kinds: *Kinds) Error![]const []const u8 {
     var t: T = .{ .arena = arena, .kinds = kinds };
     try t.declare(in);
@@ -44,8 +48,9 @@ pub fn translate(arena: Allocator, in: []const []const u8, kinds: *Kinds) Error!
     return t.out.items;
 }
 
-/// True for `simulator lang=<lang> ...`, case-blind as a SPICE region writes it.
-/// Whether `line` is `simulator lang=<lang>`.
+/// Whether `line` is `simulator lang=<lang> ...`, compared
+/// case-insensitively, as a SPICE region writes it; fields after the
+/// language are ignored.
 pub fn switchesTo(line: []const u8, lang: []const u8) bool {
     var f = lines.Fields("\"", false).init(line);
     for ([_][]const u8{ "simulator", "lang", "=" }) |w| if (!std.ascii.eqlIgnoreCase(f.next() orelse return false, w)) return false;

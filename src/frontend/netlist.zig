@@ -3,6 +3,12 @@
 //! (subcircuit ranges, `.param`, `.model`, directives), devices (an `X` card
 //! re-reads its subcircuit's lines under a frame), then analysis nets. Values
 //! are rows of flat tables; an expression that does not fold stays postfix.
+//!
+//! Cites ngspice (inpcom.c, inp.c recifeval, subckt.c modtranslate,
+//! INPgetModBin) for the ngspice dialect, the HSPICE manuals ([SA], [CR])
+//! for the HSPICE cards, and dev/research/{ngspice,hspice,spectre}-syntax.md
+//! (§ and rule ids) for the grammar; tests/grammar/ngspice.peg, hspice.peg
+//! and spectre.peg are its oracle.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 /// Logical lines and fields per dialect, re-exported for the frontend tests.
@@ -232,8 +238,8 @@ pub const Analysis = struct {
     neg: u32 = none,
     ports: [4]u32 = @splat(none),
     /// Written as an HSPICE shooting-Newton card (`.sn`, `.snac`,
-    /// `.snnoise`, `.snxf`), whose keyword arguments differ from `.pss`,
-    /// `.pac`, `.pnoise` and `.pxf`.
+    /// `.snnoise`, `.snxf`) or as `.ptdnoise`, whose keyword arguments
+    /// differ from `.pss`, `.pac`, `.pnoise` and `.pxf`.
     sn: bool = false,
     /// One output of a `.four` card that named several; each is its own card.
     split: bool = false,
@@ -444,7 +450,9 @@ pub const Netlist = struct {
     /// before the call sees the new values. A binned M card whose L or W is
     /// live takes the bin its new geometry selects (`Live.bins`);
     /// `ModelBinNotFound` when none holds it, with the values already
-    /// rewritten. Asserts that `values.len` equals `live.names.len`.
+    /// rewritten. `ParseError` when such a card's L or W no longer reads as
+    /// a number, `OutOfMemory` from growing `stack`. Asserts that
+    /// `values.len` equals `live.names.len`.
     pub fn setLive(nl: *Netlist, gpa: Allocator, stack: *std.ArrayList(expr.Val), values: []const f64, draw: anytype) !bool {
         const live = nl.live;
         const pool = nl.consts;
@@ -536,13 +544,14 @@ fn nameKey(owner: u64, name: []const u8) u64 {
     return siteKey(owner, std.hash.Wyhash.hash(0, name));
 }
 
-/// True for `0`, `gnd` and `ground`, case-insensitively.
 /// True for a name that is ground in `dialect`: only `0` in Spectre, where
 /// `gnd` is ground only when `global` names it first (spectre-syntax.md §7).
 pub fn isGround(dialect: Dialect, name: []const u8) bool {
     return if (dialect == .spectre) std.mem.eql(u8, name, "0") else isGroundName(name);
 }
 
+/// True for `0`, `gnd` and `ground`, case-insensitively: ground in the
+/// ngspice and HSPICE dialects.
 pub fn isGroundName(name: []const u8) bool {
     return std.mem.eql(u8, name, "0") or
         std.ascii.eqlIgnoreCase(name, "gnd") or
@@ -766,8 +775,9 @@ pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error
     return out.items;
 }
 
-/// `.sn`, `.snac`, `.snnoise` or `.snxf`: the HSPICE shooting-Newton
-/// spelling of a periodic card. `.snosc` keeps the `.pss` form.
+/// `.sn`, `.snac`, `.snnoise`, `.snxf` or `.ptdnoise`: the HSPICE
+/// shooting-Newton spelling of a periodic card. `.snosc` keeps the `.pss`
+/// form.
 fn isSn(line: []const u8) bool {
     const words = std.StaticStringMap(void).initComptime(.{ .{"sn"}, .{"snac"}, .{"snnoise"}, .{"snxf"}, .{"ptdnoise"} });
     const head = line[1 .. std.mem.indexOfAny(u8, line, " \t") orelse line.len];
@@ -874,7 +884,6 @@ const ModelRow = struct { name: []const u8, kind: []const u8, kv: Span };
 /// `.if` (`cond`), which only an instance can decide.
 const LocalModel = struct { name: []const u8, line: u32, top: u32, shared: bool, cond: bool };
 
-/// A `.model` line and whether it sits under a subcircuit body's `.if`.
 /// A `.model` line, the innermost subcircuit whose body holds it (`top`
 /// for none), and whether an `.if` there guards it.
 const ModelLine = struct { line: u32, cond: bool, owner: u16 = top_level };
@@ -882,9 +891,6 @@ const ModelLine = struct { line: u32, cond: bool, owner: u16 = top_level };
 /// `ModelLine.owner` of a model outside every subcircuit.
 const top_level = std.math.maxInt(u16);
 
-/// ngspice b_transformation_wanted (inpcom.c): `p` reads a node voltage,
-/// a branch current, `time`, `temper` or `hertz`, so a passive card holding
-/// it becomes a B source.
 /// A `.option`/`.options` card (lowercased) that sets `seed=`.
 fn seedOption(line: []const u8) bool {
     return std.mem.startsWith(u8, line, ".opt") and setsKey(line, "seed");
@@ -911,6 +917,9 @@ fn setsKey(line: []const u8, key: []const u8) bool {
     return false;
 }
 
+/// ngspice b_transformation_wanted (inpcom.c): `p` reads a node voltage,
+/// a branch current, `time`, `temper` or `hertz`, so a passive card holding
+/// it becomes a B source.
 fn bTransformationWanted(p: []const u8) bool {
     for (p, 0..) |c, i| {
         if (std.mem.indexOfScalar(u8, "vith", c) == null) continue;
@@ -1477,7 +1486,6 @@ fn Reader(comptime S: type) type {
             return path;
         }
 
-        /// The text a parameter definition is re-read from on every use.
         /// `name(a, b) [=] body`: a user function, from `.func` or from
         /// `.param` (`eq` set: its `=` is required). ngspice expands it as
         /// a textual macro wherever it is called (ngspice-syntax.md §2.4).
@@ -1499,6 +1507,7 @@ fn Reader(comptime S: type) type {
             try r.funcs.put(r.arena, name, .{ .formals = formals.items, .body = try r.paramText(f) });
         }
 
+        /// The text a parameter definition is re-read from on every use.
         fn paramText(r: *R, f: *F) Error![]const u8 {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
@@ -2214,7 +2223,8 @@ fn Reader(comptime S: type) type {
         /// HSPICE `.variation` block [SA Ch.20]: `.global_variation` and
         /// `.local_variation` rows `<type> <model> p=sigma [%] ...`, and
         /// `.element_variation` rows `<letter> p=sigma [%] ...`. Sigmas are
-        /// one sigma of a Gaussian, relative when followed by `%`.
+        /// one sigma of a Gaussian, relative when followed by `%`; a sigma
+        /// that is not a number is an expression (`sigmaExpr`).
         fn readVariation(r: *R, b: [2]u32) Error!void {
             var local = false;
             var element = false;
@@ -2781,7 +2791,7 @@ fn Reader(comptime S: type) type {
         }
 
         /// A numeric `.option name=value`, the last one given; null when no
-        /// card sets it.
+        /// card sets it. `name` matches byte for byte, unlike `option`.
         pub fn measureOption(r: *R, name: []const u8) ?f64 {
             var found: ?f64 = null;
             for (r.config.items) |c| if (!c.temp) for (c.args, 0..) |a, i| {
@@ -2811,7 +2821,7 @@ fn Reader(comptime S: type) type {
             return r.fold(mark.ops, frame, geometry);
         }
 
-        /// Splice parameters into the scratch ops from `from` on, then fold. A
+        /// Splices parameters into the scratch ops from `from` on, then folds. A
         /// number keeps nothing; anything else keeps its postfix.
         /// A device or model value that reads a live name, or a distribution
         /// when some card runs Monte Carlo, keeps its postfix too: a variant
@@ -2854,7 +2864,7 @@ fn Reader(comptime S: type) type {
             return null;
         }
 
-        /// Copy scratch ops `from..to` into the netlist's ops. A name a scope
+        /// Copies scratch ops `from..to` into the netlist's ops. A name a scope
         /// defines is replaced by its definition, read in the scope that
         /// defined it; probe nets are mapped through `frame`.
         fn subst(r: *R, from: usize, to: usize, frame: *const Frame, scopes: []const *const Scope, depth: u8) Error!void {
@@ -3039,7 +3049,8 @@ fn Reader(comptime S: type) type {
         }
 
         /// A node as the frame names it: a port maps to the caller's net,
-        /// `0`/`gnd` stay global, anything else is `<path>.<node>`.
+        /// ground (`isGround`) and `.global` names stay global, anything else
+        /// is `<path>.<node>`.
         fn netOf(r: *R, frame: *const Frame, node: []const u8) Error!VertexId {
             const path = frame.path orelse return r.intern(node);
             for (frame.ports, frame.actuals) |p, a| if (std.mem.eql(u8, p, node)) return a;
@@ -3546,7 +3557,7 @@ fn Reader(comptime S: type) type {
 
         /// Q cards carry 3-5 terminals and M cards 3-7 against the fixed 3
         /// and 4 read, so the model name can land on either side of the
-        /// node/positional split. Move it to positional[0].
+        /// node/positional split. Moves it to positional[0].
         fn splitTerminals(r: *R) Error!void {
             const nodes = &r.nodes;
             const pos = &r.positional;
@@ -3614,7 +3625,7 @@ fn Reader(comptime S: type) type {
             };
         }
 
-        /// Flatten an `X` card: read its subcircuit's lines under a child frame.
+        /// Flattens an `X` card: reads its subcircuit's lines under a child frame.
         fn expand(r: *R, head: []const u8, frame: *const Frame, kv_text: []const []const u8) Error!void {
             const arena = r.arena;
             // A top-level X card expands at depth 0, so 32 levels end at 31.
