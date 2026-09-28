@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "analysis": "qpss",
+  "purpose": "A Verilog-A idt with ic integrates under QPSS: in feedback it is the lowpass wc/(s + wc).",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "V(out) = idt(wc*(V(in) - V(out)), 0.5) is H = 1/(1 + jw/wc) with wc = 1000, the RC of linear_two_tone_1_1, so |X(+/-1,0)| = A1*|H(f1)|/2 and |X(0,+/-1)| = A2*|H(f2)|/2; the ic sets no steady-state value (DC mix product 0)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Quasi-Periodic Steady State",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.003,
+            "atol": 1e-07,
+            "values": [
+              0.0,
+              0.02795839335028,
+              0.0,
+              0.078588362738795,
+              0.0,
+              0.078588362738795,
+              0.0,
+              0.02795839335028,
+              0.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            -2414.2135623731,
+            -1414.2135623731,
+            -414.2135623731,
+            -1000.0,
+            0.0,
+            1000.0,
+            414.2135623731,
+            1414.2135623731,
+            2414.2135623731
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 9
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3fa8a957a21bfa657b8132e27ff6f5e95209da5869f21d32f9a08da86c402d3e"
+}
