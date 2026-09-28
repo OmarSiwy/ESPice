@@ -267,7 +267,7 @@ fn markWarm(image: []const u8) void {
 const BatchGpu = struct {
     kernel: Raw,
     /// `arp_lim_<model>`: the fused limit/state pass, when the device has one.
-    /// Launched per converged solve, or per accepted point when `held`.
+    /// Fused into each limit pass, or once per converged solve when `held`.
     lim_kernel: ?Raw,
     /// `arp_ctl_<model>`: the accepted-step latch pass, when the device
     /// declares `stateCtl`.
@@ -296,10 +296,11 @@ const BatchGpu = struct {
     grid: gompute.Dim3,
     block: u32,
     has_lim: bool,
-    /// The host batch has `commit_held`: its `updateState` writes held
-    /// variables no revert restores, so `lim_kernel` runs only from
-    /// `commitHeldOnGpu`. `gpuEligible` admits such a device only without
-    /// `limit`, so skipping the per-solve launch skips no clamp.
+    /// A state kernel without `limit`: its `updateState` writes held
+    /// variables, so `lim_kernel` runs once per converged solve from
+    /// `updateStatesOnGpu`, never per iterate. `gpuEligible` admits such a
+    /// device only without `limit`, so skipping the fused launch skips no
+    /// clamp.
     held: bool,
     /// The device lim plane holds live clamp state (after a seed upload or a
     /// limit launch). Mirrors the host batch's `lim_active`.
@@ -742,7 +743,7 @@ pub const GpuContext = struct {
             .grid = gompute.Dim3.linear(p.count, block),
             .block = block,
             .has_lim = p.lim_x.len > 0,
-            .held = b.hooks.commit_held != null,
+            .held = lim_kernel != null and b.hooks.apply_limits == null,
         };
         return true;
     }
@@ -1430,28 +1431,22 @@ pub const GpuContext = struct {
         };
     }
 
-    /// The `update_states` hook. The resident half already ran in the fused
-    /// limit launch and never returns a reject time, so only the host batches
-    /// walk (all of them once poisoned).
-    fn updateStatesHook(ctx: *anyopaque, x: []const f64) ?f64 {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        return Circuit.updateBatches(if (self.poisoned) self.ckt.batches else self.cpu_batches, x);
-    }
-
-    /// Runs the held batches' state kernel at the accepted `x` and the host
-    /// walk on the rest. A resident batch cannot ask for a step reject: the
+    /// Runs the held batches' state kernel at the converged `x` and the host
+    /// walk on the rest; the other resident batches staged in the fused
+    /// limit launch. A resident batch cannot ask for a step reject: the
     /// kernel flags any non-`.ok` `updateState` as a fault instead.
-    fn commitHeldOnGpu(self: *Self, x: []const f64) !?f64 {
-        if (comptime backend == null) return null;
-        self.pre = null;
+    fn updateStatesOnGpu(self: *Self, x: []const f64) !?f64 {
+        if (comptime backend == null) return Circuit.updateBatches(self.cpu_batches, x);
         if (self.poisoned) return error.GpuStateReject;
-        if (self.params_dirty) try self.repack();
         const n = self.ckt.n;
         var launched = false;
         for (self.batches) |*bg| {
             const lk = if (bg.lim_kernel) |*k| k else continue;
             if (bg.count == 0 or !bg.held) continue;
             if (!launched) {
+                // A prefetched eval read the held values this launch rewrites.
+                self.pre = null;
+                if (self.params_dirty) try self.repack();
                 @memcpy(self.pin_x2[0..n], x[0..n]);
                 try self.d_x2.uploadAtAsync(self.pin_x2.ptr, 0, n * @sizeOf(f64), &self.stream);
                 try self.d_flags.fillAsync(0, 4, &self.stream);
@@ -1485,14 +1480,15 @@ pub const GpuContext = struct {
                 return error.GpuStateReject;
             }
         }
-        return Circuit.commitHeldBatches(self.cpu_batches, x);
+        return Circuit.updateBatches(self.cpu_batches, x);
     }
 
-    fn commitHeldHook(ctx: *anyopaque, x: []const f64) ?f64 {
+    /// The `update_states` hook; every batch walks on the host once poisoned.
+    fn updateStatesHook(ctx: *anyopaque, x: []const f64) ?f64 {
         const self: *Self = @ptrCast(@alignCast(ctx));
-        return self.commitHeldOnGpu(x) catch {
+        return self.updateStatesOnGpu(x) catch {
             self.warnStateFallback();
-            return Circuit.commitHeldBatches(self.ckt.batches, x);
+            return Circuit.updateBatches(self.ckt.batches, x);
         };
     }
 
@@ -1649,7 +1645,6 @@ pub const GpuContext = struct {
             .eval_charge = evalChargeHook,
             .apply_limits = applyLimitsHook,
             .update_states = updateStatesHook,
-            .commit_held = commitHeldHook,
             .clear_limits = clearLimitsHook,
             .seed_junctions = seedJunctionsHook,
             .state_ctl = stateCtlHook,

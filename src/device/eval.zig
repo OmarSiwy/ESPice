@@ -970,6 +970,7 @@ pub fn ProtoStore(comptime D: type) type {
             if (comptime @hasDecl(D, "State")) {
                 store.states = try gpa.alloc(D.State, count);
                 for (0..count) |i| store.states[i] = D.initState(&store.models[i], &store.instances[i]);
+                store.commitBirth();
             }
             if (comptime @hasDecl(D, "precompute")) {
                 for (0..count) |i| D.precompute(&store.instances[i], &store.models[i]);
@@ -1029,7 +1030,8 @@ pub fn ProtoStore(comptime D: type) type {
 /// (`__analog_op__timer__*`). This host never reads it: breakpoints come from
 /// the model-level `nextBreakpoint`, and the pass writes `bound_step = inf`
 /// and `discontinuity_order = -1`, the Instance defaults. So the batch skips
-/// `updateState` and the `bound_step` walk. Opt-in by name because a
+/// `updateState`, the `bound_step` walk and `stateCtl`, whose twins then
+/// never differ from the Instance. Opt-in by name because a
 /// `$bound_step` or `$discontinuity` call leaves no trace in the Instance:
 /// vsource.va and isource.va call neither (only `$abstime` and `@(timer)`);
 /// re-check before adding one. `skipsTimerState` rejects any other state.
@@ -1041,8 +1043,11 @@ const timer_only_state = std.StaticStringMap(void).initComptime(.{
 
 fn skipsTimerState(comptime D: type) bool {
     if (timer_only_state.get(comptime baseName(D)) == null) return false;
-    if (@sizeOf(D.State) != 0) @compileError(@typeName(D) ++ " carries State; drop it from timer_only_state");
     @setEvalBranchQuota(200_000);
+    for (@typeInfo(D.State).@"struct".fields) |f| {
+        if (!@hasField(D.Instance, f.name))
+            @compileError(@typeName(D) ++ " carries State beyond stateCtl twins (" ++ f.name ++ "); drop it from timer_only_state");
+    }
     for (@typeInfo(D.Instance).@"struct".fields) |f| {
         if (std.mem.indexOf(u8, f.name, "__") != null and std.mem.indexOf(u8, f.name, "__analog_op__timer") == null)
             @compileError(@typeName(D) ++ " holds non-timer state (" ++ f.name ++ "); drop it from timer_only_state");
@@ -1050,15 +1055,17 @@ fn skipsTimerState(comptime D: type) bool {
     return true;
 }
 
-/// Whether D's `updateState` pushes history it cannot take back (LRM §4.5
-/// `absdelay`). Native devices declare `unrevertible_state`; VerA devices are
-/// recognized by the `__absdelay__` infix its naming scheme puts on the
-/// Instance fields.
-// ponytail: field-name matching until VerA can emit `unrevertible_state`
-// (its contract has no slot for host-only decls yet).
+/// Whether D's `updateState` pushes delay-line history, which only accepted
+/// transient points may feed: LRM §4.5 `absdelay`, and the native lines that
+/// declare `unrevertible_state` (they have no `stateCtl`). A VerA ring would
+/// revert, but a push at the operating point seeds it with a static solve
+/// (multi_analysis/bench_hb_tline_guard: 6.7e-8 to 0.66 of its tolerance).
+/// VerA devices are recognized by the `__absdelay__` infix its naming scheme
+/// puts on the Instance fields.
+// ponytail: field-name matching until VerA's contract marks delay history.
 fn hasAbsdelayState(comptime D: type) bool {
     if (@hasDecl(D, "unrevertible_state")) return D.unrevertible_state;
-    return hasInstanceField(D, "__absdelay__", false);
+    return hasInstanceField(D, "__absdelay__");
 }
 
 /// D's §4.5.4 `idt` operator unknowns, as local indices. VerA spells the
@@ -1076,22 +1083,19 @@ fn idtUnknowns(comptime D: type) []const u32 {
     }
 }
 
-/// Whether D holds a §5.10 variable across evaluations with no VerA `__acc`
-/// accepted copy, so `stateCtl(.revert)` cannot take its write back.
-fn hasUnrevertibleHeld(comptime D: type) bool {
-    return hasInstanceField(D, "__held__", true);
+/// Whether D's history is §5.10 held variables and no analog operator (no
+/// cross/above FSM, delay line or timer).
+fn holdsOnlyHeld(comptime D: type) bool {
+    return hasInstanceField(D, "__held__") and !hasInstanceField(D, "__analog_op__");
 }
 
-/// Whether some Instance field of D contains `infix`; with `uncopied`, only
-/// fields without an `__acc` accepted copy count.
-fn hasInstanceField(comptime D: type, comptime infix: []const u8, comptime uncopied: bool) bool {
+/// Whether some Instance field of D contains `infix`.
+fn hasInstanceField(comptime D: type, comptime infix: []const u8) bool {
     if (!@hasDecl(D, "Instance")) return false;
     // hisim Instances have hundreds of long field names.
     @setEvalBranchQuota(2_000_000);
     inline for (@typeInfo(D.Instance).@"struct".fields) |f| {
-        if (std.mem.indexOf(u8, f.name, infix) != null and
-            !(uncopied and (std.mem.endsWith(u8, f.name, "__acc") or @hasField(D.Instance, f.name ++ "__acc"))))
-            return true;
+        if (std.mem.indexOf(u8, f.name, infix) != null) return true;
     }
     return false;
 }
@@ -1155,12 +1159,11 @@ pub fn DeviceBatch(comptime D: type) type {
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
             .seed_ic = if (idtUnknowns(D).len != 0) seedIc else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
-            // Unrevertible state runs once per accepted point; everything
-            // else per converged solve. See `Hooks.commit_state`.
-            .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and !hasUnrevertibleHeld(D) and !skipsTimerState(D)) updateState else null,
+            // Delay history runs once per accepted point; everything else
+            // per converged solve. See `Hooks.commit_state`.
+            .update_state = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and !skipsTimerState(D)) updateState else null,
             .commit_state = if (@hasDecl(D, "updateState") and hasAbsdelayState(D)) updateState else null,
-            .commit_held = if (@hasDecl(D, "updateState") and !hasAbsdelayState(D) and hasUnrevertibleHeld(D)) updateState else null,
-            .state_ctl = if (@hasDecl(D, "stateCtl")) stateCtl else null,
+            .state_ctl = if (@hasDecl(D, "stateCtl") and !skipsTimerState(D)) stateCtl else null,
             // Only `updateState` writes `bound_step`.
             .bound_step = if (@hasDecl(D, "updateState") and @hasField(D.Instance, "bound_step") and !skipsTimerState(D)) boundStep else null,
             .set_temp = if (@hasField(D.Instance, "temperature")) setTemp else null,
@@ -1323,7 +1326,7 @@ pub fn DeviceBatch(comptime D: type) type {
         /// Runs `D.updateState` on every instance at `x` and returns the
         /// earliest time any of them asks the step to be rejected at, if any.
         /// Called once per converged solve (or per accepted step for
-        /// `commit_state`/`commit_held`), not per Newton iteration.
+        /// `commit_state`), not per Newton iteration.
         fn updateState(ctx: *anyopaque, x: []const f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             var min_reject: ?f64 = null;
@@ -1346,6 +1349,12 @@ pub fn DeviceBatch(comptime D: type) type {
             var b = std.math.inf(f64);
             for (self.instances[0..self.count]) |*inst| b = @min(b, inst.bound_step);
             return b;
+        }
+
+        /// Commits the initial state, so a `stateCtl(.revert)` before the
+        /// first accepted point restores it rather than the `State` defaults.
+        fn commitBirth(self: *Self) void {
+            if (comptime @hasDecl(D, "stateCtl")) _ = stateCtl(self, .commit);
         }
 
         fn stateCtl(ctx: *anyopaque, op: StateCtlOp) bool {
@@ -1631,6 +1640,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 } else {
                     for (self.states, self.models, self.instances) |*state, *model, *instance|
                         state.* = D.initState(model, instance);
+                    self.commitBirth();
                 }
             }
             return self.binding();
@@ -1666,9 +1676,9 @@ fn isVera(comptime D: type) bool {
 ///   evaluation;
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
 ///   `limiter_previous` the host advances on its own Instance copy;
-/// - unrevertible held variables (`hasUnrevertibleHeld`) together with
-///   `limit`: the launcher runs a held device's `StateKernel` only at
-///   accepted points (`commit_held`), so it could not also limit per solve;
+/// - held variables (`holdsOnlyHeld`) together with `limit`: the launcher
+///   runs a held device's `StateKernel` once per converged solve, not fused
+///   into the per-iterate limit pass, which would latch Newton iterates;
 /// - otherwise, `State` without `limit` (sources and FSMs whose eval reads
 ///   host-owned per-attempt state).
 /// `State` with `limit` is the path-latch pattern that `StateKernel` and
@@ -1682,9 +1692,9 @@ fn isVera(comptime D: type) bool {
 fn gpuEligible(comptime D: type) bool {
     if (@hasDecl(D, "mutable_eval") and D.mutable_eval) return false;
     if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return false;
-    // ponytail: no model holds variables and limits; split `StateKernel`
-    // into its two halves when one does.
-    if (hasUnrevertibleHeld(D)) return !@hasDecl(D, "limit");
+    // ponytail: vbic13_4t holds variables and limits, so it stays on the
+    // host; split `StateKernel` into its two halves to bring it over.
+    if (holdsOnlyHeld(D)) return !@hasDecl(D, "limit");
     return @hasDecl(D, "limit") or !@hasDecl(D, "State");
 }
 

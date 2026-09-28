@@ -18,8 +18,10 @@ on top of the downloaded planes.
 
 - `gpuEligible` refuses `mutable_eval`, Newton-history hooks and `State`
   without `limit`. It admits held-variable devices without `limit` (bsim4va,
-  psp103, vbic13_4t). Their state kernel runs once per accepted point,
-  through `GpuHook.commit_held`, never per converged solve.
+  psp103; vbic13_4t limits and stays on the host). Their state kernel runs
+  once per converged solve, from `GpuHook.update_states`, never fused into
+  the per-iterate limit pass, and `stateCtl(.revert)` takes it back on a
+  rejected step.
 - VerA ABI 5 passes `SimState` to every kernel by value (eval, state, charge
   tape), so the cores that read `analysis()` or `$abstime` are resident too:
   the Meyer MOS models (mos1/2/3/6/9) and jfet2.

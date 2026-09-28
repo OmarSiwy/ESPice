@@ -80,8 +80,7 @@ pub fn freeze(
         count += 1;
         has_charge = has_charge or batch.has_charge;
         has_state_q = has_state_q or (batch.has_charge and
-            (batch.hooks.update_state != null or batch.hooks.commit_state != null or
-                batch.hooks.commit_held != null));
+            (batch.hooks.update_state != null or batch.hooks.commit_state != null));
     }
     const batch_types = try allocator.dupe(abi.DeviceType, types);
     errdefer allocator.free(batch_types);

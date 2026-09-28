@@ -131,8 +131,12 @@ fn integrateOnePeriod(
         const nr = converger.run(ckt, ws, x, t, .{
             .max_iter = options.max_newton_iter,
             .abstol = options.newton_tol,
-        }, hook) catch return false;
-        if (!nr.converged) return false;
+        }, hook) catch null;
+        if (nr == null or !nr.?.converged) {
+            _ = ckt.stateCtl(.revert);
+            return false;
+        }
+        _ = ckt.stateCtl(.commit);
 
         if (has_charge) {
             // Accept: i = alpha*(q - q_prev) - i_prev, then q_prev = q.

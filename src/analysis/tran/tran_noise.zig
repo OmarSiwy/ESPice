@@ -172,10 +172,12 @@ pub fn simulate(
         };
 
         if (!nr.converged) {
+            _ = ckt.stateCtl(.revert);
             dt *= 0.5;
             if (dt < options.dt_min) return false;
             continue;
         }
+        _ = ckt.stateCtl(.commit);
 
         if (has_charge) {
             // The planes are one iterate behind the converged point. Charges

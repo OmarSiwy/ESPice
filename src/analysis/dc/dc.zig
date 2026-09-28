@@ -211,6 +211,8 @@ fn runSerial(
         const row = data[pt * ncols ..][0..ncols];
         row[0] = v;
         if (converged) {
+            // Each sweep point is an accepted point for device state.
+            _ = ckt.stateCtl(.commit);
             for (ctx.probes, row[1..]) |node, *out| out.* = x[node];
             cold = false;
             // ngspice copies state0 into state1 after the first point

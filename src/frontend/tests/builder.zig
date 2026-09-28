@@ -145,19 +145,18 @@ test "transmission-line cards retain native numerical algorithms" {
     }
 }
 
-test "held variables without an accepted copy commit once per accepted point" {
-    // vbic13_4t holds its @(initial_step) values with no `__acc` copy, so
-    // `stateCtl(.revert)` cannot restore them; the switch's hysteresis latch
-    // has one and keeps its per-solve staging.
+test "held variables and switch latches stage per converged solve" {
+    // `stateCtl(.revert)` restores vbic13_4t's @(initial_step) held values
+    // and the switch's hysteresis latch alike, so both stage per solve.
     const cases = .{
-        .{ "Q1 c b 0 qm\n.model qm NPN LEVEL=4\n", true },
-        .{ "S1 a 0 c 0 sw\n.model sw SW vt=0.5\n", false },
+        "Q1 c b 0 qm\n.model qm NPN LEVEL=4\n",
+        "S1 a 0 c 0 sw\n.model sw SW vt=0.5\n",
     };
     inline for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const nl = try netlist.parse(a, "* held state routing\n" ++ case[0] ++ ".end\n", .ngspice);
+        const nl = try netlist.parse(a, "* held state routing\n" ++ case ++ ".end\n", .ngspice);
         const lib = try device.Library.init(a);
         var b = try Builder.init(a, &lib);
         var compiled = false;
@@ -168,8 +167,7 @@ test "held variables without an accepted copy commit once per accepted point" {
         compiled = true;
         defer circuit.deinit();
         const hooks = circuit.batches[0].hooks;
-        try std.testing.expectEqual(case[1], hooks.commit_held != null);
-        try std.testing.expectEqual(!case[1], hooks.update_state != null);
+        try std.testing.expect(hooks.update_state != null and hooks.state_ctl != null);
     }
 }
 
