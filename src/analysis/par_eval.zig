@@ -17,7 +17,6 @@
 
 const std = @import("std");
 const device_ir = @import("device").abi;
-const zeroSimd = @import("core").numerics.zeroSimd;
 
 const Batch = device_ir.Batch;
 const Planes = device_ir.Planes;
@@ -86,7 +85,9 @@ pub const ParEval = struct {
     /// Workers parked (or about to park) on `epoch`. `run` pays for the wake
     /// syscall only when this is nonzero.
     sleepers: std.atomic.Value(u32),
-    /// Workers finished with the current pass.
+    /// Lanes, lane 0 included, finished stamping the current pass.
+    stamped: std.atomic.Value(u32),
+    /// Workers finished with the current pass, reduce included.
     done: std.atomic.Value(u32),
     /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
@@ -208,6 +209,7 @@ pub const ParEval = struct {
             .quit = .init(false),
             .epoch = .init(0),
             .sleepers = .init(0),
+            .stamped = .init(0),
             .done = .init(0),
             .job_batches = batches,
             .job_own_planes = undefined,
@@ -253,6 +255,7 @@ pub const ParEval = struct {
         self.job_x = x;
         self.job_t = t;
         self.job_mode = mode;
+        self.stamped.store(0, .monotonic);
         self.done.store(0, .monotonic);
         // seq_cst pairs with the worker's `sleepers` increment and epoch
         // re-check: either it sees the new epoch or this sees it parking.
@@ -260,15 +263,10 @@ pub const ParEval = struct {
         if (self.sleepers.load(.seq_cst) != 0)
             self.io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
         runLane(self, batches, own_planes, 0, x, t, mode);
-        var spins: u32 = 0;
-        while (self.done.load(.acquire) < self.n_lanes - 1) {
-            // `pause` frees issue slots for the SMT sibling that may be
-            // running the lane this waits on.
-            std.atomic.spinLoopHint();
-            spins +%= 1;
-            if (spins > 4096) std.Thread.yield() catch {};
-        }
-        self.reduce(own_planes, mode);
+        _ = self.stamped.fetchAdd(1, .acq_rel);
+        waitCount(&self.stamped, self.n_lanes);
+        self.reduceChunk(own_planes, mode, 0);
+        waitCount(&self.done, self.n_lanes - 1);
     }
 
     fn startWorkers(self: *ParEval) void {
@@ -306,6 +304,9 @@ pub const ParEval = struct {
             last = e;
             if (self.quit.load(.acquire)) return;
             runLane(self, self.job_batches, self.job_own_planes, lane, self.job_x, self.job_t, self.job_mode);
+            _ = self.stamped.fetchAdd(1, .acq_rel);
+            waitCount(&self.stamped, self.n_lanes);
+            self.reduceChunk(self.job_own_planes, self.job_mode, lane);
             _ = self.done.fetchAdd(1, .release);
         }
     }
@@ -326,23 +327,12 @@ pub const ParEval = struct {
     fn runLane(self: *ParEval, batches: []const Batch, own_planes: Planes, lane: u32, x: []const f64, t: f64, mode: Mode) void {
         const pl = self.lanePlanes(own_planes, lane);
         if (lane != 0) {
-            const win = self.windows[lane - 1];
-            // `.charge` clears only q; `reduce` does not read the other slabs
-            // back in that mode.
-            if (mode != .charge) {
-                zeroSimd(pl.g_vals[win.slot_lo..win.slot_hi]);
-                zeroSimd(pl.rhs[win.row_lo..win.row_hi]);
-                pl.g_vals[self.nnz1 - 1] = 0;
-                pl.rhs[self.n1 - 1] = 0;
-            }
-            if (self.has_charge) {
-                if (mode != .charge) {
-                    zeroSimd(pl.c_vals[win.slot_lo..win.slot_hi]);
-                    pl.c_vals[self.nnz1 - 1] = 0;
-                }
-                zeroSimd(pl.q_vec[win.row_lo..win.row_hi]);
-                pl.q_vec[self.n1 - 1] = 0;
-            }
+            // The window is already zero: `reduceChunk` clears what it
+            // consumes. The trash cells lie outside it.
+            pl.g_vals[self.nnz1 - 1] = 0;
+            pl.rhs[self.n1 - 1] = 0;
+            pl.c_vals[self.nnz1 - 1] = 0;
+            pl.q_vec[self.n1 - 1] = 0;
         }
         for (self.tasks[self.task_off[lane]..self.task_off[lane + 1]]) |task|
             switch (mode) {
@@ -350,39 +340,58 @@ pub const ParEval = struct {
             };
     }
 
-    fn reduce(self: *ParEval, own_planes: Planes, mode: Mode) void {
+    /// Moves every lane's slab into lane `lane`'s share of `own_planes`:
+    /// adds, lanes in ascending order, so each cell sums in the order a
+    /// serial reduce would, and zeroes the slab cell for the next pass. The
+    /// shares split the slots and rows into cache-line aligned ranges; every
+    /// lane reduces one after all have stamped. Clearing here rather than
+    /// per lane before its stamp spreads that traffic evenly: the per-lane
+    /// clear cost each lane its whole window (chain_psp103_10k: 300k-660k
+    /// slots of 1.4M), and the widest window set the pass time.
+    fn reduceChunk(self: *ParEval, own_planes: Planes, mode: Mode, lane: u32) void {
+        const slots = share(self.nnz1, lane, self.n_lanes);
+        const rows = share(self.n1, lane, self.n_lanes);
         var l: u32 = 1;
         while (l < self.n_lanes) : (l += 1) {
             const e: usize = l - 1;
             const win = self.windows[e];
-            if (mode == .charge) {
-                addSimd(
-                    own_planes.q_vec[win.row_lo..win.row_hi],
-                    self.q_slab[e * self.n1 + win.row_lo .. e * self.n1 + win.row_hi],
-                );
-                continue;
+            const s0 = @max(slots[0], win.slot_lo);
+            const s1 = @min(slots[1], win.slot_hi);
+            const r0 = @max(rows[0], win.row_lo);
+            const r1 = @min(rows[1], win.row_hi);
+            const go = e * self.nnz1;
+            const ro = e * self.n1;
+            if (mode != .charge and s0 < s1) {
+                moveSimd(own_planes.g_vals[s0..s1], self.g_slab[go + s0 .. go + s1]);
+                if (self.has_charge) moveSimd(own_planes.c_vals[s0..s1], self.c_slab[go + s0 .. go + s1]);
             }
-            addSimd(
-                own_planes.g_vals[win.slot_lo..win.slot_hi],
-                self.g_slab[e * self.nnz1 + win.slot_lo .. e * self.nnz1 + win.slot_hi],
-            );
-            addSimd(
-                own_planes.rhs[win.row_lo..win.row_hi],
-                self.rhs_slab[e * self.n1 + win.row_lo .. e * self.n1 + win.row_hi],
-            );
-            if (self.has_charge) {
-                addSimd(
-                    own_planes.c_vals[win.slot_lo..win.slot_hi],
-                    self.c_slab[e * self.nnz1 + win.slot_lo .. e * self.nnz1 + win.slot_hi],
-                );
-                addSimd(
-                    own_planes.q_vec[win.row_lo..win.row_hi],
-                    self.q_slab[e * self.n1 + win.row_lo .. e * self.n1 + win.row_hi],
-                );
+            if (r0 < r1) {
+                if (mode != .charge) moveSimd(own_planes.rhs[r0..r1], self.rhs_slab[ro + r0 .. ro + r1]);
+                if (self.has_charge) moveSimd(own_planes.q_vec[r0..r1], self.q_slab[ro + r0 .. ro + r1]);
             }
         }
     }
 };
+
+/// Lane `lane`'s range of `[0, len)` when `lanes` split it, cut on 8-cell
+/// (64-byte) boundaries so no two lanes write one cache line.
+fn share(len: usize, lane: u32, lanes: u32) [2]usize {
+    const lo = (len * lane / lanes) & ~@as(usize, 7);
+    const hi = if (lane + 1 == lanes) len else (len * (lane + 1) / lanes) & ~@as(usize, 7);
+    return .{ lo, hi };
+}
+
+/// Spins, then yields, until `counter` reaches `target`. `pause` frees
+/// issue slots for the SMT sibling that may be running the lane this waits
+/// on.
+fn waitCount(counter: *std.atomic.Value(u32), target: u32) void {
+    var spins: u32 = 0;
+    while (counter.load(.acquire) < target) {
+        std.atomic.spinLoopHint();
+        spins +%= 1;
+        if (spins > 4096) std.Thread.yield() catch {};
+    }
+}
 
 /// Pause-loop iterations a worker spins on `epoch` before it parks: long
 /// enough to catch the next pass across a short solve, short enough that a
@@ -392,8 +401,8 @@ const park_yields: u32 = 64;
 
 const vec_width = std.simd.suggestVectorLength(f64) orelse 4;
 
-/// Adds `src` into `dst` elementwise. `src.len >= dst.len`.
-pub fn addSimd(dst: []f64, src: []const f64) void {
+/// Adds `src` into `dst` elementwise, then zeroes `src`. Equal lengths.
+fn moveSimd(dst: []f64, src: []f64) void {
     const W = vec_width;
     const Vv = @Vector(W, f64);
     var i: usize = 0;
@@ -401,6 +410,10 @@ pub fn addSimd(dst: []f64, src: []const f64) void {
         const d: Vv = dst[i..][0..W].*;
         const s: Vv = src[i..][0..W].*;
         dst[i..][0..W].* = d + s;
+        src[i..][0..W].* = @splat(0);
     }
-    while (i < dst.len) : (i += 1) dst[i] += src[i];
+    while (i < dst.len) : (i += 1) {
+        dst[i] += src[i];
+        src[i] = 0;
+    }
 }
