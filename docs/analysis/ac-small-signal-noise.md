@@ -39,6 +39,25 @@ output changed. A 50 Ω, 1 ns line differs from the old static branch by
 1e-13 relative. Both miss ngspice's e^{-jωτ} phase, which the VA tline has
 never had in AC.
 
+Why the phase is missing (`ac/device_tline_delay`, a known gap): VerA's
+`zAbsdelay` returns its input, derivative and all, whenever dt ≤ 0, whatever
+the kind, so the AC linearization sees a transparent line. It could not do
+better through the ABI anyway, which carries only G and C. LRM §4.5.7 makes
+absdelay e^{-jωτ} in AC; ngspice's TRAacLoad stamps cos(ωτ) and -sin(ωτ)
+per frequency (traacld.c). Planned host path:
+- VerA, under kind .ac, emits each absdelay site as a constant (no
+  derivative) in G and publishes the part of the Jacobian that flows
+  through it, as (slot, value, τ) triples, through a new `Hooks.ac_delays`.
+- The circuit keeps them as SoA arrays next to the G and C planes.
+- The FreqSolver fill adds d·cos(ωτ) to the real block and -d·sin(ωτ) to
+  the imaginary block of each lane, after G + jωC.
+
+The slots already exist in the pattern, because the transient stamps the
+same entries, so one pivot tape still serves every lane. Delay terms only
+change the per-lane values, as ωC does, and a lane whose pivot degrades
+fails its mask and refactors on the scalar path. pz has no finite form for
+e^{-sτ} and keeps the transparent line.
+
 ### Stacked-real formulation
 
 The engine solves the $2n$ real equivalent
