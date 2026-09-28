@@ -1,7 +1,8 @@
 //! Query validation at the analysis boundary: every numeric option a driver
 //! would otherwise trust, checked once before any allocation. The frontend
 //! runs it on each analysis card's query too, so a card it refuses names
-//! its line (#108).
+//! its line (#108). In: a `Query` and the circuit size; out: nothing, or
+//! `error.InvalidQueryOptions`. The HSPICE `.fft` bounds cite [CR .FFT].
 const std = @import("std");
 const requests = @import("query.zig");
 const Deck = @import("deck.zig").Deck;
@@ -113,7 +114,8 @@ fn port(p: requests.Port, n: u32, net: bool) !void {
 
 /// Checks `query` against a circuit of `n` unknowns: finite options, valid
 /// tolerances, in-range node and branch indices, positive steps and counts,
-/// and representable derived sizes. Fails with `error.InvalidQueryOptions`.
+/// and representable derived sizes. Fails with `error.InvalidQueryOptions`,
+/// also for `n == 0`. Allocates nothing.
 pub fn validate(query: requests.Query, n: u32) !void {
     @setEvalBranchQuota(10000);
     if (n == 0) return error.InvalidQueryOptions;
@@ -328,8 +330,11 @@ pub fn validate(query: requests.Query, n: u32) !void {
     }
 }
 
-/// `validate`, plus `error.DcSweepSourceNotFound` when a `.dc` sweep names a
-/// card the deck does not have.
+/// `validate`, plus the checks that need the deck: `error.InvalidQueryOptions`
+/// when the query's `tol.variant`, an `.mc` variant range or a `.dc` tangent
+/// row lies past `deck.variants`, and `error.DcSweepSourceNotFound` when a
+/// `.dc` sweep names a card the deck does not have. Asserts that a non-empty
+/// `deck.variants` has one `starts` entry more than rows.
 pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
     try validate(query, n);
     const variant = switch (query) {

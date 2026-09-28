@@ -1,4 +1,5 @@
 //! What an analysis publishes: the shape known up front and the finished payload.
+//! Plain data; cites nothing beyond ESPice's own analysis/output contract.
 const Kind = @import("query.zig").Kind;
 
 /// What a query will publish, known before it runs: enough for an output

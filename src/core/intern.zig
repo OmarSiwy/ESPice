@@ -1,5 +1,6 @@
 //! Net and device names, each stored once: bytes plus u32 offsets,
-//! deduplicated through a map keyed by the dense id itself.
+//! deduplicated through a map keyed by the dense id itself. Strings in,
+//! dense `Name` ids out. Cites nothing: a plain intern table.
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;

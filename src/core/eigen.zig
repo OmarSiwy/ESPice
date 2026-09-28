@@ -1,5 +1,7 @@
 //! Dense real eigenvalues: balance, Hessenberg reduction, Francis
-//! double-shift QR. Row-major n×n input, destroyed in place.
+//! double-shift QR. Row-major n×n input, destroyed in place; eigenvalues out.
+//! Cites LAPACK dgebal (permutation and scaling) and Numerical Recipes
+//! `balanc`; the QR is the textbook Francis double-shift chase.
 const std = @import("std");
 const assert = std.debug.assert;
 const num = @import("numerics.zig");

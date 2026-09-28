@@ -1,5 +1,6 @@
 //! Shared data every layer speaks: numerics, query requests, the deck,
-//! results, the name pool and the shared ids. Imports nothing but std.
+//! results, the name pool and the shared ids. Imports nothing but std and
+//! stdpp, which AGENTS.md §2.8 counts as part of std.
 const std = @import("std");
 
 /// The process-wide general-purpose allocator. SmpAllocator does not build
