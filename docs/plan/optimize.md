@@ -67,7 +67,10 @@ threads with a deterministic plane reduction, but only `ESPICE_THREADS`
    threads on transient decks (device evaluation is 52 to 71% of the run),
    higher on big-model decks. Outputs must be byte-identical across thread
    counts; the reduction order is fixed, so test it.
-4. Then the serial remainder (reduction bandwidth, barriers) if it dominates.
+4. Then the serial remainder if it dominates. The reduce is already split
+   across the lanes and idle workers park between passes (see
+   [refactoring.md](../analysis/refactoring.md)); what is left is the two
+   barriers and the slab traffic, which grows with each lane's write window.
 
 ## I. Small follow-ups
 

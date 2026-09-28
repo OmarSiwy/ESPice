@@ -45,6 +45,16 @@ serial order. Measured serial against 2 to 16 lanes: at most 1 ulp
 bit-identical), and deterministic at a given lane count. It is off by
 default: `ESPICE_THREADS` sets the device thread count (default 1).
 
+Lanes are cut by `count * n_u^2`, times 16 for a nonlinear model, since a
+PSP103 instance costs about a thousand capacitors rather than 36. After a
+barrier every lane reduces an equal, cache-line aligned share of the slots
+and rows, adding the slabs in lane order (so the sum is the serial reduce's,
+bit for bit) and zeroing them for the next pass. The serial reduce it
+replaced took as long as the stamp on chain_psp103_10k, 8.4 ms a pass over
+windows of 300k-660k slots. Between passes a worker spins 4,096 pauses, yields
+64 times, then sleeps on a futex, so the single-threaded LU does not share
+its core with seven spinning threads.
+
 **GPU.** Every eligible batch's models, instances and tapes are uploaded once
 and stay resident. Per Newton iteration the bus carries `x` up and the value
 planes down (`Circuit.gpu_hook.eval_planes`); the sparse LU, Newton update
