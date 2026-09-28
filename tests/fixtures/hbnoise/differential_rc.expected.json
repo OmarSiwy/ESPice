@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "hbnoise",
+  "purpose": "A v(a,b) output measures the difference, not node a alone",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Two uncorrelated R=1k, C=1u sections: S_v(a,b) = 2 * 4*kB*T*R / (1 + (2*pi*f*R*C)^2) at T = 300.15 K. The sine only moves the LTI orbit."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "hbnoise_density": {
+            "unit": "V^2/Hz",
+            "rtol": 0.005,
+            "atol": 1e-25,
+            "values": [
+              3.3021779029743e-17,
+              3.2555586808425e-17,
+              3.0553459825488e-17,
+              2.3768654934155e-17,
+              1.1704505557155e-17,
+              3.4877288749504e-18,
+              8.190078997661e-19,
+              1.7993746814851e-19,
+              3.8932136284686e-20,
+              8.3954095401234e-21
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            21.544346900319,
+            46.415888336128,
+            100.0,
+            215.44346900319,
+            464.15888336128,
+            1000.0,
+            2154.4346900319,
+            4641.5888336128,
+            10000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 10
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "8f99d522054eed13b57955086ae144750cbb76834ee34ec6fab035ca4e7f90ef"
+}

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Autonomous HB (.hbosc) finds a Van der Pol LC oscillator's frequency",
+  "oracle": {
+    "kind": "ngspice-45-settled-transient",
+    "derivation": "Row 1 is the fundamental. ngspice-45 transient of the same tank from .ic v(t)=0.01 (uic), 300 us at a 0.5 ns step: rising v(t)=0 crossings 100..250 are 1.00057 us apart; a 0.2 ns step gives the same digits. Van der Pol, eps = 6e-4*sqrt(L/C) = 0.095, so the shift below 1/(2*pi*sqrt(LC)) = 1 MHz is about eps^2/16."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "selected_rows",
+        "row_indices": [
+          1
+        ],
+        "row_count": 8,
+        "columns": {},
+        "axis": {
+          "name": "frequency",
+          "values": [
+            999430.3247149125
+          ],
+          "rtol": 0.0002,
+          "atol": 0
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "13ffdf644fc903f0951628e110f507aad1b4827342dd1f5f31c8b7c0c6e1ef5a"
+}

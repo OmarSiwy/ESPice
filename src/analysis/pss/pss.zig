@@ -2,6 +2,12 @@
 //! phi(x0) = x(T; x0) - x0 = 0, integrating one period with fixed-step
 //! trapezoid. The Newton system (Phi - I) dx0 = -phi is a dense
 //! finite-difference Jacobian below krylov_threshold unknowns, else JFNK GMRES.
+//!
+//! An autonomous circuit (an oscillator, `Options.osc_node` set) has no
+//! period to impose. There T joins the unknowns and the oscillator node's
+//! x0 leaves them: its value stays pinned at t = 0, which fixes the phase
+//! the time shift would otherwise leave free. The Jacobian keeps its n x n
+//! shape, the osc column holding d(phi)/d(ln T) instead of d(phi)/d(x0[osc]).
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
@@ -19,6 +25,16 @@ const V = @Vector(W, f64);
 /// Jacobian (n+1 period integrations, O(n^2) storage) to matrix-free GMRES
 /// (one integration per matvec).
 const krylov_threshold: usize = 50;
+
+/// Guess periods an autonomous solve records to measure the period from.
+const measure_periods: usize = 8;
+
+/// The largest relative period change one autonomous Newton step takes;
+/// a longer step is shortened, all unknowns together.
+const max_period_step: f64 = 0.2;
+
+/// Volts the oscillator node is pushed off its DC equilibrium to start it.
+const osc_kick: f64 = 1e-3;
 
 pub const Options = @import("core").query.Pss;
 
@@ -185,15 +201,22 @@ const ShootingKrylovCtx = struct {
 
 /// w = (Phi - I) v by one FD period integration:
 /// w = (phi(x0 + eps*v) - phi(x0)) / eps. A failed integration returns
-/// w = 0, which GMRES treats as a null direction.
+/// w = 0, which GMRES treats as a null direction. Autonomous: v[osc] moves
+/// ln T instead of x0[osc].
 fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
     const n = ctx.n;
     const inv_eps = 1.0 / ctx.options.fd_epsilon;
 
     simdCopy(ctx.x_pert[0..n], ctx.x0[0..n]);
     num.axpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
+    var opts = ctx.options;
+    const osc = opts.osc_node;
+    if (osc != root.GROUND) {
+        ctx.x_pert[osc] = ctx.x0[osc];
+        opts.period *= 1 + ctx.options.fd_epsilon * v[osc];
+    }
 
-    if (!integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, ctx.options)) {
+    if (!integrateFrom(ctx.ckt, ctx.ws, ctx.sc, ctx.x_pert, ctx.x_end_pert, opts)) {
         // ponytail: a zero column is safer than propagating NaN.
         simdZero(w[0..n]);
         return;
@@ -215,7 +238,8 @@ fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
 
 /// Dense path: builds the FD Jacobian of phi column by column (n period
 /// integrations) into `j_phi` (n*n, row-major) and solves for dx0. A column
-/// whose integration fails becomes the identity column.
+/// whose integration fails becomes the identity column. Autonomous: the
+/// osc column perturbs ln T, so dx0[osc] is the step in ln T.
 fn denseFdSolve(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
@@ -234,9 +258,10 @@ fn denseFdSolve(
 
     for (0..n) |j| {
         simdCopy(x0_pert[0..n], x0[0..n]);
-        x0_pert[j] += eps;
+        var opts = options;
+        if (options.osc_node != root.GROUND and j == options.osc_node) opts.period *= 1 + eps else x0_pert[j] += eps;
 
-        if (!integrateFrom(ckt, ws, sc, x0_pert, x_end_pert, options)) {
+        if (!integrateFrom(ckt, ws, sc, x0_pert, x_end_pert, opts)) {
             for (0..n) |row| j_phi[row * n + j] = if (row == j) @as(f64, 1.0) else @as(f64, 0.0);
             continue;
         }
@@ -299,7 +324,9 @@ fn krylovSolve(
 /// Shooting Newton from x_dc. A non-empty `wave`, sized
 /// (n_samples+1) * (1 + probes.len), receives point-major rows
 /// [t, v(probes)...] of one period from the final x0, converged or not; it is
-/// left zeroed if that integration fails.
+/// left zeroed if that integration fails. An autonomous solve starts with
+/// `startOscillator` and returns its period as the last row's t;
+/// error.OscillatorDidNotStart when the circuit does not oscillate.
 pub fn solve(
     ckt: *root.Circuit,
     x_dc: []const f64,
@@ -362,13 +389,16 @@ pub fn solve(
     const ws = try ckt.workspace();
 
     simdCopy(x0, x_dc[0..n]);
+    var opts = options;
+    const osc = options.osc_node;
+    if (osc != root.GROUND) opts.period = try startOscillator(ckt, ws, &sc, x0, options, allocator);
 
     var iter: u16 = 0;
     var res_norm: f64 = std.math.inf(f64);
 
     while (iter < options.max_shooting_iter) : (iter += 1) {
         if (iter != 0) try ckt.checkpoint(.{ .phase = .periodic, .completed = iter });
-        if (!integrateFrom(ckt, ws, &sc, x0, x_end, options)) {
+        if (!integrateFrom(ckt, ws, &sc, x0, x_end, opts)) {
             return .{
                 .converged = false,
                 .iterations = iter,
@@ -385,22 +415,98 @@ pub fn solve(
 
         if (use_krylov) {
             // ponytail: unpreconditioned; add an ILU preconditioner if GMRES stalls.
-            krylovSolve(ckt, ws, &sc, n, x0, phi, x0_pert, x_end_pert, dx0, neg_phi, &krylov.?, options);
+            krylovSolve(ckt, ws, &sc, n, x0, phi, x0_pert, x_end_pert, dx0, neg_phi, &krylov.?, opts);
         } else {
-            try denseFdSolve(ckt, ws, &sc, n, x0, phi, x0_pert, x_end_pert, dx0, j_phi, options);
+            try denseFdSolve(ckt, ws, &sc, n, x0, phi, x0_pert, x_end_pert, dx0, j_phi, opts);
         }
 
-        num.axpy(x0, 1.0, dx0);
+        var damping: f64 = 1.0;
+        if (osc != root.GROUND) {
+            const d_ln_t = dx0[osc];
+            dx0[osc] = 0;
+            if (@abs(d_ln_t) > max_period_step) damping = max_period_step / @abs(d_ln_t);
+            opts.period *= 1 + damping * d_ln_t;
+        }
+        num.axpy(x0, damping, dx0);
     }
 
     simdCopy(x_end, x0);
-    _ = integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, options);
+    _ = integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts);
 
     return .{
         .converged = res_norm < options.shooting_tol,
         .iterations = iter,
         .residual_norm = res_norm,
     };
+}
+
+/// Starts an oscillator for the autonomous solve: kicks `x` (the DC point)
+/// off its equilibrium at the osc node, integrates `osc_settle_periods`
+/// guess periods, then records `measure_periods` more. The period is the
+/// mean spacing of the osc node's rising mid-swing crossings in that
+/// record. Leaves `x` at the first sample after the last crossing, the
+/// phase anchor the solve pins, and returns the period.
+fn startOscillator(
+    ckt: *root.Circuit,
+    ws: *converger.Workspace,
+    sc: *Companion,
+    x: []f64,
+    options: Options,
+    allocator: std.mem.Allocator,
+) !f64 {
+    const n: usize = ckt.n;
+    const osc = options.osc_node;
+    const steps: usize = options.n_samples;
+    x[osc] += osc_kick;
+    for (0..options.osc_settle_periods) |_|
+        if (!integrateOnePeriod(ckt, ws, sc, x, &.{}, &.{}, options)) return error.OscillatorDidNotStart;
+
+    const rows = try allocator.alloc(u32, n);
+    defer allocator.free(rows);
+    for (rows, 0..) |*r, i| r.* = @intCast(i);
+    const stride = (steps + 1) * (n + 1);
+    const record = try allocator.alloc(f64, measure_periods * stride);
+    defer allocator.free(record);
+    for (0..measure_periods) |p|
+        if (!integrateOnePeriod(ckt, ws, sc, x, rows, record[p * stride ..][0..stride], options)) return error.OscillatorDidNotStart;
+
+    // Sample g of the record is row g % steps of period g / steps; the last
+    // row of each period repeats the next period's first.
+    const total = measure_periods * steps + 1;
+    const Sample = struct {
+        fn row(rec: []const f64, g: usize, s: usize, cols: usize) []const f64 {
+            const p = @min(g / s, measure_periods - 1);
+            return rec[p * (s + 1) * cols + (g - p * s) * cols + 1 ..][0 .. cols - 1];
+        }
+    };
+    var lo = std.math.inf(f64);
+    var hi = -std.math.inf(f64);
+    for (0..total) |g| {
+        const v = Sample.row(record, g, steps, n + 1)[osc];
+        lo = @min(lo, v);
+        hi = @max(hi, v);
+    }
+    const level = 0.5 * (lo + hi);
+    var first: f64 = 0;
+    var last: f64 = 0;
+    var anchor: usize = 0;
+    var crossings: u32 = 0;
+    var prev = Sample.row(record, 0, steps, n + 1)[osc];
+    for (1..total) |g| {
+        const v = Sample.row(record, g, steps, n + 1)[osc];
+        if (prev < level and v >= level) {
+            const at = @as(f64, @floatFromInt(g - 1)) + (level - prev) / (v - prev);
+            if (crossings == 0) first = at;
+            last = at;
+            anchor = g;
+            crossings += 1;
+        }
+        prev = v;
+    }
+    if (crossings < 2 or !(hi - lo > osc_kick)) return error.OscillatorDidNotStart;
+    simdCopy(x[0..n], Sample.row(record, anchor, steps, n + 1));
+    const dt = options.period / @as(f64, @floatFromInt(steps));
+    return (last - first) / @as(f64, @floatFromInt(crossings - 1)) * dt;
 }
 
 /// Contract entry: shoot from ctx.x_op and return one period as point-major

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Autonomous HB (.hbosc) finds a ring oscillator's frequency",
+  "oracle": {
+    "kind": "ngspice-45-settled-transient",
+    "derivation": "Row 1 is the fundamental. ngspice-45 transient of the same ring from .ic v(c1)=0.1 (uic), 400 us at a 1 ns step: mean spacing of rising v(c1)=0 crossings 50..100 is 3.52176 us; a 0.25 ns step gives the same digits."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "selected_rows",
+        "row_indices": [
+          1
+        ],
+        "row_count": 16,
+        "columns": {},
+        "axis": {
+          "name": "frequency",
+          "values": [
+            283948.9346235973
+          ],
+          "rtol": 0.002,
+          "atol": 0
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ad096f84809cbdfda88e3c6e7c6f1b0b8e5c01a914e9c756368368f586a86502"
+}

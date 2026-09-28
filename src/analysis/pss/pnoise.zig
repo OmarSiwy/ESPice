@@ -3,7 +3,8 @@
 //! matrix once. That gives every node's transfer from each input sideband
 //! f_out + m*f_fundamental to the output at f_out. Source PSDs come from the
 //! devices' `noisePsd`, re-sampled along the orbit (cyclostationary
-//! modulation).
+//! modulation). `orbitSweep` is everything after the orbit, so `.hbnoise`
+//! runs it on the harmonic-balance solution instead (hb_lptv.zig).
 const std = @import("std");
 const root = @import("../types.zig");
 const pac = @import("pac.zig");
@@ -31,18 +32,9 @@ inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
     return white + flicker / std.math.pow(f64, f_abs, ef);
 }
 
-/// Periodic noise density at `options.out_node`, in V^2/Hz.
-///
-/// Each source is a stationary unit noise n(t) scaled by a periodic
-/// amplitude a(t) = sqrt(PSD(t)) (white and flicker parts separately), so
-/// its spectrum at sideband m is sum_k A_k N(f + (m-k)f0), A_k the Fourier
-/// coefficients of a. With H_m the transfer from sideband m to the output at
-/// f_out, the output density is
-///   sum_j S_n(f_out + j*f0) * |sum_m H_m A_{m-j}|^2,
-/// which for a time-invariant circuit and source is |H_0|^2 * S(f_out): an
-/// LTI network converts no sideband.
-/// The caller owns freqs and density, both sweep-count long. Returns
-/// error.NoiseTopologyChanged if the sources differ along the orbit.
+/// Periodic noise density at `options.out_node` (minus `out_neg`), in
+/// V^2/Hz, about the shooting PSS from `x_dc`: `pac.orbit` then
+/// `orbitSweep`. The caller owns freqs and density, both sweep-count long.
 pub fn sweep(
     ckt: *root.Circuit,
     x_dc: []const f64,
@@ -52,24 +44,66 @@ pub fn sweep(
     options: Options,
     allocator: std.mem.Allocator,
 ) !SweepStatus {
-    const n: usize = ckt.n;
-    const n_srcs = noise_sources.len;
-    const m_max: usize = options.n_sidebands;
-    const n_sb = 2 * m_max + 1;
-    std.debug.assert(freqs.len == density.len);
-    // The FFT needs a power of two; 2*n_sb bins keep |m - j| <= 2M alias-free.
-    const n_samples: usize = std.math.ceilPowerOfTwoAssert(usize, @max(options.pss_n_samples, 2 * n_sb));
-
+    const n_sb = 2 * @as(usize, options.n_sidebands) + 1;
     const orb = try pac.orbit(ckt, x_dc, .{
         .tol = options.tol,
         .period = 1.0 / options.f_fundamental,
-        .n_samples = @intCast(n_samples),
+        .n_samples = @intCast(samplesFor(options.pss_n_samples, n_sb)),
         .max_shooting_iter = options.pss_shoot_max_iter,
         .shooting_tol = options.pss_shoot_tol,
         .max_newton_iter = options.pss_newton_max_iter,
         .newton_tol = options.pss_newton_tol,
     }, allocator);
     defer allocator.free(orb.wave);
+    return .{
+        .total_noise = try orbitSweep(ckt, orb, noise_sources, freqs, density, options, allocator),
+        .pss_converged = orb.converged,
+    };
+}
+
+/// Orbit samples per period for `n_sb` sidebands: at least `requested`, a
+/// power of two (the FFT's), and 2*n_sb so bins |m - j| <= 2M stay
+/// alias-free.
+pub fn samplesFor(requested: usize, n_sb: usize) usize {
+    return std.math.ceilPowerOfTwoAssert(usize, @max(requested, 2 * n_sb));
+}
+
+/// Periodic noise density about any periodic orbit `orb` (shooting or HB),
+/// whose sample count must be a power of two of at least 2*(2M+1). Reads
+/// `out_node`, `out_neg`, `sweep`, `f_fundamental` and `n_sidebands` from
+/// `options`; the `pss_*` fields are the orbit provider's. Returns the rms
+/// noise over the sweep in V (sqrt of the trapezoid integral).
+///
+/// Each source is a stationary unit noise n(t) scaled by a periodic
+/// amplitude a(t) = sqrt(PSD(t)) (white and flicker parts separately), so
+/// its spectrum at sideband m is sum_k A_k N(f + (m-k)f0), A_k the Fourier
+/// coefficients of a. With H_m the transfer from sideband m to the output at
+/// f_out, the output density is
+///   sum_j S_n(f_out + j*f0) * |sum_m H_m A_{m-j}|^2,
+/// which for a time-invariant circuit and source is |H_0|^2 * S(f_out): an
+/// LTI network converts no sideband.
+/// A source whose density is negative somewhere on the orbit keeps the
+/// sign on its amplitude, sign(D)*sqrt(|D|), as VACASK does, rather than
+/// turning into NaN. The caller owns freqs and density, both sweep-count
+/// long. Returns error.NoiseTopologyChanged if the sources differ along
+/// the orbit.
+pub fn orbitSweep(
+    ckt: *root.Circuit,
+    orb: pac.Orbit,
+    noise_sources: []const NoiseSource,
+    freqs: []f64,
+    density: []f64,
+    options: Options,
+    allocator: std.mem.Allocator,
+) !f64 {
+    const n: usize = ckt.n;
+    const n_srcs = noise_sources.len;
+    const m_max: usize = options.n_sidebands;
+    const n_sb = 2 * m_max + 1;
+    std.debug.assert(freqs.len == density.len);
+    const n_samples = orb.samples(n);
+    std.debug.assert(std.math.isPowerOfTwo(n_samples) and n_samples >= 2 * n_sb);
+
     const lin = try pac.linearize(ckt, orb, .noise, allocator);
     defer lin.deinit(allocator);
 
@@ -90,8 +124,8 @@ pub fn sweep(
         for (srcs_k, noise_sources, 0..) |src, original, s| {
             if (src.node_p != original.node_p or src.node_n != original.node_n)
                 return error.NoiseTopologyChanged;
-            amp[s * n_samples + k] = @sqrt(src.white);
-            amp[terms + s * n_samples + k] = @sqrt(src.flicker);
+            amp[s * n_samples + k] = signedSqrt(src.white);
+            amp[terms + s * n_samples + k] = signedSqrt(src.flicker);
             // ponytail: the flicker exponent is a model constant in every
             // device, so sample 0 stands for the period.
             if (k == 0) exponent[s] = src.ef;
@@ -110,6 +144,7 @@ pub fn sweep(
     defer allocator.free(drive);
     @memset(drive, 0);
     if (options.out_node != root.GROUND) drive[options.out_node] = 1;
+    if (options.out_neg != root.GROUND) drive[options.out_neg] = -1;
     const pac_opts: pac.Options = .{
         .f_lo = options.f_fundamental,
         .out_node = options.out_node,
@@ -143,14 +178,18 @@ pub fn sweep(
         if (fi > 0) integrated_noise += 0.5 * (density[fi - 1] + total.*) * (f_out - freqs[fi - 1]);
     }
 
-    return .{ .total_noise = @sqrt(integrated_noise), .pss_converged = orb.converged };
+    return @sqrt(integrated_noise);
+}
+
+/// sign(d)*sqrt(|d|): a source amplitude whose square is the density d.
+inline fn signedSqrt(d: f64) f64 {
+    return std.math.copysign(@sqrt(@abs(d)), d);
 }
 
 /// Contract entry: device noise sources at ctx.x_op, LPTV sweep. Point-major
 /// rows (frequency, pnoise_density); an unconverged PSS says so in the plot
 /// name rather than failing.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const a = ctx.allocator;
     const x_op = ctx.x_op;
 
     const scratch = ctx.scratch_allocator;
@@ -164,20 +203,24 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer scratch.free(density_buf);
 
     const st = try sweep(ctx.circuit, x_op, srcs, freqs_buf, density_buf, opts, scratch);
+    return result(ctx.allocator, freqs_buf, density_buf, "pnoise_density", if (st.pss_converged) "Periodic Noise Analysis" else "Periodic Noise Analysis (PSS not converged)");
+}
 
-    const names = try a.dupe([]const u8, &.{ "frequency", "pnoise_density" });
+/// The periodic-noise shape, shared with `.hbnoise`: point-major rows
+/// (frequency, `column`) in `a`. `column` and `plotname` are literals.
+pub fn result(a: std.mem.Allocator, freqs: []const f64, density: []const f64, column: []const u8, plotname: []const u8) !root.Result {
+    const names = try a.dupe([]const u8, &.{ "frequency", column });
     errdefer a.free(names); // entries are literals
-    const data = try a.alloc(f64, @as(usize, n_points) * 2);
-    for (0..n_points) |i| {
-        data[i * 2] = freqs_buf[i];
-        data[i * 2 + 1] = density_buf[i];
+    const data = try a.alloc(f64, freqs.len * 2);
+    for (freqs, density, 0..) |f, d, i| {
+        data[i * 2] = f;
+        data[i * 2 + 1] = d;
     }
-
     return .{
-        .plotname = if (st.pss_converged) "Periodic Noise Analysis" else "Periodic Noise Analysis (PSS not converged)",
+        .plotname = plotname,
         .varnames = names,
         .is_complex = false,
-        .npoints = n_points,
+        .npoints = freqs.len,
         .data = data,
     };
 }

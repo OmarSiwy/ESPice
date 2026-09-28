@@ -188,7 +188,7 @@ fn measures(arena: std.mem.Allocator, cards: []const core.Measure) ![]const core
 
 /// Cards whose output is `Deck.output_node` because they name none.
 fn namesNoOutput(kind: netlist.Kind) bool {
-    return kind == .pac or kind == .pxf or kind == .disto;
+    return kind == .pac or kind == .pxf or kind == .disto or kind == .hbac;
 }
 
 /// Frozen-circuit node row by label, for cards appended after the build.
