@@ -13,14 +13,21 @@
 //! emptier: a grounded output capacitor drops out of the pencil instead of
 //! surviving as a spurious root.
 //!
-//! The roots are s = σ + 1/λ for the eigenvalues λ of A = −M⁻¹C, M = G + σC,
-//! found by dense Hessenberg reduction and Francis double-shift QR (qr.zig).
+//! Poles are s = 1/λ for the eigenvalues λ of A = −G⁻¹C, found by dense
+//! Hessenberg reduction and Francis double-shift QR (qr.zig). Zeros are the
+//! finite generalized eigenvalues of the numerator pencil itself, by QZ
+//! (qz.zig). That pencil is singular at s = 0 whenever the transfer has a
+//! zero there, and its roots at infinity form a defective block. Through A
+//! that block comes back as roundoff eigenvalues scattered as far from zero
+//! as genuine ones; the QZ sees each of its roots as a vanishing diagonal of
+//! C's triangular factor instead.
 const std = @import("std");
 const root = @import("../types.zig");
 const types = @import("core").numerics;
 const dense_lu = @import("solver").dense_lu;
 const freq_solve = @import("solver").freq_solve;
 const qr = @import("qr.zig");
+const qz = @import("qz.zig");
 
 const Complex = types.Complex;
 const GROUND = root.GROUND;
@@ -47,12 +54,10 @@ const Work = struct {
     n: usize,
     g: []f64,
     c: []f64,
-    /// M = G + σC, overwritten with its LU.
+    /// G, overwritten with its LU.
     m: []f64,
-    /// A = −M⁻¹C, destroyed by the QR.
+    /// A = −G⁻¹C, destroyed by the QR.
     a: []f64,
-    /// Matrix powers for `coreRank`; empty when no zeros were asked for.
-    p: []f64,
     /// Column of C and its solve, n each.
     col: []f64,
     sol: []f64,
@@ -61,11 +66,10 @@ const Work = struct {
 };
 
 /// Poles and, when the directive asks for them, transfer zeros at the
-/// operating point `x_op`. Returns error.Singular when G itself is singular
-/// (a node reached only through capacitors), or when no shift of the zeros'
-/// ladder gives a factorable numerator, and error.PzDidNotConverge when the
-/// QR runs out of `qr_max_iter` with roots still missing: a partial root set
-/// is never returned.
+/// operating point `x_op`. Returns error.Singular when poles are wanted and G
+/// itself is singular (a node reached only through capacitors), and
+/// error.PzDidNotConverge when the QR or QZ runs out of `qr_max_iter` with
+/// roots still missing: a partial root set is never returned.
 ///
 /// Diverges from ngspice, which warns at its iteration limit and publishes
 /// the roots it found (cktpzstr.c:225).
@@ -79,8 +83,7 @@ pub fn solve(
 
     try ckt.linearizeAc(x_op);
 
-    const planes: usize = if (options.want != .poles) 5 else 4;
-    const arena = try allocator.alloc(f64, planes * n * n + 2 * n);
+    const arena = try allocator.alloc(f64, 4 * n * n + 2 * n);
     defer allocator.free(arena);
     const piv = try allocator.alloc(u32, n);
     defer allocator.free(piv);
@@ -94,9 +97,8 @@ pub fn solve(
         .c = arena[n * n .. 2 * n * n],
         .m = arena[2 * n * n .. 3 * n * n],
         .a = arena[3 * n * n .. 4 * n * n],
-        .p = if (options.want != .poles) arena[4 * n * n .. 5 * n * n] else &.{},
-        .col = arena[planes * n * n ..][0..n],
-        .sol = arena[planes * n * n + n ..][0..n],
+        .col = arena[4 * n * n ..][0..n],
+        .sol = arena[4 * n * n + n ..][0..n],
         .piv = piv,
         .eigs = eigs,
     };
@@ -115,11 +117,34 @@ pub fn solve(
         }
     }
 
-    // Denominator: σ = 0 and no rank count, the form every bare `.pz` deck is
-    // validated against.
-    try shiftedFactor(&w, 0, 0);
-    buildA(&w);
-    const den = qr.eigenvalues(n, w.a, eigs, options.qr_tol, options.qr_max_iter);
+    var poles: []Complex = &.{};
+    errdefer allocator.free(poles);
+    if (options.want != .zeros) poles = try poleRoots(&w, options, allocator);
+
+    var zeros: []Complex = &.{};
+    if (options.want != .poles) {
+        numeratorPencil(&w, options);
+        // det(G' + sC') = det(G' − s(−C')).
+        for (w.c) |*v| v.* = -v.*;
+        const num = qz.roots(n, w.g, w.c, eigs, options.qr_tol, options.qr_max_iter);
+        if (!num.converged) return error.PzDidNotConverge;
+        zeros = try allocator.dupe(Complex, eigs[0..num.count]);
+    }
+
+    return .{
+        .poles = poles,
+        .zeros = zeros,
+        .allocator = allocator,
+    };
+}
+
+/// Poles from A = −G⁻¹C, in a list owned by `allocator`.
+fn poleRoots(w: *Work, options: Options, allocator: std.mem.Allocator) ![]Complex {
+    @memcpy(w.m, w.g);
+    try dense_lu.factorize(w.n, w.m, w.piv);
+    buildA(w);
+    const eigs = w.eigs;
+    const den = qr.eigenvalues(w.n, w.a, eigs, options.qr_tol, options.qr_max_iter);
     if (!den.converged) return error.PzDidNotConverge;
 
     // s = 1/λ = conj(λ)/|λ|². |λ| ≈ 0 is a row with no dynamics (a resistive
@@ -130,64 +155,18 @@ pub fn solve(
     // twelve decades apart.
     var max_abs: f64 = 0;
     for (eigs[0..den.count]) |l| max_abs = @max(max_abs, l.mag());
-    const cutoff = @as(f64, @floatFromInt(n)) * std.math.floatEps(f64) * max_abs;
-    var n_poles: usize = 0;
-    for (eigs[0..den.count]) |l| {
-        if (l.mag() > cutoff and l.magSq() != 0) n_poles += 1;
-    }
-
-    // The pole set is built even for `zer`, because it also fixes the
-    // frequency scale the zeros' shift ladder is measured in.
-    const poles = try allocator.alloc(Complex, if (options.want != .zeros) n_poles else 0);
-    errdefer allocator.free(poles);
-    var scale: f64 = 0;
+    const cutoff = @as(f64, @floatFromInt(w.n)) * std.math.floatEps(f64) * max_abs;
     var kept: usize = 0;
     for (eigs[0..den.count]) |l| {
         const m2 = l.magSq();
         if (l.mag() <= cutoff or m2 == 0) continue;
-        const pole = Complex{ .re = l.re / m2, .im = -l.im / m2 };
-        if (options.want != .zeros) poles[kept] = pole;
+        eigs[kept] = .{ .re = l.re / m2, .im = -l.im / m2 };
         kept += 1;
-        scale = @max(scale, pole.mag());
     }
-
-    var zeros: []Complex = &.{};
-    if (options.want != .poles) {
-        numeratorPencil(&w, options);
-        const num = try zeroRoots(&w, options, scale);
-        if (!num.converged) return error.PzDidNotConverge;
-        zeros = try allocator.alloc(Complex, num.count);
-        @memcpy(zeros, eigs[0..num.count]);
-    }
-
-    return .{
-        .poles = poles,
-        .zeros = zeros,
-        .allocator = allocator,
-    };
+    return allocator.dupe(Complex, eigs[0..kept]);
 }
 
-/// M = G + σC, overwritten with its LU. `min_ratio` > 0 adds a relative
-/// singularity test (smallest pivot against max|M|) on top of dense_lu's
-/// absolute one (eps², 4.9e-32). The absolute test lets a shift that lands on
-/// a root of the pencil factor "successfully" and hand back noise; the
-/// numerator pass has a ladder of shifts to fall through and can afford to be
-/// strict. The denominator passes 0.
-fn shiftedFactor(w: *Work, sigma: f64, min_ratio: f64) !void {
-    const n = w.n;
-    var scale: f64 = 0;
-    for (w.g, w.c, w.m) |gv, cv, *mv| {
-        mv.* = gv + sigma * cv;
-        scale = @max(scale, @abs(mv.*));
-    }
-    try dense_lu.factorize(n, w.m, w.piv);
-    if (min_ratio == 0) return;
-    var min_piv: f64 = std.math.inf(f64);
-    for (0..n) |k| min_piv = @min(min_piv, @abs(w.m[k * n + k]));
-    if (min_piv <= min_ratio * scale) return error.Singular;
-}
-
-/// A = −M⁻¹C into `w.a`, one back-substitution per column of C against the
+/// A = −G⁻¹C into `w.a`, one back-substitution per column of C against the
 /// LU in `w.m`.
 fn buildA(w: *Work) void {
     const n = w.n;
@@ -226,152 +205,6 @@ fn numeratorPencil(w: *Work, o: Options) void {
         if (o.in_pos != GROUND) w.g[o.in_pos * n + o.out_pos] = 1;
         if (o.in_neg != GROUND) w.g[o.in_neg * n + o.out_pos] = -1;
     }
-}
-
-/// Finite roots of the numerator pencil, written over `w.eigs`.
-///
-/// σ = 0 first: it is exact when G is nonsingular and the most accurate, since
-/// s = σ + 1/λ loses |σ|·eps of absolute accuracy on roots far below σ. A
-/// transfer zero at the origin (every high-pass has one) makes the numerator
-/// singular at s = 0, which is why the shift exists. The ladder is in units
-/// of the pole magnitude rather than ‖G‖/‖C‖: an MNA branch row puts ±1 in G
-/// next to picofarads in C, which inflates that ratio decades past where the
-/// roots are.
-fn zeroRoots(w: *Work, options: Options, pole_scale: f64) !qr.Eigs {
-    const n = w.n;
-    const eps = std.math.floatEps(f64);
-    const min_ratio = @as(f64, @floatFromInt(n)) * eps;
-    var scale = pole_scale;
-    if (!(scale > 0) or !std.math.isFinite(scale)) scale = planeScale(w);
-    // A pencil with no C left has no finite roots; nothing to shift towards.
-    if (!(scale > 0) or !std.math.isFinite(scale)) return .{ .count = 0, .converged = true };
-    const ladder = [_]f64{ 0, 1, -1, 0.37, -2.7, 11.3 };
-
-    var sigma: f64 = 0;
-    for (ladder, 0..) |step, attempt| {
-        sigma = step * scale;
-        shiftedFactor(w, sigma, min_ratio) catch |err| {
-            if (err == error.Singular and attempt + 1 < ladder.len) continue;
-            return err;
-        };
-        break;
-    }
-
-    buildA(w);
-    // How many eigenvalues are nonzero in exact arithmetic (see coreRank);
-    // the rest are roots at infinity. Counted before the QR destroys A.
-    const rank = coreRank(w);
-    const found = qr.eigenvalues(n, w.a, w.eigs, options.qr_tol, options.qr_max_iter);
-    const keep = @min(rank, found.count);
-    // |λ| descending puts the genuine roots first: the spurious ones belong to
-    // the nilpotent block and sit within eps^(1/k)·‖A‖ of zero. A conjugate
-    // pair shares a magnitude, so this never splits one.
-    std.mem.sort(Complex, w.eigs[0..found.count], {}, struct {
-        fn cmp(_: void, x: Complex, y: Complex) bool {
-            return x.magSq() > y.magSq();
-        }
-    }.cmp);
-    var kept: usize = 0;
-    for (w.eigs[0..keep]) |l| {
-        const m2 = l.magSq();
-        if (m2 == 0) break;
-        w.eigs[kept] = .{ .re = sigma + l.re / m2, .im = -l.im / m2 };
-        kept += 1;
-    }
-    return .{ .count = kept, .converged = found.converged };
-}
-
-/// max|G| / max|C|, the pencil's own frequency scale; 0 when C is empty. Used
-/// only when there are no poles to take the scale from.
-fn planeScale(w: *const Work) f64 {
-    var g_max: f64 = 0;
-    var c_max: f64 = 0;
-    for (w.g, w.c) |gv, cv| {
-        g_max = @max(g_max, @abs(gv));
-        c_max = @max(c_max, @abs(cv));
-    }
-    if (c_max == 0) return 0;
-    return g_max / c_max;
-}
-
-/// How many eigenvalues of `w.a` are nonzero in exact arithmetic.
-///
-/// The zero eigenvalues of A = −M⁻¹C are the pencil's roots at infinity, and
-/// the QR cannot tell them from small genuine ones: a defective zero
-/// eigenvalue of multiplicity k comes back at |λ| ≈ ‖A‖·eps^(1/k), which for
-/// the common k = 2 is 1e−8·‖A‖, eight decades above any honest cutoff. That
-/// is the shape of a transfer with no finite zeros: `pz/rc_lowpass_ports`,
-/// `pz/bench_pz_two_pole` and `pz/bench_pz_filt_multistage` each have a
-/// nilpotent numerator A, and a magnitude cutoff invents zeros at 1e8 rad/s
-/// for all three.
-///
-/// rank(Aᵐ) is first-order accurate instead. In the core-nilpotent split the
-/// nilpotent block vanishes at m = its index and the rank settles on the
-/// count of genuine roots. The sequence is non-increasing, so the loop stops
-/// the first time it fails to drop. O(n⁴) worst case: one n³ product per
-/// power.
-fn coreRank(w: *Work) usize {
-    const n = w.n;
-    var norm: f64 = 0;
-    for (w.a) |v| norm = @max(norm, @abs(v));
-    if (norm == 0) return 0;
-    // Normalised so the m-th power stays O(1) and the rank threshold is a
-    // plain eps rather than eps·‖A‖ᵐ.
-    for (w.a, w.p) |v, *dst| dst.* = v / norm;
-
-    const tol = @as(f64, @floatFromInt(n)) * std.math.floatEps(f64);
-    var rank = n;
-    for (0..n) |_| {
-        @memcpy(w.m, w.p);
-        const r = eliminationRank(n, w.m, tol);
-        if (r == rank or r == 0) return r;
-        rank = r;
-        // w.p ← w.p · (A/‖A‖), through w.m because a matmul cannot alias.
-        for (0..n) |i| {
-            for (0..n) |j| {
-                var acc: f64 = 0;
-                for (0..n) |k| acc += w.p[i * n + k] * w.a[k * n + j];
-                w.m[i * n + j] = acc / norm;
-            }
-        }
-        @memcpy(w.p, w.m);
-    }
-    return rank;
-}
-
-/// Rank by Gaussian elimination with partial pivoting on a matrix already
-/// scaled to a max entry of 1; a column with no pivot above `tol` is skipped
-/// rather than ending the sweep.
-///
-/// ponytail: partial pivoting is not rank-revealing in the worst case (Kahan's
-/// matrix); a column-pivoted QR is the upgrade if a deck ever turns up whose
-/// zero count this gets wrong.
-fn eliminationRank(n: usize, a: []f64, tol: f64) usize {
-    var rank: usize = 0;
-    for (0..n) |col| {
-        if (rank == n) break;
-        var best: f64 = 0;
-        var best_row: usize = rank;
-        for (rank..n) |r| {
-            const v = @abs(a[r * n + col]);
-            if (v > best) {
-                best = v;
-                best_row = r;
-            }
-        }
-        if (best <= tol) continue;
-        if (best_row != rank) {
-            for (col..n) |j| std.mem.swap(f64, &a[rank * n + j], &a[best_row * n + j]);
-        }
-        const inv = 1.0 / a[rank * n + col];
-        for (rank + 1..n) |r| {
-            const factor = a[r * n + col] * inv;
-            if (factor == 0) continue;
-            for (col..n) |j| a[r * n + j] -= factor * a[rank * n + j];
-        }
-        rank += 1;
-    }
-    return rank;
 }
 
 /// Contract entry: the roots at ctx.x_op, complex, in one of two layouts.
