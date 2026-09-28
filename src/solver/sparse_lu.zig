@@ -100,6 +100,21 @@ pub const SparseLu = struct {
     /// row), by original row. Recomputed by each `factor`.
     rscale: []f64,
 
+    /// Full-factor scratch: `want[c]` is the row column c tries first,
+    /// `want_of` its inverse. When column c pivots on row r != want[c],
+    /// the column that wanted r inherits want[c] (see `factor`).
+    want: []u32,
+    want_of: []u32,
+    /// prev[c]: the row the last successful factor pivoted column c on,
+    /// saved when a re-pivot starts.
+    prev: []u32,
+    /// L plus U entries of the last factor that started without a pivot
+    /// sequence: the fill the column ordering was chosen for.
+    base_lu: usize = 0,
+    /// A re-pivot whose L plus U grows past `fill_cap * base_lu` is
+    /// abandoned for the previous pivot sequence. 0 disables the cap.
+    fill_cap: f64 = 0,
+
     // DFS workspace, `factor` only.
     flag: []u32, // epoch visited marker
     topo: []u32, // finish order
@@ -145,6 +160,9 @@ pub const SparseLu = struct {
             .topo = &.{},
             .stack = &.{},
             .pstack = &.{},
+            .want = &.{},
+            .want_of = &.{},
+            .prev = &.{},
         };
         errdefer self.deinit(gpa);
         self.pinv = try gpa.alloc(u32, n);
@@ -166,6 +184,9 @@ pub const SparseLu = struct {
         self.topo = try gpa.alloc(u32, n);
         self.stack = try gpa.alloc(u32, n);
         self.pstack = try gpa.alloc(u32, n);
+        self.want = try gpa.alloc(u32, n);
+        self.want_of = try gpa.alloc(u32, n);
+        self.prev = try gpa.alloc(u32, n);
         try self.li.ensureTotalCapacity(gpa, est_lu);
         try self.lx.ensureTotalCapacity(gpa, est_lu);
         try self.ui.ensureTotalCapacity(gpa, est_lu);
@@ -175,7 +196,7 @@ pub const SparseLu = struct {
     }
 
     pub fn deinit(self: *Self, gpa: Allocator) void {
-        inline for (.{ self.pinv, self.lp, self.up, self.prow, self.flag, self.topo, self.stack, self.pstack }) |s|
+        inline for (.{ self.pinv, self.lp, self.up, self.prow, self.flag, self.topo, self.stack, self.pstack, self.want, self.want_of, self.prev }) |s|
             gpa.free(s);
         gpa.free(self.void_col);
         gpa.free(self.scaled_pivot);
@@ -203,6 +224,14 @@ pub const SparseLu = struct {
     /// sparse triangular solve, threshold pivot (diagonal preferred),
     /// store L and U. Rebuilds the pattern, pivot sequence and replay
     /// tapes. On error the factorization is unusable (`factored` false).
+    ///
+    /// A re-pivot (a factor after a successful one, which the caller runs
+    /// when `refactor` fails) that fills past `fill_cap * base_lu` restarts
+    /// on the previous pivot sequence, keeping every old pivot that is
+    /// still nonzero. Measured on the chain_bsim4_10k operating point's
+    /// diverging Newton steps (values up to 1e60): threshold pivoting
+    /// sent 4,503 of 44,925 columns off the diagonal and filled 34x
+    /// against 2.6x (docs/solvers/gilbert-peierls-lu.md, "Re-pivoting").
     pub fn factor(
         self: *Self,
         gpa: Allocator,
@@ -211,6 +240,33 @@ pub const SparseLu = struct {
         vals: []const f64,
         pivot_tol: f64,
     ) FactorError!void {
+        const repivot = self.factored and self.fill_cap > 0 and self.base_lu > 0;
+        var cap: usize = std.math.maxInt(usize);
+        if (repivot) {
+            for (self.pinv, 0..) |step, r| self.prev[self.q[step]] = @intCast(r);
+            cap = @intFromFloat(@min(self.fill_cap * @as(f64, @floatFromInt(self.base_lu)), 1e18));
+        }
+        if (try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, cap, false)) {
+            if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null)
+                std.debug.print("lu-stats: re-pivot passed {d} L+U entries; keeping the previous pivots\n", .{cap});
+            _ = try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, std.math.maxInt(usize), true);
+        }
+        if (!repivot) self.base_lu = self.li.items.len + self.ui.items.len;
+    }
+
+    /// One full factor. `keep_prev` starts each column from `prev` and
+    /// takes any nonzero there; otherwise from the diagonal under the
+    /// threshold test. Returns true, unfactored, once L plus U exceeds `cap`.
+    fn factorPass(
+        self: *Self,
+        gpa: Allocator,
+        col_ptr: []const u32,
+        row_idx: []const u32,
+        vals: []const f64,
+        pivot_tol: f64,
+        cap: usize,
+        keep_prev: bool,
+    ) FactorError!bool {
         const n = self.n;
         self.factored = false;
         @memset(self.pinv, NONE);
@@ -250,6 +306,10 @@ pub const SparseLu = struct {
         const w = self.w;
         const rscale = self.rscale;
         const lend = self.lend;
+        const want = self.want;
+        const want_of = self.want_of;
+        for (want, self.prev, 0..) |*a, p, i| a.* = if (keep_prev) p else @intCast(i);
+        for (want, 0..) |r, c| want_of[r] = @intCast(c);
         // Two copies of the column loop. The plain one runs until an L
         // column reaches panel_min_rows, which typical circuit matrices
         // never do. The supernodal copy adds the lend shortcut and panels.
@@ -375,11 +435,14 @@ pub const SparseLu = struct {
                     for (topo[0..nt]) |r| w[r] = 0;
                     continue;
                 }
-                if (pinv[c] == NONE) {
-                    const dmag = @abs(w[c]);
-                    if (dmag >= pivot_tol * amax) {
-                        piv = c;
-                    } else if (dmag > 0 and dmag * rscale[c] >= pivot_tol * smax) {
+                const pr = want[c];
+                if (pinv[pr] == NONE) {
+                    const dmag = @abs(w[pr]);
+                    if (keep_prev) {
+                        if (dmag > 0) piv = pr;
+                    } else if (dmag >= pivot_tol * amax) {
+                        piv = pr;
+                    } else if (dmag > 0 and dmag * rscale[pr] >= pivot_tol * smax) {
                         // The diagonal is the largest entry measured against
                         // its own equation. A BSIMSOI floating body at default
                         // junction params: its KCL row is ~1e-18 S while Gmbs
@@ -391,9 +454,21 @@ pub const SparseLu = struct {
                         // cannot do.
                         // ponytail: scales the pivot choice only; full row
                         // equilibration (KLU scale=2) if the arithmetic needs it.
-                        piv = c;
+                        piv = pr;
                         self.scaled_pivot[k] = true;
                     }
+                }
+                if (piv != pr) {
+                    // Row piv was column want_of[piv]'s first choice; hand
+                    // it the row c gave up. Without this, each off-diagonal
+                    // pivot also cost the column whose diagonal it took, and
+                    // that one another: 1,811 of the 2,654 off-diagonal
+                    // pivots in one chain_bsim4_10k re-pivot were such
+                    // cascades. The same 2x2 exchange ngspice's Sparse gets
+                    // from ExchangeRowsAndCols; KLU has no equivalent.
+                    const c2 = want_of[piv];
+                    want[c2] = pr;
+                    want_of[pr] = c2;
                 }
                 const d = w[piv];
                 self.udiag[k] = d;
@@ -407,6 +482,7 @@ pub const SparseLu = struct {
                     }
                     w[r] = 0;
                 }
+                if (self.li.items.len + self.ui.items.len > cap) return true;
                 if (!sn) {
                     if (self.li.items.len - lp[k] >= panel_min_rows) {
                         k += 1;
@@ -457,6 +533,7 @@ pub const SparseLu = struct {
         };
 
         self.factored = true;
+        return false;
     }
 
     /// E1's census (docs/solvers/gpu-lu.md §5) of the factor just built,
@@ -530,9 +607,8 @@ pub const SparseLu = struct {
         const epoch = 8 * (nu + n + nl + 1) + 4 * (2 * (n + 1) + nu + (nu + 1) + flops + col_ptr[n]) + n +
             4 * (2 * (n + 1) + 2 * nl + 2 * nu) + 8 * @as(u64, n);
         std.debug.print("lu-census: F={d} S_r={d} levels={d} S_L={d} S_U={d} widest_U={d} narrow_F={d:.1}% rails={d}r/{d}c epoch={d:.1}MB\n", .{
-            flops,                                                                           s_r,       levels,    s_l, s_u, widest,
-            100 * @as(f64, @floatFromInt(narrow)) / @as(f64, @floatFromInt(@max(flops, 1))), rail_rows, rail_cols,
-            @as(f64, @floatFromInt(epoch)) / 1e6,
+            flops,                                                                           s_r,       levels,    s_l,                                  s_u, widest,
+            100 * @as(f64, @floatFromInt(narrow)) / @as(f64, @floatFromInt(@max(flops, 1))), rail_rows, rail_cols, @as(f64, @floatFromInt(epoch)) / 1e6,
         });
     }
 

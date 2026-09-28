@@ -2459,6 +2459,57 @@ const SparseTests = struct {
         try testing.expectEqualSlices(f64, fresh.udiag, lu.udiag);
     }
 
+    test "an off-diagonal pivot hands its diagonal to the column that lost one" {
+        const gpa = testing.allocator;
+        // Column 0 must pivot on row 1. Column 1 then gets row 0, which
+        // passes the threshold, not its column max (row 2).
+        const a = [3][3]f64{
+            .{ 1e-9, 1, 0 },
+            .{ 1, 1e-9, 0 },
+            .{ 0, 5, 1 },
+        };
+        var csc = DenseCsc(3).from(a);
+        var q = identity(3);
+        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        defer lu.deinit(gpa);
+        try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
+        try testing.expectEqualSlices(u32, &.{ 1, 0, 2 }, lu.pinv);
+        try checkSolve(3, a, .{ 1, 2, 3 }, &lu);
+    }
+
+    test "a re-pivot past the fill cap keeps the previous pivots" {
+        const gpa = testing.allocator;
+        var a = [4][4]f64{
+            .{ 2, -1, 0, 0 },
+            .{ -1, 2, -1, 0 },
+            .{ 0, -1, 2, -1 },
+            .{ 0, 0, -1, 2 },
+        };
+        var csc = DenseCsc(4).from(a);
+        const nnz = csc.nnz();
+        var q = identity(4);
+        var capped = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        defer capped.deinit(gpa);
+        var free = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        defer free.deinit(gpa);
+        capped.fill_cap = 1;
+        try capped.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        try free.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        const base = capped.li.items.len + capped.ui.items.len;
+
+        // A collapsed diagonal: threshold pivoting leaves it and fills.
+        a[0][0] = 1e-5;
+        csc = DenseCsc(4).from(a);
+        try free.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        try testing.expect(free.li.items.len + free.ui.items.len > base);
+        try capped.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
+        try testing.expectEqual(base, capped.li.items.len + capped.ui.items.len);
+        try testing.expectEqualSlices(u32, &.{ 0, 1, 2, 3 }, capped.pinv);
+        var x: [4]f64 = undefined;
+        capped.solve(&.{ 1, 2, 3, 4 }, &x);
+        for (x, denseSolve(4, a, .{ 1, 2, 3, 4 })) |xi, ri| try testing.expectApproxEqRel(ri, xi, 1e-8);
+    }
+
     test "solve and solveT in-place (b aliases x)" {
         const gpa = testing.allocator;
         const a = [2][2]f64{ .{ 3, 1 }, .{ 1, 2 } };
