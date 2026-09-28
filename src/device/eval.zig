@@ -1061,6 +1061,21 @@ fn hasAbsdelayState(comptime D: type) bool {
     return hasInstanceField(D, "__absdelay__", false);
 }
 
+/// D's §4.5.4 `idt` operator unknowns, as local indices. VerA spells the
+/// k-th one `idt$k`, escaped to `idtZ24k` in `D.U`.
+// ponytail: name matching, as above, until VerA's contract marks operator
+// unknowns.
+fn idtUnknowns(comptime D: type) []const u32 {
+    comptime {
+        var out: []const u32 = &.{};
+        if (@hasDecl(D, "U")) for (@typeInfo(D.U).@"enum".fields) |f| {
+            if (std.mem.startsWith(u8, f.name, "idtZ24")) out = out ++ [_]u32{f.value};
+        };
+        const final = out[0..out.len].*;
+        return &final;
+    }
+}
+
 /// Whether D holds a §5.10 variable across evaluations with no VerA `__acc`
 /// accepted copy, so `stateCtl(.revert)` cannot take its write back.
 fn hasUnrevertibleHeld(comptime D: type) bool {
@@ -1138,6 +1153,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .advance_iteration = if (@hasDecl(D, "advanceIteration")) advanceIteration else null,
             .check_convergence = if (@hasDecl(D, "checkConvergence")) checkConvergence else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
+            .seed_ic = if (idtUnknowns(D).len != 0) seedIc else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
             // Unrevertible state runs once per accepted point; everything
             // else per converged solve. See `Hooks.commit_state`.
@@ -1247,6 +1263,24 @@ pub fn DeviceBatch(comptime D: type) type {
                 }
                 self.lim_active = true;
             }
+        }
+
+        fn seedIc(ctx: *anyopaque, x: []f64) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            const R = RealFor(@hasDecl(D, "collapse"));
+            for (0..self.count) |id| inline for (comptime idtUnknowns(D)) |u| {
+                const gi = self.gath[id * n_u + u];
+                if (gi != GROUND) {
+                    // The static row is s - ic when the idt has an ic (slope
+                    // 1) and does not read s otherwise (slope 0). One exact
+                    // Newton step on the row lands s on ic.
+                    var lx = self.localX(x, id);
+                    const r0 = D.eval(R, &lx, &self.models[id], &self.instances[id], self.sim)[u].v;
+                    lx[u] += 1.0;
+                    const slope = D.eval(R, &lx, &self.models[id], &self.instances[id], self.sim)[u].v - r0;
+                    if (slope != 0) x[gi] -= r0 / slope;
+                }
+            };
         }
 
         /// Marks the rows of non-voltage unknowns (branch currents) unless the

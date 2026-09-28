@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A host-integrated idt with ic under uic starts integrating from ic.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "VAMS-2023 4.5.4: ic is the integral at the start of the transient, and uic skips only the operating point that would solve it (ngspice MODEUIC gives a capacitor its IC the same way). V(out) = idt(V(in), 0.5) = 0.5 + t for V(in) = 1. Samples skip t = 0, where uic leaves every unsolved node at 0."
+  },
+  "netlist_sha256": "78d551b1ce2265ace73c6ad24dbaff667a6a2518e36061ac025f25eea72d773b",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            0.1,
+            0.25,
+            0.5,
+            1.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.6,
+              0.75,
+              1.0,
+              1.5
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  }
+}

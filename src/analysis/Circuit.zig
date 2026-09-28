@@ -530,6 +530,13 @@ pub const Circuit = struct {
         for (batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
     }
 
+    /// Sets every `idt` state unknown with an ic to that ic (`Hooks.seed_ic`):
+    /// the uic start's stand-in for the operating point, which solves them.
+    /// Needs a static sim state.
+    pub fn seedIc(self: *const Circuit, x: []f64) void {
+        for (self.batches) |b| if (b.hooks.seed_ic) |f| f(b.ctx, x);
+    }
+
     pub fn clearLimitBatches(batches: []const Batch) void {
         for (batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
     }

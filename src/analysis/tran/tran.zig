@@ -161,10 +161,14 @@ pub fn simulate(
     // FSM state under `initial_step` (§5.10.2), commit it, and leave a static
     // kind for the charge seeding below. `.ic`, not `.dc`: the uic start is
     // the transient's ic phase, so waveform sources evaluate at t = 0.
+    // An idt's ic is its value at t = 0 (LRM §4.5.4) and the charge the
+    // integration starts from, as a capacitor's IC is under ngspice's
+    // MODEUIC (capload.c), so it is seeded here rather than left at 0.
     if (options.uic) {
         ckt.setSimState(.{ .kind = .ic, .initial_step = true });
         _ = ckt.stateCtl(.commit);
         ckt.setSimState(.{ .kind = .ic });
+        ckt.seedIc(x);
     }
     try ckt.computeBaseline();
 
