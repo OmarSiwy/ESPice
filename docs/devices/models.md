@@ -60,6 +60,21 @@ ring match only on VACASK's exact grid (VACASK itself scores 1.75e4x with the
 (the harness `oscillation` check, rtol 7e-3 and 1e-2) plus samples up to
 1.25 ns; the tolerance rationale is in the oracle's notes.
 
+The NQS model is flattened in but switched off. `PSP103_nqs_macrodefs.include`
+sits after `` `define OPderiv `` under `` `ifdef NQSmodel ``, where upstream's
+`psp103_nqs.va` includes it, so the shipped QS device is unchanged.
+Uncommenting `` `define NQSmodel true `` builds the NQS device (48 unknowns
+instead of 12, nine of them VerA's host-integrated `idt$k`) with the `SWNQS`
+card parameter. Checked with the file loaded through `.hdl` (module renamed)
+against VACASK running the same PSP 103.7 sources compiled by OpenVAF-r as
+`PSPNQS103VA`. The test is a 10u/10u nMOS at Vd = 1.2 V, with the gate
+stepped 0 to 1.2 V in 50 ps, over 4 ns with gear2 on both sides. With
+SWNQS=1, from 50 ps after the edge to the end, drain and gate currents agree
+within 2.9e-7 and 5.8e-7 A (about 0.1% of the 2.4e-4 A final drain current).
+The NQS effect itself (SWNQS=1 minus SWNQS=0) is 9.011e-3 A in espice against
+9.015e-3 A in VACASK. With SWNQS=0 the NQS build matches the QS device to
+1e-19 A, but not bitwise, because the extra unknowns change the matrix.
+
 These originator attributions were written from memory and still need a
 check against the original sources: T. Ytterdal (hfet1, hfet2), Holger Vogt
 and Dietmar Warning (vdmos body diode), T. Quarles and A. Gillespie (mos9),
