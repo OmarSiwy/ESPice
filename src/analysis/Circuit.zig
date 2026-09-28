@@ -176,6 +176,14 @@ pub const Circuit = struct {
     lin: struct { x_ptr: [*]const f64 = undefined, len: u32 = 0, valid: bool = false } = .{},
     /// `updateStates` ran since the last `stateCtl(.commit)` or `.revert`.
     state_staged: bool = false,
+    /// Set by the transient. `updateStates` then records a device's
+    /// `request_reject_at` in `reject_at`, for the step to be retried
+    /// ending there, instead of returning it as a flip that forces another
+    /// iterate at the same time.
+    land_rejects: bool = false,
+    /// The earliest rejection time the last `updateStates` recorded under
+    /// `land_rejects`, or null.
+    reject_at: ?f64 = null,
 
     /// Symbolic LU and Newton scratch, built on first use and shared by every
     /// analysis. The pattern is frozen, so it stays valid for the lifetime.
@@ -728,8 +736,10 @@ pub const Circuit = struct {
     pub fn updateStates(self: *Circuit, x: []const f64) ?f64 {
         if (self.state_staged) _ = self.stateCtl(.revert);
         self.state_staged = true;
-        if (self.gpu_hook) |gh| return gh.update_states(gh.ctx, x);
-        return updateBatches(self.batches, x);
+        const tr = if (self.gpu_hook) |gh| gh.update_states(gh.ctx, x) else updateBatches(self.batches, x);
+        if (!self.land_rejects) return tr;
+        self.reject_at = tr;
+        return null;
     }
 
     /// Accepted-point half of `updateStates`, for delay-line history no
