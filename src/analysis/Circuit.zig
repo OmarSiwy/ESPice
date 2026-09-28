@@ -308,6 +308,48 @@ pub const Circuit = struct {
         self.* = undefined;
     }
 
+    /// Device state held outside the circuit, one `snapshot` per batch, so
+    /// an analysis that must rewind time can restore what it committed.
+    pub const SavedState = struct {
+        batches: []Batch,
+
+        pub fn deinit(self: SavedState, gpa: std.mem.Allocator) void {
+            for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
+            gpa.free(self.batches);
+        }
+    };
+
+    /// Returns a copy of every batch's device state. The caller frees it
+    /// with `SavedState.deinit`.
+    pub fn saveState(self: *const Circuit, gpa: std.mem.Allocator) !SavedState {
+        const batches = try gpa.alloc(Batch, self.batches.len);
+        errdefer gpa.free(batches);
+        var count: usize = 0;
+        errdefer for (batches[0..count]) |b| b.hooks.deinit(b.ctx, gpa);
+        for (self.batches, batches) |b, *copy| {
+            copy.* = try b.hooks.snapshot(b.ctx, gpa).unwrap();
+            count += 1;
+        }
+        return .{ .batches = batches };
+    }
+
+    /// Overwrites `saved` with the current device state, allocating nothing.
+    pub fn storeState(self: *const Circuit, saved: SavedState) void {
+        for (saved.batches, self.batches) |dst, src| dst.hooks.copy_state(dst.ctx, src.ctx);
+    }
+
+    /// Rewinds every batch to `saved`, which becomes the accepted state.
+    /// Batch storage and every `ParamRef` into it stay valid.
+    // ponytail: host batches only. Under a GPU hook the resident state is
+    // left where it is; download it (`syncHostState`) and re-upload states
+    // too when a GPU-resident device carries history that must rewind.
+    pub fn restoreState(self: *Circuit, saved: SavedState) void {
+        if (self.gpu_hook != null) return;
+        for (self.batches, saved.batches) |dst, src| dst.hooks.copy_state(dst.ctx, src.ctx);
+        self.state_staged = false;
+        self.lin.valid = false;
+    }
+
     /// Returns a view of this circuit's own value planes.
     pub fn ownPlanes(self: *Circuit) Planes {
         return .{ .g_vals = self.g_vals, .c_vals = self.c_vals, .rhs = self.rhs, .q_vec = self.q_vec };

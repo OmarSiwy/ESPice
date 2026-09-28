@@ -355,6 +355,7 @@ pub fn build(b: *std.Build) void {
         .{ "test-analysis", "Run all analysis tests", &.{t.run(analysis_mod, &.{
             .{ .name = "builder", .module = builder_mod },
             .{ .name = "limiter_device", .module = limiter_mod },
+            .{ .name = "contract", .module = contract_mod },
             .{ .name = "models", .module = models_mod },
             .{ .name = "device_eval", .module = device_eval_mod },
         }, true)} },

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "The OPtran transient that settles a capacitor-only node commits device state at every step; none of it may reach the analysis, which starts at t = 0 with the timer unfired.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "VAMS-2023 5.10.3.3 and 4.5.8: with per = 0.3 us, lvl toggles at 0.3, 0.6 and 0.9 us, and transition(lvl, 0, 100 ns) slews V(out) linearly over the 100 ns after each fire (R1 fixes V(out); C1 and C2 only float fl). If OPtran's 1 us of fires leaked into the transient, lvl would start at 1 with the next fire at 1.2 us, and V(out) would read 1 throughout these samples."
+  },
+  "netlist_sha256": "d02b3d42d25a6ab7f2345f50b091aa7bf07acec638d4787b3c8edeb58273a51d",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            2e-07,
+            3.5e-07,
+            5e-07,
+            6.5e-07,
+            8e-07,
+            9.5e-07,
+            1.1e-06
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-04,
+            "atol": 1e-04,
+            "values": [
+              0.0,
+              0.5,
+              1.0,
+              0.5,
+              0.0,
+              0.5,
+              1.0
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  }
+}

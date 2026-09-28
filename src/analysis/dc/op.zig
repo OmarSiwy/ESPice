@@ -245,12 +245,17 @@ pub fn solveLadder(
 /// settled state itself would be a false success
 /// (stress/scaling_inverter_chain_4k). Under `needs_tran_op` the settled state
 /// is the answer. ngspice 44.2 runs this rung only when `optran` is given
-/// (cktop.c:94-97).
+/// (cktop.c:94-97). The transient commits device state at every step, so it
+/// runs between a save and a restore: only `x` leaves it, and no timer,
+/// event or delay history runs ahead of the operating point's t = 0.
 fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options) !converger.Result {
     const opa = ws.slv.gpa;
     root.zeroSimd(x);
     var wf = try tran.Waveform.init(opa, 0, 16);
     defer wf.deinit();
+    const saved = try ckt.saveState(opa);
+    defer saved.deinit(opa);
+    const op_sim = ckt.sim;
     const sim = tran.simulate(ckt, x, &.{}, &wf, .{
         .tol = options.tol,
         .t_stop = 1e-6,
@@ -263,11 +268,16 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     };
     // The transient left .tran device state behind; the op contract is a
     // static circuit whatever the outcome.
-    ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
+    ckt.restoreState(saved);
+    ckt.setSimState(op_sim);
     ckt.has_baseline = false;
     try ckt.computeBaseline();
     if (sim == null or !sim.?.completed) return failed;
-    if (ckt.needs_tran_op) return .{ .converged = true, .iterations = 0, .max_dx = 0 };
+    if (ckt.needs_tran_op) {
+        // The static history at the answer, as a converged Newton leaves it.
+        _ = ckt.updateStates(x);
+        return .{ .converged = true, .iterations = 0, .max_dx = 0 };
+    }
     return newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, false) catch |err| switch (err) {
         error.QueryCancelled => return err,
         else => failed,
