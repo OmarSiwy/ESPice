@@ -12,6 +12,9 @@ const assert = std.debug.assert;
 
 /// Writes every card in `measures` that targets `analysis`, evaluated over
 /// `result`, under ngspice's heading. Writes nothing when none targets it.
+/// A card that names a missing vector or whose event never happens writes
+/// ngspice's error line to `err` and no value. A PARAM card reads NaN for
+/// any card past the 256th.
 pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysis: Kind, result: core.Result) Writer.Error!void {
     // As ngspice's measure.c, PARAM cards read every other card's result,
     // so those are evaluated first; each card still prints in deck order.
@@ -59,7 +62,7 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
 }
 
 /// Evaluates every card in `measures` that targets `analysis` over
-/// `result` into `values` (parallel to `measures`), PARAM cards last in
+/// `result` into `out` (parallel to `measures`), PARAM cards last in
 /// deck order, as `print` does. A card that does not target the result, or
 /// whose event never happens, reads NaN.
 /// Asserts that `out.len == measures.len`.

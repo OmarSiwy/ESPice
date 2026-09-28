@@ -60,8 +60,10 @@ pub const Session = struct {
 
     /// Writes the next plot. Plot 0 writes `path`; later ones append to it
     /// for binary and ASCII raw and `.print` listings, and go to
-    /// `path.<number + 1>` for every other format. An invalid plot fails
-    /// before any I/O and is not counted. A writer error is terminal
+    /// `path.<number + 1>` for every other format. Without a path the plot
+    /// is only counted. An invalid plot (`types.ValidationError`) fails
+    /// before any I/O and is not counted; so does `error.TooManyPlots`
+    /// past maxInt(u32) - 1 plots. A writer error is terminal
     /// (`DeliveryFailed` from then on): a partial append cannot be replayed.
     pub fn publish(self: *Session, io: std.Io, plot: types.Plot) !void {
         if (self.state == .failed) return error.DeliveryFailed;
@@ -91,8 +93,8 @@ pub const Session = struct {
     /// Opens plot 0 in binary raw for rows the caller writes to the returned
     /// writer as native-endian f64s, `plot.result.data` being empty. Null when
     /// the selection cannot stream (another format, a plot already
-    /// delivered, a destination that is not a regular file); publish the
-    /// whole plot then. The header leaves `No. Points:` blank, as ngspice's
+    /// delivered, a failed session, a destination that is not a regular
+    /// file); publish the whole plot then. The header leaves `No. Points:` blank, as ngspice's
     /// batch raw file does, for `endStream` to fill in. The writer is valid
     /// until `endStream`, `abortStream` or `deinit`.
     pub fn beginStream(self: *Session, io: Io, plot: types.Plot) !?*Io.Writer {
@@ -139,8 +141,10 @@ pub const Session = struct {
     /// Finishes the streamed plot: checks that `npoints` rows of
     /// `varnames` columns arrived, fills in the point count and replaces the
     /// destination. Counts as one `publish`. The stream is closed whether
-    /// or not it succeeds; a file error fails the session. Asserts that a
-    /// stream is open.
+    /// or not it succeeds. With a path, any error (a wrong row count
+    /// included, `error.DataLengthMismatch`) fails the session; without
+    /// one, a wrong count is returned and the session stays usable. Asserts
+    /// that a stream is open.
     pub fn endStream(self: *Session, io: Io, npoints: usize, columns: usize) !void {
         assert(self.stream != null);
         const s = self.stream.?;

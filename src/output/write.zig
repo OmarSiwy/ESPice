@@ -1,12 +1,15 @@
 //! The one file write every format goes through: validate, encode, and
 //! replace the destination atomically, so it holds the old bytes or the
-//! whole new plot, never a torn one.
+//! whole new plot, never a torn one. A destination that is not a regular
+//! file (a device or FIFO, `-r /dev/null`) cannot be renamed over and is
+//! written in place.
 const std = @import("std");
 const Io = std.Io;
 const types = @import("types.zig");
 
-/// Replaces `path` with `plot` encoded as `format`. Validation errors leave
-/// the destination untouched.
+/// Replaces `path` with `plot` encoded as `format`. Any error leaves a
+/// regular file untouched; validation errors leave every destination
+/// untouched.
 pub fn write(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !void {
     return put(io, path, format, plot, false);
 }
