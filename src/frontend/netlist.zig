@@ -137,6 +137,8 @@ pub const Netlist = struct {
         kv: []const Kv,
         model: ?Model,
         subckt_instance: u32,
+        /// Row of `model` in `Netlist.models`; `none` without one.
+        model_row: u32 = none,
     };
 
     /// Devices of card letter `c` (lowercase), in file order.
@@ -156,6 +158,7 @@ pub const Netlist = struct {
             .kv = nl.kvs[d.kv.start..][0..d.kv.len],
             .model = if (d.model == none) null else nl.models[d.model],
             .subckt_instance = d.subckt_instance,
+            .model_row = d.model,
         };
     }
 
