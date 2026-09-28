@@ -201,6 +201,201 @@ harmonic off 0.8%), `stress/scaling_inverter_chain_256` and `_4k` (~1%) and
 `stress/scaling_parallel_inverters_2000` (`i(vdd)[1]` off 10%). The option
 stays for experiments.
 
+## Post-layout results
+
+Extracted netlists put a lot of RC between the transistors: the matrix
+grows 4-12x per transistor and the LU fills, so the solve competes with
+device evaluation. These decks measure where that leaves the GPU path.
+
+**Decks.** `tests/benchmark/postlayout/gen.py` writes synthetic extracted
+decks in the shape of a DSPF back-annotation: standard cells as
+subcircuits, every signal net split into pi segments from the driver pin
+through each load pin (one R per segment, one ground C per node), coupling
+caps to the neighbouring net, and the vdd/vss rails extracted as a mesh
+(per-row rails, straps every 16 cells). Four families (50-stage inverter
+chains, NAND-gated 31-stage ring oscillators, a 12-level random NAND/NOR
+block and a 6T SRAM array doing write, precharge and read), each with
+BSIM4 (LEVEL=54, the corpus card) and PSP103 (LEVEL=1040, the vacask_ring
+card), from 1k to 100k transistors and 10k to 1M R and C.
+`tests/benchmark/postlayout/fetch.sh` fetches three real ones: ISCAS85
+c7552 on sky130 and on IHP SG13G2 (ngspice's own KLU benchmark: 14,942
+FETs and one synthetic pi per net, no license, so never vendored), and
+the iic-jku TT06 TDC, a magic extraction on sky130 (2,562 FETs, extracted
+C, Apache-2.0). No GF180 extracted design turned up.
+
+```sh
+nix develop .#benchmarking
+tests/benchmark/postlayout/fetch.sh zig-out/postlayout/real   # optional
+zig build bench-postlayout -- --iters 3 --ngspice-klu \
+    --espice cpu1=--backend=cpu,--timing-in-depth \
+    --espice cpu8=ESPICE_THREADS=8,--backend=cpu,--timing-in-depth \
+    --espice cuda=--backend=cuda,--timing-in-depth \
+    --espice auto=--backend=auto,--timing-in-depth
+```
+
+The decks have no oracle, so they live outside `tests/fixtures`. The
+runner checks agreement against ngspice and VACASK as `bench` does, and
+`--timing-in-depth` now prints each query's Newton split: device eval
+(including the GPU wait), matrix load, LU factor, solve, and the step
+update, with n and the LU fill. `ZP_LU_STATS=1` adds the structural census
+of `docs/solvers/gpu-lu.md` E1.
+
+Setup: RTX 4060 Laptop, i9-14900HX, `96807bd` rebased on `3559781`,
+ngspice-45 with `.options klu`. Other sessions were held off while timing,
+and a load log every 5 s marked the runs to repeat; the numbers below come
+from runs with a 1-minute load under 3 (8 when the run itself used 8
+threads).
+
+### Wall time
+
+Seconds. 1k and real decks: median of 3 after a warm-up. 10k and 100k: one
+run after a warm-up. `auto` runs with one host thread. The stop time
+shrinks with size (1 ns at 1k, 0.5 ns at 10k, 0.2 ns at 100k; the rings
+twice that; the SRAM always 1 ns), and the 100k decks start from `uic`.
+
+| deck | FETs | R + C | cpu 1 thr | cpu 8 thr | cuda | auto | ngspice KLU | VACASK |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| chain_bsim4_1k | 1,000 | 10.5k | 1.95 | 1.22 | 1.70 | 1.78 | 1.56 | 3.25 |
+| ring_bsim4_1k | 960 | 10.0k | 3.42 | 2.02 | 2.93 | 2.99 | 2.89 | 5.27 |
+| logic_bsim4_1k | 1,084 | 8.2k | 5.35 | 4.13 | 5.40 | 5.12 | 5.65 | 14.0 |
+| sram_bsim4_1k | 1,032 | 3.3k | 2.14 | 1.63 | 1.92 | 1.89 | 1.81 | 2.41 |
+| chain_psp103_1k | 1,000 | 10.5k | 4.10 | 3.25 | 3.29 | 3.35 | | 5.63 |
+| ring_psp103_1k | 960 | 10.0k | 7.22 | 5.66 | 5.71 | 5.73 | | 8.19 |
+| logic_psp103_1k | 1,084 | 8.2k | 10.15 | 9.51 | 8.93 | 9.16 | | 21.2 |
+| sram_psp103_1k | 1,032 | 3.3k | 4.20 | 3.37 | 3.67 | 3.82 | | 3.86 |
+| chain_bsim4_10k | 10,000 | 105k | 16.2 | 13.6 | 9.6 | 12.2 | | |
+| ring_bsim4_10k | 9,984 | 103k | 25.1 | 13.9 | 15.6 | 17.4 | | |
+| logic_bsim4_10k | 10,634 | 80k | 196 | 242 | 163 | 171 | | |
+| sram_bsim4_10k | 10,216 | 32k | 53.7 | 49.3 | 47.7 | 47.3 | | |
+| chain_psp103_10k | 10,000 | 105k | 46.1 | 50.6 | 31.9 | 38.1 | | |
+| ring_psp103_10k | 9,984 | 103k | 50.8 | 45.9 | 36.0 | 37.3 | | |
+| logic_psp103_10k | 10,634 | 80k | 273 | 306 | 256 | 265 | | |
+| chain_bsim4_100k | 100,000 | 1.04M | 52.5 | 37.8 | 36.0 | 35.7 | | |
+| ring_bsim4_100k | 99,968 | 1.03M | 100.6 | 68.3 | 64.3 | 64.4 | | |
+| c7552_sky130 | 14,942 | 71k | 33.3 | 25.3 | 21.5 | 21.9 | > 2400 | |
+| c7552_ihp | 14,942 | 71k | 54.6 | 33.8 | 28.4 | 27.8 | | |
+| tdc_sky130 | 2,562 | 0.7k | 4.79 | 3.64 | 3.62 | 3.85 | 228 | |
+
+ngspice on c7552_sky130 hit a 40-minute timeout at 9.2 GB (one run).
+`sram_psp103_10k` ran past 25 minutes on the CPU and was dropped from the
+timing; `logic_bsim4_10k`'s 8-thread run overlapped a burst of outside
+load. ngspice-45 has no PSP103, and VACASK cannot take the `.lib` PDK
+decks; the 10k and 100k decks ran without references to fit the window.
+
+Agreement (the runner's comparison at rtol 1e-3): every BSIM4 1k deck
+agrees with ngspice and VACASK on all four espice columns, and the TDC with
+ngspice. The PSP103
+decks read DIFFER against VACASK on edges only: the 50-stage chain's last
+edge lands 0.4 ps later (820.6 against 820.2 ps), the ring period differs
+by 0.3 ps in 500, the SRAM bitlines by 8 mV. At the earlier 5 ps step cap
+espice took about 200 steps where VACASK took 777 and the chain edge was
+5 ps late, which is why the decks cap the step at 2 ps.
+
+### Where the time goes
+
+Share of wall time, from `--timing-in-depth` on the measured run. `eval`
+includes the GPU wait (upload, kernels, reduce, plane download); `LU` is
+factor plus solve; `setup` is parse, expansion and binding; `other` is
+everything else (step control, LTE, charge evals after acceptance,
+output).
+
+| deck | n | LU nnz | cpu1 eval / LU / setup / other | cuda eval / LU / setup / other | GPU wait per eval |
+|---|---:|---:|---|---|---:|
+| chain_bsim4_1k | 4.5k | 60k | 47 / 22 / 3 / 28 | 24 / 28 / 3 / 45 | 0.22 ms |
+| logic_bsim4_1k | 4.0k | 99k | 31 / 53 / 1 / 15 | 18 / 58 / 1 / 23 | 0.33 ms |
+| sram_psp103_1k | 10k | 126k | 33 / 37 / 9 / 21 | 19 / 43 / 11 / 27 | 0.43 ms |
+| chain_bsim4_10k | 45k | 611k | 47 / 32 / 3 / 18 | 18 / 50 / 6 / 26 | 1.8 ms |
+| ring_bsim4_10k | 44k | 669k | 48 / 27 / 2 / 23 | 21 / 49 / 4 / 26 | 1.8 ms |
+| logic_bsim4_10k | 39k | 1.76M | 8 / 82 / 0 / 9 | 3 / 94 / 0 / 3 | 2.4 ms |
+| sram_bsim4_10k | 17k | 984k | 19 / 70 / 1 / 10 | 6 / 83 / 1 / 10 | 2.1 ms |
+| chain_psp103_10k | 125k | 1.38M | 44 / 35 / 8 / 13 | 23 / 51 / 12 / 14 | 3.8 ms |
+| logic_psp103_10k | 124k | 2.61M | 8 / 87 / 1 / 3 | 3 / 93 / 2 / 2 | 4.0 ms |
+| chain_bsim4_100k | 446k | 6.75M | 38 / 31 / 10 / 21 | 14 / 46 / 15 / 25 | 15.6 ms |
+| ring_bsim4_100k | 442k | 7.28M | 39 / 33 / 5 / 23 | 14 / 53 / 8 / 25 | 15.7 ms |
+| c7552_sky130 | 117k | 871k | 39 / 17 / 29 / 15 | 15 / 26 / 42 / 17 | 3.3 ms |
+| c7552_ihp | 161k | 1.23M | 58 / 15 / 14 / 14 | 23 / 30 / 28 / 20 | 7.0 ms |
+| tdc_sky130 | 14k | 107k | 41 / 11 / 34 / 14 | 17 / 14 / 47 / 22 | 0.58 ms |
+
+One device eval, stage by stage (`ESPICE_GPU_STATS=phases`, which syncs
+after each stage), in µs:
+
+| deck | staging cells | upload + clear | eval kernels | reduce | download | total |
+|---|---:|---:|---:|---:|---:|---:|
+| chain_bsim4_10k | 8.1M | 241 | 1,513 | 213 | 321 | 2,288 |
+| c7552_sky130 | 11.2M | 391 | 2,058 | 419 | 944 | 3,812 |
+| chain_bsim4_100k | 80.9M | 2,892 | 11,096 | 2,416 | 3,155 | 19,559 |
+
+The GPU cuts device eval 1.8-2.4x at 1k and 2.7-4.9x from 10k up
+(c7552_ihp: 32.0 s of host eval against 6.5 s on the device), and `auto`
+took the GPU for every transient here. Under `cuda` the rest of the run
+decides the wall time. On the synthetic 10k and 100k decks that rest is
+the host LU, 46-94% of wall time. On the real PDK decks it is setup:
+`Problem creation` takes 9.2 s of c7552_sky130's 22 s, as much as the
+Newton loop.
+
+The E1 census (first full factor of each deck; `F` counts the refactor's
+multiply-adds, `S_r` is the sync-free column kernel's span of
+`docs/solvers/gpu-lu.md` §4.2):
+
+| deck | fill | F | S_r | n / S_r | widest U col | F in levels < 64 wide |
+|---|---:|---:|---:|---:|---:|---:|
+| chain_bsim4_10k | 2.6x | 2.9M | 2,882 | 16 | 241 | 49% |
+| logic_bsim4_10k | 9.2x | 170M | 3,512 | 11 | 1,170 | 99% |
+| sram_bsim4_10k | 8.2x | 40.7M | 4,759 | 3.6 | 2,117 | 99% |
+| chain_psp103_10k | 1.9x | 4.5M | 3,849 | 32 | 292 | 34% |
+| logic_psp103_10k | 3.8x | 201M | 3,983 | 31 | 1,269 | 99% |
+| chain_bsim4_100k | 2.9x | 74M | 14,106 | 32 | 475 | 76% |
+| ring_bsim4_100k | 3.2x | 70M | 13,885 | 32 | 351 | 63% |
+| sram_bsim4_100k | 16.6x | 3.5G | 58,128 | 2.9 | 8,666 | 97% |
+| c7552_sky130 | 1.2x | 2.0M | 49,597 | 2.3 | 49,534 | 54% |
+| c7552_ihp | 1.3x | 2.5M | 62,407 | 2.6 | 62,349 | 38% |
+| tdc_sky130 | 1.0x | 0.15M | 7,210 | 1.9 | 7,200 | 29% |
+
+The builder emits `BbdInfo` for every generated deck and for c7552, and
+`Bbd.init` declines all of them (`NotApplicable`); the TDC gets none. No
+row or column of A holds 1,000 entries on the synthetic decks, because
+their supplies are meshes; the real decks have one ideal supply node each,
+and its column is the widest in U.
+
+Against E1's rules:
+
+- Refactor plus solve alone is at least 40% of wall time under `cuda` on
+  14 of the 20 timed decks (every 10k and 100k deck, 5 of 8 at 1k), before
+  adding the plane download. The download adds 14-25% of each eval (5% of
+  c7552_sky130's wall time), which leaves the real decks at 14-35%. The
+  gate passes on the synthetic decks and fails on the real ones, whose
+  next target is setup.
+- `Bbd.init` accepts none, so option (d) does not come first.
+- `S_r` is within 10x of n on the SRAMs and on every real deck, where one
+  supply column with 49k-62k U entries is most of the critical path. The
+  gather form for wide columns (§4.2) comes before any kernel tuning.
+
+### Bottlenecks
+
+1. **The host LU.** At 10k transistors it is 27-87% of wall time on one
+   thread and 46-94% once the GPU takes the eval. The random logic block
+   refactors 170M multiply-adds per iteration (98 ms, 1,643 of them in
+   `logic_bsim4_10k`). The SRAM array fills 8.2x at 10k and 16.6x at 100k
+   (3.5G multiply-adds, why the 100k SRAM is out of the suite). When a
+   refactor fails its growth check, the re-pivoting full factor can fill
+   far worse: on the 100k chain's diverging operating point the fill went
+   from 2.9x to 25x (9e10 multiply-adds a factor), which is why the 100k
+   decks start from `uic`. This decides where GPU work goes next: the
+   solve, not more eval.
+2. **Setup on PDK decks.** Parse, subcircuit expansion and binding of the
+   sky130 and IHP model libraries take 7.9-9.2 s on c7552 and 1.6 s on
+   the TDC, 28-47% of the `cuda` wall time. ngspice's own profile of the
+   same c7552 spent 80 of 217 s parsing (ngspice-41, KLU).
+3. **Eight host threads.** `cpu8` often loses to `cpu1` on the factor
+   (sram_bsim4_10k: 37.7 s of LU on one thread, 42.9 s with seven more
+   lanes; logic_psp103_10k: 238 against 279 s). The likely cause is the
+   ParEval workers, which spin and then yield between evals while the
+   single-threaded LU runs beside them. The eval itself barely scales on
+   the PSP103 decks (chain_psp103_10k: 20.3 s on one thread, 21.8 s on
+   eight). ParEval balances lanes by `count * n_u^2` and sums each lane's
+   private slab back serially over its write window; on a 0.66M-nnz
+   pattern that summation is the suspect, not yet profiled.
+
 ## Limits
 
 - The kernels are latency-bound under ~6,000 instances. At 255 registers a
