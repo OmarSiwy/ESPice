@@ -151,7 +151,13 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
                 o.method = methods.get(std.ascii.lowerString(lower[0..method.len], method)) orelse return error.InvalidAnalysisArguments;
                 continue;
             }
-            const value = try number(args, i);
+            const raw = try number(args, i);
+            // ngspice reads an IF_INTEGER option as floor(0.5 + x)
+            // (spiceif.c:501, inpgval.c:31), so itl4=1.5 is 2.
+            const value = switch (option) {
+                .itl1, .itl2, .itl4, .maxord => @floor(0.5 + raw),
+                else => raw,
+            };
             switch (option) {
                 .method => unreachable,
                 .temp, .tnom => {
@@ -159,7 +165,7 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
                     if (option == .temp) o.temp_c = value else o.tnom_c = value;
                 },
                 .itl1, .itl2, .itl4 => {
-                    if (value < 1 or value != @trunc(value) or value > std.math.maxInt(u16)) return error.InvalidAnalysisArguments;
+                    if (value < 1 or value > std.math.maxInt(u16)) return error.InvalidAnalysisArguments;
                     const iterations: u16 = @intFromFloat(value);
                     switch (option) {
                         .itl1 => o.tol.itl1 = iterations,
@@ -169,7 +175,7 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
                     }
                 },
                 .maxord => {
-                    if (value < 1 or value != @trunc(value)) return error.InvalidAnalysisArguments;
+                    if (value < 1) return error.InvalidAnalysisArguments;
                     maxord = value;
                 },
                 .delmax => {
