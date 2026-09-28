@@ -97,8 +97,8 @@ pub const ParEval = struct {
     job_mode: Mode,
 
     /// Splits the batches into `n_lanes_req` (at least 1) lanes of roughly
-    /// equal `count * n_u^2` work, cut at instance boundaries in ascending
-    /// order. Threads start lazily on the first `run`.
+    /// equal `count * instanceWeight` work, cut at instance boundaries in
+    /// ascending order. Threads start lazily on the first `run`.
     pub fn init(
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -115,7 +115,7 @@ pub const ParEval = struct {
         const extra: usize = n_lanes - 1;
 
         var w_total: u64 = 0;
-        for (batches) |b| w_total += @as(u64, b.count) * b.n_u * b.n_u;
+        for (batches) |b| w_total += @as(u64, b.count) * instanceWeight(b);
         const target: u64 = (w_total + n_lanes - 1) / n_lanes;
 
         var lane_tasks = try gpa.alloc(std.ArrayList(EvalTask), n_lanes);
@@ -131,7 +131,7 @@ pub const ParEval = struct {
         var cur: u32 = 0;
         for (batches, 0..) |b, bi| {
             if (b.count == 0) continue;
-            const w: u64 = @as(u64, b.n_u) * b.n_u;
+            const w = instanceWeight(b);
             var pos: u32 = 0;
             while (pos < b.count) {
                 while (cur + 1 < n_lanes and loads[cur] >= target) cur += 1;
@@ -372,6 +372,17 @@ pub const ParEval = struct {
         }
     }
 };
+
+/// An instance's eval cost estimate: its stamp count `n_u^2`, times 16 for
+/// a nonlinear model. With `n_u^2` alone, chain_psp103_10k's lane 0 got all
+/// 64,244 capacitors and 241 ms of an eval pass that took the PSP103 lanes
+/// 5-7 s: a PSP103 instance costs about 1,000 capacitors, not 36.
+/// ponytail: one static factor, so the lane cuts (and the reduce order)
+/// stay deterministic; per-type costs if a model family shows imbalance.
+fn instanceWeight(b: Batch) u64 {
+    const stamps = @as(u64, b.n_u) * b.n_u;
+    return if (b.has_const_jacobian) stamps else 16 * stamps;
+}
 
 /// Lane `lane`'s range of `[0, len)` when `lanes` split it, cut on 8-cell
 /// (64-byte) boundaries so no two lanes write one cache line.
