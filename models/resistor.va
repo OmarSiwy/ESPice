@@ -49,6 +49,6 @@ module resistor(p, n);
         // the builder) but not the temperature factor, so a tempco that drives
         // the resistance to zero is a NaN here as it is there.
         I(p, n) <+ V(p, n) / rt;
-        I(p, n) <+ white_noise(4.0 * 1.380649e-23 * (tdev + 273.15) / rt, "thermal");
+        I(p, n) <+ white_noise(4.0 * 1.38064852e-23 * (tdev + 273.15) / rt, "thermal");
     end
 endmodule

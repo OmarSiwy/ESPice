@@ -210,7 +210,7 @@ module bsim2(d, g, s, b);
     parameter real nrs = 1.0 from [0:inf);    // squares of source diffusion
 
     // bias-independent
-    real leff, weff, lum, wum, il, iw, tk, vt, cox, coxwl, bfac;
+    real leff, weff, lum, wum, il, iw, tk, vt, vt0, cox, coxwl, bfac;
     real adrn, asrc, pdrn, psrc, isatd, isats, vcrits, vcritd;
     real czbs, czbssw, czbd, czbdsw, omj, omjsw;
     real gdrain, gsource, vddc, vdd2, vgg2, vbb2;
@@ -358,6 +358,7 @@ module bsim2(d, g, s, b);
         // ============ temperature scaling (b2temp.c) ======================
         tk = temp + 273.0;                           // degC -> K
         vt = 8.625e-5 * tk;                          // kT/q [V]
+        vt0 = 1.38064852e-23 * 300.15 / 1.6021766208e-19; // b2ld.c's junctions: CONSTvt0
 
         // ============ geometry, junction sizing ===========================
         // Diffusion geometry: instance AD/AS/PD/PS when given, else the
@@ -371,8 +372,8 @@ module bsim2(d, g, s, b);
         // Is = JS * A_{S/D}; the 1e-15 floor is b2ld.c's.
         isats = max(asrc * js, 1.0e-15);
         isatd = max(adrn * js, 1.0e-15);
-        vcrits = vt * ln(vt / (1.4142135623730951 * isats));
-        vcritd = vt * ln(vt / (1.4142135623730951 * isatd));
+        vcrits = vt0 * ln(vt0 / (1.4142135623730951 * isats));
+        vcritd = vt0 * ln(vt0 / (1.4142135623730951 * isatd));
 
         // CJ is F/m^2 and CJSW F/m: scale to farads before any charge use.
         czbs   = cj   * asrc;
@@ -403,13 +404,13 @@ module bsim2(d, g, s, b);
         vgs = ty * $limit(V(g, si), "fetlimds", vtx, ty, ty * vtx);
         vgd = ty * $limit(V(g, di), "fetlimds", vtx, ty);
         vds = ty * $limit(V(di, si), "limvds", ty, 0.0);
-        vbs = ty * $limit(V(b, si), "pnjlimds", vt, vcrits, ty, -1.0);
-        vbd = ty * $limit(V(b, di), "pnjlimds", vt, vcritd, ty);
+        vbs = ty * $limit(V(b, si), "pnjlimds", vt0, vcrits, ty, -1.0);
+        vbd = ty * $limit(V(b, di), "pnjlimds", vt0, vcritd, ty);
 
         // ============ bulk junctions ======================================
         // On the true junction voltages (mode-free).
-        ibs = jcur(vbs, isats, vt, 1.0e-12);
-        ibd = jcur(vbd, isatd, vt, 1.0e-12);
+        ibs = jcur(vbs, isats, vt0, 1.0e-12);
+        ibd = jcur(vbd, isatd, vt0, 1.0e-12);
 
         // ============ mode swap ===========================================
         vdsneg = min(vds, 0.0);                 // swap offset
@@ -573,13 +574,13 @@ module bsim2(d, g, s, b);
 
         // Series resistances with their thermal noise (mos1noi.c).
         I(d, di) <+ gdrain * V(d, di)
-                  + white_noise(4.0 * 1.380649e-23 * tk * gdrain, "rd");
+                  + white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
         I(s, si) <+ gsource * V(s, si)
-                  + white_noise(4.0 * 1.380649e-23 * tk * gsource, "rs");
+                  + white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
 
         // ============ noise (mos1noi.c form) ==============================
         // The flicker denominator is W*m*Leff*Cox'^2.
-        I(di, si) <+ white_noise(4.0 * 1.380649e-23 * tk * 2.0 / 3.0 * abs(gmch),
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * 2.0 / 3.0 * abs(gmch),
                                  "channel");
         if (kf > 0.0) begin
             I(di, si) <+ flicker_noise(kf * pow(abs(id), af)

@@ -53,9 +53,9 @@ module mes(d, g, s);
         // ---- bias-independent prep -------------------------------------------
         // mesload.c uses the fixed CONSTvt0 = k*300.15/q for both gate diodes:
         // `mes` has no tnom/temp card parameter and no temperature maps.
-        vt0    = 1.380649e-23 * 300.15 / 1.602176634e-19;
+        vt0    = 1.38064852e-23 * 300.15 / 1.6021766208e-19;
         scale  = area * m;                          // mesload.c: czxx*area, then m*
-        fourkt = 4.0 * 1.380649e-23 * $temperature;
+        fourkt = 4.0 * 1.38064852e-23 * $temperature;
 
         // Polarity-normalized biases: all math below is NMF.
         vgs = ztype * V(g, si);

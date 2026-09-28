@@ -94,7 +94,7 @@ module hfet2(d, g, s);
     parameter real eta2   = 0.0       from [0:inf); // second-layer cap ideality, 0 = off
     // hfet2temp.c derived defaults: VT1 = VTO + q*NMAX*DI/EPSI (raw signed
     // VTO, untempered NMAX), VT2 = VTO. Both stay overridable.
-    parameter real vt1 = vto + 1.602176634e-19 * nmax * di / epsi; // Cg1 transition [V]
+    parameter real vt1 = vto + 1.6021766208e-19 * nmax * di / epsi; // Cg1 transition [V]
     parameter real vt2 = vto;                       // second-layer threshold [V]
 
     // --- temperature coefficients ---
@@ -130,7 +130,7 @@ module hfet2(d, g, s);
         // derivative chains (doc §2 spine; hfet2temp.c does it once per temp).
         tdev     = temp > 0.0 ? temp : $temperature + dtemp;
         dtn      = tdev - tnom;
-        vth      = 1.380649e-23 * tdev / 1.602176634e-19;
+        vth      = 1.38064852e-23 / 1.6021766208e-19 * tdev;
         vto_t    = type_nfet * vto - kvto * dtn;
         lambda_t = lambda + klambda * dtn;
         mu_t     = mu - kmu * dtn;
@@ -153,13 +153,13 @@ module hfet2(d, g, s);
         // `if(eta2Given && d2Given)`; the same flag gates n02, nsm and
         // dnsm_dvgt so the three sites cannot disagree.
         two_layer = (d2 > 0.0) && (eta2 > 0.0);
-        n0    = epsi * eta_vth / (2.0 * 1.602176634e-19 * (di + deltad));
+        n0    = epsi * eta_vth / (2.0 * 1.6021766208e-19 * (di + deltad));
         if (two_layer)
-            n02 = epsi * eta2_vth / (2.0 * 1.602176634e-19 * d2);
+            n02 = epsi * eta2_vth / (2.0 * 1.6021766208e-19 * d2);
         else
             n02 = 0.0;
-        gchi0 = 1.602176634e-19 * w * mu_t / l;
-        imax  = 1.602176634e-19 * w * vs * nmax_t;
+        gchi0 = 1.6021766208e-19 * w * mu_t / l;
+        imax  = 1.6021766208e-19 * w * vs * nmax_t;
         jslw  = js  * wl / 2.0;
         ggrlw = ggr * wl / 2.0;
         vl    = (vs / mu_t) * l;
@@ -171,8 +171,8 @@ module hfet2(d, g, s);
         // fetlim(TVTO) pass that follows it in hfet2load.c is documented in the
         // header (no limvds for this device).
         vcrit = vth * ln(vth / (1.4142135623730951 * 1e-11));
-        vgsr = type_nfet * $limit(V(g, sp), "pnjlim", vth, vcrit, type_nfet);
-        vgdr = type_nfet * $limit(V(g, dp), "pnjlim", vth, vcrit, type_nfet);
+        vgsr = type_nfet * $limit(V(g, sp), "pnjlim", 1.38064852e-23 * 300.15 / 1.6021766208e-19, vcrit, type_nfet);
+        vgdr = type_nfet * $limit(V(g, dp), "pnjlim", 1.38064852e-23 * 300.15 / 1.6021766208e-19, vcrit, type_nfet);
         vdsr = vgsr - vgdr;
         vds  = max(abs(vdsr), 1e-30);
 
@@ -265,7 +265,7 @@ module hfet2(d, g, s);
         dvgt_dvgs = 1.0 - vds * (sigma0 / vsigma) * sexp / ((1.0 + sexp) * (1.0 + sexp));
 
         cg1 = 1.0 / (d1_epsi + eta1_vth * exp(min(-(vgs - vt1) / eta1_vth, 80.0)));
-        cgc = wl * (1.602176634e-19 * dns_dnsm * dnsm_dvgt * dvgt_dvgs + cg1);
+        cgc = wl * (1.6021766208e-19 * dns_dnsm * dnsm_dvgt * dvgt_dvgs + cg1);
 
         vdse     = vds / pow(1.0 + pow(vds / max(vsate, 1e-30), mc), invmc);
         tv       = 2.0 * vsate - vdse + 1e-30;

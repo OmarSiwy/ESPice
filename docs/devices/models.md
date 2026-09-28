@@ -151,6 +151,35 @@ Intentional divergences, kept rather than matched:
   the RS and ICCP contributions that its integrated totals include
   (vbicnoise.c:167-177); espice keeps them in both.
 
+## Physical constants
+
+A model uses the constants its ngspice device uses, spelled as literals
+(VerA preloads `constants.vams`, whose `P_K`/`P_Q` are the NIST 1998 set, not
+ngspice's):
+
+- const.h (CODATA 2014) k = 1.38064852e-23, q = 1.6021766208e-19, with
+  vt = (k/q) * T as `CONSTKoverQ * T` and `CONSTvt0` = k * 300.15 / q:
+  diode, jfet, jfet2, mes, mesa, vdmos, hfet1, hfet2, resistor noise, mos1,
+  mos2; bsim1 (CONSTvt0 throughout); bsim2 junctions (CONSTvt0; the channel
+  keeps b2temp.c's own 8.625e-5); hicumL2 (CONSTKoverQ in temp, k*T/q in
+  load); vbic13_4t pnjlim vt and noise; bsim4va and bsimsoi_va noise, plus
+  bsim4va's two CHARGE sites (b4temp.c:2294, b4ld.c:5412).
+- The model's own values, which ngspice copies: BSIM3/3SOI/4/4SOI `KboQ`,
+  `Charge_q`, `EPS0`, `EPSSI`; VBIC's `KB_VBIC`/`QQ_VBIC` in its thermal
+  voltage; HiSIM's `C_QE`/`C_KB`; PSP's `KBOL`/`QELE`. HiSIM2 (3.2.0 here,
+  2.8.0 in ngspice) and HiSIM-HV (2.51 here, 2.20 in ngspice) are a MODEL
+  VERSION DIFFERENCE with the same constants.
+
+Kept on CODATA 2018: `gummel_poon`. Its `.disto` third harmonic comes from a
+second finite difference of the Jacobian, which moves about 1.5% when the
+temperature moves 1e-5 K (the same deck read 1.9387e-8, 1.9636e-8 and
+1.9068e-8 A at 27, 27.00001 and 27.00078 degC). The const.h switch lands on
+the far side of that noise: `disto/bench_disto_bjt_ce` goes from 0.57 to
+9.2 of its tolerance while every BJT ngspice oracle improves (e.g.
+`reference/bjt_active` 9.1e-3 to 4.9e-11). Switch it once `.disto`'s third
+order is analytic. mos3, mos6 and mos9 still use CODATA 2018 and eps0 =
+8.8541878128e-12 where ngspice uses 8.854214871e-12 (mos*temp.c).
+
 ## Nominal temperature
 
 `.options tnom` reaches a built-in model through VerA's reserved Model field

@@ -77,8 +77,8 @@ module diode(a, c);
         tnomk = tnom + 273.15;
         ratio = tk / tnomk;                // diotemp.c Temp/DIOnomTemp
         dtk   = tk - tnomk;                // diotemp.c:48 `dt`
-        vt    = 1.380649e-23 * tk    / 1.602176634e-19;
-        vtnom = 1.380649e-23 * tnomk / 1.602176634e-19;
+        vt    = 1.38064852e-23 / 1.6021766208e-19 * tk;
+        vtnom = 1.38064852e-23 / 1.6021766208e-19 * tnomk;
         vte   = n * vt;                    // diotemp.c:39, OPERATING temp
 
         // diosetup.c: EG's default depends on TLEV, so it needs the
@@ -108,12 +108,12 @@ module diode(a, c);
         // REFTEMP, which is why pbfact(Tnom) == pbfact1 exactly.
         fact1 = tnomk / 300.15;
         fact2 = tk    / 300.15;
-        arg1  = -egfet1 / (2.0 * 1.380649e-23 * tnomk)
-              +  1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        argt  = -egfet  / (2.0 * 1.380649e-23 * tk)
-              +  1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.602176634e-19 * arg1);
-        pbfact  = -2.0 * vt    * (1.5 * ln(fact2) + 1.602176634e-19 * argt);
+        arg1  = -egfet1 / (2.0 * 1.38064852e-23 * tnomk)
+              +  1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        argt  = -egfet  / (2.0 * 1.38064852e-23 * tk)
+              +  1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.6021766208e-19 * arg1);
+        pbfact  = -2.0 * vt    * (1.5 * ln(fact2) + 1.6021766208e-19 * argt);
 
         // diotemp.c: VJ(T), CJO(T). The C's divide-by-Tnom-bracket,
         // multiply-by-T-bracket written as one ratio (1 at T == Tnom).
@@ -220,7 +220,7 @@ module diode(a, c);
         // for a junction (4q*Id vs 2q*Id), because VerA tags every
         // white_noise `.thermal`. Fix via the contract's `noisePsd` hook; all
         // shot-noise models in the tree share this ceiling.
-        I(ai, c) <+ white_noise(2.0 * 1.602176634e-19 * abs(ihi), "id");
+        I(ai, c) <+ white_noise(2.0 * 1.6021766208e-19 * abs(ihi), "id");
 
         // One junction charge, depletion plus diffusion, in one ddt site:
         // ngspice truncates it as the single state DIOcapCharge (diotrunc.c).
@@ -253,7 +253,7 @@ module diode(a, c);
         // contributes nothing, as in ngspice.
         if (rs > 0.0) begin
             I(rsb) <+ V(rsb) / rs_t;
-            I(rsb) <+ white_noise(4.0 * 1.380649e-23 * tk / rs_t, "rs");
+            I(rsb) <+ white_noise(4.0 * 1.38064852e-23 * tk / rs_t, "rs");
         end else V(rsb) <+ 0.0;
     end
 endmodule

@@ -78,7 +78,8 @@ Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)
 // For now, set NOISE to 0 to disable noise.
 `define NOISE 1
 //`define NOISE_DERIVATIVES 1
-`define KboQ `P_K / `P_Q
+`define KboQ 8.617087e-5
+`define Charge_q 1.60219e-19
 `define NMOS 1
 `define PMOS -1
 `define DEXP(A,B)                                                        \
@@ -223,7 +224,7 @@ Attribution-NonCommercial 4.0 International (CC-BY-NC 4.0)
 /* function to compute poly depletion effect */
 `define BSIM4polyDepletion(phi, ngate, epsgate,coxe, Vgs, Vgs_eff, dVgs_eff_dVg)   \
     if ((ngate > 1.0e18) && (ngate < 1.0e25) && (Vgs > phi) && (epsgate!=0)) begin \
-        T9 = 1.0e6 * `P_Q * epsgate * ngate / (coxe * coxe); \
+        T9 = 1.0e6 * 1.6021766208e-19 * epsgate * ngate / (coxe * coxe); \
         T8 = Vgs - phi;   \
         T4 = sqrt(1.0 + 2.0 * T8 / T9);  \
         T2 = 2.0 * T8 / (T4 + 1.0);  \
@@ -3121,7 +3122,7 @@ module bsim4va(d, g, s, b);
 
 
             if (!$param_given(cf))
-                BSIM4cf = 2.0 * BSIM4epsrox * `P_EPS0 / `M_PI
+                BSIM4cf = 2.0 * BSIM4epsrox * `EPS0 / `M_PI
                * ln(1.0 + 0.4e-6 / BSIM4toxe);
 
             if (!$param_given(cjd))
@@ -4601,7 +4602,7 @@ module bsim4va(d, g, s, b);
             BSIM4sqrtPhi = sqrt(BSIM4phi);
             BSIM4phis3 = BSIM4sqrtPhi * BSIM4phi;
 
-            BSIM4Xdep0 = sqrt(2.0 * epssubl / (`P_Q * BSIM4ndep * 1.0e6))
+            BSIM4Xdep0 = sqrt(2.0 * epssubl / (`Charge_q * BSIM4ndep * 1.0e6))
                       * BSIM4sqrtPhi;
             BSIM4sqrtXdep0 = sqrt(BSIM4Xdep0);
 
@@ -4629,7 +4630,7 @@ module bsim4va(d, g, s, b);
                 BSIM4vfbsd = BSIM4phig - T2;
             end
 
-            BSIM4cdep0 = sqrt(`P_Q * epssubl * BSIM4ndep * 1.0e6 / 2.0 / BSIM4phi);
+            BSIM4cdep0 = sqrt(`Charge_q * epssubl * BSIM4ndep * 1.0e6 / 2.0 / BSIM4phi);
 
             BSIM4ToxRatio = exp(BSIM4ntox * ln(BSIM4toxref / toxel))
                             / toxel / toxel;
@@ -4651,7 +4652,7 @@ module bsim4va(d, g, s, b);
             BSIM4mstarcv = 0.5 + atan(BSIM4minvcv) / `M_PI;
             BSIM4voffcbn = BSIM4voff + BSIM4voffl / BSIM4leff;
             BSIM4voffcbncv =  BSIM4voffcv + BSIM4voffcvl / BSIM4leff;
-            BSIM4ldeb = sqrt( epssubl * Vtm0 / (`P_Q * BSIM4ndep * 1.0e6)) / 3.0;
+            BSIM4ldeb = sqrt( epssubl * Vtm0 / (`Charge_q * BSIM4ndep * 1.0e6)) / 3.0;
             BSIM4acde = BSIM4acde * (  pow((BSIM4ndep / 2.0e16), -0.25));
             if (verbose ==1) begin
                 $strobe("BSIM4AechvbEdgeS,D=%g,%g\n",BSIM4AechvbEdgeS, BSIM4AechvbEdgeD);
@@ -5416,7 +5417,7 @@ module bsim4va(d, g, s, b);
                 if ((BSIM4ngate > 1.0e18) && (BSIM4ngate < 1.0e25)
                     && (vddeotl > tmp2) && (T0!=0))
                 begin
-                    T1 = 1.0e6 * `P_Q * T0 * BSIM4ngate /
+                    T1 = 1.0e6 * 1.6021766208e-19 * T0 * BSIM4ngate /
                     (BSIM4coxe * BSIM4coxe);
                     T8 = vddeotl - tmp2;
                     T4 = sqrt(1.0 + 2.0 * T8 / T1);
@@ -6712,7 +6713,7 @@ module bsim4va(d, g, s, b);
 
         /* Calculate n */
         tmp1 = `EPSSI / Xdep;
-        BSIM4nstar = BSIM4vtm / `P_Q * (BSIM4coxe + tmp1 + BSIM4cit);
+        BSIM4nstar = BSIM4vtm / `Charge_q * (BSIM4coxe + tmp1 + BSIM4cit);
         tmp2 = BSIM4nfactor * tmp1;
         tmp3 = BSIM4cdsc + BSIM4cdscb * Vbseff + BSIM4cdscd * Vds;
         tmp4 = (tmp2 + tmp3 * Theta0 + BSIM4cit) / BSIM4coxe;
@@ -9630,20 +9631,20 @@ module bsim4va(d, g, s, b);
                 gdpr = gdpr / (1.0 + npart_theta * npart_theta * gdpr / IdovVds);
         end
 
-        I(br_i_d_di) <+ white_noise(4 * `P_K * T * gdpr, "Rd");
-        I(br_i_s_si) <+ white_noise(4 * `P_K * T * gspr, "Rs");
+        I(br_i_d_di) <+ white_noise(4 * 1.38064852e-23 * T * gdpr, "Rd");
+        I(br_i_s_si) <+ white_noise(4 * 1.38064852e-23 * T * gspr, "Rs");
 
         if ((BSIM4rgateMod == 1) || (BSIM4rgateMod == 2))
-            I(gi, g) <+ white_noise(4 * `P_K * T * BSIM4grgeltd, "Rg");
+            I(gi, g) <+ white_noise(4 * 1.38064852e-23 * T * BSIM4grgeltd, "Rg");
         else if (BSIM4rgateMod == 3)
-            I(gm, g) <+ white_noise(4 * `P_K * T * BSIM4grgeltd, "Rg");
+            I(gm, g) <+ white_noise(4 * 1.38064852e-23 * T * BSIM4grgeltd, "Rg");
 
         if (BSIM4rbodyMod) begin
-            I(bi, sbulk) <+ white_noise(4 * `P_K * T / BSIM4rbps, "Rbulk");
-            I(bi, dbulk) <+ white_noise(4 * `P_K * T / BSIM4rbpd, "Rbulk");
-            I(bi, b)     <+ white_noise(4 * `P_K * T / BSIM4rbpb, "Rbulk");
-            I(b, sbulk)  <+ white_noise(4 * `P_K * T / BSIM4rbsb, "Rbulk");
-            I(b, dbulk)  <+ white_noise(4 * `P_K * T / BSIM4rbdb, "Rbulk");
+            I(bi, sbulk) <+ white_noise(4 * 1.38064852e-23 * T / BSIM4rbps, "Rbulk");
+            I(bi, dbulk) <+ white_noise(4 * 1.38064852e-23 * T / BSIM4rbpd, "Rbulk");
+            I(bi, b)     <+ white_noise(4 * 1.38064852e-23 * T / BSIM4rbpb, "Rbulk");
+            I(b, sbulk)  <+ white_noise(4 * 1.38064852e-23 * T / BSIM4rbsb, "Rbulk");
+            I(b, dbulk)  <+ white_noise(4 * 1.38064852e-23 * T / BSIM4rbdb, "Rbulk");
         end
 
         case (BSIM4tnoiMod)
@@ -9662,18 +9663,18 @@ module bsim4va(d, g, s, b);
             end
         endcase
 
-        I(di,si) <+ white_noise(4 * `P_K * T * thermalNoiseContrib,
+        I(di,si) <+ white_noise(4 * 1.38064852e-23 * T * thermalNoiseContrib,
         "thermal");
 
         if (BSIM4mode >= 0) begin
-            I(gi,si) <+ white_noise(2 * `P_Q * abs(Igs + Igcs), "shot");
-            I(gi,di) <+ white_noise(2 * `P_Q * abs(Igd + Igcd), "shot");
+            I(gi,si) <+ white_noise(2 * 1.6021766208e-19 * abs(Igs + Igcs), "shot");
+            I(gi,di) <+ white_noise(2 * 1.6021766208e-19 * abs(Igd + Igcd), "shot");
         end
         else begin
-            I(gi,si) <+ white_noise(2 * `P_Q * abs(Igs + Igcs), "shot");
-            I(gi,di) <+ white_noise(2 * `P_Q * abs(Igd + Igcd), "shot");
+            I(gi,si) <+ white_noise(2 * 1.6021766208e-19 * abs(Igs + Igcs), "shot");
+            I(gi,di) <+ white_noise(2 * 1.6021766208e-19 * abs(Igd + Igcd), "shot");
         end
-        I(gi,bi) <+ white_noise(2 * `P_Q * abs(Igb), "shot");
+        I(gi,bi) <+ white_noise(2 * 1.6021766208e-19 * abs(Igb), "shot");
 
         case (BSIM4fnoiMod)
             0: begin
@@ -9690,23 +9691,23 @@ module bsim4va(d, g, s, b);
                     T0 = ((((Vds - here_Vdseff) / BSIM4litl) + BSIM4em) / esat);
                     DelClm = BSIM4litl * ln(max(T0, `N_MINLOG));
                 end
-                T1 = `P_Q * `P_Q * `P_K * abs(cdrain) * T * ueff;
+                T1 = 1.6021766208e-19 * 1.6021766208e-19 * 1.38064852e-23 * abs(cdrain) * T * ueff;
                 T2 = 1.0e10 * here_Abulk * BSIM4coxe * Leff * Leff;
-                N0 = BSIM4coxe * here_Vgsteff / `P_Q;
+                N0 = BSIM4coxe * here_Vgsteff / 1.6021766208e-19;
                 Nl = BSIM4coxe * here_Vgsteff *
-                (1.0 - AbovVgst2Vtm * here_Vdseff) / `P_Q;
+                (1.0 - AbovVgst2Vtm * here_Vdseff) / 1.6021766208e-19;
                 T3 = BSIM4oxideTrapDensityA * ln(max(((N0 + BSIM4nstar) /
                 (Nl + BSIM4nstar)), `N_MINLOG));
                 T4 = BSIM4oxideTrapDensityB * (N0 - Nl);
                 T5 = BSIM4oxideTrapDensityC * 0.5 * (N0 * N0 - Nl * Nl);
-                T6 = `P_K * T * cdrain * cdrain;
+                T6 = 1.38064852e-23 * T * cdrain * cdrain;
                 T7 = 1.0e10 * Leff * Leff * Weff;
                 T8 = BSIM4oxideTrapDensityA + BSIM4oxideTrapDensityB * Nl +
                 BSIM4oxideTrapDensityC * Nl * Nl;
                 T9 = (Nl + BSIM4nstar) * (Nl + BSIM4nstar);
                 Ssi = T1 / T2 * (T3 + T4 + T5) + T6 / T7 * DelClm * T8 / T9;
 
-                T10 = BSIM4oxideTrapDensityA * `P_K * T;
+                T10 = BSIM4oxideTrapDensityA * 1.38064852e-23 * T;
                 T11 = Weff * Leff * 1.0e10 * BSIM4nstar * BSIM4nstar;
                 Swi = T10 / T11 * cdrain * cdrain;
                 T1 = Swi + Ssi;

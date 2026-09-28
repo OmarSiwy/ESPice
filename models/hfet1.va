@@ -51,7 +51,7 @@ module hfet1(d, g, s);
     parameter real vs      = 1.5e5  from (0:inf); // saturation velocity [m/s]
     parameter real di      = 4e-8   from (0:inf); // barrier thickness [m]
     parameter real deltad  = 4.5e-9 from [0:inf); // 2DEG centroid offset [m]
-    parameter real epsi    = 1.08411e-10;         // barrier permittivity [F/m]
+    parameter real epsi    = 12.244 * 8.85418e-12;         // barrier permittivity [F/m]
     parameter real nmax    = 2e16   from (0:inf); // max sheet density [1/m^2]
     parameter real eta     = 1.28   from (0:inf); // subthreshold ideality (PHFET 1.4)
     parameter real delta   = 3.0;                 // subthreshold smoothing (unitless)
@@ -94,7 +94,7 @@ module hfet1(d, g, s);
 
     // --- gate leakage, gatemod = 1 (thermionic + self-heating) ---
     parameter real astar  = 4.0e4 from [0:inf);   // Richardson constant [A/m^2K^2]
-    parameter real phib   = 8.010959e-20;         // barrier height [J] (0.5*q)
+    parameter real phib   = 0.5 * 1.6021766208e-19;         // barrier height [J] (0.5*q)
     parameter real talpha = 1200.0;               // self-heating coefficient [K/V^2]
     parameter real mt1    = 3.5   from (0:inf);
     parameter real mt2    = 9.9   from (0:inf);
@@ -208,23 +208,23 @@ module hfet1(d, g, s);
         if (temp > 0.0) tempk = temp;
         else            tempk = $temperature + dtemp;
         dtn = tempk - tnom;                       // reference is tnom, NOT tf
-        vth = 1.380649e-23 * tempk / 1.602176634e-19;
+        vth = 1.38064852e-23 / 1.6021766208e-19 * tempk;
 
         mu_t     = mu     - kmu     * dtn;        // hfettemp.c:72, minus sign
         lambda_t = lambda + klambda * dtn;        // hfettemp.c:71, plus sign
         vto_t    = type * vto - kvto * dtn;       // :52 (threshold *= type), :73
         if (vt2 > -9e29) vt2_i = vt2; else vt2_i = type * vto;
         if (vt1 > -9e29) vt1_i = vt1;
-        else vt1_i = type * vto + 1.602176634e-19 * nmax * di / epsi;
+        else vt1_i = type * vto + 1.6021766208e-19 * nmax * di / epsi;
 
         etavth = eta * vth;
-        n0     = epsi * eta * vth / (2.0 * 1.602176634e-19 * (di + deltad));
+        n0     = epsi * eta * vth / (2.0 * 1.6021766208e-19 * (di + deltad));
         if (eta2 > 0.0 && d2 > 0.0)
-            n02 = epsi * eta2 * vth / (2.0 * 1.602176634e-19 * d2);
+            n02 = epsi * eta2 * vth / (2.0 * 1.6021766208e-19 * d2);
         else
             n02 = 0.0;
-        gchi0 = 1.602176634e-19 * w * mu_t / l;   // hfettemp.c:80 — no factor 2
-        imax  = 1.602176634e-19 * nmax * vs * w;
+        gchi0 = 1.6021766208e-19 * w * mu_t / l;   // hfettemp.c:80 — no factor 2
+        imax  = 1.6021766208e-19 * nmax * vs * w;
         vl    = (vs / mu_t) * l;
         cf    = 0.5 * epsi * w;
         wl    = w * l;
@@ -256,7 +256,7 @@ module hfet1(d, g, s);
         ggrwl  = ggr   * area_half;
         iso    = astar * area_half;
         csat_th = iso * tempk * tempk
-                * exp(-phib / (1.380649e-23 * tempk));
+                * exp(-phib / (1.38064852e-23 * tempk));
 
         // ==== §3 bias ====================================================
         // §1.5 limiting: fetlim on both gate branches (hfetload.c:268). The
@@ -344,7 +344,7 @@ module hfet1(d, g, s);
             delnsnsm = ns / nsm * (1.0 - cc / (1.0 + cc));
             cg1 = 1.0 / (d1 / epsi + eta1 * vth
                        * exp(min(-(vx - vt1_i) / (eta1 * vth), 80.0)));
-            cgc = wl * (1.602176634e-19 * delnsnsm * delnsmvgt * delvgtvgs + cg1);
+            cgc = wl * (1.6021766208e-19 * delnsnsm * delnsmvgt * delvgtvgs + cg1);
 
             vdse = vdsx * pow(1.0 + pow(ratio, mc), -1.0 / mc);
             pfac = p + (1.0 - p) * exp(-vdsx / vsate);
@@ -387,8 +387,8 @@ module hfet1(d, g, s);
             cc     = pow(max(vdse / vkneet, 1.0e-30), mt1);
             dd     = pow(1.0 + cc, 1.0 / mt1);
             td     = tempk + talpha * vdse * vdse / dd;
-            vte_td = 1.380649e-23 * td / 1.602176634e-19 * m2d;
-            hh2    = iso * td * td * exp(-phib / (1.380649e-23 * td))
+            vte_td = 1.38064852e-23 / 1.6021766208e-19 * td * m2d;
+            hh2    = iso * td * td * exp(-phib / (1.38064852e-23 * td))
                    * exp(min((vx - vdse) / vte_td, 80.0));
             igd    = hh2 - csat_th;
 

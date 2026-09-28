@@ -142,8 +142,8 @@ module vdmos(d, g, s);
         tnomk = tnom + 273.15;
         ratio = tk / tnomk;
         dt = tk - tnomk;
-        vt = 1.380649e-23 * tk / 1.602176634e-19;
-        vtnom = 1.380649e-23 * tnomk / 1.602176634e-19;
+        vt = 1.38064852e-23 / 1.6021766208e-19 * tk;
+        vtnom = 1.38064852e-23 / 1.6021766208e-19 * tnomk;
 
         // Threshold, mapped through ty: an ngspice vdmosp card carries a
         // negative Vto and the whole channel is evaluated in the ty frame, so
@@ -175,12 +175,12 @@ module vdmos(d, g, s);
         egfet  = 1.16 - (7.02e-4 * tk * tk) / (tk + 1108.0);
         fact1 = tnomk / 300.15;
         fact2 = tk / 300.15;
-        arg1 = -egfet1 / (2.0 * 1.380649e-23 * tnomk)
-             + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        argt = -egfet / (2.0 * 1.380649e-23 * tk)
-             + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.602176634e-19 * arg1);
-        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + 1.602176634e-19 * argt);
+        arg1 = -egfet1 / (2.0 * 1.38064852e-23 * tnomk)
+             + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        argt = -egfet / (2.0 * 1.38064852e-23 * tk)
+             + 1.1150877 / (2.0 * 1.38064852e-23 * 300.15);
+        pbfact1 = -2.0 * vtnom * (1.5 * ln(fact1) + 1.6021766208e-19 * arg1);
+        pbfact  = -2.0 * vt * (1.5 * ln(fact2) + 1.6021766208e-19 * argt);
         pbo = (vj - pbfact1) / fact1;
         vj_t = fact2 * pbo + pbfact;
         gmaold = (vj - pbo) / pbo;

@@ -167,7 +167,7 @@ module bsim1(d, g, s, b);
 
         // ============ temperature scaling =================================
         // BSIM1 has no temperature model beyond Vt at the instance TEMP (K).
-        vt = 8.617333262145e-5 * temp;
+        vt = 1.38064852e-23 * temp / 1.6021766208e-19; // CONSTvt0 at the default 300.15 K
 
         // ============ geometry, junction sizing ===========================
         asource = wdf > 0.0 ? wdf * dell : wm * 1e-6;
@@ -349,20 +349,20 @@ module bsim1(d, g, s, b);
         // RSH*NR is zero.
         if (gdrain > 0.0) begin
             I(d, di) <+ gdrain * V(d, di)
-                      + white_noise(4.0 * 1.380649e-23 * temp * gdrain, "rd");
+                      + white_noise(4.0 * 1.38064852e-23 * temp * gdrain, "rd");
         end else begin
             V(d, di) <+ 0.0;
         end
         if (gsource > 0.0) begin
             I(s, si) <+ gsource * V(s, si)
-                      + white_noise(4.0 * 1.380649e-23 * temp * gsource, "rs");
+                      + white_noise(4.0 * 1.38064852e-23 * temp * gsource, "rs");
         end else begin
             V(s, si) <+ 0.0;
         end
 
         // ============ noise (mos1noi.c form) ==============================
         // Cox'^2 in the flicker denominator.
-        I(di, si) <+ white_noise(4.0 * 1.380649e-23 * temp * (2.0 / 3.0) * abs(gmnoi),
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * temp * (2.0 / 3.0) * abs(gmnoi),
                                  "channel");
         if (kf > 0.0) begin
             I(di, si) <+ flicker_noise(kf * pow(abs(id), af)
