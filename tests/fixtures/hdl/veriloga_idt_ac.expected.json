@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "analysis": [
+    "op",
+    "ac"
+  ],
+  "purpose": "A host-integrated idt with ic holds ic at the operating point and integrates in AC.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "VAMS-2023 4.5.4: idt returns ic in DC (V(out)=0.5) and is 1/(jw) in a small-signal analysis, so V(out)=-j/(2*pi*f) for a 1 V AC drive. LRM Table 4-22 runs AC as analysis(\"ac\")."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.5
+            ],
+            "unit": "V",
+            "rtol": 0,
+            "atol": 1e-09
+          }
+        }
+      },
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "row_count": 4,
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-15,
+            "values": [
+              [
+                0.0,
+                -0.15915494309189535
+              ],
+              [
+                0.0,
+                -0.015915494309189534
+              ],
+              [
+                0.0,
+                -0.0015915494309189533
+              ],
+              [
+                0.0,
+                -0.00015915494309189535
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1.0,
+            10.0,
+            100.0,
+            1000.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "e4d6df9af821a9177aaa3199e9615be482296a6d914be0edc4794e5b472c06c0"
+}

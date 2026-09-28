@@ -20,6 +20,8 @@ pub const freeze = circuit_mod.init;
 pub const CardRef = @import("core").query.CardRef;
 pub const ParamRef = device_ir.ParamRef;
 pub const NoiseSource = device_ir.NoiseSource;
+/// §4.6.1 `analysis()`: the analysis a `Circuit.setSimState` publishes.
+pub const AnalysisKind = @FieldType(device_ir.SimState, "kind");
 pub const Result = @import("core").Result;
 
 /// Everything an analysis needs, resolved before dispatch.

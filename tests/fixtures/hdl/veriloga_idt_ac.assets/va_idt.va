@@ -1,0 +1,8 @@
+`include "disciplines.vams"
+// VAMS-2023 4.5.4: idt with an initial condition. The operating point is ic;
+// the small-signal analysis sees the integral, V(out)/V(in) = 1/(jw).
+module va_idt(in, out);
+    inout in, out;
+    electrical in, out;
+    analog V(out) <+ idt(V(in), 0.5);
+endmodule

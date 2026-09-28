@@ -70,7 +70,7 @@ pub fn sweep(
         .newton_tol = options.pss_newton_tol,
     }, allocator);
     defer allocator.free(orb.wave);
-    const lin = try pac.linearize(ckt, orb, allocator);
+    const lin = try pac.linearize(ckt, orb, .noise, allocator);
     defer lin.deinit(allocator);
 
     // Source amplitudes along the orbit, source-major time series (white

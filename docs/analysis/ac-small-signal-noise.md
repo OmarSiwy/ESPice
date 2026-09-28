@@ -24,6 +24,21 @@ Excitation placement: driving a vsource means setting the RHS of its
 $\text{rhs}[\text{branch}] = V_{ac} e^{j\phi}$); stamping the clamped node
 row instead yields identically zero response.
 
+Analysis state: the linearizing eval runs at dt = 0 with `analysis("ac")`
+true (`analysis("noise")` for noise, and PNOISE's orbit samples), following
+LRM Table 4-22. ac, sp, stb, pz and disto count as "ac", and PAC and PXF
+linearize their orbit the same way. That is what turns a host-integrated
+`idt` from its DC form (ic) into 1/(jω); `hdl/veriloga_idt_ac` checks it.
+ngspice's OSDI load sets ANALYSIS_AC together with ANALYSIS_DC and
+ANALYSIS_STATIC during this load (osdiload.c:149,165), while the LRM and
+VerA's single `SimState.kind` make `analysis("static")` false here. Models
+that branch on "static" therefore take their non-static path in AC: the
+mos1/2/3/6/9 Meyer caps (`chgs + $prev(chgs)`, equal to `2*chgs` at the
+operating point) and tline's `absdelay` branch. Measured, no corpus deck's
+output changed. A 50 Ω, 1 ns line differs from the old static branch by
+1e-13 relative. Both miss ngspice's e^{-jωτ} phase, which the VA tline has
+never had in AC.
+
 ### Stacked-real formulation
 
 The engine solves the $2n$ real equivalent

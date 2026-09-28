@@ -134,10 +134,11 @@ pub fn orbit(ckt: *root.Circuit, x_init: []const f64, options: pss.Options, allo
     return .{ .wave = wave, .converged = res.converged };
 }
 
-/// Samples G and C along `orb` and Fourier-transforms each pattern slot.
+/// Samples G and C along `orb` under the small-signal analysis `kind`
+/// (`.ac` or `.noise`) and Fourier-transforms each pattern slot.
 /// The orbit's sample count must be a power of two. The caller owns the
 /// result.
-pub fn linearize(ckt: *root.Circuit, orb: Orbit, allocator: std.mem.Allocator) !Linearization {
+pub fn linearize(ckt: *root.Circuit, orb: Orbit, kind: root.AnalysisKind, allocator: std.mem.Allocator) !Linearization {
     const n: usize = ckt.n;
     const n_samples = orb.samples(n);
     const nnz: usize = ckt.nnz;
@@ -149,8 +150,9 @@ pub fn linearize(ckt: *root.Circuit, orb: Orbit, allocator: std.mem.Allocator) !
     for (0..n_samples) |k| {
         if (k != 0 and k % 64 == 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = k, .total = n_samples });
         const t = orb.wave[k * (n + 1)];
-        // Sources follow their waveform only under analysis("tran") (§4.6.1).
-        ckt.setSimState(.{ .t = t, .kind = .tran });
+        // A small-signal kind is not "static" (§4.6.1), so sources follow
+        // their waveform at t, and an idt linearizes to its 1/(jw) row.
+        ckt.setSimState(.{ .t = t, .kind = kind });
         ckt.eval(orb.state(k, n), t);
         for (ckt.g_vals[0..nnz], ckt.c_vals[0..nnz], 0..) |g, c, slot| {
             td[slot * n_samples + k] = g;
@@ -202,7 +204,7 @@ pub fn settle(ckt: *root.Circuit, x_init: []const f64, options: Options, allocat
         .newton_tol = options.pss_newton_tol,
     }, allocator);
     defer allocator.free(orb.wave);
-    return linearize(ckt, orb, allocator);
+    return linearize(ckt, orb, .ac, allocator);
 }
 
 /// Adds the real-expanded LPTV matrix into the zeroed `a_work`
