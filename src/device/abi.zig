@@ -106,6 +106,12 @@ pub const Batch = struct {
     /// The device type's name without its namespace.
     type_name: []const u8,
     hooks: *const Hooks,
+    /// The type runs a digital engine (a Verilog `.v` module) whose time
+    /// only moves forward, so analyses that rewind time refuse it
+    /// (`Circuit.refuseDigital`).
+    // ponytail: nothing sets it while the loader rejects `.v`; the loader
+    // sets it from the source extension when it accepts one.
+    digital: bool = false,
 };
 
 /// Callback status that is safe across separately compiled objects, unlike
@@ -414,7 +420,7 @@ pub const GpuPayload = struct {
 //    GPU kernel by value; `Hooks.begin_solve` is gone and `set_sim_state` is
 //    required.
 // 15: `Hooks.collect_ac_dyn`/`ac_dyn`, VerA's frequency-dependent entries.
-// 16: `Hooks.copy_state`.
+// 16: `Hooks.copy_state`, `Batch.digital`.
 // GPU planes, Model/Instance PODs and scatter tapes are unchanged by 10 to 16.
 pub const abi_version: u32 = 16;
 

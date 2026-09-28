@@ -414,6 +414,7 @@ fn extractSpectra(x_hat: []const f64, probes: []const u32, spectra: []f64, nf: u
 /// (frequency = k*f0, probes...) for k = 0 .. n_harmonics; the DC row keeps
 /// its sign. Non-convergence is error.HbDidNotConverge.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+    try ctx.circuit.refuseDigital("hb");
     const a = ctx.allocator;
     const nf: usize = 2 * @as(usize, opts.n_harmonics) + 1;
 

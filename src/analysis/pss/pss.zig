@@ -407,6 +407,7 @@ pub fn solve(
 /// rows (time, probes...), n_samples+1 of them. Non-convergence prints a
 /// warning and still returns the last period.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+    try ctx.circuit.refuseDigital("pss");
     const a = ctx.allocator;
     const x_op = ctx.x_op;
 

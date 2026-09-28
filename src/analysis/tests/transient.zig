@@ -679,6 +679,15 @@ const TranTests = struct {
         ckt.eval(&x, 0);
         try testing.expectEqual(@as(f64, 6), ckt.g_vals[ckt.diag_slots[1]]);
     }
+
+    test "circuit: analyses that rewind time refuse a digital device type" {
+        const gpa = testing.allocator;
+        var ckt = try oneDevice(Latch, gpa);
+        defer ckt.deinit();
+        try ckt.refuseDigital("pss");
+        ckt.batches[0].digital = true;
+        try testing.expectError(error.DigitalDeviceUnsupported, ckt.refuseDigital("pss"));
+    }
 };
 
 const TranNoiseTests = struct {
