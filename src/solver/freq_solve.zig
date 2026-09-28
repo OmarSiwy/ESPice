@@ -14,6 +14,22 @@ const Allocator = std.mem.Allocator;
 // of its run in dense 82^3/3 factors per omega; the sparse refactor is O(nnz).
 const DENSE_THRESHOLD: u32 = 16;
 
+/// The part of A(ω) beyond G + jωC over the ω of one `solveBatch` call:
+/// entry e adds re + j·im at source CSC slot `slots[e]`, its term at
+/// `omegas[k]` being `re[e * omegas.len + k]` and `im[...]`. A slot at or past
+/// the pattern's nnz (a ground entry) adds nothing. The default is empty.
+pub const Dyn = struct {
+    slots: []const u32 = &.{},
+    re: []const f64 = &.{},
+    im: []const f64 = &.{},
+
+    /// Entry e's term at ω index k.
+    fn at(self: Dyn, e: usize, k: usize) struct { re: f64, im: f64 } {
+        const i = e * (self.re.len / self.slots.len) + k;
+        return .{ .re = self.re[i], .im = self.im[i] };
+    }
+};
+
 /// Frequency-domain solver. Solution and right-hand side
 /// vectors are length 2n: real parts, then imaginary parts.
 pub const FreqSolver = struct {
@@ -30,8 +46,11 @@ pub const FreqSolver = struct {
     };
 
     /// n <= DENSE_THRESHOLD: owned n x n row-major G and C, assembled per
-    /// frequency into the reused 2n x 2n LU slab.
+    /// frequency into the reused 2n x 2n LU slab. The borrowed source
+    /// pattern places `Dyn` entries; empty from `initDense`.
     const Dense = struct {
+        src_col_ptr: []const u32 = &.{},
+        src_row_idx: []const u32 = &.{},
         g_dense: []f64,
         c_mat: []f64,
         a_lu: []f64,
@@ -71,7 +90,10 @@ pub const FreqSolver = struct {
                 return err;
             };
             ckt.denseC(c);
-            return initDense(allocator, n, g, c);
+            var fs = try initDense(allocator, n, g, c);
+            fs.strategy.dense.src_col_ptr = ckt.col_ptr;
+            fs.strategy.dense.src_row_idx = ckt.row_idx;
+            return fs;
         }
 
         return initSparse(allocator, n, ckt);
@@ -166,9 +188,14 @@ pub const FreqSolver = struct {
     /// Assembles and factors G + jωC. Right-hand sides at this ω then
     /// need only `solveRhs`/`solveRhsT`.
     pub fn setOmega(self: *Self, omega: f64) !void {
+        try self.setOmegaDyn(omega, .{}, 0);
+    }
+
+    /// `setOmega` plus `dyn`'s terms at ω index `k`.
+    fn setOmegaDyn(self: *Self, omega: f64, dyn: Dyn, k: usize) !void {
         switch (self.strategy) {
-            .dense => |*d| try setOmegaDense(self.n, self.nn, d, omega),
-            .sp => |*s| try setOmegaSparse(self.n, s, omega),
+            .dense => |*d| try setOmegaDense(self.n, self.nn, d, omega, dyn, k),
+            .sp => |*s| try setOmegaSparse(self.n, s, omega, dyn, k),
         }
     }
 
@@ -205,21 +232,23 @@ pub const FreqSolver = struct {
     }
 
     /// Solves every ω in `omegas` against each right-hand side in `rhs`
-    /// (nr stacked 2n vectors), W frequencies per LaneLu pass;
+    /// (nr stacked 2n vectors), with `dyn`'s terms added to each A(ω), W
+    /// frequencies per LaneLu pass;
     /// `x_out[(k*nr + r)*2n..][0..2n]` receives ω_k for rhs r, so one
     /// factorization serves every rhs. `adjoint` selects A^T. The dense
     /// strategy, a non-LU engine and any lane whose refactor fails take the
     /// per-ω scalar path. The scalar factorization afterwards holds some ω
     /// of the batch.
-    pub fn solveBatch(self: *Self, omegas: []const f64, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
+    pub fn solveBatch(self: *Self, omegas: []const f64, dyn: Dyn, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
         const m = rhs.len;
         std.debug.assert(m > 0 and m % nn == 0);
         std.debug.assert(x_out.len == omegas.len * m);
         if (omegas.len == 0) return;
+        std.debug.assert(dyn.re.len == dyn.slots.len * omegas.len and dyn.im.len == dyn.re.len);
         const sp: *Sparse = switch (self.strategy) {
             .sp => |*s| s,
-            .dense => return self.solveBatchSerial(omegas, rhs, x_out, adjoint),
+            .dense => return self.solveBatchSerial(omegas, dyn, 0, omegas.len, rhs, x_out, adjoint),
         };
 
         const gpa = sp.slv.gpa;
@@ -243,13 +272,13 @@ pub const FreqSolver = struct {
             // chunk, or one after a failed factor, pays a scalar factor.
             // A lane whose pivots decay fails the scalar growth monitor,
             // and its serial full factor repivots for the next chunk.
-            if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2]) catch {
-                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * m ..][0 .. cnt * m], adjoint);
+            if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2], dyn, base + cnt / 2) catch {
+                try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
                 continue;
             };
             // LaneLu replays SparseLu only, not the tridiagonal engine.
             const lu = if (sp.slv.lu) |*l| l else {
-                try self.solveBatchSerial(omegas[base .. base + cnt], rhs, x_out[base * m ..][0 .. cnt * m], adjoint);
+                try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
                 continue;
             };
 
@@ -264,6 +293,7 @@ pub const FreqSolver = struct {
             sp.lanes.?.base = lu;
 
             fillLanePlane(self.n, sp, omega_vec, vplane);
+            addDynLanes(sp.src_col_ptr, dyn, base, cnt, vplane);
             const growth = sp.slv.params.refactor_growth_limit;
             const bad = sp.lanes.?.refactor(sp.col_ptr, vplane, growth);
 
@@ -283,18 +313,25 @@ pub const FreqSolver = struct {
             // After every lane solve: a failed lane's full factor may
             // repivot the tape the lanes replay.
             for (0..cnt) |l| if ((bad & (@as(u64, 1) << @intCast(l))) != 0)
-                try self.solveBatchSerial(omegas[base + l ..][0..1], rhs, x_out[(base + l) * m ..][0..m], adjoint);
+                try self.solveBatchSerial(omegas, dyn, base + l, 1, rhs, x_out, adjoint);
         }
     }
 
-    pub const test_access = if (@import("builtin").is_test) .{ .solveBatchSerial = solveBatchSerial } else {};
+    pub const test_access = if (@import("builtin").is_test) .{
+        .W = W,
+        .solveBatchSerial = solveBatchSerial,
+        .setOmegaSparse = setOmegaSparse,
+        .fillLanePlane = fillLanePlane,
+        .addDynLanes = addDynLanes,
+    } else {};
 
-    /// The lane path's oracle: `setOmega` and a solve per ω.
-    fn solveBatchSerial(self: *Self, omegas: []const f64, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
+    /// The lane path's oracle: `setOmega` with `dyn` and a solve per ω, over
+    /// `omegas[first..][0..count]`, into the `x_out` rows `solveBatch` uses.
+    fn solveBatchSerial(self: *Self, omegas: []const f64, dyn: Dyn, first: usize, count: usize, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
         const m = rhs.len;
-        for (omegas, 0..) |omega, k| {
-            try self.setOmega(omega);
+        for (first..first + count) |k| {
+            try self.setOmegaDyn(omegas[k], dyn, k);
             var r: usize = 0;
             while (r < m) : (r += nn) {
                 const b = rhs[r..][0..nn];
@@ -329,14 +366,44 @@ pub const FreqSolver = struct {
         }
     }
 
-    fn setOmegaDense(n: u32, nn: u32, d: *Dense, omega: f64) !void {
+    /// `setOmegaSparse`'s `dyn` adds for ω indices `base + l`, l < W, a
+    /// ragged tail (l >= cnt) repeating its last ω as `solveBatch` pads it.
+    /// Same entry order and operations, so each lane is bitwise the scalar
+    /// fill.
+    fn addDynLanes(src_col_ptr: []const u32, dyn: Dyn, base: usize, cnt: usize, out: []@Vector(W, f64)) void {
+        const nnz = src_col_ptr[src_col_ptr.len - 1];
+        for (dyn.slots, 0..) |slot, e| {
+            if (slot >= nnz) continue;
+            var re: [W]f64 = undefined;
+            var im: [W]f64 = undefined;
+            for (0..W) |l| {
+                const t = dyn.at(e, base + @min(l, cnt - 1));
+                re[l] = t.re;
+                im[l] = t.im;
+            }
+            const q = stackedPos(src_col_ptr, slot);
+            const rv: @Vector(W, f64) = re;
+            const iv: @Vector(W, f64) = im;
+            out[q[0]] += rv;
+            out[q[1]] += iv;
+            out[q[2]] -= iv;
+            out[q[3]] += rv;
+        }
+    }
+
+    fn setOmegaDense(n: u32, nn: u32, d: *Dense, omega: f64, dyn: Dyn, k: usize) !void {
         dense_lu.buildComplexAdmittance(n, nn, d.g_dense, d.c_mat, omega, d.a_lu);
+        for (dyn.slots, 0..) |slot, e| {
+            if (slot >= d.src_row_idx.len) continue;
+            const t = dyn.at(e, k);
+            addDense(n, nn, d.a_lu, d.src_row_idx[slot], slotCol(d.src_col_ptr, slot), t.re, t.im);
+        }
         try dense_lu.factorize(nn, d.a_lu, d.piv);
     }
 
     /// Fills the 2n stacked-real values, column j < n as [G | ωC] and
-    /// column n + j as [-ωC | G], then factors.
-    fn setOmegaSparse(n: u32, s: *Sparse, omega: f64) !void {
+    /// column n + j as [-ωC | G], adds `dyn` at ω index `k`, then factors.
+    fn setOmegaSparse(n: u32, s: *Sparse, omega: f64, dyn: Dyn, k: usize) !void {
         const nu: usize = n;
         const neg_omega = -omega;
         var p: usize = 0;
@@ -359,10 +426,48 @@ pub const FreqSolver = struct {
             @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
             p += lenu;
         }
+        for (dyn.slots, 0..) |slot, e| {
+            if (slot >= s.g_vals.len) continue;
+            const q = stackedPos(s.src_col_ptr, slot);
+            const t = dyn.at(e, k);
+            s.vals[q[0]] += t.re;
+            s.vals[q[1]] += t.im;
+            s.vals[q[2]] -= t.im;
+            s.vals[q[3]] += t.re;
+        }
 
         try s.slv.factor(s.vals, .{});
     }
 };
+
+/// The column of CSC slot `slot` in the pattern `col_ptr` describes.
+pub fn slotCol(col_ptr: []const u32, slot: u32) usize {
+    return std.sort.upperBound(u32, col_ptr, slot, struct {
+        fn order(key: u32, item: u32) std.math.Order {
+            return std.math.order(key, item);
+        }
+    }.order) - 1;
+}
+
+/// Source slot `slot`'s four stacked-real positions: column j's G and ωC
+/// entries, then column n + j's -ωC and G entries.
+fn stackedPos(src_col_ptr: []const u32, slot: u32) [4]usize {
+    const j = slotCol(src_col_ptr, slot);
+    const cs: usize = src_col_ptr[j];
+    const len: usize = src_col_ptr[j + 1] - cs;
+    const top = 2 * cs + (slot - cs);
+    const right = 2 * @as(usize, src_col_ptr[src_col_ptr.len - 1]) + top;
+    return .{ top, top + len, right, right + len };
+}
+
+/// Adds re + j·im at entry (row, col) of the row-major 2n x 2n stacked-real
+/// `a`, [Re -Im; Im Re], the layout `buildComplexAdmittance` writes.
+pub fn addDense(n: usize, nn: usize, a: []f64, row: usize, col: usize, re: f64, im: f64) void {
+    a[row * nn + col] += re;
+    a[(n + row) * nn + col] += im;
+    a[row * nn + n + col] -= im;
+    a[(n + row) * nn + n + col] += re;
+}
 
 /// Writes the 2n x 2n stacked-real CSC pattern: each column j and n + j gets
 /// column j's rows r followed by r + n. `sr_col_ptr` has 2n + 1 entries,

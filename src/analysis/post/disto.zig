@@ -151,6 +151,13 @@ pub fn sweep(
     defer allocator.free(x_work2);
     const x_work3 = try allocator.alloc(f64, nn);
     defer allocator.free(x_work3);
+    // Each A(kω) adds the frequency-dependent entries (`Circuit.acDyn`). The
+    // kernels are differences of G, which leaves those entries out, so a
+    // nonlinearity behind a delay or filter reaches no harmonic.
+    // ponytail: exact for the linear lines in models/; a nonlinear
+    // operator input needs acDyn's own second derivative.
+    const dyn_work = try allocator.alloc(f64, 2 * ckt.ac_dyn_slots.len);
+    defer allocator.free(dyn_work);
 
     // Third-order scratch: one more dense Jacobian and the four real cubic
     // forms of `cubicForms`. Both are small next to the (2n)^2 LU slab, so they are
@@ -179,6 +186,7 @@ pub fn sweep(
 
         // 3a. First order: (G + jwC) V1 = ½ mag · e[drive row].
         dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega, a_work);
+        ckt.addAcDynDense(x_op, omega, a_work, dyn_work);
 
         simdZero(rhs_work);
         if (options.drive_branch != root.GROUND) {
@@ -218,6 +226,7 @@ pub fn sweep(
         // 3c. Second order: (G + j·2w·C) V2 = -D2(V1,V1).
         const omega2 = 2.0 * omega;
         dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega2, a_work);
+        ckt.addAcDynDense(x_op, omega2, a_work, dyn_work);
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work2);
 
@@ -239,6 +248,7 @@ pub fn sweep(
                 rhs_work[n + row] = -(m_im + d3v[1][row] / 6.0);
             }
             dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, 3.0 * omega, a_work);
+            ckt.addAcDynDense(x_op, 3.0 * omega, a_work, dyn_work);
             try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work3);
         }
 

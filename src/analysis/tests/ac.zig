@@ -30,16 +30,18 @@ const StreamTests = struct {
             }
         };
         var probe: Probe = .{};
-        // The stream reads only the checkpoint callback from Circuit.
+        // The stream reads only the checkpoint callback and the (empty)
+        // frequency-dependent table from Circuit.
         var ckt: root.Circuit = undefined;
         ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
+        ckt.ac_dyn_slots = &.{};
         for ([_]bool{ false, true }) |adjoint| {
             const whole = try a.alloc(f64, frequencies.len * 4);
             defer a.free(whole);
-            try fs.solveBatch(&frequencies, &rhs, whole, adjoint);
+            try fs.solveBatch(&frequencies, .{}, &rhs, whole, adjoint);
 
             probe = .{};
-            var stream = try freq.Stream.init(a, &fs, &frequencies, &rhs, adjoint);
+            var stream = try freq.Stream.init(a, &fs, &ckt, &.{}, &frequencies, &rhs, adjoint);
             defer stream.deinit(a);
             var seen: usize = 0;
             while (try stream.next(&ckt)) |pt| : (seen += 1) {
@@ -51,7 +53,7 @@ const StreamTests = struct {
             try std.testing.expectEqual(@as(u16, frequencies.len), probe.completed);
 
             probe = .{ .cancel = true };
-            var cancelled = try freq.Stream.init(a, &fs, &frequencies, &rhs, adjoint);
+            var cancelled = try freq.Stream.init(a, &fs, &ckt, &.{}, &frequencies, &rhs, adjoint);
             defer cancelled.deinit(a);
             try std.testing.expectError(error.QueryCancelled, cancelled.next(&ckt));
             try std.testing.expectEqual(@as(u16, quantum), probe.completed);

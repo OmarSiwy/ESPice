@@ -14,8 +14,8 @@
         // The Verilog-A / Verilog compiler, and the `contract` its generated
         // devices import.
         .vera = .{
-            .url = "git+https://github.com/OmarSiwy/VerA#d10422c1deebb13a8feca5073de67aca8b9bc881",
-            .hash = "vera-0.9.0-fzAu7AuCVgHNEaq18R-RdYN-iyPS8BvnrY_ngsbIuSg3",
+            .url = "git+https://github.com/OmarSiwy/VerA#cea2afc4b2c9dbd4c582c8b3bc14a9fb11893f90",
+            .hash = "vera-0.9.0-fzAu7JD6YQFsqei4MH-HL0I7GsF5wKeOUxbGOnoUOBJx",
         },
         // The GPU runtime, plus `gompute.math`: every generated device routes
         // its transcendentals through it, so it sits on the hottest path in

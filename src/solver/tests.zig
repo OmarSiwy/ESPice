@@ -1146,10 +1146,10 @@ const FreqSolveTests = struct {
 
         for ([_]bool{ false, true }) |adjoint| {
             var x_batch: [omegas.len * nn]f64 = undefined;
-            try fs.solveBatch(&omegas, &rhs, &x_batch, adjoint);
+            try fs.solveBatch(&omegas, .{}, &rhs, &x_batch, adjoint);
 
             var x_ref: [omegas.len * nn]f64 = undefined;
-            try @TypeOf(fs).test_access.solveBatchSerial(&fs, &omegas, &rhs, &x_ref, adjoint);
+            try @TypeOf(fs).test_access.solveBatchSerial(&fs, &omegas, .{}, 0, omegas.len, &rhs, &x_ref, adjoint);
             for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-12);
         }
     }
@@ -1238,15 +1238,15 @@ const FreqSolveTests = struct {
         defer allocator.free(x_ref);
 
         for ([_]bool{ false, true }) |adjoint| {
-            try fs.solveBatch(&omegas, rhs, x_batch, adjoint);
+            try fs.solveBatch(&omegas, .{}, rhs, x_batch, adjoint);
             const work_ptr = fs.strategy.sp.lane_work.ptr;
-            try @TypeOf(fs).test_access.solveBatchSerial(&fs, &omegas, rhs, x_ref, adjoint);
+            try @TypeOf(fs).test_access.solveBatchSerial(&fs, &omegas, .{}, 0, omegas.len, rhs, x_ref, adjoint);
             for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
             for (rhs) |*value| value.* *= -2;
-            try fs.solveBatch(omegas[0..3], rhs, x_batch[0 .. 3 * nn], adjoint);
-            try fs.solveBatch(omegas[3..], rhs, x_batch[3 * nn ..], adjoint);
+            try fs.solveBatch(omegas[0..3], .{}, rhs, x_batch[0 .. 3 * nn], adjoint);
+            try fs.solveBatch(omegas[3..], .{}, rhs, x_batch[3 * nn ..], adjoint);
             try testing.expectEqual(work_ptr, fs.strategy.sp.lane_work.ptr);
-            try @TypeOf(fs).test_access.solveBatchSerial(&fs, &omegas, rhs, x_ref, adjoint);
+            try @TypeOf(fs).test_access.solveBatchSerial(&fs, &omegas, .{}, 0, omegas.len, rhs, x_ref, adjoint);
             for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
         }
 
@@ -1262,9 +1262,56 @@ const FreqSolveTests = struct {
         const x2_ref = try allocator.alloc(f64, 2 * total);
         defer allocator.free(x2_ref);
         for ([_]bool{ false, true }) |adjoint| {
-            try fs.solveBatch(&omegas, rhs2, x2, adjoint);
-            try fd.solveBatch(&omegas, rhs2, x2_ref, adjoint);
+            try fs.solveBatch(&omegas, .{}, rhs2, x2, adjoint);
+            try fd.solveBatch(&omegas, .{}, rhs2, x2_ref, adjoint);
             for (x2, x2_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-10);
+        }
+
+        // Frequency-dependent terms: a repeated slot, a ground (trash) entry
+        // and an off-diagonal one.
+        const nnz: u32 = @intCast(row_idx.items.len);
+        const dyn_slots = [_]u32{ 1, 4, 4, nnz, 10 };
+        var dyn_re: [dyn_slots.len * omegas.len]f64 = undefined;
+        var dyn_im: [dyn_slots.len * omegas.len]f64 = undefined;
+        for (&dyn_re, &dyn_im, 0..) |*re, *im, i| {
+            const t: f64 = @floatFromInt(i);
+            re.* = 0.3 * @sin(t);
+            im.* = 0.2 * @cos(1.7 * t);
+        }
+        const dyn: impl.Dyn = .{ .slots = &dyn_slots, .re = &dyn_re, .im = &dyn_im };
+
+        // The W-lane fill is bitwise W scalar fills, ragged tail included.
+        const ta = @TypeOf(fs).test_access;
+        const W = ta.W;
+        const sp = &fs.strategy.sp;
+        const lanes = try allocator.alloc(@Vector(W, f64), sp.vals.len);
+        defer allocator.free(lanes);
+        var base: usize = 0;
+        while (base < omegas.len) : (base += W) {
+            const cnt = @min(W, omegas.len - base);
+            var ow: [W]f64 = undefined;
+            for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
+            ta.fillLanePlane(n, sp, ow, lanes);
+            ta.addDynLanes(sp.src_col_ptr, dyn, base, cnt, lanes);
+            for (0..cnt) |l| {
+                try ta.setOmegaSparse(n, sp, omegas[base + l], dyn, base + l);
+                for (sp.vals, lanes) |scalar, lane| {
+                    const row: [W]f64 = lane;
+                    try testing.expectEqual(@as(u64, @bitCast(scalar)), @as(u64, @bitCast(row[l])));
+                }
+            }
+        }
+
+        // Solved, the lane path matches its serial oracle and the dense
+        // strategy, which places the same entries by (row, col).
+        fd.strategy.dense.src_col_ptr = col_ptr.items;
+        fd.strategy.dense.src_row_idx = row_idx.items;
+        for ([_]bool{ false, true }) |adjoint| {
+            try fs.solveBatch(&omegas, dyn, rhs, x_batch, adjoint);
+            try ta.solveBatchSerial(&fs, &omegas, dyn, 0, omegas.len, rhs, x_ref, adjoint);
+            for (x_batch, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
+            try fd.solveBatch(&omegas, dyn, rhs, x2_ref[0..total], adjoint);
+            for (x_batch, x2_ref[0..total]) |a, b| try testing.expectApproxEqRel(b, a, 1e-10);
         }
     }
 };

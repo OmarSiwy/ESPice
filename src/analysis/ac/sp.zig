@@ -67,7 +67,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     root.zeroSimd(rhs);
     for (ports, 0..) |port, p| rhs[p * nn + port.branch] = 1.0;
 
-    var stream = try freq.Stream.init(scratch, &fs, omegas, rhs, false);
+    var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, false);
     defer stream.deinit(scratch);
     while (try stream.next(ckt)) |pt| {
         const row = data[pt.k * row_len ..][0..row_len];

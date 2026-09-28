@@ -9,6 +9,7 @@ const Prepared = @import("device").Circuit;
 const progress_api = @import("progress.zig");
 const par_eval = @import("par_eval.zig");
 const converger = @import("solver").converger;
+const freq_solve = @import("solver").freq_solve;
 const numerics = @import("core").numerics;
 
 const Batch = device_ir.Batch;
@@ -135,6 +136,10 @@ pub const Circuit = struct {
     intern_offs: []u32,
 
     bbd: ?BbdInfo = null,
+    /// CSC slot of each frequency-dependent small-signal entry, the trash
+    /// slot for a ground one (`Prepared.ac_dyn_slots`); `acDyn` fills their
+    /// terms. Borrowed topology.
+    ac_dyn_slots: []const u32 = &.{},
     solver_execution: numerics.Execution = .{},
     /// Executor-owned threaded stamp; null means serial eval.
     par_eval: ?*ParEval = null,
@@ -244,6 +249,7 @@ pub const Circuit = struct {
             .intern_bytes = data.intern_bytes,
             .intern_offs = data.intern_offs,
             .bbd = data.bbd,
+            .ac_dyn_slots = data.ac_dyn_slots,
             .owns_topology = owns_topology,
         };
     }
@@ -269,6 +275,7 @@ pub const Circuit = struct {
             gpa.free(self.current_row);
             gpa.free(self.batch_types);
             if (self.bbd) |bbd| gpa.free(bbd.blocks);
+            gpa.free(self.ac_dyn_slots);
             gpa.free(self.intern_bytes);
             gpa.free(self.intern_offs);
         }
@@ -404,6 +411,35 @@ pub const Circuit = struct {
         try self.recompute();
         self.lin.valid = false;
         self.eval(x_op, 0);
+    }
+
+    /// Writes the frequency-dependent term of every `ac_dyn_slots` entry e at
+    /// `x` and each ω in `omegas` into `re[e * omegas.len + k]` and `im[...]`,
+    /// under the stored sim state: A(ω) = G + jωC + (re + j·im) with G and C
+    /// from a `.ac`/`.noise` eval at the same x. Host-side, GPU context or not.
+    pub fn acDyn(self: *const Circuit, x: []const f64, omegas: []const f64, re: []f64, im: []f64) void {
+        std.debug.assert(re.len == self.ac_dyn_slots.len * omegas.len and im.len == re.len);
+        var off: usize = 0;
+        for (self.batches) |b| if (b.hooks.ac_dyn) |f| {
+            off += omegas.len * f(b.ctx, x, omegas, re[off..], im[off..]);
+        };
+        std.debug.assert(off == re.len);
+    }
+
+    /// Adds `acDyn` at `x` and one ω into the row-major 2n x 2n stacked-real
+    /// `a` ([Re -Im; Im Re], `dense_lu.buildComplexAdmittance`'s layout).
+    /// `scratch` holds `2 * ac_dyn_slots.len` values.
+    pub fn addAcDynDense(self: *const Circuit, x: []const f64, omega: f64, a: []f64, scratch: []f64) void {
+        const e = self.ac_dyn_slots.len;
+        if (e == 0) return;
+        const re = scratch[0..e];
+        const im = scratch[e..][0..e];
+        self.acDyn(x, &.{omega}, re, im);
+        const n: usize = self.n;
+        for (self.ac_dyn_slots, re, im) |slot, r, i| {
+            if (slot >= self.nnz) continue;
+            freq_solve.addDense(n, 2 * n, a, self.row_idx[slot], freq_solve.slotCol(self.col_ptr, slot), r, i);
+        }
     }
 
     /// Stamps the planes for a Newton iterate, seeding from the constant

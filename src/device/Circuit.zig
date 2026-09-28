@@ -26,6 +26,10 @@ current_row: []bool,
 intern_bytes: []u8,
 intern_offs: []u32,
 bbd: ?numerics.BbdInfo,
+/// CSC slot of every frequency-dependent small-signal entry, batch-major in
+/// `batches` order, then as each batch's `Hooks.collect_ac_dyn` lists them;
+/// `nnz` marks a ground entry. Entry e pairs with term e of `Hooks.ac_dyn`.
+ac_dyn_slots: []u32,
 has_charge: bool,
 has_state_q: bool,
 needs_tran_op: bool = false,
@@ -86,8 +90,14 @@ pub fn freeze(
     errdefer allocator.free(batch_types);
     const current_row = try allocator.alloc(bool, n);
     @memset(current_row, false);
+    errdefer allocator.free(current_row);
     for (batches) |batch| if (batch.hooks.mark_current_rows) |mark|
         mark(batch.ctx, current_row);
+    var ac_dyn: std.ArrayList(u32) = .empty;
+    errdefer ac_dyn.deinit(allocator);
+    for (batches) |batch| if (batch.hooks.collect_ac_dyn) |collect|
+        try collect(batch.ctx, allocator, &ac_dyn).unwrap();
+    const ac_dyn_slots = try ac_dyn.toOwnedSlice(allocator);
 
     for (protos) |proto| proto.destroy(proto.ctx, allocator);
     return .{
@@ -103,6 +113,7 @@ pub fn freeze(
         .intern_bytes = intern_bytes,
         .intern_offs = intern_offs,
         .bbd = bbd,
+        .ac_dyn_slots = ac_dyn_slots,
         .has_charge = has_charge,
         .has_state_q = has_state_q,
     };
@@ -117,6 +128,7 @@ pub fn deinit(self: *Circuit) void {
     allocator.free(self.row_idx);
     allocator.free(self.diag_slots);
     allocator.free(self.current_row);
+    allocator.free(self.ac_dyn_slots);
     allocator.free(self.intern_bytes);
     allocator.free(self.intern_offs);
     if (self.bbd) |bbd| allocator.free(bbd.blocks);

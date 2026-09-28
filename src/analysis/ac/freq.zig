@@ -6,6 +6,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
+const Dyn = @import("solver").freq_solve.Dyn;
 
 // ponytail: fixed at 64; expose a work budget if a caller needs another
 // latency/throughput tradeoff. One factorization is never split.
@@ -19,27 +20,37 @@ pub const Point = struct { k: usize, x: []const f64 };
 /// Iterator over the solutions of `omegas`, in order. Chunking cannot change a
 /// bit of the result: lanes are independent, and the pivot tape carries across
 /// `solveBatch` calls the same way it carries across its internal W-chunks.
-/// Borrows `fs`, `omegas` and `rhs` for its whole life.
+/// Each chunk adds the circuit's frequency-dependent terms at `x_op`
+/// (`Circuit.acDyn`). Borrows `fs`, `x_op`, `omegas` and `rhs` for its whole
+/// life.
 pub const Stream = struct {
     fs: *FreqSolver,
+    x_op: []const f64,
     omegas: []const f64,
     rhs: []const f64,
     adjoint: bool,
     buf: []f64,
+    /// A chunk's `acDyn` terms, re then im, each `ac_dyn_slots.len` rows of
+    /// up to `quantum` points.
+    dyn: []f64,
     /// Chunk in `buf` covers omegas[base..end]; `k` is the next point out.
     base: usize = 0,
     end: usize = 0,
     k: usize = 0,
 
-    /// Allocates the chunk buffer; free it with `deinit`.
-    pub fn init(allocator: std.mem.Allocator, fs: *FreqSolver, omegas: []const f64, rhs: []const f64, adjoint: bool) !Stream {
+    /// Allocates the chunk buffers for `ckt`, the circuit `fs` linearized;
+    /// free them with `deinit`.
+    pub fn init(allocator: std.mem.Allocator, fs: *FreqSolver, ckt: *const root.Circuit, x_op: []const f64, omegas: []const f64, rhs: []const f64, adjoint: bool) !Stream {
         const buf = try allocator.alloc(f64, @min(quantum, omegas.len) * rhs.len);
-        return .{ .fs = fs, .omegas = omegas, .rhs = rhs, .adjoint = adjoint, .buf = buf };
+        errdefer allocator.free(buf);
+        const dyn = try allocator.alloc(f64, 2 * ckt.ac_dyn_slots.len * @min(quantum, omegas.len));
+        return .{ .fs = fs, .x_op = x_op, .omegas = omegas, .rhs = rhs, .adjoint = adjoint, .buf = buf, .dyn = dyn };
     }
 
-    /// Frees the chunk buffer; points returned so far become invalid.
+    /// Frees the chunk buffers; points returned so far become invalid.
     pub fn deinit(self: *Stream, allocator: std.mem.Allocator) void {
         allocator.free(self.buf);
+        allocator.free(self.dyn);
     }
 
     /// Returns the next point, or null past the last one. Solves a new chunk
@@ -51,7 +62,13 @@ pub const Stream = struct {
             if (self.end == self.omegas.len) return null;
             self.base = self.end;
             self.end += @min(quantum, self.omegas.len - self.base);
-            try self.fs.solveBatch(self.omegas[self.base..self.end], self.rhs, self.buf[0 .. (self.end - self.base) * m], self.adjoint);
+            const chunk = self.omegas[self.base..self.end];
+            const terms = ckt.ac_dyn_slots.len * chunk.len;
+            const re = self.dyn[0..terms];
+            const im = self.dyn[self.dyn.len / 2 ..][0..terms];
+            if (terms != 0) ckt.acDyn(self.x_op, chunk, re, im);
+            const dyn: Dyn = .{ .slots = ckt.ac_dyn_slots, .re = re, .im = im };
+            try self.fs.solveBatch(chunk, dyn, self.rhs, self.buf[0 .. chunk.len * m], self.adjoint);
             try ckt.checkpoint(.{ .phase = .frequency, .completed = self.end, .total = self.omegas.len });
         }
         defer self.k += 1;
