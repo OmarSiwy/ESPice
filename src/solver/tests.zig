@@ -1332,6 +1332,71 @@ const FreqSolveTests = struct {
             for (x_batch, x2_ref[0..total]) |a, b| try testing.expectApproxEqRel(b, a, 1e-10);
         }
     }
+
+    test "factorEach/solveEach equal a per-omega setOmega+solveRhs (sparse lanes and dense)" {
+        const allocator = testing.allocator;
+        // Tridiagonal G with a C that dominates at the top of the band, and
+        // omega = 0 in the batch as harmonic balance's DC block.
+        const omegas = [_]f64{ 0, 1, 3, 10, 30, 100, 300, 1000, 3000, 1e4, 3e4 };
+        inline for (.{ 20, 6 }) |n_| {
+            const n: u32 = n_; // 20: sparse lanes; 6: dense
+            var col_ptr: std.ArrayList(u32) = .empty;
+            defer col_ptr.deinit(allocator);
+            var row_idx: std.ArrayList(u32) = .empty;
+            defer row_idx.deinit(allocator);
+            var g_vals: std.ArrayList(f64) = .empty;
+            defer g_vals.deinit(allocator);
+            var c_vals: std.ArrayList(f64) = .empty;
+            defer c_vals.deinit(allocator);
+            try col_ptr.append(allocator, 0);
+            for (0..n) |j| {
+                for ([_]i64{ -1, 0, 1 }) |d| {
+                    const r = @as(i64, @intCast(j)) + d;
+                    if (r < 0 or r >= n) continue;
+                    try row_idx.append(allocator, @intCast(r));
+                    try g_vals.append(allocator, if (d == 0) 3 + @as(f64, @floatFromInt(j % 4)) else -1);
+                    try c_vals.append(allocator, if (d == 0) 0.02 else -0.005);
+                }
+                try col_ptr.append(allocator, @intCast(row_idx.items.len));
+            }
+            const Ckt = struct {
+                n: usize,
+                nnz: usize,
+                col_ptr: []const u32,
+                row_idx: []const u32,
+                g_vals: []const f64,
+                c_vals: []const f64,
+                pub fn linearizeAc(_: @This(), _: []const f64) !void {}
+                pub fn denseG(_: @This(), g: []f64) void {
+                    @memset(g, 0);
+                }
+                pub fn denseC(_: @This(), c: []f64) void {
+                    @memset(c, 0);
+                }
+            };
+            const ckt = Ckt{ .n = n, .nnz = row_idx.items.len, .col_ptr = col_ptr.items, .row_idx = row_idx.items, .g_vals = g_vals.items, .c_vals = c_vals.items };
+            var fs = try FreqSolver.fromCircuit(allocator, ckt, &.{});
+            defer fs.deinit(allocator);
+            // The planes arrive through setPlanes, not the circuit.
+            fs.setPlanes(g_vals.items, c_vals.items);
+
+            const nn: usize = 2 * n;
+            const rhs = try allocator.alloc(f64, omegas.len * nn);
+            defer allocator.free(rhs);
+            for (rhs, 0..) |*v, i| v.* = @sin(0.37 * @as(f64, @floatFromInt(i)));
+            const x = try allocator.alloc(f64, rhs.len);
+            defer allocator.free(x);
+            const x_ref = try allocator.alloc(f64, rhs.len);
+            defer allocator.free(x_ref);
+
+            try fs.factorEach(allocator, &omegas);
+            try testing.expectEqual(@as(usize, 0), fs.held_id.items.len);
+            // Twice: the held factors survive a solve.
+            for (0..2) |_| fs.solveEach(rhs, x);
+            for (omegas, 0..) |w, k| try fs.solve(w, rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
+            for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
+        }
+    }
 };
 
 const GmresTests = struct {
