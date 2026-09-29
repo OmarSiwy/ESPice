@@ -15,6 +15,8 @@ pub const validateQuery = types.validateQuery;
 pub const printMeasures = @import("measure.zig").print;
 /// `.meas` statistics over Monte Carlo trials.
 pub const printMeasureStatistics = @import("measure.zig").printStatistics;
+/// Every `.meas` card's value over one result; see `measure.evaluateAll`.
+pub const measureValues = @import("measure.zig").evaluateAll;
 
 /// Resolves a user-facing format name or alias to a `Format`. Returns null
 /// for an unknown name so the caller owns the diagnostic.

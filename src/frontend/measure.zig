@@ -61,7 +61,10 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
             }
             if (m.first.from != 0 and m.second.from == 0) m.second.from = m.first.from else if (m.second.from != 0 and m.first.from == 0) m.first.from = m.second.from;
         },
-        .param => m.expr = try ctx.measureExpr(w[2].rhs orelse return error.ParseError),
+        .param => {
+            m.expr = try ctx.measureExpr(w[2].rhs orelse return error.ParseError);
+            try stdParams(&m.first, analysis, rest, ctx);
+        },
         .err, .err1, .err2, .err3 => {
             if (rest.len < 2) return error.ParseError;
             m.first.vec = try vector(arena, &m.first, analysis, rest[0].lhs);
@@ -141,7 +144,6 @@ fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
             continue;
         };
         const v: f64 = if (std.mem.eql(u8, rhs, "last")) core.measure_last else try ctx.measureValue(rhs);
-        // `goal` and `weight` only steer HSPICE's optimizer.
         // `print` only switches HSPICE's listing.
         const Key = enum { rise, fall, cross, val, td, from, to, at, minval, ignor, ymin, ymax, goal, weight, nbharm, minfreq, maxfreq, binsiz, print };
         const key = std.meta.stringToEnum(Key, x.lhs) orelse return error.ParseError;
@@ -160,7 +162,9 @@ fn stdParams(c: *Clause, analysis: Kind, w: []const Word, ctx: anytype) !void {
             .minval => c.minval = v,
             .ignor, .ymin => c.ymin = v,
             .ymax => c.ymax = v,
-            .goal, .weight, .print => {},
+            .goal => c.goal = v,
+            .weight => c.weight = v,
+            .print => {},
             .minfreq => c.from = v,
             .maxfreq => c.to = v,
             .nbharm, .binsiz => {
@@ -252,8 +256,11 @@ test "meas cards parse like ngspice's word lists" {
     try std.testing.expectEqualStrings("v(b)", e.first.vec2);
     try std.testing.expectEqual(1e-3, e.first.minval);
     try std.testing.expectError(error.ParseError, parse(a, "e err1 v(a) v(b)", Ctx{}, null));
-    const p = try parse(a, "tran r param='tpd*2'", Ctx{}, null);
+    const p = try parse(a, "tran r param='tpd*2' goal=2 weight=3", Ctx{}, null);
     try std.testing.expectEqual(.param, p.func);
+    try std.testing.expectEqual(3.0, p.goalError(4).?);
+    const g = try parse(a, "dc v find v(out) at=5 goal=0 minval=0.5", Ctx{}, null);
+    try std.testing.expectEqual(0.4, g.goalError(0.2).?);
     const s = try parse(a, "tran s derivative v(out) at=1e-9", Ctx{}, null);
     try std.testing.expectEqual(.deriv, s.func);
     try std.testing.expectEqual(1e-9, s.first.at);
