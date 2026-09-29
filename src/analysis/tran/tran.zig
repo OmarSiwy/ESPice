@@ -314,11 +314,19 @@ pub fn simulate(
         echo_bps[0] = td_;
         n_echo = 1;
     }
+    // Under uic ngspice sets a breakpoint at tstep "to reduce ringing of
+    // current in devices" (dctran.c:582-584), after sizing the first step,
+    // so landing there drops the order once (#166). Past t_stop it is never
+    // reached, as CKTsetBreak inserts nothing past CKTfinalTime.
+    const uic_bp: ?f64 = if (options.uic) options.dt_init else null;
     const nextBp = struct {
-        fn call(c: *root.Circuit, echo: []const f64, after: f64) ?f64 {
+        fn call(c: *root.Circuit, echo: []const f64, extra: ?f64, after: f64) ?f64 {
             var best = std.math.inf(f64);
             if (c.nextBreakpoint(after)) |bp| best = bp;
             for (echo) |e| {
+                if (e >= after and e < best) best = e;
+            }
+            if (extra) |e| {
                 if (e >= after and e < best) best = e;
             }
             return if (best == std.math.inf(f64)) null else best;
@@ -346,7 +354,7 @@ pub fn simulate(
     // (dctran.c:578-586), then the firsttime /10. The operand order sets the
     // phase of the whole accepted grid.
     var dt: f64 = @min(@min(options.dt_init, options.t_stop / 100.0) / 10.0, effective_dt_max);
-    if (nextBp(ckt, echo_bps[0..n_echo], min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
+    if (nextBp(ckt, echo_bps[0..n_echo], null, min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
     dt /= 10.0;
     if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
     // CKTdeltaOld[] starts at CKTmaxStep (dctran.c:312), which the first
@@ -599,7 +607,7 @@ pub fn simulate(
                     }
                 }
                 var shrink = bp_save_dt;
-                if (nextBp(ckt, echo_bps[0..n_echo], t + min_break)) |nb| shrink = @min(shrink, nb - t);
+                if (nextBp(ckt, echo_bps[0..n_echo], uic_bp, t + min_break)) |nb| shrink = @min(shrink, nb - t);
                 dt_next = @min(dt_next, 0.1 * shrink);
             }
             bp_next = null;
@@ -632,7 +640,7 @@ pub fn simulate(
 
         // Clamp dt to land on the next breakpoint, skipping those within
         // min_break of now (ngspice CKTminBreak merge).
-        bp_next = nextBp(ckt, echo_bps[0..n_echo], t + min_break);
+        bp_next = nextBp(ckt, echo_bps[0..n_echo], uic_bp, t + min_break);
         bp_clamped = false;
         if (bp_next) |bp| {
             const dt_to_bp = bp - t;

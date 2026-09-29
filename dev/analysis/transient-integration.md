@@ -237,7 +237,10 @@ landing, integration resumes at order 1 with
 $h = 0.1\cdot\min(\texttt{saveDelta},\, \text{gap to next break})$, spice3's
 `CKTsaveDelta` resume rule, which resolves a paired edge (rise start and end
 1 ns apart) instead of stepping over it. Transmission-line delays re-emit
-landed breakpoints at $t + \tau_d$ (echo cascade for reflections).
+landed breakpoints at $t + \tau_d$ (echo cascade for reflections). Under
+`uic`, `tstep` is a breakpoint too (`dctran.c:582-584`, "to reduce ringing of
+current in devices"), set after the first step is sized, so the run drops to
+order 1 once at `tstep`.
 
 PULSE corners, and a V source's PWL corners, are asked from the accepted
 time and rounded as ngspice's `VSRCaccept` rounds them, $t_{acc} + (t_k -
@@ -403,6 +406,7 @@ to 559 with no regression:
 | Step history seeded with $h_{\max}$ | `:312` | `vacask_mul` 234 to 200 |
 | LTE reads $q$ at the published solution | `CKTterr` on the accepted state | `vacask_graetz` 13.2 to 0.17, `vacask_mul` 242 to 0.71, `bench_bypass_gated_branch` 10.8 to 0.63, `bench_digital_clamp` 1.11 to 0.92 |
 | Coupled inductors truncate on INDflux | `indload.c:72-76` | `device_kinduc` 51.7 to 0.0013 |
+| `uic` sets a breakpoint at `tstep` | `dctran.c:582-584` | `gear_maxord6_ngspice` vmax 0.3589 to 0.3406919 (ngspice 45: 0.3406919), `trap_maxord1_ngspice` 0.07631 to 0.07584708 (0.07584708), Python replica of `simulate`; #166 |
 
 The charge re-read costs one extra `evalQ` per accepted step (callgrind Ir,
 whole run):

@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).
 - `.tran` with a `tstart` saves no extra row at `tstart` itself: the rows are ngspice's, the accepted steps from `tstart` on (#167).
 - C API: `espice_result_view` sets `*data` to NULL and `*len` to 0 on a NULL or stale handle too; `ESPICE_CANCELLED` is documented as reserved, since no C call cancels a query (#76).
 - `--format=touchstone` on an `.sp` whose ports have different z0 writes Touchstone 2.0 with each port's `[Reference]`, instead of `R 50` for all (#60).
