@@ -258,6 +258,8 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "qpss", an(.qpss) },   .{ "sens", an(.sens) },             .{ "sp", an(.sp) },
     .{ "stb", an(.stb) },     .{ "temp", an(.temp) },             .{ "tf", an(.tf) },
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
+    .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
+    .{ "dcinc", an(.dcinc) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },

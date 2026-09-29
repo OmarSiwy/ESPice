@@ -62,6 +62,8 @@ test "analysis directives dispatch every implemented capability and reject malfo
         ".tf v(out) vin",                       ".tran 1u 10u",          ".tran_noise 1u 10u",
         ".hbac dec 2 10 100 1k",                ".hbnoise v(out) vin dec 2 10 100 1k 4 2",
         ".hbxf v(out) dec 2 10 100 1k",         ".phasenoise v(out) dec 2 10 100 1meg",
+        ".lstb mode=single vsource=vin dec 2 10 100", ".acxf v(out) dec 2 10 100",
+        ".dcxf v(out) tf",                      ".dcinc",
     };
     try std.testing.expectEqual(std.meta.fields(requests.Kind).len, directives.len);
     for (directives, 0..) |directive, index| {
@@ -76,6 +78,8 @@ test "analysis directives dispatch every implemented capability and reject malfo
         ".dc vin 0 1 1 missing 0 1 1",   ".tran 0 1u",          ".tran 1u 2u 2u",                        ".pss 0",
         ".pss 1k 2m v(out) 128 4 50 1m", ".mc 65536",           ".pnoise v(out) vin dec 2 10 100 1k -1", ".pz in 0 out 0 vol pz",
         ".tf v(out) missing",            ".temp -300 125 55",
+        ".lstb mode=diff vsource=vin",   ".lstb mode=single vsource=vin,vin",   ".lstb mode=sideways vsource=vin",
+        ".dcxf v(out) zin",              ".acxf v(out) dec 2 10 100 tf extra",
     };
     for (malformed) |directive| {
         if (analyses.buildJob(try card(a, directive), sources, cards)) |_| {

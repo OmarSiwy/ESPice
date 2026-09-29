@@ -22,11 +22,11 @@ implemented.
 | [transient-integration.md](transient-integration.md) | BE/trap/Gear-2, TR-BDF2, per-state LTE (`CKTterr`), dctran.c step control, breakpoints | implemented (TR-BDF2: not implemented) |
 | [tolerance-system.md](tolerance-system.md) | reltol/abstol/vntol/chgtol semantics, the residual gate and its ngspice divergence, errpreset theory | implemented (named bundles: not implemented) |
 | [ac-small-signal-noise.md](ac-small-signal-noise.md) | AC sweep (stacked-real, SIMD frequency lanes), adjoint noise | implemented |
-| [tf.md](tf.md) | DC transfer function: gain, Rin, Rout via forward and adjoint solve | implemented |
+| [tf.md](tf.md) | DC transfer function: gain, Rin, Rout via forward and adjoint solve; all-source `.dcxf`/`.acxf`/`.dcinc` | implemented |
 | [sensitivity.md](sensitivity.md) | DC/AC sensitivity: direct, adjoint and FD | implemented (DC adjoint with FD stamps; AC: not implemented) |
 | [pole-zero.md](pole-zero.md) | Pencil $(G,C)$ eigenproblem, Hessenberg + Francis QR, column-swap zeros | implemented (QZ: not implemented) |
 | [s-parameters.md](s-parameters.md) | Port formulation, z0 terminations, wave extraction | implemented |
-| [stability.md](stability.md) | Return ratio, Middlebrook/Tian probes, margins | implemented (single-injection probe, $T(f)$ only; Tian and margins: not implemented) |
+| [stability.md](stability.md) | Return ratio, Middlebrook/Tian probes, margins | implemented (`.stb` single injection; `.lstb` Tian double injection, diff/comm modes, margins) |
 | [distortion.md](distortion.md) | Volterra small-signal distortion, FD-of-analytic-Jacobian kernels | implemented (HD2, HD3; two-tone IM: not implemented) |
 | [fourier-thd.md](fourier-thd.md) | `.four` harmonic extraction: final-period resample, FFT, THD | implemented |
 | [ensemble-sweeps.md](ensemble-sweeps.md) | Monte Carlo and temperature sweeps on structural lanes, seed policy | implemented |

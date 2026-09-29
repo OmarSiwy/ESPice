@@ -1,4 +1,5 @@
-//! Frequency-domain unit tests: the frequency stream and noise PSD/integration.
+//! Frequency-domain unit tests: the frequency stream, noise PSD/integration
+//! and the `.lstb` double-injection formulas.
 
 const StreamTests = struct {
     const freq = @import("../ac/freq.zig");
@@ -141,7 +142,32 @@ const NoiseTests = struct {
     }
 };
 
+const LstbTests = struct {
+    const lstb = @import("../ac/lstb.zig");
+    const std = @import("std");
+
+    test "double injection reads A·β through an ideal voltage break" {
+        // Probe between an ideal inverting amplifier's output (gain a) and a
+        // resistive feedback network (β): the injected current all enters
+        // the amplifier (A = 1, C = 0) and the voltage injection splits as
+        // D = 1/(1 + aβ). W = aβ whatever the probe current B.
+        const a_gain: f64 = 1e3;
+        const beta: f64 = 0.1;
+        const d = 1 / (1 + a_gain * beta);
+        const g = lstb.Gains.of(.{
+            .a = .{ .re = 1, .im = 0 },
+            .b = .{ .re = -1.1e-3 * d, .im = 0 },
+            .c = .zero,
+            .d = .{ .re = d, .im = 0 },
+        });
+        try std.testing.expectApproxEqRel(a_gain * beta, g.w.re, 1e-12);
+        try std.testing.expectApproxEqAbs(0, g.w.im, 1e-12);
+        try std.testing.expectApproxEqAbs(0, g.wr.re, 1e-12);
+    }
+};
+
 test {
     _ = StreamTests;
     _ = NoiseTests;
+    _ = LstbTests;
 }

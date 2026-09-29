@@ -89,6 +89,61 @@ kernel tf_batched(lanes):
     parallel over lanes; two dots per lane extract gain/Rin/Rout
 ```
 
+## 5. All-source transfer: `.dcxf`, `.acxf`, `.dcinc`
+
+VACASK's `dcxf`, `acxf` and `dcinc` (`lib/coredcxf.cpp`,
+`coreacxf.cpp`, `coredcinc.cpp`, read from its source), in SPICE card
+form:
+
+```
+.dcxf v(out)|v(a,b)|i(Vx) [tf]
+.acxf v(out)|v(a,b)|i(Vx) dec|oct|lin N f1 f2 [tf]
+.dcinc
+```
+
+`.dcxf` publishes one real row and `.acxf` a complex sweep with
+`tf(src)`, `zin(src)` and `yin(src)` for every independent source, V
+cards then I cards in card order. A V card's excitation is 1 V on its
+branch row; an I card's is 1 A through the card, the stamps its AC
+magnitude makes. `zin` is the impedance the source sees with every
+other source in place: $-1/i_{br}$ per volt for a V card, the terminal
+voltage per ampere for an I card; `yin = 1/zin`.
+
+- Without `tf`, each source is one forward right-hand side (VACASK's
+  method): `.dcxf` reuses one sparse factorization of G, `.acxf` puts
+  every source on the same lane factorization per frequency
+  (`FreqSolver.solveBatch`). One solve per source gives all three values.
+- With `tf`, one adjoint solve $A^T y = e_{out}$ gives every transfer at
+  once: $tf = y_{br}$ for a V card, $y_{n} - y_{p}$ for an I card. One
+  solve instead of one per source; `zin`/`yin` need the per-source solves,
+  so the flag drops them.
+
+`.dcinc` solves $G\,\Delta x = \Delta u$ at the operating point, $\Delta u$
+the deck's AC excitation, and publishes the deck's probes (`v(node)`,
+`i(Vx)`) as one real row.
+
+Divergences, recorded:
+
+- An infinite `zin` or `yin` (a V card that moves no current, an I card
+  across a short) is VACASK's finite `1e20`, not `.tf`'s `+inf`, so the
+  row stays finite.
+- VACASK saves only `tf` and `zin` by default and `yin` on request; we
+  always publish all three.
+- `.dcinc` takes the real part of each source's AC excitation, so a
+  phase other than 0 or 180° scales it by cos(phase). VACASK reads `mag`
+  alone and has no phase to apply.
+- ponytail: a V card sensed by an F or H element stamps nothing of its own
+  (`frontend/builder.zig`), so its branch row is not an excitation row;
+  such a source is listed but its values are wrong. Excluding sensed
+  sources needs a flag on `QueryBindings`.
+- ponytail: the forward `.acxf` path holds 64·sources·2n values per lane
+  chunk; split the sources into groups when a deck with hundreds of
+  sources and a large n needs it.
+
+Oracles: `tests/fixtures/xf/diode_divider` (VACASK unstable-2026 run of
+the same circuit, every column of all three analyses, both paths) and
+`xf/resistive_bridge` (analytic, `v(a,b)` and `i(V1)` outputs).
+
 ## Solvers used
 
 | Phase | Solver doc | Impl |

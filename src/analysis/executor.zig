@@ -186,7 +186,7 @@ pub const Executor = struct {
                 // LRM Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC
                 // for ac, noise, pz and disto (osdiload.c:165). It is what gives a
                 // host-integrated idt its 1/(jw) instead of its DC form.
-                .ac, .sp, .stb, .pz, .disto => .ac,
+                .ac, .sp, .stb, .pz, .disto, .lstb, .acxf => .ac,
                 .noise => .noise,
                 else => if (transient) .ic else .dc,
             },
@@ -307,7 +307,7 @@ fn expectedEvals(job: requests.Query) f64 {
             break :blk 3 * inner * outer;
         },
         .tran => |t| 4 * t.t_stop / @min(t.dt_init, t.dt_max orelse t.t_stop / 50.0),
-        .ac, .noise, .sp, .stb, .tf, .pz, .disto, .four, .dcmatch, .sens => 1,
+        .ac, .noise, .sp, .stb, .tf, .pz, .disto, .four, .dcmatch, .sens, .lstb, .acxf, .dcxf, .dcinc => 1,
         else => 200,
     };
 }
@@ -322,6 +322,10 @@ fn module(comptime kind: requests.Kind) type {
         .noise => @import("ac/noise.zig"),
         .sp => @import("ac/sp.zig"),
         .stb => @import("ac/stb.zig"),
+        .lstb => @import("ac/lstb.zig"),
+        .acxf => @import("ac/xf.zig"),
+        .dcxf => @import("dc/xf.zig"),
+        .dcinc => @import("dc/xf.zig").Inc,
         .tran => @import("tran/tran.zig"),
         .tran_noise => @import("tran/tran_noise.zig"),
         .envelope => @import("tran/envelope.zig"),

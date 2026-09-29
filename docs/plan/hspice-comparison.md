@@ -101,7 +101,7 @@ the build-order id in the last column.
 | `.TRAN tstep1 tstop1 [tstep2 tstop2 ...] [START=] [UIC] [SWEEP ...]` [CR .TRAN] | transient, multi-segment, swept | ngspice form (`tran/tran.zig`); segments misread (S4) | `tran` | high | A6 (S), C1 |
 | `.NOISE ov src [inter] [listckt listfreq listcount listfloor listsources]` [CR .NOISE] | noise over the `.AC` sweep, sorted per-device table, per-subcircuit sums | ngspice form with its own sweep; totals only (`ac/noise.zig`) | `noise` with `n(inst)` and `n(inst,contrib)` | high | B1, S |
 | `.DISTO Rload [inter [skw2 [refpwr spwf]]]` [CR .DISTO] | HD2, HD3, SIM2, DIM2, DIM3 into a load | ngspice form, HD2/HD3 (`post/disto.zig`) | no | low to medium | B6, M |
-| `.TF ov src` [CR .TF] | DC gain, Rin, Rout | yes (`dc/tf.zig`) | `dcxf` (every source at once, plus `zin`/`yin`), `acxf` | medium | B7, S |
+| `.TF ov src` [CR .TF] | DC gain, Rin, Rout | yes (`dc/tf.zig`); every source at once as `.dcxf`/`.acxf` (`dc/xf.zig`, `ac/xf.zig`) | `dcxf` (every source at once, plus `zin`/`yin`), `acxf` | medium | done |
 | `.SENS ov ...` [CR .SENS] | DC sensitivity to every parameter | yes, adjoint (`sweep/sens.zig`) | no | medium | done |
 | `.DCSENS outvar [Perturbation= Threshold= GroupByDevice=]` [CR .DCSENS; SA Ch.25] | finite-difference sensitivity to variation-block parameters | no | no | medium | C5, S after C3 |
 | `.PZ ov src` [CR .PZ; SA Ch.15] | poles and zeros | ngspice form (`eigen/pz.zig`) | no | medium | B2, S |
@@ -109,14 +109,14 @@ the build-order id in the last column.
 | `.FFT ov [START STOP NP FORMAT WINDOW ALFA FREQ FMIN FMAX]` [CR .FFT; SA Ch.14] | windowed FFT of a transient, 8 windows, THD at FREQ | no; silently ignored | no | high for data converters and PLLs | B5, M |
 | `.LIN [sparcalc noisecalc gdcalc mixedmode2port format dataformat ...]` [CR .LIN; SA Ch.17] | S/Y/Z/H, mixed-mode S, group delay, stability factors, 2-port and N-port noise parameters; writes `.sc#`, Touchstone 1/2, CITI | S only (`ac/sp.zig`); `.lin` silently ignored | `acsp` (S) | high for RF | C4, M |
 | `.NET` (obsolete, App.A) | Z/Y/H/S of a 1- or 2-port inside `.AC` | no | no | low | C4, alias of `.LIN` |
-| `.LSTB mode=single\|diff\|comm vsource=v[,v]` [CR .LSTB] | loop gain by Middlebrook injection; GM, PM, unity-gain frequency and low-frequency gain in the listing | `.stb`: one voltage injection, single-ended, no margins (`ac/stb.zig`) | `acstb`: current and voltage injection, both directions, DUT y-parameters | high | B4, M |
+| `.LSTB mode=single\|diff\|comm vsource=v[,v]` [CR .LSTB] | loop gain by Middlebrook injection; GM, PM, unity-gain frequency and low-frequency gain in the listing | `.lstb` (`ac/lstb.zig`): Tian double injection as VACASK's `acstb`, single/diff/comm, margins plot refined on the circuit; `.stb` stays single injection | `acstb`: current and voltage injection, both directions, DUT y-parameters | high | done |
 | `.SAMPLE FS= [TOL NUMF MAXFLD BETA]` [CR .SAMPLE] | noise folded by a sampler | no | no | low to medium | D6, S |
 | `.ACMATCH outvar ...` [CR .ACMATCH; SA Ch.23] | AC mismatch per device from the variation block | no | no | medium | C5, M |
 | `.DCMATCH outvar ...` [CR .DCMATCH; SA Ch.23] | DC mismatch per device | Pelgrom from W·L, not from a variation block (`dc/dcmatch.zig`) | no | medium | C5, S |
 | `.TEMP t1 [t2 ...]` [CR .TEMP] | every analysis at each temperature | three-number sweep, DC OP only (`sweep/temp_sweep.zig`); S3 | `sweep option="temp"` | high | A5, S |
 | `.TRANNOISE out METHOD=MC\|SDE SAMPLES= SEED= FMIN FMAX SCALE` [CR .TRANNOISE; RF Ch.9] | transient noise, sampled or SDE | `.trannoise`: white, BE, own syntax (`tran/tran_noise.zig`) | white and flicker | medium | C7, M |
 | `.JITTER TRANNOISE\|TRAN TRIG ov VAL= TD=` [CR .JITTER] | time-interval-error jitter from transient noise | no | no | medium | C7 |
-| (VACASK) `dcinc` | DC small-signal response to the sources' increments | no | yes | low | B7, S |
+| (VACASK) `dcinc` | DC small-signal response to the sources' increments | `.dcinc` (`dc/xf.zig`) | yes | low | done |
 
 ### 2.2 RF analyses (HSPICE RF)
 
