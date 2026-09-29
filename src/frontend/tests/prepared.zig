@@ -495,7 +495,7 @@ test "one binder: a runtime-registered device binds a card exactly as the same m
     // (loadedType, bind_model, derive, collapse). Only the dlopen step is
     // left out; a real .so of models/*.va is not a fixture yet because VerA's
     // library emit declares `h` twice for models with hoisted temporaries.
-    const loaded = try lib.register("resistor_rt", device.vtable("resistor"));
+    const loaded = try lib.register("resistor_rt", device.vtable("resistor"), false);
     try std.testing.expect(loaded != device.Library.builtin("resistor"));
 
     // One card, bound twice: R1 through the built-in resistor, N1 through the

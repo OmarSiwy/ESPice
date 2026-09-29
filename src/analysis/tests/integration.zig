@@ -15,7 +15,7 @@ test "generated limiter: failed trial rollback and retry match an untried circui
         var b = try Builder.init(t.allocator, &lib);
         const out = try b.addNode();
         const vt = eval.deviceVtable(D, "va_limit_state");
-        const proto = try b.protoOf(try lib.register("va_limit_state", vt));
+        const proto = try b.protoOf(try lib.register("va_limit_state", vt, false));
         const model: D.Model = .{};
         const instance: D.Instance = .{};
         const nodes = [_]u32{ out, analysis.GROUND };

@@ -259,6 +259,9 @@ pub const Circuit = struct {
         const q_vec = try allocator.alloc(f64, @as(usize, data.n) + 1);
         @memset(c_vals, 0);
         @memset(q_vec, 0);
+        // `Batch.digital` comes from the Library, not the device, so a batch
+        // rebuilt by `instantiate`/`snapshot` takes it from the template.
+        for (batches, data.batches) |*b, t| b.digital = t.digital;
         return .{
             .gpa = allocator,
             .col_ptr = data.col_ptr,

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "A Verilog output's D2A ramp (trise/tfall) seen through an RC: the events land exactly and the driver ramps linearly like transition().",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Source ramp 0 -> 5 V over 4 ns from 10 ns and back to 0 over 2 ns from 60 ns, behind rout = 1 kohm into 1 pF (tau = 1 ns): v(s) = V0 + S (s - tau (1 - exp(-s/tau))) during a ramp of slope S, then V1 + (v(T) - V1) exp(-(s - T)/tau). The 1 mV tolerance covers the truncation error of 0.1 ns steps."
+  },
+  "netlist_sha256": "0e0e904d73c3347c9ca0d45113383bd59f5521c1f753b9398c5fbbe94cd40ee3",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-09,
+            1.1e-08,
+            1.2e-08,
+            1.4e-08,
+            1.6e-08,
+            2e-08,
+            4e-08,
+            6.1e-08,
+            6.2e-08,
+            6.3e-08,
+            6.5e-08,
+            6.9e-08
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(y)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.001,
+            "values": [
+              0,
+              0.4598493014643021,
+              1.4191691040457657,
+              3.7728945486109167,
+              4.833929336175067,
+              4.996958309691371,
+              4.99999999999373,
+              4.080301397071381,
+              2.1616617919084584,
+              0.7952309320089457,
+              0.10762280342194566,
+              0.00197118040366959
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  }
+}

@@ -192,6 +192,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "device_abi", .module = device_abi_mod },
         core_import,
         .{ .name = "fastvaf", .module = vera.module("vera") },
+        .{ .name = "vera_sim", .module = vera.module("sim") },
         .{ .name = "build_options", .module = build_options_mod },
     });
     device_mod.link_libc = true;
