@@ -151,18 +151,18 @@ module gummel_poon(c, b, e, s);
         // ---- temperature and geometry: bias independent (bjttemp.c) -------
         tdev  = $temperature;
         dt    = tdev - tnom;
-        vt    = 1.380649e-23 * tdev / 1.602176634e-19;
-        vtn   = 1.380649e-23 * tnom / 1.602176634e-19;
+        vt    = 1.38064852e-23 / 1.6021766208e-19 * tdev;   // bjttemp.c:149 CONSTKoverQ
+        vtn   = 1.38064852e-23 / 1.6021766208e-19 * tnom;
         fact1 = tnom / 300.15;
         fact2 = tdev / 300.15;
         egt   = 1.16 - 7.02e-4 * tdev * tdev / (tdev + 1108.0);
         egn   = 1.16 - 7.02e-4 * tnom * tnom / (tnom + 1108.0);
-        argt  = -egt / (2.0 * 1.380649e-23 * tdev)
-              + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        argn  = -egn / (2.0 * 1.380649e-23 * tnom)
-              + 1.1150877 / (2.0 * 1.380649e-23 * 300.15);
-        pbft  = -2.0 * vt  * (1.5 * ln(fact2) + 1.602176634e-19 * argt);
-        pbfn  = -2.0 * vtn * (1.5 * ln(fact1) + 1.602176634e-19 * argn);
+        argt  = -egt / (2.0 * 1.38064852e-23 * tdev)
+              + 1.1150877 / (1.38064852e-23 * (300.15 + 300.15));
+        argn  = -egn / (2.0 * 1.38064852e-23 * tnom)
+              + 1.1150877 / (1.38064852e-23 * (300.15 + 300.15));
+        pbft  = -2.0 * vt  * (1.5 * ln(fact2) + 1.6021766208e-19 * argt);
+        pbfn  = -2.0 * vtn * (1.5 * ln(fact1) + 1.6021766208e-19 * argn);
 
         ratlog  = ln(tdev / tnom);
         factlog = (tdev / tnom - 1.0) * eg / vt + xti * ratlog;
@@ -327,9 +327,9 @@ module gummel_poon(c, b, e, s);
         // Currents/conductances here already carry area*m, and ngspice's table
         // is (area-scaled quantity)*m — so no extra factor except the flicker
         // row, which is m*KF*|IB/m|^AF (IB there excludes m).
-        fourkt = 4.0 * 1.380649e-23 * tdev;
-        I(ci, ei) <+ white_noise(2.0 * 1.602176634e-19 * abs(ic), "ic");
-        I(bi, ei) <+ white_noise(2.0 * 1.602176634e-19 * abs(ib), "ib");
+        fourkt = 4.0 * 1.38064852e-23 * tdev;
+        I(ci, ei) <+ white_noise(2.0 * 1.6021766208e-19 * abs(ic), "ic");
+        I(bi, ei) <+ white_noise(2.0 * 1.6021766208e-19 * abs(ib), "ib");
         I(bi, ei) <+ flicker_noise(m * kf * pow(abs(ib / m), af), 1.0, "flicker");
 
         // ---- bias-dependent base resistance ---------------------------------
