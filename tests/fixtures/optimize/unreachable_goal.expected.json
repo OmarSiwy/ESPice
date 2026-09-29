@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "A GOAL outside the parameter range stops the optimizer on the limit, with a status line saying so.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "4.9 V needs rx = 49k > 10k: rx ends at 10k and v(out) at 5 * 10k / 11k."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rx",
+        "value": 10000.0,
+        "rtol": 1e-12,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "vout",
+        "value": 4.545454545454546,
+        "rtol": 1e-06,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "The summary prints \"optimization stopped at a limit\" and \"rx is held at its upper limit\"."
+  ],
+  "netlist_sha256": "22ef9f68e595d04fb1f13e1f3cce549a2fb871acc34c90847a95b75b48938304"
+}

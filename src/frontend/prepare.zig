@@ -22,6 +22,9 @@ pub const Prepared = struct {
     /// that swaps elements, a point that collapses a node), each with its
     /// own circuit, deck and variant labels, in output order after this one.
     runs: []const Prepared = &.{},
+    /// The deck's HSPICE optimization, when it has one. It borrows the
+    /// parse arena, which must then outlive the Prepared.
+    tuner: ?*variants.Tuner = null,
 
     pub fn deinit(self: *Prepared) void {
         for (self.runs) |*run| @constCast(run).deinit();
@@ -171,6 +174,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
+    var tuner: ?*variants.Tuner = null;
     const plan: variants.Plan = if (run.point) |pt| blk: {
         var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, "");
         var own = pt;
@@ -179,9 +183,14 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         break :blk .{ .variants = try planner.table(), .fanout = .{ .global = .{ .count = 1, .nominal = false }, .only = run.card } };
     } else if (run.prefix.len != 0 or variants.any(nl.deck)) blk: {
         var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, run.prefix);
-        break :blk try variants.plan(&planner);
+        const planned = try variants.plan(&planner);
+        if (nl.deck.optimize != null) {
+            tuner = try parse_arena.create(variants.Tuner);
+            tuner.?.* = try .init(planner);
+        }
+        break :blk planned;
     } else .{};
-    return .{ .circuit = circuit, .runs = plan.runs, .deck = .{
+    return .{ .circuit = circuit, .runs = plan.runs, .tuner = tuner, .deck = .{
         .probes = out.probes,
         .probe_labels = out.probe_labels,
         .source_node = out.source_node,

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "SWEEP OPTIMIZE= on a DC card sizes one resistor to a .meas GOAL.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "5 rx / (1k + rx) = 2 V gives rx = 2k/3; the final run measures 2 V."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rx",
+        "value": 666.6666666666666,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "vout",
+        "value": 2.0,
+        "rtol": 1e-05,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "rx is the optimizer summary line `rx = <value> $ ...`; vout is the final run's .meas line."
+  ],
+  "netlist_sha256": "2a544f398e86ffb8983967c289a45a7fccae57ad5de39a002c4de9d3347590dc"
+}

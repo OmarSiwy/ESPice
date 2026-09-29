@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "METHOD=BISECTION optimization is refused, not run as Levenberg-Marquardt.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "Only METHOD=LM (LEVEL=1) is implemented."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "error",
+    "category": "unsupported_input",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "548739e5e67b2738261bc7f296a0eb5eab75ac8cacddb2b2724c5da9d672257b"
+}

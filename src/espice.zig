@@ -5,6 +5,7 @@ const std = @import("std");
 const frontend = @import("frontend");
 const analysis = @import("analysis");
 const output = @import("output");
+const core = @import("core");
 pub const requests = @import("core").query;
 pub const QueryId = requests.QueryId;
 pub const Query = requests.Query;
@@ -66,6 +67,12 @@ pub const Problem = struct {
     /// topology), run after the main session by `run_all`.
     runs: []Run = &.{},
 
+    /// Holds the netlist an HSPICE optimization re-evaluates
+    /// (`prepared.tuner`); null for a deck without one.
+    parse_arena: ?*std.heap.ArenaAllocator = null,
+    /// The finished optimization, once `optimize` has run.
+    optimization: ?core.lm.Lm = null,
+
     /// A variant run's queries and its next result to publish.
     const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
 
@@ -88,8 +95,15 @@ pub const Problem = struct {
         self.arena = std.heap.ArenaAllocator.init(allocator);
         errdefer self.arena.deinit();
         const a = self.arena.allocator();
-        var parse_arena = std.heap.ArenaAllocator.init(allocator);
-        defer parse_arena.deinit();
+        self.parse_arena = null;
+        self.optimization = null;
+        // An optimization keeps the parse arena: its tuner re-evaluates the netlist.
+        const parse_arena = try allocator.create(std.heap.ArenaAllocator);
+        parse_arena.* = .init(allocator);
+        defer if (self.parse_arena == null) {
+            parse_arena.deinit();
+            allocator.destroy(parse_arena);
+        };
         const scratch = parse_arena.allocator();
         self.library = try frontend.Library.init(allocator);
         errdefer self.library.deinit();
@@ -123,6 +137,7 @@ pub const Problem = struct {
             _ = try run.session.append(prep.deck.queries, try scratch.alloc(QueryId, prep.deck.queries.len));
         }
         timingLap(io, &lap, "query graph and output setup");
+        if (self.prepared.tuner != null) self.parse_arena = parse_arena;
         return self;
     }
 
@@ -135,6 +150,10 @@ pub const Problem = struct {
         self.delivery.deinit();
         self.prepared.deinit();
         self.library.deinit();
+        if (self.parse_arena) |arena| {
+            arena.deinit();
+            a.destroy(arena);
+        }
         self.arena.deinit();
         a.destroy(self);
     }
@@ -203,6 +222,7 @@ pub const Problem = struct {
     /// publishes whatever completed. A numerical failure is reported in the
     /// event, not as an error.
     pub fn advance(self: *Problem, id: QueryId) !Advance {
+        try self.optimize();
         var event = try self.session.advance(id);
         self.deliver();
         event.delivery_error = self.delivery_error;
@@ -213,6 +233,7 @@ pub const Problem = struct {
     /// `limits.max_parallel` at a time, writing one event per query.
     /// `ids` must be ready and distinct; a bad frontier starts nothing.
     pub fn advance_ready(self: *Problem, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
+        try self.optimize();
         const n = try self.session.advanceReady(ids, limits, events);
         self.deliver();
         for (events[0..n]) |*event| event.delivery_error = self.delivery_error;
@@ -226,6 +247,7 @@ pub const Problem = struct {
     pub fn run_all(self: *Problem) !void {
         var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &lap, "run total (analysis, scheduling, output)");
+        try self.optimize();
         const ids = try self.allocator.alloc(QueryId, self.query_count());
         defer self.allocator.free(ids);
         const events = try self.allocator.alloc(Advance, @min(ids.len, self.limits.max_parallel));
@@ -266,6 +288,7 @@ pub const Problem = struct {
     /// cannot be measured are reported on `err`.
     pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
+        if (self.optimization) |*lm| try printOptimization(out, lm, self.prepared.tuner.?, measures);
         if (measures.len == 0) return;
         try printSessionMeasures(&self.session, out, err, measures);
         for (self.runs) |*run| try printSessionMeasures(&run.session, out, err, measures);
@@ -296,6 +319,73 @@ pub const Problem = struct {
         const data = (try self.result(id)).data;
         if (buffer.len >= data.len) @memcpy(buffer[0..data.len], data);
         return data.len;
+    }
+
+    /// Runs the deck's HSPICE optimization once, before any query advances
+    /// (docs/analysis/optimize.md). Each batch of optimizer points is one
+    /// session of the optimized card's queries, a variant row per point,
+    /// run `max_parallel` at a time. The optimum's writes then fill the
+    /// rows the optimized card and every later card run.
+    fn optimize(self: *Problem) !void {
+        const t = self.prepared.tuner orelse return;
+        if (self.optimization != null) return;
+        const a = self.arena.allocator();
+        const deck = &self.prepared.deck;
+        var template: std.ArrayList(Query) = .empty;
+        for (deck.queries) |job| switch (job) {
+            inline else => |o| if (o.tol.variant == 0) try template.append(a, job),
+        };
+        var lm = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, @intCast(t.results.len), t.options);
+        const residuals = try a.alloc(f64, @as(usize, @max(lm.n, 1)) * lm.m);
+        while (lm.points().len != 0) {
+            const points = lm.points();
+            const out = residuals[0 .. points.len / lm.n * lm.m];
+            try self.evaluatePoints(t, template.items, points, out);
+            try lm.feed(out);
+        }
+        const best = try t.rows(a, &self.prepared.circuit, lm.x);
+        const refs, const values = best.writes(0);
+        deck.variants.starts = try a.dupe(u32, &.{ 0, @intCast(refs.len), @intCast(2 * refs.len) });
+        deck.variants.refs = try std.mem.concat(a, u32, &.{ refs, refs });
+        deck.variants.values = try std.mem.concat(a, f64, &.{ values, values });
+        self.optimization = lm;
+    }
+
+    /// Residuals of each point of `points` (the optimized parameters'
+    /// values, n per point) into `out`, m per point: the RESULTS cards'
+    /// goal errors over the `template` queries run at that point, NaN where
+    /// a query failed or a card found no value.
+    fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, points: []const f64, out: []f64) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const count = points.len / t.spec.live.len;
+        var deck = self.prepared.deck;
+        deck.variants = try t.rows(a, &self.prepared.circuit, points);
+        const jobs = try a.alloc(Query, count * template.len);
+        for (0..count) |p| for (template, jobs[p * template.len ..][0..template.len]) |job, *copy| {
+            copy.* = job;
+            switch (copy.*) {
+                inline else => |*o| o.tol.variant = @intCast(p),
+            }
+        };
+        var session = analysis.session.Session.init(self.workerAllocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
+        defer session.deinit();
+        const ids = try a.alloc(QueryId, jobs.len);
+        _ = try session.append(jobs, ids);
+        try runSession(&session, self.limits.max_parallel);
+        const values = try a.alloc(f64, deck.measures.len);
+        const m = t.results.len;
+        @memset(out, std.math.nan(f64));
+        for (0..count) |p| for (ids[p * template.len ..][0..template.len]) |id| {
+            const info = try session.info(id);
+            if (info.status != .complete) continue;
+            output.measureValues(deck.measures, info.kind, try session.result(id), values);
+            for (t.results, out[p * m ..][0..m]) |card, *r| {
+                const measure = deck.measures[card];
+                if (measure.analysis == info.kind) r.* = measure.goalError(values[card]).?;
+            }
+        };
     }
 
     /// Publishes completed results in request order, stopping at the first
@@ -383,6 +473,54 @@ fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.W
             else => {},
         }
     }
+}
+
+/// The optimizer's summary, after HSPICE's: one line per accepted
+/// iteration, the stop reason, the final figures, the optimized parameters
+/// and each RESULTS card's error at the optimum.
+fn printOptimization(out: *std.Io.Writer, lm: *const core.lm.Lm, t: *const frontend.Tuner, measures: []const core.Measure) !void {
+    const o = t.options;
+    try out.print("\n  Optimization {s} (Levenberg-Marquardt, model {s})\n\n  iter  evals  residual sum of squares  marquardt param", .{ t.spec.name, t.spec.model });
+    for (t.names) |name| try out.print("  {s:>14}", .{name});
+    try out.writeAll("\n");
+    const h = lm.history;
+    for (h.rss.items, h.lambda.items, h.evaluations.items, 0..) |rss, lambda, evals, k| {
+        try out.print("  {d:>4}  {d:>5}  {e:>23.6}  {e:>15.6}", .{ k, evals, rss, lambda });
+        for (h.x.items[k * lm.n ..][0..lm.n]) |x| try out.print("  {e:>14.6}", .{x});
+        try out.writeAll("\n");
+    }
+    try out.writeAll("\n");
+    var pinned = false;
+    for (0..lm.n) |j| pinned = pinned or lm.pinned(j) != 0;
+    if (lm.status != .failed and pinned) {
+        try out.writeAll("  optimization stopped at a limit: the goals are not reachable inside the parameter ranges\n");
+    } else switch (lm.status) {
+        .relin => try out.print("  optimization completed: RELIN = {e} on last iteration\n", .{o.relin}),
+        .relout => try out.print("  optimization completed: RELOUT = {e} on last iteration\n", .{o.relout}),
+        .grad => try out.print("  optimization completed: norm of the gradient < GRAD = {e}\n", .{o.grad}),
+        .itropt => try out.print("  optimization incomplete: ITROPT = {d} iterations reached\n", .{o.itropt}),
+        .max => try out.print("  optimization stopped: marquardt parameter above MAX = {e}\n", .{o.max}),
+        .failed, .running => try out.writeAll("  optimization failed: a point could not be simulated or measured\n"),
+    }
+    for (t.names, 0..) |name, j| switch (lm.pinned(j)) {
+        -1 => try out.print("  {s} is held at its lower limit {e:.6}\n", .{ name, lm.lo[j] }),
+        1 => try out.print("  {s} is held at its upper limit {e:.6}\n", .{ name, lm.hi[j] }),
+        else => {},
+    };
+    try out.print(
+        \\  residual sum of squares       = {e:.6}
+        \\  norm of the gradient          = {e:.6}
+        \\  marquardt scaling parameter   = {e:.6}
+        \\  no. of function evaluations   = {d}
+        \\  no. of iterations             = {d}
+        \\
+        \\  optimized parameters {s} -- final values
+        \\
+    , .{ lm.rss, lm.gradientNorm(), lm.lambda, lm.evaluations, lm.iterations, t.spec.name });
+    for (t.names, lm.x, t.initial, lm.lo, lm.hi) |name, x, x0, lo, hi|
+        try out.print("  {s} = {e:.6} $ initial {e:.6}, range {e:.6} to {e:.6}\n", .{ name, x, x0, lo, hi });
+    try out.writeAll("\n  goal errors at the optimum (weight * (result - goal) / max(|goal|, minval))\n");
+    for (t.results, lm.r) |card, r| try out.print("  error({s}) = {e:.6}\n", .{ measures[card].name, r });
 }
 
 /// Prints the time since `start.*` under `label` and restarts the lap.
