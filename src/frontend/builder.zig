@@ -1301,6 +1301,20 @@ pub const NetBuilder = struct {
 
 /// The built-in device a card letter and its model's LEVEL select.
 fn resolveDeviceId(letter: u8, dev: Device) !devices.DeviceId {
+    const id = try deviceIdOf(letter, dev);
+    // PSP 103 ships as two devices, as upstream does (psp103.va,
+    // psp103_nqs.va): the NQS build carries 48 unknowns per instance where
+    // the QS one carries 12, whatever SWNQS is, so only a card that asks
+    // for NQS pays for it.
+    if (id == .psp103) {
+        const swnqs = kvNumber(dev.kv, "swnqs") orelse
+            if (dev.model) |m| kvNumber(m.kv, "swnqs") orelse 0 else 0;
+        if (swnqs != 0) return .psp103_nqs;
+    }
+    return id;
+}
+
+fn deviceIdOf(letter: u8, dev: Device) !devices.DeviceId {
     const level = try modelLevel(dev);
     return switch (letter) {
         // `.model X VDMOS(...)` has no LEVEL; the model kind selects it, as

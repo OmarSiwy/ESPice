@@ -50,6 +50,9 @@ pub const DeviceId = enum {
     hisim2_va,
     hisimhv_va,
     psp103,
+    /// PSP 103 with the NQS model built in; the builder swaps it in for a
+    /// psp103 card that sets SWNQS != 0.
+    psp103_nqs,
     vdmos,
     // Q card levels.
     gummel_poon,

@@ -174,6 +174,26 @@ test "an N card on a psp103va model runs the built-in PSP 103, as ngspice with O
     try std.testing.expect(std.mem.indexOfScalar(@TypeOf(psp), prepared.circuit.batch_types, psp) != null);
 }
 
+test "PSP 103 cards run the QS device unless they set SWNQS" {
+    const cases = .{
+        .{ "", "psp103" },
+        .{ " swnqs=0", "psp103" },
+        .{ " swnqs=1", "psp103_nqs" },
+    };
+    inline for (cases) |case| {
+        var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer sa.deinit();
+        var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer pa.deinit();
+        const nl = try parse(pa.allocator(), "psp nqs pick\n.model nch nmos level=1040" ++ case[0] ++
+            "\nvd d 0 1\nm1 d d 0 0 nch w=1u l=1u\n.op\n.end\n");
+        var prepared = try build(sa.allocator(), pa.allocator(), nl);
+        defer prepared.deinit();
+        const want = device.Library.builtin(case[1]);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(@TypeOf(want), prepared.circuit.batch_types, &.{want}));
+    }
+}
+
 test ".save narrows the outputs; .save all keeps them" {
     var session = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer session.deinit();
