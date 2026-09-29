@@ -19,10 +19,12 @@ pub const Plan = struct { mosra: core.Mosra, variants: core.Variants, fanout: an
 const max_rel_times = 10_000;
 
 /// Resolves `nl.deck.mosra` against the frozen `circuit`, whose card table
-/// is `cards` and whose rows `nb` maps nets to. Lives in `sim`; `scratch`
-/// holds the lookups. Asserts that `nl.deck.mosra` is set. Every deck the
-/// aging cannot bind (a source with no MOSRA card, a MOSFET without `delvto`,
-/// more than 10000 times) is `UnsupportedCard`.
+/// is `cards` and whose rows `nb` maps nets to. The plan lives in `sim`;
+/// `scratch` holds the lookups. Asserts that `nl.deck.mosra` is set. Every
+/// deck the aging cannot bind (a source with no valid MOSRA LEVEL=1 card, a
+/// MOSFET without `delvto`, mobility aging without `mulu0`, no bound
+/// MOSFET, more than 10000 times) is `UnsupportedCard`, logged with the
+/// `.mosra` line.
 pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netlist, nb: *const builder.NetBuilder, circuit: *const device.Circuit, cards: []const core.query.CardRef, temp_c: f64) !Plan {
     const card = nl.deck.mosra.?;
     const line = card.line;

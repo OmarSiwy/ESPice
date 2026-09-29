@@ -1,5 +1,6 @@
 //! Source to netlist to frozen circuit and queries: the frontend's entry
-//! points for the Problem facade.
+//! points for the Problem facade. Cites no outside source; the run and
+//! variant plan follows dev/analysis/variants.md, the arenas AGENTS.md §2.12.
 const std = @import("std");
 const core = @import("core");
 const requests = @import("core").query;
@@ -72,7 +73,8 @@ pub fn parseDialect(name: []const u8) ?Dialect {
 /// them without a re-parse (`Prepared.tuning`). The netlist borrows
 /// `session`; release it once `build` has returned, or with the Prepared
 /// when `live` is not empty. Spectre input expands its `include`s
-/// (`source.expandSpectre`). Fails with `UnknownParameter` for a `live`
+/// (`source.expandSpectre`) and nothing else: it splits no `.alter` runs
+/// and reads no data files. Fails with `UnknownParameter` for a `live`
 /// name no global `.param` defines, and with the file error of an
 /// unreadable deck, include or data file.
 pub fn prepare(io: std.Io, session: std.mem.Allocator, input: Source, dialect: Dialect, live: []const []const u8) !netlist.Netlist {
@@ -426,7 +428,9 @@ const NodeIndex = struct {
 
 /// Resolves analysis cards appended to a built circuit. Topology and deck
 /// settings stay fixed; only the queries are allocated, in `arena`. Any card
-/// that is not an analysis is `UnsupportedDirectiveMutation`.
+/// that is not an analysis, or a single-value `.temp`, is
+/// `UnsupportedDirectiveMutation`; text holding no card is
+/// `InvalidAnalysisArguments`.
 pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, directive_text: []const u8) ![]const Job {
     const nodes: NodeIndex = try .init(arena, &prepared.circuit);
     const cards = try netlist.parseAnalyses(arena, directive_text, nodes);

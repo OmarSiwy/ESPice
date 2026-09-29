@@ -17,6 +17,7 @@ pub const Status = enum(u8) {
     running,
     /// RELIN (or ABSIN) and, for BISECTION, RELOUT (or ABSOUT) hold.
     converged,
+    /// ITROPT midpoints tested without converging; never while ABSIN is set.
     itropt,
     /// Both limits pass or both fail, so they do not bracket the target.
     bounds,

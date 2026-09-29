@@ -1,4 +1,6 @@
-//! Prepare tests: netlist → `Prepared` circuit and resolved queries, for analyses, variants and saves.
+//! Prepare tests: netlist → `Prepared` circuit and resolved queries, for
+//! analyses, variants, saves and refusals, against hand-worked expectations
+//! (and, for runtime-registered devices, the same model built in).
 const std = @import("std");
 const input = @import("../prepare.zig");
 const analyses = @import("../analyses.zig");

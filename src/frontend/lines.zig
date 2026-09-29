@@ -2,13 +2,18 @@
 //! A field is a slice of the line: `=`, `(`, `)` and `,` are one-byte fields,
 //! a `{...}` or quoted field keeps its delimiters (its kind is its first
 //! byte), and anything else is a word.
+//!
+//! Cites tests/grammar/{ngspice,hspice,spectre}_lines.peg (the line rules),
+//! dev/research/{ngspice,hspice,spectre}-syntax.md (§ and rule ids), ngspice
+//! inpeval.c INPevaluate and the HSPICE User Guide B-2008.09 for number
+//! literals, and glibc's pow(10, e) for the scale (#36).
 const std = @import("std");
 
 /// Input syntax.
 pub const Dialect = enum { ngspice, hspice, spectre };
 
-/// Split `line` into fields. `quotes` are the quote bytes, `braces` keeps
-/// `{...}` whole.
+/// A field splitter over one line. `quotes` are the quote bytes, `braces`
+/// keeps `{...}` whole.
 pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
     return struct {
         line: []const u8,
@@ -32,13 +37,13 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
             return copy.next();
         }
 
-        /// First byte of the next field.
+        /// First byte of the next field, skipping blanks but not consuming it.
         pub fn nextByte(self: *Self) ?u8 {
             while (self.pos < self.line.len and (self.line[self.pos] == ' ' or self.line[self.pos] == '\t')) self.pos += 1;
             return if (self.pos < self.line.len) self.line[self.pos] else null;
         }
 
-        /// Consume a `=` field if one is next: the word just read is a key.
+        /// Consumes a `=` field if one is next: the word just read is a key.
         pub fn takeEq(self: *Self) bool {
             if (self.nextByte() != '=') return false;
             self.pos += 1;
@@ -350,6 +355,8 @@ pub const ngspice = struct {
         }
 
         /// The next logical line, continuations joined; null at the end.
+        /// The line borrows `rest`'s text, or lives in `arena` when it joins
+        /// continuations. Fails only with `OutOfMemory` while joining.
         pub fn next(self: *Lines) !?[]const u8 {
             var t: []const u8 = undefined;
             while (true) {
@@ -494,6 +501,8 @@ pub const hspice = struct {
         }
 
         /// The next logical line, continuations joined; null at the end.
+        /// The line borrows `rest`'s text, or lives in `arena` when it joins
+        /// continuations. Fails only with `OutOfMemory` while joining.
         pub fn next(self: *Lines) !?[]const u8 {
             var part: Part = undefined;
             var quote: u8 = 0;
@@ -624,6 +633,8 @@ pub const spectre = struct {
         }
 
         /// The next logical line, continuations joined; null at the end.
+        /// The line borrows `rest`'s text, or lives in `arena` when it joins
+        /// continuations. Fails only with `OutOfMemory` while joining.
         pub fn next(self: *Lines) !?[]const u8 {
             if (self.spice) {
                 // §3.2: a SPICE region reads as HSPICE does.

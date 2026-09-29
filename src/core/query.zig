@@ -1,6 +1,9 @@
 //! Resolved query descriptions: the contract between the frontend, which
 //! fills them from analysis cards (keywords in frontend/netlist.zig `cards`),
-//! and the analysis drivers. Node and branch fields are MNA rows.
+//! and the analysis drivers. Node and branch fields are MNA rows; `validate.zig`
+//! checks the numeric fields and row indices before a driver runs. Cites the ngspice sources
+//! each field mirrors (acan.c, cktdisto.c, distoan.c, nicomcof.c, optran.c,
+//! dotcards.c) and the HSPICE manuals [CR .HB, .SAMPLE, .FFT; RF Ch.7].
 const std = @import("std");
 const Tolerances = @import("numerics.zig").Tolerances;
 const DeviceType = @import("ids.zig").DeviceType;
@@ -225,6 +228,8 @@ pub const Dcinc = struct {
 /// The DC operating point (`.op`), which most other analyses also run first.
 pub const Op = struct {
     tol: Tolerances = .{},
+    /// Newton starts from the caller's `x` instead of the cold start; the
+    /// executor sets it when `Deck.op_guess` is given.
     warm_start: bool = false,
     /// This operating point starts a transient (ngspice MODETRANOP), so
     /// waveform sources evaluate at t = 0 instead of at their DC value. The
@@ -419,7 +424,7 @@ pub const Pac = struct {
     /// Input frequency sweep.
     sweep: FreqSweep,
     /// Time samples per LO period. Must be a power of two and at least
-    /// 2 * (2 * n_harmonics + 1).
+    /// 2 * (2 * n_harmonics + 1); `validate` refuses anything else.
     n_time_samples: u16 = 64,
     pss_newton_tol: f64 = 1e-9,
     pss_max_newton_iter: u16 = 50,

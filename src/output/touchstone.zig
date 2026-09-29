@@ -2,6 +2,8 @@
 //! impedance for every port writes Touchstone 1.0 (`# Hz S RI R z0`); ports
 //! with different ones write Touchstone 2.0 with a `[Reference]` line, which
 //! 1.0 cannot express. Needs the complete matrix `types.portCount` checks for.
+//! A two-port result's `.lin` NFMIN, GAMMA_OPT and RN columns follow as the
+//! noise block.
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;

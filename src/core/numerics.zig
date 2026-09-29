@@ -1,10 +1,12 @@
 //! Numeric types and kernels shared by every layer: vector helpers, complex
 //! arithmetic, the frequency grid, solver tolerances and the BBD partition.
+//! Cites ngspice acan.c (the `.ac` grid and its stop tolerance), LAPACK
+//! dnrm2 (`norm2`'s rescaling) and AGENTS.md §2.11 (stdpp pipelines).
 
 const std = @import("std");
 const assert = std.debug.assert;
 
-/// Thread budget a solver may use; both fields are read together at dispatch.
+/// Thread budget a solver may use; its fields are read together at dispatch.
 pub const Execution = struct {
     /// Null runs everything on the calling thread.
     io: ?std.Io = null,
@@ -350,8 +352,8 @@ pub const FreqSweep = struct {
         return @as(u32, @intFromFloat(capped)) + 1;
     }
 
-    /// Frequency of point `k`, in Hz. Asserts that `k < count()`, and for
-    /// `poi` that `list` holds point `k`.
+    /// Frequency of point `k`, in Hz. Asserts that `k < count()`; for `poi`,
+    /// that `list` holds point `k` instead.
     pub fn at(self: FreqSweep, k: u32) f64 {
         if (self.kind == .poi) {
             assert(k < self.list.len);

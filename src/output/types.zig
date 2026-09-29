@@ -135,7 +135,11 @@ pub fn validatePlot(format: Format, plot: Plot) ValidationError!void {
 
 /// Refuses, before it runs, a query whose result `format` cannot encode
 /// under the deck's `title` and `probe_labels`.
+/// `NotSParameterData`: Touchstone or CITI for anything but `.sp`.
 /// `NoPorts`: a Touchstone or CITI request for an `.sp` with no ports.
+/// `DataLengthMismatch` and `FormatLimitExceeded`: sst2 or fsdb past its
+/// fixed limits, as `validateSchema` says; other formats are not checked
+/// for them until `validatePlot`.
 pub fn validateQuery(format: Format, query: core.QuerySchema, title: []const u8, probe_labels: []const []const u8) error{ NotSParameterData, NoPorts, DataLengthMismatch, FormatLimitExceeded }!void {
     if (format == .touchstone or format == .citi) {
         if (query.kind != .sp) return error.NotSParameterData;

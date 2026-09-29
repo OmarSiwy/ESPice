@@ -1,6 +1,9 @@
 //! Analysis cards and deck options to resolved queries. Node references
 //! arrive as circuit rows; source and card names resolve against the
-//! construction bindings, which outlive the parse.
+//! construction bindings, which outlive the parse. Cites ngspice's card
+//! readers and defaults (cktsopt.c, cktntask.c, traninit.c, dctran.c,
+//! distoan.c, noisean.c, spiceif.c, inpgval.c) and, for the HSPICE forms,
+//! the manuals [CR, SA, RF], at the code that follows each.
 const std = @import("std");
 const core = @import("core");
 const Library = @import("device").Library;
@@ -36,13 +39,17 @@ pub const Fanout = struct {
 };
 
 /// Queries for `cards` (nets already circuit rows), in card order, allocated
-/// in `arena`. `.noise` also yields its integrated plot, `.disto` its two
-/// harmonic vectors; a single-value `.temp` yields none. An output `v(...)`
-/// names one or two nodes in the deck; `appended` cards must name exactly one.
-/// `fanout` copies them over the deck's variants, and an HSPICE `.temp` list
-/// copies everything once per temperature. Errors are `buildJob`'s, logged
-/// with the card that raised them, and `InvalidAnalysisArguments` for a card
-/// whose query `core.validate` refuses on a circuit of `n_rows` unknowns;
+/// in `arena`. `.noise` also yields its integrated plot, `.lstb` its
+/// margins, `.disto` its two harmonic vectors (three intermodulation
+/// vectors with F2); a single-value `.temp` yields none. An output `v(...)`
+/// names one or two nodes in the deck; `appended` cards must name exactly
+/// one, else `UnsupportedAnalysisOutput`. `fanout` copies them over the
+/// deck's variants, and an HSPICE `.temp` list copies everything once per
+/// temperature. Errors are `buildJob`'s, logged with the card that raised
+/// them, and `InvalidAnalysisArguments` for a card whose query
+/// `core.validate` refuses on a circuit of `n_rows` unknowns, an HSPICE
+/// `.hbac`-family card with no `.hb` tone to take, or a `.temp` list value
+/// that is not a temperature above -273.15 degC (not logged);
 /// `OutOfMemory` also covers a fan-out count too large for `usize`.
 pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, n_rows: u32, appended: bool, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions, fanout: Fanout) ![]const Job {
     for (cards) |c| {
@@ -499,9 +506,10 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
     return o;
 }
 
-/// Copies the deck tolerances and integration method into `job`.
-/// A `.tran` keeps a `dt_max` it already has; otherwise it takes DELMAX, then
-/// ngspice's min(tstep, (tstop - tstart) / 50).
+/// Copies the deck tolerances into `job`, and into a `.tran` also the
+/// integration method, XMU and RUNLVL's TRTOL, each only when set. A
+/// `.tran` keeps a `dt_max` it already has; otherwise it takes DELMAX,
+/// then ngspice's min(tstep, (tstop - tstart) / 50).
 pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
     switch (job.*) {
         inline else => |*opts| {
@@ -1249,7 +1257,8 @@ fn outputLabel(arena: std.mem.Allocator, value: Value) ![]const u8 {
 /// that is wrong: `InvalidAnalysisArguments`, `AnalysisNodeNotFound`,
 /// `AnalysisSourceNotFound`, `UnsupportedFrequencySweep`,
 /// `UnsupportedAnalysisOutput`, and `MissingAnalysisCard` for an HSPICE form
-/// whose deck lacks the card it reads (`ctx`).
+/// whose deck lacks the card it reads (`ctx`). Point lists and labels are
+/// allocated in `ctx.arena`; `OutOfMemory` when it fails.
 pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const requests.CardRef, ctx: CardContext) !?Job {
     var args = a.args;
     const id = a.kind;

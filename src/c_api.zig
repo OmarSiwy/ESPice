@@ -15,7 +15,9 @@ pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builti
 pub const vera_validate_contract = @import("builtin").mode == .debug;
 /// `core.gpa`: SmpAllocator, or the page allocator single-threaded (wasm).
 const allocator = if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
-/// Bumped on any layout or semantics change; `espice_create` rejects a mismatch.
+/// Bumped on a change that breaks a caller built against an older header;
+/// `espice_create` rejects a mismatch. Fields appended to
+/// `espice_create_options` do not bump it: `struct_size` gates them.
 const abi_version = 1;
 /// ESPICE_NO_QUERY, "no dependency" in `QueryInfo`, and ESPICE_PLOT_TITLE,
 /// "plot title" in `espice_copy_result_name`.
@@ -218,7 +220,8 @@ const Handle = struct {
     gpa: std.mem.Allocator,
     threaded: std.Io.Threaded,
     problem: *api.Problem,
-    /// Read by `espice_error_message`; set by every failing call.
+    /// Read by `espice_error_message`; set by every failing call that got
+    /// past the handle lookup, and by an advance event's output error.
     last_error: ?anyerror = null,
     /// `Options.display` when the caller set a display callback.
     /// Unbuffered, so concurrent queries never touch its state.

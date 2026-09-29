@@ -6,6 +6,8 @@
 //! waveforms, values naming earlier results, TARG's `TD=TRIG` and
 //! inherited TD, and the DCMATCH, ACMATCH, LSTB, PHASENOISE and PTDNOISE
 //! analyses, which read those plots' columns by name [CR .MEASURE].
+//! `parseCheck` turns HSPICE `.check`, `.dout` and `.biaschk` cards into
+//! measures the same evaluator runs [CR .CHECK, .DOUT, .BIASCHK].
 const std = @import("std");
 const core = @import("core");
 const Kind = core.query.Kind;
@@ -47,7 +49,8 @@ const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
 /// reads an `.option`. A card without an analysis type reads `default`,
 /// HSPICE's last analysis card; `hspice` selects HSPICE's TARG TD
 /// inheritance. Strings in the result are slices of `text` or allocated in
-/// `arena`. ParseError for anything neither simulator accepts.
+/// `arena`. ParseError for anything neither simulator accepts; the errors
+/// of `ctx`'s callbacks pass through.
 pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: ?Kind, hspice: bool) !core.Measure {
     const typed = try words(arena, text);
     if (typed.len < 2) return error.ParseError;
@@ -339,7 +342,9 @@ pub const Levels = struct { lo: f64, hi: f64 };
 /// `.check global_level` only sets `global`, which later cards default to.
 /// `serial` numbers the card in its measures' names (`setup2_v1`).
 /// ParseError for a form ESPice does not read: a node wildcard, an element
-/// or region `.biaschk`, a `.biaschk` outside the transient.
+/// or region `.biaschk`, a `.biaschk` outside the transient; the errors of
+/// `ctx`'s callbacks pass through. Invalidates element pointers of `out`
+/// if it grows.
 pub fn parseCheck(arena: std.mem.Allocator, card: []const u8, text: []const u8, ctx: anytype, global: *?Levels, serial: u32, out: *std.ArrayList(core.Measure)) !void {
     const w = try words(arena, text);
     if (w.len == 0) return error.ParseError;

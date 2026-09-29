@@ -1,5 +1,9 @@
 //! Everything a deck says besides its topology: probes, sources, options,
-//! queries and the bindings later directives resolve against.
+//! queries and the bindings later directives resolve against. Plain data,
+//! filled by the frontend and read by the analysis and output layers.
+//! Cites ngspice com_measure2.c (`MeasureClause` defaults), the HSPICE
+//! manuals [CR .SAVE, .STIM, .MEASURE; SA Ch.27, Ch.29] and
+//! dev/analysis/mosra.md, dev/analysis/optimize.md.
 const std = @import("std");
 const assert = std.debug.assert;
 const requests = @import("query.zig");
@@ -86,8 +90,10 @@ pub const Variants = struct {
         return @intCast(self.labels.len);
     }
 
-    /// The parameter writes of variant `v`: `.{ refs, values }`. Asserts
-    /// that `starts` holds row `v`.
+    /// The parameter writes of variant `v`: `.{ refs, values }`, slices of
+    /// the table's own columns. Asserts that `starts` holds row `v`, that
+    /// `refs` and `values` have equal lengths, and that the row's range is
+    /// not reversed.
     pub fn writes(self: Variants, v: u32) struct { []const u32, []const f64 } {
         assert(v + 1 < self.starts.len);
         assert(self.refs.len == self.values.len);

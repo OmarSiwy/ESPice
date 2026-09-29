@@ -12,7 +12,8 @@
 //! over the mode's loss and delay frequencies, then written as second-order
 //! sections. Exact for N = 1 and for any coupling whose R, G, Rs and Gd
 //! share L0·C0's modes (a symmetric pair); otherwise the off-diagonal modal
-//! loss is dropped.
+//! loss is dropped. `readRlgcFile` reads the per-unit-length matrices from
+//! the RLGC file a W card names [SI Ch.3, Table 4].
 //!
 //! Data (DOD): every table is fixed size N ≤ 4 on the stack except the
 //! sections, which live in the build arena and die after the build.

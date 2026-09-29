@@ -341,6 +341,10 @@ pub const Problem = struct {
     /// takes its new bin, and the circuit is rebuilt only when parameter
     /// writes cannot express the point (dev/analysis/variants.md §5).
     ///
+    /// The first call also runs the deck's pending `.model OPT` optimization
+    /// and MOSRA stress run, so it can take as long as they do and fail with
+    /// their errors.
+    ///
     /// All-or-nothing. Fails with `error.UnknownParameter` for a name not
     /// in `Options.live_params` (nor a `.step` name), `error.InvalidArgument`
     /// when the lengths differ or a value is not finite,
@@ -385,8 +389,13 @@ pub const Problem = struct {
     }
 
     /// Runs one quantum of `id`, or of its first unfinished prerequisite, then
-    /// publishes whatever completed. A numerical failure is reported in the
-    /// event, not as an error.
+    /// publishes whatever completed. A terminal `id` returns its status
+    /// without running anything. A numerical failure is reported in the
+    /// event, not as an error, and an output failure in its
+    /// `delivery_error`. `error.InvalidQuery` for an ID outside
+    /// `0..query_count()`. The first of `advance`, `advance_ready`,
+    /// `run_all` and `set_params` also runs the deck's `.model OPT`
+    /// optimization and MOSRA stress run.
     pub fn advance(self: *Problem, id: QueryId) !Advance {
         try self.optimize();
         try self.age();
@@ -397,8 +406,11 @@ pub const Problem = struct {
     }
 
     /// Advances every query in `ids` by one quantum, up to
-    /// `limits.max_parallel` at a time, writing one event per query.
-    /// `ids` must be ready and distinct; a bad frontier starts nothing.
+    /// `limits.max_parallel` at a time, writing one event per query in `ids`
+    /// order, and returns `ids.len`. `ids` must be ready and distinct
+    /// (`error.QueryNotReady`, `error.DuplicateQuery`), `limits.max_parallel`
+    /// nonzero (`error.InvalidConcurrency`) and `events` at least as long
+    /// as `ids` (`error.BufferTooSmall`); a bad frontier starts nothing.
     pub fn advance_ready(self: *Problem, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
         try self.optimize();
         try self.age();
@@ -409,9 +421,11 @@ pub const Problem = struct {
     }
 
     /// Runs every query to completion, publishes the results and finishes
-    /// the output. Returns the first query failure, else
-    /// `error.DeliveryFailed` if output failed. Calling it again is a no-op
-    /// for finished queries and publishes nothing twice.
+    /// the output, then writes the `.save` and `.stim` files. Returns the
+    /// first query failure, else `error.DeliveryFailed` if output failed,
+    /// once every query has ended; no `.save` or `.stim` file is written
+    /// then. Calling it again is a no-op for finished queries and publishes
+    /// nothing twice.
     pub fn run_all(self: *Problem) !void {
         var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &lap, "run total (analysis, scheduling, output)");
@@ -595,10 +609,12 @@ pub const Problem = struct {
         try self.session.print(writer, resolved);
     }
 
-    /// Writes the deck's `.meas` results for every completed result a card
-    /// can read (tran, AC, DC, FFT, mismatch, loop stability, phase and
-    /// periodic noise), in request order, as ngspice prints them; cards that
-    /// cannot be measured are reported on `err`.
+    /// Writes each `.model OPT` optimization's summary, then the deck's
+    /// `.meas` results for every completed result a card can read (tran,
+    /// transient noise, AC, DC, FFT, S-parameter, mismatch, loop stability,
+    /// phase and periodic noise), in request order, as ngspice prints them,
+    /// then the Monte Carlo statistics of each tran, AC and DC card. Cards
+    /// that cannot be measured are reported on `err`.
     pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
         for (self.optimization, 0..) |*lm, k| try printOptimization(out, lm, self.prepared.tuner.?, k, measures);
@@ -945,7 +961,8 @@ fn monteTrials(gpa: std.mem.Allocator, session: *const analysis.session.Session,
     }
 }
 
-/// `.meas` results over one session's completed tran, AC and DC results.
+/// `.meas` results over one session's completed results of every kind a
+/// card can read.
 fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.Writer, err: *std.Io.Writer, measures: []const @import("core").Measure) !void {
     for (session.outputs.items) |id| {
         const info = try session.info(id);

@@ -1238,10 +1238,12 @@ pub const Sampler = struct {
         return s;
     }
 
-    /// Uniform in (0, 1) for trial `index` (0-based within the sweep) at
-    /// `site`. Under Latin hypercube, asserts that `index < n`, and the
-    /// first draw at a site allocates its strata in `arena` (on allocation
-    /// failure the draw falls back to plain sampling).
+    /// Uniform in (0, 1) for HSPICE trial number `trial` at `site`.
+    /// `index` (0-based within the sweep) picks the Latin hypercube
+    /// stratum: it must be below `n`, which only the safety-checked
+    /// `strata[index]` enforces. The first Latin hypercube draw at a site
+    /// allocates its strata in `arena` (on allocation failure the draw
+    /// falls back to plain sampling).
     pub fn uniform(s: *Sampler, site: u64, trial: u32, index: u32) f64 {
         const bits = netlist.siteKey(netlist.siteKey(s.seed, trial), site);
         const u = (@as(f64, @floatFromInt(bits >> 11)) + 0.5) * 0x1.0p-53;
@@ -1327,8 +1329,9 @@ pub const Trial = struct {
 const TrialDraw = struct {
     trial: Trial,
 
-    /// The trial's draw for distribution call `f` at `site`. Asserts that
-    /// `args` holds at least the nominal value.
+    /// The trial's draw for distribution call `f` at `site`. `args` must
+    /// hold at least the nominal value; unlike `OneSigma.sample` there is
+    /// no assert, only the safety-checked read of `args[0]`.
     pub fn sample(self: TrialDraw, site: u64, f: expr.Fn, args: []const f64) f64 {
         const nom = args[0];
         const width = if (args.len > 1) args[1] else 0;

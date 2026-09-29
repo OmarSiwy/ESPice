@@ -124,7 +124,9 @@ pub const Lm = struct {
     /// at least one parameter, equal slice lengths, lo <= hi with a grid
     /// point inside each gridded box, CLOSE > 0 and CUT > 1 (anything less
     /// never grows the Marquardt parameter past MAX, so a rejected step
-    /// would retry forever). `batch` as the field says.
+    /// would retry forever). DIFSIZ and PARMIN must be positive: a zero
+    /// finite-difference step asserts at the first Jacobian. `batch` as the
+    /// field says. Fails only when `arena` is out of memory.
     pub fn init(arena: std.mem.Allocator, x0: []const f64, lo: []const f64, hi: []const f64, dels: []const f64, grid: []const f64, m: u32, opts: Options, batch: bool) !Lm {
         const n: u32 = @intCast(x0.len);
         assert(n > 0);
