@@ -1719,6 +1719,14 @@ fn Reader(comptime S: type) type {
                     if (a[0] == ',') continue;
                     try args.append(r.arena, if (probe and F.isWord(a)) .{ .name = a } else try r.valueAt(a, f, frame, subst_names, geometry));
                 }
+                // HSPICE writes SFFM(VO VA FC MDI FS) [CR SFFM]; the source
+                // models read ngspice 44's (VO VA FM MDI FC). An omitted MDI
+                // is 0 and an omitted FS the models' -1, their 5/TSTOP.
+                if (r.dialect == .hspice and args.items.len > 2 and std.ascii.eqlIgnoreCase(t, "sffm")) {
+                    if (args.items.len == 3) try args.append(r.arena, .{ .num = 0 });
+                    if (args.items.len == 4) try args.append(r.arena, .{ .num = -1 });
+                    std.mem.swap(Value, &args.items[2], &args.items[4]);
+                }
                 return .{ .group = .{ .name = t, .args = args.items } };
             }
             if (S.parseNum(t)) |n| return .{ .num = n };
