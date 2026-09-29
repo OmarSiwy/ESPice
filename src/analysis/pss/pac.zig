@@ -49,8 +49,9 @@ pub fn sweep(
 
     // Sideband p (m_p = p - n_harm, w_p = 2*pi*(f_in + m_p*f_LO)) satisfies
     //   sum_q [G_{p-q} + j*w_p*C_{p-q}] X_q = B_p
-    // with G_m, C_m the m-th Fourier coefficients. The adjoint A^H Y = e is
-    // A^T Y = e here, since the real expansion of A is real.
+    // with G_m, C_m the m-th Fourier coefficients. The transposed real
+    // expansion solves A^H Y = e, so conj(Y) is A^T's solution, the
+    // transfer row PXF reports.
     // ponytail: dense and serial per frequency. The frequency lanes of
     // LaneLu do not apply: G_m, C_m are complex and w_p differs per block
     // row, so A(f) is not G + jwC. A batched dense LU over all frequencies
