@@ -104,6 +104,38 @@ below that, so their outputs are unchanged. Autonomous solves (`.hbosc`)
 stay dense: the f0 column and the `ppv` adjoint are written for the dense
 Jacobian.
 
+## Conversion matrix
+
+The periodic small-signal sweep behind `.pac`, `.pxf`, `.pnoise`, `.hbac`,
+`.hbxf` and `.hbnoise` (`pac.sweep`) solves the same way past
+`pac.useKrylov`: GMRES (restart 60, relative tolerance 1e-11) on the
+conversion matrix applied as the block convolution
+Σ_q (G_{p-q} + jω_p·C_{p-q}) x_q, right preconditioned by its block diagonal
+G_0 + jω_p·C_0, one `factorEach` lane per sideband per input frequency. The
+adjoint sweeps apply A^H and solve the lanes with `solveEach(.., true)`, the
+stacked-real transpose. A circuit with frequency-dependent entries (a
+transmission line) keeps the dense LU.
+
+Whole-run medians (hyperfine, 15 runs, load average about 16; callgrind
+cannot run these decks, the FFT build uses GFNI instructions valgrind does
+not decode), `.hbac dec 5 10 100k` on the diode-RC ladders:
+
+| n | 2M+1 | n·(2M+1) | dense | Krylov | ratio |
+|---|---|---|---|---|---|
+| 5 | 7 | 35 | 4.9 ms | 5.2 ms | 0.94 |
+| 7 | 7 | 49 | 7.1 ms | 7.1 ms | 1.00 |
+| 10 | 7 | 70 | 11.9 ms | 9.6 ms | 1.25 |
+| 5 | 17 | 85 | 17.8 ms | 12.4 ms | 1.44 |
+| 14 | 7 | 98 | 20.6 ms | 12.8 ms | 1.61 |
+| 9 | 17 | 153 | 53.6 ms | 29.2 ms | 1.84 |
+| 24 | 17 | 408 | 632 ms | 61 ms | 10.3 |
+| 44 | 17 | 748 | 4.63 s | 0.108 s | 42.8 |
+
+The switch is at n·(2M+1) >= 64. Every PAC-family deck in the corpus is at
+60 or below and stays dense. GMRES converges in about 25 iterations; the two
+paths agree to 1e-7 of each output's peak (`.hbac`, `.hbxf`) and 1e-12 on
+`.hbnoise`.
+
 ## QPSS
 
 Multi-tone HB subsumes `.qpss`: `.qpss f1 f2 K1 K2` is
@@ -136,10 +168,6 @@ layout nor its card.
 - The HB small-signal analyses (`.hbac`, `.hbxf`, `.hbnoise`, `.hblin`) linearize
   about one tone; with a multi-tone `.hb` card they are an argument error.
 - SUBHARMS, SS_TONE and SWEEP are not taken.
-- The conversion-matrix solves of `pac.zig` stay dense. The same
-  `factorEach` preconditioner would serve them at ω + pω0; it is not built
-  and not measured, since every HB-LPTV deck in the corpus has
-  n·(2M+1) <= 56.
 
 `ponytail:` the collocation pool is O(nt·pool·nf) greedy selection and the
 transforms are dense O(n·nt·nf) products. For many lines (three tones at

@@ -41,6 +41,7 @@ pub const Spectrum = struct {
     freqs: []f64,
     mix: []i16,
 
+    /// Frees both tables; `gpa` is the allocator `spectrum` took.
     pub fn deinit(self: Spectrum, gpa: std.mem.Allocator) void {
         gpa.free(self.freqs);
         gpa.free(self.mix);
@@ -355,7 +356,7 @@ const Operator = struct {
                 b[n + node] = if (j == 0) 0 else -r[node * nf + 2 * j];
             }
         }
-        self.fs.solveEach(self.p_rhs, self.p_x);
+        self.fs.solveEach(self.p_rhs, self.p_x, false);
         for (0..self.omegas.len) |j| {
             const x = self.p_x[j * nn ..][0..nn];
             for (0..n) |node| {
@@ -398,10 +399,9 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     const sizes = [_]usize{
         nt + 2 * nt * nf, // transform
         total, // f_hat
-        total, // q_hat
+        total, // q_hat, also the matvec's u_hat
         total, // dx
         total, // x_prev
-        total, // u_hat
         3 * n * nt, // x_td/v_td, f_td/w_td, q_td
         2 * nnz * nt, // g_td, c_td
         2 * nnz, // g0, c0
@@ -425,7 +425,6 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     const q_hat = take(arena, &off, total);
     const dx = take(arena, &off, total);
     const x_prev = take(arena, &off, total);
-    const u_hat = take(arena, &off, total);
     const x_td = take(arena, &off, n * nt);
     const f_td = take(arena, &off, n * nt);
     const q_td = take(arena, &off, n * nt);
@@ -464,7 +463,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
         .c_td = c_td,
         .v_td = x_td,
         .w_td = f_td,
-        .u_hat = u_hat,
+        .u_hat = q_hat,
         .fs = &fs,
         .p_rhs = p_rhs,
         .p_x = p_x,

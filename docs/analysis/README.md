@@ -34,7 +34,7 @@ implemented.
 | [optimize.md](optimize.md) | HSPICE `OPTIMIZE=`: bounded Levenberg-Marquardt over live parameters, finite-difference points as parallel variant queries | implemented (LM only; bisection and pass/fail: not implemented) |
 | [transient-noise.md](transient-noise.md) | Time-domain noise synthesis ($\sigma = \sqrt{S/2h}$), BE rationale | implemented (white part only) |
 | [pss-shooting-harmonic-balance.md](pss-shooting-harmonic-balance.md) | Shooting Newton (dense FD or FD-matvec GMRES), harmonic balance, autonomous oscillators (`.snosc`, `.hbosc`) | implemented (saved-factor Krylov shooting: not implemented) |
-| [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary sources; `.pnoise` on the shooting orbit, `.hbnoise` on the HB orbit | implemented (dense conversion matrix) |
+| [periodic-noise.md](periodic-noise.md) | LPTV small-signal, sideband folding, cyclostationary sources; `.pnoise` on the shooting orbit, `.hbnoise` on the HB orbit | implemented (conversion matrix dense, or GMRES with LaneLu block-diagonal preconditioning past n·(2M+1) >= 64) |
 | [pac.md](pac.md) | Periodic AC: harmonic conversion matrix over the PSS or HB orbit (`.pac`, `.hbac`) | implemented |
 | [pxf.md](pxf.md) | Periodic transfer function (adjoint PAC; `.pxf`, `.hbxf`) | implemented (dense adjoint) |
 | [phase-noise.md](phase-noise.md) | Oscillator phase noise by the PPV (`.phasenoise`, HSPICE METHOD=0) | implemented (white sources only) |

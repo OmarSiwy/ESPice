@@ -1391,9 +1391,22 @@ const FreqSolveTests = struct {
 
             try fs.factorEach(allocator, &omegas);
             try testing.expectEqual(@as(usize, 0), fs.held_id.items.len);
-            // Twice: the held factors survive a solve.
-            for (0..2) |_| fs.solveEach(rhs, x);
+            // Twice: the held factors survive a solve. Then the adjoint.
+            for (0..2) |_| fs.solveEach(rhs, x, false);
             for (omegas, 0..) |w, k| try fs.solve(w, rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
+            for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
+            try fs.factorEach(allocator, &omegas);
+            fs.solveEach(rhs, x, true);
+            for (omegas, 0..) |w, k| {
+                try fs.setOmega(w);
+                try fs.solveRhsT(rhs[k * nn ..][0..nn], x_ref[k * nn ..][0..nn]);
+            }
+            for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
+            // The same planes through fromPlanes, no circuit.
+            var fp = try FreqSolver.fromPlanes(allocator, n, col_ptr.items, row_idx.items, g_vals.items, c_vals.items);
+            defer fp.deinit(allocator);
+            try fp.factorEach(allocator, &omegas);
+            fp.solveEach(rhs, x, true);
             for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
         }
     }

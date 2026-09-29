@@ -62,7 +62,7 @@ the ngspice-45 source (`src/spicelib/analysis/*.c`) and covers analyses only.
 | PSS | `pss`: single shooting with the monodromy matrix integrated alongside, driven and autonomous (oscillator, period solved) (`lib/corepss.cpp`) | `.pss`: shooting, dense FD monodromy below 50 unknowns, matrix-free GMRES above; driven, and autonomous with the period solved and one node pinned (`.pss v(osc)`, `.snosc`) (`pss/pss.zig`) | `.pss`, experimental |
 | Harmonic balance | `hb`: any number of tones, box/diamond/hybrid truncation, APFT collocation, sparse block Jacobian on KLU or SuperLU_MT (`lib/corehb*.cpp`) | `.hb`: one tone dense (`pss/hb.zig`); `.hb TONES=` any number of tones, box/diamond (hybrid) truncation, APFT collocation, matrix-free block Jacobian by GMRES with a LaneLu block-diagonal preconditioner, also taken by large one-tone circuits (`pss/mhb.zig`, [multitone-hb.md](../analysis/multitone-hb.md)); magnitudes only | no |
 | Quasi-periodic steady state | `hb` with two or more tones | `.qpss`: two tones, GMRES without a preconditioner (`pss/qpss.zig`) | no |
-| Periodic AC | `pac` (shooting) and `hbac` (HB, multi-tone) | `.pac` (shooting) and `.hbac` (one-tone HB), dense conversion matrix | no |
+| Periodic AC | `pac` (shooting) and `hbac` (HB, multi-tone) | `.pac` (shooting) and `.hbac` (one-tone HB); conversion matrix dense, or GMRES with a LaneLu block-diagonal preconditioner past n(2M+1) >= 64 | no |
 | Periodic transfer function | no | `.pxf` (shooting) and `.hbxf` (HB) | no |
 | Periodic noise | `hbnoise` (HB, multi-tone) | `.pnoise` (shooting) | no |
 | HB noise | `hbnoise` | `.hbnoise` (one tone; `pss/hb_lptv.zig`) | no |
@@ -258,7 +258,9 @@ the RF front-end cells HB noise is usually run on and rules out large
 circuits.
 
 Phase B, the scalable version, is also what multi-tone HB, `hbac` and fast
-PAC/PXF/pnoise need:
+PAC/PXF/pnoise need. Status: landed except complex phasor output; see
+[multitone-hb.md](../analysis/multitone-hb.md) for what was built and its
+measurements.
 
 - The HB Jacobian as a sparse block matrix: the circuit's CSC pattern with
   each nonzero widened to a (2K+1)² block. VACASK stores exactly this, with

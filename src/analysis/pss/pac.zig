@@ -10,6 +10,8 @@ const num = @import("core").numerics;
 const fft_mod = @import("solver").fft;
 const dense_lu = @import("solver").dense_lu;
 const slotCol = @import("solver").freq_solve.slotCol;
+const FreqSolver = @import("solver").freq_solve.FreqSolver;
+const Gmres = @import("solver").gmres.Gmres;
 
 pub const Complex = num.Complex;
 
@@ -24,8 +26,28 @@ pub const Options = @import("core").query.Pac;
 ///   PXF (adjoint = true): out[fi*n_sb*n + sb*n + node] = conj(Y), the
 ///     transfer from a current injected at `node` on sideband sb to the
 ///     output `drive` selects; `probe_node` is unused.
-/// Cost: one dense (2(2M+1)n)^2 LU per frequency.
+/// Cost: one dense (2(2M+1)n)^2 LU per frequency, or past `useKrylov`
+/// preconditioned GMRES (`sweepKrylov`).
 pub fn sweep(
+    comptime adjoint: bool,
+    ckt: *root.Circuit,
+    lin: Linearization,
+    drive: []const f64,
+    probe_node: u32,
+    freqs: []f64,
+    out: []Complex,
+    options: Options,
+    allocator: std.mem.Allocator,
+) !void {
+    const n_sb = 2 * @as(usize, options.n_harmonics) + 1;
+    if (lin.wave.len == 0 and useKrylov(ckt.n, n_sb))
+        return sweepKrylov(adjoint, ckt, lin, drive, probe_node, freqs, out, options, allocator);
+    return sweepDense(adjoint, ckt, lin, drive, probe_node, freqs, out, options, allocator);
+}
+
+/// `sweep` by one dense LU of the real-expanded conversion matrix per
+/// input frequency.
+fn sweepDense(
     comptime adjoint: bool,
     ckt: *root.Circuit,
     lin: Linearization,
@@ -52,10 +74,9 @@ pub fn sweep(
     // with G_m, C_m the m-th Fourier coefficients. The transposed real
     // expansion solves A^H Y = e, so conj(Y) is A^T's solution, the
     // transfer row PXF reports.
-    // ponytail: dense and serial per frequency. The frequency lanes of
-    // LaneLu do not apply: G_m, C_m are complex and w_p differs per block
-    // row, so A(f) is not G + jwC. A batched dense LU over all frequencies
-    // is the upgrade when PAC/PXF sweeps dominate a mixer run.
+    // Dense and serial per frequency below `useKrylov`. A(f) is not
+    // G + jwC (G_m, C_m are complex and w_p differs per block row), so it
+    // is no lane system; its block diagonal is, which `sweepKrylov` uses.
     const a_work = try allocator.alloc(f64, nn2 * nn2);
     defer allocator.free(a_work);
     const rhs_work = try allocator.alloc(f64, nn2);
@@ -101,6 +122,155 @@ pub fn sweep(
             out[fi * n_sb + p] = .{ .re = x_work[idx], .im = x_work[nn + idx] };
         }
     }
+}
+
+/// True when a sweep over n unknowns and n_sb sidebands solves by
+/// `sweepKrylov`. The dense LU is O((2·n_sb·n)^3) a point and the Krylov
+/// solve O(iterations·(n_sb^2·nnz + n_sb·LU)). Whole-run medians on
+/// diode-RC ladder `.hbac` decks: dense 0.94x at n·n_sb = 35, even at 49,
+/// Krylov 1.25x at 70, 1.44x at 85, 10x at 408 and 43x at 748
+/// (docs/analysis/multitone-hb.md).
+fn useKrylov(n: usize, n_sb: usize) bool {
+    return n * n_sb >= 64;
+}
+
+/// `sweep` by GMRES on the conversion matrix, never formed: a product is
+/// the block convolution Σ_q (G_{p-q} + jω_p·C_{p-q}) x_q over the pattern
+/// (conjugated and transposed for the adjoint). The right preconditioner
+/// is its block diagonal G_0 + jω_p·C_0, one lane per sideband, factored
+/// once per input frequency (`FreqSolver.factorEach`). The circuit's
+/// frequency-dependent entries are the dense path's alone.
+fn sweepKrylov(
+    comptime adjoint: bool,
+    ckt: *root.Circuit,
+    lin: Linearization,
+    drive: []const f64,
+    probe_node: u32,
+    freqs: []f64,
+    out: []Complex,
+    options: Options,
+    allocator: std.mem.Allocator,
+) !void {
+    const n: usize = ckt.n;
+    const n_harm: usize = options.n_harmonics;
+    const n_sb: usize = 2 * n_harm + 1;
+    const nn = n_sb * n;
+    const nnz: usize = lin.col_ptr[n];
+
+    const work = try allocator.alloc(f64, 2 * nnz + 3 * 2 * nn + n_sb);
+    defer allocator.free(work);
+    const g0 = work[0..nnz];
+    const c0 = work[nnz..][0..nnz];
+    const rhs = work[2 * nnz..][0 .. 2 * nn];
+    const p_rhs = work[2 * nnz + 2 * nn ..][0 .. 2 * nn];
+    const p_x = work[2 * nnz + 4 * nn ..][0 .. 2 * nn];
+    const omegas = work[2 * nnz + 6 * nn ..][0..n_sb];
+    const x = try allocator.alloc(f64, 2 * nn);
+    defer allocator.free(x);
+    for (g0, c0, lin.g_hat[0..nnz], lin.c_hat[0..nnz]) |*g, *c, gh, ch| {
+        g.* = gh.re;
+        c.* = ch.re;
+    }
+    var fs = try FreqSolver.fromPlanes(allocator, @intCast(n), lin.col_ptr, lin.row_idx, g0, c0);
+    defer fs.deinit(allocator);
+    var gmres = try Gmres.init(allocator, @intCast(2 * nn), @intCast(@min(2 * nn, krylov_restart)));
+    defer gmres.deinit(allocator);
+    var op: ConversionOp(adjoint) = .{ .lin = lin, .n = n, .n_sb = n_sb, .omegas = omegas, .fs = &fs, .p_rhs = p_rhs, .p_x = p_x };
+
+    var sw = options.sweep.iter();
+    var fi: usize = 0;
+    while (sw.next()) |f_in| : (fi += 1) {
+        if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
+        for (omegas, 0..) |*w, p| w.* = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(@as(i32, @intCast(p)) - @as(i32, @intCast(n_harm)))) * options.f_lo);
+        try fs.factorEach(allocator, omegas);
+        root.zeroSimd(rhs);
+        if (drive.len != 0) {
+            @memcpy(rhs[n_harm * n ..][0..n], drive[0..n]);
+            @memcpy(rhs[nn + n_harm * n ..][0..n], drive[n..]);
+        }
+        root.zeroSimd(x);
+        // Where the dense LU would report a singular matrix.
+        if (!gmres.solve(&op, rhs, x, krylov_tol, krylov_max_restarts).converged) return error.PacDidNotConverge;
+
+        freqs[fi] = f_in;
+        if (adjoint) {
+            for (out[fi * nn ..][0..nn], x[0..nn], x[nn..]) |*t, re, im| t.* = .{ .re = re, .im = -im };
+        } else for (0..n_sb) |p| {
+            const idx = p * n + probe_node;
+            out[fi * n_sb + p] = .{ .re = x[idx], .im = x[nn + idx] };
+        }
+    }
+}
+
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .sweepDense = sweepDense,
+    .sweepKrylov = sweepKrylov,
+} else {};
+
+/// GMRES restart depth, relative tolerance and restarts of `sweepKrylov`.
+/// The tolerance keeps the transfer within roundoff distance of the dense
+/// LU's.
+const krylov_restart: u32 = 60;
+const krylov_tol: f64 = 1e-11;
+const krylov_max_restarts: u32 = 20;
+
+/// The conversion matrix of one input frequency as a GMRES operator, on
+/// stacked-real sideband-major vectors [re(p*n + node), im(p*n + node)].
+fn ConversionOp(comptime adjoint: bool) type {
+    return struct {
+        lin: Linearization,
+        n: usize,
+        n_sb: usize,
+        /// ω_p of every sideband at this input frequency.
+        omegas: []const f64,
+        fs: *FreqSolver,
+        p_rhs: []f64,
+        p_x: []f64,
+
+        /// w = A v (A^H v when adjoint): z = G_{p-q} + jω_p·C_{p-q} couples
+        /// v_q[col] into w_p[row], or conj(z) couples v_p[row] into w_q[col].
+        pub fn matvec(self: *@This(), v: []const f64, w: []f64) void {
+            const n = self.n;
+            const nn = self.n_sb * n;
+            const nnz: usize = self.lin.col_ptr[n];
+            const n_samples = self.lin.g_hat.len / nnz;
+            root.zeroSimd(w);
+            for (0..self.n_sb) |p| for (0..self.n_sb) |q| {
+                const m: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(q));
+                const bin = mapHarmonicToFftBin(m, n_samples) orelse continue;
+                const omega_p = self.omegas[p];
+                const g_hat = self.lin.g_hat[bin * nnz ..][0..nnz];
+                const c_hat = self.lin.c_hat[bin * nnz ..][0..nnz];
+                for (0..n) |col| for (self.lin.col_ptr[col]..self.lin.col_ptr[col + 1]) |slot| {
+                    const row: usize = self.lin.row_idx[slot];
+                    const z_re = g_hat[slot].re - omega_p * c_hat[slot].im;
+                    const z_im = if (adjoint) -(g_hat[slot].im + omega_p * c_hat[slot].re) else g_hat[slot].im + omega_p * c_hat[slot].re;
+                    const src = if (adjoint) p * n + row else q * n + col;
+                    const dst = if (adjoint) q * n + col else p * n + row;
+                    const x_re = v[src];
+                    const x_im = v[nn + src];
+                    w[dst] += z_re * x_re - z_im * x_im;
+                    w[nn + dst] += z_re * x_im + z_im * x_re;
+                };
+            };
+        }
+
+        /// r := M^-1 r, M the block diagonal (G_0 + jω_p·C_0, or its ^H).
+        pub fn precond(self: *@This(), r: []f64) void {
+            const n = self.n;
+            const nn = self.n_sb * n;
+            for (0..self.n_sb) |p| {
+                @memcpy(self.p_rhs[2 * p * n ..][0..n], r[p * n ..][0..n]);
+                @memcpy(self.p_rhs[2 * p * n + n ..][0..n], r[nn + p * n ..][0..n]);
+            }
+            self.fs.solveEach(self.p_rhs, self.p_x, adjoint);
+            for (0..self.n_sb) |p| {
+                @memcpy(r[p * n ..][0..n], self.p_x[2 * p * n ..][0..n]);
+                @memcpy(r[nn + p * n ..][0..n], self.p_x[2 * p * n + n ..][0..n]);
+            }
+        }
+    };
 }
 
 /// Settled G/C Fourier coefficients, bin-major over the circuit's CSC
