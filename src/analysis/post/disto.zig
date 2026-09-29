@@ -1,14 +1,18 @@
 //! Distortion analysis (`.disto`) by a simplified Volterra series. One eval
 //! at the operating point gives the analytic G and C planes. The
-//! second-order kernel is a central difference of the analytic Jacobian
-//! (d2F = dG/dx), two evals per unknown, and each frequency is a few dense
-//! solves.
+//! second-order kernel is a central difference of the analytic Jacobians
+//! (d2F = dG/dx, d2Q = dC/dx), two evals per unknown, and each frequency is
+//! a few dense solves.
 //!
 //! The third-order kernel is never stored. d3 is O(n^4) and its only uses
 //! are the contractions d3(V1,V1,V1) and, for two tones, d3(V1,V1,V2*), so
-//! each is taken as directional second differences of the Jacobian along
+//! each is taken as directional second differences of the Jacobians along
 //! the real directions V1 spans: eight or twelve evals per frequency point,
 //! no tensor (see `cubicForms`, `mixedCubic`).
+//!
+//! Every kernel has a resistive and a charge part. A product at ω_out
+//! sees K = F⁽ᵏ⁾ + jω_out·Q⁽ᵏ⁾, as ngspice's device DISTO sections stamp the
+//! charge Taylor coefficients times jω of the mixing frequency.
 //!
 //! With a second tone (the card's `f2overf1`, a `DISTOF2` source) the
 //! products are ngspice's intermodulation set: f1+f2 and f1-f2 from the
@@ -50,16 +54,16 @@ pub const Out = struct {
 
 /// Harmonic responses across the frequency sweep, into `out`:
 ///   1. Linearize at the operating point: one eval(), dense G and C.
-///   2. Second-order kernel d2F/dxa dxb = dG[.,a]/dx_b, a central difference
-///      of the analytic Jacobian at 2n perturbed points (only the extra
-///      order is FD).
-///   3. For each frequency f:
+///   2. Second-order kernels d2F/dxa dxb = dG[.,a]/dx_b and d2Q = dC/dx, a
+///      central difference of the analytic Jacobians at 2n perturbed points
+///      (only the extra order is FD).
+///   3. For each frequency f, with K(ω) = F + jω·Q for each order's kernel:
 ///      a. Solve first-order: (G + jwC) * V1 = excitation
-///      b. Second-order nonlinear current ½ F''(V1, V1) from the kernel
-///      c. Solve second-order: (G + j*2w*C) * V2 = -½ F''(V1, V1)
+///      b. Second-order nonlinear current ½ K''(2w)(V1, V1)
+///      c. Solve second-order: (G + j*2w*C) * V2 = -½ K''(2w)(V1, V1)
 ///      d. HD2 = |V2[output]| / |V1[output]|
 ///      e. Third order, only when asked for: the 3f1 current is
-///         F''(V1, V2) + ⅙·F'''(V1, V1, V1), and
+///         K''(3w)(V1, V2) + ⅙·K'''(3w)(V1, V1, V1), and
 ///         (G + j*3w*C) * V3 = -that.
 ///
 /// The phasor convention is ngspice's throughout: the drive is half the
@@ -93,31 +97,35 @@ pub fn sweep(
 
     ckt.eval(x_op, 0);
 
-    const g_dense = try allocator.alloc(f64, n * n);
-    defer allocator.free(g_dense);
+    // The dense G and C planes, adjacent: the third-order stencils
+    // difference both halves as one 2n·n slab.
+    const n2 = n * n;
+    const gc0 = try allocator.alloc(f64, 2 * n2);
+    defer allocator.free(gc0);
+    const g_dense = gc0[0..n2];
+    const c_mat = gc0[n2..];
     ckt.denseG(g_dense);
-
-    const c_mat = try allocator.alloc(f64, n * n);
-    defer allocator.free(c_mat);
     ckt.denseC(c_mat);
 
     // d2[row][a][b] ≈ (G(x_op + eps*e_b) − G(x_op − eps*e_b))[row][a] / 2eps,
-    // kept as its nonzero terms only. Outside G's pattern both planes are 0,
-    // so only pattern slots can contribute. Central, not forward: the
-    // forward difference's O(eps·d3) error was the whole 2nd-harmonic
-    // residual of disto/bench_disto_diode_clipper.
+    // and its charge twin from C, kept as the nonzero terms only. G and C
+    // share one pattern and both planes are 0 outside it, so only pattern
+    // slots can contribute. Central, not forward: the forward difference's
+    // O(eps·d3) error was the whole 2nd-harmonic residual of
+    // disto/bench_disto_diode_clipper.
     const eps = options.fd_eps;
     const inv_2eps = 0.5 / eps;
     const nnz: usize = ckt.nnz;
-    const g_plus = try allocator.alloc(f64, nnz);
-    defer allocator.free(g_plus);
+    const gc_plus = try allocator.alloc(f64, 2 * nnz);
+    defer allocator.free(gc_plus);
+    const g_plus = gc_plus[0..nnz];
+    const c_plus = gc_plus[nnz..];
 
-    const g_pert = try allocator.alloc(f64, n * n);
+    const g_pert = try allocator.alloc(f64, 2 * n2);
     defer allocator.free(g_pert);
     const x_pert = try allocator.alloc(f64, n);
     defer allocator.free(x_pert);
 
-    const Term = struct { row: u32, a: u32, b: u32, coeff: f64 };
     var term_list: std.ArrayList(Term) = .empty;
     defer term_list.deinit(allocator);
     for (0..n) |b| {
@@ -126,13 +134,15 @@ pub fn sweep(
         x_pert[b] += eps;
         ckt.eval(x_pert, 0);
         simdCopy(g_plus, ckt.g_vals[0..nnz]);
+        simdCopy(c_plus, ckt.c_vals[0..nnz]);
         x_pert[b] = x_op[b] - eps;
         ckt.eval(x_pert, 0);
         for (0..n) |a| for (ckt.col_ptr[a]..ckt.col_ptr[a + 1]) |slot| {
             // (-0 compares equal to 0 and is skipped; NaN is kept.)
             const coeff = (g_plus[slot] - ckt.g_vals[slot]) * inv_2eps;
-            if (coeff == 0) continue;
-            try term_list.append(allocator, .{ .row = ckt.row_idx[slot], .a = @intCast(a), .b = @intCast(b), .coeff = coeff });
+            const qcoeff = (c_plus[slot] - ckt.c_vals[slot]) * inv_2eps;
+            if (coeff == 0 and qcoeff == 0) continue;
+            try term_list.append(allocator, .{ .row = ckt.row_idx[slot], .a = @intCast(a), .b = @intCast(b), .coeff = coeff, .qcoeff = qcoeff });
         };
     }
 
@@ -180,17 +190,17 @@ pub fn sweep(
     const dyn_work = try allocator.alloc(f64, 2 * ckt.ac_dyn_slots.len);
     defer allocator.free(dyn_work);
 
-    // Third-order scratch: one more dense Jacobian and the four real cubic
-    // forms of `cubicForms`. Both are small next to the (2n)^2 LU slab, so they are
-    // allocated even when h3 is not wanted.
-    const g_minus = try allocator.alloc(f64, n * n);
+    // Third-order scratch: one more dense G/C pair and the eight real cubic
+    // forms of `cubicForms`. Both are the size of the (2n)^2 LU slab or
+    // less, so they are allocated even when h3 is not wanted.
+    const g_minus = try allocator.alloc(f64, 2 * n2);
     defer allocator.free(g_minus);
-    const cubic = try allocator.alloc(f64, 4 * n);
+    const cubic = try allocator.alloc(f64, 8 * n);
     defer allocator.free(cubic);
     // Two-tone scratch: the F2 response V1b (and its conjugate's imaginary
     // part), the f1-f2 response, the IM right-hand side and solution, and
-    // the two n·n planes `mixedCubic` accumulates.
-    const im_work = try allocator.alloc(f64, if (two_tone) 5 * nn + (if (want_im3) 2 * n * n else 0) else 0);
+    // the two 2n·n G/C slabs `mixedCubic` accumulates.
+    const im_work = try allocator.alloc(f64, if (two_tone) 5 * nn + (if (want_im3) 4 * n2 else 0) else 0);
     defer allocator.free(im_work);
     const v1b = im_work[0..if (two_tone) nn else 0];
     const v1b_cim = im_work[if (two_tone) nn else 0..][0..if (two_tone) n else 0];
@@ -246,82 +256,61 @@ pub fn sweep(
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work);
 
-        // 3b. Second-order rhs, -½ F''[V1, V1]:
-        // D2[row] = sum_ab d2[row,a,b] · V1[a] · V1[b] (complex product).
-        // The ½ is ngspice's: `g2 = 0.5 * gd / vte` is ½·d²I/dV²
-        // (diodset.c:78) and D1n2F1 contributes `g2 * V1²` (dloadfns.c:545).
-        // The full double sum already carries both (a,b) and (b,a), so the
-        // factor appears once.
-        for (0..n) |row| {
-            var d2_re: f64 = 0;
-            var d2_im: f64 = 0;
-            for (terms[row_start[row]..row_start[row + 1]]) |term| {
-                const a = term.a;
-                const b_idx = term.b;
-                const prod_re = v1_re[a] * v1_re[b_idx] - v1_im[a] * v1_im[b_idx];
-                const prod_im = v1_re[a] * v1_im[b_idx] + v1_im[a] * v1_re[b_idx];
-                d2_re += term.coeff * prod_re;
-                d2_im += term.coeff * prod_im;
-            }
-            rhs_work[row] = -0.5 * d2_re;
-            rhs_work[n + row] = -0.5 * d2_im;
-        }
-
-        // 3c. Second order: (G + j·2w·C) V2 = -D2(V1,V1).
+        // 3b. Second-order rhs, -½ K''(2w)[V1, V1]. The ½ is ngspice's:
+        // `g2 = 0.5 * gd / vte` is ½·d²I/dV² (diodset.c:78) and D1n2F1
+        // contributes `g2 * V1²` (dloadfns.c:545). The full double sum
+        // already carries both (a,b) and (b,a), so the factor appears once.
         const omega2 = 2.0 * omega;
+        bilinear(terms, row_start, v1_re, v1_im, v1_re, v1_im, -0.5, omega2, rhs_work);
+
+        // 3c. Second order: (G + j·2w·C) V2 = -½ K''(V1,V1).
         dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega2, a_work);
         ckt.addAcDynDense(x_op, omega2, a_work, dyn_work);
 
         try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work2);
 
         // 3d. Third order, only when h3 is wanted. The 3f1 current is
-        // F''(V1,V2) + ⅙·F'''(V1,V1,V1): the 2f1·f1 beat through the
+        // K''(V1,V2) + ⅙·K'''(V1,V1,V1) at 3w: the 2f1·f1 beat through the
         // quadratic kernel plus the direct cube.
         if (want_h3) {
-            const d3v = cubicForms(ckt, x_op, v1_re, v1_im, cubic_step, g_dense, g_pert, g_minus, x_pert, cubic);
-            for (0..n) |row| {
-                var m_re: f64 = 0;
-                var m_im: f64 = 0;
-                for (terms[row_start[row]..row_start[row + 1]]) |term| {
-                    const a = term.a;
-                    const b_idx = term.b;
-                    m_re += term.coeff * (v1_re[a] * v2_re[b_idx] - v1_im[a] * v2_im[b_idx]);
-                    m_im += term.coeff * (v1_re[a] * v2_im[b_idx] + v1_im[a] * v2_re[b_idx]);
-                }
-                rhs_work[row] = -(m_re + d3v[0][row] / 6.0);
-                rhs_work[n + row] = -(m_im + d3v[1][row] / 6.0);
+            const d3v = cubicForms(ckt, x_op, v1_re, v1_im, cubic_step, 3.0 * omega, gc0, g_pert, g_minus, x_pert, cubic);
+            bilinear(terms, row_start, v1_re, v1_im, v2_re, v2_im, -1, 3.0 * omega, rhs_work);
+            for (rhs_work[0..n], rhs_work[n..], d3v[0], d3v[1]) |*re, *im, d_re, d_im| {
+                re.* -= d_re / 6.0;
+                im.* -= d_im / 6.0;
             }
             dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, 3.0 * omega, a_work);
             ckt.addAcDynDense(x_op, 3.0 * omega, a_work, dyn_work);
             try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work3);
         }
 
-        // 3e. Two tones. The one-sided phasor of ½F''(x,x) at w1+w2 is
-        // F''(V1a, V1b), at w1-w2 F''(V1a, V1b*): the cross term of the
+        // 3e. Two tones. The one-sided phasor of ½K''(x,x) at w1+w2 is
+        // K''(V1a, V1b), at w1-w2 K''(V1a, V1b*): the cross term of the
         // square counts both orders. At 2w1-w2 the third-order current is
-        // F''(V1a, V2(w1-w2)) + F''(V1b*, V2(2w1)) + ½·d3(V1a, V1a, V1b*),
-        // the multinomial 3 of (w1, w1, -w2) over ⅙.
+        // K''(V1a, V2(w1-w2)) + K''(V1b*, V2(2w1)) + ½·K'''(V1a, V1a, V1b*),
+        // the multinomial 3 of (w1, w1, -w2) over ⅙, every K at 2w1-w2.
         if (two_tone) {
             const w1pw2 = omega + omega_f2;
             const w1mw2 = omega - omega_f2;
             const v1b_re = v1b[0..n];
             if (out.f1pf2.len != 0) {
-                bilinear(terms, row_start, v1_re, v1_im, v1b_re, v1b[n..], -1, rhs_work);
+                bilinear(terms, row_start, v1_re, v1_im, v1b_re, v1b[n..], -1, w1pw2, rhs_work);
                 try solveAt(ckt, x_op, g_dense, c_mat, w1pw2, a_work, dyn_work, rhs_work, x_im);
                 scatter(out.f1pf2, k, out.probes, x_im);
             }
             if (out.f1mf2.len != 0 or want_im3) {
-                bilinear(terms, row_start, v1_re, v1_im, v1b_re, v1b_cim, -1, rhs_work);
+                bilinear(terms, row_start, v1_re, v1_im, v1b_re, v1b_cim, -1, w1mw2, rhs_work);
                 try solveAt(ckt, x_op, g_dense, c_mat, w1mw2, a_work, dyn_work, rhs_work, v2m);
                 if (out.f1mf2.len != 0) scatter(out.f1mf2, k, out.probes, v2m);
             }
             if (want_im3) {
-                bilinear(terms, row_start, v1_re, v1_im, v2m[0..n], v2m[n..], -1, rhs_work);
-                bilinear(terms, row_start, v1b_re, v1b_cim, v2_re, v2_im, -1, t3);
+                const w_im3 = 2.0 * omega - omega_f2;
+                bilinear(terms, row_start, v1_re, v1_im, v2m[0..n], v2m[n..], -1, w_im3, rhs_work);
+                bilinear(terms, row_start, v1b_re, v1b_cim, v2_re, v2_im, -1, w_im3, t3);
                 for (rhs_work, t3) |*r, t| r.* += t;
-                mixedCubic(ckt, x_op, v1_re, v1_im, v1b_re, v1b_cim, cubic_step, g_dense, g_pert, g_minus, m_planes, x_pert, t3);
+                mixedCubic(ckt, x_op, v1_re, v1_im, v1b_re, v1b_cim, cubic_step, w_im3, gc0, g_pert, g_minus, m_planes, x_pert, t3);
                 for (rhs_work, t3) |*r, t| r.* -= 0.5 * t;
-                try solveAt(ckt, x_op, g_dense, c_mat, 2.0 * omega - omega_f2, a_work, dyn_work, rhs_work, x_im);
+                try solveAt(ckt, x_op, g_dense, c_mat, w_im3, a_work, dyn_work, rhs_work, x_im);
                 scatter(out.twof1mf2, k, out.probes, x_im);
             }
         }
@@ -374,20 +363,30 @@ fn solveAt(ckt: *root.Circuit, x_op: []const f64, g_dense: []const f64, c_mat: [
     try dense_lu.factorizeSolve(2 * n, a_work, rhs, x);
 }
 
-/// dst (stacked 2n) := scale·F''(a, b), the complex bilinear form of the
-/// second-order kernel `terms` (rows `row_start`) on phasors a and b given
-/// as real and imaginary parts.
-fn bilinear(terms: anytype, row_start: []const u32, a_re: []const f64, a_im: []const f64, b_re: []const f64, b_im: []const f64, scale: f64, dst: []f64) void {
+/// One nonzero of the second-order kernels: d²F[row]/dx_a dx_b (`coeff`)
+/// and d²Q[row]/dx_a dx_b (`qcoeff`).
+const Term = struct { row: u32, a: u32, b: u32, coeff: f64, qcoeff: f64 };
+
+/// dst (stacked 2n) := scale·(F''(a, b) + jω·Q''(a, b)), the complex
+/// bilinear form of the second-order kernels `terms` (rows `row_start`) on
+/// phasors a and b given as real and imaginary parts, for a product at ω.
+fn bilinear(terms: []const Term, row_start: []const u32, a_re: []const f64, a_im: []const f64, b_re: []const f64, b_im: []const f64, scale: f64, omega: f64, dst: []f64) void {
     const n = a_re.len;
     for (0..n) |row| {
         var re: f64 = 0;
         var im: f64 = 0;
+        var q_re: f64 = 0;
+        var q_im: f64 = 0;
         for (terms[row_start[row]..row_start[row + 1]]) |t| {
-            re += t.coeff * (a_re[t.a] * b_re[t.b] - a_im[t.a] * b_im[t.b]);
-            im += t.coeff * (a_re[t.a] * b_im[t.b] + a_im[t.a] * b_re[t.b]);
+            const p_re = a_re[t.a] * b_re[t.b] - a_im[t.a] * b_im[t.b];
+            const p_im = a_re[t.a] * b_im[t.b] + a_im[t.a] * b_re[t.b];
+            re += t.coeff * p_re;
+            im += t.coeff * p_im;
+            q_re += t.qcoeff * p_re;
+            q_im += t.qcoeff * p_im;
         }
-        dst[row] = scale * re;
-        dst[n + row] = scale * im;
+        dst[row] = scale * (re - omega * q_im);
+        dst[n + row] = scale * (im + omega * q_re);
     }
 }
 
@@ -401,12 +400,14 @@ fn scatter(dst: []f64, k: usize, probes: []const u32, x: []const f64) void {
     }
 }
 
-/// `dst` (stacked 2n) := d3(a, a, c) for complex a = p + jq and c, without
-/// forming d3. With S(u) the second difference of the Jacobian along u
-/// (`secondDirDeriv`, scaled back from a unit direction),
+/// `dst` (stacked 2n) := K'''(a, a, c) = F'''(a, a, c) + jω·Q'''(a, a, c)
+/// for complex a = p + jq and c, without forming d3. With S(u) the second
+/// difference of the Jacobians along u (`secondDirDeriv`, scaled back from a
+/// unit direction), for each of F and Q
 ///   d3(a, a, c) = (S(p) - S(q))·c + j·(S(p+q) - S(p) - S(q))·c,
 /// the second term being 2·d3(p, q, ·) by polarization. Twelve evals.
-/// `planes` is 2n·n scratch, `g_work`/`g_tap` n·n, `x_work` n.
+/// `gc0` is the G/C pair at x_op (2n·n), `planes` 4n·n scratch,
+/// `g_work`/`g_tap` 2n·n, `x_work` n.
 fn mixedCubic(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -415,7 +416,8 @@ fn mixedCubic(
     c_re: []const f64,
     c_im: []const f64,
     h: f64,
-    g0: []const f64,
+    omega: f64,
+    gc0: []const f64,
     g_work: []f64,
     g_tap: []f64,
     planes: []f64,
@@ -423,8 +425,9 @@ fn mixedCubic(
     dst: []f64,
 ) void {
     const n = p.len;
-    const m1 = planes[0 .. n * n];
-    const m2 = planes[n * n ..][0 .. n * n];
+    const n2 = n * n;
+    const m1 = planes[0 .. 2 * n2];
+    const m2 = planes[2 * n2 ..][0 .. 2 * n2];
     simdZero(planes);
     // (direction, weight into m1, weight into m2); p + q goes through x_work's tail.
     const sum = dst[0..n];
@@ -433,23 +436,25 @@ fn mixedCubic(
     for (dirs) |d| {
         const nrm = norm(d[0]);
         if (nrm == 0) continue;
-        secondDirDeriv(ckt, x_op, d[0], 1.0 / nrm, h, g0, g_work, g_tap, x_work);
+        secondDirDeriv(ckt, x_op, d[0], 1.0 / nrm, h, gc0, g_work, g_tap, x_work);
         const s2 = nrm * nrm;
         for (m1, m2, g_work) |*a, *b, g| {
             a.* += d[1] * s2 * g;
             b.* += d[2] * s2 * g;
         }
     }
-    // Re = m1·c_re - m2·c_im, Im = m1·c_im + m2·c_re.
+    // Per plane Re = m1·c_re - m2·c_im, Im = m1·c_im + m2·c_re; then F + jω·Q.
     for (0..n) |row| {
-        var re: f64 = 0;
-        var im: f64 = 0;
-        for (m1[row * n ..][0..n], m2[row * n ..][0..n], c_re, c_im) |a, b, cr, ci| {
-            re += a * cr - b * ci;
-            im += a * ci + b * cr;
+        var acc: [2][2]f64 = .{ .{ 0, 0 }, .{ 0, 0 } };
+        for (&acc, 0..) |*plane, k| {
+            const off = k * n2 + row * n;
+            for (m1[off..][0..n], m2[off..][0..n], c_re, c_im) |a, b, cr, ci| {
+                plane[0] += a * cr - b * ci;
+                plane[1] += a * ci + b * cr;
+            }
         }
-        dst[row] = re;
-        dst[n + row] = im;
+        dst[row] = acc[0][0] - omega * acc[1][1];
+        dst[n + row] = acc[0][1] + omega * acc[1][0];
     }
 }
 
@@ -469,47 +474,55 @@ const cubic_step: f64 = 1e-3;
 /// The summary plot does not apply it.
 const HARMONIC_SCALE: f64 = 2.0;
 
-/// `d3(V1, V1, V1)` without forming d3, returned as `.{ re, im }`, each an
-/// n-vector aliasing `cubic`.
+/// `K'''(V1, V1, V1)` at ω, F''' + jω·Q''', without forming d3, returned as
+/// `.{ re, im }`, each an n-vector aliasing `cubic`.
 ///
-/// It is a directional second difference of the analytic Jacobian: for a
+/// It is a directional second difference of the analytic Jacobians: for a
 /// unit direction u, with G(k) = G(x + k·h·u),
 ///   S(u)[row,a] = (16(G(1) + G(−1)) − (G(2) + G(−2)) − 30G(0))[row,a] / 12h²
 ///               = d3[row,a,·,·](u,u) + O(h⁴)
-/// and the cubic form T(w,u,u)[row] = Σ_a w[a]·S(u)[row,a] by symmetry of d3.
-/// With V1 = p + jq that is eight evals, S(p̂) and S(q̂), and
-///   Re = T(p,p,p) − 3T(p,q,q),  Im = 3T(p,p,q) − T(q,q,q).
-/// `g_work`/`g_minus` are n·n scratch, `x_work` is n scratch, `cubic` is 4n.
+/// and the cubic form T(w,u,u)[row] = Σ_a w[a]·S(u)[row,a] by symmetry of d3,
+/// likewise for C. With V1 = p + jq that is eight evals, S(p̂) and S(q̂), and
+/// per plane
+///   A = T(p,p,p) − 3T(p,q,q),  B = 3T(p,p,q) − T(q,q,q),
+/// so F'''(V1,V1,V1) = A_F + jB_F and the charge part adds jω(A_Q + jB_Q).
+/// `gc0` is the G/C pair at x_op (2n·n), `g_work`/`g_minus` 2n·n scratch,
+/// `x_work` n scratch, `cubic` 8n.
 fn cubicForms(
     ckt: *root.Circuit,
     x_op: []const f64,
     p: []const f64,
     q: []const f64,
     h: f64,
-    g0: []const f64,
+    omega: f64,
+    gc0: []const f64,
     g_work: []f64,
     g_minus: []f64,
     x_work: []f64,
     cubic: []f64,
 ) [2][]const f64 {
     const n = p.len;
-    const t_ppp = cubic[0..n];
-    const t_pqq = cubic[n .. 2 * n];
-    const t_ppq = cubic[2 * n .. 3 * n];
-    const t_qqq = cubic[3 * n ..];
+    const n2 = n * n;
     simdZero(cubic);
 
+    // cubic[k·4n ..] holds plane k's T(p,p,p), T(p,q,q), T(p,p,q), T(q,q,q).
     const norm_p = norm(p);
     const norm_q = norm(q);
     if (norm_p > 0) {
-        secondDirDeriv(ckt, x_op, p, 1.0 / norm_p, h, g0, g_work, g_minus, x_work);
-        contract(g_work, p, 1.0 / norm_p, t_ppp);
-        if (norm_q > 0) contract(g_work, q, 1.0 / norm_q, t_ppq);
+        secondDirDeriv(ckt, x_op, p, 1.0 / norm_p, h, gc0, g_work, g_minus, x_work);
+        for (0..2) |k| {
+            const t = cubic[k * 4 * n ..];
+            contract(g_work[k * n2 ..][0..n2], p, 1.0 / norm_p, t[0..n]);
+            if (norm_q > 0) contract(g_work[k * n2 ..][0..n2], q, 1.0 / norm_q, t[2 * n ..][0..n]);
+        }
     }
     if (norm_q > 0) {
-        secondDirDeriv(ckt, x_op, q, 1.0 / norm_q, h, g0, g_work, g_minus, x_work);
-        contract(g_work, q, 1.0 / norm_q, t_qqq);
-        if (norm_p > 0) contract(g_work, p, 1.0 / norm_p, t_pqq);
+        secondDirDeriv(ckt, x_op, q, 1.0 / norm_q, h, gc0, g_work, g_minus, x_work);
+        for (0..2) |k| {
+            const t = cubic[k * 4 * n ..];
+            contract(g_work[k * n2 ..][0..n2], q, 1.0 / norm_q, t[3 * n ..][0..n]);
+            if (norm_p > 0) contract(g_work[k * n2 ..][0..n2], p, 1.0 / norm_p, t[n..][0..n]);
+        }
     }
 
     // Undo the unit-direction normalization: every form is cubic in its inputs.
@@ -518,12 +531,18 @@ fn cubicForms(
     const ppq = norm_p * norm_p * norm_q;
     const qqq = norm_q * norm_q * norm_q;
     for (0..n) |row| {
-        const re = ppp * t_ppp[row] - 3.0 * pqq * t_pqq[row];
-        const im = 3.0 * ppq * t_ppq[row] - qqq * t_qqq[row];
-        t_ppp[row] = re;
-        t_pqq[row] = im;
+        var ab: [2][2]f64 = undefined;
+        for (&ab, 0..) |*plane, k| {
+            const t = cubic[k * 4 * n ..];
+            plane.* = .{
+                ppp * t[row] - 3.0 * pqq * t[n + row],
+                3.0 * ppq * t[2 * n + row] - qqq * t[3 * n + row],
+            };
+        }
+        cubic[row] = ab[0][0] - omega * ab[1][1];
+        cubic[n + row] = ab[0][1] + omega * ab[1][0];
     }
-    return .{ t_ppp, t_pqq };
+    return .{ cubic[0..n], cubic[n .. 2 * n] };
 }
 
 fn norm(v: []const f64) f64 {
@@ -532,8 +551,9 @@ fn norm(v: []const f64) f64 {
     return @sqrt(acc);
 }
 
-/// g_out := the second derivative of G along `scale·u` at x_op, by the
-/// five-point stencil in `cubicForms`.
+/// g_out := the second derivative of the G/C pair (2n·n, G first) along
+/// `scale·u` at x_op, by the five-point stencil in `cubicForms`. `g0` is the
+/// pair at x_op.
 fn secondDirDeriv(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -546,16 +566,21 @@ fn secondDirDeriv(
     x_work: []f64,
 ) void {
     const n = u.len;
+    const n2 = n * n;
     // (k, weight) of the stencil's off-centre points.
     const taps = [_]struct { f64, f64 }{ .{ 1, 16 }, .{ -1, 16 }, .{ 2, -1 }, .{ -2, -1 } };
-    for (g_out, g0) |*out, plane| out.* = -30.0 * plane;
+    for (g_out[0..n2], g0[0..n2]) |*out, plane| out.* = -30.0 * plane;
+    simdZero(g_out[n2..]);
     for (taps) |tap| {
         const step = tap[0] * h * scale;
         simdCopy(x_work, x_op[0..n]);
         for (0..n) |i| x_work[i] += step * u[i];
         ckt.eval(x_work, 0);
-        ckt.denseG(g_tap);
-        for (g_out, g_tap) |*out, g| out.* += tap[1] * g;
+        ckt.denseG(g_tap[0..n2]);
+        ckt.denseC(g_tap[n2..]);
+        for (g_out[0..n2], g_tap[0..n2]) |*out, g| out.* += tap[1] * g;
+        // C as differences from C(0): exactly zero for a linear capacitor.
+        for (g_out[n2..], g_tap[n2..], g0[n2..]) |*out, c, c0| out.* += tap[1] * (c - c0);
     }
     const inv = 1.0 / (12.0 * h * h);
     for (g_out) |*out| out.* *= inv;

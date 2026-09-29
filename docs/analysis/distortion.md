@@ -48,7 +48,8 @@ $$
 **Third order** at $3\omega$ (and the intermodulation buckets):
 
 $$
-\big(G + j\,3\omega\,C\big)\, V_3 = -\,F''\,[V_1, V_2] - \tfrac{1}{6} F'''\,[V_1,V_1,V_1],
+\big(G + j\,3\omega\,C\big)\, V_3 = -\,F''\,[V_1, V_2] - \tfrac{1}{6} F'''\,[V_1,V_1,V_1]
+\;\;(-\, j3\omega\,(Q''[V_1,V_2] + \tfrac16 Q'''[V_1,V_1,V_1])),
 $$
 
 The $\tfrac12$ on $F''[V_1,V_1]$ is ngspice's too: it spells the factor into
@@ -125,12 +126,25 @@ Against ngspice 45 (`disto/two_tone_*`): a diode divider, the same with a
 linear 1 nF shunt and a 30° F2 (10 kHz to 10 MHz), and a BJT common emitter
 with the Early effect all agree to 1e-8 of each column's peak.
 
-Nonlinear charge is not in either kernel: $F''$ and $F'''$ are differences
-of G only, so the $-j\omega\,\tfrac12 Q''$ term above is missing. A BJT with
-cje = 1 pF, cjc = 0.5 pF and tf = 0.3 ns, swept 1 kHz to 1 MHz, is 26% off
-ngspice on its 2nd harmonic and 53% on its 3rd, and the two-tone products
-inherit the same error. Differencing the C plane beside the G plane is the
-fix; it moves every existing deck with a nonlinear capacitance.
+### Charge
+
+Every kernel has a charge twin. For a product at $\omega_{out}$ the source
+is $K^{(k)} = F^{(k)} + j\omega_{out} Q^{(k)}$: $2\omega$ for HD2, $3\omega$
+for HD3, $\omega_1 \pm \omega_2$ and $2\omega_1 - \omega_2$ for the two-tone
+products. That is what ngspice's device DISTO sections stamp (the charge
+Taylor coefficients times $j\omega$ of the mixing frequency, e.g.
+`bjtdisto.c`, `diodisto.c`). $Q''$ is the central difference of the C
+plane beside G's (one more `c_vals` copy per perturbed eval, a `qcoeff`
+beside each `coeff`). $Q'''$ comes from the same five-point stencil
+evaluations as $F'''$, differencing `denseC` beside `denseG`; the C half is
+taken as $C_k - C_0$ so a linear capacitor gives exactly zero and decks
+without nonlinear charge stay bitwise unchanged.
+
+Against ngspice 45 (`disto/bjt_caps`, `disto/two_tone_bjt_caps`: cje = 1 pF,
+cjc = 0.5 pF, tf = 0.3 ns; `disto/diode_cap`, `disto/two_tone_diode_cap`:
+cjo = 10 pF, the two-tone one with tt = 1 ns), every column agrees to
+$1.6\times10^{-8}$ of its peak, up to 1 GHz. Without the charge terms
+the BJT deck was 23% off on HD2 and 54% on HD3, the diode 1.9% and 4.8%.
 
 The step is its own constant, $h = 10^{-3}$ (`cubic_step`), not `fd_eps`.
 A second difference loses $\varepsilon|G|/h^2$ to roundoff, and $V_1$ is
@@ -153,7 +167,7 @@ $10^{-3}$ tolerances.
 `src/analysis/post/disto.zig`:
 
 1. One `eval()` at $x_{op}$: dense $G$, $C$ copies.
-2. Kernel pass: $n$ perturbed `eval`s, differencing `denseG` snapshots into
+2. Kernel pass: $n$ perturbed `eval`s, differencing the G (and C) planes into
    the rank-3 tensor `d2[row][a][b]` ($n^3$ storage: the dense ceiling;
    device-side analytic $F''$ stamps are the scalable upgrade). A final
    `eval(x_op)` leaves the planes consistent with the op.
