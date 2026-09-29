@@ -1,4 +1,4 @@
-//! Periodic-family unit tests: pac/pxf, pnoise, pss and qpss.
+//! Periodic-family unit tests: pac/pxf, pnoise, pss, qpss and multi-tone hb.
 
 const PacTests = struct {
     const impl = @import("../pss/pac.zig");
@@ -564,9 +564,126 @@ const QpssTests = struct {
     }
 };
 
+const MhbTests = struct {
+    const impl = @import("../pss/mhb.zig");
+    const hb = @import("../pss/hb.zig");
+    const analysis = @import("../types.zig");
+    const Builder = @import("builder").Builder;
+    const Library = @import("device").Library;
+    const models = @import("models");
+    const std = @import("std");
+    const testing = std.testing;
+    const f1: f64 = 1000;
+    const f2: f64 = 1300;
+
+    /// Expects `spec` to hold exactly the products (k1, k2), DC first and
+    /// by frequency.
+    fn expectLines(spec: impl.Spectrum, want: []const [2]i16) !void {
+        try testing.expectEqual(want.len, spec.freqs.len);
+        var freqs: [32]f64 = undefined;
+        for (want, 0..) |k, j| freqs[j] = @as(f64, @floatFromInt(k[0])) * f1 + @as(f64, @floatFromInt(k[1])) * f2;
+        std.sort.pdq(f64, freqs[0..want.len], {}, std.sort.asc(f64));
+        for (spec.freqs, freqs[0..want.len]) |got, f| try testing.expectApproxEqAbs(f, got, 1e-9);
+        for (spec.freqs, 0..) |f, j| {
+            const k = spec.mix[2 * j ..][0..2];
+            try testing.expectApproxEqAbs(f, @as(f64, @floatFromInt(k[0])) * f1 + @as(f64, @floatFromInt(k[1])) * f2, 1e-9);
+        }
+    }
+
+    // [CR .HB] examples 1 to 6, the frontend's defaults applied: NHARMS
+    // defaults to INTMODMAX and INTMODMAX to the largest NHARMS.
+    test "mhb spectrum: HSPICE .HB truncation examples" {
+        const a = testing.allocator;
+        const tones = [_]f64{ f1, f2 };
+        const im1 = [_][2]i16{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 } };
+        const im2 = im1 ++ [_][2]i16{ .{ 1, 1 }, .{ -1, 1 }, .{ 2, 0 }, .{ 0, 2 } };
+        const im3 = im2 ++ [_][2]i16{ .{ 2, 1 }, .{ 2, -1 }, .{ 1, 2 }, .{ -1, 2 }, .{ 3, 0 }, .{ 0, 3 } };
+        const ex5 = im2 ++ [_][2]i16{ .{ 2, 1 }, .{ 2, -1 }, .{ 1, 2 }, .{ -1, 2 } };
+        const ex6 = ex5 ++ [_][2]i16{ .{ 3, 0 }, .{ 0, 3 }, .{ 4, 0 }, .{ 0, 4 }, .{ 5, 0 }, .{ 0, 5 } };
+        const cases = .{
+            .{ [_]u16{ 1, 1 }, 1, &im1 },
+            .{ [_]u16{ 2, 2 }, 2, &im2 },
+            .{ [_]u16{ 3, 3 }, 3, &im3 },
+            .{ [_]u16{ 2, 2 }, 3, &ex5 },
+            .{ [_]u16{ 5, 5 }, 3, &ex6 },
+        };
+        inline for (cases) |c| {
+            const nh = c[0];
+            const spec = try impl.spectrum(a, &tones, &nh, c[1]);
+            defer spec.deinit(a);
+            try expectLines(spec, c[2]);
+        }
+        // Box: every |k_i| <= 2, 12 lines on the positive half plus DC.
+        const box = try impl.spectrum(a, &tones, &.{ 2, 2 }, 0);
+        defer box.deinit(a);
+        try testing.expectEqual(@as(usize, 13), box.freqs.len);
+    }
+
+    test "mhb spectrum: commensurate products merge onto the lowest order" {
+        const a = testing.allocator;
+        const spec = try impl.spectrum(a, &.{ 1000, 2000 }, &.{ 2, 2 }, 0);
+        defer spec.deinit(a);
+        try testing.expectEqual(@as(usize, 7), spec.freqs.len);
+        for (spec.freqs, 0..) |f, j| try testing.expectEqual(1000 * @as(f64, @floatFromInt(j)), f);
+        // 2 kHz is tone 2 itself, not 2·f1 or the order-5 2·f2 - f1 - ...
+        try testing.expectEqualSlices(i16, &.{ 0, 1 }, spec.mix[4..6]);
+    }
+
+    test "mhb transform: the APFT inverts its own instants, one tone projects" {
+        const a = testing.allocator;
+        inline for (.{ .{ &[_]f64{ f1, f2 }, &[_]u16{ 5, 5 }, 3 }, .{ &[_]f64{ f1, f2, 1710 }, &[_]u16{ 2, 2, 2 }, 3 }, .{ &[_]f64{f1}, &[_]u16{7}, 0 } }) |c| {
+            const spec = try impl.spectrum(a, c[0], c[1], c[2]);
+            defer spec.deinit(a);
+            const nf = 2 * spec.freqs.len - 1;
+            const nt = impl.test_access.transformSamples(spec);
+            const buf = try a.alloc(f64, nt + 2 * nt * nf);
+            defer a.free(buf);
+            const tr = try impl.test_access.transform(spec, c[0], buf, a);
+            for (0..nf) |i| for (0..nf) |j| {
+                var acc: f64 = 0;
+                for (0..nt) |s| acc += tr.fwd[i * nt + s] * tr.inv[s * nf + j];
+                try testing.expectApproxEqAbs(@as(f64, if (i == j) 1 else 0), acc, 1e-12);
+            };
+        }
+    }
+
+    // The GMRES path's oracle is the dense Newton hb.zig takes below
+    // `useGmres`: same residual, same fixed point.
+    test "mhb: one tone through GMRES matches the dense Jacobian solve" {
+        const a = testing.allocator;
+        var lib = try Library.init(a);
+        defer lib.deinit();
+        var b = try Builder.init(a, &lib);
+        const vin = try b.addNode();
+        const mid = try b.addNode();
+        const out = try b.addNode();
+        try b.addDevice(models.vsource, "", .{ .dc = 0.3, .waveform = 2, .sin_vo = 0.3, .sin_va = 0.8, .sin_freq = 1e3 }, .{}, .{ vin, analysis.GROUND });
+        try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, mid });
+        try b.addDevice(models.diode, "", .{ .is = 1e-14, .cjo = 1e-12 }, .{}, .{ mid, out });
+        try b.addDevice(models.capacitor, "", .{ .c = 1e-7 }, .{}, .{ out, analysis.GROUND });
+        try b.addDevice(models.resistor, "", .{ .r = 2000 }, .{}, .{ out, analysis.GROUND });
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, a);
+        defer ckt.deinit();
+        try ckt.computeBaseline();
+
+        const opts: impl.Options = .{ .f0 = 1e3, .n_harmonics = 8 };
+        const len = @as(usize, ckt.n) * 17;
+        const dense = try a.alloc(f64, len);
+        defer a.free(dense);
+        const krylov = try a.alloc(f64, len);
+        defer a.free(krylov);
+        try testing.expect((try hb.solveSpectrum(&ckt, dense, &.{}, opts, a)).status.converged);
+        try testing.expect((try impl.solveOneTone(&ckt, krylov, opts, a)).converged);
+        for (dense, krylov) |d, k| try testing.expectApproxEqAbs(d, k, 1e-9);
+    }
+};
+
 test {
     _ = PacTests;
     _ = PnoiseTests;
     _ = PssTests;
     _ = QpssTests;
+    _ = MhbTests;
 }

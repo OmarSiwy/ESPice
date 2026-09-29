@@ -382,7 +382,7 @@ fn jacobianMatvec(ctx: *OperatorCtx, v: []const f64, w: []f64) void {
 /// as the width-one oracle. Each row still sums its columns in ascending
 /// order from +0, and an entry outside the pattern could only add ±0, so for
 /// finite v this is bitwise the dense product. Overwrites every w_td slot.
-fn gvProduct(w_td: []f64, g_td: []const f64, v_td: []const f64, col_ptr: []const u32, row_idx: []const u32, nf: usize) void {
+pub fn gvProduct(w_td: []f64, g_td: []const f64, v_td: []const f64, col_ptr: []const u32, row_idx: []const u32, nf: usize) void {
     simdZero(w_td);
     for (0..col_ptr.len - 1) |col| {
         const vc = v_td[col * nf ..][0..nf];

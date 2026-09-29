@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "Box truncation over incommensurate tones: a square law needs no period",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "(sin w1t + 0.5 sin w2t)^2 = 0.625 - 0.5 cos 2w1t - 0.125 cos 2w2t + 0.5 cos(w2-w1)t - 0.5 cos(w1+w2)t; the other 7 box lines are 0. INTMODMAX = H1 + H2 keeps the whole 5x5 box."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-09,
+            "values": [
+              0.625,
+              0.5,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.5,
+              0.5,
+              0.125,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0.0,
+            414.21356237309,
+            585.78643762691,
+            828.42712474619,
+            1000.0,
+            1414.2135623731,
+            1828.4271247462,
+            2000.0,
+            2414.2135623731,
+            2828.4271247462,
+            3414.2135623731,
+            3828.4271247462,
+            4828.4271247462
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 13
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "af3197f3c59fdc3367116c2ed7feee7d81ef4baacbe361b12295da5cb2087b75"
+}

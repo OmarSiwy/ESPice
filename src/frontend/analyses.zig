@@ -106,6 +106,10 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         switch (job) {
             inline .hbac, .hbxf, .hbnoise, .hblin => |*o| if (o.f0 == 0) {
                 const tone = hb orelse return cardError(c.line, error.InvalidAnalysisArguments);
+                // ponytail: the HB small-signal analyses linearize about one
+                // tone; a multi-tone orbit needs the conversion matrix over
+                // mixing products (VACASK `hbac`).
+                if (tone.extra_tones.len != 0) return cardError(c.line, error.InvalidAnalysisArguments);
                 o.f0 = tone.f0;
                 o.n_harmonics = tone.n_harmonics;
                 o.n_sidebands = tone.n_harmonics;
@@ -833,6 +837,46 @@ fn hspiceTranNoise(ctx: CardContext, args: []const Value) !requests.TranNoise {
     return o;
 }
 
+/// HSPICE `.hb TONES=f0 [f1 ...] [NHARMS=h0 [h1 ...]] [INTMODMAX=n]`
+/// [CR .HB]. NHARMS takes one count per tone and defaults every tone to
+/// INTMODMAX; INTMODMAX defaults to the largest NHARMS. One of them is
+/// required. SUBHARMS, SS_TONE and SWEEP are not taken.
+fn hbTones(arena: std.mem.Allocator, args: []const Value) !requests.Hb {
+    const Key = enum { tones, nharms, intmodmax };
+    var tones: std.ArrayList(f64) = .empty;
+    var nharms: std.ArrayList(u16) = .empty;
+    var intmod: ?u16 = null;
+    var key: ?Key = null;
+    for (args, 0..) |v, i| switch (v) {
+        .name => {
+            var lower: [16]u8 = undefined;
+            key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
+        },
+        .num => switch (key orelse return error.InvalidAnalysisArguments) {
+            .tones => try tones.append(arena, try positive(args, i)),
+            .nharms => try nharms.append(arena, try count(u16, args, i, 0)),
+            .intmodmax => {
+                if (intmod != null) return error.InvalidAnalysisArguments;
+                intmod = try count(u16, args, i, 0);
+            },
+        },
+        else => return error.InvalidAnalysisArguments,
+    };
+    const n = tones.items.len;
+    if (n == 0 or (nharms.items.len != 0 and nharms.items.len != n)) return error.InvalidAnalysisArguments;
+    if (nharms.items.len == 0) {
+        const h = intmod orelse return error.InvalidAnalysisArguments;
+        try nharms.appendNTimes(arena, h, n);
+    }
+    return .{
+        .f0 = tones.items[0],
+        .n_harmonics = nharms.items[0],
+        .extra_tones = tones.items[1..],
+        .extra_harmonics = nharms.items[1..],
+        .intmodmax = intmod orelse std.mem.max(u16, nharms.items),
+    };
+}
+
 /// HSPICE `.sn TRES= PERIOD=` or `.sn TONE= NHARMS=` [CR .SN] as `.pss`:
 /// the period, and PERIOD/TRES steps when TRES is given. TRINIT,
 /// MAXTRINITCYCLES and NUMPEROUT are read and unused: `.pss` shoots from
@@ -1195,6 +1239,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             // HB drives from whatever sources the deck has, current ones
             // included, so it names none. `.hb v(osc) f [K]` (HSPICE
             // `.hbosc`) solves an oscillator from the first guess f.
+            if (nameAt(args, 0) != null) return .{ .hb = try hbTones(ctx.arena, args) };
             const osc = args.len != 0 and args[0] == .group;
             const at: usize = @intFromBool(osc);
             try arity(args, at + 1, at + 2);

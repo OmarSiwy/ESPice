@@ -185,6 +185,37 @@ test "hbnoise and shooting pnoise agree about a diode mixer's orbit" {
     }
 }
 
+test "multi-tone hb in a box is qpss's two-sided spectrum folded onto one side" {
+    // One square-law mixer through both solvers. QPSS keeps both lines of
+    // each conjugate pair, so every positive line is twice its |X_kl| and
+    // DC is DC. The tones are incommensurate: neither grid has a period.
+    const sim = try runDeck(
+        \\square-law mixer
+        \\v1 a 0 sin(0 1 1000)
+        \\v2 b 0 sin(0 0.5 1414.213562373095)
+        \\bout out 0 v=(v(a)+v(b))^2
+        \\rload out 0 1k
+        \\.hb tones=1000 1414.213562373095 nharms=2 2 intmodmax=4
+        \\.qpss 1000 1414.213562373095 2 2
+        \\.end
+    );
+    defer sim.deinit();
+    const hb = try requestedResult(sim, 0);
+    const qpss = try requestedResult(sim, 1);
+    const col = findNameIndex(hb.varnames, "v(out)").?;
+    try std.testing.expectEqual(@as(usize, 13), hb.npoints);
+    try std.testing.expectEqual(@as(usize, 25), qpss.npoints);
+    const w = hb.varnames.len;
+    for (0..hb.npoints) |i| {
+        const f = hb.data[i * w];
+        const q = for (0..qpss.npoints) |k| {
+            if (@abs(qpss.data[k * w] - f) < 1e-6) break qpss.data[k * w + col];
+        } else return error.TestUnexpectedResult;
+        const want = if (f == 0) q else 2 * q;
+        try std.testing.expectApproxEqAbs(want, hb.data[i * w + col], 1e-8);
+    }
+}
+
 test "a failed query does not prevent an independent query from completing" {
     const p = try api.Problem.init(std.testing.allocator, std.testing.io, .{
         .source = .{ .bytes = .{ .data = "failure isolation\nV1 in 0 dc 1 ac 1 sin(0 1 1k)\nR1 in out 1k\nC1 out 0 1u\n.end\n", .origin = "failure.cir" } },
