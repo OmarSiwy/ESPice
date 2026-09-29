@@ -142,7 +142,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
                 try frequency(o.sweep.f_stop);
                 _ = try elements(&.{ o.sweep.count(), n, 2 });
             }
-            inline for (.{ "n_samples", "n_time_samples", "pss_n_samples", "n_trials", "max_steps", "max_iter", "max_newton", "max_shooting_iter", "carrier_steps_per_period", "periods_per_outer_step", "min_periods_per_step", "max_periods_per_step", "max_outer_steps", "max_points", "m_max", "gmres_restart", "gmres_max_restarts", "max_newton_iter", "pss_periods", "pss_max_newton_iter", "pss_shoot_max_iter", "pss_newton_max_iter", "qr_max_iter" }) |field| {
+            inline for (.{ "n_samples", "n_time_samples", "pss_n_samples", "n_trials", "max_steps", "max_iter", "max_newton", "max_shooting_iter", "carrier_steps_per_period", "periods_per_outer_step", "min_periods_per_step", "max_periods_per_step", "max_outer_steps", "max_points", "m_max", "gmres_restart", "gmres_max_restarts", "max_newton_iter", "pss_max_newton_iter", "pss_shoot_max_iter", "pss_newton_max_iter", "qr_max_iter" }) |field| {
                 if (@hasField(@TypeOf(o), field)) if (@field(o, field) == 0) return error.InvalidQueryOptions;
             }
             inline for (.{ "f0", "f1", "f2", "f_lo", "f_fundamental", "period", "t_carrier", "dt_init", "dt_min", "t_stop" }) |field| {
