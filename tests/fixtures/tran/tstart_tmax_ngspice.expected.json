@@ -4,7 +4,7 @@
  "purpose": "The default tmax is min(tstep, (tstop - tstart)/50).",
  "oracle": {
   "kind": "ngspice-45",
-  "derivation": "ngspice 45 saves 51 points 0.2u apart from 90.12u to 100u; v(in) is the source's sine. ESPice saves the same 0.2u grid plus a row at tstart itself (90u), so 52 rows.",
+  "derivation": "ngspice 45 saves 51 points 0.2u apart from 90.12u to 100u (no row at tstart itself, dctran.c:484); v(in) is the source's sine. ESPice saves the same 51 rows (#167).",
   "command": "ngspice -b tstart_tmax_ngspice.sp"
  },
  "expect": {
@@ -13,7 +13,7 @@
    {
     "name": "Transient Analysis",
     "match": "samples",
-    "row_count": 52,
+    "row_count": 51,
     "columns": {
      "v(in)": {
       "unit": "V",
@@ -47,7 +47,7 @@
     "kind": "axis_bounds",
     "plot": "Transient Analysis",
     "axis": "time",
-    "minimum": 8.9999e-05,
+    "minimum": 9.01e-05,
     "maximum": 0.0001
    }
   ],

@@ -109,14 +109,6 @@ pub const Waveform = struct {
         try self.emit(row);
     }
 
-    /// `record` of the point `(1 - f) * a + f * b` at time `t`, per probe.
-    pub fn recordLerp(self: *Waveform, t: f64, a: []const f64, b: []const f64, f: f64, probes: []const u32) !void {
-        const row = try self.next();
-        row[0] = t;
-        for (probes, row[1..]) |node, *v| v.* = a[node] + f * (b[node] - a[node]);
-        try self.emit(row);
-    }
-
     fn emit(self: Waveform, row: []const f64) !void {
         if (self.sink) |w| try w.writeAll(std.mem.sliceAsBytes(row));
     }

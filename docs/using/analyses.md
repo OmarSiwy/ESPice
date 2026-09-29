@@ -319,7 +319,8 @@ own. Plots `Loop Stability Analysis` (`loop_gain`, `loop_gain_forward`,
 The time-domain response. `tstep` sets the default PULSE edges and, with
 `(tstop - tstart)/50`, the default step cap (`tmax`, or `.option delmax`):
 `.tran 1u 100u 90u` steps at most 0.2 µs. Points before `tstart` are
-computed but not saved. `uic` starts from the `.ic` values instead of the
+computed but not saved, and as in ngspice the first saved row is the first
+step past `tstart`, not `tstart` itself. `uic` starts from the `.ic` values instead of the
 operating point. Trapezoidal integration by default; `.option method=gear`
 selects Gear-2, and `.option maxord=1` backward Euler under either method.
 As in ngspice, no method runs above order 2, so `maxord` 3 to 6 is Gear-2.
