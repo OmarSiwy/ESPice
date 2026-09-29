@@ -92,8 +92,45 @@ $G_k = G(x + khu)$,
 $S(u) = (16(G_1 + G_{-1}) - (G_2 + G_{-2}) - 30G_0)/12h^2 = F'''(\cdot, \cdot, u, u) + O(h^4)$,
 and the cubic form follows by symmetry. With $V_1 = p + jq$ that is eight
 evaluations per frequency point, $S(\hat p)$ and $S(\hat q)$
-(`cubicForms`). Implemented scope: second and third harmonics for a single
-tone. The two-tone intermodulation buckets are not implemented.
+(`cubicForms`).
+
+### Two tones
+
+`.disto dec nd fstart fstop f2overf1` with a `DISTOF2 mag [phase]` source
+asks for ngspice's intermodulation set instead of the harmonics. F2 is
+f2overf1·fstart and stays there for the whole sweep (ngspice keeps it
+constant "to be compatible with spectre", `distoan.c:139-143`); F1 sweeps.
+With $V_a$, $V_b$ the first-order responses to the two drives and $^*$ the
+conjugate, the one-sided currents are
+
+$$
+\omega_1 + \omega_2:\; F''[V_a, V_b], \qquad
+\omega_1 - \omega_2:\; F''[V_a, V_b^*],
+$$
+$$
+2\omega_1 - \omega_2:\; F''[V_a, V_2(\omega_1 - \omega_2)] + F''[V_b^*, V_2(2\omega_1)] + \tfrac12 F'''[V_a, V_a, V_b^*].
+$$
+
+The cross term of the square counts both orders, so there is no ½ at
+$\omega_1 \pm \omega_2$; the ½ at $2\omega_1 - \omega_2$ is the multinomial 3
+of $(\omega_1, \omega_1, -\omega_2)$ over ⅙. The plots report twice each
+phasor, as for the harmonics; ngspice gets the same numbers from half-size
+kernels scaled by 4 and 6 (`dkerproc.c:65-96`). $F'''[a, a, c]$ with
+$a = p + jq$ is $(S(p) - S(q))c + j(S(p+q) - S(p) - S(q))c$, the polarized
+cubic form: twelve evaluations per point (`mixedCubic`). As in ngspice,
+F2 needs a DISTOF2 source (`E_NOF2SRC`) and the harmonic plots are not
+printed.
+
+Against ngspice 45 (`disto/two_tone_*`): a diode divider, the same with a
+linear 1 nF shunt and a 30° F2 (10 kHz to 10 MHz), and a BJT common emitter
+with the Early effect all agree to 1e-8 of each column's peak.
+
+Nonlinear charge is not in either kernel: $F''$ and $F'''$ are differences
+of G only, so the $-j\omega\,\tfrac12 Q''$ term above is missing. A BJT with
+cje = 1 pF, cjc = 0.5 pF and tf = 0.3 ns, swept 1 kHz to 1 MHz, is 26% off
+ngspice on its 2nd harmonic and 53% on its 3rd, and the two-tone products
+inherit the same error. Differencing the C plane beside the G plane is the
+fix; it moves every existing deck with a nonlinear capacitance.
 
 The step is its own constant, $h = 10^{-3}$ (`cubic_step`), not `fd_eps`.
 A second difference loses $\varepsilon|G|/h^2$ to roundoff, and $V_1$ is
@@ -215,7 +252,7 @@ kernel disto(lanes = freq points):
   manual's description of what .DISTO computes.
 - §1 FD-of-analytic-Jacobian kernels (second order, and third order as a
   directional second difference): verified against `disto.zig`. Two-tone
-  IM: not implemented.
+  IM: verified against ngspice 45 on the `disto/two_tone_*` decks.
 - §2/§3: direct transcription. §4: design notes (matrix-free directional
   variant is a design note).
 

@@ -66,7 +66,8 @@ pub const Variants = struct {
 /// Source bindings kept from construction so later analysis directives can
 /// name sources and ports. All rows are post-permutation.
 pub const QueryBindings = struct {
-    /// V card names, parallel to `v_branches`, `v_pos`, `v_neg`, `v_distof1`.
+    /// V card names, parallel to `v_branches`, `v_pos`, `v_neg`, `v_distof1`,
+    /// `v_distof2`.
     v_names: []const []const u8,
     /// I card names, parallel to `i_pos` and `i_neg`.
     i_names: []const []const u8,
@@ -80,6 +81,8 @@ pub const QueryBindings = struct {
     i_neg: []const u32,
     /// `DISTOF1 <mag> <phase>` of each V card.
     v_distof1: []const [2]f64,
+    /// `DISTOF2 <mag> <phase>` of each V card; empty is none.
+    v_distof2: []const [2]f64 = &.{},
     ports: []const requests.Port,
 };
 

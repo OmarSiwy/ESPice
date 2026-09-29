@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "analysis": "disto",
+  "purpose": "Two-tone Volterra intermodulation of a resistor-diode divider",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice 45 on the same deck: `.disto` with f2overf1 prints the f1+f2, f1-f2 and 2f1-f2 vectors (distoan.c:560-620), F2 held at f2overf1 times the first frequency.",
+    "command": "ngspice -b -r reference.raw two_tone_diode.sp"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DISTORTION - IM: f1+f2",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-18,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 6e-11,
+            "values": [
+              [
+                -6.1793170231953e-05,
+                0.0
+              ],
+              [
+                -6.1793170231953e-05,
+                0.0
+              ],
+              [
+                -6.1793170231953e-05,
+                0.0
+              ]
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 6e-14,
+            "values": [
+              [
+                -6.1793170231953e-08,
+                0.0
+              ],
+              [
+                -6.1793170231953e-08,
+                0.0
+              ],
+              [
+                -6.1793170231953e-08,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 3,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100.0,
+            1000.0,
+            10000.0
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        }
+      },
+      {
+        "name": "DISTORTION - IM: f1-f2",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-18,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 6e-11,
+            "values": [
+              [
+                -6.1793170231953e-05,
+                0.0
+              ],
+              [
+                -6.1793170231953e-05,
+                0.0
+              ],
+              [
+                -6.1793170231953e-05,
+                0.0
+              ]
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 6e-14,
+            "values": [
+              [
+                -6.1793170231953e-08,
+                0.0
+              ],
+              [
+                -6.1793170231953e-08,
+                0.0
+              ],
+              [
+                -6.1793170231953e-08,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 3,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100.0,
+            1000.0,
+            10000.0
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        }
+      },
+      {
+        "name": "DISTORTION - IM: 2f1-f2",
+        "match": "exact",
+        "columns": {
+          "v(in)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 1e-18,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-05,
+            "atol": 2e-12,
+            "values": [
+              [
+                1.6717619373647e-06,
+                0.0
+              ],
+              [
+                1.6717619373647e-06,
+                0.0
+              ],
+              [
+                1.6717619373647e-06,
+                0.0
+              ]
+            ]
+          },
+          "i(vin)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 2e-15,
+            "values": [
+              [
+                1.6717619373647e-09,
+                0.0
+              ],
+              [
+                1.6717619373647e-09,
+                0.0
+              ],
+              [
+                1.6717619373647e-09,
+                0.0
+              ]
+            ]
+          }
+        },
+        "row_count": 3,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100.0,
+            1000.0,
+            10000.0
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-08
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "ca81f99598c1a3cf0180b5c6568d8de22a58e74b166ee05bd1fb32aadfa9355a"
+}

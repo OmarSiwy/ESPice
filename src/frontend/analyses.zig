@@ -53,9 +53,9 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     // What HSPICE forms borrow from the other cards: the first `.ac`,
     // `.tran` and `.sn`. A malformed one reports on its own turn below.
     var ctx: CardContext = .{ .arena = arena, .variations = deck_opts.variations };
-    // Fan-out ceiling: `.disto` gives three plots per line, `.op t1 t2 ...`
-    // one per time.
-    var fan: usize = 3;
+    // Fan-out ceiling: `.disto` gives up to four plots per line (two-tone),
+    // `.op t1 t2 ...` one per time.
+    var fan: usize = 4;
     for (cards) |c| switch (c.kind) {
         .ac => if (ctx.ac == null) {
             if (acGrid(arena, c.args, 0)) |g| ctx.ac = g.sweep else |_| {}
@@ -161,10 +161,12 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
             jobs[n] = job;
             n += 1;
         }
-        // ngspice's `.disto` output is the pair of complex harmonic vectors.
+        // ngspice's `.disto` output is the pair of complex harmonic vectors,
+        // or with F2 the three intermodulation vectors (distoan.c:510-620).
         if (job == .disto) {
-            inline for (.{ .second, .third }) |harmonic| {
-                job.disto.plot = harmonic;
+            const plots: []const requests.Disto.Plot = if (job.disto.f2_ratio == 0) &.{ .second, .third } else &.{ .f1pf2, .f1mf2, .twof1mf2 };
+            for (plots) |plot| {
+                job.disto.plot = plot;
                 jobs[n] = job;
                 n += 1;
             }
@@ -1018,9 +1020,21 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .ac = .{ .sweep = grid.sweep } };
         },
         .disto => {
-            try arity(args, 4, 4);
+            try arity(args, 4, 5);
             const grid = try frequencySweep(args, 0);
             var opts: requests.Disto = .{ .sweep = grid, .output_node = try outputNode(node_id) };
+            // `f2overf1` asks for the intermodulation products; ngspice then
+            // wants a DISTOF2 source (E_NOF2SRC, distoan.c:425).
+            if (args.len == 5) {
+                opts.f2_ratio = try positive(args, 4);
+                for (sources.v_distof2, 0..) |d, i| {
+                    if (d[0] == 0) continue;
+                    opts.drive2_branch = sources.v_branches[i];
+                    opts.ac2_magnitude = d[0];
+                    opts.ac2_phase = d[1];
+                    break;
+                } else return error.AnalysisSourceNotFound;
+            }
             // ngspice cktdisto.c:100-117: the F1 drive is the card carrying
             // DISTOF1, not the first source, on that card's branch row
             // (`disto/bjt_ce`: Vcc comes first, DISTOF1 is on Vin).

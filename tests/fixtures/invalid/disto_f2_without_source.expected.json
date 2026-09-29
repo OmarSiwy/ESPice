@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "disto",
+  "purpose": "A two-tone .disto needs a DISTOF2 source, as ngspice E_NOF2SRC.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "A two-tone .disto needs a DISTOF2 source, as ngspice E_NOF2SRC."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "7283e3c8a8ee29ecb6c42d544bdce9ccb06787841ceb114b06eb3b249c744be3"
+}
