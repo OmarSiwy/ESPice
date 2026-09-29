@@ -192,9 +192,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "e327262af38c6adf03e1aa708ac333012cda2d176f1e1754b1077c1a46012404",
-  "known_gaps": [
-    "PAC currently injects a node current instead of honoring the named voltage-source excitation",
-    "the behavioral-source compiler only supports a limited single-control polynomial subset"
-  ]
+  "netlist_sha256": "e327262af38c6adf03e1aa708ac333012cda2d176f1e1754b1077c1a46012404"
 }

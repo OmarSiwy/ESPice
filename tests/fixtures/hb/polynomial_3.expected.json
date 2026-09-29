@@ -52,9 +52,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "e146b69a4cf6b08fe5afc6b69d37b557a1e6d462cf1a646ccc64da2344ff96e8",
-  "known_gaps": [
-    "HB does not yet drive the solve from the physical source waveforms and amplitudes",
-    "the behavioral-source compiler only supports a limited single-control polynomial subset"
-  ]
+  "netlist_sha256": "db0df5a854c95c0e14f5009e1c4c80b9d19d88f524fa754e6fda1e38d399e47e"
 }
