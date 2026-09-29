@@ -67,6 +67,17 @@ which publish v(2) = 5.005 V over a 5 V supply. Disabling the gate on
 needs its own full-corpus A/B; see
 [conformance-phase2.md](../conformance-phase2.md) group 8.
 
+The transient steps run without it (`residual_tol = inf` in `tran.zig`), as
+ngspice does. There it cost `bench_tline_txl2_3_line` a third iterate on the
+step landing on a PULSE corner (the Meyer caps leave 1.3e-7 A on a
+source-driven node after the delta test passed), and that iterate split the
+grid from ngspice's (20.5x -> 2.3e-6x without it). Full-corpus A/B: with the
+gate off everywhere, 13 decks moved and several passing static ones moved
+away from their oracles (`pss/polynomial_2` 3.9e-13x -> 0.15x,
+`op/bench_analog_diff_pair` 2e-4x -> 4e-3x); off in the transient only, two
+decks moved (`txl2_3_line` and the failing `device_mesa_oscillator`, 52.5x ->
+54.6x). The static solves keep the gate.
+
 **LTE test** (transient, per charge state; see
 [transient-integration.md](transient-integration.md)):
 
@@ -165,7 +176,7 @@ finalize_step(x, dx, x_old, F, A_diag, iter, tol) -> accepted?:
     if device_limited:                   return no      # forces re-iterate
     if iter == 0:                        return no      # never accept iter 1
     if worst >= 1:                       return no
-    for each row i with A_diag[i] != 0:
+    for each row i with A_diag[i] != 0:  # static solves only
         gate = max(tol.residual_tol,
                    10*|A_diag[i]|*(tol.reltol*|x_i| + tol.vntol))
         if |F_i| > gate:                 return no
