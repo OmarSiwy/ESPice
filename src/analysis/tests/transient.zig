@@ -181,6 +181,18 @@ const TranTests = struct {
     const std = @import("std");
     const testing = std.testing;
 
+    test "almostEqualUlps counts representable doubles, as ngspice's does" {
+        const eq = impl.test_access.almostEqualUlps;
+        const x: f64 = 1.0e-9;
+        try std.testing.expect(eq(x, std.math.nextAfter(f64, x, 1), 1));
+        var y = x;
+        for (0..3) |_| y = std.math.nextAfter(f64, y, 0);
+        try std.testing.expect(eq(x, y, 3));
+        try std.testing.expect(!eq(x, y, 2));
+        try std.testing.expect(eq(0.0, -0.0, 1));
+        try std.testing.expect(!eq(1.0, 1.0 + 1e-12, 100));
+    }
+
     test "waveform: doubling fallback keeps probe-major data intact" {
         const allocator = testing.allocator;
         var waveform = try Waveform.init(allocator, 2, 2);
