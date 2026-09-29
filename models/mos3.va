@@ -157,9 +157,9 @@ module mos3(d, g, s, b);
         // ============ parameter defaulting (mos3temp.c) ====================
         // "Given" is $param_given: every default here is also a legal card value.
         tnomk  = tnom + 273.15;
-        vtnom  = 1.380649e-23 * tnomk / 1.602176634e-19;
+        vtnom  = tnomk * (1.38064852e-23 / 1.6021766208e-19);
         egfet1 = 1.16 - 7.02e-4 * tnomk * tnomk / (tnomk + 1108.0);
-        coxp   = 3.9 * 8.8541878128e-12 / tox;      // F/m^2, oxideCapFactor
+        coxp   = 3.9 * 8.854214871e-12 / tox;      // F/m^2, oxideCapFactor
 
         // NSUB defaults phi, gamma, then VTO via the flat band.
         phix   = phi;
@@ -169,8 +169,8 @@ module mos3(d, g, s, b);
             if (!$param_given(phi))
                 phix = max(0.1, 2.0 * vtnom * ln(nsub * 1e6 / 1.45e16));
             if (!$param_given(gamma))
-                gammax = sqrt(2.0 * 11.7 * 8.8541878128e-12
-                              * 1.602176634e-19 * nsub * 1e6) / coxp;
+                gammax = sqrt(2.0 * 11.7 * 8.854214871e-12
+                              * 1.6021766208e-19 * nsub * 1e6) / coxp;
             if (!$param_given(vto)) begin
                 fermis = type * 0.5 * phix;
                 if (tpg != 0) begin                 // poly gate
@@ -180,7 +180,7 @@ module mos3(d, g, s, b);
                     wkfng  = 3.2;                   // aluminium gate
                 end
                 wkfngs = wkfng - (3.25 + 0.5 * egfet1 + fermis);
-                vtox   = wkfngs - 1.602176634e-19 * nss * 1e4 / coxp
+                vtox   = wkfngs - 1.6021766208e-19 * nss * 1e4 / coxp
                          + type * (gammax * sqrt(phix) + phix);
             end
         end
@@ -192,8 +192,8 @@ module mos3(d, g, s, b);
         if ($param_given(alpha))
             alph = alpha;
         else if (nsub > 0.0)
-            alph = 2.0 * 11.7 * 8.8541878128e-12
-                   / (1.602176634e-19 * nsub * 1e6);
+            alph = 2.0 * 11.7 * 8.854214871e-12
+                   / (1.6021766208e-19 * nsub * 1e6);
         else
             alph = 0.0;
         if ($param_given(xd)) xdw = xd; else xdw = sqrt(alph);
@@ -203,8 +203,8 @@ module mos3(d, g, s, b);
         // the instance gives TEMP explicitly (ngspice CKTtemp + dtemp rule).
         if ($param_given(temp)) tk = temp + 273.15;
         else tk = $temperature + dtemp;
-        vt    = 1.380649e-23 * tk / 1.602176634e-19;
-        vt300 = 1.380649e-23 * 300.15 / 1.602176634e-19;
+        vt    = tk * (1.38064852e-23 / 1.6021766208e-19);
+        vt300 = 300.15 * (1.38064852e-23 / 1.6021766208e-19);
         ratio = tk / tnomk;
         fact1 = tnomk / 300.15;
         fact2 = tk / 300.15;
@@ -243,7 +243,7 @@ module mos3(d, g, s, b);
         weff = max(w - 2.0 * wd + xw, 1e-9);
         beta = kpt * weff / leff;
 
-        fnarrow = delta * 3.14159265358979 * 11.7 * 8.8541878128e-12
+        fnarrow = delta * 3.14159265358979 * 11.7 * 8.854214871e-12
                   / (2.0 * coxp * weff);
         etas    = eta * 8.15e-22 / (coxp * leff * leff * leff);
 
@@ -257,7 +257,7 @@ module mos3(d, g, s, b);
         end
 
         if (nfs > 0.0)
-            cscox = 1.602176634e-19 * nfs * 1e4 / coxp;
+            cscox = 1.6021766208e-19 * nfs * 1e4 / coxp;
         else
             cscox = 0.0;
 
@@ -552,11 +552,11 @@ module mos3(d, g, s, b);
         // A collapsed RD/RS is a short and has no thermal noise. gm comes from
         // the same AD machinery as the Jacobian.
         if (gdrain > 0.0)
-            I(d, di) <+ white_noise(4.0 * 1.380649e-23 * tk * gdrain, "rd");
+            I(d, di) <+ white_noise(4.0 * 1.38064852e-23 * tk * gdrain, "rd");
         if (gsource > 0.0)
-            I(s, si) <+ white_noise(4.0 * 1.380649e-23 * tk * gsource, "rs");
+            I(s, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * gsource, "rs");
         gmch = m * abs(ddx(id, V(g)));
-        I(di, si) <+ white_noise(4.0 * 1.380649e-23 * tk * (2.0 / 3.0) * gmch,
+        I(di, si) <+ white_noise(4.0 * 1.38064852e-23 * tk * (2.0 / 3.0) * gmch,
                                  "channel");
         if (kf > 0.0)
             I(di, si) <+ flicker_noise(kf * pow(abs(m * id), af)
