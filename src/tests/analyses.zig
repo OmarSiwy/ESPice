@@ -294,8 +294,9 @@ test "uic: .ic seeds the transient and the OP is skipped" {
     try std.testing.expect(v2_last < 0.5);
 }
 
-test "uic: without the keyword the transient starts from the operating point" {
-    // Same deck, same .ic card, no `uic`: the OP wins and v(2) starts at 0.
+test "uic: without the keyword the operating point holds the .ic nodes" {
+    // Same deck, same .ic card, no `uic`: the transient's OP holds v(2) at
+    // its .ic (ngspice MODETRANOP, cktload.c), so v(2) starts at 1, not 0.
     const sim = try runDeck(
         \\op rc
         \\v1 1 0 dc 0
@@ -308,7 +309,7 @@ test "uic: without the keyword the transient starts from the operating point" {
     defer sim.deinit();
 
     const v2_first = probeFirst(try requestedResult(sim, 0), "2") orelse return error.NoProbe;
-    try std.testing.expectApproxEqAbs(@as(f64, 0.0), v2_first, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), v2_first, 1e-9);
 }
 
 test "uic: keyword is positional-independent and .ic on an unknown node is dropped" {

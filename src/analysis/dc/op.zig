@@ -23,7 +23,9 @@ pub fn coldStart(ckt: *root.Circuit, x: []f64) void {
 
 /// Solves the operating point into caller-owned `x` (cold-started unless
 /// `options.warm_start`), after a first solve that holds the `nodeset` rows
-/// at their guesses. On convergence the FSM devices commit their state,
+/// at their guesses. When `options.tran_op`, every rung also holds the `ic`
+/// rows at their values, ngspice's MODETRANOP without MODEUIC (cktload.c);
+/// a standalone operating point ignores `ic`. On convergence the FSM devices commit their state,
 /// and the circuit is left in the static simulation state later evals at this
 /// point expect. `iterations` sums every rung tried.
 pub fn solve(
@@ -31,6 +33,7 @@ pub fn solve(
     x: []f64,
     options: Options,
     nodeset: []const Ic,
+    ic: []const Ic,
 ) !converger.Result {
     // Verilog-A §4.6.1: the operating point is a static solve, so
     // `analysis("dc")` holds and `$abstime` = 0. §5.10.2 `initial_step` is the
@@ -43,12 +46,26 @@ pub fn solve(
     try ckt.computeBaseline();
 
     const ws = try ckt.workspace();
+    const gpa = ws.slv.gpa;
+    const held = if (options.tran_op) ic else &.{};
+    // Holds first, then the nodesets on rows no `.ic` holds: the `.ic` value
+    // wins where both name a node.
+    var force: std.ArrayList(converger.Force) = .empty;
+    defer force.deinit(gpa);
+    try force.ensureTotalCapacityPrecise(gpa, held.len + nodeset.len);
+    for (held) |h| force.appendAssumeCapacity(.{ .slot = ckt.diag_slots[h.node], .row = h.node, .value = h.value });
+    for (nodeset) |ns| {
+        for (held) |h| {
+            if (h.node == ns.node) break;
+        } else force.appendAssumeCapacity(.{ .slot = ckt.diag_slots[ns.node], .row = ns.node, .value = ns.value });
+    }
+    const hold = force.items[0..held.len];
     // A converged forcing step leaves a warm start, as ngspice's INITFIX
     // hands INITFLOAT its iterate.
     var ladder = options;
-    if (nodeset.len > 0 and try forceNodeset(ckt, ws, x, options, nodeset)) ladder.warm_start = true;
+    if (nodeset.len > 0 and try forceNodeset(ckt, ws, x, options, force.items)) ladder.warm_start = true;
 
-    const r = try solveLadder(ckt, ws, x, ladder);
+    const r = try solveLadder(ckt, ws, x, ladder, hold);
     // Commit device state so later analyses start from the accepted state.
     if (r.converged) _ = ckt.stateCtl(.commit);
     // Every later eval at this point (ac, tf, noise, post-processing) is not
@@ -58,16 +75,20 @@ pub fn solve(
 }
 
 /// The continuation ladder from `x` as given: plain Newton, dynamic gmin
-/// stepping, source stepping, JFNK, then OPtran. Takes the caller's Workspace
-/// so dc.zig can fall back to it mid-sweep. Returns error.FloatingNode when a
-/// node has no DC path to ground outside a TRANOP.
+/// stepping, source stepping, JFNK, then OPtran, every Newton solve holding
+/// the `hold` rows. Takes the caller's Workspace so dc.zig can fall back to
+/// it mid-sweep. Returns error.FloatingNode when a node has no DC path to
+/// ground outside a TRANOP.
 pub fn solveLadder(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
     x: []f64,
     options: Options,
+    hold: []const converger.Force,
 ) !converger.Result {
-    if (ckt.needs_tran_op) {
+    // Holds can pin the floating nodes, as they do in ngspice, so a held
+    // solve tries the static rungs before settling.
+    if (ckt.needs_tran_op and hold.len == 0) {
         // A node with no DC path has an all-zero G row, so the static
         // operating point is not unique and the transient only reports
         // wherever settling from zero landed. ngspice accepts that under
@@ -77,14 +98,14 @@ pub fn solveLadder(
             std.log.err("topology: a node has no DC path to ground (capacitor-only island) — the operating point is not unique", .{});
             return error.FloatingNode;
         }
-        return transientOp(ckt, ws, x, options);
+        return transientOp(ckt, ws, x, options, hold);
     }
     // Rung 1: plain Newton with no diagonal gmin. ngspice's NIiter loads one
     // only during gmin stepping (junction gmin lives in the device models);
     // an always-on shunt moves every solution off ngspice's (voltage_divider
     // by 2.5e-9) and settles a floating bridge on a common mode ngspice never
     // picks.
-    const plain = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, !options.warm_start) catch |e| switch (e) {
+    const plain = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, !options.warm_start) catch |e| switch (e) {
         error.SingularMatrix => null,
         else => return e,
     };
@@ -117,7 +138,7 @@ pub fn solveLadder(
         var have_good = false;
         var solves: u32 = 0;
         while (solves < 100) : (solves += 1) {
-            const r = newtonRun(ckt, ws, x, options.tol, gmin_val, stamps, options.tol.itl2, !have_good) catch |e| switch (e) {
+            const r = newtonRun(ckt, ws, x, options.tol, hold, gmin_val, stamps, options.tol.itl2, !have_good) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => return e,
             };
@@ -128,7 +149,7 @@ pub fn solveLadder(
                 if (gmin_val <= gtarget) {
                     // ngspice's dynamic_gmin removes diagGmin for the last
                     // solve: the answer must not carry the shunt.
-                    const clean = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, false) catch |err| switch (err) {
+                    const clean = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
                         error.QueryCancelled => return err,
                         else => failed,
                     };
@@ -177,7 +198,7 @@ pub fn solveLadder(
             ckt.applyAttempt(lambda);
             ckt.has_baseline = false;
             try ckt.computeBaseline();
-            const sr = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
+            const sr = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => {
                     ckt.restoreModels();
@@ -210,7 +231,7 @@ pub fn solveLadder(
     ckt.has_baseline = false;
     try ckt.computeBaseline();
 
-    const final = newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, false) catch |e| switch (e) {
+    const final = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |e| switch (e) {
         error.SingularMatrix => failed,
         else => return e,
     };
@@ -221,7 +242,8 @@ pub fn solveLadder(
     // Rung 4: JFNK, the algorithm the GPU kernel runs, so CPU convergence is
     // a superset of GPU convergence. Damping plus residual backtracking
     // catches circuits where the factored Newton step wedges.
-    {
+    // It has no holds, so a held solve skips it.
+    if (hold.len == 0) {
         coldStart(ckt, x);
         const copts = converger.optionsFromTolerances(options.tol, null);
         // converger.run clears device limiting state on exit; a direct jfnk
@@ -233,7 +255,7 @@ pub fn solveLadder(
             return .{ .converged = true, .iterations = total_iter, .max_dx = jr.max_dx };
     }
 
-    var result = try transientOp(ckt, ws, x, options);
+    var result = try transientOp(ckt, ws, x, options, hold);
     result.iterations +|= total_iter;
     return result;
 }
@@ -248,9 +270,11 @@ pub fn solveLadder(
 /// (cktop.c:94-97). The transient commits device state at every step, so it
 /// runs between a save and a restore: only `x` leaves it, and no timer,
 /// event or delay history runs ahead of the operating point's t = 0.
-fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options) !converger.Result {
+fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options, hold: []const converger.Force) !converger.Result {
     const opa = ws.slv.gpa;
     root.zeroSimd(x);
+    // The held rows start at their values, where the capacitors keep them.
+    for (hold) |h| x[h.row] = h.value;
     var wf = try tran.Waveform.init(opa, 0, 16);
     defer wf.deinit();
     const saved = try ckt.saveState(opa);
@@ -273,12 +297,14 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     ckt.has_baseline = false;
     try ckt.computeBaseline();
     if (sim == null or !sim.?.completed) return failed;
-    if (ckt.needs_tran_op) {
+    // Holds can pin the floating nodes, as they do in ngspice, so a held
+    // solve tries the static rungs before settling.
+    if (ckt.needs_tran_op and hold.len == 0) {
         // The static history at the answer, as a converged Newton leaves it.
         _ = ckt.updateStates(x);
         return .{ .converged = true, .iterations = 0, .max_dx = 0 };
     }
-    return newtonRun(ckt, ws, x, options.tol, 0.0, &.{}, null, false) catch |err| switch (err) {
+    return newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
         error.QueryCancelled => return err,
         else => failed,
     };
@@ -390,14 +416,12 @@ fn gminStamps(ckt: *const root.Circuit, gpa: std.mem.Allocator) ![]converger.Gmi
 
 /// The `.nodeset` step before the ladder, ngspice's MODEINITJCT and
 /// MODEINITFIX iterations with the nodes held (cktload.c): Newton from `x`
-/// with every nodeset row tied to its guess by `converger.force_g`. True
+/// with every `force` row (the nodesets and any `.ic` holds) tied to its
+/// value by `converger.force_g`. True
 /// when it converged, leaving that point in `x` for the free solve; false
 /// restores `x`.
-fn forceNodeset(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options, nodeset: []const Ic) !bool {
+fn forceNodeset(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options, force: []const converger.Force) !bool {
     const gpa = ws.slv.gpa;
-    const force = try gpa.alloc(converger.Force, nodeset.len);
-    defer gpa.free(force);
-    for (force, nodeset) |*f, ns| f.* = .{ .slot = ckt.diag_slots[ns.node], .row = ns.node, .value = ns.value };
     const start = try gpa.dupe(f64, x);
     defer gpa.free(start);
     var copts = converger.optionsFromTolerances(options.tol, null);
@@ -416,10 +440,11 @@ fn forceNodeset(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options:
 /// CKTdcTrcvMaxIter, cktop.c:194 and the source-stepping NIiter calls).
 /// `init_fix` marks a solve from the cold start, which ngspice runs in
 /// MODEINITJCT until a rung's first success switches it to continuemode.
-fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, gmin: f64, gmin_stamps: []const converger.GminStamp, max_iter: ?u16, init_fix: bool) !converger.Result {
+fn newtonRun(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, tol: converger.Tolerances, hold: []const converger.Force, gmin: f64, gmin_stamps: []const converger.GminStamp, max_iter: ?u16, init_fix: bool) !converger.Result {
     var copts = converger.optionsFromTolerances(tol, max_iter);
     copts.gmin = gmin;
     copts.gmin_stamps = gmin_stamps;
     copts.init_fix = init_fix;
+    copts.force = hold;
     return converger.run(ckt, ws, x, 0, copts, root.EvalHook{});
 }

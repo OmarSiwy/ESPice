@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "analysis": [
+    "op",
+    "tran"
+  ],
+  "purpose": ".ic without UIC holds its node through the transient operating point only",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Standalone .op ignores .ic: v(out)=v(mid)=1. The transient OP holds v(out)=0.2, so v(mid)=0.2, then the two-section RC ladder (tau=1ms) relaxes: x(t)=1+exp(A t)(x0-1), A=[[-2,1],[1,-1]]/tau, x0=(0.2,0.2). ngspice-45 prints the same TRANOP (out=mid=0.2)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              1.0
+            ]
+          },
+          "v(mid)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              1.0
+            ]
+          }
+        }
+      },
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 1e-06,
+            "values": [
+              0.2,
+              0.46203592769694724,
+              0.5887706706873286,
+              0.7291605420765188,
+              0.8158643380517746
+            ]
+          },
+          "v(mid)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 1e-06,
+            "values": [
+              0.2,
+              0.2630934225321305,
+              0.37068352055730514,
+              0.5644034671921097,
+              0.7022541555514922
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            0,
+            0.0005,
+            0.001,
+            0.002,
+            0.003
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4f0e96ac527fcf57feeb8ce21385a9cf945c4cd3559d35fa3d9380a0d12048a5"
+}
