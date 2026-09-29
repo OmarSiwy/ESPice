@@ -104,7 +104,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         const first = n;
         var job = (buildJob(c, sources, card_refs, ctx) catch |err| return cardError(c.line, err)) orelse continue;
         switch (job) {
-            .hbac, .hbxf, .hbnoise => |*o| if (o.f0 == 0) {
+            inline .hbac, .hbxf, .hbnoise, .hblin => |*o| if (o.f0 == 0) {
                 const tone = hb orelse return cardError(c.line, error.InvalidAnalysisArguments);
                 o.f0 = tone.f0;
                 o.n_harmonics = tone.n_harmonics;
@@ -1181,6 +1181,27 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .hbxf => .{ .hbxf = opts },
                 else => .{ .hbnoise = opts },
             };
+        },
+        .hblin => {
+            // HSPICE RF `.hblin <sweep> [NOISECALC=0] [FILENAME= DATAFORMAT=
+            // MIXEDMODE2PORT=ss]` [CR .HBLIN] at the `.hb` card's tone, over
+            // the deck's P elements. The file keywords are checked and
+            // unused; noise and mixed mode are refused.
+            const grid = try acGrid(ctx.arena, args, 0);
+            var i: usize = grid.end;
+            while (i < args.len) : (i += 2) {
+                var lower: [16]u8 = undefined;
+                const key = try keyword(args, i, &lower);
+                if (i + 1 >= args.len) return error.InvalidAnalysisArguments;
+                if (std.mem.eql(u8, key, "noisecalc")) {
+                    const off = if (numberAt(args, i + 1)) |v| v == 0 else std.ascii.eqlIgnoreCase(nameAt(args, i + 1) orelse "", "no");
+                    if (!off) return error.UnsupportedAnalysisOutput;
+                } else if (std.mem.eql(u8, key, "mixedmode2port")) {
+                    if (!std.ascii.eqlIgnoreCase(nameAt(args, i + 1) orelse "", "ss")) return error.UnsupportedAnalysisOutput;
+                } else if (!std.mem.eql(u8, key, "filename") and !std.mem.eql(u8, key, "dataformat")) return error.InvalidAnalysisArguments;
+            }
+            if (sources.ports.len == 0) return error.MissingAnalysisCard;
+            return .{ .hblin = .{ .f0 = 0, .sweep = grid.sweep, .ports = sources.ports } };
         },
         .phasenoise => {
             // `.phasenoise v(out) sweep [f0 [K]]`: without f0 the oscillator

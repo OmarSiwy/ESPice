@@ -49,7 +49,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const sources: core.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{} };
+    const sources: core.QueryBindings = .{ .v_names = &.{"vin"}, .i_names = &.{}, .v_branches = &.{2}, .v_pos = &.{1}, .v_neg = &.{0}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{.{ 0, 0 }}, .ports = &.{.{ .node = 1, .branch = 2 }} };
     const cards: []const requests.CardRef = &.{.{ .type = device.Library.builtin("vsource"), .index = 0, .name = "vin" }};
     // `.fft` reads the deck's `.tran`, `.acmatch` its `.ac`.
     const ctx: analyses.CardContext = .{ .arena = a, .tran = .{ .t_stop = 10e-6, .dt_init = 1e-6 }, .ac = .{ .f_start = 10, .f_stop = 100 } };
@@ -67,6 +67,7 @@ test "analysis directives dispatch every implemented capability and reject malfo
         ".lstb mode=single vsource=vin dec 2 10 100", ".acxf v(out) dec 2 10 100",
         ".dcxf v(out) tf",                      ".dcinc",
         ".fft v(out)",                          ".acmatch v(out)",      ".dcsens v(out)",
+        ".hblin dec 2 10 100",
     };
     try std.testing.expectEqual(std.meta.fields(requests.Kind).len, directives.len);
     inline for (directives, std.meta.fields(requests.Kind)) |directive, field| {

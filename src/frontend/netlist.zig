@@ -454,7 +454,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
     .{ "dcinc", an(.dcinc) },   .{ "lin", an(.sp) },            .{ "acmatch", an(.acmatch) },
-    .{ "dcsens", an(.dcsens) },
+    .{ "dcsens", an(.dcsens) }, .{ "hblin", an(.hblin) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
@@ -1924,7 +1924,8 @@ fn Reader(comptime S: type) type {
 
         fn readDevice(r: *R, line: []const u8, frame: *const Frame) Error!void {
             const arena = r.arena;
-            var f = F.init(line);
+            const port_card = r.dialect == .hspice and std.ascii.toLower(line[0]) == 'p';
+            var f = F.init(if (port_card) try r.portLine(line) else line);
             const head = f.next() orelse return error.ParseError;
             const was_in_card = r.in_card;
             r.in_card = true;
@@ -1934,7 +1935,7 @@ fn Reader(comptime S: type) type {
             if (!F.isWord(head) or !std.ascii.isAlphabetic(head[0])) return error.ParseError;
             // HSPICE's P element is a port: a V card that `port=` numbers
             // for `.lin` (`P1 in 0 port=1 z0=50`).
-            const letter = if (r.dialect == .hspice and std.ascii.toLower(head[0]) == 'p') 'v' else std.ascii.toLower(head[0]);
+            const letter = if (port_card) 'v' else std.ascii.toLower(head[0]);
             // HSPICE reads these letters as lossy lines, S-parameter blocks
             // and IBIS buffers, none of which is built.
             if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bsuw", letter) != null)
@@ -1995,6 +1996,11 @@ fn Reader(comptime S: type) type {
                 try r.positional.append(arena, try r.nameValue(model, frame, false));
             }
 
+            // A third node makes a mixed-mode (balanced) port, not built.
+            if (port_card) {
+                var probe = f;
+                if (probe.next()) |t| if (F.isWord(t) and !probe.takeEq()) return r.unsupported(line, "mixed-mode P element");
+            }
             while (f.next()) |t| {
                 if (t[0] == ',') {
                     continue;
@@ -2009,6 +2015,20 @@ fn Reader(comptime S: type) type {
             if (letter == 'x') return r.expand(head, frame, kv_text.items);
             if (letter == 'q' or letter == 'm') try r.splitTerminals();
             return r.commit(head, letter, frame);
+        }
+
+        /// An HSPICE P card with its `hblin=[h, s]` band vector spelled as
+        /// the plain keys `hblin_h=h hblin_s=s` the builder reads. A longer
+        /// vector (multi-tone HB) is refused.
+        fn portLine(r: *R, line: []const u8) Error![]const u8 {
+            const at = std.ascii.indexOfIgnoreCase(line, "hblin") orelse return line;
+            const open = std.mem.indexOfScalarPos(u8, line, at, '[') orelse return error.ParseError;
+            const close = std.mem.indexOfScalarPos(u8, line, open, ']') orelse return error.ParseError;
+            var it = std.mem.tokenizeAny(u8, line[open + 1 .. close], ", \t");
+            const h = it.next() orelse return error.ParseError;
+            const s = it.next() orelse return error.ParseError;
+            if (it.next() != null) return r.unsupported(line, "multi-tone HBLIN band");
+            return std.fmt.allocPrint(r.arena, "{s} hblin_h={s} hblin_s={s} {s}", .{ line[0..at], h, s, line[close + 1 ..] });
         }
 
         fn isModel(r: *R, name: []const u8) bool {

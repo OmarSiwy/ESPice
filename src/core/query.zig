@@ -16,7 +16,17 @@ pub const SweepKind = @import("numerics.zig").SweepKind;
 
 /// One `.sp` port: the node rows and branch row of its source and its
 /// reference impedance in ohms. The port voltage is v(node) - v(neg).
-pub const Port = struct { node: u32, branch: u32, z0: f64 = 50.0, neg: u32 = 0 };
+pub const Port = struct {
+    node: u32,
+    branch: u32,
+    z0: f64 = 50.0,
+    neg: u32 = 0,
+    /// The band `.hblin` reads this port in (an HSPICE P card's
+    /// `hblin=[harmonic, sign]`): sign·f + harmonic·f0 for input frequency f.
+    band: Band = .{},
+
+    pub const Band = struct { harmonic: i16 = 0, sign: i8 = 1 };
+};
 
 /// The card name of one device instance.
 pub const CardRef = struct {
@@ -376,6 +386,29 @@ pub const HbLptv = struct {
     }
 };
 
+/// HSPICE RF `.hblin`: frequency-translation S-parameters between the
+/// deck's ports about the `.hb` orbit, each port read in its own band
+/// (`Port.band`).
+pub const Hblin = struct {
+    tol: Tolerances = .{},
+    /// HB fundamental, in Hz; 0 until the deck's `.hb` card fills it.
+    f0: f64,
+    n_harmonics: u16 = 8,
+    /// Sidebands kept on each side of the carrier; every port's band
+    /// harmonic must lie within them.
+    n_sidebands: u16 = 8,
+    /// Input (small-signal tone) frequency sweep.
+    sweep: FreqSweep,
+    max_iter: u16 = 200,
+    hb_tol: f64 = 1e-9,
+    ports: []const Port,
+
+    /// The HB-orbit small-signal options the orbit and linearization take.
+    pub fn lptv(self: Hblin) HbLptv {
+        return .{ .tol = self.tol, .f0 = self.f0, .n_harmonics = self.n_harmonics, .n_sidebands = self.n_sidebands, .out_node = 0, .sweep = self.sweep, .max_iter = self.max_iter, .hb_tol = self.hb_tol };
+    }
+};
+
 /// Oscillator phase noise (`.phasenoise`): the perturbation projection
 /// vector of the autonomous HB solution (Demir's method, HSPICE METHOD=0)
 /// projects every white noise source onto the oscillator's phase.
@@ -662,6 +695,7 @@ pub const Kind = enum(u8) {
     fft,
     acmatch,
     dcsens,
+    hblin,
 
     /// Runs off a transient operating point (ngspice MODETRANOP) and starts
     /// its devices in `.ic` rather than `.dc` state.
@@ -710,4 +744,5 @@ pub const Query = union(Kind) {
     fft: Fft,
     acmatch: Acmatch,
     dcsens: Dcsens,
+    hblin: Hblin,
 };
