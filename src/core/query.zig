@@ -224,11 +224,48 @@ pub const Tf = struct {
     output_node: u32,
 };
 
+/// Parameter variations a mismatch or sensitivity analysis sums over, from
+/// the deck's `.variation` block and `DEV`/`LOT` specs. Group g moves
+/// `params[starts[g]..starts[g + 1]]` (ordinals in `Circuit.collectParams`
+/// order) together, each by its own one-sigma step in `sigmas`: a
+/// per-device row is one group per device, a per-model row one group over
+/// every device of the model. Empty: every parameter alone at its Pelgrom
+/// sigma.
+pub const Variations = struct {
+    /// Per group: `<card>@<param>` or `<model>@<param>`.
+    labels: []const []const u8 = &.{},
+    starts: []const u32 = &.{},
+    params: []const u32 = &.{},
+    sigmas: []const f64 = &.{},
+};
+
 pub const Dcmatch = struct {
     tol: Tolerances = .{},
     output_node: u32,
     /// `v(a,b)` reference node for the output; GROUND is single-ended.
     output_neg: u32 = 0,
+    variations: Variations = .{},
+};
+
+/// HSPICE `.acmatch`: the 1-sigma spread of an AC output over the `.ac`
+/// sweep from the same variations as `Dcmatch`.
+pub const Acmatch = struct {
+    tol: Tolerances = .{},
+    sweep: FreqSweep,
+    output_node: u32,
+    /// `v(a,b)` reference node for the output; GROUND is single-ended.
+    output_neg: u32 = 0,
+    variations: Variations = .{},
+};
+
+/// HSPICE `.dcsens`: the DC output's change per one-sigma step of each
+/// variation group.
+pub const Dcsens = struct {
+    tol: Tolerances = .{},
+    output_node: u32,
+    /// `v(a,b)` reference node for the output; GROUND is single-ended.
+    output_neg: u32 = 0,
+    variations: Variations = .{},
 };
 
 pub const Pss = struct {
@@ -623,6 +660,8 @@ pub const Kind = enum(u8) {
     dcxf,
     dcinc,
     fft,
+    acmatch,
+    dcsens,
 
     /// Runs off a transient operating point (ngspice MODETRANOP) and starts
     /// its devices in `.ic` rather than `.dc` state.
@@ -669,4 +708,6 @@ pub const Query = union(Kind) {
     dcxf: Dcxf,
     dcinc: Dcinc,
     fft: Fft,
+    acmatch: Acmatch,
+    dcsens: Dcsens,
 };

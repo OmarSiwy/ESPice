@@ -1,9 +1,11 @@
-//! DC mismatch (Spectre `dcmatch`): the Pelgrom-model random offset of one
-//! output at the operating point, by adjoint sensitivity. One factorization
-//! and one transpose solve give lambda (J^T lambda = e_out); each parameter
-//! then costs one finite-difference re-eval of F(x_op) and a dot with lambda.
-//! The offset is sigma^2(y) = sum (dy/dp)^2 · sigma^2(p), with Pelgrom
-//! sigma^2(p) = A_P^2 / (W·L).
+//! DC mismatch (Spectre `dcmatch`, HSPICE `.dcmatch`) and DC variation
+//! sensitivity (HSPICE `.dcsens`) of one output at the operating point, by
+//! adjoint sensitivity. One factorization and one transpose solve give
+//! lambda (J^T lambda = e_out); each parameter then costs one
+//! finite-difference re-eval of F(x_op) and a dot with lambda.
+//! The parameters come in `Groups`: the deck's variation block, or every
+//! parameter alone at its Pelgrom sigma, sigma^2(p) = A_P^2 / (W·L). The
+//! offset is sigma^2(y) = sum over groups of (dy/dsigma_g)^2.
 const std = @import("std");
 const root = @import("../types.zig");
 
@@ -12,22 +14,95 @@ const W = std.simd.suggestVectorLength(f64) orelse 8;
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Dcmatch;
 
-/// One parameter's share of the output variance.
+const Variations = @import("core").query.Variations;
+
+/// One group's share of the output variance.
 pub const Contribution = struct {
-    device_name: []const u8,
-    device_index: u32,
-    param_name: []const u8,
-    /// dy/dp, in output units per parameter unit.
+    /// Index into the `Groups` the result was solved over.
+    group: u32,
+    /// dy/dsigma with a variation block; dy/dp per parameter without one.
     sensitivity: f64,
-    /// (dy/dp)^2 · sigma^2(p).
+    /// Its square times the group's sigma squared.
     variance_contrib: f64,
 };
 
 /// The mismatch of one output.
 pub const MismatchResult = struct {
-    /// Sorted by descending variance share; owned by the `solve` allocator.
+    /// In group order; owned by the `solve` allocator.
     contributions: []Contribution,
     total_sigma: f64,
+};
+
+/// The parameter groups a mismatch or sensitivity analysis sums over:
+/// `Variations` from the deck's variation block, or, without one, every
+/// parameter of `Circuit.collectParams` alone, its column dy/dp and its
+/// sigma the Pelgrom one.
+pub const Groups = struct {
+    starts: []const u32,
+    list: []Member,
+    sigmas: []f64,
+    labels: []const []const u8,
+
+    /// A parameter ordinal and the factor its dy/dp enters its group with:
+    /// its one-sigma step, or 1 without a variation block.
+    pub const Member = struct { param: u32, scale: f64 };
+
+    /// Builds the groups over `refs`; free them with `deinit`.
+    /// `error.InvalidVariation` when a group names a parameter past `refs`.
+    pub fn init(a: std.mem.Allocator, refs: []const root.ParamRef, vars: Variations) !Groups {
+        if (vars.starts.len == 0) {
+            const starts = try a.alloc(u32, refs.len + 1);
+            errdefer a.free(starts);
+            const list = try a.alloc(Member, refs.len);
+            errdefer a.free(list);
+            const sigmas = try a.alloc(f64, refs.len);
+            for (refs, starts[0..refs.len], list, sigmas, 0..) |r, *st, *m, *sg, i| {
+                st.* = @intCast(i);
+                m.* = .{ .param = @intCast(i), .scale = 1 };
+                sg.* = pelgromSigma(r);
+            }
+            starts[refs.len] = @intCast(refs.len);
+            return .{ .starts = starts, .list = list, .sigmas = sigmas, .labels = &.{} };
+        }
+        const list = try a.alloc(Member, vars.params.len);
+        errdefer a.free(list);
+        for (list, vars.params, vars.sigmas) |*m, p, sg| {
+            if (p >= refs.len) return error.InvalidVariation;
+            m.* = .{ .param = p, .scale = sg };
+        }
+        const sigmas = try a.alloc(f64, vars.starts.len - 1);
+        @memset(sigmas, 1);
+        return .{ .starts = try a.dupe(u32, vars.starts), .list = list, .sigmas = sigmas, .labels = vars.labels };
+    }
+
+    pub fn deinit(self: Groups, a: std.mem.Allocator) void {
+        a.free(self.starts);
+        a.free(self.list);
+        a.free(self.sigmas);
+    }
+
+    pub fn count(self: Groups) usize {
+        return self.starts.len - 1;
+    }
+
+    /// The parameters group `g` moves together.
+    pub fn members(self: Groups, g: usize) []const Member {
+        return self.list[self.starts[g]..self.starts[g + 1]];
+    }
+
+    /// The sigma group `g`'s column is multiplied by for its spread: 1 when
+    /// the column is already per sigma.
+    pub fn sigma(self: Groups, g: usize) f64 {
+        return self.sigmas[g];
+    }
+
+    /// Group `g`'s column label, allocated in `a`: the variation label, or
+    /// `<type>#<index>.<param>`.
+    pub fn label(self: Groups, a: std.mem.Allocator, ckt: *const root.Circuit, refs: []const root.ParamRef, g: usize) ![]const u8 {
+        if (self.labels.len != 0) return a.dupe(u8, self.labels[g]);
+        const r = refs[self.list[g].param];
+        return std.fmt.allocPrint(a, "{s}#{d}.{s}", .{ ckt.typeName(r.type), r.index, r.param_name });
+    }
 };
 
 /// The parameter's mismatch sigma (not sigma^2): A_P / sqrt(W·L).
@@ -91,19 +166,20 @@ fn fdSensitivity(
     return -dot;
 }
 
-/// Every collected parameter's contribution to the mismatch of
-/// v(output_node) - v(output_neg) at `x_op`. Leaves the circuit's planes at
-/// the last perturbed eval.
+/// Each group's contribution to the mismatch of v(output_node) -
+/// v(output_neg) at `x_op`, over `refs` (`Circuit.collectParams`). Leaves the
+/// circuit's planes at the last perturbed eval.
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,
     output_node: u32,
     output_neg: u32,
+    refs: []const root.ParamRef,
+    groups: Groups,
     allocator: std.mem.Allocator,
 ) !MismatchResult {
     const n: usize = ckt.n;
-    const refs = try ckt.collectParams();
-    if (refs.len == 0) return .{
+    if (groups.count() == 0) return .{
         .contributions = &.{},
         .total_sigma = 0,
     };
@@ -127,32 +203,29 @@ pub fn solve(
     if (output_neg != root.GROUND) e_out[output_neg] = -1.0;
     ws.slv.solveT(e_out[0..n], lambda[0..n]);
 
-    const contributions = try allocator.alloc(Contribution, refs.len);
+    const contributions = try allocator.alloc(Contribution, groups.count());
     errdefer allocator.free(contributions);
 
     var total_var: f64 = 0;
-    for (refs, contributions, 0..) |ref, *contrib, index| {
-        if (index != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = index, .total = refs.len });
-        const sens = try fdSensitivity(ckt, x_op, lambda, rhs_nom, ref);
+    for (contributions, 0..) |*contrib, index| {
+        if (index != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = index, .total = contributions.len });
+        // The first member is not added to 0, which would turn a -0 into +0.
+        var sens: f64 = 0;
+        for (groups.members(index), 0..) |m, k| {
+            const d = try fdSensitivity(ckt, x_op, lambda, rhs_nom, refs[m.param]) * m.scale;
+            sens = if (k == 0) d else sens + d;
+        }
 
-        const sigma_p = pelgromSigma(ref);
+        const sigma_p = groups.sigma(index);
         const var_contrib = sens * sens * sigma_p * sigma_p;
         total_var += var_contrib;
 
         contrib.* = .{
-            .device_name = ckt.typeName(ref.type),
-            .device_index = ref.index,
-            .param_name = ref.param_name,
+            .group = @intCast(index),
             .sensitivity = sens,
             .variance_contrib = var_contrib,
         };
     }
-
-    std.mem.sort(Contribution, contributions, {}, struct {
-        fn lessThan(_: void, a: Contribution, b: Contribution) bool {
-            return b.variance_contrib < a.variance_contrib;
-        }
-    }.lessThan);
 
     return .{
         .contributions = contributions,
@@ -160,35 +233,60 @@ pub fn solve(
     };
 }
 
-/// Contract entry: one real point, `total_3sigma` followed by each
-/// parameter's sensitivity (`<type>#<index>.<param>`) in descending variance
-/// order.
+/// Contract entry: one real point, `total_3sigma` followed by each group's
+/// sensitivity (`<type>#<index>.<param>`, or the variation label) in
+/// descending variance order.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+    return publish(ctx, opts.output_node, opts.output_neg, opts.variations, true);
+}
+
+/// `.dcsens`: DC sensitivity to the variation block's parameters.
+pub const Sens = struct {
+    pub const Options = @import("core").query.Dcsens;
+
+    /// Contract entry: one real point, each group's dy/dsigma (dy/dp per
+    /// parameter without a variation block) in group order.
+    pub fn run(ctx: *const root.RunCtx, opts: Sens.Options) !root.Result {
+        return publish(ctx, opts.output_node, opts.output_neg, opts.variations, false);
+    }
+};
+
+/// Solves the groups and publishes them, as `.dcmatch` (`mismatch`: the
+/// 3-sigma total first, variance-sorted) or `.dcsens`.
+fn publish(ctx: *const root.RunCtx, output_node: u32, output_neg: u32, vars: Variations, mismatch: bool) !root.Result {
     const a = ctx.allocator;
     const ckt = ctx.circuit;
     const scratch = ctx.scratch_allocator;
-    const res = try solve(ckt, ctx.x_op, opts.output_node, opts.output_neg, scratch);
+    const refs = try ckt.collectParams();
+    const groups = try Groups.init(scratch, refs, vars);
+    defer groups.deinit(scratch);
+    const res = try solve(ckt, ctx.x_op, output_node, output_neg, refs, groups, scratch);
     defer scratch.free(res.contributions);
+    if (mismatch) std.mem.sort(Contribution, res.contributions, {}, struct {
+        fn lessThan(_: void, x: Contribution, y: Contribution) bool {
+            return y.variance_contrib < x.variance_contrib;
+        }
+    }.lessThan);
 
-    const n_contribs = res.contributions.len;
-    const ncols = 1 + n_contribs;
+    const head: usize = @intFromBool(mismatch);
+    const ncols = head + res.contributions.len;
     const names = try a.alloc([]const u8, ncols);
     errdefer a.free(names);
-    names[0] = "total_3sigma";
+    if (mismatch) names[0] = "total_3sigma";
 
     var done: usize = 0;
-    errdefer for (names[1..][0..done]) |s| a.free(s);
-    for (res.contributions, names[1..]) |c, *name| {
-        name.* = try std.fmt.allocPrint(a, "{s}#{d}.{s}", .{ c.device_name, c.device_index, c.param_name });
+    errdefer for (names[head..][0..done]) |s| a.free(s);
+    for (res.contributions, names[head..]) |c, *name| {
+        name.* = try groups.label(a, ckt, refs, c.group);
         done += 1;
     }
 
     const data = try a.alloc(f64, ncols);
-    data[0] = 3.0 * res.total_sigma;
-    for (res.contributions, data[1..]) |c, *out| out.* = c.sensitivity;
+    if (mismatch) data[0] = 3.0 * res.total_sigma;
+    for (res.contributions, data[head..]) |c, *out| out.* = c.sensitivity;
 
     return .{
-        .plotname = "DC Mismatch",
+        .plotname = if (mismatch) "DC Mismatch" else "DC Sensitivity",
         .varnames = names,
         .is_complex = false,
         .npoints = 1,

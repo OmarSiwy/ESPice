@@ -539,11 +539,21 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,
         .hbxf => |o| 1 + (1 + 2 * @as(usize, o.n_sidebands)) * topology.n,
         .sp => |o| @import("ac/sp.zig").columns(@max(o.ports.len, 1), o.lin),
-        .sens, .dcmatch => blk: {
+        .sens, .dcmatch, .dcsens, .acmatch => blk: {
+            const groups = switch (query) {
+                inline .dcmatch, .dcsens, .acmatch => |o| o.variations.starts.len -| 1,
+                else => 0,
+            };
+            const extra: usize = switch (query) {
+                .dcmatch => 1,
+                .acmatch => 5,
+                else => 0,
+            };
+            if (groups != 0) break :blk groups + extra;
             var refs: std.ArrayList(ParamRef) = .empty;
             defer refs.deinit(allocator);
             try types.Circuit.collectTyped(topology.batches, topology.batch_types, allocator, &refs);
-            break :blk refs.items.len + @intFromBool(query == .dcmatch);
+            break :blk refs.items.len + extra;
         },
         else => deck.probes.len + 1,
     };

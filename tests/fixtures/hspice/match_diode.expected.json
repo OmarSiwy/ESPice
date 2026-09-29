@@ -1,0 +1,204 @@
+{
+ "schema_version": 1,
+ "netlist_sha256": "9864f9976f1904e922aaf8629d3812bfbef86fe899d8846273a52a8947805848",
+ "analysis": "acmatch",
+ "purpose": "HSPICE .acmatch, .dcsens and .dcmatch read their sigmas from the variation block; the AC spread includes the operating-point shift.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "Op by Newton on (Vdd - V)/R = Is(e^{V/Vt} - 1) + gmin V (Vt = k T/q, k and q as diode.va, T = 300.15 K, gmin 1e-12). G = 1/R + Is/Vt e^{V/Vt} + gmin; dV/dR = -((Vdd - V)/R^2)/G; dG/dR = -1/R^2 + Is/Vt^2 e^{V/Vt} dV/dR. y = 1/(G + j w C); per sigma dy = -y^2 dG/dR sigma_R and -y^2 j w sigma_C with sigma_R = 100 ohm, sigma_C = 50 pF. Spreads in quadrature over both: |y| moves by Re(conj(y) dy)/|y|, the phase by Im(dy/y) (degrees). .dcsens and .dcmatch: dV/dR sigma_R, 0 for c1; total_3sigma = 3 |dV/dR sigma_R|."
+ },
+ "tokenizer": "hspice",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "AC Mismatch",
+    "match": "exact",
+    "row_count": 4,
+    "columns": {
+     "acm_mag": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       [
+        1.8620130515857312,
+        0.0
+       ],
+       [
+        1.8620091219416977,
+        0.0
+       ],
+       [
+        1.861616232158832,
+        0.0
+       ],
+       [
+        1.8230610574000865,
+        0.0
+       ]
+      ]
+     },
+     "acm_phase": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       [
+        0.0007523101340841637,
+        0.0
+       ],
+       [
+        0.007523090756195326,
+        0.0
+       ],
+       [
+        0.07522032441953073,
+        0.0
+       ],
+       [
+        0.7417683834433899,
+        0.0
+       ]
+      ]
+     },
+     "acm_re": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       [
+        1.8620130118922824,
+        0.0
+       ],
+       [
+        1.8620051526098917,
+        0.0
+       ],
+       [
+        1.8612194297947693,
+        0.0
+       ],
+       [
+        1.784662346393784,
+        0.0
+       ]
+      ]
+     },
+     "acm_im": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       [
+        0.0004581294235618607,
+        0.0
+       ],
+       [
+        0.004581280951510921,
+        0.0
+       ],
+       [
+        0.045799528292541684,
+        0.0
+       ],
+       [
+        0.4449971532101931,
+        0.0
+       ]
+      ]
+     },
+     "r1@r": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       [
+        1.8620130118922822,
+        -0.0004439511077020045
+       ],
+       [
+        1.8620051526079393,
+        -0.004439498584666332
+       ],
+       [
+        1.8612194102738435,
+        -0.04438249615523421
+       ],
+       [
+        1.78446981665698,
+        -0.4315965420911306
+       ]
+      ]
+     },
+     "c1@c": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       [
+        -2.6964192004712856e-08,
+        -0.00011309280570967363
+       ],
+       [
+        -2.6964116130091016e-06,
+        -0.0011309232836149638
+       ],
+       [
+        -0.00026956530284894746,
+        -0.011304460484691284
+       ],
+       [
+        -0.026213814601690276,
+        -0.10838307626264831
+       ]
+      ]
+     }
+    }
+   },
+   {
+    "name": "DC Sensitivity",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "r1@r": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       -0.002537417454118663
+      ]
+     },
+     "c1@c": {
+      "rtol": 1e-05,
+      "atol": 1e-12,
+      "values": [
+       0.0
+      ]
+     }
+    }
+   },
+   {
+    "name": "DC Mismatch",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "total_3sigma": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       0.007612252362355989
+      ]
+     },
+     "r1@r": {
+      "rtol": 1e-05,
+      "atol": 1e-15,
+      "values": [
+       -0.002537417454118663
+      ]
+     },
+     "c1@c": {
+      "rtol": 1e-05,
+      "atol": 1e-12,
+      "values": [
+       0.0
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

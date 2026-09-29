@@ -175,6 +175,16 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
     var tuner: ?*variants.Tuner = null;
+    // Variation groups for the mismatch and sensitivity cards.
+    var card_opts = deck_opts;
+    if (nl.deck.variations.len != 0) for (nl.deck.analyses) |a| switch (a.kind) {
+        .dcmatch, .acmatch, .dcsens => {
+            var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, "");
+            card_opts.variations = try planner.variations();
+            break;
+        },
+        else => {},
+    };
     const plan: variants.Plan = if (run.point) |pt| blk: {
         var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, "");
         var own = pt;
@@ -204,7 +214,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
-        .queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, deck_opts, plan.fanout),
+        .queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout),
         .variants = plan.variants,
         .bindings = out.bindings,
         .cards = cards,
