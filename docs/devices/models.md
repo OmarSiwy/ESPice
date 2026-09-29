@@ -42,8 +42,9 @@ Technology) as ngspice-45 ships it, under the Si2 CMC in-code statement
 reproduced in its header. That license forbids charging for the model code
 itself, and any product built on it must credit NXP Semiconductors, Delft
 University of Technology and CEA in its documentation; this paragraph is that
-credit. The only edits are the module name and the escaped `\nmos`/`\pmos`
-parameter identifiers (Annex B keywords VerA rightly refuses as plain names).
+credit. The only edits are the module name, the escaped `\nmos`/`\pmos`
+parameter identifiers (Annex B keywords VerA rightly refuses as plain names)
+and the `NQSmodel` define (below).
 It has no `$limit`, so Newton runs it unlimited. The MOSFET LEVEL is 1040,
 since ngspice-45 has no PSP LEVEL.
 
@@ -60,20 +61,41 @@ ring match only on VACASK's exact grid (VACASK itself scores 1.75e4x with the
 (the harness `oscillation` check, rtol 7e-3 and 1e-2) plus samples up to
 1.25 ns; the tolerance rationale is in the oracle's notes.
 
-The NQS model is flattened in but switched off. `PSP103_nqs_macrodefs.include`
-sits after `` `define OPderiv `` under `` `ifdef NQSmodel ``, where upstream's
-`psp103_nqs.va` includes it, so the shipped QS device is unchanged.
-Uncommenting `` `define NQSmodel true `` builds the NQS device (48 unknowns
-instead of 12, nine of them VerA's host-integrated `idt$k`) with the `SWNQS`
-card parameter. Checked with the file loaded through `.hdl` (module renamed)
-against VACASK running the same PSP 103.7 sources compiled by OpenVAF-r as
-`PSPNQS103VA`. The test is a 10u/10u nMOS at Vd = 1.2 V, with the gate
-stepped 0 to 1.2 V in 50 ps, over 4 ns with gear2 on both sides. With
-SWNQS=1, from 50 ps after the edge to the end, drain and gate currents agree
-within 2.9e-7 and 5.8e-7 A (about 0.1% of the 2.4e-4 A final drain current).
-The NQS effect itself (SWNQS=1 minus SWNQS=0) is 9.011e-3 A in espice against
-9.015e-3 A in VACASK. With SWNQS=0 the NQS build matches the QS device to
-1e-19 A, but not bitwise, because the extra unknowns change the matrix.
+The NQS model ships on (user decision). `PSP103_nqs_macrodefs.include` sits
+after `` `define OPderiv `` under `` `ifdef NQSmodel ``, where upstream's
+`psp103_nqs.va` includes it, and `` `define NQSmodel true `` is set, so
+every PSP instance carries 48 unknowns instead of 12: nine NQS nodes, nine
+of VerA's host-integrated `idt$k` and their 18 branch flows. None of them
+collapse at SWNQS=0, because SWNQS is a card parameter. Cards still default
+to SWNQS=0, the quasi-static model.
+
+Checked against VACASK, which ran the same PSP 103.7 sources compiled by
+OpenVAF-r as `PSPNQS103VA`, on a 10u/10u nMOS at Vd = 1.2 V with the gate
+stepped 0 to 1.2 V in 50 ps, over 4 ns, gear2 on both sides. With SWNQS=1,
+from 50 ps after the edge to the end, drain and gate currents agree within
+2.9e-7 and 5.8e-7 A (about 0.1% of the 2.4e-4 A final drain current). The
+NQS effect itself (SWNQS=1 minus SWNQS=0) is 9.011e-3 A in espice against
+9.015e-3 A in VACASK.
+
+Cost at SWNQS=0, measured against the QS build (main daa50f3). Callgrind
+instructions: `stress/vacask_ring` cut to 50 ns (18 instances, 1107 vs 1113
+steps) goes 0.84e9 -> 2.32e9 (2.8x). The post-layout `ring_psp103_1k` deck
+from `tests/benchmark/postlayout/gen.py`, cut to 200 ps (960 instances, 114
+steps both), goes 9.44e9 -> 19.7e9 (2.1x). Charge states double (vacask_ring
+n_qt 162 -> 324). Wall time on a loaded host (load average 160-300), best of
+three: vacask_ring 6.0 -> 11.1 s, ring_psp103_1k 18.7 -> 57.3 s,
+chain_psp103_1k 10.8 -> 26.5 s. The CUDA image grows from 7.8 MB to 34 MB
+of PTX, larger than hisimhv_va's, so the cold-JIT figure in build.zig's
+`gpu_max_model_bytes` table no longer holds for psp103. It was not
+re-measured.
+
+Output at SWNQS=0: the extra unknowns change the matrix, so results match
+the QS build to roundoff but not bitwise. `chain`/`ring` post-layout decks
+at 200 ps keep the same time grid, with at most 4.9e-13 V difference. The
+`stress/vacask_ring` operating point moves 8.7e-12 V. The free-running ring
+grows that by about 10x per 300 ps until the time grid splits at 2.2 ns
+(20741 -> 20370 accepted points over 1 us). Its checked period and swing
+move 0.2564x -> 0.2565x of tolerance.
 
 These originator attributions were written from memory and still need a
 check against the original sources: T. Ytterdal (hfet1, hfet2), Holger Vogt
