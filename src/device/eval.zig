@@ -928,7 +928,7 @@ pub fn ProtoStore(comptime D: type) type {
             store.slots = &.{};
             if (comptime has_q) store.q_tape = &.{};
             if (comptime has_attempt_decl) store.saved_models = &.{};
-            if (comptime hasSpicePulse(D)) store.pulse_brk = &.{};
+            if (comptime hasSpiceBreaks(D)) store.src_brk = &.{};
             if (comptime @hasDecl(D, "limit")) store.lim_x = &.{};
             if (comptime @hasDecl(D, "State")) store.states = &.{};
             errdefer DeviceBatch(D).hooks.deinit(store, gpa);
@@ -941,9 +941,9 @@ pub fn ProtoStore(comptime D: type) type {
                 store.attempt_saved = false;
             }
             if (comptime @hasDecl(D, "nextBreakpoint") and skipsTimerState(D)) store.bp = .{ .lo = std.math.inf(f64), .hi = std.math.inf(f64) };
-            if (comptime hasSpicePulse(D)) {
-                store.pulse_brk = try gpa.alloc(PulseBrk, count);
-                @memset(store.pulse_brk, .{});
+            if (comptime hasSpiceBreaks(D)) {
+                store.src_brk = try gpa.alloc(SrcBrk, count);
+                @memset(store.src_brk, .{});
             }
             if (comptime @hasDecl(D, "limit")) {
                 // Full n_u stride and zeroed, although only `limitWrites`
@@ -1060,13 +1060,14 @@ fn skipsTimerState(comptime D: type) bool {
     return true;
 }
 
-/// A source model whose PULSE corners follow ngspice's request-time rounding
-/// (`spicePulseBreak`) instead of VerA's `td + k*per` timer arithmetic.
-fn hasSpicePulse(comptime D: type) bool {
+/// A source model whose PULSE and PWL corners follow ngspice's request-time
+/// rounding (`spicePulseBreak`, `spicePwlBreak`) instead of VerA's timer
+/// arithmetic.
+fn hasSpiceBreaks(comptime D: type) bool {
     return @hasDecl(D, "nextBreakpoint") and skipsTimerState(D) and @hasField(D.Model, "pulse_td");
 }
 
-const PulseBrk = struct { req: f64 = std.math.inf(f64), at: f64 = std.math.inf(f64) };
+const SrcBrk = struct { req: f64 = std.math.inf(f64), at: f64 = std.math.inf(f64) };
 
 /// ngspice's PULSE breakpoint (vsrcacct.c:48-121, isrcacct.c the same): the
 /// corner after `tq`, requested at the accepted time `t_acc <= tq` and
@@ -1091,6 +1092,86 @@ fn spicePulseBreak(m: anytype, t_acc: f64, tq: f64) ?f64 {
     const corner: f64 = if (atime < 0.0) 0.0 else if (atime < tr) tr else if (atime < tr + pw) tr + pw else if (atime < tr + pw + tf) tr + pw + tf else per;
     const bp = t_acc + (corner - time);
     return if (bp > tq) bp else null;
+}
+
+/// ngspice's PWL breakpoint for a V source (vsrcacct.c:167-216): the first
+/// table time `t_k` after the request, rounded from the accepted time
+/// `t_acc <= tq` as `t_acc + (t_k - local)`, where `local` is `t_acc - td`
+/// folded into `[r, t_last]` by `r=`. VerA's timers give `t_k + td`, one ulp
+/// away at times, and add the PULSE timers' corners at TD and TD + TR, which
+/// ngspice does not have. Past the last point of a non-repeating table there
+/// is no breakpoint (inf). Null when the rounded time is not after `tq`
+/// (an anchor ngspice would not ask at), and for any other waveform. The
+/// repeat gate is vsource.va's own, so breakpoints follow the waveform it
+/// computes.
+fn spicePwlBreak(m: anytype, t_acc: f64, tq: f64) ?f64 {
+    const T = @TypeOf(m.*);
+    if (m.waveform != 4 or m.pwl_len <= 0) return null;
+    // Slot `k` of the flattened `pwl_times[]`, named as in
+    // frontend/builder.zig pwlSlot.
+    @setEvalBranchQuota(200_000);
+    const cap = comptime blk: {
+        var c: usize = 0;
+        while (@hasField(T, std.fmt.comptimePrint("pwl_timesZ5b{d}Z5d", .{c}))) c += 1;
+        break :blk c;
+    };
+    var ts: [cap]f64 = undefined;
+    inline for (0..cap) |k| ts[k] = @field(m.*, std.fmt.comptimePrint("pwl_timesZ5b{d}Z5d", .{k}));
+    const n: usize = @min(@as(usize, @intCast(m.pwl_len)), cap);
+    const t_last = ts[n - 1];
+    const r = m.pwl_repeat;
+    const repeats = r > 0.0 and n > 1 and t_last > r;
+    const period = t_last - r;
+    var time = t_acc - m.pwl_td;
+    if (time > t_last) {
+        if (!repeats) return std.math.inf(f64);
+        time -= r;
+        time -= period * @floor(time / period);
+        time += r;
+    }
+    // ngspice's `atime = time + CKTminBreak`; the host asks at t + minBreak.
+    const atime = time + (tq - t_acc);
+    const corner = for (ts[0..n]) |c| {
+        if (c > atime) break c;
+    } else if (!repeats) return std.math.inf(f64) else for (ts[0..n]) |c| {
+        // At the end of a repeating table ngspice sets nothing and asks again
+        // one step later, after the fold; this names the same corner now.
+        if (c + period > atime) break c + period;
+    } else return null;
+    const bp = t_acc + (corner - time);
+    return if (bp > tq) bp else null;
+}
+
+test "spicePwlBreak rounds from the request time as ngspice does" {
+    const M = struct {
+        waveform: i64 = 4,
+        pwl_len: i64 = 3,
+        pwl_repeat: f64 = 0,
+        pwl_td: f64 = 0,
+        pwl_timesZ5b0Z5d: f64 = 0,
+        pwl_timesZ5b1Z5d: f64 = 1.0e-9,
+        pwl_timesZ5b2Z5d: f64 = 3.1e-9,
+        pwl_timesZ5b3Z5d: f64 = 0,
+    };
+    const mb = 1e-20;
+    var m: M = .{};
+    try std.testing.expectEqual(@as(?f64, 1.0e-9), spicePwlBreak(&m, 0, mb));
+    // `t_acc + (t_k - t_acc)`, not the table time itself.
+    const t_acc = 0.7e-9;
+    try std.testing.expectEqual(@as(?f64, t_acc + (3.1e-9 - t_acc)), spicePwlBreak(&m, t_acc, 1.0e-9 + mb));
+    try std.testing.expectEqual(@as(?f64, std.math.inf(f64)), spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb));
+    // TD delays every corner; the accepted time rounds it.
+    m.pwl_td = 0.3e-9;
+    try std.testing.expectEqual(@as(?f64, 0.3e-9), spicePwlBreak(&m, 0, mb));
+    try std.testing.expectEqual(@as(?f64, 0.3e-9 + 1.0e-9), spicePwlBreak(&m, 0.3e-9, 0.3e-9 + mb));
+    // `r=1n`: past the end the table replays [1n, 3.1n], period 2.1n.
+    m = .{ .pwl_repeat = 1.0e-9 };
+    const bp = spicePwlBreak(&m, 3.1e-9, 3.1e-9 + mb).?;
+    try std.testing.expectApproxEqRel(@as(f64, 5.2e-9), bp, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 7.3e-9), spicePwlBreak(&m, bp, bp + mb).?, 1e-12);
+    // Not PWL: the caller falls back.
+    m.waveform = 1;
+    try std.testing.expectEqual(@as(?f64, null), spicePwlBreak(&m, 0, mb));
 }
 
 test "spicePulseBreak rounds from the request time as ngspice does" {
@@ -1176,7 +1257,10 @@ pub fn DeviceBatch(comptime D: type) type {
     // Only timer-only models: their breakpoints are pure in (model, t).
     // Native lines rewrite `Model.brk` as they step, so theirs are not.
     const has_bp = @hasDecl(D, "nextBreakpoint") and skipsTimerState(D);
-    const has_pulse = hasSpicePulse(D);
+    const has_src_brk = hasSpiceBreaks(D);
+    // isrcacct.c requests the raw PWL table times, so only the V source
+    // rounds its PWL corners.
+    const is_vsource = comptime std.mem.eql(u8, baseName(D), "vsource");
     const has_ac_dyn = @hasDecl(D, "ac_dyn_slots");
 
     return struct {
@@ -1194,10 +1278,10 @@ pub fn DeviceBatch(comptime D: type) type {
         /// between. `lo = inf` is empty. Every model write goes through
         /// `reprep` or `applyAttempt`, which empty it.
         bp: if (has_bp) struct { lo: f64, hi: f64 } else void,
-        /// Per model, ngspice's VSRCbreak_time: the PULSE breakpoint `at`
+        /// Per model, ngspice's VSRCbreak_time: the PULSE or PWL breakpoint `at`
         /// requested at query time `req`, kept until a query reaches it
         /// (or goes back before `req`, a new run). `req = inf` is empty.
-        pulse_brk: if (has_pulse) []PulseBrk else void,
+        src_brk: if (has_src_brk) []SrcBrk else void,
         lim_x: if (has_limit) []f64 else void,
         lim_active: if (has_limit) bool else void,
         /// The analysis state every device call receives; `eval` takes `t`
@@ -1515,7 +1599,7 @@ pub fn DeviceBatch(comptime D: type) type {
 
         fn reprep(self: *Self) void {
             if (comptime has_bp) self.bp.lo = std.math.inf(f64);
-            if (comptime has_pulse) @memset(self.pulse_brk, .{});
+            if (comptime has_src_brk) @memset(self.src_brk, .{});
             if (comptime @hasDecl(D, "setup")) {
                 for (self.instances, self.models) |*inst, *mdl| D.setup(Real, mdl, inst);
             }
@@ -1537,9 +1621,9 @@ pub fn DeviceBatch(comptime D: type) type {
         /// transient asks once per step; for a timer-only model (`has_bp`)
         /// the answer only moves when `t` reaches it, so the walk (68 timers
         /// per vsource model, ~425 Ir) runs once per breakpoint instead. A
-        /// PULSE source rounds its corner from the accepted time `sim.t` (the
-        /// transient asks right after accepting it), as ngspice's VSRCaccept
-        /// does.
+        /// PULSE or V-source PWL corner rounds from the accepted time `sim.t`
+        /// (the transient asks right after accepting it), as ngspice's
+        /// VSRCaccept does.
         fn nextBreakpointFn(ctx: *anyopaque, t: f64) ?f64 {
             const self: *Self = @ptrCast(@alignCast(ctx));
             if (comptime has_bp) {
@@ -1548,10 +1632,12 @@ pub fn DeviceBatch(comptime D: type) type {
             const t_acc = if (self.sim.kind == .tran and self.sim.t <= t) self.sim.t else t;
             var best: f64 = std.math.inf(f64);
             if (comptime @hasDecl(D, "nextBreakpoint")) for (self.models, 0..) |*m, i| {
-                if (comptime has_pulse) {
-                    const b = &self.pulse_brk[i];
+                if (comptime has_src_brk) {
+                    const b = &self.src_brk[i];
                     if (t < b.req or t >= b.at)
-                        b.* = .{ .req = t, .at = spicePulseBreak(m, t_acc, t) orelse D.nextBreakpoint(m, t) orelse std.math.inf(f64) };
+                        b.* = .{ .req = t, .at = spicePulseBreak(m, t_acc, t) orelse
+                            (if (comptime is_vsource) spicePwlBreak(m, t_acc, t) else null) orelse
+                            D.nextBreakpoint(m, t) orelse std.math.inf(f64) };
                     best = @min(best, b.at);
                     continue;
                 }
@@ -1735,7 +1821,7 @@ pub fn DeviceBatch(comptime D: type) type {
                 dst.lim_active = src.lim_active;
             }
             if (comptime has_bp) dst.bp = src.bp;
-            if (comptime has_pulse) @memcpy(dst.pulse_brk, src.pulse_brk);
+            if (comptime has_src_brk) @memcpy(dst.src_brk, src.src_brk);
         }
 
         fn setLimitActive(ctx: *anyopaque, active: bool) void {
@@ -1763,13 +1849,13 @@ pub fn DeviceBatch(comptime D: type) type {
                 self.lim_x = &.{};
                 self.lim_active = if (accepted) template.lim_active else false;
             }
-            if (comptime has_pulse) self.pulse_brk = &.{};
+            if (comptime has_src_brk) self.src_brk = &.{};
             errdefer destroy(self, gpa);
 
             // Model/Instance are POD, so a byte copy is a deep copy.
             self.models = try gpa.dupe(D.Model, template.models);
             self.instances = try gpa.dupe(D.Instance, template.instances);
-            if (comptime has_pulse) self.pulse_brk = try gpa.dupe(PulseBrk, template.pulse_brk);
+            if (comptime has_src_brk) self.src_brk = try gpa.dupe(SrcBrk, template.src_brk);
             if (comptime has_attempt) {
                 self.saved_models = try gpa.alloc(D.Model, self.count);
                 if (accepted and template.attempt_saved) @memcpy(self.saved_models, template.saved_models);
@@ -1800,7 +1886,7 @@ pub fn DeviceBatch(comptime D: type) type {
             gpa.free(self.models);
             if (comptime has_attempt) gpa.free(self.saved_models);
             if (comptime has_limit) gpa.free(self.lim_x);
-            if (comptime has_pulse) gpa.free(self.pulse_brk);
+            if (comptime has_src_brk) gpa.free(self.src_brk);
             gpa.free(self.instances);
             if (comptime has_state) gpa.free(self.states);
             if (self.owns_tapes) {
