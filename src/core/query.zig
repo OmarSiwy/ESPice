@@ -51,6 +51,13 @@ pub const Noise = struct {
     in_branch: ?u32 = null,
     /// Emit integrated device noise in V rms instead of the measured PSD.
     integrated: bool = false,
+    /// Publish each device instance's contribution, per generator name and
+    /// in total, ahead of the totals (ngspice `.noise ... pts`, HSPICE
+    /// `.noise ... inter`).
+    contributions: bool = false,
+    /// Card names for the contribution columns. Empty falls back to
+    /// `<type>#<ordinal>`.
+    cards: []const CardRef = &.{},
 };
 
 pub const Sp = struct {
@@ -156,6 +163,10 @@ pub const Dc = struct {
     start2: f64 = 0,
     stop2: f64 = 0,
     step2: f64 = 1,
+    /// HSPICE `LIN`/`DEC`/`OCT`/`POI` grids as explicit values. Non-empty
+    /// replaces `start`/`stop`/`step` (`points2` the outer ones).
+    points: []const f64 = &.{},
+    points2: []const f64 = &.{},
 
     /// The device parameter, or the temperature, a `.dc` sweep drives.
     pub const SweepTarget = union(enum) {
@@ -368,6 +379,9 @@ pub const Tran = struct {
     /// from the `.ic` cards (zero elsewhere), and the transient does the
     /// setup the operating point would have done.
     uic: bool = false,
+    /// HSPICE `.op <time>`: publish only the state at `t_stop`, as an
+    /// operating-point plot named for that time.
+    snapshot: bool = false,
 };
 
 pub const TranNoise = struct {
@@ -481,6 +495,9 @@ pub const Four = struct {
     /// Transient window to analyze. Null means 5 fundamental periods at
     /// 200 points per period.
     tran_opts: ?Tran = null,
+    /// The output as written (`v(b)`) when the card named several: it goes
+    /// into the plot name so the plots stay apart. Empty for one output.
+    label: []const u8 = "",
 
     /// Size of the fixed harmonic table the extractor returns by value.
     pub const max_harmonics = 64;
@@ -512,6 +529,31 @@ pub const Disto = struct {
     /// `second` and `third` are the harmonic solution vectors ngspice
     /// prints; `summary` is a 4-column digest at one node.
     pub const Plot = enum(u8) { summary, second, third };
+};
+
+/// HSPICE `.fft` [CR .FFT]: the windowed spectrum of one transient output.
+pub const Fft = struct {
+    tol: Tolerances = .{},
+    /// The deck's transient, run to at least `stop`.
+    tran: Tran,
+    out_pos: u32,
+    /// `v(a,b)` reference; GROUND is single-ended.
+    out_neg: u32 = 0,
+    /// Window on the waveform, seconds.
+    start: f64,
+    stop: f64,
+    /// Uniform samples in [start, stop); a power of two.
+    np: u32 = 1024,
+    window: Window = .rect,
+    /// GAUSS and KAISER shape parameter.
+    alfa: f64 = 3,
+    /// FORMAT=NORM: magnitudes relative to the largest non-DC bin.
+    normalized: bool = true,
+    /// The output as written, which names the plot (`v(out)`).
+    label: []const u8,
+
+    /// HSPICE's eight windows, named as the card spells them [SA Ch.15 Table 56].
+    pub const Window = enum(u8) { rect, bart, hann, hamm, black, harris, gauss, kaiser };
 };
 
 /// Tag of `Query`: one per analysis.
@@ -550,12 +592,13 @@ pub const Kind = enum(u8) {
     acxf,
     dcxf,
     dcinc,
+    fft,
 
     /// Runs off a transient operating point (ngspice MODETRANOP) and starts
     /// its devices in `.ic` rather than `.dc` state.
     pub fn transient(kind: Kind) bool {
         return switch (kind) {
-            .tran, .four, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
+            .tran, .four, .fft, .tran_noise, .envelope, .pss, .qpss, .pnoise, .pac, .pxf => true,
             else => false,
         };
     }
@@ -595,4 +638,5 @@ pub const Query = union(Kind) {
     acxf: Acxf,
     dcxf: Dcxf,
     dcinc: Dcinc,
+    fft: Fft,
 };

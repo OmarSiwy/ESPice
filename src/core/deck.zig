@@ -76,8 +76,9 @@ pub const Deck = struct {
 
 /// What a `.meas` card computes, after ngspice com_measure2.c, plus the
 /// HSPICE forms: `param` (an expression over other results) and the `err`
-/// relative-error family [CR .MEASURE (Error Function)].
-pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3 };
+/// relative-error family [CR .MEASURE (Error Function)], and the FFT
+/// figures THD, SNR, SNDR, ENOB and SFDR [CR .MEASURE FFT].
+pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3, thd, snr, sndr, enob, sfdr };
 
 /// One postfix op of a `PARAM=` measure: a constant, the result of the
 /// `measure`-th card, or an arithmetic operator.
@@ -113,11 +114,16 @@ pub const MeasureClause = struct {
     minval: f64 = 1e-12,
     ymin: f64 = 1e-15,
     ymax: f64 = 1e15,
+    /// FFT figures: the highest harmonic counted as distortion (0: every
+    /// one in the spectrum), and the bins either side of the fundamental
+    /// counted as signal. MINFREQ and MAXFREQ are `from` and `to`.
+    nbharm: u32 = 0,
+    binsiz: u32 = 0,
 };
 
 /// A parsed `.meas` card.
 pub const Measure = struct {
-    /// `tran`, `ac` or `dc`: the results it is evaluated over.
+    /// `tran`, `ac`, `dc` or `fft`: the results it is evaluated over.
     analysis: requests.Kind,
     name: []const u8,
     func: MeasureFunc,

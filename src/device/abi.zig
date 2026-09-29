@@ -214,6 +214,10 @@ pub const Hooks = struct {
     /// Appends every declared noise generator with its PSD at x. Temperature
     /// is the instance's own, already applied by the device.
     collect_noise: ?*const fn (*anyopaque, []const f64, std.mem.Allocator, *std.ArrayList(NoiseSource)) DeviceResult(void) = null,
+    /// The model's name for each generator `collect_noise` appends per
+    /// instance, in that order (LRM §4.6.4 `name` argument; "" when absent).
+    /// Its length is the per-instance generator count.
+    noise_names: []const []const u8 = &.{},
     /// Appends the global CSC slot of every frequency-dependent small-signal
     /// entry (VerA `ac_dyn_slots`: §4.5.7 absdelay, §4.5.11 laplace, §4.5.12
     /// zi), instance-major. A ground entry reads as the trash slot. Under

@@ -163,8 +163,8 @@ pub const Complex = struct {
     }
 };
 
-/// SPICE's three `.ac`/`.noise`/`.sp` grid spellings.
-pub const SweepKind = enum { dec, oct, lin };
+/// SPICE's `.ac`/`.noise`/`.sp` grid spellings, plus HSPICE's POI point list.
+pub const SweepKind = enum { dec, oct, lin, poi };
 
 /// The frequency grid every frequency-domain analysis runs on.
 pub const FreqSweep = struct {
@@ -172,16 +172,20 @@ pub const FreqSweep = struct {
     f_start: f64,
     /// Hz. A geometric grid may stop short of it (see `count`).
     f_stop: f64,
-    /// Points per decade (`dec`), per octave (`oct`), or in total (`lin`).
+    /// Points per decade (`dec`), per octave (`oct`), or in total (`lin`,
+    /// `poi`).
     points: u32 = 10,
     kind: SweepKind = .dec,
+    /// The `poi` frequencies in Hz, ascending, `points` of them; `f_start`
+    /// and `f_stop` are its ends. Unused by the other kinds.
+    list: []const f64 = &.{},
 
     /// Number of grid points, at least 1.
     /// A geometric grid steps by a fixed ratio and stops at the last point
     /// under `f_stop`, as ngspice ACan does: `.ac dec 3 10 730` is 6 points
     /// ending at 464.16, not 7 ending at 730.
     pub fn count(self: FreqSweep) u32 {
-        if (self.kind == .lin) return @max(self.points, 1);
+        if (self.kind == .lin or self.kind == .poi) return @max(self.points, 1);
         if (!(self.f_start > 0) or !(self.f_stop >= self.f_start)) return 1;
         const decades = @log(self.f_stop / self.f_start) / @log(self.base());
         const steps = decades * @as(f64, @floatFromInt(self.points));
@@ -193,6 +197,7 @@ pub const FreqSweep = struct {
 
     /// Frequency of point `k`, in Hz. `k` is not range-checked.
     pub fn at(self: FreqSweep, k: u32) f64 {
+        if (self.kind == .poi) return self.list[k];
         const n = self.count();
         if (self.kind == .lin) {
             if (n <= 1) return self.f_start;

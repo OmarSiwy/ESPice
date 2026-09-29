@@ -59,8 +59,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         }
     };
 
-    const n_inner = sweepCount(opts.start, opts.stop, opts.step);
-    const n_outer: usize = if (opts.hasOuter()) sweepCount(opts.start2, opts.stop2, opts.step2) else 1;
+    const n_inner = if (opts.points.len > 0) opts.points.len else sweepCount(opts.start, opts.stop, opts.step);
+    const n_outer: usize = if (!opts.hasOuter()) 1 else if (opts.points2.len > 0) opts.points2.len else sweepCount(opts.start2, opts.stop2, opts.step2);
     const npoints = n_inner * n_outer;
     const ncols = ctx.probes.len + 1;
     const data = try a.alloc(f64, npoints * ncols);
@@ -92,6 +92,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         var v2 = opts.start2;
         for (0..n_outer) |po| {
             if (po != 0) v2 += opts.step2;
+            if (opts.points2.len > 0) v2 = opts.points2[po];
             if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
             const block = data[po * n_inner * ncols ..][0 .. n_inner * ncols];
             try runSerial(ctx, ckt, hist, t, opts, n_inner, ncols, block, po == 0);
@@ -167,6 +168,7 @@ fn runSerial(
         if (pt != 0) try ckt.checkpoint(.{ .phase = .dc, .completed = pt, .total = npoints });
         // Accumulated like ngspice (see the outer loop in `run`).
         if (pt != 0) v += opts.step;
+        if (opts.points.len > 0) v = opts.points[pt];
         if (t) |r| r.set(v) else ckt.setCircuitTemp(@floatCast(v));
         // Recompute device params so const-Jacobian stamps see the new value.
         // Only `t`'s device type moved, so later points re-derive just that

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "fft",
+  "purpose": ".measure FFT reads THD, SNR, SNDR, ENOB, SFDR and FIND off the .fft spectrum.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Bin-exact tones 1 V at 1 kHz, 10 mV at 3 kHz, 1 mV at 1.5 kHz; the figures follow the SA Ch.15 formulas."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "thd1",
+        "value": 0.01,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "snr1",
+        "value": 60.0,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "sndr1",
+        "value": 39.95678626217357,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "enob1",
+        "value": 6.344981106673352,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "sfdr1",
+        "value": 40.0,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "m3k",
+        "value": 0.01,
+        "rtol": 0.001,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "63e5959a3e832f98e2fca9b81e1c37346d595adf6f537b6d757d1fb6f72f065a"
+}

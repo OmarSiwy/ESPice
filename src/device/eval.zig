@@ -1298,6 +1298,13 @@ pub fn DeviceBatch(comptime D: type) type {
 
         const Self = @This();
 
+        const noise_names = if (@hasDecl(D, "noise_gens")) blk: {
+            var names: [D.noise_gens.len][]const u8 = undefined;
+            for (D.noise_gens, &names) |gen, *name| name.* = if (@hasField(@TypeOf(gen), "name")) gen.name else "";
+            const frozen = names;
+            break :blk frozen;
+        } else {};
+
         pub const hooks: Hooks = .{
             .instantiate = instantiate,
             .snapshot = snapshot,
@@ -1331,6 +1338,7 @@ pub fn DeviceBatch(comptime D: type) type {
                     " declares noise_gens without noisePsd; see docs/devices/noise-contract.md §3");
                 break :blk collectNoise;
             } else null,
+            .noise_names = if (@hasDecl(D, "noise_gens")) &noise_names else &.{},
             .collect_ac_dyn = if (has_ac_dyn) collectAcDyn else null,
             .ac_dyn = if (has_ac_dyn) acDyn else null,
             .recompute = if (@hasDecl(D, "collapse") or @hasDecl(D, "precompute") or @hasDecl(D, "setup") or has_bp) recomputePrecomputed else null,

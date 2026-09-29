@@ -27,16 +27,38 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
             else => {},
         };
     }
-    // Fan-out ceiling: `.disto` is the widest card at three plots per line.
+    // What HSPICE forms borrow from the other cards: the first `.ac`,
+    // `.tran` and `.sn`. A malformed one reports on its own turn below.
+    var ctx: CardContext = .{ .arena = arena };
+    // Fan-out ceiling: `.disto` gives three plots per line, `.op t1 t2 ...`
+    // one per time.
+    var fan: usize = 3;
+    for (cards) |c| switch (c.kind) {
+        .ac => if (ctx.ac == null) {
+            if (acGrid(arena, c.args, 0)) |g| ctx.ac = g.sweep else |_| {}
+        },
+        .tran => if (ctx.tran == null) {
+            if (buildJob(c, sources, card_refs, ctx)) |job| {
+                var tran = job.?;
+                applyDeckOptions(&tran, deck_opts);
+                ctx.tran = tran.tran;
+            } else |_| {}
+        },
+        .pss => if (c.sn and ctx.sn_f0 == null) {
+            if (buildJob(c, sources, card_refs, ctx)) |job| ctx.sn_f0 = 1 / job.?.pss.period else |_| {}
+        },
+        .op => fan = @max(fan, c.args.len),
+        else => {},
+    };
     const temps = @max(deck_opts.temp_list.len, 1);
-    const jobs = try arena.alloc(Job, cards.len * 3 * (temps + 1));
+    const jobs = try arena.alloc(Job, cards.len * fan * (temps + 1));
     var n: usize = 0;
     // HSPICE's `.hbac`, `.hbxf`, `.hbnoise` and `.phasenoise` take the tone
     // and harmonic count (and oscillator node) of the deck's `.hb` or
     // `.hbosc` card unless the card gives its own.
     var hb: ?requests.Hb = null;
     for (cards) |c| if (c.kind == .hb) {
-        hb = ((buildJob(c, sources, card_refs) catch |err| return cardError(c.line, err)).?).hb;
+        hb = ((buildJob(c, sources, card_refs, ctx) catch |err| return cardError(c.line, err)).?).hb;
     };
     // HSPICE's `.lstb` sweeps the deck's `.ac` frequencies [CR .LSTB].
     const ac_sweep: ?numerics.FreqSweep = for (cards) |c| {
@@ -44,7 +66,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     } else null;
     var xf_sources: ?[]const requests.XfSource = null;
     for (cards) |c| {
-        var job = (buildJob(c, sources, card_refs) catch |err| return cardError(c.line, err)) orelse continue;
+        var job = (buildJob(c, sources, card_refs, ctx) catch |err| return cardError(c.line, err)) orelse continue;
         switch (job) {
             .hbac, .hbxf, .hbnoise => |*o| if (o.f0 == 0) {
                 const tone = hb orelse return cardError(c.line, error.InvalidAnalysisArguments);
@@ -69,6 +91,20 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
             else => {},
         }
         applyDeckOptions(&job, deck_opts);
+        // HSPICE `.op t1 t2 ...` [CR .OP]: one operating point per time, a
+        // transient snapshot past t = 0.
+        if (job == .op and hasNumber(c.args)) {
+            for (c.args) |v| {
+                const t = switch (v) {
+                    .num => |t| t,
+                    else => continue,
+                };
+                jobs[n] = if (t == 0) job else snapshot(t, ctx.tran);
+                applyDeckOptions(&jobs[n], deck_opts);
+                n += 1;
+            }
+            continue;
+        }
         jobs[n] = job;
         n += 1;
         // `.lstb` also reports its margins.
@@ -113,6 +149,37 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         }
     }
     return jobs[base..][0..n];
+}
+
+/// What a card borrows from the rest of the deck: HSPICE's `.noise` runs
+/// over the `.ac` sweep, `.fft` and `.op <time>` over the `.tran`, and
+/// `.snac`/`.snnoise`/`.snxf` at the `.sn` fundamental.
+pub const CardContext = struct {
+    /// Owns the point lists and labels a card allocates.
+    arena: std.mem.Allocator,
+    /// The first `.ac` card's grid.
+    ac: ?numerics.FreqSweep = null,
+    /// The first `.tran` card, deck options applied.
+    tran: ?requests.Tran = null,
+    /// The first `.sn` card's fundamental, in Hz.
+    sn_f0: ?f64 = null,
+};
+
+fn hasNumber(args: []const Value) bool {
+    for (args) |v| if (v == .num) return true;
+    return false;
+}
+
+/// A transient that publishes only its state at `t` (HSPICE `.op <time>`),
+/// stepping as the deck's `.tran` does and at most t / 50.
+fn snapshot(t: f64, tran: ?requests.Tran) Job {
+    var s: requests.Tran = tran orelse .{ .t_stop = t, .dt_init = t / 50 };
+    s.t_stop = t;
+    s.t_start = 0;
+    s.snapshot = true;
+    s.dt_init = @min(s.dt_init, t / 50);
+    s.dt_max = @min(s.dt_max orelse t / 50, t / 50);
+    return .{ .tran = s };
 }
 
 /// Logs the card a query could not be built from, then returns `err`.
@@ -459,6 +526,97 @@ fn frequencySweep(args: []const Value, offset: usize) !numerics.FreqSweep {
     return .{ .f_start = first, .f_stop = last, .points = try count(u32, args, offset + 1, 10), .kind = kind };
 }
 
+/// A frequency grid at `args[offset..]` and the index past it: the
+/// `dec|oct|lin N fstart fstop` grid, or HSPICE's `POI n f1 ... fn` [CR .AC]
+/// with its frequencies ascending and positive, allocated in `arena`.
+fn acGrid(arena: std.mem.Allocator, args: []const Value, offset: usize) !struct { sweep: numerics.FreqSweep, end: usize } {
+    var lower: [4]u8 = undefined;
+    const poi = nameAt(args, offset) != null and std.mem.eql(u8, keyword(args, offset, &lower) catch "", "poi");
+    if (!poi) return .{ .sweep = try frequencySweep(args, offset), .end = offset + 4 };
+    const n = try count(u32, args, offset + 1, 0);
+    if (n == 0) return error.InvalidAnalysisArguments;
+    const list = try arena.alloc(f64, n);
+    for (list, 0..) |*f, k| {
+        f.* = try positive(args, offset + 2 + k);
+        if (k > 0 and !(f.* > list[k - 1])) return error.InvalidAnalysisArguments;
+    }
+    return .{ .sweep = .{ .kind = .poi, .points = n, .list = list, .f_start = list[0], .f_stop = list[n - 1] }, .end = offset + 2 + n };
+}
+
+/// One `.dc` axis, read from `args[i.*..]` and `i` advanced past it:
+/// `start stop incr`, HSPICE `START= STOP= STEP=`, `LIN|DEC|OCT np start
+/// stop` or `POI np v1 ... vn` [CR .DC]. The typed grids become explicit
+/// `points`, allocated in `arena`.
+const Axis = struct { start: f64 = 0, stop: f64 = 0, step: f64 = 1, points: []const f64 = &.{} };
+
+fn dcAxis(arena: std.mem.Allocator, args: []const Value, i: *usize) !Axis {
+    const Word = enum { lin, dec, oct, poi, start, stop, step };
+    const words = std.StaticStringMap(Word).initComptime(.{
+        .{ "lin", .lin },     .{ "dec", .dec },   .{ "oct", .oct },   .{ "poi", .poi },
+        .{ "start", .start }, .{ "stop", .stop }, .{ "step", .step },
+    });
+    const wordAt = struct {
+        fn f(a: []const Value, at: usize) ?Word {
+            var lower: [8]u8 = undefined;
+            const name = nameAt(a, at) orelse return null;
+            if (name.len > lower.len) return null;
+            return words.get(std.ascii.lowerString(lower[0..name.len], name));
+        }
+    }.f;
+    var axis: Axis = .{};
+    switch (wordAt(args, i.*) orelse {
+        axis = .{ .start = try number(args, i.*), .stop = try number(args, i.* + 1), .step = try number(args, i.* + 2) };
+        try checkStep(axis.start, axis.stop, axis.step);
+        i.* += 3;
+        return axis;
+    }) {
+        .start, .stop, .step => {
+            var seen: u3 = 0;
+            while (wordAt(args, i.*)) |key| : (i.* += 2) {
+                const v = try number(args, i.* + 1);
+                switch (key) {
+                    .start => axis.start = v,
+                    .stop => axis.stop = v,
+                    .step => axis.step = v,
+                    else => return error.InvalidAnalysisArguments,
+                }
+                seen |= @as(u3, 1) << @intCast(@intFromEnum(key) - @intFromEnum(Word.start));
+            }
+            if (seen != 0b111) return error.InvalidAnalysisArguments;
+            try checkStep(axis.start, axis.stop, axis.step);
+        },
+        .poi => {
+            const n = try count(u32, args, i.* + 1, 0);
+            if (n == 0) return error.InvalidAnalysisArguments;
+            const points = try arena.alloc(f64, n);
+            for (points, 0..) |*p, k| p.* = try number(args, i.* + 2 + k);
+            i.* += 2 + n;
+            axis.points = points;
+        },
+        .lin, .dec, .oct => |kind| {
+            const grid: numerics.FreqSweep = .{
+                .kind = if (kind == .lin) .lin else if (kind == .dec) .dec else .oct,
+                .points = try count(u32, args, i.* + 1, 0),
+                .f_start = try number(args, i.* + 2),
+                .f_stop = try number(args, i.* + 3),
+            };
+            if (grid.points == 0) return error.InvalidAnalysisArguments;
+            if (kind != .lin and !(grid.f_start > 0 and grid.f_stop >= grid.f_start)) return error.InvalidAnalysisArguments;
+            // ponytail: a 10M-point ceiling keeps a typo from allocating the heap.
+            if (grid.count() > 10_000_000) return error.InvalidAnalysisArguments;
+            const points = try arena.alloc(f64, grid.count());
+            for (points, 0..) |*p, k| p.* = grid.at(@intCast(k));
+            i.* += 4;
+            axis.points = points;
+        },
+    }
+    if (axis.points.len > 0) {
+        axis.start = axis.points[0];
+        axis.stop = axis.points[axis.points.len - 1];
+    }
+    return axis;
+}
+
 /// HSPICE `.tran tstep1 tstop1 [tstep2 tstop2 ...] [START=t] [UIC]` [CR
 /// .TRAN]: one run to the last tstop. A double-point card whose tstep2 and
 /// tstop2 are both below tstop1, with no START=, is the SPICE form
@@ -510,11 +668,104 @@ fn hspiceTran(args: []const Value) !requests.Tran {
     return t;
 }
 
+/// HSPICE `.sn TRES= PERIOD=` or `.sn TONE= NHARMS=` [CR .SN] as `.pss`:
+/// the period, and PERIOD/TRES steps when TRES is given. TRINIT,
+/// MAXTRINITCYCLES and NUMPEROUT are read and unused: `.pss` shoots from
+/// the operating point and publishes one period.
+fn shootingNewton(args: []const Value) !requests.Pss {
+    const Key = enum { tres, period, tone, nharms, trinit, maxtrinitcycles, numperout };
+    var given: [@typeInfo(Key).@"enum".fields.len]?f64 = @splat(null);
+    var i: usize = 0;
+    while (i < args.len) : (i += 2) {
+        var lower: [16]u8 = undefined;
+        const key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
+        given[@intFromEnum(key)] = try positive(args, i + 1);
+    }
+    const period = given[@intFromEnum(Key.period)] orelse
+        1 / (given[@intFromEnum(Key.tone)] orelse return error.InvalidAnalysisArguments);
+    var pss: requests.Pss = .{ .period = period };
+    if (given[@intFromEnum(Key.tres)]) |tres| {
+        const steps = @round(period / tres);
+        if (!(steps >= 1) or steps > std.math.maxInt(u32) - 1) return error.InvalidAnalysisArguments;
+        pss.n_samples = @intFromFloat(steps);
+    }
+    return pss;
+}
+
+/// HSPICE `.fft v(a[,b]) [START=|FROM=] [STOP=|TO=] [NP=] [FORMAT=NORM|UNORM]
+/// [WINDOW=] [ALFA=] [FREQ=] [FMIN=] [FMAX=]` [CR .FFT] over the deck's
+/// `.tran`, whose window START and STOP default to. NP rounds up to a power
+/// of two. FREQ, FMIN and FMAX only shape HSPICE's printed listing; they are
+/// checked and not stored.
+fn fft(ctx: CardContext, args: []const Value, pos: u32, neg: u32) !requests.Fft {
+    const tran = ctx.tran orelse return error.MissingAnalysisCard;
+    if (args.len == 0) return error.InvalidAnalysisArguments;
+    if (currentProbeName(args, 0) != null) return error.UnsupportedAnalysisOutput;
+    var o: requests.Fft = .{
+        .tran = tran,
+        .out_pos = try outputNode(pos),
+        .out_neg = try outputNeg(neg),
+        .start = tran.t_start,
+        .stop = tran.t_stop,
+        .label = try outputLabel(ctx.arena, args[0]),
+    };
+    const Key = enum { start, from, stop, to, np, format, window, alfa, freq, fmin, fmax };
+    var i: usize = 1;
+    while (i < args.len) : (i += 2) {
+        var lower: [8]u8 = undefined;
+        const key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
+        switch (key) {
+            .start, .from => o.start = try number(args, i + 1),
+            .stop, .to => o.stop = try number(args, i + 1),
+            .np => {
+                const np = try positive(args, i + 1);
+                if (np > 1 << 27) return error.InvalidAnalysisArguments;
+                o.np = std.math.ceilPowerOfTwoAssert(u32, @intFromFloat(@max(@ceil(np), 4)));
+            },
+            .format => {
+                const word = try keyword(args, i + 1, &lower);
+                o.normalized = if (std.mem.eql(u8, word, "norm")) true else if (std.mem.eql(u8, word, "unorm")) false else return error.InvalidAnalysisArguments;
+            },
+            .window => o.window = std.meta.stringToEnum(requests.Fft.Window, try keyword(args, i + 1, &lower)) orelse return error.InvalidAnalysisArguments,
+            .alfa => {
+                o.alfa = try number(args, i + 1);
+                if (o.alfa < 1 or o.alfa > 20) return error.InvalidAnalysisArguments;
+            },
+            .freq, .fmin, .fmax => if (try number(args, i + 1) < 0) return error.InvalidAnalysisArguments,
+        }
+    }
+    if (o.start < tran.t_start or o.stop > tran.t_stop or !(o.stop > o.start)) return error.InvalidAnalysisArguments;
+    return o;
+}
+
+/// An output as the card wrote it, `v(a)` or `v(a,b)`, allocated in `arena`.
+fn outputLabel(arena: std.mem.Allocator, value: Value) ![]const u8 {
+    const g = switch (value) {
+        .group => |g| g,
+        else => return error.InvalidAnalysisArguments,
+    };
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const w = &out.writer;
+    w.print("{s}(", .{g.name}) catch return error.OutOfMemory;
+    for (g.args, 0..) |v, k| {
+        if (k > 0) w.writeByte(',') catch return error.OutOfMemory;
+        switch (v) {
+            .name => |n| w.writeAll(n) catch return error.OutOfMemory,
+            .num => |n| w.print("{d}", .{n}) catch return error.OutOfMemory,
+            else => return error.InvalidAnalysisArguments,
+        }
+    }
+    w.writeByte(')') catch return error.OutOfMemory;
+    return out.written();
+}
+
 /// The query one analysis card asks for; null for a card that only
 /// configures the deck (single-value `.temp`). Errors name the argument
 /// that is wrong: `InvalidAnalysisArguments`, `AnalysisNodeNotFound`,
-/// `AnalysisSourceNotFound`, `UnsupportedFrequencySweep`.
-pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const requests.CardRef) !?Job {
+/// `AnalysisSourceNotFound`, `UnsupportedFrequencySweep`,
+/// `UnsupportedAnalysisOutput`, and `MissingAnalysisCard` for an HSPICE form
+/// whose deck lacks the card it reads (`ctx`).
+pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const requests.CardRef, ctx: CardContext) !?Job {
     const args = a.args;
     const id = a.kind;
     const node_id = a.pos;
@@ -522,7 +773,17 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
     const ports = a.ports;
     switch (id) {
         .op => {
-            try arity(args, 0, 0);
+            // HSPICE `.op [format] [time ...]` [CR .OP]; `queries` turns the
+            // times into snapshots.
+            const formats = std.StaticStringMap(void).initComptime(.{
+                .{"all"}, .{"brief"}, .{"current"}, .{"debug"}, .{"none"}, .{"voltage"},
+            });
+            var lower: [8]u8 = undefined;
+            for (args, 0..) |v, i| switch (v) {
+                .num => |t| if (!(t >= 0) or !std.math.isFinite(t)) return error.InvalidAnalysisArguments,
+                .name => if (!formats.has(try keyword(args, i, &lower))) return error.InvalidAnalysisArguments,
+                else => return error.InvalidAnalysisArguments,
+            };
             return .{ .op = .{} };
         },
         .tran, .tran_noise, .matex => {
@@ -541,10 +802,14 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             if (!(t_start >= 0) or t_start >= stop) return error.InvalidAnalysisArguments;
             return .{ .tran = .{ .t_stop = stop, .dt_init = step, .t_start = t_start, .dt_max = if (numeric_end > 3) try positive(args, 3) else null, .uic = uic } };
         },
-        .ac, .disto => {
+        .ac => {
+            const grid = try acGrid(ctx.arena, args, 0);
+            if (grid.end != args.len) return error.InvalidAnalysisArguments;
+            return .{ .ac = .{ .sweep = grid.sweep } };
+        },
+        .disto => {
             try arity(args, 4, 4);
             const grid = try frequencySweep(args, 0);
-            if (id == .ac) return .{ .ac = .{ .sweep = grid } };
             var opts: requests.Disto = .{ .sweep = grid, .output_node = try outputNode(node_id) };
             // ngspice cktdisto.c:100-117: the F1 drive is the card carrying
             // DISTOF1, not the first source, on that card's branch row
@@ -561,29 +826,75 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .disto = opts };
         },
         .dc => {
-            if (args.len != 4 and args.len != 8) return error.InvalidAnalysisArguments;
-            var opts: requests.Dc = .{ .target = try dcTarget(args, 0, cards), .start = try number(args, 1), .stop = try number(args, 2), .step = try number(args, 3) };
-            try checkStep(opts.start, opts.stop, opts.step);
-            if (args.len == 8) {
-                opts.target2 = try dcTarget(args, 4, cards);
-                opts.start2 = try number(args, 5);
-                opts.stop2 = try number(args, 6);
-                opts.step2 = try number(args, 7);
-                try checkStep(opts.start2, opts.stop2, opts.step2);
+            var opts: requests.Dc = .{ .target = try dcTarget(args, 0, cards) };
+            var i: usize = 1;
+            const inner = try dcAxis(ctx.arena, args, &i);
+            opts.start = inner.start;
+            opts.stop = inner.stop;
+            opts.step = inner.step;
+            opts.points = inner.points;
+            if (i < args.len) {
+                opts.target2 = try dcTarget(args, i, cards);
+                i += 1;
+                const outer = try dcAxis(ctx.arena, args, &i);
+                opts.start2 = outer.start;
+                opts.stop2 = outer.stop;
+                opts.step2 = outer.step;
+                opts.points2 = outer.points;
             }
+            if (i != args.len) return error.InvalidAnalysisArguments;
             return .{ .dc = opts };
         },
         .noise => {
+            // ngspice: `v(out) [src] dec|oct|lin N f1 f2 [pts]`; HSPICE:
+            // `v(out) src [inter]` over the `.ac` sweep [CR .NOISE]. A
+            // nonzero pts or inter asks for the per-device contributions.
             // The input reference source does not drive the noise solve, but
             // a name no card carries is still an error, not a silent success.
-            try arity(args, 5, 6);
-            const in_branch: ?u32 = if (args.len == 6)
-                sources.v_branches[try voltageSource(args, 1, sources)]
-            else
-                null;
-            return .{ .noise = .{ .out_node = try outputNode(node_id), .out_neg = try outputNeg(node_neg), .in_branch = in_branch, .sweep = try frequencySweep(args, args.len - 4) } };
+            var i: usize = 1;
+            var in_branch: ?u32 = null;
+            const grid_words = std.StaticStringMap(void).initComptime(.{ .{"dec"}, .{"oct"}, .{"lin"}, .{"poi"} });
+            var lower: [4]u8 = undefined;
+            const isGrid = struct {
+                fn f(words: anytype, xs: []const Value, at: usize, buf: *[4]u8) bool {
+                    const name = nameAt(xs, at) orelse return false;
+                    return name.len <= buf.len and words.has(std.ascii.lowerString(buf[0..name.len], name));
+                }
+            }.f;
+            if (i < args.len and !isGrid(grid_words, args, i, &lower)) {
+                in_branch = sources.v_branches[try voltageSource(args, i, sources)];
+                i += 1;
+            }
+            var sweep: numerics.FreqSweep = undefined;
+            if (i < args.len and isGrid(grid_words, args, i, &lower)) {
+                const g = try acGrid(ctx.arena, args, i);
+                sweep = g.sweep;
+                i = g.end;
+            } else sweep = ctx.ac orelse return error.MissingAnalysisCard;
+            const contributions = i < args.len and try number(args, i) > 0;
+            if (i < args.len) i += 1;
+            if (i != args.len) return error.InvalidAnalysisArguments;
+            return .{ .noise = .{
+                .out_node = try outputNode(node_id),
+                .out_neg = try outputNeg(node_neg),
+                .in_branch = in_branch,
+                .sweep = sweep,
+                .contributions = contributions,
+                .cards = cards,
+            } };
         },
         .pnoise => {
+            // HSPICE `.snnoise v(out) insrc <sweep> [n1 +/-1]` [CR .SNNOISE]
+            // at the `.sn` fundamental. Only the n1 = 0 band, the input's
+            // own frequency, is the band `.pnoise` measures.
+            if (a.sn) {
+                const f0 = ctx.sn_f0 orelse return error.MissingAnalysisCard;
+                _ = nameAt(args, 1) orelse return error.InvalidAnalysisArguments;
+                const grid = try acGrid(ctx.arena, args, 2);
+                if (args.len > grid.end + 2) return error.InvalidAnalysisArguments;
+                if (grid.end < args.len and try number(args, grid.end) != 0) return error.InvalidAnalysisArguments;
+                return .{ .pnoise = .{ .out_node = try outputNode(node_id), .sweep = grid.sweep, .f_fundamental = f0 } };
+            }
             try arity(args, 7, 8);
             const sweep = try frequencySweep(args, 2);
             const sidebands = if (args.len == 8) try number(args, 7) else 7;
@@ -618,11 +929,38 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         },
         .four => {
             try arity(args, 2, 3);
-            return .{ .four = .{ .f_fundamental = try positive(args, 0), .output_node = try outputNode(node_id), .n_harmonics = try count(u16, args, 2, 9) } };
+            return .{ .four = .{
+                .f_fundamental = try positive(args, 0),
+                .output_node = try outputNode(node_id),
+                .n_harmonics = try count(u16, args, 2, 9),
+                .label = if (a.split) try outputLabel(ctx.arena, args[1]) else "",
+            } };
         },
+        .fft => return .{ .fft = try fft(ctx, args, node_id, node_neg) },
         .pz => {
             // Bare `.pz` asks for the circuit's own poles and names no transfer.
             if (args.len == 0) return .{ .pz = .{} };
+            // HSPICE `.pz v(out[,ref]) src` [CR .PZ]: the input is the
+            // source's own node pair, `vol` for a V card and `cur` for an I
+            // card; poles and zeros both.
+            if (args.len == 2) {
+                if (currentProbeName(args, 0) != null) return error.UnsupportedAnalysisOutput;
+                var opts: requests.Pz = .{ .out_pos = try outputNode(node_id), .out_neg = try outputNeg(node_neg), .want = .both };
+                const name = nameAt(args, 1) orelse return error.InvalidAnalysisArguments;
+                if (netlist.nameIndex(sources.v_names, name)) |v| {
+                    opts.in_pos = sources.v_pos[v];
+                    opts.in_neg = sources.v_neg[v];
+                    opts.drive_branch = sources.v_branches[v];
+                } else if (netlist.nameIndex(sources.i_names, name)) |v| {
+                    opts.in_pos = sources.i_pos[v];
+                    opts.in_neg = sources.i_neg[v];
+                } else return error.AnalysisSourceNotFound;
+                // The drive's node pair is unordered for poles and zeros;
+                // keep the grounded side second, as the SPICE form must.
+                if (opts.in_pos == GROUND) std.mem.swap(u32, &opts.in_pos, &opts.in_neg);
+                _ = try outputNode(opts.in_pos);
+                return .{ .pz = opts };
+            }
             try arity(args, 6, 6);
             const drive_kind = std.StaticStringMap(enum { vol, cur })
                 .initComptime(.{ .{ "vol", .vol }, .{ "cur", .cur } });
@@ -651,6 +989,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .pz = opts };
         },
         .pss => {
+            if (a.sn) return .{ .pss = try shootingNewton(args) };
             // `.pss v(osc) f [n [settle]]` (HSPICE `.snosc`) solves an
             // oscillator: f is the first guess and osc the phase node.
             const osc = args.len != 0 and args[0] == .group;
@@ -724,6 +1063,16 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .phasenoise = .{ .f0 = try positive(args, 5), .n_harmonics = try count(u16, args, 6, 8), .osc_node = out, .sweep = grid } };
         },
         .pac, .pxf => {
+            // HSPICE `.snac <sweep>` and `.snxf v(out) <sweep>` [CR .SNAC,
+            // .SNXF] run at the `.sn` fundamental.
+            if (a.sn) {
+                const lo = ctx.sn_f0 orelse return error.MissingAnalysisCard;
+                const first: usize = @intFromBool(id == .pxf);
+                const grid = try acGrid(ctx.arena, args, first);
+                if (grid.end != args.len) return error.InvalidAnalysisArguments;
+                const opts: requests.Pac = .{ .f_lo = lo, .sweep = grid.sweep, .out_node = try outputNode(node_id) };
+                return if (id == .pac) .{ .pac = opts } else .{ .pxf = opts };
+            }
             try arity(args, 5, 5);
             const sweep = try frequencySweep(args, 1);
             const lo = try positive(args, 0);

@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "analysis": "four",
+  "purpose": ".four with several outputs gives one Fourier table per output.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(a) = sin(2 pi 1k t); v(b) = v(a)/2 + 0.5 V; ngspice 44.2 prints the same magnitudes."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Fourier Analysis v(a)",
+        "match": "exact",
+        "row_count": 10,
+        "axis": {
+          "name": "harmonic",
+          "values": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "rtol": 0,
+          "atol": 1e-12
+        },
+        "columns": {
+          "magnitude": {
+            "rtol": 0.001,
+            "atol": 0.0001,
+            "values": [
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "unit": "V"
+          }
+        }
+      },
+      {
+        "name": "Fourier Analysis v(b)",
+        "match": "exact",
+        "row_count": 10,
+        "axis": {
+          "name": "harmonic",
+          "values": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "rtol": 0,
+          "atol": 1e-12
+        },
+        "columns": {
+          "magnitude": {
+            "rtol": 0.001,
+            "atol": 0.0001,
+            "values": [
+              0.5,
+              0.5,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "unit": "V"
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "65830e9bcd7372b446840e7a8c3529ccca2fedee8bc4f356ba2a2ce2c450361e"
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "A .dc with START=/STOP=/STEP= keywords sweeps linearly.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Divider 1/4 at 0, 0.25, ..., 1 V."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "row_count": 5,
+        "axis": {
+          "name": "v(v-sweep)",
+          "values": [
+            0,
+            0.25,
+            0.5,
+            0.75,
+            1
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(out)": {
+            "rtol": 1e-09,
+            "atol": 1e-12,
+            "values": [
+              0.0,
+              0.0625,
+              0.125,
+              0.1875,
+              0.25
+            ],
+            "unit": "V"
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "3c0981ca317809b8fe822f35dc08c1fe4aa13250499413da5eb49ee498a1d704"
+}

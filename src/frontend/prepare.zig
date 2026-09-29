@@ -134,7 +134,7 @@ pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_are
     const cards_rows = try parse_arena.dupe(netlist.Analysis, nl.deck.analyses);
     for (cards_rows) |*a| {
         a.pos = nb.frozenRow(a.pos);
-        if (namesNoOutput(a.kind)) a.pos = out.output_node;
+        if (namesNoOutput(a.*)) a.pos = out.output_node;
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
@@ -186,9 +186,10 @@ fn measures(arena: std.mem.Allocator, cards: []const core.Measure) ![]const core
     return out;
 }
 
-/// Cards whose output is `Deck.output_node` because they name none.
-fn namesNoOutput(kind: netlist.Kind) bool {
-    return kind == .pac or kind == .pxf or kind == .disto or kind == .hbac;
+/// Cards whose output is `Deck.output_node` because they name none. HSPICE's
+/// `.snxf v(out) ...` names its own.
+fn namesNoOutput(a: netlist.Analysis) bool {
+    return a.kind == .pac or (a.kind == .pxf and !a.sn) or a.kind == .disto or a.kind == .hbac;
 }
 
 /// Frozen-circuit node row by label, for cards appended after the build.
@@ -218,7 +219,7 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
     const nodes: NodeIndex = try .init(arena, &prepared.circuit);
     const cards = try netlist.parseAnalyses(arena, directive_text, nodes);
     if (cards.len == 0) return error.InvalidAnalysisArguments;
-    for (cards) |*a| if (namesNoOutput(a.kind)) {
+    for (cards) |*a| if (namesNoOutput(a.*)) {
         a.pos = prepared.deck.output_node;
     };
     return analyses.queries(arena, cards, true, prepared.deck.bindings, prepared.deck.cards, .{

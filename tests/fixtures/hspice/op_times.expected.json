@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "HSPICE .op t1 t2 publishes an operating point at each transient time.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "RC step response 1 - exp(-t/5 ns) at 1 ns and 5 ns."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point (time=1e-9)",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "rtol": 0.002,
+            "atol": 0.0001,
+            "values": [
+              0.18126924692201818
+            ],
+            "unit": "V"
+          },
+          "v(in)": {
+            "rtol": 1e-09,
+            "atol": 1e-09,
+            "values": [
+              1.0
+            ],
+            "unit": "V"
+          }
+        }
+      },
+      {
+        "name": "Operating Point (time=5e-9)",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "rtol": 0.002,
+            "atol": 0.0001,
+            "values": [
+              0.6321205588285577
+            ],
+            "unit": "V"
+          },
+          "v(in)": {
+            "rtol": 1e-09,
+            "atol": 1e-09,
+            "values": [
+              1.0
+            ],
+            "unit": "V"
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "cc4e2376c4dea8b67965da82ff7b8bec778673eb369127f225df567369ffe337"
+}

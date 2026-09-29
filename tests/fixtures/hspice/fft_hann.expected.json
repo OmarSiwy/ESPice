@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "analysis": "fft",
+  "purpose": ".fft windows its samples (HANN), normalizes (NORM) and honors START=/STOP=.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Exact DFT of the windowed samples of 0.5 sin(2 pi 2k t) on [1 ms, 5 ms), 2/sum(w) scaling, sine phase, normalized to the peak bin."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "FFT Analysis v(out)",
+        "match": "selected_rows",
+        "row_count": 129,
+        "row_indices": [
+          0,
+          7,
+          8,
+          9,
+          20
+        ],
+        "columns": {
+          "frequency": {
+            "rtol": 1e-12,
+            "atol": 1e-09,
+            "values": [
+              0,
+              1750,
+              2000,
+              2250,
+              5000
+            ]
+          },
+          "v(out)": {
+            "rtol": 0.001,
+            "atol": 0.0002,
+            "values": [
+              [
+                -6.140179697536572e-06,
+                0.0
+              ],
+              [
+                -0.502917445310834,
+                0.006168612381763772
+              ],
+              [
+                0.9999999999954872,
+                -3.0042586269391938e-06
+              ],
+              [
+                -0.5029135247728185,
+                -0.006174645242377955
+              ],
+              [
+                2.2586930423775233e-05,
+                2.375304077383265e-06
+              ]
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "05b737b5c20a6e22fe693d789c182a562f59e710c7e12be4bf36eeaa9dd6f3e1"
+}

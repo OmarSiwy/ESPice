@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": "A .ac POI list runs at exactly the listed frequencies.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "H = 1/(1 + j*2*pi*f*R*C), R*C = 1 ms."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "row_count": 3,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10,
+            159.1549431,
+            1000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(out)": {
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              [
+                0.9960676824071726,
+                -0.0625847782705717
+              ],
+              [
+                0.4999999999745385,
+                -0.5
+              ],
+              [
+                0.024704523031857644,
+                -0.15522309613464763
+              ]
+            ],
+            "unit": "V"
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "009135d42ea9afd18f862f54c569365d277ea8327c7b04d835a9b79e16173202"
+}
