@@ -20,8 +20,11 @@
 // derives the PSD from the branch conductance as 4kT*g, which for a linear
 // resistor is the same number; the declaration is what installs the generator.
 //
-// ponytail: no flicker noise (resnoise.c, gated on KF, default 0) and no
-// `noisy=0`. Add either when a deck names it.
+// `noisy=0` (ngspice; `noise=0` there and in HSPICE, through the host's
+// alias table in device/bind.zig) turns the generator off.
+//
+// ponytail: no flicker noise (resnoise.c, gated on KF, default 0). Add it
+// when a deck names it.
 module resistor(p, n);
     inout p, n;
     electrical p, n;
@@ -35,6 +38,7 @@ module resistor(p, n);
     parameter real tc1   = 0.0;                  // 1/degC    linear tempco
     parameter real tc2   = 0.0;                  // 1/degC^2  quadratic tempco
     parameter real tce   = 0.0;                  // %/degC    exponential tempco
+    parameter integer noisy = 1 from [0:1];      // -         0: noiseless
 
     real tdev, dt, rt;
 
@@ -49,6 +53,6 @@ module resistor(p, n);
         // the builder) but not the temperature factor, so a tempco that drives
         // the resistance to zero is a NaN here as it is there.
         I(p, n) <+ V(p, n) / rt;
-        I(p, n) <+ white_noise(4.0 * 1.38064852e-23 * (tdev + 273.15) / rt, "thermal");
+        I(p, n) <+ white_noise(noisy * 4.0 * 1.38064852e-23 * (tdev + 273.15) / rt, "thermal");
     end
 endmodule

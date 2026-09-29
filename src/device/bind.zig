@@ -167,6 +167,8 @@ fn aliasesOf(comptime field: []const u8) []const []const u8 {
         .{ "trs", "trs1" },
         .{ "cta", "ctc" },
         .{ "tpb", "tvj" },
+        // Resistor noise switch (res.c IOPR, HSPICE NOISE=).
+        .{ "noisy", "noise" },
     };
     comptime {
         var out: [pairs.len + 1][]const u8 = undefined;

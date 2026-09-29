@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "JFET channel noise against 8/3 kT gm, with a noiseless load",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "onoise = sqrt(8/3 kB T gm) * RL, gm = 4 mS, RL = 1k, T = 300.15 K; the load is noiseless (noisy=0, noise=0). ngspice-45 prints 6.648522e-09."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 2e-05,
+            "atol": 1e-18,
+            "values": [
+              6.648521867025783e-09
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-15
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2be08ef02a40ed3f559dabc46e10d1a6d432c0c9e4101be66191d6dbd0fe56c1"
+}
