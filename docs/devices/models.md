@@ -173,11 +173,26 @@ current deck status is in `issues.md`.
 | vsource, isource | SFFM reads (VO VA FM MDI FC TD PHASEM PHASEC) and limits MDI to FC/FM | vsrcload.c:228-282, isrcload.c:206-254 |
 | bsim4va | CVCHARGEMOD defaults to 0 (upstream VA had 1), so capMod 1/2 take VgsteffCV from NOFF and VOFFCV as the BSIM4.8 manual specifies. With 1, sky130 nfet Cgg ran 3.9% low at 1 MHz and inverter tpd_hl 1.8% fast; now within 3e-6 and 0.12% (`ac/device_bsim4_capmod2`) | b4set.c:102-103, b4ld.c:3351 |
 | bsim4va | GIDLMOD defaults to 0 (upstream VA had 1), selecting the pre-4.7 GIDL/GISL formulation as the BSIM4.8 manual and ngspice do | b4set.c:458-459 |
+| hfet1, hfet2 | Gate-charge Jacobian is ag0 * C (`vera_nodiff` on capgs/capgd), so Newton converges linearly as ngspice's does and takes its NR failures | hfetload.c:360-369, hfet2load.c:251-258 |
+| hfet1 | The first transient iterate extrapolates its internal nodes over dt/dt_prev2 (`Hooks.predict_first_iterate`), and Newton does not converge while a current into gp/sp/dp misses its linear prediction from the previous iterate by more than reltol * (branch flow) + abstol (`Circuit.loadCheck`). `tran/device_hfet_inverter` 5615x -> 0.30x | hfetload.c:129, 389-396 |
 
 Known open differences: VBIC puts the RBP thermal noise on bp-cx where
 ngspice puts it between emitEI and emit (0.9% at 100 MHz), and the VBIC
 physical constants differ from ngspice's (about 1e-6 relative at one zero
 crossing). Both are described under group 5.
+
+hfet1's own test has a quirk the row test cannot reproduce: its cdhat
+leaves out the -ggdpp*delvgdpp term that its cd carries (hfetload.c:211-216
+against 358-366), a first-order miss on every gate-drain swing that makes
+ngspice iterate more there. The check and the dt/dt_prev2 predictor stay
+off for mesa and hfet2, which have the same code in ngspice (mesaload.c:150,
+388; hfet2load.c:98, 270): on `tran/device_mesa_oscillator` the predictor
+alone moved the worst err/tol 52.5x -> 57.7x and the check 52.5x -> 65x,
+and on `op/device_hfet2` the check moved only roundoff. mesa.va's series
+resistors are flow unknowns ngspice does not have, and their Newton delta
+test rejects iterates ngspice accepts (at 0.29 ns a flow row at 1.39x its
+tolerance forced a fourth iteration where ngspice stopped at three); that
+is the next suspect for the mesa deck.
 
 Intentional divergences, kept rather than matched:
 

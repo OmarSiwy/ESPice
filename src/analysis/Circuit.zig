@@ -188,6 +188,9 @@ pub const Circuit = struct {
     /// Symbolic LU and Newton scratch, built on first use and shared by every
     /// analysis. The pattern is frozen, so it stays valid for the lifetime.
     ws: ?converger.Workspace = null,
+    /// `loadCheck`'s rows and last iterate, built with `ws`; null when no
+    /// batch marks rows (`Hooks.mark_load_check_rows`).
+    load_check: ?LoadCheck = null,
     /// `collectParams` memo. The refs point into frozen batch storage.
     param_refs: ?[]ParamRef = null,
     /// Parameters with a frequency-domain value, filled by the executor.
@@ -204,10 +207,50 @@ pub const Circuit = struct {
 
     pub fn workspace(self: *Circuit) !*converger.Workspace {
         if (self.ws == null) {
+            self.load_check = try LoadCheck.init(self.gpa, self.batches, self.col_ptr, self.row_idx[0..self.nnz]);
+            errdefer if (self.load_check) |*lc| lc.deinit(self.gpa);
             self.ws = try converger.Workspace.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.bbd);
             self.ws.?.slv.params.fast_mode = self.lu_fast;
         }
         return &self.ws.?;
+    }
+
+    /// ngspice's in-load current test for the models that keep it
+    /// (hfetload.c:389): each current the model drives into one of its
+    /// internal nodes must land within reltol·m + abstol of its linear
+    /// prediction from the previous iterate, `i_old + J_old·(x − x_old)`,
+    /// where m is the largest branch flow into the node (ngspice's cg or
+    /// cd). `vals`/`rhs` are the Newton matrix and residual assembled
+    /// at `x`, companion terms included, so the row test sees the same
+    /// currents ngspice's cg/cd carry; the flow and resistor terms are
+    /// linear and cancel. True when every row passes; false on the first
+    /// iterate of a solve, which has no previous one. Records `x` as the
+    /// previous iterate either way.
+    ///
+    /// ponytail: hfet1's cdhat leaves out the -ggdpp*delvgdpp its cd
+    /// carries (hfetload.c:211-216), a first-order miss on every gate-drain
+    /// swing that makes ngspice iterate more; a row test cannot see
+    /// branches, so that quirk is not reproduced. docs/devices/models.md.
+    pub fn loadCheck(self: *Circuit, x: []const f64, vals: []const f64, rhs: []const f64, reltol: f64, abstol: f64) bool {
+        const lc = if (self.load_check) |*l| l else return true;
+        var ok = lc.valid;
+        for (lc.rows, 0..) |r, k| {
+            var pred = lc.i_old[k];
+            var mag: f64 = 0;
+            for (lc.ptr[k]..lc.ptr[k + 1]) |e| {
+                const c = lc.col[e];
+                pred += lc.v_old[e] * (x[c] - lc.x_old[e]);
+                if (self.current_row[c]) mag = @max(mag, @abs(x[c]));
+                lc.v_old[e] = vals[lc.slot[e]];
+                lc.x_old[e] = x[c];
+            }
+            const i = rhs[r];
+            if (mag == 0) mag = @max(@abs(i), @abs(pred));
+            if (!(@abs(i - pred) <= reltol * mag + abstol)) ok = false;
+            lc.i_old[k] = i;
+        }
+        lc.valid = true;
+        return ok;
     }
 
     /// Reports progress to the owning worker. Fails only when the query was
@@ -294,6 +337,7 @@ pub const Circuit = struct {
     pub fn deinit(self: *Circuit) void {
         const gpa = self.gpa;
         if (self.ws) |*w| w.deinit(gpa);
+        if (self.load_check) |*lc| lc.deinit(gpa);
         if (self.param_refs) |refs| gpa.free(refs);
         for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
         gpa.free(self.batches);
@@ -709,6 +753,7 @@ pub const Circuit = struct {
     /// Starts a nonlinear solve: `$simparam("iteration")` reads 1.
     pub fn beginSolve(self: *Circuit) void {
         self.lin.valid = false;
+        if (self.load_check) |*lc| lc.valid = false;
         self.sim.iteration = 1;
         self.publishSim();
     }
@@ -915,6 +960,83 @@ pub const Circuit = struct {
         if (node + 1 < self.intern_offs.len)
             return self.intern_bytes[self.intern_offs[node]..self.intern_offs[node + 1]];
         return "";
+    }
+};
+
+/// The rows `Circuit.loadCheck` tests, their CSC entries row by row, and
+/// the last iterate's current, entries and x. One allocation per slice,
+/// freed with the workspace.
+const LoadCheck = struct {
+    rows: []u32,
+    /// Entries of row k are `ptr[k]..ptr[k + 1]`.
+    ptr: []u32,
+    slot: []u32,
+    col: []u32,
+    i_old: []f64,
+    v_old: []f64,
+    x_old: []f64,
+    valid: bool = false,
+
+    /// Null when no batch marks a row.
+    fn init(gpa: std.mem.Allocator, batches: []const Batch, col_ptr: []const u32, row_idx: []const u32) !?LoadCheck {
+        const n = col_ptr.len - 1;
+        const mask = try gpa.alloc(bool, n);
+        defer gpa.free(mask);
+        @memset(mask, false);
+        var any = false;
+        for (batches) |b| if (b.hooks.mark_load_check_rows) |mark| {
+            mark(b.ctx, mask);
+            any = true;
+        };
+        if (!any) return null;
+        // Row position of each marked row, then the entries counted per row.
+        const pos = try gpa.alloc(u32, n);
+        defer gpa.free(pos);
+        var n_rows: u32 = 0;
+        for (mask, pos) |m, *p| {
+            p.* = n_rows;
+            n_rows += @intFromBool(m);
+        }
+        var lc: LoadCheck = undefined;
+        lc.rows = try gpa.alloc(u32, n_rows);
+        errdefer gpa.free(lc.rows);
+        lc.ptr = try gpa.alloc(u32, n_rows + 1);
+        errdefer gpa.free(lc.ptr);
+        for (mask, 0..) |m, r| if (m) {
+            lc.rows[pos[r]] = @intCast(r);
+        };
+        @memset(lc.ptr, 0);
+        for (row_idx) |r| if (mask[r]) {
+            lc.ptr[pos[r] + 1] += 1;
+        };
+        for (1..lc.ptr.len) |k| lc.ptr[k] += lc.ptr[k - 1];
+        const n_e = lc.ptr[n_rows];
+        lc.slot = try gpa.alloc(u32, n_e);
+        errdefer gpa.free(lc.slot);
+        lc.col = try gpa.alloc(u32, n_e);
+        errdefer gpa.free(lc.col);
+        const fill = try gpa.dupe(u32, lc.ptr[0..n_rows]);
+        defer gpa.free(fill);
+        for (0..n) |c| for (col_ptr[c]..col_ptr[c + 1]) |slot| {
+            const r = row_idx[slot];
+            if (!mask[r]) continue;
+            const e = fill[pos[r]];
+            fill[pos[r]] += 1;
+            lc.slot[e] = @intCast(slot);
+            lc.col[e] = @intCast(c);
+        };
+        lc.i_old = try gpa.alloc(f64, n_rows);
+        errdefer gpa.free(lc.i_old);
+        lc.v_old = try gpa.alloc(f64, n_e);
+        errdefer gpa.free(lc.v_old);
+        lc.x_old = try gpa.alloc(f64, n_e);
+        lc.valid = false;
+        return lc;
+    }
+
+    fn deinit(self: *LoadCheck, gpa: std.mem.Allocator) void {
+        for ([_][]u32{ self.rows, self.ptr, self.slot, self.col }) |s| gpa.free(s);
+        for ([_][]f64{ self.i_old, self.v_old, self.x_old }) |s| gpa.free(s);
     }
 };
 

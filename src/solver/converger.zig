@@ -202,6 +202,8 @@ pub fn newton(
         }
         if (newtonDbg())
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
+        // Before the factor and solve, which may overwrite `v` and `rhs`.
+        const load_ok = if (comptime @hasDecl(S, "loadCheck")) sys.loadCheck(x, v, sys.rhs[0..sys.n], opts.reltol, opts.abstol) else true;
         prof.lap(.load);
         const need = opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig;
         // The device LU (docs/solvers/gpu-lu.md) is bitwise this factor and
@@ -229,7 +231,7 @@ pub fn newton(
         }
         if (!on_device) slv.solveNeg(sys.rhs, dx);
         prof.lap(.solve);
-        const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts);
+        const st = finalizeStep(sys, x, dx, x_old, sys.rhs, v, iter, t, opts, load_ok);
         prof.lap(.update);
         if (opdbg()) {
             var fi: usize = 0;
@@ -261,7 +263,8 @@ fn sysNodeName(sys: anytype, idx: u32) []const u8 {
 const Step = struct { converged: bool, scaled: f64, flipped: bool = false, why: Reject = .converged };
 
 /// Applies `dx` and runs the acceptance gates in order: device limiting,
-/// first iterate, per-row delta, row-scaled residual, device convergence,
+/// first iterate, per-row delta, row-scaled residual, the device load test
+/// (`load_ok`, `sys.loadCheck` at the assembled x), device convergence,
 /// then state staging.
 fn finalizeStep(
     sys: anytype,
@@ -273,6 +276,7 @@ fn finalizeStep(
     iter: u16,
     t: f64,
     opts: Options,
+    load_ok: bool,
 ) Step {
     const S = Deref(@TypeOf(sys));
     const n = sys.n;
@@ -300,6 +304,7 @@ fn finalizeStep(
         const tol = @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(x[i]) + opts.vntol));
         if (@abs(residual[i]) > tol) return .{ .converged = false, .scaled = scaled, .why = .residual };
     }
+    if (!load_ok) return .{ .converged = false, .scaled = scaled, .why = .device };
     if (comptime @hasDecl(S, "checkConvergence")) {
         if (!sys.checkConvergence(x)) return .{ .converged = false, .scaled = scaled, .why = .device };
     }
