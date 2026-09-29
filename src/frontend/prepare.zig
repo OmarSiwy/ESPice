@@ -240,12 +240,25 @@ fn measures(arena: std.mem.Allocator, cards: []const core.Measure) ![]const core
     const out = try arena.dupe(core.Measure, cards);
     for (out) |*m| {
         m.name = try arena.dupe(u8, m.name);
-        m.expr = try arena.dupe(core.MeasureOp, m.expr);
+        m.expr = try measureOps(arena, m.expr);
         for ([_]*core.MeasureClause{ &m.first, &m.second }) |c| {
             c.vec = try arena.dupe(u8, c.vec);
             c.vec2 = try arena.dupe(u8, c.vec2);
+            c.ops = try measureOps(arena, c.ops);
+            c.ops2 = try measureOps(arena, c.ops2);
+            const refs = try arena.dupe(core.MeasureRef, c.refs);
+            for (refs) |*ref| ref.expr = try measureOps(arena, ref.expr);
+            c.refs = refs;
         }
     }
+    return out;
+}
+
+fn measureOps(arena: std.mem.Allocator, ops: []const core.MeasureOp) ![]const core.MeasureOp {
+    const out = try arena.dupe(core.MeasureOp, ops);
+    for (out) |*op| if (op.* == .vector) {
+        op.vector = try arena.dupe(u8, op.vector);
+    };
     return out;
 }
 

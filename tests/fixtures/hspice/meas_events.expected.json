@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "HSPICE .measure event forms: inherited and TRIG-relative TD, result-named windows, par() waveforms, CROSS=LAST, TRAN_CONT and EM_AVG.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(s) = sin(2 pi 1MHz t): 0.5 rising at 1/12, 13/12, 25/12 us, falling at 5/12, 17/12, 29/12 us. d1: TRIG after TD=1us rises at 13/12, TARG inherits TD and falls at 17/12; d2: TARG counted from the trigger at 13/12. Peak 1 between ta and tb. mean sin^2 = 1/2, RMS of 2 sin = sqrt 2, EM_AVG over a period = (1/pi) - 0.5 (1/pi)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(s)": {
+            "unit": "V",
+            "rtol": 0.002,
+            "atol": 0.001,
+            "values": [
+              1.0,
+              -1.0,
+              1.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            2.5e-07,
+            7.5e-07,
+            1.2499999999999999e-06
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "d1",
+        "value": 3.333333333333333e-07,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "d2",
+        "value": 3.333333333333333e-07,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "tl",
+        "value": 2.4166666666666663e-06,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "ta",
+        "value": 8.333333333333333e-08,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "tb",
+        "value": 4.1666666666666667e-07,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "pk",
+        "value": 1.0,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "sq",
+        "value": 0.5,
+        "rtol": 0.005,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "r2",
+        "value": 1.4142135623730951,
+        "rtol": 0.005,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "tc[1]",
+        "value": 8.333333333333333e-08,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "tc[2]",
+        "value": 1.0833333333333333e-06,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "tc[3]",
+        "value": 2.0833333333333334e-06,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "em",
+        "value": 0.15915494309189535,
+        "rtol": 0.01,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a0e1ca5e17d9667ae1fc097e2c185f82baf4319e038551e29285a55c1a8b7ac2"
+}
