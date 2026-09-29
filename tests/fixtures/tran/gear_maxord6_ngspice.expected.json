@@ -4,7 +4,7 @@
  "purpose": "gear with maxord=6 runs Gear-2, as ngspice does.",
  "oracle": {
   "kind": "ngspice-45",
-  "derivation": "ngspice 45 prints vmax = 3.406919e-01 at maxord 2, 3 and 6 alike (dctran.c:900 raises the order only from 1 to 2). ESPice reads 0.3589 here at maxord 2 and 6 alike: the 5% gap to ngspice is its Gear-2 step sequence, present at maxord 2 too, not the order.",
+  "derivation": "ngspice 45 prints vmax = 3.406919e-01 at maxord 2, 3 and 6 alike (dctran.c:900 raises the order only from 1 to 2). The tank rings over 4 steps a period, so vmax is the step sequence: under uic ngspice sets a breakpoint at tstep (dctran.c:582-584) and drops to order 1 there; espice without it read 0.3589 (#166).",
   "command": "ngspice -b gear_maxord6_ngspice.sp"
  },
  "expect": {
@@ -15,7 +15,7 @@
     "kind": "measure",
     "name": "vmax",
     "value": 0.3406919,
-    "rtol": 0.06,
+    "rtol": 0.001,
     "atol": 0
    }
   ],

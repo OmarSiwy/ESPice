@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "analysis": "ac",
- "purpose": "#157: BSIM2 common-source AC gain with collapsed and resistive drain/source, against ngspice 45. i(vg) is left out: the gate capacitance differs from ngspice's by 30% (open).",
+ "purpose": "#157: BSIM2 common-source AC gain with collapsed and resistive drain/source, against ngspice 45. #168: i(vg) is the gate charge model of b2eval.c (2/3*CoxWL in saturation).",
  "oracle": {
   "kind": "ngspice-45",
   "derivation": "Independent ngspice-45 run of this deck. Stored binary raw doubles, selected by column name.",
@@ -289,6 +289,57 @@
       "unit": "A",
       "rtol": 0.0005,
       "atol": 1e-11
+     },
+     "i(vg)": {
+      "values": [
+       [
+        -2.796050418344031e-19,
+        -1.9239987995687229e-10
+       ],
+       [
+        -2.7960504183440312e-18,
+        -6.084218422066952e-10
+       ],
+       [
+        -2.7960504183440294e-17,
+        -1.9239987995687225e-09
+       ],
+       [
+        -2.7960504183440086e-16,
+        -6.084218422066927e-09
+       ],
+       [
+        -2.796050418343793e-15,
+        -1.9239987995686414e-08
+       ],
+       [
+        -2.796050418341629e-14,
+        -6.084218422064361e-08
+       ],
+       [
+        -2.796050418319998e-13,
+        -1.9239987995605259e-07
+       ],
+       [
+        -2.796050418103678e-12,
+        -6.084218421807716e-07
+       ],
+       [
+        -2.7960504159404725e-11,
+        -1.9239987987489383e-06
+       ],
+       [
+        -2.796050394308413e-10,
+        -6.084218396143064e-06
+       ],
+       [
+        -2.7960501779878323e-09,
+        -1.92399871759019e-05
+       ]
+      ],
+      "unit": "A",
+      "rtol": 0.0005,
+      "atol": 1e-15
      }
     }
    }

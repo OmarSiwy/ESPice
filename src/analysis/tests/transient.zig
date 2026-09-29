@@ -383,13 +383,13 @@ const TranTests = struct {
         try testing.expectEqualSlices(f64, &.{ 0, 1, 1, 2 }, waveform.data());
     }
 
-    test "waveform: recordLerp interpolates per probe; a stream keeps no rows" {
+    test "waveform: a stream keeps no rows" {
         var buf: [6 * @sizeOf(f64)]u8 align(@alignOf(f64)) = undefined;
         var sink: std.Io.Writer = .fixed(&buf);
         var wf = try Waveform.initStream(testing.allocator, 2, &sink);
         defer wf.deinit();
         const probes = [_]u32{ 2, 0 };
-        try wf.recordLerp(0.5, &.{ 0, 9, 4 }, &.{ 2, 9, 8 }, 0.25, &probes);
+        try wf.record(0.5, &.{ 0.5, 9, 5 }, &probes);
         try wf.record(1, &.{ 2, 9, 8 }, &probes);
         try testing.expectEqual(@as(u32, 2), wf.len);
         try testing.expectEqual(@as(usize, 0), wf.data().len);

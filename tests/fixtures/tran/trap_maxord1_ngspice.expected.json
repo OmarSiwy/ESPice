@@ -15,7 +15,7 @@
     "kind": "measure",
     "name": "vmax",
     "value": 0.07584708,
-    "rtol": 0.01,
+    "rtol": 0.001,
     "atol": 0
    }
   ],

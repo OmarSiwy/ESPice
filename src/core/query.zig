@@ -578,8 +578,8 @@ pub const Tran = struct {
     dt_init: f64 = 1e-9,
     dt_min: f64 = 1e-18,
     /// ngspice tstart: output suppression only. Integration still starts at
-    /// t = 0 with the same history; points before `t_start` are dropped, and
-    /// one step lands exactly on it, as ngspice's breakpoint does.
+    /// t = 0 with the same history; points before `t_start` are dropped and
+    /// none is added at it, as in ngspice (dctran.c:484).
     t_start: f64 = 0,
     /// ngspice tmax. Null means t_stop / 50.
     dt_max: ?f64 = null,
