@@ -328,9 +328,11 @@ pub fn simulate(
 
         // MODEINITPRED (dctran.c:794, DEVpred in dioload.c/mos1load.c): the
         // first iterate extrapolates the last two accepted points by
-        // dt/dt_prev and is limited against the last accepted one.
+        // dt/dt_prev and is limited against the last accepted one. HFET and
+        // MESA divide by the step two back instead (CKTdeltaOld[2]).
         const xfact = dt / dt_prev;
         for (trial, cur, prev) |*xt, xc, xp| xt.* = xc + xfact * (xc - xp);
+        ckt.predictFirstIterate(trial, cur, prev, dt / dt_prev2);
         ckt.evalFollows(trial, t + dt, false);
         _ = ckt.applyLimits(trial, cur);
         const nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);

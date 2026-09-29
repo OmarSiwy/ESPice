@@ -1069,6 +1069,20 @@ fn hasSpiceBreaks(comptime D: type) bool {
 
 const SrcBrk = struct { req: f64 = std.math.inf(f64), at: f64 = std.math.inf(f64) };
 
+/// Models whose ngspice load extrapolates the first Newton iterate of a
+/// transient step over CKTdeltaOld[2], the step two back, where the host
+/// and the other models use the previous step (hfetload.c:129,
+/// mesaload.c:150). Every branch voltage these two read lies between
+/// internal nodes (gp/sp/dp, g1/s1/d1/s2/d2), so re-predicting only those
+/// reproduces ngspice's and leaves the ports' prediction to the other
+/// devices on them. hfet2 predicts the same way but reads its gate port
+/// directly, so it keeps the host's prediction.
+const delta_old2_predict = std.StaticStringMap(void).initComptime(.{ .{"hfet1"}, .{"mesa"} });
+
+fn predictsOverDeltaOld2(comptime D: type) bool {
+    return delta_old2_predict.get(comptime baseName(D)) != null;
+}
+
 /// ngspice's PULSE breakpoint (vsrcacct.c:48-121, isrcacct.c the same): the
 /// corner after `tq`, requested at the accepted time `t_acc <= tq` and
 /// rounded as ngspice rounds it, `t_acc + (corner - phase(t_acc))`. VerA's
@@ -1320,6 +1334,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .clear_limits = if (has_limit) clearLimits else null,
             .advance_iteration = if (@hasDecl(D, "advanceIteration")) advanceIteration else null,
             .check_convergence = if (@hasDecl(D, "checkConvergence")) checkConvergence else null,
+            .predict_first_iterate = if (predictsOverDeltaOld2(D)) predictFirstIterate else null,
             .seed = if (@hasDecl(D, "seed")) seedFn else null,
             .seed_ic = if (idtUnknowns(D).len != 0) seedIc else null,
             .mark_current_rows = if (@hasDecl(D, "u_kinds")) markCurrentRows else null,
@@ -1418,6 +1433,16 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (!D.checkConvergence(Real, &self.models[id], &self.instances[id], self.localX(x, id), self.sim)) return false;
             }
             return true;
+        }
+
+        fn predictFirstIterate(ctx: *anyopaque, trial: []f64, cur: []const f64, prev: []const f64, xfact: f64) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            for (0..self.count) |id| {
+                inline for (D.num_ports..n_u) |u| if (comptime D.u_kinds[u] == .voltage) {
+                    const row = self.gath[id * n_u + u];
+                    if (row != GROUND) trial[row] = cur[row] + xfact * (cur[row] - prev[row]);
+                };
+            }
         }
 
         fn seedFn(ctx: *anyopaque, x: []f64) void {
