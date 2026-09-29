@@ -1143,6 +1143,9 @@ pub const NetBuilder = struct {
         applySourceWaveform(&instance, dev);
         try applyKv(&model, dev.kv);
         try applyKv(&instance, dev.kv);
+        // The PWL suffixes `td=` and `r=` (vsrcpar.c VSRC_TD, VSRC_R).
+        if (kvNumber(dev.kv, "td")) |td| _ = try setParam(D, &model, &instance, "pwl_td", td);
+        if (kvNumber(dev.kv, "r")) |r| _ = try setParam(D, &model, &instance, "pwl_repeat", r);
         self.resolvePulseDefaults(&model);
         self.resolvePulseDefaults(&instance);
         // ngspice: a source with a transient spec and no DC value has the
@@ -1633,8 +1636,8 @@ fn applyWaveArgs(comptime T: type, target: anytype, kind: Wave, args: []const Va
     switch (kind) {
         // `PWL(T1 V1 T2 V2 ...)`: (time, value) pairs into the flattened
         // table. A non-numeric arg leaves its slot at the default; ngspice's
-        // `r=`/`td=` suffixes are card pairs and reach `pwl_repeat`/`pwl_td`
-        // through applyKv.
+        // `r=`/`td=` suffixes are card pairs that bindSource maps onto
+        // `pwl_repeat`/`pwl_td`.
         .pwl => if (comptime @hasField(T, pwlSlot("pwl_times", 0))) {
             const n_pts = @min(args.len / 2, comptime pwlCapacity(T));
             inline for (0..comptime pwlCapacity(T)) |k| {

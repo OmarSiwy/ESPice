@@ -262,6 +262,37 @@ test "RG line retains the checked instance length alias" {
     return error.MissingLineLength;
 }
 
+test "V card: PWL td= and r= suffixes bind, and r=0 means repeat" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nl = try netlist.parse(a, "* pwl suffixes\nV1 a 0 pwl(0 0 1n 1 2n 0) td=0.5n r=0\n.end\n", .ngspice);
+    const lib = try device.Library.init(a);
+    var b = try Builder.init(a, &lib);
+    var compiled = false;
+    defer if (!compiled) b.deinit();
+    var nb = try builder.NetBuilder.init(a, &b, nl);
+    try nb.build();
+    var circuit = try b.compile();
+    compiled = true;
+    defer circuit.deinit();
+    var params: std.ArrayList(device.abi.ParamRef) = .empty;
+    defer params.deinit(a);
+    const batch = circuit.batches[0];
+    try batch.hooks.collect_params(batch.ctx, a, &params).unwrap();
+    var seen: u8 = 0;
+    for (params.items) |param| {
+        if (std.mem.eql(u8, param.param_name, "pwl_td")) {
+            try std.testing.expectEqual(@as(f64, 0.5e-9), param.get());
+            seen += 1;
+        } else if (std.mem.eql(u8, param.param_name, "pwl_repeat")) {
+            try std.testing.expectEqual(@as(f64, 0), param.get());
+            seen += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 2), seen);
+}
+
 test "compile frees the BBD permutation it does not return" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
