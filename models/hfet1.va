@@ -426,7 +426,13 @@ module hfet1(d, g, s);
 
         // Incremental Meyer capacitances: ngspice integrates dq = C*dv, so the
         // branch current is C*dv/dt — not d(C*v)/dt, which would add a spurious
-        // v*dC/dv term (hfetload.c:326-336, 360-369).
+        // v*dC/dv term (hfetload.c:326-336, 360-369). Its Jacobian entry is
+        // geq = ag0*C with no dC/dV either (NIintegrate on capgs, :360-369);
+        // vera_nodiff drops the dC/dV forward AD would otherwise stamp.
+        (* vera_nodiff *) begin
+            capgs = capgs;
+            capgd = capgd;
+        end
         I(gp, sp) <+ mult * capgs * ddt(V(gp, sp));
         I(gp, dp) <+ mult * capgd * ddt(V(gp, dp));
         // hfettrunc.c truncates qgs and qgd, not qds.
