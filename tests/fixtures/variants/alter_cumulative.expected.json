@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "HSPICE .alter runs are cumulative; a new element becomes its own run.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Dividers: base 1k/1k, alter=1 1k/3k, alter=2 2k/3k, alter=3 2k/(3k || 1k)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.5
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.0005
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (alter=1)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.75
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.00025
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (alter=2)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.6
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.0002
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (alter=3)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.2727272727272727
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.0003636363636363636
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Cumulative .alter follows HSPICE's documented reading of each block into the previous run's netlist; not yet checked against an HSPICE run."
+  ],
+  "netlist_sha256": "0fdb0ef36d9d328d5459a05995aa02bc442853a8f635c14f01ab890a417e3adc"
+}

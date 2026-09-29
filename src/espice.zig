@@ -62,6 +62,12 @@ pub const Problem = struct {
     /// First output failure. Once set, nothing else is published.
     delivery_error: ?anyerror = null,
     timing_in_depth: bool = false,
+    /// One session per `prepared.runs` entry (variants with their own
+    /// topology), run after the main session by `run_all`.
+    runs: []Run = &.{},
+
+    /// A variant run's queries and its next result to publish.
+    const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
 
     /// Parses and prepares `options.source`, then queues the deck's analyses
     /// (a lone `.op` when the deck names none). Nothing runs yet.
@@ -107,6 +113,15 @@ pub const Problem = struct {
             self.prepared.deck.queries;
         const ids = try scratch.alloc(QueryId, jobs.len);
         _ = try self.append_queries(jobs, ids);
+        self.runs = try a.alloc(Run, self.prepared.runs.len);
+        for (self.runs, self.prepared.runs, 0..) |*run, *prep, k| {
+            errdefer for (self.runs[0..k]) |*done| done.session.deinit();
+            run.* = .{ .session = analysis.session.Session.init(self.workerAllocator(), io, &prep.circuit, &prep.deck, execution) };
+            errdefer run.session.deinit();
+            for (prep.deck.queries) |query|
+                try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &prep.circuit, &prep.deck, query), prep.deck.title, prep.deck.probe_labels);
+            _ = try run.session.append(prep.deck.queries, try scratch.alloc(QueryId, prep.deck.queries.len));
+        }
         timingLap(io, &lap, "query graph and output setup");
         return self;
     }
@@ -115,6 +130,7 @@ pub const Problem = struct {
     /// Invalidates every result slice handed out.
     pub fn deinit(self: *Problem) void {
         const a = self.allocator;
+        for (self.runs) |*run| run.session.deinit();
         self.session.deinit();
         self.delivery.deinit();
         self.prepared.deinit();
@@ -225,7 +241,12 @@ pub const Problem = struct {
             _ = try self.advance_ready(ids[0..selected], quantum, events);
         }
         self.deliver();
+        for (self.runs) |*run| {
+            try runSession(&run.session, self.limits.max_parallel);
+            self.deliverFrom(&run.session, &run.next_output, run.session.deck.title);
+        }
         if (self.session.failure()) |err| return err;
+        for (self.runs) |*run| if (run.session.failure()) |err| return err;
         if (self.delivery_error != null) return error.DeliveryFailed;
         var output_lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &output_lap, "output finish");
@@ -246,13 +267,20 @@ pub const Problem = struct {
     pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
         if (measures.len == 0) return;
-        for (self.session.outputs.items) |id| {
-            const info = try self.query_info(id);
-            if (info.status != .complete) continue;
-            switch (info.kind) {
-                .tran, .ac, .dc, .fft => try output.printMeasures(out, err, measures, info.kind, try self.result(id)),
-                else => {},
+        try printSessionMeasures(&self.session, out, err, measures);
+        for (self.runs) |*run| try printSessionMeasures(&run.session, out, err, measures);
+        // Statistics over the Monte Carlo trials of each analysis kind.
+        var trials: std.ArrayList(Result) = .empty;
+        defer trials.deinit(self.allocator);
+        inline for (.{ .tran, .ac, .dc }) |kind| {
+            trials.clearRetainingCapacity();
+            for (self.session.outputs.items) |id| {
+                const info = try self.query_info(id);
+                if (info.status != .complete or info.kind != kind) continue;
+                const res = try self.result(id);
+                if (std.mem.indexOf(u8, res.plotname, "(monte=") != null) try trials.append(self.allocator, res);
             }
+            if (trials.items.len != 0) try output.printMeasureStatistics(out, measures, kind, trials.items);
         }
     }
 
@@ -273,21 +301,25 @@ pub const Problem = struct {
     /// Publishes completed results in request order, stopping at the first
     /// unfinished query or the first output failure.
     fn deliver(self: *Problem) void {
+        self.deliverFrom(&self.session, &self.next_output, self.prepared.deck.title);
+    }
+
+    fn deliverFrom(self: *Problem, session: *const analysis.session.Session, next_output: *usize, deck_title: []const u8) void {
         if (self.delivery_error != null) return;
-        while (self.next_output < self.session.outputs.items.len) {
-            const id = self.session.outputs.items[self.next_output];
-            const status = (self.query_info(id) catch unreachable).status;
+        while (next_output.* < session.outputs.items.len) {
+            const id = session.outputs.items[next_output.*];
+            const status = (session.info(id) catch unreachable).status;
             if (!status.terminal()) return;
             if (status == .complete) {
-                const res = self.result(id) catch unreachable;
+                const res = session.result(id) catch unreachable;
                 var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
                 defer timingLap(self.io, &lap, "output delivery");
-                self.delivery.publish(self.io, .{ .title = self.prepared.deck.title, .result = res }) catch |err| {
+                self.delivery.publish(self.io, .{ .title = deck_title, .result = res }) catch |err| {
                     self.delivery_error = err;
                     return;
                 };
             }
-            self.next_output += 1;
+            next_output.* += 1;
         }
     }
 
@@ -325,6 +357,33 @@ pub const Problem = struct {
         self.allocator.rawFree(memory, alignment, ret);
     }
 };
+
+/// Runs every query of a variant run's session to completion, whole
+/// queries at a time.
+fn runSession(session: *analysis.session.Session, max_parallel: u16) !void {
+    const gpa = session.allocator;
+    const ids = try gpa.alloc(QueryId, session.count());
+    defer gpa.free(ids);
+    const events = try gpa.alloc(Advance, @max(1, @min(ids.len, max_parallel)));
+    defer gpa.free(events);
+    while (!session.finished()) {
+        const n = try session.readyQueries(.all, ids);
+        if (n == 0) return error.SchedulingFailure;
+        _ = try session.advanceReady(ids[0..@min(n, events.len)], .{ .max_parallel = max_parallel, .quantum = .completion }, events);
+    }
+}
+
+/// `.meas` results over one session's completed tran, AC and DC results.
+fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.Writer, err: *std.Io.Writer, measures: []const @import("core").Measure) !void {
+    for (session.outputs.items) |id| {
+        const info = try session.info(id);
+        if (info.status != .complete) continue;
+        switch (info.kind) {
+            .tran, .ac, .dc, .fft => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
+            else => {},
+        }
+    }
+}
 
 /// Prints the time since `start.*` under `label` and restarts the lap.
 /// A null `start` means timing is off.

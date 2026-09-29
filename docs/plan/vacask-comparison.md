@@ -117,6 +117,8 @@ Each sketch follows the lane-axis doctrine and the data rules in `AGENTS.md`.
 
 ### G1. Sweeps and alters over any analysis (L)
 
+Status: landed as hspice-comparison C1-C3 ([variants.md](../analysis/variants.md)).
+
 VACASK sweeps any instance, model or subcircuit parameter, option or
 circuit variable around any analysis, to any depth, and changes them
 between analyses without reparsing. ESPice sweeps sources, R/C/L and
@@ -152,6 +154,8 @@ is nothing to re-evaluate. The foundation is a table of live parameters:
   first.
 
 ### G2. Statistical Monte Carlo over any analysis (M, after G1)
+
+Status: landed as hspice-comparison C1-C3 ([variants.md](../analysis/variants.md)).
 
 PDK decks describe process and mismatch variation with `agauss` and `gauss`
 inside `.param` and subckt defaults. VACASK's `mc` loop redraws every

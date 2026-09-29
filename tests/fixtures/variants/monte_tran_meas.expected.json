@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "SWEEP MONTE= on a transient: nominal plus per-trial plots and .meas statistics.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "t = R C ln 2 = 693.1 ns nominal; over trials mean 693.1 ns, relative sigma sqrt(0.03^2 + 0.1^2)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "tc",
+        "value": 6.931471805599454e-07,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "mean(tc)",
+        "value": 6.931471805599454e-07,
+        "rtol": 0.02,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "sigma(tc)",
+        "value": 7.236669020832995e-08,
+        "rtol": 0.15,
+        "atol": 0
+      },
+      {
+        "kind": "repeatability",
+        "same_netlist": true,
+        "comparison": "bitwise_numeric_results"
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "tc is the nominal run's line, printed first. Latin hypercube sampling holds the mean within 2 %."
+  ],
+  "netlist_sha256": "af9d8f868f275d4f77043e324a994d2affee9a21c74e65a9ab8c3c780cba77ff"
+}

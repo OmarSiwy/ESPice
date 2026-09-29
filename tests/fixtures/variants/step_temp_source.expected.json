@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "Nested .step over a source and the temperature, last card fastest.",
+  "oracle": {
+    "kind": "ngspice-45",
+    "derivation": "ngspice -b once per point, with the source value and .options temp=T written into the deck."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point (v1=1, temp=-40)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.789396276052339
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.000210603723947661
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (v1=1, temp=85)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.5999307329528409
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.000400069267047159
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (v1=2, temp=-40)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.8320544944968317
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.00116794550550317
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (v1=2, temp=85)",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.646087647336802
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-05,
+            "atol": 1e-12,
+            "values": [
+              -0.0013539123526632
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "38629161f16727386c9331b321f58c2b3e5b4ff2c2d289e272c296d9509fa957"
+}

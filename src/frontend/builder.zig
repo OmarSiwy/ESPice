@@ -1533,7 +1533,7 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *devices.bsource.Model
                 break :blk if (op.b == netlist.none) .v else .vd;
             },
             .call => try callCode(@enumFromInt(op.a), op.b),
-            .ident, .iprobe => return error.UnsupportedOperand,
+            .ident, .live, .iprobe => return error.UnsupportedOperand,
             inline else => |c| @field(tape.Code, @tagName(c)),
         };
         model.op_code[n] = code;
@@ -1564,7 +1564,7 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
     return switch (f) {
         .ternary => .sel,
         .ln, .log => .ln,
-        .agauss, .limit, .other => error.UnsupportedFunction,
+        .agauss, .gauss, .unif, .aunif, .limit, .other => error.UnsupportedFunction,
         inline else => |g| @field(tape.Code, @tagName(g)),
     };
 }

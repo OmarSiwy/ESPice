@@ -13,11 +13,34 @@ const GROUND = core.GROUND;
 /// Unresolved or absent node row.
 pub const NO_NODE = netlist.none;
 
+/// How `queries` copies jobs over `Deck.variants` rows.
+pub const Fanout = struct {
+    /// Rows every card runs (`.step` points, `.alter` runs): the jobs of
+    /// all cards once per row, after the nominal jobs when `nominal`.
+    global: Span = .{},
+    /// Rows of each card's own HSPICE sweep, parallel to the cards; empty
+    /// for a deck without one.
+    cards: []const Span = &.{},
+    /// Keep only this card's jobs: a rebuilt point of one card's sweep.
+    only: ?u32 = null,
+
+    /// Rows `first..first + count` of `Deck.variants`.
+    pub const Span = struct {
+        first: u32 = 0,
+        count: u32 = 0,
+        nominal: bool = true,
+        /// Solve the rows as one DC lane query (`.dc DATA=`, `.dc MONTE=`)
+        /// whose first column is `axis`.
+        lanes: ?struct { axis: []const u8, dc_plot: bool } = null,
+    };
+};
+
 /// Queries for `cards` (nets already circuit rows), in card order, allocated
 /// in `arena`. `.noise` also yields its integrated plot, `.disto` its two
 /// harmonic vectors; a single-value `.temp` yields none. An output `v(...)`
 /// names one or two nodes in the deck; `appended` cards must name exactly one.
-pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, appended: bool, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions) ![]const Job {
+/// `fanout` copies them over the deck's variants.
+pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, appended: bool, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions, fanout: Fanout) ![]const Job {
     for (cards) |c| {
         const args = c.args;
         const arg: usize = if (c.kind == .four) 1 else 0;
@@ -51,7 +74,10 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         else => {},
     };
     const temps = @max(deck_opts.temp_list.len, 1);
-    const jobs = try arena.alloc(Job, cards.len * fan * (temps + 1));
+    var per_card: usize = fan;
+    for (fanout.cards) |span| per_card = @max(per_card, fan * (span.count + 1));
+    const rows = fanout.global.count + @intFromBool(fanout.global.nominal);
+    const jobs = try arena.alloc(Job, cards.len * per_card * (temps + 1) * rows);
     var n: usize = 0;
     // HSPICE's `.hbac`, `.hbxf`, `.hbnoise` and `.phasenoise` take the tone
     // and harmonic count (and oscillator node) of the deck's `.hb` or
@@ -65,7 +91,17 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
         if (c.kind == .ac) break frequencySweep(c.args, 0) catch null;
     } else null;
     var xf_sources: ?[]const requests.XfSource = null;
-    for (cards) |c| {
+    for (cards, 0..) |c, ci| {
+        if (fanout.only) |only| if (ci != only) continue;
+        const span: Fanout.Span = if (ci < fanout.cards.len) fanout.cards[ci] else .{};
+        if (span.lanes) |lanes| {
+            var job: Job = .{ .mc = .{ .variants = .{ .first = span.first, .count = span.count }, .axis = lanes.axis, .dc_plot = lanes.dc_plot } };
+            applyDeckOptions(&job, deck_opts);
+            jobs[n] = job;
+            n += 1;
+            continue;
+        }
+        const first = n;
         var job = (buildJob(c, sources, card_refs, ctx) catch |err| return cardError(c.line, err)) orelse continue;
         switch (job) {
             .hbac, .hbxf, .hbnoise => |*o| if (o.f0 == 0) {
@@ -103,6 +139,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
                 applyDeckOptions(&jobs[n], deck_opts);
                 n += 1;
             }
+            if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
             continue;
         }
         jobs[n] = job;
@@ -128,7 +165,9 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
                 n += 1;
             }
         }
+        if (span.count != 0) n = first + copyVariants(jobs[first..], n - first, span);
     }
+    if (fanout.global.count != 0) n = copyVariants(jobs, n, fanout.global);
     if (temps == 1) return jobs[0..n];
     // An HSPICE `.temp` list runs every query once per temperature [CR .TEMP].
     const base = n;
@@ -180,6 +219,25 @@ fn snapshot(t: f64, tran: ?requests.Tran) Job {
     s.dt_init = @min(s.dt_init, t / 50);
     s.dt_max = @min(s.dt_max orelse t / 50, t / 50);
     return .{ .tran = s };
+}
+
+/// Rewrites the first `n` jobs of `jobs` as their copies over `span`'s rows,
+/// row-major, after the originals when `span.nominal`, and returns the count.
+fn copyVariants(jobs: []Job, n: usize, span: Fanout.Span) usize {
+    const skip: usize = @intFromBool(span.nominal);
+    // Back to front, so no copy overwrites a job not yet copied.
+    var row = span.count;
+    while (row > 0) {
+        row -= 1;
+        for (0..n) |k| {
+            var copy = jobs[k];
+            switch (copy) {
+                inline else => |*opts| opts.tol.variant = span.first + @as(u32, @intCast(row)),
+            }
+            jobs[(row + skip) * n + k] = copy;
+        }
+    }
+    return (span.count + skip) * n;
 }
 
 /// Logs the card a query could not be built from, then returns `err`.
@@ -248,6 +306,11 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
         while (i < args.len) : (i += 1) {
             const key = nameAt(args, i) orelse continue;
             if (key.len > lower.len) continue;
+            // Monte Carlo draws read these (frontend/variants.zig).
+            if (std.ascii.eqlIgnoreCase(key, "seed") or std.ascii.eqlIgnoreCase(key, "sampling_method")) {
+                i += 1;
+                continue;
+            }
             const option = names.get(std.ascii.lowerString(lower[0..key.len], key)) orelse {
                 if (dialect == .hspice) std.log.warn("options: ignoring unsupported option '{s}'", .{key});
                 continue;
@@ -486,7 +549,7 @@ fn voltageSource(args: []const Value, i: usize, sources: core.QueryBindings) !us
 
 /// The swept quantity of `.dc <card|TEMP> start stop step`, as the
 /// (device type, instance index, parameter) key `ParamRef` uses.
-fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !requests.Dc.SweepTarget {
+pub fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !requests.Dc.SweepTarget {
     const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
     if (std.ascii.eqlIgnoreCase(name, "temp")) return .temp;
     for (cards) |c| {

@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "analysis": "ac",
+  "purpose": ".data rows as a DC sweep (.dc DATA=) and as reruns of an .ac card (SWEEP DATA=).",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "DC: v(b) = v1 rl/(1k + rl). AC with a 1 V drive: v(b) = rl/(rl + 1k + j w 1k rl 1n)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC transfer characteristic",
+        "match": "exact",
+        "row_count": 3,
+        "columns": {
+          "rl": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 0,
+            "values": [
+              1000.0,
+              3000.0,
+              9000.0
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.5,
+              1.5,
+              0.45
+            ]
+          }
+        }
+      },
+      {
+        "name": "AC Analysis (rl=1000, v1=1)",
+        "match": "exact",
+        "row_count": 3,
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.45508491882313773,
+                -0.14296914377342768
+              ],
+              [
+                0.35847840016244886,
+                -0.22523862168419428
+              ],
+              [
+                0.26479342672202727,
+                -0.24956192523263643
+              ]
+            ]
+          }
+        }
+      },
+      {
+        "name": "AC Analysis (rl=3000, v1=2)",
+        "match": "exact",
+        "row_count": 3,
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.61371475781766,
+                -0.28920626618393996
+              ],
+              [
+                0.3971901400830409,
+                -0.37434288784895464
+              ],
+              [
+                0.25011714726650125,
+                -0.3535947865751746
+              ]
+            ]
+          }
+        }
+      },
+      {
+        "name": "AC Analysis (rl=9000, v1=0.5)",
+        "match": "exact",
+        "row_count": 3,
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.6819343262919819,
+                -0.3856247765477272
+              ],
+              [
+                0.3948925942599626,
+                -0.4466130023102808
+              ],
+              [
+                0.2320797887067096,
+                -0.393714085993742
+              ]
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "545247b7d64aea6a30f120548511338203b8ad0042fbc307f542ce78a4718a64"
+}

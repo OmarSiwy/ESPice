@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "analysis": "mc",
+  "purpose": "LOT draws once per model and trial, DEV once per device.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v = n Vt ln(I/IS) at 25 C (HSPICE TNOM): mean 0.6508 V; first order sigma(v(a)) = Vt sqrt(0.1^2 + 0.02^2) = 2.620 mV, sigma(v(a) - v(b)) = Vt 0.02 sqrt 2 = 0.727 mV."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "sample_moments",
+        "plot": "Monte Carlo",
+        "column": "v(a)",
+        "row_count": 4000,
+        "mean_min": 0.6506,
+        "mean_max": 0.6512,
+        "stddev_min": 0.002436729498648746,
+        "stddev_max": 0.002803548993068987
+      },
+      {
+        "kind": "sample_moments",
+        "plot": "Monte Carlo",
+        "column": "v(d)",
+        "row_count": 4000,
+        "mean_min": -0.0001,
+        "mean_max": 0.0001,
+        "stddev_min": 0.0006758271655241319,
+        "stddev_max": 0.0007775645882912055
+      },
+      {
+        "kind": "repeatability",
+        "same_netlist": true,
+        "comparison": "bitwise_numeric_results"
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Limits are about four standard errors of 4000 trials, plus the second-order log bias."
+  ],
+  "netlist_sha256": "5e516bc0f0aa18e2f2d45bf25f48a20e79f2c6c50cbb8a85051b678bb53431a3"
+}
