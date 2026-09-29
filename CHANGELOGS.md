@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
 - `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).
 - `.tran` with a `tstart` saves no extra row at `tstart` itself: the rows are ngspice's, the accepted steps from `tstart` on (#167).
 - C API: `espice_result_view` sets `*data` to NULL and `*len` to 0 on a NULL or stale handle too; `ESPICE_CANCELLED` is documented as reserved, since no C call cancels a query (#76).

@@ -167,6 +167,7 @@ current deck status is what `zig build test` reports.
 | bsim1 | K1 and K2 are clamped at 0 | b1temp.c:124-125 |
 | hisim2_va | LP defaults to 15 nm when CODEP = 0 (HiSIM 2.80, which ngspice 44.2 forces) | hsm2set.c:236 |
 | bsim2 | Vc is not clamped at 0; only the sqrt argument is guarded | b2eval.c |
+| bsim2 | Gate, bulk and drain charges are b2eval.c's on the raw Vgst (accumulation, depletion, 2/3 CoxWL in saturation, 40/60 partition whatever XPART says), on the swapped frame's source in either mode; GS/GD overlaps on the drawn W. The old charges on Vgeff read Cgg 1 - 1/(3Aa) of CoxWL: `i(vg)` 30% high on `ac/bsim2_cs_gain`, now its ngspice 45 column (#168) | b2eval.c:389-559, b2ld.c:152-154, b2mpar.c:509 |
 | mesa | CODATA constants of ngspice 44 `const.h`; PHIB default 0.5 * CHARGE | const.h, mesasetup.c:126 |
 | mos1 | ngspice's `const.h` k and q (CODATA 2014) and vt = T * (k/q); gmbs = gm * gamma / (2 * sarg) also above vbs = 0, where AD of the Taylor-continued root would give gamma / (2 * sqrt(phi)) | const.h, main.c:501, mos1load.c:478-491 |
 | vbic13_4t | DEVpnjlim on the six junctions at the ambient vt, vcrit from IS * M; without it plain Newton swung internal nodes by kV and never converged on `multi_analysis/device_vbic_ce_amp` | vbicload.c:655-667, vbictemp.c:84 |

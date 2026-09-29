@@ -9,7 +9,7 @@
 // Laid out like models/mos1.va (same sections, same local names); the channel
 // core is b2eval.c's:
 //     d --[RD]-- di --[channel]-- si --[RS]-- s
-//     bulk diodes b-di / b-si, charge-based gate/channel charges (no Meyer caps)
+//     bulk diodes b-di / b-si, b2eval.c's gate/bulk/drain charges (no Meyer caps)
 //
 // Every core coefficient carries L- and W-sensitivity siblings combined as
 // P_eff = P0 + PL/Leff_um + PW/Weff_um (b2temp.c).
@@ -178,7 +178,9 @@ module bsim2(d, g, s, b);
     parameter real cgso = 0.0;    // gate-source overlap [F/m]
     parameter real cgdo = 0.0;    // gate-drain overlap [F/m]
     parameter real cgbo = 0.0;    // gate-bulk overlap [F/m]
-    parameter integer xpart = 0 from [0:1];   // 0 = 40/60, 1 = 0/100
+    // Accepted, unused: b2mpar.c stores XPART as 0 or 1 and b2eval.c only
+    // drops the charges above 1, so ngspice partitions 40/60 under either.
+    parameter integer xpart = 0 from [0:1];
 
     // --- junctions --------------------------------------------------------
     parameter real js   = 0.0;    // saturation current density [A/m^2]
@@ -224,12 +226,13 @@ module bsim2(d, g, s, b);
     real ty, vtx;
     real vgs, vgd, vds, vbs, vbd, ibs, ibd;
     real mode, vdsneg, vgsx, vdsx, vbx;
-    real phisb, t1s, eta, vth, vth0, nsub, vof, gg, aa;
+    real phisb, t1s, eta, vth, nsub, vof, gg, aa;
     real wds, wpre, vgwk, vglo, slo, hspan, tsp, h00, h10, h01, h11;
     real vgst, vgeff, dvgeff, ua, ub, uvert, u1s, u1, vc, kk, vdsat, vdsch, t4;
     real beta0b, betas, beta1, beta2, beta3, beta4, beta, betaeff, targ;
     real ai, bi, dvds, fclm, idscore, gmch, id, idst;
-    real qgch, qbch, qdch, qgso, qgdo, qgbo, qbs, qbd, dq;
+    real vbseff, arg1, qbulk, uvq, vcq, kkq, vdsq, vgdt, t0, t1, t5;
+    real qgch, qbch, qdch, qgso, qgdo, qgbo, qbs, qbd, dqg, dqb, dq;
 
     // Junction depletion charge, forward/reverse blended by a steep sigmoid
     // (one differentiable expression instead of a v<0 branch). The reverse
@@ -439,7 +442,6 @@ module bsim2(d, g, s, b);
         end
         eta  = eta0e + etabe * vbx;
         vth  = vfbe + phie + k1e * t1s - k2e * phisb - eta * vdsx;
-        vth0 = vfbe + phie + k1e * t1s;          // threshold without DIBL
         vgst = vgsx - vth;
 
         gg = 1.0 - 1.0 / (1.744 + 0.8364 * phisb);
@@ -547,22 +549,52 @@ module bsim2(d, g, s, b);
         gmch = idscore * dvgeff / max(vgeff - 0.5 * aa * vdsch, 1.0e-9);
 
         // ============ junction and gate charges ===========================
-        // Charges. Overlaps are linear; the intrinsic channel charge is split
-        // gate / bulk / drain so that q(si) = -(qg + qb + qd) by construction
-        // (charge-conserving). XPART picks the drain partition:
-        // 0 = 40/60, 1 = 0/100. All carry m, as the resistances and the
-        // channel current do.
-        qgso = cgso * weff * m * V(g, si);
-        qgdo = cgdo * weff * m * V(g, di);
+        // Overlaps are linear, on the drawn W for gate-source and gate-drain
+        // and Leff for gate-bulk (b2ld.c:152-154).
+        qgso = cgso * w * m * V(g, si);
+        qgdo = cgdo * w * m * V(g, di);
         qgbo = cgbo * leff * m * V(g, b);
 
+        // Intrinsic gate, bulk and drain charges, b2eval.c:407-559, in the
+        // swapped frame on the clamped triple and the raw gate drive vgst
+        // (not vgeff): accumulation, depletion, then strong inversion with
+        // its own Vdsat. Drain partition 40/60 (cdg = -0.4*cgg).
         // Charges built from the folded voltages are folded charges; type
         // converts them back.
-        qgch = type * m * coxwl * (vgsx - vfbe - phie - vgeff / (3.0 * aa));
-        qbch = type * m * coxwl * (vfbe + phie - vth0
-                                    + (1.0 - aa) * vgeff / (3.0 * aa));
-        if (xpart > 0) qdch = 0.0;
-        else qdch = -type * m * (4.0 / 15.0) * coxwl * vgeff;
+        vbseff = (vbx < 0.0) ? vbx : phie - phisb;
+        arg1   = vgsx - vbseff - vfbe;
+        qbulk  = coxwl / 3.0 * (arg1 - vgst);
+        if (arg1 <= 0.0) begin
+            qgch = coxwl * arg1;
+            qbch = -qgch;
+            qdch = 0.0;
+        end else if (vgst <= 0.0) begin
+            t0   = arg1 / (arg1 - vgst);
+            qgch = coxwl * arg1 * (1.0 - t0 * (1.0 - t0 / 3.0));
+            qbch = -qgch;
+            qdch = 0.0;
+        end else begin
+            uvq  = max(1.0 + vgst * (ua + vgst * ub), 0.2);
+            vcq  = u1s * vgst / (aa * uvq);
+            kkq  = 0.5 * (1.0 + vcq + sqrt(max(1.0 + 2.0 * vcq, 1.0e-18)));
+            vdsq = vgst / (aa * sqrt(kkq));
+            qbch = -qbulk;
+            if (vdsx >= vdsq) begin
+                qgch = 2.0 / 3.0 * coxwl * vgst + qbulk;
+                qdch = -0.4 * 2.0 / 3.0 * coxwl * vgst;
+            end else begin
+                vgdt = vgst * (1.0 - vdsx / vdsq);
+                t0   = vgst / (vgst + vgdt);
+                t1   = vgdt / (vgst + vgdt);
+                t5   = t0 * t1;
+                qgch = 2.0 / 3.0 * coxwl * (vgst + vgdt - vgdt * t0) + qbulk;
+                qdch = -coxwl / 3.0 * (0.2 * vgdt + 0.8 * vgst + vgdt * t1
+                                       + 0.2 * t5 * (vgdt - vgst));
+            end
+        end
+        qgch = type * m * qgch;
+        qbch = type * m * qbch;
+        qdch = type * m * qdch;
 
         qbs = m * type * jcharge(type * V(b, si), czbs, czbssw,
                                   pb, pbsw, mj, mjsw, omj, omjsw);
@@ -597,16 +629,25 @@ module bsim2(d, g, s, b);
 
         I(b, si) <+ m * type * ibs;
         I(b, di) <+ m * type * ibd;
-        I(g, si) <+ ddt(qgso + qgch);
+        I(g, si) <+ ddt(qgso);
         I(g, di) <+ ddt(qgdo);
         I(g, b)  <+ ddt(qgbo);
-        I(b, si) <+ ddt(qbs + qbch);
+        I(b, si) <+ ddt(qbs);
         I(b, di) <+ ddt(qbd);
-        // The channel charge's drain side is di in forward mode, si in
-        // reverse (the intrinsic charges are in the swapped frame).
+        // The intrinsic charges sit on the swapped frame: its source is si in
+        // forward mode and di in reverse, which takes -(qg + qb + qd).
         // LRM 5.8.1: ddt on the spine, only its use conditional (E0514).
-        dq = ddt(qdch);
-        if (mode >= 0.0) I(di, si) <+ dq;
-        else I(si, di) <+ dq;
+        dqg = ddt(qgch);
+        dqb = ddt(qbch);
+        dq  = ddt(qdch);
+        if (mode >= 0.0) begin
+            I(g, si)  <+ dqg;
+            I(b, si)  <+ dqb;
+            I(di, si) <+ dq;
+        end else begin
+            I(g, di)  <+ dqg;
+            I(b, di)  <+ dqb;
+            I(si, di) <+ dq;
+        end
     end
 endmodule
