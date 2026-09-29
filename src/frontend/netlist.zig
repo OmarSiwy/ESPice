@@ -462,7 +462,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
-    .{ "global", .global },     .{ "connect", .connect },
+    .{ "global", .global },     .{ "connect", .connect },           .{ "jitter", .meas },
     .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
     .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
     .{ "protect", .ignored },   .{ "unprotect", .ignored },         .{ "prot", .ignored },
@@ -1699,10 +1699,21 @@ fn Reader(comptime S: type) type {
                 .tran, .ac, .dc => last = a.kind,
                 else => {},
             };
+            var jitters: u32 = 0;
             for (r.meas_lines.items) |line| {
                 var f = F.init(line);
-                _ = f.next();
-                const m = measure.parse(r.arena, f.rest(), r, last, r.dialect == .hspice) catch |err| switch (err) {
+                var text = f.rest();
+                if (std.mem.eql(u8, f.next().?, ".jitter")) {
+                    // `.jitter <kind> TRIG ...` reads as `.meas <kind>
+                    // jitter[N] jitter TRIG ...`, N from the second card on.
+                    jitters += 1;
+                    const kind = f.next() orelse "";
+                    text = if (jitters == 1)
+                        try std.fmt.allocPrint(r.arena, "{s} jitter jitter {s}", .{ kind, f.rest() })
+                    else
+                        try std.fmt.allocPrint(r.arena, "{s} jitter{d} jitter {s}", .{ kind, jitters, f.rest() });
+                } else text = f.rest();
+                const m = measure.parse(r.arena, text, r, last, r.dialect == .hspice) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {
                         std.log.warn("netlist: ignoring malformed card '{s}'", .{line});

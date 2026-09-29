@@ -13,7 +13,7 @@ const Clause = core.MeasureClause;
 /// `lhs`, or `lhs=rhs` with blanks around the `=` dropped.
 const Word = struct { lhs: []const u8, rhs: ?[]const u8 = null };
 
-const analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran", .tran }, .{ "ac", .ac }, .{ "dc", .dc }, .{ "fft", .fft } });
+const analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran", .tran }, .{ "ac", .ac }, .{ "dc", .dc }, .{ "fft", .fft }, .{ "trannoise", .tran_noise } });
 /// HSPICE continuous measures [CR .MEASURE (Continuous Results)].
 const cont_analyses = std.StaticStringMap(Kind).initComptime(.{ .{ "tran_cont", .tran }, .{ "ac_cont", .ac }, .{ "dc_cont", .dc } });
 
@@ -27,6 +27,7 @@ const funcs = std.StaticStringMap(core.MeasureFunc).initComptime(.{
     .{ "err1", .err1 },      .{ "err2", .err2 },       .{ "err3", .err3 },
     .{ "thd", .thd },        .{ "snr", .snr },         .{ "sndr", .sndr },
     .{ "enob", .enob },      .{ "sfdr", .sfdr },       .{ "em_avg", .em_avg },
+    .{ "jitter", .jitter },
 });
 
 /// Parses `text`, the card after `.meas`, lowercased. `ctx.measureValue(text)
@@ -102,6 +103,13 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
             }
         },
         .when => try when(arena, &m.first, analysis, rest, ctx),
+        // `.jitter trannoise|tran TRIG v(clk) VAL= [TD=] [RISE|FALL|CROSS=]`
+        // [CR .JITTER], read as `.meas <kind> <name> jitter TRIG ...`.
+        .jitter => {
+            if (analysis != .tran and analysis != .tran_noise) return error.ParseError;
+            if (rest.len == 0 or !std.mem.eql(u8, rest[0].lhs, "trig")) return error.ParseError;
+            try trigTarg(arena, &m.first, analysis, rest[1..], ctx);
+        },
         // `.meas fft name THD|SNR|SNDR|ENOB|SFDR v(out) [NBHARM=] [MAXFREQ=]
         // [MINFREQ=] [BINSIZ=]`.
         .thd, .snr, .sndr, .enob, .sfdr => {

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "tran_noise",
+  "purpose": "HSPICE .trannoise synthesizes flicker noise with a 1/f spectrum between FMIN and FMAX.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Drain flicker KF*ID/f into a 1k load: Var v(d1) = R^2 KF ID ln(FMAX/FMIN) (+0.2 % channel thermal); through a 10 MHz pole Var v(d2) = R^2 KF ID [ln f - ln(1+(f/fc)^2)/2] from FMIN to FMAX. Bands of 15 % and 20 % in variance cover the sample spread of a 20 us record (measured 2 % and 6 % rms over 12 seeds)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "sample_moments",
+        "plot": "Transient Noise Analysis",
+        "column": "v(d1)",
+        "row_count": 40001,
+        "mean_min": 5.99,
+        "mean_max": 6.01,
+        "stddev_min": 0.0048511174675981966,
+        "stddev_max": 0.00564262577457379
+      },
+      {
+        "kind": "sample_moments",
+        "plot": "Transient Noise Analysis",
+        "column": "v(d2)",
+        "row_count": 40001,
+        "mean_min": 5.99,
+        "mean_max": 6.01,
+        "stddev_min": 0.0027173576935960197,
+        "stddev_max": 0.0033280698989682023
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Statistical acceptance interval over a fixed-seed run, not a prescribed noise waveform."
+  ],
+  "netlist_sha256": "585f4f44485ddf58b51f3170acc0e1030dbd3091616f71ee44cdfa6cb1745115"
+}

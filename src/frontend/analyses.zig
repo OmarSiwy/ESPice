@@ -776,6 +776,39 @@ fn lin(args: []const Value) !requests.Sp.Lin {
     return o;
 }
 
+/// HSPICE `.trannoise out [METHOD=MC] [SEED=] [SAMPLES=1] [AUTOCORRELATION=]
+/// [FMIN=] [FMAX=] [SCALE=]` [CR .TRANNOISE] over the deck's `.tran`: one
+/// Monte Carlo sample stepped at 1/(2 FMAX), the bandwidth that carries the
+/// white noise up to FMAX (default 1/TSTEP). METHOD=SDE, TIME= and more
+/// than one sample are `UnsupportedAnalysisOutput`. The output only names
+/// what HSPICE's ONOISE refers to; every probe is recorded.
+fn hspiceTranNoise(ctx: CardContext, args: []const Value) !requests.TranNoise {
+    const tran = ctx.tran orelse return error.MissingAnalysisCard;
+    if (args[0] != .group) return error.InvalidAnalysisArguments;
+    var o: requests.TranNoise = .{ .tol = tran.tol, .t_stop = tran.t_stop };
+    var f_max = 1 / tran.dt_init;
+    const Key = enum { method, seed, samples, autocorrelation, fmin, fmax, scale, time };
+    var i: usize = 1;
+    while (i < args.len) : (i += 2) {
+        var lower: [16]u8 = undefined;
+        const key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
+        if (i + 1 >= args.len) return error.InvalidAnalysisArguments;
+        switch (key) {
+            .method => if (!std.mem.eql(u8, try keyword(args, i + 1, &lower), "mc")) return error.UnsupportedAnalysisOutput,
+            .seed => o.seed = @intFromFloat(@min(@abs(try number(args, i + 1)), 0x1p63)),
+            .samples => if (try number(args, i + 1) != 1) return error.UnsupportedAnalysisOutput,
+            .autocorrelation => {},
+            .fmin => o.f_min = try positive(args, i + 1),
+            .fmax => f_max = try positive(args, i + 1),
+            .scale => o.scale = try positive(args, i + 1),
+            .time => return error.UnsupportedAnalysisOutput,
+        }
+    }
+    o.dt_max = 0.5 / f_max;
+    o.dt_init = o.dt_max;
+    return o;
+}
+
 /// HSPICE `.sn TRES= PERIOD=` or `.sn TONE= NHARMS=` [CR .SN] as `.pss`:
 /// the period, and PERIOD/TRES steps when TRES is given. TRINIT,
 /// MAXTRINITCYCLES and NUMPEROUT are read and unused: `.pss` shoots from
@@ -896,6 +929,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
         },
         .tran, .tran_noise, .matex => {
             if (id == .tran and a.dialect == .hspice) return .{ .tran = try hspiceTran(args) };
+            if (id == .tran_noise and args.len > 0 and args[0] != .num) return .{ .tran_noise = try hspiceTranNoise(ctx, args) };
             try arity(args, 2, if (id == .tran) 5 else 2);
             const step = try positive(args, 0);
             const stop = try positive(args, 1);

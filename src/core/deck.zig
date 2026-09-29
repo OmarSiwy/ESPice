@@ -110,8 +110,9 @@ pub const Deck = struct {
 /// HSPICE forms: `param` (an expression over other results) and the `err`
 /// relative-error family [CR .MEASURE (Error Function)], and the FFT
 /// figures THD, SNR, SNDR, ENOB and SFDR [CR .MEASURE FFT], and the
-/// recovered electromigration average `em_avg`.
-pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3, thd, snr, sndr, enob, sfdr, em_avg };
+/// recovered electromigration average `em_avg`, and `.jitter`'s time
+/// interval error.
+pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3, thd, snr, sndr, enob, sfdr, em_avg, jitter };
 
 /// One postfix op of a `PARAM=` measure or a `par('expr')` waveform: a
 /// constant, the result of the `measure`-th card, a result vector by label
@@ -179,7 +180,8 @@ pub const MeasureClause = struct {
 
 /// A parsed `.meas` card.
 pub const Measure = struct {
-    /// `tran`, `ac`, `dc` or `fft`: the results it is evaluated over.
+    /// `tran`, `ac`, `dc`, `fft` or `tran_noise`: the results it is
+    /// evaluated over.
     analysis: requests.Kind,
     name: []const u8,
     func: MeasureFunc,

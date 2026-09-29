@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": ".jitter reports the time interval error of a clock against its fitted ideal clock.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Rising zero crossings of sin(2 pi fc t + m sin(2 pi fs t)) solve 2 pi fc t + m sin(2 pi fs t) = 2 pi k; the RMS of those roots (k = 1..202) minus their least-squares line."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(clk)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.0001,
+            "values": [
+              0.5877852522924683,
+              8.816218992587766e-15,
+              -1.7632437985175533e-14
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-06,
+            5e-06,
+            1e-05
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "jitter",
+        "value": 5.567387751385423e-09,
+        "rtol": 0.002,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b60cebb2acd165d576fc22914d527dc31c6e55b73d9f003b7886b63c167852eb"
+}

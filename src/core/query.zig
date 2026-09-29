@@ -484,6 +484,11 @@ pub const TranNoise = struct {
     max_steps: u32 = 1_000_000_000,
     /// Noise generator seed; the same seed reproduces the same run.
     seed: u64 = 0xDEAD_BEEF_CAFE_1234,
+    /// Multiplies every source's PSD (HSPICE `SCALE`).
+    scale: f64 = 1,
+    /// Hz; the lowest flicker-noise frequency, 1/t_stop when null (HSPICE
+    /// `FMIN`). The highest is the sampling bandwidth 1/(2 dt_max).
+    f_min: ?f64 = null,
 };
 
 pub const Envelope = struct {
