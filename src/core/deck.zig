@@ -7,6 +7,20 @@ const numerics = @import("numerics.zig");
 /// with UIC.
 pub const Ic = struct { node: u32, value: f64 };
 
+/// HSPICE `.save` [CR .SAVE]: write the operating point as `.nodeset` (or
+/// `.ic`) cards a later run's `.load` reads.
+pub const SaveOp = struct {
+    /// FILE=, as written; null for `<deck stem>.ic0`.
+    file: ?[]const u8 = null,
+    /// TYPE=IC instead of NODESET.
+    ic: bool = false,
+    /// LEVEL=TOP: top-level nodes only.
+    top_only: bool = false,
+    /// TIME=: the transient state at this time, in seconds; 0 is the
+    /// operating point.
+    time: f64 = 0,
+};
+
 /// A device parameter value that replaces the DC one in AC-family analyses
 /// (a resistor's `ac=`). Stored by identity; each analysis clone resolves
 /// its own parameter pointer.
@@ -104,6 +118,8 @@ pub const Deck = struct {
     /// `.meas` cards, in deck order, evaluated over finished results.
     measures: []const Measure = &.{},
     variants: Variants = .{},
+    /// HSPICE `.save`, when the deck has one.
+    save_op: ?SaveOp = null,
 };
 
 /// What a `.meas` card computes, after ngspice com_measure2.c, plus the

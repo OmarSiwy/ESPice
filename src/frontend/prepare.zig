@@ -220,6 +220,11 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         .cards = cards,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
         .measures = try measures(sim_arena, nl.deck.measures),
+        .save_op = if (nl.deck.save_op) |s| blk: {
+            var own = s;
+            if (s.file) |file| own.file = try sim_arena.dupe(u8, file);
+            break :blk own;
+        } else null,
     } };
 }
 

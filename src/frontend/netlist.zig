@@ -256,6 +256,8 @@ pub const Deck = struct {
     /// Each `.alter` run's full source, cumulative, expanded; set by
     /// `prepare`.
     alters: []const []const u8 = &.{},
+    /// HSPICE `.save` (the last one); ngspice's `.save` fills `saves`.
+    save_op: ?core.SaveOp = null,
 };
 
 /// A parsed, flattened deck. Every slice lives in the parse arena.
@@ -408,7 +410,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
 
 /// `ignored`: a card that only shapes printed output, which ESPice writes
 /// in full anyway.
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, store, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -463,6 +465,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
     .{ "global", .global },     .{ "connect", .connect },           .{ "jitter", .meas },
+    .{ "store", .store },
     .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
     .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
     .{ "protect", .ignored },   .{ "unprotect", .ignored },         .{ "prot", .ignored },
@@ -666,6 +669,7 @@ fn Reader(comptime S: type) type {
         global_nets: std.StringHashMapUnmanaged(void) = .empty,
         saves: std.ArrayList([]const u8) = .empty,
         save_all: bool = false,
+        save_op: ?core.SaveOp = null,
         foreign: std.ArrayList(Foreign) = .empty,
         measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
@@ -811,6 +815,7 @@ fn Reader(comptime S: type) type {
                     .data = r.data.items,
                     .variations = r.variations.items,
                     .optimize = r.optimize,
+                    .save_op = r.save_op,
                 },
             };
         }
@@ -1174,6 +1179,11 @@ fn Reader(comptime S: type) type {
             if (card != null and card.? == .meas) return r.meas_lines.append(r.arena, line);
             const c = card orelse return r.unsupported(line, "unsupported card");
             if (c == .ignored) return;
+            if (c == .save and r.dialect == .hspice) return r.readSaveOp(line, &f);
+            // HSPICE `.store` checkpoints the process on a wall-clock
+            // schedule for an OS-level restore [CR .STORE]; the results do not
+            // depend on it.
+            if (c == .store) return std.log.warn("netlist: .store: checkpoints are not written; the run is not restartable", .{});
             const args = try r.readArgs(&f);
             switch (c) {
                 .step => try r.steps.append(r.arena, r.readStep(args) catch |err| return r.failed(line, err)),
@@ -1216,6 +1226,36 @@ fn Reader(comptime S: type) type {
                 },
                 else => {},
             }
+        }
+
+        /// HSPICE `.save [TYPE=NODESET|IC] [FILE=] [LEVEL=ALL|TOP|SELECT|NONE]
+        /// [TIME=]` [CR .SAVE]. SELECT saves every node, as ALL; NONE saves
+        /// nothing. The last card wins.
+        fn readSaveOp(r: *R, line: []const u8, f: *F) Error!void {
+            var save: core.SaveOp = .{};
+            var none_level = false;
+            while (f.next()) |key| {
+                if (!F.isWord(key) or !f.takeEq()) return r.failed(line, error.ParseError);
+                const Key = enum { type, file, level, time };
+                switch (std.meta.stringToEnum(Key, key) orelse return r.failed(line, error.ParseError)) {
+                    .file => save.file = try r.pathOf(f),
+                    .time => save.time = S.parseNum(f.next() orelse "") orelse return r.failed(line, error.ParseError),
+                    .type => {
+                        const v = f.next() orelse "";
+                        if (!std.mem.eql(u8, v, "ic") and !std.mem.eql(u8, v, "nodeset")) return r.failed(line, error.ParseError);
+                        save.ic = std.mem.eql(u8, v, "ic");
+                    },
+                    .level => {
+                        const v = f.next() orelse "";
+                        const levels = std.StaticStringMap(void).initComptime(.{ .{"all"}, .{"top"}, .{"select"}, .{"none"} });
+                        if (!levels.has(v)) return r.failed(line, error.ParseError);
+                        save.top_only = std.mem.eql(u8, v, "top");
+                        none_level = std.mem.eql(u8, v, "none");
+                    },
+                }
+            }
+            if (!(save.time >= 0)) return r.failed(line, error.ParseError);
+            r.save_op = if (none_level) null else save;
         }
 
         /// `line` as the deck spells it: the original case when `line` is a
