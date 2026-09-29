@@ -426,6 +426,10 @@ Status: landed; see [variants.md](../analysis/variants.md) for what was built an
 
 ### C4. `.lin`
 
+Status: landed without mixed mode, stability factors or `.net`; see
+[s-parameters.md](../analysis/s-parameters.md) §5 for what was built and
+where it differs from this sketch (group delay by a central difference).
+
 `sp.zig` already builds the full S-matrix per frequency lane, with one
 right-hand side per port. On top of that:
 

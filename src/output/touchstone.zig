@@ -30,6 +30,32 @@ pub fn encode(w: *Io.Writer, plot: Plot) !void {
             }
         }
     }
+    if (n_ports == 2) try noiseBlock(w, plot);
+}
+
+/// Touchstone 1.0's two-port noise data after the S block, when `.lin`
+/// published it: frequency, NFmin in dB, |Γopt|, ∠Γopt in degrees and
+/// RN normalized to the 50 ohm reference.
+fn noiseBlock(w: *Io.Writer, plot: Plot) !void {
+    var cols: [3]usize = undefined;
+    for ([_][]const u8{ "NFMIN", "GAMMA_OPT", "RN" }, &cols) |name, *col| {
+        col.* = for (plot.result.varnames, 0..) |v, i| {
+            if (std.mem.eql(u8, v, name)) break i;
+        } else return;
+    }
+    try w.writeAll("! noise parameters\n");
+    for (0..plot.result.npoints) |pt| {
+        const row = plot.point(pt);
+        const g_re = row[2 * cols[1]];
+        const g_im = row[2 * cols[1] + 1];
+        try w.print("{e} {e} {e} {e} {e}\n", .{
+            row[0],
+            10 * std.math.log10(row[2 * cols[0]]),
+            std.math.hypot(g_re, g_im),
+            std.math.radiansToDegrees(std.math.atan2(g_im, g_re)),
+            row[2 * cols[2]] / 50.0,
+        });
+    }
 }
 
 test "Touchstone 2-port writes S21 before S12" {

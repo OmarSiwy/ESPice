@@ -731,6 +731,46 @@ fn hspiceTran(args: []const Value) !requests.Tran {
     return t;
 }
 
+/// True for an HSPICE `.lin` card, which runs as an `.sp` query.
+fn isLin(line: []const u8) bool {
+    const head = line[@min(line.len, 1) .. std.mem.indexOfAny(u8, line, " \t") orelse line.len];
+    return std.ascii.eqlIgnoreCase(head, "lin");
+}
+
+/// HSPICE `.lin [sparcalc=1] [noisecalc=0|1|2] [gdcalc=0|1]
+/// [mixedmode2port=ss] [format= filename= dataformat= modelname= ...]`
+/// [CR .LIN] over the `.ac` sweep. S is always computed. noisecalc=2 (the
+/// N-port correlation matrix) publishes the two-port parameters only.
+/// `format=touchstone|touchstone2` also writes a Touchstone 1.0 file named
+/// by `filename=`; the other formats (`selem`, `citi`) and the listing
+/// keywords are checked for a value and unused.
+fn lin(args: []const Value) !requests.Sp.Lin {
+    const Key = enum { sparcalc, noisecalc, gdcalc, mixedmode2port, format, filename, dataformat, modelname, freqdigit, spardigit, listfreq, listcount, listfloor, listsources };
+    var o: requests.Sp.Lin = .{};
+    var i: usize = 0;
+    while (i < args.len) : (i += 2) {
+        var lower: [16]u8 = undefined;
+        const key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
+        if (i + 1 >= args.len) return error.InvalidAnalysisArguments;
+        switch (key) {
+            .sparcalc, .noisecalc, .gdcalc => {
+                const v = try number(args, i + 1);
+                if (v != @trunc(v) or v < 0 or v > @as(f64, if (key == .noisecalc) 2 else 1)) return error.InvalidAnalysisArguments;
+                if (key == .noisecalc) o.noise = v != 0;
+                if (key == .gdcalc) o.group_delay = v != 0;
+            },
+            .mixedmode2port => if (!std.ascii.eqlIgnoreCase(nameAt(args, i + 1) orelse "", "ss")) return error.UnsupportedAnalysisOutput,
+            .format => {
+                const f = nameAt(args, i + 1) orelse return error.InvalidAnalysisArguments;
+                o.touchstone = std.ascii.startsWithIgnoreCase(f, "touchstone");
+            },
+            .filename => o.file = nameAt(args, i + 1) orelse return error.InvalidAnalysisArguments,
+            else => {},
+        }
+    }
+    return o;
+}
+
 /// HSPICE `.sn TRES= PERIOD=` or `.sn TONE= NHARMS=` [CR .SN] as `.pss`:
 /// the period, and PERIOD/TRES steps when TRES is given. TRINIT,
 /// MAXTRINITCYCLES and NUMPEROUT are read and unused: `.pss` shoots from
@@ -1144,6 +1184,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .pxf = .{ .f_lo = lo, .sweep = sweep, .out_node = out } };
         },
         .sp => {
+            if (isLin(a.line)) return .{ .sp = .{ .sweep = ctx.ac orelse return error.MissingAnalysisCard, .ports = sources.ports, .lin = try lin(args) } };
             try arity(args, 4, 4);
             return .{ .sp = .{ .sweep = try frequencySweep(args, 0), .ports = sources.ports } };
         },

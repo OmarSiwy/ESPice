@@ -453,7 +453,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "snxf", an(.pxf) },    .{ "fft", an(.fft) },
     .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
     .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
-    .{ "dcinc", an(.dcinc) },
+    .{ "dcinc", an(.dcinc) },   .{ "lin", an(.sp) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
@@ -1931,10 +1931,12 @@ fn Reader(comptime S: type) type {
             r.site_owner = nameKey(nameKey(0, frame.path orelse ""), head);
             r.site_ordinal = 0;
             if (!F.isWord(head) or !std.ascii.isAlphabetic(head[0])) return error.ParseError;
-            const letter = std.ascii.toLower(head[0]);
-            // HSPICE reads these letters as lossy lines, S-parameter blocks,
-            // IBIS buffers and ports, none of which is built.
-            if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bpsuw", letter) != null)
+            // HSPICE's P element is a port: a V card that `port=` numbers
+            // for `.lin` (`P1 in 0 port=1 z0=50`).
+            const letter = if (r.dialect == .hspice and std.ascii.toLower(head[0]) == 'p') 'v' else std.ascii.toLower(head[0]);
+            // HSPICE reads these letters as lossy lines, S-parameter blocks
+            // and IBIS buffers, none of which is built.
+            if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bsuw", letter) != null)
                 return r.unsupported(line, "unsupported HSPICE element");
             if (std.mem.indexOfScalar(u8, "efgh", letter) != null) {
                 var probe = f;

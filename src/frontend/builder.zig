@@ -634,11 +634,11 @@ pub const NetBuilder = struct {
         const ports = try arena.alloc(requests.Port, n_ports);
         for (ports) |*p| p.branch = std.math.maxInt(u32); // unset
         const v = self.v.slice();
-        for (v.items(.portnum), v.items(.pos), v.items(.branch), v.items(.z0)) |num, node, br, z0| {
+        for (v.items(.portnum), v.items(.pos), v.items(.neg), v.items(.branch), v.items(.z0)) |num, node, neg, br, z0| {
             if (num == 0) continue;
             const slot = &ports[num - 1];
             if (slot.branch != std.math.maxInt(u32)) return error.DuplicatePortNumber;
-            slot.* = .{ .node = node, .branch = br, .z0 = z0 };
+            slot.* = .{ .node = node, .branch = br, .z0 = z0, .neg = neg };
         }
         for (ports) |p| if (p.branch == std.math.maxInt(u32)) return error.MissingPortNumber;
         return ports;
@@ -1829,13 +1829,14 @@ fn sourceDc(dev: Device) ?f64 {
     return null;
 }
 
-/// The RF port of a V card (`VP1 in 0 DC 0 AC 1 portnum 1 z0 50`), null when
-/// `portnum` is not given (ngspice vsrctemp.c:74-82). `z0` defaults to 50 ohm.
+/// The RF port of a V card (`VP1 in 0 DC 0 AC 1 portnum 1 z0 50`, or an
+/// HSPICE P card's `port=1`), null when `portnum` is not given (ngspice
+/// vsrctemp.c:74-82). `z0` defaults to 50 ohm.
 /// Both `portnum 1` and `portnum=1` are accepted. A given `portnum` outside
 /// 1..1024 or a non-positive `z0` is an error, not a plain source.
 fn sourcePort(dev: Device) !?struct { num: u16, z0: f64 } {
     const num_f = blk: {
-        if (kvNumber(dev.kv, "portnum")) |v| break :blk v;
+        if (kvNumber(dev.kv, "portnum") orelse kvNumber(dev.kv, "port")) |v| break :blk v;
         for (dev.positional, 0..) |pos, idx| {
             if (pos != .name or !std.mem.eql(u8, pos.name, "portnum")) continue;
             break :blk positionalNumber(dev, idx + 1) orelse return null;

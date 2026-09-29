@@ -55,17 +55,19 @@ pub fn sParameter(name: []const u8) ?[2]u32 {
 }
 
 /// Returns the port count of a complete S matrix: complex data, `frequency`
-/// first, then every `S(m,n)` in row-major order. Touchstone needs exactly
-/// this layout.
+/// first, then every `S(m,n)` in row-major order. Touchstone needs this
+/// layout; columns after the S block (`.lin`'s) are allowed.
 pub fn portCount(schema: Schema) ValidationError!u32 {
     if (!schema.is_complex or schema.varnames.len < 2 or
         !std.mem.eql(u8, schema.varnames[0], "frequency")) return error.NotSParameterData;
-    const last = sParameter(schema.varnames[schema.varnames.len - 1]) orelse return error.NotSParameterData;
+    var end: usize = 1;
+    while (end < schema.varnames.len and sParameter(schema.varnames[end]) != null) end += 1;
+    const last = sParameter(schema.varnames[end - 1]) orelse return error.NotSParameterData;
     const n: usize = last[0];
     if (last[1] != n) return error.NotSParameterData;
     const count = std.math.mul(usize, n, n) catch return error.NotSParameterData;
-    if (count != schema.varnames.len - 1) return error.NotSParameterData;
-    for (schema.varnames[1..], 0..) |name, i| {
+    if (count != end - 1) return error.NotSParameterData;
+    for (schema.varnames[1..end], 0..) |name, i| {
         const pair = sParameter(name) orelse return error.NotSParameterData;
         if (pair[0] != i / n + 1 or pair[1] != i % n + 1) return error.NotSParameterData;
     }

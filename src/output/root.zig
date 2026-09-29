@@ -11,6 +11,8 @@ pub const Format = types.Format;
 pub const Result = types.Result;
 pub const Plot = types.Plot;
 pub const validateQuery = types.validateQuery;
+/// Validates, encodes and atomically replaces one file with one plot.
+pub const write = @import("write.zig").write;
 /// `.meas` results in ngspice's print format.
 pub const printMeasures = @import("measure.zig").print;
 /// `.meas` statistics over Monte Carlo trials.

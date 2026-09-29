@@ -66,6 +66,9 @@ pub const Problem = struct {
     /// One session per `prepared.runs` entry (variants with their own
     /// topology), run after the main session by `run_all`.
     runs: []Run = &.{},
+    /// The deck's file name (`Source` path or origin), which names the
+    /// Touchstone files `.lin format=touchstone` writes beside it.
+    origin: []const u8 = "",
 
     /// Holds the netlist an HSPICE optimization re-evaluates
     /// (`prepared.tuner`); null for a deck without one.
@@ -95,6 +98,10 @@ pub const Problem = struct {
         self.arena = std.heap.ArenaAllocator.init(allocator);
         errdefer self.arena.deinit();
         const a = self.arena.allocator();
+        self.origin = try a.dupe(u8, switch (options.source) {
+            .file => |path| path,
+            .bytes => |bytes| bytes.origin,
+        });
         self.parse_arena = null;
         self.optimization = null;
         // An optimization keeps the parse arena: its tuner re-evaluates the netlist.
@@ -408,9 +415,30 @@ pub const Problem = struct {
                     self.delivery_error = err;
                     return;
                 };
+                const job = session.query(id) catch unreachable;
+                if (job == .sp) if (job.sp.lin) |lin| if (lin.touchstone)
+                    self.writeTouchstone(lin.file, job.sp.ports, .{ .title = deck_title, .result = res }) catch |err| {
+                        self.delivery_error = err;
+                        return;
+                    };
             }
             next_output.* += 1;
         }
+    }
+
+    /// Writes a `.lin format=touchstone` result as `<file>.s<N>p` beside the
+    /// deck, `file` defaulting to the deck's name without its extension
+    /// (HSPICE names it after the netlist). The writer's header states a
+    /// 50 ohm reference, so another port z0 is
+    /// `error.UnsupportedReferenceImpedance`.
+    fn writeTouchstone(self: *Problem, file: []const u8, ports: []const requests.Port, plot: output.Plot) !void {
+        for (ports) |p| if (p.z0 != 50) return error.UnsupportedReferenceImpedance;
+        const stem = if (file.len > 0) file else std.fs.path.stem(self.origin);
+        const name = try std.fmt.allocPrint(self.allocator, "{s}.s{d}p", .{ stem, @max(ports.len, 1) });
+        defer self.allocator.free(name);
+        const path = try std.fs.path.join(self.allocator, &.{ std.fs.path.dirname(self.origin) orelse ".", name });
+        defer self.allocator.free(path);
+        try output.write(self.io, path, .touchstone, plot);
     }
 
     /// `allocator` behind a mutex, so parallel query arenas can share it

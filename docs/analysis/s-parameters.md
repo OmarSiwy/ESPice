@@ -114,6 +114,76 @@ kernel sp(lanes = freq points):
     parallel over (k, p): S[k][p] = wave_ratio(x_p, port k)
 ```
 
+## 5. HSPICE `.lin`
+
+`.lin [noisecalc=0|1|2] [gdcalc=0|1] [format=touchstone] [filename=f]`
+runs as an `.sp` query (`Sp.lin`) over the first `.ac` card's sweep, with
+ports from P elements (`P1 in 0 port=1 z0=50`, read as a V card whose
+`port=` is ngspice's `portnum`; the port voltage is v(n+) - v(n-)). The
+plot is `LIN Analysis`:
+
+| Columns | Meaning |
+|---|---|
+| `S(i,j)`, `Y(i,j)`, `Z(i,j)` | full N-port matrices; with $F = \mathrm{diag}(\sqrt{z_0})$, $Y = F^{-1}(E+S)^{-1}(E-S)F^{-1}$, $Z = F(E-S)^{-1}(E+S)F$ on a small dense complex solve |
+| `H(i,j)` | two-port hybrid parameters of ports 1-2, from the Z of the 2x2 S block (other ports terminated in z0, as HSPICE defines it) |
+| `TD(X(i,j))` | `gdcalc=1`: group delay $-\mathrm{Im}(X'/X)$ of every S, Y, Z and H entry, s |
+| `NFMIN`, `NF`, `RN`, `YOPT`, `GAMMA_OPT` | `noisecalc=1`: two-port noise parameters between ports 1 and 2 (power ratios, ohm, S, reflection against port 1's z0) |
+
+**Group delay** is a central difference at $\omega(1 \pm 10^{-5})$: two more
+frequency lanes per point, solved against the same port drives. The plan
+proposed the exact derivative $dx/d\omega = -A^{-1}(jC)x$; the difference
+was chosen because it also differentiates frequency-dependent stamps
+(`acDyn`: transmission lines), which $jC$ misses, and costs no new solver
+path. Truncation and roundoff are both near $10^{-10}$ relative; the
+fixtures agree with the exact derivative to better than $10^{-6}$
+relative, a matched line's `TD(S(2,1))` with its 1 ns delay included.
+
+**Noise parameters.** One adjoint sweep with a right-hand side per port
+(ports 1 and 2) gives each device generator's transfer to the terminated
+port voltages. The stacked-real transpose solve is $A^H y = e$, so the
+transfer is $\overline{y_p - y_n}$. With every port terminated in its
+noiseless z0 the incident waves vanish and the noise waves are
+$c_k = v_k/\sqrt{z_{0k}}$, so $C_S = \sum_s \mathrm{PSD}_s\, h_s h_s^H$ scaled
+by $1/\sqrt{z_{0i} z_{0j}}$. The short-circuit noise currents are
+$i = -2F^{-1}(E+S)^{-1}c$ (Hillbrand and Russer 1976), and the chain form
+puts $v_n = -i_2/Y_{21}$, $i_n = i_1 - (Y_{11}/Y_{21}) i_2$ at the input.
+With $S_{vv}$, $S_{ii}$, $S_{iv} = \langle i_n v_n^* \rangle$ and
+$4kT_0$ at $T_0 = 290$ K (k is ngspice's CONSTboltz, the devices'):
+$R_n = S_{vv}/4kT_0$,
+$Y_{opt} = (\sqrt{S_{ii}S_{vv} - \mathrm{Im}^2 S_{iv}} - j\,\mathrm{Im}\,S_{iv})/S_{vv}$,
+$F_{min} = 1 + (\mathrm{Re}\,S_{iv} + \sqrt{S_{ii}S_{vv} - \mathrm{Im}^2 S_{iv}})/2kT_0$,
+and NF at $Y_s = 1/z_{01}$.
+
+**Touchstone.** `format=touchstone` (or `touchstone2`) writes
+`<filename or deck name>.s<N>p` beside the deck after the plot is
+published: the S block (Touchstone 1.0, RI, 50 ohm), then for two ports
+the noise block `f NFmin(dB) |Γopt| ∠Γopt RN/50`. `--format=touchstone`
+writes the same file for an `.sp`/`.lin` query, but a `.lin` deck also
+publishes its `.ac` plot, which that format refuses; the side file is the
+route for decks. A port z0 other than 50 ohm is refused
+(`UnsupportedReferenceImpedance`), since the header states 50.
+
+**Oracles** (`tests/fixtures/hspice/lin_*`): analytic. `lin_pad` is the
+matched pi pad (S, Y, Z, H closed forms; a matched pad at 290 K has
+NF = NFMIN = its loss, 4). `lin_rc_noise` is a lossy RC two-port with 50
+and 75 ohm ports: nodal Y with the inner node eliminated, S, Z, H from it,
+group delay from the exact $dY/d\omega$, and the noise parameters by
+Twiss's theorem ($C_Y = 4kT\,\mathrm{Re}\,Y$ for a passive network at one
+temperature) read through the textbook Rn, Gu, Yc route. Its NF matches
+ngspice `.noise` on the same network with a 50 ohm source and a noiseless
+75 ohm load (4.70010 at 1 MHz, ngspice's printed digits). `lin_line` is a
+matched lossless line: $S_{21} = e^{-j\omega t_d}$, group delay $t_d$.
+
+**Divergences from HSPICE**, each a `ponytail:` until a deck needs it:
+
+- A P element is ngspice's port: an ideal source outside the port
+  analyses. HSPICE puts z0 in series in DC and transient too, so a port
+  node that carries bias sits at the source's DC value here.
+- Mixed-mode ports (`P1 inp inn 0 ...`) and `mixedmode2port` other than
+  `ss` are refused; `noisecalc=2` publishes the two-port parameters only;
+  the stability, gain and matching measurements (K, MU, G_MAX, ...) and
+  `.net` are not built; `dataformat` is always RI.
+
 ## Solvers used
 
 | Phase | Solver doc | Impl |
