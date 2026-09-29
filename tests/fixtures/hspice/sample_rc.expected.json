@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "HSPICE .sample folds the output noise spectrum into the sampler's baseband.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "RC thermal noise S(g) = 4kTR/(1+(g/fc)^2), fc = 1/(2 pi R C); sampled at FS with BETA=0 the density at f is the sum of S(|f + k FS|) over 0 < |f + k FS| <= MAXFLD FS."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "samples",
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-05,
+            "atol": 0,
+            "values": [
+              4.05770501183119e-09,
+              4.049798998333057e-09,
+              3.4358606217256204e-09,
+              6.377893757985454e-10
+            ]
+          },
+          "onoise_sampled": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-05,
+            "atol": 0,
+            "values": [
+              4.210845895891516e-09,
+              4.2032583204648745e-09,
+              3.6189594084955944e-09,
+              1.1271289157520813e-09
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            10000.0,
+            100000.0,
+            1000000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "6a450ffdd83fb78c7fee3fe428e5248bcbbcc2cb00dd4ee81b3a6a7c90240072"
+}

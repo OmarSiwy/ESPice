@@ -186,6 +186,56 @@ pub fn sweep(
 /// instance, `onoise_<inst>_<gen>` and `onoise_<inst>` in the spectrum,
 /// `v(onoise_total_<inst>_<gen>)`, `v(inoise_total_<inst>_<gen>)` and the
 /// instance sums in the integrated plot.
+/// The output density at each of `freqs` as a sampler at `s.fs` sees it:
+/// the density at every |f + k fs| up to `s.max_fold * fs`, each weighted
+/// by the integrator's sinc^2(pi g beta / fs), summed. Caller frees with
+/// `gpa`.
+fn sampled(ckt: *root.Circuit, x_op: []const f64, srcs: []const NoiseSource, freqs: []const f64, s: @import("core").query.NoiseSample, opts: Options, gpa: std.mem.Allocator) ![]f64 {
+    const f_top = s.max_fold * s.fs;
+    const k_max: i64 = @intFromFloat(@ceil(s.max_fold) + 1);
+    var grid: std.ArrayList(f64) = .empty;
+    defer grid.deinit(gpa);
+    for (freqs) |f| {
+        var k = -k_max;
+        while (k <= k_max) : (k += 1) {
+            const g = @abs(f + @as(f64, @floatFromInt(k)) * s.fs);
+            if (g > 0 and g <= f_top) try grid.append(gpa, g);
+        }
+    }
+    std.mem.sort(f64, grid.items, {}, std.sort.asc(f64));
+    var unique: usize = 0;
+    for (grid.items) |g| {
+        if (unique != 0 and grid.items[unique - 1] == g) continue;
+        grid.items[unique] = g;
+        unique += 1;
+    }
+    const at = grid.items[0..unique];
+    const work = try gpa.alloc(f64, 3 * unique);
+    defer gpa.free(work);
+    var o = opts;
+    o.sweep = .{ .f_start = if (unique != 0) at[0] else 0, .f_stop = if (unique != 0) at[unique - 1] else 0, .points = @intCast(unique), .kind = .poi, .list = at };
+    o.contributions = false;
+    if (unique != 0) _ = try sweep(ckt, x_op, srcs, work[0..unique], work[unique..][0..unique], work[2 * unique ..], null, o, gpa);
+    const out = try gpa.alloc(f64, freqs.len);
+    for (freqs, out) |f, *total| {
+        total.* = 0;
+        var k = -k_max;
+        while (k <= k_max) : (k += 1) {
+            const g = @abs(f + @as(f64, @floatFromInt(k)) * s.fs);
+            if (!(g > 0 and g <= f_top)) continue;
+            const i = std.sort.lowerBound(f64, at, g, orderF64);
+            const x = std.math.pi * g * s.beta / s.fs;
+            const sinc = if (x == 0) 1 else @sin(x) / x;
+            total.* += work[unique + i] * sinc * sinc;
+        }
+    }
+    return out;
+}
+
+fn orderF64(a: f64, b: f64) std.math.Order {
+    return std.math.order(a, b);
+}
+
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
@@ -245,12 +295,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         };
     }
 
-    const width = n_cols + 3;
+    const folded = if (opts.sample) |s| try sampled(ctx.circuit, x_op, srcs, freqs, s, opts, scratch) else null;
+    defer if (folded) |f| scratch.free(f);
+    const extra: usize = @intFromBool(folded != null);
+    const width = n_cols + 3 + extra;
     const names = try a.alloc([]const u8, width);
     names[0] = "frequency";
     for (columns.labels, names[1 .. 1 + n_cols]) |label, *name| name.* = try std.fmt.allocPrint(a, "onoise_{s}", .{label});
-    names[width - 2] = "onoise_spectrum";
-    names[width - 1] = "inoise_spectrum";
+    names[n_cols + 1] = "onoise_spectrum";
+    names[n_cols + 2] = "inoise_spectrum";
+    if (folded != null) names[width - 1] = "onoise_sampled";
     const data = try a.alloc(f64, @as(usize, n_points) * width);
     for (0..n_points) |i| {
         const row = data[i * width ..][0..width];
@@ -261,8 +315,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             columns.sum(ps.dens[i * srcs.len ..][0..srcs.len], cols);
             for (cols) |*v| v.* = @sqrt(v.*);
         }
-        row[width - 2] = @sqrt(density[i]);
-        row[width - 1] = @sqrt(in_density[i]);
+        row[n_cols + 1] = @sqrt(density[i]);
+        row[n_cols + 2] = @sqrt(in_density[i]);
+        if (folded) |f| row[width - 1] = @sqrt(f[i]);
     }
 
     return .{

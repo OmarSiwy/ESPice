@@ -776,6 +776,30 @@ fn lin(args: []const Value) !requests.Sp.Lin {
     return o;
 }
 
+/// HSPICE `.ptdnoise v(out) TIME=t [TDELTA=dt] <sweep> [LISTFREQ= LISTCOUNT=
+/// LISTFLOOR= LISTSOURCES=]` [CR .PTDNOISE] at the `.sn` fundamental: the
+/// noise density at time t of the period. A TIME sweep or a `.meas` name is
+/// `UnsupportedAnalysisOutput`; TDELTA only feeds HSPICE's strobed-jitter
+/// measure and the LIST keywords its listing, so they are checked and unused.
+fn ptdNoise(ctx: CardContext, args: []const Value, pos: u32, neg: u32) !requests.Pnoise {
+    const f0 = ctx.sn_f0 orelse return error.MissingAnalysisCard;
+    var lower: [16]u8 = undefined;
+    if (args.len < 3 or args[0] != .group or !std.mem.eql(u8, try keyword(args, 1, &lower), "time")) return error.InvalidAnalysisArguments;
+    if (args[2] != .num) return error.UnsupportedAnalysisOutput;
+    const t = try number(args, 2);
+    if (!(t >= 0)) return error.InvalidAnalysisArguments;
+    var k: usize = 3;
+    if (k < args.len and args[k] == .name and std.mem.eql(u8, try keyword(args, k, &lower), "tdelta")) {
+        _ = try positive(args, k + 1);
+        k += 2;
+    }
+    const grid = try acGrid(ctx.arena, args, k);
+    const lists = std.StaticStringMap(void).initComptime(.{ .{"listfreq"}, .{"listcount"}, .{"listfloor"}, .{"listsources"} });
+    var i = grid.end;
+    while (i < args.len) : (i += 2) if (!lists.has(try keyword(args, i, &lower))) return error.InvalidAnalysisArguments;
+    return .{ .out_node = try outputNode(pos), .out_neg = try outputNeg(neg), .sweep = grid.sweep, .f_fundamental = f0, .strobe = t };
+}
+
 /// HSPICE `.trannoise out [METHOD=MC] [SEED=] [SAMPLES=1] [AUTOCORRELATION=]
 /// [FMIN=] [FMAX=] [SCALE=]` [CR .TRANNOISE] over the deck's `.tran`: one
 /// Monte Carlo sample stepped at 1/(2 FMAX), the bandwidth that carries the
@@ -1029,6 +1053,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             // HSPICE `.snnoise v(out) insrc <sweep> [n1 +/-1]` [CR .SNNOISE]
             // at the `.sn` fundamental. Only the n1 = 0 band, the input's
             // own frequency, is the band `.pnoise` measures.
+            if (a.sn and std.ascii.startsWithIgnoreCase(a.line, ".ptdnoise")) return .{ .pnoise = try ptdNoise(ctx, args, node_id, node_neg) };
             if (a.sn) {
                 const f0 = ctx.sn_f0 orelse return error.MissingAnalysisCard;
                 _ = nameAt(args, 1) orelse return error.InvalidAnalysisArguments;

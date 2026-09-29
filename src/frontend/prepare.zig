@@ -214,7 +214,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
-        .queries = try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout),
+        .queries = sampled(try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout), nl.deck.sample),
         .variants = plan.variants,
         .bindings = out.bindings,
         .cards = cards,
@@ -238,6 +238,18 @@ fn nodeRows(arena: std.mem.Allocator, nb: *const builder.NetBuilder, items: []co
         try out.append(arena, .{ .node = row, .value = item.value });
     }
     return out.items;
+}
+
+/// `queries` with HSPICE `.sample` set on every `.noise` spectrum.
+fn sampled(queries: []const Job, sample: ?requests.NoiseSample) []const Job {
+    const s = sample orelse return queries;
+    for (@constCast(queries)) |*q| switch (q.*) {
+        .noise => |*n| if (!n.integrated) {
+            n.sample = s;
+        },
+        else => {},
+    };
+    return queries;
 }
 
 /// `.meas` cards with their strings copied out of the parse arena.
