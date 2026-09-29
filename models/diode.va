@@ -215,11 +215,6 @@ module diode(a, c);
         // 2q|Id|, across (DIOposPrimeNode, DIOnegNode) = (ai, c); RS thermal
         // noise is in the series branch below. Flicker is gated on KF, which
         // ngspice defaults to 0 and this model does not carry.
-        // ponytail: the host derives each generator's PSD from the Jacobian
-        // as 4kT*g (collectNoise), exact for a resistor but 2x high in power
-        // for a junction (4q*Id vs 2q*Id), because VerA tags every
-        // white_noise `.thermal`. Fix via the contract's `noisePsd` hook; all
-        // shot-noise models in the tree share this ceiling.
         I(ai, c) <+ white_noise(2.0 * 1.6021766208e-19 * abs(ihi), "id");
 
         // One junction charge, depletion plus diffusion, in one ddt site:

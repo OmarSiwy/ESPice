@@ -16,10 +16,7 @@
 // by the host (frontend builder addPassive) before the value reaches `r`;
 // declaring them here would apply `scale`/`m` twice.
 //
-// Noise (resnoise.c): thermal S_i = 4kT/R across the terminals. The host
-// derives the PSD from the branch conductance as 4kT*g, which for a linear
-// resistor is the same number; the declaration is what installs the generator.
-//
+// Noise (resnoise.c): thermal S_i = 4kT/R across the terminals.
 // `noisy=0` (ngspice; `noise=0` there and in HSPICE, through the host's
 // alias table in device/bind.zig) turns the generator off.
 //
