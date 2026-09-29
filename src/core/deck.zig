@@ -18,6 +18,37 @@ pub const AcOverride = struct {
     value: f64,
 };
 
+/// Circuit variants over one topology: `.step` and `.data` points, `.alter`
+/// runs and Monte Carlo trials. Variant `v` writes `values[i]` to parameter
+/// `refs[i]` (an index into the circuit's `collectParams` list) for every
+/// `i` in `starts[v]..starts[v + 1]`, then runs at `temp_c[v]` when that is
+/// set. A query runs variant `Tolerances.variant`; the rows are SoA and
+/// `starts` has one entry more than `labels`.
+pub const Variants = struct {
+    /// Plot-name suffix without parentheses: `p=1.5`, `alter=2`, `monte=3`.
+    labels: []const []const u8 = &.{},
+    /// Circuit temperature in °C, or null for the deck's.
+    temp_c: []const ?f64 = &.{},
+    /// The variant's value of the first swept name (the trial number for
+    /// Monte Carlo), the sweep axis of a lane query.
+    axis: []const f64 = &.{},
+    starts: []const u32 = &.{},
+    refs: []const u32 = &.{},
+    values: []const f64 = &.{},
+
+    /// Number of variants (rows).
+    pub fn count(self: Variants) u32 {
+        return @intCast(self.labels.len);
+    }
+
+    /// The parameter writes of variant `v`: `.{ refs, values }`.
+    pub fn writes(self: Variants, v: u32) struct { []const u32, []const f64 } {
+        const lo = self.starts[v];
+        const hi = self.starts[v + 1];
+        return .{ self.refs[lo..hi], self.values[lo..hi] };
+    }
+};
+
 /// Source bindings kept from construction so later analysis directives can
 /// name sources and ports. All rows are post-permutation.
 pub const QueryBindings = struct {
@@ -72,6 +103,7 @@ pub const Deck = struct {
     ac_overrides: []const AcOverride,
     /// `.meas` cards, in deck order, evaluated over finished results.
     measures: []const Measure = &.{},
+    variants: Variants = .{},
 };
 
 /// What a `.meas` card computes, after ngspice com_measure2.c, plus the

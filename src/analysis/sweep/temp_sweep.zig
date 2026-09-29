@@ -53,7 +53,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .t_nom = opts.t_nom };
     const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts);
+    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts, false);
 
     var npoints: usize = 0;
     for (results) |r| npoints += @intFromBool(r.converged);

@@ -93,14 +93,34 @@ pub const Executor = struct {
         self.circuit.solver_execution = .{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads };
         self.circuit.lu_fast = config.lu_fast;
         if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
-        if (queryTemp(job) orelse deck.deck_temp) |temp| if (initial == null) {
-            self.circuit.setCircuitTemp(@floatCast(temp));
-            try self.circuit.recompute();
-        };
+        // A dependent copies its prerequisite's circuit, variant included.
+        if (initial == null) try self.installVariant();
         try self.bindAcOverrides();
         self.controller = Controller.init(io, self, execute, .{ .report_nonlinear = job == .op });
         self.circuit.progress = self.controller.callback();
         return self;
+    }
+
+    /// Writes the query's variant parameters and temperature, then
+    /// re-derives the devices once. A nominal query at the deck temperature
+    /// touches nothing.
+    fn installVariant(self: *Executor) !void {
+        const variant = queryVariant(self.job);
+        var dirty = false;
+        if (variant) |v| {
+            const refs, const values = self.deck.variants.writes(v);
+            if (refs.len != 0) {
+                const params = try self.circuit.collectParams();
+                for (refs, values) |r, value| params[r].set(value);
+                dirty = true;
+            }
+        }
+        const variant_temp = if (variant) |v| self.deck.variants.temp_c[v] else null;
+        if (queryTemp(self.job) orelse variant_temp orelse self.deck.deck_temp) |temp| {
+            self.circuit.setCircuitTemp(@floatCast(temp));
+            dirty = true;
+        }
+        if (dirty) try self.circuit.recompute();
     }
 
     fn bindAcOverrides(self: *Executor) !void {
@@ -213,12 +233,14 @@ pub const Executor = struct {
             .source_node = self.deck.source_node,
             .source_branch = self.deck.source_branch,
             .ac_drive = self.deck.ac_drive,
+            .variants = self.deck.variants,
             .allocator = self.results.allocator(),
             .scratch_allocator = self.allocator,
         };
         var res = try run(&run_ctx, self.job);
         // Copies of one card at several temperatures keep apart by name.
         if (queryTemp(self.job)) |temp| res.plotname = try std.fmt.allocPrint(self.results.allocator(), "{s} (temp={d})", .{ res.plotname, temp });
+        if (queryVariant(self.job)) |v| res.plotname = try std.fmt.allocPrint(self.results.allocator(), "{s} ({s})", .{ res.plotname, self.deck.variants.labels[v] });
         return res;
     }
 
@@ -273,6 +295,12 @@ const gpu_lu_min_n = 10_000;
 fn queryTemp(job: requests.Query) ?f64 {
     return switch (job) {
         inline else => |o| o.tol.temp_c,
+    };
+}
+
+fn queryVariant(job: requests.Query) ?u32 {
+    return switch (job) {
+        inline else => |o| o.tol.variant,
     };
 }
 
