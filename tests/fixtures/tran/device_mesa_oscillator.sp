@@ -16,6 +16,11 @@ ci 3 0 20f
 .ends mesinv
 
 .options noacct
+* The oracle is the converged waveform (reltol=1e-7, tmax 0.02 ps). At the
+* default options the ring runs 1.1% slow and the trapezoid rule rings
+* +-1.9 uA in i(vnoise) where the gate current is nA, in ngspice and espice
+* alike; these options put both within 0.1x of the converged voltages.
+.options reltol=1e-7 chgtol=1e-20 trtol=1
 .model driver nmf level=2 n=1.44 rd=20 rs=20 vs=1.9e5
 + mu=0.25 d=1e-7 vto=0.15 m=2 lambda=0.15 sigma0=0.02
 + vsigmat=0.5
