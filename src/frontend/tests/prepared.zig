@@ -91,6 +91,10 @@ test "analysis directives dispatch every implemented capability and reject malfo
             return error.AcceptedInvalidAnalysis;
         } else |_| {}
     }
+    // `.lstb` without its own sweep takes the deck's `.ac` grid, and needs one.
+    const bare = try card(a, ".lstb mode=single vsource=vin");
+    try std.testing.expectEqual(@as(f64, 100), (try analyses.buildJob(bare, sources, cards, ctx)).?.lstb.sweep.f_stop);
+    try std.testing.expectError(error.MissingAnalysisCard, analyses.buildJob(bare, sources, cards, .{ .arena = a }));
     // HB and QPSS drive from whatever sources the deck stamps, current ones
     // included, so a deck without a V card is valid.
     const no_v: core.QueryBindings = .{ .v_names = &.{}, .i_names = &.{}, .v_branches = &.{}, .v_pos = &.{}, .v_neg = &.{}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{}, .ports = &.{} };
