@@ -229,11 +229,7 @@ fn findDecks(a: Allocator, io: Io, root: []const u8, filter: []const u8) ![]cons
         if (std.mem.indexOf(u8, entry.path, ".assets/") != null or !matches(entry.path, filter)) continue;
         try paths.append(a, try a.dupe(u8, entry.path));
     }
-    std.mem.sort([]const u8, paths.items, {}, struct {
-        fn less(_: void, x: []const u8, y: []const u8) bool {
-            return std.mem.lessThan(u8, x, y);
-        }
-    }.less);
+    std.mem.sort([]const u8, paths.items, {}, lessStr);
     return paths.items;
 }
 
@@ -441,11 +437,7 @@ fn vacaskPlots(io: Io, a: Allocator, path: []const u8) ![]const compare.Plot {
     while (try it.next(io)) |entry| if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".raw")) {
         try names.append(a, try a.dupe(u8, entry.name));
     };
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn less(_: void, x: []const u8, y: []const u8) bool {
-            return std.mem.lessThan(u8, x, y);
-        }
-    }.less);
+    std.mem.sort([]const u8, names.items, {}, lessStr);
     var plots: std.ArrayList(compare.Plot) = .empty;
     for (names.items) |name| {
         const raw = try dir.readFileAlloc(io, name, a, .unlimited);
@@ -453,6 +445,10 @@ fn vacaskPlots(io: Io, a: Allocator, path: []const u8) ![]const compare.Plot {
     }
     if (plots.items.len == 0) return error.MissingRaw;
     return plots.toOwnedSlice(a);
+}
+
+fn lessStr(_: void, x: []const u8, y: []const u8) bool {
+    return std.mem.lessThan(u8, x, y);
 }
 
 test "a vendor run writes only a vendor-*.md report" {
