@@ -3,7 +3,10 @@
 //! their step by ticket, so a block that starts late never holds a step an
 //! earlier one waits on), the solves' heads `arp_lu_lhead`/`arp_lu_uhead`
 //! (one block per run of rows, by ticket the same way) and their tails
-//! `arp_lu_ltail`/`arp_lu_utail` (one block of `solve_block` lanes each). The bodies are `lu_kernels.zig`'s, shared with the host threads.
+//! `arp_lu_ltail`/`arp_lu_utail` (one block of `solve_block` lanes each).
+//! The bodies are `lu_kernels.zig`'s, shared with the host threads. In: the
+//! tables and values the host uploads. Out: the factors and solutions in
+//! device memory.
 
 const gompute = @import("gompute");
 const lu = @import("lu_kernels.zig");

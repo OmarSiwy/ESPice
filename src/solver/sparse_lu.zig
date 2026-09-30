@@ -1,7 +1,12 @@
 //! Left-looking Gilbert-Peierls sparse LU with threshold partial pivoting,
 //! a numeric refactor that replays the frozen pattern and pivot sequence,
 //! and forward/transpose solves. The caller supplies the column ordering.
-//! Background: dev/solvers/gilbert-peierls-lu.md, klu-pipeline.md.
+//! In: a CSC pattern, its values and a column order. Out: L, U and the
+//! pivot sequence, and solutions of A x = b and A^T x = b.
+//! Background: dev/solvers/gilbert-peierls-lu.md, klu-pipeline.md,
+//! refactor-tape-2026-09.md, gpu-lu.md (the census); KLU's threshold
+//! pivoting; ngspice Sparse 1.3 spfactor.c (ExchangeRowsAndCols, the row
+//! exchange the scaled pivot and the want hand-off stand in for); #45.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -868,8 +873,9 @@ pub const SparseLu = struct {
 
     /// Numeric refactor: the last factor's pattern and pivot sequence,
     /// new values, no allocation. Fails when a pivot is zero or
-    /// non-finite, falls below `growth_limit` times its column max, or a
-    /// fabricated pivot's row or column turned nonzero; the caller then
+    /// non-finite, falls below `growth_limit` times its column max (steps in
+    /// `scaled_pivot` excepted; 0 disables the test), or a fabricated
+    /// pivot's row or column turned nonzero; the caller then
     /// runs a full `factor`, and the old factors are unusable until it
     /// does. Asserts that a `factor` has succeeded and that `col_ptr` and
     /// `vals` cover its pattern. Allocates nothing and leaves `w` all-zero

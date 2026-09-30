@@ -1,6 +1,8 @@
 //! O(n) Thomas solver for tridiagonal patterns (RC ladders, chains).
 //! No pivoting: a pivot threshold pivoting would not keep fails the factor
-//! and `direct` demotes the system to the pivoting sparse LU.
+//! and `direct` demotes the system to the pivoting sparse LU (#45).
+//! In: a tridiagonal CSC pattern and its values. Out: solutions of A x = b
+//! and A^T x = b.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -103,7 +105,7 @@ pub const TriDiag = struct {
     /// non-finite, or below `pivot_tol` times the entry under it: the test
     /// threshold partial pivoting would keep the diagonal by, so the sparse
     /// LU `direct` demotes to pivots where Thomas cannot (#45). The factors
-    /// are then unusable.
+    /// are then unusable. Asserts that `pivot_tol` is not negative.
     pub fn factor(self: *Self, vals: []const f64, pivot_tol: f64) FactorError!void {
         const n = self.n;
         assert(n >= 3);

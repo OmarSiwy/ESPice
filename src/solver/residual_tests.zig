@@ -184,11 +184,12 @@ fn permuteRows(r: std.Random, sys: System, groups: []const [2]u32) void {
 /// Factors through `direct.Solver`, solves both ways for two right-hand
 /// sides, then perturbs every nonzero by up to 25% and factors again, which
 /// replays the first factor's pivots (the LU falls back to a full factor
-/// when its growth check refuses). Thomas keeps no pivots, so its second
-/// pass would only leave the dominant family it is stable on (a perturbed
-/// SPD ladder at κ 1e4 measured 105; Thomas has no growth check) and is
-/// skipped. Returns the worst ratio of all passes. `null` when the solver reports a matrix singular, which the
-/// caller allows only past κ = 1/eps. Fails unless `engine` picked the
+/// when its growth check or its replay probe refuses). Thomas keeps no
+/// pivots, so its second pass would only leave the dominant family it is
+/// stable on (a perturbed SPD ladder at κ 1e4 measured 105; Thomas has no
+/// growth check) and is skipped. Returns the worst ratio of all passes.
+/// `null` when the solver reports a matrix singular, which the caller
+/// allows only past κ = 1/eps. Fails unless `engine` picked the
 /// pattern and solved both passes on it, or, when `demoted` is given, on
 /// the general LU it demoted to, which sets `demoted` and ends the passes.
 fn certify(gpa: Allocator, r: std.Random, sys: System, info: ?num.BbdInfo, engine: std.meta.Tag(direct.Engine), demoted: ?*bool) !?f64 {

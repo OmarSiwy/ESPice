@@ -2,6 +2,12 @@
 //! for small circuits and sparse above. The sparse 2n pattern is derived once
 //! from the circuit CSC, so each frequency's fill is a streamed copy of the G
 //! and C planes. Batches of frequencies run as SIMD lanes through LaneLu.
+//!
+//! In: a circuit's G and C planes (or a dense G and C) and right-hand sides
+//! per ω. Out: stacked-real solutions, real parts then imaginary. Cites
+//! dev/solvers/overview.md and dev/solvers/gilbert-peierls-lu.md ("Two
+//! replay thresholds", #44); #43 (held singular ω in `factorEach`), #83
+//! (allocation failure is not a numerical one).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -268,8 +274,9 @@ pub const FreqSolver = struct {
 
     /// Factors A(ω) = G + jωC and solves one stacked right-hand side; `rhs`
     /// and `x_out` are 2n long and may alias. Fails with `error.Singular`
-    /// (dense) or `error.SingularMatrix` (sparse) on a singular A(ω),
-    /// leaving `x_out` untouched. Asserts that both slices hold 2n entries.
+    /// (dense) or `error.SingularMatrix` (sparse) on a singular A(ω), or
+    /// `OutOfMemory`, leaving `x_out` untouched and no usable factor. Asserts
+    /// that both slices hold 2n entries.
     pub fn solve(self: *Self, omega: f64, rhs: []const f64, x_out: []f64) !void {
         assert(rhs.len >= self.nn);
         assert(x_out.len >= self.nn);
@@ -340,9 +347,12 @@ pub const FreqSolver = struct {
     /// solution for A^T's (|x| is the same either way). The dense
     /// strategy, a non-LU engine and any lane whose refactor fails take the
     /// per-ω scalar path. The scalar factorization afterwards holds some ω
-    /// of the batch. Allocates the lane planes on first use. Asserts that
-    /// `rhs` is a positive multiple of 2n long, that `x_out` holds
-    /// `omegas.len` times that, and that `dyn` has one term per entry per ω.
+    /// of the batch. Allocates the lane planes on first use. Fails with
+    /// `error.Singular` or `error.SingularMatrix` when an ω the scalar path
+    /// takes is singular, with some ω's rows of `x_out` already written.
+    /// Asserts that `rhs` is a positive multiple of 2n long, that `x_out`
+    /// holds `omegas.len` times that, and that `dyn` has one term per entry
+    /// per ω.
     pub fn solveBatch(self: *Self, omegas: []const f64, dyn: Dyn, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
         const nn: usize = self.nn;
         const m = rhs.len;

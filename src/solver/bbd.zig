@@ -12,6 +12,11 @@
 //! which keeps two factors of the same values byte-identical. Every factor
 //! is a full dense factor; there is no pivot replay. Row/col 0 (ground)
 //! sits outside every block and joins the border.
+//!
+//! In: a CSC pattern and `numerics.BbdInfo`, then values per factor. Out:
+//! the factor and solves with A and A^T, plus the Schur growth that
+//! `direct.zig` reads to refine or demote (#136). Cites no ngspice source:
+//! ngspice factors every matrix with its general sparse LU.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -21,8 +26,10 @@ const dense_lu = @import("dense_lu.zig");
 const Allocator = std.mem.Allocator;
 const NONE: u32 = std.math.maxInt(u32);
 
-/// `NotApplicable`: the split is unprofitable under `Limits`, or some CSC
-/// entry couples two blocks (the builder never emits one).
+/// `NotApplicable`: the split is unprofitable under `Limits`, the blocks
+/// overlap or leave a node outside both the blocks and the border, some CSC
+/// entry couples two blocks (the builder never emits one), or the arena
+/// outgrows u32 offsets.
 pub const InitError = error{ NotApplicable, OutOfMemory };
 
 /// Activation thresholds. The defaults are the production gates; tests relax
@@ -274,9 +281,10 @@ pub const Bbd = struct {
 
     /// Full numeric factor of `vals` (CSC order). Block factors may run
     /// on `execution.io`; the Schur reduction is always serial in block
-    /// order, so the result does not depend on the schedule. Fails when a
-    /// block or S is singular; the arena is then unusable until the next
-    /// successful factor. Asserts one value per pattern entry.
+    /// order, so the result does not depend on the schedule. Sets `growth`
+    /// unless a block is singular. Fails when a block or S is singular; the
+    /// arena is then unusable until the next successful factor. Asserts one
+    /// value per pattern entry.
     pub fn factorWithExecution(self: *Self, vals: []const f64, execution: num.Execution) error{SingularMatrix}!void {
         assert(vals.len == self.dst.len);
         simdZero(self.arena);

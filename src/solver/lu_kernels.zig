@@ -698,8 +698,8 @@ const HostFactor = struct {
     }
 
     /// Refactors `a` (A's values in CSC order) on the caller plus
-    /// `threads - 1` tasks of `io` (none when null). False when a pivot
-    /// test fails; the factors are then unusable.
+    /// `threads - 1` tasks of `io`, at most 15 (none when null). False when
+    /// a pivot test fails; the factors are then unusable.
     pub fn refactor(self: *Self, a: []const f64, io: ?std.Io, threads: u32) bool {
         assert(self.sync.len == self.tb.tab.syncLen());
         assert(self.val.len == self.tb.tab.n_val);
@@ -739,8 +739,9 @@ pub const HostRefactor = struct {
         self.f.deinit(gpa);
     }
 
-    /// `lu.refactor(col_ptr, vals, growth)` on the caller plus
-    /// `threads - 1` tasks of `io`, then the factors copied into `lu`.
+    /// `lu.refactor(col_ptr, vals, growth)`, with the `growth` `init` got,
+    /// on the caller plus `threads - 1` tasks of `io` (at most 15), then the
+    /// factors copied into `lu`.
     /// Fails exactly when `refactor` would, and `lu`'s factors are then
     /// unusable, as after a failed `refactor`. Asserts that `lu` is factored
     /// on the epoch the tables were built from.

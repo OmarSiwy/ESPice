@@ -2,6 +2,7 @@
 //! small dense f64 systems: HB/PSS Jacobians, BBD blocks and the dense AC
 //! path. Matrices are n x n, row-major, stride n. From n = 40 elimination
 //! runs in rank-8 panels; the unblocked loops are its bitwise oracle.
+//! Cites LAPACK's dgetrf pivot convention and #160 (`pinVoid`).
 
 const std = @import("std");
 const assert = std.debug.assert;

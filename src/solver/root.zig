@@ -1,5 +1,6 @@
-//! Linear and nonlinear solvers. Imports only `core`; `analysis` is the only
-//! module build.zig wires it into. The re-exports below are the module's API;
+//! Linear and nonlinear solvers. Imports only `core` (and stdpp, the std
+//! extension every host module gets); `analysis` is the only module
+//! build.zig wires it into. The re-exports below are the module's API;
 //! the engines behind `direct` (sparse_lu, tridiag, bbd, order) and
 //! `freq_solve` (lane_lu) are reached through those two.
 pub const direct = @import("direct.zig");
