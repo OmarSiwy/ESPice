@@ -2,6 +2,9 @@
 //! and runtime-loaded `.so` devices: construction (`Proto`, `PatternBuilder`),
 //! the frozen per-type `Batch` with its `Hooks`, and the `DeviceVtable`.
 //! Everything that crosses a separately compiled boundary is in `layoutHash`.
+//! Cites VerA's device contract (`contract`: `SimState`, `StateCtlOp`, noise
+//! terms), the LRM sections named on each hook, and ngspice's nevalsrc.c for
+//! the noise row shape; dev/devices/abi.md records why each ABI version moved.
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("contract");
@@ -132,8 +135,8 @@ pub const NoiseGen = struct { row: usize, col: usize, kind: NoiseGenKind };
 pub const PsdTerm = contract.PsdTerm;
 
 /// The value planes one eval pass stamps into. The serial path points them at
-/// the circuit's own slices; each ParEval lane gets private slabs, reduced
-/// afterwards.
+/// the circuit's own slices; ParEval points them at each batch's window of its
+/// staging arrays and calls `Hooks.stage`.
 pub const Planes = struct {
     g_vals: []f64,
     c_vals: []f64,
@@ -160,9 +163,9 @@ pub const ScatterTapes = struct {
 };
 
 /// One device type's frozen batch, made by `Proto.finalize`. `eval` and
-/// `eval_newton` stamp instances `[first, last)` into the given planes, so the
-/// same entry serves the serial path and a ParEval lane; `eval_newton` skips
-/// a constant Jacobian half. Both assert `first <= last <= count`.
+/// `eval_newton` add the stamps of instances `[first, last)` into the given
+/// planes; `eval_newton` skips a constant Jacobian half. ParEval stamps
+/// through `Hooks.stage` instead. Both assert `first <= last <= count`.
 pub const Batch = struct {
     // hot
     ctx: *anyopaque,
@@ -251,11 +254,17 @@ pub const Hooks = struct {
     stage: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64, StampMode) void,
     /// The batch's scatter tapes: plane cell of every staged position.
     scatter_tapes: *const fn (*anyopaque) ScatterTapes,
+    /// Runs the device's `limit` on every instance at x, against x_old (the
+    /// previous limited value once limiting is active), into the batch's lim
+    /// plane, which later evals read; x itself is not written. Turns limiting
+    /// on. Returns true when any instance reports its clamp not converged.
     apply_limits: ?*const fn (*anyopaque, []f64, []const f64) bool = null,
+    /// Turns limiting off, so the next eval reads x unlimited.
     clear_limits: ?*const fn (*anyopaque) void = null,
     /// Advances Newton-history state between evaluated iterates, given the
     /// previous x.
     advance_iteration: ?*const fn (*anyopaque, []const f64) void = null,
+    /// False when any instance's own convergence test fails at x.
     check_convergence: ?*const fn (*anyopaque, []const f64) bool = null,
     /// Overwrites the batch's internal voltage unknowns in `trial`, the
     /// transient's first Newton iterate, with `cur + xfact * (cur - prev)`:
@@ -268,6 +277,8 @@ pub const Hooks = struct {
     /// `Circuit.loadCheck`); every device current into those rows is the
     /// model's own.
     mark_load_check_rows: ?*const fn (*anyopaque, mask: []bool) void = null,
+    /// Fills the lim plane from the device's `seed` values, x where it gives
+    /// none, and turns limiting on. Reads x only.
     seed: ?*const fn (*anyopaque, []f64) void = null,
     /// Writes each LRM §4.5.4 `idt` initial condition into its operator
     /// unknown in `x`, for a transient that skips the operating point
@@ -275,6 +286,8 @@ pub const Hooks = struct {
     /// static form, so the host sets a static sim state (dt = 0) first. An
     /// idt without ic keeps its value.
     seed_ic: ?*const fn (*anyopaque, []f64) void = null,
+    /// Sets `mask[row]` for each branch-current unknown, unless the same row
+    /// is also one of the instance's voltage unknowns.
     mark_current_rows: ?*const fn (*anyopaque, []bool) void = null,
     /// Runs `updateState` at x once per converged solve; returns the earliest
     /// requested rejection time, if any. `state_ctl(.revert)` takes it back
@@ -307,6 +320,7 @@ pub const Hooks = struct {
     /// next step, or `inf`. Valid after `updateState` has run for the
     /// accepted step.
     bound_step: ?*const fn (*anyopaque) f64 = null,
+    /// The earliest model or instance breakpoint strictly after t, or null.
     next_breakpoint: ?*const fn (*anyopaque, f64) ?f64 = null,
     /// The first instance with a latched VerA `$fatal`/`$error`
     /// (`vera_status__`): writes its `contract.formatStatus` text into `msg`,
@@ -334,6 +348,9 @@ pub const Hooks = struct {
     /// `acceptQ`: no charge, or it calls `$vera_reject_step`, whose request
     /// a charge return cannot carry. The host then calls the two hooks.
     accept_q: ?*const fn (*anyopaque, *const Planes, u32, u32, []const f64) void = null,
+    /// Appends a `ParamRef` for every sweepable field of every instance and
+    /// Model row. First gives every instance its own Model row, so a
+    /// `GpuPayload.models` slice taken before the call is stale.
     collect_params: *const fn (*anyopaque, std.mem.Allocator, *std.ArrayList(ParamRef)) DeviceResult(void),
     /// Appends every declared noise generator with its PSD at x. Temperature
     /// is the instance's own, already applied by the device.
@@ -361,7 +378,11 @@ pub const Hooks = struct {
     /// GPU-eligible, in which case the launcher keeps the whole circuit on
     /// the CPU.
     gpu_payload: ?*const fn (*anyopaque) GpuPayload = null,
+    /// Rewrites every Model row as the device's `attempt` at the given
+    /// homotopy factor, from a copy saved on the first call, and reruns
+    /// `setup`/`precompute`.
     apply_attempt: ?*const fn (*anyopaque, f64) void = null,
+    /// Puts back the rows `apply_attempt` saved; a no-op before it ran.
     restore_models: ?*const fn (*anyopaque) void = null,
     deinit: *const fn (*anyopaque, std.mem.Allocator) void,
 };
@@ -521,15 +542,19 @@ pub const PatternBuilder = struct {
     }
 };
 
-/// The halves of `arp_lim_<model>` one launch runs: bits of its `halves`
-/// argument.
+/// Bit of `arp_lim_<model>`'s `halves` argument that runs `limit` into the
+/// lim plane. The launcher sets it once per Newton iterate.
 pub const lim_pass_limit: u64 = 1;
+/// Bit of `halves` that runs `updateState`. The launcher sets it once per
+/// converged solve, at the converged x, never with `lim_pass_limit` (#15).
 pub const lim_pass_state: u64 = 2;
 
 /// One batch's GPU-resident working set, type-erased. Frozen for the solve:
 /// the launcher uploads it once and afterwards moves only x in and the value
-/// planes out per Newton iteration. `models`/`instances` change only when a
-/// sweep writes a parameter.
+/// planes out per Newton iteration. `models` changes only when a sweep writes
+/// a parameter; a host-stepped batch's `instances` also change at each host
+/// state step, and the launcher re-uploads them (`GpuContext.pushStepped`).
+/// The slices stay owned by the batch.
 pub const GpuPayload = struct {
     /// `arp_eval_<model>`.
     kernel: []const u8,
@@ -554,9 +579,9 @@ pub const GpuPayload = struct {
     slots: []const u32,
     /// `arp_lim_<model>`, or "" when the device has no state kernel.
     lim_kernel: []const u8,
-    /// The state kernel's `updateState` writes §5.10 held variables: run its
-    /// state half once per converged solve, never per Newton iterate, which
-    /// would latch an iterate. Its limit half still runs per iterate.
+    /// The state kernel's `updateState` writes §5.10 held variables. The
+    /// launcher no longer reads it: since #15 every state kernel runs its
+    /// state half once per converged solve and its limit half per iterate.
     held: bool,
     /// `arp_ctl_<model>`, or "" when the device has no accepted-step latch.
     ctl_kernel: []const u8,

@@ -1,6 +1,7 @@
 //! The device module: the build-time model catalog, runtime HDL loading, the
 //! per-Problem `Library` of device types, and the frozen `Circuit`. `abi` is
 //! the neutral device ABI; eval.zig implements it for every device type.
+//! Cites nothing: it only re-exports.
 /// The neutral device ABI (abi.zig), shared with every device object.
 pub const abi = @import("device_abi");
 /// The frozen circuit `Circuit.freeze` builds from the protos.

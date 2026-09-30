@@ -4,6 +4,8 @@
 //! register. Loaded libraries are never unloaded, so a vtable stays valid for
 //! the life of the process. The loader never sees the `Library`: it reads the
 //! names already loaded and returns values.
+//! Cites VerA's diagnostics it forwards (E1103, E1104, E0515), LRM 2.4 for the
+//! comments the cache key strips, and #102 for display tasks in a loaded model.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -468,7 +470,8 @@ pub const Result = Error!?Prepared;
 /// Compiles and opens every file in `files` in parallel into `results`
 /// (parallel to `files`), skipping modules named in `loaded` (lowercased, as
 /// `Library.names` holds them). Registers nothing: the caller walks `results`
-/// in order. Fails only when the task group is canceled.
+/// in order. Fails only when the task group is canceled. Asserts that
+/// `results` has one entry per file.
 pub fn prepareAll(gpa: std.mem.Allocator, io: std.Io, files: []const []const u8, loaded: []const []const u8, paths: BuildPaths, results: []Result) std.Io.Cancelable!void {
     std.debug.assert(results.len == files.len);
     var group: std.Io.Group = .init;

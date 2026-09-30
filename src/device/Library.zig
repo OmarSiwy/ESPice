@@ -1,7 +1,8 @@
 //! Every device type one Problem can instantiate, built-in or runtime-loaded,
 //! under one dense `DeviceType` id. Built-ins take ids [0, builtin_count) in
 //! catalog order, so their ids are comptime-known (`builtin`); each loaded
-//! HDL module appends one.
+//! HDL module appends one. Cites #13 for the embedder's toolchain paths; the
+//! loading itself is loader.zig.
 const std = @import("std");
 const abi = @import("device_abi");
 const catalog = @import("catalog.zig");
@@ -140,9 +141,11 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
     return @fromBackingInt(@intCast(self.names.items.len - 1));
 }
 
-/// Why `load` failed: `RuntimeHdlUnsupported` on wasm, `TooManyDeviceTypes`
-/// when the id space is full, or the first file's `loader.Error` in `files`
-/// order. Files before the failing one stay registered; none after it are.
+/// Why `load` failed: `RuntimeHdlUnsupported` on wasm, `HdlShareNotFound`
+/// when `toolchain.share` holds no evaluator sources, `TooManyDeviceTypes`
+/// when the id space is full, out of memory, a canceled task group, or the
+/// first file's `loader.Error` in `files` order. Files before the failing one
+/// stay registered; none after it are.
 pub const LoadError = error{ RuntimeHdlUnsupported, HdlShareNotFound, TooManyDeviceTypes } || std.mem.Allocator.Error || std.Io.Cancelable || loader.Error;
 
 /// Compiles, opens and registers each HDL source not loaded yet (loader.zig).

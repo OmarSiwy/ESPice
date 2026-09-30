@@ -2,6 +2,11 @@
 //! devices: forward-mode AD scalars, the per-type SoA batch behind the
 //! `Batch`/`Hooks` ABI, and the one `evalRange` body both backends run.
 //! Also the build root of every per-model object, GPU image and HDL `.so`.
+//! Cites VerA's device contract (`contract`) and the Verilog-AMS LRM
+//! sections named at each use; ngspice's hfetload.c, mesaload.c,
+//! hfet2load.c, vsrcacct.c, isrcacct.c, nevalsrc.c and the `*trunc.c` LTE
+//! routines where a host rule reproduces them; dev/devices/abi.md and
+//! dev/devices/gpu-evaluation.md for the ABI and the GPU path.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -1513,7 +1518,8 @@ fn idtUnknowns(comptime D: type) []const u32 {
 /// Whether the host reads D's live per-instance timer schedule
 /// (`pendingBreakpoint`, which holds §5.10.3.3 start times computed during
 /// the solve). Not for timer-only models, whose `updateState` never runs so
-/// `__next` is stale, nor for GPU-resident types, whose host Instance is.
+/// `__next` is stale, nor for types whose state the GPU steps
+/// (`hasCtlKernel`), whose host Instance is. A host-stepped type walks.
 fn walksPending(comptime D: type) bool {
     return @hasDecl(D, "pendingBreakpoint") and !skipsTimerState(D) and !hasCtlKernel(D);
 }
@@ -2077,7 +2083,7 @@ pub fn DeviceBatch(comptime D: type) type {
         }
 
         /// VerA's `setup` once per Model row (the solve-invariant cache and
-        /// the temperature live on the row, device ABI 6), then
+        /// the temperature live on the row, VerA device ABI 6), then
         /// `setupInstance` for every instance that caches from its row.
         fn setupRows(self: *Self) void {
             if (comptime @hasDecl(D, "setup")) for (self.models) |*m| D.setup(Real, m);
@@ -2181,7 +2187,7 @@ pub fn DeviceBatch(comptime D: type) type {
             if (isVera(D) and T == D.Instance) {
                 // A VerA Instance holds runtime state; only `mfactor` is a
                 // parameter (the temperature is the Model row's
-                // `temperature__`, device ABI 6).
+                // `temperature__`, VerA device ABI 6).
                 if (!std.mem.eql(u8, field_name, "mfactor")) return false;
             }
             const dflt = @field(T{}, field_name);
@@ -2427,7 +2433,8 @@ fn isVera(comptime D: type) bool {
 ///   evaluation, unless the status latch is their only eval write
 ///   (`statusOnlyMutable`);
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
-///   `limiter_previous` the host advances on its own Instance copy;
+///   `limiter_previous` the host advances on its own Instance copy.
+///
 /// `State` without `limit` that VerA does not declare `.path_latch` (the
 /// `.history` class: switches, delay lines, Laplace and pole filters) is
 /// admitted host-stepped (`gpuHostStepped`).
@@ -2435,9 +2442,9 @@ fn isVera(comptime D: type) bool {
 /// what `StateKernel` and `CtlKernel` run on the device: `updateState`
 /// stages `wb__/wq__`, `stateCtl` commits them into the `pb__/pq__` latches
 /// eval reads. A held device's `State` is that latch plus its held
-/// variables, all in the resident Instance; its `StateKernel` runs the
+/// variables, all in the resident Instance. Every `StateKernel` runs the
 /// limit half per iterate and the state half once per converged solve
-/// (`GpuPayload.held`), so no Newton iterate is latched. `SimState` is a
+/// (#15), so no Newton iterate is latched. `SimState` is a
 /// kernel argument, so a core that reads `analysis()` or `$abstime` (the
 /// Meyer MOS models, jfet2) runs resident too.
 // ponytail: the State-with-limit rule is decl correlation, not proof;
@@ -2552,8 +2559,8 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, comp
         c_vals: gompute.GlobalPtr(f64),
         rhs: gompute.GlobalPtr(f64),
         q_vec: gompute.GlobalPtr(f64),
-        /// The lim plane (count * n_u). Undefined, and never read, when D has
-        /// no `limit`.
+        /// The lim plane (`count * LimMap(D).k`). Undefined, and never read,
+        /// when D has no `limit`.
         lim_: gompute.GlobalPtr(f64),
         /// `x_old`; read only by `limitRange`.
         xo: gompute.GlobalPtr(f64),
@@ -2703,11 +2710,9 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
 }
 
 /// GPU limit and state-latch kernel, one thread per instance: the device side
-/// of `applyLimits` followed by `updateState`. `halves` (`ir.lim_pass_*`
-/// bits) picks which run: both per Newton iterate, fused because the
-/// converger runs the two back to back at the same x, or for a held batch
-/// (`GpuPayload.held`) the limit per iterate and the state once per
-/// converged solve, as the host does.
+/// of `applyLimits` and of `updateState`. `halves` (`ir.lim_pass_*` bits)
+/// picks which run; the launcher runs the limit half per Newton iterate and
+/// the state half once per converged solve, as the host does (#15).
 ///
 /// Sets bit 0 of `flags[0]` when a clamp reports not converged, and bit 1
 /// when an `updateState` returns anything but `.ok`, which the launcher
