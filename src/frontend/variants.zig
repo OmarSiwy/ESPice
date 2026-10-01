@@ -80,7 +80,13 @@ pub fn plan(p: *Planner) !Plan {
                     try p.addRow(table, table.values[row * cols ..][0..cols]);
                 if (lanes) span.lanes = .{ .axis = table.labels[0], .dc_plot = true };
             },
-            .monte => |m| {
+            .monte => |m| if (m.list.len != 0) {
+                // A listed trial t is trial t of a `MONTE=max` run, Latin
+                // hypercube stratum included.
+                var sampler = try Sampler.init(p.scratch, deck.config, std.mem.max(u32, m.list));
+                for (m.list) |t| try p.addTrial(&sampler, t, t - 1);
+                if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };
+            } else {
                 var sampler = try Sampler.init(p.scratch, deck.config, m.n);
                 for (0..m.n) |k| try p.addTrial(&sampler, m.first + @as(u32, @intCast(k)), @intCast(k));
                 if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };

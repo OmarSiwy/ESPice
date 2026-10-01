@@ -12,10 +12,12 @@ vacask-comparison G1) and statistical Monte Carlo (C3, G2).
 | `.step temp ...`, `.step <source> ...` | the same over the temperature or a card's primary value (`dc`, `r`, `c`, `l`) | as above |
 | several `.step` cards | cartesian product; the **last card varies fastest** | |
 | `.data d p1 p2 ... .enddata` (inline) | a table; columns are `.param` names, sources/elements or `temp` | |
+| `.data d MER\|LAM FILE=f p=col ... .enddata` (external) [CR .DATA] | the same table read from files: `MER` stacks their rows, and a file keeps the previous file's column for a name it does not give; `LAM` puts them side by side, row for row. A value a file lacks is 0. Data files hold blank- or comma-separated numbers, one row per line; a path resolves against the file that names it | |
 | `<analysis> ... SWEEP DATA=d` | that card once per row | one per row |
 | `<analysis> ... SWEEP p a b x`, `SWEEP p lin\|dec\|oct\|poi ...` | that card once per point | one per point |
 | `.dc DATA=d` | the rows as one DC sweep (first column is the axis) | one lane query |
 | `<analysis> ... SWEEP MONTE=n [FIRSTRUN=k]` | the nominal run, then trials k..k+n-1 | nominal plus n |
+| `SWEEP MONTE=list(a b:c ...)` [CR .DC] | the nominal run, then exactly the listed trials (`a:b` a range, parentheses optional); trial t draws as in a `MONTE=max` run, Latin hypercube stratum included | nominal plus one per trial |
 | `.dc MONTE=n` | the trials as one DC table (`run` column) | one lane query |
 | `.alter` blocks (HSPICE) | the base run, then one run per block | base plus one per block |
 
@@ -148,8 +150,12 @@ query on its own circuit copy.
   point never re-parses. HSPICE re-reads the netlist per point there.
 - A swept or sampled `l`/`w` on an M card whose model is binned is refused:
   a variant never re-picks the bin.
-- `.data` reads inline tables only (`MER`, `LAM`, `FILE=` are refused).
-  `MONTE=list(...)` is not parsed.
+- `.data ... MER|LAM` reads external files but refuses `OUT=` (writing
+  the merged table back).
+- The manual's two `MONTE=list(10 20:30 35:40 50)` examples [CR .DC]
+  describe the same card differently ("10 values from 11th to 20th
+  trials" and "the 10th trial, then from the 20th to the 30th ..."); we
+  follow the second, which matches the argument table.
 - `SWEEP` on a card together with `.step` in the same deck is refused.
 - A DC ensemble point that needs its own topology is refused.
 - The fast-path probe sees each parameter at one perturbed point: a
