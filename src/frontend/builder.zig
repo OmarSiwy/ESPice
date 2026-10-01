@@ -618,6 +618,7 @@ pub const NetBuilder = struct {
                 .i_neg = try arena.dupe(u32, self.i.items(.neg)),
                 .v_distof1 = try arena.dupe([2]f64, self.v.items(.distof1)),
                 .v_distof2 = try arena.dupe([2]f64, self.v.items(.distof2)),
+                .sensed = try copyNames(arena, self.sensed_sources),
                 .ports = try self.portList(arena),
             },
             .probes = probe_buf[0..n_probes],

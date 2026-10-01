@@ -300,6 +300,28 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqual(@as(usize, 5), prepared.deck.queries.len);
 }
 
+test ".dcxf leaves out a V card an F or H senses" {
+    var session = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer session.deinit();
+    const nl = try parse(session.allocator(),
+        \\sensed
+        \\v1 in 0 1
+        \\vs in a 0
+        \\r1 a 0 1k
+        \\f1 0 out vs 2
+        \\r2 out 0 1k
+        \\i1 0 out 1m
+        \\.dcxf v(out)
+        \\.end
+    );
+    var prepared = try build(session.allocator(), session.allocator(), nl);
+    defer prepared.deinit();
+    const sources = prepared.deck.queries[0].dcxf.sources;
+    try std.testing.expectEqual(@as(usize, 2), sources.len);
+    try std.testing.expectEqualStrings("v1", sources[0].name);
+    try std.testing.expectEqualStrings("i1", sources[1].name);
+}
+
 test "a numeric reference node is that node, not ground" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

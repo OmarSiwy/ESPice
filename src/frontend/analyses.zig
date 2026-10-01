@@ -472,12 +472,16 @@ fn currentProbeName(args: []const Value, i: usize) ?[]const u8 {
     };
 }
 
-/// Every independent source, V cards then I cards, in card order.
+/// Every independent source, V cards then I cards, in card order. A V card
+/// an F or H senses stamps nothing, so it is left out.
 fn xfSources(arena: std.mem.Allocator, sources: core.QueryBindings) ![]const requests.XfSource {
-    const out = try arena.alloc(requests.XfSource, sources.v_names.len + sources.i_names.len);
-    for (sources.v_names, sources.v_branches, out[0..sources.v_names.len]) |name, br, *s| s.* = .{ .name = name, .branch = br };
-    for (sources.i_names, sources.i_pos, sources.i_neg, out[sources.v_names.len..]) |name, p, m, *s| s.* = .{ .name = name, .branch = null, .nodes = .{ p, m } };
-    return out;
+    var out: std.ArrayList(requests.XfSource) = try .initCapacity(arena, sources.v_names.len + sources.i_names.len);
+    for (sources.v_names, sources.v_branches) |name, br| {
+        if (std.sort.binarySearch([]const u8, sources.sensed, name, std.ascii.orderIgnoreCase) == null)
+            out.appendAssumeCapacity(.{ .name = name, .branch = br });
+    }
+    for (sources.i_names, sources.i_pos, sources.i_neg) |name, p, m| out.appendAssumeCapacity(.{ .name = name, .branch = null, .nodes = .{ p, m } });
+    return out.items;
 }
 
 /// `.lstb mode=single|diff|comm vsource=v1[,v2] [localgnd=n] [dec|oct|lin

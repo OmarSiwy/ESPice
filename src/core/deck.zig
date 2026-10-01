@@ -83,6 +83,9 @@ pub const QueryBindings = struct {
     v_distof1: []const [2]f64,
     /// `DISTOF2 <mag> <phase>` of each V card; empty is none.
     v_distof2: []const [2]f64 = &.{},
+    /// F/H/W control names, sorted case-insensitively. The V cards they
+    /// sense stamp nothing of their own, so no query drives them.
+    sensed: []const []const u8 = &.{},
     ports: []const requests.Port,
 };
 
