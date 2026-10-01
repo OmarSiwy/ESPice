@@ -59,12 +59,11 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) voi
 
     // Scale until max |H_ij| <= 0.5.
     // ponytail: the max element suffices for the scaling decision.
-    var norm_h: f64 = 0;
-    for (0..m * m) |i| norm_h = @max(norm_h, @abs(H[i]));
+    var norm_h = num.normInf(H[0 .. m * m]);
     var s: u32 = 0;
     while (norm_h > 0.5) : (s += 1) {
         norm_h *= 0.5;
-        for (0..m * m) |i| H[i] *= 0.5;
+        num.scale(H[0 .. m * m], 0.5, H[0 .. m * m]);
     }
 
     const mm = m * m;
@@ -282,7 +281,7 @@ fn posteriorOk(
         simdCopy(H_copy[i * mm ..][0..mm], H[i * @as(usize, m_max) ..][0..mm]);
     }
 
-    for (0..msq) |i| H_copy[i] *= h_step;
+    num.scale(H_copy[0..msq], h_step, H_copy[0..msq]);
 
     expmSmall(mm, H_copy, expm_out, expm_scratch, piv);
 
@@ -564,7 +563,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             for (0..m) |i| u[i] = H_inv[i * m];
 
             const scale = h / gamma;
-            for (0..msq) |i| H_copy[i] = -scale * H_inv[i];
+            num.scale(H_copy[0..msq], -scale, H_inv[0..msq]);
             for (0..m) |i| H_copy[i * m + i] += scale;
 
             expmSmall(m, H_copy, expm_out, expm_scratch, piv_all);

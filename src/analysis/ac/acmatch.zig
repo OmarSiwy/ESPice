@@ -10,7 +10,9 @@ const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const dcmatch = @import("../dc/dcmatch.zig");
-const Complex = @import("core").numerics.Complex;
+const num = @import("core").numerics;
+const Complex = num.Complex;
+const z = @import("stdpp");
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 /// Query options, defined in core/query.zig.
@@ -107,21 +109,22 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             if (delta == 0) continue;
             // dx = −J⁻¹ ∂F/∂p, then the planes at (p + δ, x_op + δ·dx).
             ckt.eval(ctx.x_op, 0);
-            for (dx, ckt.rhs[0..n], rhs0) |*d, r, r0| d.* = (r - r0) / delta;
+            diffQuot(dx, ckt.rhs[0..n], rhs0, delta);
             ws.slv.solve(dx, dx);
-            for (xs, ctx.x_op[0..n], dx) |*x, x0, d| x.* = x0 - delta * d;
+            @memcpy(xs, ctx.x_op[0..n]);
+            num.axpy(xs, -delta, dx);
             ckt.eval(xs, 0);
-            for (dg, ckt.g_vals[0..nnz], g0) |*d, v, v0| d.* = (v - v0) / delta;
-            for (dval, ckt.c_vals[0..nnz], c0) |*d, v, v0| d.* = (v - v0) / delta;
+            diffQuot(dg, ckt.g_vals[0..nnz], g0, delta);
+            diffQuot(dval, ckt.c_vals[0..nnz], c0, delta);
             for (0..n_points) |k| {
                 const x = sol[k * nn ..][0..nn];
-                const z = sol[(n_points + k) * nn ..][0..nn];
+                const adj = sol[(n_points + k) * nn ..][0..nn];
                 var acc = Complex.zero;
                 for (0..n) |col| {
                     const xc = Complex{ .re = x[col], .im = x[n + col] };
                     for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
                         const row = ckt.row_idx[slot];
-                        const lam = Complex{ .re = z[row], .im = -z[n + row] };
+                        const lam = Complex{ .re = adj[row], .im = -adj[n + row] };
                         const da = Complex{ .re = dg[slot], .im = omegas[k] * dval[slot] };
                         acc = acc.add(lam.mul(da).mul(xc));
                     }
@@ -178,3 +181,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .data = data,
     };
 }
+
+/// dst[i] = (v[i] − v0[i]) / delta over dst.len.
+fn diffQuot(dst: []f64, v: []const f64, v0: []const f64, delta: f64) void {
+    var it = z.fromSlice(f64, v[0..dst.len]).zip(z.fromSlice(f64, v0[0..dst.len])).map(DiffQuot{ .delta = delta });
+    _ = it.writeInto(dst);
+}
+const DiffQuot = struct {
+    pub const lanewise = true;
+    delta: f64,
+    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
+        return (p.left - p.right) / z.splat(@TypeOf(p.left), self.delta);
+    }
+};

@@ -1,7 +1,8 @@
 //! Dense real eigenvalues: balance, Hessenberg reduction, Francis
 //! double-shift QR. Row-major n×n input, destroyed in place.
 const std = @import("std");
-const Complex = @import("core").numerics.Complex;
+const num = @import("core").numerics;
+const Complex = num.Complex;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
@@ -63,9 +64,7 @@ fn isolate(n: usize, a: []f64, out: []Complex) usize {
     // Read offsets only grow and never fall behind the write offset, so the
     // in-place copy never overwrites an entry it has yet to read.
     const m = hi - lo;
-    for (0..m) |r| {
-        for (0..m) |c| a[r * m + c] = a[(lo + r) * n + lo + c];
-    }
+    for (0..m) |r| std.mem.copyForwards(f64, a[r * m ..][0..m], a[(lo + r) * n + lo ..][0..m]);
     return count;
 }
 
@@ -94,9 +93,7 @@ fn francis(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
     // its subdiagonal never falls below tol times its own noise-sized
     // diagonal (`multi_analysis/device_vbic_ce_amp`). Setting an entry below
     // eps·‖H‖ to zero is within the QR's own backward error.
-    var norm: f64 = 0;
-    for (a[0 .. n * n]) |v| norm = @max(norm, @abs(v));
-    const floor = std.math.floatEps(f64) * norm;
+    const floor = std.math.floatEps(f64) * num.normInf(a[0 .. n * n]);
 
     var count: usize = 0;
     var nn = n;
@@ -174,7 +171,7 @@ fn balance(n: usize, a: []f64) void {
             }
             if (!((c + r) / f < 0.95 * s)) continue;
             const inv = 1 / f;
-            for (0..n) |j| a[i * n + j] *= inv;
+            num.scale(a[i * n ..][0..n], inv, a[i * n ..][0..n]);
             for (0..n) |j| a[j * n + i] *= f;
             settled = false;
         }

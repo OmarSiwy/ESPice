@@ -327,7 +327,7 @@ fn computeResidual(
 
     // jW*Q from the DFT of q(t_s), exact for nonlinear charge; same
     // projection and sign as dft2D.
-    // ponytail: scalar O(n*nf^2), the order of dft2D. The matvec keeps the
+    // ponytail: O(n*nf^2), the order of dft2D. The matvec keeps the
     // C(t0) Jacobian (quasi-Newton for nonlinear charge).
     if (ckt.has_charge) {
         const inv_nf: f64 = 1.0 / @as(f64, @floatFromInt(nf));
@@ -336,12 +336,8 @@ fn computeResidual(
             for (0..nf) |f_idx| {
                 const omega_f = ctx.grid.omega(f_idx, ctx.f1, ctx.f2);
                 if (omega_f == 0) continue;
-                var q_re: f64 = 0;
-                var q_im: f64 = 0;
-                for (q_slice, ctx.basis_cos[f_idx * nf ..][0..nf], ctx.basis_sin[f_idx * nf ..][0..nf]) |q, bc, bs| {
-                    q_re += q * bc;
-                    q_im -= q * bs;
-                }
+                const q_re = num.dot(q_slice, ctx.basis_cos[f_idx * nf ..][0..nf]);
+                const q_im = -num.dot(q_slice, ctx.basis_sin[f_idx * nf ..][0..nf]);
                 res_re[node * nf + f_idx] += omega_f * (-q_im * inv_nf);
                 res_im[node * nf + f_idx] += omega_f * (q_re * inv_nf);
             }

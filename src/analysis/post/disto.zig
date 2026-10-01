@@ -27,6 +27,7 @@ const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
 const simdCopy = root.copySimd;
 const dense_lu = @import("solver").dense_lu;
+const num = @import("core").numerics;
 
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Disto;
@@ -229,7 +230,7 @@ pub fn sweep(
         rhs_work[options.drive2_branch] = 0.5 * options.ac2_magnitude * @cos(ph2);
         rhs_work[n + options.drive2_branch] = 0.5 * options.ac2_magnitude * @sin(ph2);
         try solveAt(ckt, x_op, g_dense, c_mat, omega_f2, a_work, dyn_work, rhs_work, v1b);
-        for (v1b_cim, v1b[n..]) |*c, v| c.* = -v;
+        num.scale(v1b_cim, -1, v1b[n..]);
     }
 
     var sw = options.sweep.iter();
@@ -307,9 +308,9 @@ pub fn sweep(
                 const w_im3 = 2.0 * omega - omega_f2;
                 bilinear(terms, row_start, v1_re, v1_im, v2m[0..n], v2m[n..], -1, w_im3, rhs_work);
                 bilinear(terms, row_start, v1b_re, v1b_cim, v2_re, v2_im, -1, w_im3, t3);
-                for (rhs_work, t3) |*r, t| r.* += t;
+                num.axpy(rhs_work, 1, t3);
                 mixedCubic(ckt, x_op, v1_re, v1_im, v1b_re, v1b_cim, cubic_step, w_im3, gc0, g_pert, g_minus, m_planes, x_pert, t3);
-                for (rhs_work, t3) |*r, t| r.* -= 0.5 * t;
+                num.axpy(rhs_work, -0.5, t3);
                 try solveAt(ckt, x_op, g_dense, c_mat, w_im3, a_work, dyn_work, rhs_work, x_im);
                 scatter(out.twof1mf2, k, out.probes, x_im);
             }
@@ -546,9 +547,7 @@ fn cubicForms(
 }
 
 fn norm(v: []const f64) f64 {
-    var acc: f64 = 0;
-    for (v) |x| acc += x * x;
-    return @sqrt(acc);
+    return @sqrt(num.dot(v, v));
 }
 
 /// g_out := the second derivative of the G/C pair (2n·n, G first) along
@@ -569,21 +568,21 @@ fn secondDirDeriv(
     const n2 = n * n;
     // (k, weight) of the stencil's off-centre points.
     const taps = [_]struct { f64, f64 }{ .{ 1, 16 }, .{ -1, 16 }, .{ 2, -1 }, .{ -2, -1 } };
-    for (g_out[0..n2], g0[0..n2]) |*out, plane| out.* = -30.0 * plane;
+    num.scale(g_out[0..n2], -30.0, g0[0..n2]);
     simdZero(g_out[n2..]);
     for (taps) |tap| {
         const step = tap[0] * h * scale;
         simdCopy(x_work, x_op[0..n]);
-        for (0..n) |i| x_work[i] += step * u[i];
+        num.axpy(x_work[0..n], step, u);
         ckt.eval(x_work, 0);
         ckt.denseG(g_tap[0..n2]);
         ckt.denseC(g_tap[n2..]);
-        for (g_out[0..n2], g_tap[0..n2]) |*out, g| out.* += tap[1] * g;
+        num.axpy(g_out[0..n2], tap[1], g_tap[0..n2]);
         // C as differences from C(0): exactly zero for a linear capacitor.
         for (g_out[n2..], g_tap[n2..], g0[n2..]) |*out, c, c0| out.* += tap[1] * (c - c0);
     }
     const inv = 1.0 / (12.0 * h * h);
-    for (g_out) |*out| out.* *= inv;
+    num.scale(g_out, inv, g_out);
 }
 
 /// dst[row] := (Σ_a s[row·n + a] · w[a]) · scale.

@@ -281,19 +281,13 @@ pub fn solveSpectrum(
         // dq/dt from the DFT of q(t_k), exact for nonlinear charge. With
         // q(t) = a cos(w_h t) + b sin(w_h t), dq/dt = w_h b cos - w_h a sin,
         // so the cos row takes +w_h*Q_sin and the sin row -w_h*Q_cos.
-        // ponytail: scalar O(n*nh*nt) projection, the same order as the
-        // residual DFT; vectorize both if HB ever profiles hot.
         // They are linear in w0, so q_term is also dF/d(ln w0).
         root.zeroSimd(q_term);
         if (ckt.has_charge) for (0..n) |node| {
             const q_slice = q_td[node * nt ..][0..nt];
             for (0..nh) |hi| {
-                var q_cos: f64 = 0;
-                var q_sin: f64 = 0;
-                for (q_slice, basis_cos[hi * nt ..][0..nt], basis_sin[hi * nt ..][0..nt]) |q, bc, bs| {
-                    q_cos += q * bc;
-                    q_sin += q * bs;
-                }
+                const q_cos = num.dot(q_slice, basis_cos[hi * nt ..][0..nt]);
+                const q_sin = num.dot(q_slice, basis_sin[hi * nt ..][0..nt]);
                 const omega_h = @as(f64, @floatFromInt(hi + 1)) * omega0;
                 q_term[node * nf + 2 * (hi + 1) - 1] = omega_h * (2.0 * q_sin / nt_f);
                 q_term[node * nf + 2 * (hi + 1)] = -omega_h * (2.0 * q_cos / nt_f);
