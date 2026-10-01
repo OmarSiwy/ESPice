@@ -575,7 +575,7 @@ pub fn orbit(
 /// its sign. Non-convergence is error.HbDidNotConverge.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     try ctx.circuit.refuseDigital("hb");
-    if (opts.extra_tones.len != 0) return mhb.run(ctx, opts);
+    if (opts.extra_tones.len != 0 or opts.phasors) return mhb.run(ctx, opts);
     const a = ctx.allocator;
     const nf: usize = 2 * @as(usize, opts.n_harmonics) + 1;
 

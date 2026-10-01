@@ -4,7 +4,7 @@
   "purpose": "Two-tone diode intermodulation against VACASK multi-tone HB",
   "oracle": {
     "kind": "vacask",
-    "derivation": "VACASK (unstable-2026) `hb freq=[1k, 1.3k] nharm=7 immax=7 truncate=\"diamond\"` on the same circuit with its diode.osdi (is=1e-12), magnitudes of the phasors at node 2, run with `options reltol=1e-8 vntol=1e-12 abstol=1e-15`: at the VACASK defaults reltol=1e-3 and vntol=1e-6 its lines move by up to 6.5e-7 V. The two solvers pick different collocation instants, so lines of order 6 and 7, below 2e-8 V, differ by their aliasing."
+    "derivation": "VACASK (unstable-2026) `hb freq=[1k, 1.3k] nharm=7 immax=7 truncate=\"diamond\"` on the same circuit with its diode.osdi (is=1e-12), magnitudes of the phasors at node 2, run with `options reltol=1e-8 vntol=1e-12 abstol=1e-15`: at the VACASK defaults reltol=1e-3 and vntol=1e-6 its lines move by up to 6.5e-7 V. The two solvers pick different collocation instants, so lines of order 6 and 7, below 2e-8 V, differ by their aliasing. The oracle has magnitudes only, so the complex column is compared by |X|."
   },
   "expect": {
     "status": "success",
@@ -75,7 +75,8 @@
               3.24402524e-09,
               7.67449569e-10,
               3.09099407e-10
-            ]
+            ],
+            "magnitude": true
           }
         },
         "axis": {

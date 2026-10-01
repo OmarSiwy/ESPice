@@ -549,9 +549,11 @@ fn toneList(opts: Options, tones: *[max_tones]f64, nharms: *[max_tones]u16) !usi
     return count;
 }
 
-/// Contract entry for several tones: one row per spectral line, DC first
-/// then by frequency, (frequency, each probe's amplitude sqrt(c² + s²)); the
-/// DC row keeps its sign. `hb.run`'s shape, over the mixing products.
+/// Contract entry for `.hb TONES=` (any tone count) and the positional
+/// card with several tones: one row per spectral line, DC first then by
+/// frequency. With `opts.phasors` the rows are complex, (frequency, each
+/// probe's phasor c - j·s), x(t) = Re{X·e^(jωt)}, DC real; otherwise
+/// (frequency, each probe's amplitude sqrt(c² + s²)) with a signed DC.
 /// Non-convergence is error.HbDidNotConverge.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
@@ -569,20 +571,28 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (!st.converged) return error.HbDidNotConverge;
 
     const names = try root.probeNames(ctx, "frequency");
-    const ncols = names.len;
+    const width: usize = if (opts.phasors) 2 else 1;
+    const ncols = names.len * width;
     const data = try a.alloc(f64, spec.freqs.len * ncols);
+    @memset(data, 0);
     for (spec.freqs, 0..) |f, j| {
         const row = data[j * ncols ..][0..ncols];
         row[0] = f;
-        for (ctx.probes, row[1..]) |node, *v| {
+        for (ctx.probes, 1..) |node, p| {
             const x = x_hat[node * nf ..][0..nf];
-            v.* = if (j == 0) x[0] else std.math.hypot(x[2 * j - 1], x[2 * j]);
+            const v = row[p * width ..][0..width];
+            if (j == 0) {
+                v[0] = x[0];
+            } else if (opts.phasors) {
+                v[0] = x[2 * j - 1];
+                v[1] = -x[2 * j];
+            } else v[0] = std.math.hypot(x[2 * j - 1], x[2 * j]);
         }
     }
     return .{
         .plotname = "Harmonic Balance",
         .varnames = names,
-        .is_complex = false,
+        .is_complex = opts.phasors,
         .npoints = spec.freqs.len,
         .data = data,
     };

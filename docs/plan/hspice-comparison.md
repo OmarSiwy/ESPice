@@ -122,7 +122,7 @@ the build-order id in the last column.
 
 | Card | What it does | ESPice | VACASK | Value | Build id, size |
 |---|---|---|---|---|---|
-| `.HB TONES= NHARMS= INTMODMAX= SUBHARMS= SS_TONE= [SWEEP]` [CR .HB; RF Ch.5] | multi-tone harmonic balance | `.hb TONES= NHARMS= INTMODMAX=`, any number of tones, magnitudes only (`pss/mhb.zig`); SUBHARMS, SS_TONE, SWEEP not taken | any number of tones, sparse blocks | high for RF | D2 done |
+| `.HB TONES= NHARMS= INTMODMAX= SUBHARMS= SS_TONE= [SWEEP]` [CR .HB; RF Ch.5] | multi-tone harmonic balance | `.hb TONES= NHARMS= INTMODMAX=`, any number of tones, complex phasors per line (`pss/mhb.zig`); SUBHARMS, SS_TONE, SWEEP not taken | any number of tones, sparse blocks | high for RF | D2 done |
 | `.HBAC sweep` [CR .HBAC; RF Ch.8] | periodic AC on the HB orbit | `.pac` on the shooting orbit (`pss/pac.zig`) | `hbac` | high for RF | D1, S after the orbit adapter |
 | `.HBNOISE out src sweep [sidebands]` [CR .HBNOISE; RF Ch.8] | cyclostationary noise on the HB orbit | `.pnoise` on the shooting orbit (`pss/pnoise.zig`) | `hbnoise` | high for RF | D1, M (vacask-comparison G4) |
 | `.HBXF out sweep` [CR .HBXF] | periodic transfer function | `.pxf` on the shooting orbit (`pss/pxf.zig`) | no | medium | D1, S |
