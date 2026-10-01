@@ -6,7 +6,7 @@
     "kind": "analytic",
     "derivation": "vth = 2.5 V, vhys = 1 V: clk rises through 3 V at 6 ns and 28 ns; the 14 ns dip to 2.2 V stays above 2 V. q toggles at 6 ns and 28 ns with 1 ns linear ramps to 5*1000/1001 V. Mid-ramp samples allow 5 mV for the ramp start, which lags the crossing by at most ttol = 0.5 ps (2.5 mV). Without the band q would fall at 14.43 ns and read 0 at 16 ns and 24 ns."
   },
-  "netlist_sha256": "a49fab0cd6891b9dfe766ff212375769dfcec885c475af50e614aa84ef01e9b6",
+  "netlist_sha256": "1f27e51bd242455d0b1ffec4c8647e8559d12ab304ca3f0192f310a730f5d35f",
   "expect": {
     "status": "success",
     "plots": [

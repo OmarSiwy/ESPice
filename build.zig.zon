@@ -4,10 +4,10 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .vera = .{
-            .url = "git+https://github.com/OmarSiwy/VerA#c964f64433ab7f91715ba995f821a12144037d29",
-            .hash = "vera-0.9.0-fzAu7JrBbAFtS7BM73qDB5ciyYgf7erWs4Rmjlt-AQ66",
-        },
+        // Local: VerA 9da4c81f (timepoint cache, $vera_reject_step, laplace_nd
+        // runtime degree) is not pushed yet. Restore a git pin before pushing
+        // (AGENTS.md).
+        .vera = .{ .path = "../VerA-pin" },
         // Local until stdpp has a git remote; pin it before pushing (AGENTS.md).
         .stdpp = .{ .path = "../../Trial/ZvsRust" },
         .gompute = .{
