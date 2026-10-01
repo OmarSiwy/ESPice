@@ -79,6 +79,18 @@ Circuit, bind private parameter pointers, create working/result arenas, and
 start its retained worker. A dependent executor clones the accepted OP's
 complete state. Pure readiness and preview operations never create executors.
 
+Under `ExecutionConfig.final_plan`, set by the CLI because it appends no
+query after init, copies become moves. The last root query evaluates the
+never-evaluated template's batches in place (`Circuit.instantiateMove`; the
+template still owns them). The last dependent of an OP takes its state
+(`fromSnapshotMove`) and the OP's circuit frees the rest. A completed query
+that no pending dependent will snapshot frees its circuit (`Circuit.release`).
+Results and the OP vector stay. Optimization sessions run before the main
+one and keep copying. Peak RSS, 2026-10-01: sweep_opamp_wl_5000
+198 -> 160 MB, scaling_rc_ladder_100k 332 -> 300 MB, and the opamp deck with
+a second `.ac` card 214 -> 183 MB (that figure includes the lane-pass
+frequency stream).
+
 Caller allocators may be ordinary serialized allocators: the analysis session
 coordinates allocator access used by its internal workers. This does not allow
 concurrent external calls on one Problem. See

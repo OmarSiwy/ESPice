@@ -272,9 +272,9 @@ pub const Session = struct {
         }
     }
 
-    /// Whether query `i` is the last that will snapshot prerequisite `dep`
-    /// (the template for `none`): every other row on `dep` already has its
-    /// executor.
+    /// Whether every row on `dep` but `i` already has its executor: query `i`
+    /// is the last that will snapshot prerequisite `dep` (the template for
+    /// `none`), or, with `dep` = `i`, no dependent will snapshot `i` again.
     fn lastReader(self: *const Session, i: usize, dep: QueryId) bool {
         for (self.rows.items(.dependency), self.rows.items(.executor), 0..) |d, e, j| {
             if (j != i and d == dep and e == null) return false;
@@ -336,7 +336,14 @@ pub const Session = struct {
                             self.rows.items(.status)[i] = .paused;
                             self.rows.items(.progress)[i] = p;
                         },
-                        .complete => self.rows.items(.status)[i] = .complete,
+                        .complete => {
+                            self.rows.items(.status)[i] = .complete;
+                            // Under a final plan nothing reads a finished
+                            // query's circuit unless a dependent still has to
+                            // snapshot it; its result lives elsewhere.
+                            if (self.config.final_plan and self.lastReader(i, id))
+                                self.rows.items(.executor)[i].?.circuit.release();
+                        },
                         .failed => |err| {
                             self.rows.items(.status)[i] = .failed;
                             self.rows.items(.failure)[i] = err;
