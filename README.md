@@ -106,6 +106,37 @@ route. The O, Y and P cards (LTRA, TXL, CPL) run native Zig devices, because
 transcriptions sit in `models/native/` and wait on VerA features; see
 [docs/vera-gaps.md](docs/vera-gaps.md).
 
+### Your own Verilog-A models
+
+A deck loads a Verilog-A module at run time with `.hdl "model.va"` (a
+Verilog-1364 `.v` design works the same way), and an `N` card instantiates it
+by module name:
+
+```
+.hdl "vres.va"
+N1 a 0 vres r=2k
+```
+
+ESPice compiles the source itself; it does not load OSDI binaries. A
+`pre_osdi`/`osdi_include` card (or `pre_osdi` inside `.control`) loads the
+`.va` beside the `.osdi` if there is one, runs the built-in model of that
+name if there is one, and otherwise stops with an error. Other `.control`
+commands are skipped with a warning. The first load of a model builds a shared library, which
+takes a few seconds and needs:
+
+- the Zig compiler espice was built with (0.16.0) on `PATH`, or its path in
+  `$ZIG`;
+- a release build of espice (any `-Doptimize` but `Debug`, which cannot load
+  the library);
+- the evaluator sources, which `zig build` installs in `share/espice/` next
+  to `bin/espice`.
+
+Builds are cached by content under `$ESPICE_CACHE/hdl`, else
+`$XDG_CACHE_HOME/espice/hdl`, else `~/.cache/espice/hdl`, so a later run of an
+unchanged model starts at once. VerA's diagnostics (file, line, code) print
+when a model does not compile. An instance parameter the module does not
+declare, or a card with the wrong number of nodes, is an error.
+
 ## Formats
 
 | | |

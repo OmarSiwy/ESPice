@@ -412,7 +412,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
 
 /// `ignored`: a card that only shapes printed output, which ESPice writes
 /// in full anyway.
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, control, endc, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -468,6 +468,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
     .{ "global", .global },     .{ "connect", .connect },           .{ "jitter", .meas },
     .{ "store", .store },       .{ "sample", .sample },
+    .{ "control", .control },   .{ "endc", .endc },
     .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
     .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
     .{ "protect", .ignored },   .{ "unprotect", .ignored },         .{ "prot", .ignored },
@@ -874,8 +875,21 @@ fn Reader(comptime S: type) type {
             const global: Frame = .{ .scopes = &r.global_scopes };
             // An open `.data` or `.variation` block: its closing card and first line.
             var block: ?struct { close: Card, first: u32 } = null;
+            // Inside `.control`/`.endc`: ngspice's interpreter. Only the
+            // model loads matter to a batch run; the rest is skipped aloud.
+            var control = false;
             for (r.lines.items, 0..) |line, index| {
                 const i: u32 = @intCast(index);
+                if (control) {
+                    var cf = F.init(line);
+                    const head = cf.next().?;
+                    if (std.ascii.eqlIgnoreCase(head, ".endc")) {
+                        control = false;
+                    } else if (std.ascii.eqlIgnoreCase(head, "pre_osdi") or std.ascii.eqlIgnoreCase(head, "osdi")) {
+                        if (branches.active()) try r.foreign.append(arena, .{ .kind = .pre_osdi, .path = try r.pathOf(&cf) });
+                    } else if (!@import("builtin").is_test) std.log.warn("netlist: .control command '{s}' ignored", .{head});
+                    continue;
+                }
                 if (block) |b| {
                     if (line[0] != '.') continue;
                     var bf = F.init(line);
@@ -906,6 +920,10 @@ fn Reader(comptime S: type) type {
                             else => {},
                         }
                     } else try r.branch(&branches, card.cond, &f, &global);
+                    continue;
+                }
+                if (card == .control) {
+                    control = true;
                     continue;
                 }
                 if (card == .data or card == .variation) {
@@ -966,7 +984,7 @@ fn Reader(comptime S: type) type {
                     else => try directives.append(arena, i),
                 }
             }
-            if (open != null or branches.depth != 0 or block != null) return error.ParseError;
+            if (open != null or branches.depth != 0 or block != null or control) return error.ParseError;
         }
 
         /// Applies one `.if`/`.elseif`/`.else`/`.endif` card to `b`. A

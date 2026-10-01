@@ -94,17 +94,55 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
 }
 
 /// Compiles, opens and registers each HDL source not loaded yet (loader.zig).
-/// The generated devices build against this source tree, under
-/// `.zig-cache/espice-hdl`.
+/// The generated devices build against the sources `zig build` installs in
+/// `<exe>/../share/espice`, else against the source tree this espice was built
+/// from, with the compiler in `$ZIG`, else `zig` on PATH. Builds are cached
+/// under `cacheDir`.
 pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
-    const work_dir = try std.fs.path.join(self.gpa, &.{ build_options.src_root, ".zig-cache", "espice-hdl" });
-    defer self.gpa.free(work_dir);
-    try loader.ensureAllLoaded(self, io, files, .{
+    var arena_state: std.heap.ArenaAllocator = .init(self.gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const zig = if (std.c.getenv("ZIG")) |z| std.mem.span(z) else "zig";
+    const work_dir = try cacheDir(a);
+    const exe_dir = std.process.executableDirPathAlloc(io, a) catch "";
+    const share = try std.fs.path.join(a, &.{ exe_dir, "..", "share", "espice" });
+    const installed = if (std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ share, "device", "eval.zig" }), .{})) |_| true else |_| false;
+    // ponytail: exe-relative, so a host of libespice finds no share/ and
+    // falls back to the build tree; pass the prefix through the C API if an
+    // installed library ever needs runtime .hdl.
+    try loader.ensureAllLoaded(self, io, files, if (installed) .{
+        .work_dir = work_dir,
+        .contract = try std.fs.path.join(a, &.{ share, "vera", "tools", "contract.zig" }),
+        .dyn = try std.fs.path.join(a, &.{ share, "device", "eval.zig" }),
+        .gompute = try std.fs.path.join(a, &.{ share, "gompute", "root.zig" }),
+        .device_abi = try std.fs.path.join(a, &.{ share, "device", "abi.zig" }),
+        .core = try std.fs.path.join(a, &.{ share, "core", "root.zig" }),
+        .stdpp = try std.fs.path.join(a, &.{ share, "stdpp", "root.zig" }),
+        .zig = zig,
+    } else .{
         .work_dir = work_dir,
         .contract = build_options.contract_path,
         .dyn = build_options.dyn_path,
         .gompute = build_options.gompute_path,
         .device_abi = build_options.device_abi_path,
         .core = build_options.core_path,
+        .stdpp = build_options.stdpp_path,
+        .zig = zig,
     });
+}
+
+/// The runtime HDL build cache: `$ESPICE_CACHE/hdl`, else
+/// `$XDG_CACHE_HOME/espice/hdl`, else `$HOME/.cache/espice/hdl`, else
+/// `$TMPDIR/espice-cache/hdl` (default `/tmp`).
+fn cacheDir(a: std.mem.Allocator) ![]const u8 {
+    const env = struct {
+        fn get(name: [*:0]const u8) ?[]const u8 {
+            const v = std.mem.span(std.c.getenv(name) orelse return null);
+            return if (v.len == 0) null else v;
+        }
+    }.get;
+    if (env("ESPICE_CACHE")) |d| return std.fs.path.join(a, &.{ d, "hdl" });
+    if (env("XDG_CACHE_HOME")) |d| return std.fs.path.join(a, &.{ d, "espice", "hdl" });
+    if (env("HOME")) |d| return std.fs.path.join(a, &.{ d, ".cache", "espice", "hdl" });
+    return std.fs.path.join(a, &.{ env("TMPDIR") orelse "/tmp", "espice-cache", "hdl" });
 }

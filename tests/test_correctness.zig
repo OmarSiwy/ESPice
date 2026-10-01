@@ -250,6 +250,9 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
         .{ "inconsistent_circuit", "inconsistent_circuit" },
         .{ "UnsupportedCard", "unsupported_input" },
         .{ "UnresolvedParameter", "unsupported_input" },
+        .{ "UnknownParameter", "unsupported_input" },
+        .{ "WrongNodeCount", "inconsistent_circuit" },
+        .{ "OsdiUnsupported", "unsupported_input" },
         .{ "unsupported_input", "unsupported_input" },
     });
     var lines = std.mem.splitScalar(u8, result.stderr, '\n');
