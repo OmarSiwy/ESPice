@@ -145,6 +145,9 @@ pub const Problem = struct {
         execution.timing_in_depth = options.timing_in_depth;
         self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
+        // An optimization's sessions run before this one; nothing after it
+        // instantiates the template.
+        self.session.last_template_reader = true;
         const jobs = if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
@@ -155,6 +158,7 @@ pub const Problem = struct {
         for (self.runs, self.prepared.runs, 0..) |*run, *prep, k| {
             errdefer for (self.runs[0..k]) |*done| done.session.deinit();
             run.* = .{ .session = analysis.session.Session.init(self.workerAllocator(), io, &prep.circuit, &prep.deck, execution) };
+            run.session.last_template_reader = true;
             errdefer run.session.deinit();
             for (prep.deck.queries) |query|
                 try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &prep.circuit, &prep.deck, query), prep.deck.title, prep.deck.probe_labels);
