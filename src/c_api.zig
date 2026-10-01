@@ -3,6 +3,12 @@
 //! there, and the comptime block below fails the build if the enums drift.
 const std = @import("std");
 const api = @import("espice");
+
+/// std reserves a 256 KB alternate signal stack per thread for stack-overflow
+/// traces, as zero-filled TLS: every thread of every compilation unit pays it
+/// (1.5 MB per thread across the device objects before this). Kept in Debug,
+/// where the trace is worth it.
+pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
 const allocator = std.heap.smp_allocator;
 /// Bumped on any layout or semantics change; `espice_create` rejects a mismatch.
 const abi_version = 1;
