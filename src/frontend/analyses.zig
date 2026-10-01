@@ -480,19 +480,22 @@ fn xfSources(arena: std.mem.Allocator, sources: core.QueryBindings) ![]const req
     return out;
 }
 
-/// `.lstb mode=single|diff|comm vsource=v1[,v2] [dec|oct|lin N f1 f2]`
-/// [CR .LSTB]: the first three letters of the mode count. Without a sweep
-/// the card takes the deck's `.ac` frequencies, `ac`.
-fn lstbJob(args: []const Value, sources: core.QueryBindings, ac: ?numerics.FreqSweep) !requests.Lstb {
-    const Key = enum { mode, vsource, dec, oct, lin };
+/// `.lstb mode=single|diff|comm vsource=v1[,v2] [localgnd=n] [dec|oct|lin
+/// N f1 f2]` [CR .LSTB]: the first three letters of the mode count. Without
+/// a sweep the card takes the deck's `.ac` frequencies, `ac`. `local_gnd`
+/// is the `localgnd` row `netlist.resolve` found, GROUND without one.
+fn lstbJob(args: []const Value, sources: core.QueryBindings, ac: ?numerics.FreqSweep, local_gnd: u32) !requests.Lstb {
+    const Key = enum { mode, vsource, localgnd, dec, oct, lin };
     const keys = std.StaticStringMap(Key).initComptime(.{
-        .{ "mode", .mode }, .{ "vsource", .vsource }, .{ "dec", .dec }, .{ "oct", .oct }, .{ "lin", .lin },
+        .{ "mode", .mode },     .{ "vsource", .vsource }, .{ "localgnd", .localgnd },
+        .{ "dec", .dec },       .{ "oct", .oct },         .{ "lin", .lin },
     });
+    if (local_gnd == NO_NODE) return error.AnalysisNodeNotFound;
     const modes = std.StaticStringMap(requests.Lstb.Mode).initComptime(.{
         .{ "sin", .single }, .{ "dif", .diff }, .{ "com", .comm },
     });
     var sweep = ac;
-    var opts: requests.Lstb = .{ .sweep = undefined, .probes = undefined };
+    var opts: requests.Lstb = .{ .sweep = undefined, .probes = undefined, .local_gnd = local_gnd };
     var n_probes: usize = 0;
     var buf: [16]u8 = undefined;
     var i: usize = 0;
@@ -504,6 +507,7 @@ fn lstbJob(args: []const Value, sources: core.QueryBindings, ac: ?numerics.FreqS
                 opts.mode = modes.get(m[0..@min(m.len, 3)]) orelse return error.InvalidAnalysisArguments;
                 i += 2;
             },
+            .localgnd => i += 2,
             .vsource => {
                 i += 1;
                 while (i < args.len) : (i += 1) {
@@ -1369,7 +1373,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .probe_branch = sources.v_branches[probe],
             } };
         },
-        .lstb => return .{ .lstb = try lstbJob(args, sources, ctx.ac) },
+        .lstb => return .{ .lstb = try lstbJob(args, sources, ctx.ac, node_id) },
         .dcxf => {
             try arity(args, 1, 2);
             return .{ .dcxf = try xfOutput(requests.Dcxf, args, node_id, node_neg, sources) };

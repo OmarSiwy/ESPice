@@ -127,8 +127,7 @@ the full matrix. Open items:
   - mixed-mode;
   - K and MU;
   - Touchstone files that are not 50 Ω.
-- **`.dcxf` and `.lstb`:** `.dcxf` does not exclude F/H sources. `.lstb`
-  does not support `localgnd`.
+- **`.dcxf`:** does not exclude F/H sources.
 - **Unconfirmed against HSPICE:** each of these follows the manual and has
   never been run against real HSPICE:
   - `.alter` being cumulative;

@@ -67,16 +67,23 @@ column; `.stb` computes no margins.
 
 ### `.lstb`: double injection and margins
 
-`.lstb mode=single|diff|comm vsource=v1[,v2]` (HSPICE [CR .LSTB]) runs
+`.lstb mode=single|diff|comm vsource=v1[,v2] [localgnd=n]` (HSPICE
+[CR .LSTB]; `localgnd` is VACASK's) runs
 VACASK's `acstb` algorithm (`lib/coreacstb.cpp`), read from its source.
 The probe orientation is HSPICE's and VACASK's, the reverse of `.stb`:
 `+` faces the loop's input (drv), `−` its output (fbk). At every
 frequency two right-hand sides share one lane factorization:
 
-- **current injection**: 1 A into the probe's `+` node from ground, the
-  probe still a short. Probe current $A$, `+` node voltage $C$;
+- **current injection**: 1 A into the probe's `+` node from the local
+  ground, the probe still a short. Probe current $A$, `+` node voltage $C$;
 - **voltage injection**: 1 V on the probe's branch row. Probe current $B$,
   `+` node voltage $D$.
+
+Both voltages are read against the local ground: `localgnd=n`, ground
+when the card has none. A loop that reaches ground only through an
+impedance (`stb/lstb_localgnd`, lifted on a 1 kΩ) keeps its own
+y-parameters this way; from ground, $y_{21}$ and $y_{22}$ would see the
+impedance. The loop gain is the same either way for that deck.
 
 With $\Delta = AD - BC$ the DUT y-parameters and the loop gains are
 
@@ -137,8 +144,6 @@ Divergences, recorded:
   where $\angle W = -180°$.
 - The y-parameters divide by $C$: a probe whose `+` node is an ideal
   source (an E output) makes them infinite, as in VACASK. $W$ stays finite.
-- VACASK's `localgnd` (a reference other than ground for $C$, $D$) is not
-  offered.
 
 `.measure lstb` [CR .MEASURE] reads these plots. The margin keywords are
 measures on their own (`.measure lstb pm phase_margin`, likewise
@@ -218,5 +223,5 @@ kernel stb(lanes = freq points):
   factorization through `freq.Stream`; the margins plot (its own query,
   fanned out by `frontend/analyses.zig` like `.noise`'s integrated plot)
   refines each crossing with single-lane `solveBatch` calls.
-- Fixtures: `tests/fixtures/stb/` (`lstb_three_pole`, `lstb_diff_comm`
-  and `lstb_loaded_break` for `.lstb`, analytic).
+- Fixtures: `tests/fixtures/stb/` (`lstb_three_pole`, `lstb_diff_comm`,
+  `lstb_loaded_break` and `lstb_localgnd` for `.lstb`, analytic).
