@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "analysis": "dcmatch",
+  "purpose": ".measure DCMATCH and ACMATCH read the mismatch plots by column",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Op by Newton on (Vdd - V)/R = Is(e^{V/Vt} - 1) + gmin V (Vt = k T/q, k and q as diode.va, T = 300.15 K, gmin 1e-12). G = 1/R + Is/Vt e^{V/Vt} + gmin; dV/dR = -((Vdd - V)/R^2)/G; dG/dR = -1/R^2 + Is/Vt^2 e^{V/Vt} dV/dR. y = 1/(G + j w C); per sigma dy = -y^2 dG/dR sigma_R and -y^2 j w sigma_C with sigma_R = 100 ohm, sigma_C = 50 pF. Spreads in quadrature over both: |y| moves by Re(conj(y) dy)/|y|, the phase by Im(dy/y) (degrees). .dcsens and .dcmatch: dV/dR sigma_R, 0 for c1; total_3sigma = 3 |dV/dR sigma_R|. The measures read total_3sigma and r1@r off the one-row DC Mismatch plot, acm_mag at 1 kHz and acm_phase at 1 MHz off grid points of the AC Mismatch sweep."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "DC Mismatch",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "total_3sigma": {
+            "rtol": 1e-05,
+            "atol": 1e-15,
+            "values": [
+              0.007612252362355989
+            ]
+          },
+          "r1@r": {
+            "rtol": 1e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.002537417454118663
+            ]
+          },
+          "c1@c": {
+            "rtol": 1e-05,
+            "atol": 1e-12,
+            "values": [
+              0.0
+            ]
+          }
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "s3",
+        "value": 0.007612252362355989,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "sr1",
+        "value": -0.002537417454118663,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "am",
+        "value": 1.8620130515857312,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "ap",
+        "value": 0.7417683834433899,
+        "rtol": 1e-05,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "dd529c0da4283766dfa56d69ecd9fdb16231c11e5a760f2cbe917f86d71e8487"
+}

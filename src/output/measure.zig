@@ -32,6 +32,11 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
                 .tran_noise => "Transient Noise",
                 .ac => "AC",
                 .fft => "FFT",
+                .dcmatch => "DC Mismatch",
+                .acmatch => "AC Mismatch",
+                .lstb => "Loop Stability",
+                .phasenoise => "Phase Noise",
+                .pnoise => "Periodic Time-Dependent Noise",
                 else => "DC",
             }});
         }
@@ -66,11 +71,12 @@ pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.
     };
 }
 
-/// Whether card `m` reads `result`. Each `.fft` card has its own plot, so an
-/// FFT card reads the one holding its vector.
+/// Whether card `m` reads `result`. Each `.fft` card has its own plot, and
+/// `.lstb` and `.ptdnoise` publish two kinds under one analysis, so those
+/// cards read the plot holding their vector.
 fn targets(m: core.Measure, analysis: Kind, result: core.Result) bool {
     if (m.analysis != analysis) return false;
-    if (analysis != .fft or m.func == .param) return true;
+    if ((analysis != .fft and analysis != .lstb and analysis != .pnoise) or m.func == .param) return true;
     const w: Wave = .{ .result = result, .analysis = analysis };
     _ = w.column(m.first.vec, 0) catch return false;
     return true;
@@ -133,6 +139,13 @@ fn evaluate(out: *Writer, m: core.Measure, w: Wave) EvalError!f64 {
             return targ - trig;
         },
         .find, .deriv => {
+            // A bare FIND: the value of a one-row plot.
+            if (a.at == core.measure_no_at and b.vec.len == 0) {
+                if (w.len() != 1) return error.OutOfInterval;
+                const v = try defined((try w.waveform(a.vec, a.ops, a.vectype)).get(0));
+                try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+                return v;
+            }
             const at = if (a.at == core.measure_no_at) try defined(try w.when(b)) else a.at;
             const v = try defined(if (m.func == .find) try w.valueAt(a, at) else try w.slopeAt(a, at));
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
@@ -366,6 +379,7 @@ const Column = struct {
             // ngspice radtodeg() converts only under `set units=degrees`.
             'p' => std.math.atan2(im, re),
             'd' => 20 * std.math.log10(std.math.hypot(re, im)),
+            'g' => std.math.radiansToDegrees(std.math.atan2(im, re)),
             else => re,
         };
     }

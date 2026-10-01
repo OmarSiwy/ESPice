@@ -140,6 +140,16 @@ Divergences, recorded:
 - VACASK's `localgnd` (a reference other than ground for $C$, $D$) is not
   offered.
 
+`.measure lstb` [CR .MEASURE] reads these plots. The margin keywords are
+measures on their own (`.measure lstb pm phase_margin`, likewise
+`gain_margin`, `unity_gain_freq`, `phase_crossover_freq`,
+`loop_gain_minifreq`), read off the margins row. `lstb(db)`, `lstb(m)`,
+`lstb(p)` (degrees), `lstb(r)` and `lstb(i)` are `loop_gain` in the
+ordinary FIND, WHEN and window forms, interpolated on the sweep:
+`.measure lstb f0 when lstb(db)=0` is the grid estimate of the refined
+`unity_gain_freq`. This follows the manual's syntax and is unconfirmed
+against HSPICE (`hspice/meas_lstb`, analytic).
+
 ## 2. Flow explanation
 
 `src/analysis/ac/stb.zig`:

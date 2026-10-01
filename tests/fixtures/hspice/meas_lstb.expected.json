@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "analysis": "lstb",
+  "purpose": ".measure LSTB reads the margins keywords and lstb(db|p|m)",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Ideal buffered chain, so the loop is unilateral and the break unloaded at its input: W = Wf = 4/(1+jf/1k)^3, Wr = y11 = y12 = 0, y22 = (1+jf/1k)/1k, y21 = W*y22. Unity gain at f = 1k*sqrt(4^(2/3)-1), PM = 180 - 3*atan(f/1k) deg there; phase crossover at f = 1k*sqrt(3), GM = 20*log10(8/4) dB; loop_gain_minifreq = 20*log10|W(10 Hz)|. At 1 kHz W = 4/(1+j)^3: |W| = sqrt(2), phase -135 deg. WHEN lstb(db)=0 interpolates the dec 10 grid linearly, within 1e-3 of the unity-gain frequency."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Loop Stability Margins",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "gain_margin": {
+            "unit": "dB",
+            "rtol": 1e-07,
+            "atol": 1e-09,
+            "values": [
+              6.0205999132796215
+            ]
+          },
+          "phase_crossover_freq": {
+            "unit": "Hz",
+            "rtol": 1e-07,
+            "atol": 1e-09,
+            "values": [
+              1732.0508075688772
+            ]
+          },
+          "phase_margin": {
+            "unit": "deg",
+            "rtol": 1e-07,
+            "atol": 1e-09,
+            "values": [
+              27.141630595376217
+            ]
+          },
+          "unity_gain_freq": {
+            "unit": "Hz",
+            "rtol": 1e-07,
+            "atol": 1e-09,
+            "values": [
+              1232.8187619393805
+            ]
+          },
+          "loop_gain_minifreq": {
+            "unit": "dB",
+            "rtol": 1e-07,
+            "atol": 1e-09,
+            "values": [
+              12.039897008253366
+            ]
+          }
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "pm",
+        "value": 27.141630595376217,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "gm",
+        "value": 6.0205999132796215,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "ugf",
+        "value": 1232.8187619393805,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "f0",
+        "value": 1232.8187619393805,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "ph",
+        "value": -135.0,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "mag",
+        "value": 1.4142135623730951,
+        "rtol": 1e-06,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b06ef816fa5b3d3e1e88da5811c1df8acd720fccc7c90eac1d9589a2cb986224"
+}
