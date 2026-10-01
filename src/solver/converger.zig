@@ -14,6 +14,21 @@ const std = @import("std");
 const direct = @import("direct.zig");
 const BbdInfo = @import("core").numerics.BbdInfo;
 const Execution = @import("core").numerics.Execution;
+const num = @import("core").numerics;
+const z = @import("stdpp");
+
+const mul = z.lanewise(mulFn);
+fn mulFn(p: anytype) @TypeOf(p.left) {
+    return p.left * p.right;
+}
+/// (left - right) * inv: the finite-difference Jacobian product.
+const FdQuot = struct {
+    pub const lanewise = true;
+    inv: f64,
+    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
+        return (p.left - p.right) * z.splat(@TypeOf(p.left), self.inv);
+    }
+};
 
 /// `ESPICE_SOLVER` overrides `run`'s choice: direct, jfnk (LU-preconditioned
 /// GMRES) or jfnk-nolu (Jacobi-preconditioned, no factorization at all).
@@ -198,7 +213,7 @@ pub fn newton(
         }
         var norm_f: f64 = 0; // read only by the traces
         if (newtonDbg() or opdbg()) {
-            for (0..sys.n) |i| norm_f = @max(norm_f, @abs(sys.rhs[i]));
+            norm_f = num.normInf(sys.rhs[0..sys.n]);
         }
         if (newtonDbg())
             std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
@@ -217,11 +232,10 @@ pub fn newton(
             slv.factor(v, executionOf(sys)) catch |e| {
                 if (opdbg()) {
                     var nan_cnt: usize = 0;
-                    var max_x: f64 = 0;
                     for (v[0..sys.nnz]) |vi| {
                         if (!std.math.isFinite(vi)) nan_cnt += 1;
                     }
-                    for (0..sys.n) |i| max_x = @max(max_x, @abs(x[i]));
+                    const max_x = num.normInf(x[0..sys.n]);
                     std.debug.print("  newton it={d} FACTOR FAIL {} nan_vals={d} max|x|={e:.3} |F|={e:.3}\n", .{ iter, e, nan_cnt, max_x, norm_f });
                 }
                 return e;
@@ -386,11 +400,9 @@ pub fn jfnk(
         }
 
         // r = -M^-1 f0, beta = ||r||.
-        for (r, f0) |*ri, fi| ri.* = -fi;
+        num.scale(r, -1, f0);
         applyPreconditioner(r, diag, slv);
-        var acc: f64 = 0;
-        for (r) |ri| acc += ri * ri;
-        const beta = @sqrt(acc);
+        const beta = @sqrt(num.dot(r, r));
 
         if (beta < opts.abstol and residualConverged(sys, hook, x, f0, opts)) {
             @memset(r, 0);
@@ -401,45 +413,39 @@ pub fn jfnk(
             continue;
         }
 
-        for (v_basis[0..n], r) |*vi, ri| vi.* = ri / beta;
+        num.scale(v_basis[0..n], 1 / beta, r);
         g[0] = beta;
         @memset(g[1 .. m + 1], 0);
 
         // eps_j = sqrt(eps_mach) * max(||x||, 1) / ||v_j||.
-        acc = 0;
-        for (x) |xi| acc += xi * xi;
-        const x_norm = @max(@sqrt(acc), 1.0);
+        const x_norm = @max(@sqrt(num.dot(x, x)), 1.0);
 
         var jj: usize = 0; // Arnoldi steps completed
         for (0..m) |j| {
             const vj = v_basis[j * n ..][0..n];
-            acc = 0;
-            for (vj) |vi| acc += vi * vi;
-            const v_norm = @sqrt(acc);
+            const v_norm = @sqrt(num.dot(vj, vj));
             const eps = if (v_norm > 1e-30) sqrt_eps * x_norm / v_norm else sqrt_eps;
 
             // w = M^-1 (F(x + eps v_j) - f0) / eps.
-            for (x_pert, x, vj) |*xp, xi, vi| xp.* = xi + eps * vi;
+            @memcpy(x_pert, x);
+            num.axpy(x_pert, eps, vj);
             assembleShifted(sys, x_pert, t, opts, hook);
             const inv_eps = 1.0 / eps;
-            for (w, sys.rhs[0..n], f0) |*wi, ri, fi| wi.* = (ri - fi) * inv_eps;
+            var fd = z.fromSlice(f64, sys.rhs[0..n]).zip(z.fromSlice(f64, f0)).map(FdQuot{ .inv = inv_eps });
+            _ = fd.writeInto(w);
             applyPreconditioner(w, diag, slv);
 
             // Modified Gram-Schmidt, sequential dot products.
             for (0..j + 1) |mi| {
                 const vi = v_basis[mi * n ..][0..n];
-                acc = 0;
-                for (vi, w) |a, b| acc += a * b;
-                const hij = acc;
+                const hij = num.dot(vi, w);
                 h[mi * m + j] = hij;
-                for (w, vi) |*wi, a| wi.* -= hij * a;
+                num.axpy(w, -hij, vi);
             }
-            acc = 0;
-            for (w) |wi| acc += wi * wi;
-            const h_jp1 = @sqrt(acc);
+            const h_jp1 = @sqrt(num.dot(w, w));
             h[(j + 1) * m + j] = h_jp1;
             if (h_jp1 > 1e-30) {
-                for (v_basis[(j + 1) * n ..][0..n], w) |*vi, wi| vi.* = wi / h_jp1;
+                num.scale(v_basis[(j + 1) * n ..][0..n], 1 / h_jp1, w);
             }
 
             for (0..j) |k| {
@@ -477,11 +483,9 @@ pub fn jfnk(
             const d = h[k * m + k];
             y[k] = if (@abs(d) > 1e-30) s / d else 0;
         }
-        for (r, 0..) |*ri, i| {
-            var dxi: f64 = 0;
-            for (0..jj) |kk| dxi += y[kk] * v_basis[kk * n + i];
-            ri.* = dxi;
-        }
+        // Column by column: each entry still sums in increasing kk.
+        @memset(r, 0);
+        for (0..jj) |kk| num.axpy(r, y[kk], v_basis[kk * n ..][0..n]);
 
         // x_old = x; x += dx; per-row delta test. A non-finite iterate scores
         // inf: `@max` lowers to maxnum, which would drop a NaN and report a
@@ -557,7 +561,7 @@ fn assembleShifted(sys: anytype, x: []const f64, t: f64, opts: Options, hook: an
     else
         hook.assemble(sys, x, t);
     if (opts.gmin > 0) {
-        for (0..x.len) |i| sys.rhs[i] += opts.gmin * x[i];
+        num.axpy(sys.rhs[0..x.len], opts.gmin, x);
     }
 }
 
@@ -578,7 +582,8 @@ fn applyPreconditioner(r: []f64, diag: []const f64, slv: ?*direct.Solver) void {
             return;
         }
     }
-    for (r, diag) |*ri, d| ri.* *= d;
+    var it = z.fromSlice(f64, r).zip(z.fromSlice(f64, diag[0..r.len])).map(mul);
+    _ = it.writeInto(r);
 }
 
 fn applyLimits(sys: anytype, x: []f64, x_old: []f64) bool {

@@ -7,6 +7,7 @@ const std = @import("std");
 const dense_lu = @import("dense_lu.zig");
 const direct = @import("direct.zig");
 const lane_lu = @import("lane_lu.zig");
+const num = @import("core").numerics;
 
 const Allocator = std.mem.Allocator;
 
@@ -601,14 +602,14 @@ pub const FreqSolver = struct {
             const lenu: usize = len;
             @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
             p += lenu;
-            scaleCopy(s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], omega);
+            num.scale(s.vals[p..][0..lenu], omega, s.c_vals[cs..][0..lenu]);
             p += lenu;
         }
         for (0..nu) |j| {
             const cs = s.src_col_ptr[j];
             const len = s.src_col_ptr[j + 1] - cs;
             const lenu: usize = len;
-            scaleCopy(s.vals[p..][0..lenu], s.c_vals[cs..][0..lenu], neg_omega);
+            num.scale(s.vals[p..][0..lenu], neg_omega, s.c_vals[cs..][0..lenu]);
             p += lenu;
             @memcpy(s.vals[p..][0..lenu], s.g_vals[cs..][0..lenu]);
             p += lenu;
@@ -674,32 +675,13 @@ inline fn buildStackedRealPattern(
         for (0..nu) |j| {
             const s = col_ptr[j];
             const e = col_ptr[j + 1];
-            for (row_idx[s..e]) |r| {
-                sr_row_idx[p] = r;
-                p += 1;
-            }
+            @memcpy(sr_row_idx[p..][0 .. e - s], row_idx[s..e]);
+            p += e - s;
             for (row_idx[s..e]) |r| {
                 sr_row_idx[p] = r + n;
                 p += 1;
             }
             sr_col_ptr[half * nu + j + 1] = p;
         }
-    }
-}
-
-/// dst[i] = s * src[i].
-fn scaleCopy(dst: []f64, src: []const f64, s: f64) void {
-    const W = std.simd.suggestVectorLength(f64) orelse 1;
-    const VT = @Vector(W, f64);
-    const sv: VT = @splat(s);
-
-    var i: usize = 0;
-    while (i + W <= src.len) : (i += W) {
-        const v: VT = src[i..][0..W].*;
-        const p: *[W]f64 = dst[i..][0..W];
-        p.* = sv * v;
-    }
-    while (i < src.len) : (i += 1) {
-        dst[i] = s * src[i];
     }
 }

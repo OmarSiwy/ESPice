@@ -4,6 +4,7 @@
 //! runs in rank-8 panels; the unblocked loops are its bitwise oracle.
 
 const std = @import("std");
+const scale = @import("core").numerics.scale;
 
 // ponytail: rank-8 panels are the only blocking; 2-D register tiling of the
 // trailing update is next if dense solves dominate again.
@@ -159,14 +160,7 @@ inline fn subtractColumnDot(n: usize, lu: []const f64, x: []const f64, i: usize,
 /// Carries x through the elimination instead of recording pivots.
 fn factorizeSolveImpl(n: usize, a: []f64, b: []const f64, x: []f64, comptime negate: bool) Error!void {
     if (negate) {
-        var i: usize = 0;
-        while (i + W <= n) : (i += W) {
-            const bv: V = b[i..][0..W].*;
-            const p: *[W]f64 = x[i..][0..W];
-            const zero: V = @splat(@as(f64, 0));
-            p.* = zero - bv;
-        }
-        while (i < n) : (i += 1) x[i] = -b[i];
+        scale(x[0..n], -1, b[0..n]);
     } else {
         @memcpy(x[0..n], b[0..n]);
     }

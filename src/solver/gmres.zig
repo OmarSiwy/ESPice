@@ -5,13 +5,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const num = @import("core").numerics;
 
 /// GMRES(m) workspace for n-dimensional systems.
 pub const Gmres = struct {
     const Self = @This();
-    const W = std.simd.suggestVectorLength(f64) orelse 1;
-    const Vec = @Vector(W, f64);
-
     pub const SolveResult = struct {
         /// Arnoldi steps across all restarts.
         iterations: u32,
@@ -113,7 +111,7 @@ pub const Gmres = struct {
 
         for (0..max_restarts + 1) |_| {
             op.matvec(x[0..n], self.r[0..n]);
-            for (0..n) |i| self.r[i] = b[i] - self.r[i];
+            self.residual(b[0..n]);
 
             const beta = vecNorm(self.r[0..n]);
             if (beta <= abs_tol) {
@@ -121,7 +119,7 @@ pub const Gmres = struct {
             }
 
             const v0 = self.getV(0);
-            vecScale(self.r[0..n], 1.0 / beta, v0);
+            num.scale(v0, 1.0 / beta, self.r[0..n]);
 
             @memset(self.g[0 .. m + 1], 0);
             self.g[0] = beta;
@@ -145,9 +143,9 @@ pub const Gmres = struct {
                 // Modified Gram-Schmidt.
                 for (0..ju + 1) |i| {
                     const vi = self.getV(@intCast(i));
-                    const hij = vecDot(self.r[0..n], vi);
+                    const hij = num.dot(self.r[0..n], vi);
                     self.h[i * m + ju] = hij;
-                    vecAxpy(self.r[0..n], -hij, vi);
+                    num.axpy(self.r[0..n], -hij, vi);
                 }
 
                 const h_jp1_j = vecNorm(self.r[0..n]);
@@ -155,7 +153,7 @@ pub const Gmres = struct {
 
                 if (h_jp1_j != 0) {
                     const vjp1 = self.getV(j + 1);
-                    vecScale(self.r[0..n], 1.0 / h_jp1_j, vjp1);
+                    num.scale(vjp1, 1.0 / h_jp1_j, self.r[0..n]);
                 }
 
                 self.applyPreviousGivens(j);
@@ -193,9 +191,14 @@ pub const Gmres = struct {
         }
 
         op.matvec(x[0..n], self.r[0..n]);
-        for (0..n) |i| self.r[i] = b[i] - self.r[i];
+        self.residual(b[0..n]);
         const final_res = vecNorm(self.r[0..n]);
         return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = false };
+    }
+
+    /// r = b - r.
+    fn residual(self: *Self, b: []const f64) void {
+        num.sub(self.r[0..b.len], b, self.r[0..b.len]);
     }
 
     inline fn getV(self: *Self, i: u32) []f64 {
@@ -250,62 +253,20 @@ pub const Gmres = struct {
             @memset(self.w[0..n], 0);
             for (0..k) |j| {
                 const vj = self.getV(@intCast(j));
-                vecAxpy(self.w[0..n], self.y[j], vj);
+                num.axpy(self.w[0..n], self.y[j], vj);
             }
             op.precond(self.w[0..n]);
-            for (0..n) |i| x[i] += self.w[i];
+            num.axpy(x, 1, self.w[0..n]);
         } else {
             for (0..k) |j| {
                 const vj = self.getV(@intCast(j));
-                vecAxpy(x, self.y[j], vj);
+                num.axpy(x, self.y[j], vj);
             }
         }
     }
 
     fn vecNorm(v: []const f64) f64 {
-        return @sqrt(vecDot(v, v));
-    }
-
-    /// W-lane partial sums, one reduce, then the scalar tail.
-    fn vecDot(a: []const f64, b: []const f64) f64 {
-        std.debug.assert(a.len == b.len);
-        const n = a.len;
-        var acc: Vec = @splat(0);
-        var i: usize = 0;
-        while (i + W <= n) : (i += W) {
-            const va: Vec = a[i..][0..W].*;
-            const vb: Vec = b[i..][0..W].*;
-            acc += va * vb;
-        }
-        var s: f64 = @reduce(.Add, acc);
-        while (i < n) : (i += 1) s += a[i] * b[i];
-        return s;
-    }
-
-    fn vecAxpy(a: []f64, alpha: f64, b: []const f64) void {
-        std.debug.assert(a.len == b.len);
-        const n = a.len;
-        const va: Vec = @splat(alpha);
-        var i: usize = 0;
-        while (i + W <= n) : (i += W) {
-            const p: *[W]f64 = a[i..][0..W];
-            const vb: Vec = b[i..][0..W].*;
-            p.* = @as(Vec, p.*) + va * vb;
-        }
-        while (i < n) : (i += 1) a[i] += alpha * b[i];
-    }
-
-    fn vecScale(src: []const f64, alpha: f64, dst: []f64) void {
-        std.debug.assert(src.len == dst.len);
-        const n = src.len;
-        const va: Vec = @splat(alpha);
-        var i: usize = 0;
-        while (i + W <= n) : (i += W) {
-            const vs: Vec = src[i..][0..W].*;
-            const p: *[W]f64 = dst[i..][0..W];
-            p.* = va * vs;
-        }
-        while (i < n) : (i += 1) dst[i] = alpha * src[i];
+        return @sqrt(num.dot(v, v));
     }
 };
 
