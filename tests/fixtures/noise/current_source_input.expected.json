@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": ".noise with a current-source input",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "onoise = sqrt(4kTR), gain from Iin to v(out) = R, inoise = onoise/R = sqrt(4kT/R)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 3,
+        "columns": {
+          "onoise_spectrum": {
+            "values": [
+              4.0713722372192895e-09,
+              4.0713722372192895e-09,
+              4.0713722372192895e-09
+            ],
+            "unit": "V/sqrt(Hz)",
+            "rtol": 5e-05,
+            "atol": 1e-18
+          },
+          "inoise_spectrum": {
+            "values": [
+              4.07137223721929e-12,
+              4.07137223721929e-12,
+              4.07137223721929e-12
+            ],
+            "unit": "A/sqrt(Hz)",
+            "rtol": 5e-05,
+            "atol": 1e-21
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "eac9c06537fb52c27ac0117870a34a70998d16c4bb09fb9e6b0d958565b34433"
+}
