@@ -1,6 +1,7 @@
 //! The KCL certificate (`zig build -Dcertify`, #53): at every point direct
-//! Newton converges on, re-evaluate the devices at the published x with the
-//! limiters cleared and check the result against the solver's own promise.
+//! Newton converges on and stages, re-evaluate the devices at the
+//! published x with the limiters cleared and check the result against the
+//! solver's own promise.
 //!
 //! Asserted: the converger's per-row residual gate
 //! (`converger.residualGate`, with the same gmin and force loads). A row
@@ -121,9 +122,11 @@ pub fn measure(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: conver
 
 /// `measure`, then panics when a row is over the converger's gate, and
 /// records the ratio in `ckt.cert`. `newton` calls it, through
-/// `Circuit.certifyPoint`, on every converged x under `-Dcertify`, after
-/// every gate and before `updateStates` stages the point: a device whose
-/// eval reads its staged history would otherwise see x twice.
+/// `Circuit.certifyPoint`, on every converged x it stages under
+/// `-Dcertify`, after every gate and before `updateStates` stages the
+/// point: a device whose eval reads its staged history would otherwise see
+/// x twice. Sizes `ckt.cert.scratch` on first use and panics if that
+/// allocation fails.
 pub fn check(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: converger.Options) void {
     comptime std.debug.assert(enabled);
     const tally = &ckt.cert;

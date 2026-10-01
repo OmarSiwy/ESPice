@@ -3,6 +3,10 @@
 //! frequency solve the LPTV conversion matrix that couples sidebands
 //! f_in + m*f_LO, m in -M..M. pxf.zig runs the same sweep on the transposed
 //! system, pnoise.zig on the transposed system with noise sources.
+//!
+//! Cites: dev/analysis/pac.md, dev/analysis/multitone-hb.md (the
+//! dense/Krylov crossover in `useKrylov`), Verilog-A LRM §4.6.1 (a
+//! small-signal phase is not static, so sources follow their waveform).
 const std = @import("std");
 const root = @import("../types.zig");
 const pss = @import("pss.zig");
@@ -29,7 +33,12 @@ pub const Options = @import("core").query.Pac;
 ///     transfer from a current injected at `node` on sideband sb to the
 ///     output `drive` selects; `probe_node` is unused.
 /// Cost: one dense (2(2M+1)n)^2 LU per frequency, or past `useKrylov`
-/// preconditioned GMRES (`sweepKrylov`).
+/// preconditioned GMRES (`sweepKrylov`) when `lin` has no
+/// frequency-dependent entries (`lin.wave` empty). Asserts on the dense
+/// path that freqs.len is the sweep count, `out` is that many rows of the
+/// shape above, and `drive` is 2n or empty. error.Singular when a dense
+/// conversion matrix does not factor, error.PacDidNotConverge when GMRES
+/// stops short, plus OutOfMemory and QueryCancelled.
 pub fn sweep(
     comptime adjoint: bool,
     ckt: *root.Circuit,
@@ -320,8 +329,9 @@ pub const Orbit = struct {
 
 /// Shoots from x_init to the periodic steady state (`pss.solve`: trapezoid
 /// steps that carry the charge history) and records one period of every
-/// unknown. An unconverged shoot still returns its last period, flagged. The
-/// caller frees `wave` with `allocator`.
+/// unknown. An unconverged shoot still returns its last period, flagged
+/// (zeroed when that period's integration fails). Fails as `pss.solve`.
+/// The caller frees `wave` with `allocator`.
 pub fn orbit(ckt: *root.Circuit, x_init: []const f64, options: pss.Options, allocator: std.mem.Allocator) !Orbit {
     const n: usize = ckt.n;
     const rows = try allocator.alloc(u32, n);

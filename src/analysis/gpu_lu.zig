@@ -3,7 +3,8 @@
 //! the refactor and runs both triangular solves (`solver.lu_kernels`), and
 //! dx comes back. Bitwise the host's `refactor` plus `solveNeg`, so a device
 //! pivot failure peels to the host's full factor as if the host had run
-//! the refactor itself.
+//! the refactor itself. The admission bars cite the E2/E3 measurements in
+//! dev/solvers/gpu-lu.md and #141.
 
 const std = @import("std");
 const gompute = @import("gompute");

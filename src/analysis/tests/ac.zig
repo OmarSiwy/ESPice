@@ -1,5 +1,9 @@
 //! Frequency-domain unit tests: the frequency stream, noise PSD/integration
-//! and the `.lstb` double-injection formulas.
+//! and the `.lstb` double-injection formulas. Oracles: the chunked stream
+//! against one whole-grid `FreqSolver` batch; the PSD shapes and ngspice's
+//! three `nintegrate` branches against their closed forms; `.lstb` against
+//! A·β through an ideal voltage break. Also pulls in the in-file tests of
+//! acmatch, lstb and sp.
 
 const StreamTests = struct {
     const freq = @import("../ac/freq.zig");

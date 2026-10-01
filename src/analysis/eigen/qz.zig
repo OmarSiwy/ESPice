@@ -6,6 +6,8 @@
 //! Every transform is a Givens rotation. The 3-element Householders of the
 //! textbook step cost fewer flops, but a pole-zero pencil is solved once per
 //! query and one primitive keeps the step short.
+//!
+//! Cites Moler and Stewart (1973) and dev/analysis/pole-zero.md.
 const std = @import("std");
 const num = @import("core").numerics;
 const Complex = num.Complex;

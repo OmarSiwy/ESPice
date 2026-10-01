@@ -2,6 +2,8 @@
 //! A(f)^H Y = e_(out, m=0) per frequency gives conj(Y_(i,m)), the transfer
 //! from every node i at every sideband m to the output (images, LO
 //! feedthrough, conversion gain from every port at once).
+//!
+//! Cites: dev/analysis/pxf.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const pac = @import("pac.zig");

@@ -1,4 +1,7 @@
-//! QR and QZ eigenvalue unit tests behind the pole-zero analysis.
+//! QR and QZ eigenvalue unit tests behind the pole-zero analysis. Oracles:
+//! matrices and pencils built with known eigenvalues (real, complex pairs,
+//! defective, infinite), and the eigenvalues of the unreduced matrix for
+//! `hessenbergReduce`.
 
 const qr = @import("core").eigen;
 const qz = @import("../eigen/qz.zig");

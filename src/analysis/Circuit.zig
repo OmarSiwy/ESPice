@@ -1,7 +1,14 @@
 //! The analysis-side circuit: a frozen CSC pattern plus four value planes
 //! (g = dI/dx, c = dQ/dx, rhs = I, q = Q) that one device pass fills. Every
 //! analysis is an affine consumer of the planes: DC solves G, transient
-//! G + a*C, AC G + jwC.
+//! G + a*C, AC G + jwC. In: the prepared `device.Circuit` template and an
+//! x. Out: the planes, the device state walks the solvers drive, and the
+//! routing to an attached ParEval, GPU context or device LU.
+//!
+//! Cites: ngspice resdefs.h/resload.c (`ac=`), hfetload.c (the in-load
+//! current test), CKTacLoad; VAMS LRM §9.4 (display tasks), §9.15
+//! (`$simparam`), §9.17.2 (`$bound_step`); dev/devices/models.md;
+//! analysis/certify.zig (#53).
 
 const std = @import("std");
 const device_ir = @import("device").abi;
@@ -192,7 +199,7 @@ pub const Circuit = struct {
     /// The KCL certificate's record under `-Dcertify`; void otherwise.
     cert: if (kcl_cert.enabled) kcl_cert.Tally else void = if (kcl_cert.enabled) .{} else {},
 
-    /// `newton` calls `certifyPoint` on every converged x when true.
+    /// `newton` calls `certifyPoint` on every converged x it stages when true.
     pub const certify = kcl_cert.enabled;
 
     /// Certifies the converged `x` (analysis/certify.zig). Only `newton`
@@ -263,7 +270,8 @@ pub const Circuit = struct {
     // touches the planes or a device parameter, so none clears `lin`.
 
     /// Installs the query's solver threading and the facade's developer
-    /// switches. Call before the first `workspace`, which reads `knobs`.
+    /// switches. Asserts that `workspace` has not run yet, since it reads
+    /// `knobs`.
     pub fn configure(self: *Circuit, execution: numerics.Execution, knobs: Knobs) void {
         std.debug.assert(self.ws == null);
         self.solver_execution = execution;
@@ -296,6 +304,7 @@ pub const Circuit = struct {
     /// Evaluates the resident batches through `g` from now on and moves the
     /// planes into its page-locked buffers, which `GpuContext.init` filled
     /// with their values. `g` is borrowed: `detachGpu` before freeing it.
+    /// Asserts that no context is attached.
     pub fn attachGpu(self: *Circuit, g: *GpuContext) void {
         std.debug.assert(self.gpu == null);
         self.gpu = g;
@@ -524,7 +533,8 @@ pub const Circuit = struct {
     }
 
     /// Rewinds every batch to `saved`, which becomes the accepted state.
-    /// Batch storage and every `ParamRef` into it stay valid.
+    /// Batch storage and every `ParamRef` into it stay valid. Does nothing
+    /// while a GPU context is attached.
     // ponytail: host batches only. Under a GPU hook the resident state is
     // left where it is; download it (`syncHostState`) and re-upload states
     // too when a GPU-resident device carries history that must rewind.
@@ -569,9 +579,10 @@ pub const Circuit = struct {
     /// (instance, LTE charge site) of every charge-carrying batch,
     /// batch-major.
     ///
-    /// Zero when nothing carries charge, and zero under a GPU plane hook that
-    /// cannot fill the resident batches' tapes (`GpuContext.tape_ok`). The
-    /// transient reads zero as "use per-row LTE on the summed q plane".
+    /// Zero when nothing carries charge, and zero while an attached GPU
+    /// context cannot fill the resident batches' tapes
+    /// (`GpuContext.tape_ok`). The transient reads zero as "use per-row LTE
+    /// on the summed q plane".
     pub fn qTapeLen(self: *const Circuit) u32 {
         if (self.gpuContext()) |g| if (!g.tape_ok) return 0;
         var total: u32 = 0;
@@ -601,11 +612,11 @@ pub const Circuit = struct {
         self.rhs[0] += x[0];
     }
 
-    /// Stamps all four planes for state `x` at time `t`.
+    /// Stamps all four planes for state `x` at time `t`, on the attached GPU
+    /// context when there is one. Invalidates the `linearize` memo.
     ///
-    /// This and `evalNewton` are the only places the GPU enters an analysis.
-    /// Replacing the stamp rather than the solve lets every host step layered
-    /// on a stamp (companion RHS, `combineGC`, limiting) compose with it.
+    /// The GPU replaces the stamp, not the analysis: every host step layered
+    /// on a stamp (companion RHS, `combineGC`, limiting) composes with it.
     pub fn eval(self: *Circuit, x: []const f64, t: f64) void {
         // Callers also eval at points other than x_op (disto, pss, pac, ...),
         // so the linearization memo cannot survive this.
@@ -668,8 +679,9 @@ pub const Circuit = struct {
     /// Stamps only the charges at `x`: `q_vec` and every batch's `q_tape`,
     /// bit-for-bit what `eval` would leave there, with g/c/rhs untouched.
     /// ParEval reuses the lane cuts and reduce order of `.full`, so the
-    /// promise holds threaded too. The GPU has no charge-only kernel and runs
-    /// the full pass.
+    /// promise holds threaded too. The GPU has no charge-only kernel: with a
+    /// context attached this runs the full pass, so g, c and rhs change too,
+    /// and the resident batches' tapes reach the host at `snapshotQTape`.
     pub fn evalQ(self: *Circuit, x: []const f64, t: f64) void {
         self.lin.valid = false;
         if (self.gpuContext()) |g| return self.evalGpu(g, x, t, true);
@@ -688,7 +700,9 @@ pub const Circuit = struct {
     /// `linearize` for a frequency-domain analysis (ngspice CKTacLoad rather
     /// than CKTload): swaps in each `AcParam` value, stamps, and restores the
     /// DC values. Leaves the memo invalid, because the planes then hold the AC
-    /// linearization that a later DC eval must not reuse.
+    /// linearization that a later DC eval must not reuse. Fails with
+    /// `error.TopologyChanged` when an AC value re-wires a device; the DC
+    /// values are back in place either way.
     pub fn linearizeAc(self: *Circuit, x_op: []const f64) !void {
         if (self.ac_params.len == 0) return self.linearize(x_op);
         for (self.ac_params) |*p| {
@@ -933,7 +947,9 @@ pub const Circuit = struct {
     /// device asks the step to be rejected at, or null. A second call
     /// before the next commit or revert (a flip that forced another
     /// iterate, a continuation rung) reverts first, since `stateCtl(.revert)`
-    /// is exact only across one `updateState`.
+    /// is exact only across one `updateState`. Under `landRejects(true)` the
+    /// reject time goes to `reject_at` and this returns null. Stages the
+    /// attached `Display` lines for the next `stateCtl`.
     pub fn updateStates(self: *Circuit, x: []const f64) ?f64 {
         if (self.state_staged) _ = self.stateCtl(.revert);
         self.state_staged = true;
@@ -1085,9 +1101,11 @@ pub const Circuit = struct {
         for (self.batches) |b| b.hooks.set_sim_state(b.ctx, self.sim);
     }
 
-    /// Re-derives every batch's numeric parameters. `error.TopologyChanged`
-    /// means internal wiring moved and the circuit must be rebuilt; restore
-    /// the parameters and recompute before reusing it.
+    /// Re-derives every batch's numeric parameters. Drops the constant-Jacobian
+    /// baseline (`computeBaseline` rebuilds it) and marks the GPU context's
+    /// resident parameters stale. `error.TopologyChanged` means internal
+    /// wiring moved and the circuit must be rebuilt; restore the parameters
+    /// and recompute before reusing it.
     pub fn recompute(self: *Circuit) error{TopologyChanged}!void {
         self.lin.valid = false;
         self.has_baseline = false;
@@ -1274,7 +1292,8 @@ pub fn init(
 }
 
 /// Writes `out = g + alpha*c` over independent CSC entries. `W == 1` is the
-/// scalar oracle and the tail. `out` may alias `g`.
+/// scalar oracle and the tail. `out` may alias `g`. Asserts that the three
+/// slices have one length.
 pub fn combinePlanes(comptime W: usize, out: []f64, g: []const f64, c: []const f64, alpha: f64) void {
     std.debug.assert(out.len == g.len and out.len == c.len);
     const V = @Vector(W, f64);

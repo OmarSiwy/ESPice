@@ -150,7 +150,9 @@ pub const ParEval = struct {
     /// chunks of roughly equal `count * instanceWeight` work, about eight
     /// per lane, so a fast lane can take a slow lane's share. Threads start
     /// lazily on the first `run`. `batches` must outlive it; free it with
-    /// `deinit`.
+    /// `deinit`. Asserts that `trash_slot == nnz`. Fails with
+    /// `error.OutOfMemory` on allocation or when the tapes hold more than
+    /// 2^32 positions. A single-threaded build runs one lane.
     pub fn init(
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -274,7 +276,9 @@ pub const ParEval = struct {
     /// (`.newton` only; zero otherwise) plus every batch's stamps at `x`, and
     /// waits for all lanes. `planes` need no clearing first. Spawns the
     /// workers on first use; a failed spawn panics. `.charge` on a circuit
-    /// without charge is a no-op: there is no q plane.
+    /// without charge is a no-op: there is no q plane. Asserts that
+    /// `batches` has as many batches as `init` saw and that `base` is empty
+    /// outside `.newton`.
     pub fn run(self: *ParEval, batches: []const Batch, planes: Planes, base: Base, x: []const f64, t: f64, mode: Mode) void {
         if (mode == .charge and !self.has_charge) return;
         std.debug.assert(batches.len == self.slot_base.len);

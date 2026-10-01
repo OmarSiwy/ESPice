@@ -6,6 +6,8 @@
 //! The parameters come in `Groups`: the deck's variation block, or every
 //! parameter alone at its Pelgrom sigma, sigma^2(p) = A_P^2 / (W·L). The
 //! offset is sigma^2(y) = sum over groups of (dy/dsigma_g)^2.
+//! Cites the Spectre and HSPICE `.dcmatch`/`.dcsens` manuals and
+//! dev/analysis/dcmatch.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const adjointFd = @import("../sweep/sens.zig").adjointFd;
@@ -174,7 +176,9 @@ fn fdSensitivity(
 
 /// Each group's contribution to the mismatch of v(output_node) -
 /// v(output_neg) at `x_op`, over `refs` (`Circuit.collectParams`). Leaves the
-/// circuit's planes at the last perturbed eval.
+/// circuit's planes at the last perturbed eval and the workspace factored at
+/// J(x_op). A parameter whose step rounds away or would change the topology
+/// contributes 0. `contributions` is owned by `allocator`.
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,

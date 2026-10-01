@@ -1,4 +1,7 @@
 //! Generated-device integration across the real batch, Circuit and solver seams.
+//! Oracles: an untried circuit for rollback and retry, Newton against JFNK
+//! on the same operating point, and the KCL residual F(x) = 0 at the
+//! published solution rather than at the limited image.
 const std = @import("std");
 const analysis = @import("../types.zig");
 const Builder = @import("builder").Builder;

@@ -2,7 +2,7 @@
 //! NP uniform points over [START, STOP), windowed and transformed. The plot
 //! is the `.ft#` data: every bin from DC to NP/2, as one complex column
 //! whose magnitude is the component's amplitude and whose angle is its sine
-//! phase.
+//! phase. Also cites Harris 1978 (Kaiser window side lobes, #82).
 const std = @import("std");
 const root = @import("../types.zig");
 const fft_mod = @import("solver").fft;

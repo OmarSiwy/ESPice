@@ -2,6 +2,11 @@
 //! and one transpose solve give λ (J^T λ = e_out). Each parameter then costs
 //! one re-eval of F(x_op) and a dot product, dy/dp = -λ^T · dF/dp with dF/dp
 //! a forward difference, instead of a Newton solve per parameter.
+//! In: the circuit at its operating point and the output node pair. Out:
+//! one real point of dVout/dp per parameter, named as ngspice names it.
+//! Cites ngspice cktsens.c and the IF_PRINCIPAL tables of res.c, cap.c,
+//! ind.c, vsrc.c and isrc.c; #71, #85, #91, #154;
+//! dev/analysis/sensitivity.md.
 const std = @import("std");
 const root = @import("../types.zig");
 
@@ -51,11 +56,11 @@ pub inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64
 /// dV(output_node, output_neg)/dp for each of `params` at `x_op`, parallel to
 /// `params` and owned by `allocator`. `x_op` is the executor's operating point
 /// (the full OP ladder; a plain Newton here fails on circuits that need
-/// stepping). Each parameter is restored before the next. Returns
+/// stepping). Each parameter is restored before the next. A parameter whose
+/// step would change the topology reads 0, and so does one at its "infinite"
+/// default 0 whose quotient does not survive a doubled step (#91).
+/// Overwrites the circuit's planes and the workspace factorization. Returns
 /// error.ZeroDelta when a parameter's step rounds away entirely.
-///
-/// No `computeBaseline()`: the baseline would freeze the const-Jacobian
-/// stamps (resistors) and mask the very perturbations being measured.
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -64,6 +69,8 @@ pub fn solve(
     output_neg: u32,
     allocator: std.mem.Allocator,
 ) ![]f64 {
+    // No `computeBaseline()`: the baseline would freeze the const-Jacobian
+    // stamps (resistors) and mask the very perturbations being measured.
     const n: usize = ckt.n;
     const ws = try ckt.workspace();
 

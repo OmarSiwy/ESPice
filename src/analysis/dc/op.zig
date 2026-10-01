@@ -1,6 +1,12 @@
 //! Operating point: a five-rung Newton ladder (plain, gmin stepping, source
 //! stepping, JFNK, OPtran) over one Workspace. The pattern is frozen, so the
 //! ordering and symbolic factorization happen once for the whole ladder.
+//! In: a frozen circuit, `.nodeset` and `.ic` rows. Out: the operating
+//! point in `x` and the committed device state.
+//! Cites ngspice cktop.c (dynamic_gmin, source stepping), optran.c,
+//! cktload.c, cktic.c, spsmp.c LoadGmin and sputils.c spMNA_Preorder;
+//! Verilog-AMS LRM §4.6.1, §5.10.2 and §9.15; #53;
+//! dev/analysis/operating-point-homotopy.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
@@ -92,8 +98,10 @@ pub fn nodesetLadder(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, opt
 
 /// The continuation ladder from `x` as given: plain Newton, dynamic gmin
 /// stepping, source stepping, JFNK, then OPtran, every Newton solve holding
-/// the `hold` rows. Takes the caller's Workspace so dc.zig can fall back to
-/// it mid-sweep. Returns error.FloatingNode when a node has no DC path to
+/// the `hold` rows. A circuit with a capacitor-only island
+/// (`needs_tran_op`) and no holds skips the static rungs and goes straight
+/// to OPtran. Takes the caller's Workspace so dc.zig can fall back to it
+/// mid-sweep. Returns error.FloatingNode when a node has no DC path to
 /// ground outside a TRANOP.
 pub fn solveLadder(
     ckt: *root.Circuit,
@@ -288,14 +296,14 @@ pub fn solveLadder(
 
 /// Rung 5, ngspice OPtran (optran.c): a real transient with full sources
 /// held at their t = 0 values (optran.c runs its own clock and leaves
-/// CKTtime at 0), dt 10 ns to 1 µs, no ramp and no extra regularization, so the device
-/// capacitances do the conditioning the static rungs could not. The settled
-/// state only seeds a clean Newton, whose result is the answer; reporting the
-/// settled state itself would be a false success
-/// (stress/scaling_inverter_chain_4k). Under `needs_tran_op` the settled
-/// state supplies the capacitor-only nodes, which that Newton holds there
-/// (`floatingHolds`). ngspice 44.2 runs this rung only when `optran` is given
-/// (cktop.c:94-97). The transient commits device state at every step, so it
+/// CKTtime at 0), steps of at most 10 ns out to 1 µs, no ramp and no extra
+/// regularization, so the device capacitances do the conditioning the
+/// static rungs could not. The settled state only seeds a clean Newton,
+/// whose result is the answer; reporting the settled state itself would be
+/// a false success (stress/scaling_inverter_chain_4k). Under
+/// `needs_tran_op` with no holds, the settled state supplies the
+/// capacitor-only nodes, which that Newton holds there (`floatingHolds`).
+/// ngspice 44.2 runs this rung only when `optran` is given (cktop.c:94-97). The transient commits device state at every step, so it
 /// runs between a save and a restore: only `x` leaves it, and no timer,
 /// event or delay history runs ahead of the operating point's t = 0.
 fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options, hold: []const converger.Force) !converger.Result {
@@ -329,8 +337,8 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     ckt.setSimState(op_sim);
     try ckt.rebuildBaseline();
     if (sim == null or !sim.?.completed) return failed;
-    // Holds can pin the floating nodes, as they do in ngspice, so a held
-    // solve tries the static rungs before settling.
+    // A held solve keeps its own holds; only an unheld one holds the
+    // capacitor-only nodes at their settled values.
     // The settled x belongs to the device state at t = 1 us, not the
     // restored one, so it is not the answer even where the static rows are
     // singular: the rest is re-solved at the restored state (#53).

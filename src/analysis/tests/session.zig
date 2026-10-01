@@ -1,4 +1,7 @@
-//! Query-boundary validation and Session scheduling tests.
+//! Query-boundary validation and Session scheduling tests. Oracles: the
+//! named refusal each invalid query must get (the frontend's own refusals
+//! for `validate`), the dependency order a Session must keep, and the
+//! columns a run publishes for `schemaOf`'s prediction.
 
 const Deck = @import("core").Deck;
 const builtin = @import("device").Library.builtin;

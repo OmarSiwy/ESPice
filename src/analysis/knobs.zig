@@ -37,9 +37,11 @@ pub const Knobs = struct {
     gpu_stats: enum { off, on, phases } = .off,
     /// `ESPICE_GPU_BLOCK`: the CUDA block width, 1..1024.
     gpu_block: u32 = 64,
-    /// `ESPICE_GPU_EVAL_CHECK`: check every device eval against the host.
+    /// `ESPICE_GPU_EVAL_CHECK`: replay every device eval at the same x and
+    /// report the worst plane cell that moved (`GpuContext.evalCheck`).
     gpu_eval_check: bool = false,
-    /// `ESPICE_GPU_NOFUSE`: launch the eval kernels unfused.
+    /// `ESPICE_GPU_NOFUSE`: give every device eval its own host wait instead
+    /// of sharing the limit pass's (`GpuContext.evalFollows`), for A/B runs.
     gpu_nofuse: bool = false,
     /// `XDG_CACHE_HOME` and `HOME`, where the GPU JIT warm markers live.
     xdg_cache_home: ?[]const u8 = null,

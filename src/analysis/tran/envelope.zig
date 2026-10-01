@@ -2,6 +2,9 @@
 //! carrier periods with coarse trapezoid steps, then resolves the last period
 //! finely to extract per-probe peak and RMS. The outer step halves when the
 //! envelope moves more than envelope_reltol and doubles below a quarter of it.
+//! In: a circuit at its operating point and the carrier period. Out: one
+//! row of time, peak and rms per probe per envelope point.
+//! Cites Verilog-AMS LRM §9.10 and dev/analysis/mpde-envelope.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
@@ -99,10 +102,11 @@ fn newtonAt(
     return true;
 }
 
-/// Envelope-following transient from `x`. The caller owns `rows`, sized
-/// maxPoints(options) * (1 + 2*probes.len): point-major rows
-/// [t, peak_p0, rms_p0, peak_p1, rms_p1, ...]. Returns
-/// error.EnvelopeDidNotConverge when a step fails at min_periods_per_step.
+/// Envelope-following transient from `x` into the caller's `rows`:
+/// point-major rows [t, peak_p0, rms_p0, peak_p1, rms_p1, ...]. Asserts
+/// that `rows` holds at least maxPoints(options) * (1 + 2*probes.len)
+/// values. Returns error.EnvelopeDidNotConverge when a step fails at
+/// min_periods_per_step.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -298,7 +302,9 @@ fn stepCount(duration: f64, dt: f64) u32 {
 }
 
 /// Contract entry: envelope-follow from ctx.x_op. Point-major rows
-/// (time, peak and rms per probe), exactly what `simulate` writes.
+/// (time, peak and rms per probe), exactly what `simulate` writes. Returns
+/// error.DigitalDeviceUnsupported for a deck with a digital device, since
+/// a rejected outer step rewinds time.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     try ctx.circuit.refuseDigital("envelope");
     const a = ctx.allocator;

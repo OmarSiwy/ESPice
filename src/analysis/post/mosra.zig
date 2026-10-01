@@ -20,7 +20,9 @@ pub const Aged = struct {
 /// Mechanism k of a device sees A_k(t) = a0·exp(fd·v(t) - td/T) while
 /// stressed. ΔVth_k(t_rel) = (t_rel·avg(A_k^(1/n_k)))^n_k, the average
 /// taken over the stress window: exactly A·t^n under constant stress, and
-/// the usual quasi-static sum when the stress varies.
+/// the usual quasi-static sum when the stress varies. Asserts that `res`
+/// has 1 + 3 columns per device. Returns error.MosraEmptyWindow when fewer
+/// than two samples, or a zero span, fall in [aging_start, aging_stop].
 pub fn age(arena: std.mem.Allocator, m: core.Mosra, res: core.Result) !Aged {
     const n = m.names.len;
     const width = res.varnames.len;

@@ -1,7 +1,12 @@
 //! Small-signal noise of the device generators, measured at an output node.
 //! Each frequency is one adjoint solve (a lane of `freq.Stream`); the source
 //! PSDs come from the devices' noise models. Densities are V^2/Hz internally
-//! and the published plots are V/sqrt(Hz) and V rms.
+//! and the published plots are V/sqrt(Hz) and V rms. The same sweep feeds
+//! `.acphasenoise` (dBc/Hz), the per-generator contribution columns and the
+//! sampler-folded `onoise_sampled` column.
+//! Cites ngspice noisean.c, ninteg.c, noisedef.h and resnoise.c;
+//! Verilog-AMS LRM §4.6.4; #83, #84; dev/analysis/ac-small-signal-noise.md
+//! and dev/analysis/phase-noise.md.
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
@@ -73,15 +78,16 @@ pub const Integrals = struct { onoise: f64, inoise: f64 };
 
 /// Per-generator results for the contribution columns: `dens` is point-major
 /// (`n_points * n_sources`, V^2/Hz at the output); `out` and `in` are each
-/// generator's own band integral in V^2. The caller zeroes `out` and `in`.
+/// generator's own band integral in V^2. A correlated group's values land
+/// on its first row only, so the caller zeroes all three.
 pub const PerSource = struct { dens: []f64, out: []f64, in: []f64 };
 
 /// Fills `freqs`, `density` and `in_density` (V^2/Hz, all `sweep.count()`
 /// long) and returns the band integrals. `in_density` is all zeros unless
 /// `options.in_branch` or `options.in_nodes` names a source. `per_source`, when given, also
 /// receives every generator's density and integrals. Asserts that
-/// `density` matches `freqs` in length. Every work buffer comes from and
-/// returns to `allocator`; error.QueryCancelled unwinds at a checkpoint.
+/// `density` matches `freqs` in length; `in_density` must match too.
+/// Every work buffer comes from and returns to `allocator`; error.QueryCancelled unwinds at a checkpoint.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -379,9 +385,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-/// The contribution columns and where each noise source lands in them.
-/// Generators of one instance that share a name (LRM §4.6.4 `name`) share a
-/// column; each instance's total column follows its generator columns.
 const Batch = @import("device").abi.Batch;
 const DeviceType = @import("device").abi.DeviceType;
 
@@ -404,6 +407,9 @@ pub fn columnCount(gpa: std.mem.Allocator, batches: []const Batch, types: []cons
     return if (opts.integrated) 2 * n_cols + 2 else n_cols + 3 + @intFromBool(opts.sample != null);
 }
 
+/// The contribution columns and where each noise source lands in them.
+/// Generators of one instance that share a name (LRM §4.6.4 `name`) share a
+/// column; each instance's total column follows its generator columns.
 const Columns = struct {
     /// `<inst>_<gen>` or `<inst>`, in column order.
     labels: []const []const u8 = &.{},

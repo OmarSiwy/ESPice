@@ -22,6 +22,9 @@
 //! ponytail: d2 kept as its nonzero terms (at most nnz(G) per unknown) and
 //! O(n^3) dense solves per frequency; device-side analytic F''/F''' stamps and
 //! a sparse frequency solve are the upgrade for large n.
+//!
+//! Cites ngspice distoan.c, cktdisto.c, dkerproc.c, dloadfns.c and
+//! diodset.c; dev/analysis/distortion.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
@@ -74,7 +77,10 @@ pub const Out = struct {
 /// `g2 * V1²` (dloadfns.c:545 D1n2F1). The harmonic vectors are reported as
 /// sinusoid amplitudes, ×2 (DkerProc, dkerproc.c:43-52, `HARMONIC_SCALE`);
 /// the summary magnitudes are not rescaled. The planes are left at the
-/// operating point.
+/// operating point. Asserts that `hd2`, `v1_mag` and `v2_mag` match
+/// `freqs` in length, that each non-empty `h2`/`h3` holds
+/// `freqs.len * probes.len * 2` values, and that a two-tone output comes
+/// with `options.f2_ratio > 0`.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,

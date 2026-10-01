@@ -5,6 +5,9 @@
 //! devices' `noisePsd`, re-sampled along the orbit (cyclostationary
 //! modulation). `orbitSweep` is everything after the orbit, so `.hbnoise`
 //! runs it on the harmonic-balance solution instead (hb_lptv.zig).
+//!
+//! Cites: dev/analysis/periodic-noise.md; VACASK for the signed amplitude
+//! of a negative density; HSPICE `.ptdnoise` for the strobed density.
 const std = @import("std");
 const root = @import("../types.zig");
 const pac = @import("pac.zig");
@@ -71,11 +74,13 @@ pub fn samplesFor(requested: usize, n_sb: usize) usize {
     return std.math.ceilPowerOfTwoAssert(usize, @max(requested, 2 * n_sb));
 }
 
-/// Periodic noise density about any periodic orbit `orb` (shooting or HB),
-/// whose sample count must be a power of two of at least 2*(2M+1). Reads
-/// `out_node`, `out_neg`, `sweep`, `f_fundamental` and `n_sidebands` from
-/// `options`; the `pss_*` fields are the orbit provider's. Returns the rms
-/// noise over the sweep in V (sqrt of the trapezoid integral).
+/// Periodic noise density about any periodic orbit `orb` (shooting or HB).
+/// Asserts the orbit's sample count is a power of two of at least
+/// 2*(2M+1) and freqs.len == density.len. Reads `out_node`, `out_neg`,
+/// `sweep`, `f_fundamental`, `n_sidebands` and `strobe` from `options`
+/// (a set `strobe` gives the time-dependent density at that instant, as
+/// `.ptdnoise`); the `pss_*` fields are the orbit provider's. Returns the
+/// rms noise over the sweep in V (sqrt of the trapezoid integral).
 ///
 /// Each source is a stationary unit noise n(t) scaled by a periodic
 /// amplitude a(t) = sqrt(PSD(t)) (white and flicker parts separately), so

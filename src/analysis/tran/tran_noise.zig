@@ -6,6 +6,10 @@
 //! the step. The PSDs come from the devices (`Circuit.collectNoiseSources`).
 //! METHOD=SDE draws nothing: the noiseless march carries the covariance of
 //! the noise that sampled runs on the same steps would add (`Covariance`).
+//! In: a circuit at its operating point and its noise sources. Out: the
+//! probes at every accepted point, plus `onoise` under SDE.
+//! Cites HSPICE `.trannoise` (SEED, TIME=, SAMPLES), Verilog-AMS LRM §9.10
+//! and dev/analysis/transient-noise.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
@@ -345,11 +349,13 @@ const NoiseHook = struct {
 };
 
 /// Integrates from `x`, recording every accepted point into `waveform`.
-/// Returns false when dt fell below dt_min before t_stop. There is no LTE
+/// Returns false when dt fell below dt_min or `max_steps` ran out before
+/// t_stop. There is no LTE
 /// control: the noise dominates the local error, so dt only shrinks (by half)
 /// on a Newton failure and otherwise grows 1.5x up to dt_max. With
 /// `options.sde` nothing is drawn, and `onoise` (required then) gets the rms
-/// noise of v(out_node, out_neg) at every recorded point.
+/// noise of v(out_node, out_neg) at every recorded point, grown on
+/// `allocator`.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,

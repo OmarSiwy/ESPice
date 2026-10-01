@@ -6,6 +6,8 @@
 //! the total is Tian's loop gain, exact for a bilateral loop and any
 //! loading at the break. `diff` and `comm` drive a probe pair ±1 and read
 //! the modal half of each response.
+//! Cites VACASK coreacstb.cpp, HSPICE [CR .MEASURE LSTB] and
+//! dev/analysis/stability.md.
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");

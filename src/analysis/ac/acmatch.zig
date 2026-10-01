@@ -6,6 +6,7 @@
 //!   dy/dp = −λ(ω)ᵀ (dG/dp + jω dC/dp) x(ω),
 //! with A x = b the AC solution and Aᵀ λ = e_out. The magnitude, phase, real
 //! and imaginary spreads sum each group's linear change in quadrature.
+//! Cites the HSPICE `.acmatch` manual and dev/analysis/dcmatch.md.
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");

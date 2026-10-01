@@ -2,6 +2,9 @@
 //! (2K1+1) x (2K2+1) mix-product grid k*f1 + l*f2, solved by Newton with
 //! matrix-free GMRES. Residual and Jacobian-vector products are DFT
 //! sandwiches: IDFT to the sample grid, evaluate, DFT back plus jw*Q.
+//!
+//! Cites: dev/analysis/qpss.md, Verilog-A LRM §4.6.1 (sources follow their
+//! waveform only in the transient phase).
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
@@ -424,7 +427,10 @@ fn transposePattern(col_ptr: []const u32, row_idx: []const u32, row_ptr: []u32, 
 
 /// Newton with unpreconditioned GMRES from X = 0; the deck's sources drive
 /// the residual. The caller owns spectra_re/spectra_im, probes.len * nf each,
-/// probe-major in MixGrid order. Memory is O(nnz * nf) for the G samples.
+/// probe-major in MixGrid order, the last iterate when Newton does not
+/// converge (`converged = false`, not an error). Memory is O(nnz * nf) for
+/// the G samples. Errors: OutOfMemory, QueryCancelled, and error.Singular
+/// when the sample instants give a singular transform.
 pub fn solve(
     ckt: *root.Circuit,
     probes: []const u32,
@@ -533,15 +539,15 @@ pub fn solve(
         .x_sample = x_sample,
     };
 
-    // No preconditioner: solver/preconditioner.zig's block-diagonal form is
-    // sideband-major at w = p*2*pi*f1, while this system is node-major at the
-    // mix frequencies k*f1 + l*f2, so neither its indexing nor its w fits.
+    // No preconditioner: this system is node-major at the mix frequencies
+    // k*f1 + l*f2, stacked real.
     // ponytail: the systems here are 2*n*nf <= a few hundred unknowns, and
     // unrestarted GMRES handles their conditioning (restart 30 stalled on a
     // 90-unknown two-tone deck with a 1e4 spread). Below 512 unknowns the
     // restart depth is the whole system (~2 MB of basis at 512); past it the
     // requested depth stands. The upgrade is a node-major block preconditioner
-    // with one sparse (G0 + j*w_kl*C0) factor per mix product.
+    // with one sparse (G0 + j*w_kl*C0) factor per mix product, as `mhb.zig`
+    // builds from `FreqSolver` lanes.
     const want_m: usize = if (total <= 512) total else options.gmres_restart;
     const gmres_m: u32 = @intCast(@min(want_m, total));
     var gmres = try gmres_mod.Gmres.init(allocator, @intCast(total), gmres_m);

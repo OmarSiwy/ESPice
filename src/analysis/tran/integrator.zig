@@ -1,6 +1,8 @@
 //! Integration kernels: the companion coefficients, the dynamic-current
 //! recurrence and the CKTterr LTE bound. tran.zig drives them per step;
 //! envelope, tran_noise and pss reuse the companion kernel.
+//! Cites ngspice nicomcof.c, niinteg.c, cktterr.c and dctran.c;
+//! dev/analysis/transient-integration.md.
 const std = @import("std");
 const Method = @import("types.zig").Method;
 

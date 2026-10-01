@@ -1,4 +1,8 @@
-//! Circuit pattern, plane-kernel, stamp and lifecycle tests.
+//! Circuit pattern, plane-kernel, stamp and lifecycle tests. Oracles: a
+//! comparison sort for the radix-sorted CSC pattern, each plane kernel's
+//! W == 1 instantiation, a full stamp for the baseline-seeded Newton stamp,
+//! the serial stamp for the threaded ones (bit for bit), the plane accessors
+//! against each other, and `checkAllAllocationFailures` for setup leaks.
 
 const impl = @import("../Circuit.zig");
 const combinePlanes = impl.combinePlanes;

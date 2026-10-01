@@ -1,6 +1,12 @@
 //! Transient analysis: Newton per timestep on A = G + ag0*C, with ngspice's
 //! LTE step control, order promotion and breakpoint landing. The companion
 //! residual uses the exact q(x) plane and the Jacobian the analytic C plane.
+//! In: a circuit at its operating point (or the `.ic` values under uic) and
+//! `Options`. Out: the probes at every accepted point, as `Waveform` rows.
+//! Cites ngspice dctran.c, traninit.c, cktsetbk.c, ckttrunc.c, niconv.c,
+//! indload.c, capload.c and AlmostEqualUlps (maths/misc/equality.c);
+//! Verilog-AMS LRM §4.5, §5.10.2, §9.10 and §9.17.2; #161;
+//! dev/analysis/transient-integration.md.
 const std = @import("std");
 const z = @import("stdpp");
 const root = @import("../types.zig");
@@ -131,10 +137,13 @@ fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratc
 }
 
 /// Integrates from the operating point in `x` to options.t_stop, recording
-/// accepted points at t >= t_start into `waveform`. On return `x` holds the
-/// last accepted solution. `allocator` backs per-run scratch only. A dt
-/// underflow returns `completed = false`, not an error; the errors are
-/// cancellation, circuit setup and allocation (scratch or `waveform`).
+/// accepted points at t >= t_start into `waveform`. When the loop ends at
+/// t_stop or at `max_steps`, `x` holds the last accepted solution; after a
+/// dt underflow its contents are unspecified (one of the rotating step
+/// buffers was live). `allocator` backs per-run scratch only. A dt
+/// underflow or `max_steps` returns `completed = false`, not an error; the
+/// errors are cancellation, circuit setup and allocation (scratch or
+/// `waveform`). Leaves the device state committed at the last accepted point.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -694,7 +703,9 @@ test "atStop: within 100 ulps of t_stop, not past them" {
 
 /// Contract entry: integrate from the operating point and return the
 /// waveform as point-major rows (time, probes...). A run that stops short of
-/// t_stop is error.TimestepTooSmall, as in ngspice.
+/// t_stop is error.TimestepTooSmall, as in ngspice. The result's names and
+/// data live in `ctx.allocator`; `opts.snapshot` returns the one row at
+/// t_stop instead, and a streamed run (`ctx.stream`) returns empty `data`.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;

@@ -8,6 +8,9 @@
 //! x0 leaves them: its value stays pinned at t = 0, which fixes the phase
 //! the time shift would otherwise leave free. The Jacobian keeps its n x n
 //! shape, the osc column holding d(phi)/d(ln T) instead of d(phi)/d(x0[osc]).
+//!
+//! Cites: dev/analysis/pss-shooting-harmonic-balance.md, Verilog-A LRM
+//! §4.6.1 (sources follow their waveform only in the transient phase).
 const std = @import("std");
 const root = @import("../types.zig");
 const simdZero = root.zeroSimd;
@@ -329,7 +332,11 @@ fn krylovSolve(
 /// `startOscillator` and returns its period as the last row's t;
 /// error.OscillatorDidNotStart when the circuit does not oscillate.
 /// Allocates O(n^2) below `krylov_threshold` unknowns, O(n * gmres_restart)
-/// past it, all freed before return. Asserts `wave` is empty or that size.
+/// past it, and O(n * n_samples) more to start an oscillator, all freed
+/// before return. Asserts `wave` is empty or that size. A period whose
+/// integration fails ends the solve unconverged with an infinite residual,
+/// not an error; the errors are OutOfMemory, QueryCancelled, error.Singular
+/// from the dense Jacobian, and error.OscillatorDidNotStart.
 pub fn solve(
     ckt: *root.Circuit,
     x_dc: []const f64,
