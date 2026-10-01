@@ -13,19 +13,48 @@ pub const Execution = struct {
     lu_threads: u8 = 1,
 };
 
-// Elementwise helpers are exact at any width. `dot` fixes one reduction
-// order (W-lane accumulator, one @reduce, scalar tail), so every caller
-// rounds the same way.
-const vw = std.simd.suggestVectorLength(f64) orelse 8;
-const Vf = @Vector(vw, f64);
+// Elementwise helpers are exact at any width. `dot` and `sum` reassociate
+// (stdpp `foldAssoc`: fixed lane accumulators, one fixed combine order), so
+// every caller rounds the same way, but not like an ordered scalar fold.
+const z = @import("stdpp");
+const vw = z.lanes.width(f64) orelse 1; // test sizing only
 
-/// Zeroes `buf` with ordinary (temporal) vector stores, so a plane that is
-/// read right after stays in cache.
+/// Lanewise float add; stdpp's `ops.add` wraps, which floats reject.
+pub const add = z.lanewise(addFn);
+fn addFn(a: anytype, b: anytype) @TypeOf(a) {
+    return a + b;
+}
+const mul = z.lanewise(mulFn);
+fn mulFn(p: anytype) @TypeOf(p.left) {
+    return p.left * p.right;
+}
+const diff = z.lanewise(diffFn);
+fn diffFn(p: anytype) @TypeOf(p.left) {
+    return p.left - p.right;
+}
+const absMax = z.lanewise(absMaxFn);
+fn absMaxFn(a: anytype, b: anytype) @TypeOf(a) {
+    return @max(a, @abs(b));
+}
+const Axpy = struct {
+    pub const lanewise = true;
+    a: f64,
+    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
+        return p.left + z.splat(@TypeOf(p.left), self.a) * p.right;
+    }
+};
+const Scale = struct {
+    pub const lanewise = true;
+    a: f64,
+    pub fn call(self: *@This(), x: anytype) @TypeOf(x) {
+        return z.splat(@TypeOf(x), self.a) * x;
+    }
+};
+
+/// Zeroes `buf` with ordinary (temporal) stores, so a plane that is read
+/// right after stays in cache.
 pub fn zeroSimd(buf: []f64) void {
-    const zero: Vf = @splat(0.0);
-    var i: usize = 0;
-    while (i + vw <= buf.len) : (i += vw) buf[i..][0..vw].* = zero;
-    for (buf[i..]) |*v| v.* = 0;
+    @memset(buf, 0);
 }
 
 /// Copies the common prefix of `src` into `dst`; exact aliasing is a no-op.
@@ -36,47 +65,46 @@ pub fn copySimd(dst: []f64, src: []const f64) void {
 
 /// dst[i] += a * src[i] over dst.len; src may alias dst.
 pub fn axpy(dst: []f64, a: f64, src: []const f64) void {
-    const av: Vf = @splat(a);
-    var i: usize = 0;
-    while (i + vw <= dst.len) : (i += vw) dst[i..][0..vw].* = @as(Vf, dst[i..][0..vw].*) + av * @as(Vf, src[i..][0..vw].*);
-    while (i < dst.len) : (i += 1) dst[i] += a * src[i];
+    var it = z.fromSlice(f64, dst).zip(z.fromSlice(f64, src[0..dst.len])).map(Axpy{ .a = a });
+    _ = it.writeInto(dst);
 }
 
 /// dst[i] = a * src[i] over dst.len; src may alias dst.
 pub fn scale(dst: []f64, a: f64, src: []const f64) void {
-    const av: Vf = @splat(a);
-    var i: usize = 0;
-    while (i + vw <= dst.len) : (i += vw) dst[i..][0..vw].* = av * @as(Vf, src[i..][0..vw].*);
-    while (i < dst.len) : (i += 1) dst[i] = a * src[i];
+    var it = z.fromSlice(f64, src[0..dst.len]).map(Scale{ .a = a });
+    _ = it.writeInto(dst);
+}
+
+/// dst[i] = a[i] - b[i] over dst.len; either input may alias dst.
+pub fn sub(dst: []f64, a: []const f64, b: []const f64) void {
+    var it = z.fromSlice(f64, a[0..dst.len]).zip(z.fromSlice(f64, b[0..dst.len])).map(diff);
+    _ = it.writeInto(dst);
 }
 
 /// Σ a[i]·b[i] over a.len.
 pub fn dot(a: []const f64, b: []const f64) f64 {
-    var acc: Vf = @splat(0);
-    var i: usize = 0;
-    while (i + vw <= a.len) : (i += vw) acc += @as(Vf, a[i..][0..vw].*) * @as(Vf, b[i..][0..vw].*);
-    var sum = @reduce(.Add, acc);
-    while (i < a.len) : (i += 1) sum += a[i] * b[i];
-    return sum;
+    var it = z.fromSlice(f64, a).zip(z.fromSlice(f64, b[0..a.len])).map(mul);
+    return it.foldAssoc(@as(f64, 0), add);
+}
+
+/// Σ buf[i], reassociated like `dot`.
+pub fn sum(buf: []const f64) f64 {
+    var it = z.fromSlice(f64, buf);
+    return it.foldAssoc(@as(f64, 0), add);
 }
 
 /// max |buf[i]|, 0 for an empty slice; NaN entries are skipped like @max does.
 pub fn normInf(buf: []const f64) f64 {
-    // Max is exact, so one lane accumulator reduced once equals the scalar
-    // fold bit for bit.
-    var acc: Vf = @splat(0);
-    var i: usize = 0;
-    while (i + vw <= buf.len) : (i += vw) acc = @max(acc, @abs(@as(Vf, buf[i..][0..vw].*)));
-    var mx = @reduce(.Max, acc);
-    while (i < buf.len) : (i += 1) mx = @max(mx, @abs(buf[i]));
-    return mx;
+    // Max is exact, so any lane grouping equals the scalar fold bit for bit.
+    var it = z.fromSlice(f64, buf);
+    return it.foldAssoc(@as(f64, 0), absMax);
 }
 
 test "vector helpers match their per-element formulas" {
     var prng = std.Random.DefaultPrng.init(0x5eed);
     const r = prng.random();
-    var x: [3 * vw + 1]f64 = undefined;
-    var y: [3 * vw + 1]f64 = undefined;
+    var x: [3 * 8 * vw + 1]f64 = undefined;
+    var y: [3 * 8 * vw + 1]f64 = undefined;
     for (0..x.len + 1) |len| {
         for (x[0..len], y[0..len]) |*u, *v| {
             u.* = r.float(f64) - 0.5;
@@ -85,14 +113,19 @@ test "vector helpers match their per-element formulas" {
         var got = y;
         axpy(got[0..len], 0.3, x[0..len]);
         for (0..len) |i| try std.testing.expectEqual(y[i] + 0.3 * x[i], got[i]);
+        sub(got[0..len], y[0..len], x[0..len]);
+        for (0..len) |i| try std.testing.expectEqual(y[i] - x[i], got[i]);
         scale(got[0..len], -2.0, x[0..len]);
         for (0..len) |i| try std.testing.expectEqual(-2.0 * x[i], got[i]);
         var mx: f64 = 0;
         for (x[0..len]) |u| mx = @max(mx, @abs(u));
         try std.testing.expectEqual(mx, normInf(x[0..len]));
-        var sum: f64 = 0;
-        for (x[0..len], y[0..len]) |u, v| sum += u * v;
-        try std.testing.expectApproxEqAbs(sum, dot(x[0..len], y[0..len]), 1e-12);
+        var acc: f64 = 0;
+        for (x[0..len], y[0..len]) |u, v| acc += u * v;
+        try std.testing.expectApproxEqAbs(acc, dot(x[0..len], y[0..len]), 1e-12);
+        acc = 0;
+        for (x[0..len]) |u| acc += u;
+        try std.testing.expectApproxEqAbs(acc, sum(x[0..len]), 1e-12);
     }
     // NaN lanes are skipped in the vector body and the tail alike.
     var with_nan: [2 * vw + 1]f64 = @splat(1);

@@ -8,6 +8,8 @@
             .url = "git+https://github.com/OmarSiwy/VerA#c964f64433ab7f91715ba995f821a12144037d29",
             .hash = "vera-0.9.0-fzAu7JrBbAFtS7BM73qDB5ciyYgf7erWs4Rmjlt-AQ66",
         },
+        // Local until stdpp has a git remote; pin it before pushing (AGENTS.md).
+        .stdpp = .{ .path = "../../Trial/ZvsRust" },
         .gompute = .{
             .url = "git+https://github.com/OmarSiwy/Gompute#a91b9b15b89b0e5dc26fd2dd3e22dd344e76cb00",
             .hash = "gompute-1.0.0-YJVc1lcCBwCIZWVp8A2OHnYsJz5AV8nGMyDZcmK6F3wB",

@@ -50,30 +50,36 @@ pub fn build(b: *std.Build) void {
     // `-Dgpu=false` is the CPU iteration build, not a shipping or bench one.
     const gpu_kernels = b.option(bool, "gpu", "Compile the GPU device kernels (default true)") orelse true;
     // Every module here is (root, target, optimize, strip) plus imports.
+    // stdpp (vectorizing iterators) is a std extension: every host module
+    // gets it. GPU device modules do not; eval.zig must not import it.
+    const stdpp_mod = b.dependency("stdpp", .{ .target = target, .optimize = optimize }).module("stdpp");
     const M = struct {
         b: *std.Build,
         target: std.Build.ResolvedTarget,
         optimize: std.builtin.OptimizeMode,
         strip: bool,
+        stdpp: ?*std.Build.Module,
         fn make(
             self: @This(),
             root: std.Build.LazyPath,
             imports: []const std.Build.Module.Import,
         ) *std.Build.Module {
-            return self.b.createModule(.{
+            const mod = self.b.createModule(.{
                 .root_source_file = root,
                 .target = self.target,
                 .optimize = self.optimize,
                 .strip = self.strip,
                 .imports = imports,
             });
+            if (self.stdpp) |s| mod.addImport("stdpp", s);
+            return mod;
         }
-    }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .Debug and !debug_info };
+    }{ .b = b, .target = target, .optimize = optimize, .strip = optimize != .Debug and !debug_info, .stdpp = stdpp_mod };
     // Strip pinned on, `-Ddebug-info` or not, for device code: DWARF over
     // generated models is superlinear and maps to cache files nobody reads,
     // and with DI on, the NVPTX backend and the host device objects SEGV'd
     // the compiler (mos2, vdmos). Symbols survive; only line tables go.
-    const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true };
+    const GPU = @TypeOf(M){ .b = b, .target = target, .optimize = optimize, .strip = true, .stdpp = null };
 
     const build_options_mod = bopts.createModule();
 
