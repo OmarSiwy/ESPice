@@ -1,0 +1,205 @@
+{
+ "schema_version": 1,
+ "netlist_sha256": "8283af42dea12467f685b46009b01e635ee70236952f00de10378bf997877d61",
+ "analysis": "sp",
+ "purpose": "HSPICE .NET two-port, voltage-driven (Y form): S, Y, Z, H and the stability factors of a resistive T network against RIN = 50 and ROUT = 75.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "T network Z = [[R1+R2, R2], [R2, R3+R2]]; S = (Zn - E)(Zn + E)^-1 with Zn = F^-1 Z F^-1, F = diag(sqrt(RIN), sqrt(ROUT)); Y = Z^-1; H from Z (h11 = det Z / Z22, h12 = Z12/Z22, h21 = -Z21/Z22, h22 = 1/Z22); Rollett K and Edwards-Sinsky MU from S."
+ },
+ "tokenizer": "hspice",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "LIN Analysis",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "S(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.08018867924528296,
+        0.0
+       ]
+      ]
+     },
+     "S(1,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.5777098449960325,
+        0.0
+       ]
+      ]
+     },
+     "S(2,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.5777098449960325,
+        0.0
+       ]
+      ]
+     },
+     "S(2,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        -0.13207547169811337,
+        0.0
+       ]
+      ]
+     },
+     "Y(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.037500000000000006,
+        0.0
+       ]
+      ]
+     },
+     "Y(1,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        -0.031249999999999997,
+        0.0
+       ]
+      ]
+     },
+     "Y(2,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        -0.03125,
+        0.0
+       ]
+      ]
+     },
+     "Y(2,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.034375,
+        0.0
+       ]
+      ]
+     },
+     "Z(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        109.99999999999997,
+        0.0
+       ]
+      ]
+     },
+     "Z(1,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        99.99999999999996,
+        0.0
+       ]
+      ]
+     },
+     "Z(2,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        99.99999999999994,
+        0.0
+       ]
+      ]
+     },
+     "Z(2,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        119.99999999999993,
+        0.0
+       ]
+      ]
+     },
+     "H(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        26.666666666666668,
+        0.0
+       ]
+      ]
+     },
+     "H(1,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.8333333333333335,
+        0.0
+       ]
+      ]
+     },
+     "H(2,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        -0.8333333333333334,
+        0.0
+       ]
+      ]
+     },
+     "H(2,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.008333333333333338,
+        0.0
+       ]
+      ]
+     },
+     "K_STABILITY_FACTOR": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        1.6400000000000001,
+        0.0
+       ]
+      ]
+     },
+     "MU_STABILITY_FACTOR": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        2.2673267326732667,
+        0.0
+       ]
+      ]
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

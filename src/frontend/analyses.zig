@@ -745,20 +745,72 @@ fn hspiceTran(args: []const Value) !requests.Tran {
     return t;
 }
 
-/// True for an HSPICE `.lin` card, which runs as an `.sp` query.
-fn isLin(line: []const u8) bool {
+/// True when `line` is the dot card `name` (HSPICE `.lin` and `.net` run
+/// as `.sp` queries).
+fn cardIs(line: []const u8, name: []const u8) bool {
     const head = line[@min(line.len, 1) .. std.mem.indexOfAny(u8, line, " \t") orelse line.len];
-    return std.ascii.eqlIgnoreCase(head, "lin");
+    return std.ascii.eqlIgnoreCase(head, name);
+}
+
+/// HSPICE `.net input [RIN=r]`, `.net input r` and `.net output input
+/// [ROUT=r] [RIN=r]` [CR App.A], obsolete, over the `.ac` sweep: the S, Y,
+/// Z and H of the network between the input source's terminals (port 1)
+/// and the output, `v(n1[,n2])` or `i(Vx)` (port 2), each port driven as
+/// what it is (a V card's voltage, an I card's or node pair's current) and
+/// S taken against RIN and ROUT, which default to 1 ohm. A V card's port
+/// keeps its branch; the others have `Port.no_branch`.
+fn net(a: netlist.Analysis, sources: core.QueryBindings, ctx: CardContext) !requests.Sp {
+    const args = a.args;
+    const ports = try ctx.arena.alloc(requests.Port, 2);
+    var n_ports: usize = 1;
+    var i: usize = 0;
+    if (args.len > 0 and args[0] == .group) {
+        // Two-port: the output first.
+        ports[1] = if (currentProbeName(args, 0)) |probe| blk: {
+            const v = netlist.nameIndex(sources.v_names, probe) orelse return error.AnalysisSourceNotFound;
+            break :blk .{ .node = sources.v_pos[v], .neg = sources.v_neg[v], .branch = sources.v_branches[v] };
+        } else .{ .node = a.pos, .neg = if (a.neg == netlist.none) GROUND else a.neg, .branch = requests.Port.no_branch };
+        if (ports[1].node == netlist.none) return error.AnalysisNodeNotFound;
+        n_ports = 2;
+        i = 1;
+    }
+    const input = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
+    // An I card delivers its current into n-, so that is the port's + terminal.
+    ports[0] = if (netlist.nameIndex(sources.v_names, input)) |v|
+        .{ .node = sources.v_pos[v], .neg = sources.v_neg[v], .branch = sources.v_branches[v] }
+    else if (netlist.nameIndex(sources.i_names, input)) |k|
+        .{ .node = sources.i_neg[k], .neg = sources.i_pos[k], .branch = requests.Port.no_branch }
+    else
+        return error.AnalysisSourceNotFound;
+    i += 1;
+    var z0 = [2]f64{ 1, 1 };
+    if (n_ports == 1 and i < args.len and args[i] == .num) {
+        z0[0] = try positive(args, i);
+        i += 1;
+    }
+    while (i < args.len) : (i += 2) {
+        const at: usize = if (isKey(args, i, "rin")) 0 else if (n_ports == 2 and isKey(args, i, "rout")) 1 else return error.InvalidAnalysisArguments;
+        z0[at] = try positive(args, i + 1);
+    }
+    for (ports[0..n_ports], z0[0..n_ports]) |*p, z| p.z0 = z;
+    return .{ .sweep = ctx.ac orelse return error.MissingAnalysisCard, .ports = ports[0..n_ports], .lin = .{}, .net = true };
+}
+
+fn isKey(args: []const Value, i: usize, key: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(nameAt(args, i) orelse return false, key);
 }
 
 /// HSPICE `.lin [sparcalc=1] [noisecalc=0|1|2] [gdcalc=0|1]
-/// [mixedmode2port=ss] [format= filename= dataformat= modelname= ...]`
+/// [mixedmode2port=xy] [format= filename= dataformat= modelname= ...]`
 /// [CR .LIN] over the `.ac` sweep. S is always computed. noisecalc=2 (the
 /// N-port correlation matrix) publishes the two-port parameters only.
+/// mixedmode2port names port 1's and port 2's mode in the two-port
+/// measurements: `s` for a single-ended port, `d` or `c` for a balanced
+/// one; any other pairing is InvalidAnalysisArguments.
 /// `format=touchstone|touchstone2` also writes a Touchstone 1.0 file named
 /// by `filename=`; the other formats (`selem`, `citi`) and the listing
 /// keywords are checked for a value and unused.
-fn lin(args: []const Value) !requests.Sp.Lin {
+fn lin(args: []const Value, ports: []const requests.Port) !requests.Sp.Lin {
     const Key = enum { sparcalc, noisecalc, gdcalc, mixedmode2port, format, filename, dataformat, modelname, freqdigit, spardigit, listfreq, listcount, listfloor, listsources };
     var o: requests.Sp.Lin = .{};
     var i: usize = 0;
@@ -773,7 +825,19 @@ fn lin(args: []const Value) !requests.Sp.Lin {
                 if (key == .noisecalc) o.noise = v != 0;
                 if (key == .gdcalc) o.group_delay = v != 0;
             },
-            .mixedmode2port => if (!std.ascii.eqlIgnoreCase(nameAt(args, i + 1) orelse "", "ss")) return error.UnsupportedAnalysisOutput,
+            .mixedmode2port => {
+                const mode = nameAt(args, i + 1) orelse return error.InvalidAnalysisArguments;
+                if (mode.len != 2) return error.InvalidAnalysisArguments;
+                for (mode, 0..) |c, k| {
+                    const balanced = k < ports.len and ports[k].balanced != null;
+                    switch (std.ascii.toLower(c)) {
+                        's' => if (balanced) return error.InvalidAnalysisArguments,
+                        'd', 'c' => if (!balanced) return error.InvalidAnalysisArguments,
+                        else => return error.InvalidAnalysisArguments,
+                    }
+                    o.common[k] = std.ascii.toLower(c) == 'c';
+                }
+            },
             .format => {
                 const f = nameAt(args, i + 1) orelse return error.InvalidAnalysisArguments;
                 o.touchstone = std.ascii.startsWithIgnoreCase(f, "touchstone");
@@ -1331,6 +1395,9 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 } else if (!std.mem.eql(u8, key, "filename") and !std.mem.eql(u8, key, "dataformat")) return error.InvalidAnalysisArguments;
             }
             if (sources.ports.len == 0) return error.MissingAnalysisCard;
+            // ponytail: mixed-mode P cards only in `.lin`; `.hblin` would
+            // need the leg drives in every band.
+            for (sources.ports) |p| if (p.balanced != null) return error.UnsupportedAnalysisOutput;
             return .{ .hblin = .{ .f0 = 0, .sweep = grid.sweep, .ports = sources.ports, .noise = noise } };
         },
         .phasenoise => {
@@ -1361,7 +1428,8 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .pxf = .{ .f_lo = lo, .sweep = sweep, .out_node = out } };
         },
         .sp => {
-            if (isLin(a.line)) return .{ .sp = .{ .sweep = ctx.ac orelse return error.MissingAnalysisCard, .ports = sources.ports, .lin = try lin(args) } };
+            if (cardIs(a.line, "net")) return .{ .sp = try net(a, sources, ctx) };
+            if (cardIs(a.line, "lin")) return .{ .sp = .{ .sweep = ctx.ac orelse return error.MissingAnalysisCard, .ports = sources.ports, .lin = try lin(args, sources.ports) } };
             try arity(args, 4, 4);
             return .{ .sp = .{ .sweep = try frequencySweep(args, 0), .ports = sources.ports } };
         },

@@ -1,0 +1,67 @@
+{
+ "schema_version": 1,
+ "netlist_sha256": "1c2fbe2e2c1cb4f014bc0b35e97bb661070355e585e3d1a851e30dde1406ee02",
+ "analysis": "sp",
+ "purpose": "HSPICE .NET one-port: S, Y and Z of a series RC behind the input source against RIN = 50.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "Z = 30 + 1/(j 2 pi f 10n); Y = 1/Z; S11 = (Z - 50)/(Z + 50)."
+ },
+ "tokenizer": "hspice",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "LIN Analysis",
+    "match": "exact",
+    "row_count": 2,
+    "columns": {
+     "S(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.7478750269917465,
+        -0.501586696639678
+       ],
+       [
+        -0.20241029894047424,
+        -0.23921192837622507
+       ]
+      ]
+     },
+     "Y(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.00114371565239927,
+        0.006067599985697195
+       ],
+       [
+        0.02601224575306647,
+        0.013799924975072302
+       ]
+      ]
+     },
+     "Z(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        29.999999999999986,
+        -159.15494309189535
+       ],
+       [
+        30.000000000000004,
+        -15.915494309189539
+       ]
+      ]
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

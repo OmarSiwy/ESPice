@@ -19,6 +19,9 @@ pub const Result = core.Result;
 pub const Plot = struct {
     title: []const u8,
     result: Result,
+    /// Touchstone port reference impedances in ohms, one per port; empty is
+    /// 50 ohm on every port. Other formats ignore it.
+    z0: []const f64 = &.{},
 
     pub fn schema(self: Plot) Schema {
         return .{ .varnames = self.result.varnames, .is_complex = self.result.is_complex, .npoints = self.result.npoints };

@@ -420,7 +420,8 @@ pub const NetBuilder = struct {
         /// `.sp` port index, 1-based; 0 when not a port (vsrcdefs.h:104-105).
         portnum: u16,
         /// The port the card is, valid when `portnum` is nonzero. A P card's
-        /// port node is n+ in front of its z0.
+        /// port node is n+ in front of its z0, and a mixed-mode one's
+        /// branch is its + leg's.
         port: requests.Port,
     };
 
@@ -830,16 +831,35 @@ pub const NetBuilder = struct {
                 // [SA Ch.17]: a noiseless resistor from n+ to a hidden node the
                 // source drives. ngspice's portnum V stays ideal.
                 const series = port != null and isPortCard(dev);
-                if (series) {
+                const neg = nodes[1];
+                var port_branch: u32 = undefined;
+                var balanced: ?requests.Port.Leg = null;
+                if (series and dev.pins.len == 3) {
+                    // Mixed mode [SA Ch.17]: the card's value V drives a hidden
+                    // node m against ref, and each leg is V/2 or -V/2 against
+                    // ref (a VCVS on m) behind its own z0.
+                    const ref = try self.rowOf(dev.pins[2]);
+                    nodes = .{ try self.b.addNode(), ref };
+                    var legs: [2]requests.Port.Leg = undefined;
+                    for (&legs, [2]u32{ pos, neg }, [2]f64{ 0.5, -0.5 }) |*leg, pin, gain| {
+                        const h = try self.b.addNode();
+                        try self.b.addDevice(devices.resistor, dev.name, .{ .r = port.?.z0, .noisy = 0 }, .{}, [2]u32{ pin, h });
+                        try self.b.addDevice(devices.vcvs, dev.name, .{ .gain = gain }, .{}, [4]u32{ h, ref, nodes[0], ref });
+                        leg.* = .{ .node = pin, .branch = internalRow(devices.vcvs, "flowZ28pZ2cnZ29", self.b.n) };
+                    }
+                    port_branch = legs[0].branch;
+                    balanced = legs[1];
+                } else if (series) {
                     nodes[0] = try self.b.addNode();
                     try self.b.addDevice(devices.resistor, dev.name, .{ .r = port.?.z0, .noisy = 0 }, .{}, [2]u32{ pos, nodes[0] });
                 }
                 const br = self.b.n;
+                if (balanced == null) port_branch = br;
                 if (!sensed) try self.b.addDevice(devices.vsource, dev.name, bound[0], bound[1], nodes);
                 try self.v.append(self.arena, .{
                     .name = dev.name,
                     .pos = pos,
-                    .neg = nodes[1],
+                    .neg = neg,
                     .branch = br,
                     .dc = bound[0].dc,
                     .distof1 = sourceDisto(dev, "distof1"),
@@ -848,10 +868,11 @@ pub const NetBuilder = struct {
                     .port = if (port) |p| .{
                         .node = pos,
                         .neg = nodes[1],
-                        .branch = br,
+                        .branch = port_branch,
                         .z0 = p.z0,
                         .band = p.band,
                         .series_z0 = series,
+                        .balanced = balanced,
                     } else .{ .node = GROUND, .branch = GROUND },
                 });
                 // A replaced source stamps nothing, so it can neither anchor

@@ -107,8 +107,8 @@ the build-order id in the last column.
 | `.PZ ov src` [CR .PZ; SA Ch.15] | poles and zeros | ngspice form (`eigen/pz.zig`) | no | medium | B2, S |
 | `.FOUR f ov1 [ov2 ...]` [CR .FOUR] | DC plus 9 harmonics and THD over the last period | one output (`post/four.zig`) | no | medium | B2, S |
 | `.FFT ov [START STOP NP FORMAT WINDOW ALFA FREQ FMIN FMAX]` [CR .FFT; SA Ch.14] | windowed FFT of a transient, 8 windows, THD at FREQ | no; silently ignored | no | high for data converters and PLLs | B5, M |
-| `.LIN [sparcalc noisecalc gdcalc mixedmode2port format dataformat ...]` [CR .LIN; SA Ch.17] | S/Y/Z/H, mixed-mode S, group delay, stability factors, 2-port and N-port noise parameters; writes `.sc#`, Touchstone 1/2, CITI | S only (`ac/sp.zig`); `.lin` silently ignored | `acsp` (S) | high for RF | C4, M |
-| `.NET` (obsolete, App.A) | Z/Y/H/S of a 1- or 2-port inside `.AC` | no | no | low | C4, alias of `.LIN` |
+| `.LIN [sparcalc noisecalc gdcalc mixedmode2port format dataformat ...]` [CR .LIN; SA Ch.17] | S/Y/Z/H, mixed-mode S, group delay, stability factors, 2-port and N-port noise parameters; writes `.sc#`, Touchstone 1/2, CITI | S/Y/Z/H, mixed-mode S, group delay, K and MU, two-port noise; Touchstone 1.0, or 2.0 when port impedances differ (`ac/sp.zig`) | `acsp` (S) | high for RF | C4, landed |
+| `.NET` (obsolete, App.A) | Z/Y/H/S of a 1- or 2-port inside `.AC` | yes, ideal V/I ports, S against RIN/ROUT (`ac/sp.zig`) | no | low | C4, landed |
 | `.LSTB mode=single\|diff\|comm vsource=v[,v]` [CR .LSTB] | loop gain by Middlebrook injection; GM, PM, unity-gain frequency and low-frequency gain in the listing | `.lstb` (`ac/lstb.zig`): Tian double injection as VACASK's `acstb`, single/diff/comm, `localgnd`, margins plot refined on the circuit, `.measure lstb`; `.stb` stays single injection | `acstb`: current and voltage injection, both directions, DUT y-parameters | high | done |
 | `.SAMPLE FS= [TOL NUMF MAXFLD BETA]` [CR .SAMPLE] | noise folded by a sampler | no | no | low to medium | D6, S |
 | `.ACMATCH outvar ...` [CR .ACMATCH; SA Ch.23] | AC mismatch per device from the variation block | no | no | medium | C5, M |
@@ -195,7 +195,7 @@ the build-order id in the last column.
 | U-element [SA Ch.8] | lumped lossy line | letter taken by URC | no | low | E2, S |
 | S-element, Touchstone/CITI models [SA Ch.8; SI] | multiport S-parameter block, recursive convolution, passivity | no | no | high for SI | E3, L |
 | B-element, `.IBIS`, `.EBD`, `.PKG`, `.ICM` [SI] | IBIS buffers and packages | no | no | high for SI | E3, L |
-| P-element [SA Ch.17] | port for `.LIN`, also a source | a V source behind a noiseless z0 resistor in every analysis | port pairs | medium | C4, landed |
+| P-element [SA Ch.17] | port for `.LIN`, also a source | a V source behind a noiseless z0 resistor in every analysis; mixed-mode ports | port pairs | medium | C4, landed |
 | `.STATEYE` [CR; SA Ch.18] | statistical eye and BER | no | no | medium for SerDes | E3, L |
 | Field solver: `.MATERIAL`, `.LAYERSTACK`, `.SHAPE`, `.FSOPTIONS` | 2-D field solver for W-element models | no | no | low | out of scope |
 
@@ -426,7 +426,7 @@ Status: landed; see [variants.md](../analysis/variants.md) for what was built an
 
 ### C4. `.lin`
 
-Status: landed without mixed mode, stability factors or `.net`; see
+Status: landed, mixed mode, K/MU and `.net` included; see
 [s-parameters.md](../analysis/s-parameters.md) §5 for what was built and
 where it differs from this sketch (group delay by a central difference).
 

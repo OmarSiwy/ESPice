@@ -156,7 +156,9 @@ pub fn validate(query: requests.Query, n: u32) !void {
         },
         .sp => |o| {
             for (o.ports) |port| {
-                if (port.node >= n or port.branch >= n or port.z0 <= 0) return error.InvalidQueryOptions;
+                const branch_ok = port.branch < n or (o.net and port.branch == requests.Port.no_branch);
+                if (port.node >= n or port.neg >= n or !branch_ok or port.z0 <= 0) return error.InvalidQueryOptions;
+                if (port.balanced) |leg| if (leg.node >= n or leg.branch >= n or o.net) return error.InvalidQueryOptions;
             }
             const ports = @max(o.ports.len, 1);
             _ = try elements(&.{ o.sweep.count(), ports, ports, 2 });
