@@ -76,15 +76,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer scratch.free(re);
     const im = re[np..];
     @memset(im, 0);
-    const times = wf.timeSlice();
+    const times = wf.column(0);
     const dt = (opts.stop - opts.start) / @as(f64, @floatFromInt(np));
     var cursor_p: usize = 0;
     var cursor_n: usize = 0;
     var w_sum: f64 = 0;
     for (re[0..np], 0..) |*r, k| {
         const t = opts.start + dt * @as(f64, @floatFromInt(k));
-        var v = four.interpolateAt(times, wf.probeValues(0), t, &cursor_p);
-        if (differential) v -= four.interpolateAt(times, wf.probeValues(1), t, &cursor_n);
+        var v = four.interpolateAt(times, wf.column(1), t, &cursor_p);
+        if (differential) v -= four.interpolateAt(times, wf.column(2), t, &cursor_n);
         const w = window(opts.window, k, np, opts.alfa);
         w_sum += w;
         r.* = v * w;

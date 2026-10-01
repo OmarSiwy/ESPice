@@ -61,7 +61,7 @@ test "four: cursor interpolation matches the binary-search oracle" {
         const t = @as(f64, @floatFromInt(k)) * 0.01 - 0.05;
         try testing.expectEqual(
             interpolate(&times, &vals, t),
-            interpolateAt(&times, &vals, t, &cursor),
+            interpolateAt(.of(&times), .of(&vals), t, &cursor),
         );
     }
 }

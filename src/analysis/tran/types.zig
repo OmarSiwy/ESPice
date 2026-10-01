@@ -15,15 +15,47 @@ pub fn initialCapacity(options: Options) u32 {
     return @intFromFloat(@min(@max(64.0, est), @as(f64, 1 << 22)));
 }
 
-const simdCopy = @import("core").numerics.copySimd;
+/// A borrowed series inside a row-major table: element i is
+/// `base[i * stride]`. Readers walk a waveform column in place instead of
+/// gathering it.
+pub const Column = struct {
+    base: []const f64,
+    stride: usize,
+    len: usize,
 
-/// Recorded transient waveform, probe-major so each probe's samples are one
-/// contiguous slice (`probeValues`). Owns both buffers through `allocator`.
+    /// A plain slice as a column of stride 1.
+    pub fn of(s: []const f64) Column {
+        return .{ .base = s, .stride = 1, .len = s.len };
+    }
+
+    pub fn at(c: Column, i: usize) f64 {
+        return c.base[i * c.stride];
+    }
+
+    /// The column from element `i` on.
+    pub fn from(c: Column, i: usize) Column {
+        return .{ .base = c.base[i * c.stride ..], .stride = c.stride, .len = c.len - i };
+    }
+
+    /// The first index whose value is >= `v`; the column must be ascending.
+    pub fn lowerBound(c: Column, v: f64) usize {
+        var lo: usize = 0;
+        var hi = c.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (c.at(mid) < v) lo = mid + 1 else hi = mid;
+        }
+        return lo;
+    }
+};
+
+/// Recorded transient waveform as point-major rows (time, probe 0, ...),
+/// the exact layout a transient `Result` publishes, so the result borrows
+/// the recording instead of transposing a copy of it. Untouched capacity is
+/// virtual memory only: the estimate in `initialCapacity` costs no RSS.
 pub const Waveform = struct {
-    /// Sample times, `capacity` long; the first `len` are valid.
-    times: []f64,
-    /// `n_probes * capacity`; probe k's point i is at `k * capacity + i`.
-    values: []f64,
+    /// `capacity` rows of `stride()` f64s; the first `len` rows are valid.
+    rows: []f64,
     len: u32,
     capacity: u32,
     n_probes: u32,
@@ -32,12 +64,8 @@ pub const Waveform = struct {
     /// Allocates room for `capacity` points (at least 1) of `n_probes` probes.
     pub fn init(allocator: std.mem.Allocator, n_probes: u32, capacity: u32) !Waveform {
         const cap: u32 = @max(capacity, 1);
-        const times = try allocator.alloc(f64, cap);
-        errdefer allocator.free(times);
-        const values = try allocator.alloc(f64, @as(usize, n_probes) * cap);
         return .{
-            .times = times,
-            .values = values,
+            .rows = try allocator.alloc(f64, @as(usize, n_probes + 1) * cap),
             .len = 0,
             .capacity = cap,
             .n_probes = n_probes,
@@ -45,87 +73,61 @@ pub const Waveform = struct {
         };
     }
 
-    /// Appends point `t` with `x[probes[k]]` as probe k. A full buffer
-    /// doubles, which invalidates earlier `timeSlice`/`probeValues` slices.
+    /// Columns per row: time, then one per probe.
+    pub fn stride(self: Waveform) usize {
+        return @as(usize, self.n_probes) + 1;
+    }
+
+    /// Appends point `t` with `x[probes[k]]` as probe k. Growing invalidates
+    /// earlier `data` slices.
     pub fn record(self: *Waveform, t: f64, x: []const f64, probes: []const u32) !void {
-        if (self.len == self.capacity) try self.grow();
-        self.times[self.len] = t;
-        const cap: usize = self.capacity;
-        for (probes, 0..) |node, k| self.values[k * cap + self.len] = x[node];
-        self.len += 1;
+        const row = try self.next();
+        row[0] = t;
+        for (probes, row[1..]) |node, *v| v.* = x[node];
     }
 
-    /// `record` of the point `(1 - f) * a + f * b` at time `t`, per probe;
-    /// grows and invalidates like `record`.
+    /// `record` of the point `(1 - f) * a + f * b` at time `t`, per probe.
     pub fn recordLerp(self: *Waveform, t: f64, a: []const f64, b: []const f64, f: f64, probes: []const u32) !void {
+        const row = try self.next();
+        row[0] = t;
+        for (probes, row[1..]) |node, *v| v.* = a[node] + f * (b[node] - a[node]);
+    }
+
+    /// The recorded rows, borrowed: valid until the next `record` or
+    /// `deinit`. A transient `Result.data` is exactly this slice.
+    pub fn data(self: Waveform) []f64 {
+        return self.rows[0 .. @as(usize, self.len) * self.stride()];
+    }
+
+    /// Point `i`'s time.
+    pub fn time(self: Waveform, i: usize) f64 {
+        return self.rows[i * self.stride()];
+    }
+
+    /// Column `c` (0 = time, k + 1 = probe k), borrowed in place; valid
+    /// until the next `record` or `deinit`.
+    pub fn column(self: Waveform, c: usize) Column {
+        return .{ .base = self.rows[c..], .stride = self.stride(), .len = self.len };
+    }
+
+    fn next(self: *Waveform) ![]f64 {
         if (self.len == self.capacity) try self.grow();
-        self.times[self.len] = t;
-        const cap: usize = self.capacity;
-        for (probes, 0..) |node, k| self.values[k * cap + self.len] = a[node] + f * (b[node] - a[node]);
-        self.len += 1;
+        const s = self.stride();
+        defer self.len += 1;
+        return self.rows[@as(usize, self.len) * s ..][0..s];
     }
 
-    /// The recorded times, valid until the next `record`.
-    pub fn timeSlice(self: *const Waveform) []const f64 {
-        return self.times[0..self.len];
-    }
-
-    /// Probe k's recorded samples, valid until the next `record`.
-    pub fn probeValues(self: *const Waveform, k: u32) []const f64 {
-        return self.values[@as(usize, k) * self.capacity ..][0..self.len];
-    }
-
-    /// Transposes to point-major rows (time, probes...) of stride `ncols`.
-    /// The caller owns the returned slice.
-    pub fn toRows(self: *const Waveform, allocator: std.mem.Allocator, ncols: usize) ![]f64 {
-        const data = try allocator.alloc(f64, @as(usize, self.len) * ncols);
-        const times = self.timeSlice();
-        // 32x32 point/probe tiles keep 8 KB of source and 8 KB of destination
-        // resident, so each cache line is consumed whole on both sides.
-        // ponytail: 32x32 measured 1.85 s vs 1.97 s untiled on rc_ladder_100k,
-        // and 32 points x all probes was slower than no tiling. Retune both
-        // dimensions together.
-        const tile = 32;
-        var p0: usize = 0;
-        while (p0 < self.len) : (p0 += tile) {
-            const p1 = @min(p0 + tile, self.len);
-            for (p0..p1) |p| data[p * ncols] = times[p];
-            var k0: usize = 0;
-            while (k0 < self.n_probes) : (k0 += tile) {
-                const k1 = @min(k0 + tile, self.n_probes);
-                for (k0..k1) |idx| {
-                    const src = self.probeValues(@intCast(idx))[p0..p1];
-                    for (src, p0..) |v, p| data[p * ncols + idx + 1] = v;
-                }
-            }
-        }
-        return data;
-    }
-
-    // ponytail: doubling fallback; initialCapacity covers normal runs.
+    // ponytail: doubling fallback; initialCapacity covers normal runs. On an
+    // arena a growth that cannot resize in place leaves the old rows resident
+    // until the arena dies; a reserve-and-commit buffer removes that.
     fn grow(self: *Waveform) !void {
-        const old_cap: usize = self.capacity;
-        const new_cap = old_cap * 2;
-        const times_new = try self.allocator.alloc(f64, new_cap);
-        errdefer self.allocator.free(times_new);
-        const values_new = try self.allocator.alloc(f64, @as(usize, self.n_probes) * new_cap);
-        simdCopy(times_new[0..self.len], self.times[0..self.len]);
-        for (0..self.n_probes) |k| {
-            simdCopy(
-                values_new[k * new_cap ..][0..self.len],
-                self.values[k * old_cap ..][0..self.len],
-            );
-        }
-        self.allocator.free(self.times);
-        self.allocator.free(self.values);
-        self.times = times_new;
-        self.values = values_new;
+        const new_cap = @as(usize, self.capacity) * 2;
+        self.rows = try self.allocator.realloc(self.rows, self.stride() * new_cap);
         self.capacity = @intCast(new_cap);
     }
 
     pub fn deinit(self: *Waveform) void {
-        self.allocator.free(self.times);
-        self.allocator.free(self.values);
+        self.allocator.free(self.rows);
         self.* = undefined;
     }
 };

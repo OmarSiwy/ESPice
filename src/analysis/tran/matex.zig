@@ -431,8 +431,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         @max(@as(f64, 256), opts.t_stop / h_cap * 2.0),
         @as(f64, opts.max_points),
     ));
-    var wf = try Waveform.init(ctx.scratch_allocator, n_probes, est_points);
-    defer wf.deinit();
+    // Recorded straight into the results arena; the Result borrows it.
+    var wf = try Waveform.init(a, n_probes, est_points);
+    errdefer wf.deinit();
 
     try wf.record(0, x, ctx.probes);
 
@@ -605,14 +606,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         for (names[1..]) |s_val| a.free(s_val);
         a.free(names);
     }
-    const data = try wf.toRows(a, names.len);
-
     return .{
         .plotname = "MATEX Transient Analysis",
         .varnames = names,
         .is_complex = false,
         .npoints = wf.len,
-        .data = data,
+        .data = wf.data(),
     };
 }
 

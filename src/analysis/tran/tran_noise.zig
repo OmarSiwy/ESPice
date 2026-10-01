@@ -289,19 +289,18 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // from dt_init, so t_stop/dt_init + 1 rows is the most a run records; 2x
     // is headroom and the waveform doubles past it.
     const est_rows = 2.0 * opts.t_stop / opts.dt_init;
-    var wf = try Waveform.init(scratch, @intCast(ctx.probes.len), @intFromFloat(@min(@max(1024.0, est_rows), @as(f64, 1 << 22))));
-    defer wf.deinit();
+    // Recorded straight into the results arena; the Result borrows it.
+    var wf = try Waveform.init(a, @intCast(ctx.probes.len), @intFromFloat(@min(@max(1024.0, est_rows), @as(f64, 1 << 22))));
+    errdefer wf.deinit();
     const completed = try simulate(ctx.circuit, x, ctx.probes, srcs, &wf, opts, scratch);
 
-    const data = try wf.toRows(a, ctx.probes.len + 1);
-    errdefer a.free(data);
     const names = try root.probeNames(ctx, "time");
     return .{
         .plotname = if (completed) "Transient Noise Analysis" else "Transient Noise Analysis (stopped early)",
         .varnames = names,
         .is_complex = false,
         .npoints = wf.len,
-        .data = data,
+        .data = wf.data(),
     };
 }
 
