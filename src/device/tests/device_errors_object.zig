@@ -33,7 +33,7 @@ fn tooManyInstances() ir.DeviceResult(ir.Batch) {
     var store: eval.ProtoStore(Device) = .{};
     // Only the count guard may inspect this oversized row count; no element is
     // allocated or accessed, and finalize must fail before taking ownership.
-    store.rows.len = @as(usize, std.math.maxInt(u32)) + 1;
+    store.nodes.items.len = @as(usize, std.math.maxInt(u32)) + 1;
     return eval.ProtoStore(Device).finalize(&store, std.heap.page_allocator, undefined);
 }
 
