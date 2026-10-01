@@ -29,10 +29,19 @@ v1=1)`, `Transient Analysis (monte=7)`, `Operating Point (alter=2)`.
 ### Choices that are ours
 
 - **`.alter` is cumulative**: block k edits the deck as blocks 1..k-1 left
-  it. HSPICE's manual describes each run reading the input after the
-  previous `.alter`, and options set in one block staying set until a
-  later block turns them off; Spectre's `alter` statements persist the
-  same way. **Not yet checked against an HSPICE run.** In a block, an
+  it. The manual does not say so in one sentence; the reading rests on two
+  passages of [SA Ch.4], E-2010.12 p. 107. "Altering Design Variables
+  and Subcircuits": "If you used an .OPTION statement (in an original input
+  file or a .ALTER block) to turn on an option, you can turn that option
+  off", so an option set in one block holds in the next. "Using Multiple
+  .ALTER Blocks": after each run HSPICE reads the next block and "uses these
+  statements to modify the input netlist file", the file the earlier blocks
+  already modified. Spectre's `alter` statements persist the same way.
+  The same page also says that for each further block "HSPICE performs the
+  simulation that precedes the first .ALTER statement", which could be read
+  as base plus the current block only; we read it as the base deck's
+  statements being re-read, which the `.DEL LIB` advice that follows it is
+  about. **Not checked against an HSPICE run.** In a block, an
   element card replaces the top-level card of that name, `.model` and
   `.subckt ... .ends` replace by name, `.lib file sec` replaces the `.lib`
   line naming the same file, `.del lib` removes one, and anything else is
@@ -50,12 +59,15 @@ v1=1)`, `Transient Analysis (monte=7)`, `Operating Point (alter=2)`.
   uniform over ±width; `limit(nom, abs)` one of the two extremes. A
   multiplier m keeps the largest of m draws. Outside Monte Carlo every one
   folds to its nominal.
-- **`DEV`/`LOT`** after a `.model` value (`is=1e-14 lot/gauss=10%
-  dev/2/gauss=2%`): `LOT` draws once per model and trial, `DEV` once per
-  device. The value is one sigma for `gauss`, the half range for `unif`
-  (the default distribution) and `limit`; `%` makes it relative. The
-  sigma reading follows the variation block; **HSPICE's own convention
-  for DEV/LOT GAUSS is not verified.**
+- **`DEV`/`LOT`** after a `.model` value (`is=1e-14 lot/gauss=30%
+  dev/2/gauss=6%`): `LOT` draws once per model and trial, `DEV` once per
+  device. For `gauss` the value is the 3-sigma spread: [SA Ch.20
+  "Variations Specified Using DEV and LOT"], E-2010.12 p. 694, calls
+  LotDist and DevDist "the characteristic numbers for the distribution:
+  3-sigma value for Gaussian distributions", so `gauss=30%` draws with a
+  10% sigma. For `unif` (the default distribution [CR .MODEL]) and
+  `limit` it is the half range. `%` makes it relative. **Not checked
+  against an HSPICE run.**
 - **`.variation`**: `.global_variation` rows (`<type> <model> p=σ [%]`)
   draw per model, `.local_variation` rows per device, and
   `.element_variation` rows (`<letter> p=σ [%]`) per element; σ is one
