@@ -28,7 +28,7 @@ Every source header carries one of three attribution forms:
 | Models | Attribution |
 |---|---|
 | capacitor, inductor | own |
-| resistor, vcvs, vccs, cccs, ccvs, kinduc, cswitch, vswitch, bsource, vsource, isource | derived |
+| resistor, vcvs, vccs, cccs, ccvs, kinduc, cswitch, vswitch, bsource, bsource_i, vsource, isource | derived |
 | tline, lossy_tline, coupled_tlines, diode, jfet, jfet2, mes, mesa, gummel_poon | derived |
 | mos1, mos2, mos3, mos6, mos9, bsim1, bsim2, bsim3 | derived |
 | hfet1, hfet2, vdmos | derived |
@@ -200,7 +200,15 @@ Intentional divergences, kept rather than matched:
   through repeated multiplication, matching ngspice's hspice/ltspice compat
   mode (ptfuncs.c `PTpowerH`) and the fixture oracles' analytic math;
   ngspice's default mode computes `|x|^k` for every constant power (see
-  `models/native/bsource.zig`).
+  `models/bsource.va`).
+- `bsource`/`bsource_i` interpret the B card's expression tape in Verilog-A
+  (they replaced the native `bsource.zig`). VerA holds the tape stack between
+  evaluations (VAMS variables are static), so the device is `.history` and
+  CPU-only, as the native one was. Cost, best of 3 at load ~78 against the
+  native device (d9f1a7c9): polynomial_3 four 42 -> 66 ms, pss
+  ring_oscillator 70 -> 95 ms, hb ring_oscillator 46 -> 55 ms; the 29 B decks
+  together 4.09 -> 3.96 s (mesa dominates). Fallback: none needed for
+  correctness; `(* vera_scratch *)` on the stack is the planned speedup.
 - `vbic13_4t` keeps VBIC 1.3's `avalm` smoothing, which shifts the smooth
   max by `vminm` (lines ~753-757); `dc/device_vbic_forced_output`'s ngspice
   44.2 oracle runs VBIC 1.2 (vbicload.c:3597), which has no such shift.

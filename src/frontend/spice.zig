@@ -25,6 +25,7 @@ pub const DeviceId = enum {
     cccs,
     ccvs,
     bsource,
+    bsource_i,
     vswitch,
     cswitch,
     tline,
@@ -125,6 +126,7 @@ pub const cccs = DeviceId.Type(.cccs);
 pub const ccvs = DeviceId.Type(.ccvs);
 pub const vcvs = DeviceId.Type(.vcvs);
 pub const bsource = DeviceId.Type(.bsource);
+pub const bsource_i = DeviceId.Type(.bsource_i);
 pub const cswitch = DeviceId.Type(.cswitch);
 pub const tline = DeviceId.Type(.tline);
 pub const lossy_tline = DeviceId.Type(.lossy_tline);

@@ -853,7 +853,7 @@ pub const NetBuilder = struct {
                 // the unknown either way; the I-mode one stays unprobed rather
                 // than published as a column ngspice never writes.
                 if (try addBsource(self, dev))
-                    try self.addBranchProbe(dev.name, internalRow(devices.bsource, "br", self.b.n));
+                    try self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", self.b.n));
             },
             'p' => try self.addCpl(dev),
             'o' => try self.addLossyLine(dev),
@@ -1480,11 +1480,21 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     try b.addDevice(D, dev.name, model, instance, try deviceNodes(self, D, dev));
 }
 
-/// B card as an expression tape (models/native/bsource.zig). Returns true for
-/// a voltage-mode B, the only kind with a branch current worth probing
-/// (ngspice asrcset.c:81-88).
+/// B card as an expression tape, run by models/bsource.va (V output) or
+/// models/bsource_i.va (I output). Returns true for a voltage-mode B, the only
+/// kind with a branch current worth probing (ngspice asrcset.c:81-88).
 fn addBsource(self: *NetBuilder, dev: Device) !bool {
-    const B = devices.bsource;
+    // The last v=/i= wins, as ngspice reads the card.
+    var imode = false;
+    for (dev.kv) |item| {
+        if (std.ascii.eqlIgnoreCase(item.key, "i")) imode = true;
+        if (std.ascii.eqlIgnoreCase(item.key, "v")) imode = false;
+    }
+    if (imode) try addTape(self, devices.bsource_i, dev) else try addTape(self, devices.bsource, dev);
+    return !imode;
+}
+
+fn addTape(self: *NetBuilder, comptime B: type, dev: Device) !void {
     if (comptime !@hasDecl(B, "eval")) return error.UnsupportedDevice;
     var model: B.Model = .{};
     var instance: B.Instance = .{};
@@ -1495,19 +1505,18 @@ fn addBsource(self: *NetBuilder, dev: Device) !bool {
     // Output rows before control rows, so node numbering follows the card.
     var nodes: [B.num_ports]u32 = @splat(GROUND);
     for (dev.pins[0..@min(dev.pins.len, 2)], 0..) |pin, k| nodes[k] = try self.rowOf(pin);
-    const modes = std.StaticStringMap(bool).initComptime(.{ .{ "v", false }, .{ "i", true } });
+    var t: Tape = .{};
     for (dev.kv) |item| {
-        model.imode = modes.get(item.key) orelse continue;
+        if (!std.ascii.eqlIgnoreCase(item.key, "v") and !std.ascii.eqlIgnoreCase(item.key, "i")) continue;
+        t = .{};
         switch (item.value) {
             .num => |value| {
-                model.op_code[0] = .num;
-                model.op_a[0] = 0;
-                model.consts[0] = value;
-                model.n_ops = 1;
+                t.consts[0] = value;
+                t.n_ops = 1;
             },
             .expr => |span| {
                 const ops = self.nl.exprOps(span);
-                compileTape(self, ops, &model, &nodes) catch |err| switch (err) {
+                compileTape(self, ops, &t, &nodes) catch |err| switch (err) {
                     error.OutOfMemory => return err,
                     else => {
                         // The test runner fails any test that logs an error.
@@ -1519,23 +1528,51 @@ fn addBsource(self: *NetBuilder, dev: Device) !bool {
             else => return error.UnresolvedParameter,
         }
     }
+    t.store(B.Model, &model);
     try self.b.addDevice(B, dev.name, model, instance, nodes);
-    return !model.imode;
 }
 
-/// The bsource tape's opcode and capacities, read off its Model.
+/// The tape's opcodes and capacities. The opcode numbers and capacities are
+/// the ones models/bsource.va interprets; `Tape.store` checks the capacities
+/// against the generated Model at compile time.
 const tape = struct {
-    const M = devices.bsource.Model;
-    const Code = std.meta.Elem(@FieldType(M, "op_code"));
-    const max_ops = @typeInfo(@FieldType(M, "op_code")).array.len;
-    const max_consts = @typeInfo(@FieldType(M, "consts")).array.len;
-    const max_probes = devices.bsource.num_ports - 2;
+    const max_ops = 64;
+    const max_consts = 32;
+    const max_probes = 8;
+    const Code = enum(u8) {
+        num, v, vd, neg, not, add, sub, mul, div, powi, powc, pow, lt, gt, le, ge, eq, ne,
+        @"and", @"or", sel, sqrt, abs, min, max, exp, ln, log10, sin, cos, tan, atan, tanh,
+        floor, ceil, time, temper,
+    };
+};
+
+/// A compiled expression: postfix opcodes with two u8 operands each, and a
+/// constant pool. Built here, then copied into the device's parameter arrays.
+const Tape = struct {
+    n_ops: u8 = 0,
+    op_code: [tape.max_ops]tape.Code = @splat(.num),
+    op_a: [tape.max_ops]u8 = @splat(0),
+    op_b: [tape.max_ops]u8 = @splat(0),
+    consts: [tape.max_consts]f64 = @splat(0.0),
+
+    /// Writes the tape into a bsource Model, whose arrays VerA flattens into
+    /// one field per slot (see `pwlSlot`).
+    fn store(t: Tape, comptime M: type, model: *M) void {
+        comptime std.debug.assert(slotCount(M, "op_code") == tape.max_ops and slotCount(M, "consts") == tape.max_consts);
+        model.n_ops = t.n_ops;
+        inline for (0..tape.max_ops) |k| {
+            @field(model, pwlSlot("op_code", k)) = @intFromEnum(t.op_code[k]);
+            @field(model, pwlSlot("op_a", k)) = t.op_a[k];
+            @field(model, pwlSlot("op_b", k)) = t.op_b[k];
+        }
+        inline for (0..tape.max_consts) |k| @field(model, pwlSlot("consts", k)) = t.consts[k];
+    }
 };
 
 /// Translates a postfix card expression into the bsource tape, giving each
 /// distinct probed net a control port in `nodes`. Fails on anything the tape
 /// cannot express or hold.
-fn compileTape(self: *NetBuilder, ops: []const Op, model: *devices.bsource.Model, nodes: []u32) !void {
+fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !void {
     var nets: [tape.max_probes]u32 = undefined;
     var n_nets: usize = 0;
     var n_consts: usize = 0;
@@ -1631,8 +1668,13 @@ fn pwlSlot(comptime base: []const u8, comptime k: usize) []const u8 {
 
 /// PWL table capacity, read off the struct so it follows `max_pwl` in the .va.
 fn pwlCapacity(comptime T: type) usize {
+    return slotCount(T, "pwl_times");
+}
+
+/// Slots of the flattened Verilog-A array `base` in `T`.
+fn slotCount(comptime T: type, comptime base: []const u8) usize {
     comptime var n: usize = 0;
-    inline while (@hasField(T, pwlSlot("pwl_times", n))) : (n += 1) {}
+    inline while (@hasField(T, pwlSlot(base, n))) : (n += 1) {}
     return n;
 }
 
