@@ -1563,7 +1563,7 @@ fn addTape(self: *NetBuilder, comptime B: type, dev: Device) !void {
                     error.OutOfMemory => return err,
                     else => {
                         // The test runner fails any test that logs an error.
-                        if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is not supported ({s}); the limits are i() of branch cards only, no unknown names, known functions only, {d} probed nets and currents, {d} ops, {d} constants", .{ dev.name, item.key, @errorName(err), tape.max_probes, tape.max_ops, tape.max_consts });
+                        if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is not supported ({s}); the limits are i() of branch cards only, no unknown names, known functions only, {d} probed nets and currents, {d} ops, {d} constants, stack depth {d}", .{ dev.name, item.key, @errorName(err), tape.max_probes, tape.max_ops, tape.max_consts, tape.max_depth });
                         return error.UnsupportedBsourceExpression;
                     },
                 };
@@ -1644,6 +1644,9 @@ fn addDelay(self: *NetBuilder, dev: Device, letter: u8) !void {
 /// the ones models/bsource.va interprets; `Tape.store` checks the capacities
 /// against the generated Model at compile time.
 const tape = struct {
+    /// The interpreter's stack, `st[0:15]` in models/bsource.va: zeroed on
+    /// every evaluation (vera_scratch), so it is kept short.
+    const max_depth = 16;
     const max_ops = 64;
     const max_consts = 32;
     const max_probes = 8;
@@ -1766,6 +1769,23 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !
         n += 1;
     }
     model.n_ops = @intCast(n);
+    if (stackDepth(model.*) > tape.max_depth) return error.TooDeep;
+}
+
+/// The deepest the interpreter's stack gets running `t`.
+fn stackDepth(t: Tape) usize {
+    var sp: isize = 0;
+    var deepest: isize = 0;
+    for (t.op_code[0..t.n_ops]) |code| {
+        sp += switch (code) {
+            .num, .v, .vd, .time, .temper => 1,
+            .sel => -2,
+            .add, .sub, .mul, .div, .pow, .lt, .gt, .le, .ge, .eq, .ne, .@"and", .@"or", .min, .max => -1,
+            else => 0,
+        };
+        deepest = @max(deepest, sp);
+    }
+    return @intCast(deepest);
 }
 
 /// The tape op for a call of `f` with `argc` arguments.
