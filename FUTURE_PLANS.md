@@ -115,13 +115,13 @@ the full matrix. Open items:
   - SUBHARMS, SS_TONE and SWEEP;
   - complex output;
   - small-signal analyses on top of multitone.
-- **Optimization:**
-  - bisection and pass/fail;
-  - LEVEL>1;
-  - inequality goals;
-  - optimization combined with `.step`.
-- **Variants:** external `.data` files and the other limits listed in
-  hspice-comparison.
+- **Optimization** (bisection, pass/fail, LEVEL 1-3, inequality goals and
+  `.step` landed; docs/analysis/optimize.md): still refused are a bisection
+  over several parameters or RESULTS cards, a bisection on a `GOAL <`/`>`
+  card, OPTIMIZE with `.alter`, and `.measure ... pushout=`.
+- **Variants** (external `.data` MER/LAM and `MONTE=list` landed;
+  docs/analysis/variants.md): `.data OUT=`, DEV/LOT AGAUSS/AUNIF and the
+  blank-separated `dev/2 0.1` form, and `SWEEP` together with `.step`.
 - **Unconfirmed against HSPICE:** each of these follows the manual and has
   never been run against real HSPICE:
   - `.alter` being cumulative;
@@ -129,7 +129,10 @@ the full matrix. Open items:
   - `.measure` over DCMATCH, ACMATCH, LSTB, PHASENOISE and PTDNOISE
     (our column names, not HSPICE's output variables);
   - `.dcxf` leaving out F/H-sensed sources;
-  - DEV/LOT sigma;
+  - DEV/LOT GAUSS values read as 3 sigma (SA Ch.20 p. 694);
+  - an inequality goal adds no error while it holds (the manual gives only
+    the syntax);
+  - `MONTE=list(...)`, where the manual's two examples disagree;
   - VCR and VCCAP.
 - **Long tail:** digital vector cards, `.check` cards, SEARCH, RUNLVL and
   ACCURATE, MOSRA, design exploration, IBIS and W/S details beyond what landed
