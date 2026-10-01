@@ -1,6 +1,7 @@
 //! In-place radix-2 Cooley-Tukey FFT on split real/imaginary f64 arrays.
 //! Convention: X[k] = sum x[n] e^(-j 2 pi n k / N), unnormalized forward,
 //! as in ngspice and numpy (cos(2 pi t / T) over N points gives X[1] = N/2).
+//! Twiddle reseeding: #41.
 
 const std = @import("std");
 const assert = std.debug.assert;

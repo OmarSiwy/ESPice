@@ -5,7 +5,10 @@
 //! that oracle.
 //! Lanes that fail a pivot guard are reported in a mask and substituted with
 //! a unit divisor so the surviving lanes stay exact; the caller re-solves
-//! them on the scalar path (freq_solve.zig `solveBatch`).
+//! them on the scalar path (freq_solve.zig `solveBatch`) or holds them
+//! (`factorEach`). In: a factored SparseLu and W lanes of values. Out: W
+//! lanes of L and U, and W-lane solves. Cites no outside source; the lane
+//! axis is AGENTS.md §2.10.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -99,8 +102,8 @@ pub fn LaneLu(comptime W: usize) type {
         /// value plane. Returns the mask of lanes whose pivot was zero,
         /// non-finite or below `growth_limit` times its column max (bit l =
         /// lane l); their factors are garbage. A void pivot in the base fails
-        /// every lane. Asserts that `base` still has the L/U lengths `init`
-        /// sized the planes for.
+        /// every lane. Asserts that `base` is factored and still has the L/U
+        /// lengths `init` sized the planes for.
         pub fn refactor(self: *Self, src: anytype, growth_limit: f64) u64 {
             const b = self.base;
             assert(b.factored);

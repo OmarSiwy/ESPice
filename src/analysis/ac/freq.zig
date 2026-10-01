@@ -3,6 +3,7 @@
 //! and the lane axis is frequency (`FreqSolver.solveBatch`). One lane pass,
 //! `FreqSolver.W` points, is live at once, so a sweep holds W·rhs.len values
 //! instead of points·rhs.len.
+//! No outside source; dev/analysis/README.md describes the lane axis.
 const std = @import("std");
 const root = @import("../types.zig");
 const FreqSolver = @import("solver").freq_solve.FreqSolver;

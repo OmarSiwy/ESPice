@@ -2,6 +2,7 @@
 //! the transfer from every independent source to one output, and the input
 //! impedance each source sees. One sparse factorization of G serves every
 //! solve. `ac/xf.zig` runs the same readout over a frequency sweep.
+//! Cites VACASK coredcxf.cpp; no dev/ note.
 const std = @import("std");
 const root = @import("../types.zig");
 const core = @import("core");

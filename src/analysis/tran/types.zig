@@ -1,5 +1,7 @@
 //! Transient data types shared by tran.zig, integrator.zig, matex.zig and
 //! the post-processors, kept apart from the driver so they import no solver.
+//! No outside source: these are ESPice's own layouts (#52, #123 fixed two
+//! of their edge cases).
 const std = @import("std");
 const assert = std.debug.assert;
 

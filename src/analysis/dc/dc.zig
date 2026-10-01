@@ -1,7 +1,10 @@
 //! DC sweep (`.dc`): steps one parameter (a source value, a device parameter
 //! or the temperature) through its ParamRef, one warm-started Newton per
 //! point, and records the probes. An optional second parameter is the outer
-//! loop.
+//! loop, and each `tangents` variant row adds a first-order block.
+//! Cites ngspice dctrcurv.c (predictor, state rotation, accumulated steps)
+//! and DCTsetup; dev/analysis/dc-sweep.md and dev/analysis/optimize.md
+//! (tangent rows).
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;

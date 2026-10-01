@@ -1,6 +1,7 @@
 //! AC small-signal sweep. One linearization at the operating point gives the
 //! G and C planes; each frequency is then one lane of `freq.Stream`, with no
 //! circuit evaluation inside the sweep.
+//! Cites dev/analysis/ac-small-signal-noise.md.
 const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
@@ -20,7 +21,9 @@ pub const Options = @import("core").query.Ac;
 /// identically zero response. An I card drives its two node rows. An empty
 /// drive is a deck with no AC source and yields a zero response.
 ///
-/// Complex, point-major (frequency, probes...).
+/// Complex, point-major (frequency, probes...). A streamed run
+/// (`ctx.stream`) writes each row there and returns empty `data`. Asserts
+/// that `ctx.ac_drive` is 2n long or empty.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;

@@ -1,6 +1,8 @@
 //! Fourier analysis (`.four`): the harmonic content of a transient's steady
 //! state. Takes the last fundamental period of the waveform, resamples it to
 //! a power of two, and reads magnitudes, phases and THD off the FFT.
+//! Cites ngspice fourier.c (CKTfour's sine phase reference) and
+//! dev/analysis/fourier-thd.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const fft_mod = @import("solver").fft;

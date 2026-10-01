@@ -1,4 +1,10 @@
 //! Periodic-family unit tests: pac/pxf, pnoise, pss, qpss and multi-tone hb.
+//! Oracles: the analytic steady state of an RC low-pass (pss and hb), a
+//! resistive mixer's f_in ± f_LO lines, PAC's magnitudes for PXF, the dense
+//! LU for the Krylov conversion solve, the dense Jacobian Newton for the
+//! one-tone GMRES path, the dense product for `gvProduct` (bit for bit),
+//! transform round trips for the DFT pairs, and the HSPICE [CR .HB]
+//! truncation examples for the multi-tone spectrum.
 
 const PacTests = struct {
     const impl = @import("../pss/pac.zig");

@@ -1,4 +1,7 @@
-//! Fourier post-processing unit tests.
+//! Fourier post-processing unit tests. Oracles: `interpolate` below (binary
+//! search, clamped) for the cursor interpolation, and closed forms for the
+//! spectra: a pure cosine's zero THD, a square wave's 48.3 %, a known
+//! amplitude, phase and DC offset.
 
 const impl = @import("../post/four.zig");
 const analyze = impl.analyze;

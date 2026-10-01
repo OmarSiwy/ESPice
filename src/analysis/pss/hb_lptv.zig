@@ -6,6 +6,9 @@
 //! sideband folding are shared code, so the two orbit providers differ only
 //! in how they find the orbit. `.hblin` builds the same conversion matrix
 //! with the port terminations and reads S-parameters between port bands.
+//!
+//! Cites: dev/analysis/multitone-hb.md, dev/analysis/periodic-noise.md,
+//! HSPICE RF [RF Ch.10] for `.hblin`.
 const std = @import("std");
 const root = @import("../types.zig");
 const hb = @import("hb.zig");

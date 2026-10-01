@@ -1,6 +1,10 @@
 //! Executor: one query's mutable numerical state and the worker thread that
 //! runs it. Prepared topology and the deck are borrowed; an accepted OP from a
-//! dependency is copied before use. Dispatches to the analysis leaves.
+//! dependency is copied before use, or moved under `Config.final_plan`.
+//! Dispatches to the analysis leaves, with the query's ParEval, GPU context
+//! and device LU attached for the run. Cites VAMS LRM Table 4-22 and
+//! ngspice osdiload.c (the small-signal `analysis()` kind), §9.4 display
+//! tasks, #13.
 const std = @import("std");
 const Circuit = @import("device").Circuit;
 const Deck = @import("core").Deck;
@@ -97,9 +101,14 @@ pub const Executor = struct {
     /// a completed `.op` query over the same topology; its device state and
     /// operating point seed this one. With `take`, this is the last query
     /// that will read `initial` (or, without one, the template), so its
-    /// device state moves here instead of being copied. Fails with
-    /// `error.InvalidOperatingPoint` when `initial` is not such a query.
-    /// Caller frees it with `destroy`.
+    /// device state moves here instead of being copied, and `initial`'s
+    /// circuit may be left empty: its result and operating point stay readable,
+    /// but nothing may evaluate it again. Fails with
+    /// `error.InvalidOperatingPoint` when `initial` is not such a query,
+    /// with `validateBackend`'s errors, with `error.InvalidAcOverride` when an
+    /// AC override names no device parameter, and with
+    /// `error.TopologyChanged` when the query's variant or temperature
+    /// re-wires a device. Caller frees it with `destroy`.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*Executor, take: bool, config: Config) !*Executor {
         try validateBackend(config);
         if (initial) |source| {

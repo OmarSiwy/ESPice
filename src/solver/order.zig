@@ -1,7 +1,9 @@
 //! Fill-reducing column ordering for the sparse LU: block triangular form by
 //! Tarjan SCC, then AMD (Amestoy-Davis-Duff approximate minimum degree)
-//! inside each block. All scratch comes from one caller-owned u32 slab, with
-//! no allocator, so the same code also runs at comptime.
+//! inside each block, or the natural order where that fills less (#46).
+//! In: a CSC pattern. Out: the column order q. All scratch comes from one
+//! caller-owned u32 slab, with no allocator, so the same code also runs at
+//! comptime.
 //! Background: dev/solvers/btf-permutation.md, amd-ordering.md.
 
 const std = @import("std");
@@ -66,8 +68,10 @@ pub fn wsSize(n: usize, nnz: usize) usize {
 
 /// Writes q[k] = the column factored at step k: strongly connected blocks of
 /// the graph j -> i for A(i,j) != 0, sink block first, each block's columns
-/// AMD-ordered. Requires a structurally full diagonal (the pattern merge
-/// guarantees it), so no matching step is needed. Restores `ws` on return.
+/// in AMD order or in natural order, whichever gives the smaller Cholesky
+/// factor of the block's A + A^T (#46). Requires a structurally full
+/// diagonal (the pattern merge guarantees it), so no matching step is
+/// needed. Restores `ws` on return.
 /// Asserts that `q` has n entries and `col_ptr` n + 1.
 pub fn order(n: u32, col_ptr: []const u32, row_idx: []const u32, q: []u32, ws: *Ws) Error!void {
     if (n == 0) return;

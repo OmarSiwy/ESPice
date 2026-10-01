@@ -21,6 +21,9 @@
 //! that block comes back as roundoff eigenvalues scattered as far from zero
 //! as genuine ones; the QZ sees each of its roots as a vanishing diagonal of
 //! C's triangular factor instead.
+//!
+//! Cites ngspice cktpzstr.c (where the iteration limit diverges) and
+//! dev/analysis/pole-zero.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const types = @import("core").numerics;

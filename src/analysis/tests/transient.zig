@@ -1,4 +1,9 @@
 //! Transient-family unit tests: envelope, matex, tran and tran_noise.
+//! Oracles: each vector kernel's W == 1 instantiation (bit for bit), closed
+//! forms for `expmSmall` (identity, diagonal, nilpotent, rotation),
+//! ngspice's `cktterr.c` coefficient tables, the theoretical convergence
+//! order of every integrator on an RC discharge, and real generated
+//! devices for the SimState, event and display paths.
 
 const EnvelopeTests = struct {
     const impl = @import("../tran/envelope.zig");

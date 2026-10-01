@@ -1,6 +1,8 @@
-//! Session: the query graph and its cooperative scheduler. Each row is one
-//! query plus its implicit OP prerequisite; numerical state lives in the
-//! row's Executor.
+//! Session: the query graph and its cooperative scheduler. In: query
+//! requests. Out: rows with their status, progress and results. Each row is
+//! one query, an implicit OP prerequisite included; numerical state lives in
+//! the row's Executor. Cites #13 (the C API's calling contract) and #154
+//! (the `.sens` schema).
 const std = @import("std");
 const core = @import("core");
 const requests = core.query;
@@ -98,7 +100,8 @@ const Row = struct {
 };
 
 /// The query graph over one prepared circuit and deck, both borrowed for the
-/// session's lifetime. `QueryId` is the row index.
+/// session's lifetime. `QueryId` is the row index; every call that takes one
+/// fails with `error.InvalidQuery` for an id at or past `count`.
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -393,7 +396,13 @@ pub const Session = struct {
 
     /// Advances each of `ids` by one quantum, at most `limits.max_parallel` at
     /// a time, and writes one event per id. Every id must be ready and unique;
-    /// that is checked for all of them before any runs.
+    /// that is checked for all of them before any runs: fails with
+    /// `error.InvalidConcurrency` for a zero `max_parallel`,
+    /// `error.QueryNotReady`, `error.DuplicateQuery`, or
+    /// `error.BufferTooSmall` when `events` is shorter than `ids`. A query
+    /// whose executor cannot be built or started is marked failed, not
+    /// returned as an error. Under `Config.final_plan`, a completed query's
+    /// circuit is released once no dependent still has to snapshot it.
     pub fn advanceReady(self: *Session, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
         try self.validateReady(ids, limits);
         if (events.len < ids.len) return error.BufferTooSmall;
@@ -446,7 +455,8 @@ pub const Session = struct {
     }
 
     /// Advances `target`, or its prerequisite first, by one quantum. A
-    /// terminal target returns its status without running anything.
+    /// terminal target returns its status without running anything. Fails
+    /// as `advanceReady` does.
     pub fn advance(self: *Session, target: QueryId) !Advance {
         const target_info = try self.info(target);
         if (target_info.status.terminal()) return .{

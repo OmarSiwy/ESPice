@@ -15,6 +15,8 @@
 //! frequency, O((2·n·nf)³). Past a few hundred unknowns the upgrade is
 //! `pac.sweepKrylov`'s: GMRES on the block convolution, right
 //! preconditioned by G_0 + j(ω + ω_p)·C_0 lanes.
+//!
+//! Cites: dev/analysis/multitone-hb.md, dev/analysis/periodic-noise.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const mhb = @import("mhb.zig");

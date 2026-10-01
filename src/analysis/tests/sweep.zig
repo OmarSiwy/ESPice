@@ -1,6 +1,7 @@
 //! DC and sweep-family tests: the pure helpers of dc, xf, dcmatch, sens and
 //! temp_sweep, then every DC analysis on a resistive divider whose answers
-//! are closed-form.
+//! are closed-form. The helpers check against hand-computed values or a
+//! second path (materialize-then-dot for `adjointFd`, bit for bit).
 
 const DcmatchTests = struct {
     const impl = @import("../dc/dcmatch.zig");

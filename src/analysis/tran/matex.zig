@@ -1,7 +1,12 @@
 //! MATEX: matrix-exponential transient for linear circuits (R-MATEX). Two
 //! factorizations serve every step: Arnoldi on (C + gamma*G)^-1 C
 //! approximates exp(hA), and G gives the source terms. Only source
-//! transition spots bound the step. G must be regular.
+//! transition spots and `h_output_cap` bound the step. G must be regular.
+//! In: a linear circuit at its operating point. Out: the probes at every
+//! step, as `Waveform` rows.
+//! Cites the MATEX paper's eq. 5 (the piecewise-linear source update),
+//! expokit's breakdown tolerance, Verilog-AMS LRM §4.6.1, #51, #125 and
+//! dev/analysis/matex-exponential-integrators.md.
 //! ponytail: no nonlinear (EPIRK) path; add one when a const-Jacobian check
 //! says a circuit needs linearization.
 const std = @import("std");
@@ -362,7 +367,12 @@ pub const estPoints = @import("core").validate.matexEstPoints;
 
 /// Contract entry: march from ctx.x_op with the piecewise-linear source
 /// integral (MATEX eq. 5), stepping to each transition spot or h_output_cap.
-/// Point-major rows (time, probes...).
+/// Point-major rows (time, probes...) in `ctx.allocator`. Errors:
+/// error.EmptyCircuit for n = 0; error.MatexDidNotConverge when Arnoldi
+/// reaches `m_max` without converging, expm meets an inf, or a step comes
+/// out non-finite; error.Singular from the dense LU of H_m (a DAE of index
+/// above 1); and the sparse solver's errors from factoring G or
+/// C + gamma*G.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     // `a` holds only the Result. The fixed-size work buffers share one

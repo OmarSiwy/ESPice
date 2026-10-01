@@ -1,4 +1,5 @@
-//! GPU backend selection test; runs without a GPU.
+//! GPU backend selection test; runs without a GPU. The oracle is the
+//! kernel artifacts the build carries (`gompute_kernels.has_cuda`/`has_hip`).
 
 const impl = @import("../gpu.zig");
 const artifacts = @import("gompute_kernels");

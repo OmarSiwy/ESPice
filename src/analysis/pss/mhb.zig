@@ -20,6 +20,10 @@
 //! oversampled pool for the best-conditioned transform, and invert it
 //! (the APFT; VACASK `lib/corehbcoloc.cpp`, after Kundert, White and
 //! Sangiovanni-Vincentelli, 1990, App. B).
+//!
+//! Cites: dev/analysis/multitone-hb.md, VACASK `lib/spurs.cpp` (line
+//! merging in `spectrum`), Verilog-A LRM §4.6.1 (sources follow their
+//! waveform only in the transient phase), #83 (NaN residuals).
 const std = @import("std");
 const root = @import("../types.zig");
 const num = @import("core").numerics;
@@ -63,8 +67,11 @@ pub const max_box = @import("core").validate.mhb_max_box;
 /// first tone count as one order (HSPICE SUBHARMS; 1 for none). A product whose frequency
 /// matches a kept one to 1e-14 relative is the same line: the lower order
 /// wins, then a single tone's harmonic, then the earlier product, as in
-/// VACASK `lib/spurs.cpp`. error.InvalidQueryOptions past `max_tones` or
-/// `max_box`.
+/// VACASK `lib/spurs.cpp`. Asserts tones.len == nharms.len; `sub` must be
+/// at least 1 (the query validator refuses 0). error.InvalidQueryOptions
+/// for no tones, more than `max_tones`, a box past `max_box`, or a harmonic
+/// count past i16 max. The caller frees the result with `Spectrum.deinit`
+/// on `gpa`.
 pub fn spectrum(gpa: std.mem.Allocator, tones: []const f64, nharms: []const u16, intmodmax: u16, sub: u16) !Spectrum {
     std.debug.assert(tones.len == nharms.len);
     const nt = tones.len;
@@ -416,7 +423,10 @@ const gmres_max_restarts: u32 = 20;
 /// is GMRES on the matrix-free Jacobian with the block-diagonal
 /// preconditioner. Memory is O(nnz·nt + m·LU) for the sampled planes and
 /// the held factors. Asserts `spec` has two or more lines and x_hat.len is
-/// n·(2m-1).
+/// n·(2m-1). Non-convergence is `converged = false`, not an error; a GMRES
+/// step that stops short is taken as it stands. Errors: OutOfMemory,
+/// QueryCancelled, error.HbDidNotConverge when the collocation transform
+/// of several tones is singular, and `FreqSolver.factorEach`'s.
 pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f64, options: Options, allocator: std.mem.Allocator) !SolveResult {
     const n: usize = ckt.n;
     const nnz: usize = ckt.nnz;
@@ -635,8 +645,10 @@ pub const Orbit = struct {
 };
 
 /// Solves `opts`' harmonic balance and samples the solution for
-/// linearization. error.HbDidNotConverge when Newton stops short, and as
-/// `solve` and `spectrum` otherwise. Free with `Orbit.deinit` on `allocator`.
+/// linearization. error.HbDidNotConverge when Newton stops short,
+/// error.InvalidQueryOptions when the spectrum has fewer than two lines,
+/// and as `solve` and `spectrum` otherwise. Free with `Orbit.deinit` on
+/// `allocator`.
 pub fn orbit(ckt: *root.Circuit, opts: Options, allocator: std.mem.Allocator) !Orbit {
     var tones: [max_tones]f64 = undefined;
     var nharms: [max_tones]u16 = undefined;

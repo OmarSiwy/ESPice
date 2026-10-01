@@ -33,8 +33,9 @@ pub fn ErrorOf(comptime f: anytype) type {
 /// Everything an analysis needs, resolved before dispatch.
 pub const RunCtx = struct {
     circuit: *Circuit,
-    /// The operating point. The session solves one ahead of every query except
-    /// `.op` (the executor solves it) and `.tran uic` (the executor seeds ICs).
+    /// The operating point. The session solves one ahead of every query
+    /// except `.op` (the executor solves it) and a `uic` start (the executor
+    /// seeds ICs).
     x_op: []f64,
     probes: []const u32,
     /// Raw column label per probe, parallel to `probes`. May be empty in

@@ -2,7 +2,16 @@
 //! Picks an engine from the pattern (tridiagonal, bordered block diagonal or
 //! general sparse LU), skips refactoring when the values did not change, and
 //! demotes to the general LU when a structured engine meets a singular pivot
-//! (or, for BBD, a Schur reduction too unstable to refine).
+//! (or, for BBD, a Schur reduction too unstable to refine). A pivot replay
+//! that kept a sub-threshold pivot is probed and re-factored when its solves
+//! miss the threshold-pivoting bar.
+//!
+//! In: a frozen CSC pattern, then values per factor and right-hand sides per
+//! solve. Out: solutions of A x = b and A^T x = b. Cites KLU's threshold
+//! pivoting (`pivot_tol`), LAPACK dgerfs and LAWN 41 (BBD refinement and the
+//! residual bars), dev/solvers/gilbert-peierls-lu.md ("Two replay
+//! thresholds"), dev/solvers/gpu-lu.md ("Multicore host refactor"); #44,
+//! #45, #136.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -34,10 +43,11 @@ pub const Params = struct {
     /// A re-pivot whose L plus U outgrows this multiple of the fresh
     /// factor's restarts on the previous pivots (`SparseLu.fill_cap`).
     repivot_fill_cap: f64 = 3,
-    /// A BBD factor whose `Bbd.growth` exceeds this is probed: one refined
-    /// solve whose scaled residual misses `probe_ratio_max` demotes it to
-    /// the general LU, else every solve on it is refined (#136). Below it
-    /// the certificate's ratio stayed under 0.04 (`residual_tests.zig`).
+    /// A BBD factor whose `Bbd.growth` exceeds this is probed: a refined
+    /// solve each way (A and A^T) whose scaled residual misses
+    /// `probe_ratio_max` demotes it to the general LU, else every solve on
+    /// it is refined (#136). Below it the certificate's ratio stayed under
+    /// 0.04 (`residual_tests.zig`).
     bbd_refine_growth: f64 = 1e3,
 };
 
@@ -203,14 +213,15 @@ pub const Solver = struct {
     /// the values equal the last factored ones, which is common on linear
     /// circuits between timestep changes. Otherwise refactors on the
     /// existing pivot sequence and falls back to a full factor if the
-    /// replay fails. The solver keeps its own copy of `vals` unless
-    /// `dropBypass` ran. `execution` schedules the BBD block factors and the
-    /// multicore refactor; `.{}` runs serially. A structured engine that
-    /// meets a singular pivot is freed for good and the call retries on the
-    /// general LU, as is a BBD factor that fails its refinement probe
-    /// (`Params.bbd_refine_growth`). `SingularMatrix` leaves no usable
-    /// factorization: solve only after a successful `factor`. Asserts that
-    /// `vals` holds the pattern's nnz entries.
+    /// replay fails or its probe misses (`replayHolds`). The solver keeps
+    /// its own copy of `vals` unless `dropBypass` ran. `execution`
+    /// schedules the BBD block factors and the multicore refactor; `.{}`
+    /// runs serially. A structured engine that meets a singular pivot is
+    /// freed for good and the call retries on the general LU, as is a BBD
+    /// factor that fails its refinement probe (`Params.bbd_refine_growth`).
+    /// `SingularMatrix` leaves no usable factorization, and neither does
+    /// `OutOfMemory`: solve only after a successful `factor`. Asserts that
+    /// `vals` holds at least the pattern's nnz entries.
     pub fn factor(self: *Self, vals: []const f64, execution: num.Execution) !void {
         assert(vals.len >= self.col_ptr[self.n]);
         const nnz = self.vcopy.len;
@@ -230,7 +241,8 @@ pub const Solver = struct {
     /// Frees the copy behind the unchanged-matrix bypass, for a caller whose
     /// values never repeat (a frequency sweep): every `factor` then factors.
     /// Not for a solver a device LU (`gpu_lu.zig`) shares, which syncs
-    /// through the copy.
+    /// through the copy, nor for a BBD engine, whose solves refine against
+    /// the copy and go unrefined without it.
     pub fn dropBypass(self: *Self) void {
         self.gpa.free(self.vcopy);
         self.vcopy = &.{};

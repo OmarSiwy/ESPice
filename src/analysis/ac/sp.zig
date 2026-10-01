@@ -15,6 +15,10 @@
 //! lanes per point, so frequency-dependent elements are differentiated
 //! too), and reads the two-port noise parameters off one adjoint solve per
 //! port (see `noiseParams`).
+//!
+//! Cites ngspice span.c (column and plot names), HSPICE [SA Ch.17],
+//! Kurokawa power waves, Bockelman and Eisenstadt (1995), Hillbrand and
+//! Russer (1976) and dev/analysis/s-parameters.md.
 const std = @import("std");
 const freq = @import("freq.zig");
 const noise = @import("noise.zig");
@@ -254,6 +258,7 @@ const Basis = struct {
 
     /// Turns the stacked (re, im) leg S matrix `s` into the mode one in
     /// place: M·S·Mᵀ. A no-op with no balanced port.
+    /// error.InvalidQueryOptions past 16 legs, the fixed scratch's size.
     fn toModes(b: Basis, s: []f64) !void {
         if (b.m.len == 0) return;
         const n = b.legs.len;

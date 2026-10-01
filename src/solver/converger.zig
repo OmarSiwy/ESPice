@@ -3,14 +3,22 @@
 //! GMRES with finite-difference Jacobian products), plus the shared
 //! acceptance gates and per-circuit workspace.
 //!
+//! In: a system, its assembly hook and a start x. Out: x at a converged
+//! point (or the last iterate) and a `Result`.
+//!
 //! `sys` is a pointer with fields `n`, `nnz`, `diag_slots`, `rhs` and
-//! `current_row`, and optional methods beginSolve, advanceIteration,
-//! checkpoint, checkConvergence, applyLimits, updateStates, clearLimits and
+//! `current_row`, an optional `solver_execution`, and optional methods
+//! beginSolve, advanceIteration, checkpoint, loadCheck, deviceSolve,
+//! evalFollows, checkConvergence, applyLimits, updateStates, clearLimits and
 //! nodeName, plus `certify: bool` with certifyPoint(hook, x, t, opts), which
-//! `newton` calls on every converged x, before staging, when `certify` is
-//! true. `hook` provides assemble(sys, x, t), vals(sys) (the Jacobian in
-//! pattern order), diagAt(sys, slot), and optionally residual(sys, x, t)
-//! for a residual-only evaluation.
+//! `newton` calls on every converged x outside the INITFIX pass, before
+//! staging, when `certify` is true. `hook` provides assemble(sys, x, t),
+//! vals(sys) (the Jacobian in pattern order), diagAt(sys, slot), and
+//! optionally residual(sys, x, t) for a residual-only evaluation.
+//!
+//! Cites ngspice NIiter (maths/ni/niiter.c), NIconvTest (maths/ni/niconv.c)
+//! and CKTload's nodeset hold (cktload.c); dev/solvers/gpu-lu.md (the device
+//! factor); #3, #53, #152 (the runaway bound and the branch-row gate).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -60,10 +68,11 @@ pub const Knobs = struct {
 
 /// Which gate refused an iterate, for the `ZP_OPDBG` trace. ngspice's
 /// NIconvTest (maths/ni/niconv.c) has only the delta test, the first-iterate
-/// floor and the device limiting flag; `.residual` and `.runaway` are ours. Disabling `.residual` on
-/// vacask/mul changed the Newton count by 0.01%. ngspice's CKTconvTest
-/// device tests are dead in 44.2: they bump CKTnoncon, then NIiter assigns
-/// NIconvTest's return over it, and CKTconvTest returns OK (niiter.c:288).
+/// floor and the device limiting flag; `.residual` and `.runaway` are ours.
+/// Disabling `.residual` on vacask/mul changed the Newton count by 0.01%.
+/// ngspice's CKTconvTest device tests are dead in 44.2: they bump
+/// CKTnoncon, then NIiter assigns NIconvTest's return over it, and
+/// CKTconvTest returns OK (niiter.c:288).
 const Reject = enum { converged, first_iter, delta, limited, flipped, residual, device, runaway };
 
 fn Deref(comptime P: type) type {
@@ -115,9 +124,10 @@ pub const Options = struct {
     /// factor with this signature, so `newton` skips the factor.
     matrix_sig: u64 = 0,
     /// The solve is a cold operating point, ngspice's MODEINITJCT/INITFIX:
-    /// the first iterate that passes every gate only switches to INITFLOAT
-    /// and the next must pass too, so `newton` publishes the first passing
-    /// solve (niiter.c, the MODEINITFIX branch).
+    /// the first iterate that passes every gate only switches to INITFLOAT,
+    /// without staging device states, and the next must pass too, so
+    /// `newton` publishes the second passing iterate (niiter.c, the
+    /// MODEINITFIX branch; #53). Direct Newton only.
     init_fix: bool = false,
     /// Rows held near a value by a `force_g` conductance, as ngspice holds
     /// `.nodeset` nodes during MODEINITJCT/INITFIX (cktload.c). Direct Newton
@@ -244,7 +254,8 @@ pub fn newton(
 
 /// Adds the loads `newton` stamps on top of `hook.assemble`: the diagonal
 /// (or `opts.gmin_stamps`) gmin and the `opts.force` holds, into `v` and
-/// `sys.rhs`. `v` is `hook.vals(sys)`.
+/// `sys.rhs`. `v` is `hook.vals(sys)`. Asserts that `x` holds n entries
+/// and `v` nnz.
 pub fn loadExtras(sys: anytype, v: []f64, x: []const f64, opts: Options) void {
     std.debug.assert(x.len >= sys.n);
     std.debug.assert(v.len >= sys.nnz);
@@ -256,8 +267,9 @@ pub fn loadExtras(sys: anytype, v: []f64, x: []const f64, opts: Options) void {
 }
 
 /// The row-scaled residual gate's tolerance on a row whose diagonal is
-/// `diag` and unknown `xi`: `newton` accepts only when every row with a
-/// nonzero diagonal has |F_i| at or below it. A zero `diag` returns inf.
+/// `diag` and unknown `xi`: `newton` and `jfnk` accept only when every row
+/// has |F_i| at or below it. A zero `diag` (a voltage-defined branch row)
+/// is gated at scale 1, a tolerance in volts (#152).
 pub fn residualGate(opts: Options, diag: f64, xi: f64) f64 {
     const scale = @abs(diag);
     // A zero diagonal is a voltage-defined branch row (V/E/H source): it is

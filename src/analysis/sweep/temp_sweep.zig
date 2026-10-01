@@ -1,6 +1,7 @@
 //! Temperature sweep (`.temp`): one structural lane per temperature, using
 //! the devices' own temperature physics (setCircuitTemp), no external
 //! coefficients.
+//! Cites dev/analysis/dc-sweep.md and dev/analysis/ensemble-sweeps.md.
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solver").converger;

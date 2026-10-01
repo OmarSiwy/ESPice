@@ -1,6 +1,8 @@
 //! DC transfer function (`.tf`): one dense LU of the linearized G, then a
 //! forward solve for the gain and input resistance and a transpose solve on
 //! the same factors for the output resistance.
+//! Cites ngspice tfanal.c and dev/analysis/tf.md (where Rout departs from
+//! ngspice's 1e20 clamp).
 const std = @import("std");
 const root = @import("../types.zig");
 const dense_lu = @import("solver").dense_lu;
@@ -19,8 +21,9 @@ pub const Values = struct {
 /// DC transfer function at the operating point `x_op`. The gain and Rin come
 /// from a unit drive on the input, Rout from the adjoint solve with e_out.
 /// Rin, and Rout for a current output, are +inf when the unit drive moves no
-/// branch current. Returns
-/// error.SingularMatrix when G is singular.
+/// branch current. Overwrites the circuit's planes with the eval at `x_op`.
+/// Returns error.Singular when G is singular once `dense_lu.pinVoid` has
+/// pinned its all-zero rows (#160).
 pub fn solve(
     ckt: *root.Circuit,
     x_op: []const f64,

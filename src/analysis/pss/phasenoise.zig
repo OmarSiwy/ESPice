@@ -23,6 +23,9 @@
 //! `hb.solveSpectrum` returns y already normalized to y.dF/d(ln w) = 1, and
 //! matching d(ln w) = (1/T) integral v.b harmonic by harmonic gives
 //! v = -(y_dc + 2 sum_h y_ch cos + y_sh sin), which `hb.orbit` samples.
+//!
+//! Cites: dev/analysis/phase-noise.md, the Demir paper above, HSPICE
+//! `.phasenoise` (METHOD, PHNOISE_LORENTZ, carrierindex).
 const std = @import("std");
 const root = @import("../types.zig");
 const hb = @import("hb.zig");
@@ -38,8 +41,9 @@ const min_samples: usize = 64;
 /// (2 f_m^ef_s), in s.
 pub const Diffusion = struct {
     white: f64,
-    /// Per noise source: (1/T) integral (v_p - v_n) sqrt(flicker_s(t)) dt,
-    /// and its flicker exponent.
+    /// Per noise source: (1/T) integral coeff·(v_p - v_n) sqrt(flicker_s(t))
+    /// dt, and its flicker exponent. A correlated group sums into its first
+    /// row; the other rows of the group stay 0.
     dc: []f64,
     ef: []f64,
 
@@ -147,7 +151,7 @@ fn periodic(ckt: *root.Circuit, x_hat: []const f64, f0: f64, srcs: []const root.
 
 /// METHOD=2: `nlp` below the first offset where it and `pac` agree within
 /// `match_db`, `pac` from there on; all `nlp` when they never agree. Both
-/// in dBc/Hz, written into `nlp`. Reads pac[0..nlp.len].
+/// in dBc/Hz, written into `nlp`. Asserts pac.len == nlp.len.
 pub fn stitch(nlp: []f64, pac: []const f64, match_db: f64) void {
     for (nlp, pac, 0..) |l, p, i| if (@abs(l - p) <= match_db) {
         @memcpy(nlp[i..], pac[i..]);

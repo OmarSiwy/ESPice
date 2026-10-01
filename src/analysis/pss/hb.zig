@@ -8,6 +8,11 @@
 //! column becomes dF/d(ln f0). The charge terms are the only place f0
 //! enters the residual, and they are linear in it, so that column is the
 //! charge terms themselves.
+//!
+//! Cites: dev/analysis/pss-shooting-harmonic-balance.md (the method),
+//! dev/analysis/multitone-hb.md (the dense/GMRES crossover in `useGmres`),
+//! Verilog-A LRM §4.6.1 (sources follow their waveform only in the
+//! transient phase), #14 (the projection lane kernel).
 const std = @import("std");
 const root = @import("../types.zig");
 const simdCopy = root.copySimd;
@@ -70,8 +75,13 @@ fn magnitude(spectrum: []const f64, k: u16) f64 {
 /// J_w^T y = e_w at the solution, J_w the Newton Jacobian with its f0
 /// column: the left null vector of the HB Jacobian, normalized so that
 /// y . dF/d(ln w0) = 1. phasenoise.zig turns it into the perturbation
-/// projection vector. Asserts n_harmonics > 0 when autonomous (the
-/// phase condition lives on sin_1).
+/// projection vector. Asserts x_hat.len is n * (2K+1), `ppv` is empty or
+/// x_hat.len long with `osc_node` set, and n_harmonics > 0 when autonomous
+/// (the phase condition lives on sin_1). Non-convergence is
+/// `status.converged = false`, not an error; the errors are OutOfMemory,
+/// QueryCancelled from the per-iteration checkpoint, and error.Singular
+/// when the dense spectral Jacobian does not factor (a large driven
+/// circuit fails as `mhb.solve` instead).
 pub fn solveSpectrum(
     ckt: *root.Circuit,
     x_hat: []f64,
@@ -421,8 +431,10 @@ pub fn solveSpectrum(
 
 /// Autonomous HB from the DC point `x_dc`: the oscillator's shooting orbit
 /// (`pss.solve` with the same osc node, from the guess `options.f0`) seeds
-/// `x_hat` and f0, then `solveSpectrum` refines both. `ppv` as there.
-/// error.HbDidNotConverge when the shooting seed does not converge.
+/// `x_hat` and f0, then `solveSpectrum` refines both. `ppv` and the
+/// asserts as there. error.HbDidNotConverge when the shooting seed does not
+/// converge, error.OscillatorDidNotStart when the circuit does not
+/// oscillate from its DC point (`pss.solve`).
 pub fn solveOscillator(ckt: *root.Circuit, x_dc: []const f64, x_hat: []f64, ppv: []f64, options: Options, allocator: std.mem.Allocator) !Spectrum {
     // ponytail: HSPICE's HBOSC searches amplitude and frequency from a
     // probe voltage; the shooting orbit is a seed already on the limit

@@ -2,7 +2,9 @@
 //! parameter, one cold DC solve per trial. Each trial is a structural sweep
 //! lane (`lanes.solveLanes`) sharing one Newton workspace. The draws come
 //! from a std.Random.DefaultPrng seeded with Options.seed, so a run is
-//! reproducible.
+//! reproducible. With `Options.variants` the lanes are deck variants
+//! instead, solved warm in order.
+//! Cites dev/analysis/ensemble-sweeps.md and dev/analysis/variants.md.
 const std = @import("std");
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");

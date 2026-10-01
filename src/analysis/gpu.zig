@@ -1,9 +1,16 @@
-//! GPU device evaluation feeding the host solver. Every eligible batch's
-//! models, instances and tapes are uploaded once and stay resident; per Newton
-//! iteration the bus carries `x` up and one contiguous block of value planes
-//! down, and the sparse LU, Newton update and convergence test stay on the
-//! CPU. That round trip is the floor, so the GPU pays off on device work, not
-//! circuit size; `init` prices both sides before `auto` commits.
+//! GPU device evaluation feeding the host solver. In: the analysis
+//! circuit's batches and planes (`Host`). Out: the planes stamped on the
+//! device, plus the limit, state and accepted-step passes of the resident
+//! batches. Every eligible batch's models, instances and tapes are uploaded
+//! once and stay resident; per Newton iteration the bus carries `x` up and
+//! one contiguous block of value planes down, and the Newton update and
+//! convergence test stay on the CPU (the device LU is gpu_lu.zig's, and
+//! independent of this context). That round trip is the floor, so the GPU
+//! pays off on device work, not circuit size; `init` prices both sides
+//! before `auto` commits.
+//!
+//! Cites: dev/decisions.md S5 (the `noinline` entry points); #15, #93,
+//! #126, #139 for the decisions marked in the body.
 
 const std = @import("std");
 const device_ir = @import("device").abi;
@@ -35,8 +42,9 @@ pub const Request = enum { cpu, auto, cuda, hip };
 
 /// Why `init` refused, in the three kinds a caller acts on differently.
 pub const Decline = enum {
-    /// A performance estimate (the CPU is faster). An explicit request
-    /// overrides it, so only `auto` sees one.
+    /// A performance estimate: the CPU is priced faster, or a heavy image
+    /// is not compiled yet. An explicit request overrides it, so only
+    /// `auto` sees one.
     policy,
     /// Nothing in this circuit has a kernel image. A reported CPU fallback
     /// under `auto`; `cuda`/`hip` fail.
@@ -463,7 +471,8 @@ pub const GpuContext = struct {
     cpu_owned: []device_ir.Batch,
 
     /// The circuit's own plane allocations, swapped out for `pin_planes` while
-    /// the context lives and restored (with the last values) by `deinit`.
+    /// the context lives and handed back (with the last values) by
+    /// `restorePlanes`.
     host_planes: Planes,
     /// Two page-locked landing areas in `Layout` order, back to back. The
     /// circuit's planes point into buffer `cur`, so the one download per eval
@@ -526,7 +535,7 @@ pub const GpuContext = struct {
     tape_buf: ?u1 = null,
     /// The host tapes match `d_x[cur]`; cleared by every eval.
     tape_fresh: bool = false,
-    /// Set by `eval_follows`, consumed by the next limit pass or state query,
+    /// Set by `evalFollows`, consumed by the next limit pass or state query,
     /// and dropped by every other hook.
     follow: ?Follow = null,
     /// A prefetched eval at `pin_x[cur ^ 1]` sits in plane buffer `cur ^ 1`.
@@ -538,7 +547,8 @@ pub const GpuContext = struct {
     last_t: f64 = 0,
 
     /// A resident device requested a step reject, which the GPU path cannot
-    /// deliver. Every later call takes the host path.
+    /// deliver, or a tape sync faulted. Every later eval, limit and state
+    /// call takes the host path.
     poisoned: bool = false,
     /// Host parameters changed; re-upload models and instances before the
     /// next launch. Lazy, so an applyAttempt/restoreModels pair costs one.
@@ -567,7 +577,7 @@ pub const GpuContext = struct {
 
     prof: Prof = .{},
     /// False under `ESPICE_GPU_NOFUSE`: the unfused sequence, for A/B runs.
-    /// Read once at `init`, since `eval_follows` fires every iteration.
+    /// Read once at `init`, since `evalFollows` fires every iteration.
     fuse: bool = true,
 
     const Self = @This();
@@ -1386,11 +1396,12 @@ pub const GpuContext = struct {
     }
 
     /// Stamps all four planes at `x`, ground pin aside; with `charge`, also
-    /// brings the resident batches' host `q_tape` to x on the same wait
-    /// (`Circuit.evalQ`). Serves `eval`, `evalNewton` and `evalQ`: the
-    /// device path never uses the constant-Jacobian baseline. False after a
-    /// driver fault, warned once: no analysis can unwind from one mid-solve,
-    /// so the caller restamps on the host instead (`Circuit.evalGpu`).
+    /// downloads the resident batches' charge tapes on the same wait, so the
+    /// next `syncQTape` copies them without another (`Circuit.evalQ`).
+    /// Serves `eval`, `evalNewton` and `evalQ`: the device path never uses
+    /// the constant-Jacobian baseline. False after a driver fault (warned
+    /// once) or once poisoned: no analysis can unwind from one mid-solve, so
+    /// the caller restamps on the host instead (`Circuit.evalGpu`).
     pub noinline fn eval(self: *Self, x: []const f64, t: f64, sim: SimState, charge: bool) bool {
         self.sim = sim;
         self.evalOnGpu(x, t, charge) catch |e| {
@@ -1488,7 +1499,7 @@ pub const GpuContext = struct {
     /// once. No state half: the host stages state only at the converged
     /// iterate, and so does `updateStatesOnGpu`.
     ///
-    /// After `eval_follows`, the eval at the limited x goes on the stream
+    /// After `evalFollows`, the eval at the limited x goes on the stream
     /// behind the limit pass, once the host limiters have finished with x,
     /// and one wait covers both (`evalOnGpu` picks it up). The device runs
     /// the same launches in the same order as the two-wait sequence, so the
@@ -1567,7 +1578,8 @@ pub const GpuContext = struct {
     }
 
     /// Announces an eval at `x` under `sim` right after the next
-    /// `applyLimits` or `stateCtl(.query)` (`Circuit.evalFollows`).
+    /// `applyLimits` or `stateCtl(.query)` (`Circuit.evalFollows`). `x` is
+    /// borrowed until that call. A no-op under `ESPICE_GPU_NOFUSE`.
     pub noinline fn evalFollows(self: *Self, x: []const f64, sim: SimState, charge: bool) void {
         if (!self.fuse) return;
         self.follow = .{ .x = x, .sim = sim, .charge = charge };
@@ -1850,7 +1862,8 @@ pub const GpuContext = struct {
     /// Downloads the resident instance, state and lim data into the host
     /// batches, so dependents copy an OP that matches the device. Fails with
     /// `error.GpuStateUnavailable` after any fallback, which can leave the two
-    /// sides at different accepted points.
+    /// sides at different accepted points, or with the driver's error from a
+    /// download, which can leave the host copy part-written.
     pub fn syncHostState(self: *Self) !void {
         if (comptime backend == null) return;
         if (self.poisoned or self.warned_eval or self.warned_state)

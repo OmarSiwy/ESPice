@@ -1,4 +1,7 @@
-//! Worker lifecycle tests: resume, cancel, failure and timing.
+//! Worker lifecycle tests: resume, cancel, failure and timing. The oracle
+//! is each test's own context, which counts calls, checkpoints and cleanup
+//! as the worker drives it, against the sequence the `Worker` contract
+//! promises.
 
 const Worker = @import("../worker.zig").Worker;
 const progress = @import("../progress.zig");

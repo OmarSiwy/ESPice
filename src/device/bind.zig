@@ -1,7 +1,9 @@
 //! The parameter binder: card `name=value` pairs onto a device's Model or
 //! Instance fields. eval.zig compiles it into every device object behind
 //! `DeviceVtable.bind_model`/`bind_instance`, so built-in and runtime-loaded
-//! devices bind a card identically.
+//! devices bind a card identically. Cites ngspice's inpgval.c (integer
+//! rounding), the bjt.c, dio.c and res.c IOPR tables (alternate spellings)
+//! and LRM §9.19 `$param_given`.
 const std = @import("std");
 
 /// One card pair, key lowercased. `value` is null when the netlist value is
@@ -78,7 +80,8 @@ fn applyKv(target: anytype, params: []const Param) !void {
 
 /// Sets `known[i]` for every `params[i]` whose key `apply` would bind on a
 /// `T`: a scalar field's lowercased name or one of its `aliasesOf`.
-/// `known` is parallel to `params`; entries already set stay set.
+/// Entries already set stay set. Asserts that `known` is parallel to
+/// `params`.
 pub fn markKnown(comptime T: type, params: []const Param, known: []bool) void {
     std.debug.assert(known.len == params.len);
     @setEvalBranchQuota(1_000_000);

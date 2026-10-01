@@ -1,6 +1,7 @@
 //! The frozen circuit: CSC matrix pattern, one device batch per type, and node
 //! names. `freeze` builds it from the construction protos; analysis
-//! instantiates its mutable state from it.
+//! instantiates its mutable state from it. Cites ngspice's OPtran for
+//! `needs_tran_op` and #13 for `Facts`.
 const std = @import("std");
 const abi = @import("device_abi");
 const numerics = @import("core").numerics;
@@ -17,6 +18,7 @@ col_ptr: []u32,
 row_idx: []u32,
 /// CSC slot of each diagonal entry.
 diag_slots: []u32,
+/// One batch per proto, in `protos` order, each owned.
 batches: []abi.Batch,
 /// The Library type of each batch, parallel to `batches`.
 batch_types: []abi.DeviceType,
@@ -26,6 +28,8 @@ current_row: []bool,
 /// intern_offs[i + 1]]`.
 intern_bytes: []u8,
 intern_offs: []u32,
+/// The frontend's bordered-block-diagonal row partition, or null; `blocks`
+/// is owned and freed by `deinit`.
 bbd: ?numerics.BbdInfo,
 /// CSC slot of every frequency-dependent small-signal entry, batch-major in
 /// `batches` order, then as each batch's `Hooks.collect_ac_dyn` lists them;
@@ -55,8 +59,11 @@ pub const Facts = struct {
 /// ownership of `intern_bytes`, `intern_offs` and `bbd`; on failure the caller
 /// keeps all of them. Fails with `InvalidCircuit` when `n` is 0 or the tables
 /// do not match: `intern_offs` must hold n + 1 ascending offsets ending at
-/// `intern_bytes.len`, and `types` one id per proto. `facts` carries what the
-/// netlist decided beside the protos, so no caller sets it afterwards (#13).
+/// `intern_bytes.len`, and `types` one id per proto. Fails with
+/// `TooManyInstances` when a proto stages more than `maxInt(u32)` instances,
+/// and on out of memory. After a failure inside a proto's `finalize` that
+/// proto is only fit for `destroy`. `facts` carries what the netlist decided
+/// beside the protos, so no caller sets it afterwards (#13).
 pub fn freeze(
     allocator: std.mem.Allocator,
     n: u32,

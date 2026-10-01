@@ -1,6 +1,9 @@
-//! Structural sweep lanes: N independent cold DC solves, each after one
-//! parameter install, sharing the circuit pattern and one Newton workspace.
-//! Lane k's solution lands at x_lanes[k*n..][0..n].
+//! Structural sweep lanes: N DC solves, each after one parameter install,
+//! sharing the circuit pattern and one Newton workspace. Each lane starts
+//! cold, or with `warm` from the previous converged lane. Lane k's solution
+//! lands at x_lanes[k*n..][0..n].
+//! No outside source; dev/analysis/ensemble-sweeps.md and
+//! dev/analysis/dc-sweep.md describe the lane axis.
 const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
