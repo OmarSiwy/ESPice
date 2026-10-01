@@ -156,8 +156,6 @@ fn aliasesOf(comptime field: []const u8) []const []const u8 {
         .{ "mjc", "mc" },
         .{ "vjs", "ps" },
         .{ "mjs", "ms" },
-        // mesa.va channel depth: the ngspice key `d` is its drain port name.
-        .{ "dch", "d" },
         // Diode alternates (dio.c IOPR). `cjo`/`vj` exist only in diode.va
         // and vdmos.va, `trs`/`cta`/`tpb` only in diode.va.
         .{ "tnom", "tref" },
