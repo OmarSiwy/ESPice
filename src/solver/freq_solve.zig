@@ -35,7 +35,9 @@ pub const Dyn = struct {
 /// vectors are length 2n: real parts, then imaginary parts.
 pub const FreqSolver = struct {
     const Self = @This();
-    const W = std.simd.suggestVectorLength(f64) orelse 1;
+    /// Frequencies per LaneLu pass; `solveBatch` groups its ω from the
+    /// first in runs of W.
+    pub const W = std.simd.suggestVectorLength(f64) orelse 1;
 
     n: u32,
     nn: u32,

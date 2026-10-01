@@ -66,7 +66,7 @@ Host path:
   frequencies (F = `@Vector(W, f64)`, bit-identical to W scalar calls), and
   `Circuit.acDyn` fills a (entry, ω) table. It runs on the host whether or
   not a GPU context is live.
-- `freq.Stream` fills that table per quantum chunk and hands it to
+- `freq.Stream` fills that table per lane pass and hands it to
   `FreqSolver.solveBatch` as a `Dyn`. The lane fill adds re to both real
   blocks, +im to the lower-left and -im to the upper-right, after G + jωC;
   the scalar fill does the same adds in the same order, so each lane is
@@ -239,15 +239,18 @@ That is why a resistor-only `.noise` deck returned exactly 0 until
 2026-09-13.
 
 **Frequency lanes.** `ac`, `noise`, `stb` and `sp` share one driver,
-`freq.Stream` (`src/analysis/ac/freq.zig`): it solves `quantum` = 64
-frequencies per `FreqSolver.solveBatch` call (W lanes per `LaneLu` replay of
-one pivot tape) and hands them out in order, so at most 64 solutions of
-$2n$ values are live instead of the whole sweep. Chunking cannot change a bit
-of the result, since lanes are independent and the pivot tape carries across
-calls. Measured (commit `8bd084e`) on a 1k-stage RC ladder with
-`.noise dec 200 1 1g` (1601 points): 3.191G to 3.183G Ir and peak RSS
+`freq.Stream` (`src/analysis/ac/freq.zig`): it solves W frequencies, one
+`LaneLu` replay of one pivot tape, per `FreqSolver.solveBatch` call, hands
+them out in order and checkpoints every `quantum` = 64, so at most W
+solutions of $2n$ values are live instead of the whole sweep. Chunking cannot
+change a bit of the result, since lanes are independent and the pivot tape
+carries across calls. Measured (commit `8bd084e`) on a 1k-stage RC ladder
+with `.noise dec 200 1 1g` (1601 points): 3.191G to 3.183G Ir and peak RSS
 70.1 MB to 16.6 MB. The same ladder under `.ac dec 200 1 1g` with every node
-probed stays at 67 MB, since the all-node result dominates the peak. `sp`
+probed stays at 67 MB, since the all-node result dominates the peak. The
+chunk was 64 frequencies until 2026-10-01; one lane pass per call took
+stress/sweep_opamp_wl_5000 from 160.4 MB to 144.8 MB peak, the 15 MB that 64
+live solutions of $2n$ = 30018 values held. `sp`
 hands the Stream one right-hand side per port; `solveBatch` solves all of
 them against each lane factorization.
 

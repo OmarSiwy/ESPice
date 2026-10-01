@@ -13,7 +13,7 @@ pub const Options = @import("core").query.Acxf;
 /// `yin(src)`] per source). `tf_only` solves one adjoint right-hand side
 /// per frequency and reads every transfer off it; otherwise each source is
 /// its own forward right-hand side on the same lane factorization.
-// ponytail: the forward path holds quantum·sources·2n values per chunk;
+// ponytail: the forward path holds W·sources·2n values per chunk;
 // split the sources into groups when a deck with hundreds of sources and a
 // large n needs it.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {

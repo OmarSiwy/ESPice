@@ -56,7 +56,12 @@ const StreamTests = struct {
             probe = .{ .cancel = true };
             var cancelled = try freq.Stream.init(a, &fs, &ckt, &.{}, &frequencies, &rhs, adjoint);
             defer cancelled.deinit(a);
-            try std.testing.expectError(error.QueryCancelled, cancelled.next(&ckt));
+            // The first checkpoint, after `quantum` points, cancels.
+            const stopped = while (true) {
+                const pt = cancelled.next(&ckt) catch |err| break err;
+                if (pt == null) break error.NeverCancelled;
+            };
+            try std.testing.expectEqual(error.QueryCancelled, stopped);
             try std.testing.expectEqual(@as(u16, quantum), probe.completed);
         }
     }
