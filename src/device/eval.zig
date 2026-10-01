@@ -800,7 +800,10 @@ inline fn anyNonzero(comptime w: usize, v: @Vector(w, f64)) bool {
 /// reassembling at the accepted iterate, so the planes still hold the
 /// previous iterate's charge. The limiting correction is skipped because
 /// limits are cleared before Newton returns.
-fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, sim: SimState) void {
+///
+/// With `batch` non-null each instance runs `acceptQ` instead of `q`: the
+/// same charges, plus the staging `updateState` does, off one core run.
+fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, sim: SimState, batch: anytype) void {
     @setEvalBranchQuota(1_000_000);
     @setFloatMode(.optimized);
     const n_u = comptime contract.nU(D);
@@ -809,7 +812,10 @@ fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end
     while (id < end) : (id += 1) {
         var lx: [n_u]f64 = undefined;
         inline for (0..n_u) |u| lx[u] = sink.x(sink.gath(id, u));
-        const qs = D.q(S, &lx, sink.model(id), sink.inst(id), sim);
+        const qs = if (comptime @TypeOf(batch) == @TypeOf(null))
+            D.q(S, &lx, sink.model(id), sink.inst(id), sim)
+        else
+            D.acceptQ(S, &lx, sink.model(id), &batch.instances[id], &batch.states[id], sim);
         const qo = contract.qRows(D, S, qs);
         // Same `q_row` gate as `evalRange`, or the two passes would differ.
         inline for (0..n_u) |ru| if (comptime q_row[ru]) sink.scatterQ(sink.rhsRow(id, ru), qo[ru].v);
@@ -1387,6 +1393,9 @@ pub fn DeviceBatch(comptime D: type) type {
             .scatter_bounds = scatterBounds,
             .q_tape = if (has_q) qTape else null,
             .eval_q = if (has_q) evalQOnly else null,
+            // Only where `update_state` is the hook that stages (not the
+            // delay lines' `commit_state`, not timer-only state).
+            .accept_q = if (has_q and @hasDecl(D, "acceptQ") and !hasAbsdelayState(D) and !skipsTimerState(D)) acceptQOnly else null,
             .apply_limits = if (has_limit) applyLimits else null,
             .clear_limits = if (has_limit) clearLimits else null,
             .advance_iteration = if (@hasDecl(D, "advanceIteration")) advanceIteration else null,
@@ -1437,7 +1446,15 @@ pub fn DeviceBatch(comptime D: type) type {
             var sink = Sink(D, false, false).host(self, pl, x, undefined);
             // Without `always_inline` LLVM moves mos6's charge core out of
             // line, measured +0.9% on devices/mos6_inverter.
-            @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, self.simAt(t) });
+            @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, self.simAt(t), null });
+        }
+
+        /// `evalQOnly` at `self.sim` plus `updateState`'s staging, one core
+        /// run per instance.
+        fn acceptQOnly(ctx: *anyopaque, pl: *const Planes, first: u32, last: u32, x: []const f64) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            var sink = Sink(D, false, false).host(self, pl, x, undefined);
+            @call(.always_inline, evalQRange, .{ D, RealFor(@hasDecl(D, "collapse")), &sink, first, last, self.sim, self });
         }
 
         fn scatterBounds(ctx: *anyopaque, first: u32, last: u32, trash_slot: u32, trash_row: u32) [4]u32 {

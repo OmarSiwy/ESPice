@@ -415,7 +415,8 @@ pub fn simulate(
             // returns x_k+1 while the planes hold q(x_k) (or a JFNK matvec's
             // x), so re-read q at the solution: the LTE, advanceCurrent and
             // the next residual all see q(trial).
-            ckt.evalQ(trial, t + dt);
+            // `q_fresh`: the converger's `updateStates` already stamped them.
+            if (!ckt.q_fresh) ckt.evalQ(trial, t + dt);
             simdCopy(q_hist[0], ckt.q_vec[0..n]);
             if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
             // Taken before the ring rotation below.
