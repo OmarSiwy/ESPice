@@ -199,7 +199,14 @@ pub const MeasureClause = struct {
     /// HSPICE optimization target (`GOAL=`) and the weight of its error.
     goal: ?f64 = null,
     weight: f64 = 1,
+    /// `GOAL < v` and `GOAL > v` [SA Ch.27 "Optimization Statements"]:
+    /// the result only has to stay on that side of the goal.
+    goal_bound: GoalBound = .equal,
 };
+
+/// How a `.meas` result is held to its GOAL: equal, or only below or
+/// above it (an inequality constraint, no error while it holds).
+pub const GoalBound = enum(u8) { equal, below, above };
 
 /// A parsed `.meas` card.
 pub const Measure = struct {
@@ -221,10 +228,12 @@ pub const Measure = struct {
 
     /// The card's optimization error for result `value`, HSPICE's
     /// WEIGHT * (result - GOAL) / max(|GOAL|, MINVAL), from the clause that
-    /// carries `GOAL=`; null for a card without one.
+    /// carries `GOAL=`; 0 while an inequality goal holds; null for a card
+    /// without a goal.
     pub fn goalError(m: Measure, value: f64) ?f64 {
         const c = if (m.first.goal != null) m.first else if (m.second.goal != null) m.second else return null;
         const goal = c.goal.?;
+        if ((c.goal_bound == .below and value < goal) or (c.goal_bound == .above and value > goal)) return 0;
         return c.weight * (value - goal) / @max(@abs(goal), c.minval);
     }
 };

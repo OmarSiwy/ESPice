@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "METHOD=BISECTION finds where a monotone .meas first exceeds its GOAL.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "5 rx / (1k + rx) = 2 V at rx = 2k/3; the last passing value lies within RELIN * 9900 = 1e-4 ohm above it."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rx",
+        "value": 666.6666666666666,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "vout",
+        "value": 2.0,
+        "rtol": 1e-06,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "rx is the summary line `rx = <value> $ last passing value ...`; vout is the final run's .meas line."
+  ],
+  "netlist_sha256": "e343700c0ec1e1c466934b115b5c623eeda2cee0d46758e80966a495a85ea511"
+}

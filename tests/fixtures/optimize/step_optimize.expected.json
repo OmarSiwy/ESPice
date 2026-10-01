@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "SWEEP OPTIMIZE= under .step: one fit per step point, and later cards run at each point's optimum.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "5 rx / (rt + rx) = 2 V gives rx = 2 rt / 3 per point; at the .op, i(v1) = -5 / (rt + rx) = -3 mA and -1.5 mA."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point (optimize=opt1, rt=1000)",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              2.0
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.003
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (optimize=opt1, rt=2000)",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              2.0
+            ]
+          },
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.0015
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rx",
+        "value": 666.6666666666666,
+        "rtol": 1e-05,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "rx is the first optimizer summary line, the rt=1k fit; the second fit shows in the rt=2000 .op current."
+  ],
+  "netlist_sha256": "33e85c6365e565e1c1ae706de45652f919f626ab3f779fa001ee644faa6e2bf1"
+}

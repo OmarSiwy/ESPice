@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "analysis": "dc",
-  "purpose": "METHOD=BISECTION optimization is refused, not run as Levenberg-Marquardt.",
+  "purpose": "METHOD=BISECTION over more than one parameter is refused.",
   "oracle": {
     "kind": "input_contract",
-    "derivation": "Only METHOD=LM (LEVEL=1) is implemented."
+    "derivation": "Bisection searches one parameter with one RESULTS card; more is not specified by the manual."
   },
   "tokenizer": "hspice",
   "expect": {
@@ -13,5 +13,5 @@
     "diagnostic_required": true,
     "successful_analysis_for_invalid_request": false
   },
-  "netlist_sha256": "548739e5e67b2738261bc7f296a0eb5eab75ac8cacddb2b2724c5da9d672257b"
+  "netlist_sha256": "b06d85cd9a6e50ca427ae9ac5504524950b28405fa47b4cdf2b7db2268be57af"
 }

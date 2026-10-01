@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "analysis": "dc",
+  "purpose": "GOAL < v and GOAL > v: an inequality card adds error only while violated.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "With va satisfied and vb violated, the fit minimizes ((v-2)/2)^2 + ((v-3)/3)^2: v = 30/13, rx = 1000 v / (5 - v) = 6000/7."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "rx",
+        "value": 857.1428571428571,
+        "rtol": 1e-05,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "vout",
+        "value": 2.3076923076923075,
+        "rtol": 1e-05,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "Reading va as an equality would give v = 42/17; ignoring vb would give v = 2 (rx = 2k/3)."
+  ],
+  "netlist_sha256": "82b6a7b1ff7d54a567589439417d778c28a95018358fb5d76b1390e52b21adaa"
+}
