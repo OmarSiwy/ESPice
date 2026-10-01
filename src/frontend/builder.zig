@@ -32,6 +32,12 @@ const Proto = batch.Proto;
 /// `node_instance` tag of a node shared by two subcircuit instances.
 const MULTI_INSTANCE: u32 = std.math.maxInt(u32);
 
+/// Allocator for the Builder's own growing tables, which die at the freeze.
+/// Not `Builder.gpa`, usually the Problem's arena: an arena keeps every
+/// abandoned capacity alive for the run, 30 MB of card and label lists on
+/// the 200,000-device RC ladder.
+const staging = std.heap.smp_allocator;
+
 /// Mutable circuit under construction: rows, device protos and card
 /// identities. `compilePerm` consumes it into a `Circuit`.
 pub const Builder = struct {
@@ -74,7 +80,7 @@ pub const Builder = struct {
     /// An empty circuit with only the ground row. `lib` must outlive the Builder.
     pub fn init(gpa: std.mem.Allocator, lib: *const Library) !Builder {
         var labels: std.ArrayList([]const u8) = .empty;
-        try labels.append(gpa, "0");
+        try labels.append(staging, "0");
         return .{
             .gpa = gpa,
             .lib = lib,
@@ -91,12 +97,12 @@ pub const Builder = struct {
     }
 
     inline fn deinitStorage(self: *Builder) void {
-        self.protos.deinit(self.gpa);
-        self.proto_types.deinit(self.gpa);
-        self.cards.deinit(self.gpa);
-        self.card_counts.deinit(self.gpa);
-        self.node_labels.deinit(self.gpa);
-        self.node_instance.deinit(self.gpa);
+        self.protos.deinit(staging);
+        self.proto_types.deinit(staging);
+        self.cards.deinit(staging);
+        self.card_counts.deinit(staging);
+        self.node_labels.deinit(staging);
+        self.node_instance.deinit(staging);
         self.* = undefined;
     }
 
@@ -106,7 +112,7 @@ pub const Builder = struct {
         if (node == GROUND) return;
         if (self.node_instance.items.len <= node) {
             const grow = node + 1 - self.node_instance.items.len;
-            try self.node_instance.appendNTimes(self.gpa, 0, grow);
+            try self.node_instance.appendNTimes(staging, 0, grow);
         }
         const cur = self.node_instance.items[node];
         if (cur == 0 and subckt_instance != 0) {
@@ -132,18 +138,18 @@ pub const Builder = struct {
         // One block per instance, in first-seen node order. `at` counts the
         // block's nodes here and becomes its write cursor below.
         var instance_list: std.ArrayList(struct { inst: u32, at: u32 }) = .empty;
-        defer instance_list.deinit(gpa);
+        defer instance_list.deinit(staging);
         // Instance to block index.
         var index: std.AutoHashMapUnmanaged(u32, u32) = .empty;
-        defer index.deinit(gpa);
+        defer index.deinit(staging);
         const tagged = @min(n, @as(u32, @intCast(ni.len)));
         for (1..tagged) |i| {
             const inst = ni[i];
             if (inst == 0 or inst == MULTI_INSTANCE) continue;
-            const gop = try index.getOrPut(gpa, inst);
+            const gop = try index.getOrPut(staging, inst);
             if (!gop.found_existing) {
                 gop.value_ptr.* = @intCast(instance_list.items.len);
-                try instance_list.append(gpa, .{ .inst = inst, .at = 0 });
+                try instance_list.append(staging, .{ .inst = inst, .at = 0 });
             }
             instance_list.items[gop.value_ptr.*].at += 1;
         }
@@ -195,7 +201,7 @@ pub const Builder = struct {
     pub fn addNode(self: *Builder) !u32 {
         if (self.n == std.math.maxInt(u32)) return error.TooManyNodes;
         const id = self.n;
-        try self.node_labels.append(self.gpa, "");
+        try self.node_labels.append(staging, "");
         self.n += 1;
         return id;
     }
@@ -203,7 +209,7 @@ pub const Builder = struct {
     /// Reserves label capacity for `expected` rows past ground.
     pub fn reserveNodes(self: *Builder, expected: u32) !void {
         if (expected == std.math.maxInt(u32)) return error.TooManyNodes;
-        try self.node_labels.ensureTotalCapacity(self.gpa, expected + 1);
+        try self.node_labels.ensureTotalCapacity(staging, expected + 1);
     }
 
     /// Adds one instance of built-in `D` on `nodes` (one row per port),
@@ -232,9 +238,9 @@ pub const Builder = struct {
         {
             const i = @intFromEnum(t);
             if (self.card_counts.items.len <= i)
-                try self.card_counts.appendNTimes(self.gpa, 0, i + 1 - self.card_counts.items.len);
+                try self.card_counts.appendNTimes(staging, 0, i + 1 - self.card_counts.items.len);
             const ordinal = &self.card_counts.items[i];
-            if (card.len != 0) try self.cards.append(self.gpa, .{ .type = t, .index = ordinal.*, .name = card });
+            if (card.len != 0) try self.cards.append(staging, .{ .type = t, .index = ordinal.*, .name = card });
             ordinal.* += 1;
         }
         if (comptime n_u > D.num_ports) {
@@ -252,8 +258,8 @@ pub const Builder = struct {
         for (self.protos.items, self.proto_types.items) |p, pt| {
             if (pt == t) return p;
         }
-        try self.protos.ensureUnusedCapacity(self.gpa, 1);
-        try self.proto_types.ensureUnusedCapacity(self.gpa, 1);
+        try self.protos.ensureUnusedCapacity(staging, 1);
+        try self.proto_types.ensureUnusedCapacity(staging, 1);
         const p = try self.lib.vtable(t).proto_create(self.gpa).unwrap();
         self.protos.appendAssumeCapacity(p);
         self.proto_types.appendAssumeCapacity(t);
@@ -284,8 +290,8 @@ pub const Builder = struct {
         errdefer if (bbd.info) |inf| gpa.free(inf.blocks);
         if (bbd.perm) |perm| {
             for (self.protos.items) |p| p.apply_perm(p.ctx, perm);
-            const old_labels = try gpa.alloc([]const u8, n);
-            defer gpa.free(old_labels);
+            const old_labels = try staging.alloc([]const u8, n);
+            defer staging.free(old_labels);
             @memcpy(old_labels, self.node_labels.items);
             for (old_labels, perm) |label, new_i| self.node_labels.items[new_i] = label;
             perm_out.* = perm;
