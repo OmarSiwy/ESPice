@@ -102,9 +102,9 @@ the full matrix. Open items:
     directory;
   - IBIS was only scoped, never built;
   - a docs page for W/S, and the E2/E3 status in hspice-comparison.
-- **HSPICE P elements.** Put z0 in series in DC, tran and HB (a hidden node
-  plus a noiseless resistor), and stop `sp.zig` and `hb_lptv.zig` from adding
-  it twice. Then `.hblsp` and `.hblin` noise.
+- **`.hblsp`:** large-signal S over a power sweep. P elements now carry z0
+  in HB; what is missing is driving a port's sine amplitude and frequency
+  per point and a confirmed HSPICE definition of S12/S22.
 - **`.meas` over NOISE:** not read yet.
 - **Noise:**
   - trannoise `SAMPLES>1`, SDE and TIME;

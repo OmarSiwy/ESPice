@@ -1313,25 +1313,25 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             };
         },
         .hblin => {
-            // HSPICE RF `.hblin <sweep> [NOISECALC=0] [FILENAME= DATAFORMAT=
+            // HSPICE RF `.hblin <sweep> [NOISECALC=0|1] [FILENAME= DATAFORMAT=
             // MIXEDMODE2PORT=ss]` [CR .HBLIN] at the `.hb` card's tone, over
             // the deck's P elements. The file keywords are checked and
-            // unused; noise and mixed mode are refused.
+            // unused; mixed mode is refused.
             const grid = try acGrid(ctx.arena, args, 0);
+            var noise = false;
             var i: usize = grid.end;
             while (i < args.len) : (i += 2) {
                 var lower: [16]u8 = undefined;
                 const key = try keyword(args, i, &lower);
                 if (i + 1 >= args.len) return error.InvalidAnalysisArguments;
                 if (std.mem.eql(u8, key, "noisecalc")) {
-                    const off = if (numberAt(args, i + 1)) |v| v == 0 else std.ascii.eqlIgnoreCase(nameAt(args, i + 1) orelse "", "no");
-                    if (!off) return error.UnsupportedAnalysisOutput;
+                    noise = if (numberAt(args, i + 1)) |v| v != 0 else !std.ascii.eqlIgnoreCase(nameAt(args, i + 1) orelse "", "no");
                 } else if (std.mem.eql(u8, key, "mixedmode2port")) {
                     if (!std.ascii.eqlIgnoreCase(nameAt(args, i + 1) orelse "", "ss")) return error.UnsupportedAnalysisOutput;
                 } else if (!std.mem.eql(u8, key, "filename") and !std.mem.eql(u8, key, "dataformat")) return error.InvalidAnalysisArguments;
             }
             if (sources.ports.len == 0) return error.MissingAnalysisCard;
-            return .{ .hblin = .{ .f0 = 0, .sweep = grid.sweep, .ports = sources.ports } };
+            return .{ .hblin = .{ .f0 = 0, .sweep = grid.sweep, .ports = sources.ports, .noise = noise } };
         },
         .phasenoise => {
             // `.phasenoise v(out) sweep [f0 [K]]`: without f0 the oscillator

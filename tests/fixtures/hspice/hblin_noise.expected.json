@@ -1,0 +1,95 @@
+{
+ "schema_version": 1,
+ "netlist_sha256": "581fff9cd5c25d748efc959938e2a503ca23f1386e3289800feff664257ef086",
+ "analysis": "hblin",
+ "purpose": "HSPICE RF .hblin noisecalc=1: S and the single-sideband noise figure of an ideal multiplying mixer.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "gm(t) = 0.1 sin(w0 t), so gm_{-1} = 0.05j. With P1 driven, v(rf) = sqrt(z0) a1 (z0 against R1 = 50); the lower sideband current gm_{-1} v(rf) flows into z0 || R2 = 25 ohm, so b2 = 25 * 0.05j a1 = 1.25j a1, conjugated for the lower band: S21 = -1.25j. Both ports see 50 ohm and the multiplier is unilateral, so S11 = S22 = S12 = 0. Noise at 290 K: the RF node carries 50 kT (V^2/Hz) from P1's z0 and 50 kT from R1 in each of the bands f and 2 f0 - f, both converted by |25 * 0.05|^2 = 1.5625 into the IF band; R2 adds 50 kT at the IF node. F_ssb = (4 * 50 kT * 1.5625 + 50 kT) / (50 kT * 1.5625) = 4.64."
+ },
+ "tokenizer": "hspice",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Harmonic Balance LIN Analysis",
+    "match": "exact",
+    "row_count": 2,
+    "columns": {
+     "S(1,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0
+       ]
+      ]
+     },
+     "S(1,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0
+       ]
+      ]
+     },
+     "S(2,1)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.0,
+        -1.25
+       ],
+       [
+        0.0,
+        -1.25
+       ]
+      ]
+     },
+     "S(2,2)": {
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.0
+       ]
+      ]
+     },
+     "NF": {
+      "rtol": 1e-06,
+      "atol": 1e-12,
+      "values": [
+       [
+        4.64,
+        0.0
+       ],
+       [
+        4.64,
+        0.0
+       ]
+      ]
+     }
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

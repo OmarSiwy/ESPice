@@ -1,0 +1,80 @@
+{
+ "schema_version": 1,
+ "netlist_sha256": "de0ddc5c903ce4dbff74a0773c1762b3e258690354bbaa290b7a008aa1182cd4",
+ "analysis": "tran",
+ "purpose": "HSPICE P element keeps z0 in series with its source in DC and transient.",
+ "oracle": {
+  "kind": "analytic",
+  "derivation": "Voltage divider 1 V * 150/(50+150) = 0.75 V; RC charge through z0: v(b) = 1 - exp(-t / (1k * 1n))."
+ },
+ "tokenizer": "hspice",
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Operating Point",
+    "match": "exact",
+    "row_count": 1,
+    "columns": {
+     "v(a)": {
+      "unit": "V",
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       0.75
+      ]
+     },
+     "v(b)": {
+      "unit": "V",
+      "rtol": 1e-09,
+      "atol": 1e-12,
+      "values": [
+       0.0
+      ]
+     }
+    }
+   },
+   {
+    "name": "Transient Analysis",
+    "match": "samples",
+    "columns": {
+     "v(a)": {
+      "unit": "V",
+      "rtol": 1e-06,
+      "atol": 1e-09,
+      "values": [
+       0.75,
+       0.75,
+       0.75,
+       0.75
+      ]
+     },
+     "v(b)": {
+      "unit": "V",
+      "rtol": 0.002,
+      "atol": 1e-05,
+      "values": [
+       0.3934693402873666,
+       0.6321205588285577,
+       0.8646647167633873,
+       0.950212931632136
+      ]
+     }
+    },
+    "axis": {
+     "name": "time",
+     "values": [
+      5e-07,
+      1e-06,
+      2e-06,
+      3e-06
+     ],
+     "atol": 1e-15,
+     "rtol": 1e-09
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ }
+}

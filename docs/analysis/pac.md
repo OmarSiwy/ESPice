@@ -57,14 +57,25 @@ source is pumped, $g_m(t) = \beta(1 - 0.5\sin\omega_0 t)$, read at the
 input band, the lower sideband (with 1 nF across the port) and the upper
 sideband; it matches the closed form to 1e-10.
 
-`ponytail:` not built: `NOISECALC=1` (the noise figure needs the
-terminations inside `pnoise.orbitSweep`) and mixed-mode ports are
-refused, `SS_TONE` and multi-tone port vectors are refused, and `.hblsp`
-is not built. `.hblsp` sweeps the port's drive power through a large-signal
-HB, which needs the P element's z0 inside the HB circuit; a P element is
-an ideal source outside the port analyses here (see
-[s-parameters.md](s-parameters.md) §5), so the HB orbit also sees the
-ports as ideal sources at their `dc=` values.
+A P element's z0 is a resistor in the circuit (see
+[s-parameters.md](s-parameters.md) §5), so the HB orbit sees each port
+source behind its z0, and `.hblin` does not terminate those branches a
+second time.
+
+`NOISECALC=1` adds `NF`, the single-sideband noise figure from port 1 to
+port 2: the noise power in port 2's band, with port 1's z0 at 290 K, over
+the part of it that comes from port 1's z0 in port 1's band. The circuit's
+own noise is `pnoise.orbitSweep` read at port 2's band on the same orbit
+(the z0 resistors are noiseless, so it holds no termination); the z0
+terms come from one adjoint solve per frequency on the conversion
+matrix's factor, summed over every sideband. Oracle `hspice/hblin_noise`:
+an ideal multiplying mixer with 50 ohm shunts on both ports; signal and
+image bands each bring their RF noise through the conversion gain, so
+F = 4.64 in closed form.
+
+`ponytail:` not built: mixed-mode ports are refused in `.hblin` (each leg
+would need its own drive in every band), `SS_TONE` and multi-tone port
+vectors are refused, and `.hblsp` is not built.
 
 `src/analysis/pss/pac.zig analyze()`:
 
