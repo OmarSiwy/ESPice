@@ -6,6 +6,7 @@
 //! clamping each step into the box and holding a parameter fixed while it
 //! sits on a limit its gradient pushes it past.
 const std = @import("std");
+const dot = @import("numerics.zig").dot;
 
 /// The optimizer knobs of an HSPICE `.model m OPT` card, with its defaults.
 pub const Options = struct {
@@ -127,7 +128,7 @@ pub const Lm = struct {
         s.evaluations += s.pending;
         switch (s.phase) {
             .start => {
-                const rss = sumSquares(residuals);
+                const rss = dot(residuals, residuals);
                 if (!std.math.isFinite(rss)) return s.stop(.failed);
                 @memcpy(s.r, residuals);
                 s.rss = rss;
@@ -142,7 +143,7 @@ pub const Lm = struct {
                     s.jac[j * m + i] = d;
                 };
                 for (0..n) |j| {
-                    s.g[j] = 2 * dotCol(s.jac[j * m ..][0..m], s.r);
+                    s.g[j] = 2 * dot(s.jac[j * m ..][0..m], s.r);
                     // A parameter on a limit its descent direction points past stays put.
                     s.free[j] = !((s.x[j] <= s.lo[j] and s.g[j] > 0) or (s.x[j] >= s.hi[j] and s.g[j] < 0));
                 }
@@ -150,7 +151,7 @@ pub const Lm = struct {
                 s.trialPoint();
             },
             .trial => {
-                const rss = sumSquares(residuals);
+                const rss = dot(residuals, residuals);
                 if (!(rss < s.rss)) {
                     s.lambda *= s.opts.cut;
                     if (s.lambda > s.opts.max) return s.stop(.max);
@@ -231,7 +232,7 @@ pub const Lm = struct {
                 s.a[j * n + k] = if (!s.free[j] or !s.free[k])
                     @floatFromInt(@intFromBool(j == k))
                 else
-                    dotCol(s.jac[j * m ..][0..m], s.jac[k * m ..][0..m]);
+                    dot(s.jac[j * m ..][0..m], s.jac[k * m ..][0..m]);
             };
             for (0..n) |j| {
                 const d = s.a[j * n + j];
@@ -253,18 +254,6 @@ pub const Lm = struct {
         s.phase = .trial;
     }
 };
-
-fn sumSquares(v: []const f64) f64 {
-    var sum: f64 = 0;
-    for (v) |x| sum += x * x;
-    return sum;
-}
-
-fn dotCol(a: []const f64, b: []const f64) f64 {
-    var sum: f64 = 0;
-    for (a, b) |x, y| sum += x * y;
-    return sum;
-}
 
 /// Solves the symmetric positive definite `a` (n x n, row-major, destroyed)
 /// against `b` in place. False when `a` is not positive definite.
