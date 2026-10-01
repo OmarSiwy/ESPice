@@ -1,0 +1,8 @@
+// Conductance read from the simulator's tolerances (VAMS §9.15 $simparam):
+// G = reltol*1e3 + abstol*1e9 + vntol*1e4 S.
+`include "disciplines.vams"
+module va_gtol(p, n);
+    inout p, n;
+    electrical p, n;
+    analog I(p, n) <+ V(p, n) * ($simparam("reltol") * 1e3 + $simparam("abstol") * 1e9 + $simparam("vntol") * 1e4);
+endmodule

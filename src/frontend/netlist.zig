@@ -480,14 +480,76 @@ const variant_cards = std.StaticStringMap(Card).initComptime(.{
     .{ "step", .step }, .{ "data", .data }, .{ "enddata", .enddata }, .{ "variation", .variation }, .{ "end_variation", .end_variation },
 });
 
-/// Words that open a behavioural E/F/G/H form in the first control-node
-/// slot (ngspice inpcom.c, HSPICE's E/G element keywords). None is built.
-const behavioural = std.StaticStringMap(void).initComptime(.{
-    .{"poly"},  .{"value"},  .{"vol"},   .{"cur"},  .{"table"},       .{"laplace"}, .{"pole"},
-    .{"freq"},  .{"vcr"},    .{"vccap"}, .{"delay"}, .{"opamp"},      .{"npwl"},    .{"ppwl"},
-    .{"pwl"},   .{"and"},    .{"nand"},  .{"or"},   .{"nor"},         .{"vcvs"},    .{"vccs"},
-    .{"ccvs"},  .{"cccs"},   .{"transformer"},
+/// A behavioural E/F/G/H form, named by the word in the first control-node
+/// slot (ngspice inpcom.c, HSPICE's E/G element keywords).
+const Form = enum { value, poly, table, pwl, laplace, delay, vcr, vccap, kind, refused };
+
+const behavioural = std.StaticStringMap(Form).initComptime(.{
+    .{ "poly", .poly },       .{ "value", .value },   .{ "vol", .value },      .{ "cur", .value },
+    .{ "table", .table },     .{ "laplace", .laplace }, .{ "pole", .refused }, .{ "freq", .refused },
+    .{ "vcr", .vcr },         .{ "vccap", .vccap },   .{ "delay", .delay },    .{ "opamp", .refused },
+    .{ "npwl", .refused },    .{ "ppwl", .refused },  .{ "pwl", .pwl },        .{ "and", .refused },
+    .{ "nand", .refused },    .{ "or", .refused },    .{ "nor", .refused },    .{ "vcvs", .kind },
+    .{ "vccs", .kind },       .{ "ccvs", .kind },     .{ "cccs", .kind },      .{ "transformer", .refused },
 });
+
+/// Row of `key` in `kvs`.
+fn kvIndex(kvs: []const Kv, key: []const u8) ?usize {
+    for (kvs, 0..) |kv, i| if (std.mem.eql(u8, kv.key, key)) return i;
+    return null;
+}
+
+/// Steps `pw` to the exponents of the next SPICE 2G6 polynomial term: a
+/// literal port of NXTPWR (XSPICE spice2poly), which orders the terms as
+/// the expansion of (a + (b + c))^k, k = 1, 2, ...
+fn nextPower(pw: []u32) void {
+    const dim = pw.len;
+    if (dim == 1) {
+        pw[0] += 1;
+        return;
+    }
+    var k = dim;
+    while (k > 0 and pw[k - 1] == 0) k -= 1;
+    if (k == 0) {
+        pw[0] += 1;
+        return;
+    }
+    if (k != dim) {
+        pw[k - 1] -= 1;
+        pw[k] += 1;
+        return;
+    }
+    for (pw[0 .. k - 1]) |e| {
+        if (e != 0) break;
+    } else {
+        pw[0] = pw[dim - 1] + 1;
+        pw[dim - 1] = 0;
+        return;
+    }
+    var psum: u32 = 1;
+    k = dim;
+    while (pw[k - 2] < 1) : (k -= 1) {
+        psum += pw[k - 1];
+        pw[k - 1] = 0;
+    }
+    pw[k - 1] += psum;
+    pw[k - 2] -= 1;
+}
+
+test "nextPower: SPICE 2G6 term order" {
+    var pw: [2]u32 = .{ 0, 0 };
+    const want = [_][2]u32{ .{ 1, 0 }, .{ 0, 1 }, .{ 2, 0 }, .{ 1, 1 }, .{ 0, 2 }, .{ 3, 0 }, .{ 2, 1 } };
+    for (want) |e| {
+        nextPower(&pw);
+        try std.testing.expectEqual(e, pw);
+    }
+    var p3: [3]u32 = .{ 0, 0, 0 };
+    const want3 = [_][3]u32{ .{ 1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 }, .{ 2, 0, 0 }, .{ 1, 1, 0 }, .{ 1, 0, 1 }, .{ 0, 2, 0 }, .{ 0, 1, 1 }, .{ 0, 0, 2 }, .{ 3, 0, 0 } };
+    for (want3) |e| {
+        nextPower(&p3);
+        try std.testing.expectEqual(e, p3);
+    }
+}
 
 /// The card a `.keyword` names, case-insensitively; null for any other card.
 fn cardOf(head: []const u8) ?Card {
@@ -1931,7 +1993,9 @@ fn Reader(comptime S: type) type {
         /// defined it; probe nets are mapped through `frame`.
         fn subst(r: *R, from: usize, to: usize, frame: *const Frame, scopes: []const *const Scope, depth: u8) Error!void {
             if (depth == 64) return error.ParseError;
-            const geometry_names = std.StaticStringMap(void).initComptime(.{ .{ "l", {} }, .{ "w", {} }, .{ "mult", {} } });
+            // `expr.Code.ident`'s final operand: declared geometry, then the
+            // B-source tape's simulator variables.
+            const ident_class = std.StaticStringMap(u32).initComptime(.{ .{ "l", 1 }, .{ "w", 1 }, .{ "mult", 1 }, .{ "time", 2 }, .{ "temper", 3 } });
             var i = from;
             while (i < to) : (i += 1) {
                 const op = r.scratch.ops.items[i];
@@ -1940,7 +2004,7 @@ fn Reader(comptime S: type) type {
                     .ident => {
                         const name = r.scratch.names.items[op.a];
                         const hit = find(scopes, name) orelse {
-                            try r.ops.append(r.arena, .{ .code = .ident, .a = @intFromBool(geometry_names.has(name)) });
+                            try r.ops.append(r.arena, .{ .code = .ident, .a = ident_class.get(name) orelse 0 });
                             continue;
                         };
                         if (hit.level == 0) if (r.live_names.getIndex(name)) |k| {
@@ -1967,8 +2031,15 @@ fn Reader(comptime S: type) type {
                             },
                         }
                     },
-                    // The device name is not kept: no consumer reads it.
-                    .iprobe => try r.ops.append(r.arena, .{ .code = .iprobe, .a = none, .b = none }),
+                    // The device by its flattened card name (`commit`), for a B-source tape.
+                    .iprobe => {
+                        const a = if (op.a == none) none else a: {
+                            const dev = r.scratch.names.items[op.a];
+                            const flat = if (frame.path) |path| try r.joined(&.{ dev[0..1], ".", path, ".", dev }) else dev;
+                            break :a (try r.internName(flat)).index();
+                        };
+                        try r.ops.append(r.arena, .{ .code = .iprobe, .a = a, .b = none });
+                    },
                     .vprobe => try r.ops.append(r.arena, .{
                         .code = .vprobe,
                         .a = if (op.a == none) none else (try r.netOf(frame, r.scratch.names.items[op.a])).index(),
@@ -2092,8 +2163,12 @@ fn Reader(comptime S: type) type {
                 _ = probe.next();
                 _ = probe.next();
                 var buf: [16]u8 = undefined;
-                if (probe.next()) |t| if (t.len <= buf.len and behavioural.has(std.ascii.lowerString(&buf, t)))
-                    return r.unsupported(line, "unsupported controlled-source form");
+                const at = probe.pos;
+                if (probe.next()) |t| if (t.len <= buf.len) if (behavioural.get(std.ascii.lowerString(&buf, t))) |form| {
+                    // `E1 a b VCVS c d 2`: the type word only repeats the letter.
+                    if (form == .kind) return r.readDevice(try std.mem.concat(r.arena, u8, &.{ line[0..at], " ", probe.line[probe.pos..] }), frame);
+                    return r.behaviouralCard(line, head, letter, f, frame, form);
+                };
             }
             r.nodes.clearRetainingCapacity();
             r.positional.clearRetainingCapacity();
@@ -2164,7 +2239,244 @@ fn Reader(comptime S: type) type {
             return r.commit(head, letter, frame);
         }
 
-        /// An HSPICE P card with its `hblin=[h, s]` band vector spelled as
+        /// An E/F/G/H card in a behavioural form, `f` just past the name. Value,
+        /// POLY, TABLE and PWL(1) forms, and HSPICE's VCR and VCCAP, become a
+        /// B card over one expression (`i=`, `v=`, or `q=` for the charge of
+        /// VCCAP); LAPLACE and DELAY keep their letter and carry the form in
+        /// `laplace=<numerator count>` or `td=`. Anything else is refused.
+        fn behaviouralCard(r: *R, line: []const u8, head: []const u8, letter: u8, f_in: F, frame: *const Frame, form: Form) Error!void {
+            const arena = r.arena;
+            var f = f_in;
+            r.nodes.clearRetainingCapacity();
+            r.positional.clearRetainingCapacity();
+            r.card_kv.clearRetainingCapacity();
+            for (0..2) |_| try r.nodes.append(arena, try r.word(&f));
+            _ = f.next();
+            const by_current = letter == 'f' or letter == 'h';
+            var w: std.ArrayList(u8) = .empty;
+            switch (form) {
+                .refused, .kind => return r.unsupported(line, "unsupported controlled-source form"),
+                .laplace, .delay => {
+                    if (by_current) return r.unsupported(line, "unsupported controlled-source form");
+                    for (0..2) |_| try r.nodes.append(arena, try r.word(&f));
+                    var n_num: usize = 0;
+                    while (f.next()) |t| {
+                        if (t[0] == ',' or t[0] == '(' or t[0] == ')') continue;
+                        if (form == .laplace and std.mem.eql(u8, t, "/")) {
+                            n_num = r.positional.items.len;
+                        } else if (F.isWord(t) and f.takeEq()) {
+                            try r.card_kv.append(arena, .{ .key = t, .value = try r.kvValue(&f, frame, false) });
+                        } else try r.positional.append(arena, .{ .num = try r.numberAt(t, &f, frame) });
+                    }
+                    if (form == .laplace) {
+                        if (n_num == 0 or n_num == r.positional.items.len) return error.ParseError;
+                        try r.card_kv.append(arena, .{ .key = "laplace", .value = .{ .num = @floatFromInt(n_num) } });
+                    } else if (r.positional.items.len != 0 or kvIndex(r.card_kv.items, "td") == null) return error.ParseError;
+                    return r.commit(head, letter, frame);
+                },
+                .value => {
+                    _ = f.takeEq();
+                    const t = f.peek() orelse return error.ParseError;
+                    if (t[0] == '{' or F.isQuote(t[0])) {
+                        try w.appendSlice(arena, F.body(t));
+                        _ = f.next();
+                    } else {
+                        try w.appendSlice(arena, f.rest());
+                        f.pos = f.line.len;
+                    }
+                },
+                .poly => try r.polyText(&w, &f, frame, by_current),
+                .table => {
+                    // TABLE {expr} = (x1, y1) (x2, y2) ... (ngspice inpcom.c),
+                    // corners smoothed over a tenth of the shorter segment.
+                    _ = f.takeEq();
+                    const t = f.next() orelse return error.ParseError;
+                    if (t[0] != '{' and !F.isQuote(t[0])) return error.ParseError;
+                    _ = f.takeEq();
+                    try w.print(arena, "table(({s}),0.1", .{F.body(t)});
+                    _ = try r.tableText(&w, &f, frame);
+                },
+                .pwl, .vcr, .vccap => {
+                    // HSPICE: [VCR|VCCAP] [PWL(1)|POLY(n)] in+ in- ..., or the
+                    // linear `VCR in+ in- factor` (a resistance or capacitance).
+                    const inner = if (form == .pwl) Form.pwl else blk: {
+                        if (by_current) return r.unsupported(line, "unsupported controlled-source form");
+                        const t = f.peek() orelse return error.ParseError;
+                        var buf: [8]u8 = undefined;
+                        const sub = if (t.len <= buf.len) behavioural.get(std.ascii.lowerString(&buf, t)) else null;
+                        if (sub == null) break :blk Form.value;
+                        if (sub.? != .pwl and sub.? != .poly) return r.unsupported(line, "unsupported controlled-source form");
+                        _ = f.next();
+                        break :blk sub.?;
+                    };
+                    switch (form) {
+                        .vcr => try w.print(arena, "v({s},{s})/(", .{ r.nodes.items[0], r.nodes.items[1] }),
+                        .vccap => try w.print(arena, "v({s},{s})*(", .{ r.nodes.items[0], r.nodes.items[1] }),
+                        else => try w.append(arena, '('),
+                    }
+                    switch (inner) {
+                        .poly => try r.polyText(&w, &f, frame, false),
+                        .pwl => {
+                            if (!std.mem.eql(u8, f.next() orelse "", "(") or !std.mem.eql(u8, f.next() orelse "", "1") or
+                                !std.mem.eql(u8, f.next() orelse "", ")")) return r.unsupported(line, "multi-input PWL");
+                            var ctl: std.ArrayList(u8) = .empty;
+                            try r.controlText(&ctl, &f, by_current);
+                            var pts: std.ArrayList(u8) = .empty;
+                            const spacing = try r.tableText(&pts, &f, frame);
+                            // DELTA, the corner width, defaults to a quarter of
+                            // the closest breakpoint spacing [SA G-element parameters].
+                            const delta = if (kvIndex(r.card_kv.items, "delta")) |k| switch (r.card_kv.items[k].value) {
+                                .num => |x| x,
+                                else => return error.ParseError,
+                            } else spacing / 4;
+                            try w.print(arena, "table({s},{e}{s}", .{ ctl.items, -delta, pts.items });
+                        },
+                        else => {
+                            try w.append(arena, '(');
+                            try r.controlText(&w, &f, false);
+                            try w.print(arena, ")*({e})", .{try r.numberAt(f.next() orelse return error.ParseError, &f, frame)});
+                        },
+                    }
+                    try w.append(arena, ')');
+                },
+            }
+            // HSPICE modifiers [SA E-element parameters], in this order.
+            while (f.next()) |t| {
+                if (t[0] == ',') continue;
+                if (!F.isWord(t) or !f.takeEq()) return error.ParseError;
+                try r.card_kv.append(arena, .{ .key = t, .value = try r.kvValue(&f, frame, false) });
+            }
+            var tc: [2]Kv = undefined;
+            var n_tc: usize = 0;
+            for (r.card_kv.items) |kv| {
+                const x = switch (kv.value) {
+                    .num => |x| x,
+                    else => return r.unsupported(line, "non-constant controlled-source parameter"),
+                };
+                const keys = std.StaticStringMap(u8).initComptime(.{
+                    .{ "scale", 's' }, .{ "m", 's' },   .{ "abs", 'a' },   .{ "max", 'x' },  .{ "min", 'n' },
+                    .{ "tc1", 't' },   .{ "tc2", 't' }, .{ "ic", 'i' },    .{ "delta", 'i' },
+                });
+                const k = keys.get(kv.key) orelse return r.unsupported(line, "unsupported controlled-source parameter");
+                switch (k) {
+                    's' => w = try wrapped(arena, "(", w.items, try std.fmt.allocPrint(arena, ")*({e})", .{x})),
+                    'a' => if (x != 0) {
+                        w = try wrapped(arena, "abs(", w.items, ")");
+                    },
+                    'x' => w = try wrapped(arena, "min(", w.items, try std.fmt.allocPrint(arena, ",{e})", .{x})),
+                    'n' => w = try wrapped(arena, "max(", w.items, try std.fmt.allocPrint(arena, ",{e})", .{x})),
+                    't' => {
+                        if (n_tc == tc.len) return error.ParseError;
+                        tc[n_tc] = kv;
+                        n_tc += 1;
+                    },
+                    else => {},
+                }
+            }
+            r.card_kv.clearRetainingCapacity();
+            const key: []const u8 = if (form == .vccap) "q" else if (letter == 'g' or letter == 'f') "i" else "v";
+            try r.card_kv.append(arena, .{ .key = key, .value = try r.exprValue(w.items, frame, false) });
+            try r.card_kv.appendSlice(arena, tc[0..n_tc]);
+            return r.commit(head, 'b', frame);
+        }
+
+        /// `pre ++ text ++ post` in a fresh list.
+        fn wrapped(arena: Allocator, pre: []const u8, text: []const u8, post: []const u8) Error!std.ArrayList(u8) {
+            var out: std.ArrayList(u8) = .empty;
+            try out.print(arena, "{s}{s}{s}", .{ pre, text, post });
+            return out;
+        }
+
+        /// The next node or source name, past any `(`, `)` or `,`.
+        fn word(_: *R, f: *F) Error![]const u8 {
+            while (f.next()) |t| {
+                if (t[0] == ',' or t[0] == '(' or t[0] == ')') continue;
+                if (!F.isWord(t)) return error.ParseError;
+                return t;
+            }
+            return error.ParseError;
+        }
+
+        /// A number field, or a parameter or `{expr}` that folds to one.
+        fn numberAt(r: *R, t: []const u8, f: *F, frame: *const Frame) Error!f64 {
+            return switch (try r.valueAt(t, f, frame, true, false)) {
+                .num => |x| x,
+                else => error.ParseError,
+            };
+        }
+
+        /// One controlling quantity as expression text: `v(a,b)` over the
+        /// next two nodes, or `i(vname)` over the next source name.
+        fn controlText(r: *R, w: *std.ArrayList(u8), f: *F, by_current: bool) Error!void {
+            if (by_current) return w.print(r.arena, "i({s})", .{try r.word(f)});
+            const a = try r.word(f);
+            const b = try r.word(f);
+            if (isGroundName(b)) return w.print(r.arena, "v({s})", .{a});
+            try w.print(r.arena, "v({s},{s})", .{ a, b });
+        }
+
+        /// `(x1, y1) (x2, y2) ...` or `x1,y1 x2,y2 ...` as `,x1,y1,...)`.
+        /// A `key=value` among them goes to `card_kv`. Returns the smallest x
+        /// spacing.
+        fn tableText(r: *R, w: *std.ArrayList(u8), f: *F, frame: *const Frame) Error!f64 {
+            var n: usize = 0;
+            var last: f64 = 0;
+            var spacing = std.math.inf(f64);
+            while (f.next()) |t| {
+                if (t[0] == ',' or t[0] == '(' or t[0] == ')') continue;
+                if (F.isWord(t) and f.takeEq()) {
+                    try r.card_kv.append(r.arena, .{ .key = t, .value = try r.kvValue(f, frame, false) });
+                    continue;
+                }
+                const x = try r.numberAt(t, f, frame);
+                if (n % 2 == 0) {
+                    if (n > 0) spacing = @min(spacing, x - last);
+                    last = x;
+                }
+                try w.print(r.arena, ",{e}", .{x});
+                n += 1;
+            }
+            if (n < 4 or n % 2 != 0) return error.ParseError;
+            try w.append(r.arena, ')');
+            return spacing;
+        }
+
+        /// `POLY(n) <controls> p0 p1 ...` as a sum of products in SPICE 2G6
+        /// coefficient order (XSPICE spice2poly nxtpwr). HSPICE reads a lone
+        /// coefficient as p1 [SA G-element parameters]; ngspice as p0.
+        fn polyText(r: *R, w: *std.ArrayList(u8), f: *F, frame: *const Frame, by_current: bool) Error!void {
+            const arena = r.arena;
+            if (!std.mem.eql(u8, f.next() orelse "", "(")) return error.ParseError;
+            const dim_f = try r.numberAt(f.next() orelse return error.ParseError, f, frame);
+            if (!std.mem.eql(u8, f.next() orelse "", ")") or dim_f < 1 or dim_f > 8 or dim_f != @trunc(dim_f)) return error.ParseError;
+            const dim: usize = @intFromFloat(dim_f);
+            var ctl: [8][]const u8 = undefined;
+            for (ctl[0..dim]) |*c| {
+                var t: std.ArrayList(u8) = .empty;
+                try r.controlText(&t, f, by_current);
+                c.* = t.items;
+            }
+            var coef: std.ArrayList(f64) = .empty;
+            while (f.next()) |t| {
+                if (t[0] == ',') continue;
+                if (F.isWord(t) and f.takeEq()) {
+                    try r.card_kv.append(arena, .{ .key = t, .value = try r.kvValue(f, frame, false) });
+                    continue;
+                }
+                try coef.append(arena, try r.numberAt(t, f, frame));
+            }
+            if (coef.items.len == 0) return error.ParseError;
+            if (coef.items.len == 1 and dim == 1 and r.dialect == .hspice) try coef.insert(arena, 0, 0);
+            try w.print(arena, "({e})", .{coef.items[0]});
+            var pw: [8]u32 = @splat(0);
+            for (coef.items[1..]) |c| {
+                nextPower(pw[0..dim]);
+                if (c == 0) continue;
+                try w.print(arena, "+({e})", .{c});
+                for (pw[0..dim], ctl[0..dim]) |e, x| for (0..e) |_| try w.print(arena, "*{s}", .{x});
+            }
+        }
+
         /// the plain keys `hblin_h=h hblin_s=s` the builder reads. A longer
         /// vector (multi-tone HB) is refused.
         fn portLine(r: *R, line: []const u8) Error![]const u8 {
@@ -2234,7 +2546,10 @@ fn Reader(comptime S: type) type {
                 try r.modelRow(letter, r.positional.items[0].name, positional.start, frame)
             else
                 none;
-            const name = try r.internName(if (frame.path) |path| try r.joined(&[_][]const u8{ &.{letter}, ".", path, ".", head }) else head);
+            // A behavioural E/F/G/H is built as a B card but keeps its own
+            // letter in a flattened name, which is what its i() probes use.
+            const name_letter = if (letter == 'b') std.ascii.toLower(head[0]) else letter;
+            const name = try r.internName(if (frame.path) |path| try r.joined(&[_][]const u8{ &.{name_letter}, ".", path, ".", head }) else head);
             _ = r.hg.addEdge(arena, .{
                 .kind = letter,
                 .name = name,

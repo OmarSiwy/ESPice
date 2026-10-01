@@ -661,6 +661,9 @@ pub fn circuitOf(lib: *const device.Library, gpa: std.mem.Allocator, scratch: st
     var compiled = false;
     errdefer if (!compiled) b.deinit();
     b.nom_temp_c = deck_opts.tnom_c;
+    b.reltol = deck_opts.tol.reltol;
+    b.abstol = deck_opts.tol.abstol;
+    b.vntol = deck_opts.tol.vntol;
     try b.reserveNodes(nl.graph.vertexCount());
     var nb = try builder.NetBuilder.init(scratch, &b, nl.*);
     try nb.build();

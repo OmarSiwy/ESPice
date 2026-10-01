@@ -56,6 +56,11 @@ pub const Builder = struct {
     /// a model card without its own TNOM/TREF was extracted at. `deriveModel`
     /// copies it into the models that read it.
     nom_temp_c: f64 = 27.0,
+    /// `.options reltol/abstol/vntol`, for §9.15 `$simparam` in models;
+    /// `deriveModel` copies them like `nom_temp_c`.
+    reltol: f64 = 1e-3,
+    abstol: f64 = 1e-12,
+    vntol: f64 = 1e-6,
 
     /// (device type, instance ordinal) to card name, for `.sens` columns: a
     /// `ParamRef` only knows its ordinal (`resistor#0`). Names borrow the
@@ -500,6 +505,11 @@ pub const NetBuilder = struct {
             // Card pairs override the .model card. VA parameters are Model
             // fields, so they go to the model blob too.
             try bindKv(vt.bind_model, mblob.ptr, dev.kv);
+            // The §9.15 `$simparam` host fields, as `deriveModel` writes them
+            // for built-in devices; a model without them ignores the keys.
+            var host: [simparam_fields.len]batch.Param = undefined;
+            inline for (simparam_fields, &host) |f, *h| h.* = .{ .key = f[0], .value = @field(b, f[1]) };
+            try vt.bind_model(mblob.ptr, &host).unwrap();
             // LRM 6.3.4/3.4.5: derived parameters after the last write, before
             // `collapse`/`proto_add` read the blob.
             if (vt.derive) |df| df(mblob.ptr);
@@ -847,21 +857,19 @@ pub const NetBuilder = struct {
                 try self.i.append(self.arena, .{ .name = dev.name, .pos = nodes[0], .neg = if (nodes.len > 1) nodes[1] else GROUND });
             },
             'f', 'h', 'w', 'k' => try self.deferred.append(self.arena, dev),
-            'b' => {
-                // Only a V-mode B gets an i() column: ngspice makes the branch
-                // only for ASRC_VOLTAGE (asrcset.c:81-88). Our bsource declares
-                // the unknown either way; the I-mode one stays unprobed rather
-                // than published as a column ngspice never writes.
-                if (try addBsource(self, dev))
-                    try self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", self.b.n));
-            },
+            // A tape that reads i() waits until every branch row exists.
+            'b' => if (readsCurrent(self.nl, dev)) try self.deferred.append(self.arena, dev) else try self.addB(dev),
             'p' => try self.addCpl(dev),
             'o' => try self.addLossyLine(dev),
             'y' => try self.addTxl(dev),
             'u' => try self.addUrc(dev),
-            'e' => {
+            'e', 'g' => if (kvNumber(dev.kv, "laplace") != null) {
+                try addLaplace(self, dev, letter);
+            } else if (kvNumber(dev.kv, "td") != null) {
+                try addDelay(self, dev, letter);
+            } else {
                 try self.addByLetter(letter, dev);
-                try self.addBranchProbe(dev.name, internalRow(devices.vcvs, "flowZ28pZ2cnZ29", self.b.n));
+                if (letter == 'e') try self.addBranchProbe(dev.name, internalRow(devices.vcvs, "flowZ28pZ2cnZ29", self.b.n));
             },
             else => try self.addByLetter(letter, dev),
         }
@@ -956,7 +964,7 @@ pub const NetBuilder = struct {
                 const zs = r_t * sinhc;
                 if (gl <= 0 or !finiteLineCoefficients(.{ gl, sinhc, std.math.cosh(gl), zs, zs * (1.0 + 1e-12) }))
                     return error.UnsupportedTransmissionLineParameters;
-                deriveModel(devices.lossy_tline, &model, self.b.nom_temp_c);
+                deriveModel(devices.lossy_tline, &model, self.b);
                 return self.b.addDevice(devices.lossy_tline, dev.name, model, .{}, try deviceNodes(self, devices.lossy_tline, dev));
             }
             return error.UnsupportedTransmissionLineParameters;
@@ -1197,7 +1205,27 @@ pub const NetBuilder = struct {
         }
     }
 
-    /// Adds the F/H/W/K cards once every V and L row exists.
+    /// B card. Only a V-mode B gets an i() column: ngspice makes the branch
+    /// only for ASRC_VOLTAGE (asrcset.c:81-88). Our bsource declares the
+    /// unknown either way; the I-mode one stays unprobed rather than
+    /// published as a column ngspice never writes.
+    fn addB(self: *NetBuilder, dev: Device) !void {
+        if (try addBsource(self, dev))
+            try self.addBranchProbe(dev.name, internalRow(devices.bsource, "flowZ28pZ2cnZ29", self.b.n));
+    }
+
+    /// The branch-current row of card `name`: a V card's (its sensing
+    /// model's control branch once an F/H/W takes it over), an L card's, or
+    /// any other branch `br` lists. Null for a card without one.
+    fn branchRow(self: *const NetBuilder, name: []const u8) ?u32 {
+        if (netlist.nameIndex(self.v.items(.name), name)) |k| return self.v.items(.branch)[k];
+        if (netlist.nameIndex(self.l.items(.name), name)) |k| return self.l.items(.branch)[k];
+        if (netlist.nameIndex(self.br.items(.name), name)) |k| return self.br.items(.row)[k];
+        return null;
+    }
+
+    /// Adds the F/H/W/K cards once every V and L row exists, then the B
+    /// cards that read i(), once F/H/W have claimed their sensed branches.
     fn resolveDeferred(self: *NetBuilder) !void {
         if (self.deferred.items.len == 0) return;
         var source_index: std.StringHashMapUnmanaged(u32) = .empty;
@@ -1214,9 +1242,11 @@ pub const NetBuilder = struct {
                 'h' => try self.addBranchRef(devices.ccvs, dev, source_index, 0.0),
                 'w' => try self.addBranchRef(devices.cswitch, dev, source_index, null),
                 'k' => try self.addKinduc(dev),
+                'b' => {},
                 else => unreachable,
             }
         }
+        for (self.deferred.items) |dev| if (dev.kind == 'b') try self.addB(dev);
     }
 
     /// CPL (P card) on the native modal-fit, accepted-step convolution line,
@@ -1413,9 +1443,15 @@ fn setPolarity(comptime D: type, model: *D.Model) !void {
     }
 }
 
-/// VerA's reserved Model field for §9.15 `$simparam("tnom")`: the circuit's
-/// nominal temperature in degC. See `Lower.simparamHostField`.
-const nom_temp_field = "nom_temp__";
+/// VerA's reserved Model fields for §9.15 `$simparam`, each with the Builder
+/// field it is copied from: tnom (degC), reltol, abstol (A), vntol (V). See
+/// VerA's `Lower.simparamHostField`.
+const simparam_fields = .{
+    .{ "nom_temp__", "nom_temp_c" },
+    .{ "reltol__", "reltol" },
+    .{ "abstol__", "abstol" },
+    .{ "vntol__", "vntol" },
+};
 
 /// Runs §6.3.4/§3.4.5 `derive` through the device's own object: calling
 /// `D.derive` directly would compile the generated body (thousands of lines
@@ -1426,9 +1462,10 @@ const nom_temp_field = "nom_temp__";
 /// model.tnom = model.nom_temp__`, ngspice's `if (!BSIM4tnomGiven)
 /// BSIM4tnom = ckt->CKTnomTemp` (b4set.c:1950). A card TNOM/TREF set
 /// `__given` in `applyKv`, so it still wins.
-fn deriveModel(comptime D: type, model: *D.Model, nom_temp_c: f64) void {
-    if (comptime @hasField(D.Model, nom_temp_field))
-        @field(model, nom_temp_field) = nom_temp_c;
+fn deriveModel(comptime D: type, model: *D.Model, b: *const Builder) void {
+    inline for (simparam_fields) |f| {
+        if (comptime @hasField(D.Model, f[0])) @field(model, f[0]) = @field(b, f[1]);
+    }
     if (comptime device.modelName(D)) |name| {
         if (device.vtable(name).derive) |f| f(@ptrCast(model));
     } else if (comptime @hasDecl(D, "derive")) D.derive(model);
@@ -1476,23 +1513,29 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     try applyKv(&instance, dev.kv);
     // §6.3.4/§3.4.5: derived parameters after the last write; explicit card
     // values win through `__given`.
-    deriveModel(D, &model, b.nom_temp_c);
+    deriveModel(D, &model, b);
     try b.addDevice(D, dev.name, model, instance, try deviceNodes(self, D, dev));
 }
 
-/// B card as an expression tape, run by models/bsource.va (V output) or
-/// models/bsource_i.va (I output). Returns true for a voltage-mode B, the only
-/// kind with a branch current worth probing (ngspice asrcset.c:81-88).
+/// B card as an expression tape, run by models/bsource.va (V output),
+/// bsource_i.va (I output) or bsource_q.va (the `q=` charge of a behavioural
+/// VCCAP). Returns true for a voltage-mode B, the only kind with a branch
+/// current worth probing (ngspice asrcset.c:81-88).
 fn addBsource(self: *NetBuilder, dev: Device) !bool {
-    // The last v=/i= wins, as ngspice reads the card.
-    var imode = false;
-    for (dev.kv) |item| {
-        if (std.ascii.eqlIgnoreCase(item.key, "i")) imode = true;
-        if (std.ascii.eqlIgnoreCase(item.key, "v")) imode = false;
+    // The last v=/i=/q= wins, as ngspice reads the card.
+    var mode: BMode = .v;
+    for (dev.kv) |item| mode = b_modes.get(item.key) orelse mode;
+    switch (mode) {
+        .v => try addTape(self, devices.bsource, dev),
+        .i => try addTape(self, devices.bsource_i, dev),
+        .q => try addTape(self, devices.bsource_q, dev),
     }
-    if (imode) try addTape(self, devices.bsource_i, dev) else try addTape(self, devices.bsource, dev);
-    return !imode;
+    return mode == .v;
 }
+
+/// A B card's output: V(p,n), I(p,n), or the charge whose ddt is I(p,n).
+const BMode = enum { v, i, q };
+const b_modes = std.StaticStringMap(BMode).initComptime(.{ .{ "v", .v }, .{ "i", .i }, .{ "q", .q } });
 
 fn addTape(self: *NetBuilder, comptime B: type, dev: Device) !void {
     if (comptime !@hasDecl(B, "eval")) return error.UnsupportedDevice;
@@ -1507,7 +1550,7 @@ fn addTape(self: *NetBuilder, comptime B: type, dev: Device) !void {
     for (dev.pins[0..@min(dev.pins.len, 2)], 0..) |pin, k| nodes[k] = try self.rowOf(pin);
     var t: Tape = .{};
     for (dev.kv) |item| {
-        if (!std.ascii.eqlIgnoreCase(item.key, "v") and !std.ascii.eqlIgnoreCase(item.key, "i")) continue;
+        _ = b_modes.get(item.key) orelse continue;
         t = .{};
         switch (item.value) {
             .num => |value| {
@@ -1520,7 +1563,7 @@ fn addTape(self: *NetBuilder, comptime B: type, dev: Device) !void {
                     error.OutOfMemory => return err,
                     else => {
                         // The test runner fails any test that logs an error.
-                        if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is not supported ({s}); the limits are no i() or unknown names, known functions only, {d} probed nets, {d} ops, {d} constants", .{ dev.name, item.key, @errorName(err), tape.max_probes, tape.max_ops, tape.max_consts });
+                        if (!@import("builtin").is_test) std.log.err("B-source '{s}': the {s}= expression is not supported ({s}); the limits are i() of branch cards only, no unknown names, known functions only, {d} probed nets and currents, {d} ops, {d} constants", .{ dev.name, item.key, @errorName(err), tape.max_probes, tape.max_ops, tape.max_consts });
                         return error.UnsupportedBsourceExpression;
                     },
                 };
@@ -1530,6 +1573,71 @@ fn addTape(self: *NetBuilder, comptime B: type, dev: Device) !void {
     }
     t.store(B.Model, &model);
     try self.b.addDevice(B, dev.name, model, instance, nodes);
+}
+
+/// Four rows: the output pair, then the control pair.
+fn controlledNodes(self: *NetBuilder, dev: Device) ![4]u32 {
+    if (dev.pins.len != 4) return error.InvalidControlledSourceNodes;
+    var nodes: [4]u32 = undefined;
+    for (dev.pins, &nodes) |pin, *row| row.* = try self.rowOf(pin);
+    return nodes;
+}
+
+/// HSPICE `SCALE` times, for a G card, `M`; both default to 1.
+fn cardScale(dev: Device, letter: u8) f64 {
+    const m = if (letter == 'g') kvNumber(dev.kv, "m") orelse 1 else 1;
+    return (kvNumber(dev.kv, "scale") orelse 1) * m;
+}
+
+/// E/G LAPLACE card: H(s) = Σ k_i s^i / Σ d_i s^i, ascending coefficients
+/// with `laplace=` of them in the numerator [SA E-element Laplace
+/// Transform], on models/vcvs_laplace.va or vccs_laplace.va (`laplace_nd`).
+/// Improper H, a zero denominator and orders past the arrays are refused.
+fn addLaplace(self: *NetBuilder, dev: Device, letter: u8) !void {
+    for (dev.kv) |item| {
+        const known = std.StaticStringMap(void).initComptime(.{ .{"laplace"}, .{"scale"}, .{"m"} });
+        if (!known.has(item.key)) return error.UnsupportedLaplaceParameter;
+    }
+    const nk_f = kvNumber(dev.kv, "laplace").?;
+    if (!(nk_f >= 1) or nk_f != @round(nk_f) or nk_f >= @as(f64, @floatFromInt(dev.positional.len))) return error.UnsupportedLaplaceOrder;
+    const nk: usize = @intFromFloat(nk_f);
+    var coef: [2 * 32]f64 = undefined;
+    if (dev.positional.len > coef.len) return error.UnsupportedLaplaceOrder;
+    for (dev.positional, coef[0..dev.positional.len]) |v, *c| c.* = valueNumber(v) orelse return error.UnresolvedParameter;
+    var num = coef[0..nk];
+    var den = coef[nk..dev.positional.len];
+    while (den.len > 0 and den[den.len - 1] == 0) den.len -= 1;
+    while (num.len > 0 and num[num.len - 1] == 0) num.len -= 1;
+    inline for (.{ devices.vcvs_laplace, devices.vccs_laplace }, "eg") |D, l| if (letter == l) {
+        if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
+        const slots = comptime slotCount(D.Model, "den");
+        if (den.len == 0 or den.len > slots or num.len > den.len) return error.UnsupportedLaplaceOrder;
+        var model: D.Model = .{};
+        var instance: D.Instance = .{};
+        _ = try setParam(D, &model, &instance, "gain", cardScale(dev, letter));
+        inline for (0..slots) |k| {
+            @field(model, pwlSlot("num", k)) = if (k < num.len) num[k] else 0;
+            @field(model, pwlSlot("den", k)) = if (k < den.len) den[k] else 0;
+        }
+        try self.b.addDevice(D, dev.name, model, instance, try controlledNodes(self, dev));
+        if (l == 'e') try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", self.b.n));
+    };
+}
+
+/// E/G DELAY card: the control voltage delayed by `td=`, times SCALE
+/// [SA E-element Delay Element], on models/vcvs_delay.va or vccs_delay.va.
+fn addDelay(self: *NetBuilder, dev: Device, letter: u8) !void {
+    const td = kvNumber(dev.kv, "td") orelse return error.UnresolvedParameter;
+    if (!(td > 0)) return error.InvalidDelay;
+    inline for (.{ devices.vcvs_delay, devices.vccs_delay }, "eg") |D, l| if (letter == l) {
+        if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
+        var model: D.Model = .{};
+        var instance: D.Instance = .{};
+        _ = try setParam(D, &model, &instance, "gain", cardScale(dev, letter));
+        _ = try setParam(D, &model, &instance, "td", td);
+        try self.b.addDevice(D, dev.name, model, instance, try controlledNodes(self, dev));
+        if (l == 'e') try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", self.b.n));
+    };
 }
 
 /// The tape's opcodes and capacities. The opcode numbers and capacities are
@@ -1542,7 +1650,7 @@ const tape = struct {
     const Code = enum(u8) {
         num, v, vd, neg, not, add, sub, mul, div, powi, powc, pow, lt, gt, le, ge, eq, ne,
         @"and", @"or", sel, sqrt, abs, min, max, exp, ln, log10, sin, cos, tan, atan, tanh,
-        floor, ceil, time, temper,
+        floor, ceil, time, temper, pwl,
     };
 };
 
@@ -1569,12 +1677,23 @@ const Tape = struct {
     }
 };
 
+/// True when a B card's expression reads a branch current.
+fn readsCurrent(nl: Netlist, dev: Device) bool {
+    for (dev.kv) |item| switch (item.value) {
+        .expr => |span| for (nl.exprOps(span)) |op| {
+            if (op.code == .iprobe) return true;
+        },
+        else => {},
+    };
+    return false;
+}
+
 /// Translates a postfix card expression into the bsource tape, giving each
-/// distinct probed net a control port in `nodes`. Fails on anything the tape
-/// cannot express or hold.
+/// distinct probed row (a net, or the branch an i() reads) a control port in
+/// `nodes`. Fails on anything the tape cannot express or hold.
 fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !void {
-    var nets: [tape.max_probes]u32 = undefined;
-    var n_nets: usize = 0;
+    var rows: [tape.max_probes]u32 = undefined;
+    var n_rows: usize = 0;
     var n_consts: usize = 0;
     var n: usize = 0;
     for (ops) |op| {
@@ -1587,17 +1706,21 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !
                 n_consts += 1;
                 break :blk .num;
             },
-            .vprobe => blk: {
+            .vprobe, .iprobe => blk: {
                 if (op.a == netlist.none) return error.EmptyProbe;
                 var port: [2]u8 = .{ 0, 0 };
-                for ([2]u32{ op.a, op.b }, &port) |net, *slot| {
-                    if (net == netlist.none) break;
-                    const k = std.mem.indexOfScalar(u32, nets[0..n_nets], net) orelse k: {
-                        if (n_nets == tape.max_probes) return error.TooManyProbes;
-                        nets[n_nets] = net;
-                        nodes[2 + n_nets] = try self.rowOf(.from(net));
-                        n_nets += 1;
-                        break :k n_nets - 1;
+                for ([2]u32{ op.a, op.b }, &port) |id, *slot| {
+                    if (id == netlist.none) break;
+                    const row = if (op.code == .vprobe)
+                        try self.rowOf(.from(id))
+                    else
+                        self.branchRow(self.nl.pool.str(@enumFromInt(id))) orelse return error.UnknownCurrentProbe;
+                    const k = std.mem.indexOfScalar(u32, rows[0..n_rows], row) orelse k: {
+                        if (n_rows == tape.max_probes) return error.TooManyProbes;
+                        rows[n_rows] = row;
+                        nodes[2 + n_rows] = row;
+                        n_rows += 1;
+                        break :k n_rows - 1;
                     };
                     slot.* = @intCast(k);
                 }
@@ -1605,8 +1728,27 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !
                 model.op_b[n] = port[1];
                 break :blk if (op.b == netlist.none) .v else .vd;
             },
-            .call => try callCode(@enumFromInt(op.a), op.b),
-            .ident, .live, .iprobe => return error.UnsupportedOperand,
+            .ident => switch (op.a) {
+                2 => .time,
+                3 => .temper,
+                else => return error.UnsupportedOperand,
+            },
+            .call => blk: {
+                if (@as(netlist.expr.Fn, @enumFromInt(op.a)) != .table) break :blk try callCode(@enumFromInt(op.a), op.b);
+                // table(x, d, x1, y1, ...): the constants after x become the
+                // op's table, already consecutive in the pool.
+                const k = op.b - 1;
+                if (op.b < 6 or k % 2 != 1 or n < k) return error.WrongArity;
+                for (model.op_code[n - k .. n]) |c| if (c != .num) return error.NonConstantTable;
+                n -= k;
+                const at = model.op_a[n];
+                const pts = model.consts[at + 1 .. at + k];
+                var i: usize = 2;
+                while (i < pts.len) : (i += 2) if (!(pts[i] > pts[i - 2])) return error.TableNotAscending;
+                model.op_b[n] = @intCast(k / 2);
+                break :blk .pwl;
+            },
+            .live => return error.UnsupportedOperand,
             inline else => |c| @field(tape.Code, @tagName(c)),
         };
         model.op_code[n] = code;
@@ -1637,7 +1779,7 @@ fn callCode(f: netlist.expr.Fn, argc: u32) !tape.Code {
     return switch (f) {
         .ternary => .sel,
         .ln, .log => .ln,
-        .agauss, .gauss, .unif, .aunif, .limit, .other => error.UnsupportedFunction,
+        .agauss, .gauss, .unif, .aunif, .limit, .table, .other => error.UnsupportedFunction,
         inline else => |g| @field(tape.Code, @tagName(g)),
     };
 }

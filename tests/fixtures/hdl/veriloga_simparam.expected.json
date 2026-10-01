@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "$simparam reads .options reltol/abstol/vntol",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "G = 10+1+1 = 12 S in series with 1 ohm from 1.3 V: v(out) = 1.3/13 = 0.1 V, i(vin) = -1.2 A."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.1
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "i(vin)": {
+            "values": [
+              -1.2
+            ],
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "2a663ad8e3a15755f86f733347ee9643a7ba7504fb6c26b1a522384d97cdc9ee"
+}

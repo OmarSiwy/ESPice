@@ -1,17 +1,93 @@
 {
   "schema_version": 1,
-  "analysis": "op",
-  "purpose": "An unsupported E/G keyword form is rejected, not read as node names.",
+  "analysis": "ac",
+  "purpose": "E and G LAPLACE transfer functions (HSPICE)",
   "oracle": {
-    "kind": "input_contract",
-    "derivation": "An unsupported E/G keyword form is rejected, not read as node names."
+    "kind": "analytic",
+    "derivation": "H1 = 1/(1+1e-3 s) drives v(b); H2 = 1/(1+1e-3 s+1e-7 s^2) is a transconductance into 1 ohm, v(c) = -H2 v(a); s = j 2 pi f."
   },
-  "tokenizer": "hspice",
   "expect": {
-    "status": "error",
-    "category": "unsupported_input",
-    "diagnostic_required": true,
-    "successful_analysis_for_invalid_request": false
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(b)": {
+            "values": [
+              1.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(c)": {
+            "values": [
+              -1.0
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        }
+      },
+      {
+        "name": "AC Analysis",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "values": [
+              [
+                0.9999605231408796,
+                -0.006282937266758388
+              ],
+              [
+                0.9960676824071726,
+                -0.0625847782705717
+              ],
+              [
+                0.7169568003248977,
+                -0.45047724336838857
+              ],
+              [
+                0.024704523031857644,
+                -0.15522309613464763
+              ]
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "v(c)": {
+            "values": [
+              [
+                -0.999964470530689,
+                0.006282986873177998
+              ],
+              [
+                -0.9964579738002614,
+                0.06263402792514415
+              ],
+              [
+                -0.7291117905472815,
+                0.4769434204937092
+              ],
+              [
+                0.06119893321962087,
+                0.13044263202369016
+              ]
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        },
+        "row_count": 4
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "dec7e5b5bc510b932266b4e9f37233a2cea70694eb1adf8765b1959cacd1437c"
+  "netlist_sha256": "ac92fb622383cf9792886150083a434bbfc5097683b654f44cecf8c7e6b6dbb5"
 }

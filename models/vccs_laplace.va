@@ -1,0 +1,4 @@
+// vccs_laplace: the G-card LAPLACE source, I(p,n) = scale * H(s) V(cp,cn).
+// Same body as vcvs_laplace.va.
+`define LAPLACE_CURRENT
+`include "vcvs_laplace.va"

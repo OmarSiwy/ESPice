@@ -1,0 +1,5 @@
+// bsource_q: the charge-output B element behind a behavioural VCCAP (HSPICE
+// G/E VCCAP lowered to `q=`): I(p,n) = ddt(expression). Same tape as
+// bsource.va.
+`define BSRC_CHARGE
+`include "bsource.va"
