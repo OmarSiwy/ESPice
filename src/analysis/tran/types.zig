@@ -60,6 +60,9 @@ pub const Waveform = struct {
     capacity: u32,
     n_probes: u32,
     allocator: std.mem.Allocator,
+    /// When set, every row goes here as native-endian f64s and only the row
+    /// being built is kept: `data` is empty and `column`/`time` are invalid.
+    sink: ?*std.Io.Writer = null,
 
     /// Allocates room for `capacity` points (at least 1) of `n_probes` probes.
     pub fn init(allocator: std.mem.Allocator, n_probes: u32, capacity: u32) !Waveform {
@@ -73,6 +76,13 @@ pub const Waveform = struct {
         };
     }
 
+    /// A waveform that writes each row to `sink` instead of keeping it.
+    pub fn initStream(allocator: std.mem.Allocator, n_probes: u32, sink: *std.Io.Writer) !Waveform {
+        var wf = try init(allocator, n_probes, 1);
+        wf.sink = sink;
+        return wf;
+    }
+
     /// Columns per row: time, then one per probe.
     pub fn stride(self: Waveform) usize {
         return @as(usize, self.n_probes) + 1;
@@ -84,6 +94,7 @@ pub const Waveform = struct {
         const row = try self.next();
         row[0] = t;
         for (probes, row[1..]) |node, *v| v.* = x[node];
+        try self.emit(row);
     }
 
     /// `record` of the point `(1 - f) * a + f * b` at time `t`, per probe.
@@ -91,11 +102,17 @@ pub const Waveform = struct {
         const row = try self.next();
         row[0] = t;
         for (probes, row[1..]) |node, *v| v.* = a[node] + f * (b[node] - a[node]);
+        try self.emit(row);
+    }
+
+    fn emit(self: Waveform, row: []const f64) !void {
+        if (self.sink) |w| try w.writeAll(std.mem.sliceAsBytes(row));
     }
 
     /// The recorded rows, borrowed: valid until the next `record` or
     /// `deinit`. A transient `Result.data` is exactly this slice.
     pub fn data(self: Waveform) []f64 {
+        if (self.sink != null) return &.{};
         return self.rows[0 .. @as(usize, self.len) * self.stride()];
     }
 
@@ -111,9 +128,10 @@ pub const Waveform = struct {
     }
 
     fn next(self: *Waveform) ![]f64 {
-        if (self.len == self.capacity) try self.grow();
         const s = self.stride();
         defer self.len += 1;
+        if (self.sink != null) return self.rows[0..s];
+        if (self.len == self.capacity) try self.grow();
         return self.rows[@as(usize, self.len) * s ..][0..s];
     }
 

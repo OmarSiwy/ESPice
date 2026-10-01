@@ -118,6 +118,24 @@ append-and-run calls. `deinit()` releases the owned destination. The
 per-format encoders and `output.write`/`output.append` remain callable
 directly.
 
+Streaming applies only under a final plan (`ExecutionConfig.final_plan`, which
+only the CLI sets). If the first output is a transient that nothing reads
+afterwards (no `.meas` over it, no `.save`, no optimization, no temperature or
+variant suffix), `Problem.openStream` asks `output.Session.beginStream` for a
+writer and sets it as the session's `stream` for that query. The transient
+then writes each row as it records it and keeps only the row in progress, so
+its `Result.data` is empty. The binary raw header goes out first with
+`No. Points:` left blank (20 spaces, as ngspice's batch raw file does), and
+`endStream` checks the byte count, fills in the count and renames the file
+into place. A failed query discards the file. With no `-r` the rows are
+counted and dropped. Any other format, an earlier plot, or a destination that
+is not a regular file falls back to whole-plot delivery. Library callers keep
+every row: their results stay valid until the Problem is destroyed.
+Peak RSS on the CLI vs 4fc7b941 (release, `time %M`, no `-r`): ladder_100k
+335 -> 149 MB, inverter_chain_4k 104 -> 43 MB, vacask_graetz 58 -> 14 MB,
+vacask_rc 44 -> 13 MB, parallel_inverters_2000 36 -> 29 MB. The raw files
+match the whole-plot ones byte for byte apart from the padded count.
+
 A writer failure marks the output session failed to avoid replaying a possibly
 partial append. Problem retains the original delivery error and numerical
 results, stops further file delivery, and reports that failure separately from

@@ -617,14 +617,22 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // The recording is the published result, so it lives in the results
     // arena and `data` is borrowed below. A `.op <time>` snapshot publishes
-    // only x, so its recording stays scratch and dies here.
-    var wf = try Waveform.init(if (opts.snapshot) scratch else a, @intCast(ctx.probes.len), initialCapacity(opts));
-    errdefer wf.deinit();
+    // only x, and a streamed run writes its rows to `ctx.stream` as it goes,
+    // so either keeps its recording in scratch and drops it here.
+    const n_probes: u32 = @intCast(ctx.probes.len);
+    const kept = !opts.snapshot and ctx.stream == null;
+    var wf = if (kept)
+        try Waveform.init(a, n_probes, initialCapacity(opts))
+    else if (opts.snapshot)
+        try Waveform.init(scratch, n_probes, initialCapacity(opts))
+    else
+        try Waveform.initStream(scratch, n_probes, ctx.stream.?);
+    defer if (!kept) wf.deinit();
+    errdefer if (kept) wf.deinit();
     const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, scratch);
     if (!sim.completed) return error.TimestepTooSmall;
     // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
     if (opts.snapshot) {
-        wf.deinit();
         const names = try root.probeNames(ctx, null);
         const data = try a.alloc(f64, names.len);
         for (ctx.probes, data) |node, *out| out.* = x[node];

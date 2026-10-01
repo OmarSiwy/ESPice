@@ -1,7 +1,8 @@
-//! Delivery of whole plots to one output selection, in publish order. The
-//! caller keeps each result alive until `publish` returns.
-//! ponytail: whole plots only; add chunked delivery when a writer can frame it.
+//! Delivery of plots to one output selection, in publish order. The caller
+//! keeps each result alive until `publish` returns, or streams a binary raw
+//! plot's rows as they are computed (`beginStream`).
 const std = @import("std");
+const Io = std.Io;
 const types = @import("types.zig");
 const dispatch = @import("write.zig");
 
@@ -14,6 +15,25 @@ pub const Session = struct {
     published: u32 = 0,
     /// `failed` after a writer error; every later call reports it.
     state: enum(u8) { ready, failed } = .ready,
+    /// The plot `beginStream` opened, until `endStream` or `abortStream`.
+    stream: ?*Stream = null,
+
+    /// Plot 0 in binary raw, written while its query runs: the header with
+    /// the point count left blank, then rows as they arrive. Without a path
+    /// the rows are counted and dropped.
+    const Stream = struct {
+        atomic: ?Io.File.Atomic,
+        file: Io.File.Writer,
+        discard: Io.Writer.Discarding,
+        /// File offsets of the blank point count and of the first row.
+        count_at: u64,
+        rows_at: u64,
+        buffer: [64 * 1024]u8,
+
+        fn writer(s: *Stream) *Io.Writer {
+            return if (s.atomic != null) &s.file.interface else &s.discard.writer;
+        }
+    };
 
     /// Copies `selection.path`; performs no I/O.
     pub fn init(allocator: std.mem.Allocator, selection: types.Selection) !Session {
@@ -27,6 +47,7 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        self.abortStream();
         if (self.selection.path) |path| self.allocator.free(path);
         self.* = undefined;
     }
@@ -59,6 +80,78 @@ pub const Session = struct {
             };
         }
         self.published += 1;
+    }
+
+    /// Opens plot 0 in binary raw for rows the caller writes to the returned
+    /// writer as native-endian f64s, `plot.result.data` being empty. Null when
+    /// the selection cannot stream (another format, a plot already
+    /// delivered, a destination that is not a regular file); publish the
+    /// whole plot then. The header leaves `No. Points:` blank, as ngspice's
+    /// batch raw file does, for `endStream` to fill in.
+    pub fn beginStream(self: *Session, io: Io, plot: types.Plot) !?*Io.Writer {
+        if (self.selection.format != .binary or self.published != 0 or self.state == .failed) return null;
+        try types.validatePlot(.binary, plot);
+        const s = try self.allocator.create(Stream);
+        errdefer self.allocator.destroy(s);
+        s.discard = .init(&.{});
+        s.atomic = null;
+        s.count_at = 0;
+        s.rows_at = 0;
+        const path = self.selection.path orelse {
+            self.stream = s;
+            return s.writer();
+        };
+        if (Io.Dir.cwd().statFile(io, path, .{})) |stat| {
+            if (stat.kind != .file) {
+                self.allocator.destroy(s);
+                return null;
+            }
+        } else |_| {}
+        s.atomic = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+        errdefer s.atomic.?.deinit(io);
+        s.file = s.atomic.?.file.writer(io, &s.buffer);
+        var header: Io.Writer.Allocating = .init(self.allocator);
+        defer header.deinit();
+        try @import("rawfile.zig").writeHeader(&header.writer, plot, true);
+        const field = "No. Points: 0\n";
+        const at = std.mem.indexOf(u8, header.written(), field).? + field.len - 2;
+        const w = &s.file.interface;
+        try w.writeAll(header.written()[0..at]);
+        try w.splatByteAll(' ', count_width);
+        try w.writeAll(header.written()[at + 1 ..]);
+        s.count_at = at;
+        s.rows_at = s.file.logicalPos();
+        self.stream = s;
+        return w;
+    }
+
+    /// Room for the point count of a streamed plot, as many digits as u64 has.
+    const count_width = 20;
+
+    /// Finishes the streamed plot: checks that `npoints` rows of
+    /// `varnames` columns arrived, fills in the point count and replaces the
+    /// destination. Counts as one `publish`.
+    pub fn endStream(self: *Session, io: Io, npoints: usize, columns: usize) !void {
+        const s = self.stream.?;
+        defer self.abortStream();
+        if (s.atomic) |*atomic| {
+            errdefer self.state = .failed;
+            const w = &s.file.interface;
+            try w.flush();
+            if (s.file.logicalPos() - s.rows_at != @as(u64, npoints) * columns * @sizeOf(f64)) return error.DataLengthMismatch;
+            var digits: [count_width]u8 = undefined;
+            try atomic.file.writePositionalAll(io, try std.fmt.bufPrint(&digits, "{d}", .{npoints}), s.count_at);
+            try atomic.replace(io);
+        }
+        self.published += 1;
+    }
+
+    /// Drops the streamed plot, if any, leaving the destination as it was.
+    pub fn abortStream(self: *Session) void {
+        const s = self.stream orelse return;
+        if (s.atomic) |*atomic| atomic.deinit(s.file.io);
+        self.allocator.destroy(s);
+        self.stream = null;
     }
 
     /// Reports whether delivery has failed. Does not seal the session: every
@@ -188,4 +281,45 @@ test "session: writer failure is terminal and does not acknowledge output" {
     try std.testing.expectEqual(@as(u32, 0), session.published);
     try std.testing.expectError(error.DeliveryFailed, session.publish(io, plot));
     try std.testing.expectError(error.DeliveryFailed, session.finish());
+}
+
+test "session: a streamed plot matches the whole-plot encoding but for the padded count" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/stream.raw", .{tmp.sub_path});
+    defer a.free(path);
+    const rows = [_]f64{ 0, 1.5, 1e-9, 2.5 };
+    var plot: types.Plot = .{ .title = "t", .result = .{
+        .plotname = "Transient Analysis",
+        .varnames = &.{ "time", "v(out)" },
+        .is_complex = false,
+        .npoints = 0,
+        .data = &.{},
+    } };
+    var session = try Session.init(a, .{ .path = path });
+    defer session.deinit();
+    const w = (try session.beginStream(io, plot)).?;
+    try w.writeAll(std.mem.sliceAsBytes(&rows));
+    try std.testing.expectError(error.DataLengthMismatch, session.endStream(io, 3, 2));
+    try std.testing.expectError(error.DeliveryFailed, session.publish(io, plot));
+
+    var again = try Session.init(a, .{ .path = path });
+    defer again.deinit();
+    try (try again.beginStream(io, plot)).?.writeAll(std.mem.sliceAsBytes(&rows));
+    try again.endStream(io, 2, 2);
+    try std.testing.expectEqual(@as(u32, 1), again.published);
+    const streamed = try tmp.dir.readFileAlloc(io, "stream.raw", a, .unlimited);
+    defer a.free(streamed);
+    plot.result.npoints = 2;
+    plot.result.data = &rows;
+    var whole: Io.Writer.Allocating = .init(a);
+    defer whole.deinit();
+    try @import("rawfile.zig").encode(&whole.writer, plot);
+    const field = "No. Points: 2";
+    const at = std.mem.indexOf(u8, streamed, field).? + field.len;
+    try std.testing.expectEqualStrings(whole.written()[0..at], streamed[0..at]);
+    try std.testing.expectEqualStrings(" " ** (Session.count_width - 1), streamed[at..][0 .. Session.count_width - 1]);
+    try std.testing.expectEqualSlices(u8, whole.written()[at..], streamed[at + Session.count_width - 1 ..]);
 }
