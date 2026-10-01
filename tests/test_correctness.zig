@@ -1,6 +1,9 @@
 //! End-to-end fixture runner: simulates every tests/fixtures deck in a child
 //! espice and checks the raw output against its embedded .expected.json
-//! oracle. An unsupported feature is a failure, never a skip. From the root:
+//! oracle. An unsupported feature is a failure, never a skip. A deck whose
+//! header carries `* KNOWN GAP:` reports XFAIL when it fails, which does not
+//! fail the run, and XPASS when it passes, which does: drop the marker. From
+//! the root:
 //!   zig build test -- --jobs 8 --filter op/
 //!   zig build test -- --list
 const std = @import("std");
@@ -64,7 +67,7 @@ const Plot = struct {
 };
 
 // Workers claim independent indices; the result slots have one writer each.
-const Outcome = enum(u8) { unselected, pass, fail };
+const Outcome = enum(u8) { unselected, pass, fail, xfail, xpass };
 const Runner = struct {
     io: Io,
     app: []const u8,
@@ -128,15 +131,12 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("Correctness: {d} fixtures, {d} workers\n", .{ selected, @min(jobs, selected) });
     for (0..@min(jobs, selected)) |_| try group.concurrent(init.io, worker, .{&runner});
     try group.await(init.io);
-    var passed: u32 = 0;
-    var failed: u32 = 0;
-    for (outcomes) |outcome| switch (outcome) {
-        .pass => passed += 1,
-        .fail => failed += 1,
-        .unselected => {},
-    };
-    std.debug.print("Correctness: {d} passed, {d} failed, {d} selected\n", .{ passed, failed, selected });
-    return if (failed == 0 and passed == selected) 0 else 1;
+    var count = std.EnumArray(Outcome, u32).initFill(0);
+    for (outcomes) |outcome| count.getPtr(outcome).* += 1;
+    std.debug.print("Correctness: {d} passed, {d} failed, {d} xfail, {d} xpass, {d} selected\n", .{
+        count.get(.pass), count.get(.fail), count.get(.xfail), count.get(.xpass), selected,
+    });
+    return if (count.get(.fail) == 0 and count.get(.xpass) == 0) 0 else 1;
 }
 
 fn worker(runner: *Runner) void {
@@ -150,14 +150,27 @@ fn worker(runner: *Runner) void {
         var report: Io.Writer.Allocating = .init(arena.allocator());
         diagnostics = &report.writer;
         defer diagnostics = null;
+        const gap = knownGap(arena.allocator(), runner.io, path);
         runCase(arena.allocator(), runner.io, runner.app, path, expected_outputs[i], runner.timeout_seconds) catch |err| {
-            runner.outcomes[i] = .fail;
-            std.debug.print("FAIL {s}: {s}\n{s}", .{ path, @errorName(err), report.written() });
+            runner.outcomes[i] = if (gap) .xfail else .fail;
+            std.debug.print("{s} {s}: {s}\n{s}", .{ if (gap) "XFAIL" else "FAIL", path, @errorName(err), report.written() });
             continue;
         };
-        runner.outcomes[i] = .pass;
-        std.debug.print("PASS {s}\n", .{path});
+        runner.outcomes[i] = if (gap) .xpass else .pass;
+        std.debug.print("{s} {s}\n", .{ if (gap) "XPASS" else "PASS", path });
     }
+}
+
+/// Whether the deck at `path` (under tests/) is marked `* KNOWN GAP:`.
+fn knownGap(a: Allocator, io: Io, path: []const u8) bool {
+    const full = std.fmt.allocPrint(a, "tests/{s}", .{path}) catch return false;
+    const source = Io.Dir.cwd().readFileAlloc(io, full, a, .unlimited) catch return false;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |text| {
+        if (text.len == 0 or text[0] != '*') continue;
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, text[1..], " \t"), "KNOWN GAP:")) return true;
+    }
+    return false;
 }
 
 /// Checks the oracle, the deck's hash against it, then simulates and compares.

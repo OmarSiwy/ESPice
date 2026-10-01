@@ -97,7 +97,7 @@ in, not retrofitted per-loop:
 
 | Axis | Mechanism |
 |---|---|
-| Frequency points (ac, noise, stb, sp through `ac/freq.zig`) | SIMD lanes: `LaneLu(W)` replay of one SparseLu pivot tape; `FreqSolver.solveBatch`, every rhs (sp: one per port) per factorization. pac, pxf and pnoise still solve per point |
+| Frequency points (ac, noise, stb, sp through `ac/freq.zig`) | SIMD lanes: `LaneLu(W)` replay of one SparseLu pivot tape; `FreqSolver.solveBatch`, every rhs (sp: one per port) per factorization. pac, pxf and pnoise solve per point with GMRES over the periodic operator (`pss/pac.zig`) |
 | Sweep points (mc/temp/sens/dcmatch) | Structural lanes: `sweep/lanes.zig solveLanes` (serial over lanes) |
 | Device derivatives | `Dual(N, F)` forward AD (device/eval.zig) |
 | Device instances | ParEval worker threads |
@@ -169,12 +169,12 @@ into the topical page before the branch merges.
 ## Verification
 
 - `zig build && zig build test` after every step. `zig build test` runs the
-  unit suites and then the numeric corpus. Baseline at `321044c`: every
-  unit test passes (295 across the eight per-area steps, plus the corpus
-  harness's own tests), and the corpus scores 560/616. The step exits
-  nonzero while any deck fails, so compare the failing set, not the exit
-  code: no deck on the pass list may start failing. All `disto` decks pass;
-  the analysis-contract suite is `src/tests/analyses.zig`.
+  unit suites and then the numeric corpus. Baseline at `7535909f`: every
+  unit test passes (391), and the corpus scores 724/726. The two misses are
+  the VBIC model-version decks marked `* KNOWN GAP:`, which the harness
+  reports as XFAIL; the step exits nonzero on any FAIL or XPASS, so a green
+  exit code is the gate. No deck on the pass list may start failing. All
+  `disto` decks pass; the analysis-contract suite is `src/tests/analyses.zig`.
 - The numeric corpus is `tests/fixtures/**`. A deck whose feature is
   missing says so in the deck (`* KNOWN GAP: ...`) and is expected to fail
   until the feature lands. `issues.md` is the audited index of failing
