@@ -1208,6 +1208,29 @@ const PivotTests = struct {
         try testing.expect(lawnRatio(3, @ptrCast(&at), &x, &b) <= 30);
     }
 
+    test "a refactor that fails its probe allocation leaves no bypass onto the overwritten LU" {
+        try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, struct {
+            fn run(gpa: std.mem.Allocator) !void {
+                const a0 = [3][3]f64{ .{ 4, 1, 1 }, .{ 1, 4, 1 }, .{ 1, 1, 4 } };
+                const a1 = [3][3]f64{ .{ 1e-9, 1, 1 }, .{ 1, 1e-9, 1 }, .{ 1, 1, 1e-9 } };
+                const c0 = DenseCsc(3).from(a0);
+                const c1 = DenseCsc(3).from(a1);
+                var s = try Solver.init(gpa, 3, &c0.col_ptr, c0.row_idx[0..c0.nnz()], null, .{});
+                defer s.deinit();
+                try s.factor(c0.vals[0..c0.nnz()], .{});
+                s.factor(c1.vals[0..c1.nnz()], .{}) catch |e| {
+                    // The LU may now hold a1; a0 must not pass the bypass test.
+                    try testing.expect(!s.unchanged(c0.vals[0..c0.nnz()]));
+                    return e;
+                };
+                const b = [3]f64{ 1, -2, 0.5 };
+                var x: [3]f64 = undefined;
+                s.solve(&b, &x);
+                try testing.expect(lawnRatio(3, @ptrCast(&a1), &x, &b) <= 30);
+            }
+        }.run, .{});
+    }
+
     test "a zero pivot tolerance still refuses a zero pivot (#45)" {
         const gpa = testing.allocator;
         // [0 1; 1 1]; the zero diagonal is structural, as the MNA pattern keeps it.

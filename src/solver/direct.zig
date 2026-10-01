@@ -260,6 +260,9 @@ pub const Solver = struct {
     }
 
     fn factorInner(self: *Self, vals: []const f64, execution: num.Execution) !void {
+        // A refactor that fails after overwriting the LU (the probe's OOM)
+        // must not leave the old `vcopy` bypassing onto it.
+        errdefer self.factored = false;
         switch (self.engine) {
             .lu => {},
             // Thomas has no pivoting, so an MNA branch row's zero diagonal
