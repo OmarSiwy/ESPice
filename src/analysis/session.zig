@@ -551,6 +551,13 @@ fn copyValue(allocator: std.mem.Allocator, value: anytype) std.mem.Allocator.Err
     }
 }
 
+/// Sidebands an HB small-signal analysis reads: 2M + 1 about one tone,
+/// every signed line of a multi-tone spectrum.
+fn hbSidebands(allocator: std.mem.Allocator, o: requests.HbLptv) !usize {
+    if (o.extra_tones.len == 0) return 2 * @as(usize, o.n_sidebands) + 1;
+    return 2 * try @import("pss/mhb.zig").lineCount(allocator, o.hb()) - 1;
+}
+
 /// Returns the shape `query` publishes over this circuit and deck, without
 /// running it.
 pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *const Deck, query: requests.Query) !core.QuerySchema {
@@ -567,9 +574,9 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .disto => |o| if (o.plot == .summary) 4 else deck.probes.len + 1,
         .pz, .stb, .pnoise, .hbnoise, .phasenoise, .fft => 2,
         .pac => |o| 2 + 2 * @as(usize, o.n_harmonics),
-        .hbac => |o| 2 + 2 * @as(usize, o.n_sidebands),
+        .hbac => |o| 1 + try hbSidebands(allocator, o),
         .pxf => |o| 1 + (1 + 2 * @as(usize, o.n_harmonics)) * topology.n,
-        .hbxf => |o| 1 + (1 + 2 * @as(usize, o.n_sidebands)) * topology.n,
+        .hbxf => |o| 1 + try hbSidebands(allocator, o) * topology.n,
         .hblin => |o| 1 + o.ports.len * o.ports.len + @intFromBool(o.noise and o.ports.len >= 2),
         .sp => |o| @import("ac/sp.zig").columns(@import("ac/sp.zig").modeCount(o.ports), o.lin),
         .sens, .dcmatch, .dcsens, .acmatch => blk: {

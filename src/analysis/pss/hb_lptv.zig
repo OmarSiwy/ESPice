@@ -12,6 +12,7 @@ const hb = @import("hb.zig");
 const pac = @import("pac.zig");
 const pxf = @import("pxf.zig");
 const pnoise = @import("pnoise.zig");
+const mhb_lptv = @import("mhb_lptv.zig");
 const dense_lu = @import("solver").dense_lu;
 const k_boltzmann = @import("../ac/sp.zig").k_boltzmann;
 const t0_kelvin = @import("../ac/sp.zig").t0_kelvin;
@@ -56,8 +57,9 @@ pub const Ac = struct {
 
     /// Contract entry: the deck's AC excitation on sideband 0, read at
     /// `opts.out_node`, in `.pac`'s shape: point-major complex rows
-    /// (frequency, tf_h{-M}..tf_h{+M}).
+    /// (frequency, tf_h{-M}..tf_h{+M}). Several tones go to `mhb_lptv.ac`.
     pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+        if (opts.extra_tones.len != 0) return mhb_lptv.ac(ctx, opts);
         const scratch = ctx.scratch_allocator;
         const n_freqs: usize = opts.sweep.count();
         const freqs = try scratch.alloc(f64, n_freqs);
@@ -77,8 +79,10 @@ pub const Xf = struct {
 
     /// Contract entry: transfers from every node and sideband to
     /// `opts.out_node`, in `.pxf`'s shape: point-major complex rows
-    /// (frequency, pxf_h{m}(node) for every sideband then node).
+    /// (frequency, pxf_h{m}(node) for every sideband then node). Several
+    /// tones go to `mhb_lptv.xf`.
     pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+        if (opts.extra_tones.len != 0) return mhb_lptv.xf(ctx, opts);
         const scratch = ctx.scratch_allocator;
         const n: usize = ctx.circuit.n;
         const n_freqs: usize = opts.sweep.count();
@@ -103,7 +107,9 @@ pub const Noise = struct {
 
     /// Contract entry: output noise density of v(out_node) - v(out_neg), in
     /// `.pnoise`'s shape: point-major rows (frequency, hbnoise_density).
+    /// Several tones go to `mhb_lptv.noise`.
     pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
+        if (opts.extra_tones.len != 0) return mhb_lptv.noise(ctx, opts);
         const scratch = ctx.scratch_allocator;
         const srcs = try ctx.circuit.collectNoiseSources(ctx.x_op, scratch);
         defer scratch.free(srcs);

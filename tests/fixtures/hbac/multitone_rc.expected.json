@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "analysis": "hbac",
+  "purpose": "HB AC on a linear RC under two large tones is plain AC on sideband 0",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Linear and time-invariant, so the tones do not mix the small signal: tf_h[0,0] = G1/(G1 + G2 + j w C) with G = 1/1k, C = 1u, and every other sideband is 0."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance AC Analysis",
+        "match": "exact",
+        "columns": {
+          "tf_h[0,0]": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.4550849188231377,
+                -0.14296914377342768
+              ],
+              [
+                0.3584784001624489,
+                -0.2252386216841943
+              ],
+              [
+                0.26479342672202727,
+                -0.24956192523263643
+              ]
+            ]
+          },
+          "tf_h[1,0]": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          },
+          "tf_h[0,-1]": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            100,
+            200,
+            300
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 3
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "440248e5c2f1d7b6b4ee4055d0c469383105f5d20d7e31b60a61118ed8f8747b"
+}

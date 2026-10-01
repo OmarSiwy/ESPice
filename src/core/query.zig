@@ -371,6 +371,10 @@ pub const Hb = struct {
     /// harmonics are kept up to its count regardless, and every |k_i| stays
     /// within tone i's count. 0 keeps that whole box.
     intmodmax: u16 = 0,
+    /// HSPICE SUBHARMS: `f0` is the card's lowest tone divided by this and
+    /// `n_harmonics` its NHARMS times this, so every subharmonic step is a
+    /// line. In the INTMODMAX order, `subharms` steps of f0 count as one.
+    subharms: u16 = 1,
     /// Publish complex phasors X = c - j·s per line, x(t) = Re{X·e^(jωt)},
     /// instead of magnitudes: HSPICE's `.hb TONES=` form [CR .HB]. The
     /// positional `.hb f0 K` keeps magnitudes.
@@ -439,10 +443,17 @@ pub const HbLptv = struct {
     sweep: FreqSweep,
     max_iter: u16 = 200,
     hb_tol: f64 = 1e-9,
+    /// The `.hb TONES=` card's other tones, as `Hb`'s fields. With any
+    /// extra tone the sidebands are the HB spectrum's lines, both signs,
+    /// and `n_sidebands` is unused.
+    extra_tones: []const f64 = &.{},
+    extra_harmonics: []const u16 = &.{},
+    intmodmax: u16 = 0,
+    subharms: u16 = 1,
 
     /// The `.hb` solve this analysis linearizes about.
     pub fn hb(self: HbLptv) Hb {
-        return .{ .tol = self.tol, .f0 = self.f0, .n_harmonics = self.n_harmonics, .max_iter = self.max_iter, .hb_tol = self.hb_tol };
+        return .{ .tol = self.tol, .f0 = self.f0, .n_harmonics = self.n_harmonics, .max_iter = self.max_iter, .hb_tol = self.hb_tol, .extra_tones = self.extra_tones, .extra_harmonics = self.extra_harmonics, .intmodmax = self.intmodmax, .subharms = self.subharms };
     }
 };
 

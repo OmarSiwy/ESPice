@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "analysis": "hbac",
+  "purpose": "SS_TONE takes the RF tone out of the large-signal spectrum; .hbac drives it",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "SS_TONE=2 leaves the 1 kHz LO as the only large-signal tone, so this is one-tone HB AC: the gain cos(wLO t) gives 1/2 on sidebands +/-1 and 0 elsewhere."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance AC Analysis",
+        "match": "exact",
+        "columns": {
+          "tf_h-3": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          },
+          "tf_h-2": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          },
+          "tf_h-1": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.5,
+                0
+              ],
+              [
+                0.5,
+                0
+              ]
+            ]
+          },
+          "tf_h0": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          },
+          "tf_h1": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.5,
+                0
+              ],
+              [
+                0.5,
+                0
+              ]
+            ]
+          },
+          "tf_h2": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          },
+          "tf_h3": {
+            "unit": "V/V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              [
+                0,
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1100,
+            1200
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 2
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a66ca0a04ed20173ce2678257ab8b7ff3267f887428f3ce1d4c54472cf1393a1"
+}
