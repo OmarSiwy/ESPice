@@ -82,6 +82,8 @@ pub const Problem = struct {
     /// `.model OPT` says.
     optimization: []core.lm.Lm = &.{},
     bisection: []core.bisect.Bisect = &.{},
+    /// The MOSRA degradation table, once `age` has run.
+    degradation: ?Result = null,
 
     /// A variant run's queries and its next result to publish.
     const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
@@ -112,6 +114,7 @@ pub const Problem = struct {
         self.parse_arena = null;
         self.optimization = &.{};
         self.bisection = &.{};
+        self.degradation = null;
         // An optimization keeps the parse arena: its tuner re-evaluates the netlist.
         const parse_arena = try allocator.create(std.heap.ArenaAllocator);
         parse_arena.* = .init(allocator);
@@ -254,6 +257,7 @@ pub const Problem = struct {
     /// event, not as an error.
     pub fn advance(self: *Problem, id: QueryId) !Advance {
         try self.optimize();
+        try self.age();
         var event = try self.session.advance(id);
         self.deliver();
         event.delivery_error = self.delivery_error;
@@ -265,6 +269,7 @@ pub const Problem = struct {
     /// `ids` must be ready and distinct; a bad frontier starts nothing.
     pub fn advance_ready(self: *Problem, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
         try self.optimize();
+        try self.age();
         const n = try self.session.advanceReady(ids, limits, events);
         self.deliver();
         for (events[0..n]) |*event| event.delivery_error = self.delivery_error;
@@ -279,6 +284,7 @@ pub const Problem = struct {
         var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &lap, "run total (analysis, scheduling, output)");
         try self.optimize();
+        try self.age();
         try self.openStream();
         const ids = try self.allocator.alloc(QueryId, self.query_count());
         defer self.allocator.free(ids);
@@ -499,6 +505,35 @@ pub const Problem = struct {
         deck.variants.starts = starts.items;
         deck.variants.refs = refs.items;
         deck.variants.values = values.items;
+    }
+
+    /// HSPICE MOSRA, once before any query advances
+    /// (docs/analysis/mosra.md): runs the stress transient with the bound
+    /// MOSFETs' terminals as its only outputs, fills the aged rows'
+    /// `delvto`/`mulu0` writes and publishes the degradation table.
+    /// ponytail: the stress transient repeats the fresh one; fold them
+    /// into one run when MOSRA decks get large.
+    fn age(self: *Problem) !void {
+        const m = self.prepared.deck.mosra orelse return;
+        if (self.degradation != null) return;
+        const a = self.arena.allocator();
+        var deck = self.prepared.deck;
+        const probes = try a.alloc(u32, 3 * m.terminals.len);
+        for (m.terminals, 0..) |t, i| probes[3 * i ..][0..3].* = t;
+        const labels = try a.alloc([]const u8, probes.len);
+        @memset(labels, "");
+        deck.probes = probes;
+        deck.probe_labels = labels;
+        var session = analysis.session.Session.init(self.workerAllocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
+        defer session.deinit();
+        var id: [1]QueryId = undefined;
+        _ = try session.append(&.{.{ .tran = m.tran }}, &id);
+        try runSession(&session, self.limits.max_parallel);
+        if (session.failure()) |err| return err;
+        const aged = try analysis.mosra.age(a, m, try session.result(id[0]));
+        if (m.aged_runs) self.prepared.deck.variants.values = aged.values;
+        self.degradation = aged.table;
+        try self.delivery.publish(self.io, .{ .title = deck.title, .result = aged.table });
     }
 
     /// Feeds `solver` (`core.lm.Lm` or `core.bisect.Bisect`) the residuals

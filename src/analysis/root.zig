@@ -4,6 +4,8 @@ pub const session = @import("session.zig");
 pub const ExecutionConfig = @import("executor.zig").Config;
 pub const validateBackend = @import("executor.zig").validateBackend;
 pub const schemaOf = session.schemaOf;
+/// HSPICE MOSRA level 1 aging over a stress transient.
+pub const mosra = @import("post/mosra.zig");
 
 test {
     _ = @import("tests/ac.zig");
@@ -17,6 +19,7 @@ test {
     _ = @import("tests/sweep.zig");
     _ = @import("tests/transient.zig");
     _ = @import("tests/integration.zig");
+    _ = @import("post/mosra.zig");
 
     // Imported for semantic analysis only: Zig never type-checks an
     // unreferenced function, and the test step does not link the executor's

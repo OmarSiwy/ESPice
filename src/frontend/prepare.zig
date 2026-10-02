@@ -8,6 +8,7 @@ const device = @import("device");
 const analyses = @import("analyses.zig");
 const builder = @import("builder");
 const variants = @import("variants.zig");
+const mosra = @import("mosra.zig");
 const Builder = builder.Builder;
 const Job = requests.Query;
 const Ic = core.Ic;
@@ -215,7 +216,15 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         },
         else => {},
     };
-    const plan: variants.Plan = if (run.point) |pt| blk: {
+    var aging: ?mosra.Plan = null;
+    if (nl.deck.mosra) |m| {
+        if (run.point != null or run.prefix.len != 0 or variants.any(nl.deck)) {
+            if (!@import("builtin").is_test) std.log.err("netlist: .mosra together with .step, .alter or an analysis sweep: {s}", .{m.line});
+            return error.UnsupportedCard;
+        }
+        aging = try mosra.plan(sim_arena, parse_arena, nl, &nb, &circuit, cards, deck_opts.temp_c orelse 27);
+    }
+    const plan: variants.Plan = if (aging) |a| .{ .variants = a.variants, .fanout = a.fanout } else if (run.point) |pt| blk: {
         var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, "");
         var own = pt;
         own.label = run.prefix;
@@ -230,6 +239,13 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         }
         break :blk planned;
     } else .{};
+    const queries = sampled(try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout), nl.deck.sample);
+    if (aging) |*a| a.mosra.tran = for (queries) |q| {
+        if (q == .tran and q.tran.tol.variant == null) break q.tran;
+    } else {
+        if (!@import("builtin").is_test) std.log.err("netlist: .mosra needs a .tran to stress the devices: {s}", .{nl.deck.mosra.?.line});
+        return error.UnsupportedCard;
+    };
     return .{ .circuit = circuit, .runs = plan.runs, .tuner = tuner, .deck = .{
         .probes = out.probes,
         .probe_labels = out.probe_labels,
@@ -244,7 +260,8 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
         .deck_tol = deck_opts.tol,
         .deck_temp = deck_opts.temp_c,
         .deck_method = deck_opts.method,
-        .queries = sampled(try analyses.queries(sim_arena, cards_rows, false, out.bindings, cards, card_opts, plan.fanout), nl.deck.sample),
+        .queries = queries,
+        .mosra = if (aging) |a| a.mosra else null,
         .variants = plan.variants,
         .bindings = out.bindings,
         .cards = cards,

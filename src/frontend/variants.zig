@@ -709,7 +709,7 @@ fn targetName(nl: *const Netlist, t: netlist.StepTarget) []const u8 {
 
 /// Every parameter of `c`'s batches, typed, in `Circuit.collectParams`
 /// order.
-fn collect(gpa: std.mem.Allocator, c: *const device.Circuit) ![]const ParamRef {
+pub fn collect(gpa: std.mem.Allocator, c: *const device.Circuit) ![]const ParamRef {
     var list: std.ArrayList(ParamRef) = .empty;
     for (c.batches, c.batch_types) |b, t| {
         const first = list.items.len;

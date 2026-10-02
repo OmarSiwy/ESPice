@@ -261,7 +261,32 @@ pub const Deck = struct {
     save_op: ?core.SaveOp = null,
     /// HSPICE `.sample` (the last one), for the `.noise` spectra.
     sample: ?core.query.NoiseSample = null,
+    /// HSPICE `.mosra` (the last one) and its `.appendmodel` bindings.
+    mosra: ?Mosra = null,
+    appendmodels: []const AppendModel = &.{},
 };
+
+/// HSPICE `.mosra` options as read [SA Ch.29]; SimMode 0 or 2.
+pub const Mosra = struct {
+    rel_total_time: f64 = 0,
+    rel_start_time: f64 = 0,
+    rel_step: f64 = 0,
+    /// SimMode 2: aged runs after the fresh ones; 0: degradation only.
+    aged_runs: bool = true,
+    /// RelMode 0 (both), 1 (HCI) or 2 (BTI).
+    rel_mode: u2 = 0,
+    aging_start: f64 = 0,
+    aging_stop: f64 = std.math.inf(f64),
+    hci_threshold: f64 = 0,
+    nbti_threshold: f64 = 0,
+    deg_f: ?f64 = null,
+    /// The card as written, for diagnostics.
+    line: []const u8 = "",
+};
+
+/// `.appendmodel src MOSRA dst NMOS|PMOS`: MOSRA model `src` ages the
+/// MOSFETs of model `dst`.
+pub const AppendModel = struct { src: []const u8, dst: []const u8 };
 
 /// A parsed, flattened deck. Every slice lives in the parse arena.
 pub const Netlist = struct {
@@ -413,7 +438,7 @@ pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize {
 
 /// `ignored`: a card that only shapes printed output, which ESPice writes
 /// in full anyway.
-const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, control, endc, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
+const Card = union(enum) { end, ends, subckt, param, model, include, osdi_include, pre_osdi, verilog, control, endc, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, mosra, appendmodel, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
 
 const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -475,6 +500,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
     .{ "global", .global },     .{ "connect", .connect },           .{ "jitter", .meas },
     .{ "store", .store },       .{ "sample", .sample },
+    .{ "mosra", .mosra },       .{ "appendmodel", .appendmodel },
     .{ "control", .control },   .{ "endc", .endc },
     .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
     .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
@@ -752,6 +778,8 @@ fn Reader(comptime S: type) type {
         save_all: bool = false,
         save_op: ?core.SaveOp = null,
         sample: ?core.query.NoiseSample = null,
+        mosra: ?Mosra = null,
+        appendmodels: std.ArrayList(AppendModel) = .empty,
         foreign: std.ArrayList(Foreign) = .empty,
         measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
@@ -899,6 +927,8 @@ fn Reader(comptime S: type) type {
                     .optimize = r.optimize,
                     .save_op = r.save_op,
                     .sample = r.sample,
+                    .mosra = r.mosra,
+                    .appendmodels = r.appendmodels.items,
                 },
             };
         }
@@ -1315,6 +1345,14 @@ fn Reader(comptime S: type) type {
                 .options => try r.config.append(r.arena, .{ .temp = false, .args = args, .line = r.written(line) }),
                 .ic => try r.ic_cards.append(r.arena, args),
                 .sample => r.sample = r.readSample(args) catch |err| return r.failed(line, err),
+                .mosra => r.mosra = try r.readMosra(line, args),
+                .appendmodel => {
+                    // `.appendmodel src mosra dst nmos`; HSPICE's other
+                    // appended kinds (a second model card) are not modeled.
+                    if (args.len != 4 or args[0] != .name or args[2] != .name or args[1] != .name or !std.mem.eql(u8, args[1].name, "mosra"))
+                        return r.unsupported(line, ".appendmodel other than `src mosra dst type`");
+                    try r.appendmodels.append(r.arena, .{ .src = args[0].name, .dst = args[2].name });
+                },
                 .nodeset => try r.nodeset_cards.append(r.arena, args),
                 .global => for (args) |a| {
                     var buf: [24]u8 = undefined;
@@ -1344,6 +1382,33 @@ fn Reader(comptime S: type) type {
                 },
                 else => {},
             }
+        }
+
+        /// HSPICE `.mosra k=v ...` [SA Ch.29]. Keys outside `Key` (DEC, LIN,
+        /// AgingPeriod, AgingInst, ...) and SimMode 1 or 3 are refused.
+        fn readMosra(r: *R, line: []const u8, args: []const Value) Error!Mosra {
+            var m: Mosra = .{ .line = r.written(line) };
+            var i: usize = 0;
+            while (i + 1 < args.len) : (i += 2) {
+                if (args[i] != .name or args[i + 1] != .num) return r.failed(line, error.ParseError);
+                const v = args[i + 1].num;
+                const Key = enum { reltotaltime, relstarttime, relstep, simmode, relmode, agingstart, agingstop, hcithreshold, nbtithreshold, degf };
+                switch (std.meta.stringToEnum(Key, args[i].name) orelse return r.unsupported(line, ".mosra key other than RelTotalTime, RelStartTime, RelStep, SimMode, RelMode, AgingStart, AgingStop, HciThreshold, NbtiThreshold, DegF")) {
+                    .reltotaltime => m.rel_total_time = v,
+                    .relstarttime => m.rel_start_time = v,
+                    .relstep => m.rel_step = v,
+                    .simmode => m.aged_runs = if (v == 2) true else if (v == 0) false else return r.unsupported(line, ".mosra SimMode other than 0 or 2"),
+                    .relmode => m.rel_mode = if (v == 0 or v == 1 or v == 2) @intFromFloat(v) else return r.failed(line, error.ParseError),
+                    .agingstart => m.aging_start = v,
+                    .agingstop => m.aging_stop = v,
+                    .hcithreshold => m.hci_threshold = v,
+                    .nbtithreshold => m.nbti_threshold = v,
+                    .degf => m.deg_f = v,
+                }
+            }
+            if (i != args.len or !(m.rel_total_time > 0) or !(m.rel_step >= 0) or !(m.rel_start_time >= 0) or !(m.aging_stop > m.aging_start))
+                return r.failed(line, error.ParseError);
+            return m;
         }
 
         /// HSPICE `.sample FS= [TOL=] [NUMF=] [MAXFLD=] [BETA=]` [CR .SAMPLE].
