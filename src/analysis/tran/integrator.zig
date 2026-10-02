@@ -6,7 +6,6 @@
 const std = @import("std");
 const Method = @import("types.zig").Method;
 
-// ponytail: platform SIMD width, not hardcoded.
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 /// Integration coefficients, ngspice `CKTag[]` (nicomcof.c). `ag0` multiplies

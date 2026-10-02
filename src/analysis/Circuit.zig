@@ -607,7 +607,7 @@ pub const Circuit = struct {
     }
 
     /// Adds the ground pin. Runs once, after every batch stamp and reduction.
-    pub fn groundStamp(self: *Circuit, x: []const f64) void {
+    fn groundStamp(self: *Circuit, x: []const f64) void {
         self.g_vals[self.diag_slots[0]] += 1.0;
         self.rhs[0] += x[0];
     }
@@ -635,9 +635,8 @@ pub const Circuit = struct {
     }
 
     /// Clears the planes `mode` writes, or seeds g/c from the baseline for
-    /// `.newton`. The one plane reset shared by the serial path, ParEval and
-    /// the GPU's host half.
-    pub fn clearPlanes(self: *Circuit, comptime mode: par_eval.Mode) void {
+    /// `.newton`. The one plane reset; every eval path in this file runs it.
+    fn clearPlanes(self: *Circuit, comptime mode: par_eval.Mode) void {
         self.q_fresh = false;
         switch (mode) {
             .charge => zeroSimd(self.q_vec),
@@ -761,7 +760,7 @@ pub const Circuit = struct {
     }
 
     /// Host half of `evalNewton`, also the GPU context's fault fallback.
-    pub fn evalNewtonCpu(self: *Circuit, x: []const f64, t: f64) void {
+    fn evalNewtonCpu(self: *Circuit, x: []const f64, t: f64) void {
         if (self.has_baseline) self.stamp(x, t, .newton) else self.stamp(x, t, .full);
     }
 

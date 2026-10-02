@@ -631,8 +631,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var out: Out = .{ .freqs = freqs, .hd2 = hd2_buf, .v1_mag = v1_buf, .v2_mag = v2_buf };
     const harmonic = o.plot != .summary;
-    // ponytail: allocated on every path; it is the size of the result plot
-    // itself, so branching around it would save nothing measurable.
 
     const harm_buf = try scratch.alloc(f64, n_points * ctx.probes.len * 2);
     defer scratch.free(harm_buf);

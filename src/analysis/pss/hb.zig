@@ -215,8 +215,6 @@ pub fn solveSpectrum(
         // Sample k is the circuit at t_k = k*T/nt in the transient phase,
         // the only phase in which a source follows its waveform (§4.6.1).
         // One eval fills the residual and the G plane; sample 0 also gives C.
-        // ponytail: the nt evals are independent; batch them on the GPU when
-        // HB needs it.
         for (0..nt) |k| {
             const t_k = period * @as(f64, @floatFromInt(k)) / nt_f;
             for (0..n) |node| x_sample[node] = x_td[node * nt + k];

@@ -21,7 +21,6 @@ const Waveform = @import("types.zig").Waveform;
 const dense_lu = solvers.dense_lu;
 const Solver = solvers.direct.Solver;
 
-// ponytail: platform SIMD width, not hardcoded.
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
@@ -363,7 +362,7 @@ fn negGinvMul(slv_g: *Solver, v: []const f64, dest: []f64) void {
 
 /// The waveform rows `run` reserves up front (core/validate.zig, which query
 /// validation shares).
-pub const estPoints = @import("core").validate.matexEstPoints;
+const estPoints = @import("core").validate.matexEstPoints;
 
 /// Contract entry: march from ctx.x_op with the piecewise-linear source
 /// integral (MATEX eq. 5), stepping to each transition spot or h_output_cap.

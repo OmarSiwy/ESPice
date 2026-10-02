@@ -273,9 +273,8 @@ pub fn solveLadder(
     if (final.converged)
         return .{ .converged = true, .iterations = total_iter, .max_dx = final.max_dx };
 
-    // Rung 4: JFNK, the algorithm the GPU kernel runs, so CPU convergence is
-    // a superset of GPU convergence. Damping plus residual backtracking
-    // catches circuits where the factored Newton step wedges.
+    // Rung 4: JFNK. Damping plus residual backtracking catches circuits
+    // where the factored Newton step wedges.
     // It has no holds, so a held solve skips it.
     if (hold.len == 0) {
         coldStart(ckt, x);

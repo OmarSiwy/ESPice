@@ -539,15 +539,13 @@ pub fn solve(
         .x_sample = x_sample,
     };
 
-    // No preconditioner: this system is node-major at the mix frequencies
-    // k*f1 + l*f2, stacked real.
-    // ponytail: the systems here are 2*n*nf <= a few hundred unknowns, and
-    // unrestarted GMRES handles their conditioning (restart 30 stalled on a
-    // 90-unknown two-tone deck with a 1e4 spread). Below 512 unknowns the
-    // restart depth is the whole system (~2 MB of basis at 512); past it the
-    // requested depth stands. The upgrade is a node-major block preconditioner
-    // with one sparse (G0 + j*w_kl*C0) factor per mix product, as `mhb.zig`
-    // builds from `FreqSolver` lanes.
+    // ponytail: no preconditioner. The systems here are 2*n*nf <= a few
+    // hundred unknowns, and unrestarted GMRES handles their conditioning
+    // (restart 30 stalled on a 90-unknown two-tone deck with a 1e4 spread).
+    // Below 512 unknowns the restart depth is the whole system (~2 MB of
+    // basis at 512); past it the requested depth stands. The upgrade exists:
+    // mhb.zig's `Operator.precond` (one G0 + jw*C0 factor per mix product)
+    // already solves any tone count.
     const want_m: usize = if (total <= 512) total else options.gmres_restart;
     const gmres_m: u32 = @intCast(@min(want_m, total));
     var gmres = try gmres_mod.Gmres.init(allocator, @intCast(total), gmres_m);
