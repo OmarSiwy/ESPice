@@ -140,6 +140,8 @@ pub fn validate(query: requests.Query, n: u32) !void {
         },
         .tran_noise => |o| {
             if (o.dt_max < o.dt_min or o.dt_min > o.dt_init or o.max_steps == std.math.maxInt(u32)) return error.InvalidQueryOptions;
+            if (o.out_node >= n or o.out_neg >= n) return error.InvalidQueryOptions;
+            if (o.sde) _ = try elements(&.{ n, n });
             try timeStep(o.dt_min);
             try timeStep(o.dt_init);
             try timeStep(o.dt_max);
@@ -178,8 +180,10 @@ pub fn validate(query: requests.Query, n: u32) !void {
             _ = try elements(&.{ @as(usize, o.n_samples) + 1, @as(usize, n) + 1 });
         },
         .phasenoise => |o| {
-            if (o.osc_node == 0) return error.InvalidQueryOptions;
+            if (o.osc_node == 0 or o.carrier == 0 or o.carrier > o.n_harmonics) return error.InvalidQueryOptions;
             try validate(.{ .hb = o.hb() }, n);
+            const bands = 2 * @as(usize, o.n_harmonics) + 1;
+            if (o.method != .nlp) _ = try elements(&.{ bands, n, bands, n, 4 });
         },
         .hbac, .hbxf, .hbnoise => |o| {
             try validate(.{ .hb = o.hb() }, n);

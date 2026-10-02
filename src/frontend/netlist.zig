@@ -495,6 +495,7 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
     .{ "dcinc", an(.dcinc) },   .{ "lin", an(.sp) },            .{ "acmatch", an(.acmatch) },
     .{ "dcsens", an(.dcsens) }, .{ "hblin", an(.hblin) },     .{ "net", an(.sp) },
+    .{ "acphasenoise", an(.noise) },
     .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
     .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
     .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },

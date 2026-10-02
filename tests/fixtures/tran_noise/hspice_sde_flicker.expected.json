@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "tran_noise",
+  "purpose": "HSPICE .trannoise METHOD=SDE carries flicker noise through the covariance.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Memoryless JFET drain into 1k: Var v(d) = R^2 (KF ID ln(FMAX/FMIN) + 8/3 kT gm FMAX) at every step after t = 0, ID = 4 mA, gm = 4 mS, FMIN = 1 MHz, FMAX = 1 GHz, 25 degC."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Noise Analysis",
+        "match": "samples",
+        "columns": {
+          "onoise": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 0,
+            "values": [
+              0.005260696668299667,
+              0.005260696668299667,
+              0.005260696668299667,
+              0.005260696668299667
+            ]
+          },
+          "v(d)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 0,
+            "values": [
+              6.0,
+              6.0,
+              6.0,
+              6.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-09,
+            2e-09,
+            1.0000000000000001e-07,
+            2.0000000000000002e-07
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "626e32ab0d9be1e303003801915ffb60533a855ee5b02609c92cec4fda06ae03"
+}

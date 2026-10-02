@@ -109,6 +109,7 @@ pub fn solveSpectrum(
         total_unknowns * total_unknowns + // jac
         total_unknowns + // dx_hat
         nt * nnz + // g_td (slot-major, samples contiguous)
+        (if (ppv.len != 0) nt * nnz else 0) + // c_td: C(t) for the PPV's exact Jacobian
         nt * 2 * nh + // basis_cos (harmonic-major, harmonics 1..2K)
         nt * 2 * nh + // basis_sin
         n + // x_sample (gather buffer for device eval)
@@ -136,6 +137,8 @@ pub fn solveSpectrum(
     off += total_unknowns;
     const g_td = arena[off..][0 .. nt * nnz];
     off += nt * nnz;
+    const c_td = arena[off..][0 .. if (ppv.len != 0) nt * nnz else 0];
+    off += c_td.len;
     const basis_cos = arena[off..][0 .. nt * 2 * nh];
     off += nt * 2 * nh;
     const basis_sin = arena[off..][0 .. nt * 2 * nh];
@@ -234,6 +237,9 @@ pub fn solveSpectrum(
             for (0..n) |node| f_td[node * nt + k] = ckt.rhs[node];
             for (0..n) |node| q_td[node * nt + k] = ckt.q_vec[node];
             for (ckt.g_vals[0..nnz], 0..) |g, slot| g_td[slot * nt + k] = g;
+            if (c_td.len != 0) for (ckt.c_vals[0..nnz], 0..) |c, slot| {
+                c_td[slot * nt + k] = c;
+            };
             if (k == 0) {
                 if (ckt.has_charge) ckt.denseC(c_mat) else root.zeroSimd(c_mat);
             }
@@ -338,40 +344,7 @@ pub fn solveSpectrum(
                 const row: usize = ckt.row_idx[slot];
                 const g_slice = g_td[slot * nt ..][0..nt];
 
-                // Gc[0] = 2*mean(G); Gc[k>0], Gs[k>0] are the 2/nt projections.
-                var g_dc_acc: V = @splat(0.0);
-                var k2: usize = 0;
-                while (k2 + W <= nt) : (k2 += W) {
-                    const gv: V = g_slice[k2..][0..W].*;
-                    g_dc_acc += gv;
-                }
-                var g_sum: f64 = @reduce(.Add, g_dc_acc);
-                while (k2 < nt) : (k2 += 1) g_sum += g_slice[k2];
-                gc[0] = 2.0 * g_sum / nt_f;
-                gs[0] = 0;
-
-                for (0..2 * nh) |hi| {
-                    const bc_slice = basis_cos[hi * nt ..][0..nt];
-                    const bs_slice = basis_sin[hi * nt ..][0..nt];
-                    var g_cos_acc: V = @splat(0.0);
-                    var g_sin_acc: V = @splat(0.0);
-                    var k3: usize = 0;
-                    while (k3 + W <= nt) : (k3 += W) {
-                        const gv: V = g_slice[k3..][0..W].*;
-                        const bcv: V = bc_slice[k3..][0..W].*;
-                        const bsv: V = bs_slice[k3..][0..W].*;
-                        g_cos_acc += gv * bcv;
-                        g_sin_acc += gv * bsv;
-                    }
-                    var g_cos_h: f64 = @reduce(.Add, g_cos_acc);
-                    var g_sin_h: f64 = @reduce(.Add, g_sin_acc);
-                    while (k3 < nt) : (k3 += 1) {
-                        g_cos_h += g_slice[k3] * bc_slice[k3];
-                        g_sin_h += g_slice[k3] * bs_slice[k3];
-                    }
-                    gc[hi + 1] = 2.0 * g_cos_h / nt_f;
-                    gs[hi + 1] = 2.0 * g_sin_h / nt_f;
-                }
+                project(g_slice, basis_cos, basis_sin, gc, gs);
 
                 const row_dc = row * nf;
                 const col_dc = col * nf;
@@ -408,11 +381,41 @@ pub fn solveSpectrum(
         }
 
         // Charge Jacobian: +-w_h*C skew blocks.
-        // ponytail: C(t0), not the C(t) convolution G gets. Exact for linear
-        // charge and quasi-Newton otherwise; the residual is exact either
-        // way, so the fixed point is right. Convolve C like G if a
-        // nonlinear-charge deck converges too slowly.
-        for (0..nh) |hi| {
+        // ponytail: C(t0), not the C(t) convolution G gets, while Newton
+        // runs. Exact for linear charge and quasi-Newton otherwise; the
+        // residual is exact either way, so the fixed point is right. The
+        // PPV's Jacobian convolves C(t) (a varactor converts a slow control
+        // voltage into the carrier through it); convolve C on every
+        // iteration too if a nonlinear-charge deck converges too slowly.
+        if (solved != null and c_td.len != 0) {
+            for (0..n) |col| for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
+                const row: usize = ckt.row_idx[slot];
+                project(c_td[slot * nt ..][0..nt], basis_cos, basis_sin, gc, gs);
+                // dQ/dt: F_cos_h += w_h Q_sin_h, F_sin_h -= w_h Q_cos_h,
+                // with Q = conv(C) x as the G blocks above.
+                for (1..nh + 1) |h| {
+                    const omega_h = @as(f64, @floatFromInt(h)) * omega0;
+                    const row_cos = (row * nf + 2 * h - 1) * total_unknowns;
+                    const row_sin = (row * nf + 2 * h) * total_unknowns;
+                    const col_dc = col * nf;
+                    jac[row_cos + col_dc] += omega_h * gs[h];
+                    jac[row_sin + col_dc] -= omega_h * gc[h];
+                    for (1..nh + 1) |m| {
+                        const diff = @as(isize, @intCast(h)) - @as(isize, @intCast(m));
+                        const adiff: usize = @abs(diff);
+                        const c_diff = gc[adiff];
+                        const s_diff = if (diff < 0) -gs[adiff] else gs[adiff];
+                        const c_sum = gc[h + m];
+                        const s_sum = gs[h + m];
+                        const col_cos = col_dc + 2 * m - 1;
+                        jac[row_cos + col_cos] += omega_h * 0.5 * (s_sum + s_diff);
+                        jac[row_cos + col_cos + 1] += omega_h * 0.5 * (c_diff - c_sum);
+                        jac[row_sin + col_cos] -= omega_h * 0.5 * (c_diff + c_sum);
+                        jac[row_sin + col_cos + 1] -= omega_h * 0.5 * (s_sum - s_diff);
+                    }
+                }
+            };
+        } else for (0..nh) |hi| {
             const h = hi + 1;
             const omega_h = @as(f64, @floatFromInt(h)) * omega0;
             for (0..n) |row| {
@@ -481,6 +484,47 @@ pub fn solveOscillator(ckt: *root.Circuit, x_dc: []const f64, x_hat: []f64, ppv:
     var opts = options;
     opts.f0 = 1 / orb.wave[orb.samples(n) * (n + 1)];
     return solveSpectrum(ckt, x_hat, ppv, opts, allocator);
+}
+
+/// The spectrum of one pattern slot's samples `g` to harmonic 2K, in the
+/// Jacobian's convention: gc[0] = 2*mean(g), gs[0] = 0, and gc[k], gs[k]
+/// the 2/nt cos and sin projections on the harmonic-major bases.
+fn project(g: []const f64, basis_cos: []const f64, basis_sin: []const f64, gc: []f64, gs: []f64) void {
+    const nt = g.len;
+    const nt_f: f64 = @floatFromInt(nt);
+    var g_dc_acc: V = @splat(0.0);
+    var k2: usize = 0;
+    while (k2 + W <= nt) : (k2 += W) {
+        const gv: V = g[k2..][0..W].*;
+        g_dc_acc += gv;
+    }
+    var g_sum: f64 = @reduce(.Add, g_dc_acc);
+    while (k2 < nt) : (k2 += 1) g_sum += g[k2];
+    gc[0] = 2.0 * g_sum / nt_f;
+    gs[0] = 0;
+
+    for (0..gc.len - 1) |hi| {
+        const bc_slice = basis_cos[hi * nt ..][0..nt];
+        const bs_slice = basis_sin[hi * nt ..][0..nt];
+        var g_cos_acc: V = @splat(0.0);
+        var g_sin_acc: V = @splat(0.0);
+        var k3: usize = 0;
+        while (k3 + W <= nt) : (k3 += W) {
+            const gv: V = g[k3..][0..W].*;
+            const bcv: V = bc_slice[k3..][0..W].*;
+            const bsv: V = bs_slice[k3..][0..W].*;
+            g_cos_acc += gv * bcv;
+            g_sin_acc += gv * bsv;
+        }
+        var g_cos_h: f64 = @reduce(.Add, g_cos_acc);
+        var g_sin_h: f64 = @reduce(.Add, g_sin_acc);
+        while (k3 < nt) : (k3 += 1) {
+            g_cos_h += g[k3] * bc_slice[k3];
+            g_sin_h += g[k3] * bs_slice[k3];
+        }
+        gc[hi + 1] = 2.0 * g_cos_h / nt_f;
+        gs[hi + 1] = 2.0 * g_sin_h / nt_f;
+    }
 }
 
 /// Moves the autonomous fundamental and the period with it.

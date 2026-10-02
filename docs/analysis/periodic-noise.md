@@ -151,7 +151,7 @@ Card syntax:
 ```
 .pnoise   v(out[,ref]) Vsrc sweep f0 [M]
 .hbnoise  v(out[,ref]) [Vsrc] sweep [f0 [K [M]]]
-.ptdnoise v(out[,ref]) TIME=t [TDELTA=dt] sweep [LIST...=]   (HSPICE, with .sn)
+.ptdnoise v(out[,ref]) TIME=t|tsweep [TDELTA=dt] sweep [LIST...=]   (HSPICE, with .sn)
 ```
 
 ### Periodic time-dependent noise (`.ptdnoise`)
@@ -175,10 +175,15 @@ point, one per output sideband, where `.pnoise` needs one. The result is
 is the power the output receives from $f$ over all sidebands, which is not
 `.pnoise`'s density per output frequency, though both integrate to the same
 total. `hspice/ptdnoise_diode` checks $2qV_t^2/I(t)$ at two phases of a
-memoryless cyclostationary diode to 1e-4. Divergences: a TIME sweep or a
-`.meas` name for TIME is refused (one card per time point); TDELTA and the
-LIST keywords only shape HSPICE's strobed-jitter measure and listing, and
-are checked and unused; `.MEASURE PTDNOISE` is not read.
+memoryless cyclostationary diode. A TIME sweep (`LIN|DEC|OCT|POI`, as in
+the manual's `TIME=lin 3 0 2n`) becomes one query, and one plot, per time;
+each solves its own PSS.
+How HSPICE lays out the swept output is not documented, so the plot per
+time is ESPice's. `hspice/ptdnoise_time_sweep` checks three phases; the
+7-sideband conversion matrix leaves 0.15 % where $I(t)$ is steepest.
+Divergences: a `.meas` name for TIME is refused; TDELTA and the LIST
+keywords only shape HSPICE's strobed-jitter measure and listing, and are
+checked and unused; `.MEASURE PTDNOISE` is not read.
 
 `.hbnoise` without f0 takes f0 and K from the deck's `.hb` card, as HSPICE
 does; `sweep` is `dec|oct|lin N fstart fstop`.

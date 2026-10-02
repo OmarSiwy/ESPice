@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "HSPICE .acphasenoise reads the .noise output of a phase-domain circuit as phase noise in dBc/Hz.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Phase-domain RC: S(f) = 4kTR/(1+(f/fc)^2) rad^2/Hz at 25 degC, k = 1.38064852e-23 J/K (ngspice CONSTboltz, as ESPice), fc = 1/(2 pi R C); PHNOISE = 10 log10(S/2) (IEEE 1139 L(f); the manual gives no formula)."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "AC Phase Noise Analysis",
+        "match": "exact",
+        "row_count": 4,
+        "columns": {
+          "phnoise": {
+            "unit": "dBc/Hz",
+            "rtol": 0,
+            "atol": 1e-06,
+            "values": [
+              -170.84469203884493,
+              -170.86163209398453,
+              -172.28959070584523,
+              -186.91675585544547
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000.0,
+            10000.0,
+            100000.0,
+            1000000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9dfabbe5e77066eeada32db237702d59855b168a3b37ec4cc7bf0c38e4c96a19"
+}

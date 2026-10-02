@@ -75,6 +75,37 @@ higher-order method buys nothing statistically. **No LTE control**: the
 rejection would fight the physics; the step shrinks only on Newton failure
 and grows gently ($\times 1.5$, capped) otherwise.
 
+### Covariance propagation (METHOD=SDE)
+
+HSPICE's `METHOD=SDE` [RF Ch.9] publishes the variance of the noise part
+of the output instead of a sample of it. ESPice propagates the covariance
+of exactly the sampled scheme above along the noiseless march. With
+$A = G + C/h$ and $P = C/h$ at the end of the step, white draws $w$
+(covariance $N$, $\sigma^2 = S/(2h)$ per source), flicker poles $y$
+(variances $V$, decays $D = e^{-h/\tau}$, injected by $J$),
+
+$$
+x_k = A^{-1}(P x_{k-1} + J y_k + w_k),
+$$
+
+$K = E[x x^T]$ and $K_{xy} = E[x y^T]$ start at zero and advance as
+
+$$
+K_k = A^{-1}\big(P K P^T + P K_{xy} D J^T + J D K_{xy}^T P^T + J V J^T + N\big)A^{-T},
+\qquad
+K_{xy,k} = A^{-1}(P K_{xy} D + J V).
+$$
+
+`onoise` is $\sqrt{K_{oo} - 2K_{or} + K_{rr}}$ for `v(o,r)`. The variance is
+the ensemble variance of METHOD=MC runs on the same steps, exactly, for the
+circuit linearized along the noiseless march. K is dense $n \times n$ with
+a dense LU per step, $O(n^3)$ a step (a `ponytail:` in `Covariance`); a
+low-rank factor over the sparse LU is the upgrade. `hspice_sde_rc` checks
+the RC recursion $\mathrm{Var} \leftarrow a^2\mathrm{Var} + b^2\, 2kTG/h$
+to 1e-6 (within 0.1 % of $kT/C(1-e^{-2t/\tau})$ at $h/\tau = 0.0025$), and
+`hspice_sde_flicker` the flicker poles' summed variance
+$K_F I_D \ln(F_{\max}/F_{\min})$ plus the channel's white part.
+
 ### Correlation with `.noise`
 
 Validation identity: for an LTI (or small-signal-valid) circuit, the
@@ -112,8 +143,9 @@ to exist.
    injected current. A rejected step's pole advance stands; each process
    stays stationary. `scale` (HSPICE `SCALE`) multiplies every PSD.
 2. RNG: private Xorshift64 + Box-Muller, seed in `Options`
-   (default `0xDEAD_BEEF_CAFE_1234`), deterministic and reproducible per
-   seed, same policy as [ensemble-sweeps.md](ensemble-sweeps.md).
+   (default `0xDEAD_BEEF_CAFE_1234`) mixed through SplitMix64 so small
+   seeds start well spread, deterministic and reproducible per seed, same
+   policy as [ensemble-sweeps.md](ensemble-sweeps.md).
 3. March: per step compute $B = 1/(2h)$, draw one Gaussian per source with
    the $\sigma$ above, Newton-solve the BE companion with the noise
    currents added to the residual (`NoiseHook`: matrix $G + C/h$, ITL4
@@ -129,12 +161,24 @@ Knobs: transient knobs minus LTE (`dt_init/dt_min/dt_max/max_steps`),
 temperature is the circuit's.
 
 Cards: `.trannoise tstep tstop` (ESPice's own), and HSPICE's
-`.trannoise out [METHOD=MC] [SEED=] [FMIN=] [FMAX=] [SCALE=]
-[AUTOCORRELATION=]` [CR .TRANNOISE] over the deck's `.tran`, stepped at
-$h = 1/(2\,\text{FMAX})$ with FMAX defaulting to 1/TSTEP. Divergences:
-`METHOD=SDE`, `TIME=` and `SAMPLES` above 1 are refused (use one card per
-seed); every probe is recorded rather than an ONOISE trace;
-AUTOCORRELATION is accepted and unused, since `.jitter` needs none.
+`.trannoise out [METHOD=MC|SDE] [SEED=] [SAMPLES=] [TIME=all|t] [FMIN=]
+[FMAX=] [SCALE=] [AUTOCORRELATION=]` [CR .TRANNOISE; RF Ch.9] over the
+deck's `.tran`, stepped at $h = 1/(2\,\text{FMAX})$ with FMAX defaulting
+to 1/TSTEP. SEED is the Monte Carlo index of the first run (default 2)
+and index 1 is the noiseless run, per the manual's keyword table; its
+`SAMPLES=30` example says the 30 runs begin with the noiseless index 1,
+which contradicts the default of 2, and ESPice follows the table
+(unconfirmed). SAMPLES=n makes one query per index, SEED to SEED+n-1, each
+a plot named `Transient Noise Analysis (sample=<index>)`; the index seeds
+the generator. METHOD=SDE adds the `onoise` column (§1, covariance
+propagation) and takes one sample only. `TIME=t` makes the march land on
+t exactly (for MC too); `TIME=all` is the default. Divergences: an MC run
+records every probe rather than an ONOISE trace; SDE's `onoise` is the
+output's only and VRMS of other nodes is not offered; the noise sources
+are sampled at the operating point for both methods, where HSPICE's SDE
+follows the bias along the march [RF Eq. 58]; AUTOCORRELATION is accepted
+and unused, since `.jitter` needs none; `.meas` and `.jitter` print once
+per run of a SAMPLES set rather than over the ensemble.
 
 `.jitter trannoise|tran TRIG v(x) VAL= [TD=] [RISE=|FALL=|CROSS=]`
 [CR .JITTER] runs as a `.meas` over that result: the event times after TD
@@ -213,5 +257,7 @@ runs on the host; device evaluation inside each Newton iterate can use
 - `src/analysis/tran/tran_noise.zig`.
 - Fixtures: `tests/fixtures/tran_noise/` (`rc_equilibrium` checks the
   $kT/C$ variance; `ideal_clamp_*`; `jfet_flicker` the flicker synthesis
-  through the HSPICE card), `tests/fixtures/tran/jitter_sffm` (`.jitter`),
+  through the HSPICE card; `hspice_samples` a SAMPLES set with its
+  noiseless index 1, the variance band sized from the record length;
+  `hspice_sde_rc` and `hspice_sde_flicker` METHOD=SDE and TIME=), `tests/fixtures/tran/jitter_sffm` (`.jitter`),
   `tests/fixtures/noise/` for frequency-domain cross-checks.

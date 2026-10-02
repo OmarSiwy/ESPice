@@ -36,6 +36,10 @@ const max_period_step: f64 = 0.2;
 /// Volts the oscillator node is pushed off its DC equilibrium to start it.
 const osc_kick: f64 = 1e-3;
 
+/// Cap on the periods an autonomous start settles past
+/// `osc_settle_periods` while the swing still grows by over 1 % a period.
+const max_settle_periods: usize = 2000;
+
 pub const Options = @import("core").query.Pss;
 
 /// Outcome of a periodic solve (shared by pss, hb and qpss).
@@ -442,9 +446,10 @@ pub fn solve(
 
 /// Starts an oscillator for the autonomous solve: kicks `x` (the DC point)
 /// off its equilibrium at the osc node, integrates `osc_settle_periods`
-/// guess periods, then records `measure_periods` more. The period is the
-/// mean spacing of the osc node's rising mid-swing crossings in that
-/// record. Leaves `x` at the first sample after the last crossing, the
+/// guess periods and then until the swing settles (at most
+/// `max_settle_periods`), then records `measure_periods` more. The period
+/// is the mean spacing of the osc node's rising mid-swing crossings in
+/// that record. Leaves `x` at the first sample after the last crossing, the
 /// phase anchor the solve pins, and returns the period.
 fn startOscillator(
     ckt: *root.Circuit,
@@ -460,6 +465,22 @@ fn startOscillator(
     x[osc] += osc_kick;
     for (0..options.osc_settle_periods) |_|
         if (!integrateOnePeriod(ckt, ws, sc, x, &.{}, &.{}, options)) return error.OscillatorDidNotStart;
+    // A weakly unstable tank grows from the kick over many periods: keep
+    // settling until the osc node's swing moves under 1 % a period.
+    const swing = try allocator.alloc(f64, 2 * (steps + 1));
+    defer allocator.free(swing);
+    var prev_swing: f64 = 0;
+    for (0..max_settle_periods) |_| {
+        if (!integrateOnePeriod(ckt, ws, sc, x, &.{osc}, swing, options)) return error.OscillatorDidNotStart;
+        var lo = std.math.inf(f64);
+        var hi = -std.math.inf(f64);
+        for (0..steps + 1) |k| {
+            lo = @min(lo, swing[2 * k + 1]);
+            hi = @max(hi, swing[2 * k + 1]);
+        }
+        if (@abs(hi - lo - prev_swing) <= 0.01 * (hi - lo)) break;
+        prev_swing = hi - lo;
+    }
 
     const rows = try allocator.alloc(u32, n);
     defer allocator.free(rows);

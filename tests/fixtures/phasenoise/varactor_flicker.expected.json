@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "analysis": "phasenoise",
+  "purpose": "PPV phase noise with flicker noise upconverted through the PPV mean, by METHOD=0 and METHOD=1.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Varactor-tuned Van der Pol LC (C = 1.3 nF, A = 1 V, f0 = 877.058 kHz); PPV at ctl -(Rc k C0/C) cos^2(w0 t). c(fm) = kT/(R C^2 A^2 w0^2) + (3/8)(Rc k C0/C)^2 (8/3 kT gm)/2 + (Rc k C0/(2C))^2 KF ID/(2 fm); L = f0^2 c/(pi^2 f0^4 c^2 + fm^2), 27 degC. METHOD=1 adds amplitude noise under 0.001 dB here."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Phase Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "phnoise": {
+            "unit": "dBc/Hz",
+            "rtol": 0,
+            "atol": 0.1,
+            "values": [
+              -91.39434151559661,
+              -116.70971372267644,
+              -137.90183865740036,
+              -158.0412318806418
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            100.0,
+            1000.0,
+            10000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        },
+        "row_count": 4
+      },
+      {
+        "name": "Phase Noise Analysis",
+        "match": "exact",
+        "columns": {
+          "phnoise": {
+            "unit": "dBc/Hz",
+            "rtol": 0,
+            "atol": 0.1,
+            "values": [
+              -91.39434151559661,
+              -116.70971372267644,
+              -137.90183865740036,
+              -158.0412318806418
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            10.0,
+            100.0,
+            1000.0,
+            10000.0
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        },
+        "row_count": 4
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "19226e03ea0a0e66f2b78fdc798ae330a2b82ec1b12645c472e3852d7a063fe5"
+}

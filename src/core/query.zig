@@ -89,6 +89,9 @@ pub const Noise = struct {
     /// HSPICE `.sample`: also publish the output noise folded by a sampler
     /// (`onoise_sampled`); spectrum queries only.
     sample: ?NoiseSample = null,
+    /// HSPICE `.acphasenoise`: the output is a phase in radians, published
+    /// as phase noise `phnoise` in dBc/Hz instead of the noise curves.
+    phase: bool = false,
 };
 
 /// HSPICE `.sample FS= [MAXFLD=] [BETA=]` [CR .SAMPLE]: noise sampled at
@@ -483,9 +486,7 @@ pub const Hblin = struct {
     }
 };
 
-/// Oscillator phase noise (`.phasenoise`): the perturbation projection
-/// vector of the autonomous HB solution (Demir's method, HSPICE METHOD=0)
-/// projects every white noise source onto the oscillator's phase.
+/// Oscillator phase noise (`.phasenoise`) about the autonomous HB solution.
 pub const PhaseNoise = struct {
     tol: Tolerances = .{},
     /// Oscillation frequency guess, in Hz.
@@ -498,6 +499,22 @@ pub const PhaseNoise = struct {
     sweep: FreqSweep,
     max_iter: u16 = 200,
     hb_tol: f64 = 1e-9,
+    method: Algorithm = .nlp,
+    /// HSPICE CARRIERINDEX: the harmonic, 1..n_harmonics, whose phase noise
+    /// is reported.
+    carrier: u16 = 1,
+
+    /// HSPICE METHOD=0|1|2 [RF Ch.7].
+    pub const Algorithm = enum(u2) {
+        /// The perturbation projection vector projects every source onto
+        /// the phase (Demir's method).
+        nlp,
+        /// Periodic noise at the carrier sideband over the carrier power:
+        /// phase and amplitude noise.
+        pac,
+        /// `nlp` close in, `pac` from where the two first agree.
+        bpn,
+    };
 
     /// The autonomous `.hb` solve the phase noise is computed about.
     pub fn hb(self: PhaseNoise) Hb {
@@ -568,6 +585,17 @@ pub const TranNoise = struct {
     /// Hz; the lowest flicker-noise frequency, 1/t_stop when null (HSPICE
     /// `FMIN`). The highest is the sampling bandwidth 1/(2 dt_max).
     f_min: ?f64 = null,
+    /// HSPICE Monte Carlo index of one run of a `SAMPLES>1` card, named in
+    /// the plot; 0 for a lone run.
+    sample: u32 = 0,
+    /// HSPICE `METHOD=SDE`: no sampled noise; the noiseless march carries
+    /// the noise covariance and publishes `onoise`, the rms noise of
+    /// v(out_node, out_neg).
+    sde: bool = false,
+    out_node: u32 = 0,
+    out_neg: u32 = 0,
+    /// Seconds; HSPICE `TIME=`, a time the march lands on exactly.
+    t_break: ?f64 = null,
 };
 
 pub const Envelope = struct {

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "analysis": "tran_noise",
+  "purpose": "HSPICE .trannoise METHOD=SDE publishes the rms noise of the output along the noiseless march, landing on TIME=.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "RC thermal noise from a noiseless start; per backward-Euler step Var <- a^2 Var + b^2 2kTG/h, a = (C/h)/(G+C/h), b = 1/(G+C/h), 25 degC; h = 2.5 ps, and the step that reaches TIME = 1.001 ns is cut to land on it. Continuous limit kT/C (1 - exp(-2t/RC))."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Noise Analysis",
+        "match": "samples",
+        "columns": {
+          "onoise": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-15,
+            "values": [
+              4.525428098341855e-06,
+              5.0960054055554026e-05,
+              5.962043457375796e-05,
+              6.403905944969902e-05
+            ]
+          },
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-15,
+            "values": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            2.5e-12,
+            4.999999999999995e-10,
+            1.001e-09,
+            3e-09
+          ],
+          "atol": 0,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "checks": [],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9156a71edf44242ce1d17823e8e593c1d384d27a3a3051c6a0c427ea730b0504"
+}
