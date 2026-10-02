@@ -12,7 +12,6 @@ const numerics = @import("core").numerics;
 
 const K = solver.lu_kernels;
 const direct = solver.direct;
-const fast_lu = solver.fast_lu;
 
 const artifacts = @import("gompute_kernels");
 const backend: ?gompute.Backend = if (artifacts.has_cuda) .cuda else if (artifacts.has_hip) .hip else null;
@@ -42,8 +41,6 @@ pub const GpuLu = struct {
     k_ref: Raw,
     k_ls: Raw,
     k_us: Raw,
-    /// The f32 kernels of `fast_mode`.
-    k32: [3]Raw,
     stream: Stream,
     pin_a: []f64,
     pin_rhs: []f64,
@@ -75,11 +72,6 @@ pub const GpuLu = struct {
     poisoned: bool = false,
     check: bool,
     bench: ?*Bench = null,
-    /// `fast_mode`: the f64 side of the refined solve, and whether the
-    /// device's f32 factors (in `d_val`) match `ref.fa`.
-    ref: ?fast_lu.Refiner = null,
-    valid32: bool = false,
-    bneg: []f64 = &.{},
     st: struct { calls: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0 } = .{},
 
     /// Loads the three kernels and allocates the per-iteration buffers for an
@@ -94,13 +86,6 @@ pub const GpuLu = struct {
         errdefer k_ls.deinit();
         var k_us = try gompute.rawKernelByName(be, "arp_lu_usolve", 0);
         errdefer k_us.deinit();
-        var k32: [3]Raw = undefined;
-        var n32: usize = 0;
-        errdefer for (k32[0..n32]) |*k| k.deinit();
-        for ([_][]const u8{ "arp_lu_refactor_f32", "arp_lu_lsolve_f32", "arp_lu_usolve_f32" }, &k32) |name, *k| {
-            k.* = try gompute.rawKernelByName(be, name, 0);
-            n32 += 1;
-        }
         const pin_a = try pinnedF64(&k_ref, nnz);
         errdefer k_ref.freePinned(std.mem.sliceAsBytes(pin_a));
         const pin_rhs = try pinnedF64(&k_ref, n);
@@ -127,7 +112,6 @@ pub const GpuLu = struct {
             .k_ref = k_ref,
             .k_ls = k_ls,
             .k_us = k_us,
-            .k32 = k32,
             .stream = stream,
             .pin_a = pin_a,
             .pin_rhs = pin_rhs,
@@ -163,15 +147,6 @@ pub const GpuLu = struct {
         k.freePinned(self.pin_fail);
         for ([_]*Buffer{ &self.d_a, &self.d_rhs, &self.d_y, &self.d_dx }) |b| b.free();
         self.stream.deinit();
-        if (self.ref) |*r| {
-            if (envOn("ESPICE_LU_FAST_STATS")) {
-                const st = r.stats;
-                std.debug.print("gpu-lu-fast: refactors={d} refactor_fails={d} solves={d} iterations={d} gmres={d} fallbacks={d}\n", .{ st.refactors, st.refactor_fails, st.solves, st.iterations, st.gmres, st.fallbacks });
-            }
-            r.deinit(self.gpa);
-        }
-        self.gpa.free(self.bneg);
-        for (&self.k32) |*kk| kk.deinit();
         self.k_us.deinit();
         self.k_ls.deinit();
         self.k_ref.deinit();
@@ -192,9 +167,9 @@ pub const GpuLu = struct {
     /// `need` false when the caller knows the matrix is unchanged. Null
     /// when the device did not try (no general LU yet, a declined epoch,
     /// factors it does not hold); false when it tried and the host's exact
-    /// factor and solve must run: a device pivot failure (which clears
+    /// factor and solve must run: a device pivot failure, which clears
     /// `slv.factored`, so the host goes straight to the full factor its own
-    /// refactor would have fallen back to) or a failed fast solve.
+    /// refactor would have fallen back to.
     pub fn solve(ctx: *anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool {
         const self: *Self = @ptrCast(@alignCast(ctx));
         if (self.poisoned) return null;
@@ -214,7 +189,6 @@ pub const GpuLu = struct {
         if (lu.tv.items.len != 0) return null;
         if (self.epoch != lu.pattern_epoch) try self.load(slv);
         if (self.declined) return null;
-        if (slv.params.fast_mode) return try self.fastSolve(slv, vals, rhs, dx, need);
         const refactor = need and !slv.unchanged(vals);
         if (!refactor and self.dev_gen != slv.gen) return null;
         if (refactor) for (lu.void_slots.items) |p| {
@@ -273,78 +247,6 @@ pub const GpuLu = struct {
         return true;
     }
 
-    /// `fast_mode` on the device: the f32 kernels refactor R A C on the
-    /// same tables (into `d_val`, which the f64 path will refill) and give
-    /// the corrections of a refined solve. False when the host's exact
-    /// pair must run.
-    fn fastSolve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) !bool {
-        const n = self.n;
-        const lu = &slv.lu.?;
-        if (self.ref == null) {
-            self.ref = try fast_lu.Refiner.init(self.gpa, n, slv.col_ptr, slv.row_idx);
-            self.bneg = try self.gpa.alloc(f64, n);
-        }
-        const ref = &self.ref.?;
-        self.dev_gen = null; // d_val stops holding f64 factors
-        if (!self.valid32 or (need and !std.mem.eql(u8, std.mem.sliceAsBytes(ref.fa), std.mem.sliceAsBytes(vals[0..self.nnz])))) {
-            self.valid32 = false;
-            ref.stats.refactors += 1;
-            for (lu.void_slots.items) |p| {
-                if (vals[p] != 0) return fast32Failed(ref);
-            }
-            const a32 = @as([*]f32, @ptrCast(self.pin_a.ptr))[0..self.nnz];
-            if (!ref.load(vals, a32)) return fast32Failed(ref);
-            try self.d_a.uploadAtAsync(a32.ptr, 0, self.nnz * 4, &self.stream);
-            try self.d_sync.fillAsync(0, K.sync_header * 4, &self.stream);
-            self.stamp +%= 1;
-            var tab = self.tab;
-            tab.growth = fast_lu.growth_f32;
-            var stamp = self.stamp;
-            try self.k32[0].launchOn(&self.stream, .{ .x = n }, .{ .x = K.refactor_block }, 0, &.{
-                gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_a.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
-            });
-            try self.d_sync.downloadAtAsync(self.pin_fail.ptr, 4, 4, &self.stream);
-            try self.stream.synchronize();
-            if (std.mem.bytesToValue(u32, self.pin_fail[0..4]) != 0) return fast32Failed(ref);
-            self.valid32 = true;
-        }
-        numerics.scale(self.bneg, -1, rhs[0..n]);
-        return ref.solve(self.gpa, self, self.bneg, dx);
-    }
-
-    fn fast32Failed(ref: *fast_lu.Refiner) bool {
-        ref.stats.refactor_fails += 1;
-        return false;
-    }
-
-    /// One correction of `fastSolve`'s refinement: dx32 = -(R A C)^-1 r32
-    /// through the device's f32 factors. A driver fault poisons the
-    /// context and returns NaN, which fails the refinement.
-    pub fn apply(self: *Self, r32: []const f32, dx32: []f32) void {
-        self.apply32(r32, dx32) catch {
-            self.poisoned = true;
-            @memset(dx32, std.math.nan(f32));
-        };
-    }
-
-    fn apply32(self: *Self, r32: []const f32, dx32: []f32) !void {
-        const n = self.n;
-        const pr = @as([*]f32, @ptrCast(self.pin_rhs.ptr))[0..n];
-        const pd = @as([*]f32, @ptrCast(self.pin_dx.ptr))[0..n];
-        @memcpy(pr, r32);
-        try self.d_rhs.uploadAtAsync(pr.ptr, 0, n * 4, &self.stream);
-        var tab = self.tab;
-        try self.k32[1].launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
-            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_rhs.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(),
-        });
-        try self.k32[2].launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
-            gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_dx.argPtr(), self.d_sync.argPtr(),
-        });
-        try self.d_dx.downloadAtAsync(pd.ptr, 0, n * 4, &self.stream);
-        try self.stream.synchronize();
-        @memcpy(dx32, pd);
-    }
-
     /// Builds and uploads the tables of `slv`'s current pivot epoch, or
     /// declines it (`declined`) past `max_flops` or, unless `forced`, under
     /// `min_per_col` flops per column.
@@ -354,7 +256,6 @@ pub const GpuLu = struct {
         self.epoch = lu.pattern_epoch;
         self.declined = true;
         self.dev_gen = null;
-        self.valid32 = false;
         var flops: u64 = 0;
         for (lu.ui.items) |i| flops += lu.lp[i + 1] - lu.lp[i];
         self.flops = flops;

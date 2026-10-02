@@ -22,18 +22,9 @@ test "C creation validates versions, tags and pointer lengths" {
     options.backend = 99;
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
     options.backend = 0;
-    // lu_fast is 0 or 1; a caller built before it existed passes the
-    // shorter struct_size and is still accepted (then fails on the path).
-    options.lu_fast = 2;
-    try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
-    options.struct_size = @offsetOf(c.espice_create_options, "lu_fast");
-    try std.testing.expect(c.espice_create(&options, &handle, &diagnostic, diagnostic.len) != c.ESPICE_ABI_MISMATCH);
-    c.espice_destroy(handle);
-    handle = null;
-    options.struct_size = @offsetOf(c.espice_create_options, "lu_fast") - 1;
+    options.struct_size = @sizeOf(c.espice_create_options) - 1;
     try std.testing.expectEqual(@as(u32, c.ESPICE_ABI_MISMATCH), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
     options.struct_size = @sizeOf(c.espice_create_options);
-    options.lu_fast = 0;
     options.max_parallel = 65536;
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_create(&options, &handle, &diagnostic, diagnostic.len));
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_ARGUMENT), c.espice_query_count(null, null));

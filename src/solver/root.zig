@@ -4,7 +4,6 @@ pub const direct = @import("direct.zig");
 pub const sparse_lu = @import("sparse_lu.zig");
 pub const lane_lu = @import("lane_lu.zig");
 pub const lu_kernels = @import("lu_kernels.zig");
-pub const fast_lu = @import("fast_lu.zig");
 pub const tridiag = @import("tridiag.zig");
 pub const dense_lu = @import("dense_lu.zig");
 pub const bbd = @import("bbd.zig");

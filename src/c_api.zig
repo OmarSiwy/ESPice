@@ -71,13 +71,7 @@ const CreateOptions = extern struct {
     source: Bytes,
     origin: Bytes,
     output_path: Bytes,
-    /// Appended after ABI 1 shipped: a caller built against the shorter
-    /// struct passes a smaller `struct_size` and gets the default (0).
-    lu_fast: u32 = 0,
-    reserved: u32 = 0,
 };
-/// `struct_size` of the options struct before `lu_fast` existed.
-const options_size_v1 = @offsetOf(CreateOptions, "lu_fast");
 comptime {
     if (@sizeOf(CreateOptions) != @sizeOf(header.espice_create_options)) @compileError("espice_create_options drifted from CreateOptions");
 }
@@ -162,9 +156,7 @@ export fn espice_create(options: ?*const CreateOptions, out: ?*?*Handle, diagnos
 }
 
 fn create(options: *const CreateOptions) !*Handle {
-    if (options.abi_version != abi_version or options.struct_size < options_size_v1) return error.AbiMismatch;
-    const lu_fast = if (options.struct_size >= @sizeOf(CreateOptions)) options.lu_fast else 0;
-    if (lu_fast > 1) return error.InvalidArgument;
+    if (options.abi_version != abi_version or options.struct_size < @sizeOf(CreateOptions)) return error.AbiMismatch;
     const source = try constSlice(u8, options.source.data, options.source.len);
     const origin = try constSlice(u8, options.origin.data, options.origin.len);
     const path = try constSlice(u8, options.output_path.data, options.output_path.len);
@@ -179,7 +171,6 @@ fn create(options: *const CreateOptions) !*Handle {
         .backend = .{
             .backend = std.enums.fromInt(api.Request, options.backend) orelse return error.InvalidArgument,
             .gpu_explicit = options.explicit_gpu == 1,
-            .lu_fast = lu_fast == 1,
         },
         .output = .{
             .format = std.enums.fromInt(api.Format, options.output_format) orelse return error.InvalidArgument,

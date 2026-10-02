@@ -81,9 +81,6 @@ const Runner = struct {
 /// The `--backend` every run gets; `--backend cuda` checks the GPU path
 /// against the same expectations. Set once in `main`, before any worker.
 var backend_name: []const u8 = "cpu";
-/// `--lu-fast`: every run gets espice's `--lu-fast`, whose results must
-/// still meet each deck's tolerance.
-var lu_fast = false;
 /// Per-case failure detail, printed under the case's FAIL line.
 threadlocal var diagnostics: ?*Io.Writer = null;
 fn diagnostic(comptime fmt: []const u8, args: anytype) void {
@@ -98,11 +95,11 @@ pub fn main(init: std.process.Init) !u8 {
     var jobs: u16 = 8;
     var timeout_seconds: u32 = 300;
     var list = equal(app, "--list");
-    const Flag = enum(u8) { list, filter, jobs, timeout, backend, lu_fast };
+    const Flag = enum(u8) { list, filter, jobs, timeout, backend };
     const flags = std.StaticStringMap(Flag).initComptime(.{
         .{ "--list", .list },       .{ "--filter", .filter },
         .{ "--jobs", .jobs },       .{ "--timeout", .timeout },
-        .{ "--backend", .backend }, .{ "--lu-fast", .lu_fast },
+        .{ "--backend", .backend },
     });
     while (args.next()) |arg| {
         switch (flags.get(arg) orelse return error.UnknownArgument) {
@@ -111,7 +108,6 @@ pub fn main(init: std.process.Init) !u8 {
             .jobs => jobs = try std.fmt.parseInt(u16, args.next() orelse return error.MissingArgument, 10),
             .timeout => timeout_seconds = try std.fmt.parseInt(u32, args.next() orelse return error.MissingArgument, 10),
             .backend => backend_name = args.next() orelse return error.MissingArgument,
-            .lu_fast => lu_fast = true,
         }
     }
     if (jobs == 0) return error.InvalidWorkerCount;
@@ -222,10 +218,7 @@ fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: 
     var select: Io.Select(Event) = .init(io, &events);
     defer select.cancelDiscard();
     const options: std.process.RunOptions = .{
-        .argv = if (lu_fast)
-            &.{ app, "--backend", backend_name, "--lu-fast", "--format=binary", "-b", "-r", output, "--tokenizer", tokenizer orelse "ngspice", std.fs.path.basename(netlist) }
-        else
-            &.{ app, "--backend", backend_name, "--format=binary", "-b", "-r", output, "--tokenizer", tokenizer orelse "ngspice", std.fs.path.basename(netlist) },
+        .argv = &.{ app, "--backend", backend_name, "--format=binary", "-b", "-r", output, "--tokenizer", tokenizer orelse "ngspice", std.fs.path.basename(netlist) },
         .cwd = .{ .path = std.fs.path.dirname(netlist).? },
         .stdout_limit = .limited(1024 * 1024),
         .stderr_limit = .limited(1024 * 1024),
