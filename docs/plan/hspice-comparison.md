@@ -122,10 +122,10 @@ the build-order id in the last column.
 
 | Card | What it does | ESPice | VACASK | Value | Build id, size |
 |---|---|---|---|---|---|
-| `.HB TONES= NHARMS= INTMODMAX= SUBHARMS= SS_TONE= [SWEEP]` [CR .HB; RF Ch.5] | multi-tone harmonic balance | `.hb TONES= NHARMS= INTMODMAX=`, any number of tones, complex phasors per line (`pss/mhb.zig`); SUBHARMS, SS_TONE, SWEEP not taken | any number of tones, sparse blocks | high for RF | D2 done |
-| `.HBAC sweep` [CR .HBAC; RF Ch.8] | periodic AC on the HB orbit | `.pac` on the shooting orbit (`pss/pac.zig`) | `hbac` | high for RF | D1, S after the orbit adapter |
-| `.HBNOISE out src sweep [sidebands]` [CR .HBNOISE; RF Ch.8] | cyclostationary noise on the HB orbit | `.pnoise` on the shooting orbit (`pss/pnoise.zig`) | `hbnoise` | high for RF | D1, M (vacask-comparison G4) |
-| `.HBXF out sweep` [CR .HBXF] | periodic transfer function | `.pxf` on the shooting orbit (`pss/pxf.zig`) | no | medium | D1, S |
+| `.HB TONES= NHARMS= INTMODMAX= SUBHARMS= SS_TONE= [SWEEP]` [CR .HB; RF Ch.5] | multi-tone harmonic balance | `.hb TONES= NHARMS= INTMODMAX=`, any number of tones, complex phasors per line, SUBHARMS, SS_TONE, SWEEP (`pss/mhb.zig`) | any number of tones, sparse blocks | high for RF | D2 done |
+| `.HBAC sweep` [CR .HBAC; RF Ch.8] | periodic AC on the HB orbit | `.pac` on the shooting orbit (`pss/pac.zig`); multi-tone on the mixing products (`pss/mhb_lptv.zig`) | `hbac` | high for RF | D1, S after the orbit adapter |
+| `.HBNOISE out src sweep [sidebands]` [CR .HBNOISE; RF Ch.8] | cyclostationary noise on the HB orbit | `.pnoise` on the shooting orbit (`pss/pnoise.zig`); multi-tone (`pss/mhb_lptv.zig`) | `hbnoise` | high for RF | D1, M (vacask-comparison G4) |
+| `.HBXF out sweep` [CR .HBXF] | periodic transfer function | `.pxf` on the shooting orbit (`pss/pxf.zig`); multi-tone (`pss/mhb_lptv.zig`) | no | medium | D1, S |
 | `.HBOSC`, `.SNOSC` [CR; RF Ch.7] | oscillator steady state, period solved | no (`.pss` is driven only) | `pss` autonomous | high for RF | D3, M |
 | `.PHASENOISE out sweep method=0\|1\|2` [CR .PHASENOISE; RF Ch.7] | oscillator phase noise: nonlinear perturbation, periodic AC, broadband | no | no | high for RF | D4, M |
 | `.ACPHASENOISE out in carrier=` [CR .ACPHASENOISE] | phase-domain noise and jitter of a closed-loop PLL model | no | no | low | D4, M |

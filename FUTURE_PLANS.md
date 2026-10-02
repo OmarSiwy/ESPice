@@ -111,10 +111,6 @@ the full matrix. Open items:
   - a `.ptdnoise` TIME sweep;
   - `.sample BETA`;
   - phase-noise flicker, METHOD 1 and 2, and `.acphasenoise`.
-- **Multitone HB:**
-  - SUBHARMS, SS_TONE and SWEEP;
-  - complex output;
-  - small-signal analyses on top of multitone.
 - **Optimization** (bisection, pass/fail, LEVEL 1-3, inequality goals and
   `.step` landed; docs/analysis/optimize.md): still refused are a bisection
   over several parameters or RESULTS cards, a bisection on a `GOAL <`/`>`

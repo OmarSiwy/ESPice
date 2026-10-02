@@ -5,6 +5,22 @@ steady state under any number of tones (`src/analysis/pss/mhb.zig`). A
 single-tone `.hb f0 K` keeps the dense solver in `hb.zig` until the circuit
 is large enough for the Krylov path to pay (see [Crossover](#crossover)).
 
+## Card options
+
+`.hb TONES= ... [SUBHARMS=s] [SS_TONE=i] [SWEEP ...]`:
+
+- SUBHARMS=s puts the lowest tone f's lines at multiples of f/s, up to its
+  NHARMS·f. In the INTMODMAX order s steps of f/s count as one, so the
+  subharmonics do not crowd out the other tones' products. The manual only
+  says the lowest non-DC line is f/s; the order rule is ours. Oracles
+  `hb/subharms_cubic` and `hb/subharms_two_tone_square`.
+- SS_TONE=i (from 1) takes tone i out of the large-signal spectrum. It is
+  the small-signal tone: `.hbac`, `.hbxf` and `.hbnoise` supply its
+  frequency through their own sweep. With one tone left the small-signal
+  analyses take the one-tone path (`hbac/ss_tone_multiplier`).
+- SWEEP is the generic HSPICE card sweep: the `.hb` card reruns once per
+  point, one plot per point (`hb/sweep_two_tone_cubic`).
+
 ## Spectrum
 
 A line is a mixing product k·f = k1·f1 + k2·f2 + ... with |ki| <= Hi. With
@@ -136,6 +152,37 @@ The switch is at n·(2M+1) >= 64. Every PAC-family deck in the corpus is at
 paths agree to 1e-7 of each output's peak (`.hbac`, `.hbxf`) and 1e-12 on
 `.hbnoise`.
 
+## Small signal
+
+`.hbac`, `.hbxf` and `.hbnoise` after a multi-tone `.hb` card linearize
+about its solution (`src/analysis/pss/mhb_lptv.zig`). A small signal at f
+rides every line, so its sidebands are f + f_p over the signed lines p.
+The linear system is the conversion matrix over those sidebands,
+A(ω)[p][q] = G_{p-q} + j(ω + ω_p)·C_{p-q}, with G_d and C_d the phasors
+of G(t) and C(t) on the line at f_p - f_q and zero when that difference
+is not a line. With one tone this is `pac.zig`'s conversion matrix.
+
+Divergence, measured: the first version formed A as the HB Jacobian
+DFT·diag(G(t_s))·IDFT over the collocation instants. That folds every
+product that leaves the spectrum back onto the kept lines, and on
+`hbnoise/multitone_multiplier` it gave 3.05x the analytic density at
+NHARMS=1 1, still 0.3% off at NHARMS=6 6. The conversion matrix drops
+those products instead and matches the closed form at NHARMS=1 1.
+Columns are named by mixing product: `tf_h[1,-1]` is the sideband
+at f + f1 - f2. `.hbnoise` modulates each source by its amplitude
+sqrt(PSD(t)) along the orbit and adds the pairs that land on the same
+frequency offset coherently.
+
+Oracles: `hbac/multitone_rc` and `hbxf/multitone_rc` (a linear RC under
+two large tones is plain AC on sideband 0), `hbac/multitone_multiplier`
+(a multiplier pumped by cos ω1t + cos ω2t puts 1/2 on each tone's
+sidebands), `hbnoise/multitone_multiplier` (RC noise folded through the
+same multiplier, ¼ Σ [Sx(|f - fLO|) + Sx(f + fLO)]).
+
+`ponytail:` A(ω) is dense, one LU of the stacked-real 2·n·nf system per
+frequency. Past a few hundred unknowns the upgrade is `pac.sweepKrylov`'s
+GMRES with the G_0 + j(ω + ω_p)·C_0 lane preconditioner.
+
 ## QPSS
 
 Multi-tone HB subsumes `.qpss`: `.qpss f1 f2 K1 K2` is
@@ -172,9 +219,10 @@ layout nor its card.
   keeps its magnitudes with a signed DC. HSPICE's own `.hb` output
   layout (its `.printhb` forms and the `.hb0` file) has not been checked
   against a real run.
-- The HB small-signal analyses (`.hbac`, `.hbxf`, `.hbnoise`, `.hblin`) linearize
-  about one tone; with a multi-tone `.hb` card they are an argument error.
-- SUBHARMS, SS_TONE and SWEEP are not taken.
+- `.hblin` linearizes about one tone; with a multi-tone `.hb` card it is
+  an argument error.
+- SUBHARMS and SS_TONE follow the manual's text and have not been run
+  against HSPICE (see [Card options](#card-options)).
 
 `ponytail:` the collocation pool is O(nt·pool·nf) greedy selection and the
 transforms are dense O(n·nt·nf) products. For many lines (three tones at

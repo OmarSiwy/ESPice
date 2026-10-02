@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "analysis": "hb",
+  "purpose": "SWEEP on .hb reruns the two-tone cubic once per divider point",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(div) = v(out) rl/(1k + rl) with v(out) = (A sin w1t + B sin w2t)^3, A=1, B=0.5: hb/two_tone_cubic_im3's phasors times 0.5 (rl=1k) and 0.75 (rl=3k)."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Harmonic Balance (rl=1000)",
+        "match": "exact",
+        "columns": {
+          "v(div)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                -0.1875
+              ],
+              [
+                0.0,
+                -0.5625
+              ],
+              [
+                0.0,
+                -0.421875
+              ],
+              [
+                0.0,
+                -0.09375
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.125
+              ],
+              [
+                0.0,
+                0.1875
+              ],
+              [
+                0.0,
+                0.09375
+              ],
+              [
+                0.0,
+                0.015625
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0.0,
+            300.0,
+            700.0,
+            1000.0,
+            1300.0,
+            1600.0,
+            2000.0,
+            2300.0,
+            2600.0,
+            3000.0,
+            3300.0,
+            3600.0,
+            3900.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 13
+      },
+      {
+        "name": "Harmonic Balance (rl=3000)",
+        "match": "exact",
+        "columns": {
+          "v(div)": {
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-09,
+            "values": [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                -0.28125
+              ],
+              [
+                0.0,
+                -0.84375
+              ],
+              [
+                0.0,
+                -0.6328125
+              ],
+              [
+                0.0,
+                -0.140625
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.1875
+              ],
+              [
+                0.0,
+                0.28125
+              ],
+              [
+                0.0,
+                0.140625
+              ],
+              [
+                0.0,
+                0.0234375
+              ]
+            ]
+          }
+        },
+        "axis": {
+          "name": "frequency",
+          "values": [
+            0.0,
+            300.0,
+            700.0,
+            1000.0,
+            1300.0,
+            1600.0,
+            2000.0,
+            2300.0,
+            2600.0,
+            3000.0,
+            3300.0,
+            3600.0,
+            3900.0
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "row_count": 13
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "62e9ffe1d230511be25d811eb196d022f0e9a469674a038af8c02ba774db3208"
+}
