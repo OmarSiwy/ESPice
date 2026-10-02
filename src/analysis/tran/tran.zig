@@ -326,7 +326,7 @@ pub fn simulate(
             .final_step = t + dt >= options.t_stop,
         });
         const eff_method: Method = if (use_be) .backward_euler else options.method;
-        const cf = integrator.coeffs(eff_method, dt, dt_prev);
+        const cf = integrator.coeffs(eff_method, dt, dt_prev, options.xmu);
         const hook = TranHook{
             .method = eff_method,
             .c = cf,

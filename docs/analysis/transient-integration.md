@@ -50,6 +50,16 @@ Trap's residue at $z \to \infty$ is $-1$: an unresolved discontinuity
 produces the well-known step-to-step ringing, which is why the flow drops
 to BE at breakpoints.
 
+An edge that falls at no breakpoint (a fast nonlinear transition inside a
+step) still rings, and on a current that only capacitance sets the ringing
+never decays: `tran/trap_xmu_damping` holds $\pm 4\times10^{-4}$ A in
+ngspice 44.2 and espice alike. `.options xmu` (ngspice, `nicomcof.c`) is the
+opt-in damping: $\alpha = 1/(h(1-\mu))$ and the history term becomes
+$\tfrac{\mu}{1-\mu}\, i_{m-1}$ (`Coeffs.ag1`), so each step multiplies the
+ringing by $\mu/(1-\mu)$. The default $\mu = 0.5$ gives $2/h$ and $1$ bit for
+bit; $\mu = 0$ is backward Euler. The LTE estimate and order control are
+unchanged, as in ngspice. Values outside $[0, 0.5]$ are rejected.
+
 **Gear-2 / BDF2** (order 2, L-stable). With $r = h/h_{\text{prev}}$ the
 variable-step coefficients are ngspice's (`nicomcof.c:60-136`, solved there
 as a Vandermonde system):
@@ -227,6 +237,14 @@ $h = 0.1\cdot\min(\texttt{saveDelta},\, \text{gap to next break})$, spice3's
 `CKTsaveDelta` resume rule, which resolves a paired edge (rise start and end
 1 ns apart) instead of stepping over it. Transmission-line delays re-emit
 landed breakpoints at $t + \tau_d$ (echo cascade for reflections).
+
+PULSE corners, and a V source's PWL corners, are asked from the accepted
+time and rounded as ngspice's `VSRCaccept` rounds them, $t_{acc} + (t_k -
+t_{local})$ (`device/eval.zig` `spicePulseBreak`, `spicePwlBreak`). An I
+source's PWL corners keep their exact table times from the `@(timer)`
+events, because that is what `ISRCaccept` sets: it applies no rounding and
+reads no `td=`/`r=`. `tran/pwl_isource_breakpoints` matches ngspice 44.2's
+accepted grid row for row.
 
 ## 2. Flow explanation
 
@@ -419,8 +437,17 @@ Open:
   (`bench_ensemble_pvt_corners`, `bench_ngspice_mosamp`). The Meyer MOS
   models (mos1/2/3/6/9) follow `MODEINITPRED` and `MODEINITTRAN` for their
   gate charges; see [models.md](../devices/models.md).
-- `bench_ngspice_mosamp` publishes far fewer points than ngspice's 2316 later
-  in the run.
+- `bench_ngspice_mosamp` at its original options (abstol=10n, vntol=10n)
+  publishes 169 points against ngspice's 2316. The LTE is not the cause. On
+  the 5.0-5.12 us settling tail both simulators are LTE-bound and their
+  steps agree within about 15% (5.0168 us: 2.93e-9 s ngspice, 2.86e-9 s
+  espice; 5.09 us: 3.25e-8 s against 3.00e-8 s). From 5.19 us on, ngspice's
+  steps run in a 1x, 2x, 4x, /8 cycle: Newton failing its ITL4 = 10
+  iterations at the tight vntol, then dctran.c's h/8 cut. Its `rusage` counts
+  728 rejected timepoints for 2316 accepted. espice's Newton converges there
+  (0 Newton rejections, 13 LTE rejections, 181 attempts). Closing the gap
+  means matching the MOS2 Newton behaviour (`fetlim`/`limvds`,
+  `CKTconvTest`), not the LTE.
 
 ## Solvers used
 

@@ -220,7 +220,17 @@ solves at ITL2 each, then a clean ITL1 solve with no shunt.
 **Rung 3: source stepping.** Devices implement `attempt(lambda)`; the
 engine recomputes the constant baseline per $\lambda$, restores the true
 models afterwards whatever the outcome, and finishes with one ITL1 solve at
-the true parameters.
+the true parameters. The `.ic` holds of a transient operating point scale
+with the sources, held at $\lambda \cdot v_{ic}$, as `cktload.c` multiplies
+each `.ic` by `CKTsrcFact`.
+
+**Nodesets.** Before the ladder, `x` takes the `.nodeset` (and held `.ic`)
+values, as ngspice's `CKTic` seeds `rhsOld`, and one Newton runs with those
+rows tied to their values by $10^{10}$ S (MODEINITJCT/INITFIX). Seeding
+matters: a latch whose $x = 0$ is an exact metastable solution linearizes
+there and never leaves it, whatever the hold. `op.nodesetLadder` serves the
+operating point and every cold DC-sweep point
+(`dc/nodeset_sweep_latch`).
 
 **Rung 4: JFNK.** `converger.jfnk` from a cold start: restarted GMRES(30)
 with finite-difference Jacobian products, right-preconditioned by the

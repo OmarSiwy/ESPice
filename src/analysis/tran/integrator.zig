@@ -10,21 +10,23 @@ const W = std.simd.suggestVectorLength(f64) orelse 8;
 /// Integration coefficients, ngspice `CKTag[]` (nicomcof.c). `ag0` multiplies
 /// q(x): it is the companion conductance factor (niinteg.c:77) and the
 /// Jacobian axpy weight. `ag2` multiplies q_prev2 and is nonzero for gear-2
-/// only. With ag0 + ag1 + ag2 = 0 each method's dynamic residual is
+/// only. `ag1` weighs trap's previous current, ngspice's xmu/(1 - xmu): 1 for
+/// the plain trapezoid. Each method's dynamic residual is
 ///   BE:   ag0*(q - q1)
-///   trap: ag0*(q - q1) - i_prev
+///   trap: ag0*(q - q1) - ag1*i_prev
 ///   gear: ag0*(q - q1) - ag2*(q1 - q2)
-pub const Coeffs = struct { ag0: f64, ag2: f64 };
+pub const Coeffs = struct { ag0: f64, ag2: f64, ag1: f64 = 1 };
 
 /// Coefficients for a step of `dt` seconds after one of `dt_prev`. Gear-2 is
 /// the variable-step BDF2 ngspice solves as a Vandermonde system over the
 /// real step history (nicomcof.c:60-136); with r = dt/dt_prev its closed form
 /// is ag0 = (1+2r)/((1+r)dt), ag2 = r^2/((1+r)dt), and r = 1 gives the
-/// uniform-step 3/(2dt), 1/(2dt).
-pub fn coeffs(method: Method, dt: f64, dt_prev: f64) Coeffs {
+/// uniform-step 3/(2dt), 1/(2dt). `xmu` is the trapezoid's weight
+/// (`Options.xmu`); at 0.5 its coefficients are exactly 2/dt and 1.
+pub fn coeffs(method: Method, dt: f64, dt_prev: f64, xmu: f64) Coeffs {
     return switch (method) {
         .backward_euler => .{ .ag0 = 1.0 / dt, .ag2 = 0 },
-        .trapezoidal => .{ .ag0 = 2.0 / dt, .ag2 = 0 },
+        .trapezoidal => .{ .ag0 = 1.0 / dt / (1.0 - xmu), .ag2 = 0, .ag1 = xmu / (1.0 - xmu) },
         .gear_2 => blk: {
             const r = dt / dt_prev;
             break :blk .{
@@ -60,7 +62,7 @@ pub fn advanceCurrent(method: Method, i_cur: []f64, q0: []const f64, q1: []const
 }
 
 /// The companion kernel over any index space, `d = ag0*(q0 - q1)` minus the
-/// method's history term (i_prev for trap, ag2*(q1 - q2) for gear):
+/// method's history term (ag1*i_prev for trap, ag2*(q1 - q2) for gear):
 ///   accumulate = false: out  = d - history   (NIintegrate)
 ///   accumulate = true:  out += d - history   (the Newton residual's dynamic part)
 /// `i_prev` may alias `out`. q2 is read by gear only, i_prev by trap only.
@@ -100,7 +102,7 @@ inline fn companionLane(
     const d = @as(V, @splat(c.ag0)) * (a - b);
     const base = if (accumulate) @as(V, out[j..][0..w].*) + d else d;
     out[j..][0..w].* = switch (method) {
-        .trapezoidal => base - @as(V, i_prev[j..][0..w].*),
+        .trapezoidal => base - @as(V, @splat(c.ag1)) * @as(V, i_prev[j..][0..w].*),
         .gear_2 => base - @as(V, @splat(c.ag2)) * (b - @as(V, q2[j..][0..w].*)),
         .backward_euler => base,
     };
@@ -166,6 +168,7 @@ fn minDel(comptime w: usize, comptime method: Method, comptime cur_method: Metho
     const sum012: V = @splat(lte.dt + (lte.dt1 + lte.dt2));
     const av: V = @splat(c.ag0);
     const a2: V = @splat(c.ag2);
+    const a1: V = @splat(c.ag1);
     const abstol: V = @splat(lte.abstol);
     const reltol: V = @splat(lte.reltol);
     const chgtol: V = @splat(lte.chgtol);
@@ -179,7 +182,7 @@ fn minDel(comptime w: usize, comptime method: Method, comptime cur_method: Metho
         const qp2: V = q[2][i..][0..w].*;
         const ip: V = i_prev[i..][0..w].*;
         const i_new = switch (cur_method) {
-            .trapezoidal => av * (qc - qp) - ip,
+            .trapezoidal => av * (qc - qp) - a1 * ip,
             .gear_2 => av * (qc - qp) - a2 * (qp - qp2),
             .backward_euler => av * (qc - qp),
         };

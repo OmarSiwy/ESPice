@@ -59,19 +59,32 @@ pub fn solve(
             if (h.node == ns.node) break;
         } else force.appendAssumeCapacity(.{ .slot = ckt.diag_slots[ns.node], .row = ns.node, .value = ns.value });
     }
-    const hold = force.items[0..held.len];
-    // A converged forcing step leaves a warm start, as ngspice's INITFIX
-    // hands INITFLOAT its iterate.
-    var ladder = options;
-    if (nodeset.len > 0 and try forceNodeset(ckt, ws, x, options, force.items)) ladder.warm_start = true;
-
-    const r = try solveLadder(ckt, ws, x, ladder, hold);
+    const r = try nodesetLadder(ckt, ws, x, options, force.items, held.len);
     // Commit device state so later analyses start from the accepted state.
     if (r.converged) _ = ckt.stateCtl(.commit);
     // Every later eval at this point (ac, tf, noise, post-processing) is not
     // an initial step and must not re-latch.
     ckt.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
     return r;
+}
+
+/// The `.nodeset` step, then the ladder holding the first `n_hold` rows of
+/// `force` (the `.ic` holds; the rest are nodesets). With nodesets given,
+/// `x` first takes every `force` value on its row. Every cold CKTop in
+/// ngspice starts in MODEINITJCT, where cktload.c applies the nodesets, so
+/// the operating point and each cold DC-sweep point both start here.
+pub fn nodesetLadder(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options, force: []const converger.Force, n_hold: usize) !converger.Result {
+    // A converged forcing step leaves a warm start, as ngspice's INITFIX
+    // hands INITFLOAT its iterate.
+    var ladder = options;
+    if (force.len > n_hold) {
+        // CKTic (cktic.c) starts rhsOld at the nodeset and ic values, so the
+        // devices first linearize there: a latch whose x = 0 is an exact
+        // (metastable) solution only leaves it this way.
+        for (force) |f| x[f.row] = f.value;
+        if (try forceNodeset(ckt, ws, x, options, force)) ladder.warm_start = true;
+    }
+    return solveLadder(ckt, ws, x, ladder, force[0..n_hold]);
 }
 
 /// The continuation ladder from `x` as given: plain Newton, dynamic gmin
@@ -186,10 +199,13 @@ pub fn solveLadder(
 
     // Rung 3: source stepping through the devices' attempt(lambda), with an
     // adaptive step: grow 1.5x on success, halve on failure and retry from
-    // the last good lambda and x.
+    // the last good lambda and x. The holds scale with the sources, as
+    // ngspice's cktload.c multiplies each `.ic` by CKTsrcFact.
     coldStart(ckt, x);
     total_iter = 0;
     {
+        const scaled = try gpa.dupe(converger.Force, hold);
+        defer gpa.free(scaled);
         var lambda: f64 = 0.0;
         var lambda_good: f64 = -1.0; // none converged yet
         var delta: f64 = 0.25;
@@ -198,7 +214,8 @@ pub fn solveLadder(
             ckt.applyAttempt(lambda);
             ckt.has_baseline = false;
             try ckt.computeBaseline();
-            const sr = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
+            for (scaled, hold) |*s, h| s.value = h.value * lambda;
+            const sr = newtonRun(ckt, ws, x, options.tol, scaled, 0.0, &.{}, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => {
                     ckt.restoreModels();

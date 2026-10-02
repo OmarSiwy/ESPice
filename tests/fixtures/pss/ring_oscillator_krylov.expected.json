@@ -1,0 +1,34 @@
+{
+ "schema_version": 1,
+ "analysis": "pss",
+ "purpose": "Autonomous shooting PSS on the Krylov path (51 unknowns) finds a 17-stage ring's period",
+ "oracle": {
+  "kind": "ngspice-44.2-settled-transient",
+  "derivation": "The period is the last row's time. ngspice-44.2 transient of the same ring from .ic v(c1)=0.1 (uic), 1 ms at a 1 ns step: mean spacing of the rising v(c1)=0 crossings in the second half is 2.642949e-05 s (spacings agree to 1e-8 relative). espice converges on it at h^2: 2.64574e-5 at 256 points, 2.64364e-5 (2.7e-4) at 512, 2.64312e-5 at 1024."
+ },
+ "expect": {
+  "status": "success",
+  "plots": [
+   {
+    "name": "Periodic Steady State",
+    "match": "selected_rows",
+    "row_indices": [
+     512
+    ],
+    "row_count": 513,
+    "columns": {},
+    "axis": {
+     "name": "time",
+     "values": [
+      2.642949e-05
+     ],
+     "rtol": 0.001,
+     "atol": 0
+    }
+   }
+  ],
+  "finite_values_required": true,
+  "all_requested_analyses_must_complete": true
+ },
+ "netlist_sha256": "00e24f9cc53804801beca86e34ea4fb59e3a14415c6e93ef9dcdfa3586c91865"
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A negative reltol is out of range; the diagnostic names the .options card.",
+  "oracle": {
+    "kind": "input_contract",
+    "derivation": "A negative reltol is out of range; the diagnostic names the .options card."
+  },
+  "expect": {
+    "status": "error",
+    "category": "invalid_analysis_arguments",
+    "diagnostic_required": true,
+    "successful_analysis_for_invalid_request": false
+  },
+  "netlist_sha256": "eeb61bb0306c8fbba9f1a2a4ea5cca61a7ff7cdfc1a2d52d663e0800c52ea9a5"
+}

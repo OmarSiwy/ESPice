@@ -266,6 +266,8 @@ pub const DeckOptions = struct {
     /// `.options delmax`: the transient step cap when the `.tran` card sets
     /// none.
     delmax: ?f64 = null,
+    /// `.options xmu`: the trapezoidal damping weight; null keeps 0.5.
+    xmu: ?f64 = null,
     /// `.options tnom=<degC>`: the temperature model cards were extracted at
     /// (ngspice cktsopt.c:71-73 takes the card in Celsius; default 27 degC
     /// from cktntask.c:127). Unlike `temp`, where the circuit runs, it reaches
@@ -277,7 +279,7 @@ pub const DeckOptions = struct {
 
 /// Option names outside this list are not simulated; the HSPICE dialect
 /// warns about each. `gshunt` and `cshunt` are read by the netlist.
-const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, gshunt, cshunt };
+const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, xmu, gshunt, cshunt };
 
 /// Folds the deck's `.options` and `.temp` cards; `InvalidAnalysisArguments`
 /// on a value out of range. The HSPICE dialect defaults TNOM to 25 degC and
@@ -292,14 +294,19 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
         .{ "itl4", .itl4 },     .{ "maxord", .maxord }, .{ "temp", .temp },
         .{ "tnom", .tnom },     .{ "absv", .vntol },    .{ "relv", .reltol },
         .{ "absi", .abstol },   .{ "gmindc", .gmin },   .{ "delmax", .delmax },
-        .{ "gshunt", .gshunt }, .{ "cshunt", .cshunt },
+        .{ "gshunt", .gshunt }, .{ "cshunt", .cshunt }, .{ "xmu", .xmu },
     });
     const methods = std.StaticStringMap(requests.Method).initComptime(.{
         .{ "gear", .gear_2 }, .{ "trap", .trapezoidal }, .{ "trapezoidal", .trapezoidal }, .{ "bdf", .gear_2 },
     });
     var o: DeckOptions = .{ .tnom_c = if (dialect == .hspice) 25 else 27 };
     var maxord: ?f64 = null;
+    // The card being folded, named by any error it raises.
+    var line: []const u8 = "";
+    // The test runner fails any test that logs an error.
+    errdefer |err| if (!@import("builtin").is_test) std.log.err("options: {s}: {s}", .{ line, @errorName(err) });
     for (config) |card| {
+        line = card.line;
         const args = card.args;
         if (card.temp) {
             if (args.len > 1) {
@@ -363,6 +370,10 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
                     if (!(value > 0)) return error.InvalidAnalysisArguments;
                     o.delmax = value;
                 },
+                .xmu => {
+                    if (!(value >= 0 and value <= 0.5)) return error.InvalidAnalysisArguments;
+                    o.xmu = value;
+                },
                 .gshunt, .cshunt => if (value < 0) return error.InvalidAnalysisArguments,
                 inline else => |field| {
                     if (value < 0) return error.InvalidAnalysisArguments;
@@ -388,6 +399,7 @@ pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
     if (job.* == .tran) {
         const t = &job.tran;
         if (o.method) |m| t.method = m;
+        if (o.xmu) |x| t.xmu = x;
         // ngspice's default tmax, min(tstep, tstop / 50).
         t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, t.t_stop / 50);
     }

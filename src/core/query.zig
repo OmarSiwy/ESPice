@@ -535,6 +535,11 @@ pub const Tran = struct {
     /// ngspice tmax. Null means t_stop / 50.
     dt_max: ?f64 = null,
     method: Method = .trapezoidal,
+    /// ngspice `.options xmu`: the trapezoidal weight on the previous step's
+    /// derivative (nicomcof.c). 0.5 is the plain trapezoid; below it each
+    /// step damps the trapezoid's undamped ringing by xmu/(1 - xmu), down to
+    /// backward Euler at 0. Range [0, 0.5].
+    xmu: f64 = 0.5,
     /// Runaway guard only; `dt_min` is the real brake. A 1 s run on a 1 us
     /// grid is already 1e6 accepted points.
     max_steps: u32 = 1_000_000_000,

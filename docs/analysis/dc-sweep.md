@@ -62,8 +62,12 @@ point).
 3. **Per point**: write the swept value, recompute device parameters (the
    full walk at point 0, then only the swept device's type through
    `recomputeType`), recompute the baseline, then solve. The first point, and
-   any point whose warm-started Newton fails, goes through the full OP ladder
-   (see [operating-point-homotopy.md](operating-point-homotopy.md)). Interior
+   any point whose warm-started Newton fails, goes through the `.nodeset`
+   step and the full OP ladder (see
+   [operating-point-homotopy.md](operating-point-homotopy.md)), as every cold
+   `CKTop` in `dctrcurv.c` starts in MODEINITJCT, where the nodesets load.
+   ngspice seeds `rhsOld` with the nodesets once per analysis; espice seeds
+   each cold point, which only differs at a mid-sweep fallback. Interior
    points warm-start from the previous solution with a Newton at ITL2.
 4. **Failure handling**: `SingularMatrix` on a warm-started point (NaN
    stamps from a bad guess) does not abort the sweep; it falls to the ladder
