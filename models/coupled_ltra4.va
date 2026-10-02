@@ -1,0 +1,4 @@
+// CPL (P card) with 4 conductors; the model is coupled_ltra.va.
+`define CPL_N 4
+`define CPL_MODULE coupled_ltra4
+`include "coupled_ltra.va"

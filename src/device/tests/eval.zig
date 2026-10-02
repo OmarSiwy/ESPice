@@ -603,3 +603,77 @@ test "permuteInPlace: moves every row to dst[k], cycles and fixed points alike" 
         try std.testing.expectEqualSlices(u64, want[0..len], items[0..len]);
     }
 }
+
+test "analog initial reruns after a revert rolls its held results back" {
+    // Stands in for a VerA device: `updateState` holds what the §5.2.1 block
+    // computes, `stateCtl` commits and reverts it like any held value.
+    const D = struct {
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        pub const Instance = struct { held: f64 = 0 };
+        pub const State = struct { committed: f64 = 0 };
+        pub fn initState(_: *const Model, _: *const Instance) State {
+            return .{};
+        }
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+        pub fn updateState(comptime _: type, _: *const Model, inst: *Instance, _: [2]f64, _: *State, sim: SimState) contract.UpdateResult {
+            if (sim.analog_initial) inst.held = 5;
+            return .ok;
+        }
+        pub fn stateCtl(_: *const Model, inst: *Instance, st: *State, op: contract.StateCtlOp) bool {
+            switch (op) {
+                .commit => st.committed = inst.held,
+                .revert => inst.held = st.committed,
+                .query => {},
+            }
+            return false;
+        }
+    };
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    try proto.append(.{}, .{}, .{ 1, 2 });
+    const template = try ProtoStore(D).finalize(&proto, a, .{
+        .col_ptr = &.{ 0, 3, 6, 9 },
+        .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+        .n = 3,
+        .trash_slot = 9,
+    }).unwrap();
+    defer template.hooks.deinit(template.ctx, a);
+    const batch = try template.hooks.instantiate(template.ctx, a).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const typed: *DeviceBatch(D) = @ptrCast(@alignCast(batch.ctx));
+    const x = [_]f64{ 0, 1, 0 };
+    const ctl = batch.hooks.state_ctl.?;
+    const update = batch.hooks.update_state.?;
+
+    _ = update(batch.ctx, &x);
+    try std.testing.expectEqual(@as(f64, 5), typed.instances[0].held);
+    try std.testing.expect(!typed.sim.analog_initial);
+    // Back to the birth commit: the held result is gone, so the block reruns.
+    _ = ctl(batch.ctx, .revert);
+    try std.testing.expectEqual(@as(f64, 0), typed.instances[0].held);
+    try std.testing.expect(typed.sim.analog_initial);
+    batch.hooks.set_sim_state(batch.ctx, .{});
+    try std.testing.expect(typed.sim.analog_initial);
+    _ = update(batch.ctx, &x);
+    try std.testing.expectEqual(@as(f64, 5), typed.instances[0].held);
+    // Committed, a revert keeps the result and the block stays skipped.
+    _ = ctl(batch.ctx, .commit);
+    _ = ctl(batch.ctx, .revert);
+    try std.testing.expectEqual(@as(f64, 5), typed.instances[0].held);
+    try std.testing.expect(!typed.sim.analog_initial);
+    batch.hooks.set_sim_state(batch.ctx, .{});
+    try std.testing.expect(!typed.sim.analog_initial);
+    // A fresh instance starts over; copy_state carries the flag with the values.
+    const fresh = try template.hooks.instantiate(template.ctx, a).unwrap();
+    defer fresh.hooks.deinit(fresh.ctx, a);
+    const fresh_typed: *DeviceBatch(D) = @ptrCast(@alignCast(fresh.ctx));
+    try std.testing.expect(fresh_typed.sim.analog_initial);
+    fresh.hooks.copy_state(fresh.ctx, batch.ctx);
+    try std.testing.expect(!fresh_typed.sim.analog_initial);
+}

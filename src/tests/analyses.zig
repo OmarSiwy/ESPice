@@ -29,6 +29,38 @@ fn findNameIndex(names: []const []const u8, name: []const u8) ?usize {
     return null;
 }
 
+test "a failed line fit refuses every analysis" {
+    // txl.va and coupled_ltra.va $fatal when the Padé or modal fit fails;
+    // the run must stop with that refusal, never a DC-only line. uic skips
+    // the operating point.
+    const lines = [_][]const u8{
+        "y1 a 0 b 0 line\n.model line txl r=1 l=1u g=1u c=1p length=1\n",
+        "y1 a 0 b 0 line\n.model line txl r=1 l=1e200 c=1e-200 length=1\n",
+        "p1 a a2 0 b b2 0 line\nr2 a2 0 50\nr3 b2 0 50\n.model line cpl r=1 0 1 l=1u 2u 1u c=1p 0 1p length=1\n",
+        "p1 a a2 0 b b2 0 line\nr2 a2 0 50\nr3 b2 0 50\n.model line cpl r=1 0 1 l=0 0 0 c=1p 0 1p length=1\n",
+    };
+    const analyses = [_][]const u8{ ".op", ".tran 1n 10n", ".tran 1n 10n uic", ".ac dec 1 1k 1meg", ".noise v(b) v1 dec 1 1k 1meg" };
+    for (lines) |line| for (analyses) |analysis| {
+        var buf: [512]u8 = undefined;
+        const deck = try std.fmt.bufPrint(&buf, "refused fit\nv1 a 0 dc 1 ac 1\nr1 b 0 50\n{s}{s}\n.end\n", .{ line, analysis });
+        const problem = try api.Problem.init(std.testing.allocator, std.testing.io, .{
+            .source = .{ .bytes = .{ .data = deck, .origin = "refused.cir" } },
+        });
+        defer problem.deinit();
+        problem.run_all() catch |err| {
+            // .tran, .ac and .noise run their operating point as a
+            // prerequisite query, so the refusal reaches them as
+            // DependencyFailed; .op and uic have none.
+            const has_op = !std.mem.eql(u8, analysis, ".op") and std.mem.indexOf(u8, analysis, "uic") == null;
+            if (err == error.DeviceRefused or (has_op and err == error.DependencyFailed)) continue;
+            std.debug.print("{s} instead of DeviceRefused: {s}", .{ @errorName(err), deck });
+            return err;
+        };
+        std.debug.print("ran past a failed fit: {s}", .{deck});
+        return error.TestUnexpectedResult;
+    };
+}
+
 test "spectral queries cannot publish an unconverged result" {
     const jobs = [_]api.Query{
         .{ .hb = .{ .f0 = 1e3, .n_harmonics = 1, .max_iter = 1 } },

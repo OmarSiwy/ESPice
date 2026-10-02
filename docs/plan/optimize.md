@@ -46,11 +46,10 @@ charge separately, while the host q tape keeps one per terminal.
 
 ## G. Native transmission lines to Verilog-A
 
-Move `models/native/{ltra,txl,coupled_ltra}.va` into `models/` and delete
-the matching `.zig` one model at a time, only once VerA compiles it and it
-matches the native model on the tline decks. Status and remaining VerA gaps:
-[vera-gaps.md](../vera-gaps.md). Until then the native `.zig` models stay the
-O, Y and P devices.
+Done: LTRA, TXL and CPL run on `models/{ltra,txl,coupled_ltra}.va` and the
+native `.zig` models are deleted. Their cost against the native devices is in
+[native-transmission-line-migration.md](../native-transmission-line-migration.md);
+remaining VerA gaps in [vera-gaps.md](../vera-gaps.md).
 
 ## H. Multithreaded device evaluation
 

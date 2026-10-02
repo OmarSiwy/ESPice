@@ -31,7 +31,7 @@ pub const DeviceId = enum {
     cswitch,
     tline,
     lossy_tline,
-    txl_native,
+    txl,
     coupled_tlines,
     diode,
     // M card levels.
@@ -108,7 +108,7 @@ pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "t", DeviceId.tline },
     .{ "o", DeviceId.lossy_tline },
     // Y cards require the TXL Padé/history algorithm; they are not LTRA cards.
-    .{ "y", DeviceId.txl_native },
+    .{ "y", DeviceId.txl },
     .{ "p", DeviceId.coupled_tlines },
     .{ "d", DeviceId.diode },
 });
@@ -132,14 +132,17 @@ pub const bsource_q = DeviceId.Type(.bsource_q);
 pub const cswitch = DeviceId.Type(.cswitch);
 pub const tline = DeviceId.Type(.tline);
 pub const lossy_tline = DeviceId.Type(.lossy_tline);
-pub const ltra_native = byName("ltra_native");
+pub const ltra = byName("ltra");
 pub const vcvs_laplace = byName("vcvs_laplace");
 pub const vccs_laplace = byName("vccs_laplace");
 pub const vcvs_pole = byName("vcvs_pole");
 pub const vccs_pole = byName("vccs_pole");
 pub const vcvs_delay = byName("vcvs_delay");
 pub const vccs_delay = byName("vccs_delay");
-pub const txl_native = byName("txl_native");
+pub const txl = DeviceId.Type(.txl);
+pub const coupled_ltra = byName("coupled_ltra");
+pub const coupled_ltra3 = byName("coupled_ltra3");
+pub const coupled_ltra4 = byName("coupled_ltra4");
 pub const wline_1 = byName("wline_1");
 pub const wline_2 = byName("wline_2");
 pub const wline_3 = byName("wline_3");

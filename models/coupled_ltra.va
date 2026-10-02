@@ -9,57 +9,38 @@
 //   Numerical Recipes.
 //   ngspice: Copyright Regents of the University of California and others,
 //   modified BSD license.
-// Transcribed from models/native/coupled_ltra.zig, which remains the built
-// and used device; this file is NOT registered in build.zig (discoverModels
-// scans models/ only). Bug-compatible with cplsetup/cplload like the native
-// model: the reference's scaled pole units, diag()'s ordering queue with
-// integer-truncated comparisons, the R entry floor MAX(R, 1e-4), integer-ps
-// history, update_cnv's slope accumulated across terms.
+// Transcribed from the retired native device (coupled_ltra.zig), which it
+// matches on the CPL decks to 6e-8 relative
+// (docs/native-transmission-line-migration.md). Bug-compatible with
+// cplsetup/cplload: the reference's scaled pole units, diag()'s ordering queue
+// with integer-truncated comparisons, the R entry floor MAX(R, 1e-4),
+// integer-ps history, update_cnv's slope accumulated across terms. One
+// divergence: cplload's 0.1*gmin port stamp is not modelled.
 //
 // The conductor count is structural (port vector width), so it is a macro:
-// a 3- or 4-line build is a two-line wrapper,
+// a 3- or 4-line build is a wrapper (coupled_ltra3.va, coupled_ltra4.va):
 //   `define CPL_N 3
-//   `include "coupled_ltra.va"
-// (native: CoupledLtra(2/3/4)). The card matrices are packed upper triangles
+//   `define CPL_MODULE coupled_ltra3
+//   `include "coupled_ltra.va" The card matrices are packed upper triangles
 // of up to 10 entries (N <= 4), as the builder passes them.
 //
-// VERA-GAP: array slices as analog-function actuals -- needed to pass one
-//   entry's sample/series vector (sip[i][j], w[i], ...) to matchfit, multp and
-//   approxmode. VAMS-2023 §5 allows "a slice of an array variable" wherever
-//   unpacked arrays are assigned, and VerA accepts slices in plain
-//   assignments, but its call lowering rejects them: error[E0511]
-//   "`matchfit()` argument `ya` needs 8 elements" (lib/ir/lower.zig
-//   funcArrayIn). With the nine call sites rewritten through a temporary
-//   (probe), the file emits Zig and passes `vera --check`.
-// VERA-GAP: memory-backed arrays with runtime indexing -- needed for the
-//   2048-point conductor histories (4N arrays) and the [N][N][N][3]
-//   convolution state. VerA scalarizes arrays (lib/ir/lower.zig
-//   declareVarDecl), so every runtime-indexed access is a select/switch over
-//   every element; the N = 2 probe emits 25 MB of Zig.
-// VERA-GAP: held analog-initial results -- needed for the modal fit. VerA
-//   holds only variables assigned under @(...) (lib/ir/lower.zig scanHeld);
-//   an `analog initial` result reads as sel(is_analog_initial, value, 0), so
-//   it is right only while the host leaves is_analog_initial set, and then
-//   the whole setup (8 x two Jacobi diagonalizations, inversions, degree-7
-//   fits, 2N^3 + N^2 Padé fits) reruns on EVERY evaluation (§5.2.1 says once
-//   per sub-task).
-// VERA-GAP: per-timepoint cache that survives Newton iterations and is
-//   dropped on rejection -- needed to run the delayed walk and the
-//   O(N^3) exponentials once per timepoint (native cache_t/cache_dt).
-//
-// State model: variables assigned under @(initial_step) are held: every
-// evaluation starts from the values the last ACCEPTED evaluation left behind
-// (VerA HeldVar, §5.10). The native committed/pending pair collapses into one
-// set advanced by the block and kept only for an accepted point.
+// State model: every variable a later evaluation reads is held (§5.10): each
+// evaluation starts from the values the last ACCEPTED evaluation left behind.
+// The native committed/pending pair collapses into one set advanced by the
+// block and kept only for an accepted point. The static solve a transient
+// starts from seeds the history; an accepted point is staged and committed by
+// the next timepoint, which labels it from the host step ($simparam("dt")) as
+// cplload does.
 //
 // Nodes: ngspice cplsetup binds each conductor to ground and ignores the
 // card's reference nodes, so r1/r2 are declared for the card shape and unused.
 
 `ifndef CPL_N
 `define CPL_N 2
+`define CPL_MODULE coupled_ltra
 `endif
 
-module coupled_ltra(p1, r1, p2, r2);
+module `CPL_MODULE(p1, r1, p2, r2);
     localparam integer n = `CPL_N;       // conductors
     localparam integer deg = 7;          // 8 samples, degree-7 fits (Left_deg)
     localparam integer cap = 2048;       // history capacity (native CAP)
@@ -612,7 +593,6 @@ module coupled_ltra(p1, r1, p2, r2);
     endfunction
 
     // ---- setup (coupled() + ReadCpL folding) ----
-    // VERA-GAP: held analog-initial results -- needed so this setup runs once, not per evaluation
     integer ok, i, j, k, m, idx, dg, img;
     real rm[0:n-1][0:n-1], gm[0:n-1][0:n-1], lm[0:n-1][0:n-1], cm[0:n-1][0:n-1];
     real sv[0:n-1][0:n-1], dm[0:n-1], sv1[0:n-1][0:n-1], si[0:n-1][0:n-1], si1[0:n-1][0:n-1];
@@ -620,7 +600,7 @@ module coupled_ltra(p1, r1, p2, r2);
     real sip[0:n-1][0:n-1][0:deg], si1p[0:n-1][0:n-1][0:deg], sv1p[0:n-1][0:n-1][0:deg];
     real sisv1[0:n-1][0:n-1][0:deg], w[0:n-1][0:deg], tau[0:n-1];
     real tq[0:n-1][0:n-1][0:deg], pp[0:deg], ser[0:deg], cc3[0:2], xx3[0:2];
-    real taul[0:n-1], max_taul, min_tau_s, rdiag[0:n-1];
+    real taul[0:n-1], max_taul, min_tau_s, rdiag[0:n-1], fin;
     // Per-entry kernels: aten (C_0; 0 = entry absent), complex flag, 3 terms.
     real h1_aten[0:n-1][0:n-1], h1_c[0:n-1][0:n-1][0:2], h1_x[0:n-1][0:n-1][0:2], h1c[0:n-1][0:n-1];
     integer h1_img[0:n-1][0:n-1], h2_img[0:n-1][0:n-1][0:n-1], h3_img[0:n-1][0:n-1][0:n-1];
@@ -628,16 +608,16 @@ module coupled_ltra(p1, r1, p2, r2);
     real h3_aten[0:n-1][0:n-1][0:n-1], h3_c[0:n-1][0:n-1][0:n-1][0:2], h3_x[0:n-1][0:n-1][0:n-1][0:2];
 
     // ---- convolution state and history (held: see header) ----
-    // VERA-GAP: memory-backed arrays with runtime indexing -- needed for this state and the 4N x cap histories
     real cnv1_i[0:n-1][0:n-1][0:2], cnv1_o[0:n-1][0:n-1][0:2];
     real cnv2_i[0:n-1][0:n-1][0:n-1][0:2], cnv2_o[0:n-1][0:n-1][0:n-1][0:2];
     real cnv3_i[0:n-1][0:n-1][0:n-1][0:2], cnv3_o[0:n-1][0:n-1][0:n-1][0:2];
-    real vprev_i[0:n-1], vprev_o[0:n-1], dv_i[0:n-1], dv_o[0:n-1], dc1[0:n-1], dc2[0:n-1], tlast;
+    real vprev_i[0:n-1], vprev_o[0:n-1], dv_i[0:n-1], dv_o[0:n-1], dc1[0:n-1], dc2[0:n-1];
+    real stg_v1[0:n-1], stg_v2[0:n-1], stg_i1[0:n-1], stg_i2[0:n-1];   // the staged accepted point
     real ht[0:cap-1], hvi[0:n-1][0:cap-1], hvo[0:n-1][0:cap-1], hii[0:n-1][0:cap-1], hio[0:n-1][0:cap-1];
-    integer nh, drop;
+    integer nh, drop, staged, rebuild;
+    real tacc;   // label of the staged point, integer ps
 
     // ---- per-evaluation rebuild (right_consts) ----
-    // VERA-GAP: per-timepoint cache surviving Newton iterations -- needed so this rebuild runs once per timepoint
     real t, h, h1, tps, t1, ta, tb, f, e, er, ei, a1, ar, ai, ao, a2, b2, ff1, yc, s1, s2;
     real bi, bo, bia, boa, hh, a1r, a1i, tt, bit, bot, delta, cutoff, dd;
     real h1e[0:n-1][0:n-1][0:2], ff[0:n-1], gg[0:n-1], vx1[0:n-1], vx2[0:n-1];
@@ -693,7 +673,6 @@ module coupled_ltra(p1, r1, p2, r2);
                     w[i][dg] = dm[i];
                 end
             end
-            // VERA-GAP: array slices as analog-function actuals -- needed to fit each [i][j] series in place (E0511, lib/ir/lower.zig funcArrayIn)
             for (i = 0; i < n; i = i + 1)
                 for (j = 0; j < n; j = j + 1) begin
                     dummy = matchfit(ser, freq, sip[i][j]);  sip[i][j] = ser;
@@ -708,7 +687,6 @@ module coupled_ltra(p1, r1, p2, r2);
 
             // IWI = Si W Si^-1 -> h2, IWV = Si W Sv^-1 -> h3: per entry C_0 +
             // normalized series -> Padé. A failed fit drops the entry.
-            // VERA-GAP: array slices as analog-function actuals -- needed for the per-entry series products below
             for (m = 0; m < 2; m = m + 1) begin
                 for (i = 0; i < n; i = i + 1)
                     for (j = 0; j < n; j = j + 1)
@@ -743,7 +721,6 @@ module coupled_ltra(p1, r1, p2, r2);
             end
 
             // SIV = fitted Si Sv^-1 -> h1.
-            // VERA-GAP: array slices as analog-function actuals -- needed for matchfit(pp, freq, sisv1[i][j])
             for (i = 0; i < n; i = i + 1)
                 for (j = 0; j < n; j = j + 1) begin
                     dummy = matchfit(pp, freq, sisv1[i][j]);
@@ -783,39 +760,262 @@ module coupled_ltra(p1, r1, p2, r2);
                     end
                 end
         end
+        // A declined or nonfinite modal fit must not become a DC-only line:
+        // $fatal stops the run through the host's status channel. fin - fin
+        // is 0 only when every coefficient is finite.
+        fin = min_tau_s + max_taul;
+        for (i = 0; i < n; i = i + 1) begin
+            fin = fin + rdiag[i] + taul[i];
+            for (j = 0; j < n; j = j + 1) begin
+                fin = fin + h1_aten[i][j] + h1c[i][j];
+                for (m = 0; m < 3; m = m + 1) fin = fin + h1_c[i][j][m] + h1_x[i][j][m];
+                for (k = 0; k < n; k = k + 1) begin
+                    fin = fin + h2_aten[i][j][k] + h3_aten[i][j][k];
+                    for (m = 0; m < 3; m = m + 1)
+                        fin = fin + h2_c[i][j][k][m] + h2_x[i][j][k][m] + h3_c[i][j][k][m] + h3_x[i][j][k][m];
+                end
+            end
+        end
+        if (!(ok && min_tau_s > 0.0 && fin - fin == 0.0))
+            $fatal(1, "coupled_ltra: the modal fit failed for %d conductors, length=%g", n, length);
     end
 
     analog begin
-        // Fresh transient. Assigning here is also what makes these held.
-        @(initial_step) begin
-            nh = 0;
-            tlast = 0.0;
-            for (i = 0; i < n; i = i + 1) begin
-                vprev_i[i] = 0.0; vprev_o[i] = 0.0; dv_i[i] = 0.0; dv_o[i] = 0.0; dc1[i] = 0.0; dc2[i] = 0.0;
-                for (j = 0; j < n; j = j + 1)
-                    for (m = 0; m < 3; m = m + 1) begin
-                        cnv1_i[i][j][m] = 0.0;
-                        cnv1_o[i][j][m] = 0.0;
-                        for (k = 0; k < n; k = k + 1) begin
-                            cnv2_i[i][j][k][m] = 0.0; cnv2_o[i][j][k][m] = 0.0;
-                            cnv3_i[i][j][k][m] = 0.0; cnv3_o[i][j][k][m] = 0.0;
-                        end
+        // right_consts, once per timepoint: the delayed reads and the
+        // advanced h2/h3 states depend on the time and the accepted history
+        // only, so Newton iterations read them back (native cache_t).
+        (* vera_timepoint *) begin
+            t = $abstime;
+            h = $simparam("dt");   // host dt, 0 in the static solve
+            // Commit the point accepted last, labelled as cplload.c:64-103
+            // labels it at the next load: trunc((t - h)*1e12), clamped up to
+            // the tail. h1e, p2 and p3 still hold that point's rebuild.
+            if (staged && h > 0.0) begin
+                staged = 0;
+                tacc = floor((t - h) * 1e12);
+                if (tacc > ht[nh - 1]) begin
+                    // Adopt the advanced h2/h3 states, then advance h1 over the
+                    // accepted segment (update_cnv / update_cnv_a).
+                    cnv2_i = p2_i; cnv2_o = p2_o;
+                    cnv3_i = p3_i; cnv3_o = p3_o;
+                    delta = tacc - ht[nh - 1];
+                    for (k = 0; k < n; k = k + 1) begin
+                        dv_i[k] = (stg_v1[k] - vprev_i[k]) / delta;
+                        dv_o[k] = (stg_v2[k] - vprev_o[k]) / delta;
+                        vprev_i[k] = stg_v1[k];
+                        vprev_o[k] = stg_v2[k];
                     end
-                for (k = 0; k < cap; k = k + 1) begin
-                    hvi[i][k] = 0.0; hvo[i][k] = 0.0; hii[i][k] = 0.0; hio[i][k] = 0.0;
+                    for (j = 0; j < n; j = j + 1)
+                        for (k = 0; k < n; k = k + 1)
+                            if (h1_aten[j][k] != 0.0) begin
+                                bi = dv_i[k];
+                                bo = dv_o[k];
+                                if (h1_img[j][k]) begin
+                                    // update_cnv_a on the pair (its h*0.5e-12 and
+                                    // a - b*h argument, as in cplload), then the
+                                    // real term's exact-segment formula.
+                                    hh = delta * 0.5e-12;
+                                    er = h1e[j][k][1];
+                                    ei = h1e[j][k][2];
+                                    a1r = h1_c[j][k][1] * er - h1_c[j][k][2] * ei;
+                                    a1i = h1_c[j][k][1] * ei + h1_c[j][k][2] * er;
+                                    bia = vprev_i[k] - bi * delta;
+                                    boa = vprev_o[k] - bo * delta;
+                                    ar = cnv1_i[j][k][1] * er - cnv1_i[j][k][2] * ei;
+                                    ai = cnv1_i[j][k][1] * ei + cnv1_i[j][k][2] * er;
+                                    cnv1_i[j][k][1] = ar + hh * (a1r * bia + vprev_i[k] * h1_c[j][k][1]);
+                                    cnv1_i[j][k][2] = ai + hh * (a1i * bia + vprev_i[k] * h1_c[j][k][2]);
+                                    ar = cnv1_o[j][k][1] * er - cnv1_o[j][k][2] * ei;
+                                    ai = cnv1_o[j][k][1] * ei + cnv1_o[j][k][2] * er;
+                                    cnv1_o[j][k][1] = ar + hh * (a1r * boa + vprev_o[k] * h1_c[j][k][1]);
+                                    cnv1_o[j][k][2] = ai + hh * (a1i * boa + vprev_o[k] * h1_c[j][k][2]);
+                                    e = h1e[j][k][0];
+                                    tt = h1_c[j][k][0] / h1_x[j][k][0];
+                                    bit = bi * tt;
+                                    bot = bo * tt;
+                                    cnv1_i[j][k][0] = (cnv1_i[j][k][0] - bit * delta) * e + (e - 1.0) * (vprev_i[k] * tt + 1.0e12 * bit / h1_x[j][k][0]);
+                                    cnv1_o[j][k][0] = (cnv1_o[j][k][0] - bot * delta) * e + (e - 1.0) * (vprev_o[k] * tt + 1.0e12 * bot / h1_x[j][k][0]);
+                                end else
+                                    for (m = 0; m < 3; m = m + 1) begin
+                                        // ngspice-compatible: bi accumulates the c/x
+                                        // product across terms, as update_cnv does.
+                                        e = h1e[j][k][m];
+                                        tt = h1_c[j][k][m] / h1_x[j][k][m];
+                                        bi = bi * tt;
+                                        bo = bo * tt;
+                                        cnv1_i[j][k][m] = (cnv1_i[j][k][m] - bi * delta) * e + (e - 1.0) * (vprev_i[k] * tt + 1.0e12 * bi / h1_x[j][k][m]);
+                                        cnv1_o[j][k][m] = (cnv1_o[j][k][m] - bo * delta) * e + (e - 1.0) * (vprev_o[k] * tt + 1.0e12 * bo / h1_x[j][k][m]);
+                                    end
+                            end
+
+                    // Prune behind the largest mode delay, then append.
+                    cutoff = tacc - max_taul;
+                    drop = 0;
+                    while (drop + 1 < nh && ht[drop + 1] < cutoff) drop = drop + 1;
+                    if (drop > 64 || nh == cap) begin
+                        if (nh == cap && drop == 0) drop = 1;
+                        for (k = 0; k + drop < nh; k = k + 1) begin
+                            ht[k] = ht[k + drop];
+                            for (m = 0; m < n; m = m + 1) begin
+                                hvi[m][k] = hvi[m][k + drop]; hvo[m][k] = hvo[m][k + drop];
+                                hii[m][k] = hii[m][k + drop]; hio[m][k] = hio[m][k + drop];
+                            end
+                        end
+                        nh = nh - drop;
+                    end
+                    ht[nh] = tacc;
+                    for (k = 0; k < n; k = k + 1) begin
+                        hvi[k][nh] = stg_v1[k];
+                        hvo[k][nh] = stg_v2[k];
+                        hii[k][nh] = stg_i1[k];
+                        hio[k][nh] = stg_i2[k];
+                    end
+                    nh = nh + 1;
                 end
             end
-            for (k = 0; k < cap; k = k + 1) ht[k] = 0.0;
+            rebuild = analysis("tran") && !analysis("static") && ok && nh > 0 && h > 0.0;
+            if (rebuild) begin
+                h1 = 0.5 * h;
+                tps = floor(t * 1e12);
+                for (j = 0; j < n; j = j + 1) begin
+                    ff[j] = 0.0;
+                    gg[j] = 0.0;
+                end
+
+                // h1: exponential caches and their RHS share.
+                for (j = 0; j < n; j = j + 1)
+                    for (k = 0; k < n; k = k + 1)
+                        if (h1_aten[j][k] != 0.0) begin
+                            if (h1_img[j][k]) begin
+                                e = exp(h1_x[j][k][0] * h);
+                                h1e[j][k][0] = e;
+                                er = exp(h1_x[j][k][1] * h) * cos(h1_x[j][k][2] * h);
+                                ei = exp(h1_x[j][k][1] * h) * sin(h1_x[j][k][2] * h);
+                                h1e[j][k][1] = er;
+                                h1e[j][k][2] = ei;
+                                ff1 = h1_c[j][k][0] * e * h1;
+                                ff[j] = ff[j] - cnv1_i[j][k][0] * e;
+                                gg[j] = gg[j] - cnv1_o[j][k][0] * e;
+                                ff[j] = ff[j] - ff1 * vprev_i[k];
+                                gg[j] = gg[j] - ff1 * vprev_o[k];
+                                a1 = h1_c[j][k][1] * er - h1_c[j][k][2] * ei;
+                                ai = cnv1_i[j][k][1] * er - cnv1_i[j][k][2] * ei;
+                                ff[j] = ff[j] - 2.0 * (a1 * h1 * vprev_i[k] + ai);
+                                ao = cnv1_o[j][k][1] * er - cnv1_o[j][k][2] * ei;
+                                gg[j] = gg[j] - 2.0 * (a1 * h1 * vprev_o[k] + ao);
+                            end else begin
+                                ff1 = 0.0;
+                                for (m = 0; m < 3; m = m + 1) begin
+                                    e = exp(h1_x[j][k][m] * h);
+                                    h1e[j][k][m] = e;
+                                    ff1 = ff1 - h1_c[j][k][m] * e;
+                                    ff[j] = ff[j] - cnv1_i[j][k][m] * e;
+                                    gg[j] = gg[j] - cnv1_o[j][k][m] * e;
+                                end
+                                ff[j] = ff[j] + ff1 * h1 * vprev_i[k];
+                                gg[j] = gg[j] + ff1 * h1 * vprev_o[k];
+                            end
+                        end
+
+                // get_pvs_vi: delayed conductor values for every mode delay.
+                t1 = ht[nh - 1];
+                for (m = 0; m < n; m = m + 1) begin
+                    ta = t1 - taul[m];
+                    tb = tps - taul[m];
+                    if (tb > t1) tb = t1;   // dt > tau is cut off by the 0.9 tau step bound
+                    for (k = 0; k < n; k = k + 1) begin
+                        i1d_i[m][k] = 0.0; i1d_o[m][k] = 0.0; i2d_i[m][k] = 0.0; i2d_o[m][k] = 0.0;
+                        v1d_i[m][k] = dc1[k]; v1d_o[m][k] = dc2[k]; v2d_i[m][k] = dc1[k]; v2d_o[m][k] = dc2[k];
+                    end
+                    if (tb > 0.0) begin
+                        j = 1;
+                        if (ta > 0.0) begin
+                            while (j + 1 < nh && ht[j] < ta) j = j + 1;
+                            f = (ta - ht[j - 1]) / (ht[j] - ht[j - 1]);
+                            for (k = 0; k < n; k = k + 1) begin
+                                v1d_i[m][k] = hvi[k][j - 1] + f * (hvi[k][j] - hvi[k][j - 1]);
+                                v1d_o[m][k] = hvo[k][j - 1] + f * (hvo[k][j] - hvo[k][j - 1]);
+                                i1d_i[m][k] = hii[k][j - 1] + f * (hii[k][j] - hii[k][j - 1]);
+                                i1d_o[m][k] = hio[k][j - 1] + f * (hio[k][j] - hio[k][j - 1]);
+                            end
+                        end
+                        while (j + 1 < nh && ht[j] < tb) j = j + 1;
+                        f = (tb - ht[j - 1]) / (ht[j] - ht[j - 1]);
+                        for (k = 0; k < n; k = k + 1) begin
+                            v2d_i[m][k] = hvi[k][j - 1] + f * (hvi[k][j] - hvi[k][j - 1]);
+                            v2d_o[m][k] = hvo[k][j - 1] + f * (hvo[k][j] - hvo[k][j - 1]);
+                            i2d_i[m][k] = hii[k][j - 1] + f * (hii[k][j] - hii[k][j - 1]);
+                            i2d_o[m][k] = hio[k][j - 1] + f * (hio[k][j] - hio[k][j - 1]);
+                        end
+                    end
+                end
+
+                // h3 (on delayed voltages) then h2 (on delayed currents), per row j.
+                for (j = 0; j < n; j = j + 1)
+                    for (idx = 0; idx < 2; idx = idx + 1)
+                        for (k = 0; k < n; k = k + 1)
+                            for (m = 0; m < n; m = m + 1) begin
+                                if (idx == 0) begin
+                                    c0 = h3_aten[j][k][m]; img = h3_img[j][k][m];
+                                    cc3 = h3_c[j][k][m];   xx3 = h3_x[j][k][m];
+                                    sv1i = v1d_i[m][k]; sv2i = v2d_i[m][k]; sv1o = v1d_o[m][k]; sv2o = v2d_o[m][k];
+                                end else begin
+                                    c0 = h2_aten[j][k][m]; img = h2_img[j][k][m];
+                                    cc3 = h2_c[j][k][m];   xx3 = h2_x[j][k][m];
+                                    sv1i = i1d_i[m][k]; sv2i = i2d_i[m][k]; sv1o = i1d_o[m][k]; sv2o = i2d_o[m][k];
+                                end
+                                if (c0 != 0.0) begin
+                                    for (i = 0; i < 3; i = i + 1) begin
+                                        pp[i] = (idx == 0) ? cnv3_i[j][k][m][i] : cnv2_i[j][k][m][i];
+                                        ser[i] = (idx == 0) ? cnv3_o[j][k][m][i] : cnv2_o[j][k][m][i];
+                                    end
+                                    if (img) begin
+                                        er = exp(xx3[1] * h) * cos(xx3[2] * h);
+                                        ei = exp(xx3[1] * h) * sin(xx3[2] * h);
+                                        a2 = h1 * cc3[1];
+                                        b2 = h1 * cc3[2];
+                                        ar = pp[1] * er - pp[2] * ei;
+                                        ai = pp[1] * ei + pp[2] * er;
+                                        pp[1] = ar + a2 * (sv1i * er + sv2i) - b2 * (sv1i * ei);
+                                        pp[2] = ai + a2 * (sv1i * ei) + b2 * (sv1i * er + sv2i);
+                                        ar = ser[1] * er - ser[2] * ei;
+                                        ai = ser[1] * ei + ser[2] * er;
+                                        ser[1] = ar + a2 * (sv1o * er + sv2o) - b2 * (sv1o * ei);
+                                        ser[2] = ai + a2 * (sv1o * ei) + b2 * (sv1o * er + sv2o);
+                                        e = exp(xx3[0] * h);
+                                        pp[0] = pp[0] * e + h1 * cc3[0] * (sv1i * e + sv2i);
+                                        ser[0] = ser[0] * e + h1 * cc3[0] * (sv1o * e + sv2o);
+                                        ff[j] = ff[j] + (c0 * sv2o + ser[0] + 2.0 * ser[1]);
+                                        gg[j] = gg[j] + (c0 * sv2i + pp[0] + 2.0 * pp[1]);
+                                    end else begin
+                                        for (i = 0; i < 3; i = i + 1) begin
+                                            e = exp(xx3[i] * h);
+                                            pp[i] = pp[i] * e + h1 * cc3[i] * (sv1i * e + sv2i);
+                                            ser[i] = ser[i] * e + h1 * cc3[i] * (sv1o * e + sv2o);
+                                            ff[j] = ff[j] + ser[i];
+                                            gg[j] = gg[j] + pp[i];
+                                        end
+                                        ff[j] = ff[j] + c0 * sv2o;
+                                        gg[j] = gg[j] + c0 * sv2i;
+                                    end
+                                    for (i = 0; i < 3; i = i + 1)
+                                        if (idx == 0) begin
+                                            p3_i[j][k][m][i] = pp[i];
+                                            p3_o[j][k][m][i] = ser[i];
+                                        end else begin
+                                            p2_i[j][k][m][i] = pp[i];
+                                            p2_o[j][k][m][i] = ser[i];
+                                        end
+                                end
+                            end
+            end
         end
 
-        t = $abstime;
-        h = t - tlast;   // host dt: seconds since the last accepted point
         for (gk = 0; gk < n; gk = gk + 1) begin
             vx1[gk] = V(p1[gk]);
             vx2[gk] = V(p2[gk]);
         end
-
-        if (!analysis("tran") || !ok || nh == 0 || h <= 0.0) begin
+        if (!rebuild) begin
             // cplload cond1: per conductor i1 + i2 = 0 and v1 - v2 = R_mm len i1
             // (diagonal R only, as the reference's resindex walk stamps).
             for (gk = 0; gk < n; gk = gk + 1) begin
@@ -823,140 +1023,6 @@ module coupled_ltra(p1, r1, p2, r2);
                 V(p2[gk]) <+ V(p2[gk]) + I(p1[gk]) + I(p2[gk]);
             end
         end else begin
-            h1 = 0.5 * h;
-            tps = floor(t * 1e12);
-            for (j = 0; j < n; j = j + 1) begin
-                ff[j] = 0.0;
-                gg[j] = 0.0;
-            end
-
-            // h1: exponential caches and their RHS share.
-            for (j = 0; j < n; j = j + 1)
-                for (k = 0; k < n; k = k + 1)
-                    if (h1_aten[j][k] != 0.0) begin
-                        if (h1_img[j][k]) begin
-                            e = exp(h1_x[j][k][0] * h);
-                            h1e[j][k][0] = e;
-                            er = exp(h1_x[j][k][1] * h) * cos(h1_x[j][k][2] * h);
-                            ei = exp(h1_x[j][k][1] * h) * sin(h1_x[j][k][2] * h);
-                            h1e[j][k][1] = er;
-                            h1e[j][k][2] = ei;
-                            ff1 = h1_c[j][k][0] * e * h1;
-                            ff[j] = ff[j] - cnv1_i[j][k][0] * e;
-                            gg[j] = gg[j] - cnv1_o[j][k][0] * e;
-                            ff[j] = ff[j] - ff1 * vprev_i[k];
-                            gg[j] = gg[j] - ff1 * vprev_o[k];
-                            a1 = h1_c[j][k][1] * er - h1_c[j][k][2] * ei;
-                            ai = cnv1_i[j][k][1] * er - cnv1_i[j][k][2] * ei;
-                            ff[j] = ff[j] - 2.0 * (a1 * h1 * vprev_i[k] + ai);
-                            ao = cnv1_o[j][k][1] * er - cnv1_o[j][k][2] * ei;
-                            gg[j] = gg[j] - 2.0 * (a1 * h1 * vprev_o[k] + ao);
-                        end else begin
-                            ff1 = 0.0;
-                            for (m = 0; m < 3; m = m + 1) begin
-                                e = exp(h1_x[j][k][m] * h);
-                                h1e[j][k][m] = e;
-                                ff1 = ff1 - h1_c[j][k][m] * e;
-                                ff[j] = ff[j] - cnv1_i[j][k][m] * e;
-                                gg[j] = gg[j] - cnv1_o[j][k][m] * e;
-                            end
-                            ff[j] = ff[j] + ff1 * h1 * vprev_i[k];
-                            gg[j] = gg[j] + ff1 * h1 * vprev_o[k];
-                        end
-                    end
-
-            // get_pvs_vi: delayed conductor values for every mode delay.
-            t1 = ht[nh - 1];
-            for (m = 0; m < n; m = m + 1) begin
-                ta = t1 - taul[m];
-                tb = tps - taul[m];
-                if (tb > t1) tb = t1;   // dt > tau is cut off by the 0.9 tau step bound
-                for (k = 0; k < n; k = k + 1) begin
-                    i1d_i[m][k] = 0.0; i1d_o[m][k] = 0.0; i2d_i[m][k] = 0.0; i2d_o[m][k] = 0.0;
-                    v1d_i[m][k] = dc1[k]; v1d_o[m][k] = dc2[k]; v2d_i[m][k] = dc1[k]; v2d_o[m][k] = dc2[k];
-                end
-                if (tb > 0.0) begin
-                    j = 1;
-                    if (ta > 0.0) begin
-                        while (j + 1 < nh && ht[j] < ta) j = j + 1;
-                        f = (ta - ht[j - 1]) / (ht[j] - ht[j - 1]);
-                        for (k = 0; k < n; k = k + 1) begin
-                            v1d_i[m][k] = hvi[k][j - 1] + f * (hvi[k][j] - hvi[k][j - 1]);
-                            v1d_o[m][k] = hvo[k][j - 1] + f * (hvo[k][j] - hvo[k][j - 1]);
-                            i1d_i[m][k] = hii[k][j - 1] + f * (hii[k][j] - hii[k][j - 1]);
-                            i1d_o[m][k] = hio[k][j - 1] + f * (hio[k][j] - hio[k][j - 1]);
-                        end
-                    end
-                    while (j + 1 < nh && ht[j] < tb) j = j + 1;
-                    f = (tb - ht[j - 1]) / (ht[j] - ht[j - 1]);
-                    for (k = 0; k < n; k = k + 1) begin
-                        v2d_i[m][k] = hvi[k][j - 1] + f * (hvi[k][j] - hvi[k][j - 1]);
-                        v2d_o[m][k] = hvo[k][j - 1] + f * (hvo[k][j] - hvo[k][j - 1]);
-                        i2d_i[m][k] = hii[k][j - 1] + f * (hii[k][j] - hii[k][j - 1]);
-                        i2d_o[m][k] = hio[k][j - 1] + f * (hio[k][j] - hio[k][j - 1]);
-                    end
-                end
-            end
-
-            // h3 (on delayed voltages) then h2 (on delayed currents), per row j.
-            for (j = 0; j < n; j = j + 1)
-                for (idx = 0; idx < 2; idx = idx + 1)
-                    for (k = 0; k < n; k = k + 1)
-                        for (m = 0; m < n; m = m + 1) begin
-                            if (idx == 0) begin
-                                c0 = h3_aten[j][k][m]; img = h3_img[j][k][m];
-                                cc3 = h3_c[j][k][m];   xx3 = h3_x[j][k][m];
-                                sv1i = v1d_i[m][k]; sv2i = v2d_i[m][k]; sv1o = v1d_o[m][k]; sv2o = v2d_o[m][k];
-                            end else begin
-                                c0 = h2_aten[j][k][m]; img = h2_img[j][k][m];
-                                cc3 = h2_c[j][k][m];   xx3 = h2_x[j][k][m];
-                                sv1i = i1d_i[m][k]; sv2i = i2d_i[m][k]; sv1o = i1d_o[m][k]; sv2o = i2d_o[m][k];
-                            end
-                            if (c0 != 0.0) begin
-                                for (i = 0; i < 3; i = i + 1) begin
-                                    pp[i] = (idx == 0) ? cnv3_i[j][k][m][i] : cnv2_i[j][k][m][i];
-                                    ser[i] = (idx == 0) ? cnv3_o[j][k][m][i] : cnv2_o[j][k][m][i];
-                                end
-                                if (img) begin
-                                    er = exp(xx3[1] * h) * cos(xx3[2] * h);
-                                    ei = exp(xx3[1] * h) * sin(xx3[2] * h);
-                                    a2 = h1 * cc3[1];
-                                    b2 = h1 * cc3[2];
-                                    ar = pp[1] * er - pp[2] * ei;
-                                    ai = pp[1] * ei + pp[2] * er;
-                                    pp[1] = ar + a2 * (sv1i * er + sv2i) - b2 * (sv1i * ei);
-                                    pp[2] = ai + a2 * (sv1i * ei) + b2 * (sv1i * er + sv2i);
-                                    ar = ser[1] * er - ser[2] * ei;
-                                    ai = ser[1] * ei + ser[2] * er;
-                                    ser[1] = ar + a2 * (sv1o * er + sv2o) - b2 * (sv1o * ei);
-                                    ser[2] = ai + a2 * (sv1o * ei) + b2 * (sv1o * er + sv2o);
-                                    e = exp(xx3[0] * h);
-                                    pp[0] = pp[0] * e + h1 * cc3[0] * (sv1i * e + sv2i);
-                                    ser[0] = ser[0] * e + h1 * cc3[0] * (sv1o * e + sv2o);
-                                    ff[j] = ff[j] + (c0 * sv2o + ser[0] + 2.0 * ser[1]);
-                                    gg[j] = gg[j] + (c0 * sv2i + pp[0] + 2.0 * pp[1]);
-                                end else begin
-                                    for (i = 0; i < 3; i = i + 1) begin
-                                        e = exp(xx3[i] * h);
-                                        pp[i] = pp[i] * e + h1 * cc3[i] * (sv1i * e + sv2i);
-                                        ser[i] = ser[i] * e + h1 * cc3[i] * (sv1o * e + sv2o);
-                                        ff[j] = ff[j] + ser[i];
-                                        gg[j] = gg[j] + pp[i];
-                                    end
-                                    ff[j] = ff[j] + c0 * sv2o;
-                                    gg[j] = gg[j] + c0 * sv2i;
-                                end
-                                for (i = 0; i < 3; i = i + 1)
-                                    if (idx == 0) begin
-                                        p3_i[j][k][m][i] = pp[i];
-                                        p3_o[j][k][m][i] = ser[i];
-                                    end else begin
-                                        p2_i[j][k][m][i] = pp[i];
-                                        p2_o[j][k][m][i] = ser[i];
-                                    end
-                            end
-                        end
-
             // Branch rows: sum_p yc_mp v_p - i_m = ff_m (resp. gg_m), stamped
             // as implicit potential equations (§5.6.6: V <+ V + F means F = 0).
             for (gk = 0; gk < n; gk = gk + 1) begin
@@ -975,8 +1041,10 @@ module coupled_ltra(p1, r1, p2, r2);
         // ---- accepted-point bookkeeping (cplload accept loop) ----
         // Runs on every evaluation; only an accepted evaluation's result is held.
         if (analysis("tran") && ok) begin
-            tps = floor(t * 1e12);
-            if (t == 0.0 || nh == 0) begin
+            if (analysis("static") || nh == 0) begin
+                // DC seed from the static solve the transient starts from
+                // (or, under uic, its first point).
+                staged = 0;
                 // DC seed: steady h1/h3 states (complex pairs by complex
                 // division), zero h2, one t = 0 point with zero currents.
                 nh = 1;
@@ -1029,86 +1097,16 @@ module coupled_ltra(p1, r1, p2, r2);
                             end
                         end
                     end
-            end else if (tps > ht[nh - 1]) begin
-                // Adopt the advanced h2/h3 states, then advance h1 over the
-                // accepted segment (update_cnv / update_cnv_a).
-                cnv2_i = p2_i; cnv2_o = p2_o;
-                cnv3_i = p3_i; cnv3_o = p3_o;
-                delta = tps - ht[nh - 1];
-                for (k = 0; k < n; k = k + 1) begin
-                    dv_i[k] = (vx1[k] - vprev_i[k]) / delta;
-                    dv_o[k] = (vx2[k] - vprev_o[k]) / delta;
-                    vprev_i[k] = vx1[k];
-                    vprev_o[k] = vx2[k];
-                end
-                for (j = 0; j < n; j = j + 1)
-                    for (k = 0; k < n; k = k + 1)
-                        if (h1_aten[j][k] != 0.0) begin
-                            bi = dv_i[k];
-                            bo = dv_o[k];
-                            if (h1_img[j][k]) begin
-                                // update_cnv_a on the pair (its h*0.5e-12 and
-                                // a - b*h argument, as in cplload), then the
-                                // real term's exact-segment formula.
-                                hh = delta * 0.5e-12;
-                                er = h1e[j][k][1];
-                                ei = h1e[j][k][2];
-                                a1r = h1_c[j][k][1] * er - h1_c[j][k][2] * ei;
-                                a1i = h1_c[j][k][1] * ei + h1_c[j][k][2] * er;
-                                bia = vprev_i[k] - bi * delta;
-                                boa = vprev_o[k] - bo * delta;
-                                ar = cnv1_i[j][k][1] * er - cnv1_i[j][k][2] * ei;
-                                ai = cnv1_i[j][k][1] * ei + cnv1_i[j][k][2] * er;
-                                cnv1_i[j][k][1] = ar + hh * (a1r * bia + vprev_i[k] * h1_c[j][k][1]);
-                                cnv1_i[j][k][2] = ai + hh * (a1i * bia + vprev_i[k] * h1_c[j][k][2]);
-                                ar = cnv1_o[j][k][1] * er - cnv1_o[j][k][2] * ei;
-                                ai = cnv1_o[j][k][1] * ei + cnv1_o[j][k][2] * er;
-                                cnv1_o[j][k][1] = ar + hh * (a1r * boa + vprev_o[k] * h1_c[j][k][1]);
-                                cnv1_o[j][k][2] = ai + hh * (a1i * boa + vprev_o[k] * h1_c[j][k][2]);
-                                e = h1e[j][k][0];
-                                tt = h1_c[j][k][0] / h1_x[j][k][0];
-                                bit = bi * tt;
-                                bot = bo * tt;
-                                cnv1_i[j][k][0] = (cnv1_i[j][k][0] - bit * delta) * e + (e - 1.0) * (vprev_i[k] * tt + 1.0e12 * bit / h1_x[j][k][0]);
-                                cnv1_o[j][k][0] = (cnv1_o[j][k][0] - bot * delta) * e + (e - 1.0) * (vprev_o[k] * tt + 1.0e12 * bot / h1_x[j][k][0]);
-                            end else
-                                for (m = 0; m < 3; m = m + 1) begin
-                                    // ngspice-compatible: bi accumulates the c/x
-                                    // product across terms, as update_cnv does.
-                                    e = h1e[j][k][m];
-                                    tt = h1_c[j][k][m] / h1_x[j][k][m];
-                                    bi = bi * tt;
-                                    bo = bo * tt;
-                                    cnv1_i[j][k][m] = (cnv1_i[j][k][m] - bi * delta) * e + (e - 1.0) * (vprev_i[k] * tt + 1.0e12 * bi / h1_x[j][k][m]);
-                                    cnv1_o[j][k][m] = (cnv1_o[j][k][m] - bo * delta) * e + (e - 1.0) * (vprev_o[k] * tt + 1.0e12 * bo / h1_x[j][k][m]);
-                                end
-                        end
-
-                // Prune behind the largest mode delay, then append.
-                cutoff = tps - max_taul;
-                drop = 0;
-                while (drop + 1 < nh && ht[drop + 1] < cutoff) drop = drop + 1;
-                if (drop > 64 || nh == cap) begin
-                    if (nh == cap && drop == 0) drop = 1;
-                    for (k = 0; k + drop < nh; k = k + 1) begin
-                        ht[k] = ht[k + drop];
-                        for (m = 0; m < n; m = m + 1) begin
-                            hvi[m][k] = hvi[m][k + drop]; hvo[m][k] = hvo[m][k + drop];
-                            hii[m][k] = hii[m][k + drop]; hio[m][k] = hio[m][k + drop];
-                        end
-                    end
-                    nh = nh - drop;
-                end
-                ht[nh] = tps;
+            end else begin
+                // Staged for the next timepoint, which knows the label.
+                staged = 1;
                 for (gk = 0; gk < n; gk = gk + 1) begin
-                    hvi[gk][nh] = vx1[gk];
-                    hvo[gk][nh] = vx2[gk];
-                    hii[gk][nh] = I(p1[gk]);
-                    hio[gk][nh] = I(p2[gk]);
+                    stg_v1[gk] = vx1[gk];
+                    stg_v2[gk] = vx2[gk];
+                    stg_i1[gk] = I(p1[gk]);
+                    stg_i2[gk] = I(p2[gk]);
                 end
-                nh = nh + 1;
             end
-            tlast = t;   // a sub-ps step appends nothing but still sets the host dt
             $bound_step(0.9 * min_tau_s);
         end
     end

@@ -54,7 +54,7 @@ compiler side; this table is not re-verified on every change.
 | D04/D05 | Initial/always control flow and explicit `@` event control integrated; implicit sensitivity, named events and mixed-signal re-entry remain open |
 | A07 | Reference algorithms, guarded errors and host overrides integrated; paramset skipped-arm folding under implementation; fractional counts and lifecycle open |
 | Q03 | Loader isolation and the portable device error status (device ABI 10, now 13) integrated; separate-object allocation tests pass (`zig build test-device`) |
-| X01 | Native routes and setup guards restored; prescribed ngspice-grid replay passes; full waveform comparisons are tracked in `issues.md` |
+| X01 | LTRA, TXL and CPL run on `models/ltra.va`, `txl.va` and `coupled_ltra.va`, matching the retired native devices on the line decks |
 | Q01-Q03 | Compiler build, 404 units and 1,323/1,323 strict fixtures passed when recorded. ESPice host counts are in AGENTS.md "Verification" |
 | D03 | Net state, independent drivers, §7.9 wired-logic resolution, `assign` and one-dimensional memories integrated; drive strengths remain open |
 | P01 | `vpi_user.h`, the elaborated object model and eleven handle/traversal/property routines integrated; a compiled C application walks a three-deep design. P02/P03 values and callbacks remain open |
@@ -562,10 +562,10 @@ Direct Newton/JFNK limiter hooks exist; this item is not a rewrite of those hook
 
 ### X01: LTRA, TXL and coupled transmission lines
 
-The native source files remain under `models/native/`. The routing audit found
-that O/Y/P paths selected approximate generated models. Native LTRA/TXL/CPL
-registration and supported construction routes are restored through the neutral
-CPU interface, with explicit rejection of unsupported setups. The
+LTRA, TXL and CPL moved to `models/ltra.va`, `txl.va` and `coupled_ltra.va`
+on line-deck parity with the native devices, which are deleted. An earlier
+routing audit found that O/Y/P paths selected approximate generated models;
+the exact routes reject unsupported setups instead. The
 [migration audit](native-transmission-line-migration.md) records the algorithms,
 standard facilities, numerical evidence and remaining differences. A replacement
 may take over only after the comparisons below pass. The retained algorithms also have existing capacity,

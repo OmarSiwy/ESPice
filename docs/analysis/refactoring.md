@@ -104,21 +104,16 @@ These came out of the engine cleanup (branch history `9df71ed` to
   envelope `extractPeak`/`extractRMS` helpers and the `stb` margin
   extraction had no callers and were deleted.
 
-## Native transmission lines
+## Transmission lines
 
-O, Y and P cards stay on the native Zig devices (`models/native/`), registered
-through the same neutral CPU vtable boundary as generated models: O cards use
-native LTRA convolution for RLC/RC, the ideal line for LC and the static
-Verilog-A two-port for RG; Y cards use native TXL; P cards use native CPL for
-two, three or four conductors. Unsupported parameter sets and dimensions
-fail at construction; the approximate Verilog-A RLC/RC and coupled models are
-not fallbacks. The natives commit their own histories through `commit_state`,
-with step bounds and breakpoints through the existing hooks. They stay until a
-Verilog-A replacement passes the same numerical oracles (see
-[vera-gaps.md](../vera-gaps.md)). Native history capacities, interpolation
-choices, fit limits and non-transient behavior still need their own
-compatibility coverage, and runtime parameter sweeps need a failure path for
-newly invalid fits.
+O, Y and P cards run on Verilog-A: O cards use `ltra.va`'s convolution for
+RLC/RC, the ideal line for LC and the static two-port of `lossy_tline.va` for
+RG; Y cards use `txl.va`; P cards use `coupled_ltra.va` for two, three or four
+conductors. Unsupported parameter sets and dimensions fail at construction; a
+failed TXL or CPL fit `$fatal`s and the run is refused. The approximate
+Verilog-A RLC/RC and coupled models are not fallbacks. History capacities,
+interpolation choices and non-transient behavior still need their own
+compatibility coverage.
 
 ## Tests
 

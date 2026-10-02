@@ -7,8 +7,8 @@
 //   ngspice: Copyright Regents of the University of California and others,
 //   modified BSD license.
 //
-// O-card RLC/RC devices use the native convolution model
-// (models/native/ltra_native.zig); LC uses tline.va. This file is kept for
+// O-card RLC/RC devices use the recursive-convolution model
+// (models/ltra.va); LC uses tline.va. This file is kept for
 // comparison and the static RG path. Migration requirements:
 // docs/native-transmission-line-migration.md.
 //

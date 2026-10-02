@@ -110,20 +110,20 @@ test "control source sensing ignores case while binding rejects missing and inex
     }
 }
 
-test "transmission-line cards retain native numerical algorithms" {
+test "transmission-line cards route to their convolution algorithms" {
     const cases = .{
-        .{ "O1 a 0 b 0 line\n.model line LTRA r=0.5 l=250n c=100p len=2\n", "ltra_native" },
-        .{ "O1 a 0 b 0 line\n.model line LTRA r=1 c=100p len=2\n", "ltra_native" },
-        .{ "Y1 a 0 b 0 line\n.model line TXL r=12.45 l=8.972n c=0.468p length=16\n", "txl_native" },
-        .{ "P1 a b 0 c d 0 line\n.model line CPL r=0.2 0 0.2 l=9.13n 3.3n 9.13n c=0.365p -0.09p 0.365p length=10\n", "cpl_native_2" },
-        .{ "P1 a b c 0 d e f 0 line\n.model line CPL r=0.2 0 0 0.2 0 0.2 l=9n 3n 0 9n 3n 9n c=0.3p -0.03p 0 0.3p -0.03p 0.3p length=10\n", "cpl_native_3" },
-        .{ "P1 a b c d 0 e f g h 0 line\n.model line CPL r=0.2 0 0 0 0.2 0 0 0.2 0 0.2 l=9n 3n 0 0 9n 3n 0 9n 3n 9n c=0.3p -0.03p 0 0 0.3p -0.03p 0 0.3p -0.03p 0.3p length=10\n", "cpl_native_4" },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=0.5 l=250n c=100p len=2\n", "ltra" },
+        .{ "O1 a 0 b 0 line\n.model line LTRA r=1 c=100p len=2\n", "ltra" },
+        .{ "Y1 a 0 b 0 line\n.model line TXL r=12.45 l=8.972n c=0.468p length=16\n", "txl" },
+        .{ "P1 a b 0 c d 0 line\n.model line CPL r=0.2 0 0.2 l=9.13n 3.3n 9.13n c=0.365p -0.09p 0.365p length=10\n", "coupled_ltra" },
+        .{ "P1 a b c 0 d e f 0 line\n.model line CPL r=0.2 0 0 0.2 0 0.2 l=9n 3n 0 9n 3n 9n c=0.3p -0.03p 0 0.3p -0.03p 0.3p length=10\n", "coupled_ltra3" },
+        .{ "P1 a b c d 0 e f g h 0 line\n.model line CPL r=0.2 0 0 0 0.2 0 0 0.2 0 0.2 l=9n 3n 0 0 9n 3n 0 9n 3n 9n c=0.3p -0.03p 0 0 0.3p -0.03p 0 0.3p -0.03p 0.3p length=10\n", "coupled_ltra4" },
     };
     inline for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const nl = try netlist.parse(a, "* native line routing\n" ++ case[0] ++ ".end\n", .ngspice);
+        const nl = try netlist.parse(a, "* line routing\n" ++ case[0] ++ ".end\n", .ngspice);
         const lib = try device.Library.init(a);
         var b = try Builder.init(a, &lib);
         var compiled = false;
@@ -139,8 +139,9 @@ test "transmission-line cards retain native numerical algorithms" {
         var circuit = try b.compile();
         compiled = true;
         defer circuit.deinit();
-        try std.testing.expect(circuit.batches[0].hooks.commit_state != null);
-        try std.testing.expect(circuit.batches[0].hooks.update_state == null);
+        // The lines hold their history as §5.10 state, staged per converged solve.
+        try std.testing.expect(circuit.batches[0].hooks.commit_state == null);
+        try std.testing.expect(circuit.batches[0].hooks.update_state != null);
         try std.testing.expect(circuit.batches[0].hooks.gpu_payload == null);
     }
 }
@@ -200,16 +201,14 @@ test "source breakpoints match an uncached walk, forward and backward" {
     }
 }
 
+// A failed TXL or CPL fit passes the builder and the run refuses it; see
+// "a failed line fit refuses every analysis" in src/tests/analyses.zig.
 test "unsupported transmission-line cards never select approximate fallbacks" {
     const cases = .{
         .{ "P1 a b c d e 0 f g h i j 0 line\n.model line CPL length=1\n", error.UnsupportedCoupledLineDimension },
         .{ "P1 a b 0 c d 0 line\n.model line CPL r=1 l=1n c=1p length=1\n", error.UnsupportedTransmissionLineParameters },
         .{ "Y1 a 0 b 0 line\n.model line TXL r=1e6 l=1n c=1p length=1\n", error.UnsupportedTransmissionLineParameters },
-        .{ "Y1 a 0 b 0 line\n.model line TXL r=1 l=1u g=1u c=1p length=1\n", error.UnsupportedTransmissionLineParameters },
         .{ "Y1 a 0 b 0 line\n.model line TXL r=1e200 l=1e200 c=1e-100 length=1e150\n", error.UnsupportedTransmissionLineParameters },
-        .{ "Y1 a 0 b 0 line\n.model line TXL r=1 l=1e200 c=1e-200 length=1\n", error.UnsupportedTransmissionLineParameters },
-        .{ "P1 a b 0 c d 0 line\n.model line CPL r=1 0 1 l=1u 2u 1u c=1p 0 1p length=1\n", error.UnsupportedTransmissionLineParameters },
-        .{ "P1 a b 0 c d 0 line\n.model line CPL r=1 0 1 l=0 0 0 c=1p 0 1p length=1\n", error.UnsupportedTransmissionLineParameters },
         .{ "Y1 a 0 b 0 line\n.model line TXL r=12.45 l=8.972n g=unresolved c=0.468p length=16\n", error.UnresolvedParameter },
         .{ "Y1 a 0 b 0 line len=unresolved\n.model line TXL r=12.45 l=8.972n c=0.468p length=16\n", error.UnresolvedParameter },
         .{ "O1 a 0 b 0 line\n.model line LTRA r=0.5 l=250n c=100p length=unresolved\n", error.UnresolvedParameter },
