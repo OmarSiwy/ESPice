@@ -4,10 +4,12 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        // Local: VerA ae44118d (device ABI 6: setup cache and temperature per
-        // Model row; $port_connected mask; $fatal/$error status channel) is not
-        // pushed yet. Restore a git pin before pushing (AGENTS.md).
-        .vera = .{ .path = "../VerA-pin9" },
+        // VerA ae44118d: device ABI 6 (setup cache and temperature per Model
+        // row), $port_connected mask, $fatal/$error status channel, batch_inst.
+        .vera = .{
+            .url = "git+https://github.com/OmarSiwy/VerA#ae44118d7de548344a6c1b5ccafaced593422e4c",
+            .hash = "vera-0.9.0-fzAu7PHBkAG_ygMrCZqScL79aNecIjvztHTOhyAnBhLL",
+        },
         // Local until stdpp has a git remote; pin it before pushing (AGENTS.md).
         .stdpp = .{ .path = "../../Trial/ZvsRust" },
         .gompute = .{
