@@ -8,7 +8,6 @@ const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
 const simdCopy = root.copySimd;
 
-// ponytail: platform SIMD width, not hardcoded.
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
 // Re-exported so the post-processors and tests import one file; each is

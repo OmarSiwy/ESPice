@@ -265,9 +265,8 @@ pub fn solveLadder(
     if (final.converged)
         return .{ .converged = true, .iterations = total_iter, .max_dx = final.max_dx };
 
-    // Rung 4: JFNK, the algorithm the GPU kernel runs, so CPU convergence is
-    // a superset of GPU convergence. Damping plus residual backtracking
-    // catches circuits where the factored Newton step wedges.
+    // Rung 4: JFNK. Damping plus residual backtracking catches circuits
+    // where the factored Newton step wedges.
     // It has no holds, so a held solve skips it.
     if (hold.len == 0) {
         coldStart(ckt, x);
@@ -329,8 +328,6 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     ckt.setSimState(op_sim);
     try ckt.rebuildBaseline();
     if (sim == null or !sim.?.completed) return failed;
-    // Holds can pin the floating nodes, as they do in ngspice, so a held
-    // solve tries the static rungs before settling.
     // The settled x belongs to the device state at t = 1 us, not the
     // restored one, so it is not the answer even where the static rows are
     // singular: the rest is re-solved at the restored state (#53).
