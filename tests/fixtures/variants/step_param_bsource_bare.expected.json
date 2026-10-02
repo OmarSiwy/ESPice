@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A .step over a .param a B source reads as a bare name rebuilds each point once instead of recursing.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(out) = g * v(a) = g; i(bout) = -g/1k."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point (g=1)",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              1.0
+            ]
+          },
+          "i(bout)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.001
+            ]
+          }
+        },
+        "row_count": 1
+      },
+      {
+        "name": "Operating Point (g=2)",
+        "match": "exact",
+        "columns": {
+          "v(out)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              2.0
+            ]
+          },
+          "i(bout)": {
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-12,
+            "values": [
+              -0.002
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ]
+  },
+  "netlist_sha256": "a6816aa35ef60960658ae534f6155a9896172037122a8382ba16779033af3290"
+}
