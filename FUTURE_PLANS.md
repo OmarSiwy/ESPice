@@ -60,8 +60,8 @@ the full matrix. Open items:
      error.
   3. VCR (factor read as a resistance) and VCCAP (Q = C·V) come from reading
      the manual. Check them against HSPICE and record them in `docs/`.
-  4. POLE, FREQ, OPAMP, NPWL/PPWL, the logic gates and TRANSFORMER are
-     still refused.
+  4. FREQ, OPAMP, NPWL/PPWL, the logic gates and TRANSFORMER are still
+     refused. POLE has landed on main (`laplace_zp`, docs/frontend.md).
 - **W and S elements (WIP, not landed).** Branch
   `worktree-agent-a88282e1f6b249fdd`, commit `7accb00d`. Only its three
   standalone `zig test` files have been run: `wline.zig`, `ydata.zig` and

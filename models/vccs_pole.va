@@ -1,0 +1,5 @@
+// vccs_pole: the G-card POLE source, I(p,n) = gain * H(s) V(cp,cn) with
+// H(s) from laplace_zp. Same body as vcvs_laplace.va.
+`define LAPLACE_ZP
+`define LAPLACE_CURRENT
+`include "vcvs_laplace.va"

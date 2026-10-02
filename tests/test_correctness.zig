@@ -268,6 +268,7 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
         .{ "UnknownParameter", "unsupported_input" },
         .{ "WrongNodeCount", "inconsistent_circuit" },
         .{ "OsdiUnsupported", "unsupported_input" },
+        .{ "UnpairedPoleRoot", "unsupported_input" },
         .{ "unsupported_input", "unsupported_input" },
     });
     var lines = std.mem.splitScalar(u8, result.stderr, '\n');

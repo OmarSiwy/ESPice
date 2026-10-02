@@ -129,6 +129,34 @@ buffers, ports, S-parameter blocks and lossy lines. Output-only cards
 and friends) are accepted and ignored, since every vector is written. An
 analysis card that fails to build logs its line before the error.
 
+## Pole-zero sources
+
+`E|G name out+ out- POLE in+ in- a az1,fz1 ... / b ap1,fp1 ...` [SA
+E-element Pole-Zero Function] is H(s) = a (s - z1)...(s - zn) / (b (s -
+p1)...(s - pm)) with each root s = -alpha + j 2 pi f, in every dialect. The
+builder hands the roots to `laplace_zp` (`models/vcvs_pole.va`,
+`vccs_pole.va`, the `LAPLACE_ZP` body of `vcvs_laplace.va`) with the gain
+a/b times the product of -r over the nonzero roots, since laplace_zp's
+terms are (1 - s/r). Unused root slots hold an infinite root, whose term is
+exactly 1. Where this differs from HSPICE, or the manual is silent:
+
+- A complex root needs its conjugate on the same side, written out as the
+  manual's examples do; a lone one is `UnpairedPoleRoot`, paired exactly as
+  VerA pairs at run time (within 1e-9 relative), so no accepted card
+  evaluates to NaN.
+- At most 8 roots a side, and no more zeros than poles
+  (`UnsupportedLaplaceOrder`). `SCALE=` and `M=` (G only) are read; `MAX=`,
+  `MIN=`, `TC1=` and `TC2=` are refused (`UnsupportedLaplaceParameter`).
+- A pole at s = 0 has no DC value; the operating point takes 0 there, as
+  VerA does for every laplace filter.
+
+The syntax comes from memory of the manual's Pole-Zero Function section and
+its examples. It has not been checked against the manual text or a real
+HSPICE run.
+
+Oracle decks: `tests/fixtures/hspice/pole_source.sp` (DC and AC),
+`pole_step.sp` (transient), `invalid/pole_unpaired_root.sp`.
+
 ## HSPICE dialect
 
 `--tokenizer=hspice` also switches these semantics [CR = HSPICE Command

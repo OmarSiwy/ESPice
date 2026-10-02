@@ -908,6 +908,8 @@ pub const NetBuilder = struct {
             'u' => try self.addUrc(dev),
             'e', 'g' => if (kvNumber(dev.kv, "laplace") != null) {
                 try addLaplace(self, dev, letter);
+            } else if (kvNumber(dev.kv, "pole") != null) {
+                try addPole(self, dev, letter);
             } else if (kvNumber(dev.kv, "td") != null) {
                 try addDelay(self, dev, letter);
             } else {
@@ -1674,6 +1676,75 @@ fn addLaplace(self: *NetBuilder, dev: Device, letter: u8) !void {
         try self.b.addDevice(D, dev.name, model, instance, try controlledNodes(self, dev));
         if (l == 'e') try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", self.b.n));
     };
+}
+
+/// E/G POLE card: H(s) = a (s - z1)...(s - zn) / (b (s - p1)...(s - pm)),
+/// each root written `alpha, f` for s = -alpha + j 2 pi f [SA E-element
+/// Pole-Zero Function], on models/vcvs_pole.va or vccs_pole.va
+/// (`laplace_zp`). A complex root without its conjugate on the same side
+/// is refused (UnpairedPoleRoot), as are more zeros than poles and more
+/// than 8 roots a side.
+fn addPole(self: *NetBuilder, dev: Device, letter: u8) !void {
+    for (dev.kv) |item| {
+        const known = std.StaticStringMap(void).initComptime(.{ .{"pole"}, .{"scale"}, .{"m"} });
+        if (!known.has(item.key)) return error.UnsupportedLaplaceParameter;
+    }
+    // The parser checked both sides: a constant, then (alpha, f) pairs.
+    const nk: usize = @intFromFloat(kvNumber(dev.kv, "pole").?);
+    var v: [2 * (1 + 2 * 8)]f64 = undefined;
+    if (dev.positional.len > v.len) return error.UnsupportedLaplaceOrder;
+    for (dev.positional, v[0..dev.positional.len]) |p, *x| x.* = valueNumber(p) orelse return error.UnresolvedParameter;
+    const zeros = v[1..nk];
+    const poles = v[nk + 1 .. dev.positional.len];
+    if (zeros.len > poles.len or poles.len > 2 * 8) return error.UnsupportedLaplaceOrder;
+    // The roots as laplace_zp takes them, s = -alpha + j 2 pi f, padded with
+    // inf, whose (1 - s/inf) term is exactly 1.
+    var zr: [2 * 8]f64 = @splat(0);
+    var pr: [2 * 8]f64 = @splat(0);
+    inline for (.{ zeros, poles }, .{ &zr, &pr }) |side, r| {
+        for (0..8) |k| r[2 * k] = std.math.inf(f64);
+        for (0..side.len / 2) |k| r[2 * k ..][0..2].* = .{ -side[2 * k], 2 * std.math.pi * side[2 * k + 1] };
+    }
+    // laplace_zp is prod(1 - s/r), and s - r = -r (1 - s/r) for r != 0.
+    const gain = cardScale(dev, letter) * v[0] / v[nk] * try rootProduct(zr[0..zeros.len]) / try rootProduct(pr[0..poles.len]);
+    inline for (.{ devices.vcvs_pole, devices.vccs_pole }, "eg") |D, l| if (letter == l) {
+        if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
+        comptime std.debug.assert(slotCount(D.Model, "poles") == 2 * 8);
+        var model: D.Model = .{};
+        var instance: D.Instance = .{};
+        _ = try setParam(D, &model, &instance, "gain", gain);
+        inline for (0..2 * 8) |k| {
+            @field(model, pwlSlot("zeros", k)) = zr[k];
+            @field(model, pwlSlot("poles", k)) = pr[k];
+        }
+        try self.b.addDevice(D, dev.name, model, instance, try controlledNodes(self, dev));
+        if (l == 'e') try self.addBranchProbe(dev.name, internalRow(D, "flowZ28pZ2cnZ29", self.b.n));
+    };
+}
+
+/// prod(-r) over the nonzero roots `r` of one side, (re, im) pairs. Pairs
+/// complex roots as VerA's zRootSecs does (the first unused root within 1e-9
+/// relative of the conjugate), so a root it would turn into NaN is refused.
+fn rootProduct(r: []const f64) error{UnpairedPoleRoot}!f64 {
+    var used: [8]bool = @splat(false);
+    var prod: f64 = 1;
+    for (0..r.len / 2) |i| {
+        if (used[i]) continue;
+        used[i] = true;
+        const a = r[2 * i];
+        const b = r[2 * i + 1];
+        if (b == 0) {
+            if (a != 0) prod *= -a;
+            continue;
+        }
+        const tol = 1e-9 * @sqrt(a * a + b * b);
+        const j = for (0..r.len / 2) |c| {
+            if (!used[c] and @abs(r[2 * c] - a) <= tol and @abs(r[2 * c + 1] + b) <= tol) break c;
+        } else return error.UnpairedPoleRoot;
+        used[j] = true;
+        prod *= a * a + b * b;
+    }
+    return prod;
 }
 
 /// E/G DELAY card: the control voltage delayed by `td=`, times SCALE
