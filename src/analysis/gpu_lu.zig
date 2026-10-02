@@ -56,8 +56,10 @@ pub const GpuLu = struct {
 
     /// `SparseLu.pattern_epoch` the tables below were built from; 0 = none.
     epoch: u32 = 0,
-    /// This epoch's tables were too big (or failed to upload).
+    /// This epoch's tables were too big or too thin (or failed to upload).
     declined: bool = true,
+    /// `ESPICE_GPU_LU=1`: skip the `min_per_col` bar.
+    forced: bool = false,
     tab: K.Tab = undefined,
     d_idx: Buffer = undefined,
     d_val: Buffer = undefined,
@@ -139,14 +141,6 @@ pub const GpuLu = struct {
         };
         if (envOn("ESPICE_GPU_LU_BENCH")) self.bench = Bench.init(gpa, &self.k_ref) catch null;
         return self;
-    }
-
-    /// True when the device's FP64 runs at least 1/4 of its FP32 rate (a
-    /// data-center card), the bar for `auto` to keep the device LU. A
-    /// driver that cannot say (HIP today) counts as slow.
-    pub fn fp64Fast(self: *Self) bool {
-        const ratio = self.k_ref.context.fp64Ratio() catch return false;
-        return ratio <= 4;
     }
 
     fn pinnedF64(k: *Raw, n: usize) ![]f64 {
@@ -352,7 +346,8 @@ pub const GpuLu = struct {
     }
 
     /// Builds and uploads the tables of `slv`'s current pivot epoch, or
-    /// declines it (`declined`) past `max_flops`.
+    /// declines it (`declined`) past `max_flops` or, unless `forced`, under
+    /// `min_per_col` flops per column.
     fn load(self: *Self, slv: *direct.Solver) !void {
         const lu = &slv.lu.?;
         self.dropTables();
@@ -363,7 +358,7 @@ pub const GpuLu = struct {
         var flops: u64 = 0;
         for (lu.ui.items) |i| flops += lu.lp[i + 1] - lu.lp[i];
         self.flops = flops;
-        if (flops > max_flops) return;
+        if (flops > max_flops or (!self.forced and flops < min_per_col * @as(u64, lu.n))) return;
         // E2 calibration knobs: ESPICE_GPU_LU_TAIL=m fixes the solves' tail
         // at m steps, ESPICE_GPU_LU_NOGATHER keeps every column in stored
         // order.
@@ -390,6 +385,18 @@ pub const GpuLu = struct {
     /// ponytail: a fixed 1.6 GB of `dmap`; price it against free device
     /// memory if a deck between that and the card's size shows up.
     const max_flops = 400_000_000;
+
+    /// Below this F/n the columns form a chain and every handoff is a
+    /// device-wide wait. Wall time on an RTX 4060 Laptop (FP64 1/64),
+    /// `cuda` with the device LU against the host LU on one thread:
+    /// logic_bsim4_10k (F/n 4,400) 63 against 237 s, sram_bsim4_10k
+    /// (2,400) 26 against 52 s, logic_psp103_10k (1,600) 86 against 357 s;
+    /// chain_bsim4_10k (63) 11.6 against 9.9 s,
+    /// ring_bsim4_10k (87) 24.4 against 20.1 s, and the E2 100k decks
+    /// (about 160) lost too (docs/solvers/gpu-lu.md, "E3, host").
+    /// ponytail: no deck measured between 166 and 1,600; refit the bar if
+    /// one lands there.
+    const min_per_col = 500;
 
     /// `ESPICE_GPU_LU_CHECK`: refactors and solves on the host from the same
     /// values and compares the factors and dx bitwise, printing the first
