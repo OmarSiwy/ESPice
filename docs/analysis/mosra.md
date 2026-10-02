@@ -49,7 +49,13 @@ Each mechanism k of a device sees, while stressed,
 
 $$A_k(t) = a_{0,k}\,\exp(fd_k\,v_k(t) - td_k/T)$$
 
-with T the circuit temperature in kelvin and
+with T the device temperature in kelvin during the stress run: the
+instance's own `temp` when its card gives one, else the circuit
+temperature (`.temp` or `.options temp`; without either, TNOM, 25 °C
+under HSPICE) plus the
+instance's `dtemp`, as mos3 and ngspice compute it. A model without a
+`dtemp` parameter (all aging models but mos3) runs at the circuit
+temperature. T is the same for every mechanism of a device, and
 
 | k | a0, fd, td, n | v | stressed when |
 |---|---|---|---|
@@ -126,6 +132,10 @@ transient. This is marked `ponytail:` in `Problem.age`.
 - Fixtures under `tests/fixtures/mosra/` (analytic):
   - `nmos_dc_stress.sp`: a bsim3 NMOS held at Vgs = 1.2 V, Vds = 1.5 V;
     the table's `delvto`, `mulu0` and `life` against the closed form.
+  - `nmos_dtemp_arrhenius.sp`: three mos3 NMOS at one stress, at
+    dtemp 0 and 50 and at an explicit temp=100. Each delvto against
+    1e-2·exp(-3000/T)·(1e8)^0.25, so the m2/m1 ratio is the Arrhenius
+    factor exp(3000·(1/298.15 - 1/348.15)).
   - `nmos_aged_vth.sp`: the same NMOS held at a fixed drain current by a
     servo loop, BTI only. The aged `.op` gate voltage is the fresh one
     plus 1e-4·(1e8)^0.25 = 0.01 V. With UA = UB = UC = 0 (so mobility does
