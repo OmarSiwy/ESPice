@@ -12,10 +12,6 @@ pub const Library = @import("Library.zig");
 /// A dense device-type id into a `Library`.
 pub const DeviceType = abi.DeviceType;
 const cat = @import("catalog.zig");
-/// Every build-time device type, one decl per binding name.
-pub const models = cat.models;
-/// One catalog row: a model's binding name and its generated device type.
-pub const Entry = cat.Entry;
 /// Every decl of `models`, in declaration order.
 pub const catalog = cat.catalog;
 /// The binding name of a device type, or null when it is not in the catalog.

@@ -1,6 +1,5 @@
 //! All-source AC transfer (`.acxf`, VACASK `acxf`): `.dcxf`'s readout at
 //! every frequency, the frequencies riding `FreqSolver.solveBatch` lanes.
-const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const dcxf = @import("../dc/xf.zig");

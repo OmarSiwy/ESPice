@@ -1,6 +1,5 @@
 //! Loop-gain stability (STB): drive the deck's own 0 V probe source with a
 //! unit injection on its branch row and sweep T(ω) = −V(+)/V(−).
-const std = @import("std");
 const freq = @import("freq.zig");
 const root = @import("../types.zig");
 const Complex = @import("core").numerics.Complex;

@@ -56,7 +56,7 @@ pub const Spectrum = struct {
 pub const max_tones = @import("core").validate.mhb_max_tones;
 
 /// The largest box a spectrum enumerates, Π(2H_i + 1).
-pub const max_box = @import("core").validate.mhb_max_box;
+const max_box = @import("core").validate.mhb_max_box;
 
 /// The spectrum of `tones` Hz with `nharms[i]` harmonics each and
 /// INTMODMAX `intmodmax` (0: the whole box), where `sub` steps of the
