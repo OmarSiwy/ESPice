@@ -140,7 +140,7 @@ pub const Solver = struct {
         if (self.factored and !self.host_stale and simdEql(self.vcopy, vals[0..nnz])) return;
         try self.factorInner(vals, execution);
         self.host_stale = false;
-        @memcpy(self.vcopy, vals[0..nnz]);
+        root.copySimd(self.vcopy, vals[0..nnz]);
         self.gen +%= 1;
     }
 

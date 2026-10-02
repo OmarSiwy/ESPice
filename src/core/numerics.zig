@@ -51,16 +51,33 @@ const Scale = struct {
     }
 };
 
+/// Up to this length `zeroSimd` and `copySimd` store vectors inline. A
+/// `memset` or `memcpy` call costs 70 to 140 Ir at any length, most of a
+/// small deck's plane reset (vacask_graetz: 4% of its instructions).
+const inline_len = 64;
+const vec_len = std.simd.suggestVectorLength(f64) orelse 1;
+/// Read through a volatile so LLVM cannot turn the zeroing loop back into
+/// a `memset` call.
+var opaque_zero: f64 = 0;
+
 /// Zeroes `buf` with ordinary (temporal) stores, so a plane that is read
 /// right after stays in cache.
 pub fn zeroSimd(buf: []f64) void {
-    @memset(buf, 0);
+    if (buf.len > inline_len) return @memset(buf, 0);
+    const z0: f64 = @as(*const volatile f64, &opaque_zero).*;
+    var i: usize = 0;
+    while (i + vec_len <= buf.len) : (i += vec_len) buf[i..][0..vec_len].* = @as(@Vector(vec_len, f64), @splat(z0));
+    while (i < buf.len) : (i += 1) buf[i] = z0;
 }
 
 /// Copies the common prefix of `src` into `dst`; exact aliasing is a no-op.
 pub fn copySimd(dst: []f64, src: []const f64) void {
     const n = @min(dst.len, src.len);
-    if (dst.ptr != src.ptr) @memcpy(dst[0..n], src[0..n]);
+    if (dst.ptr == src.ptr) return;
+    if (n > inline_len) return @memcpy(dst[0..n], src[0..n]);
+    var i: usize = 0;
+    while (i + vec_len <= n) : (i += vec_len) dst[i..][0..vec_len].* = src[i..][0..vec_len].*;
+    while (i < n) : (i += 1) dst[i] = src[i];
 }
 
 /// dst[i] += a * src[i] over dst.len; src may alias dst.
@@ -317,12 +334,20 @@ test "bulk buffers preserve bits, common prefixes and exact aliases" {
     try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0, 0 }, @as([]const u64, @ptrCast(&dst)));
 }
 
-test "bulk zeroing covers full vectors and the tail without overwriting adjacent storage" {
-    var values: [67]f64 = @splat(-1);
-    zeroSimd(values[1..66]);
-    try std.testing.expectEqual(@as(f64, -1), values[0]);
-    try std.testing.expectEqual(@as(f64, -1), values[66]);
-    for (values[1..66]) |value| try std.testing.expectEqual(@as(u64, 0), @as(u64, @bitCast(value)));
+test "bulk zeroing and copying cover full vectors and the tail without overwriting adjacent storage" {
+    // 11 takes the inline stores, 65 the `memset`/`memcpy` call.
+    for ([_]usize{ 11, 65 }) |len| {
+        var values: [67]f64 = @splat(-1);
+        zeroSimd(values[1..][0..len]);
+        try std.testing.expectEqual(@as(f64, -1), values[0]);
+        try std.testing.expectEqual(@as(f64, -1), values[len + 1]);
+        for (values[1..][0..len]) |value| try std.testing.expectEqual(@as(u64, 0), @as(u64, @bitCast(value)));
+        var src: [67]f64 = undefined;
+        for (&src, 0..) |*v, i| v.* = @floatFromInt(i);
+        copySimd(values[1..][0..len], &src);
+        try std.testing.expectEqualSlices(f64, src[0..len], values[1..][0..len]);
+        try std.testing.expectEqual(@as(f64, -1), values[len + 1]);
+    }
 }
 
 test "FreqSweep matches the ngspice grids the oracles were taken on" {
