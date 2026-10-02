@@ -156,13 +156,13 @@ fn tokenize(arena: Allocator, line: []const u8) Error![]const Tok {
 
 /// §6.3: the built-in constants, as their values.
 const constants = std.StaticStringMap(f64).initComptime(.{
-    .{ "M_E", std.math.e },          .{ "M_LOG2E", std.math.log2e },      .{ "M_LOG10E", std.math.log10e },
-    .{ "M_LN2", std.math.ln2 },      .{ "M_LN10", std.math.ln10 },        .{ "M_PI", std.math.pi },
-    .{ "M_TWO_PI", 2.0 * std.math.pi }, .{ "M_PI_2", std.math.pi / 2.0 },   .{ "M_PI_4", std.math.pi / 4.0 },
-    .{ "M_1_PI", 1.0 / std.math.pi },  .{ "M_2_PI", 2.0 / std.math.pi },      .{ "M_2_SQRTPI", std.math.two_sqrtpi },
-    .{ "M_SQRT2", std.math.sqrt2 },  .{ "M_SQRT1_2", std.math.sqrt1_2 },  .{ "M_DEGPERRAD", 180.0 / std.math.pi },
-    .{ "P_Q", 1.6021918e-19 },       .{ "P_C", 2.997924562e8 },           .{ "P_K", 1.3806226e-23 },
-    .{ "P_H", 6.6260755e-34 },       .{ "P_EPS0", 8.85418792394420013968e-12 }, .{ "P_U0", 4.0e-7 * std.math.pi },
+    .{ "M_E", std.math.e },             .{ "M_LOG2E", std.math.log2e },            .{ "M_LOG10E", std.math.log10e },
+    .{ "M_LN2", std.math.ln2 },         .{ "M_LN10", std.math.ln10 },              .{ "M_PI", std.math.pi },
+    .{ "M_TWO_PI", 2.0 * std.math.pi }, .{ "M_PI_2", std.math.pi / 2.0 },          .{ "M_PI_4", std.math.pi / 4.0 },
+    .{ "M_1_PI", 1.0 / std.math.pi },   .{ "M_2_PI", 2.0 / std.math.pi },          .{ "M_2_SQRTPI", std.math.two_sqrtpi },
+    .{ "M_SQRT2", std.math.sqrt2 },     .{ "M_SQRT1_2", std.math.sqrt1_2 },        .{ "M_DEGPERRAD", 180.0 / std.math.pi },
+    .{ "P_Q", 1.6021918e-19 },          .{ "P_C", 2.997924562e8 },                 .{ "P_K", 1.3806226e-23 },
+    .{ "P_H", 6.6260755e-34 },          .{ "P_EPS0", 8.85418792394420013968e-12 }, .{ "P_U0", 4.0e-7 * std.math.pi },
     .{ "P_CELSIUS0", 273.15 },
 });
 
@@ -407,7 +407,7 @@ const tran_keys = std.StaticStringMap(void).initComptime(.{ .{"stop"}, .{"step"}
 /// Spectre `tran method=` as the `.options` that select it; `trapgear2` has
 /// no ESPice equivalent and is refused.
 const tran_methods = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "euler", "method=gear maxord=1" }, .{ "trap", "method=trap" },  .{ "traponly", "method=trap" },
+    .{ "euler", "method=gear maxord=1" }, .{ "trap", "method=trap" },      .{ "traponly", "method=trap" },
     .{ "gear2", "method=gear" },          .{ "gear2only", "method=gear" },
 });
 
@@ -421,9 +421,9 @@ const reserved = std.StaticStringMap(void).initComptime(.{ .{"temp"}, .{"tnom"},
 
 /// §4.3: the primitives and their SPICE letters.
 const primitives = std.StaticStringMap(u8).initComptime(.{
-    .{ "resistor", 'r' }, .{ "capacitor", 'c' }, .{ "inductor", 'l' },  .{ "vsource", 'v' },
-    .{ "isource", 'i' },  .{ "vcvs", 'e' },      .{ "vccs", 'g' },      .{ "ccvs", 'h' },
-    .{ "cccs", 'f' },     .{ "mutual_inductor", 'k' }, .{ "iprobe", 'v' }, .{ "bsource", 'b' },
+    .{ "resistor", 'r' }, .{ "capacitor", 'c' },       .{ "inductor", 'l' }, .{ "vsource", 'v' },
+    .{ "isource", 'i' },  .{ "vcvs", 'e' },            .{ "vccs", 'g' },     .{ "ccvs", 'h' },
+    .{ "cccs", 'f' },     .{ "mutual_inductor", 'k' }, .{ "iprobe", 'v' },   .{ "bsource", 'b' },
     .{ "tline", 't' },
 });
 
@@ -452,18 +452,18 @@ const masters = std.StaticStringMap(Master).initComptime(.{
 
 /// §4.9 and §4.10: analysis and control type keywords after a name.
 const analysis_kinds = std.StaticStringMap(void).initComptime(.{
-    .{"acmatch"}, .{"ac"},    .{"dcmatch"}, .{"dc"},    .{"envlp"}, .{"hbac"},  .{"hbnoise"}, .{"hbsp"},
-    .{"hbstb"},   .{"hbxf"},  .{"hb"},      .{"montecarlo"}, .{"noise"}, .{"pac"}, .{"pnoise"}, .{"psp"},
-    .{"pss"},     .{"pstb"},  .{"pxf"},     .{"pz"},    .{"qpac"},  .{"qpnoise"}, .{"qpsp"},  .{"qpss"},
-    .{"qpxf"},    .{"sp"},    .{"stb"},     .{"sweep"}, .{"tdr"},   .{"tran"},    .{"xf"},    .{"fourier"},
+    .{"acmatch"}, .{"ac"},   .{"dcmatch"}, .{"dc"},         .{"envlp"}, .{"hbac"},    .{"hbnoise"}, .{"hbsp"},
+    .{"hbstb"},   .{"hbxf"}, .{"hb"},      .{"montecarlo"}, .{"noise"}, .{"pac"},     .{"pnoise"},  .{"psp"},
+    .{"pss"},     .{"pstb"}, .{"pxf"},     .{"pz"},         .{"qpac"},  .{"qpnoise"}, .{"qpsp"},    .{"qpss"},
+    .{"qpxf"},    .{"sp"},   .{"stb"},     .{"sweep"},      .{"tdr"},   .{"tran"},    .{"xf"},      .{"fourier"},
     .{"pdisto"},  .{"sens"},
 });
 /// What a control statement does here: `options` set options, the rest are
 /// read and not acted on, or refused by name.
 const ControlKind = enum { options, ignored, refused };
 const control_kinds = std.StaticStringMap(ControlKind).initComptime(.{
-    .{ "options", .options }, .{ "info", .ignored },     .{ "set", .ignored },  .{ "shell", .ignored },
-    .{ "check", .ignored },   .{ "checklimit", .ignored }, .{ "assert", .ignored }, .{ "paramtest", .ignored },
+    .{ "options", .options }, .{ "info", .ignored },       .{ "set", .ignored },      .{ "shell", .ignored },
+    .{ "check", .ignored },   .{ "checklimit", .ignored }, .{ "assert", .ignored },   .{ "paramtest", .ignored },
     .{ "alter", .refused },   .{ "altergroup", .refused }, .{ "paramset", .refused },
 });
 

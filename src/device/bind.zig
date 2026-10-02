@@ -255,8 +255,8 @@ test "VerA escapes bind under the VA name; ordinary trailing Z does not" {
     const M = struct { u0Z: f64 = 0, typeZ: i64 = 1, pubZ: f64 = 0, RZ: f64 = 0, abZ5f_cd: f64 = 0, Z5ain: f64 = 0 };
     var m: M = .{};
     try apply(&m, &.{
-        .{ .key = "u0", .value = 400 }, .{ .key = "type", .value = -1 },
-        .{ .key = "pub", .value = 2 },  .{ .key = "r", .value = 5 },
+        .{ .key = "u0", .value = 400 },   .{ .key = "type", .value = -1 },
+        .{ .key = "pub", .value = 2 },    .{ .key = "r", .value = 5 },
         .{ .key = "ab__cd", .value = 3 }, .{ .key = "zin", .value = 50 },
     }).unwrap();
     try std.testing.expectEqual(M{ .u0Z = 400, .typeZ = -1, .pubZ = 2, .RZ = 0, .abZ5f_cd = 3, .Z5ain = 50 }, m);

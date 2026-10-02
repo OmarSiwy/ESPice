@@ -153,7 +153,7 @@ fn fdAdjoint(
 /// vsrc.c, isrc.c) by device type; every other device has none, so all its
 /// columns are `<card>:<param>` (`v(d1:is)`, #71).
 const principal = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "resistor", "r" },  .{ "capacitor", "c" }, .{ "inductor", "l" },
+    .{ "resistor", "r" }, .{ "capacitor", "c" }, .{ "inductor", "l" },
     .{ "vsource", "dc" }, .{ "isource", "dc" },
 });
 

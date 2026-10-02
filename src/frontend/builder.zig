@@ -3056,7 +3056,6 @@ fn refuseS(dev: Device, why: []const u8) error{UnsupportedCard} {
     return error.UnsupportedCard;
 }
 
-
 fn kvName(kv: []const Kv, key: []const u8) ?[]const u8 {
     for (kv) |item| if (std.mem.eql(u8, item.key, key)) return switch (item.value) {
         .name => |n| n,

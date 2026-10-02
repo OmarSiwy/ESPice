@@ -47,8 +47,8 @@ test "validate: every node and branch row a driver indexes with is in range" {
     const t = std.testing;
     const sweep: requests.FreqSweep = .{ .f_start = 1, .f_stop = 1e3 };
     const far = 4;
-    const ports = [_]requests.Port{ .{ .node = 1, .neg = far, .branch = 2 } };
-    const zero_z0 = [_]requests.Port{ .{ .node = 1, .neg = 0, .branch = 2, .z0 = 0 } };
+    const ports = [_]requests.Port{.{ .node = 1, .neg = far, .branch = 2 }};
+    const zero_z0 = [_]requests.Port{.{ .node = 1, .neg = 0, .branch = 2, .z0 = 0 }};
     const out_of_range = [_]requests.Query{
         .{ .noise = .{ .out_node = 1, .sweep = sweep, .in_nodes = .{ 1, far } } },
         .{ .tf = .{ .output_node = 1, .input_nodes = .{ far, 0 } } },

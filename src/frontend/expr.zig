@@ -78,16 +78,16 @@ pub fn isDistribution(f: Fn) bool {
 }
 
 const fns = std.StaticStringMap(Fn).initComptime(.{
-    .{ "sqrt", .sqrt },   .{ "abs", .abs },       .{ "min", .min },     .{ "max", .max },
-    .{ "pow", .pow },     .{ "pwr", .pwr },       .{ "exp", .exp },       .{ "ln", .ln },       .{ "log", .log },
-    .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },     .{ "tan", .tan },
-    .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },   .{ "ternary", .ternary },
-    .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .gauss }, .{ "unif", .unif },
-    .{ "aunif", .aunif }, .{ "limit", .limit },   .{ "table", .table },
+    .{ "sqrt", .sqrt },           .{ "abs", .abs },     .{ "min", .min },       .{ "max", .max },
+    .{ "pow", .pow },             .{ "pwr", .pwr },     .{ "exp", .exp },       .{ "ln", .ln },
+    .{ "log", .log },             .{ "log10", .log10 }, .{ "sin", .sin },       .{ "cos", .cos },
+    .{ "tan", .tan },             .{ "atan", .atan },   .{ "floor", .floor },   .{ "ceil", .ceil },
+    .{ "ternary", .ternary },     .{ "tanh", .tanh },   .{ "agauss", .agauss }, .{ "gauss", .gauss },
+    .{ "unif", .unif },           .{ "aunif", .aunif }, .{ "limit", .limit },   .{ "table", .table },
     // numparam's other built-ins (ngspice-syntax.md §2.2, xpressn.c fmathS).
-    .{ "sqr", .sqr },     .{ "int", .int },       .{ "nint", .nint },   .{ "sgn", .sgn },
-    .{ "sinh", .sinh },   .{ "cosh", .cosh },     .{ "asin", .asin },   .{ "acos", .acos },
-    .{ "asinh", .asinh }, .{ "acosh", .acosh },   .{ "atanh", .atanh }, .{ "arctan", .atan },
+    .{ "sqr", .sqr },             .{ "int", .int },     .{ "nint", .nint },     .{ "sgn", .sgn },
+    .{ "sinh", .sinh },           .{ "cosh", .cosh },   .{ "asin", .asin },     .{ "acos", .acos },
+    .{ "asinh", .asinh },         .{ "acosh", .acosh }, .{ "atanh", .atanh },   .{ "arctan", .atan },
     .{ "ternary_fcn", .ternary },
 });
 
@@ -616,28 +616,29 @@ test "compile and fold: precedence, associativity and calls" {
     const a = arena.allocator();
     const Case = struct { []const u8, f64 };
     for ([_]Case{
-        .{ "1+2*3", 1 + 2 * 3 },   .{ "(1+2)*3", (1 + 2) * 3 },    .{ "7-2-1", 7 - 2 - 1 },
-        .{ "10/4", 10.0 / 4.0 },   .{ "2^3^2", 64 },               .{ "2**3", 8 },
-        .{ "-2^2", -4 },           .{ "2^-1", 0.5 },               .{ "+3", 3 },
-        .{ "1<2", 1 },             .{ "2<=1", 0 },                 .{ "1>=1", 1 },
-        .{ "3>2", 1 },             .{ "1==1", 1 },                 .{ "1!=1", 0 },
-        .{ "1&&0", 0 },            .{ "1||0", 1 },                 .{ "!0", 1 },
-        .{ "!3", 0 },              .{ "1?2:3", 2 },                .{ "0?2:3", 3 },
-        .{ "1+1?4:5", 4 },         .{ "'1+2'*2", 6 },              .{ "\"2\"", 2 },
-        .{ "sqrt(16)", 4 },        .{ "max(1,min(5,3))", 3 },      .{ "pow(2,10)", 1024 },
-        .{ "abs(-3)", 3 },         .{ "floor(2.5)+ceil(2.5)", 5 }, .{ "1k*2", 2000 },
-        .{ "agauss(1,0.1,3)", 1 }, .{ "limit(2,1)", 2 },           .{ "1e-3*2", 2e-3 },
-        .{ "pwr(-4,0.5)", 2 },     .{ "pwr(9,0.5)", 3 },
+        .{ "1+2*3", 1 + 2 * 3 },      .{ "(1+2)*3", (1 + 2) * 3 },                .{ "7-2-1", 7 - 2 - 1 },
+        .{ "10/4", 10.0 / 4.0 },      .{ "2^3^2", 64 },                           .{ "2**3", 8 },
+        .{ "-2^2", -4 },              .{ "2^-1", 0.5 },                           .{ "+3", 3 },
+        .{ "1<2", 1 },                .{ "2<=1", 0 },                             .{ "1>=1", 1 },
+        .{ "3>2", 1 },                .{ "1==1", 1 },                             .{ "1!=1", 0 },
+        .{ "1&&0", 0 },               .{ "1||0", 1 },                             .{ "!0", 1 },
+        .{ "!3", 0 },                 .{ "1?2:3", 2 },                            .{ "0?2:3", 3 },
+        .{ "1+1?4:5", 4 },            .{ "'1+2'*2", 6 },                          .{ "\"2\"", 2 },
+        .{ "sqrt(16)", 4 },           .{ "max(1,min(5,3))", 3 },                  .{ "pow(2,10)", 1024 },
+        .{ "abs(-3)", 3 },            .{ "floor(2.5)+ceil(2.5)", 5 },             .{ "1k*2", 2000 },
+        .{ "agauss(1,0.1,3)", 1 },    .{ "limit(2,1)", 2 },                       .{ "1e-3*2", 2e-3 },
+        .{ "pwr(-4,0.5)", 2 },        .{ "pwr(9,0.5)", 3 },
         // numparam's operators and built-ins (#121).
-        .{ "7%3", 1 },             .{ "-7%3", -1 },                .{ "7\\2", 3 },
-        .{ "1<>2", 1 },            .{ "2<>2", 0 },                 .{ "tanh(0)", 0 },
-        .{ "sqr(3)", 9 },          .{ "int(-2.7)", -2 },           .{ "nint(2.5)", 2 },
-        .{ "nint(3.5)", 4 },       .{ "nint(-2.5)", -2 },          .{ "sgn(-3)", -1 },
-        .{ "sinh(0)+cosh(0)", 1 }, .{ "arctan(0)+asin(0)", 0 },    .{ "acos(1)+asinh(0)+atanh(0)", 0 },
-        .{ "acosh(1)", 0 },        .{ "ternary_fcn(0,2,3)", 3 },
+                              .{ "7%3", 1 },
+        .{ "-7%3", -1 },              .{ "7\\2", 3 },                             .{ "1<>2", 1 },
+        .{ "2<>2", 0 },               .{ "tanh(0)", 0 },                          .{ "sqr(3)", 9 },
+        .{ "int(-2.7)", -2 },         .{ "nint(2.5)", 2 },                        .{ "nint(3.5)", 4 },
+        .{ "nint(-2.5)", -2 },        .{ "sgn(-3)", -1 },                         .{ "sinh(0)+cosh(0)", 1 },
+        .{ "arctan(0)+asin(0)", 0 },  .{ "acos(1)+asinh(0)+atanh(0)", 0 },        .{ "acosh(1)", 0 },
+        .{ "ternary_fcn(0,2,3)", 3 },
         // ngspice's powers of a negative base (#39).
-        .{ "pwr(-0,0)", 1 },       .{ "(-2)^3", 8 },               .{ "(-2)^0.5", @sqrt(2.0) },
-        .{ "(-2)^2.5", std.math.pow(f64, 2, 2.5) }, .{ "pow(-2,0.5)", @sqrt(2.0) },
+        .{ "pwr(-0,0)", 1 },                        .{ "(-2)^3", 8 },
+        .{ "(-2)^0.5", @sqrt(2.0) },  .{ "(-2)^2.5", std.math.pow(f64, 2, 2.5) }, .{ "pow(-2,0.5)", @sqrt(2.0) },
     }) |case| {
         const v = try testFold(a, case[0]);
         try std.testing.expect(v.known);
@@ -660,9 +661,9 @@ test "HSPICE sqrt, log, log10 and pow follow Star-Hspice Table 10-1 (#39)" {
     defer arena.deinit();
     const a = arena.allocator();
     for ([_]struct { []const u8, f64 }{
-        .{ "sqrt(-4)", -2 }, .{ "log(-100)", -@log(100.0) }, .{ "log10(-100)", -2 },
-        .{ "pow(2,2.5)", 4 }, .{ "pow(-2,3.7)", -8 }, .{ "sqrt(4)", 2 },
-        .{ "(-2)**3", -8 },   .{ "(-2)**2.6", -8 },   .{ "0**2", 0 },
+        .{ "sqrt(-4)", -2 },  .{ "log(-100)", -@log(100.0) }, .{ "log10(-100)", -2 },
+        .{ "pow(2,2.5)", 4 }, .{ "pow(-2,3.7)", -8 },         .{ "sqrt(4)", 2 },
+        .{ "(-2)**3", -8 },   .{ "(-2)**2.6", -8 },           .{ "0**2", 0 },
     }) |case| {
         var s: Scratch = .{};
         try compileAll(@import("lines.zig").hspice, a, &s, case[0]);
