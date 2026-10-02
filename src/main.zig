@@ -10,7 +10,17 @@ const problem = @import("espice");
 /// where the trace is worth it.
 pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builtin").mode == .Debug) 1 << 18 else null };
 
+/// glibc's `mallopt` (malloc.h); M_MMAP_THRESHOLD is -3.
+extern "c" fn mallopt(param: c_int, value: c_int) c_int;
+
 pub fn main(init: std.process.Init) !u8 {
+    // glibc raises its mmap threshold to each mmapped block it frees (up to
+    // 32 MB), so after one query frees a big buffer the next ones come from
+    // the heap and stay resident when freed. A fixed 128 KB threshold (its
+    // default) hands every big block back at once: peak RSS
+    // scaling_rc_ladder_100k 285 -> 277 MB, opamp with two .ac 180 -> 170 MB,
+    // for 4% more minor page faults on the ladder.
+    if (@import("builtin").target.isGnuLibC()) _ = mallopt(-3, 128 * 1024);
     var args = init.minimal.args.iterate();
     _ = args.skip();
     var paths: std.ArrayList([]const u8) = .empty;

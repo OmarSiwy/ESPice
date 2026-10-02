@@ -277,11 +277,12 @@ const BatchGpu = struct {
     /// Resident for the simulation. `repack` re-uploads only models and
     /// instances; the tapes never change.
     d_models: Buffer,
+    d_model_of: Buffer,
     d_instances: Buffer,
     d_gath: Buffer,
     d_rhs_idx: Buffer,
     d_slots: Buffer,
-    /// Lim plane (`count * n_u` f64), `[]D.State` and the charge tape;
+    /// Lim plane (`GpuPayload.lim_x`'s length), `[]D.State` and the charge tape;
     /// 1-byte dummies when absent, so every kernel signature is uniform.
     d_lim: Buffer,
     d_states: Buffer,
@@ -293,6 +294,8 @@ const BatchGpu = struct {
     payload: *const fn (*anyopaque) device_ir.GpuPayload,
     set_limit_active: ?*const fn (*anyopaque, bool) void,
     count: u32,
+    /// Bytes `d_models` holds; `repack` regrows it when unsharing changed it.
+    models_len: usize,
     grid: gompute.Dim3,
     block: u32,
     has_lim: bool,
@@ -311,6 +314,7 @@ const BatchGpu = struct {
 
     fn deinit(self: *BatchGpu) void {
         self.d_models.free();
+        self.d_model_of.free();
         self.d_instances.free();
         self.d_gath.free();
         self.d_rhs_idx.free();
@@ -705,6 +709,8 @@ pub const GpuContext = struct {
         // failure part way through frees what this batch already holds.
         var d_models = try uploadBytes(&kernel, p.models);
         errdefer d_models.free();
+        var d_model_of = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.model_of));
+        errdefer d_model_of.free();
         var d_instances = try uploadBytes(&kernel, p.instances);
         errdefer d_instances.free();
         var d_gath = try uploadBytes(&kernel, std.mem.sliceAsBytes(p.gath));
@@ -715,7 +721,7 @@ pub const GpuContext = struct {
         errdefer d_slots.free();
         // Left unwritten: reads are gated by `lim_active`, like the host's
         // `lim_x`.
-        var d_lim = try kernel.alloc(if (p.lim_x.len > 0) @as(usize, p.count) * p.n_u * @sizeOf(f64) else 1);
+        var d_lim = try kernel.alloc(@max(p.lim_x.len * @sizeOf(f64), 1));
         errdefer d_lim.free();
         var d_states = try uploadBytes(&kernel, p.states);
         errdefer d_states.free();
@@ -728,6 +734,7 @@ pub const GpuContext = struct {
             .ctl_kernel = ctl_kernel,
             .qtp_kernel = qtp_kernel,
             .d_models = d_models,
+            .d_model_of = d_model_of,
             .d_instances = d_instances,
             .d_gath = d_gath,
             .d_rhs_idx = d_rhs_idx,
@@ -740,6 +747,7 @@ pub const GpuContext = struct {
             .payload = get,
             .set_limit_active = b.hooks.set_limit_active,
             .count = p.count,
+            .models_len = p.models.len,
             .grid = gompute.Dim3.linear(p.count, block),
             .block = block,
             .has_lim = p.lim_x.len > 0,
@@ -768,7 +776,7 @@ pub const GpuContext = struct {
             for (ckt.batches) |b| {
                 const get = b.hooks.gpu_payload orelse continue;
                 const p = get(b.ctx);
-                slots += @as(u64, p.count) * p.n_u * p.n_u;
+                slots += p.slots.len;
             }
             // Scratch planes: the probe must not disturb a linearization a
             // prerequisite query left behind.
@@ -1153,6 +1161,7 @@ pub const GpuContext = struct {
                 bg.d_rhs_idx.argPtr(),
                 bg.d_slots.argPtr(),
                 bg.d_models.argPtr(),
+                bg.d_model_of.argPtr(),
                 bg.d_instances.argPtr(),
                 self.v_stage[0].argPtr(),
                 self.v_stage[2].argPtr(),
@@ -1295,6 +1304,7 @@ pub const GpuContext = struct {
                 self.d_x[buf].argPtr(),
                 bg.d_gath.argPtr(),
                 bg.d_models.argPtr(),
+                bg.d_model_of.argPtr(),
                 bg.d_instances.argPtr(),
                 bg.d_tape.argPtr(),
             });
@@ -1374,6 +1384,7 @@ pub const GpuContext = struct {
                 self.d_xold.argPtr(),
                 bg.d_gath.argPtr(),
                 bg.d_models.argPtr(),
+                bg.d_model_of.argPtr(),
                 bg.d_instances.argPtr(),
                 bg.d_lim.argPtr(),
                 bg.d_states.argPtr(),
@@ -1460,6 +1471,7 @@ pub const GpuContext = struct {
                 self.d_x2.argPtr(),
                 bg.d_gath.argPtr(),
                 bg.d_models.argPtr(),
+                bg.d_model_of.argPtr(),
                 bg.d_instances.argPtr(),
                 bg.d_lim.argPtr(),
                 bg.d_states.argPtr(),
@@ -1528,6 +1540,7 @@ pub const GpuContext = struct {
             try bg.launch(ck, &self.stream, &.{
                 gompute.interface.arg(&count),
                 bg.d_models.argPtr(),
+                bg.d_model_of.argPtr(),
                 bg.d_instances.argPtr(),
                 bg.d_states.argPtr(),
                 gompute.interface.arg(&opv),
@@ -1622,7 +1635,15 @@ pub const GpuContext = struct {
         if (comptime backend == null) return;
         for (self.batches) |*bg| {
             const p = bg.payload(bg.ctx);
-            if (p.models.len > 0) try bg.d_models.upload(p.models.ptr, p.models.len);
+            // Unsharing (a parameter write) grows `models` past the buffer.
+            if (p.models.len != bg.models_len) {
+                const models = try uploadBytes(&bg.kernel, p.models);
+                bg.d_models.free();
+                bg.d_models = models;
+                const rows = std.mem.sliceAsBytes(p.model_of);
+                if (rows.len > 0) try bg.d_model_of.upload(rows.ptr, rows.len);
+                bg.models_len = p.models.len;
+            } else if (p.models.len > 0) try bg.d_models.upload(p.models.ptr, p.models.len);
             if (p.instances.len > 0) try bg.d_instances.upload(p.instances.ptr, p.instances.len);
         }
         self.params_dirty = false;

@@ -11,6 +11,18 @@ harness reports as XFAIL (they do not fail `zig build test`; an XPASS does):
 | `dc/device_vbic_forced_output` | VBIC 1.3 `avalm` shifts the smooth max by `vminm`; the ngspice 44.2 oracle runs VBIC 1.2 | kept: model version, not force-matched (`docs/devices/models.md`) |
 | `noise/device_vbic_noise_scale` | same VBIC 1.2/1.3 difference in the noise scale | kept, as above |
 
+### GPU corpus (`zig build test-gpu`, 2026-10-02)
+
+At `bd053e57` on an RTX sm_89 card, 7 of 753 decks fail under
+`--backend cuda`. Six are timeouts on a machine at load 20+
+(`dc/device_hisimhv`, `stress/vacask_{graetz,mul,rc}`,
+`tran/bench_ngspice_mosamp`, `tran/device_mesa_oscillator`); one is a
+numeric difference:
+
+| Deck | Cause | Status |
+|---|---|---|
+| `tran/device_hfet_inverter` | `i(vin)[85]`: expected -4.0699898567735e-4, CUDA -4.083762897864557e-4 (0.34%, rtol 3e-3). The CPU run passes. Raw CPU vs CUDA outputs share the time grid (max time difference 1.1e-14 s) but drift apart in value: 3e-9 relative at point 85 of the raw output, and up to 4.7% on `i(vin)`'s near-zero tail (-1.383e-11 vs -1.448e-11 A at 2.735 ns). One batch (hfet) is resident on the device, the other on the host. | open: reproduces at `bd053e57` and at `0c120dfd` plus two host-only commits, i.e. before the ABI 19-21 device-state commits, which leave the CUDA output byte-identical |
+
 Open work that has no failing deck lives in `FUTURE_PLANS.md`. Everything
 below is the audit history (sections A-F), indexed as of 2026-09-24.
 

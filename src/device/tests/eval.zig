@@ -214,6 +214,70 @@ test "dyn vtable: blob init, param set by name, proto add" {
     proto.destroy(proto.ctx, testing.allocator);
 }
 
+test "equal cards share one Model row until a parameter is collected" {
+    const D = struct {
+        // Marks a VerA device, the only kind whose Models are shared.
+        pub const lane_masks = [_]contract.LaneUse{.{ .mask = 0b11, .uses = 1 }};
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct { r: f64 = 1000, given: bool = false };
+        pub const Instance = struct { temperature: f64 = 300.15, mfactor: f64 = 1 };
+        pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]).scale(1 / m.r);
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+    };
+    comptime std.debug.assert(DeviceBatch(D).shares_models);
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    for ([_]f64{ 1000, 50, 1000 }, [_][2]u32{ .{ 1, 2 }, .{ 2, 0 }, .{ 1, 0 } }) |r, nodes|
+        try proto.append(.{ .r = r }, .{}, nodes);
+    const batch = try ProtoStore(D).finalize(&proto, a, .{
+        .col_ptr = &.{ 0, 3, 6, 9 },
+        .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+        .n = 3,
+        .trash_slot = 9,
+    }).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    const copy = try batch.hooks.instantiate(batch.ctx, a).unwrap();
+    defer copy.hooks.deinit(copy.ctx, a);
+    const shared: *DeviceBatch(D) = @ptrCast(@alignCast(copy.ctx));
+    try std.testing.expectEqual(@as(usize, 2), shared.models.len);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 0 }, shared.model_of);
+
+    // The shared rows stamp what one row per instance stamps.
+    var g: [10]f64 = undefined;
+    var rhs: [4]f64 = undefined;
+    const x = [_]f64{ 0, 2, 0.5 };
+    const stamp = struct {
+        fn run(b: Batch, gv: *[10]f64, rv: *[4]f64, xs: []const f64) void {
+            @memset(gv, 0);
+            @memset(rv, 0);
+            var c: [10]f64 = @splat(0);
+            var q: [4]f64 = @splat(0);
+            b.eval(b.ctx, &.{ .g_vals = gv, .c_vals = &c, .rhs = rv, .q_vec = &q }, 0, b.count, xs, 0);
+        }
+    }.run;
+    stamp(copy, &g, &rhs, &x);
+    const g_shared = g;
+    const rhs_shared = rhs;
+
+    // Collecting parameters gives each instance its own row, so a write
+    // through instance 0 leaves instance 2, which shared its card, alone.
+    var params: std.ArrayList(impl.test_access.ParamRef) = .empty;
+    defer params.deinit(a);
+    try copy.hooks.collect_params(copy.ctx, a, &params).unwrap();
+    try std.testing.expectEqual(@as(usize, 3), shared.models.len);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, shared.model_of);
+    stamp(copy, &g, &rhs, &x);
+    try std.testing.expectEqualSlices(f64, &g_shared, &g);
+    try std.testing.expectEqualSlices(f64, &rhs_shared, &rhs);
+    for (params.items) |ref| if (!ref.is_instance and ref.index == 0) ref.set(10);
+    try std.testing.expectEqual(@as(f64, 10), shared.models[0].r);
+    try std.testing.expectEqual(@as(f64, 1000), shared.models[2].r);
+}
+
 test "prepared device instances share tapes and isolate parameters and accepted history" {
     const D = struct {
         pub const noise_gens = [_]NoiseGen{

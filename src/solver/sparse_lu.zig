@@ -175,20 +175,10 @@ pub const SparseLu = struct {
         self.prow = try gpa.alloc(u32, nnz);
         self.void_col = try gpa.alloc(bool, n);
         self.scaled_pivot = try gpa.alloc(bool, n);
-        self.lend = try gpa.alloc(u32, n);
-        self.sn_of = try gpa.alloc(u32, n);
-        self.sn_slot = try gpa.alloc(u32, n);
         self.tape_col = try gpa.alloc(u32, @as(usize, n) + 1);
         self.amap = try gpa.alloc(u32, nnz);
         self.w = try gpa.alloc(f64, n);
         self.y = try gpa.alloc(f64, n);
-        self.rscale = try gpa.alloc(f64, n);
-        self.flag = try gpa.alloc(u32, n);
-        self.topo = try gpa.alloc(u32, n);
-        self.stack = try gpa.alloc(u32, n);
-        self.pstack = try gpa.alloc(u32, n);
-        self.want = try gpa.alloc(u32, n);
-        self.want_of = try gpa.alloc(u32, n);
         self.prev = try gpa.alloc(u32, n);
         try self.li.ensureTotalCapacity(gpa, est_lu);
         try self.lx.ensureTotalCapacity(gpa, est_lu);
@@ -199,13 +189,11 @@ pub const SparseLu = struct {
     }
 
     pub fn deinit(self: *Self, gpa: Allocator) void {
-        inline for (.{ self.pinv, self.lp, self.up, self.prow, self.flag, self.topo, self.stack, self.pstack, self.want, self.want_of, self.prev }) |s|
+        self.dropScratch(gpa);
+        inline for (.{ self.pinv, self.lp, self.up, self.prow, self.prev }) |s|
             gpa.free(s);
         gpa.free(self.void_col);
         gpa.free(self.scaled_pivot);
-        gpa.free(self.lend);
-        gpa.free(self.sn_of);
-        gpa.free(self.sn_slot);
         gpa.free(self.tape_col);
         gpa.free(self.amap);
         self.tape.deinit(gpa);
@@ -215,7 +203,7 @@ pub const SparseLu = struct {
         self.panel_rows.deinit(gpa);
         self.panel_vals.deinit(gpa);
         self.void_slots.deinit(gpa);
-        inline for (.{ self.udiag, self.w, self.y, self.rscale }) |s|
+        inline for (.{ self.udiag, self.w, self.y }) |s|
             gpa.free(s);
         self.li.deinit(gpa);
         self.lx.deinit(gpa);
@@ -243,6 +231,8 @@ pub const SparseLu = struct {
         vals: []const f64,
         pivot_tol: f64,
     ) FactorError!void {
+        try self.holdScratch(gpa);
+        defer self.dropScratch(gpa);
         const repivot = self.factored and self.fill_cap > 0 and self.base_lu > 0;
         var cap: usize = std.math.maxInt(usize);
         if (repivot) {
@@ -255,6 +245,26 @@ pub const SparseLu = struct {
             _ = try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, std.math.maxInt(usize), true);
         }
         if (!repivot) self.base_lu = self.li.items.len + self.ui.items.len;
+    }
+
+    /// The full factor's own scratch, `n` per array, alive only inside
+    /// `factor`: a refactor or a solve never reads it (n * 44 bytes, 4.4 MB
+    /// at the 100k-node RC ladder).
+    const scratch_u32 = .{ "flag", "topo", "stack", "pstack", "want", "want_of", "lend", "sn_of", "sn_slot" };
+
+    fn holdScratch(self: *Self, gpa: Allocator) Allocator.Error!void {
+        errdefer self.dropScratch(gpa);
+        inline for (scratch_u32) |name| @field(self, name) = try gpa.alloc(u32, self.n);
+        self.rscale = try gpa.alloc(f64, self.n);
+    }
+
+    fn dropScratch(self: *Self, gpa: Allocator) void {
+        inline for (scratch_u32) |name| {
+            gpa.free(@field(self, name));
+            @field(self, name) = &.{};
+        }
+        gpa.free(self.rscale);
+        self.rscale = &.{};
     }
 
     /// One full factor. `keep_prev` starts each column from `prev` and

@@ -76,9 +76,15 @@ pub const FreqSolver = struct {
         row_idx: []u32,
         vals: []f64,
         slv: direct.Solver,
-        /// Lane scratch: one vector per structural entry, then the RHS
-        /// and solution planes. Allocated by the first `solveBatch`.
+        /// Lane scratch: the RHS and solution planes. Allocated by the
+        /// first `solveBatch` or `factorEach`; the matrix values never exist
+        /// as a lane plane (`Stacked` computes each column as it is read).
         lane_work: []@Vector(W, f64) = &.{},
+        /// The current `Dyn`'s entries grouped by source column: column j's
+        /// are `dyn_ent[dyn_ptr[j]..dyn_ptr[j + 1]]`, in entry order, ground
+        /// entries left out. Rebuilt by every `solveBatch` with a `Dyn`.
+        dyn_ptr: []u32 = &.{},
+        dyn_ent: []u32 = &.{},
         lanes: ?lane_lu.LaneLu(W) = null,
         /// `factorEach`'s factors: W ω per group, all replaying `slv.lu`'s
         /// pivot tape.
@@ -160,6 +166,9 @@ pub const FreqSolver = struct {
 
         var slv = try direct.Solver.init(allocator, nn, col_ptr, row_idx, null);
         errdefer slv.deinit();
+        // Each ω's values are new; the bypass copy would be nnz2 f64s
+        // (3.7 MB on sweep_opamp_wl_5000) that never match.
+        slv.dropBypass();
 
         return .{
             .n = n,
@@ -214,6 +223,8 @@ pub const FreqSolver = struct {
                 freeHeld(allocator, s);
                 if (s.lanes) |*l| l.deinit(allocator);
                 allocator.free(s.lane_work);
+                allocator.free(s.dyn_ptr);
+                allocator.free(s.dyn_ent);
                 s.slv.deinit();
                 allocator.free(s.col_ptr);
                 allocator.free(s.row_idx);
@@ -302,12 +313,11 @@ pub const FreqSolver = struct {
 
         const gpa = sp.slv.gpa;
         const LL = lane_lu.LaneLu(W);
-        const nnz2 = sp.vals.len; // structural entries in the 2n CSC
         if (sp.lane_work.len == 0)
-            sp.lane_work = try gpa.alloc(@Vector(W, f64), nnz2 + 2 * nn);
-        const vplane = sp.lane_work[0..nnz2];
-        const b_plane = sp.lane_work[nnz2..][0..nn];
-        const x_plane = sp.lane_work[nnz2 + nn ..];
+            sp.lane_work = try gpa.alloc(@Vector(W, f64), 2 * nn);
+        const b_plane = sp.lane_work[0..nn];
+        const x_plane = sp.lane_work[nn..];
+        try indexDyn(gpa, sp, dyn);
 
         var base: usize = 0;
         while (base < omegas.len) : (base += W) {
@@ -341,10 +351,8 @@ pub const FreqSolver = struct {
             if (sp.lanes == null) sp.lanes = try LL.init(gpa, lu);
             sp.lanes.?.base = lu;
 
-            fillLanePlane(self.n, sp, omega_vec, vplane);
-            addDynLanes(sp.src_col_ptr, dyn, base, cnt, vplane);
-            const growth = sp.slv.params.refactor_growth_limit;
-            const bad = sp.lanes.?.refactor(sp.col_ptr, vplane, growth);
+            const src = Stacked(W).of(sp, omega_vec, dyn, base, cnt);
+            const bad = sp.lanes.?.refactor(src, sp.slv.params.refactor_growth_limit);
 
             var r: usize = 0;
             while (r < m) : (r += nn) {
@@ -427,10 +435,8 @@ pub const FreqSolver = struct {
         const gpa = sp.slv.gpa;
         const LL = lane_lu.LaneLu(W);
         const nn: usize = self.nn;
-        const nnz2 = sp.vals.len;
         if (sp.lane_work.len == 0)
-            sp.lane_work = try gpa.alloc(@Vector(W, f64), nnz2 + 2 * nn);
-        const vplane = sp.lane_work[0..nnz2];
+            sp.lane_work = try gpa.alloc(@Vector(W, f64), 2 * nn);
         const groups = (omegas.len + W - 1) / W;
         var tape = omegas.len / 2;
         var tries: u8 = 0;
@@ -453,8 +459,7 @@ pub const FreqSolver = struct {
                 const cnt = @min(W, omegas.len - base);
                 var ow: [W]f64 = undefined;
                 for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
-                fillLanePlane(self.n, sp, ow, vplane);
-                const bad = h.refactor(sp.col_ptr, vplane, sp.slv.params.refactor_growth_limit);
+                const bad = h.refactor(Stacked(W).of(sp, ow, .{}, base, cnt), sp.slv.params.refactor_growth_limit);
                 for (0..cnt) |l| if ((bad >> @intCast(l)) & 1 != 0)
                     try self.held_id.append(allocator, @intCast(base + l));
             }
@@ -478,9 +483,8 @@ pub const FreqSolver = struct {
                 if (adjoint) dense_lu.solveFactoredT(nn, lu, piv, b, x) else dense_lu.solveFactored(nn, lu, piv, b, x);
             },
             .sp => |*sp| {
-                const nnz2 = sp.vals.len;
-                const b_plane = sp.lane_work[nnz2..][0..nn];
-                const x_plane = sp.lane_work[nnz2 + nn ..];
+                const b_plane = sp.lane_work[0..nn];
+                const x_plane = sp.lane_work[nn..];
                 const m = rhs.len / nn;
                 for (sp.held, 0..) |*h, g| {
                     const base = g * W;
@@ -511,8 +515,8 @@ pub const FreqSolver = struct {
         .W = W,
         .solveBatchSerial = solveBatchSerial,
         .setOmegaSparse = setOmegaSparse,
-        .fillLanePlane = fillLanePlane,
-        .addDynLanes = addDynLanes,
+        .indexDyn = indexDyn,
+        .Sparse = Sparse,
     } else {};
 
     /// The lane path's oracle: `setOmega` with `dyn` and a solve per ω, over
@@ -531,54 +535,42 @@ pub const FreqSolver = struct {
         }
     }
 
-    /// `setOmegaSparse`'s fill for W frequencies at once, in the same
-    /// entry order and with the same products, so each lane is bitwise
-    /// the scalar fill.
-    fn fillLanePlane(n: u32, s: *Sparse, omega: @Vector(W, f64), out: []@Vector(W, f64)) void {
-        const nu: usize = n;
-        const neg_omega = -omega;
-        var p: usize = 0;
-        for (0..nu) |j| {
-            const cs = s.src_col_ptr[j];
-            const len: usize = s.src_col_ptr[j + 1] - cs;
-            for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
-            p += len;
-            for (0..len) |q| out[p + q] = omega * @as(@Vector(W, f64), @splat(s.c_vals[cs + q]));
-            p += len;
+    /// Groups `dyn`'s entries by source column into `dyn_ptr`/`dyn_ent`
+    /// with a counting sort, so each column keeps entry order. An empty
+    /// `dyn` leaves them alone: `Stacked.of` ignores them then.
+    fn indexDyn(gpa: Allocator, s: *Sparse, dyn: Dyn) !void {
+        if (dyn.slots.len == 0) return;
+        const n = s.src_col_ptr.len - 1;
+        const nnz = s.src_col_ptr[n];
+        if (s.dyn_ptr.len != n + 1) {
+            gpa.free(s.dyn_ptr);
+            s.dyn_ptr = &.{};
+            s.dyn_ptr = try gpa.alloc(u32, n + 1);
         }
-        for (0..nu) |j| {
-            const cs = s.src_col_ptr[j];
-            const len: usize = s.src_col_ptr[j + 1] - cs;
-            for (0..len) |q| out[p + q] = neg_omega * @as(@Vector(W, f64), @splat(s.c_vals[cs + q]));
-            p += len;
-            for (0..len) |q| out[p + q] = @splat(s.g_vals[cs + q]);
-            p += len;
+        const ptr = s.dyn_ptr;
+        @memset(ptr, 0);
+        for (dyn.slots) |slot| if (slot < nnz) {
+            ptr[slotCol(s.src_col_ptr, slot) + 1] += 1;
+        };
+        for (1..n + 1) |j| ptr[j] += ptr[j - 1];
+        if (s.dyn_ent.len != ptr[n]) {
+            gpa.free(s.dyn_ent);
+            s.dyn_ent = &.{};
+            s.dyn_ent = try gpa.alloc(u32, ptr[n]);
         }
-    }
-
-    /// `setOmegaSparse`'s `dyn` adds for ω indices `base + l`, l < W, a
-    /// ragged tail (l >= cnt) repeating its last ω as `solveBatch` pads it.
-    /// Same entry order and operations, so each lane is bitwise the scalar
-    /// fill.
-    fn addDynLanes(src_col_ptr: []const u32, dyn: Dyn, base: usize, cnt: usize, out: []@Vector(W, f64)) void {
-        const nnz = src_col_ptr[src_col_ptr.len - 1];
-        for (dyn.slots, 0..) |slot, e| {
+        // Backwards from each column's end leaves ptr[j + 1] at column j's
+        // start; one shift down restores the starts.
+        var e = dyn.slots.len;
+        while (e > 0) {
+            e -= 1;
+            const slot = dyn.slots[e];
             if (slot >= nnz) continue;
-            var re: [W]f64 = undefined;
-            var im: [W]f64 = undefined;
-            for (0..W) |l| {
-                const t = dyn.at(e, base + @min(l, cnt - 1));
-                re[l] = t.re;
-                im[l] = t.im;
-            }
-            const q = stackedPos(src_col_ptr, slot);
-            const rv: @Vector(W, f64) = re;
-            const iv: @Vector(W, f64) = im;
-            out[q[0]] += rv;
-            out[q[1]] += iv;
-            out[q[2]] -= iv;
-            out[q[3]] += rv;
+            const j = slotCol(s.src_col_ptr, slot);
+            ptr[j + 1] -= 1;
+            s.dyn_ent[ptr[j + 1]] = @intCast(e);
         }
+        std.mem.copyForwards(u32, ptr[0..n], ptr[1..]);
+        ptr[n] = @intCast(s.dyn_ent.len);
     }
 
     fn setOmegaDense(n: u32, nn: u32, d: *Dense, omega: f64, dyn: Dyn, k: usize) !void {
@@ -629,6 +621,86 @@ pub const FreqSolver = struct {
         try s.slv.factor(s.vals, .{});
     }
 };
+
+/// The stacked-real A(ω) = [G, -ωC; ωC, G] (plus `Dyn`) for L frequencies,
+/// as a `LaneLu(L).refactor` source: each column is computed from the G and
+/// C snapshots as the refactor reads it, so no lane value plane exists. Same
+/// products and adds, in the same order per entry, as `setOmegaSparse`, so
+/// lane l is bitwise that scalar fill at ω index `base + min(l, cnt - 1)`.
+/// `Stacked(1)` is the scalar oracle of the fill.
+pub fn Stacked(comptime L: usize) type {
+    return struct {
+        const V = @Vector(L, f64);
+        src_col_ptr: []const u32,
+        col_ptr: []const u32,
+        g: []const f64,
+        c: []const f64,
+        omega: V,
+        dyn: Dyn,
+        dyn_ptr: []const u32,
+        dyn_ent: []const u32,
+        base: usize,
+        cnt: usize,
+
+        /// The fill of `sp` at `omega`; `dyn` must be the one `indexDyn`
+        /// grouped into `sp`, with lane l at ω index `base + min(l, cnt - 1)`.
+        pub fn of(sp: anytype, omega: V, dyn: Dyn, base: usize, cnt: usize) @This() {
+            return .{
+                .src_col_ptr = sp.src_col_ptr,
+                .col_ptr = sp.col_ptr,
+                .g = sp.g_vals,
+                .c = sp.c_vals,
+                .omega = omega,
+                .dyn = dyn,
+                .dyn_ptr = sp.dyn_ptr,
+                .dyn_ent = if (dyn.slots.len == 0) &.{} else sp.dyn_ent,
+                .base = base,
+                .cnt = cnt,
+            };
+        }
+
+        /// Stacked column `col`: for col = j < n, G then ωC of source column
+        /// j; for col = n + j, -ωC then G. Entry p lands at `w[prow[p]]`.
+        pub inline fn load(s: @This(), col: usize, w: []V, prow: []const u32) void {
+            const n = s.src_col_ptr.len - 1;
+            const top = col < n;
+            const j = if (top) col else col - n;
+            const cs = s.src_col_ptr[j];
+            const len: usize = s.src_col_ptr[j + 1] - cs;
+            const rows = prow[s.col_ptr[col]..][0 .. 2 * len];
+            const g = s.g[cs..][0..len];
+            const c = s.c[cs..][0..len];
+            if (top) {
+                for (rows[0..len], g) |r, v| w[r] = @splat(v);
+                for (rows[len..], c) |r, v| w[r] = s.omega * @as(V, @splat(v));
+            } else {
+                const neg = -s.omega;
+                for (rows[0..len], c) |r, v| w[r] = neg * @as(V, @splat(v));
+                for (rows[len..], g) |r, v| w[r] = @splat(v);
+            }
+            if (s.dyn_ent.len == 0) return;
+            for (s.dyn_ent[s.dyn_ptr[j]..s.dyn_ptr[j + 1]]) |e| {
+                var re: [L]f64 = undefined;
+                var im: [L]f64 = undefined;
+                for (0..L) |l| {
+                    const t = s.dyn.at(e, s.base + @min(l, s.cnt - 1));
+                    re[l] = t.re;
+                    im[l] = t.im;
+                }
+                const at = s.dyn.slots[e] - cs;
+                const rv: V = re;
+                const iv: V = im;
+                if (top) {
+                    w[rows[at]] += rv;
+                    w[rows[len + at]] += iv;
+                } else {
+                    w[rows[at]] -= iv;
+                    w[rows[len + at]] += rv;
+                }
+            }
+        }
+    };
+}
 
 /// The column of CSC slot `slot` in the pattern `col_ptr` describes.
 pub fn slotCol(col_ptr: []const u32, slot: u32) usize {
