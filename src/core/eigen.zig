@@ -1,7 +1,7 @@
 //! Dense real eigenvalues: balance, Hessenberg reduction, Francis
 //! double-shift QR. Row-major n×n input, destroyed in place.
 const std = @import("std");
-const num = @import("core").numerics;
+const num = @import("numerics.zig");
 const Complex = num.Complex;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;

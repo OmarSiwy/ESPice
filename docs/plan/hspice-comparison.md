@@ -53,7 +53,7 @@ the others come from reading the code.
 | S9 | `.NODESET`, `.DCVOLT`, `.LOAD` | OP initial guess; initial conditions (same as `.IC`); a saved OP [CR] | ignored (`netlist.zig:779`, `card orelse return`) | `.dcvolt` is an `.ic` alias; `.nodeset` is vacask-comparison G3; `.load` is C6 | S each |
 | S10 | `.LSTB`, `.LIN`, `.NET`, `.FFT`, `.STIM`, `.SAMPLE`, `.ACMATCH`, `.DCSENS`, `.TRANNOISE` in its HSPICE form, the HB/SN/ENV family, `.MOSRA`, `.BIASCHK`, `.POWER` | an analysis or report | no output and no message (observed for `.lstb`, `.lin`, `.net`, `.fft`: the run printed only the `.ac` plot) | A1 turns each into an error that names the card | S |
 | S11 | `.OPTION GSHUNT=1e-3 CSHUNT= GMINDC= DELMAX= RUNLVL=6 ACCURATE ABSV= RELV= SEARCH=` | these change the solution or where libraries are found [CR Ch.3] | options outside the 13 names in `analyses.zig:75-81` (plus `scale`, read in `netlist.zig:1211`) are skipped without a message (observed for GSHUNT: the answer did not move) | A9 maps the ones that change answers; the rest get one warning listing them. Landed: GSHUNT, CSHUNT, GMINDC, DELMAX, ABSV/RELV/ABSI, RUNLVL/ACCURATE/FAST (as `trtol`), SEARCH | S |
-| S12 | `W1 in 0 out 0 RLGCMODEL=m N=1 L=0.1`, `S1 ... MNAME=`, `U1 ...`, `B1 ... file= model=`, `P1 in 0 port=1` | lossy line, S-parameter block, lossy line, IBIS buffer, port [SA Ch.8; SI] | letters keep their ngspice meaning in every dialect: W is a current switch, S a voltage switch, U a URC line, B a behavioural source, P a CPL line. The W card failed with `UnknownControlSource` (observed); the others fail or misread depending on the line | reject HSPICE-only letters in the HSPICE dialect until E2/E3 land | S |
+| S12 | `W1 in 0 out 0 RLGCMODEL=m N=1 L=0.1`, `S1 ... MNAME=`, `U1 ...`, `B1 ... file= model=`, `P1 in 0 port=1` | lossy line, S-parameter block, lossy line, IBIS buffer, port [SA Ch.8; SI] | letters kept their ngspice meaning in every dialect: W was a current switch, S a voltage switch, U a URC line, B a behavioural source, P a CPL line | W and S are built in the HSPICE dialect (E2, E3, [w-s-elements.md](../devices/w-s-elements.md)); U and B are still rejected there | done for W/S |
 
 Some HSPICE forms fail loudly, but the error names neither the card nor
 the line. Each of these gives only `InvalidAnalysisArguments` or
@@ -191,9 +191,9 @@ the build-order id in the last column.
 | Element or card | What it does | ESPice | VACASK | Value | Build id, size |
 |---|---|---|---|---|---|
 | E/G behavioural forms: `VOL=`/`CUR=`, `POLY`, `LAPLACE`, `POLE`, `FREQ`, `VCR`, `VCCAP`, `DELAY`, `OPAMP`, `NPWL/PPWL`, `TRANSFORMER` [SA Ch.31-32] | behavioural and frequency-domain sources | plain linear E/G, B-sources (`models/native/bsource.zig`); `POLY` and `VOL=` rejected; keyword forms misread (S7) | behavioural sources compiled to Verilog-A | high for analog behavioural decks | A1, then E1 (S to L per form) |
-| W-element with `RLGCMODEL=`/`RLGCFILE=`/`UMODEL=`/`TABLEMODEL=` [SA Ch.8; SI] | multiconductor lossy line, frequency-dependent R and G | native TXL/CPL/LTRA under ngspice letters | ideal line only | high for SI | E2, M |
+| W-element with `RLGCMODEL=`/`RLGCFILE=`/`UMODEL=`/`TABLEMODEL=` [SA Ch.8; SI] | multiconductor lossy line, frequency-dependent R and G | `RLGCMODEL=` and `RLGCFILE=`, N ≤ 4, Rs and Gd included, in every analysis: rational fit of each mode's Yc and delay-extracted propagation run by `models/wline_N.va` ([w-s-elements.md](../devices/w-s-elements.md)); `UMODEL`/`TABLEMODEL`/`FSMODEL`/`SMODEL` refused | ideal line only | high for SI | E2 done (RLGC) |
 | U-element [SA Ch.8] | lumped lossy line | letter taken by URC | no | low | E2, S |
-| S-element, Touchstone/CITI models [SA Ch.8; SI] | multiport S-parameter block, recursive convolution, passivity | no | no | high for SI | E3, L |
+| S-element, Touchstone/CITI models [SA Ch.8; SI] | multiport S-parameter block, recursive convolution, passivity | Touchstone 1.0, up to 4 ports: passive vector fit run by `models/sparam_N.va` in every analysis ([w-s-elements.md](../devices/w-s-elements.md)); CITI, Touchstone 2.0, FQMODEL and mixed mode refused | no | high for SI | E3 done (Touchstone 1.0) |
 | B-element, `.IBIS`, `.EBD`, `.PKG`, `.ICM` [SI] | IBIS buffers and packages | no | no | high for SI | E3, L |
 | P-element [SA Ch.17] | port for `.LIN`, also a source | a V source behind a noiseless z0 resistor in every analysis; mixed-mode ports | port pairs | medium | C4, landed |
 | `.STATEYE` [CR; SA Ch.18] | statistical eye and BER | no | no | medium for SerDes | E3, L |
@@ -534,11 +534,15 @@ G₀ + jkω₀C₀ are `LaneLu` frequency lanes, and complex phasor output.
     (state-space sections in transient); POLE's limits are in
     docs/frontend.md "Pole-zero sources".
   - `FREQ` tables need convolution in transient (L).
-- E2: the W-element's RLGC matrices map onto the native coupled line
-  (CPL), which already takes per-length R, L, G and C matrices. Skin
-  effect (Rs·√f) and dielectric loss (Gd·f) are a second step.
-- E3: S-elements, IBIS and `.stateye` are each large, self-contained
-  projects. Build them only when SI users show up.
+- E2 (done for RLGC): the W element fits each mode's characteristic
+  admittance and its delay-extracted propagation (Rs·√f and Gd·f included)
+  as rational sections and runs them by the method of characteristics in
+  Verilog-A; see [w-s-elements.md](../devices/w-s-elements.md). Tabular
+  models (TABLEMODEL, UMODEL, FSMODEL, SMODEL) remain.
+- E3: the S element is done for Touchstone 1.0 up to four ports (passive
+  vector fit, [w-s-elements.md](../devices/w-s-elements.md)). IBIS and
+  `.stateye` are each large, self-contained projects; build them only when
+  SI users show up.
 - E4, E5: digital and report cards read the result tables after the run,
   with one exception: `.biaschk` region checks need device
   operating-point values, which are blocked on VerA the same way
@@ -589,13 +593,13 @@ tier, the smaller item with more users goes first.
 | 31 | D5 | `.hblin`, `.hblsp` | M each |
 | 32 | D6 | `.ptdnoise`, `.sample` | M, S |
 | 33 | E1 | Behavioural E/G forms | S to L per form |
-| 34 | E2 | W-element on native CPL, then frequency-dependent losses | M |
+| 34 | E2 | W-element with frequency-dependent losses (RLGC done: [w-s-elements.md](../devices/w-s-elements.md); tabular models remain) | M |
 | 35 | E7 | RUNLVL/ACCURATE/FAST presets, with the divergence recorded | M |
 | 36 | E4 | `.vec`, `.pat`, `.dout`, `.lprint`, `.stim` | M total |
 | 37 | E5 | `.biaschk`, `.check`, `.power`, `.powerdc`, `.surge`, `.ivth`, `.model_info` | M total |
 | 38 | D7 | HB envelope (`.env`, `.envosc`, `.envfft`) | L |
 | 39 | E6 | MOSRA aging | L |
-| 40 | E3 | S-element, IBIS, `.stateye` | L each |
+| 40 | E3 | S-element (Touchstone 1.0 done: [w-s-elements.md](../devices/w-s-elements.md)), IBIS, `.stateye` | L each |
 | 41 | E8 | `.design_exploration` | S |
 
 Out of scope: the obsolete `.plot`, `.graph`, `.width` and `.acdcfactor`

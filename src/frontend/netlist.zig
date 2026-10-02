@@ -234,6 +234,14 @@ pub const ForeignKind = source.ForeignKind;
 /// An HDL or OSDI include, path as written (relative to the deck).
 pub const Foreign = struct { kind: ForeignKind, path: []const u8 };
 
+/// Keys whose value is a data file an HSPICE W or S card reads.
+const data_file_keys = std.StaticStringMap(void).initComptime(.{
+    .{ "rlgcfile", {} }, .{ "tstonefile", {} }, .{ "citifile", {} },
+});
+
+/// A `ForeignKind.data` file's contents, read by `prepare`.
+pub const DataFile = struct { path: []const u8, bytes: []const u8 };
+
 /// Deck data: everything that is not circuit topology.
 pub const Deck = struct {
     title: []const u8,
@@ -313,6 +321,8 @@ pub const Netlist = struct {
     model_ids: std.StringHashMapUnmanaged(u32),
     deck: Deck,
     live: Live = .{},
+    /// The `ForeignKind.data` files, as `prepare` read them.
+    files: []const DataFile = &.{},
 
     /// A card as the builder reads it.
     pub const View = struct {
@@ -356,6 +366,12 @@ pub const Netlist = struct {
     /// Name of net `v`: `x1.mid` for `mid` inside instance `x1`.
     pub fn netName(nl: *const Netlist, v: VertexId) []const u8 {
         return nl.pool.str(nl.graph.vertices.items(.name)[v.index()]);
+    }
+
+    /// The bytes of data file `path`, spelled as the card spells it.
+    pub fn dataFile(nl: *const Netlist, path: []const u8) ?[]const u8 {
+        for (nl.files) |f| if (std.mem.eql(u8, f.path, path)) return f.bytes;
+        return null;
     }
 
     /// First `.model` card named `name`.
@@ -1187,6 +1203,12 @@ fn Reader(comptime S: type) type {
             const matrix_keys = std.StaticStringMap(void).initComptime(.{ .{ "r", {} }, .{ "l", {} }, .{ "g", {} }, .{ "c", {} } });
             // CPL matrices are blank-separated; a negative entry is not a subtraction.
             const cpl = std.mem.eql(u8, kind, "cpl");
+            // So are an HSPICE W model's lower-triangle matrices.
+            const wline = std.mem.eql(u8, kind, "w");
+            const w_matrix_keys = std.StaticStringMap(void).initComptime(.{
+                .{ "lo", {} }, .{ "co", {} }, .{ "ro", {} }, .{ "go", {} }, .{ "rs", {} }, .{ "gd", {} },
+                .{ "l", {} },  .{ "c", {} },  .{ "r", {} },  .{ "g", {} },
+            });
             r.card_kv.clearRetainingCapacity();
             while (f.next()) |t| {
                 if (t[0] == '(' or t[0] == ')' or t[0] == ',') continue;
@@ -1199,7 +1221,11 @@ fn Reader(comptime S: type) type {
                         if (global) try r.variations.append(r.arena, v);
                         continue;
                     }
-                    const value = if (cpl and matrix_keys.has(t)) try r.readValue(&f, frame, true, true) else try r.kvValue(&f, frame, true);
+                    if (data_file_keys.has(t)) {
+                        try r.card_kv.append(r.arena, .{ .key = t, .value = .{ .name = try r.dataPath(&f) } });
+                        continue;
+                    }
+                    const value = if ((cpl and matrix_keys.has(t)) or (wline and w_matrix_keys.has(t))) try r.readValue(&f, frame, true, true) else try r.kvValue(&f, frame, true);
                     try r.card_kv.append(r.arena, .{ .key = t, .value = value });
                 } else {
                     const value: Value = if (S.parseNum(t)) |n| .{ .num = n } else try r.nameValue(t, frame, true);
@@ -2455,10 +2481,11 @@ fn Reader(comptime S: type) type {
             // HSPICE's P element is a port: a V card that `port=` numbers
             // for `.lin` (`P1 in 0 port=1 z0=50`).
             const letter = if (port_card) 'v' else std.ascii.toLower(head[0]);
-            // HSPICE reads these letters as lossy lines, S-parameter blocks
-            // and IBIS buffers, none of which is built.
-            if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bsuw", letter) != null)
+            // HSPICE reads these letters as IBIS buffers and lumped lines,
+            // neither of which is built.
+            if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bu", letter) != null)
                 return r.unsupported(line, "unsupported HSPICE element");
+            if (r.dialect == .hspice and (letter == 's' or letter == 'w')) return r.readDataElement(head, letter, &f, frame);
             if (std.mem.indexOfScalar(u8, "efgh", letter) != null) {
                 var probe = f;
                 _ = probe.next();
@@ -2802,6 +2829,35 @@ fn Reader(comptime S: type) type {
             }
         }
 
+        /// HSPICE W and S cards: nodes and `key=value` pairs in any order
+        /// (`W1 N=3 1 3 5 0 2 4 6 0 RLGCMODEL=m L=0.97`). A file key's value
+        /// is the raw path in the deck's own case.
+        fn readDataElement(r: *R, head: []const u8, letter: u8, f: *F, frame: *const Frame) Error!void {
+            r.nodes.clearRetainingCapacity();
+            r.positional.clearRetainingCapacity();
+            r.card_kv.clearRetainingCapacity();
+            while (f.next()) |t| {
+                if (t[0] == ',') continue;
+                if (!F.isWord(t)) return error.ParseError;
+                if (!f.takeEq()) {
+                    try r.nodes.append(r.arena, t);
+                } else if (data_file_keys.has(t)) {
+                    try r.card_kv.append(r.arena, .{ .key = t, .value = .{ .name = try r.dataPath(f) } });
+                } else {
+                    try r.card_kv.append(r.arena, .{ .key = t, .value = try r.kvValue(f, frame, false) });
+                }
+            }
+            return r.commit(head, letter, frame);
+        }
+
+        /// A data file's path, recorded for `prepare` to read.
+        fn dataPath(r: *R, f: *F) Error![]const u8 {
+            const path = try r.pathOf(f);
+            try r.foreign.append(r.arena, .{ .kind = .data, .path = path });
+            return path;
+        }
+
+        /// An HSPICE P card with its `hblin=[h, s]` band vector spelled as
         /// the plain keys `hblin_h=h hblin_s=s` the builder reads. A longer
         /// vector (multi-tone HB) is refused.
         fn portLine(r: *R, line: []const u8) Error![]const u8 {

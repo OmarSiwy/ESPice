@@ -35,17 +35,22 @@ items:
 - **Controlled-source forms still refused** (`src/frontend/netlist.zig`):
   FREQ, OPAMP, NPWL/PPWL, the logic gates and TRANSFORMER. POLE is on main
   (`laplace_zp`, docs/frontend.md).
-- **W and S elements:** on `feat/ws` (W and S in Verilog-A) and
-  `feat/lines` (TXL/CPL fits). Main still refuses W, and
-  `hspice/w_element.sp` expects that error.
+- **W and S elements** (landed for RLGC W and Touchstone 1.0 S, all
+  Verilog-A: [w-s-elements.md](docs/devices/w-s-elements.md)). Left:
+  - tabular W models (TABLEMODEL, UMODEL, FSMODEL, SMODEL), FQMODEL, CITI,
+    Touchstone 2.0, S with more than 4 ports, mixed mode, DELAYHANDLE;
+  - noise from lossy W lines and S elements (both are noiseless);
+  - data files named inside an `.include` resolve against the top deck's
+    directory;
+  - |P| ≤ 1 is not enforced on the W propagation fit;
+  - Gd·f is non-causal, so W lines with Gd fit to ~3e-2, not 1e-5;
+  - the FGD roll-off follows a garbled manual equation, unconfirmed;
+  - IBIS was only scoped, never built.
 - **IBIS:** `feat/ibis`, not started on main.
 - **`.hblsp`:** large-signal S over a power sweep. P elements carry z0 in
   HB; missing are driving a port's sine amplitude and frequency per point
   and a confirmed HSPICE definition of S12/S22.
 - **`.meas` over NOISE:** not read yet. The other new analyses are.
-- **Noise** (all on `feat/noise`): trannoise `SAMPLES>1`, SDE and TIME;
-  a `.ptdnoise` TIME sweep; `.sample BETA`; phase-noise flicker, METHOD 1
-  and 2, and `.acphasenoise`.
 - **Optimization** (docs/analysis/optimize.md): still refused are a
   bisection over several parameters or RESULTS cards, a bisection on a
   `GOAL <`/`>` card, OPTIMIZE with `.alter`, and `.measure ... pushout=`.

@@ -5,6 +5,8 @@ pub const numerics = @import("numerics.zig");
 pub const query = @import("query.zig");
 pub const lm = @import("lm.zig");
 pub const bisect = @import("bisect.zig");
+/// Dense real eigenvalues (balance, Hessenberg, Francis QR).
+pub const eigen = @import("eigen.zig");
 pub const QueryId = query.QueryId;
 
 const deck = @import("deck.zig");
@@ -50,4 +52,5 @@ test {
     _ = intern;
     _ = lm;
     _ = bisect;
+    _ = eigen;
 }

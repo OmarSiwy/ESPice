@@ -80,7 +80,22 @@ pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, inp
     for (alters, runs[1..]) |*text, run| text.* = try netlist.source.expand(io, session, origin, run);
     nl.deck.alters = alters;
     try loadModels(io, lib, session, nl.deck.foreign, origin);
+    nl.files = try loadData(io, session, nl.deck.foreign, origin);
     return nl;
+}
+
+/// Reads every data file the deck names, relative to the deck's directory.
+fn loadData(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.Foreign, origin: []const u8) ![]const netlist.DataFile {
+    var files: std.ArrayList(netlist.DataFile) = .empty;
+    for (foreign) |f| if (f.kind == .data) {
+        const path = if (std.fs.path.isAbsolute(f.path)) f.path else try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, session, .unlimited) catch |err| {
+            std.log.err("netlist: cannot read data file {s}: {s}", .{ path, @errorName(err) });
+            return err;
+        };
+        try files.append(session, .{ .path = f.path, .bytes = bytes });
+    };
+    return files.items;
 }
 
 fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, foreign: []const netlist.Foreign, origin: []const u8) !void {
@@ -91,6 +106,7 @@ fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, fore
         else
             try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", f.path });
         switch (f.kind) {
+            .data => {},
             .verilog_a, .verilog => try paths.append(session, path),
             // ngspice loads a compiled OSDI binary; espice compiles Verilog-A
             // itself, so it takes the `.va` beside one, or its built-in model

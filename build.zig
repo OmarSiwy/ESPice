@@ -377,6 +377,8 @@ pub fn build(b: *std.Build) void {
             "test-frontend", "Run netlist, builder and prepared-circuit tests",
             &.{
                 t.run(netlist_mod, &.{}, false),
+                // The W/S fitters (wfit.zig imports sparam.zig).
+                t.run(M.make(b.path("src/frontend/wfit.zig"), &.{core_import}), &.{}, false),
                 // build_options: the binder test loads models/diode.va at runtime.
                 t.run(frontend_mod, &.{.{ .name = "build_options", .module = build_options_mod }}, true),
             },
@@ -520,6 +522,12 @@ const model_includes = [_]struct { name: []const u8, file: []const u8 }{
     .{ .name = "vccs_laplace", .file = "vcvs_laplace.va" },
     .{ .name = "vcvs_pole", .file = "vcvs_laplace.va" },
     .{ .name = "vccs_pole", .file = "vcvs_laplace.va" },
+    .{ .name = "sparam_2", .file = "sparam_1.va" },
+    .{ .name = "sparam_3", .file = "sparam_1.va" },
+    .{ .name = "sparam_4", .file = "sparam_1.va" },
+    .{ .name = "wline_2", .file = "wline_1.va" },
+    .{ .name = "wline_3", .file = "wline_1.va" },
+    .{ .name = "wline_4", .file = "wline_1.va" },
 };
 
 /// Whether `name` is one of the comma-separated entries of `csv`.

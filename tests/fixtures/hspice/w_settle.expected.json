@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "HSPICE W element: a resistive line settles to its DC divider and holds it",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Exact DC ABCD of the line with R0 = 50 ohm/m and the fit's G floor 2*pi*lo*C0 = 2.0e-4 S/m (lo = 2.6526e5 Hz), l = 0.2 m, 50 ohm source, 100 ohm load: v(b) = 0.6241001996 V. The transient must hold it from 0.1 us to 2 us; tolerance 1e-6."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "axis": {
+          "name": "time",
+          "values": [
+            1e-07,
+            5e-07,
+            1e-06,
+            1.5e-06,
+            2e-06
+          ],
+          "rtol": 0,
+          "atol": 1e-15
+        },
+        "columns": {
+          "v(b)": {
+            "values": [
+              0.6241001996,
+              0.6241001996,
+              0.6241001996,
+              0.6241001996,
+              0.6241001996
+            ],
+            "unit": "V",
+            "rtol": 0,
+            "atol": 1e-06
+          }
+        }
+      }
+    ]
+  },
+  "netlist_sha256": "f45879a5d6541731db5897ba0c2fad1b83b3d4a1ea9ffa4b18c5ffeabcd16504"
+}
