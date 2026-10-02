@@ -28,6 +28,7 @@ pub const Session = struct {
         /// File offsets of the blank point count and of the first row.
         count_at: u64,
         rows_at: u64,
+        complex: bool,
         buffer: [64 * 1024]u8,
 
         fn writer(s: *Stream) *Io.Writer {
@@ -97,6 +98,7 @@ pub const Session = struct {
         s.atomic = null;
         s.count_at = 0;
         s.rows_at = 0;
+        s.complex = plot.result.is_complex;
         const path = self.selection.path orelse {
             self.stream = s;
             return s.writer();
@@ -138,7 +140,7 @@ pub const Session = struct {
             errdefer self.state = .failed;
             const w = &s.file.interface;
             try w.flush();
-            if (s.file.logicalPos() - s.rows_at != @as(u64, npoints) * columns * @sizeOf(f64)) return error.DataLengthMismatch;
+            if (s.file.logicalPos() - s.rows_at != @as(u64, npoints) * columns * @sizeOf(f64) * @as(u64, if (s.complex) 2 else 1)) return error.DataLengthMismatch;
             var digits: [count_width]u8 = undefined;
             try atomic.file.writePositionalAll(io, try std.fmt.bufPrint(&digits, "{d}", .{npoints}), s.count_at);
             try atomic.replace(io);

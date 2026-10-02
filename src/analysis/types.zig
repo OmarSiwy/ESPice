@@ -47,7 +47,7 @@ pub const RunCtx = struct {
     allocator: std.mem.Allocator,
     /// Reclaimable work storage.
     scratch_allocator: std.mem.Allocator,
-    /// Where a transient writes its rows instead of keeping them
+    /// Where a transient or AC sweep writes its rows instead of keeping them
     /// (`Session.stream`); its Result then has empty `data`.
     stream: ?*std.Io.Writer = null,
 };
