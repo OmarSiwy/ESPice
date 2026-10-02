@@ -41,10 +41,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     opts.sweep.fill(freqs, omegas);
 
     const names = try root.probeNames(ctx, "frequency");
-    errdefer {
-        for (names[1..]) |s| a.free(s); // names[0] is the "frequency" literal
-        a.free(names);
-    }
     const row_len = names.len * 2;
     // A streamed run writes each row to `ctx.stream` and keeps only the one
     // being built, in scratch; otherwise the rows are the result.

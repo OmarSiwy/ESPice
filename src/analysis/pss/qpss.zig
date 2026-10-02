@@ -638,10 +638,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (!st.converged) return error.QpssDidNotConverge;
 
     const names = try root.probeNames(ctx, "frequency");
-    errdefer {
-        for (names[1..]) |s| a.free(s);
-        a.free(names);
-    }
     const ncols = names.len;
 
     const n_rows = nf;

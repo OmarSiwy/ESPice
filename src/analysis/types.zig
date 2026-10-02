@@ -53,29 +53,28 @@ pub const RunCtx = struct {
 };
 
 /// Returns one column name per probe, preceded by `first` when given.
+/// Labeled names borrow `ctx.probe_labels` (deck storage that outlives every
+/// result), and without `first` the slice is `probe_labels` itself.
 /// Unlabeled contexts fall back to `v(<node name>)`, or `v(<row>)` for an
-/// unnamed branch row so two such columns never share a name. Every name
-/// except `first` is allocated from `ctx.allocator`.
+/// unnamed branch row so two such columns never share a name, allocated from
+/// `ctx.allocator`. Callers free nothing: the results arena owns the rest.
 pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     const a = ctx.allocator;
+    const labeled = ctx.probe_labels.len == ctx.probes.len;
+    if (labeled and first == null) return ctx.probe_labels;
     const extra: usize = if (first == null) 0 else 1;
     const names = try a.alloc([]const u8, ctx.probes.len + extra);
-    errdefer a.free(names);
     if (first) |name| names[0] = name;
-    const labeled = ctx.probe_labels.len == ctx.probes.len;
-    var done: usize = 0;
-    errdefer for (names[extra..][0..done]) |s| a.free(s);
-    for (ctx.probes, names[extra..], 0..) |row, *out, i| {
-        out.* = if (labeled)
-            try a.dupe(u8, ctx.probe_labels[i])
-        else blk: {
-            const label = ctx.circuit.nodeName(row);
-            break :blk if (label.len == 0)
-                try std.fmt.allocPrint(a, "v({d})", .{row})
-            else
-                try std.fmt.allocPrint(a, "v({s})", .{label});
-        };
-        done += 1;
+    if (labeled) {
+        @memcpy(names[extra..], ctx.probe_labels);
+        return names;
+    }
+    for (ctx.probes, names[extra..]) |row, *out| {
+        const label = ctx.circuit.nodeName(row);
+        out.* = if (label.len == 0)
+            try std.fmt.allocPrint(a, "v({d})", .{row})
+        else
+            try std.fmt.allocPrint(a, "v({s})", .{label});
     }
     return names;
 }
