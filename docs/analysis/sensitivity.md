@@ -103,6 +103,14 @@ analytic stamps are the upgrade
    a model parameter, `<card>` for the principal instance parameter,
    `<card>_<param>` for any other instance parameter.
 
+Since VerA device ABI 6 (2026-10-02) a device's temperature is its Model
+row's `temperature__`, not an instance parameter, so the
+`<card>_temperature` columns are gone: `.sens` lists every other parameter
+as before, at the same values. A user-visible output change (13 corpus
+decks lost 2 to 13 columns each). ponytail: a temperature sensitivity,
+if wanted, belongs at Model-row level (perturb `temperature__` of the
+rows a device uses); not built.
+
 Per-parameter re-derivation through `recomputeType` instead of a full
 `recompute` (commit `148361f`) took `multi_analysis/bench_sens_diffpair`
 (4 BJTs) from 80.61M to 42.51M Ir (-47.3%) and `sens/bench_sens_bridge` from
