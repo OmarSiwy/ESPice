@@ -488,10 +488,59 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
     try std.testing.expectEqual(@as(f64, 3), typed.instances[0].previous);
 }
 
+test "a status-latch-only device stays GPU-eligible and reports its latched status" {
+    const D = struct {
+        pub const mutable_eval = true;
+        pub const contract_abi: u32 = 6;
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct { limit: f64 = 4 };
+        pub const Instance = struct {
+            vera_status__: u32 = 0,
+            vera_status_args__: [4]f64 = @splat(0.0),
+        };
+        pub const status_sites = [_]contract.StatusSite{.{ .severity = .@"error", .fmt = "v = %g", .file = "m.va", .line = 7 }};
+        pub fn eval(comptime S: type, xv: *const [2]S.V, m: *const Model, inst: *Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const v = x[0].sub(x[1]);
+            if (inst.vera_status__ == 0 and v.val() > m.limit) {
+                inst.vera_status__ = contract.statusCode(.@"error", 0);
+                inst.vera_status_args__[0] = v.val();
+            }
+            return contract.rows(@This(), S, .{ v, v.neg() });
+        }
+    };
+    const a = std.testing.allocator;
+    var proto: ProtoStore(D) = .{};
+    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(.{}, .{}, .{ 2, 1 });
+    const batch = try ProtoStore(D).finalize(&proto, a, .{
+        .col_ptr = &.{ 0, 3, 6, 9 },
+        .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
+        .n = 3,
+        .trash_slot = 9,
+    }).unwrap();
+    defer batch.hooks.deinit(batch.ctx, a);
+    // The latch is its only eval write, so the device may be resident.
+    try std.testing.expect(batch.hooks.gpu_payload != null);
+    var msg: [64]u8 = undefined;
+    try std.testing.expectEqual(null, batch.hooks.status.?(batch.ctx, &msg));
+    var g: [10]f64 = @splat(0);
+    var c: [10]f64 = @splat(0);
+    var rhs: [4]f64 = @splat(0);
+    var q: [4]f64 = @splat(0);
+    const planes: impl.Planes = .{ .g_vals = &g, .c_vals = &c, .rhs = &rhs, .q_vec = &q };
+    // v(1) - v(2) = -5 for instance 0 and +5 for instance 1.
+    batch.eval(batch.ctx, &planes, 0, 2, &.{ 0, 0, 5 }, 0);
+    const hit = batch.hooks.status.?(batch.ctx, &msg).?;
+    try std.testing.expectEqual(@as(u32, 1), hit.index);
+    try std.testing.expectEqualStrings("m.va:7: error: v = 5", msg[0..hit.len]);
+}
+
 test "mutable evaluation captures per-instance data without GPU residency" {
     const D = struct {
         pub const mutable_eval = true;
-        pub const contract_abi: u32 = 5;
+        pub const contract_abi: u32 = 6;
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
         pub const Model = struct {};

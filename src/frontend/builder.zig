@@ -1007,7 +1007,7 @@ pub const NetBuilder = struct {
                 const zs = r_t * sinhc;
                 if (gl <= 0 or !finiteLineCoefficients(.{ gl, sinhc, std.math.cosh(gl), zs, zs * (1.0 + 1e-12) }))
                     return error.UnsupportedTransmissionLineParameters;
-                deriveModel(devices.lossy_tline, &model, self.b);
+                deriveModel(devices.lossy_tline, &model, self.b, dev.pins.len);
                 return self.b.addDevice(devices.lossy_tline, dev.name, model, .{}, try deviceNodes(self, devices.lossy_tline, dev));
             }
             return error.UnsupportedTransmissionLineParameters;
@@ -1505,9 +1505,18 @@ const simparam_fields = .{
 /// model.tnom = model.nom_temp__`, ngspice's `if (!BSIM4tnomGiven)
 /// BSIM4tnom = ckt->CKTnomTemp` (b4set.c:1950). A card TNOM/TREF set
 /// `__given` in `applyKv`, so it still wins.
-fn deriveModel(comptime D: type, model: *D.Model, b: *const Builder) void {
+///
+/// A card with `pins` nodes leaves the module's later ports unconnected:
+/// §9.19 `$port_connected` reads `Model.port_connected__` (bit p = port p,
+/// all ones by default), written here because `derive` may read it. A
+/// 4-terminal card on HiSIM_HV's 6-port module clears `sub` and `temp`, as
+/// its 4-node path expects.
+fn deriveModel(comptime D: type, model: *D.Model, b: *const Builder, pins: usize) void {
     inline for (simparam_fields) |f| {
         if (comptime @hasField(D.Model, f[0])) @field(model, f[0]) = @field(b, f[1]);
+    }
+    if (comptime @hasField(D.Model, "port_connected__")) {
+        if (pins < 64) model.port_connected__ &= (@as(u64, 1) << @intCast(pins)) - 1;
     }
     if (comptime device.modelName(D)) |name| {
         if (device.vtable(name).derive) |f| f(@ptrCast(model));
@@ -1556,7 +1565,7 @@ fn addSingleDevice(self: *NetBuilder, comptime D: type, dev: Device) !void {
     try applyKv(&instance, dev.kv);
     // §6.3.4/§3.4.5: derived parameters after the last write; explicit card
     // values win through `__given`.
-    deriveModel(D, &model, b);
+    deriveModel(D, &model, b, dev.pins.len);
     try b.addDevice(D, dev.name, model, instance, try deviceNodes(self, D, dev));
 }
 

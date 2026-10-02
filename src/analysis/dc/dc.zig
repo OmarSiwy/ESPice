@@ -40,24 +40,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         if (t) |r| r.set(saved);
         ckt.recompute() catch unreachable; // restores the checked original source value
     }
-    // A temperature sweep at either level writes every instance's
+    // A temperature sweep at either level writes every Model row's
     // temperature; put the netlist's back before the recompute above.
     const sweeps_temp = opts.target == .temp or (opts.hasOuter() and opts.target2.? == .temp);
-    var temperatures: std.ArrayList(f64) = .empty;
-    defer temperatures.deinit(scratch);
-    if (sweeps_temp) for (refs) |ref| {
-        if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature"))
-            try temperatures.append(scratch, ref.get());
-    };
-    defer if (sweeps_temp) {
-        var i: usize = 0;
-        for (refs) |ref| {
-            if (ref.is_instance and std.mem.eql(u8, ref.param_name, "temperature")) {
-                ref.set(temperatures.items[i]);
-                i += 1;
-            }
-        }
-    };
+    const temp_c = ckt.temp_c;
+    defer if (sweeps_temp) ckt.setCircuitTemp(temp_c);
 
     const n_inner = if (opts.points.len > 0) opts.points.len else sweepCount(opts.start, opts.stop, opts.step);
     const n_outer: usize = if (!opts.hasOuter()) 1 else if (opts.points2.len > 0) opts.points2.len else sweepCount(opts.start2, opts.stop2, opts.step2);

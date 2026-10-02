@@ -189,8 +189,38 @@ pub const Executor = struct {
         self.allocator.destroy(self);
     }
 
+    /// Runs the query, then refuses it if any device latched a VerA
+    /// `$fatal`/`$error` (`Hooks.status`), whether the analysis failed on it
+    /// or not: a latched device stamps zero rows, which can still solve.
+    // ponytail: checked once per query, not per eval; a refused device
+    // costs the analysis's own failure path first. Check per Newton
+    // iterate if that turns out slow.
     fn execute(ctx: *anyopaque) !types.Result {
         const self: *Executor = @ptrCast(@alignCast(ctx));
+        const res = self.runQuery() catch |err| {
+            try self.refuseLatched();
+            return err;
+        };
+        try self.refuseLatched();
+        return res;
+    }
+
+    /// `error.DeviceRefused` after logging `<instance>: <file>:<line>:
+    /// fatal|error: <message>` for the first instance with a latched status.
+    /// A warning, not `log.err`: a test runner fails any test that logs an
+    /// error, and refusing is this path's expected outcome.
+    fn refuseLatched(self: *const Executor) error{DeviceRefused}!void {
+        var buf: [512]u8 = undefined;
+        for (self.circuit.batches, self.circuit.batch_types) |b, t| {
+            const status = b.hooks.status orelse continue;
+            const hit = status(b.ctx, &buf) orelse continue;
+            const name = requests.CardRef.lookup(self.deck.cards, t, hit.index) orelse b.type_name;
+            std.log.warn("{s}: {s}", .{ name, buf[0..hit.len] });
+            return error.DeviceRefused;
+        }
+    }
+
+    fn runQuery(self: *Executor) !types.Result {
         var par: ?ParEval = null;
         if (self.config.device_threads > 1) {
             par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.circuit.trash_slot, self.config.device_threads);
@@ -203,7 +233,11 @@ pub const Executor = struct {
         const gpu_context = try self.prepareGpu();
         defer {
             self.circuit.gpu_hook = null;
-            if (gpu_context) |g| g.deinit();
+            if (gpu_context) |g| {
+                // `refuseLatched` reads statuses off the host instances.
+                g.syncStatus();
+                g.deinit();
+            }
         }
         const lu_context = self.prepareGpuLu();
         defer {

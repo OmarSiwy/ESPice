@@ -113,6 +113,10 @@ pub const Batch = struct {
     digital: bool = false,
 };
 
+/// Where `Hooks.status` found a latched status: the instance index within
+/// the batch and the length of the message it wrote.
+pub const StatusHit = struct { index: u32, len: u32 };
+
 /// Callback status that is safe across separately compiled objects, unlike
 /// Zig error values, whose numbering is per compilation.
 pub const DeviceStatus = enum(u8) { ok = 0, out_of_memory = 1, too_many_instances = 2 };
@@ -213,6 +217,11 @@ pub const Hooks = struct {
     /// accepted step.
     bound_step: ?*const fn (*anyopaque) f64 = null,
     next_breakpoint: ?*const fn (*anyopaque, f64) ?f64 = null,
+    /// The first instance with a latched VerA `$fatal`/`$error`
+    /// (`vera_status__`): writes its `contract.formatStatus` text into `msg`,
+    /// truncated to fit. Null when the type has no status sites; those types
+    /// are `mutable_eval`, so their instances live on the host.
+    status: ?*const fn (*anyopaque, msg: []u8) ?StatusHit = null,
     /// Charge per instance and LTE site (`ddt()` sites not marked
     /// `vera_lte = 0`) from the last eval, instance-major. Lets the transient
     /// run its LTE per charge state, as ngspice's CKTterr does, instead of
@@ -454,7 +463,8 @@ pub const GpuPayload = struct {
 //    kernel takes `model_of` after `models`.
 // 20: the slot tape holds only the device's pattern entries, not n_u^2.
 // 21: the lim plane holds only the unknowns `limit` writes, not n_u.
-pub const abi_version: u32 = 21;
+// 22: `Hooks.status`, VerA's `$fatal`/`$error` channel.
+pub const abi_version: u32 = 22;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -499,7 +509,7 @@ pub fn layoutHash() u64 {
             PatternBuilder,      ParamRef,            NoiseSource,
             std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
             DeviceResult(Batch), DeviceResult(Proto), Param,
-            SimState,
+            SimState,            StatusHit,
         }) |T| h = hashType(h, T);
         h = mix(h, abi_version);
         break :blk h;

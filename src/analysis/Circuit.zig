@@ -161,6 +161,9 @@ pub const Circuit = struct {
     lu_hook: ?LuHook = null,
     /// `direct.Params.fast_mode` of the workspace's solver.
     lu_fast: bool = false,
+    /// The temperature `setCircuitTemp` last installed, in degrees Celsius;
+    /// the devices' own 27 until then. A sweep restores it from here.
+    temp_c: f32 = 27,
     /// The analysis state every device call receives (`setSimState`), with
     /// the Newton iteration `beginSolve`/`advanceIteration` count.
     sim: device_ir.SimState = .{},
@@ -306,6 +309,7 @@ pub const Circuit = struct {
         }
         var ckt = try allocate(template.*, allocator, batches, false);
         ckt.sim = source.sim;
+        ckt.temp_c = source.temp_c;
         return ckt;
     }
 
@@ -321,6 +325,7 @@ pub const Circuit = struct {
         var ckt = try allocate(template.*, allocator, source.batches, false);
         ckt.owns_batches = source.owns_batches;
         ckt.sim = source.sim;
+        ckt.temp_c = source.temp_c;
         source.batches = &.{};
         source.release();
         return ckt;
@@ -918,6 +923,7 @@ pub const Circuit = struct {
     /// Installs a circuit temperature in degrees Celsius. Call `recompute`
     /// before solving, which also detects a temperature-driven topology change.
     pub fn setCircuitTemp(self: *Circuit, temp_c: f32) void {
+        self.temp_c = temp_c;
         self.lin.valid = false;
         for (self.batches) |b| if (b.hooks.set_temp) |f| f(b.ctx, temp_c);
         self.markGpuDirty();

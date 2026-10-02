@@ -541,8 +541,8 @@ pub fn CoupledLtra(comptime N: usize) type {
             break :vals &frozen;
         });
         pub const num_ports: usize = 2 * N;
-        /// Hand-written against VerA's device ABI 5 (`contract.abi_version`); review on a bump.
-        pub const contract_abi: u32 = 5;
+        /// Hand-written against VerA's device ABI 6 (`contract.abi_version`); review on a bump.
+        pub const contract_abi: u32 = 6;
         const n_u = NU;
         const Self = @This();
 
