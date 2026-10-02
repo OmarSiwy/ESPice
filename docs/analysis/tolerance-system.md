@@ -138,6 +138,39 @@ An errpreset-style profile would be a set of these values chosen together
 (for example `trtol` 1 with reltol, vntol and abstol scaled down). Not
 implemented: no deck has needed one, and `.options` covers each knob.
 
+### HSPICE RUNLVL
+
+HSPICE's `.option runlvl=0..6`, `accurate` and `fast` [CR .OPTION RUNLVL,
+.OPTION ACCURATE, .OPTION FAST] scale "all simulator tolerances"
+together, for the transient only, without publishing the factors. ESPice
+maps the level onto `trtol` alone, and leaves `reltol` and the Newton
+tests where they are:
+
+| RUNLVL | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| `trtol` | 28 | 14 | 7 | 3.5 | 1.75 | 0.875 |
+
+Level 3 is HSPICE's default, "similar to HSPICE's original default mode",
+so it keeps SPICE's 7; each level up halves the LTE bound. As the manual
+says: a bare `runlvl` is 3, `runlvl=0` turns the mapping off, the level
+overrides `.option trtol` wherever that sits, `accurate` raises any level
+below 5 to 5 (alone it means 5), and `fast` alone is level 1. Divergence:
+HSPICE's level also changes its bypass and timestep algorithm, which
+ESPice does not have. The mapping is ESPice's; unconfirmed against HSPICE.
+
+Measured (2026-10-01, `espice --tokenizer hspice`): 1 V, 1 MHz sine into
+1 kΩ and 1 nF, `.tran 1u 5u` (so `dt_max` = 100 ns), maximum error of
+`v(b)` against the analytic response:
+
+| RUNLVL | 0 or 3 | 1 | 2 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| time points | 62 | 60 | 61 | 65 | 78 | 99 |
+| max error (V) | 7.09e-3 | 7.10e-3 | 7.10e-3 | 6.75e-3 | 4.74e-3 | 3.06e-3 |
+
+Levels 1 and 2 barely move this deck because the 100 ns `dt_max` already
+holds the step; they loosen only decks whose steps LTE limits. Fallback:
+`.option runlvl=0` with explicit `trtol`, `reltol` and friends.
+
 ## 2. Flow explanation
 
 Convergence is decided in one module, `src/solver/converger.zig`:

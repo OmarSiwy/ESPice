@@ -67,6 +67,9 @@ pub const Problem = struct {
     timing_in_depth: bool = false,
     /// Where an HSPICE `.save` writes the operating point; null without one.
     save_path: ?[]const u8 = null,
+    /// Where `.save` and `.stim` files go: beside the output file, as HSPICE
+    /// writes beside its listing.
+    out_dir: []const u8 = ".",
     /// One session per `prepared.runs` entry (variants with their own
     /// topology), run after the main session by `run_all`.
     runs: []Run = &.{},
@@ -131,15 +134,10 @@ pub const Problem = struct {
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
         errdefer self.prepared.deinit();
         self.save_path = null;
+        self.out_dir = try a.dupe(u8, if (options.output.path) |out| std.fs.path.dirname(out) orelse "." else ".");
         if (self.prepared.deck.save_op) |save| {
-            // Beside the output file, as HSPICE writes beside its listing.
-            const origin = switch (options.source) {
-                .file => |path| path,
-                .bytes => |bytes| bytes.origin,
-            };
-            const name = save.file orelse try std.mem.concat(a, u8, &.{ std.fs.path.stem(origin), ".ic0" });
-            const dir = if (options.output.path) |out| std.fs.path.dirname(out) orelse "." else ".";
-            self.save_path = try std.fs.path.resolve(a, &.{ dir, name });
+            const name = save.file orelse try std.mem.concat(a, u8, &.{ std.fs.path.stem(self.origin), ".ic0" });
+            self.save_path = try std.fs.path.resolve(a, &.{ self.out_dir, name });
         }
         self.delivery = try output.Session.init(allocator, options.output);
         errdefer self.delivery.deinit();
@@ -312,6 +310,67 @@ pub const Problem = struct {
         defer timingLap(self.io, &output_lap, "output finish");
         try self.delivery.finish();
         if (self.save_path) |path| try self.saveOperatingPoint(path, self.prepared.deck.save_op.?);
+        for (self.prepared.deck.stims) |stim| try self.writeStim(stim);
+    }
+
+    /// Writes an HSPICE `.stim` card's file from the main session's first
+    /// transient: one PWL source per signal, or one `.data` table with a row
+    /// per time. No transient only warns.
+    fn writeStim(self: *Problem, stim: core.Stim) !void {
+        const res = for (self.session.outputs.items) |id| {
+            const info = try self.session.info(id);
+            if (info.status == .complete and info.kind == .tran) {
+                const r = try self.session.result(id);
+                if (r.npoints != 0) break r;
+            }
+        } else {
+            std.log.warn(".stim: no transient result to write", .{});
+            return;
+        };
+        const gpa = self.allocator;
+        var times: std.ArrayList(f64) = .empty;
+        defer times.deinit(gpa);
+        const width = res.varnames.len;
+        if (stim.times.len != 0) {
+            try times.appendSlice(gpa, stim.times);
+        } else if (stim.npoints > 1) {
+            const to = @min(stim.to, res.data[(res.npoints - 1) * width]);
+            for (0..stim.npoints) |k| try times.append(gpa, stim.from + (to - stim.from) * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(stim.npoints - 1)));
+        } else for (0..res.npoints) |k| {
+            const t = res.data[k * width];
+            if (t >= stim.from and t <= stim.to) try times.append(gpa, t);
+        }
+        // Column-major: signal k's samples at values[k * n ..].
+        const n = times.items.len;
+        const values = try gpa.alloc(f64, n * stim.signals.len);
+        defer gpa.free(values);
+        for (stim.signals, 0..) |m, k| output.sampleMeasure(m.first, res, times.items, values[k * n ..][0..n]) catch {
+            std.log.warn(".stim: no such vector for {s}", .{m.name});
+            return;
+        };
+        var text: std.Io.Writer.Allocating = .init(gpa);
+        defer text.deinit();
+        const w = &text.writer;
+        try w.print("* {s}\n* written by .stim\n", .{self.prepared.deck.title});
+        if (stim.data) {
+            try w.print(".data {s}{s}", .{ stim.dataname, if (stim.indepout) " time" else "" });
+            for (stim.signals) |m| try w.print(" {s}", .{m.name});
+            for (times.items, 0..) |t, i| {
+                try w.writeAll("\n+");
+                if (stim.indepout) try w.print(" {e}", .{t});
+                for (0..stim.signals.len) |k| try w.print(" {e}", .{values[k * n + i]});
+            }
+            try w.writeAll("\n.enddata\n");
+        } else for (stim.signals, stim.nodes, 0..) |m, pair, k| {
+            try w.print("{s} {s} {s} pwl(", .{ m.name, pair[0], pair[1] });
+            for (times.items, 0..) |t, i| try w.print("\n+ {e} {e}", .{ t, values[k * n + i] });
+            try w.writeAll(")\n");
+        }
+        const name = try std.fmt.allocPrint(gpa, "{s}.{s}{d}_tr0", .{ stim.file orelse std.fs.path.stem(self.origin), if (stim.data) "dat" else "pwl", stim.serial });
+        defer gpa.free(name);
+        const path = try std.fs.path.resolve(gpa, &.{ self.out_dir, name });
+        defer gpa.free(path);
+        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = text.written() });
     }
 
     /// Under a final plan (the CLI), a transient or AC sweep that publishes

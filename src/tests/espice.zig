@@ -448,6 +448,50 @@ test "HSPICE .save writes the operating point beside the output and .load reads 
     try t.expectEqual(@as(usize, 2), loader.prepared.deck.ic.len);
 }
 
+test "HSPICE .stim writes PWL sources and a .data table a later run reads" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer t.allocator.free(dir);
+    const out = try std.fmt.allocPrint(t.allocator, "{s}/a.raw", .{dir});
+    defer t.allocator.free(out);
+    // v(a) ramps 0 to 1 V over 1 ns, then holds.
+    const writer = try api.Problem.init(t.allocator, io, .{
+        .source = .{ .bytes = .{ .data = "stim\nv1 a 0 pwl(0 0 1n 1)\nr1 a 0 1k\n.tran 0.1n 2n\n" ++
+            ".stim tran pwl filename=rc v0=v(a) node1=b node2=0 npoints=5\n" ++
+            ".stim tran data filename=rc tab vv=v(a) w=par('2*v(a)') indepvar=(0.5n 1.5n) indepout\n.end\n", .origin = "stim.sp" } },
+        .dialect = .hspice,
+        .output = .{ .path = out },
+    });
+    defer writer.deinit();
+    try writer.run_all();
+    const pwl = try tmp.dir.readFileAlloc(io, "rc.pwl0_tr0", t.allocator, .unlimited);
+    defer t.allocator.free(pwl);
+    try t.expectEqualStrings("* stim\n* written by .stim\nv0 b 0 pwl(\n+ 0e0 0e0\n+ 5e-10 5e-1\n+ 1e-9 1e0\n+ 1.5000000000000002e-9 1e0\n+ 2e-9 1e0)\n", pwl);
+    const data = try tmp.dir.readFileAlloc(io, "rc.dat0_tr0", t.allocator, .unlimited);
+    defer t.allocator.free(data);
+    try t.expect(std.mem.startsWith(u8, data, "* stim\n* written by .stim\n.data tab time vv w\n+ ") and std.mem.endsWith(u8, data, "\n.enddata\n"));
+    // Rows: time, v(a), 2 v(a) at 0.5 ns and 1.5 ns.
+    const want = [_]f64{ 0.5e-9, 0.5, 1, 1.5e-9, 1, 2 };
+    var got: std.ArrayList(f64) = .empty;
+    defer got.deinit(t.allocator);
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |line| if (std.mem.startsWith(u8, line, "+")) {
+        var cells = std.mem.tokenizeScalar(u8, line[1..], ' ');
+        while (cells.next()) |c| try got.append(t.allocator, try std.fmt.parseFloat(f64, c));
+    };
+    try t.expectEqual(want.len, got.items.len);
+    for (want, got.items) |w, g| try t.expectApproxEqRel(w, g, 1e-9);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "load.sp", .data = "load\n.include rc.pwl0_tr0\nr2 b 0 1k\n.tran 0.1n 2n\n.end\n" });
+    const deck_path = try std.fmt.allocPrint(t.allocator, "{s}/load.sp", .{dir});
+    defer t.allocator.free(deck_path);
+    const reader = try api.Problem.init(t.allocator, io, .{ .source = .{ .file = deck_path }, .dialect = .hspice });
+    defer reader.deinit();
+    try reader.run_all();
+}
+
 test "HSPICE .op <time> counts its columns as .op does" {
     // 63 nets and one source current: 64 columns, SST2's limit. A time
     // column that the snapshot never publishes would make it 65.

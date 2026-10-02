@@ -1,13 +1,14 @@
-//! `.include`, `.lib`, HSPICE `.load` and external `.data` expansion,
-//! before parsing. Paths resolve against the directory of the file that
-//! names them.
+//! `.include`, `.lib`, HSPICE `.load`, `.vec` and external `.data`
+//! expansion, before parsing. Paths resolve against the directory of the file
+//! that names them, then against each HSPICE `.option search=` directory.
 const std = @import("std");
 const Io = std.Io;
 const Fields = @import("lines.zig").Fields("\"'", false);
-const Directive = enum { include, lib, endl, load, data };
+const vec = @import("vec.zig");
+const Directive = enum { include, lib, endl, load, data, vec };
 const directives = std.StaticStringMap(Directive).initComptime(.{
     .{ ".include", .include }, .{ ".inc", .include }, .{ ".lib", .lib }, .{ ".endl", .endl },
-    .{ ".load", .load },       .{ ".data", .data },
+    .{ ".load", .load },       .{ ".data", .data },   .{ ".vec", .vec },
 });
 
 /// Reads `path` and expands it (see `expand`). The result is allocated in `arena`.
@@ -31,7 +32,7 @@ pub fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.heap.page_allocator);
-    try appendContents(io, origin, src, null, 0, &out);
+    try appendContents(io, try searchDirs(arena, origin, src), origin, src, null, 0, &out);
     return try arena.dupe(u8, out.items);
 }
 
@@ -43,6 +44,45 @@ fn hasAlter(src: []const u8) bool {
         if (eqlLower(firstWord(std.mem.trim(u8, line, " \t\r")), ".alter")) return true;
     }
     return false;
+}
+
+/// HSPICE `.option search='dir'` [CR .OPTION SEARCH]: where `.lib`,
+/// `.include` and `.load` look for a file not found beside the file naming
+/// it. Read off the top-level deck only, so a search path set inside an
+/// included file is not seen; a relative directory resolves against the
+/// deck's.
+fn searchDirs(arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]const []const u8 {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, src, '\n');
+    _ = lines.next();
+    while (lines.next()) |line| {
+        var tokens = Fields.init(std.mem.trim(u8, line, " \t\r"));
+        const head = tokens.next() orelse continue;
+        if (!eqlLower(head, ".option") and !eqlLower(head, ".options") and !eqlLower(head, ".opt")) continue;
+        while (tokens.next()) |key| {
+            if (!Fields.isWord(key) or !tokens.takeEq()) continue;
+            const value = word(&tokens) catch continue orelse continue;
+            if (eqlLower(key, "search")) try dirs.append(arena, try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(origin) orelse ".", value }));
+        }
+    }
+    return dirs.items;
+}
+
+/// `name` beside `path`, else in the first search directory holding it;
+/// beside `path` when none does, so the open reports the usual error.
+fn locate(io: Io, search: []const []const u8, path: []const u8, name: []const u8) ![]u8 {
+    const gpa = std.heap.page_allocator;
+    const here = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", name });
+    if (search.len == 0 or std.fs.path.isAbsolute(name)) return here;
+    if (Io.Dir.cwd().access(io, here, .{})) |_| return here else |_| {}
+    for (search) |dir| {
+        const there = try std.fs.path.resolve(gpa, &.{ dir, name });
+        if (Io.Dir.cwd().access(io, there, .{})) |_| {
+            gpa.free(here);
+            return there;
+        } else |_| gpa.free(there);
+    }
+    return here;
 }
 
 /// HSPICE `.alter` [SA Ch.4]: the deck up to the first `.alter`, then one
@@ -199,13 +239,13 @@ pub fn foreignKindForPath(path: []const u8) ?ForeignKind {
     return null;
 }
 
-fn appendFile(io: Io, path: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
+fn appendFile(io: Io, search: []const []const u8, path: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     // ponytail: bounded recursion; iterative include stack if real PDKs exceed 32.
     if (depth == 32) return error.IncludeDepthExceeded;
     const gpa = std.heap.page_allocator;
     const src = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
     defer gpa.free(src);
-    try appendContents(io, path, src, section, depth, out);
+    try appendContents(io, search, path, src, section, depth, out);
 }
 
 /// HSPICE `.load [FILE=f] [RUN=...]` [CR .LOAD]: inlines the `.nodeset`/`.ic`
@@ -213,7 +253,7 @@ fn appendFile(io: Io, path: []const u8, section: ?[]const u8, depth: u8, out: *s
 /// not there yet (the run that first saves it) is skipped with a warning.
 /// RUN= only picks between `.alter` runs' files, which ESPice does not
 /// number; it is accepted and unused.
-fn appendLoad(io: Io, path: []const u8, tokens: *Fields, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
+fn appendLoad(io: Io, search: []const []const u8, path: []const u8, tokens: *Fields, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     const gpa = std.heap.page_allocator;
     var file: ?[]const u8 = null;
     while (tokens.next()) |key| {
@@ -224,9 +264,9 @@ fn appendLoad(io: Io, path: []const u8, tokens: *Fields, depth: u8, out: *std.Ar
     const stem = std.fs.path.stem(path);
     const default = try std.mem.concat(gpa, u8, &.{ stem, ".ic0" });
     defer gpa.free(default);
-    const resolved = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", file orelse default });
+    const resolved = try locate(io, search, path, file orelse default);
     defer gpa.free(resolved);
-    appendFile(io, resolved, null, depth + 1, out) catch |err| switch (err) {
+    appendFile(io, search, resolved, null, depth + 1, out) catch |err| switch (err) {
         error.FileNotFound => std.log.warn(".load: {s} not found; no saved operating point", .{resolved}),
         else => return err,
     };
@@ -333,7 +373,20 @@ fn cell(f: anytype, r: usize, k: usize) []const u8 {
     return if (col <= row.len) row[col - 1] else "0";
 }
 
-fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
+/// HSPICE `.vec 'file'`: the sources and `.dout` cards the vector file
+/// stands for (frontend/vec.zig).
+fn appendVec(io: Io, path: []const u8, out: *std.ArrayList(u8)) anyerror!void {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const src = try Io.Dir.cwd().readFileAlloc(io, path, arena.allocator(), .unlimited);
+    const text = vec.expand(arena.allocator(), src) catch |err| {
+        if (err == error.InvalidVector) std.log.warn(".vec: cannot read {s}", .{path});
+        return err;
+    };
+    try out.appendSlice(std.heap.page_allocator, text);
+}
+
+fn appendContents(io: Io, search: []const []const u8, path: []const u8, src: []const u8, section: ?[]const u8, depth: u8, out: *std.ArrayList(u8)) anyerror!void {
     const gpa = std.heap.page_allocator;
     var lines = std.mem.splitScalar(u8, src, '\n');
     var selected = section == null;
@@ -364,7 +417,7 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
                 continue;
             }
             if (kind == .load) {
-                if (selected) try appendLoad(io, path, &tokens, depth, out);
+                if (selected) try appendLoad(io, search, path, &tokens, depth, out);
                 continue;
             }
             if (kind == .endl) {
@@ -386,7 +439,7 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
                 continue;
             }
             if (!selected) continue;
-            const resolved = try std.fs.path.resolve(gpa, &.{ std.fs.path.dirname(path) orelse ".", file_or_section });
+            const resolved = try locate(io, search, path, file_or_section);
             defer gpa.free(resolved);
             // HDL includes are left for the runtime loader.
             if (foreignKindForPath(file_or_section) != null) {
@@ -395,7 +448,11 @@ fn appendContents(io: Io, path: []const u8, src: []const u8, section: ?[]const u
                 try out.appendSlice(gpa, "\"\n");
                 continue;
             }
-            try appendFile(io, resolved, corner, depth + 1, out);
+            if (kind == .vec) {
+                try appendVec(io, resolved, out);
+                continue;
+            }
+            try appendFile(io, search, resolved, corner, depth + 1, out);
         } else if (selected) {
             try out.appendSlice(gpa, line);
             try out.append(gpa, '\n');

@@ -19,6 +19,8 @@ pub const printMeasures = @import("measure.zig").print;
 pub const printMeasureStatistics = @import("measure.zig").printStatistics;
 /// Every `.meas` card's value over one result; see `measure.evaluateAll`.
 pub const measureValues = @import("measure.zig").evaluateAll;
+/// A measure clause's transient waveform at given times (HSPICE `.stim`).
+pub const sampleMeasure = @import("measure.zig").sample;
 
 /// Resolves a user-facing format name or alias to a `Format`. Returns null
 /// for an unknown name so the caller owns the diagnostic.

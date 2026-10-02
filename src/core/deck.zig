@@ -22,6 +22,33 @@ pub const SaveOp = struct {
     time: f64 = 0,
 };
 
+/// HSPICE `.stim tran pwl|data` [CR .STIM]: after the run, the first
+/// transient's signals are written to a file as PWL sources or as one
+/// `.data` table, for a later run to read.
+pub const Stim = struct {
+    /// `.data dataname` instead of PWL sources.
+    data: bool = false,
+    /// FILENAME=, as written; null for the deck's stem. The file is
+    /// `<name>.pwl<serial>_tr0` or `<name>.dat<serial>_tr0`.
+    file: ?[]const u8 = null,
+    /// Counts the cards of the same form from 0.
+    serial: u32 = 0,
+    dataname: []const u8 = "",
+    /// One `find` measure per signal: `name` is the source or column name,
+    /// `first` the waveform.
+    signals: []const Measure = &.{},
+    /// A PWL source's terminals, parallel to `signals`.
+    nodes: []const [2][]const u8 = &.{},
+    /// INDEPVAR= times; empty to sample FROM..TO, at NPOINTS evenly spaced
+    /// times, or at every transient point when NPOINTS is 0.
+    times: []const f64 = &.{},
+    from: f64 = 0,
+    to: f64 = std.math.inf(f64),
+    npoints: u32 = 0,
+    /// INDEPOUT: a `time` column in a `.data` table.
+    indepout: bool = false,
+};
+
 /// A device parameter value that replaces the DC one in AC-family analyses
 /// (a resistor's `ac=`). Stored by identity; each analysis clone resolves
 /// its own parameter pointer.
@@ -198,6 +225,8 @@ pub const Deck = struct {
     save_op: ?SaveOp = null,
     /// HSPICE `.mosra`, when the deck has one.
     mosra: ?Mosra = null,
+    /// HSPICE `.stim` cards, in deck order.
+    stims: []const Stim = &.{},
 };
 
 /// What a `.meas` card computes, after ngspice com_measure2.c, plus the
@@ -205,8 +234,35 @@ pub const Deck = struct {
 /// relative-error family [CR .MEASURE (Error Function)], and the FFT
 /// figures THD, SNR, SNDR, ENOB and SFDR [CR .MEASURE FFT], and the
 /// recovered electromigration average `em_avg`, and `.jitter`'s time
-/// interval error.
-pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3, thd, snr, sndr, enob, sfdr, em_avg, jitter };
+/// interval error. The `check_*` and `dout` forms count the violations of
+/// an HSPICE `.check`, `.biaschk` or `.dout` card (see `Check`).
+pub const MeasureFunc = enum(u8) { trig_targ, find, when, avg, min, max, min_at, max_at, pp, rms, integ, deriv, param, err, err1, err2, err3, thd, snr, sndr, enob, sfdr, em_avg, jitter, check_slew, check_forbid, check_require, check_level, dout };
+
+/// What a violation-counting measure tests on the `first` clause's
+/// waveform, and on the `second` clause's reference where it has one.
+/// Transitions are read between the logic thresholds: a rise leaves `lo`
+/// and reaches `hi` without falling back, and it happens at the midpoint of
+/// those two crossings.
+pub const Check = struct {
+    lo: f64 = 0,
+    hi: f64 = 0,
+    /// `check_slew`: the allowed transition time. `check_forbid`: the window
+    /// around each reference edge no transition may land in (SETUP is
+    /// [-duration, 0], HOLD [0, duration]). `check_require`: the window one
+    /// must land in (EDGE). `check_level`: the allowed band.
+    min: f64 = -std.math.inf(f64),
+    max: f64 = std.math.inf(f64),
+    /// `check_level`: the longest excursion out of the band that passes; 0
+    /// counts every one.
+    dur: f64 = 0,
+    edge: Edge = .both,
+    ref_edge: Edge = .both,
+    /// `dout`: (time, state) pairs, state 0 or 1; don't-care states are
+    /// left out.
+    expect: []const [2]f64 = &.{},
+
+    pub const Edge = enum(u8) { rise, fall, both };
+};
 
 /// One postfix op of a `PARAM=` measure or a `par('expr')` waveform: a
 /// constant, the result of the `measure`-th card, a result vector by label
@@ -297,6 +353,8 @@ pub const Measure = struct {
     /// HSPICE `TRAN_CONT`/`AC_CONT`/`DC_CONT`: every event from the given
     /// count on, one result each.
     cont: bool = false,
+    /// The `check_*` and `dout` forms' test.
+    check: Check = .{},
 
     /// The card's optimization error for result `value`, HSPICE's
     /// WEIGHT * (result - GOAL) / max(|GOAL|, MINVAL), from the clause that

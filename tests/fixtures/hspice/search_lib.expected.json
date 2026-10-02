@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": ".option search finds .include and .lib files outside the deck's directory.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "1 V divided by r1 = 1 kOhm (search_dir/divider.inc) over r2 = 3 kOhm (search_dir/corners.lib, tt): 0.75 V."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.75
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b663be83f435ec04ffc8e1690e9fbb80246ec793715c2106c385da84bd981b6c"
+}

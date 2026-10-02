@@ -1,0 +1,7 @@
+* Found through .option search (search_lib.sp), not beside the deck.
+.lib tt
+r2 b 0 3k
+.endl tt
+.lib ff
+r2 b 0 1k
+.endl ff

@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": ".power AVG/RMS/MAX/MIN of a source's absorbed power and of an output variable.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v1 = sin(2 pi 1MHz t) across 1 kOhm absorbs -sin^2/1k W: one period has avg -0.5 mW, rms sqrt(3/8) mW, max 0, min -1 mW. v2 = 2 V across 2 kOhm in series absorbs -2 mW. i(v1) = -sin/1k A: avg 0, rms 1/sqrt(2) mA, max and min +-1 mA."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "power1_avg",
+        "value": -0.0005,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power1_rms",
+        "value": 0.0006123724356957945,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power1_max",
+        "value": 0,
+        "rtol": 0,
+        "atol": 1e-08
+      },
+      {
+        "kind": "measure",
+        "name": "power1_min",
+        "value": -0.001,
+        "rtol": 0.0001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power2_avg",
+        "value": -0.002,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power2_rms",
+        "value": 0.002,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power2_max",
+        "value": -0.002,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power2_min",
+        "value": -0.002,
+        "rtol": 1e-06,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power3_avg",
+        "value": 0,
+        "rtol": 0,
+        "atol": 1e-07
+      },
+      {
+        "kind": "measure",
+        "name": "power3_rms",
+        "value": 0.0007071067811865475,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power3_max",
+        "value": 0.001,
+        "rtol": 0.0001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "power3_min",
+        "value": -0.001,
+        "rtol": 0.0001,
+        "atol": 0
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b369cc9894565facab005619f454e62a526dbae50eadaa143cee2b1cb20c182f"
+}

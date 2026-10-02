@@ -272,7 +272,25 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
             if (s.file) |file| own.file = try sim_arena.dupe(u8, file);
             break :blk own;
         } else null,
+        .stims = try stims(sim_arena, nl.deck.stims),
     } };
+}
+
+/// `.stim` cards with their strings copied out of the parse arena.
+fn stims(arena: std.mem.Allocator, cards: []const core.Stim) ![]const core.Stim {
+    const out = try arena.dupe(core.Stim, cards);
+    for (out) |*s| {
+        if (s.file) |file| s.file = try arena.dupe(u8, file);
+        s.dataname = try arena.dupe(u8, s.dataname);
+        s.signals = try measures(arena, s.signals);
+        const nodes = try arena.dupe([2][]const u8, s.nodes);
+        for (nodes) |*pair| for (pair) |*n| {
+            n.* = try arena.dupe(u8, n.*);
+        };
+        s.nodes = nodes;
+        s.times = try arena.dupe(f64, s.times);
+    }
+    return out;
 }
 
 /// `.ic`-style values on circuit rows. A node no device touches is dropped,
@@ -305,6 +323,7 @@ fn measures(arena: std.mem.Allocator, cards: []const core.Measure) ![]const core
     for (out) |*m| {
         m.name = try arena.dupe(u8, m.name);
         m.expr = try measureOps(arena, m.expr);
+        m.check.expect = try arena.dupe([2]f64, m.check.expect);
         for ([_]*core.MeasureClause{ &m.first, &m.second }) |c| {
             c.vec = try arena.dupe(u8, c.vec);
             c.vec2 = try arena.dupe(u8, c.vec2);

@@ -10,6 +10,7 @@ pub const source = @import("source.zig");
 const csr = @import("csr.zig");
 pub const expr = @import("expr.zig");
 const measure = @import("measure.zig");
+const pattern = @import("pattern.zig");
 const core = @import("core");
 const Name = core.Name;
 const InternPool = @import("core").InternPool;
@@ -259,6 +260,8 @@ pub const Deck = struct {
     alters: []const []const u8 = &.{},
     /// HSPICE `.save` (the last one); ngspice's `.save` fills `saves`.
     save_op: ?core.SaveOp = null,
+    /// HSPICE `.stim` cards; their strings borrow the parse arena.
+    stims: []const core.Stim = &.{},
     /// HSPICE `.sample` (the last one), for the `.noise` spectra.
     sample: ?core.query.NoiseSample = null,
     /// HSPICE `.mosra` (the last one) and its `.appendmodel` bindings.
@@ -502,6 +505,9 @@ const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "global", .global },     .{ "connect", .connect },           .{ "jitter", .meas },
     .{ "store", .store },       .{ "sample", .sample },
     .{ "mosra", .mosra },       .{ "appendmodel", .appendmodel },
+    .{ "check", .meas },        .{ "dout", .meas },                 .{ "biaschk", .meas },
+    .{ "power", .meas },        .{ "pat", .ignored },               .{ "stim", .meas },
+    .{ "stimuli", .meas },
     .{ "control", .control },   .{ "endc", .endc },
     .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
     .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
@@ -778,6 +784,7 @@ fn Reader(comptime S: type) type {
         saves: std.ArrayList([]const u8) = .empty,
         save_all: bool = false,
         save_op: ?core.SaveOp = null,
+        stims: std.ArrayList(core.Stim) = .empty,
         sample: ?core.query.NoiseSample = null,
         mosra: ?Mosra = null,
         appendmodels: std.ArrayList(AppendModel) = .empty,
@@ -845,6 +852,10 @@ fn Reader(comptime S: type) type {
             }
             try r.lines.ensureTotalCapacity(arena, line_hint);
             while (try split.next()) |line| try r.lines.append(arena, line);
+            pattern.rewrite(arena, r.lines.items) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidPattern => return error.ParseError,
+            };
             try r.hg.ensureTotalCapacity(arena, line_hint + 1, line_hint, 3 * line_hint);
             try r.pool.reserve(arena, @intCast(@min(2 * line_hint, none - 1)));
             try r.values.ensureTotalCapacity(arena, line_hint);
@@ -927,6 +938,7 @@ fn Reader(comptime S: type) type {
                     .variations = r.variations.items,
                     .optimize = r.optimize,
                     .save_op = r.save_op,
+                    .stims = r.stims.items,
                     .sample = r.sample,
                     .mosra = r.mosra,
                     .appendmodels = r.appendmodels.items,
@@ -1965,10 +1977,39 @@ fn Reader(comptime S: type) type {
                 else => {},
             };
             var jitters: u32 = 0;
+            var checks: u32 = 0;
+            var powers: u32 = 0;
+            var stims: [2]u32 = @splat(0);
+            var global_level: ?measure.Levels = null;
             for (r.meas_lines.items) |line| {
                 var f = F.init(line);
                 var text = f.rest();
-                if (std.mem.eql(u8, f.next().?, ".jitter")) {
+                const head = f.next().?[1..];
+                if (std.mem.eql(u8, head, "check") or std.mem.eql(u8, head, "dout") or std.mem.eql(u8, head, "biaschk")) {
+                    const n = r.measures.items.len;
+                    measure.parseCheck(r.arena, head, f.rest(), r, &global_level, checks + 1, &r.measures) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => std.log.warn("netlist: ignoring unsupported or malformed card '{s}'", .{line}),
+                    };
+                    if (r.measures.items.len > n) checks += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, head, "power")) {
+                    powers += 1;
+                    r.readPower(&f, powers) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => std.log.warn("netlist: ignoring unsupported or malformed card '{s}'", .{line}),
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, head, "stim")) {
+                    r.readStim(&f, &stims) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => std.log.warn("netlist: ignoring unsupported or malformed card '{s}'", .{line}),
+                    };
+                    continue;
+                }
+                if (std.mem.eql(u8, head, "jitter")) {
                     // `.jitter <kind> TRIG ...` reads as `.meas <kind>
                     // jitter[N] jitter TRIG ...`, N from the second card on.
                     jitters += 1;
@@ -1987,6 +2028,141 @@ fn Reader(comptime S: type) type {
                 };
                 try r.measures.append(r.arena, m);
             }
+        }
+
+        /// HSPICE `.power signal [REF=] [FROM=] [TO=]` [CR .POWER] as four
+        /// transient measures, `power<serial>_avg`, `_rms`, `_max` and
+        /// `_min`. A bare name is a top-level voltage source, read as the
+        /// power it absorbs, v(n+, n-) * i(name); any other signal is an
+        /// output variable read as written. REF= only names HSPICE's table
+        /// and is dropped.
+        fn readPower(r: *R, f: *F, serial: u32) Error!void {
+            const start = f.pos;
+            _ = f.next() orelse return error.ParseError;
+            if (f.nextByte() == '(') while (f.next()) |t| if (t[0] == ')') break;
+            const sig = std.mem.trim(u8, f.line[start..f.pos], " \t");
+            const wave = if (std.mem.indexOfScalar(u8, sig, '(') != null) sig else try r.sourcePower(sig);
+            var window: std.ArrayList(u8) = .empty;
+            while (f.next()) |t| {
+                if (std.mem.eql(u8, t, "ref") and f.takeEq()) {
+                    _ = f.next();
+                    continue;
+                }
+                try window.print(r.arena, " {s}", .{t});
+            }
+            for ([_][]const u8{ "avg", "rms", "max", "min" }) |func| {
+                const text = try std.fmt.allocPrint(r.arena, "tran power{d}_{s} {s} {s}{s}", .{ serial, func, func, wave, window.items });
+                try r.measures.append(r.arena, try measure.parse(r.arena, text, r, .tran, true));
+            }
+        }
+
+        /// HSPICE `.stim [tran] pwl|data [filename=] [dataname] [name=]ovar
+        /// [node1= node2=] ... [from= to= npoints= | indepvar=(t ...)]
+        /// [indepout]` [CR .STIM]. Each signal is read as a `find` measure.
+        /// A signal with no name takes its output variable's, `v(a)` as
+        /// `v_a`; a `par()` one must be named, and a PWL source's name says
+        /// V or I. A PWL source of `v(a[,b])` defaults to terminals a and b
+        /// (else 0). The AC, DC and VEC forms are a ParseError.
+        fn readStim(r: *R, f: *F, serials: *[2]u32) Error!void {
+            var form = f.next() orelse return error.ParseError;
+            if (std.mem.eql(u8, form, "tran")) form = f.next() orelse return error.ParseError;
+            const data = std.mem.eql(u8, form, "data");
+            if (!data and !std.mem.eql(u8, form, "pwl")) return error.ParseError;
+            var stim: core.Stim = .{ .data = data, .serial = serials[@intFromBool(data)] };
+            var signals: std.ArrayList(core.Measure) = .empty;
+            var nodes: std.ArrayList([2][]const u8) = .empty;
+            var times: std.ArrayList(f64) = .empty;
+            const Key = enum { filename, node1, node2, from, to, npoints, indepvar, indepout };
+            var name: ?[]const u8 = null;
+            while (f.peek()) |t| {
+                const start = f.pos;
+                _ = f.next();
+                const key = if (F.isWord(t) and f.takeEq()) t else null;
+                if (key == null and std.mem.eql(u8, t, "indepout")) {
+                    stim.indepout = true;
+                    continue;
+                }
+                const field = if (key) |k| std.meta.stringToEnum(Key, k) else null;
+                if (field) |which| switch (which) {
+                    .filename => stim.file = try r.pathOf(f),
+                    .node1, .node2 => {
+                        const node = f.next() orelse return error.ParseError;
+                        if (nodes.items.len == 0) return error.ParseError;
+                        nodes.items[nodes.items.len - 1][@intFromBool(which == .node2)] = node;
+                    },
+                    .from, .to => {
+                        const v = S.parseNum(f.next() orelse "") orelse return error.ParseError;
+                        if (which == .from) stim.from = v else stim.to = v;
+                    },
+                    .npoints => stim.npoints = std.math.lossyCast(u32, S.parseNum(f.next() orelse "") orelse return error.ParseError),
+                    .indepvar => {
+                        const paren = f.peek() != null and f.peek().?[0] == '(';
+                        if (paren) _ = f.next();
+                        while (f.peek()) |v| {
+                            if (v[0] == ')') {
+                                _ = f.next();
+                                break;
+                            }
+                            const x = S.parseNum(v) orelse if (paren) return error.ParseError else break;
+                            _ = f.next();
+                            try times.append(r.arena, x);
+                        }
+                    },
+                    .indepout => {
+                        const v = f.next() orelse "";
+                        stim.indepout = !std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "off");
+                    },
+                } else if (key) |k| {
+                    name = k;
+                } else if (data and stim.dataname.len == 0 and signals.items.len == 0 and f.peek() != null and f.peek().?[0] != '(') {
+                    stim.dataname = t;
+                } else {
+                    // An output variable: `v(a)`, `i(r1)`, `par('...')`.
+                    if (f.nextByte() == '(') while (f.next()) |p| if (p[0] == ')') break;
+                    const ovar = std.mem.trim(u8, f.line[start..f.pos], " \t");
+                    const text = try std.fmt.allocPrint(r.arena, "tran s find {s} at=0", .{ovar});
+                    var m = try measure.parse(r.arena, text, r, .tran, true);
+                    m.name = name orelse blk: {
+                        if (m.first.ops.len != 0) return error.ParseError;
+                        const own = try r.arena.dupe(u8, ovar);
+                        for (own) |*c| if (!std.ascii.isAlphanumeric(c.*)) {
+                            c.* = '_';
+                        };
+                        break :blk std.mem.trimEnd(u8, own, "_");
+                    };
+                    name = null;
+                    if (!data and m.name[0] != 'v' and m.name[0] != 'i') return error.ParseError;
+                    var pair: [2][]const u8 = .{ "", "0" };
+                    if (std.mem.startsWith(u8, ovar, "v(")) {
+                        var it = std.mem.tokenizeAny(u8, ovar[2 .. ovar.len - 1], ", ");
+                        pair[0] = it.next() orelse "";
+                        pair[1] = it.next() orelse "0";
+                    }
+                    try signals.append(r.arena, m);
+                    try nodes.append(r.arena, pair);
+                }
+            }
+            if (signals.items.len == 0 or (data and stim.dataname.len == 0)) return error.ParseError;
+            if (!data) for (nodes.items) |pair| if (pair[0].len == 0) return error.ParseError;
+            stim.signals = signals.items;
+            stim.nodes = nodes.items;
+            stim.times = times.items;
+            serials[@intFromBool(data)] += 1;
+            try r.stims.append(r.arena, stim);
+        }
+
+        /// `par()` power absorbed by top-level voltage source `name`.
+        fn sourcePower(r: *R, name: []const u8) Error![]const u8 {
+            if (name[0] != 'v') return error.ParseError;
+            for (r.lines.items) |line| {
+                var f = F.init(line);
+                if (!std.mem.eql(u8, f.next() orelse continue, name)) continue;
+                const p = f.next() orelse return error.ParseError;
+                const n = f.next() orelse return error.ParseError;
+                if (isGroundName(n)) return std.fmt.allocPrint(r.arena, "par('v({s})*i({s})')", .{ p, name });
+                return std.fmt.allocPrint(r.arena, "par('(v({s})-v({s}))*i({s})')", .{ p, n, name });
+            }
+            return error.ParseError;
         }
 
         /// A `PARAM=` or `par()` measure expression in postfix: names of
@@ -2998,5 +3174,7 @@ fn appendSpan(comptime T: type, arena: Allocator, list: *std.ArrayList(T), items
 test {
     _ = csr;
     _ = measure;
+    _ = pattern;
+    _ = @import("vec.zig");
     _ = @import("tests/netlist.zig");
 }

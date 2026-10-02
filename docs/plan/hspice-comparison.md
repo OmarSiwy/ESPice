@@ -52,7 +52,7 @@ the others come from reading the code.
 | S8 | `.CONNECT b c` | nets b and c are one net [CR .CONNECT] | ignored (observed: `v(c) = 0` while `v(b) = 1`) | top-level alias in `netOf` | S |
 | S9 | `.NODESET`, `.DCVOLT`, `.LOAD` | OP initial guess; initial conditions (same as `.IC`); a saved OP [CR] | ignored (`netlist.zig:779`, `card orelse return`) | `.dcvolt` is an `.ic` alias; `.nodeset` is vacask-comparison G3; `.load` is C6 | S each |
 | S10 | `.LSTB`, `.LIN`, `.NET`, `.FFT`, `.STIM`, `.SAMPLE`, `.ACMATCH`, `.DCSENS`, `.TRANNOISE` in its HSPICE form, the HB/SN/ENV family, `.MOSRA`, `.BIASCHK`, `.POWER` | an analysis or report | no output and no message (observed for `.lstb`, `.lin`, `.net`, `.fft`: the run printed only the `.ac` plot) | A1 turns each into an error that names the card | S |
-| S11 | `.OPTION GSHUNT=1e-3 CSHUNT= GMINDC= DELMAX= RUNLVL=6 ACCURATE ABSV= RELV= SEARCH=` | these change the solution or where libraries are found [CR Ch.3] | options outside the 13 names in `analyses.zig:75-81` (plus `scale`, read in `netlist.zig:1211`) are skipped without a message (observed for GSHUNT: the answer did not move) | A9 maps the ones that change answers; the rest get one warning listing them | S |
+| S11 | `.OPTION GSHUNT=1e-3 CSHUNT= GMINDC= DELMAX= RUNLVL=6 ACCURATE ABSV= RELV= SEARCH=` | these change the solution or where libraries are found [CR Ch.3] | options outside the 13 names in `analyses.zig:75-81` (plus `scale`, read in `netlist.zig:1211`) are skipped without a message (observed for GSHUNT: the answer did not move) | A9 maps the ones that change answers; the rest get one warning listing them. Landed: GSHUNT, CSHUNT, GMINDC, DELMAX, ABSV/RELV/ABSI, RUNLVL/ACCURATE/FAST (as `trtol`), SEARCH | S |
 | S12 | `W1 in 0 out 0 RLGCMODEL=m N=1 L=0.1`, `S1 ... MNAME=`, `U1 ...`, `B1 ... file= model=`, `P1 in 0 port=1` | lossy line, S-parameter block, lossy line, IBIS buffer, port [SA Ch.8; SI] | letters keep their ngspice meaning in every dialect: W is a current switch, S a voltage switch, U a URC line, B a behavioural source, P a CPL line. The W card failed with `UnknownControlSource` (observed); the others fail or misread depending on the line | reject HSPICE-only letters in the HSPICE dialect until E2/E3 land | S |
 
 Some HSPICE forms fail loudly, but the error names neither the card nor
@@ -162,11 +162,11 @@ the build-order id in the last column.
 | `.PRINT`, `.PROBE`, `par('expr')` outputs [CR .PRINT/.PROBE] | output selection and derived waveforms | ignored; ESPice writes every vector and honours ngspice `.save` | `save` | derived outputs: medium | A1 (ignore list), C9 |
 | `.PLOT`, `.GRAPH`, `.WIDTH`, `.ACDCFACTOR` | obsolete (CR App.A) | ignored | no | none | accept and ignore |
 | `.LPRINT (v1,v2) outs` [CR .LPRINT] | transient to VCD by logic thresholds | no | no | low | E4, S |
-| `.DOUT`, `.VEC`, `.PAT` [CR; CR Ch.4] | expected digital outputs, digital vector stimulus files, bit-pattern sources | no | no | medium for mixed-signal | E4, M |
-| `.STIM` [CR .STIM] | turns one run's outputs into PWL/DATA/VEC stimuli | no | no | low | E4, S |
-| `.POWER`, `.POWERDC` [CR] | average/RMS/peak power per element or subcircuit; DC leakage per hierarchy | no | no | medium | E5, M |
-| `.BIASCHK` [CR .BIASCHK] | voltage, size and region violation monitor | no | no | medium for reliability sign-off | E5, M |
-| `.CHECK SETUP/HOLD/SLEW/EDGE/RISE/FALL/IRDROP/GLOBAL_LEVEL` [CR] | timing and IR-drop checks | no | no | low to medium | E5, M |
+| `.DOUT`, `.VEC`, `.PAT` [CR; CR Ch.4] | expected digital outputs, digital vector stimulus files, bit-pattern sources | `.dout`, PAT sources with `.pat` names, and `.vec` inputs and outputs ([frontend.md](../frontend.md), unconfirmed against HSPICE); no bidirectional vectors | no | medium for mixed-signal | E4, M |
+| `.STIM` [CR .STIM] | turns one run's outputs into PWL/DATA/VEC stimuli | transient PWL and DATA files ([frontend.md](../frontend.md), unconfirmed against HSPICE); AC, DC and VEC forms: no | no | low | E4, S |
+| `.POWER`, `.POWERDC` [CR] | average/RMS/peak power per element or subcircuit; DC leakage per hierarchy | `.power`: AVG/RMS/MAX/MIN of a V source's absorbed power or any output variable ([frontend.md](../frontend.md), unconfirmed against HSPICE); `.powerdc`: no (no port currents) | no | medium | E5, M |
+| `.BIASCHK` [CR .BIASCHK] | voltage, size and region violation monitor | expression form over the transient only ([frontend.md](../frontend.md)); element, region and size forms: no | no | medium for reliability sign-off | E5, M |
+| `.CHECK SETUP/HOLD/SLEW/EDGE/RISE/FALL/IRDROP/GLOBAL_LEVEL` [CR] | timing and IR-drop checks | yes, violation counts per node ([frontend.md](../frontend.md), unconfirmed against HSPICE); no node wildcards | no | low to medium | E5, M |
 | `.SURGE`, `.IVTH`, `.MODEL_INFO` [CR] | current-surge detection, constant-current Vth, parameter dump | no | no | low | E5, S each |
 
 ### 2.5 Control and netlist cards
@@ -184,7 +184,7 @@ the build-order id in the last column.
 | `.PARAM` expressions, UDFs `f(a,b)='...'`, `str()` [CR .PARAM] | parameters | reals, about 20 functions | 62 functions | medium | not ranked here |
 | `.LIB`, `.INCLUDE`, `.HDL`, `.IF/.ELSEIF/.ELSE/.ENDIF`, `.SUBCKT` with parameters, `.PROTECT/.UNPROTECT` | library and hierarchy | yes (`frontend/source.zig`, `netlist.zig`); `.protect` is ignored, which is correct for simulation | yes | done | done |
 | `.MACRO/.EOM`, `.ALIAS`, `.MALIAS`, `.SWEEPBLOCK`, `.TITLE` | synonyms, model aliases, sweep unions | no | no | low | A1 then S each |
-| `.OPTION` set: `RUNLVL`, `ACCURATE`, `FAST`, `METHOD=TRAP\|GEAR\|BDF`, `RELTOL`, `ABSTOL`/`ABSI`, `VNTOL`/`ABSV`, `DELMAX`, `GMIN`, `GMINDC`, `GSHUNT`, `CSHUNT`, `ITL1/2/4`, `LVLTIM`, `DVDT`, `SEARCH`, `SCALE`, `TNOM`, `POST`, `PROBE`, `INGOLD`, `MEASOUT` ... [CR Ch.3] | tolerances, integration, output | 13 names mapped (`analyses.zig:75-81`) plus `scale`; `METHOD=BDF` errors; the rest silently ignored (S11) | its own option set | high | A9 (S), E7 (RUNLVL presets, M) |
+| `.OPTION` set: `RUNLVL`, `ACCURATE`, `FAST`, `METHOD=TRAP\|GEAR\|BDF`, `RELTOL`, `ABSTOL`/`ABSI`, `VNTOL`/`ABSV`, `DELMAX`, `GMIN`, `GMINDC`, `GSHUNT`, `CSHUNT`, `ITL1/2/4`, `LVLTIM`, `DVDT`, `SEARCH`, `SCALE`, `TNOM`, `POST`, `PROBE`, `INGOLD`, `MEASOUT` ... [CR Ch.3] | tolerances, integration, output | 13 names mapped (`analyses.zig:75-81`) plus `scale`; `METHOD=BDF` errors; the rest silently ignored (S11). Done: `RUNLVL`, `ACCURATE` and `FAST` set `trtol` ([tolerance-system.md](../analysis/tolerance-system.md), unconfirmed against HSPICE); `SEARCH` adds include directories ([frontend.md](../frontend.md), fixture `hspice/search_lib.sp`) | its own option set | high | A9 (S), E7 (RUNLVL presets, M) |
 
 ### 2.6 Signal integrity and elements
 

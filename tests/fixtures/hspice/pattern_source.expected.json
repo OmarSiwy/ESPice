@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "PAT sources: b-strings with R/RB, M states, nested structures and .pat names, as PWL.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v1 bits (2 ns from td = 1 ns): 1011 011 0m1, so bit centres 2n..20n read 1 0 1 1 0 1 1 0 0.5 1 and the delay holds 1; the 1->0 edge at 3 ns ramps over tf = 0.4 ns centred there (0.5). v2 = .pat a2=[b10 b01] r=1 = 1001 1001 at 1 ns bits, 2 V high: 2 at 0.5n, 0 at 2n, the 0->1 ramp centre at 3n reads 1, 2 at 4n, 0 at 6n, then the last bit's 2 V holds."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis",
+        "match": "samples",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-06,
+            "values": [
+              1,
+              1,
+              0.5,
+              0,
+              1,
+              1,
+              0,
+              1,
+              1,
+              0,
+              0.5,
+              1
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-06,
+            "values": [
+              2,
+              0,
+              1,
+              2,
+              0,
+              2,
+              2,
+              2,
+              2,
+              2,
+              2,
+              2
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            5e-10,
+            2e-09,
+            3.0000000000000004e-09,
+            4e-09,
+            6.000000000000001e-09,
+            8e-09,
+            1e-08,
+            1.2000000000000002e-08,
+            1.4000000000000001e-08,
+            1.6e-08,
+            1.8000000000000002e-08,
+            2e-08
+          ],
+          "atol": 1e-15,
+          "rtol": 1e-09
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "fadfb7a3d8b3af020b3a10ce3dc5a0405749d063583f0bdea65231df6d1eb5fe"
+}
