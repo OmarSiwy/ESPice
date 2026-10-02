@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "VALUE={...} followed by SCALE= or MAX= keeps the braced field as the whole expression and applies the modifier.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "v(a) = 0.5: v(o1) = 3 (2 v(a)) = 3; v(o2) = min(2 v(a), 0.4) = 0.4."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(o1)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              3.0
+            ]
+          },
+          "v(o2)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              0.4
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ]
+  },
+  "netlist_sha256": "22bb38f22c46cc09b2d3944050dae3b3d071abd92637dd20d934107095b07647"
+}

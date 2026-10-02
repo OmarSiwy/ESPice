@@ -2258,9 +2258,7 @@ fn Reader(comptime S: type) type {
                     const out = f.next() orelse return error.ParseError;
                     const eq = f.next() orelse return error.ParseError;
                     if (!F.isWord(out) or eq[0] != '=') return error.ParseError;
-                    const t = f.peek() orelse return error.ParseError;
-                    const text = if (t[0] == '{' or F.isQuote(t[0])) F.body(t) else f.rest();
-                    try r.card_kv.append(arena, .{ .key = out, .value = try r.exprValue(text, frame, false) });
+                    try r.card_kv.append(arena, .{ .key = out, .value = try r.exprValue(try r.exprRest(&f), frame, false) });
                     return r.commit(head, letter, frame);
                 }
             } else {
@@ -2336,14 +2334,7 @@ fn Reader(comptime S: type) type {
                 },
                 .value => {
                     _ = f.takeEq();
-                    const t = f.peek() orelse return error.ParseError;
-                    if (t[0] == '{' or F.isQuote(t[0])) {
-                        try w.appendSlice(arena, F.body(t));
-                        _ = f.next();
-                    } else {
-                        try w.appendSlice(arena, f.rest());
-                        f.pos = f.line.len;
-                    }
+                    try w.appendSlice(arena, try r.exprRest(&f));
                 },
                 .poly => try r.polyText(&w, &f, frame, by_current),
                 .table => {
@@ -2445,6 +2436,34 @@ fn Reader(comptime S: type) type {
             var out: std.ArrayList(u8) = .empty;
             try out.print(arena, "{s}{s}{s}", .{ pre, text, post });
             return out;
+        }
+
+        /// The expression after a B or VALUE `=`. A `{...}` or quoted field
+        /// followed by nothing or by `name=` modifiers is its body; one that
+        /// only starts the expression (`{g}*V(a)`) runs to the end of the
+        /// line, its delimiters grouping like parentheses.
+        fn exprRest(r: *R, f: *F) Error![]const u8 {
+            const start = f.pos;
+            const t = f.next() orelse return error.ParseError;
+            const all = std.mem.trim(u8, f.line[start..], " \t");
+            if (t[0] == '{' or F.isQuote(t[0])) {
+                var after = f.*;
+                const n = after.next() orelse return F.body(t);
+                if (F.isWord(n) and after.takeEq()) return F.body(t);
+            }
+            f.pos = f.line.len;
+            if (t[0] != '{' and !F.isQuote(t[0])) return all;
+            const text = try r.arena.dupe(u8, all);
+            var open = false;
+            for (text) |*c| switch (c.*) {
+                '{' => c.* = '(',
+                '}' => c.* = ')',
+                else => if (F.isQuote(c.*)) {
+                    c.* = if (open) ')' else '(';
+                    open = !open;
+                },
+            };
+            return text;
         }
 
         /// The next node or source name, past any `(`, `)` or `,`.

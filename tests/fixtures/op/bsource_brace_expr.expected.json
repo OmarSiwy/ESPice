@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A braced parameter that only starts a B or VALUE expression groups like parentheses; the rest of the line stays in the expression.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "g = 2, v(a) = v(b) = 1: v(o1) = g (v(a)+v(b))^3 = 16; v(o2) = g v(a) + 1 = 3; v(o3) = g v(a) = 2."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(o1)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              16.0
+            ]
+          },
+          "v(o2)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              3.0
+            ]
+          },
+          "v(o3)": {
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09,
+            "values": [
+              2.0
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ]
+  },
+  "netlist_sha256": "d6225df618b6976ac43b8e432ddeea8098a1e41b54ebb037a850482695ce6198"
+}
