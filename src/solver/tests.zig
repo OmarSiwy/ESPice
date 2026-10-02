@@ -3921,6 +3921,7 @@ test {
     _ = LaneLuTests;
     _ = LuKernelTests;
     _ = OrderTests;
+    _ = PivotTests;
     _ = SparseTests;
     _ = TridiagTests;
     _ = @import("residual_tests.zig");
