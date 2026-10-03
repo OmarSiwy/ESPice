@@ -41,9 +41,13 @@ pub const void_bit: u32 = 1;
 pub const scaled_bit: u32 = 2;
 /// u32 words ahead of the done stamps in the sync buffer: the refactor
 /// ticket, the fail word (`n - k` for the lowest failing pivot step k, 0
-/// when every step passed), and the forward and back solves' head tickets.
-pub const sync_header = 4;
+/// when every step passed), and the forward and back solves' head tickets,
+/// padded to one 64-byte line so the per-column ticket RMW does not
+/// invalidate the first done stamps' line (#173). A literal, not
+/// `std.atomic.cache_line`: host and device must agree on it.
+pub const sync_header = 16;
 comptime {
+    assert(sync_header * @sizeOf(u32) == 64);
     // The column-max reduction halves the lane count down to one.
     assert(std.math.isPowerOfTwo(refactor_block));
     assert(std.math.isPowerOfTwo(solve_block));
@@ -673,7 +677,8 @@ const HostFactor = struct {
     epoch: u32,
     tb: Tables,
     val: []f64,
-    sync: []u32,
+    /// Line-aligned, so the header fills exactly the first line.
+    sync: []align(64) u32,
     stamp: u32 = 0,
 
     /// Builds the tables for `lu`'s current factor (4 bytes per flop).
@@ -683,7 +688,7 @@ const HostFactor = struct {
         errdefer tb.deinit(gpa);
         const val = try gpa.alloc(f64, tb.tab.n_val);
         errdefer gpa.free(val);
-        const sync = try gpa.alloc(u32, tb.tab.syncLen());
+        const sync = try gpa.alignedAlloc(u32, .@"64", tb.tab.syncLen());
         @memset(sync, 0);
         assert(tb.idx.len == tb.tab.n_idx);
         return .{ .epoch = lu.pattern_epoch, .tb = tb, .val = val, .sync = sync };
