@@ -33,7 +33,7 @@ test "V card: PWL table lands in the flattened Model slots" {
     var model: devices.vsource.Model = .{};
     applySourceWaveform(&model, dev);
 
-    try std.testing.expectEqual(@as(i64, @intFromEnum(Wave.pwl)), @as(i64, model.waveform));
+    try std.testing.expectEqual(@as(i64, @backingInt(Wave.pwl)), @as(i64, model.waveform));
     try std.testing.expectEqual(@as(i64, 3), @as(i64, model.pwl_len));
     try std.testing.expectEqual(@as(f64, 0.0), @field(model, pwlSlot("pwl_times", 0)));
     try std.testing.expectEqual(@as(f64, 10e-3), @field(model, pwlSlot("pwl_times", 1)));
@@ -106,7 +106,7 @@ test "control source sensing ignores case while binding rejects missing and inex
         var nb = try builder.NetBuilder.init(a, &b, nl);
         try std.testing.expectError(if (control.len == 0) error.MissingControlSource else error.UnknownControlSource, nb.build());
         if (std.mem.eql(u8, control, "vcase"))
-            try std.testing.expect(b.card_counts.items.len <= @intFromEnum(device.Library.builtin("vsource")));
+            try std.testing.expect(b.card_counts.items.len <= @backingInt(device.Library.builtin("vsource")));
     }
 }
 

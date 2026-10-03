@@ -32,7 +32,7 @@ pub fn prepare(io: std.Io, a: std.mem.Allocator, bin: []const u8, netlist: []con
 /// card and simulates something else, slowly.
 fn hasPsp(text: []const u8) bool {
     var i: usize = 0;
-    while (std.ascii.indexOfIgnoreCasePos(text, i, "level")) |at| : (i = at + 5) {
+    while (std.ascii.findIgnoreCasePos(text, i, "level")) |at| : (i = at + 5) {
         var rest = std.mem.trimStart(u8, text[at + 5 ..], " \t");
         if (!std.mem.startsWith(u8, rest, "=")) continue;
         rest = std.mem.trimStart(u8, rest[1..], " \t");

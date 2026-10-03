@@ -210,7 +210,7 @@ test "timed worker excludes paused time when cancelled" {
         }
     };
     var ctx: Context = .{};
-    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{ .timing_query = @enumFromInt(0) });
+    var worker = Worker(void).init(std.testing.io, &ctx, Context.run, .{ .timing_query = @fromBackingInt(@intCast(0)) });
     defer worker.deinit();
     ctx.callback = worker.callback();
     const outcome = try worker.advance();

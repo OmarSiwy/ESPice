@@ -2,20 +2,14 @@
     .name = .espice,
     .version = "1.0.0",
     .fingerprint = 0x8b858d53fd1540a,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        // VerA ae44118d: device ABI 6 (setup cache and temperature per Model
-        // row), $port_connected mask, $fatal/$error status channel, batch_inst.
-        .vera = .{
-            .url = "git+https://github.com/OmarSiwy/VerA#ae44118d7de548344a6c1b5ccafaced593422e4c",
-            .hash = "vera-0.9.0-fzAu7PHBkAG_ygMrCZqScL79aNecIjvztHTOhyAnBhLL",
-        },
-        // Frozen snapshot of ../ZvsRust (2026-10-02): its tree is under active edit
-        // and has no git remote yet. Pin by URL once it has one (AGENTS.md).
-        .stdpp = .{ .path = "../stdpp-pin1" },
+        // Frozen `git archive` of VerA's local zig-0.17 branch at 039717bc
+        // (2026-10-03), not pushed yet. Re-pin by URL once it is (AGENTS.md).
+        .vera = .{ .path = "../vera-pin1" },
         .gompute = .{
-            .url = "git+https://github.com/OmarSiwy/Gompute#a91b9b15b89b0e5dc26fd2dd3e22dd344e76cb00",
-            .hash = "gompute-1.0.0-YJVc1lcCBwCIZWVp8A2OHnYsJz5AV8nGMyDZcmK6F3wB",
+            .url = "git+https://github.com/OmarSiwy/Gompute#4c158ef351af529c3fb71a6d9544948111afffe1",
+            .hash = "gompute-1.0.0-YJVc1q7-BwCB519sKbZmapwJN82ncs_tjYv1C-HRKWw1",
         },
     },
     .paths = .{

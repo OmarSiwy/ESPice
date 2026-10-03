@@ -336,19 +336,19 @@ const QpssTests = struct {
         try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
 
         // Spectrum: cos at k=1,l=0 (re=0.5) + sin at k=0,l=1 (im=-0.3)
-        var x_re = [_]f64{0} ** 9;
-        var x_im = [_]f64{0} ** 9;
+        var x_re = @as([9]f64, @splat(0));
+        var x_im = @as([9]f64, @splat(0));
         const f1_idx = grid.flatIdx(1, 0);
         const f2_idx = grid.flatIdx(0, 1);
         x_re[f1_idx] = 0.5;
         x_im[f2_idx] = -0.3; // negative im = positive sin
 
         // IDFT → DFT roundtrip
-        var td = [_]f64{0} ** 9;
+        var td = @as([9]f64, @splat(0));
         idft2D(&td, &x_re, &x_im, basis_cos_t, basis_sin_t, n, nf);
 
-        var out_re = [_]f64{0} ** 9;
-        var out_im = [_]f64{0} ** 9;
+        var out_re = @as([9]f64, @splat(0));
+        var out_im = @as([9]f64, @splat(0));
         dft2D(&out_re, &out_im, &td, basis_cos, basis_sin, n, nf);
 
         // A lone one-sided coefficient round-trips at 0.5x because its conjugate

@@ -189,9 +189,9 @@ fn readModel(m: netlist.Model, line: []const u8) !core.MosraModel {
             if (v != 1) return refuse(line, "a MOSRA model LEVEL other than 1");
             continue;
         }
-        inline for (@typeInfo(core.MosraModel).@"struct".fields) |f| {
-            if (std.mem.eql(u8, kv.key, f.name)) {
-                @field(md, f.name) = v;
+        inline for (@typeInfo(core.MosraModel).@"struct".field_names) |name| {
+            if (std.mem.eql(u8, kv.key, name)) {
+                @field(md, name) = v;
                 break;
             }
         } else return refuse(line, "a MOSRA model key other than LEVEL, TIT0, TITFD, TITTD, TN, HCI0, HCIFD, HCITD, HCIN, TITMU, HCIMU");
@@ -208,7 +208,7 @@ fn binBase(name: []const u8) []const u8 {
 }
 
 fn refKey(t: core.DeviceType, index: u32) u64 {
-    return @as(u64, @intFromEnum(t)) << 32 | index;
+    return @as(u64, @backingInt(t)) << 32 | index;
 }
 
 fn refuse(line: []const u8, what: []const u8) error{UnsupportedCard} {

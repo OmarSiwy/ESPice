@@ -114,9 +114,11 @@ unchecked:
 
 ## Before publishing
 
-- stdpp is a frozen snapshot at `../stdpp-pin1` (a `.path` dependency in
-  `build.zig.zon`) until it has a git remote. Then pin it by URL; the
-  owner decides when.
+- VerA is a frozen snapshot at `../vera-pin1` (a `.path` dependency in
+  `build.zig.zon`, its local zig-0.17 branch at 039717bc) until that branch
+  is pushed. Then pin it by URL; the owner decides when. The path pin also
+  keeps the flake's `zigDeps` from packaging espice.
+- stdpp is removed until it supports Zig 0.17; plain loops stand in.
 - `main` has not been pushed since the V1.0.0 release (`origin/main`).
 - One commit already on `origin` (the V1.0.0 release) still carries an
   attribution line. It was left alone because fixing it means rewriting

@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 pub const Name = enum(u32) {
     _,
     pub inline fn index(n: Name) u32 {
-        return @intFromEnum(n);
+        return @backingInt(n);
     }
 };
 
@@ -55,7 +55,7 @@ pub const InternPool = struct {
         const gop = try p.map.getOrPutContextAdapted(gpa, s, Adapter{ .pool = p }, .{ .pool = p });
         if (gop.found_existing) return gop.key_ptr.*;
         errdefer p.map.removeByPtr(gop.key_ptr);
-        const n: Name = @enumFromInt(p.offs.items.len - 1);
+        const n: Name = @fromBackingInt(@intCast(p.offs.items.len - 1));
         try p.bytes.appendSlice(gpa, s);
         errdefer p.bytes.shrinkRetainingCapacity(p.bytes.items.len - s.len);
         try p.offs.append(gpa, @intCast(p.bytes.items.len));

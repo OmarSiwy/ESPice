@@ -100,7 +100,7 @@ pub fn LaneLu(comptime W: usize) type {
             const one: V = @splat(1);
             const zero: V = @splat(0);
             const inf: V = @splat(std.math.inf(f64));
-            const all_lanes: u64 = std.math.maxInt(std.meta.Int(.unsigned, W));
+            const all_lanes: u64 = std.math.maxInt(@Int(.unsigned, W));
             var bad: u64 = 0;
 
             for (0..self.n) |k| {
@@ -215,10 +215,10 @@ pub fn LaneLu(comptime W: usize) type {
 
         /// Lane l of `m` -> bit l.
         inline fn maskBits(m: @Vector(W, bool)) u64 {
-            const bits: std.meta.Int(.unsigned, W) = @bitCast(m);
+            const bits: @Int(.unsigned, W) = @bitCast(m);
             // A no-op under LLVM; Zig 0.16's self-hosted x86 backend (Debug)
             // widens this bitcast with a stray bit W set.
-            return @as(u64, bits) & std.math.maxInt(std.meta.Int(.unsigned, W));
+            return @as(u64, bits) & std.math.maxInt(@Int(.unsigned, W));
         }
     };
 }

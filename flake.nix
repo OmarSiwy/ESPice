@@ -24,7 +24,7 @@
           config.allowUnfree = true;
         };
 
-        zig = zig-overlay.packages.${system}."0.16.0";
+        zig = zig-overlay.packages.${system}."0.17.0";
 
         commonInputs = [
           zig

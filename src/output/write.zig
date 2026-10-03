@@ -96,8 +96,8 @@ test "every format refuses a plot whose data length disagrees with its shape" {
         .npoints = 2,
         .data = &.{ 1.0, 2.0, 3.0 },
     } };
-    inline for (@typeInfo(types.Format).@"enum".fields) |f| {
-        const format: types.Format = @enumFromInt(f.value);
+    inline for (@typeInfo(types.Format).@"enum".field_values) |value| {
+        const format: types.Format = @fromBackingInt(@intCast(value));
         const expected = if (format == .touchstone or format == .citi) error.NotSParameterData else error.DataLengthMismatch;
         try std.testing.expectError(expected, write(std.testing.io, "zig-out/should_not_exist", format, plot));
     }

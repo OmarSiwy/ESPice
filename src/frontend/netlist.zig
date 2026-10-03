@@ -23,7 +23,7 @@ pub const EdgeId = csr.EdgeId;
 /// Analysis kind, shared with the query layer.
 pub const Kind = requests.Kind;
 /// Net 0; `0`, `gnd` and `ground` all name it.
-pub const ground: VertexId = @enumFromInt(0);
+pub const ground: VertexId = @fromBackingInt(@intCast(0));
 /// Missing id in every u32 index space here.
 pub const none = std.math.maxInt(u32);
 /// `ParseError`: malformed card; `ModelBinNotFound`: no `.model nm.N` bin
@@ -487,48 +487,45 @@ fn cond(c: CondCard) Card {
 
 /// Source keywords that may follow a P card's nodes (`mixedPort`).
 const port_source_words = std.StaticStringMap(void).initComptime(.{
-    .{"dc"},   .{"ac"}, .{"hb"},   .{"hbac"}, .{"pulse"},   .{"sin"},     .{"exp"},
-    .{"pwl"},  .{"sffm"}, .{"am"}, .{"lfsr"}, .{"pat"}, .{"distof1"}, .{"distof2"},
+    .{"dc"},  .{"ac"},   .{"hb"}, .{"hbac"}, .{"pulse"}, .{"sin"},     .{"exp"},
+    .{"pwl"}, .{"sffm"}, .{"am"}, .{"lfsr"}, .{"pat"},   .{"distof1"}, .{"distof2"},
 });
 
 /// Every dot card the three dialects accept, looked up lowercased.
 const cards = std.StaticStringMap(Card).initComptime(.{
-    .{ "end", .end },         .{ "ends", .ends },                 .{ "subckt", .subckt },
-    .{ "param", .param },     .{ "model", .model },               .{ "include", .include },
-    .{ "hdl", .include },     .{ "osdi_include", .osdi_include }, .{ "pre_osdi", .pre_osdi },
-    .{ "verilog", .verilog }, .{ "option", .options },            .{ "options", .options },
-    .{ "opt", .options },     .{ "opts", .options },              .{ "ic", .ic },
-    .{ "ac", an(.ac) },       .{ "dc", an(.dc) },                 .{ "dcmatch", an(.dcmatch) },
-    .{ "disto", an(.disto) }, .{ "envelope", an(.envelope) },     .{ "envlp", an(.envelope) },
-    .{ "four", an(.four) },   .{ "hb", an(.hb) },                 .{ "matex", an(.matex) },
-    .{ "hbac", an(.hbac) },   .{ "hbnoise", an(.hbnoise) },       .{ "hbxf", an(.hbxf) },
-    .{ "hbosc", an(.hb) },    .{ "snosc", an(.pss) },         .{ "phasenoise", an(.phasenoise) },
-    .{ "mc", an(.mc) },       .{ "montecarlo", an(.mc) },         .{ "noise", an(.noise) },
-    .{ "op", an(.op) },       .{ "pac", an(.pac) },               .{ "pnoise", an(.pnoise) },
-    .{ "pss", an(.pss) },     .{ "pxf", an(.pxf) },               .{ "pz", an(.pz) },
-    .{ "qpss", an(.qpss) },   .{ "sens", an(.sens) },             .{ "sp", an(.sp) },
-    .{ "stb", an(.stb) },     .{ "temp", an(.temp) },             .{ "tf", an(.tf) },
-    .{ "sn", an(.pss) },      .{ "snac", an(.pac) },              .{ "snnoise", an(.pnoise) },
-    .{ "snxf", an(.pxf) },    .{ "fft", an(.fft) },               .{ "ptdnoise", an(.pnoise) },
-    .{ "tran", an(.tran) },   .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
-    .{ "lstb", an(.lstb) },   .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
-    .{ "dcinc", an(.dcinc) },   .{ "lin", an(.sp) },            .{ "acmatch", an(.acmatch) },
-    .{ "dcsens", an(.dcsens) }, .{ "hblin", an(.hblin) },     .{ "net", an(.sp) },
-    .{ "acphasenoise", an(.noise) },
-    .{ "if", cond(.@"if") },  .{ "elseif", cond(.elseif) },       .{ "else", cond(.@"else") },
-    .{ "endif", cond(.endif) }, .{ "meas", .meas },           .{ "measure", .meas },
-    .{ "save", .save },         .{ "dcvolt", .ic },                 .{ "nodeset", .nodeset },
-    .{ "global", .global },     .{ "connect", .connect },           .{ "jitter", .meas },
-    .{ "store", .store },       .{ "sample", .sample },
-    .{ "mosra", .mosra },       .{ "appendmodel", .appendmodel },
-    .{ "check", .meas },        .{ "dout", .meas },                 .{ "biaschk", .meas },
-    .{ "power", .meas },        .{ "pat", .ignored },               .{ "stim", .meas },
-    .{ "stimuli", .meas },
-    .{ "control", .control },   .{ "endc", .endc },
-    .{ "print", .ignored },     .{ "plot", .ignored },              .{ "probe", .ignored },
-    .{ "graph", .ignored },     .{ "width", .ignored },             .{ "title", .ignored },
-    .{ "protect", .ignored },   .{ "unprotect", .ignored },         .{ "prot", .ignored },
-    .{ "unprot", .ignored },
+    .{ "end", .end },                .{ "ends", .ends },                 .{ "subckt", .subckt },
+    .{ "param", .param },            .{ "model", .model },               .{ "include", .include },
+    .{ "hdl", .include },            .{ "osdi_include", .osdi_include }, .{ "pre_osdi", .pre_osdi },
+    .{ "verilog", .verilog },        .{ "option", .options },            .{ "options", .options },
+    .{ "opt", .options },            .{ "opts", .options },              .{ "ic", .ic },
+    .{ "ac", an(.ac) },              .{ "dc", an(.dc) },                 .{ "dcmatch", an(.dcmatch) },
+    .{ "disto", an(.disto) },        .{ "envelope", an(.envelope) },     .{ "envlp", an(.envelope) },
+    .{ "four", an(.four) },          .{ "hb", an(.hb) },                 .{ "matex", an(.matex) },
+    .{ "hbac", an(.hbac) },          .{ "hbnoise", an(.hbnoise) },       .{ "hbxf", an(.hbxf) },
+    .{ "hbosc", an(.hb) },           .{ "snosc", an(.pss) },             .{ "phasenoise", an(.phasenoise) },
+    .{ "mc", an(.mc) },              .{ "montecarlo", an(.mc) },         .{ "noise", an(.noise) },
+    .{ "op", an(.op) },              .{ "pac", an(.pac) },               .{ "pnoise", an(.pnoise) },
+    .{ "pss", an(.pss) },            .{ "pxf", an(.pxf) },               .{ "pz", an(.pz) },
+    .{ "qpss", an(.qpss) },          .{ "sens", an(.sens) },             .{ "sp", an(.sp) },
+    .{ "stb", an(.stb) },            .{ "temp", an(.temp) },             .{ "tf", an(.tf) },
+    .{ "sn", an(.pss) },             .{ "snac", an(.pac) },              .{ "snnoise", an(.pnoise) },
+    .{ "snxf", an(.pxf) },           .{ "fft", an(.fft) },               .{ "ptdnoise", an(.pnoise) },
+    .{ "tran", an(.tran) },          .{ "trannoise", an(.tran_noise) },  .{ "tran_noise", an(.tran_noise) },
+    .{ "lstb", an(.lstb) },          .{ "acxf", an(.acxf) },             .{ "dcxf", an(.dcxf) },
+    .{ "dcinc", an(.dcinc) },        .{ "lin", an(.sp) },                .{ "acmatch", an(.acmatch) },
+    .{ "dcsens", an(.dcsens) },      .{ "hblin", an(.hblin) },           .{ "net", an(.sp) },
+    .{ "acphasenoise", an(.noise) }, .{ "if", cond(.@"if") },            .{ "elseif", cond(.elseif) },
+    .{ "else", cond(.@"else") },     .{ "endif", cond(.endif) },         .{ "meas", .meas },
+    .{ "measure", .meas },           .{ "save", .save },                 .{ "dcvolt", .ic },
+    .{ "nodeset", .nodeset },        .{ "global", .global },             .{ "connect", .connect },
+    .{ "jitter", .meas },            .{ "store", .store },               .{ "sample", .sample },
+    .{ "mosra", .mosra },            .{ "appendmodel", .appendmodel },   .{ "check", .meas },
+    .{ "dout", .meas },              .{ "biaschk", .meas },              .{ "power", .meas },
+    .{ "pat", .ignored },            .{ "stim", .meas },                 .{ "stimuli", .meas },
+    .{ "control", .control },        .{ "endc", .endc },                 .{ "print", .ignored },
+    .{ "plot", .ignored },           .{ "probe", .ignored },             .{ "graph", .ignored },
+    .{ "width", .ignored },          .{ "title", .ignored },             .{ "protect", .ignored },
+    .{ "unprotect", .ignored },      .{ "prot", .ignored },              .{ "unprot", .ignored },
 });
 
 /// Sweep and variation cards (frontend/variants.zig).
@@ -541,12 +538,12 @@ const variant_cards = std.StaticStringMap(Card).initComptime(.{
 const Form = enum { value, poly, table, pwl, laplace, pole, delay, vcr, vccap, kind, refused };
 
 const behavioural = std.StaticStringMap(Form).initComptime(.{
-    .{ "poly", .poly },       .{ "value", .value },   .{ "vol", .value },      .{ "cur", .value },
-    .{ "table", .table },     .{ "laplace", .laplace }, .{ "pole", .pole }, .{ "freq", .refused },
-    .{ "vcr", .vcr },         .{ "vccap", .vccap },   .{ "delay", .delay },    .{ "opamp", .refused },
-    .{ "npwl", .refused },    .{ "ppwl", .refused },  .{ "pwl", .pwl },        .{ "and", .refused },
-    .{ "nand", .refused },    .{ "or", .refused },    .{ "nor", .refused },    .{ "vcvs", .kind },
-    .{ "vccs", .kind },       .{ "ccvs", .kind },     .{ "cccs", .kind },      .{ "transformer", .refused },
+    .{ "poly", .poly },    .{ "value", .value },     .{ "vol", .value },   .{ "cur", .value },
+    .{ "table", .table },  .{ "laplace", .laplace }, .{ "pole", .pole },   .{ "freq", .refused },
+    .{ "vcr", .vcr },      .{ "vccap", .vccap },     .{ "delay", .delay }, .{ "opamp", .refused },
+    .{ "npwl", .refused }, .{ "ppwl", .refused },    .{ "pwl", .pwl },     .{ "and", .refused },
+    .{ "nand", .refused }, .{ "or", .refused },      .{ "nor", .refused }, .{ "vcvs", .kind },
+    .{ "vccs", .kind },    .{ "ccvs", .kind },       .{ "cccs", .kind },   .{ "transformer", .refused },
 });
 
 /// Row of `key` in `kvs`.
@@ -690,7 +687,7 @@ fn resolve(a: *Analysis, lookup: anytype) void {
     // ground itself when absent.
     if (a.kind == .lstb) {
         a.pos = 0;
-        for (a.args[0 .. a.args.len -| 1], 1..) |v, i| if (v == .name and std.ascii.eqlIgnoreCase(v.name, "localgnd")) {
+        for (a.args[0..a.args.len -| 1], 1..) |v, i| if (v == .name and std.ascii.eqlIgnoreCase(v.name, "localgnd")) {
             const n = nodeText(a.args[i], &buf) orelse continue;
             a.pos = if (isGroundName(n)) 0 else lookup.node(n);
         };
@@ -2358,7 +2355,7 @@ fn Reader(comptime S: type) type {
                         .b = if (op.b == none) none else (try r.netOf(frame, r.scratch.names.items[op.b])).index(),
                     }),
                     else => {
-                        if (r.monte and op.code == .call and expr.isDistribution(@enumFromInt(op.a))) {
+                        if (r.monte and op.code == .call and expr.isDistribution(@fromBackingInt(@intCast(op.a)))) {
                             try r.site_ops.append(r.arena, @intCast(r.ops.items.len));
                             try r.site_keys.append(r.arena, siteKey(r.site_owner, r.site_ordinal));
                             r.site_ordinal += 1;
@@ -2678,8 +2675,8 @@ fn Reader(comptime S: type) type {
                     else => return r.unsupported(line, "non-constant controlled-source parameter"),
                 };
                 const keys = std.StaticStringMap(u8).initComptime(.{
-                    .{ "scale", 's' }, .{ "m", 's' },   .{ "abs", 'a' },   .{ "max", 'x' },  .{ "min", 'n' },
-                    .{ "tc1", 't' },   .{ "tc2", 't' }, .{ "ic", 'i' },    .{ "delta", 'i' },
+                    .{ "scale", 's' }, .{ "m", 's' },   .{ "abs", 'a' }, .{ "max", 'x' },   .{ "min", 'n' },
+                    .{ "tc1", 't' },   .{ "tc2", 't' }, .{ "ic", 'i' },  .{ "delta", 'i' },
                 });
                 const k = keys.get(kv.key) orelse return r.unsupported(line, "unsupported controlled-source parameter");
                 switch (k) {
@@ -2861,7 +2858,7 @@ fn Reader(comptime S: type) type {
         /// the plain keys `hblin_h=h hblin_s=s` the builder reads. A longer
         /// vector (multi-tone HB) is refused.
         fn portLine(r: *R, line: []const u8) Error![]const u8 {
-            const at = std.ascii.indexOfIgnoreCase(line, "hblin") orelse return line;
+            const at = std.ascii.findIgnoreCase(line, "hblin") orelse return line;
             const open = std.mem.indexOfScalarPos(u8, line, at, '[') orelse return error.ParseError;
             const close = std.mem.indexOfScalarPos(u8, line, open, ']') orelse return error.ParseError;
             var it = std.mem.tokenizeAny(u8, line[open + 1 .. close], ", \t");

@@ -57,13 +57,13 @@ pub fn deinit(self: *Library) void {
 /// The id of built-in `name`; a compile error when there is none.
 pub fn builtin(comptime name: []const u8) DeviceType {
     inline for (builtins, 0..) |b, i| {
-        if (comptime std.mem.eql(u8, b, name)) return @enumFromInt(i);
+        if (comptime std.mem.eql(u8, b, name)) return @fromBackingInt(@intCast(i));
     }
     @compileError("device: no built-in model named '" ++ name ++ "'");
 }
 
 pub fn vtable(self: *const Library, t: DeviceType) *const abi.DeviceVtable {
-    return self.vtables.items[@intFromEnum(t)];
+    return self.vtables.items[@backingInt(t)];
 }
 
 /// A runtime-loaded type by module name, case-insensitively. Built-ins are not
@@ -71,7 +71,7 @@ pub fn vtable(self: *const Library, t: DeviceType) *const abi.DeviceVtable {
 // ponytail: linear scan; a deck loads a handful of HDL modules.
 pub fn find(self: *const Library, module: []const u8) ?DeviceType {
     for (self.names.items[builtin_count..], builtin_count..) |n, i| {
-        if (std.ascii.eqlIgnoreCase(n, module)) return @enumFromInt(i);
+        if (std.ascii.eqlIgnoreCase(n, module)) return @fromBackingInt(@intCast(i));
     }
     return null;
 }
@@ -82,7 +82,7 @@ pub fn find(self: *const Library, module: []const u8) ?DeviceType {
 /// the id space is full.
 pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable, is_digital: bool) !DeviceType {
     if (self.find(module)) |t| return t;
-    if (self.names.items.len >= @intFromEnum(DeviceType.unset)) return error.TooManyDeviceTypes;
+    if (self.names.items.len >= @backingInt(DeviceType.unset)) return error.TooManyDeviceTypes;
     const owned = try std.ascii.allocLowerString(self.gpa, module);
     errdefer self.gpa.free(owned);
     try self.vtables.ensureUnusedCapacity(self.gpa, 1);
@@ -90,7 +90,7 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
     try self.names.append(self.gpa, owned);
     self.vtables.appendAssumeCapacity(vt);
     self.digital.appendAssumeCapacity(is_digital);
-    return @enumFromInt(self.names.items.len - 1);
+    return @fromBackingInt(@intCast(self.names.items.len - 1));
 }
 
 /// Compiles, opens and registers each HDL source not loaded yet (loader.zig).
@@ -117,7 +117,6 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
         .gompute = try std.fs.path.join(a, &.{ share, "gompute", "root.zig" }),
         .device_abi = try std.fs.path.join(a, &.{ share, "device", "abi.zig" }),
         .core = try std.fs.path.join(a, &.{ share, "core", "root.zig" }),
-        .stdpp = try std.fs.path.join(a, &.{ share, "stdpp", "root.zig" }),
         .zig = zig,
     } else .{
         .work_dir = work_dir,
@@ -126,7 +125,6 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
         .gompute = build_options.gompute_path,
         .device_abi = build_options.device_abi_path,
         .core = build_options.core_path,
-        .stdpp = build_options.stdpp_path,
         .zig = zig,
     });
 }

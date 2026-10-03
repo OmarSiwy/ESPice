@@ -9,7 +9,7 @@ const GROUND = @import("root.zig").GROUND;
 /// Dense id of a query within one session.
 pub const QueryId = enum(u32) { _ };
 /// Sentinel `QueryId` that names no query.
-pub const invalid_query: QueryId = @enumFromInt(std.math.maxInt(u32));
+pub const invalid_query: QueryId = @fromBackingInt(@intCast(std.math.maxInt(u32)));
 /// Transient integration method.
 pub const Method = enum { backward_euler, trapezoidal, gear_2 };
 pub const FreqSweep = @import("numerics.zig").FreqSweep;

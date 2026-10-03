@@ -966,7 +966,7 @@ const FftTests = struct {
     test "fft: pure sinusoid at bin 1 (N=8)" {
         const n = 8;
         var re: [n]f64 = undefined;
-        var im = [_]f64{0} ** n;
+        var im = @as([n]f64, @splat(0));
         for (0..n) |k| {
             re[k] = @cos(2.0 * math.pi * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n)));
         }
@@ -986,7 +986,7 @@ const FftTests = struct {
     test "fft: pure sine at bin 2 (N=16)" {
         const n = 16;
         var re: [n]f64 = undefined;
-        var im = [_]f64{0} ** n;
+        var im = @as([n]f64, @splat(0));
         for (0..n) |k| {
             re[k] = @sin(2.0 * math.pi * 2.0 * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n)));
         }
@@ -1001,7 +1001,7 @@ const FftTests = struct {
     test "fft/ifft: round-trip recovers original signal" {
         const n = 32;
         var re: [n]f64 = undefined;
-        var im = [_]f64{0} ** n;
+        var im = @as([n]f64, @splat(0));
         var orig: [n]f64 = undefined;
         for (0..n) |k| {
             const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
@@ -1019,7 +1019,7 @@ const FftTests = struct {
     test "fft: N=1024 Parseval and bin accuracy" {
         const n = 1024;
         var re: [n]f64 = undefined;
-        var im = [_]f64{0} ** n;
+        var im = @as([n]f64, @splat(0));
         for (0..n) |k| {
             const t = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(n));
             re[k] = 2.0 * @cos(2.0 * math.pi * 5.0 * t) + @sin(2.0 * math.pi * 100.0 * t) + 0.5 * @cos(2.0 * math.pi * 511.0 * t);
@@ -1916,7 +1916,7 @@ const LaneLuTests = struct {
         defer ll.deinit(gpa);
         var lvals: [5]LW.V = undefined;
         for (&lvals, vals) |*o, v| o.* = @splat(v);
-        const all: u64 = std.math.maxInt(std.meta.Int(.unsigned, W));
+        const all: u64 = std.math.maxInt(@Int(.unsigned, W));
         try testing.expectEqual(all, ll.refactor(LW.Plane{ .col_ptr = &col_ptr, .vals = &lvals }, 1e-12));
         try expectZero(W, ll.w);
     }
@@ -2164,7 +2164,7 @@ const SparseTests = struct {
         try order.order(4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q, &ws);
 
         // q must be a valid permutation of 0..4.
-        var seen = [_]bool{false} ** 4;
+        var seen = @as([4]bool, @splat(false));
         for (q) |c| {
             try testing.expect(!seen[c]);
             seen[c] = true;
@@ -2425,8 +2425,8 @@ const SparseTests = struct {
                 idx[i] = @intCast(2 * i + 1); // distinct rows, as a CSC column is
                 src[i] = r.float(f64) * 8 - 4;
             }
-            var got = [_]f64{0} ** 20;
-            var want = [_]f64{0} ** 20;
+            var got = @as([20]f64, @splat(0));
+            var want = @as([20]f64, @splat(0));
             for (&got, &want, 0..) |*g, *e, i| {
                 g.* = @floatFromInt(i);
                 e.* = g.*;
@@ -2533,7 +2533,7 @@ const SparseTests = struct {
         const br = 7; // branch row: zero diagonal, +-1 couplings
         var rng = std.Random.DefaultPrng.init(0x7A9E);
         const r = rng.random();
-        var dense: [n][n]bool = .{.{false} ** n} ** n;
+        var dense: [n][n]bool = @splat(@splat(false));
         for (0..n - 1) |j| {
             dense[j][j] = j != br;
             for (0..3) |_| {

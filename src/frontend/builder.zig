@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const core = @import("core");
-const z = @import("stdpp");
 const requests = core.query;
 const numerics = @import("core").numerics;
 const devices = @import("spice.zig");
@@ -227,7 +226,7 @@ pub const Builder = struct {
         instance: D.Instance,
         nodes: anytype,
     ) !void {
-        const n_u = comptime std.meta.fields(D.U).len;
+        const n_u = comptime @typeInfo(D.U).@"enum".field_names.len;
         var all: [n_u]u32 = undefined;
         inline for (0..D.num_ports) |p| all[p] = nodes[p];
 
@@ -238,7 +237,7 @@ pub const Builder = struct {
             @compileError(@typeName(D) ++ " is not a catalog device"));
         const vt = self.lib.vtable(t);
         {
-            const i = @intFromEnum(t);
+            const i = @backingInt(t);
             if (self.card_counts.items.len <= i)
                 try self.card_counts.appendNTimes(staging, 0, i + 1 - self.card_counts.items.len);
             const ordinal = &self.card_counts.items[i];
@@ -318,7 +317,7 @@ pub const Builder = struct {
 
         var ckt = try Circuit.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, self.proto_types.items, bbd.info);
         ckt.needs_tran_op = self.needs_tran_op;
-        for (ckt.batches, ckt.batch_types) |*b, t| b.digital = self.lib.digital.items[@intFromEnum(t)];
+        for (ckt.batches, ckt.batch_types) |*b, t| b.digital = self.lib.digital.items[@backingInt(t)];
 
         self.deinitStorage(); // Circuit.freeze consumed the protos
 
@@ -668,8 +667,8 @@ pub const NetBuilder = struct {
     /// (vsrctemp.c:143-160). Empty when no V card carries `portnum`, which
     /// leaves `.sp` on its one-port fallback.
     fn portList(self: *const NetBuilder, arena: std.mem.Allocator) ![]requests.Port {
-        var nums = z.fromSlice(u16, self.v.items(.portnum));
-        const n_ports: usize = nums.max() orelse 0;
+        var n_ports: usize = 0;
+        for (self.v.items(.portnum)) |num| n_ports = @max(n_ports, num);
         if (n_ports == 0) return &.{};
         const ports = try arena.alloc(requests.Port, n_ports);
         for (ports) |*p| p.branch = std.math.maxInt(u32); // unset
@@ -698,11 +697,11 @@ pub const NetBuilder = struct {
         if (comptime @hasField(T, "waveform")) {
             // SFFM's CKTfinalTime defaults: FM = 5/TSTOP when omitted, FC =
             // 500/TSTOP when omitted or 0 (vsrcload.c:237-243, isrcload.c:215-221).
-            if (comptime @hasField(T, "sffm_fm")) if (target.waveform == @intFromEnum(Wave.sffm)) {
+            if (comptime @hasField(T, "sffm_fm")) if (target.waveform == @backingInt(Wave.sffm)) {
                 if (target.sffm_fm == -1.0) target.sffm_fm = @floatCast(5.0 / tstop);
                 if (target.sffm_fc == 0.0) target.sffm_fc = @floatCast(500.0 / tstop);
             };
-            if (target.waveform != @intFromEnum(Wave.pulse)) {
+            if (target.waveform != @backingInt(Wave.pulse)) {
                 target.pulse_td = 1e30;
                 return;
             }
@@ -1981,7 +1980,7 @@ const Tape = struct {
         comptime std.debug.assert(slotCount(M, "op_code") == tape.max_ops and slotCount(M, "consts") == tape.max_consts);
         model.n_ops = t.n_ops;
         inline for (0..tape.max_ops) |k| {
-            @field(model, pwlSlot("op_code", k)) = @intFromEnum(t.op_code[k]);
+            @field(model, pwlSlot("op_code", k)) = @backingInt(t.op_code[k]);
             @field(model, pwlSlot("op_a", k)) = t.op_a[k];
             @field(model, pwlSlot("op_b", k)) = t.op_b[k];
         }
@@ -2026,7 +2025,7 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !
                     const row = if (op.code == .vprobe)
                         try self.rowOf(.from(id))
                     else
-                        self.branchRow(self.nl.pool.str(@enumFromInt(id))) orelse return error.UnknownCurrentProbe;
+                        self.branchRow(self.nl.pool.str(@fromBackingInt(@intCast(id)))) orelse return error.UnknownCurrentProbe;
                     const k = std.mem.indexOfScalar(u32, rows[0..n_rows], row) orelse k: {
                         if (n_rows == tape.max_probes) return error.TooManyProbes;
                         rows[n_rows] = row;
@@ -2046,7 +2045,7 @@ fn compileTape(self: *NetBuilder, ops: []const Op, model: *Tape, nodes: []u32) !
                 else => return error.UnsupportedOperand,
             },
             .call => blk: {
-                if (@as(netlist.expr.Fn, @enumFromInt(op.a)) != .table) break :blk try callCode(@enumFromInt(op.a), op.b);
+                if (@as(netlist.expr.Fn, @fromBackingInt(@intCast(op.a))) != .table) break :blk try callCode(@fromBackingInt(@intCast(op.a)), op.b);
                 // table(x, d, x1, y1, ...): the constants after x become the
                 // op's table, already consecutive in the pool.
                 const k = op.b - 1;
@@ -2188,7 +2187,7 @@ fn applySourceWaveform(target: anytype, dev: Device) void {
 }
 
 fn applyWaveArgs(comptime T: type, target: anytype, kind: Wave, args: []const Value) void {
-    target.waveform = @intFromEnum(kind);
+    target.waveform = @backingInt(kind);
     switch (kind) {
         // `PWL(T1 V1 T2 V2 ...)`: (time, value) pairs into the flattened
         // table. A non-numeric arg leaves its slot at the default; ngspice's
@@ -2225,16 +2224,16 @@ fn dcFromWaveform(target: anytype) void {
         }
     }.f;
     const v: f64 = switch (target.waveform) {
-        @intFromEnum(Wave.pulse) => rd(target.*, "pulse_v1", "pulse_i1"),
-        @intFromEnum(Wave.sin) => rd(target.*, "sin_vo", "sin_ioff") +
+        @backingInt(Wave.pulse) => rd(target.*, "pulse_v1", "pulse_i1"),
+        @backingInt(Wave.sin) => rd(target.*, "sin_vo", "sin_ioff") +
             rd(target.*, "sin_va", "sin_iamp") *
                 @sin(2.0 * std.math.pi * rd(target.*, "sin_phase", "sin_phase") / 360.0),
-        @intFromEnum(Wave.exp) => rd(target.*, "exp_v1", "exp_i1"),
-        @intFromEnum(Wave.pwl) => rd(target.*, pwlSlot("pwl_values", 0), pwlSlot("pwl_values", 0)),
+        @backingInt(Wave.exp) => rd(target.*, "exp_v1", "exp_i1"),
+        @backingInt(Wave.pwl) => rd(target.*, pwlSlot("pwl_values", 0), pwlSlot("pwl_values", 0)),
         // ngspice's DCOP evaluates SFFM at time 0: the V source is 0 there
         // (vsrcload.c:271-274), the I source has no delay and reads its phases
         // one slot early (isrcload.c:222-252, see isource.va).
-        @intFromEnum(Wave.sffm) => if (comptime !@hasField(T, "sffm_fm") or T == devices.vsource.Model or T == devices.vsource.Instance) 0 else blk: {
+        @backingInt(Wave.sffm) => if (comptime !@hasField(T, "sffm_fm") or T == devices.vsource.Model or T == devices.vsource.Instance) 0 else blk: {
             const mdi = if (target.sffm_mdi > target.sffm_fc / target.sffm_fm)
                 target.sffm_fc / target.sffm_fm
             else
@@ -2304,10 +2303,11 @@ fn modelLevel(dev: Device) !u16 {
 /// current column: ccvs declares two branches, the sense one first.
 fn internalRow(comptime D: type, comptime tag: []const u8, end: u32) u32 {
     const off = comptime blk: {
-        for (@typeInfo(D.U).@"enum".fields, 0..) |f, i| {
-            if (std.mem.eql(u8, f.name, tag)) {
+        const names = @typeInfo(D.U).@"enum".field_names;
+        for (names, 0..) |name, i| {
+            if (std.mem.eql(u8, name, tag)) {
                 if (i < D.num_ports) @compileError(@typeName(D) ++ ": `" ++ tag ++ "` is a port, not an internal unknown");
-                break :blk @typeInfo(D.U).@"enum".fields.len - i;
+                break :blk names.len - i;
             }
         }
         @compileError(@typeName(D) ++ ": no unknown named `" ++ tag ++ "`");
@@ -2471,8 +2471,8 @@ fn finiteLineCoefficients(value: anytype) bool {
         .array => for (value) |item| {
             if (!finiteLineCoefficients(item)) return false;
         },
-        .@"struct" => inline for (std.meta.fields(@TypeOf(value))) |field| {
-            if (!finiteLineCoefficients(@field(value, field.name))) return false;
+        .@"struct" => |info| inline for (info.field_names) |name| {
+            if (!finiteLineCoefficients(@field(value, name))) return false;
         },
         else => @compileError("unexpected native line coefficient type"),
     }
@@ -2575,8 +2575,9 @@ fn applyKv(target: anytype, kv: []const Kv) !void {
 /// Binds `kv` onto a param blob. A non-numeric value reaches the binder as
 /// null, which it rejects for a key it knows.
 fn bindKv(bind: *const fn ([*]u8, []const batch.Param) batch.BindStatus, blob: [*]u8, kv: []const Kv) !void {
-    var fallback = std.heap.stackFallback(4096, std.heap.smp_allocator);
-    const a = fallback.get();
+    var buf: [4096]u8 align(@alignOf(batch.Param)) = undefined;
+    var fallback: std.heap.BufferFirstAllocator = .init(&buf, std.heap.smp_allocator);
+    const a = fallback.allocator();
     const params = try a.alloc(batch.Param, kv.len);
     defer a.free(params);
     for (kv, params) |item, *p| p.* = .{ .key = item.key, .value = valueNumber(item.value) };

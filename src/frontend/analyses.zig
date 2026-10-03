@@ -329,6 +329,16 @@ const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, it
 /// on a value out of range. The HSPICE dialect defaults TNOM to 25 degC and
 /// runs the circuit at TNOM [SA Ch.20]; ngspice defaults both to 27 degC.
 pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !DeckOptions {
+    // The card being folded, named by any error it raises.
+    var line: []const u8 = "";
+    return foldOptions(config, dialect, &line) catch |err| {
+        // The test runner fails any test that logs an error.
+        if (!@import("builtin").is_test) std.log.err("options: {s}: {s}", .{ line, @errorName(err) });
+        return err;
+    };
+}
+
+fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *[]const u8) !DeckOptions {
     // HSPICE spellings: ABSV/RELV/ABSI are VNTOL/RELTOL/ABSTOL, GMINDC the DC
     // gmin (ESPice has one gmin), METHOD=BDF its Gear.
     const names = std.StaticStringMap(Option).initComptime(.{
@@ -345,15 +355,11 @@ pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !De
     });
     var o: DeckOptions = .{ .tnom_c = if (dialect == .hspice) 25 else 27 };
     var maxord: ?f64 = null;
-    // The card being folded, named by any error it raises.
-    var line: []const u8 = "";
-    // The test runner fails any test that logs an error.
-    errdefer |err| if (!@import("builtin").is_test) std.log.err("options: {s}: {s}", .{ line, @errorName(err) });
     var runlvl: ?f64 = null;
     var accurate = false;
     var fast = false;
     for (config) |card| {
-        line = card.line;
+        line.* = card.line;
         const args = card.args;
         if (card.temp) {
             if (args.len > 1) {
@@ -578,8 +584,8 @@ fn xfSources(arena: std.mem.Allocator, sources: core.QueryBindings) ![]const req
 fn lstbJob(args: []const Value, sources: core.QueryBindings, ac: ?numerics.FreqSweep, local_gnd: u32) !requests.Lstb {
     const Key = enum { mode, vsource, localgnd, dec, oct, lin };
     const keys = std.StaticStringMap(Key).initComptime(.{
-        .{ "mode", .mode },     .{ "vsource", .vsource }, .{ "localgnd", .localgnd },
-        .{ "dec", .dec },       .{ "oct", .oct },         .{ "lin", .lin },
+        .{ "mode", .mode }, .{ "vsource", .vsource }, .{ "localgnd", .localgnd },
+        .{ "dec", .dec },   .{ "oct", .oct },         .{ "lin", .lin },
     });
     if (local_gnd == NO_NODE) return error.AnalysisNodeNotFound;
     const modes = std.StaticStringMap(requests.Lstb.Mode).initComptime(.{
@@ -744,7 +750,7 @@ fn dcAxis(arena: std.mem.Allocator, args: []const Value, i: *usize) !Axis {
                     .step => axis.step = v,
                     else => return error.InvalidAnalysisArguments,
                 }
-                seen |= @as(u3, 1) << @intCast(@intFromEnum(key) - @intFromEnum(Word.start));
+                seen |= @as(u3, 1) << @intCast(@backingInt(key) - @backingInt(Word.start));
             }
             if (seen != 0b111) return error.InvalidAnalysisArguments;
             try checkStep(axis.start, axis.stop, axis.step);
@@ -1056,7 +1062,7 @@ fn hbTones(arena: std.mem.Allocator, args: []const Value) !requests.Hb {
             .tones => try tones.append(arena, try positive(args, i)),
             .nharms => try nharms.append(arena, try count(u16, args, i, 0)),
             inline .intmodmax, .subharms, .ss_tone => |k| {
-                const slot = &single[@intFromEnum(k) - @intFromEnum(Key.intmodmax)];
+                const slot = &single[@backingInt(k) - @backingInt(Key.intmodmax)];
                 if (slot.* != null) return error.InvalidAnalysisArguments;
                 slot.* = try count(u16, args, i, 0);
             },
@@ -1098,17 +1104,17 @@ fn hbTones(arena: std.mem.Allocator, args: []const Value) !requests.Hb {
 /// the operating point and publishes one period.
 fn shootingNewton(args: []const Value) !requests.Pss {
     const Key = enum { tres, period, tone, nharms, trinit, maxtrinitcycles, numperout };
-    var given: [@typeInfo(Key).@"enum".fields.len]?f64 = @splat(null);
+    var given: [@typeInfo(Key).@"enum".field_names.len]?f64 = @splat(null);
     var i: usize = 0;
     while (i < args.len) : (i += 2) {
         var lower: [16]u8 = undefined;
         const key = std.meta.stringToEnum(Key, try keyword(args, i, &lower)) orelse return error.InvalidAnalysisArguments;
-        given[@intFromEnum(key)] = try positive(args, i + 1);
+        given[@backingInt(key)] = try positive(args, i + 1);
     }
-    const period = given[@intFromEnum(Key.period)] orelse
-        1 / (given[@intFromEnum(Key.tone)] orelse return error.InvalidAnalysisArguments);
+    const period = given[@backingInt(Key.period)] orelse
+        1 / (given[@backingInt(Key.tone)] orelse return error.InvalidAnalysisArguments);
     var pss: requests.Pss = .{ .period = period };
-    if (given[@intFromEnum(Key.tres)]) |tres| {
+    if (given[@backingInt(Key.tres)]) |tres| {
         const steps = @round(period / tres);
         if (!(steps >= 1) or steps > std.math.maxInt(u32) - 1) return error.InvalidAnalysisArguments;
         pss.n_samples = @intFromFloat(steps);
@@ -1405,7 +1411,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             // the derivative is the adjoint one, so PERTURBATION is too.
             if (args.len == 0 or args.len % 2 != 1) return error.InvalidAnalysisArguments;
             const keys = std.StaticStringMap(void).initComptime(.{
-                .{"threshold"}, .{"file"}, .{"interval"}, .{"virtual_sensitivity"}, .{"virtual_sens"},
+                .{"threshold"},      .{"file"},         .{"interval"},      .{"virtual_sensitivity"}, .{"virtual_sens"},
                 .{"sens_threshold"}, .{"perturbation"}, .{"groupbydevice"},
             });
             var i: usize = 1;
@@ -1592,7 +1598,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                     .method => {
                         const m = try number(args, i + 1);
                         if (m != 0 and m != 1 and m != 2) return error.InvalidAnalysisArguments;
-                        o.method = @enumFromInt(@as(u2, @intFromFloat(m)));
+                        o.method = @fromBackingInt(@intCast(@as(u2, @intFromFloat(m))));
                     },
                     .carrierindex => o.carrier = try count(u16, args, i + 1, 1),
                     .spurious => if (try number(args, i + 1) != 0) return error.UnsupportedAnalysisOutput,

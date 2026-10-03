@@ -38,8 +38,9 @@ pub fn parseFormat(s: []const u8) ?Format {
 }
 
 test "every Format arm is reachable by its own name" {
-    inline for (@typeInfo(Format).@"enum".fields) |f| {
-        try std.testing.expectEqual(@as(?Format, @enumFromInt(f.value)), parseFormat(f.name));
+    const info = @typeInfo(Format).@"enum";
+    inline for (info.field_names, info.field_values) |name, value| {
+        try std.testing.expectEqual(@as(?Format, @fromBackingInt(@intCast(value))), parseFormat(name));
     }
 }
 

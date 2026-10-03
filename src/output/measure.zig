@@ -1000,7 +1000,7 @@ const Sci = struct {
 
     pub fn format(s: Sci, w: *Writer) Writer.Error!void {
         var buf: [64]u8 = undefined;
-        const t =std.fmt.float.render(&buf, s.x, .{ .mode = .scientific, .precision = s.precision }) catch return w.writeAll("?");
+        const t = std.fmt.float.render(&buf, s.x, .{ .mode = .scientific, .precision = s.precision }) catch return w.writeAll("?");
         const e = std.mem.indexOfScalar(u8, t, 'e') orelse return w.writeAll(t);
         const exp = std.fmt.parseInt(i32, t[e + 1 ..], 10) catch return w.writeAll(t);
         try w.print("{s}e{c}{d:0>2}", .{ t[0..e], @as(u8, if (exp < 0) '-' else '+'), @abs(exp) });

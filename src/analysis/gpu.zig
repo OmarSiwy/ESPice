@@ -235,9 +235,9 @@ fn imageOf(kernel: []const u8) ?[:0]const u8 {
 fn markerPath(buf: []u8, image: []const u8) ?[:0]const u8 {
     const hash = std.hash.Wyhash.hash(0, image);
     if (std.c.getenv("XDG_CACHE_HOME")) |x|
-        return std.fmt.bufPrintZ(buf, "{s}/espice/gpu-jit/{x:0>16}", .{ std.mem.span(x), hash }) catch null;
+        return std.mem.printSentinel(buf, "{s}/espice/gpu-jit/{x:0>16}", .{ std.mem.span(x), hash }, 0) catch null;
     const home = std.c.getenv("HOME") orelse return null;
-    return std.fmt.bufPrintZ(buf, "{s}/.cache/espice/gpu-jit/{x:0>16}", .{ std.mem.span(home), hash }) catch null;
+    return std.mem.printSentinel(buf, "{s}/.cache/espice/gpu-jit/{x:0>16}", .{ std.mem.span(home), hash }, 0) catch null;
 }
 
 fn imageWarm(image: []const u8) bool {
@@ -1540,7 +1540,7 @@ pub const GpuContext = struct {
             if (bg.count == 0) continue;
             if (!launched) try self.d_flags.fillAsync(0, 4, &self.stream);
             var count: u64 = bg.count;
-            var opv: u64 = @intFromEnum(op);
+            var opv: u64 = @backingInt(op);
             try bg.launch(ck, &self.stream, &.{
                 gompute.interface.arg(&count),
                 bg.d_models.argPtr(),

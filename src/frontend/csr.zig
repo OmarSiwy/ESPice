@@ -11,10 +11,10 @@ const Allocator = std.mem.Allocator;
 pub const VertexId = enum(u32) {
     _,
     pub inline fn from(i: usize) VertexId {
-        return @enumFromInt(@as(u32, @intCast(i)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(i))));
     }
     pub inline fn index(self: VertexId) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -22,10 +22,10 @@ pub const VertexId = enum(u32) {
 pub const EdgeId = enum(u32) {
     _,
     pub inline fn from(i: usize) EdgeId {
-        return @enumFromInt(@as(u32, @intCast(i)));
+        return @fromBackingInt(@intCast(@as(u32, @intCast(i))));
     }
     pub inline fn index(self: EdgeId) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 

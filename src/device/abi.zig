@@ -499,8 +499,8 @@ pub fn layoutHash() u64 {
         @setEvalBranchQuota(100_000);
         var h: u64 = 0xcbf29ce484222325;
         for (builtin.zig_version_string) |c| h = mix(h, c);
-        h = mix(h, @intFromEnum(builtin.zig_backend));
-        h = mix(h, @intFromEnum(builtin.mode));
+        h = mix(h, @backingInt(builtin.zig_backend));
+        h = mix(h, @backingInt(builtin.mode));
         // Error tracing adds a hidden argument to every callconv(.auto) call.
         h = mix(h, @intFromBool(builtin.have_error_return_tracing));
         for ([_]type{
@@ -523,8 +523,8 @@ fn mix(h: u64, v: u64) u64 {
 fn hashType(h0: u64, comptime T: type) u64 {
     var h = mix(mix(h0, @sizeOf(T)), @alignOf(T));
     switch (@typeInfo(T)) {
-        .@"struct" => |si| inline for (si.fields) |f| {
-            if (!f.is_comptime and @sizeOf(f.type) > 0) h = mix(h, @offsetOf(T, f.name));
+        .@"struct" => |si| inline for (si.field_names, si.field_types, si.field_attrs) |name, FT, attrs| {
+            if (!attrs.@"comptime" and @sizeOf(FT) > 0) h = mix(h, @offsetOf(T, name));
         },
         else => {},
     }

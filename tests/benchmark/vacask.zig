@@ -157,9 +157,9 @@ const Xlat = struct {
     reason: []const u8 = "",
 
     title: []const u8 = "translated from SPICE",
-    loads: std.EnumSet(Module) = .initEmpty(),
-    autos: std.EnumSet(Module) = .initEmpty(),
-    builtins: std.EnumSet(Builtin) = .initEmpty(),
+    loads: std.EnumSet(Module) = .empty,
+    autos: std.EnumSet(Module) = .empty,
+    builtins: std.EnumSet(Builtin) = .empty,
 
     /// Every `.model` and `.subckt` name, collected in pass 1 because a card
     /// may precede its model. It tells `q1 c b e sub qmod` (four nodes) from

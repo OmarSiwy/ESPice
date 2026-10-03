@@ -161,11 +161,11 @@ pub fn Worker(comptime Product: type) type {
                 const elapsed = self.timeQuantum();
                 if (event.simulation_time) |t| {
                     std.debug.print("timing: query {d} {s} attempt={d} accepted={?d} t={e:.6}s dt={?e:.6}s next_dt={?e:.6}s: {d:.6}ms\n", .{
-                        @intFromEnum(id), @tagName(event.phase), event.completed, event.accepted, t, event.step_size, event.next_step, milliseconds(elapsed),
+                        @backingInt(id), @tagName(event.phase), event.completed, event.accepted, t, event.step_size, event.next_step, milliseconds(elapsed),
                     });
                 } else {
                     std.debug.print("timing: query {d} {s} checkpoint={d}/{d}: {d:.6}ms\n", .{
-                        @intFromEnum(id), @tagName(event.phase), event.completed, event.total, milliseconds(elapsed),
+                        @backingInt(id), @tagName(event.phase), event.completed, event.total, milliseconds(elapsed),
                     });
                 }
             }
@@ -196,7 +196,7 @@ pub fn Worker(comptime Product: type) type {
                 const tail = self.timeQuantum();
                 const status = if (result) |_| "complete" else |err| @errorName(err);
                 std.debug.print("timing: query {d} {s}: final={d:.6}ms active_total={d:.6}ms\n", .{
-                    @intFromEnum(id), status, milliseconds(tail), milliseconds(self.active_ns),
+                    @backingInt(id), status, milliseconds(tail), milliseconds(self.active_ns),
                 });
             }
             self.mutex.lockUncancelable(self.io);

@@ -9,7 +9,7 @@ fn finite(value: anytype) bool {
     return switch (@typeInfo(@TypeOf(value))) {
         .float => std.math.isFinite(value),
         .@"struct" => |s| blk: {
-            inline for (s.fields) |field| if (!finite(@field(value, field.name))) break :blk false;
+            inline for (s.field_names) |name| if (!finite(@field(value, name))) break :blk false;
             break :blk true;
         },
         .optional => if (value) |v| finite(v) else true,

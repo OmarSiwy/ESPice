@@ -143,7 +143,7 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
                     if (p.peek() != ':') return error.ParseError;
                     p.pos += 1;
                     try p.bin(0);
-                    try p.emit(.{ .code = .call, .a = @intFromEnum(Fn.ternary), .b = 3 });
+                    try p.emit(.{ .code = .call, .a = @backingInt(Fn.ternary), .b = 3 });
                     continue;
                 }
                 const power = c == '*' and p.pos + 1 < p.text.len and p.text[p.pos + 1] == '*';
@@ -267,7 +267,7 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
             if (p.peek() != ')') return error.ParseError;
             p.pos += 1;
             if (probe) |code| return p.emit(.{ .code = code, .a = args[0], .b = args[1] });
-            try p.emit(.{ .code = .call, .a = @intFromEnum(fns.get(word) orelse .other), .b = argc });
+            try p.emit(.{ .code = .call, .a = @backingInt(fns.get(word) orelse .other), .b = argc });
         }
     };
 }
@@ -351,7 +351,7 @@ fn step(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), op: Op, consts: []co
         .call => blk: {
             const argc: usize = op.b;
             const args = stack.items[stack.items.len - argc ..];
-            const result = call(@enumFromInt(op.a), args);
+            const result = call(@fromBackingInt(@intCast(op.a)), args);
             stack.shrinkRetainingCapacity(stack.items.len - argc);
             break :blk result;
         },
@@ -468,7 +468,7 @@ pub fn operands(ops: []const Op, end: usize, out: []usize) []usize {
 pub fn eval(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, live: []const f64, draw: anytype) Error!f64 {
     stack.clearRetainingCapacity();
     for (ops, 0..) |op, i| {
-        if (op.code == .call and @TypeOf(draw) != @TypeOf(null) and isDistribution(@enumFromInt(op.a))) {
+        if (op.code == .call and @TypeOf(draw) != @TypeOf(null) and isDistribution(@fromBackingInt(@intCast(op.a)))) {
             const argc: usize = op.b;
             var nums: [4]f64 = @splat(0);
             const args = stack.items[stack.items.len - argc ..];
@@ -476,7 +476,7 @@ pub fn eval(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op,
                 nums[k] = if (a.known) a.num else std.math.nan(f64);
             };
             stack.shrinkRetainingCapacity(stack.items.len - argc);
-            try stack.append(gpa, .of(draw.value(i, @enumFromInt(op.a), nums[0..@min(argc, nums.len)])));
+            try stack.append(gpa, .of(draw.value(i, @fromBackingInt(@intCast(op.a)), nums[0..@min(argc, nums.len)])));
             continue;
         }
         try step(gpa, stack, op, consts, false, live);
