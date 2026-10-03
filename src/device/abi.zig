@@ -579,10 +579,6 @@ pub const GpuPayload = struct {
     slots: []const u32,
     /// `arp_lim_<model>`, or "" when the device has no state kernel.
     lim_kernel: []const u8,
-    /// The state kernel's `updateState` writes §5.10 held variables. The
-    /// launcher no longer reads it: since #15 every state kernel runs its
-    /// state half once per converged solve and its limit half per iterate.
-    held: bool,
     /// `arp_ctl_<model>`, or "" when the device has no accepted-step latch.
     ctl_kernel: []const u8,
     /// `arp_reduce_<model>`, the segmented sum from staging cells to planes.
@@ -636,7 +632,9 @@ pub const GpuPayload = struct {
 //     `layoutHash` recurses into by-value struct fields (no layout moved);
 //     the ngspice-port junction models' Model PODs gain `gmin__`, their gmin
 //     default being `$simparam("gmin")` (#78).
-pub const abi_version: u32 = 28;
+// 29: dropped `GpuPayload.held` (dead since #15); `layoutHash` covers
+//     `GpuPayload` and `ScatterTapes`, which cross through `Hooks` (#186).
+pub const abi_version: u32 = 29;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -694,6 +692,7 @@ pub fn layoutHash() u64 {
             std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
             DeviceResult(Batch), DeviceResult(Proto), Param,
             SimState,            StatusHit,           std.Io.Writer,
+            GpuPayload,          ScatterTapes,
         }) |T| h = hashType(h, T);
         h = mix(h, abi_version);
         break :blk h;

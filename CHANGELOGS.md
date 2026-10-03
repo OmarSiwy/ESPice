@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- The device layout hash covers the GPU payload and scatter tapes, and the unused `held` payload flag is gone; device ABI 29, so cached `.hdl` builds rebuild once (#186).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
 - `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).

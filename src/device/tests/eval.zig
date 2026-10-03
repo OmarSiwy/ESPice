@@ -850,7 +850,6 @@ test "a held-variable device that limits is resident, its state half deferred to
     }).unwrap();
     defer batch.hooks.deinit(batch.ctx, a);
     const p = batch.hooks.gpu_payload.?(batch.ctx);
-    try std.testing.expect(p.held);
     try std.testing.expect(p.lim_kernel.len > 0);
     try std.testing.expect(p.lim_x.len > 0);
 }

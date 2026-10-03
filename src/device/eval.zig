@@ -2040,7 +2040,6 @@ pub fn DeviceBatch(comptime D: type) type {
                 .rhs_idx = self.rhs_idx,
                 .slots = self.slots,
                 .lim_kernel = comptime if (hasStateKernel(D)) stateKernelName(D) else "",
-                .held = comptime hasStateKernel(D) and holdsOnlyHeld(D),
                 .ctl_kernel = comptime if (hasCtlKernel(D)) ctlKernelName(D) else "",
                 .reduce_kernel = comptime reduceKernelName(D),
                 .lim_x = if (comptime has_limit) self.lim_x else &.{},
