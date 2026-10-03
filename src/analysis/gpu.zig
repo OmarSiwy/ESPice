@@ -354,9 +354,14 @@ const BatchGpu = struct {
     /// pass or the accepted-step latch); empty otherwise. `syncInstances`
     /// diffs the host against it to tell parameter writes from latches.
     base: []u8,
+    /// Scratch the device Instance bytes download into, `base`'s length, so
+    /// the per-step merge allocates nothing (#174). Contents are dead
+    /// between calls.
+    dev: []u8,
 
     fn deinit(self: *BatchGpu, gpa: std.mem.Allocator) void {
         gpa.free(self.base);
+        gpa.free(self.dev);
         self.d_models.free();
         self.d_model_of.free();
         self.d_instances.free();
@@ -857,6 +862,8 @@ pub const GpuContext = struct {
         // A stepped batch keeps `base` too: `pushStepped` diffs against it.
         const writes_instances = b.hooks.status != null or lim_kernel != null or ctl_kernel != null or stepped;
         const base: []u8 = if (writes_instances) try gpa.dupe(u8, p.instances) else &.{};
+        errdefer gpa.free(base);
+        const dev: []u8 = try gpa.alloc(u8, base.len);
 
         const block = evalBlock(knobs);
         bg.* = .{
@@ -886,6 +893,7 @@ pub const GpuContext = struct {
             .has_status = b.hooks.status != null,
             .stepped = stepped,
             .base = base,
+            .dev = dev,
         };
         return true;
     }
@@ -1773,11 +1781,10 @@ pub const GpuContext = struct {
             if (!waited) try self.sync();
             waited = true;
             const host: []u8 = @constCast(bg.payload(bg.ctx).instances);
-            const dev = try self.gpa.alloc(u8, host.len);
-            defer self.gpa.free(dev);
-            try bg.d_instances.download(dev.ptr, dev.len);
-            _ = mergeInstances(host, bg.base, dev);
-            @memcpy(bg.base, dev);
+            std.debug.assert(bg.dev.len == host.len);
+            try bg.d_instances.download(bg.dev.ptr, bg.dev.len);
+            _ = mergeInstances(host, bg.base, bg.dev);
+            @memcpy(bg.base, bg.dev);
         }
     }
 
@@ -1797,10 +1804,8 @@ pub const GpuContext = struct {
                 // Normally `pullStepped` already merged; this covers a host
                 // write outside `updateStates` (a revert, `commit_state`).
                 try self.sync();
-                const dev = try self.gpa.alloc(u8, host.len);
-                defer self.gpa.free(dev);
-                try bg.d_instances.download(dev.ptr, dev.len);
-                _ = mergeInstances(host, bg.base, dev);
+                try bg.d_instances.download(bg.dev.ptr, bg.dev.len);
+                _ = mergeInstances(host, bg.base, bg.dev);
             }
             try bg.d_instances.upload(host.ptr, host.len);
             @memcpy(bg.base, host);
@@ -1828,10 +1833,9 @@ pub const GpuContext = struct {
             }
             if (!waited) try self.sync();
             waited = true;
-            const dev = try self.gpa.alloc(u8, host.len);
-            defer self.gpa.free(dev);
-            try bg.d_instances.download(dev.ptr, dev.len);
-            if (mergeInstances(host, bg.base, dev)) try bg.d_instances.upload(host.ptr, host.len);
+            std.debug.assert(bg.dev.len == host.len);
+            try bg.d_instances.download(bg.dev.ptr, bg.dev.len);
+            if (mergeInstances(host, bg.base, bg.dev)) try bg.d_instances.upload(host.ptr, host.len);
             @memcpy(bg.base, host);
         }
     }
