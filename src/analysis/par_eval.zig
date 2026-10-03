@@ -119,18 +119,16 @@ pub const ParEval = struct {
 
     threads: []std.Thread,
     started: bool,
-    quit: std.atomic.Value(bool),
-    /// Bumped once per pass; workers spin on it, then park on it.
-    epoch: std.atomic.Value(u32),
-    /// Workers parked (or about to park) on `epoch`. `run` pays for the wake
-    /// syscall only when this is nonzero.
-    sleepers: std.atomic.Value(u32),
-    next_task: std.atomic.Value(u32),
-    next_block: std.atomic.Value(u32),
+    /// Each counter a lane writes while others read sits alone on its line,
+    /// apart from the read-only `job_*` arguments and from each other, so a
+    /// claim or barrier increment invalidates only that counter's line (#172).
+    wake: Wake,
+    next_task: Counter,
+    next_block: Counter,
     /// Lanes, lane 0 included, finished stamping the current pass.
-    stamped: std.atomic.Value(u32),
+    stamped: Counter,
     /// Workers finished with the current pass, reduce included.
-    done: std.atomic.Value(u32),
+    done: Counter,
     /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
     job_planes: Planes,
@@ -138,6 +136,28 @@ pub const ParEval = struct {
     job_x: []const f64,
     job_t: f64,
     job_mode: Mode,
+
+    /// A u32 counter padded to a whole cache line: the struct's size rounds
+    /// up to its alignment, so no other field shares the line.
+    const Counter = struct {
+        v: std.atomic.Value(u32) align(std.atomic.cache_line),
+    };
+
+    /// The pass doorbell, on its own line. `epoch` is bumped once per pass;
+    /// workers spin on it, then park on it. `sleepers` counts workers parked
+    /// (or about to park) on `epoch`: `run` pays for the wake syscall only
+    /// when it is nonzero. `quit` is read right after `epoch` changes. All
+    /// three are written about once per pass, so they share one line.
+    const Wake = struct {
+        epoch: std.atomic.Value(u32) align(std.atomic.cache_line),
+        sleepers: std.atomic.Value(u32),
+        quit: std.atomic.Value(bool),
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(Counter) == std.atomic.cache_line);
+        std.debug.assert(@sizeOf(Wake) == std.atomic.cache_line);
+    }
 
     /// Initial g and c of every cell: the constant baseline, or empty for
     /// zero.
@@ -233,13 +253,11 @@ pub const ParEval = struct {
             .has_charge = has_charge,
             .threads = threads,
             .started = false,
-            .quit = .init(false),
-            .epoch = .init(0),
-            .sleepers = .init(0),
-            .next_task = .init(0),
-            .next_block = .init(0),
-            .stamped = .init(0),
-            .done = .init(0),
+            .wake = .{ .epoch = .init(0), .sleepers = .init(0), .quit = .init(false) },
+            .next_task = .{ .v = .init(0) },
+            .next_block = .{ .v = .init(0) },
+            .stamped = .{ .v = .init(0) },
+            .done = .{ .v = .init(0) },
             .job_batches = batches,
             .job_planes = undefined,
             .job_base = .{},
@@ -252,9 +270,9 @@ pub const ParEval = struct {
     /// Stops and joins the workers, then frees every table.
     pub fn deinit(self: *ParEval) void {
         if (self.started) {
-            self.quit.store(true, .release);
-            _ = self.epoch.fetchAdd(1, .seq_cst);
-            self.io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
+            self.wake.quit.store(true, .release);
+            _ = self.wake.epoch.fetchAdd(1, .seq_cst);
+            self.io.futexWake(u32, &self.wake.epoch.raw, std.math.maxInt(u32));
             for (self.threads) |th| th.join();
         }
         const gpa = self.gpa;
@@ -289,21 +307,21 @@ pub const ParEval = struct {
         self.job_x = x;
         self.job_t = t;
         self.job_mode = mode;
-        self.next_task.store(0, .monotonic);
-        self.next_block.store(0, .monotonic);
-        self.stamped.store(0, .monotonic);
-        self.done.store(0, .monotonic);
+        self.next_task.v.store(0, .monotonic);
+        self.next_block.v.store(0, .monotonic);
+        self.stamped.v.store(0, .monotonic);
+        self.done.v.store(0, .monotonic);
         // Comptime-false single-threaded, so `startWorkers` never compiles there.
         if (!builtin.single_threaded and self.n_lanes > 1) {
             if (!self.started) self.startWorkers();
             // seq_cst pairs with the worker's `sleepers` increment and epoch
             // re-check: either it sees the new epoch or this sees it parking.
-            _ = self.epoch.fetchAdd(1, .seq_cst);
-            if (self.sleepers.load(.seq_cst) != 0)
-                self.io.futexWake(u32, &self.epoch.raw, std.math.maxInt(u32));
+            _ = self.wake.epoch.fetchAdd(1, .seq_cst);
+            if (self.wake.sleepers.load(.seq_cst) != 0)
+                self.io.futexWake(u32, &self.wake.epoch.raw, std.math.maxInt(u32));
         }
         self.pass();
-        waitCount(&self.done, self.n_lanes - 1);
+        waitCount(&self.done.v, self.n_lanes - 1);
         // The trash cells take no stamps here; give them their initial value.
         switch (mode) {
             .charge => planes.q_vec[self.n] = 0,
@@ -319,7 +337,7 @@ pub const ParEval = struct {
     }
 
     fn startWorkers(self: *ParEval) void {
-        const epoch0 = self.epoch.load(.acquire);
+        const epoch0 = self.wake.epoch.load(.acquire);
         for (self.threads) |*th| {
             th.* = std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, workerMain, .{ self, epoch0 }) catch
                 @panic("ParEval: worker spawn failed");
@@ -331,7 +349,7 @@ pub const ParEval = struct {
         var last: u32 = epoch0;
         while (true) {
             var spins: u32 = 0;
-            var e = self.epoch.load(.acquire);
+            var e = self.wake.epoch.load(.acquire);
             while (e == last) {
                 if (spins < park_spins) {
                     std.atomic.spinLoopHint();
@@ -343,17 +361,17 @@ pub const ParEval = struct {
                     // Spinning (or `yield`, which returns at once on an idle
                     // core) through the host solve kept every worker at
                     // 100% CPU. The futex rechecks `epoch == last` itself.
-                    _ = self.sleepers.fetchAdd(1, .seq_cst);
-                    if (self.epoch.load(.seq_cst) == last)
-                        self.io.futexWaitUncancelable(u32, &self.epoch.raw, last);
-                    _ = self.sleepers.fetchSub(1, .seq_cst);
+                    _ = self.wake.sleepers.fetchAdd(1, .seq_cst);
+                    if (self.wake.epoch.load(.seq_cst) == last)
+                        self.io.futexWaitUncancelable(u32, &self.wake.epoch.raw, last);
+                    _ = self.wake.sleepers.fetchSub(1, .seq_cst);
                 }
-                e = self.epoch.load(.acquire);
+                e = self.wake.epoch.load(.acquire);
             }
             last = e;
-            if (self.quit.load(.acquire)) return;
+            if (self.wake.quit.load(.acquire)) return;
             self.pass();
-            _ = self.done.fetchAdd(1, .release);
+            _ = self.done.v.fetchAdd(1, .release);
         }
     }
 
@@ -362,7 +380,7 @@ pub const ParEval = struct {
     fn pass(self: *ParEval) void {
         const mode = self.job_mode;
         while (true) {
-            const i = self.next_task.fetchAdd(1, .monotonic);
+            const i = self.next_task.v.fetchAdd(1, .monotonic);
             if (i >= self.tasks.len) break;
             const task = self.tasks[i];
             const b = self.job_batches[task.batch];
@@ -376,11 +394,11 @@ pub const ParEval = struct {
             };
             b.hooks.stage(b.ctx, &pl, task.first, task.last, self.job_x, self.job_t, mode);
         }
-        _ = self.stamped.fetchAdd(1, .acq_rel);
-        waitCount(&self.stamped, self.n_lanes);
+        _ = self.stamped.v.fetchAdd(1, .acq_rel);
+        waitCount(&self.stamped.v, self.n_lanes);
         const n_blocks = self.cuts.len - 1;
         while (true) {
-            const j = self.next_block.fetchAdd(1, .monotonic);
+            const j = self.next_block.v.fetchAdd(1, .monotonic);
             if (j >= n_blocks) break;
             const lo = self.cuts[j];
             const hi = self.cuts[j + 1];
