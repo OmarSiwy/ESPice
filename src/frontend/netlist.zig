@@ -5,9 +5,12 @@
 //! are rows of flat tables; an expression that does not fold stays postfix.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+/// Logical lines and fields per dialect, re-exported for the frontend tests.
 pub const lines = @import("lines.zig");
+/// Deck loading and include expansion, re-exported for the frontend tests.
 pub const source = @import("source.zig");
 const csr = @import("csr.zig");
+/// The postfix `Value.expr` spans index, re-exported for the builder.
 pub const expr = @import("expr.zig");
 const measure = @import("measure.zig");
 const pattern = @import("pattern.zig");
@@ -18,7 +21,9 @@ const requests = @import("core").query;
 
 /// Input syntax: ngspice, HSPICE or Spectre.
 pub const Dialect = lines.Dialect;
+/// A net: a row of `Netlist.graph`'s vertex table.
 pub const VertexId = csr.VertexId;
+/// A device: a row of `Netlist.graph`'s edge table, in card order.
 pub const EdgeId = csr.EdgeId;
 /// Analysis kind, shared with the query layer.
 pub const Kind = requests.Kind;
@@ -52,7 +57,7 @@ pub const Group = struct { name: []const u8, args: []const Value };
 /// `key=value`; a positional model value has an empty key.
 pub const Kv = struct { key: []const u8, value: Value };
 
-/// Vertex payload.
+/// Vertex payload: the net's flattened name in `Netlist.pool`.
 pub const Net = struct { name: Name };
 
 /// Hyperedge payload. `kind` is the lowercase card letter.
@@ -230,6 +235,7 @@ pub const Config = struct {
 };
 /// One `.ic v(net)=value` entry on a net some card names.
 pub const Ic = struct { net: VertexId, value: f64 };
+/// What an include carries: OSDI, Verilog-A, digital Verilog or a data file.
 pub const ForeignKind = source.ForeignKind;
 /// An HDL or OSDI include, path as written (relative to the deck).
 pub const Foreign = struct { kind: ForeignKind, path: []const u8 };
@@ -244,6 +250,7 @@ pub const DataFile = struct { path: []const u8, bytes: []const u8 };
 
 /// Deck data: everything that is not circuit topology.
 pub const Deck = struct {
+    /// The first line as written, original case; "" for Spectre.
     title: []const u8,
     dialect: Dialect,
     analyses: []const Analysis,
@@ -337,12 +344,14 @@ pub const Netlist = struct {
         model_row: u32 = none,
     };
 
-    /// Devices of card letter `c` (lowercase), in file order.
+    /// Devices of card letter `c`, in file order. A behavioural E/F/G/H
+    /// sits under `b`. Asserts that `c` is a lowercase ASCII letter.
     pub fn bucket(nl: *const Netlist, c: u8) []const EdgeId {
+        std.debug.assert(c >= 'a' and c <= 'z');
         return nl.order[nl.kind_starts[c - 'a']..nl.kind_starts[c - 'a' + 1]];
     }
 
-    /// Device `e` with its slices resolved.
+    /// Device `e` with its slices resolved; they borrow the netlist.
     pub fn device(nl: *const Netlist, e: EdgeId) View {
         const i = e.index();
         const d = nl.graph.edges.get(i);
@@ -368,13 +377,15 @@ pub const Netlist = struct {
         return nl.pool.str(nl.graph.vertices.items(.name)[v.index()]);
     }
 
-    /// The bytes of data file `path`, spelled as the card spells it.
+    /// The bytes of data file `path`, spelled as the card spells it; null
+    /// before `prepare` reads it. O(files).
     pub fn dataFile(nl: *const Netlist, path: []const u8) ?[]const u8 {
         for (nl.files) |f| if (std.mem.eql(u8, f.path, path)) return f.bytes;
         return null;
     }
 
-    /// First `.model` card named `name`.
+    /// First global `.model` card named `name`; a subcircuit's own models
+    /// are reached only through `View.model`.
     pub fn findModel(nl: *const Netlist, name: []const u8) ?Model {
         return if (nl.model_ids.get(name)) |i| nl.models[i] else null;
     }
@@ -387,7 +398,10 @@ pub const Netlist = struct {
     /// Rewrites every live value for one variant: `values[k]` is live name
     /// k, and `draw.sample(site, f, args)` answers each distribution call
     /// (`null` keeps nominals). Returns true when some value changed.
-    /// `stack` is scratch.
+    /// `stack` is scratch, grown with `gpa`. Writes through `const`: the
+    /// live slots and `consts` rows live in the parse arena, so every
+    /// `View` and `Model` read before the call sees the new values.
+    /// Asserts that `values.len` equals `live.names.len`.
     pub fn setLive(nl: *const Netlist, gpa: Allocator, stack: *std.ArrayList(expr.Val), values: []const f64, draw: anytype) !bool {
         const live = nl.live;
         const pool: []f64 = @constCast(nl.consts);
@@ -429,7 +443,8 @@ fn SiteDraw(comptime D: type) type {
     };
 }
 
-/// A site key: `owner` mixed with `salt` (splitmix64 finalizer).
+/// A site key: `owner` mixed with `salt` (splitmix64 finalizer). Stable
+/// across runs and targets, so a seed replays the same draws.
 pub fn siteKey(owner: u64, salt: u64) u64 {
     var z = owner ^ (salt +% 0x9e3779b97f4a7c15);
     z = (z ^ (z >> 30)) *% 0xbf58476d1ce4e5b9;
@@ -613,7 +628,9 @@ fn cardOf(head: []const u8) ?Card {
 }
 
 /// Parses `src` in `dialect` into `arena`. The result borrows `src` (paths
-/// keep their original case) and the arena.
+/// and the title keep their original case) and the arena, which should be
+/// an arena: nothing is freed piecewise. Fails per `Error`; partial
+/// results stay in the arena.
 pub fn parse(arena: Allocator, src: []const u8, dialect: Dialect) Error!Netlist {
     return switch (dialect) {
         inline else => |d| Reader(lines.Syntax(d)).run(arena, src, d),
@@ -621,8 +638,9 @@ pub fn parse(arena: Allocator, src: []const u8, dialect: Dialect) Error!Netlist 
 }
 
 /// Parses analysis cards appended to a built circuit, resolving nets through
-/// `lookup.node(name) u32`. Any other line, and a single-value `.temp`, is
-/// refused with `UnsupportedDirectiveMutation`.
+/// `lookup.node(name) u32`, which sees lowercased names. Any other line, and
+/// a single-value `.temp`, is refused with `UnsupportedDirectiveMutation`.
+/// The cards and their strings live in `arena`.
 pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error || error{UnsupportedDirectiveMutation})![]Analysis {
     const lower = try arena.alloc(u8, text.len);
     _ = lines.normalize(1, lower, text);
@@ -835,6 +853,10 @@ fn Reader(comptime S: type) type {
         card_kv: std.ArrayList(Kv) = .empty,
         scratch: expr.Scratch = .{},
         stack: std.ArrayList(expr.Val) = .empty,
+        /// Open `name(` groups in the value being read.
+        group_depth: u8 = 0,
+
+        const max_group_depth = 32;
 
         fn init(arena: Allocator, orig: []const u8, text: []const u8, dialect: Dialect) Allocator.Error!R {
             var r: R = .{ .arena = arena, .dialect = dialect, .orig = orig, .text = text, .hg = try .init(arena) };
@@ -859,8 +881,9 @@ fn Reader(comptime S: type) type {
             var split: S.Lines = .{ .rest = text, .arena = arena };
             var title: []const u8 = "";
             if (S.title_line) {
+                // Case folding keeps byte positions, so the title is `src`'s.
                 const nl = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
-                title = std.mem.trim(u8, text[0..nl], " \t\r");
+                title = std.mem.trim(u8, src[0..nl], " \t\r");
                 split.rest = if (nl < text.len) text[nl + 1 ..] else "";
             }
             try r.lines.ensureTotalCapacity(arena, line_hint);
@@ -987,7 +1010,7 @@ fn Reader(comptime S: type) type {
             pool: *const InternPool,
             net_of: []const u32,
             pub fn node(self: NetLookup, name: []const u8) u32 {
-                if (std.mem.eql(u8, name, "0")) return 0;
+                if (isGroundName(name)) return 0;
                 const n = self.pool.find(name) orelse return none;
                 return self.net_of[n.index()];
             }
@@ -1327,6 +1350,9 @@ fn Reader(comptime S: type) type {
             return true;
         }
 
+        /// The widest `a:b` range one `MONTE=list(...)` entry expands to.
+        const max_trials = 1 << 24;
+
         fn readArgs(r: *R, f: *F) Error![]const Value {
             const top: Frame = .{ .scopes = &r.global_scopes };
             var args: std.ArrayList(Value) = .empty;
@@ -1343,7 +1369,7 @@ fn Reader(comptime S: type) type {
                         const colon = std.mem.indexOfScalar(u8, n, ':') orelse n.len;
                         const lo = S.parseNum(n[0..colon]) orelse return error.ParseError;
                         const hi = if (colon == n.len) lo else S.parseNum(n[colon + 1 ..]) orelse return error.ParseError;
-                        if (!(lo >= 1 and hi >= lo and hi <= std.math.maxInt(u32)) or lo != @trunc(lo) or hi != @trunc(hi)) return error.ParseError;
+                        if (!(lo >= 1 and hi >= lo and hi <= std.math.maxInt(u32) and hi - lo < max_trials) or lo != @trunc(lo) or hi != @trunc(hi)) return error.ParseError;
                         var k = lo;
                         while (k <= hi) : (k += 1) try args.append(r.arena, .{ .num = k });
                     }
@@ -1613,7 +1639,8 @@ fn Reader(comptime S: type) type {
                     const n = try r.numbers(tail[2..]);
                     if (n.len < 1 or n[0] != @trunc(n[0]) or n[0] < 1) return error.ParseError;
                     if (grid == .poi) {
-                        if (n.len != 1 + @as(usize, @intFromFloat(n[0]))) return error.ParseError;
+                        // In f64: a count past usize must not reach @intFromFloat.
+                        if (@as(f64, @floatFromInt(n.len)) != 1 + n[0]) return error.ParseError;
                         break :blk .{ .step = .{ .target = target, .values = n[1..] } };
                     }
                     if (n.len != 3) return error.ParseError;
@@ -1935,6 +1962,10 @@ fn Reader(comptime S: type) type {
             }
             if (f.nextByte() == '(') {
                 _ = f.next();
+                // Bounded: each nesting level is a stack frame.
+                if (r.group_depth == max_group_depth) return error.ParseError;
+                r.group_depth += 1;
+                defer r.group_depth -= 1;
                 // `v(...)`/`i(...)` name nodes and devices, never numbers.
                 const probe = std.ascii.eqlIgnoreCase(t, "v") or std.ascii.eqlIgnoreCase(t, "i");
                 var args: std.ArrayList(Value) = .empty;
@@ -2154,9 +2185,9 @@ fn Reader(comptime S: type) type {
                         break :blk std.mem.trimEnd(u8, own, "_");
                     };
                     name = null;
-                    if (!data and m.name[0] != 'v' and m.name[0] != 'i') return error.ParseError;
+                    if (m.name.len == 0 or (!data and m.name[0] != 'v' and m.name[0] != 'i')) return error.ParseError;
                     var pair: [2][]const u8 = .{ "", "0" };
-                    if (std.mem.startsWith(u8, ovar, "v(")) {
+                    if (std.mem.startsWith(u8, ovar, "v(") and std.mem.endsWith(u8, ovar, ")")) {
                         var it = std.mem.tokenizeAny(u8, ovar[2 .. ovar.len - 1], ", ");
                         pair[0] = it.next() orelse "";
                         pair[1] = it.next() orelse "0";
@@ -2191,7 +2222,7 @@ fn Reader(comptime S: type) type {
         /// A `PARAM=` or `par()` measure expression in postfix: names of
         /// earlier `.meas` cards read their results, global parameters fold
         /// to numbers, `v(a[,b])` and `i(x)` read result vectors. Arithmetic
-        /// only; anything else is a ParseError.
+        /// only; anything else is a ParseError. The ops live in the arena.
         pub fn measureExpr(r: *R, text: []const u8) Error![]const core.MeasureOp {
             const body = if (text.len > 0 and (text[0] == '{' or F.isQuote(text[0]))) F.body(text) else text;
             const mark = r.scratch.mark();
@@ -2226,7 +2257,8 @@ fn Reader(comptime S: type) type {
             return out.items;
         }
 
-        /// A numeric `.option name=value`, the last one given.
+        /// A numeric `.option name=value`, the last one given; null when no
+        /// card sets it.
         pub fn measureOption(r: *R, name: []const u8) ?f64 {
             var found: ?f64 = null;
             for (r.config.items) |c| if (!c.temp) for (c.args, 0..) |a, i| {
@@ -2237,7 +2269,9 @@ fn Reader(comptime S: type) type {
         }
 
         /// A `.meas` value: a number or a global parameter expression.
+        /// ParseError for empty text or one that does not fold.
         pub fn measureValue(r: *R, text: []const u8) Error!f64 {
+            if (text.len == 0) return error.ParseError;
             if (S.parseNum(text)) |n| return n;
             const body = if (text[0] == '{' or F.isQuote(text[0])) F.body(text) else text;
             const top: Frame = .{ .scopes = &r.global_scopes };
@@ -2411,15 +2445,17 @@ fn Reader(comptime S: type) type {
         /// Two names that are already distinct nets (an alias chain closing
         /// on itself through different roots) are refused.
         fn connect(r: *R, a: []const u8, b: []const u8) Error!void {
-            var slots: [2]?*u32 = .{ null, null };
+            // Name rows, not pointers into `net_of`: interning `b` can grow it.
+            var rows: [2]?u32 = .{ null, null };
+            for ([_][]const u8{ a, b }, &rows) |name, *row| if (!isGroundName(name)) {
+                row.* = (try r.internName(try r.arena.dupe(u8, name))).index();
+            };
             var ids: [2]u32 = .{ 0, 0 };
-            for ([_][]const u8{ a, b }, 0..) |name, k| if (!isGroundName(name)) {
-                const n = try r.internName(try r.arena.dupe(u8, name));
-                slots[k] = &r.net_of.items[n.index()];
-                ids[k] = slots[k].?.*;
+            for (rows, &ids) |row, *id| if (row) |n| {
+                id.* = r.net_of.items[n];
             };
             if (ids[0] == none and ids[1] == none) ids[0] = (try r.intern(try r.arena.dupe(u8, a))).index();
-            if (ids[0] == none) slots[0].?.* = ids[1] else if (ids[1] == none) slots[1].?.* = ids[0] else if (ids[0] != ids[1]) return error.ParseError;
+            if (ids[0] == none) r.net_of.items[rows[0].?] = ids[1] else if (ids[1] == none) r.net_of.items[rows[1].?] = ids[0] else if (ids[0] != ids[1]) return error.ParseError;
         }
 
         /// `parts` joined, in reused scratch.
@@ -2434,7 +2470,7 @@ fn Reader(comptime S: type) type {
         fn netOf(r: *R, frame: *const Frame, node: []const u8) Error!VertexId {
             const path = frame.path orelse return r.intern(node);
             for (frame.ports, frame.actuals) |p, a| if (std.mem.eql(u8, p, node)) return a;
-            if (std.mem.eql(u8, node, "0") or std.mem.eql(u8, node, "gnd") or r.global_nets.contains(node)) return r.intern(node);
+            if (isGroundName(node) or r.global_nets.contains(node)) return r.intern(node);
             return r.intern(try r.joined(&.{ path, ".", node }));
         }
 
@@ -2491,7 +2527,14 @@ fn Reader(comptime S: type) type {
                 const at = probe.pos;
                 if (probe.next()) |t| if (t.len <= buf.len) if (behavioural.get(std.ascii.lowerString(&buf, t))) |form| {
                     // `E1 a b VCVS c d 2`: the type word only repeats the letter.
-                    if (form == .kind) return r.readDevice(try std.mem.concat(r.arena, u8, &.{ line[0..at], " ", probe.line[probe.pos..] }), frame);
+                    // A run of them goes in one copy, so the re-read never recurses.
+                    if (form == .kind) {
+                        while (probe.peek()) |u| {
+                            if (u.len > buf.len or (behavioural.get(std.ascii.lowerString(&buf, u)) orelse .refused) != .kind) break;
+                            _ = probe.next();
+                        }
+                        return r.readDevice(try std.mem.concat(r.arena, u8, &.{ line[0..at], " ", probe.line[probe.pos..] }), frame);
+                    }
                     return r.behaviouralCard(line, head, letter, f, frame, form);
                 };
             }
@@ -3217,6 +3260,65 @@ fn points(arena: Allocator, grid: Grid, start: f64, stop: f64, x: f64, mode: enu
     return out;
 }
 
+test points {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // The end point survives the increment's rounding.
+    const lin = try points(a, .lin, 0, 1, 0.1, .per_unit);
+    try std.testing.expectEqual(@as(usize, 11), lin.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), lin[10], 1e-12);
+    try std.testing.expectEqualSlices(f64, &.{0}, try points(a, .lin, 0, 1, 1, .total));
+    try std.testing.expectEqualSlices(f64, &.{ 0, 0.5, 1 }, try points(a, .lin, 0, 1, 3, .total));
+    // A falling sweep with a falling increment.
+    try std.testing.expectEqualSlices(f64, &.{ 2, 1, 0 }, try points(a, .lin, 2, 0, -1, .per_unit));
+    const dec = try points(a, .dec, 1, 100, 2, .per_unit);
+    try std.testing.expectEqual(@as(usize, 5), dec.len);
+    try std.testing.expectApproxEqRel(@as(f64, 100), dec[4], 1e-12);
+    try std.testing.expectEqual(@as(usize, 4), (try points(a, .oct, 1, 8, 1, .per_unit)).len);
+    for ([_]struct { Grid, f64, f64, f64 }{
+        .{ .lin, 0, 1, 0 }, // no increment
+        .{ .lin, 0, 1, -0.1 }, // increment away from the stop
+        .{ .lin, 0, 1e9, 1 }, // past 1 << 24 points
+        .{ .dec, 0, 1, 10 }, // log grid through zero
+        .{ .dec, 2, 1, 10 }, // falling log grid
+        .{ .oct, 1, 2, 0 }, // no points per octave
+        .{ .dec, 1, 10, std.math.nan(f64) },
+    }) |c| try std.testing.expectError(error.ParseError, points(a, c[0], c[1], c[2], c[3], .per_unit));
+    try std.testing.expectError(error.ParseError, points(a, .lin, 0, 1, 0.5, .total));
+    try std.testing.expectError(error.ParseError, points(a, .lin, 0, 1, 0, .total));
+}
+
+test "measure values: empty text is a ParseError, not an index past the end" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r: Reader(lines.ngspice) = try .init(arena.allocator(), "", "", .ngspice);
+    r.global_scopes = .{&r.globals};
+    try std.testing.expectError(error.ParseError, r.measureValue(""));
+    try std.testing.expectEqual(@as(f64, 2e-3), try r.measureValue("2m"));
+    try std.testing.expectEqual(@as(f64, 3), try r.measureValue("{1+2}"));
+}
+
+test isGroundName {
+    for ([_][]const u8{ "0", "gnd", "GND", "Ground" }) |n| try std.testing.expect(isGroundName(n));
+    for ([_][]const u8{ "00", "", "gnd1", "x1.gnd" }) |n| try std.testing.expect(!isGroundName(n));
+}
+
+test nameIndex {
+    const names = [_][]const u8{ "v1", "r1", "v1" };
+    try std.testing.expectEqual(@as(?usize, 0), nameIndex(&names, "v1"));
+    try std.testing.expectEqual(@as(?usize, 1), nameIndex(&names, "r1"));
+    try std.testing.expectEqual(@as(?usize, null), nameIndex(&names, "R1"));
+    try std.testing.expectEqual(@as(?usize, null), nameIndex(&.{}, "v1"));
+}
+
+test siteKey {
+    // Fixed bits: a seed must replay the same draws on every target.
+    try std.testing.expectEqual(siteKey(1, 2), siteKey(1, 2));
+    try std.testing.expect(siteKey(1, 2) != siteKey(2, 1));
+    try std.testing.expect(siteKey(0, 0) != siteKey(0, 1));
+}
+
 fn appendSpan(comptime T: type, arena: Allocator, list: *std.ArrayList(T), items: []const T) Error!Span {
     const start = list.items.len;
     if (start + items.len > none) return error.CircuitTooLarge;
@@ -3225,6 +3327,9 @@ fn appendSpan(comptime T: type, arena: Allocator, list: *std.ArrayList(T), items
 }
 
 test {
+    _ = lines;
+    _ = source;
+    _ = expr;
     _ = csr;
     _ = measure;
     _ = pattern;

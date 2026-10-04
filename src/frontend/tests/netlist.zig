@@ -605,3 +605,230 @@ test "analysis cards resolve output nets; a numeric reference is a net" {
     try std.testing.expectEqual(@as(usize, 2), nl.deck.config.len);
     try std.testing.expect(nl.deck.config[1].temp);
 }
+
+test "empty, title-only and CRLF decks parse; the title keeps its case" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const empty = try parse(a, "");
+    try std.testing.expectEqual(@as(u32, 0), empty.deviceCount());
+    try std.testing.expectEqualStrings("", empty.deck.title);
+    try std.testing.expectEqualStrings("My Deck", (try parse(a, "  My Deck \r\n")).deck.title);
+    const crlf = try parse(a, "T\r\nR1 A 0 1K\r\n.END\r\n");
+    const r1 = try device(crlf, "r1");
+    try std.testing.expectEqual(@as(f64, 1000), try numeric(r1.positional[0]));
+    try std.testing.expectEqualStrings("a", crlf.netName(r1.pins[0]));
+    try std.testing.expectEqualStrings("T", crlf.deck.title);
+}
+
+test "continuations join across comment and blank lines; tails are stripped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\continuations
+        \\R1 A
+        \\* interleaved comment
+        \\
+        \\+ B   $ tail comment
+        \\+ 2K ; another
+        \\.end
+        \\r2 after end is never read !!
+    );
+    try std.testing.expectEqual(@as(u32, 1), nl.deviceCount());
+    const r1 = try device(nl, "r1");
+    var buf: [2][]const u8 = undefined;
+    try std.testing.expectEqualStrings("a", pinNames(nl, r1, &buf)[0]);
+    try std.testing.expectEqualStrings("b", pinNames(nl, r1, &buf)[1]);
+    try std.testing.expectEqual(@as(f64, 2000), try numeric(r1.positional[0]));
+}
+
+test "malformed cards fail with ParseError, never a panic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const decks = [_][]const u8{
+        "t\n.\n",
+        "t\n.subckt\n",
+        "t\n.ends\n",
+        "t\n.subckt a p\n.subckt b q\n.ends\n.ends\n",
+        "t\n.subckt a p\nr1 p 0 1\n",
+        "t\n.param a\n",
+        "t\n.param a=\n",
+        "t\n.model\n",
+        "t\n.model m\n",
+        "t\nr1\n",
+        "t\nr1 a\n",
+        "t\nx1\n",
+        "t\nx1 a b nosuch\n",
+        "t\nx1 a s\n.subckt s p q\n.ends\n",
+        "t\nr1 a b v(\n",
+        "t\nr1 a b 1 )\n",
+        "t\n.endif\n",
+        "t\n.else\n",
+        "t\n.elseif (1)\n",
+        "t\n.if (1)\n",
+        "t\n.data d\nx 1\n",
+        "t\n.control\n",
+        "t\n.connect a\n",
+        "t\n.global v(a)\n",
+        "t\n.step param nosuch 1 2 1\n",
+        // A point count past usize, and a trial range past any budget.
+        "t\n.tran 1n 10n sweep v1 poi 1e300 1 2\n",
+        "t\n.tran 1n 10n sweep monte=list(1:4294967295)\n",
+    };
+    for (decks) |src| {
+        if (parse(arena.allocator(), src)) |_| {
+            std.debug.print("accepted: {s}\n", .{src});
+            return error.TestUnexpectedResult;
+        } else |err| if (err != error.ParseError) {
+            std.debug.print("{s}: {s}\n", .{ @errorName(err), src });
+            return err;
+        }
+    }
+}
+
+test "nesting is bounded: groups, .if chains and repeated type words" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    // `f(f(f(...` deep enough to overflow the stack if each level recursed.
+    try src.appendSlice(a, "t\nr1 a b ");
+    for (0..1 << 16) |_| try src.appendSlice(a, "f(");
+    try std.testing.expectError(error.ParseError, parse(a, src.items));
+    // 32 nested `.if` blocks are fine; the 33rd is refused.
+    inline for (.{ 32, 33 }) |depth| {
+        src.clearRetainingCapacity();
+        try src.appendSlice(a, "t\n");
+        for (0..depth) |_| try src.appendSlice(a, ".if (1)\n");
+        try src.appendSlice(a, "r1 a 0 1\n");
+        for (0..depth) |_| try src.appendSlice(a, ".endif\n");
+        if (depth == 32)
+            try std.testing.expectEqual(@as(u32, 1), (try parse(a, src.items)).deviceCount())
+        else
+            try std.testing.expectError(error.ParseError, parse(a, src.items));
+    }
+    // `E1 a b VCVS VCVS ... c d 2`: one copy of the line, not one per word.
+    src.clearRetainingCapacity();
+    try src.appendSlice(a, "t\ne1 a b");
+    for (0..20_000) |_| try src.appendSlice(a, " vcvs");
+    try src.appendSlice(a, " c d 2\n");
+    const nl = try parse(a, src.items);
+    const e1 = try device(nl, "e1");
+    try std.testing.expectEqual(@as(usize, 4), e1.pins.len);
+    try std.testing.expectEqual(@as(f64, 2), try numeric(e1.positional[0]));
+}
+
+test "ground aliases name net 0 inside subcircuits and on analysis cards" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(),
+        \\ground aliases
+        \\.subckt s a
+        \\r1 a ground 1
+        \\r2 a GND 1
+        \\.ends
+        \\x1 n s
+        \\v1 n 0 1
+        \\.tf v(n, gnd) v1
+        \\.end
+    );
+    for ([_][]const u8{ "r.x1.r1", "r.x1.r2" }) |name| try std.testing.expectEqual(netlist.ground, (try device(nl, name)).pins[1]);
+    const tf = nl.deck.analyses[0];
+    try std.testing.expectEqualStrings("n", nl.netName(.from(tf.pos)));
+    try std.testing.expectEqual(@as(u32, 0), tf.neg);
+}
+
+test ".connect aliases nets; joining two distinct nets is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(), "c\n.connect a b\n.connect z 0\nr1 a 0 1\nr2 b 0 1\nr3 z 1 1\n.end\n");
+    try std.testing.expectEqual((try device(nl, "r1")).pins[0], (try device(nl, "r2")).pins[0]);
+    try std.testing.expectEqual(netlist.ground, (try device(nl, "r3")).pins[0]);
+    try std.testing.expectError(error.ParseError, parse(arena.allocator(), "c\n.connect a c\n.connect b d\n.connect a b\n.end\n"));
+}
+
+test "buckets list each card letter in file order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nl = try parse(arena.allocator(), "b\nr1 a 0 1\nc1 a 0 1p\nr2 a 0 2\nv1 a 0 1\nr3 a 0 3\n.end\n");
+    const rs = nl.bucket('r');
+    try std.testing.expectEqual(@as(usize, 3), rs.len);
+    for (rs, [_][]const u8{ "r1", "r2", "r3" }) |e, name| try std.testing.expectEqualStrings(name, nl.device(e).name);
+    try std.testing.expectEqual(@as(usize, 1), nl.bucket('c').len);
+    try std.testing.expectEqual(@as(usize, 0), nl.bucket('z').len);
+    try std.testing.expectEqual(nl.deviceCount(), nl.kind_starts[26]);
+}
+
+test ".step sweeps a global parameter; the device keeps its nominal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nl = try parse(a, "s\n.param r=1\nr1 a 0 {r}\n.step param r 1 3 1\n.end\n");
+    try std.testing.expectEqual(@as(usize, 1), nl.deck.steps.len);
+    try std.testing.expectEqualSlices(f64, &.{ 1, 2, 3 }, nl.deck.steps[0].values);
+    try std.testing.expectEqual(@as(u32, 0), nl.deck.steps[0].target.param);
+    try std.testing.expectEqualStrings("r", nl.live.names[0]);
+    try std.testing.expectEqual(@as(f64, 1), try numeric((try device(nl, "r1")).positional[0]));
+    const list = try parse(a, "s\n.param r=1\nr1 a 0 {r}\n.step r list 5 7\n.end\n");
+    try std.testing.expectEqualSlices(f64, &.{ 5, 7 }, list.deck.steps[0].values);
+}
+
+test "parseAnalyses reads analysis cards only and resolves their nets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Lookup = struct {
+        pub fn node(_: @This(), name: []const u8) u32 {
+            return if (std.mem.eql(u8, name, "out")) 7 else netlist.none;
+        }
+    };
+    const cards = try netlist.parseAnalyses(a, ".TRAN 1n 10n\n.ac dec 10 1 1k\n.tf v(OUT) v1\n", Lookup{});
+    try std.testing.expectEqual(@as(usize, 3), cards.len);
+    for (cards, [_]netlist.Kind{ .tran, .ac, .tf }) |c, kind| try std.testing.expectEqual(kind, c.kind);
+    try std.testing.expectEqual(@as(u32, 7), cards[2].pos);
+    for ([_][]const u8{ "r1 a 0 1\n", ".temp 27\n", ".options reltol=1e-4\n", ".nosuch\n" }) |text|
+        try std.testing.expectError(error.UnsupportedDirectiveMutation, netlist.parseAnalyses(a, text, Lookup{}));
+}
+
+test "a large flat deck parses in one pass" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "chain\n");
+    const n = 20_000;
+    for (0..n) |i| try src.print(a, "r{d} n{d} n{d} 1k\n", .{ i, i, i + 1 });
+    const nl = try parse(a, src.items);
+    try std.testing.expectEqual(@as(u32, n), nl.deviceCount());
+    try std.testing.expectEqual(@as(usize, n), nl.bucket('r').len);
+    try std.testing.expectEqual(@as(u32, n + 2), nl.graph.vertexCount());
+}
+
+fn parseAll(gpa: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    _ = try parse(arena.allocator(),
+        \\allocation failures
+        \\.param base=2 k={base*3}
+        \\.subckt cell a b w0=1u
+        \\.if (w0 > 0)
+        \\r1 a b {k*w0/1u}
+        \\.endif
+        \\m1 a b 0 0 nm w=w0 l=1u
+        \\.model nm nmos level=1 vto='0.5+w0/1u'
+        \\.ends
+        \\x1 in out cell
+        \\x2 in out cell w0=2u
+        \\v1 in 0 dc 1 ac 1
+        \\b1 out 0 v={v(in)*2}
+        \\e1 o2 0 poly(1) in 0 0 1 0.5
+        \\.tran 1n 10n
+        \\.step param base 1 3 1
+        \\.ic v(in)=0.5
+        \\.end
+    );
+}
+
+test "every allocation failure surfaces as OutOfMemory" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseAll, .{});
+}
