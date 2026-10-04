@@ -533,7 +533,7 @@ pub fn build(b: *std.Build) void {
     run_fitness.has_side_effects = true; // it reads the tree, which the cache does not track
     run_fitness.addPassthruArgs();
     run_fitness.step.dependOn(&t.run(M.make(b.path("tests/fitness.zig"), &.{}), &.{}, false).step);
-    b.step("test-fitness", "Check file headers, root imports and catch-all arms against tests/FITNESS.tsv").dependOn(&run_fitness.step);
+    b.step("test-fitness", "Check file headers, test lists, root imports and catch-all arms against tests/FITNESS.tsv").dependOn(&run_fitness.step);
     test_step.dependOn(&run_fitness.step);
 
     const run_harness_tests = t.run(MH.make(b.path("tests/test_correctness.zig"), fixture_imports), &.{}, false);
