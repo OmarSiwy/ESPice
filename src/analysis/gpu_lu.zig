@@ -75,8 +75,10 @@ pub const GpuLu = struct {
     st: struct { calls: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0 } = .{},
 
     /// Loads the three kernels and allocates the per-iteration buffers for an
-    /// n-unknown, nnz-entry pattern. Fails when this build has no kernels or
-    /// the driver refuses. Caller owns the result; free with `deinit`.
+    /// n-unknown, nnz-entry pattern. Fails with `error.NoGpuArtifacts` in a
+    /// build without kernel images, or with the driver's error. Every solver
+    /// it later serves must be n by n with nnz entries. Caller owns the
+    /// result; free with `deinit`.
     pub fn init(gpa: std.mem.Allocator, n: u32, nnz: u32) !*Self {
         if (comptime backend == null) return error.NoGpuArtifacts;
         const be = backend.?;
@@ -133,7 +135,8 @@ pub const GpuLu = struct {
     }
 
     /// Prints the `ESPICE_GPU_STATS`/check/bench summary, then frees every
-    /// device and pinned buffer and `self`.
+    /// device and pinned buffer and `self`. Clear `Circuit.lu_hook` first:
+    /// the hook's `ctx` is `self`.
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         if (envOn("ESPICE_GPU_STATS") or self.check or self.bench != null) std.debug.print(
@@ -169,7 +172,8 @@ pub const GpuLu = struct {
     /// factors it does not hold); false when it tried and the host's exact
     /// factor and solve must run: a device pivot failure, which clears
     /// `slv.factored`, so the host goes straight to the full factor its own
-    /// refactor would have fallen back to.
+    /// refactor would have fallen back to. A driver error warns once and
+    /// returns null for the rest of the query.
     pub fn solve(ctx: *anyopaque, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool {
         const self: *Self = @ptrCast(@alignCast(ctx));
         if (self.poisoned) return null;
@@ -259,7 +263,8 @@ pub const GpuLu = struct {
         var flops: u64 = 0;
         for (lu.ui.items) |i| flops += lu.lp[i + 1] - lu.lp[i];
         self.flops = flops;
-        if (flops > max_flops or (!self.forced and flops < min_per_col * @as(u64, lu.n))) return;
+        // The buffers and every copy are sized by `self.n`.
+        if (lu.n != self.n or !admits(flops, lu.n, self.forced)) return;
         // E2 calibration knobs: ESPICE_GPU_LU_TAIL=m fixes the solves' tail
         // at m steps, ESPICE_GPU_LU_NOGATHER keeps every column in stored
         // order.
@@ -280,6 +285,13 @@ pub const GpuLu = struct {
         if (self.bench != null) self.idx = try self.gpa.dupe(u32, tb.idx);
         self.declined = false;
         self.st.epochs += 1;
+    }
+
+    /// Whether an epoch of `flops` over `n` columns goes to the device. An
+    /// empty matrix never does: its refactor grid would have no blocks.
+    fn admits(flops: u64, n: u32, forced: bool) bool {
+        if (n == 0 or flops > max_flops) return false;
+        return forced or flops >= min_per_col * @as(u64, n);
     }
 
     /// The epoch's tables cost 4 bytes per flop on both sides of the bus.
@@ -367,10 +379,16 @@ const Bench = struct {
     fn init(gpa: std.mem.Allocator, k: *Raw) !*Bench {
         if (!k.hasEvents()) return error.Unsupported;
         const b = try gpa.create(Bench);
+        errdefer gpa.destroy(b);
         b.* = .{ .ev = undefined, .threads = 8 };
         if (std.c.getenv("ESPICE_GPU_LU_THREADS")) |v| b.threads = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8;
         if (std.c.getenv("ESPICE_GPU_LU_BENCH")) |v| b.limit = std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0;
-        for (&b.ev) |*e| e.* = try k.createEvent(true);
+        var made: usize = 0;
+        errdefer for (b.ev[0..made]) |*e| e.deinit();
+        for (&b.ev) |*e| {
+            e.* = try k.createEvent(true);
+            made += 1;
+        }
         return b;
     }
 
@@ -452,3 +470,15 @@ const Bench = struct {
         gpa.destroy(b);
     }
 };
+
+test "GpuLu.admits: the flop bars and the empty matrix" {
+    const admits = GpuLu.admits;
+    const n: u32 = 1000;
+    try std.testing.expect(admits(GpuLu.min_per_col * n, n, false));
+    try std.testing.expect(!admits(GpuLu.min_per_col * n - 1, n, false));
+    // `ESPICE_GPU_LU=1` lifts the per-column bar, never the size cap.
+    try std.testing.expect(admits(0, n, true));
+    try std.testing.expect(admits(GpuLu.max_flops, n, false));
+    try std.testing.expect(!admits(GpuLu.max_flops + 1, n, true));
+    try std.testing.expect(!admits(0, 0, true));
+}
