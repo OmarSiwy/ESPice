@@ -16,10 +16,13 @@ pub const Ws = struct {
     buf: []u32,
     used: usize = 0,
 
+    /// Borrows `buf`, which must outlive every slice handed out.
     pub fn init(buf: []u32) Ws {
         return .{ .buf = buf };
     }
 
+    /// The next `m` words, uninitialized; `OutOfWorkspace` when they do
+    /// not fit. Valid until a `release` to a mark at or before them.
     pub fn alloc(w: *Ws, m: usize) Error![]u32 {
         if (w.used + m > w.buf.len) return error.OutOfWorkspace;
         const s = w.buf[w.used .. w.used + m];
@@ -27,16 +30,19 @@ pub const Ws = struct {
         return s;
     }
 
+    /// `alloc`, every word set to `fill`.
     pub fn allocSet(w: *Ws, m: usize, fill: u32) Error![]u32 {
         const s = try w.alloc(m);
         @memset(s, fill);
         return s;
     }
 
+    /// The current top, for a later `release`.
     pub fn mark(w: *const Ws) usize {
         return w.used;
     }
 
+    /// Frees everything allocated since `mark` returned `m`.
     pub fn release(w: *Ws, m: usize) void {
         w.used = m;
     }
@@ -532,4 +538,41 @@ fn sameAdj(
         }
     }
     return true;
+}
+
+test "order and amd return permutations and restore the workspace on random patterns" {
+    var prng = std.Random.DefaultPrng.init(0x0de7);
+    const r = prng.random();
+    var col_ptr: [65]u32 = undefined;
+    var row_idx: [64 * 64]u32 = undefined;
+    var q: [64]u32 = undefined;
+    var buf: [wsSize(64, 64 * 64)]u32 = undefined;
+    for (0..300) |t| {
+        const n: u32 = if (t < 64) @intCast(t + 1) else r.intRangeAtMost(u32, 1, 64);
+        // Full diagonal, as `order` requires. Circuit-like sparsity, or
+        // dense enough that `wsSize`'s 4 nnz covers any fill; random graphs
+        // of average degree near 10 may outgrow the slab (the `amd`
+        // ponytail note).
+        const density = if (t % 4 == 0) 0.3 + 0.6 * r.float(f64) else 0.05 * r.float(f64);
+        var nnz: u32 = 0;
+        col_ptr[0] = 0;
+        for (0..n) |j| {
+            for (0..n) |i| {
+                if (i != j and r.float(f64) >= density) continue;
+                row_idx[nnz] = @intCast(i);
+                nnz += 1;
+            }
+            col_ptr[j + 1] = nnz;
+        }
+        inline for (.{ order, amd }) |f| {
+            var ws = Ws.init(buf[0..wsSize(n, nnz)]);
+            try f(n, col_ptr[0 .. n + 1], row_idx[0..nnz], q[0..n], &ws);
+            try std.testing.expectEqual(@as(usize, 0), ws.used);
+            var seen: [64]bool = @splat(false);
+            for (q[0..n]) |c| {
+                try std.testing.expect(c < n and !seen[c]);
+                seen[c] = true;
+            }
+        }
+    }
 }

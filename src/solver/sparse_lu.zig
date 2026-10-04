@@ -188,6 +188,8 @@ pub const SparseLu = struct {
         return self;
     }
 
+    /// Frees every buffer `init` and `factor` allocated; `q` stays the
+    /// caller's.
     pub fn deinit(self: *Self, gpa: Allocator) void {
         self.dropScratch(gpa);
         inline for (.{ self.pinv, self.lp, self.up, self.prow, self.prev }) |s|
@@ -215,6 +217,9 @@ pub const SparseLu = struct {
     /// sparse triangular solve, threshold pivot (diagonal preferred),
     /// store L and U. Rebuilds the pattern, pivot sequence and replay
     /// tapes. On error the factorization is unusable (`factored` false).
+    /// Invalidates slices of L and U, which may reallocate, and bumps
+    /// `pattern_epoch` on success: a LaneLu or device table built on the
+    /// old factor must be rebuilt.
     ///
     /// A re-pivot (a factor after a successful one, which the caller runs
     /// when `refactor` fails) that fills past `fill_cap * base_lu` restarts
@@ -788,9 +793,11 @@ pub const SparseLu = struct {
         return true;
     }
 
+    /// Private kernels for src/solver/tests.zig; empty outside test builds.
     pub const test_access = if (@import("builtin").is_test) .{
         .scatterAxpy = scatterAxpy,
         .refactorColumns = refactorColumns,
+        .TestSystem = TestSystem,
     } else {};
 
     /// dst[idx[p]] -= src[p] * f for p in [p0, p1): the scatter-axpy of
@@ -816,7 +823,9 @@ pub const SparseLu = struct {
     /// new values, no allocation. Fails when a pivot is zero or
     /// non-finite, falls below `growth_limit` times its column max, or a
     /// fabricated pivot's row or column turned nonzero; the caller then
-    /// runs a full `factor`. Requires a successful `factor` first.
+    /// runs a full `factor`, and the old factors are unusable until it
+    /// does. Asserts that the last `factor` succeeded.
+    /// Allocates nothing and leaves `w` all-zero on every path.
     pub fn refactor(
         self: *Self,
         col_ptr: []const u32,
@@ -880,6 +889,14 @@ pub const SparseLu = struct {
                     w[li[p]] = 0;
                 }
                 w[k] = 0;
+                // The flops above also hit rows below k, which a void
+                // column keeps no L entry for. Finite factors add exact
+                // zeros there, but a NaN multiplier leaves 0 * NaN behind,
+                // and a replay that fails before those rows' own steps
+                // would hand it to the next call. Void columns are rare.
+                for (ui[uk0..uk1]) |i| for (li[lp[i]..lp[i + 1]]) |r| {
+                    w[r] = 0;
+                };
                 continue;
             }
             const d = w[k];
@@ -1023,7 +1040,8 @@ pub const SparseLu = struct {
         while (i < dst.len) : (i += 1) dst[i] = src[i];
     }
 
-    /// x = A^-1 b. `b` and `x` may alias.
+    /// x = A^-1 b. `b` and `x` may alias. Requires the last `factor` or
+    /// `refactor` to have succeeded; garbage otherwise. O(nnz(L+U)).
     pub fn solve(self: *Self, b: []const f64, x: []f64) void {
         const li = self.li.items;
         const lx = self.lx.items;
@@ -1066,7 +1084,8 @@ pub const SparseLu = struct {
     }
 
     /// x = A^-T b, for adjoint analyses. A = P^-1 L U Q^-1, so
-    /// A^-T = P^T L^-T U^-T Q^T. `b` and `x` may alias.
+    /// A^-T = P^T L^-T U^-T Q^T. `b` and `x` may alias. Same precondition
+    /// as `solve`.
     pub fn solveT(self: *Self, b: []const f64, x: []f64) void {
         const li = self.li.items;
         const lx = self.lx.items;
@@ -1091,3 +1110,204 @@ pub const SparseLu = struct {
         for (0..self.n) |r| x[r] = self.y[self.pinv[r]];
     }
 };
+
+const testing = std.testing;
+
+/// Test-only random system: an n x n CSC pattern (n <= 64) with a full
+/// structural diagonal, as the pattern merge guarantees, and off-diagonals
+/// at `density`. Values lie in [-1, 1] with the diagonal pushed past its
+/// column's off-diagonal sum, except that a column with another entry gets
+/// a zero diagonal (an MNA branch row) 15% of the time. No unknown is void.
+const TestSystem = struct {
+    col_ptr: []u32,
+    row_idx: []u32,
+    vals: []f64,
+
+    /// Caller owns the result; free with `deinit`. Asserts n <= 64.
+    pub fn init(gpa: Allocator, r: std.Random, n: u32, density: f64) !TestSystem {
+        std.debug.assert(n <= 64);
+        var mask: [64]u64 = @splat(0);
+        var nnz: u32 = 0;
+        for (0..n) |j| {
+            mask[j] = @as(u64, 1) << @intCast(j);
+            for (0..n) |i| {
+                if (i != j and r.float(f64) < density) mask[j] |= @as(u64, 1) << @intCast(i);
+            }
+            nnz += @popCount(mask[j]);
+        }
+        const col_ptr = try gpa.alloc(u32, n + 1);
+        errdefer gpa.free(col_ptr);
+        const row_idx = try gpa.alloc(u32, nnz);
+        errdefer gpa.free(row_idx);
+        const vals = try gpa.alloc(f64, nnz);
+        var p: u32 = 0;
+        col_ptr[0] = 0;
+        for (0..n) |j| {
+            var sum: f64 = 0;
+            var diag: u32 = 0;
+            for (0..n) |i| {
+                if ((mask[j] >> @intCast(i)) & 1 == 0) continue;
+                row_idx[p] = @intCast(i);
+                vals[p] = 2 * r.float(f64) - 1;
+                if (i == j) diag = p else sum += @abs(vals[p]);
+                p += 1;
+            }
+            const d = vals[diag];
+            vals[diag] = if (sum > 0 and r.float(f64) < 0.15) 0 else d + std.math.copysign(sum, d);
+            col_ptr[j + 1] = p;
+        }
+        return .{ .col_ptr = col_ptr, .row_idx = row_idx, .vals = vals };
+    }
+
+    /// Frees the three arrays.
+    pub fn deinit(self: TestSystem, gpa: Allocator) void {
+        gpa.free(self.col_ptr);
+        gpa.free(self.row_idx);
+        gpa.free(self.vals);
+    }
+
+    /// LAPACK's scaled residual ||A x - b|| / (||A|| ||x|| n eps), max norms,
+    /// with n * max|a_ij| bounding ||A||; `transpose` checks A^T x = b.
+    pub fn residual(self: TestSystem, vals: []const f64, x: []const f64, b: []const f64, comptime transpose: bool) f64 {
+        const n = self.col_ptr.len - 1;
+        var r: [64]f64 = undefined;
+        @memcpy(r[0..n], b);
+        var amax: f64 = 0;
+        for (0..n) |j| for (self.col_ptr[j]..self.col_ptr[j + 1]) |p| {
+            const i = self.row_idx[p];
+            if (transpose) r[j] -= vals[p] * x[i] else r[i] -= vals[p] * x[j];
+            amax = @max(amax, @abs(vals[p]));
+        };
+        var rmax: f64 = 0;
+        var xmax: f64 = 0;
+        for (r[0..n], x) |ri, xi| {
+            rmax = @max(rmax, @abs(ri));
+            xmax = @max(xmax, @abs(xi));
+        }
+        const nf: f64 = @floatFromInt(n);
+        return rmax / (nf * amax * xmax * nf * std.math.floatEps(f64));
+    }
+};
+
+fn expectAllZero(w: []const f64) !void {
+    for (w) |v| try testing.expect(v == 0);
+}
+
+fn expectBitwise(a: []const f64, b: []const f64) !void {
+    try testing.expectEqualSlices(u64, @ptrCast(a), @ptrCast(b));
+}
+
+test "factor, refactor and both solves leave a small scaled residual on random systems" {
+    // A wrong factor scores ~1/(n eps), 1e13 and up; threshold pivoting at
+    // 1e-3 can grow entries, so the bar is far above LAPACK's 30.
+    const thresh = 1e6;
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5ba75e);
+    const r = prng.random();
+    const trials = 256;
+    var solved: u32 = 0;
+    for (0..trials) |t| {
+        // Every order 1..64 once, then random ones; dense enough past 32
+        // that L columns reach `panel_min_rows` and panels open.
+        const n: u32 = if (t < 64) @intCast(t + 1) else r.intRangeAtMost(u32, 1, 64);
+        const density = r.float(f64) * @as(f64, if (n > 32) 0.6 else 0.3);
+        const sys = try TestSystem.init(gpa, r, n, density);
+        defer sys.deinit(gpa);
+        const q = try gpa.alloc(u32, n);
+        defer gpa.free(q);
+        for (q, 0..) |*c, i| c.* = @intCast(i);
+        r.shuffle(u32, q);
+        var lu = try SparseLu.init(gpa, n, sys.col_ptr, sys.row_idx, q);
+        defer lu.deinit(gpa);
+        lu.factor(gpa, sys.col_ptr, sys.row_idx, sys.vals, 1e-3) catch |err| {
+            try testing.expectEqual(error.SingularMatrix, err);
+            try expectAllZero(lu.w);
+            continue;
+        };
+        try expectAllZero(lu.w);
+        solved += 1;
+
+        const b = try gpa.alloc(f64, 3 * @as(usize, n));
+        defer gpa.free(b);
+        const rhs = b[0..n];
+        const x = b[n .. 2 * n];
+        const x2 = b[2 * n ..];
+        for (rhs) |*v| v.* = 2 * r.float(f64) - 1;
+        lu.solve(rhs, x);
+        try testing.expect(sys.residual(sys.vals, x, rhs, false) <= thresh);
+        lu.solveT(rhs, x);
+        try testing.expect(sys.residual(sys.vals, x, rhs, true) <= thresh);
+
+        // The full factor (panels included) is bitwise a column replay of
+        // the same values.
+        const f_l = try gpa.dupe(f64, lu.lx.items);
+        defer gpa.free(f_l);
+        const f_u = try gpa.dupe(f64, lu.ux.items);
+        defer gpa.free(f_u);
+        const f_d = try gpa.dupe(f64, lu.udiag);
+        defer gpa.free(f_d);
+        try lu.refactorColumns(sys.col_ptr, sys.vals, 1e-12);
+        try expectBitwise(f_l, lu.lx.items);
+        try expectBitwise(f_u, lu.ux.items);
+        try expectBitwise(f_d, lu.udiag);
+
+        // New values on the frozen pivots: `refactor` (the tape on small
+        // factors) is bitwise the column replay, failures included.
+        const pert = try gpa.alloc(f64, sys.vals.len);
+        defer gpa.free(pert);
+        for (pert, sys.vals) |*o, v| o.* = v * (0.9 + 0.2 * r.float(f64));
+        const ok = if (lu.refactor(sys.col_ptr, pert, 1e-12)) |_| true else |_| false;
+        try expectAllZero(lu.w);
+        if (ok) lu.solve(rhs, x);
+        const ok2 = if (lu.refactorColumns(sys.col_ptr, pert, 1e-12)) |_| true else |_| false;
+        try expectAllZero(lu.w);
+        try testing.expectEqual(ok, ok2);
+        if (!ok) continue;
+        lu.solve(rhs, x2);
+        try expectBitwise(x, x2);
+        try testing.expect(sys.residual(pert, x, rhs, false) <= thresh);
+        lu.solveT(rhs, x);
+        try testing.expect(sys.residual(pert, x, rhs, true) <= thresh);
+    }
+    try testing.expect(solved >= trials / 2);
+}
+
+test "a failed replay after a void column with a NaN multiplier leaves w zero" {
+    // Unknown 1 is void (zero-valued column and row), and its U entry
+    // reaches L[:,0], whose row 3 lies below it. Step 2 then fails, so
+    // nothing after the void column would clear row 3.
+    const gpa = testing.allocator;
+    const col_ptr = [_]u32{ 0, 2, 4, 5, 6 };
+    const row_idx = [_]u32{ 0, 3, 0, 1, 2, 3 };
+    const vals = [_]f64{ 1, 0.5, 0, 0, 1, 1 };
+    const q = [_]u32{ 0, 1, 2, 3 };
+    var lu = try SparseLu.init(gpa, 4, &col_ptr, &row_idx, &q);
+    defer lu.deinit(gpa);
+    try lu.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
+    try testing.expect(lu.void_col[1]);
+    const bad = [_]f64{ 1, std.math.nan(f64), 0, 0, 0, 1 };
+    try testing.expectError(error.SingularMatrix, lu.refactorColumns(&col_ptr, &bad, 1e-12));
+    try expectAllZero(lu.w);
+    try testing.expectError(error.SingularMatrix, lu.refactor(&col_ptr, &bad, 1e-12));
+    try expectAllZero(lu.w);
+}
+
+test "the empty and 1x1 systems factor, replay and solve" {
+    const gpa = testing.allocator;
+    var empty = try SparseLu.init(gpa, 0, &.{0}, &.{}, &.{});
+    defer empty.deinit(gpa);
+    try empty.factor(gpa, &.{0}, &.{}, &.{}, 1e-3);
+    try empty.refactor(&.{0}, &.{}, 1e-12);
+    empty.solve(&.{}, &.{});
+    empty.solveT(&.{}, &.{});
+
+    var one = try SparseLu.init(gpa, 1, &.{ 0, 1 }, &.{0}, &.{0});
+    defer one.deinit(gpa);
+    try one.factor(gpa, &.{ 0, 1 }, &.{0}, &.{4}, 1e-3);
+    var x: [1]f64 = undefined;
+    one.solve(&.{2}, &x);
+    try testing.expectEqual(@as(f64, 0.5), x[0]);
+    try testing.expectError(error.SingularMatrix, one.refactor(&.{ 0, 1 }, &.{std.math.inf(f64)}, 1e-12));
+    try testing.expectError(error.SingularMatrix, one.factor(gpa, &.{ 0, 1 }, &.{0}, &.{std.math.nan(f64)}, 1e-3));
+    try expectAllZero(one.w);
+}

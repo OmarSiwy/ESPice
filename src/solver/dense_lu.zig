@@ -17,8 +17,9 @@ const V = @Vector(W, f64);
 /// Pivot magnitudes below eps^2 (4.9e-32) count as zero.
 const singular_tol: f64 = std.math.floatEps(f64) * std.math.floatEps(f64);
 
-/// x = A^-1 b in one elimination pass. Destroys `a`; `b` and `x`
-/// must not alias.
+/// x = A^-1 b in one elimination pass, O(n^3). Destroys `a`; `b` and `x`
+/// must not alias. `Singular` when a pivot falls below eps^2 in absolute
+/// terms (a NaN pivot passes); `x` is then partial.
 pub fn factorizeSolve(n: usize, a: []f64, b: []const f64, x: []f64) Error!void {
     return factorizeSolveImpl(n, a, b, x, false);
 }
@@ -31,7 +32,8 @@ pub fn factorizeSolveNeg(n: usize, a: []f64, b: []const f64, x: []f64) Error!voi
 
 /// PA = LU in place: unit-lower L below the diagonal, U on and above
 /// it. `piv[k]` is the row swapped with row k at step k (LAPACK
-/// convention). On error `a` and `piv` are partial.
+/// convention). O(n^3). `Singular` as in `factorizeSolve`; on error `a`
+/// and `piv` are partial.
 pub fn factorize(n: usize, a: []f64, piv: []u32) Error!void {
     if (n >= blocked_min) return eliminateBlocked(n, a, piv, &.{}, .factor);
     for (0..n) |k| {
@@ -71,8 +73,8 @@ pub fn solveFactored(n: usize, lu: []const f64, piv: []const u32, b: []const f64
     backSubstitute(n, lu, x);
 }
 
-/// x = A^-f64 b from `factorize` output: A^f64 = U^f64 L^f64 P, so forward
-/// through U^f64, back through L^f64, then undo the swaps. `b` and `x`
+/// x = A^-T b from `factorize` output: A^T = U^T L^T P, so forward
+/// through U^T, back through L^T, then undo the swaps. `b` and `x`
 /// may alias.
 pub fn solveFactoredT(n: usize, lu: []const f64, piv: []const u32, b: []const f64, x: []f64) void {
     if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
@@ -95,7 +97,8 @@ pub fn solveFactoredT(n: usize, lu: []const f64, piv: []const u32, b: []const f6
 }
 
 /// Writes the stacked-real admittance [G, -ωC; ωC, G] into `a`
-/// (row-major, stride nn = 2n) from n x n row-major G and C.
+/// (row-major, stride nn = 2n) from n x n row-major G and C. Every entry
+/// of the 2n x 2n block is written.
 pub fn buildComplexAdmittance(
     n: usize,
     nn: usize,
@@ -350,4 +353,71 @@ fn fmsSolveSimd(lu: []const f64, x: []f64, n: usize, k: usize, xk: f64) void {
         p.* = cur - xkv * lvu;
     }
     while (ii < n) : (ii += 1) x[ii] -= xk * lu[ii * n + k];
+}
+
+const testing = std.testing;
+
+/// LAPACK's scaled residual ||A x - b|| / (||A|| ||x|| n eps) in max norms,
+/// with n max|a_ij| bounding ||A||; `transpose` checks A^T x = b.
+fn scaledResidual(n: usize, a: []const f64, x: []const f64, b: []const f64, transpose: bool) f64 {
+    var rmax: f64 = 0;
+    var amax: f64 = 0;
+    var xmax: f64 = 0;
+    for (0..n) |i| {
+        var ri = b[i];
+        for (0..n) |j| {
+            const aij = if (transpose) a[j * n + i] else a[i * n + j];
+            ri -= aij * x[j];
+            amax = @max(amax, @abs(aij));
+        }
+        rmax = @max(rmax, @abs(ri));
+        xmax = @max(xmax, @abs(x[i]));
+    }
+    const nf: f64 = @floatFromInt(n);
+    return rmax / (nf * amax * xmax * nf * std.math.floatEps(f64));
+}
+
+test "every entry point solves random systems, blocked and unblocked, and agrees on singular ones" {
+    // A wrong solve scores ~1/(n eps), 1e13 and up.
+    const thresh = 1e4;
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xde45e);
+    const r = prng.random();
+    // Past blocked_min, with every panel tail length.
+    for (0..2 * blocked_min + block + 1) |n| {
+        const buf = try gpa.alloc(f64, 2 * n * n + 3 * n);
+        defer gpa.free(buf);
+        const a0 = buf[0 .. n * n];
+        const a = buf[n * n .. 2 * n * n];
+        const b = buf[2 * n * n ..][0..n];
+        const x = buf[2 * n * n + n ..][0..n];
+        const x2 = buf[2 * n * n + 2 * n ..][0..n];
+        const piv = try gpa.alloc(u32, n);
+        defer gpa.free(piv);
+        for (a0) |*v| v.* = 2 * r.float(f64) - 1;
+        for (b) |*v| v.* = 2 * r.float(f64) - 1;
+
+        @memcpy(a, a0);
+        try factorize(n, a, piv);
+        solveFactored(n, a, piv, b, x);
+        @memcpy(x2, b);
+        solveFactored(n, a, piv, x2, x2);
+        try testing.expectEqualSlices(u64, @ptrCast(x), @ptrCast(x2));
+        if (n > 0) try testing.expect(scaledResidual(n, a0, x, b, false) <= thresh);
+        solveFactoredT(n, a, piv, b, x);
+        if (n > 0) try testing.expect(scaledResidual(n, a0, x, b, true) <= thresh);
+
+        @memcpy(a, a0);
+        try factorizeSolve(n, a, b, x);
+        if (n > 0) try testing.expect(scaledResidual(n, a0, x, b, false) <= thresh);
+        @memcpy(a, a0);
+        try factorizeSolveNeg(n, a, b, x2);
+        for (x, x2) |p, m| try testing.expect(m == -p);
+
+        if (n == 0) continue;
+        @memset(a, 0);
+        try testing.expectError(error.Singular, factorize(n, a, piv));
+        @memset(a, 0);
+        try testing.expectError(error.Singular, factorizeSolve(n, a, b, x));
+    }
 }

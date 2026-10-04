@@ -16,20 +16,24 @@
 
 const std = @import("std");
 
-/// Lanes per device refactor block, and the widest column it accumulates
-/// in shared memory (8 bytes a slot; wider columns work in `val`). E2 on
-/// logic_bsim4_10k and chain_bsim4_10k: 128 or 256 lanes, or a 2048-slot
-/// scratch (fewer resident blocks), were 1.0-1.8x slower
+/// Lanes per device refactor block. E2 on logic_bsim4_10k and
+/// chain_bsim4_10k: 128 or 256 lanes were 1.0-1.8x slower
 /// (docs/solvers/gpu-lu.md).
 pub const refactor_block = 64;
+/// The widest column a refactor block accumulates in shared memory (8
+/// bytes a slot); wider columns work in `val`. A 2048-slot scratch (fewer
+/// resident blocks) measured slower in the same E2 runs.
 pub const col_max = 256;
 /// Lanes of the one solve block on the device.
 pub const solve_block = 256;
 /// Longest solve tail: its y lives in the block's shared memory
 /// (`SolveShared`, 40 KB of the 48 KB a block may declare).
 pub const tail_max = 5120;
-/// `Tab.flags` bits.
+/// `Tab.flags` bit: the step has a fabricated unit pivot
+/// (`SparseLu.void_col`).
 pub const void_bit: u32 = 1;
+/// `Tab.flags` bit: the pivot passed only the row-scaled test
+/// (`SparseLu.scaled_pivot`), so the growth monitor skips it.
 pub const scaled_bit: u32 = 2;
 /// u32 words ahead of the done stamps in the sync buffer: the refactor
 /// ticket and the fail word, `n - k` for the lowest failing pivot step k,
@@ -502,9 +506,11 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
 
 /// The host instance: plain pointers, a block of one lane.
 pub const HostSy = struct {
+    /// A plain many-item pointer: host memory has one address space.
     pub fn P(comptime T: type) type {
         return [*]T;
     }
+    /// A no-op: a host block is one lane.
     pub inline fn barrier() void {}
     /// Spins briefly, then yields: on a loaded machine the thread holding
     /// the awaited column may be the one descheduled (chain_psp103_10k at
@@ -512,9 +518,11 @@ pub const HostSy = struct {
     pub inline fn pause(spins: u32) void {
         if (spins < 256) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
     }
+    /// Reads a done stamp; pairs with `release`.
     pub inline fn acquire(p: *const u32) u32 {
         return @atomicLoad(u32, p, .acquire);
     }
+    /// Publishes a done stamp after the column's stores.
     pub inline fn release(p: *u32, v: u32) void {
         @atomicStore(u32, p, v, .release);
     }
@@ -532,10 +540,13 @@ pub const HostBufs = struct {
     sync: []u32,
 };
 
-/// Refactors on `threads` host threads and solves on this one with the
-/// kernel bodies: bitwise `refactorColumns` plus `solve` (dx = -A^-1 rhs).
-/// Returns the lowest failing pivot step, or null. One thread is the
-/// scalar oracle: it takes every ticket in order, so no wait ever spins.
+/// Refactors on `threads` host threads (at most 64) and solves on this one
+/// with the kernel bodies: bitwise `refactorColumns` plus `solve` (dx =
+/// -A^-1 rhs). Returns the lowest failing pivot step, or null; the solves
+/// then leave `y` and `dx` untouched. One thread is the scalar oracle: it
+/// takes every ticket in order, so no wait ever spins. A thread that fails
+/// to spawn leaves its tickets to the others. Fails only when the solve
+/// scratch (40 KB) cannot be allocated.
 pub fn runHost(t: Tab, b: HostBufs, stamp: u32, threads: u32) !?u32 {
     return runHostCap(col_max, t, b, stamp, threads);
 }
@@ -554,9 +565,14 @@ pub fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u
     };
     var pool: [63]std.Thread = undefined;
     const extra = @min(@max(threads, 1) - 1, pool.len);
-    for (pool[0..extra]) |*th| th.* = try std.Thread.spawn(.{}, Worker.work, .{ t, b, stamp });
+    // Returning on a failed spawn would free `b` under the running threads.
+    var spawned: usize = 0;
+    for (pool[0..extra]) |*th| {
+        th.* = std.Thread.spawn(.{}, Worker.work, .{ t, b, stamp }) catch break;
+        spawned += 1;
+    }
     Worker.work(t, b, stamp);
-    for (pool[0..extra]) |th| th.join();
+    for (pool[0..spawned]) |th| th.join();
     const ssh = try std.heap.page_allocator.create(H.SolveShared);
     defer std.heap.page_allocator.destroy(ssh);
     H.lsolve(t, x, b.val.ptr, @constCast(b.rhs.ptr), b.y.ptr, b.sync.ptr, ssh, 0, 1);
@@ -595,6 +611,7 @@ const HostFactor = struct {
         return .{ .epoch = lu.pattern_epoch, .tb = tb, .val = val, .sync = sync };
     }
 
+    /// Frees the tables and buffers; `self` is undefined afterwards.
     pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
         self.tb.deinit(gpa);
         gpa.free(self.val);
@@ -636,6 +653,7 @@ pub const HostRefactor = struct {
         return .{ .f = try .init(gpa, lu, col_ptr, growth) };
     }
 
+    /// Frees the tables and buffers; `lu` stays the caller's.
     pub fn deinit(self: *HostRefactor, gpa: std.mem.Allocator) void {
         self.f.deinit(gpa);
     }
@@ -643,7 +661,8 @@ pub const HostRefactor = struct {
     /// `lu.refactor(col_ptr, vals, growth)` on the caller plus
     /// `threads - 1` tasks of `io`, then the factors copied into `lu`.
     /// Fails exactly when `refactor` would, and `lu`'s factors are then
-    /// unusable, as after a failed `refactor`. Requires the epoch to match.
+    /// unusable, as after a failed `refactor`. Asserts that `lu` is factored
+    /// on the epoch the tables were built from.
     pub fn run(self: *HostRefactor, lu: *SparseLu, vals: []const f64, io: std.Io, threads: u32) error{SingularMatrix}!void {
         std.debug.assert(lu.factored and lu.pattern_epoch == self.f.epoch);
         for (lu.void_slots.items) |p| {
@@ -688,6 +707,7 @@ pub const Tables = struct {
     /// Every u32 table, at the offsets in `tab`. Owned; free with `deinit`.
     idx: []u32,
 
+    /// Frees `idx`; `self` is undefined afterwards.
     pub fn deinit(self: *Tables, gpa: std.mem.Allocator) void {
         gpa.free(self.idx);
         self.* = undefined;
@@ -695,8 +715,11 @@ pub const Tables = struct {
 };
 
 /// Builds the tables for `lu`'s current factor. O(F + nnz(L+U)) time; the
-/// narrow columns' `dmap` is 4 bytes per flop. Requires a successful
-/// `factor`.
+/// narrow columns' `dmap` is 4 bytes per flop. Asserts a successful
+/// `factor` and a tail of at most `tail_max` steps. `OutOfMemory` also
+/// means the tables passed u32 offsets. Caller owns the result; free with
+/// `Tables.deinit`. A later `factor` of `lu` (new `pattern_epoch`) makes
+/// them stale.
 pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !Tables {
     const lanes = refactor_block;
     std.debug.assert(lu.factored);

@@ -10,6 +10,7 @@ const order_mod = @import("order.zig");
 const bbd_mod = @import("bbd.zig");
 const lu_kernels = @import("lu_kernels.zig");
 const root = @import("core").numerics;
+const z = @import("stdpp");
 
 const Allocator = std.mem.Allocator;
 
@@ -63,7 +64,10 @@ pub const Solver = struct {
     host_stale: bool = false,
 
     /// Chooses the engine from the pattern alone: tridiagonal, then BBD
-    /// when `bbd` describes a profitable split, else sparse LU.
+    /// when `bbd` describes a profitable split, else sparse LU (whose AMD
+    /// ordering fails with `OutOfWorkspace` on pathological fill). Borrows
+    /// `col_ptr` and `row_idx`, which must outlive the solver; free with
+    /// `deinit`.
     pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !Self {
         var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .lu = null, .tri = null, .gpa = gpa };
         errdefer self.deinit();
@@ -100,6 +104,7 @@ pub const Solver = struct {
         return eng;
     }
 
+    /// Frees every engine and copy; the borrowed pattern stays the caller's.
     pub fn deinit(self: *Self) void {
         if (self.par) |*p| p.deinit(self.gpa);
         if (self.lu) |*lu| lu.deinit(self.gpa);
@@ -115,8 +120,11 @@ pub const Solver = struct {
     /// circuits between timestep changes. Otherwise refactors on the
     /// existing pivot sequence and falls back to a full factor if the
     /// replay fails. The solver keeps its own copy of `vals` unless
-    /// `dropBypass` ran. `execution` schedules the BBD block factors; `.{}`
-    /// runs them serially.
+    /// `dropBypass` ran. `execution` schedules the BBD block factors and the
+    /// multicore refactor; `.{}` runs serially. A structured engine that
+    /// meets a singular pivot is freed for good and the call retries on the
+    /// general LU. `SingularMatrix` leaves no usable factorization: solve
+    /// only after a successful `factor`. Asserts `vals.len >= nnz`.
     pub fn factor(self: *Self, vals: []const f64, execution: root.Execution) !void {
         const nnz = self.vcopy.len;
         if (nnz != 0 and self.factored and !self.host_stale and simdEql(self.vcopy, vals[0..nnz])) return;
@@ -218,19 +226,21 @@ pub const Solver = struct {
         self.lu.?.solve(x[0..self.n], x[0..self.n]);
     }
 
-    /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias.
+    /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias. Requires a
+    /// successful `factor`.
     pub fn solveNeg(self: *Self, rhs: []const f64, x: []f64) void {
         root.scale(x[0..self.n], -1, rhs[0..self.n]);
         self.solveInPlace(x);
     }
 
-    /// x = A^-1 rhs. `rhs` and `x` may alias.
+    /// x = A^-1 rhs. `rhs` and `x` may alias. Requires a successful `factor`.
     pub fn solve(self: *Self, rhs: []const f64, x: []f64) void {
         if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
         self.solveInPlace(x);
     }
 
-    /// x = A^-T rhs, for adjoint analyses. `rhs` and `x` may alias.
+    /// x = A^-T rhs, for adjoint analyses. `rhs` and `x` may alias. Requires
+    /// a successful `factor`.
     pub fn solveT(self: *Self, rhs: []const f64, x: []f64) void {
         if (rhs.ptr != x.ptr) @memcpy(x[0..self.n], rhs[0..self.n]);
         self.syncHost();
@@ -278,18 +288,98 @@ fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []cons
     return q;
 }
 
-/// Bitwise-meaningful float equality (-0 == +0, NaN != NaN), W lanes at a time.
+/// IEEE equality per element (-0 == +0, NaN != NaN) and equal lengths.
+/// stdpp's mismatch search: four vector blocks per branch.
 fn simdEql(a: []const f64, b: []const f64) bool {
-    const W = std.simd.suggestVectorLength(f64) orelse 1;
-    const V = @Vector(W, f64);
-    var i: usize = 0;
-    while (i + W <= a.len) : (i += W) {
-        const av: V = a[i..][0..W].*;
-        const bv: V = b[i..][0..W].*;
-        if (@reduce(.Or, av != bv)) return false;
+    return z.fromSlice(f64, a).eq(z.fromSlice(f64, b));
+}
+
+const testing = std.testing;
+
+test simdEql {
+    const builtin = @import("builtin");
+    // Other self-hosted backends run stdpp's scalar fallback.
+    if (builtin.zig_backend == .stage2_llvm or builtin.zig_backend == .stage2_x86_64)
+        comptime std.debug.assert(@TypeOf(z.fromSlice(f64, &.{})).lane_count != null);
+    const Ref = struct {
+        fn scalar(a: []const f64, b: []const f64) bool {
+            if (a.len != b.len) return false;
+            for (a, b) |x, y| if (x != y) return false;
+            return true;
+        }
+        fn pull(a: []const f64, b: []const f64) bool {
+            var src = z.fromSlice(f64, a);
+            return src.byRef().eq(z.fromSlice(f64, b));
+        }
+        fn check(a: []const f64, b: []const f64) !void {
+            const want = scalar(a, b);
+            try testing.expectEqual(want, simdEql(a, b));
+            try testing.expectEqual(want, pull(a, b));
+        }
+    };
+    var buf_a: [208]f64 = undefined;
+    var buf_b: [208]f64 = undefined;
+    var prng = std.Random.DefaultPrng.init(0xe91);
+    const r = prng.random();
+    for (&buf_a, &buf_b) |*a, *b| {
+        a.* = r.float(f64) - 0.5;
+        b.* = a.*;
     }
-    for (a[i..], b[i..]) |ai, bi| {
-        if (ai != bi) return false;
-    }
-    return true;
+    // Past 3x the widest f64 lane count, at several misalignments, with
+    // one planted change at a spread of positions: a different value, a
+    // NaN on both sides (unequal), zeros of opposite sign (equal).
+    for (0..201) |n| for (0..3) |off| {
+        const a = buf_a[off..][0..n];
+        const b = buf_b[off..][0..n];
+        try Ref.check(a, b);
+        if (n > 0) try Ref.check(a, b[0 .. n - 1]);
+        const step = @max(1, n / 16);
+        for (0..n) |i| {
+            if (i % step != 0 and i != n - 1) continue;
+            const ka = a[i];
+            const kb = b[i];
+            defer {
+                a[i] = ka;
+                b[i] = kb;
+            }
+            b[i] = kb + 1;
+            try Ref.check(a, b);
+            a[i] = std.math.nan(f64);
+            b[i] = a[i];
+            try Ref.check(a, b);
+            a[i] = 0;
+            b[i] = -0.0;
+            try Ref.check(a, b);
+        }
+    };
+}
+
+test "Solver: a tridiagonal pattern with a zero diagonal demotes to the pivoting LU" {
+    // A = [0 1 0; 1 2 4; 0 1 3]: row 0 is an MNA branch row with no
+    // diagonal value, so Thomas fails at its first pivot.
+    const gpa = testing.allocator;
+    const col_ptr = [_]u32{ 0, 2, 5, 7 };
+    const row_idx = [_]u32{ 0, 1, 0, 1, 2, 1, 2 };
+    var vals = [_]f64{ 0, 1, 1, 2, 1, 4, 3 };
+    var s = try Solver.init(gpa, 3, &col_ptr, &row_idx, null);
+    defer s.deinit();
+    try testing.expect(s.tri != null);
+    try s.factor(&vals, .{});
+    try testing.expect(s.tri == null and s.lu != null);
+
+    // A [1 2 3] = [2 17 11], A^T [1 2 3] = [2 8 17].
+    var x: [3]f64 = undefined;
+    s.solve(&.{ 2, 17, 11 }, &x);
+    for (x, [_]f64{ 1, 2, 3 }) |xi, want| try testing.expectApproxEqAbs(want, xi, 1e-12);
+    s.solveT(&.{ 2, 8, 17 }, &x);
+    for (x, [_]f64{ 1, 2, 3 }) |xi, want| try testing.expectApproxEqAbs(want, xi, 1e-12);
+
+    // The same values again are the bypass: no new generation. A NaN never
+    // matches, so it always refactors.
+    const gen = s.gen;
+    try s.factor(&vals, .{});
+    try testing.expectEqual(gen, s.gen);
+    try testing.expect(s.unchanged(&vals));
+    vals[3] = std.math.nan(f64);
+    try testing.expect(!s.unchanged(&vals));
 }

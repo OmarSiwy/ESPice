@@ -64,7 +64,9 @@ pub const Bbd = struct {
     gpa: Allocator,
 
     /// Classifies the pattern against `info` and lays out the arena.
-    /// Borrows nothing; `col_ptr`/`row_idx` may be freed afterwards.
+    /// Borrows nothing; `col_ptr`/`row_idx` may be freed afterwards. Keeps
+    /// `gpa` for `deinit`. Arena offsets are u32: a larger arena is
+    /// `NotApplicable`.
     pub fn init(
         gpa: Allocator,
         n: u32,
@@ -240,6 +242,7 @@ pub const Bbd = struct {
         };
     }
 
+    /// Frees every slab with the allocator `init` got.
     pub fn deinit(self: *Self) void {
         const gpa = self.gpa;
         gpa.free(self.blk_start);
@@ -332,7 +335,7 @@ pub const Bbd = struct {
         return result;
     }
 
-    /// x = A^-1 x after a successful factor.
+    /// x = A^-1 x after a successful factor; `x` holds all n unknowns.
     pub fn solveInPlace(self: *Self, x: []f64) void {
         self.solve(false, x);
     }

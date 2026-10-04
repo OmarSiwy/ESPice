@@ -11,11 +11,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sparse_lu = @import("sparse_lu.zig");
 
-/// W numeric factorizations sharing one SparseLu pattern.
+/// W numeric factorizations sharing one SparseLu pattern. W is at most 64,
+/// the width of the failure mask.
 pub fn LaneLu(comptime W: usize) type {
+    comptime std.debug.assert(W >= 1 and W <= 64);
     return struct {
         const Self = @This();
         const Base = sparse_lu.SparseLu;
+        /// One structural entry or unknown across the lanes: element l
+        /// belongs to lane l's matrix.
         pub const V = @Vector(W, f64);
 
         /// Borrowed factored pattern and pivot sequence; must outlive self.
@@ -56,6 +60,7 @@ pub fn LaneLu(comptime W: usize) type {
             return self;
         }
 
+        /// Frees the value planes; `base` stays the caller's.
         pub fn deinit(self: *Self, gpa: Allocator) void {
             gpa.free(self.lx);
             gpa.free(self.ux);
@@ -153,8 +158,10 @@ pub fn LaneLu(comptime W: usize) type {
         }
 
         /// SparseLu.solve for W lanes. `b_in` and `x` may alias. Unlike the
-        /// scalar path there is no zero skip in the L sweep, so a zero result
-        /// can differ from SparseLu's in sign.
+        /// scalar path there is no zero skip in either sweep, so a zero result
+        /// can differ from SparseLu's in sign, and a lane whose factors hold
+        /// an Inf or NaN can turn 0 * Inf into NaN where SparseLu skipped it.
+        /// A lane `refactor` masked holds garbage.
         pub fn solve(self: *Self, b_in: []const V, x: []V) void {
             const b = self.base;
             const li = b.li.items;
@@ -183,7 +190,8 @@ pub fn LaneLu(comptime W: usize) type {
             for (b.q, 0..) |c, j| x[c] = y[j];
         }
 
-        /// SparseLu.solveT for W lanes. `b_in` and `x` may alias.
+        /// SparseLu.solveT for W lanes, bitwise its result per lane. `b_in`
+        /// and `x` may alias. A lane `refactor` masked holds garbage.
         pub fn solveT(self: *Self, b_in: []const V, x: []V) void {
             const b = self.base;
             const li = b.li.items;
@@ -221,4 +229,86 @@ pub fn LaneLu(comptime W: usize) type {
             return @as(u64, bits) & std.math.maxInt(@Int(.unsigned, W));
         }
     };
+}
+
+const testing = std.testing;
+
+test "LaneLu(W) lane l is the scalar replay of lane l on random systems, NaN and Inf lanes included" {
+    const gpa = testing.allocator;
+    const W = comptime std.simd.suggestVectorLength(f64) orelse 4;
+    const L = LaneLu(W);
+    const SparseLu = sparse_lu.SparseLu;
+    const Sys = SparseLu.test_access.TestSystem;
+    var prng = std.Random.DefaultPrng.init(0x1a7e5);
+    const r = prng.random();
+    for (0..96) |t| {
+        const n: u32 = @intCast(1 + t % 24);
+        const sys = try Sys.init(gpa, r, n, 0.25);
+        defer sys.deinit(gpa);
+        const nnz = sys.vals.len;
+        const q = try gpa.alloc(u32, n);
+        defer gpa.free(q);
+        for (q, 0..) |*c, i| c.* = @intCast(i);
+        r.shuffle(u32, q);
+        var base = try SparseLu.init(gpa, n, sys.col_ptr, sys.row_idx, q);
+        defer base.deinit(gpa);
+        base.factor(gpa, sys.col_ptr, sys.row_idx, sys.vals, 1e-3) catch continue;
+        var ll = try L.init(gpa, &base);
+        defer ll.deinit(gpa);
+
+        // Lane l scales every entry by 1 +- 10%; some lanes also get one
+        // NaN or Inf entry, which must fail exactly when the scalar replay
+        // fails.
+        const lane_vals = try gpa.alloc([W]f64, nnz);
+        defer gpa.free(lane_vals);
+        var finite: [W]bool = @splat(true);
+        for (0..W) |l| {
+            for (lane_vals, sys.vals) |*v, a| v[l] = a * (0.9 + 0.2 * r.float(f64));
+            const bad_val: f64 = switch (r.uintLessThan(u8, 6)) {
+                0 => std.math.nan(f64),
+                1 => -std.math.inf(f64),
+                else => continue,
+            };
+            lane_vals[r.uintLessThan(usize, nnz)][l] = bad_val;
+            finite[l] = false;
+        }
+        const plane = try gpa.alloc(L.V, nnz);
+        defer gpa.free(plane);
+        for (plane, lane_vals) |*v, a| v.* = a;
+        const mask = ll.refactor(L.Plane{ .col_ptr = sys.col_ptr, .vals = plane }, 1e-12);
+        for (ll.w) |v| try testing.expect(@reduce(.And, v == @as(L.V, @splat(0))));
+
+        const bufs = try gpa.alloc(f64, 3 * @as(usize, n));
+        defer gpa.free(bufs);
+        const rhs = bufs[0..n];
+        const xs = bufs[n .. 2 * n];
+        const xt = bufs[2 * n ..];
+        const col = try gpa.alloc(f64, nnz);
+        defer gpa.free(col);
+        for (rhs) |*v| v.* = 2 * r.float(f64) - 1;
+        const lv = try gpa.alloc(L.V, 3 * @as(usize, n));
+        defer gpa.free(lv);
+        const lb = lv[0..n];
+        const lx = lv[n .. 2 * n];
+        const lxt = lv[2 * n ..];
+        for (lb, rhs) |*o, v| o.* = @splat(v);
+        ll.solve(lb, lx);
+        ll.solveT(lb, lxt);
+
+        for (0..W) |l| {
+            for (col, lane_vals) |*o, v| o.* = v[l];
+            const scalar_bad = if (base.refactor(sys.col_ptr, col, 1e-12)) |_| false else |_| true;
+            try testing.expectEqual(scalar_bad, (mask >> @intCast(l)) & 1 != 0);
+            if (scalar_bad or !finite[l]) continue;
+            base.solve(rhs, xs);
+            base.solveT(rhs, xt);
+            for (xs, xt, lx, lxt) |a, at, vx, vt| {
+                const x_l: [W]f64 = vx;
+                const t_l: [W]f64 = vt;
+                // solve: equal up to the sign of a zero; solveT: bitwise.
+                try testing.expect(a == x_l[l]);
+                try testing.expectEqual(@as(u64, @bitCast(at)), @as(u64, @bitCast(t_l[l])));
+            }
+        }
+    }
 }
