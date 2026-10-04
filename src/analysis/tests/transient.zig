@@ -26,6 +26,38 @@ const EnvelopeTests = struct {
         const mp = maxPoints(opts);
         try testing.expect(mp >= 3); // at least DC + one step + slack
     }
+
+    test "envelope: stepCount covers the window without a roundoff step" {
+        const stepCount = impl.test_access.stepCount;
+        // A fine window that came out of a subtraction is a carrier period
+        // only to roundoff; it still takes carrier_steps_per_period steps.
+        const t_carrier: f64 = 1e-6;
+        const dt = t_carrier / 64.0;
+        for ([_]f64{ 3, 37, 1001 }) |k| {
+            const t_target = k * t_carrier;
+            try testing.expectEqual(@as(u32, 64), stepCount(t_target - (t_target - t_carrier), dt));
+        }
+        // Ten additions of 0.1 sum to 0.9999999999999999, which made an
+        // accumulating loop take an eleventh step.
+        var acc: f64 = 0;
+        for (0..10) |_| acc += 0.1;
+        try testing.expect(acc < 1.0);
+        try testing.expectEqual(@as(u32, 10), stepCount(1.0, 0.1));
+        // A partial window still takes its last, overshooting step, and a
+        // window shorter than one step takes exactly one.
+        try testing.expectEqual(@as(u32, 3), stepCount(2.5 * dt, dt));
+        try testing.expectEqual(@as(u32, 1), stepCount(1e-3 * dt, dt));
+    }
+
+    test "envelope: maxPoints bounds the rows a run can write" {
+        // t_stop / (min_periods * t_carrier) outer steps, plus DC and slack.
+        // Binary-exact times, so the ceil sees exactly 25.
+        const opts: Options = .{ .t_carrier = 0.25, .t_stop = 25, .min_periods_per_step = 4, .max_periods_per_step = 16, .periods_per_outer_step = 4 };
+        try testing.expectEqual(@as(u32, 25 + 2), maxPoints(opts));
+        var capped = opts;
+        capped.max_outer_steps = 3;
+        try testing.expectEqual(@as(u32, 3 + 2), maxPoints(capped));
+    }
 };
 
 const MatexTests = struct {
@@ -169,6 +201,17 @@ const MatexTests = struct {
             try testing.expectEqualSlices(f64, want, C);
         }
     }
+
+    test "cscMulVec: matches the dense product, zero columns skipped" {
+        // [[1 0 2], [0 3 0], [4 0 5]] in CSC.
+        const col_ptr = [_]u32{ 0, 2, 3, 5 };
+        const row_idx = [_]u32{ 0, 2, 1, 0, 2 };
+        const vals = [_]f64{ 1, 4, 3, 2, 5 };
+        const x = [_]f64{ 1, 0, -1 };
+        var y: [3]f64 = @splat(std.math.nan(f64)); // overwritten, not accumulated
+        impl.test_access.cscMulVec(3, &col_ptr, &row_idx, &vals, &x, &y);
+        try testing.expectEqualSlices(f64, &.{ -1, 0, -1 }, &y);
+    }
 };
 
 const TranTests = struct {
@@ -239,6 +282,118 @@ const TranTests = struct {
                 try testing.expectEqual(want, rows[p * ncols + k + 1]);
             }
         }
+    }
+
+    test "predict: the stdpp pipeline matches its .byRef() pull oracle" {
+        const z = @import("stdpp");
+        const Predict = impl.test_access.Predict;
+        var prng = std.Random.DefaultPrng.init(0x9ed1);
+        const r = prng.random();
+        const L = 200; // past 3x the widest lane count, so every tail runs
+        var cur: [L + 3]f64 = undefined;
+        var prev: [L + 3]f64 = undefined;
+        for (&cur, &prev) |*c, *p| {
+            c.* = (r.float(f64) - 0.5) * 10;
+            p.* = (r.float(f64) - 0.5) * 10;
+        }
+        cur[5] = std.math.nan(f64);
+        prev[9] = std.math.inf(f64);
+        const xfact = 0.37;
+        for (0..L) |len| for (0..4) |off| {
+            const c = cur[off..][0..len];
+            const p = prev[off..][0..len];
+            var fast: [L]f64 = undefined;
+            var slow: [L]f64 = undefined;
+            impl.test_access.predict(fast[0..len], c, p, xfact);
+            var src = z.fromSlice(f64, c);
+            var it = src.byRef().zip(z.fromSlice(f64, p)).map(Predict{ .xfact = xfact });
+            try testing.expectEqual(len, it.writeInto(slow[0..len]));
+            // Bit for bit; NaN payloads may differ between the paths.
+            for (slow[0..len], fast[0..len]) |a, b| {
+                if (std.math.isNan(a) and std.math.isNan(b)) continue;
+                try testing.expectEqual(@as(u64, @bitCast(a)), @as(u64, @bitCast(b)));
+            }
+        };
+    }
+
+    test "almostEqualUlps: the ulp count runs straight across zero" {
+        const eq = impl.test_access.almostEqualUlps;
+        const tiny = std.math.floatTrueMin(f64);
+        try testing.expect(eq(-tiny, tiny, 2));
+        try testing.expect(!eq(-tiny, tiny, 1));
+        try testing.expect(eq(-0.0, tiny, 1));
+        // Opposite extremes are 2^64 - 2^53 - 2 apart: no i64 overflow.
+        try testing.expect(!eq(-std.math.floatMax(f64), std.math.floatMax(f64), std.math.maxInt(i64)));
+        // Identical NaN bits count as equal, as in ngspice: 0 ulps apart.
+        try testing.expect(eq(std.math.nan(f64), std.math.nan(f64), 0));
+    }
+
+    test "column: lowerBound, from and strided reads" {
+        const Column = impl.Column;
+        // Rows (t, v): the t column has stride 2.
+        const rows = [_]f64{ 0, 10, 1, 11, 1, 12, 3, 13 };
+        const t: Column = .{ .base = &rows, .stride = 2, .len = 4 };
+        try testing.expectEqual(@as(usize, 0), t.lowerBound(-1));
+        try testing.expectEqual(@as(usize, 1), t.lowerBound(1)); // first of the duplicates
+        try testing.expectEqual(@as(usize, 3), t.lowerBound(2));
+        try testing.expectEqual(@as(usize, 4), t.lowerBound(4));
+        try testing.expectEqual(@as(usize, 0), Column.of(&.{}).lowerBound(1));
+        const v: Column = .{ .base = rows[1..], .stride = 2, .len = 4 };
+        try testing.expectEqual(@as(f64, 13), v.from(2).at(1));
+        try testing.expectEqual(@as(usize, 0), v.from(4).len);
+    }
+
+    test "initialCapacity: twice the window over dt_init, clamped to [64, 2^22]" {
+        // Powers of two keep the quotient exact; the hint truncates.
+        try testing.expectEqual(@as(u32, 2048), impl.initialCapacity(.{ .t_stop = 1024, .dt_init = 1 }));
+        try testing.expectEqual(@as(u32, 1024), impl.initialCapacity(.{ .t_stop = 1024, .t_start = 512, .dt_init = 1 }));
+        try testing.expectEqual(@as(u32, 64), impl.initialCapacity(.{ .t_stop = 1e-9, .dt_init = 1e-9 }));
+        try testing.expectEqual(@as(u32, 1 << 22), impl.initialCapacity(.{ .t_stop = 1, .dt_init = 1e-12 }));
+    }
+
+    test "waveform: a failed grow appends nothing" {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
+        var waveform = try Waveform.init(failing.allocator(), 1, 2);
+        defer waveform.deinit();
+        const probes = [_]u32{0};
+        try waveform.record(0, &.{1}, &probes);
+        try waveform.record(1, &.{2}, &probes);
+        try testing.expectError(error.OutOfMemory, waveform.record(2, &.{3}, &probes));
+        try testing.expectEqual(@as(u32, 2), waveform.len);
+        try testing.expectEqualSlices(f64, &.{ 0, 1, 1, 2 }, waveform.data());
+    }
+
+    test "waveform: recordLerp interpolates per probe; a stream keeps no rows" {
+        var buf: [6 * @sizeOf(f64)]u8 align(@alignOf(f64)) = undefined;
+        var sink: std.Io.Writer = .fixed(&buf);
+        var wf = try Waveform.initStream(testing.allocator, 2, &sink);
+        defer wf.deinit();
+        const probes = [_]u32{ 2, 0 };
+        try wf.recordLerp(0.5, &.{ 0, 9, 4 }, &.{ 2, 9, 8 }, 0.25, &probes);
+        try wf.record(1, &.{ 2, 9, 8 }, &probes);
+        try testing.expectEqual(@as(u32, 2), wf.len);
+        try testing.expectEqual(@as(usize, 0), wf.data().len);
+        const got: []const f64 = @alignCast(std.mem.bytesAsSlice(f64, sink.buffered()));
+        try testing.expectEqualSlices(f64, &.{ 0.5, 5, 0.5 }, got[0..3]);
+        try testing.expectEqualSlices(f64, &.{ 1, 8, 2 }, got[3..6]);
+    }
+
+    test "advanceCurrent: trapezoid in place over its own i_prev" {
+        const cap = 3 * W + 2;
+        var q0: [cap]f64 = undefined;
+        var q1: [cap]f64 = undefined;
+        var i_cur: [cap]f64 = undefined;
+        for (0..cap) |j| {
+            const fj: f64 = @floatFromInt(j);
+            q0[j] = fj * 1e-12;
+            q1[j] = -fj * 0.5e-12;
+            i_cur[j] = fj * 1e-3;
+        }
+        var want = i_cur;
+        const c: integrator.Coeffs = .{ .ag0 = 2e9, .ag2 = 0 };
+        for (&want, q0, q1) |*w, a, b| w.* = c.ag0 * (a - b) - c.ag1 * w.*;
+        integrator.advanceCurrent(.trapezoidal, &i_cur, &q0, &q1, &.{}, c);
+        try testing.expectEqualSlices(u64, @ptrCast(&want), @ptrCast(&i_cur));
     }
 
     test "rebaseCurrent: vector kernel is bit-identical to its w=1 oracle" {
@@ -780,6 +935,52 @@ const TranNoiseTests = struct {
 
         try testing.expectApproxEqAbs(@as(f64, 0.0), mean, 0.02);
         try testing.expectApproxEqAbs(@as(f64, 1.0), variance, 0.02);
+    }
+
+    test "flicker: poles sum to K ln(f_max / f_min) for 1/f, skip the rest" {
+        const NoiseSource = @import("../types.zig").NoiseSource;
+        const Flicker = impl.test_access.Flicker;
+        const gpa = testing.allocator;
+        const sources = [_]NoiseSource{
+            .{ .node_p = 1, .node_n = 0, .white = 1e-20 }, // white only
+            .{ .node_p = 1, .node_n = 2, .flicker = 2e-14, .ef = 1 },
+            .{ .node_p = 2, .node_n = 0, .flicker = 1e-14, .ef = 2 }, // no finite sum
+        };
+        // f_max = 0.5 / dt_max = 500 Hz, f_min = 1 / t_stop = 1 Hz.
+        var f = try Flicker.init(gpa, &sources, .{ .t_stop = 1, .dt_max = 1e-3 });
+        defer f.deinit(gpa);
+        try testing.expectEqual(@as(usize, 9), f.source.len); // ceil(3 * log10(500))
+        var total: f64 = 0;
+        for (f.source, f.variance) |s, v| {
+            try testing.expectEqual(@as(u32, 1), s);
+            total += v;
+        }
+        try testing.expectApproxEqRel(2e-14 * @log(500.0), total, 1e-12);
+        // An empty band has no poles.
+        var none = try Flicker.init(gpa, &sources, .{ .t_stop = 1, .dt_max = 1, .f_min = 10 });
+        defer none.deinit(gpa);
+        try testing.expectEqual(@as(usize, 0), none.source.len);
+        // Every partial init frees what it took.
+        const initFree = struct {
+            fn run(a: std.mem.Allocator, srcs: []const NoiseSource) !void {
+                var fl = try Flicker.init(a, srcs, .{ .t_stop = 1, .dt_max = 1e-3 });
+                fl.deinit(a);
+            }
+        }.run;
+        try testing.checkAllAllocationFailures(gpa, initFree, .{@as([]const NoiseSource, &sources)});
+    }
+
+    test "covariance: stampPair skips ground, transpose is an involution" {
+        const Cov = impl.test_access.Covariance;
+        var m: [9]f64 = @splat(0);
+        Cov.stampPair(&m, 3, 1, 0, 2);
+        Cov.stampPair(&m, 3, 1, 2, 1);
+        try testing.expectEqualSlices(f64, &.{ 0, 0, 0, 0, 3, -1, 0, -1, 1 }, &m);
+        var a = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+        Cov.transpose(&a, 3);
+        try testing.expectEqualSlices(f64, &.{ 1, 4, 7, 2, 5, 8, 3, 6, 9 }, &a);
+        Cov.transpose(&a, 3);
+        try testing.expectEqualSlices(f64, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &a);
     }
 
     test "tran_noise: simdCopy matches element-wise" {

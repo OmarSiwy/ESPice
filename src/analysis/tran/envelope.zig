@@ -8,12 +8,14 @@ const simdCopy = root.copySimd;
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
 
+/// `.envelope` query options, defined in core/query.zig.
 pub const Options = @import("core").query.Envelope;
 
 /// Outcome of one envelope run.
 pub const SimResult = struct {
     /// True when t reached t_stop.
     completed: bool,
+    /// Accepted outer steps; rejected (halved) attempts are not counted.
     outer_steps: u32,
     /// Time of the last envelope point, in seconds.
     t_final: f64,
@@ -48,10 +50,12 @@ const Trap = struct {
         simdCopy(self.q_cur[0..n], ckt.q_vec[0..n]);
         integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
     }
+    /// G + alpha*C rebuilt into `a_vals`, overwriting the previous return.
     pub fn vals(self: Trap, ckt: *root.Circuit) []f64 {
         ckt.combineGC(self.alpha, self.a_vals);
         return self.a_vals;
     }
+    /// One diagonal of G + alpha*C without materializing it (`Circuit.gcAt`).
     pub fn diagAt(self: Trap, ckt: *root.Circuit, slot: u32) f64 {
         return ckt.gcAt(self.alpha, slot);
     }
@@ -203,15 +207,16 @@ pub fn simulate(
         }
         var n_steps: u32 = 0;
 
-        var t_inner: f64 = 0;
-        const fine_duration = t_target - t_fine_start;
-        while (ok and t_inner < fine_duration) {
-            if (!try newtonAt(ckt, ws, x, t_fine_start + t_inner + dt_inner, dt_inner, options, trap)) {
+        // Counted, not accumulated: summing dt_inner drifts below the window
+        // and takes one step past it.
+        const n_fine = stepCount(t_target - t_fine_start, dt_inner);
+        while (ok and n_steps < n_fine) {
+            const t_step = t_fine_start + @as(f64, @floatFromInt(n_steps + 1)) * dt_inner;
+            if (!try newtonAt(ckt, ws, x, t_step, dt_inner, options, trap)) {
                 ok = false;
                 break;
             }
 
-            t_inner += dt_inner;
             n_steps += 1;
 
             for (probes, 0..) |node, p| {
@@ -281,13 +286,22 @@ fn coarseAdvance(
     options: Options,
     trap: ?*Trap,
 ) !bool {
-    var t_elapsed: f64 = 0;
-    while (t_elapsed < duration) {
-        const dt = @min(dt_coarse, duration - t_elapsed);
-        if (!try newtonAt(ckt, ws, x, t_start + t_elapsed + dt, dt, options, trap)) return false;
-        t_elapsed += dt;
+    // Counted like the fine window: an accumulated time left a roundoff-sized
+    // last step whose 2/dt companion swamps the matrix.
+    const n = stepCount(duration, dt_coarse);
+    var t_prev = t_start;
+    for (1..@as(usize, n) + 1) |k| {
+        const t_end = if (k == n) t_start + duration else t_start + @as(f64, @floatFromInt(k)) * dt_coarse;
+        if (!try newtonAt(ckt, ws, x, t_end, t_end - t_prev, options, trap)) return false;
+        t_prev = t_end;
     }
     return true;
+}
+
+/// Steps of at most `dt` that cover `duration` > 0: at least one, and a
+/// remainder within 1e-9 of a step is roundoff, not one more step.
+fn stepCount(duration: f64, dt: f64) u32 {
+    return @max(1, @as(u32, @intFromFloat(@ceil(duration / dt - 1e-9))));
 }
 
 /// Contract entry: envelope-follow from ctx.x_op. Point-major rows
@@ -326,3 +340,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .data = try a.realloc(data, npoints * ncols),
     };
 }
+
+// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .stepCount = stepCount,
+} else {};

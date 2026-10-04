@@ -16,6 +16,7 @@ const integrator = @import("integrator.zig");
 
 const NoiseSource = root.NoiseSource;
 
+/// `.trannoise` query options, defined in core/query.zig.
 pub const Options = @import("core").query.TranNoise;
 const Waveform = @import("types.zig").Waveform;
 
@@ -32,6 +33,7 @@ const Xorshift64 = struct {
         return .{ .state = if (state == 0) 1 else state };
     }
 
+    /// The next state; never 0, since a nonzero state stays nonzero.
     pub fn next(self: *Xorshift64) u64 {
         var s = self.state;
         s ^= s << 13;
@@ -74,7 +76,10 @@ const Flicker = struct {
     // ponytail: fixed density; the sum ripples about 0.1 dB around K/f^ef.
     const per_decade = 3.0;
 
-    fn init(gpa: std.mem.Allocator, sources: []const NoiseSource, options: Options) !Flicker {
+    /// `per_decade` poles per decade of [f_min, 1/(2 dt_max)] for every
+    /// source with 0 < ef < 2; none when the band is empty. The four columns
+    /// are owned by `gpa`; free with `deinit`.
+    pub fn init(gpa: std.mem.Allocator, sources: []const NoiseSource, options: Options) !Flicker {
         const f_max = 0.5 / options.dt_max;
         const f_min = options.f_min orelse 1.0 / options.t_stop;
         const decades = if (f_max > f_min) std.math.log10(f_max / f_min) else 0;
@@ -83,12 +88,13 @@ const Flicker = struct {
         // ponytail: ef outside (0, 2) has no finite Lorentzian sum; such a
         // source keeps its white half only.
         for (sources) |s| count += if (s.flicker > 0 and s.ef > 0 and s.ef < 2) k else 0;
-        var f: Flicker = .{
-            .source = try gpa.alloc(u32, count),
-            .rate = try gpa.alloc(f64, count),
-            .variance = try gpa.alloc(f64, count),
-            .y = try gpa.alloc(f64, count),
-        };
+        const source = try gpa.alloc(u32, count);
+        errdefer gpa.free(source);
+        const rate = try gpa.alloc(f64, count);
+        errdefer gpa.free(rate);
+        const variance = try gpa.alloc(f64, count);
+        errdefer gpa.free(variance);
+        var f: Flicker = .{ .source = source, .rate = rate, .variance = variance, .y = try gpa.alloc(f64, count) };
         if (count == 0) return f;
         const ln_r = @log(f_max / f_min) / @as(f64, @floatFromInt(k));
         var p: usize = 0;
@@ -106,7 +112,8 @@ const Flicker = struct {
         return f;
     }
 
-    fn deinit(f: *Flicker, gpa: std.mem.Allocator) void {
+    /// Frees the columns `init` allocated on `gpa`.
+    pub fn deinit(f: *Flicker, gpa: std.mem.Allocator) void {
         gpa.free(f.source);
         gpa.free(f.rate);
         gpa.free(f.variance);
@@ -152,6 +159,7 @@ const Covariance = struct {
 
     fn init(gpa: std.mem.Allocator, n: usize, poles: usize, inj_nodes: []const u32, white: []const f64) !Covariance {
         const buf = try gpa.alloc(f64, 3 * n * n + poles * n);
+        errdefer gpa.free(buf);
         @memset(buf, 0);
         return .{
             .k = buf[0 .. n * n],
@@ -180,7 +188,7 @@ const Covariance = struct {
 
     /// Adds v (e_a - e_b)(e_a - e_b)^T to the dense matrix m; ground rows
     /// carry no noise.
-    fn stampPair(m: []f64, n: usize, a: u32, b: u32, v: f64) void {
+    pub fn stampPair(m: []f64, n: usize, a: u32, b: u32, v: f64) void {
         if (a != root.GROUND) m[a * n + a] += v;
         if (b != root.GROUND) m[b * n + b] += v;
         if (a != root.GROUND and b != root.GROUND) {
@@ -190,7 +198,7 @@ const Covariance = struct {
     }
 
     /// In-place transpose of the row-major n x n matrix m.
-    fn transpose(m: []f64, n: usize) void {
+    pub fn transpose(m: []f64, n: usize) void {
         for (0..n) |i| for (i + 1..n) |j| std.mem.swap(f64, &m[i * n + j], &m[j * n + i]);
     }
 
@@ -259,10 +267,12 @@ const NoiseHook = struct {
     a_vals: []f64,
     has_charge: bool,
     /// Injection endpoints (p0, n0, p1, n1, ...) in source order: the only
-    /// 8 bytes of each 48-byte `NoiseSource` this loop reads.
+    /// 8 bytes of each 32-byte `NoiseSource` this loop reads.
     inj_nodes: []const u32,
     noise_currents: []const f64,
 
+    /// Stamps the planes at `x`, then the BE companion and this step's
+    /// noise currents into the residual rows (converger hook).
     pub fn assemble(self: NoiseHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.eval(x, t);
         if (self.has_charge) {
@@ -277,6 +287,8 @@ const NoiseHook = struct {
         }
     }
 
+    /// The Newton matrix values: G itself without charge, else G + C/dt
+    /// rebuilt into `a_vals`, overwriting the previous return.
     pub fn vals(self: NoiseHook, ckt: *root.Circuit) []f64 {
         if (!self.has_charge) return ckt.g_vals;
         ckt.combineGC(self.alpha, self.a_vals);
@@ -483,4 +495,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 pub const test_access = if (@import("builtin").is_test) .{
     .Xorshift64 = Xorshift64,
     .simdCopy = simdCopy,
+    .Flicker = Flicker,
+    .Covariance = Covariance,
 } else {};

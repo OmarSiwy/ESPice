@@ -11,17 +11,24 @@ const simdCopy = root.copySimd;
 // ponytail: platform SIMD width, not hardcoded.
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
+// Re-exported so the post-processors and tests import one file; each is
+// documented in types.zig.
 const tran_types = @import("types.zig");
+/// See types.zig `Method`.
 pub const Method = tran_types.Method;
+/// See types.zig `Options`.
 pub const Options = tran_types.Options;
+/// See types.zig `Waveform`.
 pub const Waveform = tran_types.Waveform;
+/// See types.zig `Column`.
 pub const Column = tran_types.Column;
+/// See types.zig `SimResult`.
 pub const SimResult = tran_types.SimResult;
+/// See types.zig `initialCapacity`.
 pub const initialCapacity = tran_types.initialCapacity;
 
-/// ZP_TRAN_STATS step-economics counters: wall time in a slow transient is
-/// attempts x Newton iterations x eval cost, and these say which factor.
-/// trial = cur + xfact·(cur - prev), the MODEINITPRED extrapolation.
+/// trial = cur + xfact·(cur - prev), the MODEINITPRED extrapolation, over
+/// the pair (cur, prev) as a stdpp zip item.
 const Predict = struct {
     pub const lanewise = true;
     xfact: f64,
@@ -30,6 +37,24 @@ const Predict = struct {
     }
 };
 
+/// Writes the MODEINITPRED first iterate into `trial[0..cur.len]`; `prev`
+/// must be at least as long as `cur`. Elementwise, so the SIMD path and the
+/// `.byRef()` pull path give the same bits (tests/transient.zig).
+fn predict(trial: []f64, cur: []const f64, prev: []const f64, xfact: f64) void {
+    var it = z.fromSlice(f64, cur).zip(z.fromSlice(f64, prev[0..cur.len])).map(Predict{ .xfact = xfact });
+    comptime std.debug.assert(!simd_backend or @TypeOf(it).lane_count != null);
+    _ = it.writeInto(trial[0..cur.len]);
+}
+
+/// stdpp lowers to vector blocks only on these backends; elsewhere the same
+/// pipeline runs its scalar fallback.
+const simd_backend = blk: {
+    const b = @import("builtin").zig_backend;
+    break :blk b == .stage2_llvm or b == .stage2_x86_64;
+};
+
+/// ZP_TRAN_STATS step-economics counters: wall time in a slow transient is
+/// attempts x Newton iterations x eval cost, and these say which factor.
 const Stats = struct {
     attempts: u64 = 0,
     nr_iters: u64 = 0,
@@ -51,6 +76,8 @@ const TranHook = struct {
     a_vals: []f64,
     has_charge: bool,
 
+    /// Stamps the planes at `x` and adds the companion's dynamic current to
+    /// the residual rows (converger hook).
     pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
         if (self.has_charge) {
@@ -61,6 +88,8 @@ const TranHook = struct {
         }
     }
 
+    /// The Newton matrix values: G itself without charge, else G + ag0*C
+    /// rebuilt into `a_vals`, overwriting the previous return.
     pub fn vals(self: TranHook, ckt: *root.Circuit) []f64 {
         if (!self.has_charge) return ckt.g_vals;
         ckt.combineGC(self.c.ag0, self.a_vals);
@@ -76,7 +105,9 @@ const TranHook = struct {
 
 /// Integrates from the operating point in `x` to options.t_stop, recording
 /// accepted points at t >= t_start into `waveform`. On return `x` holds the
-/// last accepted solution. `allocator` backs per-run scratch only.
+/// last accepted solution. `allocator` backs per-run scratch only. A dt
+/// underflow returns `completed = false`, not an error; the errors are
+/// cancellation, circuit setup and allocation (scratch or `waveform`).
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -141,9 +172,11 @@ pub fn simulate(
     if (n_qt > 0) for (ckt.batches) |kb| {
         if (!std.mem.eql(u8, kb.type_name, "kinduc")) continue;
         var rows: std.ArrayList(u32) = .empty;
+        errdefer rows.deinit(allocator);
         for (ckt.current_row[0..n], 0..) |is_cur, r| if (is_cur) try rows.append(allocator, @intCast(r));
         lte_rows = try rows.toOwnedSlice(allocator);
         var spans: std.ArrayList([2]u32) = .empty;
+        errdefer spans.deinit(allocator);
         var off: u32 = 0;
         for (ckt.batches) |b| {
             const f = b.hooks.q_tape orelse continue;
@@ -342,8 +375,7 @@ pub fn simulate(
         // dt/dt_prev and is limited against the last accepted one. HFET and
         // MESA divide by the step two back instead (CKTdeltaOld[2]).
         const xfact = dt / dt_prev;
-        var pred = z.fromSlice(f64, cur).zip(z.fromSlice(f64, prev[0..cur.len])).map(Predict{ .xfact = xfact });
-        _ = pred.writeInto(trial[0..cur.len]);
+        predict(trial, cur, prev, xfact);
         ckt.predictFirstIterate(trial, cur, prev, dt / dt_prev2);
         ckt.evalFollows(trial, t + dt, false);
         _ = ckt.applyLimits(trial, cur);
@@ -660,6 +692,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 pub const test_access = if (@import("builtin").is_test) .{
     .W = W,
     .integrator = integrator,
+    .Predict = Predict,
+    .predict = predict,
     .almostEqualUlps = almostEqualUlps,
 } else {};
 

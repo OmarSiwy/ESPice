@@ -2,8 +2,10 @@
 //! the post-processors, kept apart from the driver so they import no solver.
 const std = @import("std");
 
+/// The integration method a `.tran` card selects (core/query.zig).
 pub const Method = @import("core").query.Method;
 
+/// `.tran` query options, defined in core/query.zig.
 pub const Options = @import("core").query.Tran;
 
 /// Initial waveform capacity in points: twice the printed window over the
@@ -28,16 +30,18 @@ pub const Column = struct {
         return .{ .base = s, .stride = 1, .len = s.len };
     }
 
+    /// Element `i`. Asserts (via the slice bounds check) that `i < len`.
     pub fn at(c: Column, i: usize) f64 {
         return c.base[i * c.stride];
     }
 
-    /// The column from element `i` on.
+    /// The column from element `i` on. `i == len` gives an empty column.
     pub fn from(c: Column, i: usize) Column {
         return .{ .base = c.base[i * c.stride ..], .stride = c.stride, .len = c.len - i };
     }
 
-    /// The first index whose value is >= `v`; the column must be ascending.
+    /// The first index whose value is >= `v`, or `len` when none is; the
+    /// column must be ascending. O(log len).
     pub fn lowerBound(c: Column, v: f64) usize {
         var lo: usize = 0;
         var hi = c.len;
@@ -61,14 +65,15 @@ pub const Waveform = struct {
     n_probes: u32,
     allocator: std.mem.Allocator,
     /// When set, every row goes here as native-endian f64s and only the row
-    /// being built is kept: `data` is empty and `column`/`time` are invalid.
+    /// being built is kept: `data()` is empty and `column`/`time` are
+    /// invalid, while `len` still counts the rows written.
     sink: ?*std.Io.Writer = null,
 
     /// Allocates room for `capacity` points (at least 1) of `n_probes` probes.
     pub fn init(allocator: std.mem.Allocator, n_probes: u32, capacity: u32) !Waveform {
         const cap: u32 = @max(capacity, 1);
         return .{
-            .rows = try allocator.alloc(f64, @as(usize, n_probes + 1) * cap),
+            .rows = try allocator.alloc(f64, (@as(usize, n_probes) + 1) * cap),
             .len = 0,
             .capacity = cap,
             .n_probes = n_probes,
@@ -89,7 +94,8 @@ pub const Waveform = struct {
     }
 
     /// Appends point `t` with `x[probes[k]]` as probe k. Growing invalidates
-    /// earlier `data` slices.
+    /// earlier `data` and `column` slices; on error.OutOfMemory nothing is
+    /// appended.
     pub fn record(self: *Waveform, t: f64, x: []const f64, probes: []const u32) !void {
         const row = try self.next();
         row[0] = t;
@@ -129,9 +135,11 @@ pub const Waveform = struct {
 
     fn next(self: *Waveform) ![]f64 {
         const s = self.stride();
+        // The count moves only once the row exists: a failed grow appends
+        // nothing.
+        if (self.sink == null and self.len == self.capacity) try self.grow();
         defer self.len += 1;
         if (self.sink != null) return self.rows[0..s];
-        if (self.len == self.capacity) try self.grow();
         return self.rows[@as(usize, self.len) * s ..][0..s];
     }
 
@@ -144,6 +152,7 @@ pub const Waveform = struct {
         self.capacity = @intCast(new_cap);
     }
 
+    /// Frees the rows; every borrowed `data` or `column` slice dies with them.
     pub fn deinit(self: *Waveform) void {
         self.allocator.free(self.rows);
         self.* = undefined;
@@ -155,7 +164,7 @@ pub const SimResult = struct {
     /// True when t reached t_stop; false when dt fell below dt_min or
     /// max_steps ran out.
     completed: bool,
-    /// Accepted steps.
+    /// Accepted steps, the t = 0 point not counted.
     steps: u32,
     /// Time of the last accepted point, in seconds.
     t_final: f64,

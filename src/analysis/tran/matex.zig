@@ -19,6 +19,7 @@ const Solver = solvers.direct.Solver;
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
+/// `.matex` query options, defined in core/query.zig.
 pub const Options = @import("core").query.Matex;
 
 /// y = M*x for the n x n CSC matrix M; zero columns of x are skipped.
@@ -615,4 +616,5 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 pub const test_access = if (@import("builtin").is_test) .{
     .denseMatMul = denseMatMul,
     .expmSmall = expmSmall,
+    .cscMulVec = cscMulVec,
 } else {};
