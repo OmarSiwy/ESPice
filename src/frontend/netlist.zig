@@ -60,11 +60,31 @@ pub const Value = union(enum) {
     group: Group,
 };
 
-/// `name(args)`.
-/// ponytail: group arguments are arena slices, not a table: a few per deck.
-pub const Group = struct { name: []const u8, args: []const Value };
+/// `name(args)`, held as one slice: `items[0]` is the name (a `.name`
+/// value), the rest the arguments. One slice keeps `Value` at 24 B.
+/// ponytail: group items are arena slices, not a table: a few per deck.
+pub const Group = struct {
+    items: []const Value,
+
+    /// The word before the parenthesis. Asserts that `items[0]` is a name.
+    pub fn name(g: Group) []const u8 {
+        std.debug.assert(g.items.len > 0);
+        return g.items[0].name;
+    }
+
+    /// The values inside the parentheses, in card order.
+    pub fn args(g: Group) []const Value {
+        std.debug.assert(g.items.len > 0);
+        return g.items[1..];
+    }
+};
 /// `key=value`; a positional model value has an empty key.
 pub const Kv = struct { key: []const u8, value: Value };
+
+comptime {
+    std.debug.assert(@sizeOf(Value) == 24);
+    std.debug.assert(@sizeOf(Kv) == 40);
+}
 
 /// Vertex payload: the net's flattened name in `Netlist.pool`.
 pub const Net = struct { name: Name };
@@ -790,7 +810,7 @@ fn isSn(line: []const u8) bool {
 fn groupNode(value: Value, which: usize, buf: *[24]u8) ?[]const u8 {
     return switch (value) {
         .name => |n| if (which == 0) n else null,
-        .group => |g| if (std.ascii.eqlIgnoreCase(g.name, "v") and g.args.len > which) nodeText(g.args[which], buf) else null,
+        .group => |g| if (std.ascii.eqlIgnoreCase(g.name(), "v") and g.args().len > which) nodeText(g.args()[which], buf) else null,
         else => null,
     };
 }
@@ -1256,7 +1276,7 @@ fn Reader(comptime S: type) type {
                 var i: usize = 0;
                 while (i + 1 < args.len) : (i += 2) {
                     const name = switch (args[i]) {
-                        .group => |g| if (std.ascii.eqlIgnoreCase(g.name, "v") and g.args.len > 0) nodeText(g.args[0], &buf) else null,
+                        .group => |g| if (std.ascii.eqlIgnoreCase(g.name(), "v") and g.args().len > 0) nodeText(g.args()[0], &buf) else null,
                         else => nodeText(args[i], &buf),
                     } orelse continue;
                     const value = switch (args[i + 1]) {
@@ -1814,10 +1834,10 @@ fn Reader(comptime S: type) type {
                     try r.connect(nodeText(args[0], &bufs[0]) orelse return error.ParseError, nodeText(args[1], &bufs[1]) orelse return error.ParseError);
                 },
                 .save => for (args) |a| switch (a) {
-                    .group => |g| if (g.args.len == 1 and (std.ascii.eqlIgnoreCase(g.name, "v") or std.ascii.eqlIgnoreCase(g.name, "i"))) {
+                    .group => |g| if (g.args().len == 1 and (std.ascii.eqlIgnoreCase(g.name(), "v") or std.ascii.eqlIgnoreCase(g.name(), "i"))) {
                         var buf: [24]u8 = undefined;
-                        const name = nodeText(g.args[0], &buf) orelse continue;
-                        const label = try std.fmt.allocPrint(r.arena, "{c}({s})", .{ std.ascii.toLower(g.name[0]), name });
+                        const name = nodeText(g.args()[0], &buf) orelse continue;
+                        const label = try std.fmt.allocPrint(r.arena, "{c}({s})", .{ std.ascii.toLower(g.name()[0]), name });
                         try r.saves.append(r.arena, std.ascii.lowerString(label, label));
                     },
                     .name => |n| if (std.ascii.eqlIgnoreCase(n, "all")) {
@@ -2382,7 +2402,7 @@ fn Reader(comptime S: type) type {
             switch (v.*) {
                 // `valueAt` built the arguments in the parse arena, mutable;
                 // `Group` types them const for every reader after the parse.
-                .group => |g| for (g.args) |*a| try r.liveSlot(@constCast(a), slots, spans, pool_rows, sites),
+                .group => |g| for (g.args()) |*a| try r.liveSlot(@constCast(a), slots, spans, pool_rows, sites),
                 .expr => |span| {
                     const sited = r.holdsSite(span.start, span.start + span.len);
                     var reads = false;
@@ -2494,22 +2514,25 @@ fn Reader(comptime S: type) type {
                 defer r.group_depth -= 1;
                 // `v(...)`/`i(...)` name nodes and devices, never numbers.
                 const probe = std.ascii.eqlIgnoreCase(t, "v") or std.ascii.eqlIgnoreCase(t, "i");
-                var args: std.ArrayList(Value) = .empty;
+                // `items[0]` is the name (`Group`).
+                var items: std.ArrayList(Value) = .empty;
+                try items.append(r.arena, .{ .name = t });
                 while (true) {
                     const a = f.next() orelse return error.ParseError;
                     if (a[0] == ')') break;
                     if (a[0] == ',') continue;
-                    try args.append(r.arena, if (probe and F.isWord(a)) .{ .name = a } else try r.valueAt(a, f, frame, subst_names, geometry));
+                    try items.append(r.arena, if (probe and F.isWord(a)) .{ .name = a } else try r.valueAt(a, f, frame, subst_names, geometry));
                 }
                 // HSPICE writes SFFM(VO VA FC MDI FS) [CR SFFM]; the source
                 // models read ngspice 44's (VO VA FM MDI FC). An omitted MDI
                 // is 0 and an omitted FS the models' -1, their 5/TSTOP.
-                if (r.dialect == .hspice and args.items.len > 2 and std.ascii.eqlIgnoreCase(t, "sffm")) {
-                    if (args.items.len == 3) try args.append(r.arena, .{ .num = 0 });
-                    if (args.items.len == 4) try args.append(r.arena, .{ .num = -1 });
-                    std.mem.swap(Value, &args.items[2], &args.items[4]);
+                const args = items.items[1..];
+                if (r.dialect == .hspice and args.len > 2 and std.ascii.eqlIgnoreCase(t, "sffm")) {
+                    if (args.len == 3) try items.append(r.arena, .{ .num = 0 });
+                    if (items.items.len == 5) try items.append(r.arena, .{ .num = -1 });
+                    std.mem.swap(Value, &items.items[3], &items.items[5]);
                 }
-                return .{ .group = .{ .name = t, .args = args.items } };
+                return .{ .group = .{ .items = items.items } };
             }
             if (S.parseNum(t)) |n| return .{ .num = n };
             return if (subst_names) r.nameValue(t, frame, geometry) else .{ .name = t };

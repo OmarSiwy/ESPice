@@ -1401,9 +1401,12 @@ pub const NetBuilder = struct {
             else => return dev, // else: only PULSE and AM have an order to fix
         };
         const kind: []const u8 = if (w.kind == .am or args.len == 7) @tagName(w.kind) else "pwl";
+        const items = try self.arena.alloc(Value, args.len + 1);
+        items[0] = .{ .name = kind };
+        @memcpy(items[1..], args);
         const positional = try self.arena.alloc(Value, dev.positional.len - (w.end - w.start) + 1);
         @memcpy(positional[0..w.start], dev.positional[0..w.start]);
-        positional[w.start] = .{ .group = .{ .name = kind, .args = args } };
+        positional[w.start] = .{ .group = .{ .items = items } };
         @memcpy(positional[w.start + 1 ..], dev.positional[w.end..]);
         var out = dev;
         out.positional = positional;
@@ -2575,7 +2578,7 @@ fn refuseUnknownWave(dev: Device) error{UnsupportedCard}!void {
     var buf: [8]u8 = undefined;
     for (dev.positional) |v| {
         const name = switch (v) {
-            .group => |g| g.name,
+            .group => |g| g.name(),
             .name => |n| n,
             else => continue, // else: numbers and expressions name no waveform
         };
@@ -2641,8 +2644,8 @@ fn applySourceWaveform(target: anytype, dev: Device) void {
     while (i < dev.positional.len) : (i += 1) {
         switch (dev.positional[i]) {
             .group => |group| {
-                const kind = waveKind(group.name) orelse continue;
-                applyWaveArgs(T, target, kind, group.args);
+                const kind = waveKind(group.name()) orelse continue;
+                applyWaveArgs(T, target, kind, group.args());
             },
             // Parenless spelling (`vs a 0 dc=0 sin 0 50 100k`): the keyword is
             // a bare positional name and its args are the numeric positionals
@@ -2699,7 +2702,7 @@ const WaveAt = struct { kind: Wave, args: []const Value, start: usize, end: usiz
 /// The first waveform of `dev`, or null when it has none.
 fn waveAt(dev: Device) ?WaveAt {
     for (dev.positional, 0..) |v, i| switch (v) {
-        .group => |g| if (waveKind(g.name)) |kind| return .{ .kind = kind, .args = g.args, .start = i, .end = i + 1 },
+        .group => |g| if (waveKind(g.name())) |kind| return .{ .kind = kind, .args = g.args(), .start = i, .end = i + 1 },
         .name => |nm| if (waveKind(nm)) |kind| {
             var end = i + 1;
             while (end < dev.positional.len and dev.positional[end] == .num) end += 1;
@@ -2902,8 +2905,8 @@ fn sourceDc(dev: Device) ?f64 {
             return n;
         },
         .group => |group| {
-            if (std.mem.eql(u8, group.name, "dc") and group.args.len > 0)
-                return valueNumber(group.args[0]) orelse 0;
+            if (std.mem.eql(u8, group.name(), "dc") and group.args().len > 0)
+                return valueNumber(group.args()[0]) orelse 0;
         },
         .name => |name| {
             if (std.mem.eql(u8, name, "dc")) {
@@ -2976,9 +2979,9 @@ fn sourceAc(dev: Device) ?struct { re: f64, im: f64 } {
                 }
             },
             .group => |group| {
-                if (!std.mem.eql(u8, group.name, "ac")) continue;
-                if (group.args.len > 0) mag = valueNumber(group.args[0]) orelse mag;
-                if (group.args.len > 1) phase = valueNumber(group.args[1]) orelse phase;
+                if (!std.mem.eql(u8, group.name(), "ac")) continue;
+                if (group.args().len > 0) mag = valueNumber(group.args()[0]) orelse mag;
+                if (group.args().len > 1) phase = valueNumber(group.args()[1]) orelse phase;
             },
             else => continue,
         }

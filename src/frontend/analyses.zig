@@ -56,7 +56,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, n_rows
         const args = c.args;
         const arg: usize = if (c.kind == .four) 1 else 0;
         if (arg < args.len) switch (args[arg]) {
-            .group => |g| if (g.args.len > @as(usize, if (appended) 1 else 2) or (appended and g.args.len == 0))
+            .group => |g| if (g.args().len > @as(usize, if (appended) 1 else 2) or (appended and g.args().len == 0))
                 return cardError(c.line, error.UnsupportedAnalysisOutput),
             else => {},
         };
@@ -603,8 +603,8 @@ fn outputNeg(node: u32) !u32 {
 fn currentProbeName(args: []const Value, i: usize) ?[]const u8 {
     if (i >= args.len) return null;
     return switch (args[i]) {
-        .group => |g| if (std.ascii.eqlIgnoreCase(g.name, "i") and g.args.len == 1)
-            switch (g.args[0]) {
+        .group => |g| if (std.ascii.eqlIgnoreCase(g.name(), "i") and g.args().len == 1)
+            switch (g.args()[0]) {
                 .name => |n| n,
                 else => null,
             }
@@ -1239,8 +1239,8 @@ fn outputLabel(arena: std.mem.Allocator, value: Value) ![]const u8 {
     };
     var out: std.Io.Writer.Allocating = .init(arena);
     const w = &out.writer;
-    w.print("{s}(", .{g.name}) catch return error.OutOfMemory;
-    for (g.args, 0..) |v, k| {
+    w.print("{s}(", .{g.name()}) catch return error.OutOfMemory;
+    for (g.args(), 0..) |v, k| {
         if (k > 0) w.writeByte(',') catch return error.OutOfMemory;
         switch (v) {
             .name => |n| w.writeAll(n) catch return error.OutOfMemory,
@@ -1991,7 +1991,7 @@ test queries {
 test outputLabel {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("v(a,2)", try outputLabel(arena.allocator(), .{ .group = .{ .name = "v", .args = argv(.{ "a", 2 }) } }));
+    try testing.expectEqualStrings("v(a,2)", try outputLabel(arena.allocator(), .{ .group = .{ .items = argv(.{ "v", "a", 2 }) } }));
     try testing.expectError(error.InvalidAnalysisArguments, outputLabel(arena.allocator(), .{ .name = "v" }));
 }
 
@@ -2003,7 +2003,7 @@ test cardIs {
 }
 
 test tranNoiseSamples {
-    const out: Value = .{ .group = .{ .name = "v", .args = argv(.{"o"}) } };
+    const out: Value = .{ .group = .{ .items = argv(.{ "v", "o" }) } };
     try testing.expectEqual(@as(u32, 4), tranNoiseSamples(&[_]Value{ out, .{ .name = "seed" }, .{ .num = 3 }, .{ .name = "samples" }, .{ .num = 4 } }));
     try testing.expectEqual(@as(u32, 1), tranNoiseSamples(&[_]Value{ out, .{ .name = "samples" }, .{ .num = -4 } }));
     try testing.expectEqual(@as(u32, 1), tranNoiseSamples(&[_]Value{out}));
