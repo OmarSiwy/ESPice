@@ -168,3 +168,137 @@ test "C short buffers and invalid frontiers do not modify IDs, events or query s
     }
     // Destroy also exercises cancellation/join through the opaque handle.
 }
+
+test "C entry points reject NULL handles and malformed options" {
+    c.espice_default_options(null);
+    var n: usize = 0;
+    var u: u32 = 0;
+    const all: c.espice_scope = .{ .kind = c.ESPICE_ALL, .id = 0 };
+    const empty: c.espice_bytes = .{ .data = null, .len = 0 };
+    const invalid: u32 = c.ESPICE_INVALID_ARGUMENT;
+    const t = std.testing;
+    try t.expectEqual(invalid, c.espice_query_count(null, &u));
+    try t.expectEqual(invalid, c.espice_get_query_info(null, 0, null));
+    try t.expectEqual(invalid, c.espice_ready_queries(null, all, null, 0, &n));
+    try t.expectEqual(invalid, c.espice_advance(null, 0, null));
+    try t.expectEqual(invalid, c.espice_advance_ready(null, null, 0, 1, null, 0, &n));
+    try t.expectEqual(invalid, c.espice_run_all(null));
+    try t.expectEqual(invalid, c.espice_append_directives(null, empty, null, 0, &n));
+    try t.expectEqual(invalid, c.espice_get_result_info(null, 0, null));
+    try t.expectEqual(invalid, c.espice_copy_result(null, 0, null, 0, &n));
+    try t.expectEqual(invalid, c.espice_result_view(null, 0, null, null));
+    try t.expectEqual(invalid, c.espice_copy_result_name(null, 0, 0, null, 0, &n));
+    try t.expectEqual(invalid, c.espice_print(null, null, null, 0, &n));
+    try t.expectEqual(invalid, c.espice_error_message(null, null, 0, &n));
+    try t.expectEqual(invalid, c.espice_query_error_message(null, 0, null, 0, &n));
+
+    const deck = "C options\nV1 in 0 1\nR1 in 0 1k\n.op\n.end\n";
+    var good: c.espice_create_options = undefined;
+    c.espice_default_options(&good);
+    good.source_kind = c.ESPICE_BYTES;
+    good.source = .{ .data = deck.ptr, .len = deck.len };
+    var handle: ?*c.espice_problem = null;
+    var diagnostic: [4]u8 = undefined;
+    try t.expectEqual(invalid, c.espice_create(&good, null, &diagnostic, diagnostic.len));
+    try t.expectEqual(invalid, c.espice_create(null, &handle, &diagnostic, diagnostic.len));
+    try t.expect(handle == null);
+    // Truncated, still NUL-terminated.
+    try t.expectEqualStrings("Inv", std.mem.sliceTo(&diagnostic, 0));
+    try t.expectEqual(invalid, c.espice_create(&good, &handle, null, 1));
+    try t.expect(handle == null);
+    for (0..8) |case| {
+        var bad = good;
+        switch (case) {
+            0 => bad.source_kind = 2,
+            1 => bad.dialect = 3,
+            2 => bad.output_format = 9,
+            3 => bad.explicit_gpu = 2,
+            4 => bad.max_parallel = 0,
+            5 => bad.source.len = 0,
+            6 => bad.origin = .{ .data = null, .len = 1 },
+            7 => bad.output_path = .{ .data = null, .len = 1 },
+            else => unreachable,
+        }
+        try t.expectEqual(invalid, c.espice_create(&bad, &handle, null, 0));
+        try t.expect(handle == null);
+    }
+    // A newer caller's larger struct is accepted; only our prefix is read.
+    good.struct_size += 16;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&good, &handle, null, 0));
+    c.espice_destroy(handle);
+}
+
+test "C calls on a live handle validate every pointer, scope and preview" {
+    const t = std.testing;
+    const deck = "C arguments\nV1 in 0 1\nR1 in 0 1k\n.op\n.end\n";
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&options, &handle, null, 0));
+    defer c.espice_destroy(handle);
+    const invalid: u32 = c.ESPICE_INVALID_ARGUMENT;
+    var n: usize = 0;
+    var message: [64]u8 = undefined;
+
+    try t.expectEqual(invalid, c.espice_query_count(handle, null));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_error_message(handle, &message, message.len, &n));
+    try t.expectEqualStrings("InvalidArgument", std.mem.sliceTo(&message, 0));
+    var result: c.espice_result_info = undefined;
+    try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), c.espice_get_result_info(handle, 0, &result));
+
+    var ids = [_]u32{c.ESPICE_NO_QUERY};
+    try t.expectEqual(invalid, c.espice_ready_queries(handle, .{ .kind = 3, .id = 0 }, &ids, ids.len, &n));
+    try t.expectEqual(invalid, c.espice_ready_queries(handle, .{ .kind = c.ESPICE_COMPONENT, .id = 99 }, &ids, ids.len, &n));
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_QUERY), c.espice_ready_queries(handle, .{ .kind = c.ESPICE_QUERY, .id = c.ESPICE_NO_QUERY }, &ids, ids.len, &n));
+    try t.expectEqual(@as(u32, c.ESPICE_BUFFER_TOO_SMALL), c.espice_ready_queries(handle, .{ .kind = c.ESPICE_ALL, .id = 0 }, null, 0, &n));
+    try t.expectEqual(@as(usize, 1), n);
+    try t.expectEqual(c.ESPICE_NO_QUERY, ids[0]);
+
+    var event: c.espice_advance_event = undefined;
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_QUERY), c.espice_advance(handle, c.ESPICE_NO_QUERY, &event));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_advance_ready(handle, null, 0, 1, null, 0, &n));
+    try t.expectEqual(@as(usize, 0), n);
+    try t.expectEqual(invalid, c.espice_advance_ready(handle, null, 1, 1, &event, 1, &n));
+    const zero = [_]u32{0};
+    try t.expectEqual(invalid, c.espice_advance_ready(handle, &zero, 1, 65536, &event, 1, &n));
+
+    try t.expectEqual(invalid, c.espice_append_directives(handle, .{ .data = null, .len = 3 }, null, 0, &n));
+    // No analysis card: a numerical-layer failure, named in the message.
+    try t.expectEqual(@as(u32, c.ESPICE_FAILED), c.espice_append_directives(handle, .{ .data = null, .len = 0 }, null, 0, &n));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_error_message(handle, &message, message.len, &n));
+    try t.expectEqualStrings("InvalidAnalysisArguments", std.mem.sliceTo(&message, 0));
+
+    var print = std.mem.zeroes(c.espice_print_options);
+    var text: [4096]u8 = undefined;
+    print.ascii = 2;
+    try t.expectEqual(invalid, c.espice_print(handle, &print, &text, text.len, &n));
+    print.ascii = 1;
+    print.preview = 3;
+    try t.expectEqual(invalid, c.espice_print(handle, &print, &text, text.len, &n));
+    print.preview = c.ESPICE_PREVIEW_READY;
+    print.ready_count = 1;
+    try t.expectEqual(invalid, c.espice_print(handle, &print, &text, text.len, &n));
+    print.preview = c.ESPICE_PREVIEW_ADVANCE;
+    print.query = c.ESPICE_NO_QUERY;
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_QUERY), c.espice_print(handle, &print, &text, text.len, &n));
+    print.preview = c.ESPICE_PREVIEW_RUN_ALL;
+    print.scope.kind = 3;
+    try t.expectEqual(invalid, c.espice_print(handle, &print, &text, text.len, &n));
+    try t.expectEqual(invalid, c.espice_print(handle, null, null, 1, &n));
+    try t.expectEqual(invalid, c.espice_print(handle, null, &text, text.len, null));
+
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(handle));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_get_result_info(handle, 0, &result));
+    try t.expectEqual(invalid, c.espice_copy_result_name(handle, 0, result.variable_count, &message, message.len, &n));
+    try t.expectEqual(invalid, c.espice_copy_result(handle, 0, null, 1, &n));
+    var nul = [_]u8{'x'};
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_error_message(handle, 0, &nul, nul.len, &n));
+    try t.expectEqual(@as(usize, 1), n);
+    try t.expectEqual(@as(u8, 0), nul[0]);
+    const sentinel = [_]f64{0};
+    var view: [*c]const f64 = &sentinel;
+    try t.expectEqual(invalid, c.espice_result_view(handle, 0, &view, null));
+    try t.expect(view == null);
+}

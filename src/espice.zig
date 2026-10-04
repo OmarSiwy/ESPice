@@ -6,31 +6,51 @@ const frontend = @import("frontend");
 const analysis = @import("analysis");
 const output = @import("output");
 const core = @import("core");
+/// Query request types (`core.query`): what `append_queries` takes.
 pub const requests = core.query;
+/// Dense DAG index, `0..query_count()`. Appends never renumber an ID.
 pub const QueryId = requests.QueryId;
+/// One analysis request; `append_queries` copies its slices.
 pub const Query = requests.Query;
+/// A netlist path, or in-memory text with the origin it is named by.
 pub const Source = frontend.Source;
+/// The netlist syntax family, which decides SPICE letter and LEVEL meaning.
 pub const Dialect = frontend.Dialect;
+/// Maps a CLI dialect name (`ngspice`, `hspice`, `spectre`); null if unknown.
 pub const parseDialect = frontend.parseDialect;
 /// Requested compute backend; `Problem.init` rejects one the hardware lacks.
 pub const Request = analysis.ExecutionConfig.Backend;
+/// A query's lifecycle state; `terminal()` says whether it can still run.
 pub const Status = analysis.session.Status;
+/// Which part of the DAG a call looks at: all, one query's chain, or one component.
 pub const Scope = analysis.session.Scope;
+/// Concurrency and quantum for one advancing call.
 pub const Limits = analysis.session.Limits;
+/// Which call's next frontier `print` marks.
 pub const Preview = analysis.session.Preview;
+/// `print` settings; a null `limits` takes the Problem's.
 pub const PrintOptions = analysis.session.PrintOptions;
+/// A query's kind, status, prerequisite, component and progress.
 pub const QueryInfo = analysis.session.QueryInfo;
+/// What one quantum did: which query ran, where it and its target stand.
 pub const Advance = analysis.session.Advance;
+/// A published plot. Its slices borrow Problem storage until `deinit`.
 pub const Result = output.Result;
+/// Output file format; some (touchstone, citi) hold only S-parameter queries.
 pub const Format = output.Format;
+/// Output format and path. A null path keeps results in memory only.
 pub const Selection = output.Selection;
+/// Maps a CLI format name (`binary`, `csv`, ...); null if unknown.
 pub const parseFormat = output.parseFormat;
 
 /// Everything `Problem.init` needs. Its slices are copied during init.
 pub const Options = struct {
     source: Source,
     dialect: Dialect = .ngspice,
+    /// Where results go. `.save` and `.stim` files land in its path's directory.
     output: Selection = .{},
+    /// Device backend and thread counts. `final_plan` lets a lone leading
+    /// transient or AC sweep stream to the output instead of being kept.
     backend: analysis.ExecutionConfig = .{},
     /// Queries `run_all` advances concurrently. Zero is `error.InvalidConcurrency`.
     max_parallel: u16 = 1,
@@ -195,6 +215,7 @@ pub const Problem = struct {
         return self.prepared.deck.title;
     }
 
+    /// Device instances in the flattened circuit, subcircuits expanded.
     pub fn device_count(self: *const Problem) u32 {
         return self.prepared.deck.n_devices;
     }
@@ -215,6 +236,8 @@ pub const Problem = struct {
         return self.session.count();
     }
 
+    /// A snapshot of one query's state. `error.InvalidQuery` for an ID
+    /// outside `0..query_count()`.
     pub fn query_info(self: *const Problem, id: QueryId) !QueryInfo {
         return self.session.info(id);
     }
@@ -242,7 +265,8 @@ pub const Problem = struct {
 
     /// `append_queries` for SPICE analysis directives (`.ac dec 10 1 1meg`),
     /// resolved against the prepared circuit. A device card is
-    /// `error.UnsupportedDirectiveMutation`.
+    /// `error.UnsupportedDirectiveMutation`; text with no analysis card is
+    /// `error.InvalidAnalysisArguments`.
     pub fn append_directives(self: *Problem, text: []const u8, ids: []QueryId) !usize {
         var scratch = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch.deinit();
@@ -375,14 +399,14 @@ pub const Problem = struct {
 
     /// Under a final plan (the CLI), a transient or AC sweep that publishes
     /// first and that nothing reads afterwards (no `.meas` over it, no
-    /// `.save`, no optimization) writes its rows straight to a binary raw
+    /// `.save` or `.stim`, no optimization) writes its rows straight to a binary raw
     /// output, or drops them without one, instead of keeping them all in
     /// memory. Its Result then has empty `data`. Plotname and columns are the
     /// ones `tran.run` and `ac.run` publish; `endStream` checks the row count.
     fn openStream(self: *Problem) !void {
         const deck = &self.prepared.deck;
         if (!self.session.config.final_plan or self.next_output != 0 or self.streaming != null) return;
-        if (self.save_path != null or self.prepared.tuner != null or deck.probe_labels.len != deck.probes.len) return;
+        if (self.save_path != null or deck.stims.len != 0 or self.prepared.tuner != null or deck.probe_labels.len != deck.probes.len) return;
         if (self.session.outputs.items.len == 0) return;
         const id = self.session.outputs.items[0];
         if ((try self.session.info(id)).status != .pending) return;
@@ -506,7 +530,8 @@ pub const Problem = struct {
     }
 
     /// Copies a result's data into `buffer` and returns its length. A buffer
-    /// shorter than that receives nothing.
+    /// shorter than that receives nothing; a longer one keeps its tail.
+    /// `error.ResultUnavailable` until the query completes.
     pub fn copy_result(self: *const Problem, id: QueryId, buffer: []f64) !usize {
         const data = (try self.result(id)).data;
         if (buffer.len >= data.len) @memcpy(buffer[0..data.len], data);
