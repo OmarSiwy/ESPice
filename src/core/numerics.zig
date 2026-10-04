@@ -7,6 +7,7 @@ const std = @import("std");
 pub const Execution = struct {
     /// Null runs everything on the calling thread.
     io: ?std.Io = null,
+    /// Workers a solver may fan out to through `io`; 1 is serial.
     threads: u8 = 1,
     /// Workers the sparse refactor may use when its cost model admits the
     /// multicore kernel (`direct.Solver`); 1 keeps it serial.
@@ -62,7 +63,7 @@ const vec_len = std.simd.suggestVectorLength(f64) orelse 1;
 var opaque_zero: f64 = 0;
 
 /// Zeroes `buf` with ordinary (temporal) stores, so a plane that is read
-/// right after stays in cache.
+/// right after stays in cache. Above 64 entries this is a `memset`.
 pub fn zeroSimd(buf: []f64) void {
     if (buf.len > inline_len) return @memset(buf, 0);
     const z0: f64 = @as(*const volatile f64, &opaque_zero).*;
@@ -72,6 +73,8 @@ pub fn zeroSimd(buf: []f64) void {
 }
 
 /// Copies the common prefix of `src` into `dst`; exact aliasing is a no-op.
+/// Any other overlap is illegal: above 64 entries this is a `@memcpy`,
+/// which asserts the buffers are disjoint.
 pub fn copySimd(dst: []f64, src: []const f64) void {
     const n = @min(dst.len, src.len);
     if (dst.ptr == src.ptr) return;
@@ -81,25 +84,29 @@ pub fn copySimd(dst: []f64, src: []const f64) void {
     while (i < n) : (i += 1) dst[i] = src[i];
 }
 
-/// dst[i] += a * src[i] over dst.len; src may alias dst.
+/// dst[i] += a * src[i] over dst.len. `src` needs at least dst.len
+/// entries and may be `dst` itself; a shifted overlap is unspecified,
+/// since the vector path loads a block before it stores it.
 pub fn axpy(dst: []f64, a: f64, src: []const f64) void {
     var it = z.fromSlice(f64, dst).zip(z.fromSlice(f64, src[0..dst.len])).map(Axpy{ .a = a });
     _ = it.writeInto(dst);
 }
 
-/// dst[i] = a * src[i] over dst.len; src may alias dst.
+/// dst[i] = a * src[i] over dst.len. Aliasing and length as `axpy`.
 pub fn scale(dst: []f64, a: f64, src: []const f64) void {
     var it = z.fromSlice(f64, src[0..dst.len]).map(Scale{ .a = a });
     _ = it.writeInto(dst);
 }
 
-/// dst[i] = a[i] - b[i] over dst.len; either input may alias dst.
+/// dst[i] = a[i] - b[i] over dst.len. Each input needs dst.len entries
+/// and may be `dst` itself; a shifted overlap is unspecified.
 pub fn sub(dst: []f64, a: []const f64, b: []const f64) void {
     var it = z.fromSlice(f64, a[0..dst.len]).zip(z.fromSlice(f64, b[0..dst.len])).map(diff);
     _ = it.writeInto(dst);
 }
 
-/// Σ a[i]·b[i] over a.len.
+/// Σ a[i]·b[i] over a.len; `b` needs at least a.len entries. Reassociated:
+/// fixed per target, but not the rounding of an ordered loop.
 pub fn dot(a: []const f64, b: []const f64) f64 {
     var it = z.fromSlice(f64, a).zip(z.fromSlice(f64, b[0..a.len])).map(mul);
     return it.foldAssoc(@as(f64, 0), add);
@@ -168,6 +175,7 @@ test "vector helpers match their per-element formulas" {
 pub const BbdBlock = struct {
     /// First row; the block owns rows `[start, start + size)`.
     start: u32,
+    /// Rows.
     size: u32,
 };
 
@@ -186,6 +194,8 @@ pub const Complex = struct {
 
     pub const zero = Complex{ .re = 0, .im = 0 };
 
+    /// |z| through |z|², so it overflows once |re| or |im| passes ~1e154
+    /// (`std.math.hypot` does not, at a price).
     pub inline fn mag(self: Complex) f64 {
         return @sqrt(self.magSq());
     }
@@ -242,19 +252,26 @@ pub const FreqSweep = struct {
     /// and `f_stop` are its ends. Unused by the other kinds.
     list: []const f64 = &.{},
 
-    /// Number of grid points, at least 1.
+    /// Number of grid points, at least 1 and at most maxInt(u32). A grid it
+    /// cannot step (a non-positive, NaN or infinite span) is one point.
     /// A geometric grid steps by a fixed ratio and stops at the last point
     /// under `f_stop`, as ngspice ACan does: `.ac dec 3 10 730` is 6 points
     /// ending at 464.16, not 7 ending at 730.
     pub fn count(self: FreqSweep) u32 {
         if (self.kind == .lin or self.kind == .poi) return @max(self.points, 1);
         if (!(self.f_start > 0) or !(self.f_stop >= self.f_start)) return 1;
-        const decades = @log(self.f_stop / self.f_start) / @log(self.base());
+        // The ratio keeps ngspice's rounding; a span whose ratio overflows
+        // (1e-300 to 1e300) falls back to the log difference.
+        const ratio = self.f_stop / self.f_start;
+        const ln_span = if (std.math.isFinite(ratio)) @log(ratio) else @log(self.f_stop) - @log(self.f_start);
+        const decades = ln_span / @log(self.base());
         const steps = decades * @as(f64, @floatFromInt(self.points));
         if (!std.math.isFinite(steps) or steps < 0) return 1;
         // +1e-9: an exact integral span (oct 2 10 1280 = 14 steps) must not
-        // lose its last point to a 1-ulp shortfall.
-        return @as(u32, @intFromFloat(@floor(steps + 1e-9))) + 1;
+        // lose its last point to a 1-ulp shortfall. The cap keeps an absurd
+        // span (`dec 4294967295 1e-300 1e300`) inside u32 instead of trapping.
+        const capped = @min(@floor(steps + 1e-9), @as(f64, std.math.maxInt(u32) - 1));
+        return @as(u32, @intFromFloat(capped)) + 1;
     }
 
     /// Frequency of point `k`, in Hz. `k` is not range-checked.
@@ -281,6 +298,7 @@ pub const FreqSweep = struct {
         }
     }
 
+    /// The grid as an iterator, `count()` points in the order of `at`.
     pub fn iter(self: FreqSweep) Iter {
         return .{ .sweep = self, .n = self.count() };
     }
@@ -291,6 +309,7 @@ pub const FreqSweep = struct {
         n: u32,
         k: u32 = 0,
 
+        /// Null once all `n` points are out.
         pub fn next(self: *Iter) ?f64 {
             if (self.k >= self.n) return null;
             defer self.k += 1;
@@ -306,6 +325,7 @@ pub const FreqSweep = struct {
 /// Convergence and timestep tolerances, one copy per query. Defaults follow
 /// the SPICE `.options` defaults.
 pub const Tolerances = struct {
+    /// Relative part of every convergence test, dimensionless.
     reltol: f64 = 1e-3,
     /// Amperes.
     abstol: f64 = 1e-12,
@@ -346,22 +366,6 @@ test "bulk buffers preserve bits, common prefixes and exact aliases" {
     try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0, 0 }, @as([]const u64, @ptrCast(&dst)));
 }
 
-test "bulk zeroing and copying cover full vectors and the tail without overwriting adjacent storage" {
-    // 11 takes the inline stores, 65 the `memset`/`memcpy` call.
-    for ([_]usize{ 11, 65 }) |len| {
-        var values: [67]f64 = @splat(-1);
-        zeroSimd(values[1..][0..len]);
-        try std.testing.expectEqual(@as(f64, -1), values[0]);
-        try std.testing.expectEqual(@as(f64, -1), values[len + 1]);
-        for (values[1..][0..len]) |value| try std.testing.expectEqual(@as(u64, 0), @as(u64, @bitCast(value)));
-        var src: [67]f64 = undefined;
-        for (&src, 0..) |*v, i| v.* = @floatFromInt(i);
-        copySimd(values[1..][0..len], &src);
-        try std.testing.expectEqualSlices(f64, src[0..len], values[1..][0..len]);
-        try std.testing.expectEqual(@as(f64, -1), values[len + 1]);
-    }
-}
-
 test "FreqSweep matches the ngspice grids the oracles were taken on" {
     const t = std.testing;
     const dec: FreqSweep = .{ .f_start = 10, .f_stop = 730, .points = 3, .kind = .dec };
@@ -388,4 +392,125 @@ test "FreqSweep matches the ngspice grids the oracles were taken on" {
     var single = point.iter();
     try t.expectApproxEqRel(@as(f64, 7), single.next().?, 1e-12);
     try t.expect(single.next() == null);
+}
+
+test "vector helpers match their stdpp pull-path oracle at every length and offset" {
+    // `.byRef()` hides random access, so the same pipeline runs the scalar
+    // pull path. Small integers make every reassociated sum exact, so the
+    // folds must agree with it bit for bit too. 256 entries is past 3x the
+    // widest f64 vector and past stdpp's 64-entry fold cutoff.
+    const t = std.testing;
+    var prng = std.Random.DefaultPrng.init(0x0c0e);
+    const r = prng.random();
+    var xs: [260]f64 = undefined;
+    var ys: [260]f64 = undefined;
+    for (&xs, &ys) |*u, *v| {
+        u.* = @floatFromInt(r.intRangeAtMost(i8, -8, 8));
+        v.* = @floatFromInt(r.intRangeAtMost(i8, -8, 8));
+    }
+    var want: [256]f64 = undefined;
+    var got: [256]f64 = undefined;
+    for (0..257) |len| for (0..4) |off| {
+        const x = xs[off..][0..len];
+        const y = ys[off..][0..len];
+
+        var pair = z.fromSlice(f64, x).zip(z.fromSlice(f64, y));
+        try t.expectEqual(pair.byRef().map(mul).foldAssoc(@as(f64, 0), add), dot(x, y));
+        var single = z.fromSlice(f64, x);
+        try t.expectEqual(single.byRef().foldAssoc(@as(f64, 0), add), sum(x));
+        single = z.fromSlice(f64, x);
+        try t.expectEqual(single.byRef().foldAssoc(@as(f64, 0), absMax), normInf(x));
+
+        @memcpy(want[0..len], y);
+        @memcpy(got[0..len], y);
+        var acc = z.fromSlice(f64, want[0..len]).zip(z.fromSlice(f64, x));
+        _ = acc.byRef().map(Axpy{ .a = 3 }).writeInto(want[0..len]);
+        axpy(got[0..len], 3, x);
+        try t.expectEqualSlices(f64, want[0..len], got[0..len]);
+
+        single = z.fromSlice(f64, x);
+        _ = single.byRef().map(Scale{ .a = -2 }).writeInto(want[0..len]);
+        scale(got[0..len], -2, x);
+        try t.expectEqualSlices(f64, want[0..len], got[0..len]);
+
+        pair = z.fromSlice(f64, x).zip(z.fromSlice(f64, y));
+        _ = pair.byRef().map(diff).writeInto(want[0..len]);
+        sub(got[0..len], x, y);
+        try t.expectEqualSlices(f64, want[0..len], got[0..len]);
+    };
+}
+
+test "vector helpers accept dst itself as their source" {
+    const t = std.testing;
+    var buf: [3 * vec_len + 1]f64 = undefined;
+    for (&buf, 0..) |*v, i| v.* = @floatFromInt(i);
+    axpy(&buf, 2, &buf);
+    for (buf, 0..) |v, i| try t.expectEqual(@as(f64, @floatFromInt(3 * i)), v);
+    scale(&buf, 0.5, &buf);
+    sub(&buf, &buf, &buf);
+    for (buf) |v| try t.expectEqual(@as(f64, 0), v);
+}
+
+test "normInf of signed zeros and infinities, and of nothing" {
+    const t = std.testing;
+    const inf = std.math.inf(f64);
+    try t.expectEqual(@as(f64, 0), normInf(&.{}));
+    try t.expectEqual(@as(u64, 0), @as(u64, @bitCast(normInf(&.{ -0.0, -0.0 }))));
+    var buf: [2 * vec_len + 3]f64 = @splat(1);
+    buf[buf.len - 1] = -inf;
+    try t.expectEqual(inf, normInf(&buf));
+    try t.expectEqual(@as(f64, 0), dot(&.{}, &.{}));
+    try t.expectEqual(@as(f64, 0), sum(&.{}));
+}
+
+test "bulk zeroing and copying at every length up to past the inline cutoff" {
+    const t = std.testing;
+    var src: [inline_len + 4]f64 = undefined;
+    for (&src, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    for (0..inline_len + 3) |len| {
+        var buf: [inline_len + 4]f64 = @splat(-1);
+        copySimd(buf[1..][0..len], src[0..len]);
+        try t.expectEqualSlices(f64, src[0..len], buf[1..][0..len]);
+        try t.expectEqual(@as(f64, -1), buf[0]);
+        try t.expectEqual(@as(f64, -1), buf[len + 1]);
+        zeroSimd(buf[1..][0..len]);
+        for (buf[1..][0..len]) |v| try t.expectEqual(@as(u64, 0), @as(u64, @bitCast(v)));
+        try t.expectEqual(@as(f64, -1), buf[0]);
+        try t.expectEqual(@as(f64, -1), buf[len + 1]);
+    }
+}
+
+test "FreqSweep is one point on a span it cannot step, and caps an absurd one" {
+    const t = std.testing;
+    const nan = std.math.nan(f64);
+    const inf = std.math.inf(f64);
+    for ([_][2]f64{ .{ 0, 10 }, .{ -1, 10 }, .{ 10, 1 }, .{ nan, 10 }, .{ 10, nan }, .{ 10, inf } }) |span| {
+        try t.expectEqual(@as(u32, 1), (FreqSweep{ .f_start = span[0], .f_stop = span[1] }).count());
+        try t.expectEqual(@as(u32, 1), (FreqSweep{ .f_start = span[0], .f_stop = span[1], .kind = .oct }).count());
+    }
+    // No points per decade is one point, not a division by zero.
+    try t.expectEqual(@as(u32, 1), (FreqSweep{ .f_start = 1, .f_stop = 1e3, .points = 0 }).count());
+    try t.expectEqual(@as(f64, 1), (FreqSweep{ .f_start = 1, .f_stop = 1e3, .points = 0 }).at(0));
+    try t.expectEqual(@as(u32, 1), (FreqSweep{ .f_start = 1, .f_stop = 1e3, .points = 0, .kind = .lin }).count());
+    const huge: FreqSweep = .{ .f_start = 1e-300, .f_stop = 1e300, .points = std.math.maxInt(u32) };
+    try t.expectEqual(@as(u32, std.math.maxInt(u32)), huge.count());
+    // A descending linear grid walks down to its stop.
+    const down: FreqSweep = .{ .f_start = 100, .f_stop = 0, .points = 5, .kind = .lin };
+    try t.expectEqual(@as(f64, 75), down.at(1));
+    try t.expectEqual(@as(f64, 0), down.at(4));
+}
+
+test "FreqSweep.fill writes the poi list and its angular frequencies" {
+    const t = std.testing;
+    const list = [_]f64{ 1, 20, 300 };
+    const poi: FreqSweep = .{ .f_start = 1, .f_stop = 300, .points = 3, .kind = .poi, .list = &list };
+    var hz: [3]f64 = undefined;
+    var rad: [3]f64 = undefined;
+    poi.fill(&hz, &rad);
+    try t.expectEqualSlices(f64, &list, &hz);
+    for (list, rad) |f, w| try t.expectEqual(2 * std.math.pi * f, w);
+    // Without a frequency buffer only the omegas are written.
+    var rad_only: [3]f64 = undefined;
+    poi.fill(null, &rad_only);
+    try t.expectEqualSlices(f64, &rad, &rad_only);
 }

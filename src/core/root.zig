@@ -1,9 +1,14 @@
 //! Shared data every layer speaks: numerics, query requests, the deck,
 //! results and the name pool. Imports nothing but std.
 const std = @import("std");
+/// Vector kernels (stdpp), complex numbers, the frequency grid and the
+/// solver tolerances.
 pub const numerics = @import("numerics.zig");
+/// One options struct per analysis, and the `Query` union over them.
 pub const query = @import("query.zig");
+/// The HSPICE `.model OPT` Levenberg-Marquardt optimizer, driven by its caller.
 pub const lm = @import("lm.zig");
+/// The HSPICE `.model OPT` bisection and pass/fail searches.
 pub const bisect = @import("bisect.zig");
 /// Dense real eigenvalues (balance, Hessenberg, Francis QR).
 pub const eigen = @import("eigen.zig");
@@ -53,4 +58,6 @@ test {
     _ = lm;
     _ = bisect;
     _ = eigen;
+    _ = query;
+    _ = deck;
 }

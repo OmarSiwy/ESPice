@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 /// Dense id of an interned name, in first-seen order.
 pub const Name = enum(u32) {
     _,
+    /// The id as a row index into tables kept parallel to the pool.
     pub inline fn index(n: Name) u32 {
         return @backingInt(n);
     }
@@ -41,6 +42,7 @@ pub const InternPool = struct {
         }
     };
 
+    /// Frees the pool's storage; every `str` slice dies with it.
     pub fn deinit(p: *InternPool, gpa: Allocator) void {
         p.bytes.deinit(gpa);
         p.offs.deinit(gpa);
@@ -73,7 +75,8 @@ pub const InternPool = struct {
         return p.map.getKeyAdapted(s, Adapter{ .pool = p });
     }
 
-    /// Returns the bytes of `n`. Valid until the next `intern`.
+    /// Returns the bytes of `n`. Valid until the next `intern`. Asserts `n`
+    /// came from this pool.
     pub fn str(p: *const InternPool, n: Name) []const u8 {
         return p.bytes.items[p.offs.items[n.index()]..p.offs.items[n.index() + 1]];
     }
@@ -95,4 +98,43 @@ test "names intern once, in first-seen order" {
     try std.testing.expectEqualStrings("n99", p.str(p.find("n99").?));
     try std.testing.expectEqual(a, p.find("x1.out").?);
     try std.testing.expectEqual(null, p.find("x1"));
+}
+
+test "the empty name interns like any other" {
+    const gpa = std.testing.allocator;
+    var p: InternPool = .{};
+    defer p.deinit(gpa);
+    try std.testing.expectEqual(null, p.find(""));
+    try p.reserve(gpa, 4);
+    const e = try p.intern(gpa, "");
+    const a = try p.intern(gpa, "a");
+    try std.testing.expectEqualStrings("", p.str(e));
+    try std.testing.expectEqualStrings("a", p.str(a));
+    try std.testing.expectEqual(e, try p.intern(gpa, ""));
+    try std.testing.expectEqual(e, p.find("").?);
+}
+
+test "a failed intern leaves the pool as it was" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(gpa: Allocator) !void {
+            var p: InternPool = .{};
+            defer p.deinit(gpa);
+            for (0..40) |i| {
+                var buf: [8]u8 = undefined;
+                const s = try std.fmt.bufPrint(&buf, "n{d}", .{i});
+                const names = p.map.count();
+                const bytes = p.bytes.items.len;
+                const id = p.intern(gpa, s) catch |err| {
+                    try std.testing.expectEqual(names, p.map.count());
+                    try std.testing.expectEqual(bytes, p.bytes.items.len);
+                    // The first intern may have laid down offs' sentinel.
+                    try std.testing.expect(p.offs.items.len == names + 1 or p.offs.items.len == 0);
+                    try std.testing.expectEqual(null, p.find(s));
+                    return err;
+                };
+                try std.testing.expectEqualStrings(s, p.str(id));
+                try std.testing.expectEqual(id, p.find(s).?);
+            }
+        }
+    }.run, .{});
 }

@@ -12,6 +12,7 @@ pub const QueryId = enum(u32) { _ };
 pub const invalid_query: QueryId = @fromBackingInt(@intCast(std.math.maxInt(u32)));
 /// Transient integration method.
 pub const Method = enum { backward_euler, trapezoidal, gear_2 };
+/// Re-exported so a query reads its sweep type from one place.
 pub const FreqSweep = @import("numerics.zig").FreqSweep;
 pub const SweepKind = @import("numerics.zig").SweepKind;
 
@@ -34,12 +35,14 @@ pub const Port = struct {
     /// single-ended port.
     balanced: ?Leg = null,
 
+    /// Node and branch row of one leg of a balanced port.
     pub const Leg = struct { node: u32, branch: u32 };
 
     /// `branch` of a port with no source branch, which `.net` drives with
     /// a current into `node`.
     pub const no_branch = std.math.maxInt(u32);
 
+    /// `sign` is +1 or -1; the default reads the port at the input frequency.
     pub const Band = struct { harmonic: i16 = 0, sign: i8 = 1 };
 };
 
@@ -58,11 +61,14 @@ pub const CardRef = struct {
     }
 };
 
+/// Small-signal sweep about the operating point (`.ac`).
 pub const Ac = struct {
     tol: Tolerances = .{},
     sweep: FreqSweep,
 };
 
+/// Small-signal noise at one output over a sweep (`.noise`, HSPICE
+/// `.acphasenoise`).
 pub const Noise = struct {
     tol: Tolerances = .{},
     out_node: u32,
@@ -103,6 +109,7 @@ pub const NoiseSample = struct {
     beta: f64 = 1,
 };
 
+/// S-parameters between ports over a sweep (`.sp`, HSPICE `.lin`, `.net`).
 pub const Sp = struct {
     tol: Tolerances = .{},
     sweep: FreqSweep,
@@ -139,6 +146,7 @@ pub const Sp = struct {
     };
 };
 
+/// Loop gain through the deck's 0 V probe source (`.stb`).
 pub const Stb = struct {
     tol: Tolerances = .{},
     sweep: FreqSweep,
@@ -214,6 +222,7 @@ pub const Dcinc = struct {
     tol: Tolerances = .{},
 };
 
+/// The DC operating point (`.op`), which most other analyses also run first.
 pub const Op = struct {
     tol: Tolerances = .{},
     warm_start: bool = false,
@@ -223,6 +232,8 @@ pub const Op = struct {
     tran_op: bool = false,
 };
 
+/// DC sweep of a source, a card parameter or the temperature (`.dc`), one
+/// or two levels deep.
 pub const Dc = struct {
     tol: Tolerances = .{},
     start: f64 = 0,
@@ -257,11 +268,13 @@ pub const Dc = struct {
         };
     };
 
+    /// True for a two-level sweep, whose outer level is `target2`.
     pub fn hasOuter(self: Dc) bool {
         return self.target2 != null;
     }
 };
 
+/// DC small-signal transfer function, input and output resistance (`.tf`).
 pub const Tf = struct {
     tol: Tolerances = .{},
     /// `v(a,b)` reference node for the output; GROUND is single-ended.
@@ -294,6 +307,7 @@ pub const Variations = struct {
     sigmas: []const f64 = &.{},
 };
 
+/// 1-sigma spread of a DC output from device mismatch (`.dcmatch`).
 pub const Dcmatch = struct {
     tol: Tolerances = .{},
     output_node: u32,
@@ -323,6 +337,7 @@ pub const Dcsens = struct {
     variations: Variations = .{},
 };
 
+/// Periodic steady state by shooting (`.pss`; autonomous with `osc_node`).
 pub const Pss = struct {
     tol: Tolerances = .{},
     /// Seconds.
@@ -351,6 +366,8 @@ pub const Pss = struct {
     osc_settle_periods: u16 = 30,
 };
 
+/// Periodic or quasi-periodic steady state by harmonic balance (`.hb`;
+/// autonomous `.hbosc` with `osc_node`).
 pub const Hb = struct {
     tol: Tolerances = .{},
     /// Fundamental, in Hz.
@@ -402,6 +419,7 @@ pub const Pac = struct {
     pss_max_newton_iter: u16 = 50,
 };
 
+/// Periodic noise about the shooting orbit (`.pnoise`, HSPICE `.ptdnoise`).
 pub const Pnoise = struct {
     tol: Tolerances = .{},
     out_node: u32,
@@ -539,6 +557,7 @@ pub const Qpss = struct {
     gmres_tol: f64 = 1e-3,
 };
 
+/// Transient analysis (`.tran`, HSPICE `.op <time>`).
 pub const Tran = struct {
     tol: Tolerances = .{},
     /// Seconds, like every time field below.
@@ -569,6 +588,8 @@ pub const Tran = struct {
     snapshot: bool = false,
 };
 
+/// Transient noise: a transient with sampled noise sources, or the noise
+/// covariance carried alongside it (`.trannoise`).
 pub const TranNoise = struct {
     tol: Tolerances = .{},
     /// Seconds, like every time field below.
@@ -598,6 +619,8 @@ pub const TranNoise = struct {
     t_break: ?f64 = null,
 };
 
+/// Envelope-following transient: carrier periods integrated in full, the
+/// envelope stepped across them (`.envelope`).
 pub const Envelope = struct {
     tol: Tolerances = .{},
     /// Carrier period (1 / f_carrier), in seconds.
@@ -668,6 +691,7 @@ pub const Temp = struct {
     dc_options: Dc = .{},
 };
 
+/// DC sensitivity of one output to every device parameter (`.sens`).
 pub const Sens = struct {
     tol: Tolerances = .{},
     output_node: u32,
@@ -678,6 +702,7 @@ pub const Sens = struct {
     cards: []const CardRef = &.{},
 };
 
+/// Poles and zeros of the linearized circuit (`.pz`).
 pub const Pz = struct {
     tol: Tolerances = .{},
     qr_max_iter: u32 = 1000,
@@ -695,9 +720,11 @@ pub const Pz = struct {
     /// The card's `pol`, `zer` or `pz`.
     want: Want = .poles,
 
+    /// Which roots the card asks for.
     pub const Want = enum(u2) { poles, zeros, both };
 };
 
+/// Fourier coefficients of one transient output (`.four`).
 pub const Four = struct {
     tol: Tolerances = .{},
     /// Hz.
@@ -715,6 +742,7 @@ pub const Four = struct {
     pub const max_harmonics = 64;
 };
 
+/// Small-signal distortion at one or two drive frequencies (`.disto`).
 pub const Disto = struct {
     tol: Tolerances = .{},
     sweep: FreqSweep,
@@ -868,3 +896,44 @@ pub const Query = union(Kind) {
     dcsens: Dcsens,
     hblin: Hblin,
 };
+
+test "CardRef.lookup keys on type and index together" {
+    const t = std.testing;
+    const r: DeviceType = @fromBackingInt(0);
+    const c: DeviceType = @fromBackingInt(1);
+    const cards = [_]CardRef{ .{ .type = r, .index = 0, .name = "r1" }, .{ .type = c, .index = 0, .name = "c1" } };
+    try t.expectEqualStrings("c1", CardRef.lookup(&cards, c, 0).?);
+    try t.expectEqualStrings("r1", CardRef.lookup(&cards, r, 0).?);
+    try t.expectEqual(null, CardRef.lookup(&cards, r, 1));
+    try t.expectEqual(null, CardRef.lookup(&.{}, r, 0));
+}
+
+test "the HB-orbit views carry the fields their solve reads" {
+    const t = std.testing;
+    const tones = [_]f64{1.1e9};
+    const harmonics = [_]u16{2};
+    const sweep: FreqSweep = .{ .f_start = 1, .f_stop = 10 };
+    const l: HbLptv = .{ .tol = .{ .reltol = 1e-4 }, .f0 = 1e9, .n_harmonics = 5, .out_node = 3, .sweep = sweep, .max_iter = 7, .hb_tol = 1e-6, .extra_tones = &tones, .extra_harmonics = &harmonics, .intmodmax = 4, .subharms = 2 };
+    const h = l.hb();
+    try t.expectEqual(@as(f64, 1e-4), h.tol.reltol);
+    try t.expectEqual(@as(f64, 1e9), h.f0);
+    try t.expectEqual(@as(u16, 5), h.n_harmonics);
+    try t.expectEqual(@as(u16, 7), h.max_iter);
+    try t.expectEqual(@as(f64, 1e-6), h.hb_tol);
+    try t.expectEqual(@as(usize, 1), h.extra_tones.len);
+    try t.expectEqual(@as(usize, 1), h.extra_harmonics.len);
+    try t.expectEqual(@as(u16, 4), h.intmodmax);
+    try t.expectEqual(@as(u16, 2), h.subharms);
+    try t.expectEqual(GROUND, h.osc_node);
+    const lin: Hblin = .{ .tol = .{ .reltol = 1e-5 }, .f0 = 2e9, .n_harmonics = 6, .n_sidebands = 3, .sweep = sweep, .max_iter = 9, .hb_tol = 1e-7, .ports = &.{} };
+    const lp = lin.lptv();
+    try t.expectEqual(@as(f64, 1e-5), lp.tol.reltol);
+    try t.expectEqual(@as(f64, 2e9), lp.f0);
+    try t.expectEqual(@as(u16, 6), lp.n_harmonics);
+    try t.expectEqual(@as(u16, 3), lp.n_sidebands);
+    try t.expectEqual(@as(u16, 9), lp.max_iter);
+    try t.expectEqual(@as(f64, 1e-7), lp.hb_tol);
+    const pn: PhaseNoise = .{ .f0 = 5e6, .osc_node = 4, .sweep = sweep, .n_harmonics = 3 };
+    try t.expectEqual(@as(u32, 4), pn.hb().osc_node);
+    try t.expectEqual(@as(u16, 3), pn.hb().n_harmonics);
+}
