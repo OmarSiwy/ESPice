@@ -659,7 +659,7 @@ const DividerTests = struct {
         try expectNominals(&ckt);
     }
 
-    test "temp_sweep: one row per temperature; the circuit's own temperature comes back, not t_nom" {
+    test "temp_sweep: one row per temperature; the circuit's own temperature comes back" {
         var lib = try Library.init(gpa);
         defer lib.deinit();
         var prepared = try build(&lib);
@@ -674,7 +674,7 @@ const DividerTests = struct {
         const ctx = try ctxFor(&ckt, x, arena.allocator());
 
         const temp_c = ckt.temp_c;
-        const r = try temp_sweep.run(&ctx, .{ .t_start = 0, .t_stop = 50, .t_step = 25, .t_nom = 99 });
+        const r = try temp_sweep.run(&ctx, .{ .t_start = 0, .t_stop = 50, .t_step = 25 });
         try t.expectEqual(@as(usize, 3), r.npoints);
         for ([_]f64{ 0, 7.5, 25, 7.5, 50, 7.5 }, r.data) |want, got| try t.expectApproxEqAbs(want, got, 1e-9);
         try t.expectEqual(temp_c, ckt.temp_c);

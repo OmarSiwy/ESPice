@@ -1,0 +1,14 @@
+// A 1 kOhm conductance whose only noise is 2*white_noise(1e-18): the 2 is the
+// LRM 4.6.4.6 per-use factor (contract PsdTerm.coeff), so the branch PSD is
+// 2^2 * 1e-18 = 4e-18 A^2/Hz.
+`include "disciplines.vams"
+module coeff_res(p, n);
+    inout p, n;
+    electrical p, n;
+
+    parameter real R = 1000.0 from (0:inf);
+
+    analog begin
+        I(p, n) <+ V(p, n) / R + 2.0 * white_noise(1.0e-18, "w");
+    end
+endmodule

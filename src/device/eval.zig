@@ -2026,12 +2026,15 @@ pub fn DeviceBatch(comptime D: type) type {
                     // not transported, so generators are independent here.
                     // Zero-power generators stay: their ordinal identifies
                     // them across PSS samples.
+                    // The density is coeff² times the shape (contract
+                    // PsdTerm.coeff); a (u, u) branch is u to ground.
                     const t = terms[k];
+                    const c2 = t.coeff * t.coeff;
                     try list.append(gpa, .{
                         .node_p = self.gath[id * n_u + gen.row],
-                        .node_n = self.gath[id * n_u + gen.col],
-                        .white = @abs(t.white),
-                        .flicker = @abs(t.flicker),
+                        .node_n = if (gen.row == gen.col) GROUND else self.gath[id * n_u + gen.col],
+                        .white = c2 * @abs(t.white),
+                        .flicker = c2 * @abs(t.flicker),
                         .ef = t.ef,
                     });
                 }

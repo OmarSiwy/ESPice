@@ -357,10 +357,15 @@ pub fn build(b: *std.Build) void {
     error_tests_mod.addObject(error_object);
 
     for ([_]struct { []const u8, []const u8, []const *std.Build.Step.Run }{
-        .{ "test-espice", "Run Problem facade, analysis contract and C ABI tests", &.{
-            t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true),
-            run_c_api_tests,
-        } },
+        .{
+            "test-espice", "Run Problem facade, analysis contract, C ABI and CLI tests",
+            &.{
+                t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true),
+                run_c_api_tests,
+                // The CLI's own tests; the exe's module already carries the device objects.
+                t.run(exe.root_module, &.{}, false),
+            },
+        },
         .{
             "test-frontend", "Run netlist, builder and prepared-circuit tests",
             &.{

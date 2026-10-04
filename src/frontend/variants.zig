@@ -20,7 +20,7 @@ const ParamRef = device.abi.ParamRef;
 pub const Plan = struct {
     variants: core.Variants = .{},
     fanout: analyses.Fanout = .{},
-    runs: []const prepare.Prepared = &.{},
+    runs: []prepare.Prepared = &.{},
 };
 
 /// What one point sets, before it becomes a row.

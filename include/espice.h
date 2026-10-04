@@ -18,7 +18,9 @@ extern "C" {
 
 typedef struct espice_problem espice_problem;
 typedef uint32_t espice_status;
-/* espice_status */
+/* espice_status. INVALID_ARGUMENT also covers malformed analysis text:
+ * no analysis card, bad query options, or an unsupported directive edit
+ * (espice_error_message names which). FAILED is a numerical or I/O failure. */
 enum {
     ESPICE_OK = 0, ESPICE_INVALID_ARGUMENT = 1, ESPICE_BUFFER_TOO_SMALL = 2,
     ESPICE_OUT_OF_MEMORY = 3, ESPICE_INVALID_QUERY = 4,

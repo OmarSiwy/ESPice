@@ -18,7 +18,8 @@ pub const Source = frontend.Source;
 pub const Dialect = frontend.Dialect;
 /// Maps a CLI dialect name (`ngspice`, `hspice`, `spectre`); null if unknown.
 pub const parseDialect = frontend.parseDialect;
-/// Requested compute backend; `Problem.init` rejects one the hardware lacks.
+/// Requested compute backend; `Problem.init` rejects one the build lacks; a
+/// query run with an explicit cuda/hip fails when no GPU is usable.
 pub const Request = analysis.ExecutionConfig.Backend;
 /// A query's lifecycle state; `terminal()` says whether it can still run.
 pub const Status = analysis.session.Status;
@@ -114,7 +115,7 @@ pub const Problem = struct {
     /// Parses and prepares `options.source`, then queues the deck's analyses
     /// (a lone `.op` when the deck names none). Nothing runs yet.
     ///
-    /// Fails on a netlist error, a backend the hardware lacks, zero
+    /// Fails on a netlist error, a backend the build lacks, zero
     /// `max_parallel`, or a query the output format cannot hold. The caller
     /// frees the result with `deinit`.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Problem {
@@ -184,8 +185,7 @@ pub const Problem = struct {
             run.* = .{ .session = analysis.session.Session.init(self.workerAllocator(), io, &prep.circuit, &prep.deck, execution) };
             run.session.last_template_reader = true;
             errdefer run.session.deinit();
-            for (prep.deck.queries) |query|
-                try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &prep.circuit, &prep.deck, query), prep.deck.title, prep.deck.probe_labels);
+            try self.checkOutput(prep, prep.deck.queries);
             _ = try run.session.append(prep.deck.queries, try scratch.alloc(QueryId, prep.deck.queries.len));
         }
         timingLap(io, &lap, "query graph and output setup");
@@ -257,10 +257,17 @@ pub const Problem = struct {
     /// unchanged. An existing identical query returns its old ID.
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
-        const deck = &self.prepared.deck;
-        for (queries) |query|
-            try output.validateQuery(self.delivery.selection.format, try analysis.schemaOf(self.allocator, &self.prepared.circuit, deck, query), deck.title, deck.probe_labels);
+        try self.checkOutput(&self.prepared, queries);
         return self.session.append(queries, ids);
+    }
+
+    /// Refuses, before anything runs, the first of `queries` whose result
+    /// the output format cannot hold over `prep`'s circuit and deck.
+    fn checkOutput(self: *const Problem, prep: *const frontend.Prepared, queries: []const Query) !void {
+        for (queries) |query| {
+            const schema = try analysis.schemaOf(self.allocator, &prep.circuit, &prep.deck, query);
+            try output.validateQuery(self.delivery.selection.format, schema, prep.deck.title, prep.deck.probe_labels);
+        }
     }
 
     /// `append_queries` for SPICE analysis directives (`.ac dec 10 1 1meg`),

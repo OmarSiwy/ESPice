@@ -19,8 +19,9 @@ pub const Config = struct {
     /// The `--backend` choices: `auto`, `cpu`, `cuda`, `hip`.
     pub const Backend = gpu.Request;
     backend: gpu.Request = .cpu,
-    /// The user named the GPU: bypass the work gate, and fail rather than fall
-    /// back when the machine cannot run it.
+    /// The user named the GPU: bypass the work gate, and under `auto` fail
+    /// rather than fall back when the machine cannot run it. `cuda` and `hip`
+    /// imply it and never fall back (`gpu.fallsBack`).
     gpu_explicit: bool = false,
     solver_threads: u8 = 1,
     /// Device-stamp lanes; above 1 each query builds a ParEval.
@@ -33,12 +34,14 @@ pub const Config = struct {
     final_plan: bool = false,
 };
 
-/// Fails with `error.GpuBackendUnavailable` for a backend this binary cannot
-/// serve (printing what it detected) and `error.InvalidThreadCount` for a
-/// zero thread count.
+/// Fails with `error.GpuBackendUnavailable` for a backend this binary has no
+/// kernels for (printing the GPU hardware the probe detected) and
+/// `error.InvalidThreadCount` for a zero thread count. A machine without the
+/// GPU fails later, when the first query brings up the driver.
 pub fn validateBackend(config: Config) !void {
     if (!gpu.requestSupported(config.backend)) {
-        std.debug.print("Error: GPU backend {s} requested; detected artifacts: {s}\n", .{ @tagName(config.backend), gpu.detectedName() });
+        const name = @tagName(config.backend);
+        std.debug.print("Error: --backend {s}: this build has no {s} kernels; detected GPU hardware: {s}\n", .{ name, name, gpu.detectedHardware() });
         return error.GpuBackendUnavailable;
     }
     if (config.solver_threads == 0 or config.device_threads == 0) return error.InvalidThreadCount;
@@ -323,8 +326,8 @@ pub const Executor = struct {
         if (self.config.backend == .cpu) return null;
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
         const context = gpu.GpuContext.init(self.allocator, &self.circuit, explicit, self.config.device_threads, expectedEvals(self.job)) catch |err| {
-            if (explicit and gpu.declineKind(err) == .machine) {
-                std.debug.print("Error: GPU requested but unavailable ({s}); detected artifacts: {s}\n", .{ @errorName(err), gpu.detectedName() });
+            if (!gpu.fallsBack(self.config.backend, explicit, err)) {
+                std.debug.print("Error: --backend {s}: GPU unavailable ({s}); detected GPU hardware: {s}\n", .{ @tagName(self.config.backend), @errorName(err), gpu.detectedHardware() });
                 return err;
             }
             if (gpu.declineKind(err) != .policy)

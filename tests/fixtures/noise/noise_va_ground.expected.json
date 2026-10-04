@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "A Verilog-A noise generator on a to-ground branch reaches the output",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Only noise: white_noise(4e-18) on the to-ground branch I(out) of Ng. Vin is an AC short, so Z(out) = 1k||1k = 500 ohm, flat. onoise = 500*sqrt(4e-18) = 1e-6 V/sqrt(Hz). Reading the branch as (out,out) gives 0."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 2,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000,
+            2000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-09,
+            "atol": 1e-18,
+            "values": [
+              1e-06,
+              1e-06
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "cc381cdc2842bb5d71b3ab7b5d8492ee295f656f7dd691b35b0b7dd5aa416519"
+}

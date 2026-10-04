@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "LRM 4.6.4.6: one noise source contributed to two branches is fully correlated, sign included",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "One source n, S = 1e-18 A^2/Hz, drawn out of node a (coeff +1) and out of node b with coeff -1. Vin is an AC short: Z(a) = 1k||1k = 500 ohm, Z(b) = 1k, no coupling. v(a) = -500 n, v(b) = +1000 n, v(a,b) = -1500 n, so onoise = 1500*1e-9 = 1.5e-6 V/sqrt(Hz). Independent rows give sqrt(500^2+1000^2)*1e-9 = 1.118e-6; a lost sign gives 5e-7."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 2,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            1000,
+            2000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-09,
+            "atol": 1e-18,
+            "values": [
+              1.5e-06,
+              1.5e-06
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "4b72f99988bd1d4387cd46a88d6f4b596d0440f4a930ff6cf154feb0020b1cf2"
+}

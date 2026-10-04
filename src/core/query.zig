@@ -687,7 +687,6 @@ pub const Temp = struct {
     t_start: f64 = -40.0,
     t_stop: f64 = 125.0,
     t_step: f64 = 1.0,
-    t_nom: f64 = 27.0,
     dc_options: Dc = .{},
 };
 

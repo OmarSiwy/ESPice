@@ -1,11 +1,14 @@
 # ESPice: a SPICE circuit simulator in Zig
 
 SPICE netlists in; DC, AC, transient, periodic, noise and sweep analyses
-out. Device models are Verilog-A compiled at build time by VerA, and GPU
-device evaluation goes through Gompute. Both are pinned git dependencies in
-`build.zig.zon`; to co-develop one, point its entry at a local `.path` and
-restore the pin before pushing. The benchmark runner lives in
-`tests/benchmark/`.
+out. Device models are Verilog-A compiled at build time by VerA, GPU device
+evaluation goes through Gompute, and stdpp supplies the vectorizing
+iterators. All three are git URL pins in `build.zig.zon`. To co-develop one,
+build against a local checkout with `zig build --fork=../VerA` (repeatable;
+it replaces every package whose manifest name matches, and fails if none
+does), so `build.zig.zon` never carries a `.path`. Commit the new pin (url
+and hash) once the dependency's change is pushed. The benchmark runner lives
+in `tests/benchmark/`.
 
 ## Skills: load these before implementing, every session
 
@@ -39,7 +42,7 @@ code we write, never what shape the data takes.
 A module can only import what build.zig hands it, so the wiring is the DAG:
 
 ```
-core     src/core/          std only: ids (DeviceType, QueryId, Name), InternPool,
+core     src/core/          std (+ stdpp): ids (DeviceType, QueryId, Name), InternPool,
                             numerics, query requests, Deck, Result/Schema, GROUND
 solver   src/solver/        core
 device   src/device/        core, device_abi (abi.zig), models, fastvaf (VerA),
@@ -52,11 +55,10 @@ espice   src/espice.zig     core, frontend, analysis, output (the Problem facade
 main     src/main.zig       espice only; src/c_api.zig likewise
 ```
 
-**stdpp** (vectorizing iterators) is removed until it supports Zig 0.17;
-plain loops and `core.numerics` stand in, and `numerics.dot`/`sum` fold in
-index order. Loop rule: a contiguous, pure, per-element loop (elementwise,
-reduction, search) goes through `core.numerics` or a plain `for`; gathers,
-sparse walks, chains and parsers stay plain loops.
+**stdpp** is a std extension here: build.zig hands it to every host module,
+so it is not an edge of the DAG. GPU device modules do not get it, so
+`device/eval.zig` must not import it. Loop rules are in "Loops and stdpp"
+below.
 
 **Only `analysis` imports `solver`.** build.zig wires `solver` into the
 analysis module and its test root and nowhere else, so an import from any
@@ -70,8 +72,8 @@ evaluator (`eval.zig`, also the per-model host-object, GPU-kernel and runtime
 `Library`: one dense `DeviceType` id per device type, built-in or
 runtime-loaded. The SPICE letter and LEVEL policy stays in
 `frontend/spice.zig`. The runtime loader rebuilds `eval.zig` by path, so the
-`dyn_path`, `device_abi_path` and `core_path` build options must follow any
-move of those files.
+`dyn_path`, `device_abi_path`, `core_path`, `stdpp_path` and `gompute_path`
+build options must follow any move of those files.
 
 Frontend produces `Prepared = {circuit: device.Circuit, deck: core.Deck}`;
 analysis takes the two separately (`Session.init(gpa, io, circuit, deck,
@@ -104,6 +106,49 @@ The scalar oracle is the `W == 1` instantiation of the same kernel, never a
 second code path. Lane kernels return per-lane failure masks, and failed
 lanes peel to the scalar path, whose full factor re-pivots (see
 `solver/freq_solve.zig` and the `solver/direct.zig` fallback).
+
+## Loops and stdpp
+
+Zig 0.17 ships with LLVM's loop vectorizer off (an LLVM 21 miscompile; it
+returns in 0.18), so a plain `for` over `[]f64` compiles to scalar code even
+at `-mcpu=x86_64_v3`. Vector code comes from stdpp pipelines or from explicit
+`@Vector(W)` kernels whose `W == 1` instantiation is the oracle. The stdpp
+skill and its measurements ship in the pinned package:
+`zig-pkg/stdpp-*/skill/stdpp/{SKILL,PERFORMANCE}.md`. Read both before
+converting a loop or claiming a speedup.
+
+- A contiguous, pure, per-element loop (map, reduction, search, filtered
+  count, compaction) is a stdpp pipeline, through a `core.numerics` helper
+  (`axpy`, `scale`, `sub`, `dot`, `sum`, `normInf`) where one fits.
+  `numerics.dot` and `sum` reassociate (`foldAssoc`: fixed lane
+  accumulators, one fixed combine order), so every caller rounds the same
+  way, though not like an index-order fold. A sum that must match ngspice
+  bit for bit stays a plain loop.
+- These stay plain loops: gathers and sparse walks (strided or indexed
+  reads), chains where each step reads the last, parsers, and the shapes
+  stdpp keeps scalar by design (`fold`, `reduce`, `forEach`, any
+  non-lanewise callback, unfiltered `stepBy(k)` with k >= 3).
+- Below its size cutoffs stdpp runs the scalar path, with the same results:
+  unfiltered folds and searches under max(64, 4 vectors), filtered pipelines
+  under 2 vectors, stores under 1 vector. Short vectors never reach the
+  vector body (an 8-harmonic HB DFT has 34 samples), so claim no speedup
+  there without a bench.
+- Callbacks are lanewise: generic over `T` and `@Vector(N, T)`, pure, and
+  total on every lane (wrapping integer ops after a filter). Pass runtime
+  constants through `z.bind` or a `lanewise = true` struct; a comptime
+  constant makes a new ~810 B instantiation per value.
+- Every pipeline asserts `comptime std.debug.assert(@TypeOf(it).lane_count
+  != null)`, guarded to `builtin.zig_backend == .stage2_llvm or
+  .stage2_x86_64` (other self-hosted backends run the scalar fallback). Every
+  pipeline also has a differential test against the same pipeline built on
+  `.byRef()`, which runs the scalar pull path. It sweeps lengths from 0 past
+  3x the widest lane count at several misalignments, compares bitwise when
+  the op is exact (or the inputs keep reassociation exact), and includes
+  NaN and inf where the input can carry them. `core/numerics.zig` is the
+  template.
+- When 0.18 turns the vectorizer back on, expect stdpp's lead on plain maps
+  and sums to disappear and its lead on early-exit, filtered and compacting
+  pipelines to stay. Re-measure before deleting a pipeline.
 
 ## CPU/GPU sharing
 
@@ -167,9 +212,11 @@ into the topical page before the branch merges.
 ## Verification
 
 - `zig build && zig build test` after every step. `zig build test` runs the
-  unit suites and then the numeric corpus. Baseline at `7535909f`: every
-  unit test passes (391), and the corpus scores 724/726. The two misses are
-  the VBIC model-version decks marked `* KNOWN GAP:`, which the harness
+  unit suites and then the numeric corpus. Baseline (CPU build, after the
+  2026-10 unit and seam pass): 700 unit tests pass; the corpus scores 787
+  passed, 7 xfail of 794. The xfails are the two VBIC model-version decks and
+  five noise decks (four noise tables, one correlated source) waiting on the
+  NoiseSource ABI change. Known corpus misses are decks marked `* KNOWN GAP:`, which the harness
   reports as XFAIL; the step exits nonzero on any FAIL or XPASS, so a green
   exit code is the gate. No deck on the pass list may start failing. All
   `disto` decks pass; the analysis-contract suite is `src/tests/analyses.zig`.
@@ -188,12 +235,13 @@ into the topical page before the branch merges.
 - New SIMD kernels: a differential test against the scalar oracle (see the
   skills list), plus an asm spot-check that the expected vector instruction
   is emitted. Read the asm off a direct invocation:
-  `zig build-obj -Ofast -fllvm -femit-asm=/tmp/k.s --dep core -Mroot=src/solver/direct.zig -Mcore=src/core/root.zig`.
+  `zig build-obj -OReleaseFast -fllvm -femit-asm=/tmp/k.s --dep core --dep stdpp -Mroot=src/solver/direct.zig --dep stdpp -Mcore=src/core/root.zig -Mstdpp=zig-pkg/stdpp-<hash>/src/root.zig`
+  (`zig build --fetch` fills `zig-pkg/`).
 
 ## Git rules
 
 - **Never `git stash`.** For a baseline, use a worktree:
   `git worktree add ../espice-base <rev>`. With the pinned dependencies a
-  worktree builds anywhere; one that points a dependency at a local `.path`
-  must keep that relative path valid.
+  worktree builds anywhere; pass `--fork` there too to build it against a
+  local dependency checkout.
 - One step per commit, tests green at every commit.

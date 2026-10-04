@@ -9,7 +9,7 @@ const tridiag_mod = @import("tridiag.zig");
 const order_mod = @import("order.zig");
 const bbd_mod = @import("bbd.zig");
 const lu_kernels = @import("lu_kernels.zig");
-const root = @import("core").numerics;
+const num = @import("core").numerics;
 const z = @import("stdpp");
 
 const Allocator = std.mem.Allocator;
@@ -68,7 +68,7 @@ pub const Solver = struct {
     /// ordering fails with `OutOfWorkspace` on pathological fill). Borrows
     /// `col_ptr` and `row_idx`, which must outlive the solver; free with
     /// `deinit`.
-    pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !Self {
+    pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo) !Self {
         var self: Self = .{ .n = n, .col_ptr = col_ptr, .row_idx = row_idx, .lu = null, .tri = null, .gpa = gpa };
         errdefer self.deinit();
         if (tridiag_mod.isTridiag(n, col_ptr, row_idx)) {
@@ -83,7 +83,7 @@ pub const Solver = struct {
         return self;
     }
 
-    fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?root.BbdInfo) !?BbdEng {
+    fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo) !?BbdEng {
         const info = bbd orelse {
             if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) std.debug.print("lu-census: no BbdInfo\n", .{});
             return null;
@@ -125,12 +125,12 @@ pub const Solver = struct {
     /// meets a singular pivot is freed for good and the call retries on the
     /// general LU. `SingularMatrix` leaves no usable factorization: solve
     /// only after a successful `factor`. Asserts `vals.len >= nnz`.
-    pub fn factor(self: *Self, vals: []const f64, execution: root.Execution) !void {
+    pub fn factor(self: *Self, vals: []const f64, execution: num.Execution) !void {
         const nnz = self.vcopy.len;
         if (nnz != 0 and self.factored and !self.host_stale and simdEql(self.vcopy, vals[0..nnz])) return;
         try self.factorInner(vals, execution);
         self.host_stale = false;
-        root.copySimd(self.vcopy, vals[0..nnz]);
+        num.copySimd(self.vcopy, vals[0..nnz]);
         self.gen +%= 1;
     }
 
@@ -158,7 +158,7 @@ pub const Solver = struct {
         self.host_stale = false;
     }
 
-    fn factorInner(self: *Self, vals: []const f64, execution: root.Execution) !void {
+    fn factorInner(self: *Self, vals: []const f64, execution: num.Execution) !void {
         if (self.tri) |*tri| {
             if (tri.factor(vals)) |_| {
                 self.factored = true;
@@ -201,7 +201,7 @@ pub const Solver = struct {
 
     /// `lu.refactor`, on `execution.lu_threads` workers when the flop-count
     /// model below prices that faster. Bitwise the same either way.
-    fn refactorLu(self: *Self, vals: []const f64, execution: root.Execution) error{SingularMatrix}!void {
+    fn refactorLu(self: *Self, vals: []const f64, execution: num.Execution) error{SingularMatrix}!void {
         const lu = &self.lu.?;
         const growth = self.params.refactor_growth_limit;
         const threads = execution.lu_threads;
@@ -229,7 +229,7 @@ pub const Solver = struct {
     /// x = -A^-1 rhs, the Newton step. `rhs` and `x` may alias. Requires a
     /// successful `factor`.
     pub fn solveNeg(self: *Self, rhs: []const f64, x: []f64) void {
-        root.scale(x[0..self.n], -1, rhs[0..self.n]);
+        num.scale(x[0..self.n], -1, rhs[0..self.n]);
         self.solveInPlace(x);
     }
 

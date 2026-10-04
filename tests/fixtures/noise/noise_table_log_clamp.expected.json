@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "analysis": "noise",
+  "purpose": "LRM 4.6.4.4 noise_table_log: no extrapolation below or above the table",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Same 500 ohm flat transfer impedance. Table (1e3,1e-18) (1e6,1e-24). LRM 4.6.4.4: 'As with noise_table(), for frequencies lower than the lowest frequency in the value set, noise_table_log() returns the power specified for the lowest frequency, and for frequencies higher than the highest frequency, noise_table_log() returns the power specified for the highest frequency.' f=500 Hz < 1000 Hz so S_I = 1.0e-18 and onoise = 500*1e-9 = 5.0e-07 V/sqrt(Hz); the -2 slope EXTRAPOLATED would have read 4e-18 and 1.0e-06, i.e. exactly 2x, so a host that runs the formula past the first knot fails here. f=2e6 Hz > 1e6 Hz so S_I = 1.0e-24, the top row, and onoise = 500*1e-12 = 5.0e-10 V/sqrt(Hz); the extrapolated slope would have read 2.5e-25 and 2.5e-10. The high point also pins the top tabulated power itself, since the clamp returns that row verbatim."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Noise Spectral Density Curves",
+        "match": "exact",
+        "row_count": 2,
+        "axis": {
+          "name": "frequency",
+          "values": [
+            500,
+            2000000
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-09
+        },
+        "columns": {
+          "onoise_spectrum": {
+            "unit": "V/sqrt(Hz)",
+            "rtol": 1e-09,
+            "atol": 1e-22,
+            "values": [
+              5e-07,
+              5e-10
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "b4d152b481d96d1ba251bd95085b2ad1bcf0e07a0a52dc2ee5c8b667aa8605d0"
+}

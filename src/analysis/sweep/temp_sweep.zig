@@ -38,8 +38,7 @@ const LaneCtx = struct {
 
 /// Contract entry: real, point-major (temp, probes...), one row per converged
 /// temperature. The circuit is back at the temperature it ran at before the
-/// sweep, so later jobs see the netlist's (or their query's) temperature;
-/// `opts.t_nom` is not consulted.
+/// sweep, so later jobs see the netlist's (or their query's) temperature.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;

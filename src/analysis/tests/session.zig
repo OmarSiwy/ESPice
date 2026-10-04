@@ -80,6 +80,18 @@ test "backend validation rejects zero thread counts" {
     try std.testing.expectError(error.InvalidThreadCount, validateBackend(.{ .device_threads = 0 }));
 }
 
+test "backend validation refuses an explicit GPU this build has no kernels for" {
+    const validateBackend = @import("../executor.zig").validateBackend;
+    const requestSupported = @import("../gpu.zig").requestSupported;
+    try validateBackend(.{ .backend = .auto });
+    inline for (.{ .cuda, .hip }) |be| {
+        if (requestSupported(be))
+            try validateBackend(.{ .backend = be })
+        else
+            try std.testing.expectError(error.GpuBackendUnavailable, validateBackend(.{ .backend = be }));
+    }
+}
+
 const Session = @import("../session.zig").Session;
 const Status = @import("../session.zig").Status;
 const Builder = @import("builder").Builder;

@@ -88,7 +88,9 @@ solver error counts as non-convergence and never aborts the ensemble.
 `setCircuitTemp` and recomputes device-native temperature coefficients
 before a cold DC solve at ITL2. Converged points are recorded; failed points
 are skipped. `numPoints` uses the same $10^{-6}$-step endpoint nudge as the DC
-sweep. The driver restores `t_nom` and recomputes after the sweep.
+sweep. After the sweep the driver puts the circuit back at the temperature
+it ran at before (`Circuit.temp_c`, the netlist's or the query's) and
+recomputes, so later jobs see that temperature.
 
 **Within-solve parallelism** (`src/analysis/par_eval.zig`): device
 evaluation can split instances across `ParEval` worker threads with private
@@ -96,8 +98,8 @@ plane slabs, a fixed partition and a fixed reduction order, so results are
 bit-identical run to run at a given thread count (they differ from serial by
 reassociation only). It is off by default (`ESPICE_THREADS`, default 1).
 
-Knobs: `n_trials`, `seed`, `variation`; temperature start/stop/step and
-`t_nom`; the tolerance bundle per solve.
+Knobs: `n_trials`, `seed`, `variation`; temperature start/stop/step; the
+tolerance bundle per solve.
 
 ## 3. Pseudo-code, CPU sequential
 
@@ -116,7 +118,7 @@ solve_lanes(ckt, N, apply):
         x_k = cold_newton(ckt, ws, itl2)     # error => not converged
     restore nominals; ckt.recompute()
 
-temp_sweep(ckt, T0..T1 step dT, t_nom):
+temp_sweep(ckt, T0..T1 step dT):
     solve_lanes over the temperatures (apply = set_circuit_temp)
     emit converged points only
 ```
