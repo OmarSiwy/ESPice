@@ -582,3 +582,57 @@ test "one binder: a runtime-registered device binds a card exactly as the same m
         try std.testing.expectEqual(built_in.get(), runtime.get());
     }
 }
+
+/// An HSPICE MOSRA deck around one BSIM3 NMOS; `tail` holds the `.mosra`,
+/// analysis and any extra cards.
+fn mosraDeck(arena: std.mem.Allocator, model: []const u8, tail: []const u8) !netlist.Netlist {
+    return netlist.parse(arena, try std.fmt.allocPrint(arena,
+        \\mosra plan
+        \\vd d 0 1.5
+        \\vg g 0 1.2
+        \\m1 d g 0 0 n3 w=10u l=0.18u
+        \\.model n3 nmos(level=49 version=3.3)
+        \\{s}
+        \\.appendmodel nra mosra n3 nmos
+        \\{s}
+        \\.end
+    , .{ model, tail }), .hspice);
+}
+
+test "a .mosra plans one aged row per reliability time, the total last" {
+    var sa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer sa.deinit();
+    var pa = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer pa.deinit();
+    const model = ".model nra mosra level=1 tit0=1e-4 tn=0.25";
+    const nl = try mosraDeck(pa.allocator(), model, ".mosra reltotaltime=10 relstep=3 simmode=2\n.tran 1n 10n\n.op");
+    var prepared = try build(sa.allocator(), pa.allocator(), nl);
+    defer prepared.deinit();
+    const m = prepared.deck.mosra.?;
+    try std.testing.expectEqualSlices(f64, &.{ 3, 6, 9, 10 }, m.rel_times);
+    try std.testing.expectApproxEqRel(@as(f64, 10e-9), m.tran.t_stop, 1e-12);
+    try std.testing.expectEqual(@as(usize, 1), m.names.len);
+    try std.testing.expectEqual(@as(u32, 4), prepared.deck.variants.count());
+    try std.testing.expectEqualStrings("reltime=3", prepared.deck.variants.labels[0]);
+    // Both cards fresh, then once per aged row.
+    try std.testing.expectEqual(@as(usize, 10), prepared.deck.queries.len);
+
+    // SimMode 0 reports the degradation only: no aged rows.
+    const fresh = try mosraDeck(pa.allocator(), model, ".mosra reltotaltime=10 simmode=0\n.tran 1n 10n");
+    var degradation = try build(sa.allocator(), pa.allocator(), fresh);
+    defer degradation.deinit();
+    try std.testing.expectEqualSlices(f64, &.{10}, degradation.deck.mosra.?.rel_times);
+    try std.testing.expectEqual(@as(u32, 0), degradation.deck.variants.count());
+
+    for ([_][2][]const u8{
+        .{ model, ".mosra reltotaltime=10\n.op" }, // nothing to stress the devices
+        .{ "", ".mosra reltotaltime=10\n.tran 1n 10n" }, // no MOSRA card for the source
+        .{ ".model nra nmos level=1", ".mosra reltotaltime=10\n.tran 1n 10n" }, // the source is no MOSRA model
+        .{ ".model nra mosra level=2", ".mosra reltotaltime=10\n.tran 1n 10n" },
+        .{ model, ".mosra reltotaltime=10\n.tran 1n 10n\n.param p=1\n.step param p list 1 2" },
+        .{ model, ".mosra reltotaltime=1e9 relstep=1e3\n.tran 1n 10n" }, // past 10000 times
+    }) |case| {
+        const bad = try mosraDeck(pa.allocator(), case[0], case[1]);
+        try std.testing.expectError(error.UnsupportedCard, build(sa.allocator(), pa.allocator(), bad));
+    }
+}

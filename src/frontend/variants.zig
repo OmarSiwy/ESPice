@@ -46,9 +46,12 @@ pub fn any(deck: netlist.Deck) bool {
     return deck.steps.len != 0 or deck.alters.len != 0;
 }
 
-/// Builds the plan of a run over `nl` whose nominal circuit is `nominal`
-/// (`cards` its card table). `prefix` labels an `.alter` run's rows.
-/// `nl`'s live values are nominal again on return.
+/// Plans every variant of `p`'s deck: each card's own sweep, then the
+/// `.step` grid, then the `.alter` runs, as rows over `p.nominal` and runs
+/// of their own where the topology moves. `p.prefix` labels an `.alter`
+/// run's rows. `p.nl`'s live values are nominal again on success.
+/// `UnsupportedCard` for a combination the plan cannot hold (SWEEP with
+/// `.step`, a DC ensemble whose topology moves, a trial number past u32).
 pub fn plan(p: *Planner) !Plan {
     const nl = p.nl;
     const deck = nl.deck;
@@ -88,6 +91,7 @@ pub fn plan(p: *Planner) !Plan {
                 if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };
             } else {
                 var sampler = try Sampler.init(p.scratch, deck.config, m.n);
+                if (m.n > std.math.maxInt(u32) - m.first + 1) return p.refuse(a.line, "a MONTE trial number past 4294967295");
                 for (0..m.n) |k| try p.addTrial(&sampler, m.first + @as(u32, @intCast(k)), @intCast(k));
                 if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };
             },
@@ -587,7 +591,9 @@ pub const Tuner = struct {
     /// optimization per `.step` point.
     bases: []const Point,
 
-    /// A tuner over the planner of the deck's main run.
+    /// A tuner over the planner of the deck's main run. Asserts that the
+    /// deck has an optimization and a card with `SWEEP OPTIMIZE=`;
+    /// `UnsupportedCard` for RESULTS or `.model OPT` settings it cannot run.
     pub fn init(planner: Planner) !Tuner {
         var pl = planner;
         const nl = planner.nl;
@@ -621,6 +627,8 @@ pub const Tuner = struct {
     /// One row per point of `points` (the optimized parameters' values,
     /// `spec.live.len` per point) on top of `bases[base]`, allocated in
     /// `arena`. `nominal` is the prepared circuit the rows write into.
+    /// Resets the planner's rows, so a table from an earlier call stays
+    /// valid (it was copied out) but the planner no longer holds it.
     pub fn rows(t: *Tuner, arena: std.mem.Allocator, nominal: *const device.Circuit, points: []const f64, base: usize) !core.Variants {
         const p = &t.planner;
         p.nominal = nominal;
@@ -708,7 +716,8 @@ fn targetName(nl: *const Netlist, t: netlist.StepTarget) []const u8 {
 }
 
 /// Every parameter of `c`'s batches, typed, in `Circuit.collectParams`
-/// order.
+/// order. Caller owns the returned slice and must free it with `gpa`; the
+/// refs point into `c`'s storage and die with it.
 pub fn collect(gpa: std.mem.Allocator, c: *const device.Circuit) ![]const ParamRef {
     var list: std.ArrayList(ParamRef) = .empty;
     for (c.batches, c.batch_types) |b, t| {
@@ -716,10 +725,12 @@ pub fn collect(gpa: std.mem.Allocator, c: *const device.Circuit) ![]const ParamR
         try b.hooks.collect_params(b.ctx, gpa, &list).unwrap();
         for (list.items[first..]) |*r| r.type = t;
     }
-    return list.items;
+    return list.toOwnedSlice(gpa);
 }
 
-/// The frozen circuit `nl` binds to, as `prepare.build` constructs it.
+/// The frozen circuit `nl` binds to, as `prepare.build` constructs it, with
+/// `nl`'s live values as they stand. Caller owns the circuit and releases
+/// it with `deinit`; `scratch` holds the construction tables.
 pub fn circuitOf(lib: *const device.Library, gpa: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netlist) !device.Circuit {
     const deck_opts = try analyses.deckOptions(nl.deck.config, nl.deck.dialect);
     var b = try builder.Builder.init(gpa, lib);
@@ -779,13 +790,15 @@ pub const Sampler = struct {
     /// Latin hypercube: per site, trial index to stratum.
     strata: std.AutoHashMapUnmanaged(u64, []const u32) = .empty,
 
-    /// Reads `.option seed=` (HSPICE default 1) and `sampling_method=lhs`.
+    /// Reads `.option seed=` (HSPICE default 1) and `sampling_method=lhs`;
+    /// any method other than `lhs` or `srs` is `UnsupportedCard`.
     pub fn init(arena: std.mem.Allocator, config: []const netlist.Config, n: u32) !Sampler {
         var s: Sampler = .{ .seed = 1, .n = n, .lhs = false, .arena = arena };
         for (config) |c| if (!c.temp) for (c.args, 0..) |a, i| {
             if (a != .name or i + 1 >= c.args.len) continue;
             const next = c.args[i + 1];
-            if (std.ascii.eqlIgnoreCase(a.name, "seed") and next == .num) s.seed = @intFromFloat(@abs(next.num));
+            // lossyCast: a NaN or out-of-range seed saturates, never traps.
+            if (std.ascii.eqlIgnoreCase(a.name, "seed") and next == .num) s.seed = std.math.lossyCast(u64, @abs(next.num));
             if (std.ascii.eqlIgnoreCase(a.name, "sampling_method") and next == .name) {
                 if (std.ascii.eqlIgnoreCase(next.name, "lhs")) s.lhs = true else if (!std.ascii.eqlIgnoreCase(next.name, "srs")) return error.UnsupportedCard;
             }
@@ -794,7 +807,9 @@ pub const Sampler = struct {
     }
 
     /// Uniform in (0, 1) for trial `index` (0-based within the sweep) at
-    /// `site`.
+    /// `site`. Under Latin hypercube, asserts that `index < n`, and the
+    /// first draw at a site allocates its strata in `arena` (on allocation
+    /// failure the draw falls back to plain sampling).
     pub fn uniform(s: *Sampler, site: u64, trial: u32, index: u32) f64 {
         const bits = netlist.siteKey(netlist.siteKey(s.seed, trial), site);
         const u = (@as(f64, @floatFromInt(bits >> 11)) + 0.5) * 0x1.0p-53;
@@ -837,6 +852,8 @@ pub const Trial = struct {
 const TrialDraw = struct {
     trial: Trial,
 
+    /// The trial's draw for distribution call `f` at `site`. Asserts that
+    /// `args` holds at least the nominal value.
     pub fn sample(self: TrialDraw, site: u64, f: expr.Fn, args: []const f64) f64 {
         const nom = args[0];
         const width = if (args.len > 1) args[1] else 0;
@@ -865,7 +882,8 @@ const TrialDraw = struct {
 };
 
 /// The standard normal quantile Φ⁻¹(u), u in (0, 1): Acklam's rational
-/// approximation, relative error below 1.2e-9.
+/// approximation, relative error below 1.2e-9. At 0 or 1 it returns NaN,
+/// so callers draw from the open interval.
 pub fn normalQuantile(u: f64) f64 {
     const a = [_]f64{ -3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00 };
     const b = [_]f64{ -5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01 };
@@ -888,4 +906,54 @@ test "normal quantile: symmetric, and the 97.5% point is 1.96" {
     try std.testing.expectApproxEqAbs(@as(f64, 0), normalQuantile(0.5), 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.959963984540054), normalQuantile(0.975), 1e-8);
     try std.testing.expectApproxEqAbs(-normalQuantile(0.01), normalQuantile(0.99), 1e-12);
+}
+
+test "Sampler.init reads seed and sampling method, and a wild seed saturates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg = struct {
+        fn of(args: []const netlist.Value) [1]netlist.Config {
+            return .{.{ .temp = false, .args = args }};
+        }
+    }.of;
+    var c = cfg(&.{ .{ .name = "seed" }, .{ .num = -7 }, .{ .name = "sampling_method" }, .{ .name = "LHS" } });
+    const s = try Sampler.init(a, &c, 4);
+    try std.testing.expectEqual(@as(u64, 7), s.seed);
+    try std.testing.expect(s.lhs);
+    c = cfg(&.{ .{ .name = "seed" }, .{ .num = comptime std.math.nan(f64) } });
+    try std.testing.expectEqual(@as(u64, 0), (try Sampler.init(a, &c, 4)).seed);
+    c = cfg(&.{ .{ .name = "seed" }, .{ .num = 1e300 } });
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), (try Sampler.init(a, &c, 4)).seed);
+    c = cfg(&.{ .{ .name = "sampling_method" }, .{ .name = "sobol" } });
+    try std.testing.expectError(error.UnsupportedCard, Sampler.init(a, &c, 4));
+    // A trailing key with no value is skipped.
+    c = cfg(&.{.{ .name = "seed" }});
+    try std.testing.expectEqual(@as(u64, 1), (try Sampler.init(a, &c, 4)).seed);
+}
+
+test "TrialDraw keeps the largest deviation of a multiplier's draws" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var sampler = try Sampler.init(arena.allocator(), &.{}, 1);
+    const draw: TrialDraw = .{ .trial = .{ .sampler = &sampler, .trial = 1, .index = 0 } };
+    const one = draw.sample(5, .agauss, &.{ 1, 0.1, 1 });
+    const many = draw.sample(5, .agauss, &.{ 1, 0.1, 1, 8 });
+    // m = 0 is the single draw, so the max over eight is at least as far.
+    try std.testing.expect(@abs(many - 1) >= @abs(one - 1));
+    // `limit` lands on nom +- abs exactly; `aunif` stays inside the band.
+    try std.testing.expectEqual(@as(f64, 0.5), @abs(draw.sample(9, .limit, &.{ 2, 0.5 }) - 2));
+    try std.testing.expect(@abs(draw.sample(9, .aunif, &.{ 2, 0.5 }) - 2) < 0.5);
+    // Nominal only: no spread.
+    try std.testing.expectEqual(@as(f64, 3), draw.sample(9, .agauss, &.{3}));
+}
+
+test "normal quantile is monotone across the tail seam" {
+    var prev = normalQuantile(1e-12);
+    for ([_]f64{ 1e-6, 0.02, 0.02425, 0.0243, 0.3, 0.5, 0.7, 0.97575, 0.98, 1 - 1e-12 }) |u| {
+        const x = normalQuantile(u);
+        try std.testing.expect(x > prev);
+        prev = x;
+    }
+    try std.testing.expect(std.math.isNan(normalQuantile(0)));
 }

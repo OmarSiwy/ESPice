@@ -39,7 +39,10 @@ pub const Fanout = struct {
 /// in `arena`. `.noise` also yields its integrated plot, `.disto` its two
 /// harmonic vectors; a single-value `.temp` yields none. An output `v(...)`
 /// names one or two nodes in the deck; `appended` cards must name exactly one.
-/// `fanout` copies them over the deck's variants.
+/// `fanout` copies them over the deck's variants, and an HSPICE `.temp` list
+/// copies everything once per temperature. Errors are `buildJob`'s, logged
+/// with the card that raised them; `OutOfMemory` also covers a fan-out
+/// count too large for `usize`.
 pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, appended: bool, sources: core.QueryBindings, card_refs: []const requests.CardRef, deck_opts: DeckOptions, fanout: Fanout) ![]const Job {
     for (cards) |c| {
         const args = c.args;
@@ -82,7 +85,11 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, append
     var per_card: usize = fan;
     for (fanout.cards) |span| per_card = @max(per_card, fan * (span.count + 1));
     const rows = fanout.global.count + @intFromBool(fanout.global.nominal);
-    const jobs = try arena.alloc(Job, cards.len * per_card * (temps + 1) * rows);
+    // `.trannoise SAMPLES=` and the variant counts are deck input, so the
+    // product can overflow before the allocator ever sees it.
+    var len: usize = cards.len;
+    for ([_]usize{ per_card, temps + 1, rows }) |f| len = std.math.mul(usize, len, f) catch return error.OutOfMemory;
+    const jobs = try arena.alloc(Job, len);
     var n: usize = 0;
     // HSPICE's `.hbac`, `.hbxf`, `.hbnoise` and `.phasenoise` take the tone
     // and harmonic count (and oscillator node) of the deck's `.hb` or
@@ -326,7 +333,8 @@ const runlvl_trtol = [6]f64{ 28, 14, 7, 3.5, 1.75, 0.875 };
 const Option = enum(u8) { method, reltol, abstol, vntol, gmin, trtol, chgtol, itl1, itl2, itl4, maxord, temp, tnom, delmax, xmu, gshunt, cshunt };
 
 /// Folds the deck's `.options` and `.temp` cards; `InvalidAnalysisArguments`
-/// on a value out of range. The HSPICE dialect defaults TNOM to 25 degC and
+/// on a value out of range, logged with its card. The last `.temp` card
+/// wins, whether it is one value or a list. The HSPICE dialect defaults TNOM to 25 degC and
 /// runs the circuit at TNOM [SA Ch.20]; ngspice defaults both to 27 degC.
 pub fn deckOptions(config: []const netlist.Config, dialect: netlist.Dialect) !DeckOptions {
     // The card being folded, named by any error it raises.
@@ -362,11 +370,14 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
         line.* = card.line;
         const args = card.args;
         if (card.temp) {
+            // The last `.temp` card wins, list or single value.
             if (args.len > 1) {
                 o.temp_list = args;
+                o.temp_c = null;
                 continue;
             }
             o.temp_c = try number(args, 0);
+            o.temp_list = &.{};
             if (o.temp_c.? <= -273.15) return error.InvalidAnalysisArguments;
             continue;
         }
@@ -391,7 +402,8 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
                 const on = (given orelse 1) != 0;
                 if (std.ascii.eqlIgnoreCase(key, "accurate")) accurate = on else if (std.ascii.eqlIgnoreCase(key, "fast")) fast = on else {
                     const level = @floor(0.5 + (given orelse 3));
-                    if (level < 0 or level > 6) return error.InvalidAnalysisArguments;
+                    // Negated so a NaN level fails here, not in @intFromFloat.
+                    if (!(level >= 0 and level <= 6)) return error.InvalidAnalysisArguments;
                     runlvl = level;
                 }
                 continue;
@@ -461,6 +473,8 @@ fn foldOptions(config: []const netlist.Config, dialect: netlist.Dialect, line: *
 }
 
 /// Copies the deck tolerances, temperature and integration method into `job`.
+/// A `.tran` keeps a `dt_max` it already has; otherwise it takes DELMAX, then
+/// ngspice's min(tstep, tstop / 50).
 pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
     switch (job.*) {
         inline else => |*opts| {
@@ -655,7 +669,9 @@ fn voltageSource(args: []const Value, i: usize, sources: core.QueryBindings) !us
 }
 
 /// The swept quantity of `.dc <card|TEMP> start stop step`, as the
-/// (device type, instance index, parameter) key `ParamRef` uses.
+/// (device type, instance index, parameter) key `ParamRef` uses. Card names
+/// match case-insensitively, first card first. `InvalidAnalysisArguments`
+/// when `args[i]` is no name, `AnalysisSourceNotFound` when no card has it.
 pub fn dcTarget(args: []const Value, i: usize, cards: []const requests.CardRef) !requests.Dc.SweepTarget {
     const name = nameAt(args, i) orelse return error.InvalidAnalysisArguments;
     if (std.ascii.eqlIgnoreCase(name, "temp")) return .temp;
@@ -704,7 +720,8 @@ fn acGrid(arena: std.mem.Allocator, args: []const Value, offset: usize) !struct 
     const poi = nameAt(args, offset) != null and std.mem.eql(u8, keyword(args, offset, &lower) catch "", "poi");
     if (!poi) return .{ .sweep = try frequencySweep(args, offset), .end = offset + 4 };
     const n = try count(u32, args, offset + 1, 0);
-    if (n == 0) return error.InvalidAnalysisArguments;
+    // Checked before the allocation: `poi 4e9 1` must not ask for 32 GB.
+    if (n == 0 or args.len < offset + 2 + n) return error.InvalidAnalysisArguments;
     const list = try arena.alloc(f64, n);
     for (list, 0..) |*f, k| {
         f.* = try positive(args, offset + 2 + k);
@@ -757,7 +774,7 @@ fn dcAxis(arena: std.mem.Allocator, args: []const Value, i: *usize) !Axis {
         },
         .poi => {
             const n = try count(u32, args, i.* + 1, 0);
-            if (n == 0) return error.InvalidAnalysisArguments;
+            if (n == 0 or args.len < i.* + 2 + n) return error.InvalidAnalysisArguments;
             const points = try arena.alloc(f64, n);
             for (points, 0..) |*p, k| p.* = try number(args, i.* + 2 + k);
             i.* += 2 + n;
@@ -773,7 +790,9 @@ fn dcAxis(arena: std.mem.Allocator, args: []const Value, i: *usize) !Axis {
             if (grid.points == 0) return error.InvalidAnalysisArguments;
             if (kind != .lin and !(grid.f_start > 0 and grid.f_stop >= grid.f_start)) return error.InvalidAnalysisArguments;
             // ponytail: a 10M-point ceiling keeps a typo from allocating the heap.
-            if (grid.count() > 10_000_000) return error.InvalidAnalysisArguments;
+            // A finite f64 span is under 2100 octaves, so 1e6 points per
+            // octave or decade keeps `count()` inside u32 before it is checked.
+            if ((kind != .lin and grid.points > 1_000_000) or grid.count() > 10_000_000) return error.InvalidAnalysisArguments;
             const points = try arena.alloc(f64, grid.count());
             for (points, 0..) |*p, k| p.* = grid.at(@intCast(k));
             i.* += 4;
@@ -1681,4 +1700,227 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             return .{ .temp = opts };
         },
     }
+}
+
+const testing = std.testing;
+
+/// A comptime argument list: strings become names, numbers numbers.
+fn argv(comptime xs: anytype) []const Value {
+    const final = comptime blk: {
+        var out: [xs.len]Value = undefined;
+        for (xs, 0..) |x, k| out[k] = if (@typeInfo(@TypeOf(x)) == .pointer) .{ .name = x } else .{ .num = x };
+        break :blk out;
+    };
+    return &final;
+}
+
+test copyVariants {
+    var jobs: [6]Job = @splat(.{ .op = .{} });
+    // Nominal kept: the originals first, then one block per row.
+    try testing.expectEqual(@as(usize, 6), copyVariants(&jobs, 2, .{ .first = 5, .count = 2, .nominal = true }));
+    for (jobs, [_]?u32{ null, null, 5, 5, 6, 6 }) |j, want| try testing.expectEqual(want, j.op.tol.variant);
+    jobs = @splat(.{ .op = .{} });
+    try testing.expectEqual(@as(usize, 4), copyVariants(&jobs, 2, .{ .first = 5, .count = 2, .nominal = false }));
+    for (jobs[0..4], [_]?u32{ 5, 5, 6, 6 }) |j, want| try testing.expectEqual(want, j.op.tol.variant);
+    try testing.expectEqual(@as(usize, 0), copyVariants(&jobs, 0, .{ .count = 3, .nominal = true }));
+}
+
+test checkStep {
+    try checkStep(0, 1, 0.1);
+    try checkStep(1, 0, -0.1);
+    try checkStep(1, 1, 0.5);
+    for ([_][3]f64{ .{ 0, 1, 0 }, .{ 0, 1, -0.1 }, .{ 0, std.math.nan(f64), 1 }, .{ 0, 1e300, 1e-300 } }) |c|
+        try testing.expectError(error.InvalidAnalysisArguments, checkStep(c[0], c[1], c[2]));
+}
+
+test frequencySweep {
+    const lin_grid = try frequencySweep(argv(.{ "LIN", 5, 0, 10 }), 0);
+    try testing.expectEqual(numerics.SweepKind.lin, lin_grid.kind);
+    try testing.expectEqual(@as(u32, 5), lin_grid.points);
+    try testing.expectError(error.InvalidAnalysisArguments, frequencySweep(argv(.{ "dec", 5, 0, 10 }), 0));
+    try testing.expectError(error.InvalidAnalysisArguments, frequencySweep(argv(.{ "lin", 5, -1, 10 }), 0));
+    try testing.expectError(error.UnsupportedFrequencySweep, frequencySweep(argv(.{ "log", 5, 1, 10 }), 0));
+    try testing.expectError(error.UnsupportedFrequencySweep, frequencySweep(argv(.{ "decadesss", 5, 1, 10 }), 0));
+    try testing.expectError(error.InvalidAnalysisArguments, frequencySweep(argv(.{"dec"}), 0));
+}
+
+test acGrid {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const poi = try acGrid(a, argv(.{ "x", "POI", 3, 1, 2, 3 }), 1);
+    try testing.expectEqual(numerics.SweepKind.poi, poi.sweep.kind);
+    try testing.expectEqual(@as(usize, 6), poi.end);
+    try testing.expectEqual(@as(f64, 3), poi.sweep.f_stop);
+    try testing.expectEqual(@as(usize, 4), (try acGrid(a, argv(.{ "dec", 2, 10, 100 }), 0)).end);
+    // Not ascending, a zero count, and a count the card does not carry
+    // (which must fail before it allocates 4e9 points).
+    for ([_][]const Value{ argv(.{ "poi", 2, 2, 1 }), argv(.{ "poi", 0 }), argv(.{ "poi", 4e9, 1 }), argv(.{ "poi", 3, 1, 2 }) }) |args|
+        try testing.expectError(error.InvalidAnalysisArguments, acGrid(a, args, 0));
+}
+
+test dcAxis {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var i: usize = 0;
+    const plain = try dcAxis(a, argv(.{ 0, 1, 0.5, "v2" }), &i);
+    try testing.expectEqual(@as(usize, 3), i);
+    try testing.expectEqual(@as(f64, 0.5), plain.step);
+    i = 1;
+    const keyed = try dcAxis(a, argv(.{ "v1", "STEP", 0.25, "start", 1, "stop", 2 }), &i);
+    try testing.expectEqual(@as(usize, 7), i);
+    try testing.expectEqual(@as(f64, 1), keyed.start);
+    try testing.expectEqual(@as(f64, 0.25), keyed.step);
+    i = 0;
+    const poi = try dcAxis(a, argv(.{ "poi", 3, 5, -1, 2 }), &i);
+    try testing.expectEqual(@as(usize, 5), i);
+    try testing.expectEqual(@as(f64, 5), poi.start);
+    try testing.expectEqual(@as(f64, 2), poi.stop);
+    i = 0;
+    const lin_axis = try dcAxis(a, argv(.{ "lin", 3, 1, 0 }), &i);
+    try testing.expectEqualSlices(f64, &.{ 1, 0.5, 0 }, lin_axis.points);
+    i = 0;
+    const dec = try dcAxis(a, argv(.{ "dec", 1, 1, 100 }), &i);
+    try testing.expectEqual(@as(usize, 3), dec.points.len);
+    for ([_][]const Value{
+        argv(.{ "start", 0, "stop", 1 }), // no STEP
+        argv(.{ "poi", 4e9, 1 }), // more points than given
+        argv(.{ "lin", 0, 0, 1 }),
+        argv(.{ "dec", 1, 0, 100 }),
+        argv(.{ "dec", 2e6, 1, 10 }), // past the per-decade cap
+        argv(.{ "dec", 1e6, 1e-300, 1e300 }), // past the 10M point cap, without trapping in count()
+        argv(.{ 0, 1 }),
+    }) |args| {
+        i = 0;
+        try testing.expectError(error.InvalidAnalysisArguments, dcAxis(a, args, &i));
+    }
+}
+
+test hspiceTran {
+    const two = try hspiceTran(argv(.{ 1e-9, 1e-6 }));
+    try testing.expectEqual(@as(f64, 1e-6), two.t_stop);
+    try testing.expectEqual(@as(?f64, null), two.dt_max);
+    // Three numbers, and four whose second pair sits below tstop1, are
+    // the SPICE `tstep tstop tstart [delmax]`.
+    try testing.expectEqual(@as(f64, 2e-7), (try hspiceTran(argv(.{ 1e-9, 1e-6, 2e-7 }))).t_start);
+    const spice = try hspiceTran(argv(.{ 1e-9, 1e-6, 2e-7, 5e-9 }));
+    try testing.expectEqual(@as(f64, 2e-7), spice.t_start);
+    try testing.expectEqual(@as(?f64, 5e-9), spice.dt_max);
+    // Segments: the finest tstep for the whole run, to the last tstop.
+    const segs = try hspiceTran(argv(.{ 1e-9, 1e-6, 1e-10, 2e-6, "START", 1e-7, "uic" }));
+    try testing.expectEqual(@as(f64, 1e-10), segs.dt_init);
+    try testing.expectEqual(@as(f64, 2e-6), segs.t_stop);
+    try testing.expectEqual(@as(f64, 1e-7), segs.t_start);
+    try testing.expect(segs.uic);
+    for ([_][]const Value{
+        argv(.{1e-9}),
+        argv(.{ 0, 1e-6 }),
+        argv(.{ 1e-9, 1e-6, 1e-9, 2e-6, 1e-9 }), // odd segment count
+        argv(.{ 1e-9, 1e-6, 1e-9, 5e-7, "start", 0 }), // tstop2 before tstop1
+        argv(.{ 1e-9, 1e-6, "start", 1e-6 }), // start at the stop
+        argv(.{ 1e-9, 1e-6, "start" }),
+        argv(.{ 1e-9, 1e-6, "bogus" }),
+    }) |args| try testing.expectError(error.InvalidAnalysisArguments, hspiceTran(args));
+}
+
+test hbTones {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const two = try hbTones(a, argv(.{ "tones", 1e3, 3e3, "nharms", 4, 2 }));
+    try testing.expectEqual(@as(f64, 1e3), two.f0);
+    try testing.expectEqual(@as(u16, 4), two.n_harmonics);
+    try testing.expectEqualSlices(f64, &.{3e3}, two.extra_tones);
+    try testing.expectEqual(@as(u16, 4), two.intmodmax);
+    // INTMODMAX alone fills NHARMS; SS_TONE takes its tone out.
+    const ss = try hbTones(a, argv(.{ "tones", 1e3, 3e3, "intmodmax", 5, "ss_tone", 2 }));
+    try testing.expectEqual(@as(u16, 5), ss.n_harmonics);
+    try testing.expectEqual(@as(usize, 0), ss.extra_tones.len);
+    // SUBHARMS puts the lowest tone first and divides it.
+    const sub = try hbTones(a, argv(.{ "tones", 3e3, 1e3, "nharms", 2, 3, "subharms", 2 }));
+    try testing.expectEqual(@as(f64, 500), sub.f0);
+    try testing.expectEqual(@as(u16, 6), sub.n_harmonics);
+    try testing.expectEqualSlices(f64, &.{3e3}, sub.extra_tones);
+    for ([_][]const Value{
+        argv(.{ "tones", 1e3 }), // neither NHARMS nor INTMODMAX
+        argv(.{ "tones", 1e3, 2e3, "nharms", 3 }), // one count for two tones
+        argv(.{ "tones", 1e3, "intmodmax", 3, "ss_tone", 1 }), // no large-signal tone left
+        argv(.{ "tones", 1e3, "intmodmax", 3, "intmodmax", 4 }),
+        argv(.{ "tones", 1e3, "nharms", 40000, "subharms", 2 }), // harmonics past u16
+        argv(.{ 1e3, "tones" }),
+        argv(.{ "tone", 1e3 }),
+    }) |args| try testing.expectError(error.InvalidAnalysisArguments, hbTones(a, args));
+}
+
+test shootingNewton {
+    try testing.expectEqual(@as(f64, 1e-3), (try shootingNewton(argv(.{ "tone", 1e3, "nharms", 8 }))).period);
+    try testing.expectEqual(@as(u32, 2000), (try shootingNewton(argv(.{ "period", 2e-6, "tres", 1e-9 }))).n_samples);
+    try testing.expectError(error.InvalidAnalysisArguments, shootingNewton(argv(.{ "period", 1e-9, "tres", 1e-8 })));
+    try testing.expectError(error.InvalidAnalysisArguments, shootingNewton(argv(.{ "tres", 1e-9 })));
+    try testing.expectError(error.InvalidAnalysisArguments, shootingNewton(argv(.{ "period", -1 })));
+}
+
+test "deckOptions: a NaN RUNLVL fails, and the last .temp card wins" {
+    const nan = comptime std.math.nan(f64);
+    try testing.expectError(error.InvalidAnalysisArguments, deckOptions(&.{.{ .temp = false, .args = argv(.{ "runlvl", nan }) }}, .hspice));
+    try testing.expectError(error.InvalidAnalysisArguments, deckOptions(&.{.{ .temp = false, .args = argv(.{ "runlvl", 7 }) }}, .hspice));
+    const list_then_one = try deckOptions(&.{ .{ .temp = true, .args = argv(.{ 0, 50 }) }, .{ .temp = true, .args = argv(.{85}) } }, .hspice);
+    try testing.expectEqual(@as(usize, 0), list_then_one.temp_list.len);
+    try testing.expectEqual(@as(?f64, 85), list_then_one.temp_c);
+    const one_then_list = try deckOptions(&.{ .{ .temp = true, .args = argv(.{85}) }, .{ .temp = true, .args = argv(.{ 0, 50 }) } }, .ngspice);
+    try testing.expectEqual(@as(usize, 2), one_then_list.temp_list.len);
+    try testing.expectEqual(@as(?f64, null), one_then_list.temp_c);
+    // Unknown and over-long option names are skipped, not fatal.
+    _ = try deckOptions(&.{.{ .temp = false, .args = argv(.{ "a_very_long_option_name", 1, "bogus", 2 }) }}, .ngspice);
+}
+
+test queries {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const none: core.QueryBindings = .{ .v_names = &.{}, .i_names = &.{}, .v_branches = &.{}, .v_pos = &.{}, .v_neg = &.{}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{}, .ports = &.{} };
+    const op: netlist.Analysis = .{ .kind = .op, .args = &.{} };
+    try testing.expectEqual(@as(usize, 0), (try queries(a, &.{}, false, none, &.{}, .{}, .{})).len);
+    // A `.temp` list runs every job once per temperature.
+    const temps = try queries(a, &.{op}, false, none, &.{}, .{ .temp_list = argv(.{ -40, 125 }) }, .{});
+    try testing.expectEqual(@as(usize, 2), temps.len);
+    try testing.expectEqual(@as(?f64, -40), temps[0].op.tol.temp_c);
+    try testing.expectEqual(@as(?f64, 125), temps[1].op.tol.temp_c);
+    try testing.expectError(error.InvalidAnalysisArguments, queries(a, &.{op}, false, none, &.{}, .{ .temp_list = argv(.{ 0, -300 }) }, .{}));
+    // HSPICE `.op 0 1u`: the operating point, then a snapshot at 1 us.
+    const times = try queries(a, &.{.{ .kind = .op, .args = argv(.{ 0, 1e-6 }) }}, false, none, &.{}, .{}, .{});
+    try testing.expectEqual(@as(usize, 2), times.len);
+    try testing.expect(times[0] == .op);
+    try testing.expect(times[1].tran.snapshot);
+    try testing.expectEqual(@as(f64, 1e-6), times[1].tran.t_stop);
+    // Global rows after the nominal one.
+    const rows = try queries(a, &.{op}, false, none, &.{}, .{}, .{ .global = .{ .first = 0, .count = 2, .nominal = true } });
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    for (rows, [_]?u32{ null, 0, 1 }) |j, want| try testing.expectEqual(want, j.op.tol.variant);
+    // `only` keeps one card's jobs.
+    const only = try queries(a, &.{ op, .{ .kind = .dcinc, .args = &.{} } }, false, none, &.{}, .{}, .{ .only = 1 });
+    try testing.expectEqual(@as(usize, 1), only.len);
+    try testing.expect(only[0] == .dcinc);
+}
+
+test outputLabel {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("v(a,2)", try outputLabel(arena.allocator(), .{ .group = .{ .name = "v", .args = argv(.{ "a", 2 }) } }));
+    try testing.expectError(error.InvalidAnalysisArguments, outputLabel(arena.allocator(), .{ .name = "v" }));
+}
+
+test cardIs {
+    try testing.expect(cardIs(".LIN sparcalc=1", "lin"));
+    try testing.expect(cardIs(".net\tvin", "net"));
+    try testing.expect(!cardIs(".linx", "lin"));
+    try testing.expect(!cardIs("", "lin"));
+}
+
+test tranNoiseSamples {
+    const out: Value = .{ .group = .{ .name = "v", .args = argv(.{"o"}) } };
+    try testing.expectEqual(@as(u32, 4), tranNoiseSamples(&[_]Value{ out, .{ .name = "seed" }, .{ .num = 3 }, .{ .name = "samples" }, .{ .num = 4 } }));
+    try testing.expectEqual(@as(u32, 1), tranNoiseSamples(&[_]Value{ out, .{ .name = "samples" }, .{ .num = -4 } }));
+    try testing.expectEqual(@as(u32, 1), tranNoiseSamples(&[_]Value{out}));
 }

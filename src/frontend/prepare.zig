@@ -27,6 +27,8 @@ pub const Prepared = struct {
     /// parse arena, which must then outlive the Prepared.
     tuner: ?*variants.Tuner = null,
 
+    /// Releases this run's circuit and every nested run's. The deck slices
+    /// stay with the session arena. Leaves `self` undefined.
     pub fn deinit(self: *Prepared) void {
         for (self.runs) |*run| @constCast(run).deinit();
         self.circuit.deinit();
@@ -35,6 +37,7 @@ pub const Prepared = struct {
 };
 const NO_NODE = analyses.NO_NODE;
 
+/// The netlist syntax a deck is read in: ngspice, HSPICE or Spectre.
 pub const Dialect = netlist.Dialect;
 
 /// Where a deck comes from.
@@ -59,7 +62,10 @@ pub fn parseDialect(name: []const u8) ?Dialect {
 
 /// Reads, expands and flattens `input` into `session`, then loads its HDL
 /// models into `lib`. The netlist borrows `session`; release it once `build`
-/// has returned. Spectre input takes no `.include` expansion.
+/// has returned. Spectre input takes no `.include` expansion. Fails with
+/// `OsdiUnsupported` on an OSDI include that has no `.va` beside it and no
+/// built-in model of its name, and with the file error of an unreadable
+/// deck, include or data file.
 pub fn prepare(io: std.Io, lib: *device.Library, session: std.mem.Allocator, input: Source, dialect: Dialect) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
@@ -146,9 +152,7 @@ fn keepSaved(scratch: std.mem.Allocator, probes: *[]u32, labels: *[][]const u8, 
     const l = labels.*;
     var kept: usize = 0;
     for (p, l) |row, label| {
-        if (label.len > 64) continue;
-        var buf: [64]u8 = undefined;
-        if (!wanted.contains(std.ascii.lowerString(&buf, label))) continue;
+        if (!wanted.contains(try std.ascii.allocLowerString(scratch, label))) continue;
         p[kept] = row;
         l[kept] = label;
         kept += 1;
@@ -161,6 +165,7 @@ fn keepSaved(scratch: std.mem.Allocator, probes: *[]u32, labels: *[][]const u8, 
 /// (`.step`, `SWEEP`, `.alter`, Monte Carlo). `parse_arena` holds
 /// construction scratch; `sim_arena` owns every published slice and must
 /// outlive the result, as must `lib` when the deck uses loaded devices.
+/// Caller owns the result and releases its circuits with `Prepared.deinit`.
 pub fn build(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netlist.Netlist) !Prepared {
     const owned = try parse_arena.create(netlist.Netlist);
     owned.* = nl;
@@ -178,7 +183,10 @@ pub const Run = struct {
     card: ?u32 = null,
 };
 
-/// `build` for one run of the deck in `nl`.
+/// `build` for one run of the deck in `nl`, which must outlive the result
+/// when the deck has an HSPICE optimization (`Prepared.tuner` borrows it).
+/// `CircuitTooLarge` when the deck has more analysis cards than a u32 job
+/// index can fan out.
 pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: *const netlist.Netlist, run: Run) anyerror!Prepared {
     if (nl.deck.analyses.len > (std.math.maxInt(u32) - 1) / 3) return error.CircuitTooLarge;
     const deck_opts = try analyses.deckOptions(nl.deck.config, nl.deck.dialect);
@@ -421,4 +429,50 @@ fn acOverrides(
         } else return error.InvalidAcOverride;
     }
     return overrides;
+}
+
+test parseDialect {
+    try std.testing.expectEqual(Dialect.spectre, parseDialect("scs").?);
+    try std.testing.expectEqual(Dialect.ngspice, parseDialect("ngspice").?);
+    // Only the listed names and aliases, no prefixes.
+    try std.testing.expectEqual(null, parseDialect("h"));
+    try std.testing.expectEqual(null, parseDialect(""));
+}
+
+test keepSaved {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // A label past 64 bytes is still matched (it used to be dropped).
+    const long = "v(xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx)";
+    var probe_buf = [_]u32{ 1, 2, 3 };
+    var label_buf = [_][]const u8{ "v(A)", long, "v(c)" };
+    var probes: []u32 = &probe_buf;
+    var labels: [][]const u8 = &label_buf;
+    try keepSaved(arena.allocator(), &probes, &labels, &.{ long, "v(a)", "v(nowhere)" });
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, probes);
+    try std.testing.expectEqualStrings("v(A)", labels[0]);
+    try std.testing.expectEqualStrings(long, labels[1]);
+    try keepSaved(arena.allocator(), &probes, &labels, &.{"v(none)"});
+    try std.testing.expectEqual(@as(usize, 0), probes.len);
+}
+
+test sampled {
+    const sweep: core.numerics.FreqSweep = .{ .f_start = 1, .f_stop = 10 };
+    var jobs = [_]Job{
+        .{ .noise = .{ .out_node = 1, .sweep = sweep } },
+        .{ .noise = .{ .out_node = 1, .sweep = sweep, .integrated = true } },
+        .{ .op = .{} },
+    };
+    try std.testing.expect(sampled(&jobs, null)[0].noise.sample == null);
+    const out = sampled(&jobs, .{ .fs = 1e6 });
+    try std.testing.expectEqual(@as(f64, 1e6), out[0].noise.sample.?.fs);
+    // The integrated plot keeps the plain band.
+    try std.testing.expect(out[1].noise.sample == null);
+}
+
+test namesNoOutput {
+    try std.testing.expect(namesNoOutput(.{ .kind = .pac, .args = &.{} }));
+    try std.testing.expect(namesNoOutput(.{ .kind = .pxf, .args = &.{} }));
+    try std.testing.expect(!namesNoOutput(.{ .kind = .pxf, .args = &.{}, .sn = true }));
+    try std.testing.expect(!namesNoOutput(.{ .kind = .ac, .args = &.{} }));
 }
