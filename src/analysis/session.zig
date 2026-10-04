@@ -13,6 +13,7 @@ const types = @import("types.zig");
 const Result = types.Result;
 const validateDeck = @import("validate.zig").validateDeck;
 
+/// A row index into the session, stable for its lifetime.
 pub const QueryId = requests.QueryId;
 const none = requests.invalid_query;
 
@@ -25,6 +26,7 @@ pub const Status = enum(u8) {
     dependency_failed,
     cancelled,
 
+    /// True once the row will never run again.
     pub fn terminal(self: Status) bool {
         return switch (self) {
             .pending, .paused => false,
@@ -41,6 +43,7 @@ pub const Limits = struct { max_parallel: u16 = 1, quantum: Quantum = .checkpoin
 const Quantum = @import("worker.zig").Quantum;
 /// Which advancement `print` previews.
 pub const Preview = union(enum) { run_all, advance: QueryId, advance_ready: []const QueryId };
+/// What `Session.print` shows; `limits` previews a concurrency cap.
 pub const PrintOptions = struct {
     scope: Scope = .all,
     preview: Preview = .run_all,
@@ -104,10 +107,14 @@ pub const Session = struct {
     /// query starts.
     stream: ?struct { id: QueryId, writer: *std.Io.Writer } = null,
 
+    /// An empty session. Allocates nothing; `topology` and `deck` must
+    /// outlive it.
     pub fn init(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, config: execution.Config) Session {
         return .{ .allocator = allocator, .io = io, .topology = topology, .deck = deck, .config = config };
     }
 
+    /// Cancels and joins every started query, then frees every row, result
+    /// and copied option. Every `Result` the session handed out dies here.
     pub fn deinit(self: *Session) void {
         // Newest first: dependents join before the OP products they copied from.
         var i = self.rows.len;
@@ -125,7 +132,9 @@ pub const Session = struct {
     /// Adds `jobs`, writing their ids to `ids`, and returns `jobs.len`. Each
     /// non-OP job shares an existing matching OP prerequisite or gets a new
     /// one. All-or-nothing: every job is validated and deep-copied before any
-    /// row or id is published.
+    /// row or id is published. Fails with `error.BufferTooSmall` when `ids`
+    /// is shorter than `jobs`, a validation error for the first bad job, or
+    /// `error.TooManyQueries` past u32 rows.
     pub fn append(self: *Session, jobs: []const requests.Query, ids: []QueryId) !usize {
         if (ids.len < jobs.len) return error.BufferTooSmall;
         if (jobs.len == 0) return 0;
@@ -183,6 +192,7 @@ pub const Session = struct {
         return jobs.len;
     }
 
+    /// Returns the row count, implicit prerequisites included.
     pub fn count(self: *const Session) u32 {
         return @intCast(self.rows.len);
     }
@@ -407,12 +417,14 @@ pub const Session = struct {
         return null;
     }
 
-    /// Returns a completed query's result, valid until `deinit`.
-    /// The request `id` was appended as.
+    /// Returns the request `id` was appended as. Its slices live until
+    /// `deinit`.
     pub fn query(self: *const Session, id: QueryId) !requests.Query {
         return self.rows.items(.job)[try self.index(id)];
     }
 
+    /// Returns a completed query's result, valid until `deinit`. Fails with
+    /// `error.ResultUnavailable` before completion.
     pub fn result(self: *const Session, id: QueryId) !Result {
         const i = try self.index(id);
         if (self.effectiveStatus(i) != .complete) return error.ResultUnavailable;
@@ -603,4 +615,40 @@ pub fn schemaOf(allocator: std.mem.Allocator, topology: *const Circuit, deck: *c
         .columns = columns,
         .portless = query == .sp and query.sp.ports.len == 0 and deck.source_branch == 0,
     };
+}
+
+test copyValue {
+    // The copy shares no slice with the request, so a caller may free or
+    // reuse its option buffers once `append` returns.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tones = [_]f64{ 2e3, 3e3 };
+    var harms = [_]u16{ 2, 3 };
+    const job: requests.Query = .{ .hb = .{ .f0 = 1e3, .extra_tones = &tones, .extra_harmonics = &harms } };
+    const copy = try copyValue(arena.allocator(), job);
+    tones[0] = 0;
+    harms[1] = 0;
+    try std.testing.expectEqual(@as(f64, 1e3), copy.hb.f0);
+    try std.testing.expectEqualSlices(f64, &.{ 2e3, 3e3 }, copy.hb.extra_tones);
+    try std.testing.expectEqualSlices(u16, &.{ 2, 3 }, copy.hb.extra_harmonics);
+    // An empty slice copies to an empty slice.
+    const plain = try copyValue(arena.allocator(), requests.Query{ .hb = .{ .f0 = 1e3 } });
+    try std.testing.expectEqual(@as(usize, 0), plain.hb.extra_tones.len);
+}
+
+test prerequisite {
+    try std.testing.expectEqual(null, prerequisite(.{ .op = .{} }));
+    try std.testing.expectEqual(null, prerequisite(.{ .tran = .{ .t_stop = 1e-6, .uic = true } }));
+    // A transient-family query gets a MODETRANOP point with its own tolerances.
+    const tran = prerequisite(.{ .tran = .{ .t_stop = 1e-6, .tol = .{ .reltol = 1e-4 } } }).?;
+    try std.testing.expect(tran.tran_op);
+    try std.testing.expectEqual(@as(f64, 1e-4), tran.tol.reltol);
+    const ac = prerequisite(.{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 1e3 } } }).?;
+    try std.testing.expect(!ac.tran_op);
+    try std.testing.expect(!ac.warm_start);
+}
+
+test "Status.terminal" {
+    for ([_]Status{ .pending, .paused }) |s| try std.testing.expect(!s.terminal());
+    for ([_]Status{ .complete, .failed, .dependency_failed, .cancelled }) |s| try std.testing.expect(s.terminal());
 }

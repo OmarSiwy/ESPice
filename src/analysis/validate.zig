@@ -270,7 +270,8 @@ pub fn validate(query: requests.Query, n: u32) !void {
         },
         // HSPICE's bounds [CR .FFT]: 4 <= NP <= 2^27, a window inside the run.
         .fft => |o| {
-            if (!std.math.isPowerOfTwo(o.np) or o.np < 4 or o.np > 1 << 27) return error.InvalidQueryOptions;
+            // Bounds first: `isPowerOfTwo` asserts a positive argument.
+            if (o.np < 4 or o.np > 1 << 27 or !std.math.isPowerOfTwo(o.np)) return error.InvalidQueryOptions;
             if (!(o.start >= 0) or !(o.stop > o.start) or o.stop > o.tran.t_stop) return error.InvalidQueryOptions;
             if (o.out_pos >= n or o.out_neg >= n) return error.InvalidQueryOptions;
             try validate(.{ .tran = o.tran }, n);

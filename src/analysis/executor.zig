@@ -16,6 +16,7 @@ const converger = @import("solver").converger;
 
 /// Per-problem execution settings, shared by every query.
 pub const Config = struct {
+    /// The `--backend` choices: `auto`, `cpu`, `cuda`, `hip`.
     pub const Backend = gpu.Request;
     backend: gpu.Request = .cpu,
     /// The user named the GPU: bypass the work gate, and fail rather than fall
@@ -32,8 +33,9 @@ pub const Config = struct {
     final_plan: bool = false,
 };
 
-/// Rejects a backend this binary cannot serve (printing what it detected)
-/// and zero thread counts.
+/// Fails with `error.GpuBackendUnavailable` for a backend this binary cannot
+/// serve (printing what it detected) and `error.InvalidThreadCount` for a
+/// zero thread count.
 pub fn validateBackend(config: Config) !void {
     if (!gpu.requestSupported(config.backend)) {
         std.debug.print("Error: GPU backend {s} requested; detected artifacts: {s}\n", .{ @tagName(config.backend), gpu.detectedName() });
@@ -60,13 +62,16 @@ pub const Executor = struct {
     /// `RunCtx.stream` for this query.
     stream: ?*std.Io.Writer = null,
 
+    /// What one `wait` saw: a checkpoint, the result, an error or a cancel.
     pub const Outcome = Controller.Outcome;
 
     /// Builds the executor without starting it. `initial`, when given, must be
     /// a completed `.op` query over the same topology; its device state and
     /// operating point seed this one. With `take`, this is the last query
     /// that will read `initial` (or, without one, the template), so its
-    /// device state moves here instead of being copied.
+    /// device state moves here instead of being copied. Fails with
+    /// `error.InvalidOperatingPoint` when `initial` is not such a query.
+    /// Caller frees it with `destroy`.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*Executor, take: bool, config: Config) !*Executor {
         try validateBackend(config);
         if (initial) |source| {
@@ -163,6 +168,7 @@ pub const Executor = struct {
         return outcome;
     }
 
+    /// Asks the worker to stop at its next checkpoint; see `Worker.cancel`.
     pub fn cancel(self: *Executor) void {
         self.controller.cancel();
     }
@@ -172,7 +178,9 @@ pub const Executor = struct {
         return self.published;
     }
 
-    /// Returns the solved operating point of a completed `.op` query.
+    /// Returns the solved operating point of a completed `.op` query, null
+    /// for any other query. Valid until `destroy`, even after the circuit
+    /// is released.
     pub fn operatingPoint(self: *const Executor) ?[]const f64 {
         return if (self.job == .op and self.published != null) self.x else null;
     }

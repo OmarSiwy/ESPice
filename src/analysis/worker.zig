@@ -15,6 +15,7 @@ pub const Quantum = enum(u8) {
     completion,
 };
 
+/// Per-worker settings, fixed at `init`.
 pub const Options = struct {
     stack_size: usize = 512 * 1024 * 1024,
     /// Park on `.nonlinear` checkpoints too. Only `.op` does; other queries
@@ -54,6 +55,8 @@ pub fn Worker(comptime Product: type) type {
             finished: anyerror!Product,
         };
 
+        /// What one `wait` returns: a parked checkpoint, the product, the
+        /// run's error, or a cancel (`error.QueryCancelled` reads as one).
         pub const Outcome = union(enum(u8)) {
             progress: progress.Event,
             complete: Product,
@@ -61,6 +64,8 @@ pub fn Worker(comptime Product: type) type {
             cancelled,
         };
 
+        /// An unstarted worker; nothing runs until `start`. `ctx` must
+        /// outlive it.
         pub fn init(io: std.Io, ctx: *anyopaque, execute_fn: *const fn (*anyopaque) anyerror!Product, options: Options) Self {
             return .{ .io = io, .ctx = ctx, .run = execute_fn, .options = options };
         }

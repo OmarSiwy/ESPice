@@ -21,7 +21,9 @@ const StateCtlOp = device_ir.StateCtlOp;
 const ParEval = par_eval.ParEval;
 const BbdInfo = numerics.BbdInfo;
 
+/// `numerics.zeroSimd`, re-exported so the leaves reach it through types.zig.
 pub const zeroSimd = numerics.zeroSimd;
+/// `numerics.copySimd`, re-exported like `zeroSimd`.
 pub const copySimd = numerics.copySimd;
 
 /// Row and column index of the ground node in every pattern.
@@ -40,12 +42,15 @@ pub const AcParam = struct {
 
 /// Newton hook for a plain DC solve: assemble is one eval, the matrix is G.
 pub const EvalHook = struct {
+    /// Stamps the Newton planes at `x`, seeded from the baseline when one exists.
     pub fn assemble(_: EvalHook, ckt: *Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
     }
+    /// Returns G, the matrix `assemble` just filled. Borrowed from `ckt`.
     pub fn vals(_: EvalHook, ckt: *Circuit) []f64 {
         return ckt.g_vals;
     }
+    /// Returns G at plane index `slot`, which must be below `nnz + 1`.
     pub fn diagAt(_: EvalHook, ckt: *Circuit, slot: u32) f64 {
         return ckt.g_vals[slot];
     }
@@ -205,14 +210,17 @@ pub const Circuit = struct {
     /// Empty on every deck without one. Owned by the query work arena.
     ac_params: []AcParam = &.{},
 
-    /// Returns the shared Newton/JFNK workspace, building it on first use.
     /// `newton`'s device path: factors `vals` (when `need`) and solves
-    /// dx = -A^-1 rhs on the device. See `LuHook.solve`.
+    /// dx = -A^-1 rhs on the device. Null without a `lu_hook`; see
+    /// `LuHook.solve` for true and false.
     pub fn deviceSolve(self: *Circuit, slv: *direct.Solver, vals: []const f64, dx: []f64, need: bool) ?bool {
         const h = self.lu_hook orelse return null;
         return h.solve(h.ctx, slv, vals, self.rhs[0..self.n], dx, need);
     }
 
+    /// Returns the shared Newton/JFNK workspace, building it (and the
+    /// `loadCheck` rows) on first use. The pointer stays valid until
+    /// `release`; the circuit owns the workspace.
     pub fn workspace(self: *Circuit) !*converger.Workspace {
         if (self.ws == null) {
             self.load_check = try LoadCheck.init(self.gpa, self.batches, self.col_ptr, self.row_idx[0..self.nnz]);
@@ -268,7 +276,7 @@ pub const Circuit = struct {
 
     /// Returns a circuit that shares `template`'s immutable topology and owns
     /// fresh device and solver state. `template` must outlive it and must never
-    /// have been evaluated.
+    /// have been evaluated. Free it with `deinit`.
     pub fn instantiate(template: *const Prepared, allocator: std.mem.Allocator) !Circuit {
         const batches = try allocator.alloc(Batch, template.batches.len);
         errdefer allocator.free(batches);
@@ -292,7 +300,9 @@ pub const Circuit = struct {
     }
 
     /// Returns a copy of `source`'s device state over `template`'s topology,
-    /// for a query that starts from a completed operating point.
+    /// for a query that starts from a completed operating point. Fails with
+    /// `error.IncompatibleDependency` when `source` was not built from
+    /// `template`. Free it with `deinit`.
     pub fn fromSnapshot(template: *const Prepared, source: *const Circuit, allocator: std.mem.Allocator) !Circuit {
         if (source.n != template.n or source.col_ptr.ptr != template.col_ptr.ptr)
             return error.IncompatibleDependency;
@@ -370,6 +380,7 @@ pub const Circuit = struct {
         };
     }
 
+    /// `release`, then poisons the struct.
     pub fn deinit(self: *Circuit) void {
         self.release();
         self.* = undefined;
@@ -417,6 +428,7 @@ pub const Circuit = struct {
     pub const SavedState = struct {
         batches: []Batch,
 
+        /// Frees every snapshot; `gpa` must be the allocator `saveState` took.
         pub fn deinit(self: SavedState, gpa: std.mem.Allocator) void {
             for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
             gpa.free(self.batches);
@@ -486,8 +498,8 @@ pub const Circuit = struct {
         return total;
     }
 
-    /// Concatenates every batch's live charge tape into `dst`, which must hold
-    /// exactly `qTapeLen()` entries.
+    /// Concatenates every batch's live charge tape into `dst`. Asserts `dst`
+    /// holds exactly `qTapeLen()` entries.
     pub fn snapshotQTape(self: *const Circuit, dst: []f64) void {
         if (self.gpu_hook) |gh| gh.sync_q_tape(gh.ctx);
         var off: usize = 0;
@@ -601,6 +613,7 @@ pub const Circuit = struct {
     /// `x` and each ω in `omegas` into `re[e * omegas.len + k]` and `im[...]`,
     /// under the stored sim state: A(ω) = G + jωC + (re + j·im) with G and C
     /// from a `.ac`/`.noise` eval at the same x. Host-side, GPU context or not.
+    /// Asserts `re` and `im` hold `ac_dyn_slots.len * omegas.len` entries.
     pub fn acDyn(self: *const Circuit, x: []const f64, omegas: []const f64, re: []f64, im: []f64) void {
         std.debug.assert(re.len == self.ac_dyn_slots.len * omegas.len and im.len == re.len);
         var off: usize = 0;
@@ -644,7 +657,8 @@ pub const Circuit = struct {
 
     /// Precomputes the constant-Jacobian contribution into `g_base`/`c_base`.
     /// A no-op when no batch has a constant Jacobian or the baseline is
-    /// already current. Clobbers `rhs` and `q_vec`.
+    /// already current. Clobbers `rhs` and `q_vec`. Fails only on
+    /// allocation, leaving no baseline and a retry safe.
     pub fn computeBaseline(self: *Circuit) !void {
         if (self.has_baseline) return;
         for (self.batches) |b| {
@@ -652,8 +666,12 @@ pub const Circuit = struct {
         } else return;
 
         if (self.g_base.len == 0) {
-            self.g_base = try self.gpa.alloc(f64, self.nnz + 1);
+            // Both or neither: a half-built pair would pass the length test
+            // on the retry and stamp into an empty `c_base`.
+            const g_base = try self.gpa.alloc(f64, self.nnz + 1);
+            errdefer self.gpa.free(g_base);
             self.c_base = try self.gpa.alloc(f64, self.nnz + 1);
+            self.g_base = g_base;
         }
         @memset(self.g_base, 0);
         @memset(self.c_base, 0);
@@ -663,13 +681,14 @@ pub const Circuit = struct {
         @memset(x_zero, 0);
 
         self.lin.valid = false;
+        self.q_fresh = false;
         zeroSimd(self.rhs);
         if (self.has_charge) zeroSimd(self.q_vec);
         const pl: Planes = .{ .g_vals = self.g_base, .c_vals = self.c_base, .rhs = self.rhs, .q_vec = self.q_vec };
         for (self.batches) |b| {
             if (b.has_const_jacobian) b.eval(b.ctx, &pl, 0, b.count, x_zero, 0);
         }
-        self.g_base[self.diag_slots[0]] += 1.0;
+        // No ground pin here: `stamp` adds it after copying the baseline.
         self.has_baseline = true;
     }
 
@@ -680,17 +699,19 @@ pub const Circuit = struct {
         return self.g_vals[slot] + alpha * self.c_vals[slot];
     }
 
-    /// Writes `G + alpha*C` into `out[0..nnz]`.
+    /// Writes `G + alpha*C` into `out[0..nnz]`, leaving the trash entry
+    /// alone. Asserts `out` holds at least `nnz` entries.
     pub fn combineGC(self: *const Circuit, alpha: f64, out: []f64) void {
         std.debug.assert(out.len >= self.nnz);
         combinePlanes(std.simd.suggestVectorLength(f64) orelse 1, out[0..self.nnz], self.g_vals[0..self.nnz], self.c_vals[0..self.nnz], alpha);
     }
 
-    /// Writes G as a dense row-major `n*n` matrix into `out`.
+    /// Writes G as a dense row-major `n*n` matrix into `out`. O(n^2).
+    /// Asserts `out` holds at least `n*n` entries.
     pub fn denseG(self: *const Circuit, out: []f64) void {
         self.denseFrom(self.g_vals, out);
     }
-    /// Writes C as a dense row-major `n*n` matrix into `out`.
+    /// `denseG` for C.
     pub fn denseC(self: *const Circuit, out: []f64) void {
         self.denseFrom(self.c_vals, out);
     }
@@ -707,7 +728,7 @@ pub const Circuit = struct {
     }
 
     /// Returns the plane index of (row, col), or null when the pattern has no
-    /// such entry.
+    /// such entry. O(log) in the column's length. Asserts `col < n`.
     pub fn findSlot(self: *const Circuit, row: u32, col: u32) ?u32 {
         const pattern: device_ir.PatternView = .{
             .col_ptr = self.col_ptr,
@@ -739,6 +760,7 @@ pub const Circuit = struct {
     // Host walks over a batch slice. `Circuit` walks every batch; the GPU
     // context walks its host-resident ones, or every batch after a fault.
 
+    /// `applyLimits` over `batches` on the host.
     pub fn limitBatches(batches: []const Batch, x: []f64, x_old: []const f64) bool {
         var any_limited = false;
         for (batches) |b| if (b.hooks.apply_limits) |f| {
@@ -747,6 +769,7 @@ pub const Circuit = struct {
         return any_limited;
     }
 
+    /// `seedJunctions` over `batches` on the host.
     pub fn seedBatches(batches: []const Batch, x: []f64) void {
         for (batches) |b| if (b.hooks.seed) |f| f(b.ctx, x);
     }
@@ -758,14 +781,18 @@ pub const Circuit = struct {
         for (self.batches) |b| if (b.hooks.seed_ic) |f| f(b.ctx, x);
     }
 
+    /// `clearLimits` over `batches` on the host.
     pub fn clearLimitBatches(batches: []const Batch) void {
         for (batches) |b| if (b.hooks.clear_limits) |f| f(b.ctx);
     }
 
+    /// `updateStates`' device walk over `batches`: the earliest reject time,
+    /// or null. Stages state for the next `stateCtl`.
     pub fn updateBatches(batches: []const Batch, x: []const f64) ?f64 {
         return minReject(batches, "update_state", x);
     }
 
+    /// `stateCtl` over `batches` on the host.
     pub fn stateCtlBatches(batches: []const Batch, sop: StateCtlOp) bool {
         var dirty = false;
         for (batches) |b| if (b.hooks.state_ctl) |f| {
@@ -994,7 +1021,8 @@ pub const Circuit = struct {
     }
 
     /// Returns every device parameter, typed by batch. Built once and freed by
-    /// `deinit`; the refs point into frozen batch storage.
+    /// `release`; the refs point into frozen batch storage, so they stay
+    /// valid across `restoreState` and die with the batches.
     pub fn collectParams(self: *Circuit) ![]const ParamRef {
         if (self.param_refs) |refs| return refs;
         const gpa = self.gpa;
@@ -1012,7 +1040,7 @@ pub const Circuit = struct {
     }
 
     /// Appends every batch's parameters to `list`, each stamped with its
-    /// batch's Library type.
+    /// batch's Library type. Invalidates pointers into `list` when it grows.
     pub fn collectTyped(batches: []const Batch, types: []const device_ir.DeviceType, gpa: std.mem.Allocator, list: *std.ArrayList(ParamRef)) !void {
         for (batches, types) |b, t| {
             const first = list.items.len;
@@ -1023,7 +1051,7 @@ pub const Circuit = struct {
 
     /// Returns every device's noise generators at `x`, with each device's own
     /// PSDs (which already carry its temperature). Pure in `x`, so `.pnoise`
-    /// calls it per PSS sample. Caller owns the slice.
+    /// calls it per PSS sample. Caller owns the slice and frees it with `gpa`.
     pub fn collectNoiseSources(self: *const Circuit, x: []const f64, gpa: std.mem.Allocator) ![]NoiseSource {
         var list: std.ArrayList(NoiseSource) = .empty;
         errdefer list.deinit(gpa);
@@ -1031,9 +1059,10 @@ pub const Circuit = struct {
         return try list.toOwnedSlice(gpa);
     }
 
-    /// Returns the netlist name of unknown `node`, or "" for a branch unknown.
+    /// Returns the netlist name of unknown `node`, or "" for a branch unknown
+    /// or a row past the circuit.
     pub fn nodeName(self: *const Circuit, node: u32) []const u8 {
-        if (node + 1 < self.intern_offs.len)
+        if (@as(usize, node) + 1 < self.intern_offs.len)
             return self.intern_bytes[self.intern_offs[node]..self.intern_offs[node + 1]];
         return "";
     }

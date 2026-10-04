@@ -1,6 +1,8 @@
 //! Cooperative analysis checkpoints: the event an analysis reports and the
 //! callback that may park or cancel it. Owns no circuit or solver state.
 
+/// The analysis stage an `Event` reports from. Only `.nonlinear` is
+/// filtered: workers park on it only under `Options.report_nonlinear`.
 pub const Phase = enum(u8) {
     prepare,
     nonlinear,

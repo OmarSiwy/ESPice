@@ -221,3 +221,53 @@ test "timed worker excludes paused time when cancelled" {
     try std.testing.expect((try worker.wait()) == .cancelled);
     try std.testing.expectEqual(active, worker.active_ns);
 }
+
+test "a second start while a quantum runs is refused" {
+    const Context = struct {
+        callback: progress.Callback = undefined,
+        go: std.Io.Event = .unset,
+
+        fn run(ctx: *anyopaque) !u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            // Hold the quantum in `.running` until the test has tried again.
+            self.go.waitUncancelable(std.testing.io);
+            try self.callback.checkpoint(.{ .phase = .dc, .completed = 1 });
+            return 7;
+        }
+    };
+    var ctx: Context = .{};
+    var worker = Worker(u8).init(std.testing.io, &ctx, Context.run, .{});
+    defer worker.deinit();
+    ctx.callback = worker.callback();
+    try worker.start(.checkpoint);
+    try std.testing.expectError(error.AlreadyRunning, worker.start(.checkpoint));
+    ctx.go.set(std.testing.io);
+    try std.testing.expect((try worker.wait()) == .progress);
+    try std.testing.expectEqual(@as(u8, 7), (try worker.advance()).complete);
+    // Cancelling a finished worker changes nothing.
+    worker.cancel();
+    try std.testing.expectEqual(@as(u8, 7), (try worker.wait()).complete);
+}
+
+test "a completion quantum runs through every checkpoint" {
+    const Context = struct {
+        callback: progress.Callback = undefined,
+        seen: u32 = 0,
+
+        fn run(ctx: *anyopaque) !u32 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            for (0..5) |i| {
+                try self.callback.checkpoint(.{ .phase = .sweep, .completed = i, .total = 5 });
+                self.seen += 1;
+            }
+            return self.seen;
+        }
+    };
+    var ctx: Context = .{};
+    var worker = Worker(u32).init(std.testing.io, &ctx, Context.run, .{});
+    defer worker.deinit();
+    ctx.callback = worker.callback();
+    try worker.start(.completion);
+    try std.testing.expectEqual(@as(u32, 5), (try worker.wait()).complete);
+    try std.testing.expect(worker.thread == null);
+}

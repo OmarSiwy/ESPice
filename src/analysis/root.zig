@@ -1,8 +1,10 @@
 //! The analysis module's public seam: the query session, execution config and
 //! result schemas. The numerical implementations stay private to the module.
+/// The query graph and its scheduler (`Session`).
 pub const session = @import("session.zig");
 pub const ExecutionConfig = @import("executor.zig").Config;
 pub const validateBackend = @import("executor.zig").validateBackend;
+/// The result shape of a query, without running it.
 pub const schemaOf = session.schemaOf;
 /// HSPICE MOSRA level 1 aging over a stress transient.
 pub const mosra = @import("post/mosra.zig");
@@ -20,6 +22,8 @@ test {
     _ = @import("tests/transient.zig");
     _ = @import("tests/integration.zig");
     _ = @import("post/mosra.zig");
+    _ = @import("par_eval.zig");
+    _ = @import("session.zig");
 
     // Imported for semantic analysis only: Zig never type-checks an
     // unreferenced function, and the test step does not link the executor's
