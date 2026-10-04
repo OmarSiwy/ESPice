@@ -4,6 +4,7 @@ const std = @import("std");
 const Io = std.Io;
 const Plot = @import("types.zig").Plot;
 
+/// Writes `plot`, which must have passed `types.validatePlot(.print, ...)`.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     try w.print("{s}: {s}\n", .{ plot.result.plotname, plot.title });
     try w.writeAll("Index");

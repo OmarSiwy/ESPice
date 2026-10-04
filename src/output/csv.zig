@@ -4,6 +4,7 @@ const std = @import("std");
 const Io = std.Io;
 const Plot = @import("types.zig").Plot;
 
+/// Writes `plot`, which must have passed `types.validatePlot(.csv, ...)`.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     for (plot.result.varnames, 0..) |name, i| {
         if (i > 0) try w.writeByte(',');
@@ -32,4 +33,11 @@ test "CSV real and complex layouts" {
     w = .fixed(&buf);
     try encode(&w, .{ .title = "ac", .result = .{ .plotname = "AC", .varnames = &.{ "frequency", "v(out)" }, .is_complex = true, .npoints = 1, .data = &.{ 1.0, 0.0, 0.5, -0.5 } } });
     try std.testing.expectEqualStrings("frequency_re,frequency_im,v(out)_re,v(out)_im\n1e0,0e0,5e-1,-5e-1\n", w.buffered());
+}
+
+test "CSV with no points is the header row alone" {
+    var buf: [64]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try encode(&w, .{ .title = "csv", .result = .{ .plotname = "Transient", .varnames = &.{ "time", "v(out)" }, .is_complex = false, .npoints = 0, .data = &.{} } });
+    try std.testing.expectEqualStrings("time,v(out)\n", w.buffered());
 }

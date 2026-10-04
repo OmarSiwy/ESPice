@@ -10,7 +10,8 @@ const Plot = @import("types.zig").Plot;
 const magic = "FSDB";
 const version: u32 = 0x0300;
 
-/// Expects the u32/u16 limits `types.validatePlot` enforces for fsdb.
+/// Writes `plot`. Expects the u32/u16 limits `types.validatePlot`
+/// enforces for fsdb; a longer string panics in safe builds.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     try w.writeAll(magic);
     try w.writeInt(u32, version, .little);

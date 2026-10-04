@@ -8,7 +8,9 @@ const dispatch = @import("write.zig");
 
 /// One output destination and the count of plots delivered to it.
 pub const Session = struct {
+    /// Owns `selection.path` and the open `stream`.
     allocator: std.mem.Allocator,
+    /// Fixed at `init`; the path is the session's own copy.
     selection: types.Selection,
     /// Plots delivered so far; the next one is plot number `published`.
     /// At most maxInt(u32) plots, numbered 0 through maxInt(u32) - 1.
@@ -36,7 +38,7 @@ pub const Session = struct {
         }
     };
 
-    /// Copies `selection.path`; performs no I/O.
+    /// Copies `selection.path`; performs no I/O. Free with `deinit`.
     pub fn init(allocator: std.mem.Allocator, selection: types.Selection) !Session {
         return .{
             .allocator = allocator,
@@ -47,6 +49,8 @@ pub const Session = struct {
         };
     }
 
+    /// Drops an open stream, leaving its destination as it was, and frees
+    /// the path copy.
     pub fn deinit(self: *Session) void {
         self.abortStream();
         if (self.selection.path) |path| self.allocator.free(path);
@@ -88,7 +92,8 @@ pub const Session = struct {
     /// the selection cannot stream (another format, a plot already
     /// delivered, a destination that is not a regular file); publish the
     /// whole plot then. The header leaves `No. Points:` blank, as ngspice's
-    /// batch raw file does, for `endStream` to fill in.
+    /// batch raw file does, for `endStream` to fill in. The writer is valid
+    /// until `endStream`, `abortStream` or `deinit`.
     pub fn beginStream(self: *Session, io: Io, plot: types.Plot) !?*Io.Writer {
         if (self.selection.format != .binary or self.published != 0 or self.state == .failed) return null;
         try types.validatePlot(.binary, plot);
@@ -132,7 +137,9 @@ pub const Session = struct {
 
     /// Finishes the streamed plot: checks that `npoints` rows of
     /// `varnames` columns arrived, fills in the point count and replaces the
-    /// destination. Counts as one `publish`.
+    /// destination. Counts as one `publish`. The stream is closed whether
+    /// or not it succeeds; a file error fails the session. Asserts that a
+    /// stream is open.
     pub fn endStream(self: *Session, io: Io, npoints: usize, columns: usize) !void {
         const s = self.stream.?;
         defer self.abortStream();
@@ -324,4 +331,47 @@ test "session: a streamed plot matches the whole-plot encoding but for the padde
     try std.testing.expectEqualStrings(whole.written()[0..at], streamed[0..at]);
     try std.testing.expectEqualStrings(&@as([Session.count_width - 1]u8, @splat(' ')), streamed[at..][0 .. Session.count_width - 1]);
     try std.testing.expectEqualSlices(u8, whole.written()[at..], streamed[at + Session.count_width - 1 ..]);
+}
+
+test "session: without a path plots are counted, not written" {
+    var session = try Session.init(std.testing.allocator, .{ .format = .csv });
+    defer session.deinit();
+    const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "op", .varnames = &.{"v(out)"}, .is_complex = false, .npoints = 1, .data = &.{1} } };
+    try session.publish(std.testing.io, plot);
+    try session.publish(std.testing.io, plot);
+    try std.testing.expectEqual(@as(u32, 2), session.published);
+    try std.testing.expectEqual(null, try session.beginStream(std.testing.io, plot));
+    session.published = std.math.maxInt(u32);
+    try std.testing.expectError(error.TooManyPlots, session.publish(std.testing.io, plot));
+}
+
+test "session: a stream without a path drops its rows and counts one plot" {
+    var session = try Session.init(std.testing.allocator, .{});
+    defer session.deinit();
+    const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "Transient Analysis", .varnames = &.{ "time", "v(out)" }, .is_complex = false, .npoints = 0, .data = &.{} } };
+    const w = (try session.beginStream(std.testing.io, plot)).?;
+    try w.writeAll(std.mem.sliceAsBytes(&[_]f64{ 0, 1 }));
+    try session.endStream(std.testing.io, 1, 2);
+    try std.testing.expectEqual(@as(u32, 1), session.published);
+    try std.testing.expectEqual(null, session.stream);
+    try std.testing.expectEqual(null, try session.beginStream(std.testing.io, plot));
+}
+
+test "session: an aborted stream leaves the destination as it was" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plot.raw", .{tmp.sub_path});
+    defer a.free(path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "plot.raw", .data = "existing" });
+    var session = try Session.init(a, .{ .path = path });
+    defer session.deinit();
+    const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "Transient Analysis", .varnames = &.{"time"}, .is_complex = false, .npoints = 0, .data = &.{} } };
+    try (try session.beginStream(io, plot)).?.writeAll(std.mem.sliceAsBytes(&[_]f64{1}));
+    session.abortStream();
+    try std.testing.expectEqual(@as(u32, 0), session.published);
+    const old = try tmp.dir.readFileAlloc(io, "plot.raw", a, .unlimited);
+    defer a.free(old);
+    try std.testing.expectEqualStrings("existing", old);
 }

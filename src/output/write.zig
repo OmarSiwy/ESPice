@@ -13,7 +13,8 @@ pub fn write(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !
 
 /// Appends `plot` to the file at `path`, creating it if missing. Only for
 /// formats that `concatenates`. The old plots are copied into the
-/// replacement, so the append is atomic too.
+/// replacement, so the append is atomic too, at O(file size) per call.
+/// Asserts that `format` concatenates.
 pub fn append(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !void {
     std.debug.assert(concatenates(format));
     return put(io, path, format, plot, true);
@@ -101,4 +102,25 @@ test "every format refuses a plot whose data length disagrees with its shape" {
         const expected = if (format == .touchstone or format == .citi) error.NotSParameterData else error.DataLengthMismatch;
         try std.testing.expectError(expected, write(std.testing.io, "zig-out/should_not_exist", format, plot));
     }
+}
+
+test "write replaces and append extends, both atomically" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/out.txt", .{tmp.sub_path});
+    defer a.free(path);
+    const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "p", .varnames = &.{"v(a)"}, .is_complex = false, .npoints = 1, .data = &.{1.0} } };
+    var one: Io.Writer.Allocating = .init(a);
+    defer one.deinit();
+    try encode(&one.writer, .print, plot);
+    try tmp.dir.writeFile(io, .{ .sub_path = "out.txt", .data = "old" });
+    try write(io, path, .print, plot);
+    try append(io, path, .print, plot);
+    const got = try tmp.dir.readFileAlloc(io, "out.txt", a, .unlimited);
+    defer a.free(got);
+    const twice = try std.mem.concat(a, u8, &.{ one.written(), one.written() });
+    defer a.free(twice);
+    try std.testing.expectEqualStrings(twice, got);
 }

@@ -7,6 +7,9 @@ const Io = std.Io;
 const types = @import("types.zig");
 const Plot = types.Plot;
 
+/// Writes `plot`, which must have passed `types.validatePlot(.touchstone,
+/// ...)`. `DataLengthMismatch` when `plot.z0` is neither empty nor one
+/// impedance per port.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     const n_ports = try types.portCount(plot.schema());
     if (plot.z0.len != 0 and plot.z0.len != n_ports) return error.DataLengthMismatch;
@@ -99,4 +102,40 @@ test "Touchstone writes 2.0 with a reference line for unequal port impedances" {
     } });
     try std.testing.expectEqualStrings("! t\n[Version] 2.0\n# Hz S RI R 50\n[Number of Ports] 2\n[Two-Port Data Order] 21_12\n" ++
         "[Number of Frequencies] 1\n[Reference] 50 75\n[Network Data]\n1e9 5e-1 -3e-1 1e-1 -5e-2 8e-1 1e-1 4e-1 -2e-1\n[End]\n", w.buffered());
+}
+
+test "Touchstone 1-port, 3-port matrix rows and a mismatched z0" {
+    var buf: [512]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    var plot: Plot = .{ .title = "s1p", .result = .{ .plotname = "sp", .varnames = &.{ "frequency", "S(1,1)" }, .is_complex = true, .npoints = 1, .data = &.{ 1, 0, 0.5, -0.5 } } };
+    try encode(&w, plot);
+    try std.testing.expectEqualStrings("! s1p\n# Hz S RI R 50\n1e0 5e-1 -5e-1\n", w.buffered());
+    plot.z0 = &.{ 50, 75 };
+    try std.testing.expectError(error.DataLengthMismatch, encode(&w, plot));
+
+    var data: [2 * 10]f64 = undefined;
+    for (&data, 0..) |*x, i| x.* = @floatFromInt(i);
+    w = .fixed(&buf);
+    try encode(&w, .{ .title = "s3p", .z0 = &.{ 75, 75, 75 }, .result = .{
+        .plotname = "sp",
+        .varnames = &.{ "frequency", "S(1,1)", "S(1,2)", "S(1,3)", "S(2,1)", "S(2,2)", "S(2,3)", "S(3,1)", "S(3,2)", "S(3,3)" },
+        .is_complex = true,
+        .npoints = 1,
+        .data = &data,
+    } });
+    try std.testing.expectEqualStrings("! s3p\n# Hz S RI R 75\n0e0\n 2e0 3e0 4e0 5e0 6e0 7e0\n 8e0 9e0 1e1 1.1e1 1.2e1 1.3e1\n 1.4e1 1.5e1 1.6e1 1.7e1 1.8e1 1.9e1\n", w.buffered());
+}
+
+test "Touchstone 2-port noise parameters follow the S block" {
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    // NFMIN 1 (0 dB), GAMMA_OPT 1 at 0 degrees, RN 25 ohm (0.5 of 50).
+    try encode(&w, .{ .title = "n", .result = .{
+        .plotname = "sp",
+        .varnames = &.{ "frequency", "S(1,1)", "S(1,2)", "S(2,1)", "S(2,2)", "NFMIN", "GAMMA_OPT", "RN" },
+        .is_complex = true,
+        .npoints = 1,
+        .data = &.{ 1e9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 25, 0 },
+    } });
+    try std.testing.expectEqualStrings("! n\n# Hz S RI R 50\n1e9 0e0 0e0 0e0 0e0 0e0 0e0 0e0 0e0\n! noise parameters\n1e9 0e0 1e0 0e0 5e-1\n", w.buffered());
 }

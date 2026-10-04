@@ -22,7 +22,8 @@ fn writeRecordI32(w: *Io.Writer, value: i32) !void {
     try writeRecord(w, &buf);
 }
 
-/// Expects at most 64 variables (`types.validateSchema` enforces it).
+/// Writes `plot`. Expects at most 64 variables (`types.validateSchema`
+/// enforces it); more panic in safe builds.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     const nvars = plot.result.varnames.len;
     const header = "SST2 {s} {s} nvars={d} npoints={d}";
@@ -54,4 +55,15 @@ test "SST2 record framing" {
     try std.testing.expectEqual(@as(i32, header.len), std.mem.readInt(i32, blob[4 + header.len ..][0..4], .little));
     // Header, count, names, complex flag, two points of 2 f64 each.
     try std.testing.expectEqual(header.len + 8 + 3 * 4 + 2 * name_slot + 8 + 3 * 4 + 2 * (8 + 16), blob.len);
+}
+
+test "SST2 cuts names to 15 bytes plus a NUL" {
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try encode(&w, .{ .title = "t", .result = .{ .plotname = "p", .varnames = &.{ "v(a_very_long_node_name)", "v(b)" }, .is_complex = false, .npoints = 0, .data = &.{} } });
+    const blob = w.buffered();
+    const header = "SST2 t p nvars=2 npoints=0";
+    const names = blob[4 + header.len + 4 + 12 + 4 ..][0 .. 2 * name_slot];
+    const pad: [12]u8 = @splat(0);
+    try std.testing.expectEqualStrings("v(a_very_long_n\x00v(b)" ++ pad, names);
 }

@@ -60,6 +60,7 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
 /// `result` into `values` (parallel to `measures`), PARAM cards last in
 /// deck order, as `print` does. A card that does not target the result, or
 /// whose event never happens, reads NaN.
+/// Asserts that `out.len == measures.len`.
 pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.Result, out: []f64) void {
     std.debug.assert(out.len == measures.len);
     @memset(out, nan);
@@ -72,12 +73,16 @@ pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.
 }
 
 /// Clause `c`'s waveform over transient `result` at each time in `at`,
-/// interpolated linearly and held flat past either end.
+/// interpolated linearly and held flat past either end. A result with no
+/// samples (none computed, or streamed to a file) reads NaN everywhere.
+/// `NoSuchVector` when `c` names a vector the result lacks. Panics in safe
+/// builds when `at.len != out.len`.
 pub fn sample(c: Clause, result: core.Result, at: []const f64, out: []f64) error{NoSuchVector}!void {
     const w: Wave = .{ .result = result, .analysis = .tran };
     const x = w.scale();
     const y = try w.waveform(c.vec, c.ops, c.vectype);
     const n = w.len();
+    if (n == 0) return @memset(out, nan);
     for (at, out) |t, *v| {
         // The first sample at or after t.
         var lo: usize = 0;
@@ -104,41 +109,42 @@ fn targets(m: core.Measure, analysis: Kind, result: core.Result) bool {
 /// Mean, sigma, min and max of each card over Monte Carlo trials, as
 /// `mean(name) = x` lines (sigma with Bessel's correction). `trials` holds
 /// the results the cards are evaluated over; a card that fails in a trial
-/// leaves that trial out.
+/// leaves that trial out. Cards past the 256th are not reported.
+/// O(cards * trials * samples).
 pub fn printStatistics(out: *Writer, measures: []const core.Measure, analysis: Kind, trials: []const core.Result) Writer.Error!void {
     var discard_buf: [64]u8 = undefined;
     var discard: Writer.Discarding = .init(&discard_buf);
-    var heading = false;
-    for (measures, 0..) |m, i| {
-        if (m.analysis != analysis or i >= 256) continue;
-        var n: f64 = 0;
-        var mean: f64 = 0;
-        var m2: f64 = 0;
-        var lo: f64 = std.math.inf(f64);
-        var hi: f64 = -std.math.inf(f64);
-        for (trials) |result| {
-            var values: [256]f64 = @splat(nan);
-            for (measures, 0..) |other, k| {
-                if (other.analysis != analysis or k >= values.len) continue;
-                if (other.func == .param and k > i) continue;
-                values[k] = evaluate(&discard.writer, other, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
-            }
-            const x = values[i];
+    // Welford accumulators, one per card; every field moves together.
+    const Acc = struct { n: f64 = 0, mean: f64 = 0, m2: f64 = 0, lo: f64 = std.math.inf(f64), hi: f64 = -std.math.inf(f64) };
+    var acc: [256]Acc = @splat(.{});
+    const cards = measures[0..@min(measures.len, acc.len)];
+    for (trials) |result| {
+        // One pass in deck order: a card reads only the cards before it (a
+        // later one is still NaN), so each card sees what it would alone.
+        var values: [256]f64 = @splat(nan);
+        for (cards, 0..) |m, k| {
+            if (m.analysis != analysis) continue;
+            values[k] = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
+            const x = values[k];
             if (!std.math.isFinite(x)) continue;
-            n += 1;
-            const delta = x - mean;
-            mean += delta / n;
-            m2 += delta * (x - mean);
-            lo = @min(lo, x);
-            hi = @max(hi, x);
+            const a = &acc[k];
+            a.n += 1;
+            const delta = x - a.mean;
+            a.mean += delta / a.n;
+            a.m2 += delta * (x - a.mean);
+            a.lo = @min(a.lo, x);
+            a.hi = @max(a.hi, x);
         }
-        if (n == 0) continue;
+    }
+    var heading = false;
+    for (cards, acc[0..cards.len]) |m, a| {
+        if (a.n == 0) continue;
         if (!heading) {
             heading = true;
             try out.print("\n  Monte Carlo statistics over {d} trials\n\n", .{trials.len});
         }
-        const sigma = if (n > 1) @sqrt(m2 / (n - 1)) else 0;
-        try out.print("mean({s}) = {f}\nsigma({s}) = {f}\nmin({s}) = {f}\nmax({s}) = {f}\n", .{ m.name, sci(mean, 6), m.name, sci(sigma, 6), m.name, sci(lo, 6), m.name, sci(hi, 6) });
+        const sigma = if (a.n > 1) @sqrt(a.m2 / (a.n - 1)) else 0;
+        try out.print("mean({s}) = {f}\nsigma({s}) = {f}\nmin({s}) = {f}\nmax({s}) = {f}\n", .{ m.name, sci(a.mean, 6), m.name, sci(sigma, 6), m.name, sci(a.lo, 6), m.name, sci(a.hi, 6) });
     }
 }
 
@@ -371,6 +377,7 @@ fn nth(c: Clause, k: i32) ?Clause {
 /// (SNDR − 1.76)/6.02; SFDR is the fundamental over the largest other bin
 /// in [MINFREQ, MAXFREQ], in dB. NaN for a spectrum with no non-DC bin.
 fn fftFigure(mag: Column, freq: Column, n: usize, c: Clause, func: core.MeasureFunc) f64 {
+    if (n < 2) return nan;
     var k0: usize = 0;
     for (1..n) |k| if (k0 == 0 or mag.get(k) > mag.get(k0)) {
         k0 = k;
@@ -406,7 +413,7 @@ fn fftFigure(mag: Column, freq: Column, n: usize, c: Clause, func: core.MeasureF
 fn paramValue(ops: []const core.MeasureOp, values: []const f64) f64 {
     return fold(ops, struct {
         values: []const f64,
-        fn leaf(s: @This(), op: core.MeasureOp) f64 {
+        fn leaf(s: @This(), op: core.MeasureOp, _: usize) f64 {
             return switch (op) {
                 .num => |x| x,
                 .measure => |k| if (k < s.values.len) s.values[k] else nan,
@@ -416,19 +423,26 @@ fn paramValue(ops: []const core.MeasureOp, values: []const f64) f64 {
     }{ .values = values });
 }
 
-/// Folds measure postfix; `leaves.leaf(op)` values each `num`, `measure`
-/// and `vector` op. NaN on a stack overflow or a malformed tail.
+/// Folds measure postfix; `leaves.leaf(op, v)` values each `num`, `measure`
+/// and `vector` op, `v` counting the vector ops before it. NaN on a stack
+/// overflow or underflow, or a malformed tail.
 fn fold(ops: []const core.MeasureOp, leaves: anytype) f64 {
     var stack: [32]f64 = undefined;
     var n: usize = 0;
+    var vectors: usize = 0;
     for (ops) |op| switch (op) {
         .num, .measure, .vector => {
             if (n == stack.len) return nan;
-            stack[n] = leaves.leaf(op);
+            stack[n] = leaves.leaf(op, vectors);
+            vectors += @intFromBool(op == .vector);
             n += 1;
         },
-        .neg => stack[n - 1] = -stack[n - 1],
+        .neg => {
+            if (n == 0) return nan;
+            stack[n - 1] = -stack[n - 1];
+        },
         else => {
+            if (n < 2) return nan;
             n -= 1;
             const b = stack[n];
             const x = &stack[n - 1];
@@ -460,6 +474,12 @@ const Column = struct {
     /// `par()` postfix and the result labels its vectors name.
     ops: []const core.MeasureOp = &.{},
     names: []const []const u8 = &.{},
+    /// Column index of each of the first `par_count` vector ops in `ops`,
+    /// resolved once by `Wave.waveform` instead of by name per sample.
+    // ponytail: 8 slots; vectors past the 8th fall back to a name lookup
+    // per sample. Widen if par() expressions grow.
+    par_cols: [8]u32 = undefined,
+    par_count: u8 = 0,
 
     fn get(c: Column, i: usize) f64 {
         if (c.ops.len != 0) return fold(c.ops, Sample{ .column = c, .i = i });
@@ -483,16 +503,13 @@ const Sample = struct {
     column: Column,
     i: usize,
 
-    // ponytail: each vector op finds its column by name per sample,
-    // O(vectors); resolve the indices once if par() waveforms get hot.
-    fn leaf(s: Sample, op: core.MeasureOp) f64 {
+    fn leaf(s: Sample, op: core.MeasureOp, v: usize) f64 {
         return switch (op) {
             .num => |x| x,
             .vector => |name| blk: {
-                const k = columnIndex(s.column.names, name) orelse break :blk nan;
-                var c = s.column;
-                c.ops = &.{};
-                c.offset = k * @as(usize, if (c.complex) 2 else 1);
+                const p = s.column;
+                const k = if (v < p.par_count) p.par_cols[v] else (columnIndex(p.names, name) orelse break :blk nan);
+                const c: Column = .{ .data = p.data, .stride = p.stride, .offset = k * @as(usize, if (p.complex) 2 else 1), .complex = p.complex, .vectype = p.vectype };
                 break :blk c.get(s.i);
             },
             .measure => nan,
@@ -521,8 +538,9 @@ const Wave = struct {
     /// Results of the cards evaluated so far, by card index.
     values: []const f64 = &.{},
 
+    /// Sample count; 0 for a result whose rows streamed to a file.
     fn len(w: Wave) usize {
-        return w.result.npoints;
+        return if (w.result.data.len == 0) 0 else w.result.npoints;
     }
 
     fn scale(w: Wave) Column {
@@ -542,12 +560,16 @@ const Wave = struct {
     /// The vector `name`, or the `par()` waveform `ops` when given.
     fn waveform(w: Wave, name: []const u8, ops: []const core.MeasureOp, vectype: u8) error{NoSuchVector}!Column {
         if (ops.len == 0) return w.column(name, vectype);
-        for (ops) |op| if (op == .vector) {
-            _ = try w.column(op.vector, vectype);
-        };
         var c = w.col(0, vectype);
         c.ops = ops;
         c.names = w.result.varnames;
+        for (ops) |op| if (op == .vector) {
+            const k = columnIndex(w.result.varnames, op.vector) orelse return error.NoSuchVector;
+            if (c.par_count < c.par_cols.len) {
+                c.par_cols[c.par_count] = @intCast(k);
+                c.par_count += 1;
+            }
+        };
         return c;
     }
 
@@ -718,7 +740,7 @@ const Wave = struct {
     fn slopeAt(w: Wave, c: Clause, at: f64) !f64 {
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
-        for (1..w.len()) |i| {
+        for (1..@max(w.len(), 1)) |i| {
             const x0 = x.get(i - 1);
             const x1 = x.get(i);
             if ((x0 <= at and x1 >= at) or (w.analysis == .dc and x0 >= at and x1 <= at))
@@ -897,6 +919,7 @@ const Wave = struct {
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
         const n = w.len();
+        if (n == 0) return .{ .value = nan, .from = nan, .to = nan };
         var win: Window = .{ .x = x, .y = y, .from = c.from, .to = c.to, .rms = rms };
         while (win.lo < n and x.get(win.lo) < c.from) win.lo += 1;
         win.hi = win.lo;
@@ -1045,4 +1068,118 @@ test "measurements match ngspice on a sampled ramp" {
         \\
     , out.buffered());
     try std.testing.expect(std.mem.indexOf(u8, err.buffered(), "gone") != null);
+}
+
+/// v(a) = t and v(b) = 4 - t on t = 0..4, sampled every 1.
+const ramp: core.Result = .{ .plotname = "t", .varnames = &.{ "time", "v(a)", "v(b)" }, .is_complex = false, .npoints = 5, .data = &.{ 0, 0, 4, 1, 1, 3, 2, 2, 2, 3, 3, 1, 4, 4, 0 } };
+
+test "every function over a result with no samples reads NaN or zero, never panics" {
+    const funcs = comptime std.enums.values(core.MeasureFunc);
+    var cards: [funcs.len]core.Measure = undefined;
+    for (funcs, &cards) |f, *c| c.* = .{ .analysis = .tran, .name = "m", .func = f, .first = .{ .vec = "v(a)", .vec2 = "v(b)" }, .second = .{ .vec = "v(b)" } };
+    var empty = ramp;
+    empty.npoints = 0;
+    empty.data = &.{};
+    // A streamed result keeps its point count but no samples.
+    var streamed = ramp;
+    streamed.data = &.{};
+    var buf: [64]u8 = undefined;
+    var sink: Writer.Discarding = .init(&buf);
+    for ([_]core.Result{ empty, streamed }) |result| {
+        var values: [funcs.len]f64 = undefined;
+        evaluateAll(&cards, .tran, result, &values);
+        for (cards, values) |c, v| switch (c.func) {
+            // ngspice measure_minMaxAvg reports 0 over an empty window, and
+            // a check over no samples counts no violation.
+            .avg, .min, .max, .min_at, .max_at, .pp, .check_slew, .check_forbid, .check_require, .check_level, .dout => try std.testing.expectEqual(0, v),
+            else => try std.testing.expect(std.math.isNan(v)),
+        };
+        try print(&sink.writer, &sink.writer, &cards, .tran, result);
+        var out: [3]f64 = undefined;
+        try sample(.{ .vec = "v(a)" }, result, &.{ -1, 0, 9 }, &out);
+        for (out) |v| try std.testing.expect(std.math.isNan(v));
+    }
+}
+
+test sample {
+    var out: [5]f64 = undefined;
+    try sample(.{ .vec = "v(a)" }, ramp, &.{ -1, 0, 2.5, 3, 9 }, &out);
+    try std.testing.expectEqualSlices(f64, &.{ 0, 0, 2.5, 3, 4 }, &out);
+    try std.testing.expectError(error.NoSuchVector, sample(.{ .vec = "v(z)" }, ramp, &.{0}, out[0..1]));
+}
+
+test printStatistics {
+    var doubled = ramp;
+    doubled.data = &.{ 0, 0, 0, 1, 2, 0, 2, 4, 0, 3, 6, 0, 4, 8, 0 };
+    const cards = [_]core.Measure{
+        .{ .analysis = .tran, .name = "mx", .func = .max, .first = .{ .vec = "a" } },
+        .{ .analysis = .tran, .name = "p", .func = .param, .first = .{}, .expr = &.{ .{ .measure = 0 }, .{ .num = 2 }, .mul } },
+        // A PARAM reads only the cards before it: `late` is NaN here.
+        .{ .analysis = .tran, .name = "q", .func = .param, .first = .{}, .expr = &.{.{ .measure = 3 }} },
+        .{ .analysis = .tran, .name = "late", .func = .max, .first = .{ .vec = "v(a)" } },
+        .{ .analysis = .ac, .name = "other", .func = .max, .first = .{ .vec = "v(a)" } },
+    };
+    var buf: [1024]u8 = undefined;
+    var out: Writer = .fixed(&buf);
+    try printStatistics(&out, &cards, .tran, &.{ ramp, doubled });
+    try std.testing.expectEqualStrings(
+        \\
+        \\  Monte Carlo statistics over 2 trials
+        \\
+        \\mean(mx) = 6.000000e+00
+        \\sigma(mx) = 2.828427e+00
+        \\min(mx) = 4.000000e+00
+        \\max(mx) = 8.000000e+00
+        \\mean(p) = 1.200000e+01
+        \\sigma(p) = 5.656854e+00
+        \\min(p) = 8.000000e+00
+        \\max(p) = 1.600000e+01
+        \\mean(late) = 6.000000e+00
+        \\sigma(late) = 2.828427e+00
+        \\min(late) = 4.000000e+00
+        \\max(late) = 8.000000e+00
+        \\
+    , out.buffered());
+}
+
+test "FFT figures of merit over a synthetic spectrum" {
+    // DC 5 (ignored), fundamental 1 at bin 2, harmonics 0.1 at bins 4 and
+    // 6, noise 0.01 in every odd bin.
+    const spectrum: core.Result = .{ .plotname = "fft", .varnames = &.{ "frequency", "v(o)" }, .is_complex = false, .npoints = 8, .data = &.{ 0, 5, 1, 0.01, 2, 1, 3, 0.01, 4, 0.1, 5, 0.01, 6, 0.1, 7, 0.01 } };
+    const clause: Clause = .{ .vec = "v(o)", .to = 100 };
+    const cards = [_]core.Measure{
+        .{ .analysis = .fft, .name = "thd", .func = .thd, .first = clause },
+        .{ .analysis = .fft, .name = "snr", .func = .snr, .first = clause },
+        .{ .analysis = .fft, .name = "sfdr", .func = .sfdr, .first = clause },
+    };
+    var values: [cards.len]f64 = undefined;
+    evaluateAll(&cards, .fft, spectrum, &values);
+    try std.testing.expectApproxEqRel(@sqrt(0.02), values[0], 1e-12);
+    try std.testing.expectApproxEqRel(10 * std.math.log10(2500.0), values[1], 1e-12);
+    try std.testing.expectApproxEqRel(20, values[2], 1e-12);
+}
+
+test "par() waveforms resolve their vectors, past the cached eight too" {
+    const v: core.MeasureOp = .{ .vector = "v(a)" };
+    const nine = [_]core.MeasureOp{ v, v, .add, v, .add, v, .add, v, .add, v, .add, v, .add, v, .add, v, .add };
+    const cards = [_]core.Measure{
+        .{ .analysis = .tran, .name = "sum", .func = .max, .first = .{ .ops = &.{ .{ .vector = "a" }, .{ .vector = "v(b)" }, .add } } },
+        .{ .analysis = .tran, .name = "nine", .func = .max, .first = .{ .ops = &nine } },
+        .{ .analysis = .tran, .name = "missing", .func = .max, .first = .{ .ops = &.{.{ .vector = "v(z)" }} } },
+    };
+    var values: [cards.len]f64 = undefined;
+    evaluateAll(&cards, .tran, ramp, &values);
+    try std.testing.expectEqual(4, values[0]);
+    try std.testing.expectEqual(36, values[1]);
+    try std.testing.expect(std.math.isNan(values[2]));
+}
+
+test "malformed PARAM postfix reads NaN" {
+    try std.testing.expect(std.math.isNan(paramValue(&.{.add}, &.{})));
+    try std.testing.expect(std.math.isNan(paramValue(&.{.neg}, &.{})));
+    try std.testing.expect(std.math.isNan(paramValue(&.{ .{ .num = 1 }, .{ .num = 2 } }, &.{})));
+    try std.testing.expect(std.math.isNan(paramValue(&.{.{ .measure = 7 }}, &.{1})));
+    const deep: [33]core.MeasureOp = @splat(.{ .num = 1 });
+    try std.testing.expect(std.math.isNan(paramValue(&deep, &.{})));
+    try std.testing.expectEqual(-6, paramValue(&.{ .{ .num = 2 }, .{ .measure = 0 }, .pow, .neg, .{ .num = 2 }, .sub }, &.{2}));
 }

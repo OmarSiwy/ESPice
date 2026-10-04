@@ -14,6 +14,7 @@ fn varType(name: []const u8) []const u8 {
     return "voltage";
 }
 
+/// Writes `plot`, which must have passed `types.validatePlot(.binary, ...)`.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     try writeHeader(w, plot, true);
     try w.writeAll(std.mem.sliceAsBytes(plot.result.data));

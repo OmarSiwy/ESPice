@@ -5,6 +5,7 @@ const Io = std.Io;
 const rawfile = @import("rawfile.zig");
 const Plot = @import("types.zig").Plot;
 
+/// Writes `plot`, which must have passed `types.validatePlot(.ascii, ...)`.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
     try rawfile.writeHeader(w, plot, false);
     for (0..plot.result.npoints) |pt| {
@@ -32,4 +33,11 @@ test "ASCII raw values follow the Values: header" {
     } });
     try std.testing.expect(std.mem.endsWith(u8, w.buffered(), "Flags: complex\nNo. Variables: 2\nNo. Points: 1\n" ++
         "Variables:\n\t0\tfrequency\tfrequency\n\t1\tv(out)\tvoltage\nValues:\n0\t1e0,0e0\n\t5e-1,-5e-1\n"));
+}
+
+test "ASCII raw writes one line per real variable" {
+    var buf: [512]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try encode(&w, .{ .title = "t", .result = .{ .plotname = "Transient", .varnames = &.{ "time", "v(a)" }, .is_complex = false, .npoints = 2, .data = &.{ 0, 1, 0.5, -2 } } });
+    try std.testing.expect(std.mem.endsWith(u8, w.buffered(), "Values:\n0\t0e0\n\t1e0\n1\t5e-1\n\t-2e0\n"));
 }
