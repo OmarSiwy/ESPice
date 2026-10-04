@@ -39,7 +39,8 @@ const units = std.StaticStringMap(f64).initComptime(.{
 
 const Field = enum { tdelay, idelay, odelay, slope, trise, tfall, vih, vil, voh, vol, vth, vref, out, outz, triz };
 
-/// The netlist text vector file `src` stands for, in `arena`.
+/// The netlist text vector file `src` stands for, in `arena`: one
+/// `vvec_<bit>` PWL source per input bit and one `.dout` card per output.
 /// InvalidVector for a form this reader does not take (see the module
 /// comment) or one the manual forbids.
 pub fn expand(arena: std.mem.Allocator, src: []const u8) Error![]const u8 {
@@ -76,6 +77,8 @@ pub fn expand(arena: std.mem.Allocator, src: []const u8) Error![]const u8 {
         const key = toks.items[0];
         const args = toks.items[1..];
         if (std.mem.eql(u8, key, "radix")) {
+            // Rows already read hold one state per bit known so far.
+            if (times.items.len != 0) return error.InvalidVector;
             for (args) |v| {
                 try vectors.append(arena, @intCast(v.len));
                 for (v) |c| {
@@ -212,7 +215,7 @@ fn names(arena: std.mem.Allocator, v: []const u8, out: []Bit) Error!void {
     const colon = std.mem.indexOfScalar(u8, inner, ':') orelse return error.InvalidVector;
     const hi = std.fmt.parseInt(i32, inner[0..colon], 10) catch return error.InvalidVector;
     const lo = std.fmt.parseInt(i32, inner[colon + 1 ..], 10) catch return error.InvalidVector;
-    if (@abs(hi - lo) + 1 != out.len) return error.InvalidVector;
+    if (@abs(@as(i64, hi) - lo) + 1 != out.len) return error.InvalidVector;
     const step: i32 = if (hi >= lo) -1 else 1;
     for (out, 0..) |*bit, k| {
         const i = hi + step * @as(i32, @intCast(k));
@@ -269,4 +272,33 @@ test "a vector file becomes PWL inputs and .dout outputs" {
         \\
     , text);
     try std.testing.expectError(error.InvalidVector, expand(arena.allocator(), "radix 1\nvname a\nio b\n10 1\n"));
+}
+
+test "vector files: hex digits, PERIOD rows and malformed input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // One hex digit is four bits, MSB first; PERIOD rows carry no time.
+    const text = try expand(a, "radix 4\nvname d[3:0]\nio i\nperiod 10\nslope 0\na\n5\n");
+    var it = std.mem.splitScalar(u8, text, '\n');
+    for ([_][]const u8{ "vvec_d3 d3 0 pwl(0 3.3e0 ", "vvec_d2 d2 0 pwl(0 0e0 ", "vvec_d1 d1 0 pwl(0 3.3e0 ", "vvec_d0 d0 0 pwl(0 0e0 " }) |head|
+        try std.testing.expect(std.mem.startsWith(u8, it.next().?, head));
+    try std.testing.expectEqualStrings("", it.next().?);
+    try std.testing.expectEqual(null, it.next());
+    for ([_][]const u8{
+        "",
+        "radix 1\n",
+        "radix 5\nvname a\n10 1\n",
+        "radix 1\nvname a b\n",
+        "radix 1\nvname a[1:0]\n",
+        "radix 1\nvname a[2147483647:-2147483648]\n",
+        "radix 1\nvname a\ntunit hours\n",
+        "radix 1\nvname a\nout 1\n10 1\n",
+        "radix 1\nvname a\nenable 1\n10 1\n",
+        "radix 1\nvname a\n10 2\n",
+        "radix 1\nvname a\n10 1 1\n",
+        "radix 1\nvname a\nvih 5 11\n10 1\n",
+        "radix 1\nvname a\n10 1\nradix 1\n20 1 0\n", // RADIX after data
+        "radix 1\n10 1\n", // a bit without a name
+    }) |src| try std.testing.expectError(error.InvalidVector, expand(a, src));
 }

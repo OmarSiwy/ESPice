@@ -11,7 +11,9 @@ const directives = std.StaticStringMap(Directive).initComptime(.{
     .{ ".load", .load },       .{ ".data", .data },   .{ ".vec", .vec },
 });
 
-/// Reads `path` and expands it (see `expand`). The result is allocated in `arena`.
+/// Reads `path` and expands it (see `expand`). The result is allocated in
+/// `arena`. Fails with the file system's error for `path` or any file it
+/// names, or with `expand`'s.
 pub fn load(io: Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
     const src = try Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited);
     errdefer arena.free(src);
@@ -23,6 +25,9 @@ pub fn load(io: Io, arena: std.mem.Allocator, path: []const u8) ![]const u8 {
 /// Inlines includes and selected .lib sections, resolving paths against
 /// `origin`'s directory; an HDL include stays an `.include` of its resolved
 /// path. Returns `src` itself when it names none, else a copy in `arena`.
+/// InvalidInclude, InvalidLibrarySection, DuplicateLibrarySection,
+/// LibrarySectionNotFound, InvalidData, InvalidVector or
+/// IncludeDepthExceeded (past 32 levels) for a deck it cannot expand.
 pub fn expand(io: Io, arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]const u8 {
     var lines = std.mem.splitScalar(u8, src, '\n');
     _ = lines.next(); // The title is opaque even when it starts with .include.
@@ -93,7 +98,10 @@ fn locate(io: Io, search: []const []const u8, path: []const u8, name: []const u8
 /// `.subckt ... .ends` the subcircuit of that name, and `.lib file sec`
 /// the `.lib` line naming the same file; `.del lib file sec` removes one.
 /// Any other card is appended (`.param`: the last definition wins). A deck
-/// without `.alter` is returned as its single run, unchanged.
+/// without `.alter` is returned as its single run, unchanged. Runs borrow
+/// `src` or live in `arena`. InvalidAlter for a nameless `.model`,
+/// `.subckt` or `.lib`, a `.del` other than `.del lib`, or a `.del` that
+/// matches no `.lib` card.
 pub fn splitAlters(arena: std.mem.Allocator, src: []const u8) ![]const []const u8 {
     // Most decks have no `.alter`: borrow `src` whole and index nothing.
     if (!hasAlter(src)) return try arena.dupe([]const u8, &.{src});
@@ -228,7 +236,6 @@ fn word(fields: *Fields) !?[]const u8 {
     return if (Fields.isWord(f)) f else error.InvalidInclude;
 }
 
-/// A model file the netlist includes but does not parse.
 /// What a non-netlist file a deck names holds: an HDL module, or `data`
 /// that a card reads (an HSPICE RLGC or Touchstone file).
 pub const ForeignKind = enum { osdi_include, pre_osdi, verilog_a, verilog, data };
@@ -462,4 +469,52 @@ fn appendContents(io: Io, search: []const []const u8, path: []const u8, src: []c
     }
     if (current_section != null) return error.InvalidLibrarySection;
     if (!found) return error.LibrarySectionNotFound;
+}
+
+test "directives and alter keys" {
+    try std.testing.expectEqual(.include, directiveOf(".INC x").?);
+    try std.testing.expectEqual(.endl, directiveOf(".endl\tx").?);
+    try std.testing.expectEqual(null, directiveOf(".includes x"));
+    try std.testing.expectEqual(null, directiveOf("r1 a b 1"));
+    try std.testing.expectEqual(null, directiveOf(""));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("e:r1", try keyOf(a, "R1 a b 1"));
+    try std.testing.expectEqualStrings("model:nm", try keyOf(a, ".model NM nmos"));
+    try std.testing.expectEqualStrings("del:f", try keyOf(a, ".del lib 'f' tt"));
+    try std.testing.expectEqualStrings("", try keyOf(a, ".param a=1"));
+    try std.testing.expectEqualStrings("", try keyOf(a, "* c"));
+    try std.testing.expectError(error.InvalidAlter, keyOf(a, ".del x"));
+    try std.testing.expectError(error.InvalidAlter, keyOf(a, ".model"));
+    try std.testing.expectEqual(.verilog_a, foreignKindForPath("a/B.VA").?);
+    try std.testing.expectEqual(.verilog, foreignKindForPath("x.sv").?);
+    try std.testing.expectEqual(null, foreignKindForPath("x.sp"));
+    // A deck naming nothing is returned as itself, even with a `.include` title.
+    const plain = ".include x\nr1 a 0 1\n";
+    try std.testing.expectEqual(plain.ptr, (try expand(std.testing.io, a, "deck.sp", plain)).ptr);
+}
+
+test "external .data: MER stacks files, LAM sets them side by side" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.txt", .data = "1 2\n3,4\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "5 6\n" });
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
+    const Case = struct { []const u8, anyerror![]const u8 };
+    for ([_]Case{
+        .{ "t\n.data d MER\n+ FILE='a.txt' x=1 y=2\n+ FILE='b.txt' y=1\n.enddata\n.end\n", "t\n.data d x y\n+ 1 2\n+ 3 4\n+ 5 5\n.enddata\n.end\n\n" },
+        .{ "t\n.data d LAM\n+ FILE='a.txt' x=1\n+ FILE='b.txt' y=2\n.enddata\n", "t\n.data d x y\n+ 1 6\n+ 3 0\n.enddata\n\n" },
+        .{ "t\n.data d MER FILE='a.txt' x=0\n.enddata\n", error.InvalidData },
+        .{ "t\n.data d MER x=1\n.enddata\n", error.InvalidData },
+        .{ "t\n.data d MER FILE='a.txt'\n.enddata\n", error.InvalidData },
+    }) |case| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "deck.sp", .data = case[0] });
+        const got = load(io, a, path);
+        if (case[1]) |want| try std.testing.expectEqualStrings(want, try got) else |err| try std.testing.expectError(err, got);
+    }
 }

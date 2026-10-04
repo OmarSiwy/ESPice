@@ -81,6 +81,7 @@ pub const Scratch = struct {
     /// Table lengths to roll back to.
     pub const Mark = struct { ops: usize, consts: usize, names: usize };
 
+    /// The current table lengths, for a later `reset`.
     pub fn mark(s: Scratch) Mark {
         return .{ .ops = s.ops.items.len, .consts = s.consts.items.len, .names = s.names.items.len };
     }
@@ -96,7 +97,8 @@ pub const Scratch = struct {
 /// Compiles the expression starting at `text[pos]` into `s` and returns
 /// where it ends. Grammar: ternary `?:` loosest, then `||`, `&&`,
 /// comparisons, `+ -`, `* /`, `^`/`**` (all left associative); unary `-`/`+`
-/// bind below power.
+/// bind below power. Nesting deeper than `max_depth` is a ParseError.
+/// Invalidates slices of `s`'s tables, which grow in `gpa`.
 pub fn compile(comptime parseNum: fn ([]const u8) ?f64, gpa: std.mem.Allocator, s: *Scratch, text: []const u8, pos: usize) Error!usize {
     var p: Compiler(parseNum) = .{ .text = text, .pos = pos, .gpa = gpa, .s = s };
     try p.bin(0);
@@ -104,11 +106,17 @@ pub fn compile(comptime parseNum: fn ([]const u8) ?f64, gpa: std.mem.Allocator, 
 }
 
 /// `compile` over the whole of `text`; trailing input is a ParseError.
+/// Invalidates slices of `s`'s tables, which grow in `gpa`.
 pub fn compileAll(comptime parseNum: fn ([]const u8) ?f64, gpa: std.mem.Allocator, s: *Scratch, text: []const u8) Error!void {
     var p: Compiler(parseNum) = .{ .text = text, .gpa = gpa, .s = s };
     try p.bin(0);
     if (p.peek() != null) return error.ParseError;
 }
+
+/// Recursion bound of `compile`, in parser calls: a level of parentheses,
+/// quotes, call arguments or ternary branch costs two, a unary operator one
+/// or two. Deeper input is a ParseError rather than a stack overflow.
+pub const max_depth = 512;
 
 fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
     return struct {
@@ -116,6 +124,7 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
         pos: usize = 0,
         gpa: std.mem.Allocator,
         s: *Scratch,
+        depth: u16 = 0,
 
         const P = @This();
 
@@ -134,6 +143,9 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
         }
 
         fn bin(p: *P, min_prec: u8) Error!void {
+            if (p.depth == max_depth) return error.ParseError;
+            p.depth += 1;
+            defer p.depth -= 1;
             try p.unary();
             while (true) {
                 const c = p.peek() orelse break;
@@ -189,7 +201,12 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
             }
         }
 
+        // Every recursion passes through `bin` or `unary`, so the guard in
+        // both bounds them all.
         fn unary(p: *P) Error!void {
+            if (p.depth == max_depth) return error.ParseError;
+            p.depth += 1;
+            defer p.depth -= 1;
             const c = p.peek() orelse return error.ParseError;
             switch (c) {
                 '-' => {
@@ -273,13 +290,14 @@ fn Compiler(comptime parseNum: fn ([]const u8) ?f64) type {
 }
 
 /// Length of the number literal `text` starts with: digits and dots, an
-/// exponent, then a letter suffix (`2.5e-3`, `10meg`).
+/// exponent, then a letter suffix (`2.5e-3`, `10meg`). `E` is an exponent
+/// too, as `lines.zig` reads it, for Spectre's case-kept text.
 pub fn numberLen(text: []const u8) usize {
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
         const ch = text[i];
         if (std.ascii.isDigit(ch) or ch == '.') continue;
-        if (ch == 'e' and i + 1 < text.len and
+        if ((ch == 'e' or ch == 'E') and i + 1 < text.len and
             (std.ascii.isDigit(text[i + 1]) or
                 ((text[i + 1] == '-' or text[i + 1] == '+') and i + 2 < text.len and std.ascii.isDigit(text[i + 2]))))
         {
@@ -327,17 +345,20 @@ fn bool01(b: bool) f64 {
     return @floatFromInt(@intFromBool(b));
 }
 
-/// Folds final ops (after `subst`) to a value; `stack` is reused scratch.
-/// `geometry` lets model-card `l`/`w`/`mult` vanish behind a zero switch;
-/// `live` holds the current value of each `.live` operand.
+/// Folds final ops (after `subst`) to a value; `stack` is reused scratch
+/// in `gpa`. `geometry` lets model-card `l`/`w`/`mult` vanish behind a zero
+/// switch; `live` holds the current value of each `.live` operand. Asserts
+/// `ops` is one complete postfix expression, as `compile` emits.
 pub fn fold(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, geometry: bool, live: []const f64) Error!Val {
     stack.clearRetainingCapacity();
-    for (ops) |op| try step(gpa, stack, op, consts, geometry, live);
+    // Every op pushes at most one value: one reserve, no per-op growth check.
+    try stack.ensureTotalCapacity(gpa, ops.len);
+    for (ops) |op| step(stack, op, consts, geometry, live);
     return stack.pop().?;
 }
 
-/// Applies one postfix op to the value stack.
-fn step(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), op: Op, consts: []const f64, geometry: bool, live: []const f64) Error!void {
+/// Applies one postfix op to the value stack, which has room for its push.
+fn step(stack: *std.ArrayList(Val), op: Op, consts: []const f64, geometry: bool, live: []const f64) void {
     const v: Val = switch (op.code) {
         .num => .of(consts[op.a]),
         .live => .of(live[op.a]),
@@ -381,7 +402,7 @@ fn step(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), op: Op, consts: []co
             });
         },
     };
-    try stack.append(gpa, v);
+    stack.appendAssumeCapacity(v);
 }
 
 fn call(f: Fn, args: []const Val) Val {
@@ -437,7 +458,8 @@ pub fn arity(op: Op) u32 {
     };
 }
 
-/// First op of the subtree whose root is `ops[end]`.
+/// First op of the subtree whose root is `ops[end]`. O(subtree size).
+/// Asserts `ops[0..end + 1]` holds that whole subtree.
 pub fn subtreeStart(ops: []const Op, end: usize) usize {
     var need: u32 = 1;
     var i = end;
@@ -464,9 +486,11 @@ pub fn operands(ops: []const Op, end: usize, out: []usize) []usize {
 /// Evaluates ops that fold to a number: constants, `.live` operands and
 /// arithmetic, as `fold` would, except that the distribution call ending at
 /// op `i` returns `draw.value(i, f, args)` when `draw` is not null. `stack`
-/// is reused scratch. Ops `fold` leaves unknown evaluate to NaN.
+/// is reused scratch in `gpa`. Ops `fold` leaves unknown evaluate to NaN.
+/// Asserts `ops` is one complete postfix expression.
 pub fn eval(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op, consts: []const f64, live: []const f64, draw: anytype) Error!f64 {
     stack.clearRetainingCapacity();
+    try stack.ensureTotalCapacity(gpa, ops.len);
     for (ops, 0..) |op, i| {
         if (op.code == .call and @TypeOf(draw) != @TypeOf(null) and isDistribution(@fromBackingInt(@intCast(op.a)))) {
             const argc: usize = op.b;
@@ -476,11 +500,157 @@ pub fn eval(gpa: std.mem.Allocator, stack: *std.ArrayList(Val), ops: []const Op,
                 nums[k] = if (a.known) a.num else std.math.nan(f64);
             };
             stack.shrinkRetainingCapacity(stack.items.len - argc);
-            try stack.append(gpa, .of(draw.value(i, @fromBackingInt(@intCast(op.a)), nums[0..@min(argc, nums.len)])));
+            stack.appendAssumeCapacity(.of(draw.value(i, @fromBackingInt(@intCast(op.a)), nums[0..@min(argc, nums.len)])));
             continue;
         }
-        try step(gpa, stack, op, consts, false, live);
+        step(stack, op, consts, false, live);
     }
     const top = stack.pop().?;
     return if (top.known) top.num else std.math.nan(f64);
+}
+
+const test_num = @import("lines.zig").ngspice.parseNum;
+
+fn testFold(a: std.mem.Allocator, text: []const u8) !Val {
+    var s: Scratch = .{};
+    try compileAll(test_num, a, &s, text);
+    var stack: std.ArrayList(Val) = .empty;
+    return fold(a, &stack, s.ops.items, s.consts.items, false, &.{});
+}
+
+test "compile and fold: precedence, associativity and calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { []const u8, f64 };
+    for ([_]Case{
+        .{ "1+2*3", 1 + 2 * 3 },   .{ "(1+2)*3", (1 + 2) * 3 },    .{ "7-2-1", 7 - 2 - 1 },
+        .{ "10/4", 10.0 / 4.0 },   .{ "2^3^2", 64 },               .{ "2**3", 8 },
+        .{ "-2^2", -4 },           .{ "2^-1", 0.5 },               .{ "+3", 3 },
+        .{ "1<2", 1 },             .{ "2<=1", 0 },                 .{ "1>=1", 1 },
+        .{ "3>2", 1 },             .{ "1==1", 1 },                 .{ "1!=1", 0 },
+        .{ "1&&0", 0 },            .{ "1||0", 1 },                 .{ "!0", 1 },
+        .{ "!3", 0 },              .{ "1?2:3", 2 },                .{ "0?2:3", 3 },
+        .{ "1+1?4:5", 4 },         .{ "'1+2'*2", 6 },              .{ "\"2\"", 2 },
+        .{ "sqrt(16)", 4 },        .{ "max(1,min(5,3))", 3 },      .{ "pow(2,10)", 1024 },
+        .{ "abs(-3)", 3 },         .{ "floor(2.5)+ceil(2.5)", 5 }, .{ "1k*2", 2000 },
+        .{ "agauss(1,0.1,3)", 1 }, .{ "limit(2,1)", 2 },           .{ "1e-3*2", 2e-3 },
+    }) |case| {
+        const v = try testFold(a, case[0]);
+        try std.testing.expect(v.known);
+        try std.testing.expectEqual(case[1], v.num);
+    }
+    // Names, probes, unknown functions and wrong arities stay symbolic.
+    for ([_][]const u8{ "x+1", "v(a)", "i(v1)*2", "foo(1)", "sqrt()", "min(1)", "tanh(0)", "agauss(1)" }) |text|
+        try std.testing.expect(!(try testFold(a, text)).known);
+    for ([_][]const u8{ "", "1+", "(1", "1)", "a=b", "a|b", "a&b", "1 2", "1?2", "f(1,", "#", "'1" }) |text| {
+        var s: Scratch = .{};
+        try std.testing.expectError(error.ParseError, compileAll(test_num, a, &s, text));
+    }
+    // `compile` stops at the first byte that cannot continue the expression.
+    var s: Scratch = .{};
+    try std.testing.expectEqual(6, try compile(test_num, a, &s, "x 1+2 y", 2));
+}
+
+test "compile bounds its recursion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n = 100_000;
+    for ([_][3]u8{ .{ '(', '1', ')' }, .{ '-', '1', ' ' }, .{ '!', '1', ' ' } }) |shape| {
+        const text = try a.alloc(u8, 2 * n + 1);
+        @memset(text[0..n], shape[0]);
+        text[n] = shape[1];
+        @memset(text[n + 1 ..], shape[2]);
+        var s: Scratch = .{};
+        try std.testing.expectError(error.ParseError, compileAll(test_num, a, &s, text));
+    }
+    // `1?1:1?1:...1` is valid but recurses through `bin` alone.
+    var chain: std.ArrayList(u8) = .empty;
+    for (0..n) |_| try chain.appendSlice(a, "1?1:");
+    try chain.appendSlice(a, "1");
+    var s: Scratch = .{};
+    try std.testing.expectError(error.ParseError, compileAll(test_num, a, &s, chain.items));
+    // Realistic nesting still compiles.
+    try std.testing.expectEqual(1, (try testFold(a, "((((((((((((((((1))))))))))))))))")).num);
+}
+
+test "a zero multiplier erases only nominal unknowns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var stack: std.ArrayList(Val) = .empty;
+    // `0*w` with w declared geometry (ident a = 1), and `0*x` for any other name.
+    const geometry = [_]Op{ .{ .code = .num }, .{ .code = .ident, .a = 1 }, .{ .code = .mul } };
+    const other = [_]Op{ .{ .code = .num }, .{ .code = .ident, .a = 0 }, .{ .code = .mul } };
+    try std.testing.expectEqual(Val.of(0), try fold(a, &stack, &geometry, &.{0}, true, &.{}));
+    try std.testing.expect(!(try fold(a, &stack, &geometry, &.{0}, false, &.{})).known);
+    try std.testing.expect(!(try fold(a, &stack, &other, &.{0}, true, &.{})).known);
+    // `0*agauss(w, 1, 1)`: the distribution of a nominal unknown is nominal.
+    const dist = [_]Op{
+        .{ .code = .num },                                       .{ .code = .ident, .a = 1 },
+        .{ .code = .num, .a = 1 },                               .{ .code = .num, .a = 1 },
+        .{ .code = .call, .a = @backingInt(Fn.agauss), .b = 3 }, .{ .code = .mul },
+    };
+    try std.testing.expectEqual(Val.of(0), try fold(a, &stack, &dist, &.{ 0, 1 }, true, &.{}));
+    // `0*(1/0 + w)`: an infinite term is not nominal, so the zero keeps it.
+    const inf_ops = [_]Op{ .{ .code = .num }, .{ .code = .num, .a = 1 }, .{ .code = .div }, .{ .code = .ident, .a = 1 }, .{ .code = .add }, .{ .code = .num, .a = 1 }, .{ .code = .mul } };
+    try std.testing.expect(!(try fold(a, &stack, &inf_ops, &.{ 1, 0 }, true, &.{})).known);
+}
+
+test eval {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var stack: std.ArrayList(Val) = .empty;
+    var s: Scratch = .{};
+    try compileAll(test_num, a, &s, "agauss(1,2,3)+1");
+    try std.testing.expectEqual(2, try eval(a, &stack, s.ops.items, s.consts.items, &.{}, null));
+    const Draw = struct {
+        fn value(_: @This(), i: usize, f: Fn, args: []const f64) f64 {
+            std.debug.assert(i == 3 and f == .agauss and args.len == 3);
+            return 41;
+        }
+    };
+    try std.testing.expectEqual(42, try eval(a, &stack, s.ops.items, s.consts.items, &.{}, Draw{}));
+    const live = [_]Op{ .{ .code = .live }, .{ .code = .num }, .{ .code = .add } };
+    try std.testing.expectEqual(5, try eval(a, &stack, &live, &.{3}, &.{2}, null));
+    s = .{};
+    try compileAll(test_num, a, &s, "x+1");
+    try std.testing.expect(std.math.isNan(try eval(a, &stack, s.ops.items, s.consts.items, &.{}, null)));
+}
+
+test "postfix subtrees" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var s: Scratch = .{};
+    try compileAll(test_num, arena.allocator(), &s, "1+2*3");
+    const ops = s.ops.items; // 1 2 3 mul add
+    try std.testing.expectEqual(5, ops.len);
+    try std.testing.expectEqual(0, subtreeStart(ops, 4));
+    try std.testing.expectEqual(1, subtreeStart(ops, 3));
+    try std.testing.expectEqual(2, subtreeStart(ops, 2));
+    var buf: [4]usize = undefined;
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, operands(ops, 4, &buf));
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2 }, operands(ops, 3, &buf));
+    try std.testing.expectEqualSlices(usize, &.{0}, operands(ops, 4, buf[0..1]));
+    // Probes keep their arguments as names; `1n` stays a node, not 1e-9.
+    s = .{};
+    try compileAll(test_num, arena.allocator(), &s, "v(1n,2)+i(vdd)");
+    try std.testing.expectEqual(Code.vprobe, s.ops.items[0].code);
+    try std.testing.expectEqualStrings("1n", s.names.items[s.ops.items[0].a]);
+    try std.testing.expectEqualStrings("vdd", s.names.items[s.ops.items[1].a]);
+    s = .{};
+    try compileAll(test_num, arena.allocator(), &s, "v(out)");
+    try std.testing.expectEqual(none, s.ops.items[0].b);
+}
+
+test numberLen {
+    try std.testing.expectEqual(7, numberLen("2.5e-3k+1"));
+    try std.testing.expectEqual(5, numberLen("10meg)"));
+    try std.testing.expectEqual(2, numberLen("1e+"));
+    try std.testing.expectEqual(3, numberLen("1e5"));
+    try std.testing.expectEqual(3, numberLen("1E5"));
+    try std.testing.expectEqual(0, numberLen(""));
+    try std.testing.expect(isOperator('+') and isOperator('?') and !isOperator(')') and !isOperator(','));
 }

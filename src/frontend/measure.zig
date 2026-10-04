@@ -272,7 +272,8 @@ fn stdParams(arena: std.mem.Allocator, c: *Clause, analysis: Kind, w: []const Wo
 }
 
 /// Blank- or comma-separated words; `{..}`, `'..'` and `(..)` stay whole,
-/// and blanks around `=` join its sides.
+/// and blanks around `=` join its sides. Every `lhs` is non-empty: a
+/// leading `=` has no key and is a ParseError.
 fn words(arena: std.mem.Allocator, text: []const u8) ![]Word {
     var out: std.ArrayList(Word) = .empty;
     var i: usize = 0;
@@ -296,7 +297,8 @@ fn words(arena: std.mem.Allocator, text: []const u8) ![]Word {
         }
         const tok = text[start..i];
         const eq = std.mem.indexOfScalar(u8, tok, '=');
-        if (pending_eq or (tok[0] == '=' and out.items.len > 0)) {
+        if (tok[0] == '=' and out.items.len == 0) return error.ParseError;
+        if (pending_eq or tok[0] == '=') {
             // `a =b`, `a = b` or `a= b`: this token completes the last word.
             const last = &out.items[out.items.len - 1];
             const value = if (tok[0] == '=') tok[1..] else tok;
@@ -386,7 +388,7 @@ pub fn parseCheck(arena: std.mem.Allocator, card: []const u8, text: []const u8, 
             2 => .{ levels.items[0], levels.items[1] },
             else => return error.ParseError,
         };
-        const row = try words(arena, last[1 .. last.len - 1]);
+        const row = try groupWords(arena, last);
         const width = names.items.len + 1;
         if (row.len == 0 or row.len % width != 0) return error.ParseError;
         for (names.items, 0..) |node, k| {
@@ -602,4 +604,55 @@ test "meas cards parse like ngspice's word lists" {
     try std.testing.expectEqualSlices([2]f64, &.{ .{ 1, 1 }, .{ 2, 0 } }, checks.items[2].check.expect);
     try std.testing.expectEqualSlices([2]f64, &.{.{ 2, 1 }}, checks.items[3].check.expect);
     try std.testing.expectError(error.ParseError, parseCheck(a, "check", "rise (1 2) a*", Ctx{}, &global, 3, &checks));
+}
+
+test "malformed measure cards are a ParseError, not a crash" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Ctx = struct {
+        fn measureValue(_: @This(), t: []const u8) !f64 {
+            return std.fmt.parseFloat(f64, t) catch error.ParseError;
+        }
+        fn measureExpr(_: @This(), _: []const u8) ![]const core.MeasureOp {
+            return &.{.{ .measure = 0 }};
+        }
+        fn measureOption(_: @This(), _: []const u8) ?f64 {
+            return null;
+        }
+    };
+    for ([_][]const u8{
+        "",                              "tran",                        "=x y z",
+        "tran x",                        "tran x find",                 "tran x find v(a) at",
+        "tran x find v(a=1",             "tran x when",                 "tran x when v(a)",
+        "tran x avg v(a) from=",         "tran x avg v(a) bogus=1",     "tran x avg v(a) stray",
+        "tran j jitter v(a)",            "ac j jitter trig v(a) val=1", "fft t thd v(o) nbharm=-1",
+        "fft t thd v(o) binsiz=1e10",    "tran t thd v(o)",             "ac x em_avg i(r1)",
+        "tran x param",                  "tran x err v(a)",             "lstb x when lstb(foo)=0",
+        "tran x trig v(a) val=1 rise=1",
+    }) |text| try std.testing.expectError(error.ParseError, parse(a, text, Ctx{}, null, true));
+    var out: std.ArrayList(core.Measure) = .empty;
+    var global: ?Levels = null;
+    const Check = struct { []const u8, []const u8 };
+    for ([_]Check{
+        .{ "biaschk", "=x" },                   .{ "biaschk", "v(a) max=1" },
+        .{ "biaschk", "'v(a)' simulation=dc" }, .{ "biaschk", "'v(a)' bogus=1" },
+        .{ "dout", "a (" },                     .{ "dout", "a" },
+        .{ "dout", "a (1 1 0)" },               .{ "dout", "a 1 2 3 (1 1)" },
+        .{ "check", "global_level (1 0 1 0" },  .{ "check", "global_level (1 0 1)" },
+        .{ "check", "rise (1 2) a" },           .{ "check", "bogus (1 2) a" },
+        .{ "check", "rise (1) a (1 0 1 0)" },   .{ "check", "setup (c up 1 rise) a (1 0 1 0)" },
+        .{ "check", "rise (1 2)" },             .{ "check", "" },
+        .{ "noise", "x" },
+    }) |c| try std.testing.expectError(error.ParseError, parseCheck(a, c[0], c[1], Ctx{}, &global, 1, &out));
+    try std.testing.expectEqual(0, out.items.len);
+    // The forms around those that do parse.
+    try parseCheck(a, "dout", "a (1 1)", Ctx{}, &global, 1, &out);
+    try std.testing.expectEqual(core.Check{ .lo = 1.65, .hi = 1.65, .expect = out.items[0].check.expect }, out.items[0].check);
+    try parseCheck(a, "biaschk", "'v(a)' max=2 min=-1 tstart=1 tstop=3 autostop", Ctx{}, &global, 4, &out);
+    try std.testing.expectEqualStrings("biaschk4", out.items[1].name);
+    try std.testing.expectEqual(2, out.items[1].check.max);
+    try parseCheck(a, "check", "irdrop (-0.1 1e-9) vdd (1 0 1 0)", Ctx{}, &global, 5, &out);
+    try std.testing.expectEqual(-0.1, out.items[2].check.min);
+    try std.testing.expectEqual(.check_level, out.items[2].func);
 }

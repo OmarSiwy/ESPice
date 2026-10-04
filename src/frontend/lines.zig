@@ -16,6 +16,7 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
 
         const Self = @This();
 
+        /// A splitter at the start of `line`; fields borrow `line`.
         pub fn init(line: []const u8) Self {
             return .{ .line = line };
         }
@@ -45,6 +46,7 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
         }
 
         /// True unless `f` is a punctuation, quoted or braced field.
+        /// Asserts `f` is non-empty, as every field `next` returns is.
         pub fn isWord(f: []const u8) bool {
             return !isBreak(f[0]);
         }
@@ -67,7 +69,8 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
             return false;
         }
 
-        /// A `{...}` or quoted field without its delimiters.
+        /// A `{...}` or quoted field without its delimiters; an unterminated
+        /// one loses only its opening byte. Asserts `f` is non-empty.
         pub fn body(f: []const u8) []const u8 {
             const close: u8 = if (f[0] == '{') '}' else f[0];
             return if (f.len >= 2 and f[f.len - 1] == close) f[1 .. f.len - 1] else f[1..];
@@ -210,6 +213,8 @@ fn inpEvaluate(lit: []const u8, scale_exp: i32, mil: bool) f64 {
         e += esign * x;
     }
     if (mil) mantis *= 25.4;
+    // ngspice returns 0 * inf = NaN for `0e400`; zero is zero at any scale.
+    if (mantis == 0) return sign * 0;
     return sign * mantis * pow10(e);
 }
 
@@ -333,6 +338,7 @@ pub const hspice = struct {
     /// Field splitter over one logical line.
     pub const Split = Fields("'\"", false);
 
+    /// Logical-line iterator; a joined line is allocated in `arena`.
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
@@ -408,13 +414,15 @@ pub const hspice = struct {
 /// Spectre: no title line, case kept, `//` and `/* */` comments, `\` or `+`
 /// continuation.
 pub const spectre = struct {
-    /// The first line is the deck title, not a card.
+    /// No title line: the first line is already a card.
     pub const title_line = false;
-    /// Cards are case-insensitive: the text is lowercased before parsing.
+    /// Cards are case-sensitive: the text is parsed as written.
     pub const fold_case = false;
     /// Field splitter over one logical line.
     pub const Split = Fields("\"", false);
 
+    /// Logical-line iterator; a joined or comment-stripped line is
+    /// allocated in `arena`.
     pub const Lines = struct {
         rest: []const u8,
         arena: std.mem.Allocator,
@@ -523,4 +531,76 @@ pub fn Syntax(comptime d: Dialect) type {
         .hspice => hspice,
         .spectre => spectre,
     };
+}
+
+test Fields {
+    const F = ngspice.Split;
+    var f = F.init("r1 a=1 'x y' {a {b}} (c,d)");
+    try std.testing.expectEqualStrings("r1", f.peek().?);
+    for ([_][]const u8{ "r1", "a", "=", "1", "'x y'", "{a {b}}", "(", "c", ",", "d", ")" }) |want|
+        try std.testing.expectEqualStrings(want, f.next().?);
+    try std.testing.expectEqual(null, f.next());
+    try std.testing.expectEqual(null, f.peek());
+    // Unterminated quotes and braces run to the end of the line.
+    f = F.init("'abc");
+    try std.testing.expectEqualStrings("abc", F.body(f.next().?));
+    f = F.init("{a {b} c");
+    try std.testing.expectEqualStrings("a {b} c", F.body(f.next().?));
+    try std.testing.expectEqualStrings("", F.body("'"));
+    try std.testing.expectEqualStrings("", F.body("''"));
+    f = F.init("k = v  ");
+    try std.testing.expectEqualStrings("k", f.next().?);
+    try std.testing.expect(f.takeEq());
+    try std.testing.expectEqualStrings("v", f.rest());
+    try std.testing.expect(!f.takeEq());
+    try std.testing.expectEqual('v', f.nextByte());
+    try std.testing.expect(F.isWord("abc") and !F.isWord("=") and !F.isWord("'x'") and !F.isWord("{x}"));
+    // HSPICE: `"` quotes too, and braces are plain word bytes.
+    var h = hspice.Split.init("{a} \"b c\"");
+    try std.testing.expectEqualStrings("{a}", h.next().?);
+    try std.testing.expectEqualStrings("\"b c\"", h.next().?);
+    try std.testing.expect(hspice.Split.isQuote('"') and !ngspice.Split.isQuote('"'));
+}
+
+test "number literals read as ngspice's INPevaluate" {
+    const n = ngspice.parseNum;
+    try std.testing.expectEqual(1e7, n("10meg").?);
+    try std.testing.expectEqual(1e-10, n("0.1n").?); // not parseFloat("0.1") * 1e-9
+    try std.testing.expectEqual(1e-3, n("1m").?);
+    try std.testing.expectEqual(1e-3, n("1ms").?);
+    try std.testing.expectEqual(1000, n("1k").?);
+    try std.testing.expectEqual(1000, n("1e3").?);
+    try std.testing.expectEqual(1, n("1e-3k").?);
+    try std.testing.expectEqual(0.5, n("+.5").?);
+    try std.testing.expectEqual(-3, n("-3").?);
+    try std.testing.expectEqual(5, n("5v").?); // an unknown suffix scales by 1
+    try std.testing.expectEqual(1, n("1x").?);
+    try std.testing.expectEqual(1e6, hspice.parseNum("1x").?);
+    try std.testing.expectApproxEqRel(25.4e-6, n("1mil").?, 1e-15);
+    try std.testing.expectEqual(1.0000000000000001e23, n("1e23").?); // glibc's pow(10, 23)
+    try std.testing.expect(1.0000000000000001e23 != 1e23);
+    try std.testing.expectEqual(0, n("0e400").?);
+    try std.testing.expect(std.math.isInf(n("1e400").?));
+    for ([_][]const u8{ "", "-", ".", "abc", "e5", "1e+" }) |bad| try std.testing.expectEqual(null, n(bad));
+    // Spectre suffixes are case-sensitive and read through parseFloat.
+    try std.testing.expectEqual(1e6, spectre.parseNum("1M").?);
+    try std.testing.expectEqual(1e-3, spectre.parseNum("1m").?);
+    try std.testing.expectEqual(1e-3, spectre.parseNum("1meg").?);
+    try std.testing.expectEqual(0.5, spectre.parseNum("50%").?);
+    try std.testing.expectEqual(1e5, spectre.parseNum("1E5").?);
+}
+
+fn expectLines(comptime S: type, src: []const u8, want: []const []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var it: S.Lines = .{ .rest = src, .arena = arena.allocator() };
+    for (want) |w| try std.testing.expectEqualStrings(w, (try it.next()).?);
+    try std.testing.expectEqual(null, try it.next());
+}
+
+test "logical lines per dialect" {
+    try expectLines(ngspice, "", &.{});
+    try expectLines(ngspice, "* c\nr1 a b 1k $ tail\n+ 2 ; more\n\n* mid\n+ 3\n$ only\nc1 x y 1p\r\n", &.{ "r1 a b 1k 2 3", "c1 x y 1p" });
+    try expectLines(hspice, "r1 a b$c 1k $ tail\nr2 a \\\\\nb 2\n+ 3\n", &.{ "r1 a b$c 1k", "r2 a b 2 3" });
+    try expectLines(spectre, "r1 (a b) resistor r=1k // c\nr2 \"x//y\" b \\\n  r=2\n+ m=1\n/* gone */\n", &.{ "r1 (a b) resistor r=1k", "r2 \"x//y\" b r=2 m=1" });
 }
