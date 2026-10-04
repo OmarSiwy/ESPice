@@ -11,14 +11,17 @@ const pac = @import("pac.zig");
 
 const Complex = pac.Complex;
 
+/// One device noise generator between two nodes, as `collectNoiseSources` lists it.
 pub const NoiseSource = root.NoiseSource;
 
+/// The `.pnoise` query; `.hbnoise` and `.phasenoise` fill one in for `orbitSweep`.
 pub const Options = @import("core").query.Pnoise;
 
 /// Outcome of a pnoise sweep.
 pub const SweepStatus = struct {
     /// sqrt of the trapezoid integral of the density over the sweep, in V.
     total_noise: f64,
+    /// False when the shooting stopped short; the density is about its last period.
     pss_converged: bool,
 };
 
@@ -63,7 +66,7 @@ pub fn sweep(
 
 /// Orbit samples per period for `n_sb` sidebands: at least `requested`, a
 /// power of two (the FFT's), and 2*n_sb so bins |m - j| <= 2M stay
-/// alias-free.
+/// alias-free. Asserts the result fits a usize.
 pub fn samplesFor(requested: usize, n_sb: usize) usize {
     return std.math.ceilPowerOfTwoAssert(usize, @max(requested, 2 * n_sb));
 }
@@ -315,7 +318,23 @@ pub fn result(a: std.mem.Allocator, freqs: []const f64, density: []const f64, co
     };
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite; void outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .sourcePsd = sourcePsd,
 } else {};
+
+test samplesFor {
+    try std.testing.expectEqual(@as(usize, 64), samplesFor(64, 5));
+    try std.testing.expectEqual(@as(usize, 16), samplesFor(3, 5));
+    try std.testing.expectEqual(@as(usize, 128), samplesFor(100, 1));
+    try std.testing.expectEqual(@as(usize, 2), samplesFor(0, 1));
+}
+
+test signedSqrt {
+    try std.testing.expectEqual(@as(f64, 2), signedSqrt(4));
+    try std.testing.expectEqual(@as(f64, -2), signedSqrt(-4));
+    // The sign of zero survives, and NaN stays NaN rather than a number.
+    try std.testing.expect(std.math.signbit(signedSqrt(-0.0)));
+    try std.testing.expect(std.math.isNan(signedSqrt(std.math.nan(f64))));
+    try std.testing.expectEqual(std.math.inf(f64), signedSqrt(std.math.inf(f64)));
+}

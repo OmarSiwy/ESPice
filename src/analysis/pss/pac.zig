@@ -13,8 +13,10 @@ const slotCol = @import("solver").freq_solve.slotCol;
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 const Gmres = @import("solver").gmres.Gmres;
 
+/// The complex scalar every periodic small-signal result is built from.
 pub const Complex = num.Complex;
 
+/// The `.pac` query; pxf, pnoise and the HB analyses fill one in too.
 pub const Options = @import("core").query.Pac;
 
 /// The LPTV sweep PAC, PXF and PNOISE share: per input frequency build the
@@ -202,7 +204,7 @@ fn sweepKrylov(
     }
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite; void outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .sweepDense = sweepDense,
     .sweepKrylov = sweepKrylov,
@@ -256,7 +258,7 @@ fn ConversionOp(comptime adjoint: bool) type {
             };
         }
 
-        /// r := M^-1 r, M the block diagonal (G_0 + jω_p·C_0, or its ^H).
+        /// r := M^-1 r through `fs`, factored at `omegas`, M the block diagonal (G_0 + jω_p·C_0, or its ^H).
         pub fn precond(self: *@This(), r: []f64) void {
             const n = self.n;
             const nn = self.n_sb * n;
@@ -289,6 +291,8 @@ pub const Linearization = struct {
     wave: []const f64 = &.{},
     kind: root.AnalysisKind = .ac,
 
+    /// Frees g_hat, c_hat and wave with the allocator `linearize` took;
+    /// the pattern slices stay the circuit's.
     pub fn deinit(self: Linearization, allocator: std.mem.Allocator) void {
         allocator.free(self.g_hat);
         allocator.free(self.c_hat);
@@ -303,7 +307,7 @@ pub const Orbit = struct {
     wave: []f64,
     converged: bool,
 
-    /// The state at sample k.
+    /// The state at sample k, a view into `wave`.
     pub fn state(self: Orbit, k: usize, n: usize) []const f64 {
         return self.wave[k * (n + 1) + 1 ..][0..n];
     }
@@ -331,8 +335,8 @@ pub fn orbit(ckt: *root.Circuit, x_init: []const f64, options: pss.Options, allo
 
 /// Samples G and C along `orb` under the small-signal analysis `kind`
 /// (`.ac` or `.noise`) and Fourier-transforms each pattern slot.
-/// The orbit's sample count must be a power of two. The caller owns the
-/// result.
+/// The orbit's sample count must be a power of two. The caller frees the
+/// result with `Linearization.deinit` on `allocator`.
 pub fn linearize(ckt: *root.Circuit, orb: Orbit, kind: root.AnalysisKind, allocator: std.mem.Allocator) !Linearization {
     const n: usize = ckt.n;
     const n_samples = orb.samples(n);
@@ -372,6 +376,7 @@ pub fn linearize(ckt: *root.Circuit, orb: Orbit, kind: root.AnalysisKind, alloca
 /// series-major in `td` (td[s * n_samples + k]), written bin-major into
 /// `hat` (hat[m * count + s]) and scaled by 1/n_samples, so bin m is the
 /// m-th complex Fourier coefficient. n_samples must be a power of two.
+/// Asserts hat.len == td.len.
 pub fn spectra(td: []const f64, n_samples: usize, hat: []Complex, allocator: std.mem.Allocator) !void {
     std.debug.assert(hat.len == td.len);
     const count = td.len / n_samples;
@@ -389,8 +394,8 @@ pub fn spectra(td: []const f64, n_samples: usize, hat: []Complex, allocator: std
 }
 
 /// Shoots to the LO-periodic steady state in n_time_samples steps and
-/// linearizes about it: the PAC and PXF front half. The caller owns the
-/// result.
+/// linearizes about it: the PAC and PXF front half. The caller frees the
+/// result with `Linearization.deinit` on `allocator`.
 pub fn settle(ckt: *root.Circuit, x_init: []const f64, options: Options, allocator: std.mem.Allocator) !Linearization {
     const orb = try orbit(ckt, x_init, .{
         .tol = options.tol,
@@ -583,4 +588,76 @@ pub fn mapHarmonicToFftBin(m: i32, n_samples: usize) ?usize {
         return @intCast(ns + m);
     }
     return null;
+}
+
+test spectra {
+    // Bin-major output: hat[m * 2 + s] for two series, 1 + cos and sin(2·),
+    // in the forward convention X_m = Σ x_k e^(-j2πkm/N) / N.
+    const ns = 8;
+    var td: [2 * ns]f64 = undefined;
+    for (0..ns) |k| {
+        const a = 2.0 * std.math.pi * @as(f64, @floatFromInt(k)) / ns;
+        td[k] = 1 + @cos(a);
+        td[ns + k] = @sin(2 * a);
+    }
+    var hat: [2 * ns]Complex = undefined;
+    try spectra(&td, ns, &hat, std.testing.allocator);
+    for (0..ns) |m| {
+        const c = hat[m * 2];
+        const s = hat[m * 2 + 1];
+        const want_c: f64 = switch (m) {
+            0 => 1,
+            1, ns - 1 => 0.5,
+            else => 0,
+        };
+        const want_s: f64 = switch (m) {
+            2 => -0.5,
+            ns - 2 => 0.5,
+            else => 0,
+        };
+        try std.testing.expectApproxEqAbs(want_c, c.re, 1e-15);
+        try std.testing.expectApproxEqAbs(@as(f64, 0), c.im, 1e-15);
+        try std.testing.expectApproxEqAbs(@as(f64, 0), s.re, 1e-15);
+        try std.testing.expectApproxEqAbs(want_s, s.im, 1e-15);
+    }
+}
+
+test ConversionOp {
+    // The matrix-free GMRES operator against the dense conversion matrix
+    // the LU path builds, forward and adjoint, on a random three-node
+    // pattern with complex G and C spectra.
+    var prng = std.Random.DefaultPrng.init(0xC0DE);
+    const rnd = prng.random();
+    const n = 3;
+    const n_harm = 1;
+    const n_sb = 2 * n_harm + 1;
+    const nn = n_sb * n;
+    const nn2 = 2 * nn;
+    const n_samples = 8;
+    const col_ptr = [_]u32{ 0, 2, 3, 5 };
+    const row_idx = [_]u32{ 0, 2, 1, 0, 2 };
+    var g_hat: [n_samples * row_idx.len]Complex = undefined;
+    var c_hat: [n_samples * row_idx.len]Complex = undefined;
+    for (&g_hat, &c_hat) |*g, *c| {
+        g.* = .{ .re = rnd.float(f64) - 0.5, .im = rnd.float(f64) - 0.5 };
+        c.* = .{ .re = (rnd.float(f64) - 0.5) * 1e-6, .im = (rnd.float(f64) - 0.5) * 1e-6 };
+    }
+    const lin: Linearization = .{ .g_hat = &g_hat, .c_hat = &c_hat, .col_ptr = &col_ptr, .row_idx = &row_idx };
+    const opts: Options = .{ .f_lo = 1e5, .out_node = 0, .n_harmonics = n_harm, .sweep = .{ .f_start = 1, .f_stop = 1 } };
+    const f_in: f64 = 3e4;
+    var omegas: [n_sb]f64 = undefined;
+    for (&omegas, 0..) |*w, p| w.* = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(@as(i32, @intCast(p)) - n_harm)) * opts.f_lo);
+    var v: [nn2]f64 = undefined;
+    for (&v) |*x| x.* = rnd.float(f64) - 0.5;
+    var a_work: [nn2 * nn2]f64 = undefined;
+    var want: [nn2]f64 = undefined;
+    var got: [nn2]f64 = undefined;
+    inline for (.{ false, true }) |adjoint| {
+        @memset(&a_work, 0);
+        buildConversionMatrix(adjoint, &a_work, lin, n, n_sb, nn, nn2, f_in, opts);
+        for (&want, 0..) |*w, r| w.* = num.dot(a_work[r * nn2 ..][0..nn2], &v);
+        var op: ConversionOp(adjoint) = .{ .lin = lin, .n = n, .n_sb = n_sb, .omegas = &omegas, .fs = undefined, .p_rhs = got[0..0], .p_x = got[0..0] };
+        op.matvec(&v, &got);
+        for (want, got) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-12);
+    }
 }

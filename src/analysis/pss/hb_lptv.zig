@@ -53,6 +53,7 @@ fn pacOptions(opts: HbLptv) pac.Options {
 
 /// `.hbac`: periodic AC about the HB orbit.
 pub const Ac = struct {
+    /// The shared HB small-signal query.
     pub const Options = HbLptv;
 
     /// Contract entry: the deck's AC excitation on sideband 0, read at
@@ -75,6 +76,7 @@ pub const Ac = struct {
 
 /// `.hbxf`: periodic transfer functions about the HB orbit.
 pub const Xf = struct {
+    /// The shared HB small-signal query.
     pub const Options = HbLptv;
 
     /// Contract entry: transfers from every node and sideband to
@@ -103,6 +105,7 @@ pub const Xf = struct {
 
 /// `.hbnoise`: cyclostationary noise about the HB orbit.
 pub const Noise = struct {
+    /// The shared HB small-signal query.
     pub const Options = HbLptv;
 
     /// Contract entry: output noise density of v(out_node) - v(out_neg), in
@@ -144,6 +147,7 @@ pub const Noise = struct {
 /// circuit's own noise comes from `pnoise.orbitSweep` at port 2's band and
 /// the z0 terms from one adjoint solve on the same factor.
 pub const Lin = struct {
+    /// The `.hblin` query: ports with their bands and z0, plus the HB tone.
     pub const Options = @import("core").query.Hblin;
     const Band = @import("core").query.Port.Band;
 
@@ -294,6 +298,7 @@ pub const Lin = struct {
     }
 
     /// Conversion-matrix sideband index of a port band: s·h, offset by M.
+    /// The caller has checked |h| <= M.
     fn sideband(band: Band, n_harm: usize) usize {
         return @intCast(@as(i32, @intCast(n_harm)) + @as(i32, band.sign) * @as(i32, band.harmonic));
     }
@@ -305,3 +310,15 @@ pub const Lin = struct {
         return .{ .re = x[base + row], .im = x[nn + base + row] };
     }
 };
+
+test "Lin.sideband offsets the signed band by M" {
+    try std.testing.expectEqual(@as(usize, 2), Lin.sideband(.{}, 2));
+    try std.testing.expectEqual(@as(usize, 1), Lin.sideband(.{ .harmonic = 1, .sign = -1 }, 2));
+    try std.testing.expectEqual(@as(usize, 3), Lin.sideband(.{ .harmonic = -1, .sign = -1 }, 2));
+    try std.testing.expectEqual(@as(usize, 4), Lin.sideband(.{ .harmonic = 2 }, 2));
+}
+
+test {
+    // mhb_lptv.zig is reached only through here.
+    _ = mhb_lptv;
+}

@@ -14,8 +14,10 @@ const num = @import("core").numerics;
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 const V = @Vector(W, f64);
 
+/// The `.qpss` query: tones f1, f2 and their truncations k1, k2.
 pub const Options = @import("core").query.Qpss;
 
+/// The Newton outcome, shared with pss and hb.
 pub const SolveResult = @import("pss.zig").SolveResult;
 
 /// The mix-product grid: k in -K1..K1 varies fastest, l in -K2..K2 slowest,
@@ -26,18 +28,22 @@ const MixGrid = struct {
     nf1: usize, // 2*K1+1
     nf2: usize, // 2*K2+1
     nf: usize, // nf1 * nf2
+
+    /// The grid of |k| <= k1, |l| <= k2.
     pub fn init(k1: u16, k2: u16) MixGrid {
         const nf1 = 2 * @as(usize, k1) + 1;
         const nf2 = 2 * @as(usize, k2) + 1;
         return .{ .k1 = k1, .k2 = k2, .nf1 = nf1, .nf2 = nf2, .nf = nf1 * nf2 };
     }
 
+    /// Flat index of (k, l). Asserts |k| <= k1 and |l| <= k2.
     pub fn flatIdx(self: MixGrid, k_signed: i32, l_signed: i32) usize {
         const k_off: usize = @intCast(k_signed + @as(i32, self.k1));
         const l_off: usize = @intCast(l_signed + @as(i32, self.k2));
         return l_off * self.nf1 + k_off;
     }
 
+    /// Inverse of `flatIdx`.
     pub fn signedKL(self: MixGrid, flat: usize) struct { k: i32, l: i32 } {
         const l_off = flat / self.nf1;
         const k_off = flat % self.nf1;
@@ -90,6 +96,7 @@ const OperatorCtx = struct {
     /// Per-sample eval input, n.
     x_sample: []f64,
 
+    /// The GMRES operator, `jacobianMatvec`.
     pub const matvec = jacobianMatvec;
 };
 
@@ -161,7 +168,7 @@ fn buildTransform(
 }
 
 /// IDFT, unscaled: x_td[node*nf + s] = sum_f (X_re[f]*cos[f,s] - X_im[f]*sin[f,s]).
-/// The sample-major basis makes each sample's frequency row one vector load.
+/// The sample-major basis makes each sample's frequency row contiguous.
 fn idft2D(
     x_td: []f64,
     x_re: []const f64,
@@ -173,25 +180,10 @@ fn idft2D(
 ) void {
     for (0..n) |node| {
         const base = node * nf;
-        for (0..nf) |s| {
-            const bc_row = basis_cos_t[s * nf ..][0..nf];
-            const bs_row = basis_sin_t[s * nf ..][0..nf];
-
-            var val: f64 = 0;
-            var f_idx: usize = 0;
-            while (f_idx + W <= nf) : (f_idx += W) {
-                const bc: V = bc_row[f_idx..][0..W].*;
-                const bs: V = bs_row[f_idx..][0..W].*;
-                const xr: V = x_re[base + f_idx ..][0..W].*;
-                const xi: V = x_im[base + f_idx ..][0..W].*;
-                val += @reduce(.Add, xr * bc - xi * bs);
-            }
-            while (f_idx < nf) : (f_idx += 1) {
-                val += x_re[base + f_idx] * bc_row[f_idx] -
-                    x_im[base + f_idx] * bs_row[f_idx];
-            }
-            x_td[base + s] = val;
-        }
+        const xr = x_re[base..][0..nf];
+        const xi = x_im[base..][0..nf];
+        for (x_td[base..][0..nf], 0..) |*out, s|
+            out.* = num.dot(xr, basis_cos_t[s * nf ..][0..nf]) - num.dot(xi, basis_sin_t[s * nf ..][0..nf]);
     }
 }
 
@@ -211,27 +203,10 @@ fn dft2D(
 
     for (0..n) |node| {
         const base = node * nf;
+        const f_row = f_td[base..][0..nf];
         for (0..nf) |f_idx| {
-            const bc_base = f_idx * nf;
-
-            var cos_acc: V = @splat(0.0);
-            var sin_acc: V = @splat(0.0);
-            var s: usize = 0;
-            while (s + W <= nf) : (s += W) {
-                const fv: V = f_td[base + s ..][0..W].*;
-                const bcv: V = basis_cos[bc_base + s ..][0..W].*;
-                const bsv: V = basis_sin[bc_base + s ..][0..W].*;
-                cos_acc += fv * bcv;
-                sin_acc += fv * bsv;
-            }
-            var cos_sum: f64 = @reduce(.Add, cos_acc);
-            var sin_sum: f64 = @reduce(.Add, sin_acc);
-            while (s < nf) : (s += 1) {
-                cos_sum += f_td[base + s] * basis_cos[bc_base + s];
-                sin_sum += f_td[base + s] * basis_sin[bc_base + s];
-            }
-            out_re[base + f_idx] = cos_sum * inv_nf;
-            out_im[base + f_idx] = -sin_sum * inv_nf;
+            out_re[base + f_idx] = num.dot(f_row, basis_cos[f_idx * nf ..][0..nf]) * inv_nf;
+            out_im[base + f_idx] = -num.dot(f_row, basis_sin[f_idx * nf ..][0..nf]) * inv_nf;
         }
     }
 }
@@ -668,7 +643,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-// Private implementation access for the analysis test suite.
+/// Private implementation access for the analysis test suite; void outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .MixGrid = MixGrid,
     .buildTransform = buildTransform,
@@ -680,3 +655,42 @@ pub const test_access = if (@import("builtin").is_test) .{
     .buildSampleTimes = buildSampleTimes,
     .simdZero = simdZero,
 } else {};
+
+test idft2D {
+    // Both transforms against ordered scalar sums at every nf from 0 past
+    // stdpp's 64-element fold cutoff, with random bases (any nf works here).
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x2D);
+    const rnd = prng.random();
+    const n = 2;
+    for (0..70) |nf| {
+        const buf = try gpa.alloc(f64, 4 * nf * nf + 6 * n * nf);
+        defer gpa.free(buf);
+        for (buf) |*v| v.* = rnd.float(f64) * 2 - 1;
+        const bc = buf[0 .. nf * nf];
+        const bs = buf[nf * nf ..][0 .. nf * nf];
+        const bc_t = buf[2 * nf * nf ..][0 .. nf * nf];
+        const bs_t = buf[3 * nf * nf ..][0 .. nf * nf];
+        const x_re = buf[4 * nf * nf ..][0 .. n * nf];
+        const x_im = buf[4 * nf * nf + n * nf ..][0 .. n * nf];
+        const td = buf[4 * nf * nf + 2 * n * nf ..][0 .. n * nf];
+        const out_re = buf[4 * nf * nf + 3 * n * nf ..][0 .. n * nf];
+        const out_im = buf[4 * nf * nf + 4 * n * nf ..][0 .. n * nf];
+        idft2D(td, x_re, x_im, bc_t, bs_t, n, nf);
+        dft2D(out_re, out_im, x_re, bc, bs, n, nf);
+        const inv: f64 = if (nf == 0) 0 else 1 / @as(f64, @floatFromInt(nf));
+        for (0..n) |node| for (0..nf) |i| {
+            var t: f64 = 0;
+            var re: f64 = 0;
+            var im: f64 = 0;
+            for (0..nf) |j| {
+                t += x_re[node * nf + j] * bc_t[i * nf + j] - x_im[node * nf + j] * bs_t[i * nf + j];
+                re += x_re[node * nf + j] * bc[i * nf + j];
+                im += x_re[node * nf + j] * bs[i * nf + j];
+            }
+            try std.testing.expectApproxEqAbs(t, td[node * nf + i], 1e-12);
+            try std.testing.expectApproxEqAbs(re * inv, out_re[node * nf + i], 1e-12);
+            try std.testing.expectApproxEqAbs(-im * inv, out_im[node * nf + i], 1e-12);
+        };
+    }
+}

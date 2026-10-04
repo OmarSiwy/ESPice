@@ -8,6 +8,7 @@ const pac = @import("pac.zig");
 
 const Complex = pac.Complex;
 
+/// PXF takes PAC's query; `out_node` is the output every transfer reaches.
 pub const Options = pac.Options;
 
 /// Contract entry: output at `opts.out_node`. Point-major complex rows

@@ -28,6 +28,7 @@ const root = @import("../types.zig");
 const hb = @import("hb.zig");
 const pnoise = @import("pnoise.zig");
 
+/// The `.phasenoise` query: the oscillator node, carrier harmonic and method.
 pub const Options = @import("core").query.PhaseNoise;
 
 /// PPV and orbit samples per period before rounding up to a power of two.
@@ -133,7 +134,7 @@ fn periodic(ckt: *root.Circuit, x_hat: []const f64, f0: f64, srcs: []const root.
 
 /// METHOD=2: `nlp` below the first offset where it and `pac` agree within
 /// `match_db`, `pac` from there on; all `nlp` when they never agree. Both
-/// in dBc/Hz, written into `nlp`.
+/// in dBc/Hz, written into `nlp`. Reads pac[0..nlp.len].
 pub fn stitch(nlp: []f64, pac: []const f64, match_db: f64) void {
     for (nlp, pac, 0..) |l, p, i| if (@abs(l - p) <= match_db) {
         @memcpy(nlp[i..], pac[i..]);
@@ -187,4 +188,24 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         },
     };
     return pnoise.result(ctx.allocator, freqs, dbc, "phnoise", "Phase Noise Analysis");
+}
+
+test stitch {
+    var nlp = [_]f64{ -60, -80, -100, -120 };
+    stitch(&nlp, &.{ -40, -79.6, -110, -130 }, 0.5);
+    try std.testing.expectEqualSlices(f64, &.{ -60, -79.6, -110, -130 }, &nlp);
+    // Never within match_db: nlp stays whole.
+    var far = [_]f64{ -60, -80 };
+    stitch(&far, &.{ 0, 0 }, 0.5);
+    try std.testing.expectEqualSlices(f64, &.{ -60, -80 }, &far);
+}
+
+test "Diffusion.at adds each flicker source as dc^2 / (2 f^ef)" {
+    var dc = [_]f64{ 2, 0 };
+    var ef = [_]f64{ 1, 1 };
+    const d: Diffusion = .{ .white = 1e-3, .dc = &dc, .ef = &ef };
+    try std.testing.expectApproxEqRel(@as(f64, 1e-3 + 4.0 / 200.0), d.at(100), 1e-15);
+    // A zero source adds nothing, even where 1/f^ef blows up.
+    dc[0] = 0;
+    try std.testing.expectEqual(@as(f64, 1e-3), d.at(0));
 }

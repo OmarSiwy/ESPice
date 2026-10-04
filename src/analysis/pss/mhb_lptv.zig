@@ -58,6 +58,7 @@ const Linear = struct {
         const sys = try allocator.alloc(f64, 4 * sq);
         errdefer allocator.free(sys);
         const piv = try allocator.alloc(u32, 2 * big);
+        errdefer allocator.free(piv);
         const lin: Linear = .{ .orb = orb, .n = n, .nf = nf, .gm = gm[0..sq], .cm = gm[sq..], .sys = sys, .piv = piv };
         try lin.blocks(ckt, allocator);
         return lin;
@@ -389,4 +390,23 @@ pub fn noise(ctx: *const root.RunCtx, opts: Options) !root.Result {
         density[fi] = total;
     }
     return pnoise.result(ctx.allocator, freqs, density, "hbnoise_density", "Harmonic Balance Noise Analysis");
+}
+
+test linePhasor {
+    // x(t) = dc + c1 cos + s1 sin + c2 cos2 + s2 sin2: the ±h phasors are
+    // conjugates and sum back to the real coefficients.
+    const c = [_]f64{ 0.5, 0.3, -0.2, 0.1, 0.4 };
+    const nf = c.len;
+    const dc = linePhasor(&c, nf, nf / 2);
+    try std.testing.expectEqual(@as(f64, 0.5), dc.re);
+    try std.testing.expectEqual(@as(f64, 0), dc.im);
+    for (1..3) |h| {
+        const pos = linePhasor(&c, nf, nf / 2 + h);
+        const neg = linePhasor(&c, nf, nf / 2 - h);
+        try std.testing.expectEqual(pos.re, neg.re);
+        try std.testing.expectEqual(pos.im, -neg.im);
+        // Re{2·X·e^(jωt)} at t = 0 is c_h, at ωt = π/2 it is s_h.
+        try std.testing.expectEqual(c[2 * h - 1], 2 * pos.re);
+        try std.testing.expectEqual(c[2 * h], -2 * pos.im);
+    }
 }
