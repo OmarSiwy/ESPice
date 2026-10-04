@@ -113,43 +113,78 @@ pub const letter_map = std.StaticStringMap(DeviceId).initComptime(.{
     .{ "d", DeviceId.diode },
 });
 
-/// Flat aliases for the devices the builder wires by hand instead of
-/// dispatching through `DeviceId`.
-/// ponytail: only the names the builder uses; everything else goes through
-/// `DeviceId.Type`.
+// Flat aliases for the devices the builder wires by hand instead of
+// dispatching through `DeviceId`. Each says which cards build it.
+// ponytail: only the names the builder uses; everything else goes through
+// `DeviceId.Type`.
+
+/// R cards, URC lumps and a P card's series z0.
 pub const resistor = DeviceId.Type(.resistor);
+/// C cards and URC lumps.
 pub const capacitor = DeviceId.Type(.capacitor);
+/// L cards.
 pub const inductor = DeviceId.Type(.inductor);
+/// K cards: mutual inductance between two L branches.
 pub const kinduc = DeviceId.Type(.kinduc);
+/// V and P cards.
 pub const vsource = DeviceId.Type(.vsource);
+/// I cards.
 pub const isource = DeviceId.Type(.isource);
+/// F cards.
 pub const cccs = DeviceId.Type(.cccs);
+/// H cards.
 pub const ccvs = DeviceId.Type(.ccvs);
+/// Plain E cards and a mixed-mode P card's legs.
 pub const vcvs = DeviceId.Type(.vcvs);
+/// V-mode B cards.
 pub const bsource = DeviceId.Type(.bsource);
+/// I-mode B cards.
 pub const bsource_i = DeviceId.Type(.bsource_i);
+/// Charge-mode (`q=`) B cards.
 pub const bsource_q = DeviceId.Type(.bsource_q);
+/// ngspice W cards (current-controlled switch).
 pub const cswitch = DeviceId.Type(.cswitch);
+/// T cards, and lossless LC O cards.
 pub const tline = DeviceId.Type(.tline);
+/// O cards of a static RG line.
 pub const lossy_tline = DeviceId.Type(.lossy_tline);
+/// O cards of an RLC or RC line.
 pub const ltra = byName("ltra");
+/// E LAPLACE cards.
 pub const vcvs_laplace = byName("vcvs_laplace");
+/// G LAPLACE cards.
 pub const vccs_laplace = byName("vccs_laplace");
+/// E POLE cards.
 pub const vcvs_pole = byName("vcvs_pole");
+/// G POLE cards.
 pub const vccs_pole = byName("vccs_pole");
+/// E DELAY cards.
 pub const vcvs_delay = byName("vcvs_delay");
+/// G DELAY cards.
 pub const vccs_delay = byName("vccs_delay");
+/// Y cards.
 pub const txl = DeviceId.Type(.txl);
+/// P (CPL) cards of 2 conductors.
 pub const coupled_ltra = byName("coupled_ltra");
+/// P (CPL) cards of 3 conductors.
 pub const coupled_ltra3 = byName("coupled_ltra3");
+/// P (CPL) cards of 4 conductors.
 pub const coupled_ltra4 = byName("coupled_ltra4");
+/// HSPICE W cards of N = 1.
 pub const wline_1 = byName("wline_1");
+/// HSPICE W cards of N = 2.
 pub const wline_2 = byName("wline_2");
+/// HSPICE W cards of N = 3.
 pub const wline_3 = byName("wline_3");
+/// HSPICE W cards of N = 4.
 pub const wline_4 = byName("wline_4");
+/// HSPICE S cards of 1 port.
 pub const sparam_1 = byName("sparam_1");
+/// HSPICE S cards of 2 ports.
 pub const sparam_2 = byName("sparam_2");
+/// HSPICE S cards of 3 ports.
 pub const sparam_3 = byName("sparam_3");
+/// HSPICE S cards of 4 ports.
 pub const sparam_4 = byName("sparam_4");
 
 /// `.model` LEVEL tables, per ngspice src/spicelib/parser/inpdomod.c.
@@ -226,22 +261,24 @@ fn levelId(comptime kind: []const u8, comptime table: []const Level, level: u16)
 }
 
 /// The M card device for `.model ... LEVEL=level` (ngspice inpdomod.c).
-pub fn mosfetDeviceId(level: u16) !DeviceId {
+/// UnsupportedDevice, with a logged warning, for a level outside the table
+/// or one whose model is not in the catalog.
+pub fn mosfetDeviceId(level: u16) error{UnsupportedDevice}!DeviceId {
     return levelId("MOSFET", &mos_levels, level);
 }
-/// The Q card device for `level`.
-pub fn bjtDeviceId(level: u16) !DeviceId {
+/// The Q card device for `level`; fails like `mosfetDeviceId`.
+pub fn bjtDeviceId(level: u16) error{UnsupportedDevice}!DeviceId {
     return levelId("BJT", &bjt_levels, level);
 }
-/// The D card device for `level`.
-pub fn diodeDeviceId(level: u16) !DeviceId {
+/// The D card device for `level`; fails like `mosfetDeviceId`.
+pub fn diodeDeviceId(level: u16) error{UnsupportedDevice}!DeviceId {
     return levelId("diode", &diode_levels, level);
 }
-/// The J card device for `level`.
-pub fn jfetDeviceId(level: u16) !DeviceId {
+/// The J card device for `level`; fails like `mosfetDeviceId`.
+pub fn jfetDeviceId(level: u16) error{UnsupportedDevice}!DeviceId {
     return levelId("JFET", &jfet_levels, level);
 }
-/// The Z card device for `level`.
-pub fn mesDeviceId(level: u16) !DeviceId {
+/// The Z card device for `level`; fails like `mosfetDeviceId`.
+pub fn mesDeviceId(level: u16) error{UnsupportedDevice}!DeviceId {
     return levelId("MESFET", &mes_levels, level);
 }
