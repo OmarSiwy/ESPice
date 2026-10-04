@@ -50,7 +50,7 @@ Status: **have** (exists, with file), **gap** (plan block that adds it).
 | Shipped ISA differs | same suite at each `-Dcpu` of `release.yml` | target matrix | release | `release.yml` smoke | gap: P1 runs the suite per target |
 | Abstraction leaves residue | `tools/asm_probe.py` verdict | codegen probe | merge | `tests/codegen.zig` (`zig build test-codegen`) | partial: `normInf`, `Dual.mul`; one pair per rung-5 seam as its block lands |
 | Hot struct grows | comptime `@sizeOf` assert | compile | merge | in the owning file | gap: P1 |
-| Architecture degrades | configure-time graph check, `else =>` / root-import ratchet, `//!` header scan | fitness function | merge | `build.zig` `checkModuleGraph`, `tests/fitness.zig` + `tests/FITNESS.tsv` | have |
+| Architecture degrades | configure-time graph check, `else =>` / root-import ratchet, `//!` header scan, test containers missing from their file's `test {}` list | fitness function | merge | `build.zig` `checkModuleGraph`, `tests/fitness.zig` + `tests/FITNESS.tsv` | have |
 | Performance regression | `zig build bench` medians vs ngspice/VACASK, callgrind Ir | benchmark | nightly | `tests/benchmark/` | have (no threshold yet: P6) |
 | Tests that cannot fail | mutation (flip one comparison, expect red) | mutation | weekly | new script | gap: P5 |
 

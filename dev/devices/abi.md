@@ -11,8 +11,10 @@ sides compile the same ABI source.
 
 `layoutHash()` hashes the size, alignment and field offsets of every
 boundary type and of every struct one holds by value (`NoiseSource.table`),
+including `GpuPayload` and `ScatterTapes`, which `Hooks` returns by value
+(a function pointer's return type is not followed, so they are listed),
 the Zig version, backend and optimize mode, whether error return tracing is
-on, and `abi_version` (28). Each device object exports it
+on, and `abi_version` (29). Each device object exports it
 as `arp_layout_hash`. The runtime loader (`src/device/loader.zig`) refuses a
 shared library whose hash differs (`error.LayoutMismatch`), and the hash keys
 the runtime build cache, so a bump rebuilds every cached device once.

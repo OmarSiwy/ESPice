@@ -495,7 +495,7 @@ the matrix is assembled on the device.
 There is no ensemble engine yet, so the prototype is a proxy plus a
 kernel.
 
-**Stacked decks** (`tests/benchmark/ensemble/gen.py`). N electrically
+**Stacked decks** (`gen.py`, since removed; see Reproducing). N electrically
 independent copies of one circuit in one netlist, each copy with its own
 sources and its own model cards, so the matrix is block diagonal and the
 existing GPU path batches the points as more instances. This is exactly the
@@ -517,7 +517,7 @@ it level-scheduled on the device.
 - Analyses: `.op`, and `.tran` with tmax a tenth of the run so the LTE sets
   every step.
 
-Configurations (`tests/benchmark/ensemble/run.py`), times are the sum of
+Configurations (`run.py`, since removed), times are the sum of
 each deck's `run total` (analysis only; parse and setup excluded):
 
 | config | what runs |
@@ -741,10 +741,14 @@ python3 tests/benchmark/postlayout/gen.py /tmp/pl chain psp103 100k
 ESPICE_THREADS=8 taskset -c 0,2,4,6,8,10,12,14 zig-out/bin/espice --backend=cpu --timing-in-depth /tmp/pl/chain_psp103_100k.sp
 ESPICE_THREADS=1 ESPICE_GPU_LU=0 zig-out/bin/espice --backend=cuda --timing-in-depth /tmp/pl/chain_psp103_100k.sp
 ESPICE_GPU_LU=1 ESPICE_GPU_LU_BENCH=20 zig-out/bin/espice --backend=cuda /tmp/pl/chain_psp103_100k.sp
-# small-circuit ensembles
-G=tests/benchmark/ensemble
-python3 $G/gen.py /tmp/ens psp103 chain50 cj tran 0
-python3 $G/run.py zig-out/bin/espice /tmp/ens singles par24 cpu1 cuda cudalu check
+# small-circuit ensembles: the scripts were deleted by the commit
+# "bench: delete the ensemble proxy scripts (#185)"; restore them from its parent
+c=$(git log -1 --format=%H --grep='delete the ensemble proxy scripts')
+mkdir -p /tmp/ensbin
+git show "$c^:tests/benchmark/ensemble/gen.py" > /tmp/ensbin/gen.py
+git show "$c^:tests/benchmark/ensemble/run.py" > /tmp/ensbin/run.py
+python3 /tmp/ensbin/gen.py /tmp/ens psp103 chain50 cj tran 0
+python3 /tmp/ensbin/run.py zig-out/bin/espice /tmp/ens singles par24 cpu1 cuda cudalu check
 ```
 
 The post-layout timings above cut each deck's `.tran` to 50 ps (100 ps

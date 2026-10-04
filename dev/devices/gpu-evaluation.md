@@ -26,7 +26,7 @@ on top of the downloaded planes.
   §5.6.1.2 latches alone: b3soidd, b3soifd, hicumL2, hisim2, kinduc, mes),
   which is what the state and control kernels carry. It admits
   held-variable devices (the Meyer MOS models mos1/2/3/6/9, bsim4va,
-  psp103, vbic13_4t), which the payload marks `held`. Every state kernel runs in halves (its `halves` argument,
+  psp103, vbic13_4t). Every state kernel runs in halves (its `halves` argument,
   device ABI 27): the limit half in every per-iterate limit pass, the
   state half once per converged solve from `GpuContext.updateStates`
   (held or not since #15), so

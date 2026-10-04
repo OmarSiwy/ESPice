@@ -333,9 +333,6 @@ const BatchGpu = struct {
     grid: gompute.Dim3,
     block: u32,
     has_lim: bool,
-    /// `GpuPayload.held`: the state kernel's `updateState` writes held
-    /// variables (`syncInstances` merges them).
-    held: bool,
     /// The host batch has `Hooks.status`: eval latches `vera_status__` in
     /// the resident Instance, which `syncStatus` brings home.
     has_status: bool,
@@ -889,7 +886,6 @@ pub const GpuContext = struct {
             .grid = gompute.Dim3.linear(p.count, block),
             .block = block,
             .has_lim = p.lim_x.len > 0,
-            .held = p.held,
             .has_status = b.hooks.status != null,
             .stepped = stepped,
             .base = base,
