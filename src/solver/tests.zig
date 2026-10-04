@@ -411,7 +411,8 @@ const ConvergerTests = struct {
     const jfnk = impl.jfnk;
     const newton = impl.newton;
 
-    /// Scalar oracle for converger.updateAndNorm (the pre-vector loop).
+    /// Scalar oracle for converger.updateAndNorm: a non-finite new x or dx
+    /// scores inf.
     fn updateAndNormOracle(x: []f64, dx: []const f64, x_old: []f64, cur: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
         var worst: f64 = 0;
         for (x, dx, x_old, cur) |*xi, dxi, *xoi, is_cur| {
@@ -419,7 +420,8 @@ const ConvergerTests = struct {
             xi.* += dxi;
             const atol = if (is_cur) abstol else vntol;
             const tol = reltol * @max(@abs(xi.*), @abs(xoi.*)) + atol;
-            worst = @max(worst, @abs(dxi) / tol);
+            const finite = std.math.isFinite(xi.*) and std.math.isFinite(dxi);
+            worst = @max(worst, if (finite) @abs(dxi) / tol else std.math.inf(f64));
         }
         return worst;
     }
@@ -641,6 +643,80 @@ const ConvergerTests = struct {
             try std.testing.expectApproxEqRel(exact, x[0], 1e-12);
             try std.testing.expectApproxEqRel(-GainRowSystem.g_load * exact, x[1], 1e-12);
         }
+    }
+
+    test "updateAndNorm: a NaN or infinite step scores inf in the vector body and the tail" {
+        const kernel = impl.test_access.updateAndNorm;
+        const cur: [17]bool = @splat(false);
+        for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64) }) |bad| {
+            for (0..17) |at| {
+                var x: [17]f64 = @splat(1);
+                var dx: [17]f64 = @splat(0);
+                var old: [17]f64 = undefined;
+                dx[at] = bad;
+                try testing.expectEqual(std.math.inf(f64), kernel(&x, &dx, &old, &cur, 1e-3, 1e-12, 1e-6));
+            }
+        }
+    }
+
+    /// One unknown whose residual is NaN at every x, as a device eval that
+    /// overflowed leaves it.
+    const NanSystem = struct {
+        n: u32 = 1,
+        nnz: u32 = 1,
+        diag_slots: [1]u32 = .{0},
+        current_row: []const bool = &.{false},
+        rhs: []f64,
+        g_vals: [1]f64 = .{1},
+
+        const Hook = struct {
+            pub fn assemble(_: @This(), sys: *NanSystem, _: []const f64, _: f64) void {
+                sys.rhs[0] = std.math.nan(f64);
+                sys.g_vals[0] = 1;
+            }
+            pub fn vals(_: @This(), sys: *NanSystem) []f64 {
+                return &sys.g_vals;
+            }
+            pub fn diagAt(_: @This(), sys: *NanSystem, slot: u32) f64 {
+                return sys.g_vals[slot];
+            }
+        };
+    };
+
+    test "a NaN residual never converges, under newton or jfnk" {
+        const a = std.testing.allocator;
+        inline for (.{ newton, jfnk }) |solve| {
+            var rhs = [_]f64{0};
+            var sys: NanSystem = .{ .rhs = &rhs };
+            var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null);
+            defer ws.deinit(a);
+            var x = [_]f64{0};
+            const r = try solve(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 6 }, NanSystem.Hook{});
+            try testing.expect(!r.converged);
+            try testing.expectEqual(@as(u16, 6), r.iterations);
+        }
+    }
+
+    test "optionsFromTolerances: an iteration cap below 100 is raised to 100, as ngspice's NIiter does" {
+        const tol: impl.Tolerances = .{ .itl1 = 7, .reltol = 1e-4 };
+        try testing.expectEqual(@as(u16, 100), impl.optionsFromTolerances(tol, null).max_iter);
+        try testing.expectEqual(@as(u16, 100), impl.optionsFromTolerances(tol, 3).max_iter);
+        try testing.expectEqual(@as(u16, 250), impl.optionsFromTolerances(tol, 250).max_iter);
+        const o = impl.optionsFromTolerances(tol, null);
+        try testing.expectEqual(@as(f64, 1e-4), o.reltol);
+        try testing.expectEqual(@as(f64, 0), o.gmin);
+    }
+
+    fn workspaceLifecycle(gpa: std.mem.Allocator) !void {
+        var ws = try Workspace.init(gpa, 2, &.{ 0, 2, 4 }, &.{ 0, 1, 0, 1 }, null);
+        defer ws.deinit(gpa);
+        try testing.expectEqual(@as(usize, 4), (try ws.ensureAVals(4)).len);
+        try testing.expectEqual(@as(usize, 2), (try ws.ensureAVals(2)).len);
+        try testing.expectEqual(@as(usize, 8), (try ws.ensureAVals(8)).len);
+    }
+
+    test "Workspace: init, growing ensureAVals and deinit leak nothing under any allocation failure" {
+        try testing.checkAllAllocationFailures(testing.allocator, workspaceLifecycle, .{});
     }
 };
 
@@ -1040,6 +1116,62 @@ const FftTests = struct {
         // bin 100: amplitude 1 sin → |X[100]| = N/2 = 512
         const mag100 = @sqrt(re[100] * re[100] + im[100] * im[100]);
         try testing.expectApproxEqRel(@as(f64, 512.0), mag100, 1e-10);
+    }
+
+    /// O(N^2) DFT in the module's convention; n*k is reduced mod N so each
+    /// twiddle angle is computed directly, never by recurrence.
+    fn naiveDft(re: []const f64, im: []const f64, out_re: []f64, out_im: []f64) void {
+        const n = re.len;
+        for (0..n) |k| {
+            var sr: f64 = 0;
+            var si: f64 = 0;
+            for (0..n) |t| {
+                const a = -2.0 * math.pi * @as(f64, @floatFromInt((t * k) % n)) / @as(f64, @floatFromInt(n));
+                sr += re[t] * @cos(a) - im[t] * @sin(a);
+                si += re[t] * @sin(a) + im[t] * @cos(a);
+            }
+            out_re[k] = sr;
+            out_im[k] = si;
+        }
+    }
+
+    test "fft: every power of two through 512 matches a naive DFT, and ifft inverts it" {
+        // N = 1 and 2 run no vector stage; from N = 2W up both stage kinds run.
+        var prng = std.Random.DefaultPrng.init(0xF17);
+        const r = prng.random();
+        var re: [512]f64 = undefined;
+        var im: [512]f64 = undefined;
+        var re0: [512]f64 = undefined;
+        var im0: [512]f64 = undefined;
+        var dre: [512]f64 = undefined;
+        var dim: [512]f64 = undefined;
+        var n: usize = 1;
+        while (n <= 512) : (n *= 2) {
+            for (re0[0..n], im0[0..n]) |*u, *v| {
+                u.* = r.float(f64) - 0.5;
+                v.* = r.float(f64) - 0.5;
+            }
+            @memcpy(re[0..n], re0[0..n]);
+            @memcpy(im[0..n], im0[0..n]);
+            naiveDft(re0[0..n], im0[0..n], dre[0..n], dim[0..n]);
+            fft(re[0..n], im[0..n]);
+            // Both sides sum N terms below 1 in magnitude.
+            const tol = 1e-13 * @as(f64, @floatFromInt(n));
+            for (0..n) |k| {
+                try testing.expectApproxEqAbs(dre[k], re[k], tol);
+                try testing.expectApproxEqAbs(dim[k], im[k], tol);
+            }
+            ifft(re[0..n], im[0..n]);
+            for (0..n) |k| {
+                try testing.expectApproxEqAbs(re0[k], re[k], tol);
+                try testing.expectApproxEqAbs(im0[k], im[k], tol);
+            }
+        }
+    }
+
+    test "nextPow2: exact powers map to themselves" {
+        for ([_][2]usize{ .{ 1, 1 }, .{ 2, 2 }, .{ 3, 4 }, .{ 4, 4 }, .{ 5, 8 }, .{ 1024, 1024 }, .{ 1025, 2048 } }) |c|
+            try testing.expectEqual(c[1], impl.nextPow2(c[0]));
     }
 };
 
@@ -1470,6 +1602,66 @@ const FreqSolveTests = struct {
             for (x, x_ref) |a, b| try testing.expectApproxEqRel(b, a, 1e-11);
         }
     }
+
+    test "slotCol: empty columns are skipped and a ground slot maps past the last column" {
+        const col_ptr = [_]u32{ 0, 0, 2, 2, 3 };
+        for ([_][2]u32{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 3 }, .{ 3, 4 } }) |c|
+            try testing.expectEqual(@as(usize, c[1]), impl.slotCol(&col_ptr, c[0]));
+    }
+
+    test "solveBatch at every length through 3W + 1, with lanes the pivot tape cannot replay" {
+        // Ten 2x2 blocks G = [0 1; 1 0], C = I: A(w) = [jw 1; 1 jw] is never
+        // singular, but its stacked-real pivots sit on wC at large w and on G
+        // at w = 0, so neither tape replays the other and those lanes peel to
+        // the serial path.
+        const allocator = testing.allocator;
+        const lane_lu = @import("root.zig").lane_lu;
+        const ta = FreqSolver.test_access;
+        const W = ta.W;
+        const n: u32 = 20;
+        var col_ptr: [n + 1]u32 = undefined;
+        var row_idx: [2 * n]u32 = undefined;
+        var g_vals: [2 * n]f64 = undefined;
+        var c_vals: [2 * n]f64 = undefined;
+        col_ptr[0] = 0;
+        for (0..n) |j| {
+            const lo = j & ~@as(usize, 1);
+            for (0..2) |d| {
+                const row = lo + d;
+                row_idx[2 * j + d] = @intCast(row);
+                g_vals[2 * j + d] = if (row == j) 0 else 1;
+                c_vals[2 * j + d] = if (row == j) 1 else 0;
+            }
+            col_ptr[j + 1] = @intCast(2 * (j + 1));
+        }
+        var fs = try FreqSolver.fromPlanes(allocator, n, &col_ptr, &row_idx, &g_vals, &c_vals);
+        defer fs.deinit(allocator);
+
+        const nn: usize = 2 * n;
+        var rhs: [nn]f64 = undefined;
+        for (&rhs, 0..) |*v, i| v.* = @sin(@as(f64, @floatFromInt(i)) + 0.5);
+        const max_len = 3 * W + 1;
+        var omegas: [max_len]f64 = undefined;
+        for (&omegas, 0..) |*w, i| w.* = if (i % 3 == 0) 0 else 1e3 * @as(f64, @floatFromInt(i));
+        var x_batch: [max_len * nn]f64 = undefined;
+        var x_ref: [max_len * nn]f64 = undefined;
+        for (0..max_len + 1) |len| for ([_]bool{ false, true }) |adjoint| {
+            try fs.solveBatch(omegas[0..len], .{}, &rhs, x_batch[0 .. len * nn], adjoint);
+            try ta.solveBatchSerial(&fs, &omegas, .{}, 0, len, &rhs, &x_ref, adjoint);
+            for (x_batch[0 .. len * nn], x_ref[0 .. len * nn]) |got, want|
+                try testing.expectApproxEqAbs(want, got, 1e-11 * @max(1, @abs(want)));
+        };
+
+        // The peel is reached: a tape laid down at w = 1e6 flags w = 0 lanes.
+        const sp = &fs.strategy.sp;
+        sp.slv.factored = false;
+        try ta.setOmegaSparse(n, sp, 1e6, .{}, 0);
+        var lanes = try lane_lu.LaneLu(W).init(allocator, &sp.slv.lu.?);
+        defer lanes.deinit(allocator);
+        const zeros: [W]f64 = @splat(0);
+        const bad = lanes.refactor(impl.Stacked(W).of(sp, zeros, .{}, 0, W), 1e-12);
+        try testing.expect(bad & 1 != 0);
+    }
 };
 
 const GmresTests = struct {
@@ -1649,6 +1841,103 @@ const GmresTests = struct {
         try testing.expect(result.iterations == 0);
         try testing.expectApproxEqAbs(@as(f64, 0.0), x[0], 1e-15);
         try testing.expectApproxEqAbs(@as(f64, 0.0), x[1], 1e-15);
+    }
+
+    test "GMRES: a singular operator is never reported converged" {
+        // A = 0, and A = [0 0; 1 0] with b = e1 outside its range: every
+        // product is exact, the Givens estimate reaches 0 and the true
+        // residual stays ||b||.
+        const gpa = testing.allocator;
+        var gmres = try Gmres.init(gpa, 2, 2);
+        defer gmres.deinit(gpa);
+        for ([_][4]f64{ .{ 0, 0, 0, 0 }, .{ 0, 0, 1, 0 } }) |a| {
+            var mv = DenseMatvec{ .a = &a, .n = 2 };
+            var x = [2]f64{ 0, 0 };
+            const result = gmres.solve(&mv, &.{ 1, 0 }, &x, 1e-10, 3);
+            try testing.expect(!result.converged);
+            try testing.expectApproxEqAbs(@as(f64, 1), result.residual, 1e-12);
+        }
+    }
+
+    test "GMRES: a non-finite right-hand side terminates unconverged" {
+        const gpa = testing.allocator;
+        var mv = DenseMatvec{ .a = &.{ 2, 1, 0, 3 }, .n = 2 };
+        var gmres = try Gmres.init(gpa, 2, 2);
+        defer gmres.deinit(gpa);
+        var x = [2]f64{ 0, 0 };
+        const result = gmres.solve(&mv, &.{ std.math.nan(f64), 1 }, &x, 1e-10, 2);
+        try testing.expect(!result.converged);
+    }
+
+    test "GMRES: n = 1, an exact initial guess and an exact preconditioner" {
+        const gpa = testing.allocator;
+        {
+            var mv = DenseMatvec{ .a = &.{4}, .n = 1 };
+            var gmres = try Gmres.init(gpa, 1, 3);
+            defer gmres.deinit(gpa);
+            var x = [1]f64{0};
+            const result = gmres.solve(&mv, &.{8}, &x, 1e-12, 0);
+            try testing.expect(result.converged);
+            try testing.expectEqual(@as(u32, 1), result.iterations);
+            try testing.expectEqual(@as(f64, 2), x[0]);
+        }
+        {
+            var mv = DenseMatvec{ .a = &.{ 4, 1, 0, 1, 3, 1, 0, 1, 2 }, .n = 3 };
+            var gmres = try Gmres.init(gpa, 3, 3);
+            defer gmres.deinit(gpa);
+            var x = [3]f64{ 1, 1, 1 };
+            const result = gmres.solve(&mv, &.{ 5, 5, 3 }, &x, 1e-12, 0);
+            try testing.expect(result.converged);
+            try testing.expectEqual(@as(u32, 0), result.iterations);
+            try testing.expectEqual([3]f64{ 1, 1, 1 }, x);
+        }
+        {
+            // M = A makes A M^-1 the identity: one Arnoldi step.
+            var op = DiagPreconditioned{ .a = &.{ 2, 0, 0, 0, 5, 0, 0, 0, 10 }, .n = 3, .diag = &.{ 2, 5, 10 } };
+            var gmres = try Gmres.init(gpa, 3, 3);
+            defer gmres.deinit(gpa);
+            var x = [3]f64{ 0, 0, 0 };
+            const result = gmres.solve(&op, &.{ 2, 10, 30 }, &x, 1e-12, 0);
+            try testing.expect(result.converged);
+            try testing.expectEqual(@as(u32, 1), result.iterations);
+            for (x, [_]f64{ 1, 2, 3 }) |got, want| try testing.expectApproxEqAbs(want, got, 1e-12);
+        }
+    }
+
+    test "GMRES: random nonsymmetric systems pass the residual certificate at every n and restart depth" {
+        // Strict row and column dominance keeps the symmetric part positive
+        // definite, so even GMRES(1) converges. The oracle is ||b - A x||,
+        // recomputed here, never GMRES's own estimate.
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x6E5);
+        const r = prng.random();
+        var a: [17 * 17]f64 = undefined;
+        var b: [17]f64 = undefined;
+        var x: [17]f64 = undefined;
+        var ax: [17]f64 = undefined;
+        for ([_]u32{ 1, 2, 3, 5, 8, 17 }) |n| for ([_]u32{ 1, 3, n }) |m| {
+            const nu: usize = n;
+            for (0..nu) |i| {
+                for (0..nu) |j| a[i * nu + j] = r.float(f64) - 0.5;
+                a[i * nu + i] = @as(f64, @floatFromInt(n)) + 2 + r.float(f64);
+                b[i] = r.float(f64) - 0.5;
+            }
+            var mv = DenseMatvec{ .a = a[0 .. nu * nu], .n = n };
+            var gmres = try Gmres.init(gpa, n, m);
+            defer gmres.deinit(gpa);
+            @memset(x[0..nu], 0);
+            const result = gmres.solve(&mv, b[0..nu], x[0..nu], 1e-10, 500);
+            try testing.expect(result.converged);
+            try testing.expect(result.residual <= 1e-10);
+            mv.matvec(x[0..nu], ax[0..nu]);
+            var res2: f64 = 0;
+            var b2: f64 = 0;
+            for (b[0..nu], ax[0..nu]) |bi, axi| {
+                res2 += (bi - axi) * (bi - axi);
+                b2 += bi * bi;
+            }
+            try testing.expect(@sqrt(res2 / b2) <= 1e-9);
+        };
     }
 };
 

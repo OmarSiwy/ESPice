@@ -9,7 +9,8 @@ const scale = @import("core").numerics.scale;
 const W = std.simd.suggestVectorLength(f64) orelse 1;
 const V = @Vector(W, f64);
 
-/// Forward DFT in place. N must be a power of two.
+/// Forward DFT in place, O(N log N). Asserts that `re` and `im` have the
+/// same length N and that N is a power of two (N = 1 is the identity).
 pub fn fft(re: []f64, im: []f64) void {
     const n = re.len;
     std.debug.assert(n == im.len);
@@ -18,7 +19,8 @@ pub fn fft(re: []f64, im: []f64) void {
     butterflyPass(re, im, false);
 }
 
-/// Inverse DFT in place, scaled by 1/N. N must be a power of two.
+/// Inverse DFT in place, scaled by 1/N, so `ifft` undoes `fft`. Asserts
+/// what `fft` does.
 pub fn ifft(re: []f64, im: []f64) void {
     const n = re.len;
     std.debug.assert(n == im.len);
@@ -30,13 +32,16 @@ pub fn ifft(re: []f64, im: []f64) void {
     scale(im, inv, im);
 }
 
-/// Smallest power of two >= n; n must be > 0.
+/// Smallest power of two >= n, the length to zero-pad an `fft` input to.
+/// Asserts that n > 0 and that the result fits in a usize.
 pub fn nextPow2(n: usize) usize {
     return math.ceilPowerOfTwoAssert(usize, n);
 }
 
 fn bitReverse(re: []f64, im: []f64) void {
     const n = re.len;
+    // N = 1 would shift by the full word width.
+    if (n < 2) return;
     const log_n: math.Log2Int(usize) = @intCast(@ctz(n));
     const shift: math.Log2Int(usize) = @intCast(@as(u7, @bitSizeOf(usize)) - @as(u7, log_n));
     for (0..n) |i| {

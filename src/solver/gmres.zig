@@ -10,11 +10,12 @@ const num = @import("core").numerics;
 /// GMRES(m) workspace for n-dimensional systems.
 pub const Gmres = struct {
     const Self = @This();
+    /// What `solve` reached; `x` holds its best iterate either way.
     pub const SolveResult = struct {
         /// Arnoldi steps across all restarts.
         iterations: u32,
-        /// ||b - A x|| / ||b||: the Givens estimate when converged, the
-        /// true residual otherwise.
+        /// ||b - A x|| / ||b||: the Givens estimate when a cycle converged,
+        /// the true residual otherwise.
         residual: f64,
         converged: bool,
     };
@@ -38,7 +39,8 @@ pub const Gmres = struct {
     w: []f64,
     r: []f64,
 
-    /// Allocates the workspace; n and m must be positive.
+    /// Allocates (m + 1)(n + m) + 2n + 4m + 1 f64s. Asserts that n and m
+    /// are positive. Caller frees with `deinit` and the same allocator.
     pub fn init(gpa: Allocator, n: u32, m: u32) !Self {
         std.debug.assert(n > 0);
         std.debug.assert(m > 0);
@@ -75,6 +77,7 @@ pub const Gmres = struct {
         };
     }
 
+    /// Frees the workspace; `gpa` must be the allocator `init` got.
     pub fn deinit(self: *Self, gpa: Allocator) void {
         inline for (.{ self.v_basis, self.h, self.cs, self.sn, self.g, self.y, self.w, self.r }) |s| gpa.free(s);
         self.* = undefined;
@@ -85,7 +88,10 @@ pub const Gmres = struct {
     /// type declares one, applies M^-1 in place for a right
     /// preconditioned solve. `x` holds the initial guess and receives
     /// the solution. Stops at ||r|| <= tol * ||b|| or after
-    /// `max_restarts + 1` cycles. A zero `b` returns x = 0 at once.
+    /// `max_restarts + 1` cycles. A zero `b` returns x = 0 at once; a
+    /// non-finite one never converges. On a singular A convergence is
+    /// judged by the true residual, never by a Givens estimate that cannot
+    /// see what it left. Asserts that `b` and `x` hold at least n entries.
     pub fn solve(
         self: *Self,
         op: anytype,
@@ -178,14 +184,15 @@ pub const Gmres = struct {
                 }
             }
 
-            const k = j; // Arnoldi steps completed
-            if (k > 0) {
-                self.solveUpperTriangular(k);
-                self.updateSolution(x[0..n], k, op);
-            }
+            const k = j; // Arnoldi steps completed, at least 1
+            const singular = self.solveUpperTriangular(k);
+            self.updateSolution(x[0..n], k, op);
 
+            // A rank-deficient R leaves g[k] blind to the part of the
+            // residual it could not reduce, so the next cycle's head (or
+            // the tail) measures the true one instead.
             const res_norm = @abs(self.g[k]);
-            if (res_norm <= abs_tol) {
+            if (!singular and res_norm <= abs_tol) {
                 return .{ .iterations = total_iters, .residual = res_norm / b_norm, .converged = true };
             }
         }
@@ -193,7 +200,7 @@ pub const Gmres = struct {
         op.matvec(x[0..n], self.r[0..n]);
         self.residual(b[0..n]);
         const final_res = vecNorm(self.r[0..n]);
-        return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = false };
+        return .{ .iterations = total_iters, .residual = final_res / b_norm, .converged = final_res <= abs_tol };
     }
 
     /// r = b - r.
@@ -220,11 +227,16 @@ pub const Gmres = struct {
         }
     }
 
-    /// y = H^-1 g over the leading k x k triangle. A zero diagonal (a
-    /// singular operator) sets that component to zero.
-    fn solveUpperTriangular(self: *Self, k: u32) void {
+    /// y = H^-1 g over the leading k x k triangle. A diagonal at or below
+    /// eps times the largest (a singular operator; rounding rarely leaves
+    /// an exact zero) sets that component to zero. Returns whether one did.
+    fn solveUpperTriangular(self: *Self, k: u32) bool {
         const m: usize = self.m;
         const ku: usize = k;
+        var d_max: f64 = 0;
+        for (0..ku) |i| d_max = @max(d_max, @abs(self.h[i * m + i]));
+        const floor = std.math.floatEps(f64) * d_max;
+        var singular = false;
         @memcpy(self.y[0..ku], self.g[0..ku]);
         var i: usize = ku;
         while (i > 0) {
@@ -233,12 +245,14 @@ pub const Gmres = struct {
                 self.y[i] -= self.h[i * m + jj] * self.y[jj];
             }
             const diag = self.h[i * m + i];
-            if (diag == 0) {
+            if (@abs(diag) <= floor) {
                 self.y[i] = 0;
+                singular = true;
             } else {
                 self.y[i] /= diag;
             }
         }
+        return singular;
     }
 
     /// x += M^-1 V_k y.
