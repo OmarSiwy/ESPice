@@ -203,8 +203,12 @@ pub const Live = struct {
     names: []const []const u8 = &.{},
     /// Each name's value in the deck as written.
     nominal: []const f64 = &.{},
-    /// Rows of `values`, `kvs` or a group's arguments, parallel to `ops`.
-    slots: []const *Value = &.{},
+    /// The values a variant rewrites, parallel to `ops`; `Netlist.slot`
+    /// reads one.
+    slots: []const Slot = &.{},
+    /// The groups whose arguments hold a slot (`Slot.table == .groups`);
+    /// their items live in the parse arena.
+    groups: []const Group = &.{},
     /// Postfix each slot is evaluated from, and the factor `.option scale`
     /// applies to it afterwards.
     ops: []const Span = &.{},
@@ -227,6 +231,17 @@ pub const Live = struct {
     /// branches only while each still has its nominal truth value.
     conds: []const Span = &.{},
     bins: Bins = .{},
+
+    /// Where a live value sits: row `row` of `Netlist.values` or
+    /// `Netlist.kvs`, or argument `arg` of row `row` of `Live.groups`.
+    pub const Slot = struct {
+        row: u32,
+        /// Index into `Group.args()`; 0 outside `.groups`.
+        arg: u32 = 0,
+        table: Table,
+
+        pub const Table = enum(u8) { values, kvs, groups };
+    };
 
     /// M cards on a binned model whose L or W reads a live name, and the
     /// bins each may take; `setLive` picks the bin again at every point.
@@ -481,14 +496,15 @@ pub const Netlist = struct {
             changed = changed or pool[row] != v;
             pool[row] = v;
         };
-        for (live.slots, live.ops, live.scale) |slot, span, scale| {
+        for (live.ops, live.scale, 0..) |span, scale, k| {
+            const at = nl.slot(k);
             const ops = nl.exprOps(span);
             const x = scale * if (@TypeOf(draw) == @TypeOf(null))
                 try expr.eval(gpa, stack, ops, nl.consts, values, null)
             else
                 try expr.eval(gpa, stack, ops, nl.consts, values, SiteDraw(@TypeOf(draw)){ .inner = draw, .base = span.start, .ops = live.site_ops, .keys = live.site_keys });
-            changed = changed or slot.num != x;
-            slot.* = .{ .num = x };
+            changed = changed or at.num != x;
+            at.* = .{ .num = x };
         }
         for (live.site_rows, live.site_spans) |row, span| {
             const ops = nl.exprOps(span);
@@ -528,7 +544,22 @@ pub const Netlist = struct {
     /// that `values.len` equals `live.slots.len`.
     pub fn setSlots(nl: *Netlist, values: []const f64) void {
         std.debug.assert(values.len == nl.live.slots.len);
-        for (nl.live.slots, values) |slot, x| slot.* = .{ .num = x };
+        for (values, 0..) |x, k| nl.slot(k).* = .{ .num = x };
+    }
+
+    /// Live slot `k`'s value, in the parse-arena table that holds it; a
+    /// write through it is what every later `View` and `Model` reads.
+    /// Asserts that `k` is a slot.
+    pub fn slot(nl: *const Netlist, k: usize) *Value {
+        const s = nl.live.slots[k];
+        if (s.table != .groups) std.debug.assert(s.arg == 0);
+        const v = switch (s.table) {
+            .values => &@constCast(nl.values)[s.row],
+            .kvs => &@constCast(nl.kvs)[s.row].value,
+            .groups => &@constCast(nl.live.groups[s.row].args())[s.arg],
+        };
+        std.debug.assert(v.* == .num);
+        return v;
     }
 };
 
@@ -2359,15 +2390,16 @@ fn Reader(comptime S: type) type {
         /// (a B source's) reads each live name from a constant-pool row.
         fn resolveLive(r: *R) Error!Live {
             if (r.live_names.count() == 0 and r.site_ops.items.len == 0) return .{};
-            var slots: std.ArrayList(*Value) = .empty;
+            var slots: Slots = .{};
             var spans: std.ArrayList(Span) = .empty;
             var out: Live = .{ .names = r.live_names.keys(), .nominal = r.live_nominal.items };
             const pool_rows = try r.arena.alloc(u32, r.live_names.count());
             @memset(pool_rows, none);
             var sites: Sites = .{};
-            for (r.values.items) |*v| try r.liveSlot(v, &slots, &spans, pool_rows, &sites);
-            for (r.kvs.items) |*kv| try r.liveSlot(&kv.value, &slots, &spans, pool_rows, &sites);
-            out.slots = slots.items;
+            for (r.values.items, 0..) |*v, i| try r.liveSlot(v, .{ .table = .values, .row = @intCast(i) }, &slots, &spans, pool_rows, &sites);
+            for (r.kvs.items, 0..) |*kv, i| try r.liveSlot(&kv.value, .{ .table = .kvs, .row = @intCast(i) }, &slots, &spans, pool_rows, &sites);
+            out.slots = slots.at.items;
+            out.groups = slots.groups.items;
             out.ops = spans.items;
             out.site_ops = r.site_ops.items;
             out.site_keys = r.site_keys.items;
@@ -2391,6 +2423,9 @@ fn Reader(comptime S: type) type {
         /// `Live.site_rows` and `Live.site_spans` as `liveSlot` finds them.
         const Sites = struct { rows: std.ArrayList(u32) = .empty, spans: std.ArrayList(Span) = .empty };
 
+        /// `Live.slots` and `Live.groups` as `liveSlot` finds them.
+        const Slots = struct { at: std.ArrayList(Live.Slot) = .empty, groups: std.ArrayList(Group) = .empty };
+
         /// Whether one of the distribution calls the parse recorded sits in
         /// ops `start..end` of the netlist.
         fn holdsSite(r: *const R, start: usize, end: usize) bool {
@@ -2398,11 +2433,25 @@ fn Reader(comptime S: type) type {
             return k < r.site_ops.items.len and r.site_ops.items[k] < end;
         }
 
-        fn liveSlot(r: *R, v: *Value, slots: *std.ArrayList(*Value), spans: *std.ArrayList(Span), pool_rows: []u32, sites: *Sites) Error!void {
+        /// Records `v`, which sits at `at`, as a slot when it reads a live
+        /// name or a distribution, and the arguments of a group the same way.
+        fn liveSlot(r: *R, v: *Value, at: Live.Slot, slots: *Slots, spans: *std.ArrayList(Span), pool_rows: []u32, sites: *Sites) Error!void {
             switch (v.*) {
                 // `valueAt` built the arguments in the parse arena, mutable;
                 // `Group` types them const for every reader after the parse.
-                .group => |g| for (g.args()) |*a| try r.liveSlot(@constCast(a), slots, spans, pool_rows, sites),
+                // A group keeps its `Live.groups` row only if an argument
+                // (or a nested group's) became a slot.
+                .group => |g| {
+                    if (slots.groups.items.len == none) return error.CircuitTooLarge;
+                    const row: u32 = @intCast(slots.groups.items.len);
+                    try slots.groups.append(r.arena, g);
+                    const mark = slots.at.items.len;
+                    for (g.args(), 0..) |*a, j| try r.liveSlot(@constCast(a), .{ .table = .groups, .row = row, .arg = @intCast(j) }, slots, spans, pool_rows, sites);
+                    if (slots.at.items.len == mark) {
+                        std.debug.assert(slots.groups.items.len == row + 1);
+                        slots.groups.items.len = row;
+                    }
+                },
                 .expr => |span| {
                     const sited = r.holdsSite(span.start, span.start + span.len);
                     var reads = false;
@@ -2410,7 +2459,7 @@ fn Reader(comptime S: type) type {
                     if (!reads and !sited) return;
                     const folded = try expr.fold(r.arena, &r.stack, r.ops.items[span.start..][0..span.len], r.consts.items, false, r.live_nominal.items);
                     if (folded.known) {
-                        try slots.append(r.arena, v);
+                        try slots.at.append(r.arena, at);
                         try spans.append(r.arena, span);
                         v.* = .{ .num = folded.num };
                         return;
@@ -3807,13 +3856,18 @@ fn Reader(comptime S: type) type {
         /// bounds hold it, within 1 nm. `modelRow` already binned the cards
         /// that name a subcircuit's own bins. Writes the factor each live
         /// slot of `slots` takes into `slot_scale`, parallel to it.
-        fn modelBins(r: *R, slots: []const *Value, slot_scale: []f64) Error!void {
+        fn modelBins(r: *R, slots: []const Live.Slot, slot_scale: []f64) Error!void {
+            std.debug.assert(slots.len == slot_scale.len);
             const scale = r.scale;
-            // Slot of each live table value, for the scale and the bin check.
-            var slot_of: std.AutoHashMapUnmanaged(*const Value, u32) = .empty;
-            for (slots, 0..) |slot, k| try slot_of.put(r.arena, slot, @intCast(k));
             const wnflag = r.wnflag;
             const arena = r.arena;
+            // Slot of each `kvs` row, `none` where it holds none, for the
+            // scale and the bin check; empty when the deck has no slot.
+            const slot_of = try arena.alloc(u32, if (slots.len == 0) 0 else r.kvs.items.len);
+            @memset(slot_of, none);
+            for (slots, 0..) |slot, k| if (slot.table == .kvs) {
+                slot_of[slot.row] = @intCast(k);
+            };
             const models = r.models.items;
             const kvs = r.kvs.items;
             var names: std.StringHashMapUnmanaged(u32) = .empty;
@@ -3843,11 +3897,12 @@ fn Reader(comptime S: type) type {
                 if (kind != 'm') continue;
                 const kv = r.kvs.items[ks.start..][0..ks.len];
                 var swept_geometry = false;
-                for (kv) |*item| {
+                for (kv, @as(usize, ks.start)..) |*item, row| {
                     const power = lengths.get(item.key) orelse continue;
                     if (item.value != .num) return error.ParseError;
                     const factor = if (power == 2) scale * scale else scale;
-                    if (slot_of.get(&item.value)) |k| {
+                    if (slot_of.len != 0 and slot_of[row] != none) {
+                        const k = slot_of[row];
                         slot_scale[k] = factor;
                         swept_geometry = swept_geometry or std.mem.eql(u8, item.key, "l") or std.mem.eql(u8, item.key, "w");
                     }

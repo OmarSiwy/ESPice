@@ -209,7 +209,7 @@ pub const Planner = struct {
         @memset(p.row_at, netlist.none);
         try p.starts.append(scratch, 0);
         const nominal_slots = try scratch.alloc(f64, nl.live.slots.len);
-        for (nominal_slots, nl.live.slots) |*v, slot| v.* = slot.num;
+        for (nominal_slots, 0..) |*v, k| v.* = nl.slot(k).num;
         p.nominal_slots = nominal_slots;
         p.kept = try .of(scratch, nl);
         return p;
@@ -387,9 +387,10 @@ pub const Planner = struct {
         try p.setLive(pt);
         var moved = false;
         var crossed = false;
-        for (p.nl.live.slots, p.nominal_slots) |slot, nominal| {
-            moved = moved or slot.num != nominal;
-            crossed = crossed or crossesZero(nominal, slot.num);
+        for (p.nominal_slots, 0..) |nominal, k| {
+            const x = p.nl.slot(k).num;
+            moved = moved or x != nominal;
+            crossed = crossed or crossesZero(nominal, x);
         }
         if (!p.kept.holds(p.nl)) return .circuit;
         if (!moved) return .row;
@@ -398,7 +399,7 @@ pub const Planner = struct {
         // rebuild can tell.
         if (p.fast == .identity and !crossed) {
             for (p.fast_slots, p.fast_refs) |k, r| {
-                const x = p.nl.live.slots[k].num;
+                const x = p.nl.slot(k).num;
                 if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[r].get()))) try p.set(r, x);
             }
             return .row;
@@ -598,7 +599,7 @@ pub const Planner = struct {
         // `.option seed` is not the circuit's own state.
         _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, null);
         const base_slots = try p.scratch.alloc(f64, live.slots.len);
-        for (base_slots, live.slots) |*x, slot| x.* = slot.num;
+        for (base_slots, 0..) |*x, k| x.* = p.nl.slot(k).num;
         var base_arena = std.heap.ArenaAllocator.init(core.gpa);
         defer base_arena.deinit();
         var base_c = try circuitOf(p.lib, base_arena.allocator(), base_arena.allocator(), p.nl);
@@ -611,14 +612,14 @@ pub const Planner = struct {
             if ((try seen.getOrPut(p.scratch, key)).found_existing) continue;
             _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, OneSigma{ .site = key });
             const first = params.items.len;
-            const crossed = for (live.slots, base_slots) |slot, x| {
-                if (crossesZero(x, slot.num)) break true;
+            const crossed = for (base_slots, 0..) |x, k| {
+                if (crossesZero(x, p.nl.slot(k).num)) break true;
             } else false;
             // The probe's slot-to-parameter map gives the steps without a
             // rebuild, unless the draw takes a slot across zero (#130).
             if (p.fast == .identity and !crossed) {
                 for (p.fast_slots, p.fast_refs) |k, ord| {
-                    const step = live.slots[k].num - base_slots[k];
+                    const step = p.nl.slot(k).num - base_slots[k];
                     if (step == 0) continue;
                     try params.append(p.sim, ord);
                     try steps.append(p.sim, step);

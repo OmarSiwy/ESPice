@@ -894,6 +894,27 @@ test ".step reaches a .model value that reads the swept name" {
     }
 }
 
+test "setLive rewrites a live value in each table: positional, key=value and group argument (#176)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var nl = try parse(a, "s\n.param g=1\nr1 a 0 {g}\nd1 a 0 dm area={2*g}\nv1 a 0 pulse(0 {3*g} 0 1n 1n 1u 2u)\n.model dm d\n.step param g list 1 2\n.end\n");
+    const Table = netlist.Live.Slot.Table;
+    try std.testing.expectEqual(@as(usize, 3), nl.live.slots.len);
+    try std.testing.expectEqual(Table.values, nl.live.slots[0].table);
+    try std.testing.expectEqual(Table.groups, nl.live.slots[1].table);
+    try std.testing.expectEqual(@as(u32, 1), nl.live.slots[1].arg);
+    try std.testing.expectEqual(Table.kvs, nl.live.slots[2].table);
+    try std.testing.expectEqual(@as(usize, 1), nl.live.groups.len);
+    var stack: std.ArrayList(netlist.expr.Val) = .empty;
+    try std.testing.expect(try nl.setLive(a, &stack, &.{2}, null));
+    // Hand-evaluated at g = 2: r = 2, the pulse's V2 = 6, area = 4.
+    try std.testing.expectEqual(@as(f64, 2), try numeric((try device(nl, "r1")).positional[0]));
+    try std.testing.expectEqual(@as(f64, 6), try numeric((try device(nl, "v1")).positional[0].group.args()[1]));
+    try std.testing.expectEqual(@as(f64, 4), try parameter((try device(nl, "d1")).kv, "area"));
+    try std.testing.expect(!try nl.setLive(a, &stack, &.{2}, null));
+}
+
 test "a .param chain resolves at any depth" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
