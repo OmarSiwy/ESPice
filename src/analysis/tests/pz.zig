@@ -217,3 +217,9 @@ test "qz: finite roots of a dense pencil with an index-2 block at infinity" {
         try testing.expectEqual(@as(f64, 0), z.im);
     }
 }
+
+test {
+    // The in-file tests of the QZ and the pole-zero driver.
+    _ = qz;
+    _ = @import("../eigen/pz.zig");
+}

@@ -156,6 +156,7 @@ fn writeColumn(n: usize, ports: []const Port, x: []const f64, s_row: []f64, p: u
 /// One or two ports.
 fn netRow(n: usize, ports: []const Port, x: []const f64, s_row: []f64) void {
     const np = ports.len;
+    std.debug.assert(np <= 2);
     var vt: [4]Complex = undefined;
     var it: [4]Complex = undefined;
     for (0..np) |j| {
@@ -280,7 +281,9 @@ const Basis = struct {
     }
 };
 
-/// Modes (published ports) of `ports`: a balanced port counts twice.
+/// Modes (published ports) of `ports`: a balanced port counts twice. At
+/// least 1, because an empty list means `run`'s one port at the deck's drive
+/// source.
 pub fn modeCount(ports: []const Port) usize {
     var n: usize = @max(ports.len, 1);
     for (ports) |p| n += @intFromBool(p.balanced != null);
@@ -292,7 +295,8 @@ fn paramCount(n_ports: usize) usize {
     return 3 * n_ports * n_ports + @as(usize, if (n_ports >= 2) 4 else 0);
 }
 
-/// Columns `run` publishes for `n_ports` ports, the frequency included.
+/// Columns `run` publishes for `n_ports` modes (`modeCount`), the frequency
+/// included; `session.schemaOf` sizes the result with it before the run.
 pub fn columns(n_ports: usize, lin: ?Lin) usize {
     const l = lin orelse return 1 + n_ports * n_ports;
     const m = paramCount(n_ports);
@@ -637,4 +641,156 @@ fn noiseParams(s: [4]Complex, z0: [2]f64, cv: [2]f64, c12: Complex) [noise_names
         yopt,
         gamma,
     };
+}
+
+const testing = std.testing;
+
+fn expectNear(want: Complex, got: Complex, tol: f64) !void {
+    try testing.expectApproxEqAbs(want.re, got.re, tol);
+    try testing.expectApproxEqAbs(want.im, got.im, tol);
+}
+
+test solveDense {
+    // Certificate: A·X = B for a dense complex A that needs a row swap
+    // (zero leading pivot), X solved for B = I.
+    const n = 3;
+    const a0 = [n * n]Complex{
+        .zero,                  .{ .re = 2, .im = -1 },  .{ .re = 0.5, .im = 0 },
+        .{ .re = 1, .im = 1 },  .{ .re = -1, .im = 0 },  .{ .re = 0, .im = 3 },
+        .{ .re = 4, .im = -2 }, .{ .re = 0, .im = 0.5 }, .{ .re = 1, .im = 0 },
+    };
+    var a = a0;
+    var x: [n * n]Complex = @splat(.zero);
+    for (0..n) |i| x[i * n + i] = .{ .re = 1, .im = 0 };
+    solveDense(n, &a, &x);
+    for (0..n) |i| for (0..n) |j| {
+        var acc = Complex.zero;
+        for (0..n) |k| acc = acc.add(a0[i * n + k].mul(x[k * n + j]));
+        try expectNear(.{ .re = @floatFromInt(@intFromBool(i == j)), .im = 0 }, acc, 1e-14);
+    };
+}
+
+test params {
+    // Matched ports (S = 0): Y = diag(1/z0), Z = diag(z0), and the two-port
+    // H is z0₁ at h11 and 1/z0₂ at h22.
+    const z0 = [_]f64{ 50, 75, 25 };
+    const np = z0.len;
+    var p: [paramCount(np)]Complex = @splat(.zero);
+    var tmp: [np * np]Complex = undefined;
+    params(&z0, .{ 0, 1 }, &p, &tmp);
+    const y = p[np * np ..][0 .. np * np];
+    const zm = p[2 * np * np ..][0 .. np * np];
+    const h = p[3 * np * np ..][0..4];
+    for (0..np) |i| for (0..np) |j| {
+        const on: f64 = @floatFromInt(@intFromBool(i == j));
+        try expectNear(.{ .re = on / z0[i], .im = 0 }, y[i * np + j], 1e-15);
+        try expectNear(.{ .re = on * z0[i], .im = 0 }, zm[i * np + j], 1e-12);
+    };
+    try expectNear(.{ .re = 50, .im = 0 }, h[0], 1e-12);
+    try expectNear(.zero, h[1], 1e-15);
+    try expectNear(.zero, h[2], 1e-15);
+    try expectNear(.{ .re = 1.0 / 75.0, .im = 0 }, h[3], 1e-15);
+
+    // Y·Z = E for a general S (certificate of the two inversions).
+    const s = [_]Complex{
+        .{ .re = 0.2, .im = 0.1 },   .{ .re = -0.3, .im = 0.05 }, .{ .re = 0.1, .im = 0 },
+        .{ .re = 0.4, .im = -0.2 },  .{ .re = 0.1, .im = 0.3 },   .{ .re = 0, .im = -0.1 },
+        .{ .re = 0.05, .im = 0.05 }, .{ .re = -0.1, .im = 0 },    .{ .re = 0.3, .im = 0.2 },
+    };
+    @memcpy(p[0 .. np * np], &s);
+    params(&z0, .{ 0, 1 }, &p, &tmp);
+    for (0..np) |i| for (0..np) |j| {
+        var acc = Complex.zero;
+        for (0..np) |k| acc = acc.add(y[i * np + k].mul(zm[k * np + j]));
+        try expectNear(.{ .re = @floatFromInt(@intFromBool(i == j)), .im = 0 }, acc, 1e-12);
+    };
+}
+
+test stability {
+    // A matched amplifier (S11 = S22 = 0) has K = (1 + |p|²)/(2|p|) and
+    // μ = 1/|p|, p = S12·S21; a unilateral one has K = ∞.
+    const s = [4]Complex{ .zero, .{ .re = 0.1, .im = 0 }, .{ .re = 0, .im = 5 }, .zero };
+    const ks = stability(s);
+    try testing.expectApproxEqRel((1 + 0.25) / (2 * 0.5), ks[0], 1e-15);
+    try testing.expectApproxEqRel(1 / 0.5, ks[1], 1e-15);
+    const uni = stability(.{ .{ .re = 0.5, .im = 0 }, .zero, .{ .re = 3, .im = 0 }, .{ .re = 0.2, .im = 0 } });
+    try testing.expect(std.math.isPositiveInf(uni[0]));
+}
+
+test noiseParams {
+    // A noiseless two-port: no noise resistance and a 1.0 noise figure.
+    const s = [4]Complex{ .{ .re = 0.1, .im = 0.2 }, .{ .re = 0.05, .im = 0 }, .{ .re = 2, .im = -1 }, .{ .re = -0.2, .im = 0.1 } };
+    const out = noiseParams(s, .{ 50, 50 }, .{ 0, 0 }, .zero);
+    try testing.expectEqual(@as(f64, 1), out[1].re);
+    try testing.expectEqual(@as(f64, 0), out[2].re);
+}
+
+test netRow {
+    // One ideal V port reading 1 V and drawing 10 mA (i_br = −10 mA): Z =
+    // 100 Ω against z0 = 50 Ω, so S = (2 − 1)/(2 + 1).
+    const n = 3;
+    var x: [2 * n]f64 = @splat(0);
+    x[1] = 1;
+    x[2] = -0.01;
+    const ports = [_]Port{.{ .node = 1, .branch = 2, .z0 = 50 }};
+    var s_row: [2]f64 = undefined;
+    netRow(n, &ports, &x, &s_row);
+    try testing.expectApproxEqRel(1.0 / 3.0, s_row[0], 1e-14);
+    try testing.expectApproxEqAbs(0, s_row[1], 1e-16);
+}
+
+test writeColumn {
+    // A port terminated in its own z0 reads V = z0·I, so b = 0: S11 = 0.
+    // Driven with 1 V through series z0 into a matched load, V = 0.5 and
+    // I = 10 mA (i_br = −10 mA).
+    const n = 3;
+    var x: [2 * n]f64 = @splat(0);
+    x[1] = 0.5;
+    x[2] = -0.01;
+    const ports = [_]Port{.{ .node = 1, .branch = 2, .z0 = 50 }};
+    var s_row: [2]f64 = undefined;
+    writeColumn(n, &ports, &x, &s_row, 0);
+    try testing.expectApproxEqAbs(0, s_row[0], 1e-15);
+    try testing.expectApproxEqAbs(0, s_row[1], 1e-15);
+}
+
+test Basis {
+    // A balanced port and a single-ended one: legs (+, single, −), M
+    // orthogonal, so the identity S stays the identity over the modes.
+    const ports = [_]Port{
+        .{ .node = 1, .branch = 4, .balanced = .{ .node = 2, .branch = 5 } },
+        .{ .node = 3, .branch = 6 },
+    };
+    var b = try Basis.init(testing.allocator, &ports, .{ false, false });
+    defer b.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), b.legs.len);
+    try testing.expectEqual(@as(u32, 2), b.legs[2].node);
+    try testing.expectEqualSlices(f64, &.{ 100, 50, 25 }, b.z0);
+    var s: [2 * 9]f64 = @splat(0);
+    for (0..3) |i| s[(i * 3 + i) * 2] = 1;
+    try b.toModes(&s);
+    for (0..3) |i| for (0..3) |j| {
+        try testing.expectApproxEqAbs(@as(f64, @floatFromInt(@intFromBool(i == j))), s[(i * 3 + j) * 2], 1e-15);
+        try testing.expectApproxEqAbs(0, s[(i * 3 + j) * 2 + 1], 1e-15);
+    };
+    // The common mode of a balanced port can be the two-port's first port;
+    // asking it of a single-ended port is an error.
+    var c = try Basis.init(testing.allocator, &ports, .{ true, false });
+    defer c.deinit(testing.allocator);
+    try testing.expectEqual([2]usize{ 2, 1 }, c.pair);
+    try testing.expectError(error.InvalidQueryOptions, Basis.init(testing.allocator, &ports, .{ false, true }));
+}
+
+test linNames {
+    // Every slot `columns` sizes is written, for every port count and flag.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    for (1..5) |np| for ([_]bool{ false, true }) |gd| for ([_]bool{ false, true }) |nz| {
+        const lin: Lin = .{ .group_delay = gd, .noise = nz };
+        const names = try linNames(arena.allocator(), np, lin);
+        try testing.expectEqual(columns(np, lin), names.len);
+        const last = if (np >= 2 and nz) "GAMMA_OPT" else if (np >= 2) "MU_STABILITY_FACTOR" else if (gd) "TD(Z(1,1))" else "Z(1,1)";
+        try testing.expectEqualStrings(last, names[names.len - 1]);
+    };
+    try testing.expectEqual(@as(usize, 1), modeCount(&.{}));
 }

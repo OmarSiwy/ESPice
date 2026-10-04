@@ -66,11 +66,22 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         }
     }
 
+    const nnz: usize = ckt.nnz;
+    // λ(ω)[row]·x(ω)[col] per slot and point, once: every parameter then
+    // reads its dy/dp off four contiguous dot products per point instead of
+    // re-gathering λ and x per slot.
+    // ponytail: holds 16·points·nnz bytes; chunk the points when a long
+    // sweep meets a large pattern.
+    const prod = try scratch.alloc(f64, 2 * n_points * nnz);
+    defer scratch.free(prod);
+    const prod_re = prod[0 .. n_points * nnz];
+    const prod_im = prod[n_points * nnz ..];
+    for (0..n_points) |k| adjointProducts(ckt.col_ptr, ckt.row_idx, n, sol[k * nn ..][0..nn], sol[(n_points + k) * nn ..][0..nn], prod_re[k * nnz ..][0..nnz], prod_im[k * nnz ..][0..nnz]);
+
     // Nominal planes and the DC factor for the operating-point shifts.
     // ponytail: dG/dp and dC/dp come from the plain eval, so an `ac=` value
     // (Circuit.linearizeAc) and the frequency-dependent `acDyn` terms carry
     // no parameter derivative; add them when a varied device has either.
-    const nnz: usize = ckt.nnz;
     const planes = try scratch.alloc(f64, 3 * nnz + 3 * n);
     defer scratch.free(planes);
     const g0 = planes[0..nnz];
@@ -117,18 +128,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             diffQuot(dg, ckt.g_vals[0..nnz], g0, delta);
             diffQuot(dval, ckt.c_vals[0..nnz], c0, delta);
             for (0..n_points) |k| {
-                const x = sol[k * nn ..][0..nn];
-                const adj = sol[(n_points + k) * nn ..][0..nn];
-                var acc = Complex.zero;
-                for (0..n) |col| {
-                    const xc = Complex{ .re = x[col], .im = x[n + col] };
-                    for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |slot| {
-                        const row = ckt.row_idx[slot];
-                        const lam = Complex{ .re = adj[row], .im = -adj[n + row] };
-                        const da = Complex{ .re = dg[slot], .im = omegas[k] * dval[slot] };
-                        acc = acc.add(lam.mul(da).mul(xc));
-                    }
-                }
+                const acc = sensitivity(prod_re[k * nnz ..][0..nnz], prod_im[k * nnz ..][0..nnz], dg, dval, omegas[k]);
                 dy[g * n_points + k] = dy[g * n_points + k].sub(acc.scale(m.scale));
             }
         }
@@ -182,6 +182,28 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
+/// u[slot] = λ[row]·x[col] over a CSC pattern, with λ = conj(adj): `adj` and
+/// `x` are stacked-real 2n solutions, `re` and `im` hold the pattern's nnz.
+fn adjointProducts(col_ptr: []const u32, row_idx: []const u32, n: usize, x: []const f64, adj: []const f64, re: []f64, im: []f64) void {
+    for (0..n) |col| {
+        const xc = Complex{ .re = x[col], .im = x[n + col] };
+        for (col_ptr[col]..col_ptr[col + 1]) |slot| {
+            const row = row_idx[slot];
+            const u = (Complex{ .re = adj[row], .im = -adj[n + row] }).mul(xc);
+            re[slot] = u.re;
+            im[slot] = u.im;
+        }
+    }
+}
+
+/// Σ u[slot]·(dg[slot] + jω·dc[slot]), u = re + j·im: λᵀ dA(ω) x.
+fn sensitivity(re: []const f64, im: []const f64, dg: []const f64, dc: []const f64, omega: f64) Complex {
+    return .{
+        .re = num.dot(re, dg) - omega * num.dot(im, dc),
+        .im = num.dot(im, dg) + omega * num.dot(re, dc),
+    };
+}
+
 /// dst[i] = (v[i] − v0[i]) / delta over dst.len.
 fn diffQuot(dst: []f64, v: []const f64, v0: []const f64, delta: f64) void {
     var it = z.fromSlice(f64, v[0..dst.len]).zip(z.fromSlice(f64, v0[0..dst.len])).map(DiffQuot{ .delta = delta });
@@ -194,3 +216,78 @@ const DiffQuot = struct {
         return (p.left - p.right) / z.splat(@TypeOf(p.left), self.delta);
     }
 };
+
+test diffQuot {
+    // SIMD path engaged, and bit-exact against the `.byRef()` pull path:
+    // elementwise, so no reassociation. Lengths cross every lane boundary.
+    const builtin = @import("builtin");
+    var buf: [3 * 64 + 4]f64 = undefined;
+    for (&buf, 0..) |*v, i| v.* = @as(f64, @floatFromInt(i % 17)) - 8.5;
+    var out: [buf.len]f64 = undefined;
+    for (0..buf.len - 3) |len| for (0..3) |off| {
+        const v = buf[off..][0..len];
+        const v0 = buf[3 - off ..][0..len];
+        if (builtin.zig_backend == .stage2_llvm or builtin.zig_backend == .stage2_x86_64) {
+            const It = @TypeOf(z.fromSlice(f64, v).zip(z.fromSlice(f64, v0)).map(DiffQuot{ .delta = 1 }));
+            comptime std.debug.assert(It.lane_count != null);
+        }
+        diffQuot(out[0..len], v, v0, 1e-3);
+        var l = z.fromSlice(f64, v);
+        var r = z.fromSlice(f64, v0);
+        var slow = l.byRef().zip(r.byRef()).map(DiffQuot{ .delta = 1e-3 });
+        var want: [buf.len]f64 = undefined;
+        try std.testing.expectEqual(len, slow.writeInto(want[0..len]));
+        try std.testing.expectEqualSlices(f64, want[0..len], out[0..len]);
+    };
+}
+
+test sensitivity {
+    // Against the per-slot complex fold it replaces, λᵀ(dG + jω dC)x, on a
+    // two-column pattern whose nnz sweeps past stdpp's dot cutoff (64).
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rnd = prng.random();
+    const n = 96;
+    var x: [2 * n]f64 = undefined;
+    var adj: [2 * n]f64 = undefined;
+    var dg: [n]f64 = undefined;
+    var dc: [n]f64 = undefined;
+    for (&x, &adj) |*a, *b| {
+        a.* = rnd.float(f64) * 2 - 1;
+        b.* = rnd.float(f64) * 2 - 1;
+    }
+    for (&dg, &dc) |*a, *b| {
+        a.* = rnd.float(f64) * 2 - 1;
+        b.* = rnd.float(f64) * 1e-9;
+    }
+    var row_idx: [n]u32 = undefined;
+    for (&row_idx, 0..) |*r, i| r.* = @intCast((i * 37) % n);
+    var col_ptr: [n + 1]u32 = undefined;
+    var re: [n]f64 = undefined;
+    var im: [n]f64 = undefined;
+    const omega = 2 * std.math.pi * 1e6;
+    for (0..n + 1) |nnz| {
+        // Column 0 takes the first half of the slots, column 1 the rest.
+        @memset(&col_ptr, @intCast(nnz));
+        col_ptr[0] = 0;
+        col_ptr[1] = @intCast(nnz / 2);
+        adjointProducts(&col_ptr, &row_idx, n, &x, &adj, re[0..nnz], im[0..nnz]);
+        const got = sensitivity(re[0..nnz], im[0..nnz], dg[0..nnz], dc[0..nnz], omega);
+        var want = Complex.zero;
+        var mass: f64 = 0;
+        for (0..2) |col| {
+            const xc = Complex{ .re = x[col], .im = x[n + col] };
+            for (col_ptr[col]..col_ptr[col + 1]) |slot| {
+                const row = row_idx[slot];
+                const lam = Complex{ .re = adj[row], .im = -adj[n + row] };
+                const term = lam.mul(.{ .re = dg[slot], .im = omega * dc[slot] }).mul(xc);
+                want = want.add(term);
+                mass += @abs(term.re) + @abs(term.im);
+            }
+        }
+        // dot reassociates and the product is grouped differently: the
+        // forward bound of a length-nnz fold, a few eps per term of mass.
+        const tol = 8 * @as(f64, @floatFromInt(nnz + 2)) * std.math.floatEps(f64) * mass;
+        try std.testing.expectApproxEqAbs(want.re, got.re, tol);
+        try std.testing.expectApproxEqAbs(want.im, got.im, tol);
+    }
+}

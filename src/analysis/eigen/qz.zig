@@ -314,3 +314,95 @@ fn qzStep(m: usize, a: []f64, b: []f64, f: usize, l: usize, iter: u32, tr_in: f6
         colZero(m, b, a, k, k + 1, k + 1, f, k + 2, r1);
     }
 }
+
+/// (A, B) = P·(S, T)·Pᵀ for upper triangular S and T, P = I + Hilbert.
+fn congruent(comptime n: usize, s: [n * n]f64, t: [n * n]f64, a: *[n * n]f64, b: *[n * n]f64) void {
+    var p: [n * n]f64 = undefined;
+    for (0..n) |i| for (0..n) |j| {
+        p[i * n + j] = 1 / @as(f64, @floatFromInt(i + j + 1)) + @as(f64, if (i == j) 1 else 0);
+    };
+    for (0..n) |i| for (0..n) |j| {
+        var av: f64 = 0;
+        var bv: f64 = 0;
+        for (0..n) |k| for (0..n) |l| {
+            av += p[i * n + k] * s[k * n + l] * p[j * n + l];
+            bv += p[i * n + k] * t[k * n + l] * p[j * n + l];
+        };
+        a[i * n + j] = av;
+        b[i * n + j] = bv;
+    };
+}
+
+test roots {
+    // A dense pencil with a complex pair: (S, T) block upper triangular,
+    // its leading 2×2 block [[1, −2], [2, 1]] against T = I there gives
+    // 1 ± 2j; the trailing diagonal gives 3/1 and −4/2.
+    const s = [16]f64{ 1, -2, 0.5, 0.25, 2, 1, -0.5, 1, 0, 0, 3, 0.75, 0, 0, 0, -4 };
+    const t = [16]f64{ 1, 0, 0.5, -0.25, 0, 1, 0.25, 0.5, 0, 0, 1, 0.125, 0, 0, 0, 2 };
+    var a: [16]f64 = undefined;
+    var b: [16]f64 = undefined;
+    congruent(4, s, t, &a, &b);
+    var out: [4]Complex = undefined;
+    const r = roots(4, &a, &b, &out, 1e-12, 1000);
+    try std.testing.expect(r.converged);
+    try std.testing.expectEqual(@as(usize, 4), r.count);
+    std.mem.sort(Complex, &out, {}, struct {
+        fn lt(_: void, l: Complex, h: Complex) bool {
+            return if (l.re != h.re) l.re < h.re else l.im < h.im;
+        }
+    }.lt);
+    // The pair's two members share a real part only to roundoff, so the
+    // sort above can order them either way; compare by |im|.
+    try std.testing.expectApproxEqAbs(@as(f64, -2), out[0].re, 1e-11);
+    for (out[1..3]) |z| {
+        try std.testing.expectApproxEqAbs(@as(f64, 1), z.re, 1e-11);
+        try std.testing.expectApproxEqAbs(@as(f64, 2), @abs(z.im), 1e-11);
+    }
+    try std.testing.expectEqual(-out[1].im, out[2].im);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), out[3].re, 1e-11);
+
+    // The same pencil with no QZ steps allowed: its roots are missing.
+    congruent(4, s, t, &a, &b);
+    try std.testing.expect(!roots(4, &a, &b, &out, 1e-12, 0).converged);
+}
+
+test isolate {
+    // A diagonal pencil isolates completely: exact roots, the row with an
+    // empty B dropped as a root at infinity, no QZ at all.
+    var a = [9]f64{ 1, 0, 0, 0, 2, 0, 0, 0, 3 };
+    var b = [9]f64{ 1, 0, 0, 0, 0, 0, 0, 0, 4 };
+    var out: [3]Complex = undefined;
+    const r = roots(3, &a, &b, &out, 1e-12, 0);
+    try std.testing.expect(r.converged);
+    try std.testing.expectEqual(@as(usize, 2), r.count);
+    std.mem.sort(Complex, out[0..2], {}, struct {
+        fn lt(_: void, l: Complex, h: Complex) bool {
+            return l.re < h.re;
+        }
+    }.lt);
+    try std.testing.expectEqual(Complex{ .re = 0.75, .im = 0 }, out[0]);
+    try std.testing.expectEqual(Complex{ .re = 1, .im = 0 }, out[1]);
+
+    // The empty pencil has no roots and nothing to iterate.
+    var empty: [0]f64 = .{};
+    var no_out: [0]Complex = .{};
+    const none = roots(0, &empty, &empty, &no_out, 1e-12, 0);
+    try std.testing.expect(none.converged);
+    try std.testing.expectEqual(@as(usize, 0), none.count);
+}
+
+test quadraticRoots {
+    var out: [2]Complex = undefined;
+    // λ² − 3λ + 2: the larger root first, the smaller from det/q.
+    quadraticRoots(3, 2, &out);
+    try std.testing.expectEqual(Complex{ .re = 2, .im = 0 }, out[0]);
+    try std.testing.expectEqual(Complex{ .re = 1, .im = 0 }, out[1]);
+    // λ² + 1: ±j.
+    quadraticRoots(0, 1, &out);
+    try std.testing.expectEqual(Complex{ .re = 0, .im = 1 }, out[0]);
+    try std.testing.expectEqual(Complex{ .re = 0, .im = -1 }, out[1]);
+    // λ²: a double root at zero, no 0/0.
+    quadraticRoots(0, 0, &out);
+    try std.testing.expectEqual(Complex.zero, out[0]);
+    try std.testing.expectEqual(Complex.zero, out[1]);
+}

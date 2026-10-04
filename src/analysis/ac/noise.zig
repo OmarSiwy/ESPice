@@ -40,7 +40,8 @@ fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
     return a * (limexp(e1 * b.ln_freq) - limexp(e1 * b.ln_last_freq)) / e1;
 }
 
-/// The source's PSD at `f`: white plus flicker / f^ef, in A^2/Hz.
+/// The source's PSD at `f`: white plus flicker / f^ef, in A^2/Hz. At f <= 0
+/// the flicker half has no value and only the white half counts.
 pub inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
     if (src.flicker == 0 or f <= 0) return src.white;
     return src.white + src.flicker / std.math.pow(f64, f, src.ef);
@@ -58,7 +59,9 @@ pub const PerSource = struct { dens: []f64, out: []f64, in: []f64 };
 /// Fills `freqs`, `density` and `in_density` (V^2/Hz, all `sweep.count()`
 /// long) and returns the band integrals. `in_density` is all zeros unless
 /// `options.in_branch` or `options.in_nodes` names a source. `per_source`, when given, also
-/// receives every generator's density and integrals.
+/// receives every generator's density and integrals. Asserts that
+/// `density` matches `freqs` in length. Every work buffer comes from and
+/// returns to `allocator`; error.QueryCancelled unwinds at a checkpoint.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -187,14 +190,6 @@ pub fn sweep(
     return .{ .onoise = integrated, .inoise = integrated_in };
 }
 
-/// Contract entry: the device generators measured at opts.out_node, with no
-/// drive source. Real; either the spectrum (frequency, onoise_spectrum,
-/// inoise_spectrum) or, with `opts.integrated`, one row of rms totals. With
-/// `opts.contributions` each device instance adds its columns ahead of the
-/// totals, as ngspice's `.noise ... pts` does: per generator name and per
-/// instance, `onoise_<inst>_<gen>` and `onoise_<inst>` in the spectrum,
-/// `v(onoise_total_<inst>_<gen>)`, `v(inoise_total_<inst>_<gen>)` and the
-/// instance sums in the integrated plot.
 /// The output density at each of `freqs` as a sampler at `s.fs` sees it:
 /// the density at every |f + k fs| up to `s.max_fold * fs`, each weighted
 /// by the integrator's sinc^2(pi g beta / fs), summed. Caller frees with
@@ -245,6 +240,16 @@ fn orderF64(a: f64, b: f64) std.math.Order {
     return std.math.order(a, b);
 }
 
+/// Contract entry: the device generators measured at opts.out_node, with no
+/// drive source. Real; either the spectrum (frequency, onoise_spectrum,
+/// inoise_spectrum) or, with `opts.integrated`, one row of rms totals. With
+/// `opts.contributions` each device instance adds its columns ahead of the
+/// totals, as ngspice's `.noise ... pts` does: per generator name and per
+/// instance, `onoise_<inst>_<gen>` and `onoise_<inst>` in the spectrum,
+/// `v(onoise_total_<inst>_<gen>)`, `v(inoise_total_<inst>_<gen>)` and the
+/// instance sums in the integrated plot. `opts.phase` replaces all of it
+/// with the single-sideband phase noise in dBc/Hz, and `opts.sample` adds
+/// the folded `onoise_sampled` column to the spectrum.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;

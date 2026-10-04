@@ -65,6 +65,36 @@ const StreamTests = struct {
             try std.testing.expectEqual(@as(u16, quantum), probe.completed);
         }
     }
+
+    test "frequency stream: every chunk boundary, two right-hand sides" {
+        // Lengths 0..3W+1 put the last chunk at every fill; each point's
+        // slice is both of its rhs blocks, as one whole-grid batch lays out.
+        const a = std.testing.allocator;
+        const g = try a.dupe(f64, &.{ 2, 1, 0, 3 });
+        const c = try a.dupe(f64, &.{ 0.1, 0, 0.02, 0.3 });
+        var fs = try FreqSolver.initDense(a, 2, g, c);
+        defer fs.deinit(a);
+        const W = FreqSolver.W;
+        var omegas: [3 * W + 1]f64 = undefined;
+        for (&omegas, 0..) |*w, i| w.* = 1e3 * @as(f64, @floatFromInt(i + 1));
+        const rhs = [_]f64{ 1, 0, 0, 0, 0, 1, 0, 0.5 };
+        var whole: [omegas.len * rhs.len]f64 = undefined;
+        var ckt: root.Circuit = undefined;
+        ckt.progress = null;
+        ckt.ac_dyn_slots = &.{};
+        for (0..omegas.len + 1) |len| {
+            try fs.solveBatch(omegas[0..len], .{}, &rhs, whole[0 .. len * rhs.len], true);
+            var stream = try freq.Stream.init(a, &fs, &ckt, &.{}, omegas[0..len], &rhs, true);
+            defer stream.deinit(a);
+            var seen: usize = 0;
+            while (try stream.next(&ckt)) |pt| : (seen += 1) {
+                try std.testing.expectEqual(seen, pt.k);
+                try std.testing.expectEqualSlices(f64, whole[pt.k * rhs.len ..][0..rhs.len], pt.x);
+            }
+            try std.testing.expectEqual(len, seen);
+            try std.testing.expectEqual(null, try stream.next(&ckt));
+        }
+    }
 };
 
 const NoiseTests = struct {
@@ -175,4 +205,8 @@ test {
     _ = StreamTests;
     _ = NoiseTests;
     _ = LstbTests;
+    // The in-file tests of the frequency-domain drivers.
+    _ = @import("../ac/acmatch.zig");
+    _ = @import("../ac/lstb.zig");
+    _ = @import("../ac/sp.zig");
 }

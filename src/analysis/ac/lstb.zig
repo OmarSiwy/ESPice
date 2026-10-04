@@ -27,8 +27,10 @@ pub const Gains = struct {
     /// Total loop gain W = Wf + Wr, the return ratio: positive at DC for
     /// negative feedback, unstable at W = −1.
     w: Complex,
+    /// The forward and reverse parts of `w`.
     wf: Complex,
     wr: Complex,
+    /// The DUT y-parameters seen across the break.
     y11: Complex,
     y12: Complex,
     y21: Complex,
@@ -67,9 +69,11 @@ fn weights(mode: Options.Mode) [2]f64 {
 }
 
 /// The two stacked 2n right-hand sides: current injection from the local
-/// ground, then voltage injection. `rhs` must be zeroed.
+/// ground, then voltage injection. `rhs` must be zeroed. An unweighted probe
+/// (`single`'s second) is never read, as in `responses`.
 fn fill(opts: Options, n: usize, rhs: []f64) void {
     for (opts.probes, weights(opts.mode)) |p, e| {
+        if (e == 0) continue;
         if (p.p != root.GROUND) rhs[p.p] += e;
         if (opts.local_gnd != root.GROUND) rhs[opts.local_gnd] -= e;
         rhs[2 * n + p.branch] += e;
@@ -289,4 +293,68 @@ fn crossing(probe: *Probe, freqs: []const f64, loop: []const Complex, comptime g
         return best;
     }
     return null;
+}
+
+test fill {
+    const n = 6;
+    var rhs: [4 * n]f64 = @splat(0);
+    // `single` never touches the second probe, whatever it holds.
+    const far = std.math.maxInt(u32);
+    var opts: Options = .{ .sweep = .{ .f_start = 1, .f_stop = 1 }, .probes = .{ .{ .p = 1, .n = 2, .branch = 4 }, .{ .p = far, .n = far, .branch = far } }, .local_gnd = 3 };
+    fill(opts, n, &rhs);
+    var want: [4 * n]f64 = @splat(0);
+    want[1] = 1;
+    want[3] = -1;
+    want[2 * n + 4] = 1;
+    try std.testing.expectEqualSlices(f64, &want, &rhs);
+
+    // `diff`: ±1 on each probe; the local-ground returns cancel.
+    opts.mode = .diff;
+    opts.probes[1] = .{ .p = 2, .n = 1, .branch = 5 };
+    @memset(&rhs, 0);
+    fill(opts, n, &rhs);
+    want = @splat(0);
+    want[1] = 1;
+    want[2] = -1;
+    want[2 * n + 4] = 1;
+    want[2 * n + 5] = -1;
+    try std.testing.expectEqualSlices(f64, &want, &rhs);
+}
+
+test responses {
+    // An antisymmetric pair read in `diff` gives its half circuit: each
+    // probe's reading times its weight, averaged.
+    const n = 6;
+    var x: [4 * n]f64 = @splat(0);
+    const opts: Options = .{ .sweep = .{ .f_start = 1, .f_stop = 1 }, .mode = .diff, .probes = .{ .{ .p = 1, .n = 0, .branch = 4 }, .{ .p = 2, .n = 0, .branch = 5 } } };
+    // Current injection: branch currents ±0.5+0.25j, node voltages ±2.
+    x[4] = 0.5;
+    x[n + 4] = 0.25;
+    x[5] = -0.5;
+    x[n + 5] = -0.25;
+    x[1] = 2;
+    x[2] = -2;
+    // Voltage injection: node voltages ±0.125j.
+    x[2 * n + n + 1] = 0.125;
+    x[2 * n + n + 2] = -0.125;
+    const r = responses(opts, n, &x);
+    try std.testing.expectEqual(Complex{ .re = 0.5, .im = 0.25 }, r.a);
+    try std.testing.expectEqual(Complex{ .re = 2, .im = 0 }, r.c);
+    try std.testing.expectEqual(Complex.zero, r.b);
+    try std.testing.expectEqual(Complex{ .re = 0, .im = 0.125 }, r.d);
+}
+
+test crossing {
+    // A sign change exactly on a grid point returns that point without a
+    // solve; no bracket returns null. Neither path touches `probe`.
+    const freqs = [_]f64{ 1, 10, 100 };
+    const above = [_]Complex{ .{ .re = 4, .im = 0 }, .{ .re = 2, .im = 0 }, .{ .re = 1.5, .im = 0 } };
+    var probe: Probe = undefined;
+    try std.testing.expectEqual(null, try crossing(&probe, &freqs, &above, logMag));
+    const on_grid = [_]Complex{ .{ .re = 4, .im = 0 }, .{ .re = 1, .im = 0 }, .{ .re = 0.5, .im = 0 } };
+    const c = (try crossing(&probe, &freqs, &on_grid, logMag)).?;
+    try std.testing.expectEqual(@as(f64, 10), c.f);
+    // reversedPhase is undefined off the negative real axis, so a loop that
+    // stays in the right half plane never brackets a phase crossover.
+    try std.testing.expectEqual(null, try crossing(&probe, &freqs, &above, reversedPhase));
 }
