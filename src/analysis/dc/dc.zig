@@ -232,3 +232,19 @@ fn sweepCount(start: f64, stop: f64, step: f64) usize {
     // a deck means.
     return @as(usize, @intFromFloat(@floor((stop - start) / step + 1e-6))) + 1;
 }
+
+test sweepCount {
+    const t = std.testing;
+    // (0.95 - 0.3) / 0.005 lands just under 130 in f64; the endpoint stays.
+    try t.expectEqual(@as(usize, 131), sweepCount(0.3, 0.95, 0.005));
+    try t.expectEqual(@as(usize, 11), sweepCount(0, 1, 0.1));
+    // A step that does not divide the span stops short of `stop`.
+    try t.expectEqual(@as(usize, 4), sweepCount(0, 1, 0.3));
+    try t.expectEqual(@as(usize, 1), sweepCount(2, 2, 1));
+    // Descending with a negative step counts like ascending.
+    try t.expectEqual(@as(usize, 6), sweepCount(5, 0, -1));
+    // A zero step, or one pointing away from `stop`, is one point.
+    try t.expectEqual(@as(usize, 1), sweepCount(0, 1, 0));
+    try t.expectEqual(@as(usize, 1), sweepCount(0, 1, -0.1));
+    try t.expectEqual(@as(usize, 1), sweepCount(1, 0, 0.1));
+}

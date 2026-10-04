@@ -18,11 +18,15 @@ pub const infinite: f64 = 1e20;
 
 /// Where an all-source transfer reads its output: a node pair or a branch.
 pub const Output = struct {
+    /// Output row; unused when `branch` is set.
     node: u32,
+    /// `v(a,b)` reference row; GROUND is single-ended.
     neg: u32,
+    /// `i(Vmeasure)`: that source's branch row.
     branch: ?u32,
 
-    /// The adjoint seed e_out, written into the first `n` rows of `rhs`.
+    /// Writes the adjoint seed e_out into `rhs`, which must be zeroed: only
+    /// the output's own rows are stored.
     pub fn seed(self: Output, rhs: []f64) void {
         if (self.branch) |br| {
             rhs[br] = 1;
@@ -80,20 +84,20 @@ pub fn immittance(src: XfSource, x: []const f64, n: usize) [2]Complex {
 }
 
 /// Column labels: `tf(name)`, then `zin(name)` and `yin(name)` unless
-/// `tf_only`, per source; after `first` when given.
+/// `tf_only`, per source; after `first` when given. Caller owns the slice and
+/// every label but `first` (borrowed), all allocated with `a`.
 pub fn names(a: std.mem.Allocator, first: ?[]const u8, sources: []const XfSource, tf_only: bool) ![]const []const u8 {
-    const per: usize = if (tf_only) 1 else 3;
+    const kinds: []const []const u8 = if (tf_only) &.{"tf"} else &.{ "tf", "zin", "yin" };
     const extra: usize = @intFromBool(first != null);
-    const out = try a.alloc([]const u8, extra + per * sources.len);
+    const out = try a.alloc([]const u8, extra + kinds.len * sources.len);
+    errdefer a.free(out);
     if (first) |f| out[0] = f;
-    for (sources, 0..) |s, i| {
-        const row = out[extra + per * i ..][0..per];
-        row[0] = try label(a, "tf", s.name);
-        if (!tf_only) {
-            row[1] = try label(a, "zin", s.name);
-            row[2] = try label(a, "yin", s.name);
-        }
-    }
+    var done: usize = 0;
+    errdefer for (out[extra..][0..done]) |l| a.free(l);
+    for (sources) |s| for (kinds) |k| {
+        out[extra + done] = try label(a, k, s.name);
+        done += 1;
+    };
     return out;
 }
 

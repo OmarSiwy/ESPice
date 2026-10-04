@@ -19,25 +19,27 @@ pub fn numPoints(options: Options) u32 {
     return @as(u32, @intFromFloat(@floor(span / options.t_step + 1e-6))) + 1;
 }
 
-/// Lane k runs at t_start + k*t_step; restore returns the circuit to t_nom.
+/// Lane k runs at t_start + k*t_step; restore reinstalls the temperature the
+/// circuit had before the sweep (`Circuit.temp_c`).
 const LaneCtx = struct {
     ckt: *root.Circuit,
     t_start: f64,
     t_step: f64,
-    t_nom: f64,
+    temp_c: f32,
 
     pub fn apply(self: *LaneCtx, k: usize) void {
         self.ckt.setCircuitTemp(@floatCast(self.t_start + @as(f64, @floatFromInt(k)) * self.t_step));
     }
 
     pub fn restore(self: *LaneCtx) void {
-        self.ckt.setCircuitTemp(@floatCast(self.t_nom));
+        self.ckt.setCircuitTemp(self.temp_c);
     }
 };
 
 /// Contract entry: real, point-major (temp, probes...), one row per converged
-/// temperature. The circuit is back at t_nom afterwards so later jobs see the
-/// netlist's temperature.
+/// temperature. The circuit is back at the temperature it ran at before the
+/// sweep, so later jobs see the netlist's (or their query's) temperature;
+/// `opts.t_nom` is not consulted.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
     const a = ctx.allocator;
@@ -51,7 +53,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const results = try scratch.alloc(converger.Result, max_points);
     defer scratch.free(results);
 
-    var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .t_nom = opts.t_nom };
+    var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .temp_c = ckt.temp_c };
     const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts, false);
 

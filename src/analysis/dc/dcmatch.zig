@@ -8,8 +8,7 @@
 //! offset is sigma^2(y) = sum over groups of (dy/dsigma_g)^2.
 const std = @import("std");
 const root = @import("../types.zig");
-
-const W = std.simd.suggestVectorLength(f64) orelse 8;
+const adjointFd = @import("../sweep/sens.zig").adjointFd;
 
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Dcmatch;
@@ -30,6 +29,8 @@ pub const Contribution = struct {
 pub const MismatchResult = struct {
     /// In group order; owned by the `solve` allocator.
     contributions: []Contribution,
+    /// The one-sigma output spread: the square root of the summed
+    /// `variance_contrib`.
     total_sigma: f64,
 };
 
@@ -38,17 +39,24 @@ pub const MismatchResult = struct {
 /// parameter of `Circuit.collectParams` alone, its column dy/dp and its
 /// sigma the Pelgrom one.
 pub const Groups = struct {
+    /// `count() + 1` offsets into `list`: group g is `list[starts[g]..starts[g + 1]]`.
     starts: []const u32,
     list: []Member,
+    /// Per group; see `sigma`.
     sigmas: []f64,
+    /// Per group, borrowed from `Variations`; empty without a variation block.
     labels: []const []const u8,
 
     /// A parameter ordinal and the factor its dy/dp enters its group with:
     /// its one-sigma step, or 1 without a variation block.
     pub const Member = struct { param: u32, scale: f64 };
 
-    /// Builds the groups over `refs`; free them with `deinit`.
-    /// `error.InvalidVariation` when a group names a parameter past `refs`.
+    /// Builds the groups over `refs`; free them with `deinit` and the same
+    /// allocator. `labels` stays borrowed from `vars`.
+    /// `error.InvalidVariation` when a group names a parameter past `refs`,
+    /// or when `vars` is not a well-formed group table (offsets that start at
+    /// 0, never decrease and end at `params.len`, one sigma per parameter,
+    /// one label per group when labelled).
     pub fn init(a: std.mem.Allocator, refs: []const root.ParamRef, vars: Variations) !Groups {
         if (vars.starts.len == 0) {
             const starts = try a.alloc(u32, refs.len + 1);
@@ -64,23 +72,35 @@ pub const Groups = struct {
             starts[refs.len] = @intCast(refs.len);
             return .{ .starts = starts, .list = list, .sigmas = sigmas, .labels = &.{} };
         }
+        // The table arrives from the query, so a bad shape is an error here
+        // rather than an out-of-bounds slice in `members`.
+        const n_groups = vars.starts.len - 1;
+        if (vars.starts[0] != 0 or vars.starts[n_groups] != vars.params.len or
+            vars.sigmas.len != vars.params.len or
+            (vars.labels.len != 0 and vars.labels.len != n_groups))
+            return error.InvalidVariation;
+        for (vars.starts[0..n_groups], vars.starts[1..]) |lo, hi| if (lo > hi) return error.InvalidVariation;
         const list = try a.alloc(Member, vars.params.len);
         errdefer a.free(list);
         for (list, vars.params, vars.sigmas) |*m, p, sg| {
             if (p >= refs.len) return error.InvalidVariation;
             m.* = .{ .param = p, .scale = sg };
         }
-        const sigmas = try a.alloc(f64, vars.starts.len - 1);
+        const starts = try a.dupe(u32, vars.starts);
+        errdefer a.free(starts);
+        const sigmas = try a.alloc(f64, n_groups);
         @memset(sigmas, 1);
-        return .{ .starts = try a.dupe(u32, vars.starts), .list = list, .sigmas = sigmas, .labels = vars.labels };
+        return .{ .starts = starts, .list = list, .sigmas = sigmas, .labels = vars.labels };
     }
 
+    /// Frees what `init` allocated; `a` must be the allocator `init` took.
     pub fn deinit(self: Groups, a: std.mem.Allocator) void {
         a.free(self.starts);
         a.free(self.list);
         a.free(self.sigmas);
     }
 
+    /// The number of groups, 0 for an empty variation block or no parameters.
     pub fn count(self: Groups) usize {
         return self.starts.len - 1;
     }
@@ -96,11 +116,12 @@ pub const Groups = struct {
         return self.sigmas[g];
     }
 
-    /// Group `g`'s column label, allocated in `a`: the variation label, or
-    /// `<type>#<index>.<param>`.
+    /// Group `g`'s column label: the variation label, or, unlabelled,
+    /// `<type>#<index>.<param>` of its first member. Caller owns the string
+    /// and frees it with `a`.
     pub fn label(self: Groups, a: std.mem.Allocator, ckt: *const root.Circuit, refs: []const root.ParamRef, g: usize) ![]const u8 {
         if (self.labels.len != 0) return a.dupe(u8, self.labels[g]);
-        const r = refs[self.list[g].param];
+        const r = refs[self.members(g)[0].param];
         return std.fmt.allocPrint(a, "{s}#{d}.{s}", .{ ckt.typeName(r.type), r.index, r.param_name });
     }
 };
@@ -143,27 +164,9 @@ fn fdSensitivity(
         error.TopologyChanged => return 0,
     };
 
-    ckt.eval(x_op, 0);
     if (delta == 0) return 0;
-
-    const inv_delta = 1.0 / delta;
-    const V = @Vector(W, f64);
-    const inv_v: V = @splat(inv_delta);
-    var dot: f64 = 0;
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const rp: V = ckt.rhs[i..][0..W].*;
-        const rn: V = rhs_nom[i..][0..W].*;
-        const lv: V = lambda[i..][0..W].*;
-        const df: V = (rp - rn) * inv_v;
-        dot += @reduce(.Add, lv * df);
-    }
-    while (i < n) : (i += 1) {
-        const df = (ckt.rhs[i] - rhs_nom[i]) * inv_delta;
-        dot += lambda[i] * df;
-    }
-
-    return -dot;
+    ckt.eval(x_op, 0);
+    return -adjointFd(lambda, ckt.rhs[0..n], rhs_nom, 1.0 / delta);
 }
 
 /// Each group's contribution to the mismatch of v(output_node) -
@@ -184,11 +187,11 @@ pub fn solve(
         .total_sigma = 0,
     };
 
-    const arena = try allocator.alloc(f64, 3 * n);
-    defer allocator.free(arena);
-    const lambda = arena[0..n];
-    const e_out = arena[n .. 2 * n];
-    const rhs_nom = arena[2 * n .. 3 * n];
+    const buf = try allocator.alloc(f64, 3 * n);
+    defer allocator.free(buf);
+    const lambda = buf[0..n];
+    const e_out = buf[n .. 2 * n];
+    const rhs_nom = buf[2 * n .. 3 * n];
 
     const ws = try ckt.workspace();
     ckt.eval(x_op, 0);
@@ -242,6 +245,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 /// `.dcsens`: DC sensitivity to the variation block's parameters.
 pub const Sens = struct {
+    /// Query options, defined in core/query.zig.
     pub const Options = @import("core").query.Dcsens;
 
     /// Contract entry: one real point, each group's dy/dsigma (dy/dp per

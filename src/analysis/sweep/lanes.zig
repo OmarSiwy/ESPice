@@ -11,7 +11,10 @@ const converger = @import("solver").converger;
 /// params and is called in lane order, `restore()` puts the nominals back.
 /// The driver recomputes after each, and restores on success and on error.
 /// With `warm`, a lane starts from the previous lane's solution when that
-/// one converged (neighbouring sweep points), else cold.
+/// one converged (neighbouring sweep points), else cold. A lane's solver
+/// error is a non-converged result; what escapes is cancellation, a
+/// recompute's error.TopologyChanged and the workspace's allocation failure.
+/// Asserts that `x_lanes.len == results.len * ckt.n`.
 pub fn solveLanes(
     ckt: *root.Circuit,
     setup: anytype,
@@ -24,6 +27,10 @@ pub fn solveLanes(
         setup.restore();
         ckt.recompute() catch {}; // keep the original error; no solve follows
     }
+    std.debug.assert(x_lanes.len == results.len * ckt.n);
+    // ponytail: every lane keeps its whole solution, O(lanes * n) floats,
+    // though callers read only the probes and the warm start only the
+    // previous lane. Record probes per lane when a big .mc runs out of memory.
     const n: usize = ckt.n;
     const n_lanes = results.len;
     const ws = try ckt.workspace();

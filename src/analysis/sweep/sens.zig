@@ -12,13 +12,17 @@ pub const Options = @import("core").query.Sens;
 
 const copySimd = root.copySimd;
 
-/// λ^T · (pert - nom) · inv_delta with the difference fused into the dot, so
-/// no n-element scratch is written or reloaded. The lane width, the
-/// left-to-right fold of the accumulator and the scalar tail fix the
-/// summation order; dcmatch's per-block `@reduce` order differs and must not
-/// be substituted here.
-inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
+/// Returns λ^T · (pert - nom) · inv_delta, the adjoint dot of a forward
+/// difference, over `lambda.len` rows. Deterministic for a given target: the
+/// summation order is fixed by the lane width, so `.sens` and `.dcmatch`
+/// (which shares it) reproduce run to run.
+/// Asserts that `pert` and `nom` are at least as long as `lambda`.
+pub inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
     const n = lambda.len;
+    std.debug.assert(pert.len >= n and nom.len >= n);
+    // The difference is fused into the dot, so no n-element scratch is
+    // written or reloaded. The W-lane accumulator, its left-to-right fold
+    // and the scalar tail fix the order; the oracle test pins it bit for bit.
     const V = @Vector(W, f64);
     const id: V = @splat(inv_delta);
     var acc: V = @splat(0.0);
@@ -158,6 +162,5 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 /// Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .W = W,
-    .adjointFd = adjointFd,
     .copySimd = copySimd,
 } else {};
