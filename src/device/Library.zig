@@ -117,6 +117,7 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
         .gompute = try std.fs.path.join(a, &.{ share, "gompute", "root.zig" }),
         .device_abi = try std.fs.path.join(a, &.{ share, "device", "abi.zig" }),
         .core = try std.fs.path.join(a, &.{ share, "core", "root.zig" }),
+        .stdpp = try std.fs.path.join(a, &.{ share, "stdpp", "root.zig" }),
         .zig = zig,
     } else .{
         .work_dir = work_dir,
@@ -125,6 +126,7 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) !void {
         .gompute = build_options.gompute_path,
         .device_abi = build_options.device_abi_path,
         .core = build_options.core_path,
+        .stdpp = build_options.stdpp_path,
         .zig = zig,
     });
 }

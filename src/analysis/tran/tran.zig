@@ -2,6 +2,7 @@
 //! LTE step control, order promotion and breakpoint landing. The companion
 //! residual uses the exact q(x) plane and the Jacobian the analytic C plane.
 const std = @import("std");
+const z = @import("stdpp");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
@@ -20,6 +21,15 @@ pub const initialCapacity = tran_types.initialCapacity;
 
 /// ZP_TRAN_STATS step-economics counters: wall time in a slow transient is
 /// attempts x Newton iterations x eval cost, and these say which factor.
+/// trial = cur + xfact·(cur - prev), the MODEINITPRED extrapolation.
+const Predict = struct {
+    pub const lanewise = true;
+    xfact: f64,
+    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
+        return p.left + z.splat(@TypeOf(p.left), self.xfact) * (p.left - p.right);
+    }
+};
+
 const Stats = struct {
     attempts: u64 = 0,
     nr_iters: u64 = 0,
@@ -332,7 +342,8 @@ pub fn simulate(
         // dt/dt_prev and is limited against the last accepted one. HFET and
         // MESA divide by the step two back instead (CKTdeltaOld[2]).
         const xfact = dt / dt_prev;
-        for (trial[0..cur.len], cur, prev[0..cur.len]) |*tr, c, p| tr.* = c + xfact * (c - p);
+        var pred = z.fromSlice(f64, cur).zip(z.fromSlice(f64, prev[0..cur.len])).map(Predict{ .xfact = xfact });
+        _ = pred.writeInto(trial[0..cur.len]);
         ckt.predictFirstIterate(trial, cur, prev, dt / dt_prev2);
         ckt.evalFollows(trial, t + dt, false);
         _ = ckt.applyLimits(trial, cur);

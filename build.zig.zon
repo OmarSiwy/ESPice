@@ -4,9 +4,14 @@
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        // Frozen `git archive` of VerA's local zig-0.17 branch at 039717bc
-        // (2026-10-03), not pushed yet. Re-pin by URL once it is (AGENTS.md).
-        .vera = .{ .path = "../vera-pin1" },
+        .vera = .{
+            .url = "git+https://github.com/OmarSiwy/VerA#ae9633f12542b89ed9b2fad0c134be1b9130aca9",
+            .hash = "vera-0.9.0-fzAu7JNymAGuSm83sD7qVpaX2H2ynE3jaZYPMSj7VN6D",
+        },
+        .stdpp = .{
+            .url = "git+https://github.com/OmarSiwy/stdpp#0b28ace3209b709ffe6dbc898ba2117b035b77e1",
+            .hash = "stdpp-0.1.0-feSLszWHCgBFofBxuzGduFgLOXmIz_cjyGj4WSgsAZUU",
+        },
         .gompute = .{
             .url = "git+https://github.com/OmarSiwy/Gompute#4c158ef351af529c3fb71a6d9544948111afffe1",
             .hash = "gompute-1.0.0-YJVc1q7-BwCB519sKbZmapwJN82ncs_tjYv1C-HRKWw1",

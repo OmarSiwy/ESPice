@@ -29,6 +29,8 @@ pub const BuildPaths = struct {
     device_abi: []const u8,
     /// The core module, for the ids the ABI names.
     core: []const u8,
+    /// stdpp's module root; core imports it.
+    stdpp: []const u8,
     /// The Zig compiler that builds the device. It must be the version this
     /// espice was built with.
     zig: []const u8 = "zig",
@@ -113,7 +115,8 @@ fn prepareOne(lib: *const Library, gpa: std.mem.Allocator, io: std.Io, path: []c
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
-        .{ .name = "core", .root = paths.core },
+        .{ .name = "stdpp", .root = paths.stdpp },
+        .{ .name = "core", .root = paths.core, .deps = &.{"stdpp"} },
         .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
         .{ .name = "sim", .root = try std.fs.path.join(arena, &.{ vera_root, "src/sim/root.zig" }), .deps = &.{ "contract", "diag", "frontend", "kernels" } },
@@ -212,7 +215,7 @@ fn inputKey(io: std.Io, gpa: std.mem.Allocator, hdl: Hdl, path: []const u8, sour
     h.update(@tagName(hdl));
     const dir = std.fs.path.dirname(path) orelse ".";
     if (!try hashCode(io, gpa, &h, hdl, dir, source, 0)) return null;
-    inline for (.{ "contract", "dyn", "gompute", "device_abi", "core", "zig" }) |f| {
+    inline for (.{ "contract", "dyn", "gompute", "device_abi", "core", "stdpp", "zig" }) |f| {
         h.update(&.{0});
         h.update(@field(paths, f));
     }

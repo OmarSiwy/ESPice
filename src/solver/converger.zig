@@ -15,6 +15,20 @@ const direct = @import("direct.zig");
 const BbdInfo = @import("core").numerics.BbdInfo;
 const Execution = @import("core").numerics.Execution;
 const num = @import("core").numerics;
+const z = @import("stdpp");
+
+const mul = z.lanewise(mulFn);
+fn mulFn(p: anytype) @TypeOf(p.left) {
+    return p.left * p.right;
+}
+/// (left - right) * inv: the finite-difference Jacobian product.
+const FdQuot = struct {
+    pub const lanewise = true;
+    inv: f64,
+    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
+        return (p.left - p.right) * z.splat(@TypeOf(p.left), self.inv);
+    }
+};
 
 /// `ESPICE_SOLVER` overrides `run`'s choice: direct, jfnk (LU-preconditioned
 /// GMRES) or jfnk-nolu (Jacobi-preconditioned, no factorization at all).
@@ -414,7 +428,8 @@ pub fn jfnk(
             num.axpy(x_pert, eps, vj);
             assembleShifted(sys, x_pert, t, opts, hook);
             const inv_eps = 1.0 / eps;
-            for (w, sys.rhs[0..n], f0) |*wi, rh, f| wi.* = (rh - f) * inv_eps;
+            var fd = z.fromSlice(f64, sys.rhs[0..n]).zip(z.fromSlice(f64, f0)).map(FdQuot{ .inv = inv_eps });
+            _ = fd.writeInto(w);
             applyPreconditioner(w, diag, slv);
 
             // Modified Gram-Schmidt, sequential dot products.
@@ -564,7 +579,8 @@ fn applyPreconditioner(r: []f64, diag: []const f64, slv: ?*direct.Solver) void {
             return;
         }
     }
-    for (r, diag[0..r.len]) |*ri, d| ri.* *= d;
+    var it = z.fromSlice(f64, r).zip(z.fromSlice(f64, diag[0..r.len])).map(mul);
+    _ = it.writeInto(r);
 }
 
 fn applyLimits(sys: anytype, x: []f64, x_old: []f64) bool {
