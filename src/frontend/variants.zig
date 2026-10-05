@@ -832,6 +832,15 @@ pub const Sampler = struct {
     }
 };
 
+/// Draws every distribution site of `nl` once, as trial 1 of the deck's
+/// `.option seed`, into its live values (`Deck.draw_seed`). `scratch` holds
+/// the sampler and the evaluation stack.
+pub fn drawOnce(scratch: std.mem.Allocator, nl: *const Netlist) !void {
+    var sampler = try Sampler.init(scratch, nl.deck.config, 1);
+    var stack: std.ArrayList(expr.Val) = .empty;
+    _ = try nl.setLive(scratch, &stack, nl.live.nominal, TrialDraw{ .trial = .{ .sampler = &sampler, .trial = 1, .index = 0 } });
+}
+
 /// One Monte Carlo trial of a sweep.
 pub const Trial = struct {
     sampler: *Sampler,

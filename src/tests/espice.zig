@@ -598,3 +598,36 @@ test "Problem: a final plan streams a lone transient but keeps one that .stim re
     defer t.allocator.free(pwl);
     try t.expectEqualStrings("* stim\n* written by .stim\nv0 b 0 pwl(\n+ 0e0 0e0\n+ 5e-10 5e-1\n+ 1e-9 1e0\n+ 1.5000000000000002e-9 1e0\n+ 2e-9 1e0)\n", pwl);
 }
+
+/// The operating-point value of column `name` in `source`'s only query.
+fn opValue(source: []const u8, name: []const u8) !f64 {
+    const p = try create(source);
+    defer p.deinit();
+    try p.run_all();
+    const r = try p.result(@fromBackingInt(@intCast(0)));
+    for (r.varnames, 0..) |v, i| if (std.mem.eql(u8, v, name)) return r.data[i];
+    return error.MissingColumn;
+}
+
+test "ngspice .option seed draws the distributions once, reproducibly per seed" {
+    const body = "seed\ni1 0 a 1m\nr1 a 0 {{agauss(1k,100,1)}}\n{s}.op\n.end\n";
+    var buf: [128]u8 = undefined;
+    const nominal = try opValue(try std.fmt.bufPrint(&buf, body, .{""}), "v(a)");
+    try t.expectEqual(@as(f64, 1), nominal);
+    var drawn: [3]f64 = undefined;
+    for (&drawn, [_][]const u8{ ".options seed=1\n", ".options seed=2\n", ".options seed=1\n" }) |*v, s|
+        v.* = try opValue(try std.fmt.bufPrint(&buf, body, .{s}), "v(a)");
+    try t.expect(drawn[0] != nominal and drawn[1] != drawn[0]);
+    try t.expectEqual(drawn[0], drawn[2]);
+    // A 1-sigma draw of 100 ohm: within 6 sigma of 1 V.
+    try t.expect(@abs(drawn[0] - 1) < 0.6 and @abs(drawn[1] - 1) < 0.6);
+}
+
+test "an R reading v() is ngspice's B source: pow() takes |x|, tc divides, m multiplies" {
+    // v(a,b) = 0.5: pow(0.5-1.7, 3) is |-1.2|^3 = 1.728 in ngspice's B
+    // parser, so R = 1k*(1+0.01*1.728) = 1017.28; tc at 60 C: 1+33e-3+33^2*2e-6
+    // = 1.035178; m=2 halves it.
+    const deck_text = "rv\nv1 a 0 0.5\nr1 a 0 r={1k*(1+0.01*pow(abs(v(a,0))-1.7,3))} tc1=1e-3 tc2=2e-6 m=2\n.temp 60\n.op\n.end\n";
+    const i = try opValue(deck_text, "i(v1)");
+    try t.expectApproxEqRel(@as(f64, -0.5 * 2 / (1017.28 * 1.035178)), i, 1e-12);
+}

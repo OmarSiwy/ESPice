@@ -186,6 +186,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
     b.gmin = deck_opts.tol.gmin;
     try b.reserveNodes(nl.graph.vertexCount());
 
+    if (nl.deck.draw_seed and run.point == null and !variants.any(nl.deck)) try variants.drawOnce(parse_arena, nl);
     var nb = try builder.NetBuilder.init(parse_arena, &b, nl.*);
     try nb.build();
     try nb.tagSubcircuitNodes();
