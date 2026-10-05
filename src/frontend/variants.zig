@@ -550,6 +550,7 @@ pub const Planner = struct {
     /// and the half range itself for `limit`.
     pub fn variations(p: *Planner) !core.query.Variations {
         const targets = try p.variationTargets();
+        const names = try core.query.CardNames.init(p.scratch, p.cards);
         var labels: std.ArrayList([]const u8) = .empty;
         var starts: std.ArrayList(u32) = .empty;
         var params: std.ArrayList(u32) = .empty;
@@ -564,7 +565,7 @@ pub const Planner = struct {
                 try params.append(p.sim, ord);
                 try sigmas.append(p.sim, if (v.dist == .unif) spread / @sqrt(3.0) else spread);
                 if (!v.per_device) continue;
-                const card = core.query.CardRef.lookup(p.cards, r.type, r.index) orelse "?";
+                const card = names.get(r.type, r.index) orelse "?";
                 try labels.append(p.sim, try std.fmt.allocPrint(p.sim, "{s}@{s}", .{ card, v.param }));
                 try starts.append(p.sim, @intCast(params.items.len));
             }
@@ -588,6 +589,7 @@ pub const Planner = struct {
         const live = p.nl.live;
         std.debug.assert(live.site_keys.len == live.site_ops.len);
         var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        const names = try core.query.CardNames.init(p.scratch, p.cards);
         var labels: std.ArrayList([]const u8) = .empty;
         var starts: std.ArrayList(u32) = .empty;
         var params: std.ArrayList(u32) = .empty;
@@ -638,7 +640,7 @@ pub const Planner = struct {
             }
             if (params.items.len == first) continue;
             const r = p.refs[params.items[first]];
-            const card = core.query.CardRef.lookup(p.cards, r.type, r.index) orelse "?";
+            const card = names.get(r.type, r.index) orelse "?";
             try labels.append(p.sim, try std.fmt.allocPrint(p.sim, "{s}@{s}", .{ card, r.param_name }));
             try starts.append(p.sim, @intCast(params.items.len));
         };

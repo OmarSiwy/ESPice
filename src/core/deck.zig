@@ -235,6 +235,8 @@ pub const Deck = struct {
     bindings: QueryBindings,
     /// Card name of every device instance, for result labels.
     cards: []const requests.CardRef,
+    /// `cards` as a dense per-type column, for per-instance labels.
+    card_names: requests.CardNames = .empty,
     ac_overrides: []const AcOverride,
     /// `.meas` cards, in deck order, evaluated over finished results.
     measures: []const Measure = &.{},

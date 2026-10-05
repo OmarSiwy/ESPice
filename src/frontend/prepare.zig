@@ -243,6 +243,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
     for (cards) |*c| {
         c.name = try sim_arena.dupe(u8, c.name);
     }
+    const card_names = try requests.CardNames.init(sim_arena, cards);
     var perm: ?[]const u32 = null;
     var circuit = try b.compilePerm(&perm);
     compiled_ok = true;
@@ -305,6 +306,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
     const tuning = if (nl.tunable.len != 0 and run.point == null and run.prefix.len == 0) try variants.Tuning.init(core.gpa, lib, sim_arena, parse_arena, nl, &circuit, cards) else null;
     errdefer if (tuning) |t| t.deinit();
     card_opts.sample = nl.deck.sample;
+    card_opts.card_names = card_names;
     const queries = try analyses.queries(sim_arena, cards_rows, circuit.n, false, out.bindings, cards, card_opts, plan.fanout);
     if (aging) |*a| a.mosra.tran = for (queries) |q| {
         if (q == .tran and q.tran.tol.variant == null) break q.tran;
@@ -332,6 +334,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
         .variants = plan.variants,
         .bindings = out.bindings,
         .cards = cards,
+        .card_names = card_names,
         .ac_overrides = try acOverrides(sim_arena, cards, nb.ac_res.items(.name), nb.ac_res.items(.value)),
         .measures = try measures(sim_arena, nl.deck.measures),
         .save_op = if (nl.deck.save_op) |s| blk: {
@@ -442,6 +445,7 @@ pub fn resolveQueries(arena: std.mem.Allocator, prepared: *const Prepared, direc
         .tol = prepared.deck.deck_tol,
         .method = prepared.deck.deck_method,
         .temp_c = prepared.deck.deck_temp,
+        .card_names = prepared.deck.card_names,
     }, .{});
 }
 

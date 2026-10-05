@@ -296,7 +296,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var columns: Columns = .{};
     var per_source: ?PerSource = null;
     if (opts.contributions) {
-        columns = try Columns.build(a, ctx.circuit.batches, ctx.circuit.batch_types, opts.cards, srcs.len);
+        columns = try Columns.build(a, ctx.circuit.batches, ctx.circuit.batch_types, opts.card_names, srcs.len);
         const ps = try a.alloc(f64, srcs.len * (@as(usize, n_points) + 2));
         @memset(ps, 0);
         per_source = .{ .dens = ps[0 .. srcs.len * n_points], .out = ps[srcs.len * n_points ..][0..srcs.len], .in = ps[srcs.len * (n_points + 1) ..] };
@@ -402,7 +402,7 @@ pub fn columnCount(gpa: std.mem.Allocator, batches: []const Batch, types: []cons
         for (batches) |b| {
             if (b.hooks.collect_noise != null) n_sources += b.count * b.hooks.noise_names.len;
         }
-        n_cols = (try Columns.build(arena.allocator(), batches, types, opts.cards, n_sources)).labels.len;
+        n_cols = (try Columns.build(arena.allocator(), batches, types, opts.card_names, n_sources)).labels.len;
     }
     return if (opts.integrated) 2 * n_cols + 2 else n_cols + 3 + @intFromBool(opts.sample != null);
 }
@@ -420,9 +420,9 @@ const Columns = struct {
 
     /// Labels the `n_sources` generators `collectNoiseSources` yields, batch
     /// by batch and instance by instance, from each batch's `noise_names`
-    /// and the card names in `cards`. `error.NoiseLabelMismatch` when the
+    /// and the card names in `names`. `error.NoiseLabelMismatch` when the
     /// batches' generator counts do not add up to `n_sources`.
-    fn build(a: std.mem.Allocator, batches: []const Batch, types: []const DeviceType, cards: []const root.CardRef, n_sources: usize) !Columns {
+    fn build(a: std.mem.Allocator, batches: []const Batch, types: []const DeviceType, names: root.CardNames, n_sources: usize) !Columns {
         var labels: std.ArrayList([]const u8) = .empty;
         const map = try a.alloc(u32, 2 * n_sources);
         const gen = map[0..n_sources];
@@ -434,7 +434,7 @@ const Columns = struct {
             if (s + b.count * gens.len > n_sources) return error.NoiseLabelMismatch;
             for (0..b.count) |id| {
                 if (gens.len == 0) break;
-                const inst = root.CardRef.lookup(cards, t, @intCast(id)) orelse
+                const inst = names.get(t, @intCast(id)) orelse
                     try std.fmt.allocPrint(a, "{s}#{d}", .{ b.type_name, id });
                 const first = labels.items.len;
                 for (gens, 0..) |name, k| {

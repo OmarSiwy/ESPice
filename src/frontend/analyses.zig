@@ -63,7 +63,7 @@ pub fn queries(arena: std.mem.Allocator, cards: []const netlist.Analysis, n_rows
     }
     // What HSPICE forms borrow from the other cards: the first `.ac`,
     // `.tran` and `.sn`. A malformed one reports on its own turn below.
-    var ctx: CardContext = .{ .arena = arena, .variations = deck_opts.variations };
+    var ctx: CardContext = .{ .arena = arena, .variations = deck_opts.variations, .card_names = deck_opts.card_names };
     // Fan-out ceiling: `.disto` gives up to four plots per line (two-tone),
     // `.op t1 t2 ...` one per time.
     var fan: usize = 4;
@@ -267,6 +267,8 @@ pub const CardContext = struct {
     sn_f0: ?f64 = null,
     /// The deck's variation groups (`DeckOptions.variations`).
     variations: requests.Variations = .{},
+    /// The deck's card names (`DeckOptions.card_names`).
+    card_names: requests.CardNames = .empty,
 };
 
 fn hasNumber(args: []const Value) bool {
@@ -341,6 +343,8 @@ pub const DeckOptions = struct {
     variations: requests.Variations = .{},
     /// HSPICE `.sample`, set on every `.noise` spectrum.
     sample: ?requests.NoiseSample = null,
+    /// The deck's card names, for `.noise` and `.sens` labels.
+    card_names: requests.CardNames = .empty,
 };
 
 /// `trtol` at HSPICE RUNLVL 1..6 [CR .OPTION RUNLVL]. HSPICE scales its
@@ -1419,7 +1423,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
                 .in_nodes = in_nodes,
                 .sweep = sweep,
                 .contributions = contributions and !phase,
-                .cards = cards,
+                .card_names = ctx.card_names,
                 .phase = phase,
             } };
         },
@@ -1466,7 +1470,7 @@ pub fn buildJob(a: netlist.Analysis, sources: core.QueryBindings, cards: []const
             try arity(args, 1, 1);
             const node = try outputNode(node_id);
             const neg = try outputNeg(node_neg);
-            if (id == .sens) return .{ .sens = .{ .output_node = node, .output_neg = neg, .cards = cards } };
+            if (id == .sens) return .{ .sens = .{ .output_node = node, .output_neg = neg, .card_names = ctx.card_names } };
             return .{ .dcmatch = .{ .output_node = node, .output_neg = neg, .variations = ctx.variations } };
         },
         .acmatch, .dcsens => {

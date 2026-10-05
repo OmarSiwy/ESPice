@@ -256,7 +256,7 @@ pub const Executor = struct {
         for (self.circuit.batches, self.circuit.batch_types) |b, t| {
             const status = b.hooks.status orelse continue;
             const hit = status(b.ctx, &buf) orelse continue;
-            const name = requests.CardRef.lookup(self.deck.cards, t, hit.index) orelse b.type_name;
+            const name = self.deck.card_names.get(t, hit.index) orelse b.type_name;
             std.log.warn("{s}: {s}", .{ name, buf[0..hit.len] });
             return error.DeviceRefused;
         }
@@ -363,7 +363,7 @@ pub const Executor = struct {
                 continue;
             }
             const own = try a.alloc([]const u8, b.count);
-            for (own, 0..) |*name, i| name.* = requests.CardRef.lookup(self.deck.cards, t, @intCast(i)) orelse b.type_name;
+            for (own, 0..) |*name, i| name.* = self.deck.card_names.get(t, @intCast(i)) orelse b.type_name;
             row.* = own;
         }
         return names;
