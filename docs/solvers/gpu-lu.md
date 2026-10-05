@@ -689,8 +689,7 @@ barrier). The host instance runs them serially in ticket order, and a
 threaded host instance is rank 3. `src/solver/tests.zig` checks the host
 instance against `refactorColumns` and `solve` bitwise, on the existing
 `SparseTests` matrices plus cases with void steps, scaled pivots and a
-growth failure (same failing step). The file adds a pointer to that case in
-`ref/SIMD-Strategies/verify.zig`, as AGENTS.md asks.
+growth failure (same failing step).
 
 **New `src/solver/lu_device.zig`**, a kernel root like `device/eval.zig`:
 imports gompute and `lu_kernels.zig` and exports `arp_lu_*`. The solver

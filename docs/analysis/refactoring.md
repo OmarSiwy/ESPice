@@ -29,10 +29,7 @@ per-model root, it exports either the host vtable or the GPU entry points.
 the serial path, `ParEval` and the GPU host half; the stamp mode is comptime
 on the serial path. `Circuit.combinePlanes(W, out, g, c, alpha)` forms
 $G + \alpha C$ in one pass (the transient Jacobian) and serves MATEX with the
-operands swapped ($C + \gamma G$). W = 1 is its scalar oracle and tail; the
-differential case is mirrored in the standalone
-`ref/SIMD-Strategies/verify.zig`, covering vector boundaries and aliased
-output.
+operands swapped ($C + \gamma G$). W = 1 is its scalar oracle and tail.
 
 **ParEval.** Lane 0 stamps the caller's planes; lanes 1 and up stamp private
 slabs that are summed into them in a fixed lane order, with no allocation and

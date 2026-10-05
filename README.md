@@ -271,8 +271,7 @@ before/after numbers for each optimization.
 │   └── main.zig      # CLI
 ├── models/           # Verilog-A device sources, compiled at build time
 ├── tests/            # 799 fixture decks, pending decks, the correctness harness, the bench runner
-├── docs/             # Design notes and measured evidence
-└── ref/              # SIMD strategy reference
+└── docs/             # Design notes and measured evidence
 ```
 
 `frontend` and `analysis` are siblings; neither imports the other. `espice`
