@@ -221,8 +221,8 @@ into the topical page before the branch merges.
   `disto` decks pass; the analysis-contract suite is `src/tests/analyses.zig`.
 - The numeric corpus is `tests/fixtures/**`. A deck whose feature is
   missing says so in the deck (`* KNOWN GAP: ...`) and is expected to fail
-  until the feature lands. `issues.md` is the audited index of failing
-  decks and their causes.
+  until the feature lands. The marker line names the cause; there is no
+  separate index of failing decks.
 - Timing-sensitive decks (`stress/scaling_inverter_chain_4k`) can time out
   on a loaded machine; check the failure reason before calling it a
   regression.

@@ -35,7 +35,7 @@ retired paths and their replacements.
 | Devices | [devices/models.md](devices/models.md): attribution, licensing and ngspice-conformance fixes per model; [devices/abi.md](devices/abi.md): the device ABI and its identity rules; [devices/iteration-lifecycle.md](devices/iteration-lifecycle.md): Verilog-AMS iteration hooks; [devices/gpu-evaluation.md](devices/gpu-evaluation.md): device planes on the GPU, the wait schedule and the `auto` cost model; [devices/verilog-digital.md](devices/verilog-digital.md): `.v` digital devices, A2D/D2A and the `ttol` cost; [devices/w-s-elements.md](devices/w-s-elements.md): HSPICE W and S elements, their rational fits and accuracy |
 | Analyses | [analysis/](analysis/README.md): one page per analysis |
 | Solvers | [solvers/](solvers/README.md): sparse LU, ordering, Newton, continuation, measured performance |
-| Conformance | [conformance-phase2.md](conformance-phase2.md): root causes and fix recipes behind `issues.md` section F; [verilog-ams-conformance-plan.md](verilog-ams-conformance-plan.md): the Verilog-AMS audit checklist |
+| Conformance | [conformance-phase2.md](conformance-phase2.md): root causes and fix recipes for the decks the retired `issues.md` indexed; [verilog-ams-conformance-plan.md](verilog-ams-conformance-plan.md): the Verilog-AMS audit checklist |
 | Transmission lines | [vera-gaps.md](vera-gaps.md): the VerA features the Verilog-A lines needed, and what is still open; [native-transmission-line-migration.md](native-transmission-line-migration.md): the migration audit |
 | Plans | [plan/optimize.md](plan/optimize.md): open work streams; [plan/vacask-comparison.md](plan/vacask-comparison.md): feature and speed comparison with VACASK, ranked gaps |
 
@@ -67,3 +67,8 @@ retired experiment, is recorded on the topical page with its measurements
 and fallback (the proof rule in `AGENTS.md`). Session handoffs and branch
 logs do not belong here: fold what lasts into the topical page and delete
 the rest.
+
+Older pages cite failing-deck IDs such as F9 or C5 from `issues.md`, which
+was retired on 2026-10-05; `git show 8ada7e9d:issues.md` has its last
+version. Deck status now comes from `zig build test`, and an expected miss
+carries a `* KNOWN GAP:` line in the deck.

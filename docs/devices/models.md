@@ -157,7 +157,7 @@ instead of running N-type.
 Each fix below matches the model to ngspice 44.2. The cause, the ngspice
 reference and the landing commit are in
 [conformance-phase2.md](../conformance-phase2.md) (groups 5, 13 and 15);
-current deck status is in `issues.md`.
+current deck status is what `zig build test` reports.
 
 | Model | Behavior now | ngspice reference |
 |---|---|---|

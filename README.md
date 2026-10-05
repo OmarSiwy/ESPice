@@ -285,8 +285,8 @@ the package cache and will not see your sibling checkout.
 `zig build test` runs every unit suite and then the numeric fixture corpus
 (`tests/test_correctness.zig`, which runs `zig-out/bin/espice` on each deck
 and scores it against its `.expected.json`). The step exits nonzero while any
-deck fails; `issues.md` indexes the failing decks and their causes, and a
-deck whose feature is missing says so in a `* KNOWN GAP:` comment.
+deck fails, and a deck whose feature is missing says so, with the cause, in a
+`* KNOWN GAP:` comment.
 
 Per-area steps, each part of `zig build test`:
 
