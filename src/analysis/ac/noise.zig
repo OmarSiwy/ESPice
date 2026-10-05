@@ -40,11 +40,31 @@ fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
     return a * (limexp(e1 * b.ln_freq) - limexp(e1 * b.ln_last_freq)) / e1;
 }
 
-/// The source's PSD at `f`: white plus flicker / f^ef, in A^2/Hz. At f <= 0
-/// the flicker half has no value and only the white half counts.
+/// The source's unit-coefficient PSD at `f`: white plus flicker / f^ef plus
+/// its table, in A^2/Hz. At f <= 0 the flicker half has no value and drops
+/// out. `coeff` is not in it: it scales the transfer (`transfer`).
 pub inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
-    if (src.flicker == 0 or f <= 0) return src.white;
-    return src.white + src.flicker / std.math.pow(f64, f, src.ef);
+    const tab = src.tableAt(f);
+    if (src.flicker == 0 or f <= 0) return src.white + tab;
+    return src.white + src.flicker / std.math.pow(f64, f, src.ef) + tab;
+}
+
+/// The (re, im) transfer of one correlated group `rows` to the output,
+/// Σ coeff·(y[node_p] − y[node_n]), from the stacked adjoint `y` of `n`
+/// unknowns.
+pub fn transfer(rows: []const NoiseSource, y: []const f64, n: usize) [2]f64 {
+    var h: [2]f64 = .{ 0, 0 };
+    for (rows) |src| {
+        if (src.node_p != root.GROUND) {
+            h[0] += src.coeff * y[src.node_p];
+            h[1] += src.coeff * y[n + src.node_p];
+        }
+        if (src.node_n != root.GROUND) {
+            h[0] -= src.coeff * y[src.node_n];
+            h[1] -= src.coeff * y[n + src.node_n];
+        }
+    }
+    return h;
 }
 
 /// Band integrals in V^2: output-referred, and referred back through the gain
@@ -149,15 +169,17 @@ pub fn sweep(
 
         var total_density: f64 = 0;
         var total_in_density: f64 = 0;
-        for (noise_sources, ln_last[0..noise_sources.len], dens_last, 0..) |src, *last, *last_dens, i| {
-            const psd = sourcePsd(src, f);
-            const yp_re: f64 = if (src.node_p != root.GROUND) y[src.node_p] else 0;
-            const yn_re: f64 = if (src.node_n != root.GROUND) y[src.node_n] else 0;
-            const yp_im: f64 = if (src.node_p != root.GROUND) y[n + src.node_p] else 0;
-            const yn_im: f64 = if (src.node_n != root.GROUND) y[n + src.node_n] else 0;
-            const h_re = yp_re - yn_re;
-            const h_im = yp_im - yn_im;
-            const dens = (h_re * h_re + h_im * h_im) * psd;
+        // One density per correlated group, kept at its first row; the
+        // other rows of a group stay zero, so the per-source arrays keep
+        // one slot per row.
+        var i: usize = 0;
+        while (i < noise_sources.len) {
+            const end = NoiseSource.groupEnd(noise_sources, i);
+            defer i = end;
+            const last = &ln_last[i];
+            const last_dens = &dens_last[i];
+            const h = transfer(noise_sources[i..end], y, n);
+            const dens = (h[0] * h[0] + h[1] * h[1]) * sourcePsd(noise_sources[i], f);
             total_density += dens;
             if (per_source) |ps| ps.dens[k * noise_sources.len + i] = dens;
 

@@ -309,8 +309,8 @@ pub fn noise(ctx: *const root.RunCtx, opts: Options) !root.Result {
             if (at.len != ns) return error.NoiseTopologyChanged;
             for (at, srcs, 0..) |src, original, i| {
                 if (src.node_p != original.node_p or src.node_n != original.node_n) return error.NoiseTopologyChanged;
-                td[i * nt + s] = pnoise.signedSqrt(src.white);
-                td[(ns + i) * nt + s] = pnoise.signedSqrt(src.flicker);
+                td[i * nt + s] = pnoise.whiteAmp(src);
+                td[(ns + i) * nt + s] = src.coeff * pnoise.signedSqrt(src.flicker);
                 if (s == 0) exponent[i] = src.ef;
             }
         }
@@ -373,9 +373,13 @@ pub fn noise(ctx: *const root.RunCtx, opts: Options) !root.Result {
         try solveAdjoint(lin, f, e, x);
         freqs[fi] = f;
         var total: f64 = 0;
-        for (srcs, exponent, 0..) |src, ef, i| {
+        var lead: usize = 0;
+        while (lead < ns) {
+            const end = root.NoiseSource.groupEnd(srcs, lead);
+            defer lead = end;
+            // One correlated group: its rows add coherently into `acc`.
             @memset(acc, Complex.zero);
-            for (0..nf) |p| {
+            for (srcs[lead..end], lead..) |src, i| for (0..nf) |p| {
                 const hp = if (src.node_p != root.GROUND) lin.sideband(x, src.node_p, p) else Complex.zero;
                 const hn = if (src.node_n != root.GROUND) lin.sideband(x, src.node_n, p) else Complex.zero;
                 const h = hp.sub(hn);
@@ -384,8 +388,9 @@ pub fn noise(ctx: *const root.RunCtx, opts: Options) !root.Result {
                     acc[g] = acc[g].add(h.mul(amp[i * nf + q]));
                     acc[groups + g] = acc[groups + g].add(h.mul(amp[(ns + i) * nf + q]));
                 }
-            }
-            for (0..groups) |g| total += pnoise.sourcePsd(acc[g].magSq(), acc[groups + g].magSq(), ef, f + group_nu[g]);
+            };
+            const head = srcs[lead];
+            for (0..groups) |g| total += pnoise.sourcePsd(acc[g].magSq() * pnoise.whiteShape(head, f + group_nu[g]), acc[groups + g].magSq(), exponent[lead], f + group_nu[g]);
         }
         density[fi] = total;
     }

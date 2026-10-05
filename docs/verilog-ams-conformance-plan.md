@@ -58,7 +58,7 @@ compiler side; this table is not re-verified on every change.
 | Q01-Q03 | Compiler build, 404 units and 1,323/1,323 strict fixtures passed when recorded. ESPice host counts are in AGENTS.md "Verification" |
 | D03 | Net state, independent drivers, §7.9 wired-logic resolution, `assign` and one-dimensional memories integrated; drive strengths remain open |
 | P01 | `vpi_user.h`, the elaborated object model and eleven handle/traversal/property routines integrated; a compiled C application walks a three-deep design. P02/P03 values and callbacks remain open |
-| A06 | `noise_table`/`noise_table_log` export as `noise_tables` with linear and log-log interpolation; ARPice host spectral integration remains open |
+| A06 | `noise_table`/`noise_table_log` export as `noise_tables` with linear and log-log interpolation; the host prices them through `NoiseSource.table` (device ABI 23). Knots bound to parameters (`noiseTablePoints`) remain open |
 | D10 | `default_nettype`, `celldefine` and `unconnected_drive` now reach elaboration; timescale operands validated |
 | A08/A02 | Nodeset exports as `u_nodeset`; `$analog_node_alias`/`$analog_port_alias` perform the alias. Switch branches were already implemented |
 | Q01 | `VerA/docs/CLAUSE-AUDIT.md`: 119 inherited obligations classified, and the chapter `COVERAGE.md` files reconciled against source |

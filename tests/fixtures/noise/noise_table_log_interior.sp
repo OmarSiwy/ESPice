@@ -1,5 +1,4 @@
 * LRM 4.6.4.4 noise_table_log: log-log interpolation, not linear, between knots
-* KNOWN GAP: noise_table/noise_table_log PSDs never reach .noise: abi.NoiseSource has no table field, so collectNoise reads the table row as zero.
 * Expected results: noise_table_log_interior.expected.json
 * Origin: VerA tests/fixtures/ch04_expressions/a06_noisetables_a06_ntab_log_interior.sp
 .hdl "va_noise.assets/noiseless_res.va"

@@ -71,16 +71,49 @@ pub const ParamRef = struct {
     }
 };
 
-/// One noise generator between two nodes, with PSD
-/// `S(f) = white + flicker / f^ef` in the contributed nature's units² per Hz.
-/// A density, not a kind: shot and thermal sources both arrive as a white
-/// density, as in ngspice's NevalSrc (nevalsrc.c:105-113).
+/// One noise generator row between two nodes. Its unit-coefficient shape is
+/// `S(f) = white + flicker / f^ef + T(f)` in the contributed nature's units²
+/// per Hz, `T` the tabulated PSD (`tableAt`, zero for a parametric row), and
+/// the row injects `coeff` times that generator. A density, not a kind:
+/// shot and thermal sources both arrive as a white density, as in ngspice's
+/// NevalSrc (nevalsrc.c:105-113).
+///
+/// Rows of one correlated generator (LRM §4.6.4.6, contract
+/// `NoiseGen.source`) are contiguous in a collected list and share `group`,
+/// the list index of their first row, so a consumer sums their transfers
+/// `Σ coeff·(y[node_p] − y[node_n])` as phasors before squaring and prices
+/// the sum with the first row's shape (`groupEnd`). An independent row is a
+/// group of one. Within a group only the first row's shape counts.
 pub const NoiseSource = struct {
     node_p: u32,
     node_n: u32,
     white: f64 = 0,
     flicker: f64 = 0,
     ef: f64 = 1,
+    /// The signed factor the contribution applies (contract `PsdTerm.coeff`).
+    coeff: f64 = 1,
+    /// List index of this row's group's first row; `maxInt` reads as the row
+    /// itself, so a hand-built list of independent rows can leave it.
+    group: u32 = std.math.maxInt(u32),
+    /// The §4.6.4.3/.4 table of a table row; empty `points` otherwise. The
+    /// slice is the device's static data and outlives every list.
+    table: contract.NoiseTable = .{ .interp = .linear, .points = &.{} },
+
+    /// Returns the tabulated PSD at `f` (contract `noiseTableAt`), or 0 for
+    /// a parametric row.
+    pub fn tableAt(self: NoiseSource, f: f64) f64 {
+        return if (self.table.points.len == 0) 0 else contract.noiseTableAt(self.table, f);
+    }
+
+    /// Returns the end of the group starting at `srcs[lead]`: rows
+    /// `[lead, end)` are one correlated generator. Asserts that `lead` starts
+    /// a group.
+    pub fn groupEnd(srcs: []const NoiseSource, lead: usize) usize {
+        std.debug.assert(srcs[lead].group == lead or srcs[lead].group == std.math.maxInt(u32));
+        var end = lead + 1;
+        while (end < srcs.len and srcs[end].group == lead) end += 1;
+        return end;
+    }
 };
 
 /// The physical origin a device declares for a noise generator.
@@ -497,7 +530,9 @@ pub const GpuPayload = struct {
 // 20: the slot tape holds only the device's pattern entries, not n_u^2.
 // 21: the lim plane holds only the unknowns `limit` writes, not n_u.
 // 22: `Hooks.status`, VerA's `$fatal`/`$error` channel.
-pub const abi_version: u32 = 22;
+// 23: `NoiseSource.coeff` (no longer folded into white/flicker), `.group`
+//    (correlated rows contiguous) and `.table`.
+pub const abi_version: u32 = 23;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.

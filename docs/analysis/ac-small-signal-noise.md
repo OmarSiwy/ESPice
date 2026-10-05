@@ -122,11 +122,16 @@ $$
 S_s = 4 k_B T g_s \quad [\mathrm{A^2/Hz}] .
 $$
 
-In general each generator reports a white part and a flicker part,
-$S_s(f) = W_s + K_s / f^{e_s}$, from the device's own noise model (§2).
-
-The output noise density at node $o$ sums over uncorrelated sources through
-their transfer impedances $H_s(\omega) = e_o^{\mathsf T} A^{-1} (e_{p_s} - e_{n_s})$:
+In general each generator reports a white part, a flicker part and, for an
+LRM §4.6.4.3/.4 `noise_table`/`noise_table_log`, a tabulated part,
+$S_s(f) = W_s + K_s / f^{e_s} + T_s(f)$, from the device's own noise model
+(§2). A generator enters each branch it is contributed to with a signed
+factor $c_{s,r}$ (`PsdTerm.coeff`, the `c1` of `V(a,b) <+ c1*n`), and one
+generator may be contributed to several branches $r$ (LRM §4.6.4.6, rows
+sharing a contract `source` id). Its transfer sums those branches as
+phasors, $H_s(\omega) = \sum_r c_{s,r}\, e_o^{\mathsf T} A^{-1} (e_{p_r} - e_{n_r})$,
+and the output noise density at node $o$ sums over the independent
+generators:
 
 $$
 S_{v,o}(\omega) \;=\; \sum_s |H_s(\omega)|^2 \, S_s .
@@ -225,13 +230,22 @@ across) and a `noisePsd` function returning one term per generator:
 `white`, `flicker` and the flicker exponent `ef`. The batch collector
 (`collectNoise` in `src/device/eval.zig`, surfaced as
 `Circuit.collectNoiseSources`) evaluates `noisePsd` for each instance at the
-given $x$ and appends one `NoiseSource` per generator with the absolute
-values of both parts (`@abs`, as ngspice `nevalsrc.c:106`). The PSD comes
+given $x$ and appends one `NoiseSource` per generator row with the
+absolute values of both parts (`@abs`, as ngspice `nevalsrc.c:106`), the
+signed `coeff`, and the device's static table for a table row (evaluated
+with the contract's `noiseTableAt`). The PSD comes
 from the device's own physics at its own bias, never from an analysis-side
 table. It is pure in $x$, so `.pnoise` calls it once per PSS sample.
 Zero-power generators stay in the list: their ordinal identifies them across
-PSS samples. Correlation between generators is not transported; they are
-treated as independent.
+PSS samples. The rows of one correlated generator are emitted contiguously
+and share `NoiseSource.group`, the list index of their first row; every
+consumer (`.noise`, `.sp` noise parameters, `.pnoise`/`.hbnoise`,
+`.phasenoise`, `.trannoise`) sums a group's transfers before squaring, and
+prices the sum with the first row's shape. `.noise` reports the group's
+density under that first row's contribution column. Two ceilings, each a
+`ponytail:` in the code: `.trannoise` does not synthesize a table row, and
+the `.phasenoise` diffusion has no term for one. `PsdTerm.corr_with` (BSIM4
+tnoiMod, PSP igid partial correlation) is still not transported.
 
 Per frequency the analysis then does one transposed solve
 $A^{\mathsf H} y = e_o$ for the adjoint, one ordinary solve driven from the
