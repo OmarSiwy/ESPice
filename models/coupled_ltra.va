@@ -11,7 +11,7 @@
 //   modified BSD license.
 // Transcribed from the retired native device (coupled_ltra.zig), which it
 // matches on the CPL decks to 6e-8 relative
-// (docs/native-transmission-line-migration.md). Bug-compatible with
+// (dev/native-transmission-line-migration.md). Bug-compatible with
 // cplsetup/cplload: the reference's scaled pole units, diag()'s ordering queue
 // with integer-truncated comparisons, the R entry floor MAX(R, 1e-4),
 // integer-ps history, update_cnv's slope accumulated across terms. One

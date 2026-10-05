@@ -9,7 +9,7 @@
 //   modified BSD license.
 // Transcribed from the retired native device (txl_native.zig), which it
 // matches on the TXL decks to 1.2e-12 relative
-// (docs/native-transmission-line-migration.md). Bug-compatible with
+// (dev/native-transmission-line-migration.md). Bug-compatible with
 // txlsetup/txlload: integer-
 // picosecond history times, the h3 complex-pair DC seed by real division,
 // update_cnv's slope accumulated across terms, and txlload's 0.1*gmin port

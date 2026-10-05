@@ -4,7 +4,7 @@
 * Oracle (analytic): DC is the series R0*l divider; AC is the exact ABCD
 * chain of each line, Z = R0 + Rs sqrt(f)(1+j) + j w L0, Y = Gd f + j w C0,
 * gamma = sqrt(ZY), Zc = Z/gamma. The W element runs a rational fit of Yc and
-* of the delay-extracted propagation (docs/devices/w-s-elements.md): w1
+* of the delay-extracted propagation (dev/devices/w-s-elements.md): w1
 * matches to 5e-5, w2 to 5e-2, because Gd f with a constant C0 is not causal
 * and no rational (causal) model reaches it.
 v1 in 0 dc 1 ac 1

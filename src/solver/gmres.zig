@@ -1,7 +1,7 @@
 //! Matrix-free restarted GMRES(m) with optional right preconditioning, for
 //! the PSS monodromy and QPSS Krylov solves. All workspace is allocated by
 //! `init`; `solve` allocates nothing. Background:
-//! docs/solvers/monodromy-krylov.md.
+//! dev/solvers/monodromy-krylov.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

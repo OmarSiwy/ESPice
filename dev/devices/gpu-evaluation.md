@@ -10,7 +10,7 @@ compiled for the device through `Sink(D, true, ...)`. The GPU boundary
 (tapes, Model/Instance PODs, the `model_of` row tape, pattern CSC, plane
 layout) is frozen, so every table here is built beside it. Each kernel reads
 an instance's Model as `models[model_of[id]]`: instances whose cards bind
-equal Models share a row on the device as on the host (docs/devices/abi.md,
+equal Models share a row on the device as on the host (dev/devices/abi.md,
 Shared Models).
 
 ## Which batches go to the device
@@ -248,7 +248,7 @@ runner checks agreement against ngspice and VACASK as `bench` does, and
 `--timing-in-depth` now prints each query's Newton split: device eval
 (including the GPU wait), matrix load, LU factor, solve, and the step
 update, with n and the LU fill. `ZP_LU_STATS=1` adds the structural census
-of `docs/solvers/gpu-lu.md` E1.
+of `dev/solvers/gpu-lu.md` E1.
 
 Setup: RTX 4060 Laptop, i9-14900HX, `96807bd` rebased on `3559781`,
 ngspice-45 with `.options klu`. Other sessions were held off while timing,
@@ -345,7 +345,7 @@ Newton loop.
 
 The E1 census (first full factor of each deck; `F` counts the refactor's
 multiply-adds, `S_r` is the sync-free column kernel's span of
-`docs/solvers/gpu-lu.md` §4.2):
+`dev/solvers/gpu-lu.md` §4.2):
 
 | deck | fill | F | S_r | n / S_r | widest U col | F in levels < 64 wide |
 |---|---:|---:|---:|---:|---:|---:|

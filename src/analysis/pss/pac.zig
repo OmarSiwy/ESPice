@@ -131,7 +131,7 @@ fn sweepDense(
 /// solve O(iterations·(n_sb^2·nnz + n_sb·LU)). Whole-run medians on
 /// diode-RC ladder `.hbac` decks: dense 0.94x at n·n_sb = 35, even at 49,
 /// Krylov 1.25x at 70, 1.44x at 85, 10x at 408 and 43x at 748
-/// (docs/analysis/multitone-hb.md).
+/// (dev/analysis/multitone-hb.md).
 fn useKrylov(n: usize, n_sb: usize) bool {
     return n * n_sb >= 64;
 }

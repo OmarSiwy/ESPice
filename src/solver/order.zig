@@ -2,7 +2,7 @@
 //! Tarjan SCC, then AMD (Amestoy-Davis-Duff approximate minimum degree)
 //! inside each block. All scratch comes from one caller-owned u32 slab, with
 //! no allocator, so the same code also runs at comptime.
-//! Background: docs/solvers/btf-permutation.md, amd-ordering.md.
+//! Background: dev/solvers/btf-permutation.md, amd-ordering.md.
 
 const std = @import("std");
 

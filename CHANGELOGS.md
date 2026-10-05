@@ -13,6 +13,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - Nix flake: `nix run github:OmarSiwy/ESPice`, `packages.espice` (CPU) and
   `espice-cuda` (CUDA), `overlays.default`, smoke `checks`; CI pushes builds
   to the `omarsiwy` Cachix cache.
+- The developer design notes moved from `docs/` to `dev/`.
 - `.hdl` parameters named with `__`, a leading or trailing `_`, or a capital
   `Z` bind from the instance card instead of failing as unknown (#2).
 - `bench-suites -Dsuite=cmcqa`: 3,218 single-device decks from the public CMC QA

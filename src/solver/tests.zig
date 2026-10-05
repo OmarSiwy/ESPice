@@ -3124,7 +3124,7 @@ const TridiagTests = struct {
 /// The device LU's kernel bodies (lu_kernels.zig) on host threads against
 /// their oracle, `refactorColumns` plus `solve`: bitwise, with the refactor
 /// on one thread (every ticket in order) and on four (real waits).
-/// docs/solvers/gpu-lu.md §4.6.
+/// dev/solvers/gpu-lu.md §4.6.
 const LuKernelTests = struct {
     const SparseLu = @import("root.zig").sparse_lu.SparseLu;
     const K = @import("root.zig").lu_kernels;

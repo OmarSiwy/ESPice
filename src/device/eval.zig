@@ -427,7 +427,7 @@ const Real = RealFor(false);
 
 /// Derivative width of `Dual` for device D on the host. f32 only when the
 /// device declares `jac_f32_host`: the f32 Jacobian helps some CPU decks and
-/// costs others extra gmin-ladder steps (docs/perf/jac-width-2026-09-10.md).
+/// costs others extra gmin-ladder steps (dev/perf/jac-width-2026-09-10.md).
 pub fn jacFloat(comptime D: type) type {
     return if (@hasDecl(D, "jac_f32_host") and D.jac_f32_host) f32 else f64;
 }
@@ -678,7 +678,7 @@ fn constEntry(comptime D: type, comptime ru: usize, comptime cu: usize) ?contrac
 
 /// Whether D gets a second `evalRange` instantiation on the narrow basis for
 /// its fully collapsed instances. It pays only when it saves a register on
-/// AVX2 (docs/perf/remaining-2026-09-10.md): the wide dual spans two ymm
+/// AVX2 (dev/perf/remaining-2026-09-10.md): the wide dual spans two ymm
 /// (4 < w <= 8) and the narrow one fits in one (w <= 4). That admits
 /// mos1/2/3/6/9, bsim1, bsim3, hfet2, jfet and mes.
 ///
@@ -748,7 +748,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
     // Ground predicates only on the GPU. On the host a ground stamp lands in
     // the shared trash slot/row, so the add is cheaper than the test. On the
     // GPU that add is a contended write on one address, measured 2x on 40,000
-    // instances (docs/device-evaluation-audit-2026-09.md).
+    // instances (dev/device-evaluation-audit-2026-09.md).
     const mask_ground = comptime SinkT.on_device;
 
     var id: u32 = first;
@@ -1575,7 +1575,7 @@ pub fn DeviceBatch(comptime D: type) type {
             // A generator is only priced by the device's own `noisePsd`.
             .collect_noise = if (@hasDecl(D, "noise_gens")) blk: {
                 if (!@hasDecl(D, "noisePsd")) @compileError(@typeName(D) ++
-                    " declares noise_gens without noisePsd; see docs/devices/noise-contract.md §3");
+                    " declares noise_gens without noisePsd; see dev/devices/noise-contract.md §3");
                 break :blk collectNoise;
             } else null,
             .noise_names = if (@hasDecl(D, "noise_gens")) &noise_names else &.{},

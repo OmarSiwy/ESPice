@@ -532,7 +532,7 @@ G₀ + jkω₀C₀ are `LaneLu` frequency lanes, and complex phasor output.
   - `DELAY` reuses the ideal line.
   - `LAPLACE` and `POLE` run on VerA's `laplace_nd` and `laplace_zp`
     (state-space sections in transient); POLE's limits are in
-    docs/frontend.md "Pole-zero sources".
+    dev/frontend.md "Pole-zero sources".
   - `FREQ` tables need convolution in transient (L).
 - E2 (done for RLGC): the W element fits each mode's characteristic
   admittance and its delay-extracted propagation (Rs·√f and Gd·f included)

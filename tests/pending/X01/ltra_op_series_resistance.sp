@@ -33,7 +33,7 @@
 *   i(vin) = -1/101 = -0.009900990099009901 A  (ngspice sign: out of the + node)
 *   v(a)   = 51/101 = 0.504950495049505 V
 *   v(b)   = 50/101 = 0.49504950495049505 V
-* This value is ALSO what docs/native-transmission-line-migration.md reports the
+* This value is ALSO what dev/native-transmission-line-migration.md reports the
 * host returning for every AC frequency, so the AC fixtures must NOT equal it.
 * Independent ngspice-44.2 agreement on all six values: exact (delta 0.0).
 * Expected results: ltra_op_series_resistance.expected.json

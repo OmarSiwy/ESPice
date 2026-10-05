@@ -3,7 +3,7 @@
 * Expected results: w_settle.expected.json
 * Oracle (analytic): the DC limit of the fitted model. G0 = 0, so the fit
 * adds the floor G = 2 pi lo C0 = 2e-4 S/m (lo = R0/(2 pi L0)/100, see
-* docs/devices/w-s-elements.md) and the line's exact DC ABCD with that G
+* dev/devices/w-s-elements.md) and the line's exact DC ABCD with that G
 * gives v(b) = 0.62410020 V; without the floor it would be 100/160 = 0.625.
 * A laplace_nd realization that loses a slow section's DC gain drifts off
 * it (0.6217 V by 2 us on VerA before 6355aaf1).

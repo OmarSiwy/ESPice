@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
     // and a Debug espice is 10-40x slower. Not `standardOptimizeOption`: in
     // 0.16 its preferred mode applies only under `-Drelease`.
     const optimize = b.option(std.lang.Optimize, "optimize", "Prioritize performance, safety, or binary size") orelse .fast;
-    // Mixed precision (docs/perf/jac-width-2026-09-10.md). The Jacobian width
+    // Mixed precision (dev/perf/jac-width-2026-09-10.md). The Jacobian width
     // is a property of the instantiation, not of the device, hence two lists.
     //
     // `-Djac-f32-gpu` permits an f32 Jacobian: vera's `--jac-f32` sets
@@ -121,7 +121,7 @@ pub fn build(b: *std.Build) void {
     const one_models = b.allocator.alloc(*std.Build.Module, models.len) catch @panic("OOM");
     // One host object per model, so a solver edit
     // does not recompile every device eval as one single-threaded unit.
-    // See docs/perf/build-split-2026-09-10.md.
+    // See dev/perf/build-split-2026-09-10.md.
     const host_objs = b.allocator.alloc(*std.Build.Step.Compile, models.len) catch @panic("OOM");
     for (models, 0..) |m, i| {
         const run = b.addRunArtifact(vera_exe);
@@ -277,7 +277,7 @@ pub fn build(b: *std.Build) void {
             .heavy = m.size >= heavy_model_bytes,
         }) catch @panic("OOM");
     }
-    // The device LU (docs/solvers/gpu-lu.md): std and gompute only, so it
+    // The device LU (dev/solvers/gpu-lu.md): std and gompute only, so it
     // builds whenever any kernel does, `-Dgpu=false` included.
     roots.append(b.allocator, .{ .name = "lu", .root = b.path("src/solver/lu_device.zig") }) catch @panic("OOM");
     // HIP is pinned: `.auto` probes the BUILD machine, and a box without an

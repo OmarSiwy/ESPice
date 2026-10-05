@@ -222,7 +222,7 @@ pub fn newton(
         const load_ok = if (comptime @hasDecl(S, "loadCheck")) sys.loadCheck(x, v, sys.rhs[0..sys.n], opts.reltol, opts.abstol) else true;
         prof.lap(.load);
         const need = opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig;
-        // The device LU (docs/solvers/gpu-lu.md) is bitwise this factor and
+        // The device LU (dev/solvers/gpu-lu.md) is bitwise this factor and
         // solve; false leaves both to the host.
         const on_device = if (comptime @hasDecl(S, "deviceSolve")) sys.deviceSolve(slv, v, dx, need) orelse false else false;
         if (on_device and need) ws.factored_sig = opts.matrix_sig;

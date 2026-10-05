@@ -1,4 +1,4 @@
-//! The device LU, stage 1 of docs/solvers/gpu-lu.md: the host assembles A,
+//! The device LU, stage 1 of dev/solvers/gpu-lu.md: the host assembles A,
 //! keeps every pivot decision and uploads the values; the device replays
 //! the refactor and runs both triangular solves (`solver.lu_kernels`), and
 //! dx comes back. Bitwise the host's `refactor` plus `solveNeg`, so a device
@@ -306,7 +306,7 @@ pub const GpuLu = struct {
     /// (2,400) 26 against 52 s, logic_psp103_10k (1,600) 86 against 357 s;
     /// chain_bsim4_10k (63) 11.6 against 9.9 s,
     /// ring_bsim4_10k (87) 24.4 against 20.1 s, and the E2 100k decks
-    /// (about 160) lost too (docs/solvers/gpu-lu.md, "E3, host").
+    /// (about 160) lost too (dev/solvers/gpu-lu.md, "E3, host").
     /// ponytail: no deck measured between 166 and 1,600; refit the bar if
     /// one lands there.
     const min_per_col = 500;

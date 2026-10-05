@@ -1,5 +1,5 @@
 * X01 pending fixture: TXL run whose LIVE history depth exceeds the native
-* 2048-entry capacity.  docs/native-transmission-line-migration.md records
+* 2048-entry capacity.  dev/native-transmission-line-migration.md records
 * "CAP=2048 front pruning can discard a still-live point" for txl_native.
 *   Td = length*sqrt(L*C) = 1 m * 5 ns/m = 5 ns, forced dt = 1 ps (tmax = 1 ps),
 *   so the far end needs a sample 5000 entries back, 2952 beyond the bound.

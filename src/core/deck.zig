@@ -91,7 +91,7 @@ pub const Variants = struct {
     }
 };
 
-/// HSPICE MOSRA [SA Ch.29] (docs/analysis/mosra.md): the transient that
+/// HSPICE MOSRA [SA Ch.29] (dev/analysis/mosra.md): the transient that
 /// stresses the bound MOSFETs, the reliability times the aged runs extrapolate
 /// to, and one SoA row per stressed instance. Aged time `k` is row `k` of
 /// `Deck.variants`; each row writes `delvto` then, where the device has
@@ -143,7 +143,7 @@ pub const Mosra = struct {
 
 /// One `.model name MOSRA LEVEL=1` card: a power law per mechanism,
 /// ΔVth = A·t^n for constant stress, with A = a0·exp(fd·v)·exp(-td/T).
-/// Parameter names are ESPice's choice (docs/analysis/mosra.md).
+/// Parameter names are ESPice's choice (dev/analysis/mosra.md).
 pub const MosraModel = struct {
     /// BTI: v is Vgs.
     tit0: f64 = 0,

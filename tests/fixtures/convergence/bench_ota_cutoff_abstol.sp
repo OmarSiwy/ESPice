@@ -25,7 +25,7 @@
 *
 * The accuracy/scaling version of this circuit is benchmark/fixtures/sweep/
 * opamp_wl_{200,1000,5000}, re-biased to VBIAS=1.0. Full diagnosis:
-* docs/perf/mos1-ac-2026-09-10.md and docs/perf/fixture-bias-2026-09-10.md.
+* dev/perf/mos1-ac-2026-09-10.md and dev/perf/fixture-bias-2026-09-10.md.
 * ============================================================================
 * 5T OTA W/L sweep: 20x10 = 200 independent instances
 * Sweep differential pair W: 20 points [0.5u..50u]

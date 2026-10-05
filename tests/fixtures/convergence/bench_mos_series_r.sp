@@ -3,7 +3,7 @@
 * Origin: benchmark/fixtures/convergence/mos_series_r/circuit.sp
 *
 * This deck exists to be the counter-case for derivative-width narrowing.
-* docs/perf/remaining-2026-09-10.md records that mos1's smallest CORRECT
+* dev/perf/remaining-2026-09-10.md records that mos1's smallest CORRECT
 * lane universe is SIX, not four, precisely because the rd/rs series
 * branches touch {d,di} and {s,si} -- and that a k=4 universe is provably
 * wrong, with 3150 bit mismatches measured at rd=12, rs=9.

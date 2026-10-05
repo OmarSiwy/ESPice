@@ -1,4 +1,4 @@
-# docs/solvers: solver references
+# dev/solvers: solver references
 
 The algorithms behind `src/solver/` (linear solvers plus the Newton layer in
 `converger.zig`). [overview.md](overview.md) is the module map and API
@@ -45,7 +45,7 @@ parameter stamps and any GPU factorization remain targets.
 
 ## Consumers: which analyses use which solver doc
 
-Cross-reference to [docs/analysis/](../analysis/README.md); each analysis
+Cross-reference to [dev/analysis/](../analysis/README.md); each analysis
 doc carries the reverse mapping in its "Solvers used" section. *(future)*
 marks a proposed algorithm or extension, even when the analysis exists.
 
@@ -81,7 +81,7 @@ AMD TOMS paper.
 ## Open questions
 
 Device evaluation dominates most profiles (about half the run on large
-transient decks; see `docs/analysis/evaluation-profile.md`), so solver work
+transient decks; see `dev/analysis/evaluation-profile.md`), so solver work
 is second order. Ranked:
 
 1. **Assembly in permuted coordinates.** Refactor replay makes the solver

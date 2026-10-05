@@ -1,4 +1,4 @@
-//! HSPICE MOSRA level 1 aging (docs/analysis/mosra.md): per-device stress
+//! HSPICE MOSRA level 1 aging (dev/analysis/mosra.md): per-device stress
 //! integrated over a fresh transient, extrapolated to each reliability time
 //! as a power law, and turned into the `delvto`/`mulu0` writes of the aged
 //! runs plus the degradation table HSPICE writes as `.radeg`.

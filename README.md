@@ -117,7 +117,7 @@ factor.
 Every device is Verilog-A. The O, Y and P cards run exact transcriptions of
 ngspice's LTRA, TXL and CPL; `lossy_tline.va` and `coupled_tlines.va`
 approximate them and no card routes there except the static RG line. See
-[docs/native-transmission-line-migration.md](docs/native-transmission-line-migration.md).
+[dev/native-transmission-line-migration.md](dev/native-transmission-line-migration.md).
 
 ### Your own Verilog-A models
 
@@ -156,7 +156,7 @@ publishes as `v(<instance>#<net>)`, the name ngspice gives an OSDI device's.
 
 | | |
 |---|---|
-| Netlist dialects | ngspice, hspice, spectre; the sky130 PDK decks run as written ([docs/sky130.md](docs/sky130.md)) |
+| Netlist dialects | ngspice, hspice, spectre; the sky130 PDK decks run as written ([dev/sky130.md](dev/sky130.md)) |
 | Output | binary raw, ASCII raw, CSV, Touchstone, PSF, FSDB, SST2, CITIfile, print |
 
 ## Accuracy and performance
@@ -179,8 +179,8 @@ them:
 nix develop .#benchmarking
 zig build bench -- --iters 3            # zig-out/benchmark-results.md
 zig build bench-postlayout -- --iters 3 # zig-out/postlayout-results.md
-python3 tools/bench_plot.py zig-out/benchmark-results.md tests/fixtures docs/bench/corpus
-python3 tools/bench_plot.py zig-out/postlayout-results.md zig-out/postlayout docs/bench/postlayout
+python3 tools/bench_plot.py zig-out/benchmark-results.md tests/fixtures dev/bench/corpus
+python3 tools/bench_plot.py zig-out/postlayout-results.md zig-out/postlayout dev/bench/postlayout
 ```
 
 ### Speed against circuit size
@@ -188,9 +188,9 @@ python3 tools/bench_plot.py zig-out/postlayout-results.md zig-out/postlayout doc
 Each point is one deck. The x axis is its device count after subcircuit
 expansion.
 
-![Wall time against circuit size, all decks](docs/bench/corpus/all.png)
+![Wall time against circuit size, all decks](dev/bench/corpus/all.png)
 
-![ESPice speedup over ngspice and VACASK](docs/bench/corpus/speedup.png)
+![ESPice speedup over ngspice and VACASK](dev/bench/corpus/speedup.png)
 
 | Compared with | decks both ran | ESPice faster | median speedup |
 |---|---:|---:|---:|
@@ -223,12 +223,12 @@ One chart per analysis type, same axes:
 
 | | | |
 |---|---|---|
-| ![op](docs/bench/corpus/op.png) | ![dc](docs/bench/corpus/dc.png) | ![ac](docs/bench/corpus/ac.png) |
-| ![tran](docs/bench/corpus/tran.png) | ![noise](docs/bench/corpus/noise.png) | ![sp](docs/bench/corpus/sp.png) |
-| ![pss](docs/bench/corpus/pss.png) | ![hb](docs/bench/corpus/hb.png) | ![pz](docs/bench/corpus/pz.png) |
+| ![op](dev/bench/corpus/op.png) | ![dc](dev/bench/corpus/dc.png) | ![ac](dev/bench/corpus/ac.png) |
+| ![tran](dev/bench/corpus/tran.png) | ![noise](dev/bench/corpus/noise.png) | ![sp](dev/bench/corpus/sp.png) |
+| ![pss](dev/bench/corpus/pss.png) | ![hb](dev/bench/corpus/hb.png) | ![pz](dev/bench/corpus/pz.png) |
 
 The other 35, mixed-analysis decks included, are in
-[docs/bench/corpus/](docs/bench/corpus/). The periodic analyses (pss, pac,
+[dev/bench/corpus/](dev/bench/corpus/). The periodic analyses (pss, pac,
 pnoise, hb, qpss) ran in neither ngspice nor VACASK here, so those charts show
 ESPice alone.
 
@@ -242,9 +242,9 @@ logic, a 6T SRAM array), each with BSIM4 and PSP103 transistors, from 1k to
 has a 300 s limit; a missing bar means the simulator timed out or could not run
 the deck.
 
-![Post-layout decks](docs/bench/postlayout/bars.png)
+![Post-layout decks](dev/bench/postlayout/bars.png)
 
-![Post-layout wall time against size](docs/bench/postlayout/all.png)
+![Post-layout wall time against size](dev/bench/postlayout/all.png)
 
 | Compared with | decks both ran | ESPice faster | median speedup | agree / differ |
 |---|---:|---:|---:|---:|
@@ -265,7 +265,7 @@ cards, HSPICE-only syntax, and PWL sources, which this VACASK build aborts on.
 In the run charted here the bench runner read every deck in the ngspice
 dialect, so 14 HSPICE decks showed as ESPice failures; the runner now passes
 each deck's `--tokenizer`, as `zig build test` does, and they run. A model in the dispatch table does not establish full SPICE
-conformance; `docs/` carries per-area status labels and the measured
+conformance; `dev/` carries per-area status labels and the measured
 before/after numbers for each optimization.
 
 ## Project structure
@@ -283,7 +283,7 @@ before/after numbers for each optimization.
 │   └── main.zig      # CLI
 ├── models/           # Verilog-A device sources, compiled at build time
 ├── tests/            # 799 fixture decks, pending decks, the correctness harness, the bench runner
-└── docs/             # Design notes and measured evidence
+└── dev/             # Design notes and measured evidence
 ```
 
 `frontend` and `analysis` are siblings; neither imports the other. `espice`

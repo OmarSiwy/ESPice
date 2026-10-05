@@ -1,7 +1,7 @@
 //! Left-looking Gilbert-Peierls sparse LU with threshold partial pivoting,
 //! a numeric refactor that replays the frozen pattern and pivot sequence,
 //! and forward/transpose solves. The caller supplies the column ordering.
-//! Background: docs/solvers/gilbert-peierls-lu.md, klu-pipeline.md.
+//! Background: dev/solvers/gilbert-peierls-lu.md, klu-pipeline.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -227,7 +227,7 @@ pub const SparseLu = struct {
     /// still nonzero. Measured on the chain_bsim4_10k operating point's
     /// diverging Newton steps (values up to 1e60): threshold pivoting
     /// sent 4,503 of 44,925 columns off the diagonal and filled 34x
-    /// against 2.6x (docs/solvers/gilbert-peierls-lu.md, "Re-pivoting").
+    /// against 2.6x (dev/solvers/gilbert-peierls-lu.md, "Re-pivoting").
     pub fn factor(
         self: *Self,
         gpa: Allocator,
@@ -538,7 +538,7 @@ pub const SparseLu = struct {
         try self.buildTape(gpa, col_ptr);
 
         // ZP_LU_STATS=1 prints n, nnz and fill per full factor, then the
-        // structural census of docs/solvers/gpu-lu.md E1. The test module
+        // structural census of dev/solvers/gpu-lu.md E1. The test module
         // builds without libc, hence the guard.
         if (comptime @import("builtin").link_libc) if (std.c.getenv("ZP_LU_STATS") != null) {
             std.debug.print("lu-stats: n={d} nnz={d} L={d} U={d} fill={d:.1}x\n", .{
@@ -555,7 +555,7 @@ pub const SparseLu = struct {
         return false;
     }
 
-    /// E1's census (docs/solvers/gpu-lu.md §5) of the factor just built,
+    /// E1's census (dev/solvers/gpu-lu.md §5) of the factor just built,
     /// all O(nnz(L+U)): F, the refactor's multiply-adds (one per U entry
     /// (j, k) and row of L[:,j]); `S_r`, the §4.2 span of the sync-free
     /// column kernel; the level count; the solve spans `S_L`/`S_U` as
@@ -808,7 +808,7 @@ pub const SparseLu = struct {
     /// of length 2). LLVM unrolls the plain loop by 4, a body that never
     /// runs, and every call still pays its guard chain. A gather-modify-
     /// scatter has nothing to widen without AVX-512; a run-vectorized
-    /// variant lost (docs/solvers/refactor-tape-2026-09.md). Pairing is
+    /// variant lost (dev/solvers/refactor-tape-2026-09.md). Pairing is
     /// bitwise the one-at-a-time loop: a column's rows are distinct.
     inline fn scatterAxpy(dst: []f64, idx: []const u32, src: []const f64, p0: u32, p1: u32, f: f64) void {
         var p = p0;
@@ -934,7 +934,7 @@ pub const SparseLu = struct {
     /// Factors with at most this many flops get the flat tape, 12 bytes
     /// per flop, so it stays in L1 between Newton iterates. A larger tape
     /// streams from L2 and loses to the column loop
-    /// (docs/solvers/refactor-tape-2026-09.md).
+    /// (dev/solvers/refactor-tape-2026-09.md).
     const tape_max_flops = 2048;
 
     /// Records the refactor as flat slot operations. Every A entry and
