@@ -86,7 +86,9 @@ fn parseOnePlot(gpa: std.mem.Allocator, blob: []const u8) ?struct { plot: Plot, 
         }
     }
 
-    if (binary_offset == null or nvars == 0 or npoints == 0 or varnames.items.len != nvars) return null;
+    // Zero points is a valid plot: a pole-zero run on a circuit with no
+    // dynamic states finds no poles.
+    if (binary_offset == null or nvars == 0 or varnames.items.len != nvars) return null;
     const boff = binary_offset.?;
 
     const per: usize = if (is_complex) 2 else 1;
@@ -504,6 +506,15 @@ test "the raw parser reads every plot, and still refuses a truncated one" {
     try std.testing.expect(parseRawBlob(a, raw[0 .. raw.len - 1]) == null);
     // A whole first plot does not excuse a truncated second one.
     try std.testing.expect(parseRawBlob(a, raw ++ raw[0 .. raw.len - 1]) == null);
+}
+
+test "a plot with no points parses: a pole-zero run that finds no poles" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const raw = "Plotname: Pole-Zero Analysis\nFlags: complex\nNo. Variables: 2\nNo. Points: 0\nVariables:\n\t0\tindex\tvoltage\n\t1\tpole\tvoltage\nBinary:\n";
+    const plots = parseRawBlob(arena.allocator(), raw).?;
+    try std.testing.expectEqual(@as(usize, 1), plots.len);
+    try std.testing.expectEqual(@as(usize, 0), plots[0].npoints);
 }
 
 test "a complex plot is scored re and im separately, not as a magnitude" {

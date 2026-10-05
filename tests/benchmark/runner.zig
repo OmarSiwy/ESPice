@@ -102,9 +102,12 @@ pub fn main(init: std.process.Init) !void {
             const job: common.Job = if (i < nv) blk: {
                 const v = cfg.variants[i];
                 const raw = try std.fmt.allocPrint(fa, "{s}/{s}.raw", .{ absolute, label });
+                // The oracle's dialect, as the correctness runner passes it:
+                // an HSPICE deck read as ngspice fails before it runs.
+                const tokenizer: []const []const u8 = if (try tokenizerOf(fa, io, source)) |t| &.{ "--tokenizer", t } else &.{};
                 const argv = try std.mem.concat(fa, []const u8, &.{
-                    if (v.env.len > 0) &.{"env"} else &.{}, v.env,                                            &.{cfg.espice},
-                    v.flags,                                &.{ "--format=binary", "-b", "-r", raw, source },
+                    if (v.env.len > 0) &.{"env"} else &.{}, v.env,     &.{cfg.espice},
+                    v.flags,                                tokenizer, &.{ "--format=binary", "-b", "-r", raw, source },
                 });
                 break :blk .{ .argv = argv, .cwd = .{ .path = std.fs.path.dirname(source).? }, .raw = raw };
             } else if (std.mem.eql(u8, cfg.refs[i - nv], "none"))
@@ -147,6 +150,19 @@ pub fn main(init: std.process.Init) !void {
     try w.print("\n{s}", .{notes.written()});
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg.report, .data = report.written() });
     std.debug.print("Report: {s}\nRaw outputs: {s}\n", .{ cfg.report, scratch });
+}
+
+/// The `tokenizer` field of the deck's `.expected.json`, or null when the
+/// deck has no oracle (post-layout decks) or the oracle names none.
+fn tokenizerOf(a: Allocator, io: Io, deck: []const u8) !?[]const u8 {
+    const path = try std.fmt.allocPrint(a, "{s}.expected.json", .{deck[0 .. deck.len - ".sp".len]});
+    const bytes = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    const Oracle = struct { tokenizer: ?[]const u8 = null };
+    const oracle = std.json.parseFromSliceLeaky(Oracle, a, bytes, .{ .ignore_unknown_fields = true }) catch return null;
+    return oracle.tokenizer;
 }
 
 /// Every `*.sp` under `root` whose relative path contains `filter`, sorted.
