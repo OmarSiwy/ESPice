@@ -239,6 +239,12 @@ into the topical page before the branch merges.
 
 ## Git rules
 
+- **Every user-visible change gets a `CHANGELOGS.md` bullet** under
+  `## Unreleased`, in the same commit. Bullets only, one line each, kept
+  light. Every fix cites its GitHub issue as `(#123)`; open the issue first
+  (`gh issue create`) if none exists. A release renames `Unreleased` to the
+  version and date and starts a new empty `Unreleased`.
+
 - **Never `git stash`.** For a baseline, use a worktree:
   `git worktree add ../espice-base <rev>`. With the pinned dependencies a
   worktree builds anywhere; pass `--fork` there too to build it against a

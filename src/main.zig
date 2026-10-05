@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !u8 {
             , .{});
             return 0;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("espice 0.1.0\n", .{});
+            std.debug.print("espice 1.0.0\n", .{});
             return 0;
         } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--batch")) {} else if (std.mem.eql(u8, arg, "--gpu")) {
             backend = .auto;

@@ -1,0 +1,37 @@
+# Changelog
+
+Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
+`(#123)`; open one first if none exists.
+
+## Unreleased
+
+## 1.0.0 (2026-10-05)
+
+- Zig 0.17.0. VerA (by its `v1.0.0` tag), Gompute and stdpp are pinned by git
+  URL and content hash; `zig build --fork=<path>` builds against a local checkout.
+- Licensed Apache-2.0. Models keep their own licences; see
+  `models/LICENSES.md` (`bsim4va` is CC-BY-NC).
+- stdpp pipelines carry the hot elementwise loops again, each with a scalar
+  oracle test.
+- Noise: table generators, `PsdTerm.coeff`, to-ground generators and
+  correlated sources work in every noise analysis (device ABI 24).
+- Verilog-A models see the stepped gmin and source scale during operating-point
+  homotopy (`$simparam`), a documented divergence from ngspice.
+- Verilog-A internal nets publish as `v(<instance>#<net>)` (device ABI 25).
+- `--backend cuda|hip` fails, naming the detected hardware, instead of falling
+  back to the CPU; `auto` still falls back.
+- GPU instance sync merges host and device changes, so a parameter written
+  after a GPU eval survives.
+- C API: argument errors return `ESPICE_INVALID_ARGUMENT`.
+- sky130 PDK decks run as written; PWL sources past 64 points chain instead of
+  truncating; an OSDI card is an error naming the `.hdl` card to use.
+- BSIM4 gets ngspice-style voltage limiting.
+- A transient that ends within 100 ulps of `tstop` finishes, as in ngspice.
+- About 90 hardening fixes across the parser, solvers, analyses, output and
+  device loader (overflows, NaN guards, leaks, crashes on malformed decks),
+  with over 300 new unit tests. Corpus: 797 of 799 decks pass.
+- `zig build bench` passes each deck's dialect and reads empty plots;
+  `test-gpu` skips decks with nothing GPU-eligible. README benchmark charts
+  against ngspice and VACASK.
+- `zig build bench-suites` fetches external SPICE suites at pinned revisions
+  (`tests/suites/`) and benches ESPice against ngspice and VACASK on them.
