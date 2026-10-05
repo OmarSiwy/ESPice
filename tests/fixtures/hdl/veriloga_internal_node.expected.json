@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "A Verilog-A internal net is published as v(<instance>#<net>), the name ngspice gives an OSDI device's internal node.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Two equal resistors in series between in (1 V) and ground: the internal net mid sits at 0.5 V; the source supplies 1 V / 2 kohm = 0.5 mA."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(n1#mid)": {
+            "values": [
+              0.5
+            ],
+            "unit": "V",
+            "rtol": 1e-09,
+            "atol": 1e-12
+          },
+          "i(v1)": {
+            "values": [
+              -0.0005
+            ],
+            "unit": "A",
+            "rtol": 1e-09,
+            "atol": 1e-15
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "237e4dd9517c00306709b2f98dfa25e7d00c8789ff78bc09e1fe2b568ec3e2ba"
+}

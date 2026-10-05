@@ -2783,6 +2783,13 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             .collapse = if (@hasDecl(D, "collapse")) collapseFn else null,
             .proto_create = protoCreate,
             .proto_add = protoAdd,
+            .unknown_names = &unknown_names,
+        };
+
+        const unknown_names: [n_u][]const u8 = blk: {
+            var out: [n_u][]const u8 = undefined;
+            for (&out, @typeInfo(D.U).@"enum".field_names) |*o, f| o.* = f;
+            break :blk out;
         };
 
         fn initBlob(comptime T: type) *const fn ([*]u8) void {

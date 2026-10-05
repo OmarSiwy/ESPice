@@ -537,7 +537,8 @@ pub const GpuPayload = struct {
 // 23: `Hooks.set_homotopy`, VerA's host-written `gmin__`/`source_scale__`.
 // 24: `NoiseSource.coeff` (no longer folded into white/flicker), `.group`
 //    (correlated rows contiguous) and `.table`.
-pub const abi_version: u32 = 24;
+// 25: `DeviceVtable.unknown_names`.
+pub const abi_version: u32 = 25;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -570,6 +571,10 @@ pub const DeviceVtable = struct {
     /// Stages one instance into a `proto_create` store, copying both blobs;
     /// `nodes` holds `n_u` global unknowns.
     proto_add: *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, model: [*]const u8, instance: [*]const u8, nodes: [*]const u32) DeviceResult(void),
+    /// Name of each unknown in `[0, n_u)`, VerA's `U`: the ports, the
+    /// internal nets, then the branch flows (`flowZ28...`, mangled `flow(`).
+    /// Empty when the device does not say.
+    unknown_names: []const []const u8 = &.{},
 };
 
 /// Hash of every type that crosses the object boundary, the compiler
