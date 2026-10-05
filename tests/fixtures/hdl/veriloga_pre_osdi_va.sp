@@ -1,4 +1,4 @@
-* pre_osdi of an .osdi with a .va beside it loads that .va: va_rh divider -> v(out) = 1/3
+* pre_osdi is an error: espice never loads OSDI, even with a .va beside the .osdi
 * Expected results: veriloga_pre_osdi_va.expected.json
 .control
 pre_osdi veriloga_hdl_errors.assets/va_rh.osdi

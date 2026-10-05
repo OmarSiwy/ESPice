@@ -75,7 +75,7 @@ the ngspice-45 source (`src/spicelib/analysis/*.c`) and covers analyses only.
 | | VACASK | ESPice |
 |---|---|---|
 | Model mechanism | OSDI shared objects from OpenVAF; `load "x.va"` compiles on demand (`docs/cir-loading.md`) | VerA compiles `models/*.va` at build time into host and GPU code; `.hdl` loads `.va` at run time through VerA into a cached `.so` (`src/device/loader.zig`) |
-| OSDI loading | yes, the only path | no. `.osdi_include` parses and is then dropped (`src/frontend/prepare.zig:68-77`) |
+| OSDI loading | yes, the only path | no, by design: `.osdi_include`/`pre_osdi` is an `OsdiUnsupported` error; Verilog-A loads as source (`.hdl`) |
 | Builtin devices | sources, controlled sources, mutual inductance, expression-defined behavioral sources compiled to Verilog-A (`docs/dev-builtin*.md`) | R C L K V I E G F H S W, B as an expression tape (up to 8 probed nets, no `i()` probes, no `time`) (`models/bsource.va`), Verilog-A lossy lines O/Y/P, URC |
 | Compact models shipped | BSIM3v3, BSIM4.8, BSIM-BULK 106.2, PSP 103.4, VBIC 1.3 (3, 4 and 5 terminals), plus VADistiller conversions of the SPICE diode, BJT, JFET 1/2, MESFET, MOS 1/2/3/6/9, VDMOS (`docs/dev-3rdparty.md`, `docs/dev-spice.md`) | 41 `.va` models: the same SPICE set plus BSIM1/2, B3SOI FD/DD, BSIM-SOI, HiSIM2, HiSIM-HV, HICUM L2, HFET1/2, MESA, JFET2, lossy and coupled lines (`models/`) |
 | Transmission lines | ideal line only (`devices/tline_ideal.va`) | LTRA, TXL, CPL (native), T, URC |
