@@ -214,7 +214,7 @@ into the topical page before the branch merges.
 - `zig build && zig build test` after every step. `zig build test` runs the
   unit suites and then the numeric corpus. Baseline (CPU build, after the
   NoiseSource change, device ABI 24): 703 unit tests pass; the corpus scores
-  793 passed, 2 xfail of 795. The xfails are the two VBIC model-version
+  797 passed, 2 xfail of 799 (BSIM4 limiting, 2026-10-05). The xfails are the two VBIC model-version
   decks. Known corpus misses are decks marked `* KNOWN GAP:`, which the harness
   reports as XFAIL; the step exits nonzero on any FAIL or XPASS, so a green
   exit code is the gate. No deck on the pass list may start failing. All
