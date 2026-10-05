@@ -379,8 +379,12 @@ linearly. A signal with no `name=` is named after its variable (`v(a)` is
 with V or I. A PWL source of `v(a,b)` defaults to terminals a and b (b = 0
 for `v(a)`); others need NODE1=. Not read: the AC, DC and VEC forms,
 `.option numdgt` and INGOLD (values print in full precision), and sweep
-numbers past `_tr0`. ESPice's PWL sources hold 64 points, so a file read
-back by a later ESPice run needs NPOINTS or INDEPVAR at or under 64.
+numbers past `_tr0`. A PWL source's table holds 64 points; a longer PWL
+(on any V or I card) continues in sources of its later segments, each
+starting on the last point of the one before and holding the change from
+there, in series with a V card and in parallel with an I card
+(`builder.zig` `pwlTail`, fixture `tran/pwl_long`). `r=` repeat is refused
+past 64 points, as are sensed and port sources.
 Test: `src/tests/espice.zig` (".stim writes PWL sources and a .data
 table"); unconfirmed against HSPICE.
 
