@@ -200,6 +200,7 @@ pub fn buildRun(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_
     b.reltol = deck_opts.tol.reltol;
     b.abstol = deck_opts.tol.abstol;
     b.vntol = deck_opts.tol.vntol;
+    b.gmin = deck_opts.tol.gmin;
     try b.reserveNodes(nl.graph.vertexCount());
 
     var nb = try builder.NetBuilder.init(parse_arena, &b, nl.*);
