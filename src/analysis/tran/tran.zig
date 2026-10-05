@@ -335,7 +335,7 @@ pub fn simulate(
     var bp_save_dt: f64 = options.t_stop / 50.0;
     var attempted_dt = dt;
 
-    while (t < options.t_stop and steps < options.max_steps) {
+    while (t < options.t_stop and !atStop(t, options.t_stop) and steps < options.max_steps) {
         if (st.attempts != 0) try ckt.checkpoint(.{
             .phase = .transient,
             .completed = st.attempts,
@@ -634,7 +634,25 @@ pub fn simulate(
     }
 
     if (cur.ptr != x.ptr) simdCopy(x, cur);
-    return .{ .completed = t >= options.t_stop, .steps = steps, .t_final = t };
+    return .{ .completed = t >= options.t_stop or atStop(t, options.t_stop), .steps = steps, .t_final = t };
+}
+
+/// ngspice's end test (dctran.c:503, AlmostEqualUlps(t, tfinal, 100)): a
+/// step that lands within 100 ulps of t_stop ends the run. Without it a
+/// breakpoint sum that rounds one ulp short of t_stop leaves a 1e-23 s step
+/// that fails as TimestepTooSmall.
+fn atStop(t: f64, t_stop: f64) bool {
+    if (t == t_stop) return true;
+    if ((t < 0) != (t_stop < 0)) return false;
+    const a: i64 = @bitCast(t);
+    const b: i64 = @bitCast(t_stop);
+    return @abs(a - b) <= 100;
+}
+
+test "atStop: within 100 ulps of t_stop, not past them" {
+    const t_stop = 2.5e-7;
+    try std.testing.expect(atStop(std.math.nextAfter(f64, t_stop, 0), t_stop));
+    try std.testing.expect(!atStop(t_stop * (1 - 1e-12), t_stop));
 }
 
 /// Contract entry: integrate from the operating point and return the
