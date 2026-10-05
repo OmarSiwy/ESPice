@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "$simparam gmin/sourceScaleFactor read .options gmin and 1 after the gmin-stepping rung",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "G = gmin*1e6 + sourceScaleFactor = 1 + 1 = 2 S in series with 1 ohm from 1.2 V: v(out) = 1.2/3 = 0.4 V, i(vin) = -0.8 A. The va_expd branch is independent and only forces the stepping rungs."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.4
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "i(vin)": {
+            "values": [
+              -0.8
+            ],
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "a0d5f3a1f2af7c42f2bdc0720be6383cf768a914d8513ccbce7af7491ddd88c3"
+}

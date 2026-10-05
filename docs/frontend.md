@@ -142,6 +142,7 @@ measure; the test named beside each one pins it.
 | URC model with `K = 1` | lump sizing divides 0 by 0, so the ladder is NaN resistors | `InvalidParameterValue` | `tests/builder.zig` "cards the builder refuses instead of misbinding" |
 | URC model with `K <= 0` | no meaningful ladder | `InvalidParameterValue` | same branch (`!(k > 0) or k == 1` in `builder.zig addUrc`) |
 | URC card without `l=` | length 0, so 0-ohm lumps | unit length | none |
+| Verilog-A `$simparam("gmin")` during gmin stepping | the deck gmin (ngspice steps `CKTdiagGmin`) | the stepped gmin; see [operating-point-homotopy.md](analysis/operating-point-homotopy.md) | `hdl/veriloga_simparam_homotopy.sp` |
 | a `.temp` list and a single `.temp` in one deck | no list form (the list is HSPICE's) | the last card wins, list or single value | `analyses.zig` "deckOptions: a NaN RUNLVL fails, and the last .temp card wins" |
 
 For the URC cases, a deck that relied on ngspice's behaviour has to give a

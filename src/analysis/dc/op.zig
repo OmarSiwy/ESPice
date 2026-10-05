@@ -148,12 +148,16 @@ pub fn solveLadder(
         defer gpa.free(stamps);
         coldStart(ckt, x);
         const gtarget = options.tol.gmin;
+        // §9.15 `$simparam("gmin")` reads the rung's gmin, the deck's after.
+        errdefer ckt.setHomotopy(gtarget, 1.0);
         var factor: f64 = 10.0;
         var good_gmin = options.tol.gmin_start; // upper bound to back up toward
         var gmin_val = good_gmin / factor;
         var have_good = false;
         var solves: u32 = 0;
         while (solves < 100) : (solves += 1) {
+            ckt.setHomotopy(gmin_val, 1.0);
+            try ckt.computeBaseline();
             const r = newtonRun(ckt, ws, x, options.tol, hold, gmin_val, stamps, options.tol.itl2, !have_good) catch |e| switch (e) {
                 error.SingularMatrix => failed,
                 else => return e,
@@ -165,6 +169,8 @@ pub fn solveLadder(
                 if (gmin_val <= gtarget) {
                     // ngspice's dynamic_gmin removes diagGmin for the last
                     // solve: the answer must not carry the shunt.
+                    ckt.setHomotopy(gtarget, 1.0);
+                    try ckt.computeBaseline();
                     const clean = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
                         error.QueryCancelled => return err,
                         else => failed,
@@ -198,6 +204,7 @@ pub fn solveLadder(
                 if (have_good) copySimd(x, x_good) else coldStart(ckt, x);
             }
         }
+        ckt.setHomotopy(gtarget, 1.0); // rung 3 rebuilds the baseline
     }
 
     // Rung 3: source stepping through the devices' attempt(lambda), with an
@@ -214,6 +221,7 @@ pub fn solveLadder(
         var solves: u32 = 0;
         while (solves < 100) : (solves += 1) {
             ckt.applyAttempt(lambda);
+            ckt.setHomotopy(options.tol.gmin, lambda);
             ckt.has_baseline = false;
             try ckt.computeBaseline();
             for (scaled, hold) |*s, h| s.value = h.value * lambda;
@@ -221,6 +229,7 @@ pub fn solveLadder(
                 error.SingularMatrix => failed,
                 else => {
                     ckt.restoreModels();
+                    ckt.setHomotopy(options.tol.gmin, 1.0);
                     ckt.has_baseline = false;
                     try ckt.computeBaseline();
                     return e;
@@ -247,6 +256,7 @@ pub fn solveLadder(
         }
     }
     ckt.restoreModels();
+    ckt.setHomotopy(options.tol.gmin, 1.0);
     ckt.has_baseline = false;
     try ckt.computeBaseline();
 
