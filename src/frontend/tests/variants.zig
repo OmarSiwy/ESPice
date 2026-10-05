@@ -249,7 +249,7 @@ test "points a B source reads rebuild as runs of their own, at their own values"
     try t.expectEqualStrings("g=3", stepped.runs[1].deck.variants.labels[0]);
     try t.expectEqualSlices(f64, &.{ 2e3, 3e3 }, try rebuilt(pa.allocator(), stepped, "r"));
     // The netlist holds its nominal values again.
-    try t.expectEqual(@as(f64, 1e3), step.live.slots[0].num);
+    try t.expectEqual(@as(f64, 1e3), step.slot(0).num);
     try t.expectEqual(@as(f64, 1), step.consts[step.live.pool_rows[0]]);
 
     // No point is nominal, so every one rebuilds and the main run keeps no

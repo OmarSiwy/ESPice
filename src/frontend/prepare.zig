@@ -26,7 +26,7 @@ pub const Prepared = struct {
     runs: []Prepared = &.{},
     /// The deck's HSPICE optimization, when it has one. It borrows the
     /// parse arena, which must then outlive the Prepared.
-    tuner: ?*variants.Tuner = null,
+    tuner: ?variants.Tuner = null,
     /// The live `.param` values a caller sets on the prepared circuit
     /// (`prepare`'s `live`); null without any. It borrows the parse arena,
     /// which must then outlive the Prepared.
@@ -259,7 +259,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
         a.neg = nb.frozenRow(a.neg);
         for (&a.ports) |*p| p.* = nb.frozenRow(p.*);
     }
-    var tuner: ?*variants.Tuner = null;
+    var tuner: ?variants.Tuner = null;
     // Variation groups for the mismatch and sensitivity cards: the deck's
     // `.variation` block, else the distribution calls in its models and
     // parameters (a PDK's mismatch), else `dcmatch`'s Pelgrom-or-unit
@@ -297,8 +297,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
         var planner = try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, run.prefix);
         const planned = try variants.plan(&planner);
         if (nl.deck.optimize != null) {
-            tuner = try parse_arena.create(variants.Tuner);
-            tuner.?.* = try .init(planner);
+            tuner = try variants.Tuner.init(planner);
         }
         break :blk planned;
     } else .{};

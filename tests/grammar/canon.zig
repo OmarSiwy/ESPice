@@ -100,8 +100,8 @@ pub fn value(w: *Writer, v: Value) Writer.Error!void {
         .name => |s| try w.writeAll(s),
         .expr => try w.writeAll("<expr>"),
         .group => |g| {
-            try w.print("{s}(", .{g.name});
-            for (g.args, 0..) |a, i| {
+            try w.print("{s}(", .{g.name()});
+            for (g.args(), 0..) |a, i| {
                 if (i > 0) try w.writeByte(' ');
                 try value(w, a);
             }

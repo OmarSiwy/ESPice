@@ -482,6 +482,14 @@ const L = struct {
         return if (neg) -v else v;
     }
 
+    /// `name(args)` as `netlist.Group` holds it: the name, then the args.
+    fn group(l: *L, name: []const u8, args: []const Value) Error!Value {
+        const items = try l.arena.alloc(Value, args.len + 1);
+        items[0] = .{ .name = name };
+        @memcpy(items[1..], args);
+        return .{ .group = .{ .items = items } };
+    }
+
     /// A positional field as the frontend reads it (`valueAt`): a number, a
     /// word (substituted when `subst` and a scope defines it), an
     /// expression, or `name(args)`.
@@ -510,14 +518,14 @@ const L = struct {
                 if (vals.items.len == 4) try vals.append(l.arena, .{ .num = -1 });
                 std.mem.swap(Value, &vals.items[2], &vals.items[4]);
             }
-            return .{ .group = .{ .name = name, .args = vals.items } };
+            return l.group(name, vals.items);
         }
         if (k == l.r.pair) return error.Refused;
         if (k == l.vec) {
             var vals: std.ArrayList(Value) = .empty;
             var it = l.t.children(row);
             while (it.next()) |a| try vals.append(l.arena, try l.field(a, frame, subst));
-            return .{ .group = .{ .name = "", .args = vals.items } };
+            return l.group("", vals.items);
         }
         // An unbraced expression where a field stands (a pair's value only).
         if (k == l.r.ternary) return l.exprValue(row, frame);
@@ -1097,8 +1105,8 @@ const L = struct {
         // A P card's `hblin=[h, s]` band is the keys `hblin_h=h hblin_s=s`
         // the builder reads.
         if (l.dialect == .hspice and letter == 'p') for (kvs.items, 0..) |kv, i| {
-            if (!std.mem.eql(u8, kv.key, "hblin") or kv.value != .group or kv.value.group.args.len != 2) continue;
-            const v = kv.value.group.args;
+            if (!std.mem.eql(u8, kv.key, "hblin") or kv.value != .group or kv.value.group.args().len != 2) continue;
+            const v = kv.value.group.args();
             kvs.items[i] = .{ .key = "hblin_h", .value = v[0] };
             try kvs.insert(l.arena, i + 1, .{ .key = "hblin_s", .value = v[1] });
             break;
@@ -1264,7 +1272,7 @@ fn nodeCards(l: *L) Error!void {
             var i: usize = 0;
             while (i + 1 < a.len) : (i += 2) {
                 const name: []const u8 = switch (a[i]) {
-                    .group => |g| if (std.mem.eql(u8, g.name, "v") and g.args.len > 0 and g.args[0] == .name) g.args[0].name else continue,
+                    .group => |g| if (std.mem.eql(u8, g.name(), "v") and g.args().len > 0 and g.args()[0] == .name) g.args()[0].name else continue,
                     .name => |n| n,
                     else => continue,
                 };

@@ -132,7 +132,7 @@ pub const Problem = struct {
 
     /// Holds the netlist an HSPICE optimization re-evaluates
     /// (`prepared.tuner`); null for a deck without one.
-    parse_arena: ?*std.heap.ArenaAllocator = null,
+    parse_arena: ?std.heap.ArenaAllocator = null,
     /// The finished optimizations, once `optimize` has run, one per
     /// `Tuner.bases` entry: Levenberg-Marquardt fits or bisections, as the
     /// `.model OPT` says.
@@ -170,18 +170,18 @@ pub const Problem = struct {
             .file => |path| path,
             .bytes => |bytes| bytes.origin,
         });
-        self.parse_arena = null;
         self.optimization = &.{};
         self.bisection = &.{};
         self.degradation = null;
         // An optimization keeps the parse arena: its tuner re-evaluates the netlist.
-        const parse_arena = try allocator.create(std.heap.ArenaAllocator);
-        parse_arena.* = .init(allocator);
-        defer if (self.parse_arena == null) {
-            parse_arena.deinit();
-            allocator.destroy(parse_arena);
+        // `self` is heap-allocated, so the arena keeps its address.
+        self.parse_arena = .init(allocator);
+        var keep_parse = false;
+        defer if (!keep_parse) {
+            self.parse_arena.?.deinit();
+            self.parse_arena = null;
         };
-        const scratch = parse_arena.allocator();
+        const scratch = self.parse_arena.?.allocator();
         self.library = try frontend.Library.init(allocator);
         errdefer self.library.deinit();
         self.library.toolchain = try toolchainFromEnv(a, options.hdl_toolchain);
@@ -239,7 +239,7 @@ pub const Problem = struct {
             _ = try run.session.append(prep.deck.queries, try scratch.alloc(QueryId, prep.deck.queries.len));
         }
         timingLap(io, &lap, "query graph and output setup");
-        if (self.prepared.tuner != null or self.prepared.tuning != null) self.parse_arena = parse_arena;
+        keep_parse = self.prepared.tuner != null or self.prepared.tuning != null;
         return self;
     }
 
@@ -252,10 +252,7 @@ pub const Problem = struct {
         self.delivery.deinit();
         self.prepared.deinit();
         self.library.deinit();
-        if (self.parse_arena) |arena| {
-            arena.deinit();
-            a.destroy(arena);
-        }
+        if (self.parse_arena) |*arena| arena.deinit();
         self.arena.deinit();
         a.destroy(self);
     }
@@ -617,8 +614,8 @@ pub const Problem = struct {
     /// that cannot be measured are reported on `err`.
     pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
-        for (self.optimization, 0..) |*lm, k| try printOptimization(out, lm, self.prepared.tuner.?, k, measures);
-        for (self.bisection, 0..) |*b, k| try printBisection(out, b, self.prepared.tuner.?, k, measures);
+        for (self.optimization, 0..) |*lm, k| try printOptimization(out, lm, &self.prepared.tuner.?, k, measures);
+        for (self.bisection, 0..) |*b, k| try printBisection(out, b, &self.prepared.tuner.?, k, measures);
         if (measures.len == 0) return;
         try printSessionMeasures(&self.session, out, err, measures);
         for (self.runs) |*run| try printSessionMeasures(&run.session, out, err, measures);
@@ -670,7 +667,7 @@ pub const Problem = struct {
     /// time. Each optimum's writes then fill the rows its optimized card
     /// and every later card run.
     fn optimize(self: *Problem) !void {
-        const t = self.prepared.tuner orelse return;
+        const t = if (self.prepared.tuner) |*tuner| tuner else return;
         if (self.optimization.len != 0 or self.bisection.len != 0) return;
         const a = self.arena.allocator();
         const deck = &self.prepared.deck;

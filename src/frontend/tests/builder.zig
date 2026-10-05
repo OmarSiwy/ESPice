@@ -25,12 +25,16 @@ fn card(name: []const u8, positional: []const Value) netlist.Netlist.View {
 // default stops being -1, an unspecified PULSE becomes a 2 ns square wave).
 
 test "V card: PWL table lands in the flattened Model slots" {
-    const args = [_]Value{
-        .{ .num = 0.0 },   .{ .num = 0.0 },
-        .{ .num = 10e-3 }, .{ .num = 5.0 },
-        .{ .num = 20e-3 }, .{ .num = 0.0 },
+    const items = [_]Value{
+        .{ .name = "PWL" },
+        .{ .num = 0.0 },
+        .{ .num = 0.0 },
+        .{ .num = 10e-3 },
+        .{ .num = 5.0 },
+        .{ .num = 20e-3 },
+        .{ .num = 0.0 },
     };
-    const positional = [_]Value{.{ .group = .{ .name = "PWL", .args = &args } }};
+    const positional = [_]Value{.{ .group = .{ .items = &items } }};
     const dev = card("Vc", &positional);
 
     var model: devices.vsource.Model = .{};
@@ -51,8 +55,8 @@ test "V card: PWL table lands in the flattened Model slots" {
 test "V/I cards: unspecified PULSE edges stay at the -1 sentinel" {
     // PULSE(0 5): no TR/TF/PW/PER. resolvePulseDefaults fills these from the
     // .tran card; until it runs they must still read as "unset".
-    const args = [_]Value{ .{ .num = 0.0 }, .{ .num = 5.0 } };
-    const positional = [_]Value{.{ .group = .{ .name = "PULSE", .args = &args } }};
+    const items = [_]Value{ .{ .name = "PULSE" }, .{ .num = 0.0 }, .{ .num = 5.0 } };
+    const positional = [_]Value{.{ .group = .{ .items = &items } }};
     const dev = card("V1", &positional);
 
     inline for (.{ devices.vsource, devices.isource }) |D| {
@@ -385,7 +389,7 @@ test "source cards: DC, AC, DISTOF and waveform keywords read as ngspice reads t
     // past the AC/DISTOF magnitude and phase.
     try std.testing.expectEqual(@as(?f64, 2), ta.sourceDc(cardWith("v1", 'v', &.{n.num(9)}, &.{.{ .key = "dc", .value = n.num(2) }})));
     try std.testing.expectEqual(@as(?f64, 7), ta.sourceDc(cardWith("v1", 'v', &.{ n.name("dc"), n.num(7) }, &.{})));
-    try std.testing.expectEqual(@as(?f64, 4), ta.sourceDc(cardWith("v1", 'v', &.{.{ .group = .{ .name = "dc", .args = &.{n.num(4)} } }}, &.{})));
+    try std.testing.expectEqual(@as(?f64, 4), ta.sourceDc(cardWith("v1", 'v', &.{.{ .group = .{ .items = &.{ n.name("dc"), n.num(4) } } }}, &.{})));
     try std.testing.expectEqual(@as(?f64, 3), ta.sourceDc(cardWith("v1", 'v', &.{ n.name("ac"), n.num(1), n.num(0), n.num(3) }, &.{})));
     try std.testing.expectEqual(@as(?f64, null), ta.sourceDc(cardWith("v1", 'v', &.{ n.name("distof1"), n.num(1), n.num(0) }, &.{})));
     try std.testing.expectEqual(@as(?f64, null), ta.sourceDc(cardWith("v1", 'v', &.{}, &.{})));
@@ -401,7 +405,7 @@ test "source cards: DC, AC, DISTOF and waveform keywords read as ngspice reads t
     const then_sin = ta.sourceAc(cardWith("v1", 'v', &.{ n.name("ac"), n.num(3), n.name("sin"), n.num(0), n.num(1) }, &.{})).?;
     try std.testing.expectEqual(@as(f64, 3), then_sin.re);
     try std.testing.expectEqual(@as(f64, 0), then_sin.im);
-    const grouped = ta.sourceAc(cardWith("v1", 'v', &.{.{ .group = .{ .name = "ac", .args = &.{n.num(5)} } }}, &.{})).?;
+    const grouped = ta.sourceAc(cardWith("v1", 'v', &.{.{ .group = .{ .items = &.{ n.name("ac"), n.num(5) } } }}, &.{})).?;
     try std.testing.expectEqual(@as(f64, 5), grouped.re);
     try std.testing.expect(ta.sourceAc(cardWith("v1", 'v', &.{n.num(1)}, &.{})) == null);
 
