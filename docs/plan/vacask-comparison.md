@@ -9,7 +9,7 @@ ESPice has that VACASK does not.
 
 Scope and sources:
 
-- ESPice: `main` at `31d202c`. Code paths are relative to the repository
+- ESPice: `main` at `21641a2`. Code paths are relative to the repository
   root.
 - VACASK: source at `4942182` (2026-09-28), cloned from
   <https://codeberg.org/arpadbuermen/VACASK>. Paths such as
