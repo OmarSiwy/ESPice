@@ -34,7 +34,10 @@
         # falls back to musl — but emits a *dynamically linked* musl binary, whose loader
         # `/lib/ld-musl-x86_64.so.1` exists on no NixOS machine. The build went green and
         # produced something that could not execute at all. Naming the target explicitly
-        # gets a statically linked musl binary on Linux, which runs anywhere.
+        # fixes that. It is glibc, not static musl: a deck's `.hdl` model is compiled
+        # to a shared library at run time and dlopen'd, which a static musl binary
+        # cannot do (it segfaulted). Zig links against its own glibc stubs, and
+        # autoPatchelfHook points the result at nixpkgs' loader.
         #
         # Naming it is also what forces `-Dgpu=false` below: with an explicit `-Dtarget`
         # the host `-mcpu` leaks into gompute's GPU kernel compilation and the amdgcn
@@ -43,8 +46,8 @@
         # develop` still carries the full CUDA/ROCm toolchain for kernel work.
         zigTarget =
           {
-            x86_64-linux = "x86_64-linux-musl";
-            aarch64-linux = "aarch64-linux-musl";
+            x86_64-linux = "x86_64-linux-gnu";
+            aarch64-linux = "aarch64-linux-gnu";
             x86_64-darwin = "x86_64-macos";
             aarch64-darwin = "aarch64-macos";
           }
@@ -72,16 +75,19 @@
           dontConfigure = true;
           dontInstall = true;
 
+          # Zig 0.17's `zig build` has no --global-cache-dir; the environment
+          # names it, and HOME must not be the sandbox's unwritable /homeless-shelter.
           buildPhase = ''
             runHook preBuild
-            zig build --fetch=all --global-cache-dir "$TMPDIR/zgc"
+            export HOME="$TMPDIR" ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zgc"
+            zig build --fetch=all
             cp -r "$TMPDIR/zgc/p" "$out"
             runHook postBuild
           '';
 
           outputHashMode = "recursive";
           outputHashAlgo = "sha256";
-          outputHash = "sha256-2z1qOSBAUmFLxMr2OIREoCH/KH/sYQxvWgSFi2Y+DZ8=";
+          outputHash = "sha256-50+Cy2UhgcPeCmAZkNHi4uSb9XCW62WyjU6ICQvF9b0=";
         };
 
         # GPU SUPPORT
@@ -154,7 +160,9 @@
 
           nativeBuildInputs = [
             zig
-          ];
+            pkgs.makeWrapper
+          ]
+          ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.autoPatchelfHook;
 
           dontConfigure = true;
 
@@ -174,8 +182,9 @@
               -Doptimize=ReleaseFast \
               -Dtarget=${zigTarget} \
               -Dgpu=false \
-              --cache-dir .zig-cache \
-              --global-cache-dir "$TMPDIR/zig-global-cache"
+              -Dhip-arch=none \
+              -Dcuda-arch=none \
+              --cache-dir .zig-cache
 
             runHook postBuild
           '';
@@ -187,9 +196,15 @@
               -Doptimize=ReleaseFast \
               -Dtarget=${zigTarget} \
               -Dgpu=false \
+              -Dhip-arch=none \
+              -Dcuda-arch=none \
               --prefix "$out" \
-              --cache-dir .zig-cache \
-              --global-cache-dir "$TMPDIR/zig-global-cache"
+              --cache-dir .zig-cache
+
+            # A `.hdl` model is compiled on first load with the Zig espice was
+            # built with; the build cache lives under $ESPICE_CACHE or
+            # ~/.cache/espice, never in the store.
+            wrapProgram $out/bin/espice --set-default ZIG ${zig}/bin/zig
 
             runHook postInstall
           '';
