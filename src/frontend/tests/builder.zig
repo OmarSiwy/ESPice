@@ -680,3 +680,69 @@ test "stdpp max over port numbers matches its pull-path oracle" {
         try std.testing.expectEqual(slow.max(), fast.max());
     };
 }
+
+/// The scans `branch_index` replaced (#177): the first V, else the first L,
+/// else the first `br` row of that name.
+fn scanBranchRow(nb: *const builder.NetBuilder, name: []const u8) ?u32 {
+    if (netlist.nameIndex(nb.v.items(.name), name)) |k| return nb.v.items(.branch)[k];
+    if (netlist.nameIndex(nb.l.items(.name), name)) |k| return nb.l.items(.branch)[k];
+    if (netlist.nameIndex(nb.br.items(.name), name)) |k| return nb.br.items(.row)[k];
+    return null;
+}
+
+fn expectScans(nb: *const builder.NetBuilder, names: []const []const u8) !void {
+    for (names) |name| {
+        try std.testing.expectEqual(scanBranchRow(nb, name), ta.branchRow(nb, name));
+        const v = netlist.nameIndex(nb.v.items(.name), name);
+        try std.testing.expectEqual(if (v) |k| @as(?u32, @intCast(k)) else null, ta.vRow(nb, name));
+        try std.testing.expectEqual(netlist.nameIndex(nb.l.items(.name), name), ta.lRow(nb, name));
+    }
+}
+
+test "the branch-name index answers as the first-match scans did, duplicates included" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Doubled V, L and E names; B1 reads one of each, B2 reads B1's own
+    // branch, which lands in `br` while the deferred cards resolve; K1 and
+    // F1 resolve through the same index.
+    const nl = try netlist.parse(a,
+        \\* duplicate branch names
+        \\v1 a 0 1
+        \\v1 b 0 2
+        \\l1 a c 1u
+        \\l1 b d 2u
+        \\l2 x 0 3u
+        \\e1 e 0 a 0 2
+        \\e1 f 0 b 0 3
+        \\r1 c 0 1
+        \\r2 d 0 1
+        \\r3 e 0 1
+        \\r4 f 0 1
+        \\r5 g 0 1
+        \\r6 h 0 1
+        \\r7 x 0 1
+        \\r8 o 0 1
+        \\k1 l1 l2 0.5
+        \\f1 o 0 v1 2
+        \\b1 g 0 v=i(v1)+i(l1)+i(e1)
+        \\b2 h 0 v=i(b1)
+        \\.end
+        \\
+    , .ngspice);
+    const lib = try device.Library.init(a);
+    var b = try Builder.init(a, &lib);
+    defer b.deinit();
+    var nb = try builder.NetBuilder.init(a, &b, nl);
+    try nb.build();
+    const names = [_][]const u8{ "v1", "l1", "l2", "e1", "b1", "b2", "r1", "k1", "f1", "nope", "" };
+    try expectScans(&nb, &names);
+    try std.testing.expectEqual(nb.v.items(.branch)[0], ta.branchRow(&nb, "v1").?);
+    try std.testing.expectEqual(nb.l.items(.branch)[0], ta.branchRow(&nb, "l1").?);
+    // A V and an L of one name (Spectre names carry no letter): the V wins
+    // the branch, and the L is still found for a K card.
+    try nb.l.append(nb.arena, .{ .name = "v1", .branch = 12345, .value = 1e-6 });
+    try ta.indexBranchNames(&nb);
+    try expectScans(&nb, &names);
+    try std.testing.expectEqual(nb.l.len - 1, ta.lRow(&nb, "v1").?);
+}
