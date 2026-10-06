@@ -469,6 +469,41 @@ const DividerTests = struct {
         try t.expectApproxEqRel(@as(f64, 750), i.output_resistance, 1e-9);
     }
 
+    test "tf: a source that moves no current reads 1e20 ohm, as ngspice does" {
+        // ngspice-45 on the divider plus an open `V2 c 0 1`: `tf i(V2) V2`
+        // prints 0, 1e20, 1e20, and `tf v(out) V2` 0, 1e20, 750.
+        var lib = try Library.init(gpa);
+        defer lib.deinit();
+        var b = try Builder.init(gpa, &lib);
+        const n_in = try b.addNode();
+        const n_out = try b.addNode();
+        const n_c = try b.addNode();
+        try b.addDevice(models.vsource, "", .{ .dc = 10 }, .{}, .{ n_in, GROUND });
+        try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ n_in, n_out });
+        try b.addDevice(models.resistor, "", .{ .r = 3000 }, .{}, .{ n_out, GROUND });
+        try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ n_c, GROUND });
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
+        defer ckt.deinit();
+        const x = try gpa.alloc(f64, ckt.n);
+        defer gpa.free(x);
+        try t.expect((try op.solve(&ckt, x, .{}, &.{}, &.{})).converged);
+        // V2's branch: the one branch row that carries no current.
+        const br2: u32 = for (ckt.current_row, x, 0..) |is_branch, current, row| {
+            if (is_branch and current == 0) break @intCast(row);
+        } else return error.TestUnexpectedResult;
+
+        const i = try tf.solve(&ckt, x, .{ .output_node = n_out, .output_branch = br2 }, br2, n_out, GROUND, gpa);
+        try t.expectEqual(@as(f64, 0), i.gain);
+        try t.expectEqual(@as(f64, 1e20), i.input_resistance);
+        try t.expectEqual(@as(f64, 1e20), i.output_resistance);
+        const v = try tf.solve(&ckt, x, .{ .output_node = n_out }, br2, n_out, GROUND, gpa);
+        try t.expectEqual(@as(f64, 0), v.gain);
+        try t.expectEqual(@as(f64, 1e20), v.input_resistance);
+        try t.expectApproxEqRel(@as(f64, 750), v.output_resistance, 1e-9);
+    }
+
     test "dcxf: forward and adjoint transfers agree; dcinc follows the AC drive" {
         var lib = try Library.init(gpa);
         defer lib.deinit();

@@ -1,11 +1,12 @@
 //! DC transfer function (`.tf`): one dense LU of the linearized G, then a
 //! forward solve for the gain and input resistance and a transpose solve on
 //! the same factors for the output resistance.
-//! Cites ngspice tfanal.c and dev/analysis/tf.md (where Rout departs from
-//! ngspice's 1e20 clamp).
+//! Cites ngspice tfanal.c and dev/analysis/tf.md (where a current output's
+//! Rout departs from ngspice's 1e20 clamp).
 const std = @import("std");
 const root = @import("../types.zig");
 const dense_lu = @import("solver").dense_lu;
+const infinite = @import("xf.zig").infinite;
 
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Tf;
@@ -20,8 +21,8 @@ pub const Values = struct {
 
 /// DC transfer function at the operating point `x_op`. The gain and Rin come
 /// from a unit drive on the input, Rout from the adjoint solve with e_out.
-/// Rin, and Rout for a current output, are +inf when the unit drive moves no
-/// branch current. Overwrites the circuit's planes with the eval at `x_op`.
+/// Rin, and Rout for a current output, are `xf.infinite` (1e20, ngspice's
+/// tfanal.c value) when the unit drive moves no branch current. Overwrites the circuit's planes with the eval at `x_op`.
 /// Returns error.Singular when G is singular once `dense_lu.pinVoid` has
 /// pinned its all-zero rows (#160).
 pub fn solve(
@@ -69,7 +70,7 @@ pub fn solve(
         // Branch stamps F_p = +i_br, so the current delivered into the
         // circuit is -i_br and Rin = dV_source / dI_delivered = 1 / (-di_br).
         const di = x[input_branch];
-        break :blk if (di != 0) -1.0 / di else std.math.inf(f64);
+        break :blk if (di != 0) -1.0 / di else infinite;
     };
 
     // Adjoint: J^T y = e_out, and Rout is y read back on the output.
@@ -86,7 +87,7 @@ pub fn solve(
     // delivered is -y[br]. ngspice's tfanal.c takes 1/MAX(1e-20, y[br]),
     // which is 1e20 for every passive circuit (dev/analysis/tf.md).
     const output_resistance = if (options.output_branch) |br|
-        (if (x[br] != 0) -1.0 / x[br] else std.math.inf(f64))
+        (if (x[br] != 0) -1.0 / x[br] else infinite)
     else
         outputOf(x, options, output_node, output_neg);
     return .{

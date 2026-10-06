@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.tf` prints an infinite input or output resistance (a source that moves no current) as `1e20`, as ngspice does, instead of `inf` (#193).
 - `.qpss` runs on multi-tone harmonic balance (`.hb TONES=`): preconditioned GMRES from the operating point instead of a second two-tone solver; the API `Qpss` drops its unused `gmres_*` fields (#189).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
