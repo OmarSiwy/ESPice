@@ -8,6 +8,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - An operating point whose Newton ran away (node voltages near 1e24 V) is
   refused instead of being published with exit 0; the ladder falls through to
   gmin stepping (#3).
+- `zig build wasm`: espice.wasm (CPU, single-threaded, built-in models) and
+  cktimg.wasm for the docs playground; `docs/playground.md` runs every spice block.
 - `.hdl` parameters named with `__`, a leading or trailing `_`, or a capital
   `Z` bind from the instance card instead of failing as unknown (#2).
 - `bench-suites -Dsuite=cmcqa`: 3,218 single-device decks from the public CMC QA

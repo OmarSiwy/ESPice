@@ -1,0 +1,16 @@
+// The docs playground's schematic half, a separate build root so ESPice's
+// own builds and its package never fetch cktImg. ESPice's `zig build wasm`
+// runs this build.
+.{
+    .name = .espice_playground,
+    .version = "1.0.0",
+    .fingerprint = 0x4bc183452cdd47d8,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .cktimg = .{
+            .url = "git+https://github.com/OmarSiwy/cktImg#298fee13cd0d307226bf69efa76017c6524f2083",
+            .hash = "NetlistParser-0.0.0-g79GuBwpCwC4z5TebWBcFMG4lhrr3M3U_eJ5ix4vFw62",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "cktimg.zig" },
+}
