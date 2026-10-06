@@ -697,6 +697,43 @@ const ConvergerTests = struct {
         }
     }
 
+    /// One unknown that Newton has run away with, as a FET fed from a current
+    /// source at 0 V left it (#3): |x| = 5e24 V, a residual stuck at 3.3e39 A,
+    /// a 3.5e23 S diagonal. Each step moves x by about 1e16 V, which the
+    /// relative delta test calls tiny.
+    const RunawaySystem = struct {
+        n: u32 = 1,
+        nnz: u32 = 1,
+        diag_slots: [1]u32 = .{0},
+        current_row: []const bool = &.{false},
+        rhs: []f64,
+        g_vals: [1]f64 = .{3.5e23},
+
+        const Hook = struct {
+            pub fn assemble(_: @This(), sys: *RunawaySystem, _: []const f64, _: f64) void {
+                sys.rhs[0] = 3.3e39;
+                sys.g_vals[0] = 3.5e23;
+            }
+            pub fn vals(_: @This(), sys: *RunawaySystem) []f64 {
+                return &sys.g_vals;
+            }
+            pub fn diagAt(_: @This(), sys: *RunawaySystem, slot: u32) f64 {
+                return sys.g_vals[slot];
+            }
+        };
+    };
+
+    test "a runaway iterate with a huge residual never converges (#3)" {
+        const a = std.testing.allocator;
+        var rhs = [_]f64{0};
+        var sys: RunawaySystem = .{ .rhs = &rhs };
+        var ws = try Workspace.init(a, 1, &.{ 0, 1 }, &.{0}, null);
+        defer ws.deinit(a);
+        var x = [_]f64{5e24};
+        const r = try newton(&sys, &ws, &x, 0, .{ .gmin = 0, .max_iter = 6 }, RunawaySystem.Hook{});
+        try testing.expect(!r.converged);
+    }
+
     test "optionsFromTolerances: an iteration cap below 100 is raised to 100, as ngspice's NIiter does" {
         const tol: impl.Tolerances = .{ .itl1 = 7, .reltol = 1e-4 };
         try testing.expectEqual(@as(u16, 100), impl.optionsFromTolerances(tol, null).max_iter);

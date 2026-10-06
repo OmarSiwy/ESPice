@@ -81,11 +81,11 @@ fn envFlag(cache: *std.atomic.Value(u8), name: [*:0]const u8) bool {
 
 /// Which gate refused an iterate, for the `ZP_OPDBG` trace. ngspice's
 /// NIconvTest (maths/ni/niconv.c) has only the delta test, the first-iterate
-/// floor and the device limiting flag; `.residual` is ours. Disabling it on
+/// floor and the device limiting flag; `.residual` and `.runaway` are ours. Disabling `.residual` on
 /// vacask/mul changed the Newton count by 0.01%. ngspice's CKTconvTest
 /// device tests are dead in 44.2: they bump CKTnoncon, then NIiter assigns
 /// NIconvTest's return over it, and CKTconvTest returns OK (niiter.c:288).
-const Reject = enum { converged, first_iter, delta, limited, flipped, residual, device };
+const Reject = enum { converged, first_iter, delta, limited, flipped, residual, device, runaway };
 
 fn Deref(comptime P: type) type {
     return if (@typeInfo(P) == .pointer) @typeInfo(P).pointer.child else P;
@@ -274,6 +274,22 @@ fn sysNodeName(sys: anytype, idx: u32) []const u8 {
 
 const Step = struct { converged: bool, scaled: f64, flipped: bool = false, why: Reject = .converged };
 
+/// The largest |x| an accepted iterate may hold. Every acceptance test is
+/// relative: the delta test to |x|, the residual gate to the diagonal
+/// conductance. A Newton that ran away carries both with it (a FET fed from
+/// a current source at 0 V reached 5e24 V with 1e45 S diagonals, and its
+/// 3e39 A residual passed), so a runaway iterate is refused outright (#3).
+/// No physical node voltage or branch current comes near 1e9.
+/// ponytail: a fixed bound, not a per-circuit scale; derive one from the
+/// sources' magnitudes if a deck ever needs unknowns past 1e9.
+const x_plausible = 1e9;
+
+/// Whether every unknown is finite and within `x_plausible`.
+fn plausible(x: []const f64) bool {
+    for (x) |xi| if (!(@abs(xi) <= x_plausible)) return false;
+    return true;
+}
+
 /// Applies `dx` and runs the acceptance gates in order: device limiting,
 /// first iterate, per-row delta, row-scaled residual, the device load test
 /// (`load_ok`, `sys.loadCheck` at the assembled x), device convergence,
@@ -306,6 +322,7 @@ fn finalizeStep(
     if (limited) return .{ .converged = false, .scaled = scaled, .why = .limited };
     if (iter == 0) return .{ .converged = false, .scaled = scaled, .why = .first_iter };
     if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
+    if (!plausible(x[0..n])) return .{ .converged = false, .scaled = scaled, .why = .runaway };
     for (0..n) |i| {
         const scale = @abs(vals[sys.diag_slots[i]]);
         // A zero diagonal is a voltage-defined branch row (V/E/H source):
@@ -610,7 +627,7 @@ fn residualConverged(sys: anytype, hook: anytype, x: []const f64, residual: []co
         const scale = @abs(hook.diagAt(sys, sys.diag_slots[i]));
         const rt = if (scale == 0) inf else @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(xi) + opts.vntol));
         // Negated comparisons reject NaN too.
-        if (!(@abs(ri) <= rt) or !(@abs(xi) < inf)) ok = false;
+        if (!(@abs(ri) <= rt) or !(@abs(xi) <= x_plausible)) ok = false;
     }
     return ok;
 }
