@@ -78,6 +78,7 @@ extra_css:
 
 nav:
   - Home: index.md
+  - Playground: playground.md
   - Learn SPICE:
       - learn/index.md
       - 1. A first circuit: learn/first-circuit.md
