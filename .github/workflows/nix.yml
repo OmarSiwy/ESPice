@@ -2,6 +2,9 @@ name: nix
 
 # Builds the flake's espice and pushes it to the omarsiwy cache, so
 # `nix run github:OmarSiwy/ESPice` is a download, not a Zig compile.
+# ponytail: x86_64-linux only, the one system the flake is verified on; add
+# macos-latest / ubuntu-24.04-arm once their devShells evaluate (CUDA/ROCm
+# and perf are Linux/x86_64 packages, so `nix flake check` fails there today).
 on:
   push:
     branches: [main]
@@ -10,11 +13,7 @@ on:
 
 jobs:
   nix:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +29,7 @@ jobs:
           # Fork PRs cannot read the secret: build, do not push.
           skipPush: ${{ github.event_name == 'pull_request' }}
 
-      # checks = the package build plus a smoke run of a plain and an .hdl deck.
+      # checks = the CPU package plus a smoke run of a plain and an .hdl deck.
       - run: nix flake check --print-build-logs
-      - run: nix build .#espice --print-build-logs
+      - run: nix build .#espice .#espice-cuda --print-build-logs
       - run: nix run . -- --version

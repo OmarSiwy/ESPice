@@ -34,7 +34,7 @@
         {
           inherit (p) espice;
         }
-        // prev.lib.optionalAttrs (p ? espice-gpu) { inherit (p) espice-gpu; };
+        // prev.lib.optionalAttrs (p ? espice-cuda) { inherit (p) espice-cuda; };
     }
     // flake-utils.lib.eachDefaultSystem (
       system:
@@ -67,6 +67,20 @@
           }
           .${system};
 
+        # Only what `zig build` reads (build.zig.zon's `.paths` minus docs), so a
+        # docs or flake edit does not rebuild the package.
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            ./build.zig
+            ./build.zig.zon
+            ./src
+            ./models
+            ./include
+            ./tests
+          ];
+        };
+
         # build.zig.zon pins VerA and Gompute as git+https URLs, which Zig resolves by
         # fetching them partway through `zig build`. A nix sandbox has no network, so
         # that build died with `unable to discover remote git server capabilities:
@@ -83,7 +97,7 @@
         # this hash, and nix will print the new one.
         zigDeps = pkgs.stdenvNoCC.mkDerivation {
           name = "espice-zig-deps";
-          src = ./.;
+          inherit src;
           nativeBuildInputs = [ zig ];
 
           dontConfigure = true;
@@ -165,14 +179,20 @@
           LD_LIBRARY_PATH = gpuLibPath;
         });
 
-        # `gpu = true` adds the CUDA (sm_75 PTX, which the driver JITs forward to
-        # newer cards) and HIP (gfx1100) device kernels, the arches release.yml
-        # ships. Zig emits both itself, so the build needs no CUDA or ROCm
-        # toolkit. At run time gompute dlopens libcuda (NixOS: /run/opengl-driver)
-        # and libamdhip64 (nixpkgs' ROCm clr) from the wrapped LD_LIBRARY_PATH.
+        # `cuda = true` adds the CUDA device kernels as sm_75 PTX, which the driver
+        # JITs forward to newer cards (release.yml's arch). Zig emits the PTX
+        # itself, so the build needs no CUDA toolkit; at run time gompute dlopens
+        # libcuda, trying /run/opengl-driver/lib (NixOS) after the loader path.
+        #
+        # ponytail: no HIP. With an explicit -Dtarget (which the sandbox needs,
+        # see zigTarget), build.zig's device-kernel imports (models, contract,
+        # device_abi, core, stdpp) keep the host target, and LLVM aborts on
+        # "'x86-64' is not a recognized processor" in every amdgcn compile.
+        # Add `-Dhip-arch=gfx1100` here once deviceKernelImports builds those
+        # modules for the device target it is handed.
         mkEspice =
           {
-            gpu ? false,
+            cuda ? false,
           }:
           let
             flags = toString (
@@ -180,12 +200,15 @@
                 "-Doptimize=ReleaseFast"
                 "-Dtarget=${zigTarget}"
                 "--cache-dir .zig-cache"
+                # Zig defaults to every core and each heavy model's LLVM job
+                # holds GBs; `nix build --cores N` bounds it.
+                "-j$NIX_BUILD_CORES"
               ]
               ++ (
-                if gpu then
+                if cuda then
                   [
                     "-Dcuda-arch=sm_75"
-                    "-Dhip-arch=gfx1100"
+                    "-Dhip-arch=none"
                   ]
                 else
                   [
@@ -197,21 +220,9 @@
             );
           in
           pkgs.stdenv.mkDerivation {
-            pname = if gpu then "espice-gpu" else "espice";
+            pname = if cuda then "espice-cuda" else "espice";
             version = "1.0.0";
-            # Only what `zig build` reads, so a docs or flake edit does not
-            # rebuild the package.
-            src = pkgs.lib.fileset.toSource {
-              root = ./.;
-              fileset = pkgs.lib.fileset.unions [
-                ./build.zig
-                ./build.zig.zon
-                ./src
-                ./models
-                ./include
-                ./tests
-              ];
-            };
+            inherit src;
 
             nativeBuildInputs = [
               zig
@@ -242,14 +253,14 @@
             installPhase = ''
               runHook preInstall
               zig build install ${flags} --prefix "$out"
-              wrapProgram $out/bin/espice --set-default ZIG ${zig}/bin/zig ${pkgs.lib.optionalString gpu "--suffix LD_LIBRARY_PATH : /run/opengl-driver/lib:${pkgs.rocmPackages.clr}/lib"}
+              wrapProgram $out/bin/espice --set-default ZIG ${zig}/bin/zig
               runHook postInstall
             '';
 
             meta = {
-              description =
-                "SPICE circuit simulator" + (if gpu then " with CUDA/HIP device kernels" else " (CPU build)");
+              description = "SPICE circuit simulator" + (if cuda then " with CUDA device kernels" else " (CPU build)");
               mainProgram = "espice";
+              license = pkgs.lib.licenses.asl20;
             };
           };
         espice = mkEspice { };
@@ -261,8 +272,8 @@
           default = espice;
           inherit espice;
         }
-        # nixpkgs' ROCm is Linux-only, and macOS has neither backend.
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux { espice-gpu = mkEspice { gpu = true; }; };
+        # NVIDIA ships no macOS driver past CUDA 10.2.
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux { espice-cuda = mkEspice { cuda = true; }; };
 
         apps.default = {
           type = "app";
@@ -276,11 +287,19 @@
           # model at run time with the wrapped Zig against share/espice in the store.
           smoke = pkgs.runCommand "espice-smoke" { } ''
             export HOME=$TMPDIR ESPICE_CACHE=$TMPDIR/cache
+            # check FILE COLUMN WANT: row 1 of COLUMN is WANT to 1e-6 relative.
+            check() {
+              awk -F, -v col="$2" -v want="$3" '
+                NR == 1 { for (i = 1; i <= NF; i++) if ($i == col) c = i }
+                NR == 2 { d = $c - want; ok = c && d * d <= 1e-12 * want * want }
+                END { exit !ok }' "$1" || { echo "$1: $2 != $3"; cat "$1"; exit 1; }
+            }
             cp -r ${./tests/fixtures/hdl}/veriloga_res_divider.{sp,assets} .
-            ${pkgs.lib.getExe espice} --format=print ${./tests/fixtures/op/balanced_bridge.sp} 2>&1 | tee op.log
-            grep -q "Operating Point" op.log
-            ${pkgs.lib.getExe espice} --format=print veriloga_res_divider.sp 2>&1 | tee hdl.log
-            grep -Eq "3\.5(0*)e-01" hdl.log
+            ${pkgs.lib.getExe espice} --format=csv --rawfile=op.csv ${./tests/fixtures/op/balanced_bridge.sp}
+            check op.csv 'v(a)' 5
+            ${pkgs.lib.getExe espice} --format=csv --rawfile=hdl.csv veriloga_res_divider.sp
+            check hdl.csv 'v(out)' 0.35
+            ls cache/hdl > /dev/null # the model compiled outside the store
             touch $out
           '';
         };
