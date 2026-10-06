@@ -746,3 +746,29 @@ test "the branch-name index answers as the first-match scans did, duplicates inc
     try expectScans(&nb, &names);
     try std.testing.expectEqual(nb.l.len - 1, ta.lRow(&nb, "v1").?);
 }
+
+test "BBD blocks follow first-seen instance order over sparse instance ordinals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const lib = try device.Library.init(arena.allocator());
+    var b = try Builder.init(std.testing.allocator, &lib);
+    defer b.deinit();
+    for (0..6) |_| _ = try b.addNode();
+    // Rows 1 and 3 in instance 3, row 2 in instance 1, row 4 shared by
+    // both (coupling), row 5 top level, row 6 never tagged.
+    for ([_][2]u32{ .{ 1, 3 }, .{ 2, 1 }, .{ 3, 3 }, .{ 4, 1 }, .{ 4, 3 }, .{ 5, 0 } }) |tag|
+        try ta.tagNodeInstance(&b, tag[0], tag[1]);
+    const bbd = try ta.computeBbd(&b);
+    const perm = bbd.perm.?;
+    defer std.testing.allocator.free(perm);
+    const info = bbd.info.?;
+    defer std.testing.allocator.free(info.blocks);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 3, 2, 4, 5, 6 }, perm);
+    try std.testing.expectEqual(@as(usize, 2), info.blocks.len);
+    try std.testing.expectEqual(@as(u32, 1), info.blocks[0].start);
+    try std.testing.expectEqual(@as(u32, 2), info.blocks[0].size);
+    try std.testing.expectEqual(@as(u32, 3), info.blocks[1].start);
+    try std.testing.expectEqual(@as(u32, 1), info.blocks[1].size);
+    try std.testing.expectEqual(@as(u32, 4), info.coupling_start);
+    try std.testing.expectEqual(@as(u32, 3), info.coupling_size);
+}

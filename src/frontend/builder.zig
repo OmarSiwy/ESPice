@@ -158,20 +158,28 @@ pub const Builder = struct {
         // block's nodes here and becomes its write cursor below.
         var instance_list: std.ArrayList(struct { inst: u32, at: u32 }) = .empty;
         defer instance_list.deinit(staging);
-        // Instance to block index.
-        var index: std.AutoHashMapUnmanaged(u32, u32) = .empty;
-        defer index.deinit(staging);
         const tagged = @min(n, @as(u32, @intCast(ni.len)));
-        for (1..tagged) |i| {
-            const inst = ni[i];
+        std.debug.assert(tagged >= 1);
+        // Instance to block index, `unseen` until its first node. Instance
+        // ordinals count from 1 (`Reader.instances`), so the table runs to
+        // the largest one.
+        const unseen = std.math.maxInt(u32);
+        var max_inst: u32 = 0;
+        for (ni[1..tagged]) |inst| if (inst != MULTI_INSTANCE) {
+            max_inst = @max(max_inst, inst);
+        };
+        const index = try staging.alloc(u32, @as(usize, max_inst) + 1);
+        defer staging.free(index);
+        @memset(index, unseen);
+        for (ni[1..tagged]) |inst| {
             if (inst == 0 or inst == MULTI_INSTANCE) continue;
-            const gop = try index.getOrPut(staging, inst);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = @intCast(instance_list.items.len);
+            if (index[inst] == unseen) {
+                index[inst] = @intCast(instance_list.items.len);
                 try instance_list.append(staging, .{ .inst = inst, .at = 0 });
             }
-            instance_list.items[gop.value_ptr.*].at += 1;
+            instance_list.items[index[inst]].at += 1;
         }
+        std.debug.assert(index[0] == unseen);
 
         if (instance_list.items.len < 2)
             return .{ .perm = null, .info = null };
@@ -191,8 +199,8 @@ pub const Builder = struct {
             pos += blk.size;
         }
         for (1..tagged) |i| {
-            const bi = index.get(ni[i]) orelse continue;
-            const cursor = &instance_list.items[bi].at;
+            if (ni[i] == 0 or ni[i] == MULTI_INSTANCE) continue;
+            const cursor = &instance_list.items[index[ni[i]]].at;
             perm[i] = cursor.*;
             cursor.* += 1;
         }
@@ -3189,4 +3197,6 @@ pub const test_access = if (@import("builtin").is_test) .{
     .vRow = NetBuilder.vRow,
     .lRow = NetBuilder.lRow,
     .indexBranchNames = NetBuilder.indexBranchNames,
+    .tagNodeInstance = Builder.tagNodeInstance,
+    .computeBbd = Builder.computeBbd,
 } else {};
