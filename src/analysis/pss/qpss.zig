@@ -1,640 +1,92 @@
-//! Quasi-periodic steady state: two-tone harmonic balance over the
-//! (2K1+1) x (2K2+1) mix-product grid k*f1 + l*f2, solved by Newton with
-//! matrix-free GMRES. Residual and Jacobian-vector products are DFT
-//! sandwiches: IDFT to the sample grid, evaluate, DFT back plus jw*Q.
+//! Quasi-periodic steady state: `.qpss f1 f2 K1 K2` solved as two-tone
+//! harmonic balance by `mhb.solve` over the (2K1+1) x (2K2+1) box, then
+//! published two-sided, one row per mix product k*f1 + l*f2.
 //!
-//! Cites: dev/analysis/qpss.md, Verilog-A LRM §4.6.1 (sources follow their
-//! waveform only in the transient phase).
+//! Cites: dev/analysis/qpss.md, dev/analysis/multitone-hb.md §QPSS.
 const std = @import("std");
 const root = @import("../types.zig");
-const simdZero = root.zeroSimd;
-const simdCopy = root.copySimd;
-const solvers = @import("solver");
-const gmres_mod = solvers.gmres;
-const dense_lu = solvers.dense_lu;
-const num = @import("core").numerics;
-
-const W = std.simd.suggestVectorLength(f64) orelse 8;
-const V = @Vector(W, f64);
+const mhb = @import("mhb.zig");
 
 /// The `.qpss` query: tones f1, f2 and their truncations k1, k2.
 pub const Options = @import("core").query.Qpss;
 
-/// The Newton outcome, shared with pss and hb.
-pub const SolveResult = @import("pss.zig").SolveResult;
-
-/// The mix-product grid: k in -K1..K1 varies fastest, l in -K2..K2 slowest,
-/// flat index (l + K2) * (2K1+1) + (k + K1).
-const MixGrid = struct {
-    k1: u16,
-    k2: u16,
-    nf1: usize, // 2*K1+1
-    nf2: usize, // 2*K2+1
-    nf: usize, // nf1 * nf2
-
-    /// The grid of |k| <= k1, |l| <= k2.
-    pub fn init(k1: u16, k2: u16) MixGrid {
-        const nf1 = 2 * @as(usize, k1) + 1;
-        const nf2 = 2 * @as(usize, k2) + 1;
-        return .{ .k1 = k1, .k2 = k2, .nf1 = nf1, .nf2 = nf2, .nf = nf1 * nf2 };
-    }
-
-    /// Flat index of (k, l). Asserts |k| <= k1 and |l| <= k2.
-    pub fn flatIdx(self: MixGrid, k_signed: i32, l_signed: i32) usize {
-        const k_off: usize = @intCast(k_signed + @as(i32, self.k1));
-        const l_off: usize = @intCast(l_signed + @as(i32, self.k2));
-        return l_off * self.nf1 + k_off;
-    }
-
-    /// Inverse of `flatIdx`.
-    pub fn signedKL(self: MixGrid, flat: usize) struct { k: i32, l: i32 } {
-        const l_off = flat / self.nf1;
-        const k_off = flat % self.nf1;
-        return .{
-            .k = @as(i32, @intCast(k_off)) - @as(i32, self.k1),
-            .l = @as(i32, @intCast(l_off)) - @as(i32, self.k2),
-        };
-    }
-
-    /// Angular frequency of a mix product: 2*pi*(k*f1 + l*f2).
-    pub fn omega(self: MixGrid, flat: usize, f1: f64, f2: f64) f64 {
-        const kl = self.signedKL(flat);
-        return 2.0 * std.math.pi * (@as(f64, @floatFromInt(kl.k)) * f1 +
-            @as(f64, @floatFromInt(kl.l)) * f2);
-    }
-};
-
-/// Everything the residual and the GMRES matvec read. Spectra are stacked
-/// real: [re of every node; im of every node], nf entries per node. Time
-/// arrays are node-major, sample-contiguous.
-const OperatorCtx = struct {
-    ckt: *root.Circuit,
-    grid: MixGrid,
-    n: usize,
-    f1: f64,
-    f2: f64,
-
-    /// Time samples of the current iterate, n * nf.
-    x_td: []f64,
-    /// G's pattern slots at every sample, slot * nf + s.
-    g_td: []f64,
-    /// C at sample 0 in row order over the pattern: row r owns entries
-    /// c_row_ptr[r]..c_row_ptr[r + 1], columns ascending, and entry k is
-    /// C's CSC slot c_slot[k].
-    c_csr: []f64,
-    c_row_ptr: []const u32,
-    c_col: []const u32,
-    c_slot: []const u32,
-    /// Matvec scratch, n * nf each.
-    v_td: []f64,
-    w_td: []f64,
-    /// The instant of each grid point, nf; see buildSampleTimes.
-    times: []f64,
-    /// Forward (DFT) basis, frequency-major: [f*nf + s].
-    basis_cos: []f64,
-    basis_sin: []f64,
-    /// Inverse (IDFT) basis, sample-major: [s*nf + f].
-    basis_cos_t: []f64,
-    basis_sin_t: []f64,
-    /// Per-sample eval input, n.
-    x_sample: []f64,
-
-    /// The GMRES operator, `jacobianMatvec`.
-    pub const matvec = jacobianMatvec;
-};
-
-/// Scratch `buildTransform` needs, in f64 and in u32.
-fn transformWork(nf: usize) struct { f64s: usize, u32s: usize } {
-    const m = 2 * nf;
-    return .{ .f64s = m * m + 2 * m, .u32s = m };
-}
-
-/// Builds the transform Gamma[s][f] = e^{j w_f t_s} at the given instants
-/// and its exact inverse, in the layouts `idft2D` and `dft2D` read:
-///
-///   basis_cos_t[s*nf+f], basis_sin_t[s*nf+f] = Re Gamma[s][f], Im Gamma[s][f]
-///   basis_cos[f*nf+s],   basis_sin[f*nf+s]   = nf*Re Gamma^-1[f][s], -nf*Im Gamma^-1[f][s]
-///
-/// (nf and the sign absorb the 1/nf and the -Im that `dft2D` applies).
-/// Incommensurate tones have no instants that are exact torus points for
-/// both, so the orthogonal DFT basis would leak each tone into every mix
-/// product at the level of the phase error. Gamma^-1 is exact at whatever
-/// instants Gamma came from; good instants only keep it well conditioned.
-/// ponytail: one (2nf)^2 dense LU and nf solves per analysis (nf <= 121 at
-/// the default truncation); no structure exploited.
-fn buildTransform(
-    grid: MixGrid,
-    f1: f64,
-    f2: f64,
-    times: []const f64,
-    basis_cos: []f64,
-    basis_sin: []f64,
-    basis_cos_t: []f64,
-    basis_sin_t: []f64,
-    work: []f64,
-    piv: []u32,
-) !void {
-    const nf = grid.nf;
-    const m = 2 * nf; // real embedding of the complex nf x nf system
-    const gamma = work[0 .. m * m];
-    const rhs = work[m * m ..][0..m];
-    const sol = work[m * m + m ..][0..m];
-
-    simdZero(gamma);
-    for (0..nf) |s| {
-        for (0..nf) |f| {
-            const angle = grid.omega(f, f1, f2) * times[s];
-            const c = @cos(angle);
-            const sn = @sin(angle);
-            basis_cos_t[s * nf + f] = c;
-            basis_sin_t[s * nf + f] = sn;
-            // [ Re -Im ]
-            // [ Im  Re ]
-            gamma[s * m + f] = c;
-            gamma[s * m + nf + f] = -sn;
-            gamma[(nf + s) * m + f] = sn;
-            gamma[(nf + s) * m + nf + f] = c;
-        }
-    }
-
-    try dense_lu.factorize(m, gamma, piv);
-    const nf_f: f64 = @floatFromInt(nf);
-    for (0..nf) |s| {
-        simdZero(rhs);
-        rhs[s] = 1.0; // column s of the identity, zero imaginary part
-        dense_lu.solveFactored(m, gamma, piv, rhs, sol);
-        for (0..nf) |f| {
-            basis_cos[f * nf + s] = nf_f * sol[f];
-            basis_sin[f * nf + s] = -nf_f * sol[nf + f];
-        }
-    }
-}
-
-/// IDFT, unscaled: x_td[node*nf + s] = sum_f (X_re[f]*cos[f,s] - X_im[f]*sin[f,s]).
-/// The sample-major basis makes each sample's frequency row contiguous.
-fn idft2D(
-    x_td: []f64,
-    x_re: []const f64,
-    x_im: []const f64,
-    basis_cos_t: []const f64,
-    basis_sin_t: []const f64,
-    n: usize,
-    nf: usize,
-) void {
-    for (0..n) |node| {
-        const base = node * nf;
-        const xr = x_re[base..][0..nf];
-        const xi = x_im[base..][0..nf];
-        for (x_td[base..][0..nf], 0..) |*out, s|
-            out.* = num.dot(xr, basis_cos_t[s * nf ..][0..nf]) - num.dot(xi, basis_sin_t[s * nf ..][0..nf]);
-    }
-}
-
-/// DFT, scaled by 1/nf: X_re[f] = sum_s f_td[s]*cos[f,s] / nf and
-/// X_im[f] = -sum_s f_td[s]*sin[f,s] / nf, per node. With `buildTransform`'s
-/// basis this inverts `idft2D` exactly.
-fn dft2D(
-    out_re: []f64,
-    out_im: []f64,
-    f_td: []const f64,
-    basis_cos: []const f64,
-    basis_sin: []const f64,
-    n: usize,
-    nf: usize,
-) void {
-    const inv_nf: f64 = 1.0 / @as(f64, @floatFromInt(nf));
-
-    for (0..n) |node| {
-        const base = node * nf;
-        const f_row = f_td[base..][0..nf];
-        for (0..nf) |f_idx| {
-            out_re[base + f_idx] = num.dot(f_row, basis_cos[f_idx * nf ..][0..nf]) * inv_nf;
-            out_im[base + f_idx] = -num.dot(f_row, basis_sin[f_idx * nf ..][0..nf]) * inv_nf;
-        }
-    }
-}
-
-/// Distance between two phases in cycles, wrapped to [0, 0.5].
-inline fn cycleErr(phase: f64, target: f64) f64 {
-    const d = phase - target;
-    return @abs(d - @round(d));
-}
-
-/// One scalar instant per mix-grid point, since a device reads one clock.
-/// Tone 1 is exact at t = (s1/nf1 + m)/f1 for every integer m, so m is spent
-/// on tone 2: the m in [0, 4096) whose frac(f2*t) lands closest to s2/nf2.
-/// The leftover phase error only affects conditioning (`buildTransform`
-/// inverts whatever these instants generate); f64 phase resolution at
-/// t = O(horizon/f1) caps the horizon.
-/// ponytail: linear scan, O(nf * horizon) once per analysis. A
-/// continued-fraction search of f2/f1 would get there in O(log) steps if the
-/// horizon ever has to grow.
-fn buildSampleTimes(times: []f64, grid: MixGrid, f1: f64, f2: f64) void {
-    const horizon: usize = 1 << 12;
-    const rho = f2 / f1;
-    const nf1_f: f64 = @floatFromInt(grid.nf1);
-    const nf2_f: f64 = @floatFromInt(grid.nf2);
-    for (0..grid.nf) |s| {
-        const phase1 = @as(f64, @floatFromInt(s % grid.nf1)) / nf1_f;
-        const target = @as(f64, @floatFromInt(s / grid.nf1)) / nf2_f;
-        var best_u = phase1;
-        var best_err = std.math.inf(f64);
-        for (0..horizon) |m| {
-            const u = phase1 + @as(f64, @floatFromInt(m));
-            const err = cycleErr(rho * u, target);
-            if (err < best_err) {
-                best_err = err;
-                best_u = u;
+/// Fills `lines[(l + k2)(2k1 + 1) + (k + k1)]` with the index of the
+/// one-sided line of `spec` (ascending `spec.freqs`) at |k*f1 + l*f2|: k in
+/// -k1..k1 fastest, l in -k2..k2 slowest. A product the spectrum merged into
+/// another line within its 1e-14 relative tolerance maps to that line.
+/// Asserts lines.len is the box size and `spec` has a line.
+pub fn boxLines(spec: mhb.Spectrum, f1: f64, f2: f64, k1: u16, k2: u16, lines: []u32) void {
+    const nf1 = 2 * @as(usize, k1) + 1;
+    std.debug.assert(lines.len == nf1 * (2 * @as(usize, k2) + 1));
+    std.debug.assert(spec.freqs.len >= 1);
+    for (lines, 0..) |*line, flat| {
+        const kl = signedKL(flat, k1, k2);
+        const f = @abs(@as(f64, @floatFromInt(kl.k)) * f1 + @as(f64, @floatFromInt(kl.l)) * f2);
+        // The nearest line: the first at or above f, or the one below it.
+        const hi = std.sort.lowerBound(f64, spec.freqs, f, struct {
+            fn order(target: f64, x: f64) std.math.Order {
+                return std.math.order(target, x);
             }
-        }
-        times[s] = best_u / f1;
+        }.order);
+        const j = if (hi == spec.freqs.len or (hi > 0 and f - spec.freqs[hi - 1] < spec.freqs[hi] - f)) hi - 1 else hi;
+        std.debug.assert(@abs(spec.freqs[j] - f) <= 1e-12 * @max(f, 1));
+        line.* = @intCast(j);
     }
 }
 
-/// F(X) = DFT(f(IDFT(X))) + jW*DFT(q(IDFT(X))), stacked real. Also refreshes
-/// the linearization the matvec reads: g_td at every sample and c_csr at
-/// sample 0.
-fn computeResidual(
-    ctx: *OperatorCtx,
-    x_hat: []const f64,
-    residual: []f64,
-) void {
-    const n = ctx.n;
-    const nf = ctx.grid.nf;
-    const total_re = n * nf;
-
-    const x_re = x_hat[0..total_re];
-    const x_im = x_hat[total_re..][0..total_re];
-
-    idft2D(ctx.x_td, x_re, x_im, ctx.basis_cos_t, ctx.basis_sin_t, n, nf);
-
-    // ponytail: the nf evals are independent; ckt.eval already uses the
-    // thread pool, and a GPU batch launch would take the whole loop.
-    const ckt = ctx.ckt;
-    // Tone 1's sample spacing, HB's period/nt. The instants are not evenly
-    // spaced, but a dynamic operator only needs dt > 0 to integrate: at
-    // dt = 0 an idt with ic takes its static form and holds ic.
-    const dt = 1.0 / (ctx.f1 * @as(f64, @floatFromInt(ctx.grid.nf1)));
-
-    for (0..nf) |s| {
-        for (0..n) |node| ctx.x_sample[node] = ctx.x_td[node * nf + s];
-
-        // Each grid point is its own instant, in the transient phase so the
-        // sources follow their waveforms (§4.6.1).
-        ckt.setSimState(.{ .t = ctx.times[s], .dt = dt, .kind = .tran });
-        ckt.eval(ctx.x_sample[0..n], ctx.times[s]);
-
-        for (0..n) |node| ctx.w_td[node * nf + s] = ckt.rhs[node];
-        // q(t_s) for the charge term; v_td is free until the next matvec.
-        for (0..n) |node| ctx.v_td[node * nf + s] = ckt.q_vec[node];
-
-        for (ckt.g_vals[0..ckt.nnz], 0..) |g, slot| ctx.g_td[slot * nf + s] = g;
-
-        if (s == 0) {
-            if (ckt.has_charge) {
-                for (ctx.c_csr, ctx.c_slot) |*c, slot| c.* = ckt.c_vals[slot];
-            } else {
-                simdZero(ctx.c_csr);
-            }
-        }
-    }
-
-    const res_re = residual[0..total_re];
-    const res_im = residual[total_re..][0..total_re];
-    dft2D(res_re, res_im, ctx.w_td, ctx.basis_cos, ctx.basis_sin, n, nf);
-
-    // jW*Q from the DFT of q(t_s), exact for nonlinear charge; same
-    // projection and sign as dft2D.
-    // ponytail: O(n*nf^2), the order of dft2D. The matvec keeps the
-    // C(t0) Jacobian (quasi-Newton for nonlinear charge).
-    if (ckt.has_charge) {
-        const inv_nf: f64 = 1.0 / @as(f64, @floatFromInt(nf));
-        for (0..n) |node| {
-            const q_slice = ctx.v_td[node * nf ..][0..nf];
-            for (0..nf) |f_idx| {
-                const omega_f = ctx.grid.omega(f_idx, ctx.f1, ctx.f2);
-                if (omega_f == 0) continue;
-                const q_re = num.dot(q_slice, ctx.basis_cos[f_idx * nf ..][0..nf]);
-                const q_im = -num.dot(q_slice, ctx.basis_sin[f_idx * nf ..][0..nf]);
-                res_re[node * nf + f_idx] += omega_f * (-q_im * inv_nf);
-                res_im[node * nf + f_idx] += omega_f * (q_re * inv_nf);
-            }
-        }
-    }
-}
-
-/// GMRES matvec: w = DFT(G(t_s) * IDFT(v)) + jW*C*v, stacked real, against
-/// the linearization of the last `computeResidual`.
-/// ponytail: the QPSS hot loop, O(nnz*nf) for the G products plus two
-/// O(n*nf^2) transforms per call, all on the CPU. A GPU version would keep
-/// the spectral slab resident and fuse IDFT, the nf batched G*v products and
-/// the DFT into one launch; it needs a `GpuContext` entry point for it. Add when
-/// a profile shows host-device latency dominating.
-fn jacobianMatvec(ctx: *OperatorCtx, v: []const f64, w: []f64) void {
-    const n = ctx.n;
-    const nf = ctx.grid.nf;
-    const total_re = n * nf;
-
-    // GMRES passes disjoint input and output slabs.
-    const v_re = v[0..total_re];
-    const v_im = v[total_re..][0..total_re];
-    const w_re = w[0..total_re];
-    const w_im = w[total_re..][0..total_re];
-
-    idft2D(ctx.v_td, v_re, v_im, ctx.basis_cos_t, ctx.basis_sin_t, n, nf);
-
-    gvProduct(ctx.w_td, ctx.g_td, ctx.v_td, ctx.ckt.col_ptr, ctx.ckt.row_idx, nf);
-
-    dft2D(w_re, w_im, ctx.w_td, ctx.basis_cos, ctx.basis_sin, n, nf);
-
-    addChargeTerms(ctx, v_re, v_im, w_re, w_im);
-}
-
-/// Time-domain Jacobian-vector product w_td[., s] = G(t_s) * v_td[., s] over
-/// the CSC pattern; g_td is slot-major, samples contiguous. Each structural
-/// entry is one axpy over its nf samples, W at a time, with the scalar tail
-/// as the width-one oracle. Each row still sums its columns in ascending
-/// order from +0, and an entry outside the pattern could only add ±0, so for
-/// finite v this is bitwise the dense product. Overwrites every w_td slot.
-pub fn gvProduct(w_td: []f64, g_td: []const f64, v_td: []const f64, col_ptr: []const u32, row_idx: []const u32, nf: usize) void {
-    simdZero(w_td);
-    for (0..col_ptr.len - 1) |col| {
-        const vc = v_td[col * nf ..][0..nf];
-        for (col_ptr[col]..col_ptr[col + 1]) |slot| {
-            const g = g_td[slot * nf ..][0..nf];
-            const w = w_td[@as(usize, row_idx[slot]) * nf ..][0..nf];
-            var s: usize = 0;
-            while (s + W <= nf) : (s += W) {
-                const gv: V = g[s..][0..W].*;
-                const vv: V = vc[s..][0..W].*;
-                const wv: V = w[s..][0..W].*;
-                w[s..][0..W].* = wv + gv * vv;
-            }
-            while (s < nf) : (s += 1) w[s] += g[s] * vc[s];
-        }
-    }
-}
-
-/// Adds j*w_f*C*X in stacked-real form, skipping DC and zero C entries.
-inline fn addChargeTerms(
-    ctx: *const OperatorCtx,
-    x_re: []const f64,
-    x_im: []const f64,
-    res_re: []f64,
-    res_im: []f64,
-) void {
-    const n = ctx.n;
-    const nf = ctx.grid.nf;
-    for (0..nf) |f_idx| {
-        const omega_f = ctx.grid.omega(f_idx, ctx.f1, ctx.f2);
-        if (omega_f == 0) continue;
-
-        for (0..n) |row| {
-            var sum_re: f64 = 0;
-            var sum_im: f64 = 0;
-            const lo = ctx.c_row_ptr[row];
-            const hi = ctx.c_row_ptr[row + 1];
-            for (ctx.c_csr[lo..hi], ctx.c_col[lo..hi]) |c_val, col| {
-                if (c_val == 0) continue;
-                sum_re += c_val * (-x_im[col * nf + f_idx]);
-                sum_im += c_val * x_re[col * nf + f_idx];
-            }
-            res_re[row * nf + f_idx] += omega_f * sum_re;
-            res_im[row * nf + f_idx] += omega_f * sum_im;
-        }
-    }
-}
-
-/// Row-major view of a CSC pattern: row r's entries are
-/// col[row_ptr[r]..row_ptr[r + 1]], columns ascending (a counting sort over
-/// the columns in order), and slot[k] is entry k's CSC slot.
-fn transposePattern(col_ptr: []const u32, row_idx: []const u32, row_ptr: []u32, col: []u32, slot: []u32) void {
-    const n = row_ptr.len - 1;
-    @memset(row_ptr, 0);
-    for (row_idx) |r| row_ptr[r + 1] += 1;
-    for (1..n + 1) |r| row_ptr[r] += row_ptr[r - 1];
-    // row_ptr[r] is row r's cursor, and ends at row r + 1's start.
-    for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |p| {
-        const r = row_idx[p];
-        col[row_ptr[r]] = @intCast(j);
-        slot[row_ptr[r]] = @intCast(p);
-        row_ptr[r] += 1;
+/// (k, l) of box row `flat`.
+fn signedKL(flat: usize, k1: u16, k2: u16) struct { k: i32, l: i32 } {
+    const nf1 = 2 * @as(usize, k1) + 1;
+    return .{
+        .k = @as(i32, @intCast(flat % nf1)) - @as(i32, k1),
+        .l = @as(i32, @intCast(flat / nf1)) - @as(i32, k2),
     };
-    var r = n;
-    while (r > 0) : (r -= 1) row_ptr[r] = row_ptr[r - 1];
-    row_ptr[0] = 0;
-}
-
-/// Newton with unpreconditioned GMRES from X = 0; the deck's sources drive
-/// the residual. The caller owns spectra_re/spectra_im, probes.len * nf each,
-/// probe-major in MixGrid order, the last iterate when Newton does not
-/// converge (`converged = false`, not an error). Memory is O(nnz * nf) for
-/// the G samples. Errors: OutOfMemory, QueryCancelled, and error.Singular
-/// when the sample instants give a singular transform.
-pub fn solve(
-    ckt: *root.Circuit,
-    probes: []const u32,
-    spectra_re: []f64,
-    spectra_im: []f64,
-    options: Options,
-    allocator: std.mem.Allocator,
-) !SolveResult {
-    const n: usize = ckt.n;
-    const nnz: usize = ckt.nnz;
-    const grid = MixGrid.init(options.k1, options.k2);
-    const nf = grid.nf;
-    const total_re = n * nf;
-    const total = total_re * 2; // stacked real
-
-    const arena_size =
-        total + // x_hat
-        total + // residual
-        total + // dx (Newton step)
-        n * nf + // x_td
-        n * nf + // v_td
-        n * nf + // w_td
-        nnz * nf + // g_td
-        nnz + // c_csr
-        nf * nf + // basis_cos
-        nf * nf + // basis_sin
-        nf * nf + // basis_cos_t
-        nf * nf + // basis_sin_t
-        nf + // times
-        n; // x_sample
-
-    const arena = try allocator.alloc(f64, arena_size);
-    defer allocator.free(arena);
-
-    var off: usize = 0;
-    const x_hat = arena[off..][0..total];
-    off += total;
-    const residual = arena[off..][0..total];
-    off += total;
-    const dx = arena[off..][0..total];
-    off += total;
-    const x_td = arena[off..][0 .. n * nf];
-    off += n * nf;
-    const v_td = arena[off..][0 .. n * nf];
-    off += n * nf;
-    const w_td = arena[off..][0 .. n * nf];
-    off += n * nf;
-    const g_td = arena[off..][0 .. nnz * nf];
-    off += nnz * nf;
-    const c_csr = arena[off..][0..nnz];
-    off += nnz;
-    const basis_cos = arena[off..][0 .. nf * nf];
-    off += nf * nf;
-    const basis_sin = arena[off..][0 .. nf * nf];
-    off += nf * nf;
-    const basis_cos_t = arena[off..][0 .. nf * nf];
-    off += nf * nf;
-    const basis_sin_t = arena[off..][0 .. nf * nf];
-    off += nf * nf;
-    const times = arena[off..][0..nf];
-    off += nf;
-    const x_sample = arena[off..][0..n];
-    off += n;
-    std.debug.assert(off == arena_size);
-
-    simdZero(x_hat);
-
-    // Row-order view of the pattern for the charge term, which sums each
-    // row's columns in ascending order as the dense product did.
-    const c_idx = try allocator.alloc(u32, n + 1 + 2 * nnz);
-    defer allocator.free(c_idx);
-    const c_row_ptr = c_idx[0 .. n + 1];
-    const c_col = c_idx[n + 1 ..][0..nnz];
-    const c_slot = c_idx[n + 1 + nnz ..][0..nnz];
-    transposePattern(ckt.col_ptr, ckt.row_idx[0..nnz], c_row_ptr, c_col, c_slot);
-
-    buildSampleTimes(times, grid, options.f1, options.f2);
-    {
-        const need = transformWork(nf);
-        const work = try allocator.alloc(f64, need.f64s);
-        defer allocator.free(work);
-        const piv = try allocator.alloc(u32, need.u32s);
-        defer allocator.free(piv);
-        try buildTransform(grid, options.f1, options.f2, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t, work, piv);
-    }
-
-    var op_ctx = OperatorCtx{
-        .ckt = ckt,
-        .grid = grid,
-        .n = n,
-        .f1 = options.f1,
-        .f2 = options.f2,
-        .x_td = x_td,
-        .g_td = g_td,
-        .c_csr = c_csr,
-        .c_row_ptr = c_row_ptr,
-        .c_col = c_col,
-        .c_slot = c_slot,
-        .v_td = v_td,
-        .w_td = w_td,
-        .times = times,
-        .basis_cos = basis_cos,
-        .basis_sin = basis_sin,
-        .basis_cos_t = basis_cos_t,
-        .basis_sin_t = basis_sin_t,
-        .x_sample = x_sample,
-    };
-
-    // ponytail: no preconditioner. The systems here are 2*n*nf <= a few
-    // hundred unknowns, and unrestarted GMRES handles their conditioning
-    // (restart 30 stalled on a 90-unknown two-tone deck with a 1e4 spread).
-    // Below 512 unknowns the restart depth is the whole system (~2 MB of
-    // basis at 512); past it the requested depth stands. The upgrade exists:
-    // mhb.zig's `Operator.precond` (one G0 + jw*C0 factor per mix product)
-    // already solves any tone count.
-    const want_m: usize = if (total <= 512) total else options.gmres_restart;
-    const gmres_m: u32 = @intCast(@min(want_m, total));
-    var gmres = try gmres_mod.Gmres.init(allocator, @intCast(total), gmres_m);
-    defer gmres.deinit(allocator);
-
-    var iter: u16 = 0;
-    while (iter < options.max_newton) : (iter += 1) {
-        if (iter != 0) try ckt.checkpoint(.{ .phase = .harmonic, .completed = iter });
-        computeResidual(&op_ctx, x_hat, residual);
-
-        const res_norm = num.normInf(residual);
-        if (res_norm < options.hb_tol) {
-            extractSpectra2D(x_hat, probes, spectra_re, spectra_im, n, nf);
-            return .{ .converged = true, .iterations = iter + 1, .residual_norm = res_norm };
-        }
-
-        // J dx = -F.
-        num.scale(residual, -1.0, residual);
-        simdZero(dx);
-
-        _ = gmres.solve(&op_ctx, residual, dx, options.gmres_tol, options.gmres_max_restarts);
-
-        num.axpy(x_hat, 1.0, dx);
-    }
-
-    computeResidual(&op_ctx, x_hat, residual);
-    const final_norm = num.normInf(residual);
-
-    extractSpectra2D(x_hat, probes, spectra_re, spectra_im, n, nf);
-    return .{ .converged = false, .iterations = options.max_newton, .residual_norm = final_norm };
-}
-
-/// Copies each probed node's re and im spectra out of the stacked-real x_hat.
-fn extractSpectra2D(
-    x_hat: []const f64,
-    probes: []const u32,
-    spectra_re: []f64,
-    spectra_im: []f64,
-    n: usize,
-    nf: usize,
-) void {
-    const total_re = n * nf;
-    for (probes, 0..) |node, p| {
-        const re_src = x_hat[node * nf ..][0..nf];
-        const im_src = x_hat[total_re + node * nf ..][0..nf];
-        simdCopy(spectra_re[p * nf ..][0..nf], re_src);
-        simdCopy(spectra_im[p * nf ..][0..nf], im_src);
-    }
 }
 
 /// Contract entry: one row per mix product (frequency k*f1 + l*f2, then each
 /// probe's |X_kl|). The grid is two-sided, so a real tone splits across its
 /// +-(k, l) conjugate pair and its amplitude is twice one line's magnitude
-/// (DC excepted). Non-convergence is error.QpssDidNotConverge.
+/// (DC excepted). Non-convergence, and a singular collocation transform, are
+/// error.QpssDidNotConverge; a box of one line (k1 = k2 = 0) is
+/// error.InvalidQueryOptions.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     try ctx.circuit.refuseDigital("qpss");
     const a = ctx.allocator;
-    const grid = MixGrid.init(opts.k1, opts.k2);
-    const nf = grid.nf;
-
     const scratch = ctx.scratch_allocator;
-    const spectra_re = try scratch.alloc(f64, ctx.probes.len * nf);
-    defer scratch.free(spectra_re);
-    const spectra_im = try scratch.alloc(f64, ctx.probes.len * nf);
-    defer scratch.free(spectra_im);
+    const f2 = [1]f64{opts.f2};
+    const k2 = [1]u16{opts.k2};
+    const hb_opts: mhb.Options = .{ .tol = opts.tol, .f0 = opts.f1, .n_harmonics = opts.k1, .extra_tones = &f2, .extra_harmonics = &k2, .max_iter = opts.max_newton, .hb_tol = opts.hb_tol };
+    const tones = [2]f64{ opts.f1, opts.f2 };
+    const spec = try mhb.spectrum(scratch, &tones, &.{ opts.k1, opts.k2 }, 0, 1);
+    defer spec.deinit(scratch);
+    if (spec.freqs.len < 2) return error.InvalidQueryOptions;
 
-    const st = try solve(ctx.circuit, ctx.probes, spectra_re, spectra_im, opts, scratch);
-
+    const nf = 2 * spec.freqs.len - 1;
+    const x_hat = try scratch.alloc(f64, @as(usize, ctx.circuit.n) * nf);
+    defer scratch.free(x_hat);
+    const st = mhb.solve(ctx.circuit, x_hat, spec, &tones, hb_opts, scratch) catch |err| switch (err) {
+        error.HbDidNotConverge => return error.QpssDidNotConverge,
+        else => |e| return e, // else: every other error passes through unchanged
+    };
     if (!st.converged) return error.QpssDidNotConverge;
+
+    const n_rows = (2 * @as(usize, opts.k1) + 1) * (2 * @as(usize, opts.k2) + 1);
+    const lines = try scratch.alloc(u32, n_rows);
+    defer scratch.free(lines);
+    boxLines(spec, opts.f1, opts.f2, opts.k1, opts.k2, lines);
 
     const names = try root.probeNames(ctx, "frequency");
     const ncols = names.len;
-
-    const n_rows = nf;
+    std.debug.assert(ncols == ctx.probes.len + 1);
     const data = try a.alloc(f64, n_rows * ncols);
-
-    for (0..n_rows) |row_idx| {
-        const row = data[row_idx * ncols ..][0..ncols];
-        const kl = grid.signedKL(row_idx);
-        const freq = @as(f64, @floatFromInt(kl.k)) * opts.f1 +
-            @as(f64, @floatFromInt(kl.l)) * opts.f2;
-        row[0] = freq;
-
-        for (0..ctx.probes.len) |p| {
-            const re_slice = spectra_re[p * nf ..][0..nf];
-            const im_slice = spectra_im[p * nf ..][0..nf];
-            const r = re_slice[row_idx];
-            const i = im_slice[row_idx];
-            row[p + 1] = @sqrt(r * r + i * i);
+    for (lines, 0..) |j, flat| {
+        const row = data[flat * ncols ..][0..ncols];
+        const kl = signedKL(flat, opts.k1, opts.k2);
+        row[0] = @as(f64, @floatFromInt(kl.k)) * opts.f1 + @as(f64, @floatFromInt(kl.l)) * opts.f2;
+        for (ctx.probes, row[1..]) |node, *v| {
+            const x = x_hat[node * nf ..][0..nf];
+            // One-sided amplitude hypot(c, s) is twice each two-sided |X_kl|.
+            v.* = if (j == 0) @abs(x[0]) else 0.5 * std.math.hypot(x[2 * j - 1], x[2 * j]);
         }
     }
 
@@ -645,56 +97,4 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .npoints = n_rows,
         .data = data,
     };
-}
-
-/// Private implementation access for the analysis test suite; void outside tests.
-pub const test_access = if (@import("builtin").is_test) .{
-    .MixGrid = MixGrid,
-    .buildTransform = buildTransform,
-    .transformWork = transformWork,
-    .dft2D = dft2D,
-    .gvProduct = gvProduct,
-    .transposePattern = transposePattern,
-    .idft2D = idft2D,
-    .buildSampleTimes = buildSampleTimes,
-    .simdZero = simdZero,
-} else {};
-
-test idft2D {
-    // Both transforms against ordered scalar sums at every nf from 0 past
-    // stdpp's 64-element fold cutoff, with random bases (any nf works here).
-    const gpa = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0x2D);
-    const rnd = prng.random();
-    const n = 2;
-    for (0..70) |nf| {
-        const buf = try gpa.alloc(f64, 4 * nf * nf + 6 * n * nf);
-        defer gpa.free(buf);
-        for (buf) |*v| v.* = rnd.float(f64) * 2 - 1;
-        const bc = buf[0 .. nf * nf];
-        const bs = buf[nf * nf ..][0 .. nf * nf];
-        const bc_t = buf[2 * nf * nf ..][0 .. nf * nf];
-        const bs_t = buf[3 * nf * nf ..][0 .. nf * nf];
-        const x_re = buf[4 * nf * nf ..][0 .. n * nf];
-        const x_im = buf[4 * nf * nf + n * nf ..][0 .. n * nf];
-        const td = buf[4 * nf * nf + 2 * n * nf ..][0 .. n * nf];
-        const out_re = buf[4 * nf * nf + 3 * n * nf ..][0 .. n * nf];
-        const out_im = buf[4 * nf * nf + 4 * n * nf ..][0 .. n * nf];
-        idft2D(td, x_re, x_im, bc_t, bs_t, n, nf);
-        dft2D(out_re, out_im, x_re, bc, bs, n, nf);
-        const inv: f64 = if (nf == 0) 0 else 1 / @as(f64, @floatFromInt(nf));
-        for (0..n) |node| for (0..nf) |i| {
-            var t: f64 = 0;
-            var re: f64 = 0;
-            var im: f64 = 0;
-            for (0..nf) |j| {
-                t += x_re[node * nf + j] * bc_t[i * nf + j] - x_im[node * nf + j] * bs_t[i * nf + j];
-                re += x_re[node * nf + j] * bc[i * nf + j];
-                im += x_re[node * nf + j] * bs[i * nf + j];
-            }
-            try std.testing.expectApproxEqAbs(t, td[node * nf + i], 1e-12);
-            try std.testing.expectApproxEqAbs(re * inv, out_re[node * nf + i], 1e-12);
-            try std.testing.expectApproxEqAbs(-im * inv, out_im[node * nf + i], 1e-12);
-        };
-    }
 }

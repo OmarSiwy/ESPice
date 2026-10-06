@@ -271,12 +271,12 @@ pub fn validate(query: requests.Query, n: u32) !void {
             try frequency(o.f0 * @as(f64, @floatFromInt(o.n_harmonics)));
         },
         .qpss => |o| {
-            const bands = try elements(&.{ 2 * @as(usize, o.k1) + 1, 2 * @as(usize, o.k2) + 1 });
-            const width = try elements(&.{ bands, n, 2 });
-            if (width > std.math.maxInt(u32)) return error.InvalidQueryOptions;
-            _ = try elements(&.{ bands, bands });
-            _ = try elements(&.{ bands, n, n });
-            _ = try elements(&.{ width, @as(usize, o.gmres_restart) + 1 });
+            // Runs as `.hb TONES=f1 f2 NHARMS=k1 k2`: the same box limits.
+            if (o.k1 == 0 and o.k2 == 0) return error.InvalidQueryOptions;
+            if (o.k1 > std.math.maxInt(i16) or o.k2 > std.math.maxInt(i16)) return error.InvalidQueryOptions;
+            const box = try elements(&.{ 2 * @as(usize, o.k1) + 1, 2 * @as(usize, o.k2) + 1 });
+            if (box > mhb_max_box) return error.InvalidQueryOptions;
+            _ = try elements(&.{ box, box, 2 * n });
             try frequency(o.f1 * @as(f64, @floatFromInt(@max(o.k1, 1))) + o.f2 * @as(f64, @floatFromInt(@max(o.k2, 1))));
         },
         .disto => |o| {
