@@ -5,6 +5,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `.hdl` parameters named with `__`, a leading or trailing `_`, or a capital
+  `Z` bind from the instance card instead of failing as unknown (#2).
 - `bench-suites -Dsuite=cmcqa`: 3,218 single-device decks from the public CMC QA
   sets (HICUM/L2 2.4.0, PSP 103) and the GF180MCU BSIM4 regression, each with
   its reference results.
