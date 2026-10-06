@@ -55,12 +55,55 @@ pub const CardRef = struct {
     /// Instance index within `type`.
     index: u32,
     name: []const u8,
+};
 
-    /// Returns the card name of instance `index` of type `t`, if listed.
-    /// Linear scan over `cards`.
-    pub fn lookup(cards: []const CardRef, t: DeviceType, index: u32) ?[]const u8 {
-        for (cards) |c| if (c.index == index and c.type == t) return c.name;
-        return null;
+/// The `CardRef` table as a dense per-type name column, so a label is one
+/// load: instance `index` of type `t` is `names[starts[t] + index]`, `""`
+/// for an instance no card names (an internal add). The builder hands out
+/// `index` densely per type, so a type's rows run to its highest named
+/// index. Lives on the arena it is built on.
+pub const CardNames = struct {
+    /// Per type, its first row in `names`; types + 1 entries.
+    starts: []const u32 = &.{},
+    names: []const []const u8 = &.{},
+
+    pub const empty: CardNames = .{};
+
+    /// The table over `cards`; where a (type, index) pair repeats, the
+    /// first row wins. Asserts that every card has a type and a name.
+    pub fn init(arena: std.mem.Allocator, cards: []const CardRef) !CardNames {
+        var n_types: usize = 0;
+        for (cards) |c| {
+            std.debug.assert(c.type != .unset);
+            std.debug.assert(c.name.len != 0);
+            n_types = @max(n_types, @as(usize, @backingInt(c.type)) + 1);
+        }
+        const starts = try arena.alloc(u32, n_types + 1);
+        @memset(starts, 0);
+        // One past each type's highest index at starts[t + 1], then the prefix sum.
+        for (cards) |c| {
+            const end = &starts[@as(usize, @backingInt(c.type)) + 1];
+            end.* = @max(end.*, c.index + 1);
+        }
+        for (1..starts.len) |t| starts[t] += starts[t - 1];
+        const names = try arena.alloc([]const u8, starts[n_types]);
+        @memset(names, "");
+        for (cards) |c| {
+            const name = &names[starts[@backingInt(c.type)] + c.index];
+            if (name.len == 0) name.* = c.name;
+        }
+        std.debug.assert(starts[0] == 0);
+        return .{ .starts = starts, .names = names };
+    }
+
+    /// The card name of instance `index` of type `t`, if a card names it.
+    pub fn get(self: CardNames, t: DeviceType, index: u32) ?[]const u8 {
+        const ti: usize = @backingInt(t);
+        if (ti + 1 >= self.starts.len) return null;
+        const row = @as(u64, self.starts[ti]) + index;
+        if (row >= self.starts[ti + 1]) return null;
+        const name = self.names[@intCast(row)];
+        return if (name.len == 0) null else name;
     }
 };
 
@@ -92,9 +135,9 @@ pub const Noise = struct {
     /// in total, ahead of the totals (ngspice `.noise ... pts`, HSPICE
     /// `.noise ... inter`).
     contributions: bool = false,
-    /// Card names for the contribution columns. Empty falls back to
-    /// `<type>#<ordinal>`.
-    cards: []const CardRef = &.{},
+    /// Card names for the contribution columns. An unnamed instance falls
+    /// back to `<type>#<ordinal>`.
+    card_names: CardNames = .empty,
     /// HSPICE `.sample`: also publish the output noise folded by a sampler
     /// (`onoise_sampled`); spectrum queries only.
     sample: ?NoiseSample = null,
@@ -713,9 +756,9 @@ pub const Sens = struct {
     output_node: u32,
     /// `v(a,b)` reference node for the output; GROUND is single-ended.
     output_neg: u32 = 0,
-    /// Card names for the result columns, so they match ngspice's. Empty
-    /// falls back to `<type>#<ordinal>`.
-    cards: []const CardRef = &.{},
+    /// Card names for the result columns, so they match ngspice's. An
+    /// unnamed instance falls back to `<type>#<ordinal>`.
+    card_names: CardNames = .empty,
 };
 
 /// Poles and zeros of the linearized circuit (`.pz`).
@@ -926,15 +969,62 @@ pub const Query = union(Kind) {
     }
 };
 
-test "CardRef.lookup keys on type and index together" {
+/// The linear scan `CardNames` replaced (#175): the first row matching
+/// (type, index). The differential oracle of the dense table.
+fn scanName(cards: []const CardRef, t: DeviceType, index: u32) ?[]const u8 {
+    for (cards) |c| if (c.index == index and c.type == t) return c.name;
+    return null;
+}
+
+test "CardNames keys on type and index together" {
     const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
     const r: DeviceType = @fromBackingInt(0);
     const c: DeviceType = @fromBackingInt(1);
     const cards = [_]CardRef{ .{ .type = r, .index = 0, .name = "r1" }, .{ .type = c, .index = 0, .name = "c1" } };
-    try t.expectEqualStrings("c1", CardRef.lookup(&cards, c, 0).?);
-    try t.expectEqualStrings("r1", CardRef.lookup(&cards, r, 0).?);
-    try t.expectEqual(null, CardRef.lookup(&cards, r, 1));
-    try t.expectEqual(null, CardRef.lookup(&.{}, r, 0));
+    const names = try CardNames.init(arena.allocator(), &cards);
+    try t.expectEqualStrings("c1", names.get(c, 0).?);
+    try t.expectEqualStrings("r1", names.get(r, 0).?);
+    try t.expectEqual(null, names.get(r, 1));
+    try t.expectEqual(null, names.get(.unset, 0));
+    try t.expectEqual(null, CardNames.empty.get(r, 0));
+    try t.expectEqual(null, (try CardNames.init(arena.allocator(), &.{})).get(r, 0));
+}
+
+test "CardNames answers as the linear scan does over a shuffled table" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(175);
+    const rand = prng.random();
+    for (0..50) |_| {
+        // Builder order: types interleaved, indices ascending per type,
+        // some instances unnamed, the odd repeated (type, index).
+        const n_types = rand.intRangeAtMost(u16, 1, 6);
+        var cards: std.ArrayList(CardRef) = .empty;
+        var counts: [6]u32 = @splat(0);
+        for (0..rand.uintLessThan(usize, 200)) |k| {
+            const ti = rand.uintLessThan(u16, n_types);
+            const index = counts[ti];
+            counts[ti] += 1;
+            if (rand.uintLessThan(u8, 4) == 0) continue;
+            const name = try std.fmt.allocPrint(a, "d{d}", .{k});
+            try cards.append(a, .{ .type = @fromBackingInt(ti), .index = index, .name = name });
+            if (index > 0 and rand.uintLessThan(u8, 16) == 0)
+                try cards.append(a, .{ .type = @fromBackingInt(ti), .index = index - 1, .name = "dup" });
+        }
+        rand.shuffle(CardRef, cards.items);
+        const names = try CardNames.init(a, cards.items);
+        for (0..n_types + 2) |ti| for (0..counts[@min(ti, 5)] + 3) |index| {
+            const ty: DeviceType = @fromBackingInt(@intCast(ti));
+            const want = scanName(cards.items, ty, @intCast(index));
+            const got = names.get(ty, @intCast(index));
+            try t.expectEqual(want == null, got == null);
+            if (want) |w| try t.expectEqualStrings(w, got.?);
+        };
+    }
 }
 
 test "the HB-orbit views carry the fields their solve reads" {

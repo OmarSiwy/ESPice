@@ -925,9 +925,8 @@ fn compareSpectre(a: std.mem.Allocator, lg: peg.Grammar, sg: peg.Grammar, cg: pe
         // Name where the frontend's rewrite stops, for the report.
         var dl: peg.Diag = .{};
         if (lines.oracle(a, lg, src, false, &dl)) |l| {
-            var kinds: netlist.spectre_rewrite.Kinds = .empty;
             for (l.lines, 0..) |_, i| {
-                _ = netlist.spectre_rewrite.translate(a, l.lines[0 .. i + 1], &kinds) catch |e| {
+                _ = netlist.spectre_rewrite.translate(a, l.lines[0 .. i + 1]) catch |e| {
                     if (e != error.ParseError or i + 1 == l.lines.len) {
                         if (low != null and !quiet) std.debug.print("{s}: frontend: {t} ({t}) at: {s}\n", .{ name, err, e, l.lines[i] });
                         break;

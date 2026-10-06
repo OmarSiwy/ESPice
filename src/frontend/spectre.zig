@@ -3,7 +3,7 @@
 //! rewrites PAT sources. dev/frontend.md "Spectre dialect" is the mapping;
 //! § numbers cite dev/research/spectre-syntax.md, and tests/grammar/spectre.peg
 //! is the syntax. A Spectre instance name says nothing about its device, so
-//! each rewritten device card's letter is kept beside it (`Kinds`).
+//! each rewritten device card's letter is kept beside it (`Translated.kinds`).
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -13,17 +13,19 @@ const lines = @import("lines.zig");
 /// form ESPice does not read (logged with the line).
 pub const Error = error{ OutOfMemory, ParseError, UnsupportedCard };
 
-/// The device letter of each rewritten card, keyed by `@intFromPtr` of the
-/// card's first byte: valid only for the slices `translate` returned, and
-/// only while their arena lives.
-pub const Kinds = std.AutoHashMapUnmanaged(usize, u8);
+/// SPICE cards and, parallel to them, each device card's letter (0 for a
+/// card that is no Spectre instance, whose name carries its own).
+pub const Translated = struct {
+    lines: []const []const u8,
+    kinds: []const u8,
+};
 
 /// Rewrites Spectre logical lines (the title already taken) into SPICE cards
-/// in `arena`; `kinds` receives each device card's letter. A failing
-/// statement is logged with its line; `ParseError` also when a `subckt` or
-/// block is still open at the end.
-pub fn translate(arena: Allocator, in: []const []const u8, kinds: *Kinds) Error![]const []const u8 {
-    var t: T = .{ .arena = arena, .kinds = kinds };
+/// in `arena`, with each device card's letter. A failing statement is
+/// logged with its line; `ParseError` also when a `subckt` or block is
+/// still open at the end.
+pub fn translate(arena: Allocator, in: []const []const u8) Error!Translated {
+    var t: T = .{ .arena = arena };
     try t.declare(in);
     var spice = false;
     for (in) |line| {
@@ -45,7 +47,9 @@ pub fn translate(arena: Allocator, in: []const []const u8, kinds: *Kinds) Error!
         };
     }
     if (t.subckts.items.len != 0 or t.blocks.items.len != 0) return error.ParseError;
-    return t.out.items;
+    assert(t.kinds.items.len <= t.out.items.len);
+    try t.kinds.appendNTimes(arena, 0, t.out.items.len - t.kinds.items.len);
+    return .{ .lines = t.out.items, .kinds = t.kinds.items };
 }
 
 /// Whether `line` is `simulator lang=<lang> ...`, compared
@@ -469,8 +473,9 @@ const control_kinds = std.StaticStringMap(ControlKind).initComptime(.{
 
 const T = struct {
     arena: Allocator,
-    kinds: *Kinds,
     out: std.ArrayList([]const u8) = .empty,
+    /// Per `out` row up to the last device card, its letter (0: none).
+    kinds: std.ArrayList(u8) = .empty,
     /// Model names and their masters; subcircuit names (any depth).
     models: std.StringHashMapUnmanaged([]const u8) = .empty,
     subckts: std.ArrayList(Open) = .empty,
@@ -492,9 +497,12 @@ const T = struct {
     }
 
     fn device(t: *T, letter: u8, comptime fmt: []const u8, args: anytype) Error!void {
+        assert(letter != 0);
         const card = try std.fmt.allocPrint(t.arena, fmt, args);
         try t.out.append(t.arena, card);
-        try t.kinds.put(t.arena, @intFromPtr(card.ptr), letter);
+        try t.kinds.appendNTimes(t.arena, 0, t.out.items.len - 1 - t.kinds.items.len);
+        try t.kinds.append(t.arena, letter);
+        assert(t.kinds.items.len == t.out.items.len);
     }
 
     /// Pass 1: model, subcircuit and module names, which instances before
@@ -1110,4 +1118,24 @@ test "expressions keep Spectre's tree (§6.1)" {
     };
     for (cases) |c| try testing.expectEqualStrings(c[1], try expression(a, try tokenize(a, c[0])));
     try testing.expectError(error.UnsupportedCard, expression(a, try tokenize(a, "a&b")));
+}
+
+test "translate keeps each device card's letter in a column parallel to the cards" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const out = try translate(arena.allocator(), &.{
+        "load (a 0) resistor r=1k",
+        "vin (a 0) vsource dc=1",
+        "simulator lang=spice",
+        "r2 a 0 1",
+    });
+    try testing.expectEqual(out.lines.len, out.kinds.len);
+    var letters: std.ArrayList(u8) = .empty;
+    for (out.lines, out.kinds) |line, k| if (k != 0) {
+        try letters.append(arena.allocator(), k);
+        try testing.expect(std.mem.startsWith(u8, line, if (k == 'r') "load" else "vin"));
+    };
+    try testing.expectEqualStrings("rv", letters.items);
+    // The SPICE region's card names its own letter.
+    try testing.expectEqual(@as(u8, 0), out.kinds[out.kinds.len - 1]);
 }

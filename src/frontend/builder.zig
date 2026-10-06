@@ -158,20 +158,28 @@ pub const Builder = struct {
         // block's nodes here and becomes its write cursor below.
         var instance_list: std.ArrayList(struct { inst: u32, at: u32 }) = .empty;
         defer instance_list.deinit(staging);
-        // Instance to block index.
-        var index: std.AutoHashMapUnmanaged(u32, u32) = .empty;
-        defer index.deinit(staging);
         const tagged = @min(n, @as(u32, @intCast(ni.len)));
-        for (1..tagged) |i| {
-            const inst = ni[i];
+        std.debug.assert(tagged >= 1);
+        // Instance to block index, `unseen` until its first node. Instance
+        // ordinals count from 1 (`Reader.instances`), so the table runs to
+        // the largest one.
+        const unseen = std.math.maxInt(u32);
+        var max_inst: u32 = 0;
+        for (ni[1..tagged]) |inst| if (inst != MULTI_INSTANCE) {
+            max_inst = @max(max_inst, inst);
+        };
+        const index = try staging.alloc(u32, @as(usize, max_inst) + 1);
+        defer staging.free(index);
+        @memset(index, unseen);
+        for (ni[1..tagged]) |inst| {
             if (inst == 0 or inst == MULTI_INSTANCE) continue;
-            const gop = try index.getOrPut(staging, inst);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = @intCast(instance_list.items.len);
+            if (index[inst] == unseen) {
+                index[inst] = @intCast(instance_list.items.len);
                 try instance_list.append(staging, .{ .inst = inst, .at = 0 });
             }
-            instance_list.items[gop.value_ptr.*].at += 1;
+            instance_list.items[index[inst]].at += 1;
         }
+        std.debug.assert(index[0] == unseen);
 
         if (instance_list.items.len < 2)
             return .{ .perm = null, .info = null };
@@ -191,8 +199,8 @@ pub const Builder = struct {
             pos += blk.size;
         }
         for (1..tagged) |i| {
-            const bi = index.get(ni[i]) orelse continue;
-            const cursor = &instance_list.items[bi].at;
+            if (ni[i] == 0 or ni[i] == MULTI_INSTANCE) continue;
+            const cursor = &instance_list.items[index[ni[i]]].at;
             perm[i] = cursor.*;
             cursor.* += 1;
         }
@@ -415,6 +423,13 @@ pub const NetBuilder = struct {
     dev_ic: std.ArrayList(core.Ic) = .empty,
     /// F/H/W/K cards, added after every other card so V and L rows exist.
     deferred: std.ArrayList(Device) = .empty,
+    /// Card name to its first branch row, V rows before L rows before `br`
+    /// rows: a value `k` below `v.len` is V row `k`, then L row
+    /// `k - v.len`, then `br` row `k - v.len - l.len`. `resolveDeferred`
+    /// builds it once the V and L tables are complete; the first
+    /// `branch_indexed` `br` rows are in it.
+    branch_index: std.StringHashMapUnmanaged(u32) = .empty,
+    branch_indexed: usize = 0,
     /// Per `Netlist.models` row, the Model its card binds to (`.{}`, the
     /// card's pairs, its polarity), bound on first use and copied per
     /// instance: a BSIM4 bin card is ~270 pairs against ~1000 fields.
@@ -1553,35 +1568,86 @@ pub const NetBuilder = struct {
 
     /// The branch-current row of card `name`: a V card's (its sensing
     /// model's control branch once an F/H/W takes it over), an L card's, or
-    /// any other branch `br` lists. Null for a card without one.
+    /// any other branch `br` lists, the first of each in that order. Null
+    /// for a card without one. Asserts that `branch_index` is current.
     fn branchRow(self: *const NetBuilder, name: []const u8) ?u32 {
-        if (netlist.nameIndex(self.v.items(.name), name)) |k| return self.v.items(.branch)[k];
-        if (netlist.nameIndex(self.l.items(.name), name)) |k| return self.l.items(.branch)[k];
-        if (netlist.nameIndex(self.br.items(.name), name)) |k| return self.br.items(.row)[k];
-        return null;
+        std.debug.assert(self.branch_indexed == self.br.len);
+        const k = self.branch_index.get(name) orelse return null;
+        const nv = self.v.len;
+        const nl = self.l.len;
+        if (k < nv) return self.v.items(.branch)[k];
+        if (k < nv + nl) return self.l.items(.branch)[k - nv];
+        std.debug.assert(k - nv - nl < self.br.len);
+        return self.br.items(.row)[k - nv - nl];
+    }
+
+    /// The first V row named `name`.
+    fn vRow(self: *const NetBuilder, name: []const u8) ?u32 {
+        const k = self.branch_index.get(name) orelse return null;
+        return if (k < self.v.len) k else null;
+    }
+
+    /// The first L row named `name`.
+    fn lRow(self: *const NetBuilder, name: []const u8) ?usize {
+        const k = self.branch_index.get(name) orelse return null;
+        const nv = self.v.len;
+        if (k >= nv) return if (k < nv + self.l.len) k - nv else null;
+        // ponytail: a V card of the same name (Spectre names carry no
+        // letter) hides the L in the index; scan the L table for that case.
+        return netlist.nameIndex(self.l.items(.name), name);
+    }
+
+    /// Adds the `br` rows past `branch_indexed` to `branch_index`, the
+    /// first of each name winning.
+    fn indexBranches(self: *NetBuilder) !void {
+        const nv: u32 = @intCast(self.v.len);
+        const nl: u32 = @intCast(self.l.len);
+        const names = self.br.items(.name);
+        for (names[self.branch_indexed..], self.branch_indexed..) |name, k| {
+            const entry = try self.branch_index.getOrPut(self.arena, name);
+            if (!entry.found_existing) entry.value_ptr.* = nv + nl + @as(u32, @intCast(k));
+        }
+        self.branch_indexed = names.len;
+    }
+
+    /// Builds `branch_index` afresh over the V and L tables, which must be
+    /// complete, and the `br` rows so far.
+    fn indexBranchNames(self: *NetBuilder) !void {
+        self.branch_index.clearRetainingCapacity();
+        self.branch_indexed = 0;
+        try self.branch_index.ensureTotalCapacity(self.arena, @intCast(self.v.len + self.l.len + self.br.len));
+        for ([_][]const []const u8{ self.v.items(.name), self.l.items(.name) }, [_]usize{ 0, self.v.len }) |names, base| {
+            for (names, base..) |name, k| {
+                const entry = self.branch_index.getOrPutAssumeCapacity(name);
+                if (!entry.found_existing) entry.value_ptr.* = @intCast(k);
+            }
+        }
+        try self.indexBranches();
+        std.debug.assert(self.branch_indexed == self.br.len);
     }
 
     /// Adds the F/H/W/K cards once every V and L row exists, then the B
     /// cards that read i(), once F/H/W have claimed their sensed branches.
     fn resolveDeferred(self: *NetBuilder) !void {
         if (self.deferred.items.len == 0) return;
-        var source_index: std.StringHashMapUnmanaged(u32) = .empty;
-        try source_index.ensureTotalCapacity(self.arena, @intCast(self.v.len));
-        for (self.v.items(.name), 0..) |name, i| {
-            const entry = source_index.getOrPutAssumeCapacity(name);
-            if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
-        }
+        try self.indexBranchNames();
         for (self.deferred.items) |dev| {
             switch (dev.kind) {
-                'f' => try self.addBranchRef(devices.cccs, dev, source_index, 1.0),
-                'h' => try self.addBranchRef(devices.ccvs, dev, source_index, 0.0),
-                'w' => try self.addBranchRef(devices.cswitch, dev, source_index, null),
+                'f' => try self.addBranchRef(devices.cccs, dev, 1.0),
+                'h' => try self.addBranchRef(devices.ccvs, dev, 0.0),
+                'w' => try self.addBranchRef(devices.cswitch, dev, null),
                 'k' => try self.addKinduc(dev),
                 'b' => {},
                 else => unreachable,
             }
         }
-        for (self.deferred.items) |dev| if (dev.kind == 'b') try self.addB(dev);
+        // H output branches, then each B's own as it lands, so a later B
+        // reads an earlier one's i() as the scan did.
+        try self.indexBranches();
+        for (self.deferred.items) |dev| if (dev.kind == 'b') {
+            try self.addB(dev);
+            try self.indexBranches();
+        };
     }
 
     /// CPL (P card) on coupled_ltra.va's modal-fit, accepted-step convolution
@@ -1781,10 +1847,10 @@ pub const NetBuilder = struct {
 
     /// F, H or W card: a device whose 0 V control branch is the next link of
     /// the sensed V card's chain (`VCard.tap`). `default_gain` null: no gain parameter.
-    fn addBranchRef(self: *NetBuilder, comptime D: type, dev: Device, source_index: std.StringHashMapUnmanaged(u32), comptime default_gain: ?f64) !void {
+    fn addBranchRef(self: *NetBuilder, comptime D: type, dev: Device, comptime default_gain: ?f64) !void {
         if (comptime !@hasDecl(D, "eval")) return error.UnsupportedDevice;
         const ctrl_name = positionalName(dev, 0) orelse return error.MissingControlSource;
-        const ctrl = source_index.get(ctrl_name) orelse return error.UnknownControlSource;
+        const ctrl = self.vRow(ctrl_name) orelse return error.UnknownControlSource;
 
         var model: D.Model = .{};
         // W card: `W n+ n- Vctrl model`, model at positional[1] after the
@@ -1822,8 +1888,8 @@ pub const NetBuilder = struct {
         if (comptime !@hasDecl(devices.kinduc, "eval")) return error.UnsupportedDevice;
         const l1_name = positionalName(dev, 0) orelse return error.KinducMissingInductor;
         const l2_name = positionalName(dev, 1) orelse return error.KinducMissingInductor;
-        const li1 = netlist.nameIndex(self.l.items(.name), l1_name) orelse return error.KinducUnknownInductor;
-        const li2 = netlist.nameIndex(self.l.items(.name), l2_name) orelse return error.KinducUnknownInductor;
+        const li1 = self.lRow(l1_name) orelse return error.KinducUnknownInductor;
+        const li2 = self.lRow(l2_name) orelse return error.KinducUnknownInductor;
         const ibr1 = self.l.items(.branch)[li1];
         const ibr2 = self.l.items(.branch)[li2];
         var model: devices.kinduc.Model = .{};
@@ -3130,4 +3196,10 @@ pub const test_access = if (@import("builtin").is_test) .{
     .isPortCard = isPortCard,
     .rootProduct = rootProduct,
     .cplVector = cplVector,
+    .branchRow = NetBuilder.branchRow,
+    .vRow = NetBuilder.vRow,
+    .lRow = NetBuilder.lRow,
+    .indexBranchNames = NetBuilder.indexBranchNames,
+    .tagNodeInstance = Builder.tagNodeInstance,
+    .computeBbd = Builder.computeBbd,
 } else {};

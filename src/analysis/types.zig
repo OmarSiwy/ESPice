@@ -19,6 +19,7 @@ pub const copySimd = circuit_mod.copySimd;
 pub const freeze = circuit_mod.init;
 
 pub const CardRef = @import("core").query.CardRef;
+pub const CardNames = @import("core").query.CardNames;
 pub const ParamRef = device_ir.ParamRef;
 pub const NoiseSource = device_ir.NoiseSource;
 /// §4.6.1 `analysis()`: the analysis a `Circuit.setSimState` publishes.

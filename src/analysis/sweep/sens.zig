@@ -188,7 +188,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var done: usize = 0;
     errdefer for (names[0..done]) |s| a.free(s);
     for (refs, names) |ref, *name| {
-        const card = root.CardRef.lookup(opts.cards, ref.type, ref.index);
+        const card = opts.card_names.get(ref.type, ref.index);
         const dev = card orelse try std.fmt.allocPrint(scratch, "{s}#{d}", .{ ctx.circuit.typeName(ref.type), ref.index });
         defer if (card == null) scratch.free(dev);
         // The table rather than is_instance: ngspice's IF_PRINCIPAL flag lives

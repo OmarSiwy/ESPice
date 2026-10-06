@@ -1021,9 +1021,10 @@ fn Reader(comptime S: type) type {
         /// `.option scale` and `wnflag`, read before any device.
         scale: f64 = 1,
         wnflag: bool = false,
-        /// Model rows read from each `local_models` line, one per distinct
-        /// set of values, so instances with equal parameters share a row.
-        variants: std.AutoHashMapUnmanaged(u32, std.ArrayList(u32)) = .empty,
+        /// Per `local_models` row, the model rows read from its line, one per
+        /// distinct set of values, so instances with equal parameters share
+        /// a row. Sized on the first `localRow`, once `local_models` is whole.
+        variants: []std.ArrayList(u32) = &.{},
         /// `(name, row)` of the instance models the open expansions resolved;
         /// `Frame.models_mark` splits it by instance.
         instance_models: std.ArrayList(struct { name: []const u8, row: u32 }) = .empty,
@@ -1040,9 +1041,10 @@ fn Reader(comptime S: type) type {
         meas_lines: std.ArrayList([]const u8) = .empty,
         /// `.global` names: one net at every subcircuit level.
         global_nets: std.StringHashMapUnmanaged(void) = .empty,
-        /// The device letter of each card `spectre.translate` wrote whose
-        /// name does not carry it, by the card's address.
-        kinds: spectre.Kinds = .empty,
+        /// Per `lines` row, the device letter `spectre.translate` gave a
+        /// card whose name does not carry it (0: none); empty outside the
+        /// Spectre dialect.
+        kinds: []const u8 = &.{},
         /// `.func` and `.param f(x)=` definitions, by name.
         funcs: std.StringHashMapUnmanaged(Func) = .empty,
         /// The formals of the user functions `subst` is inside, innermost last.
@@ -1145,9 +1147,10 @@ fn Reader(comptime S: type) type {
             }
             // Spectre statements become the SPICE cards the walks read.
             if (dialect == .spectre) {
-                const translated = try spectre.translate(arena, r.lines.items, &r.kinds);
+                const translated = try spectre.translate(arena, r.lines.items);
                 r.lines = .empty;
-                try r.lines.appendSlice(arena, translated);
+                try r.lines.appendSlice(arena, translated.lines);
+                r.kinds = translated.kinds;
             }
             pattern.rewrite(arena, r.lines.items) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1229,7 +1232,7 @@ fn Reader(comptime S: type) type {
             };
             try r.binOptions();
 
-            for (top_devices.items) |i| try r.readDevice(r.lines.items[i], &top);
+            for (top_devices.items) |i| try r.readDevice(r.lines.items[i], r.kindOf(i), &top);
             // The passes below read no one card.
             r.card = "";
             try r.shunts();
@@ -1654,7 +1657,7 @@ fn Reader(comptime S: type) type {
             const sub = r.subckts.items[frame.sub orelse return r.model_ids.get(name) orelse none];
             for (r.instance_models.items[frame.models_mark..]) |m| if (std.mem.eql(u8, m.name, name)) return m.row;
             const locals = r.local_models.items[sub.models_lo..sub.models_hi];
-            for (locals) |m| if (!m.cond and std.mem.eql(u8, m.name, name)) return r.localRow(m, frame);
+            for (locals, sub.models_lo..) |m, lm| if (!m.cond and std.mem.eql(u8, m.name, name)) return r.localRow(lm, frame);
             if (letter != 'm') return r.model_ids.get(name) orelse none;
             // ngspice prepends model declarations (inpmkmod.c): the last
             // matching bin wins, as in `modelBins`.
@@ -1679,14 +1682,14 @@ fn Reader(comptime S: type) type {
                 if (!lg.live and !w_live) {
                     if (!binHolds(b, l, w)) continue;
                     r.values.items[pos] = .{ .name = m.name };
-                    return r.localRow(m, frame);
+                    return r.localRow(sub.models_lo + k, frame);
                 }
                 // Live geometry: every bin the fixed dimension allows is a
                 // candidate a point may pick (`Live.bins`), read now under
                 // this instance's parameters.
                 if (!lg.live and !binHolds(b, l, b[2])) continue;
                 if (!w_live and !binHolds(b, b[0], w)) continue;
-                const row = try r.localRow(m, frame);
+                const row = try r.localRow(sub.models_lo + k, frame);
                 try r.bin_rows.append(r.arena, row);
                 try r.bin_bounds.append(r.arena, b);
                 if (picked == null and binHolds(b, l, w)) {
@@ -1736,27 +1739,32 @@ fn Reader(comptime S: type) type {
             return null;
         }
 
-        /// The row of local model `m` for the instance `frame` expands: the
-        /// shared global-scope row, else one read under the instance's
-        /// parameters on first use.
-        fn localRow(r: *R, m: LocalModel, frame: *const Frame) Error!u32 {
+        /// The model row of `local_models` row `lm` for the instance `frame`
+        /// expands: the shared global-scope row, else one read under the
+        /// instance's parameters on first use.
+        fn localRow(r: *R, lm: usize, frame: *const Frame) Error!u32 {
+            const m = r.local_models.items[lm];
             if (m.shared) return m.top;
             const line = m.line;
             const name = m.name;
+            if (r.variants.len != r.local_models.items.len) {
+                std.debug.assert(r.variants.len == 0);
+                r.variants = try r.arena.alloc(std.ArrayList(u32), r.local_models.items.len);
+                @memset(r.variants, .empty);
+            }
             const kv_mark = r.kvs.items.len;
             try r.readModel(r.lines.items[line], frame, false);
             var row: u32 = @intCast(r.models.items.len - 1);
-            const gop = try r.variants.getOrPut(r.arena, line);
-            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            const seen = &r.variants[lm];
             const fresh = r.kvs.items[kv_mark..];
-            for (gop.value_ptr.items) |old| {
+            for (seen.items) |old| {
                 const kv = r.models.items[old].kv;
                 if (!sameValues(r.kvs.items[kv.start..][0..kv.len], fresh)) continue;
                 r.models.shrinkRetainingCapacity(row);
                 r.kvs.shrinkRetainingCapacity(kv_mark);
                 row = old;
                 break;
-            } else try gop.value_ptr.append(r.arena, row);
+            } else try seen.append(r.arena, row);
             try r.instance_models.append(r.arena, .{ .name = name, .row = row });
             return row;
         }
@@ -3196,7 +3204,15 @@ fn Reader(comptime S: type) type {
             return try std.fmt.allocPrint(r.arena, "b{s} {s} {s} i={{v({s},{s})/({s})*({s})}} tc1={{{s}}} tc2={{{s}}} reciproctc=1", .{ head, n1, n2, n1, n2, e, m, tc1, tc2 });
         }
 
-        fn readDevice(r: *R, line: []const u8, frame: *const Frame) Error!void {
+        /// The letter `kinds` gives row `row` of `lines`, 0 when its name
+        /// carries its own.
+        fn kindOf(r: *const R, row: usize) u8 {
+            return if (row < r.kinds.len) r.kinds[row] else 0;
+        }
+
+        /// Reads device card `line`; `kind` is its letter when its name does
+        /// not carry it (`kindOf`), else 0.
+        fn readDevice(r: *R, line: []const u8, kind: u8, frame: *const Frame) Error!void {
             r.card = line;
             const arena = r.arena;
             const port_card = r.dialect == .hspice and std.ascii.toLower(line[0]) == 'p';
@@ -3211,13 +3227,13 @@ fn Reader(comptime S: type) type {
             // HSPICE's P element is a port: a V card that `port=` numbers
             // for `.lin` (`P1 in 0 port=1 z0=50`). A Spectre card's letter
             // is its master's, kept beside it.
-            const letter = if (port_card) 'v' else r.kinds.get(@intFromPtr(line.ptr)) orelse std.ascii.toLower(head[0]);
+            const letter = if (port_card) 'v' else if (kind != 0) kind else std.ascii.toLower(head[0]);
             // HSPICE reads these letters as IBIS buffers and lumped lines,
             // neither of which is built.
             if (r.dialect == .hspice and std.mem.indexOfScalar(u8, "bu", letter) != null)
                 return r.unsupported(line, "unsupported HSPICE element");
             if (r.dialect == .hspice and (letter == 's' or letter == 'w')) return r.readDataElement(head, letter, &f, frame);
-            if (letter == 'r' and r.dialect == .ngspice) if (try r.behaviouralResistor(line)) |b| return r.readDevice(b, frame);
+            if (letter == 'r' and r.dialect == .ngspice) if (try r.behaviouralResistor(line)) |b| return r.readDevice(b, 0, frame);
             if (std.mem.indexOfScalar(u8, "efgh", letter) != null) {
                 var probe = f;
                 _ = probe.next();
@@ -3236,7 +3252,7 @@ fn Reader(comptime S: type) type {
                             if (u.len > buf.len or (behavioural.get(std.ascii.lowerString(&buf, u)) orelse .refused) != .kind) break;
                             _ = probe.next();
                         }
-                        return r.readDevice(try std.mem.concat(r.arena, u8, &.{ line[0..at], " ", probe.line[probe.pos..] }), frame);
+                        return r.readDevice(try std.mem.concat(r.arena, u8, &.{ line[0..at], " ", probe.line[probe.pos..] }), letter, frame);
                     }
                     // HSPICE: VCR and VCCAP are G-element forms only (#75).
                     if ((form == .vcr or form == .vccap) and letter != 'g') return r.unsupported(line, "VCR or VCCAP on a card other than G");
@@ -3756,8 +3772,8 @@ fn Reader(comptime S: type) type {
                     if (sub.has_nested and skipNested(card, &nested)) continue;
                     switch (card) {
                         .cond => |c| try r.branch(&kept, c, &f, &child),
-                        .model => if (kept.active()) for (locals) |m| {
-                            if (m.cond and m.line == i) _ = try r.localRow(m, &child);
+                        .model => if (kept.active()) for (locals, sub.models_lo..) |m, lm| {
+                            if (m.cond and m.line == i) _ = try r.localRow(lm, &child);
                         },
                         else => {},
                     }
@@ -3765,9 +3781,9 @@ fn Reader(comptime S: type) type {
             }
             var branches: Branches = .{};
             var nested: u32 = 0;
-            for (r.lines.items[sub.first..sub.end]) |line| {
+            for (r.lines.items[sub.first..sub.end], sub.first..) |line, i| {
                 if (line[0] != '.') {
-                    if (nested == 0 and branches.active()) try r.readDevice(line, &child);
+                    if (nested == 0 and branches.active()) try r.readDevice(line, r.kindOf(i), &child);
                     continue;
                 }
                 if (!sub.has_cond and !sub.has_nested) continue;
