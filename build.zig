@@ -311,6 +311,16 @@ pub fn build(b: *std.Build) void {
     c_api_lib.use_lld = exe.use_lld;
     b.installArtifact(c_api_lib);
     c_api_lib.installHeader(b.path("include/espice.h"), "espice.h");
+    // For a package consumer: `artifact("espice")` is ambiguous (exe and lib).
+    b.addNamedLazyPath("libespice", c_api_lib.getEmittedBin());
+
+    // The C API guide's host program (docs/embed/host.c), built and run.
+    const c_example_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    c_example_mod.addCSourceFile(.{ .file = b.path("docs/embed/host.c") });
+    c_example_mod.addIncludePath(b.path("include"));
+    c_example_mod.linkLibrary(c_api_lib);
+    const c_example = b.addExecutable(.{ .name = "c-example", .root_module = c_example_mod });
+    b.step("c-example", "Build and run the C API example from the docs").dependOn(&b.addRunArtifact(c_example).step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
