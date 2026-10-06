@@ -10,6 +10,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `bench-suites -Dsuite=cmcqa`: 3,218 single-device decks from the public CMC QA
   sets (HICUM/L2 2.4.0, PSP 103) and the GF180MCU BSIM4 regression, each with
   its reference results.
+- `bench-suites -Dsuite=circuitsim90`: the 43 MCNC CircuitSim90 decks (MOS2,
+  MOS3, BJT; up to chip2) from Xyce_Regression, converted to ngspice dialect.
 
 ## 1.0.0 (2026-10-05)
 
