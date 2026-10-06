@@ -12,6 +12,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
   its reference results.
 - `bench-suites -Dsuite=circuitsim90`: the 43 MCNC CircuitSim90 decks (MOS2,
   MOS3, BJT; up to chip2) from Xyce_Regression, converted to ngspice dialect.
+- `bench-suites -Dsuite=ngspice`: 353 decks from ngspice-45's `tests/` and
+  `examples/` and the Quality-page archives (paranoia, ISCAS85 on PTM 45 nm
+  BSIM4, KiCad).
 
 ## 1.0.0 (2026-10-05)
 
