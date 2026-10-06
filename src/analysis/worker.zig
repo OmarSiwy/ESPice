@@ -2,6 +2,7 @@
 //! progress checkpoint until the coordinator resumes or cancels it.
 //! Independent of circuit and solver state.
 const std = @import("std");
+const builtin = @import("builtin");
 const requests = @import("core").query;
 const progress = @import("progress.zig");
 
@@ -78,6 +79,8 @@ pub fn Worker(comptime Product: type) type {
         /// Starts or resumes one quantum without waiting, so the coordinator
         /// can start several. A failed thread spawn leaves the worker unstarted
         /// and retryable; `error.AlreadyRunning` if a quantum is in flight.
+        /// Single-threaded, the first `start` runs the analysis to completion
+        /// before it returns.
         pub fn start(self: *Self, quantum: Quantum) !void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
@@ -85,10 +88,19 @@ pub fn Worker(comptime Product: type) type {
             switch (self.state) {
                 .created => {
                     self.state = .running;
-                    self.thread = std.Thread.spawn(.{ .stack_size = self.options.stack_size }, main, .{self}) catch |err| {
-                        self.state = .created;
-                        return err;
-                    };
+                    if (builtin.single_threaded) {
+                        // No threads (the wasm playground): the whole run
+                        // happens here, with checkpoints only polling cancel.
+                        self.quantum = .completion;
+                        self.mutex.unlock(self.io);
+                        defer self.mutex.lockUncancelable(self.io);
+                        self.main();
+                    } else {
+                        self.thread = std.Thread.spawn(.{ .stack_size = self.options.stack_size }, main, .{self}) catch |err| {
+                            self.state = .created;
+                            return err;
+                        };
+                    }
                 },
                 .paused => {
                     self.state = .running;

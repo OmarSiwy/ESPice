@@ -456,7 +456,7 @@ pub const PatternBuilder = struct {
         @memset(col_ptr, 0);
         for (all[0..m], 0..) |k, p| {
             row_idx[p] = @truncate(k);
-            col_ptr[(k >> 32) + 1] += 1;
+            col_ptr[@intCast((k >> 32) + 1)] += 1;
         }
         for (0..n) |j| col_ptr[j + 1] += col_ptr[j];
         col_ptr_out.* = col_ptr;

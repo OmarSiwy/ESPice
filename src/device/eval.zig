@@ -958,7 +958,8 @@ fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active:
 /// alive, measured at 73 MB on a 25,000-MOSFET deck. Separate per-column
 /// lists grow by remap, never by copy, and `finalize` moves one column at a
 /// time into the caller's allocator, freeing each staging column at once.
-const staging_gpa = std.heap.smp_allocator;
+/// `core.gpa`, which this file cannot import.
+const staging_gpa = if (builtin.single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
 
 /// Moves `items[k]` to `items[dst[k]]` for every k by following each cycle
 /// of the permutation, one element in hand at a time. `seen` is scratch of

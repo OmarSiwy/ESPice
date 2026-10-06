@@ -1,6 +1,11 @@
 //! Shared data every layer speaks: numerics, query requests, the deck,
 //! results and the name pool. Imports nothing but std.
 const std = @import("std");
+
+/// The process-wide general-purpose allocator. SmpAllocator does not build
+/// single-threaded (the wasm playground), so there it is the page allocator,
+/// which on wasm is WasmAllocator.
+pub const gpa: std.mem.Allocator = if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
 /// Vector kernels (stdpp), complex numbers, the frequency grid and the
 /// solver tolerances.
 pub const numerics = @import("numerics.zig");

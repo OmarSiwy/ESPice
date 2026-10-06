@@ -791,7 +791,7 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
 
         const gathered = opt.gather and nuk >= gather_min_u and try gatherColumn(ar, lu, k, base, coff[k + 1] - base, pos, lvl, cnt, pseq, &lev_ptr, &g_slot, &g_cptr, &g_l, &g_u);
         if (!gathered) {
-            try dmap.ensureUnusedCapacity(ar, col_flops);
+            try dmap.ensureUnusedCapacity(ar, std.math.cast(usize, col_flops) orelse return error.OutOfMemory);
             for (up[k]..up[k + 1]) |p| {
                 const i = ui[p];
                 for (lp[i]..lp[i + 1]) |q| {
