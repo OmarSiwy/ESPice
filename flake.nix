@@ -1,6 +1,13 @@
 {
   description = "ESPice";
 
+  # Prebuilt espice from CI (.github/workflows/nix.yml). Key from the Cachix API
+  # (app.cachix.org/api/v1/cache/omarsiwy), the same one `cachix use omarsiwy` adds.
+  nixConfig = {
+    extra-substituters = [ "https://omarsiwy.cachix.org" ];
+    extra-trusted-public-keys = [ "omarsiwy.cachix.org-1:fE15rGllP0D8ijLsCorvAx66mlXLp+1H1l0lR72iZ3U=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
@@ -11,12 +18,25 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       flake-utils,
       zig-overlay,
       ...
     }:
-    flake-utils.lib.eachDefaultSystem (
+    {
+      # `prev`, not `final`: the attribute names must not depend on this overlay.
+      overlays.default =
+        _: prev:
+        let
+          p = self.packages.${prev.stdenv.hostPlatform.system};
+        in
+        {
+          inherit (p) espice;
+        }
+        // prev.lib.optionalAttrs (p ? espice-gpu) { inherit (p) espice-gpu; };
+    }
+    // flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs {
@@ -38,12 +58,6 @@
         # to a shared library at run time and dlopen'd, which a static musl binary
         # cannot do (it segfaulted). Zig links against its own glibc stubs, and
         # autoPatchelfHook points the result at nixpkgs' loader.
-        #
-        # Naming it is also what forces `-Dgpu=false` below: with an explicit `-Dtarget`
-        # the host `-mcpu` leaks into gompute's GPU kernel compilation and the amdgcn
-        # build dies inside LLVM with "'x86-64' is not a recognized processor for this
-        # target". A packaged simulator wants the portable CPU build anyway; `nix
-        # develop` still carries the full CUDA/ROCm toolchain for kernel work.
         zigTarget =
           {
             x86_64-linux = "x86_64-linux-gnu";
@@ -117,8 +131,6 @@
           inherit pkgs;
           openvafPkg = openvafPkg;
         };
-      in
-      {
         # Default dev shell: build tools + llc + CUDA/ROCm toolchains.
         devShells.default = pkgs.mkShell ({
           packages =
@@ -153,60 +165,123 @@
           LD_LIBRARY_PATH = gpuLibPath;
         });
 
-        packages.default = pkgs.stdenv.mkDerivation {
-          pname = "espice";
-          version = "1.0.0";
-          src = ./.;
+        # `gpu = true` adds the CUDA (sm_75 PTX, which the driver JITs forward to
+        # newer cards) and HIP (gfx1100) device kernels, the arches release.yml
+        # ships. Zig emits both itself, so the build needs no CUDA or ROCm
+        # toolkit. At run time gompute dlopens libcuda (NixOS: /run/opengl-driver)
+        # and libamdhip64 (nixpkgs' ROCm clr) from the wrapped LD_LIBRARY_PATH.
+        mkEspice =
+          {
+            gpu ? false,
+          }:
+          let
+            flags = toString (
+              [
+                "-Doptimize=ReleaseFast"
+                "-Dtarget=${zigTarget}"
+                "--cache-dir .zig-cache"
+              ]
+              ++ (
+                if gpu then
+                  [
+                    "-Dcuda-arch=sm_75"
+                    "-Dhip-arch=gfx1100"
+                  ]
+                else
+                  [
+                    "-Dgpu=false"
+                    "-Dhip-arch=none"
+                    "-Dcuda-arch=none"
+                  ]
+              )
+            );
+          in
+          pkgs.stdenv.mkDerivation {
+            pname = if gpu then "espice-gpu" else "espice";
+            version = "1.0.0";
+            # Only what `zig build` reads, so a docs or flake edit does not
+            # rebuild the package.
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [
+                ./build.zig
+                ./build.zig.zon
+                ./src
+                ./models
+                ./include
+                ./tests
+              ];
+            };
 
-          nativeBuildInputs = [
-            zig
-            pkgs.makeWrapper
-          ]
-          ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.autoPatchelfHook;
+            nativeBuildInputs = [
+              zig
+              pkgs.makeWrapper
+            ]
+            ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.autoPatchelfHook;
 
-          dontConfigure = true;
+            dontConfigure = true;
 
-          # Seed the global cache from the fetched-ahead dependencies. Copied rather
-          # than symlinked, and made writable, because Zig writes into this directory
-          # while unpacking and cannot do that through a read-only store path.
-          preBuild = ''
-            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
-            mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
-            cp -r --no-preserve=mode,ownership ${zigDeps} "$ZIG_GLOBAL_CACHE_DIR/p"
-          '';
+            # Seed the global cache from the fetched-ahead dependencies. Copied rather
+            # than symlinked, and made writable, because Zig writes into this directory
+            # while unpacking and cannot do that through a read-only store path.
+            preBuild = ''
+              export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+              mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+              cp -r --no-preserve=mode,ownership ${zigDeps} "$ZIG_GLOBAL_CACHE_DIR/p"
+            '';
 
-          buildPhase = ''
-            runHook preBuild
-
-            zig build \
-              -Doptimize=ReleaseFast \
-              -Dtarget=${zigTarget} \
-              -Dgpu=false \
-              -Dhip-arch=none \
-              -Dcuda-arch=none \
-              --cache-dir .zig-cache
-
-            runHook postBuild
-          '';
-
-          installPhase = ''
-            runHook preInstall
-
-            zig build install \
-              -Doptimize=ReleaseFast \
-              -Dtarget=${zigTarget} \
-              -Dgpu=false \
-              -Dhip-arch=none \
-              -Dcuda-arch=none \
-              --prefix "$out" \
-              --cache-dir .zig-cache
+            buildPhase = ''
+              runHook preBuild
+              zig build ${flags}
+              runHook postBuild
+            '';
 
             # A `.hdl` model is compiled on first load with the Zig espice was
             # built with; the build cache lives under $ESPICE_CACHE or
             # ~/.cache/espice, never in the store.
-            wrapProgram $out/bin/espice --set-default ZIG ${zig}/bin/zig
+            installPhase = ''
+              runHook preInstall
+              zig build install ${flags} --prefix "$out"
+              wrapProgram $out/bin/espice --set-default ZIG ${zig}/bin/zig ${pkgs.lib.optionalString gpu "--suffix LD_LIBRARY_PATH : /run/opengl-driver/lib:${pkgs.rocmPackages.clr}/lib"}
+              runHook postInstall
+            '';
 
-            runHook postInstall
+            meta = {
+              description =
+                "SPICE circuit simulator" + (if gpu then " with CUDA/HIP device kernels" else " (CPU build)");
+              mainProgram = "espice";
+            };
+          };
+        espice = mkEspice { };
+      in
+      {
+        inherit devShells;
+
+        packages = {
+          default = espice;
+          inherit espice;
+        }
+        # nixpkgs' ROCm is Linux-only, and macOS has neither backend.
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux { espice-gpu = mkEspice { gpu = true; }; };
+
+        apps.default = {
+          type = "app";
+          program = pkgs.lib.getExe espice;
+          meta.description = "Run espice on a SPICE deck";
+        };
+
+        checks = {
+          inherit espice;
+          # One plain deck and one `.hdl` deck: the second compiles a Verilog-A
+          # model at run time with the wrapped Zig against share/espice in the store.
+          smoke = pkgs.runCommand "espice-smoke" { } ''
+            export HOME=$TMPDIR ESPICE_CACHE=$TMPDIR/cache
+            cp -r ${./tests/fixtures/hdl}/veriloga_res_divider.{sp,assets} .
+            ${pkgs.lib.getExe espice} --format=print ${./tests/fixtures/op/balanced_bridge.sp} 2>&1 | tee op.log
+            grep -q "Operating Point" op.log
+            ${pkgs.lib.getExe espice} --format=print veriloga_res_divider.sp 2>&1 | tee hdl.log
+            grep -Eq "3\.5(0*)e-01" hdl.log
+            touch $out
           '';
         };
       }

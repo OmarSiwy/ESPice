@@ -33,6 +33,30 @@ and its results can be driven from another language.
 
 ## Install
 
+With Nix, the CPU build comes prebuilt from the `omarsiwy` Cachix cache
+(the flake's `nixConfig` offers it):
+
+```sh
+nix run github:OmarSiwy/ESPice -- deck.sp
+nix profile install github:OmarSiwy/ESPice
+```
+
+As a flake input, via the overlay:
+
+```nix
+inputs.espice.url = "github:OmarSiwy/ESPice";
+# pkgs = import nixpkgs { inherit system; overlays = [ espice.overlays.default ]; };
+# then pkgs.espice, or espice.packages.${system}.default directly
+```
+
+The package ships `bin/espice`, `lib/libespice.a`, `include/espice.h` and the
+`share/espice` sources a deck's `.hdl` model compiles against at run time.
+`.#espice-gpu` (Linux) adds the CUDA (sm_75 PTX) and HIP (gfx1100) device
+kernels for `--backend cuda|hip`; it finds libcuda in `/run/opengl-driver/lib`
+on NixOS (elsewhere, put the driver's directory on `LD_LIBRARY_PATH`).
+
+From source:
+
 ```sh
 git clone https://github.com/OmarSiwy/ESPice
 cd ESPice
