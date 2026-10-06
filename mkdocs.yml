@@ -1,0 +1,106 @@
+site_name: ESPice
+site_description: A SPICE circuit simulator with Verilog-A device models, GPU device evaluation and a C API.
+site_url: https://omarsiwy.github.io/ESPice/
+repo_url: https://github.com/OmarSiwy/ESPice
+repo_name: OmarSiwy/ESPice
+edit_uri: edit/main/docs/
+docs_dir: docs
+copyright: ESPice is Apache-2.0. Device models keep their own licences.
+
+# The bench reports and snippet sources are read through pymdownx.snippets,
+# not published as pages.
+exclude_docs: |
+  performance/bench/*/summary.md
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      # language-spice on every netlist block: the playground hooks it.
+      pygments_lang_class: true
+      # Pygments' "spice" is the Spice programming language, not netlists.
+      extend_pygments_lang:
+        - name: spice
+          lang: text
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: [docs]
+      check_paths: true
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+  # Supplied by the playground build (tools/playground/): runs ```spice blocks in the browser.
+  - javascripts/playground.js
+
+extra_css:
+  - stylesheets/playground.css
+
+nav:
+  - Home: index.md
+  - Learn SPICE:
+      - learn/index.md
+      - 1. A first circuit: learn/first-circuit.md
+      - 2. Sources: learn/sources.md
+      - 3. The four core analyses: learn/analyses.md
+      - 4. Semiconductor models: learn/models.md
+      - 5. Subcircuits: learn/subcircuits.md
+      - 6. Parameters and sweeps: learn/parameters.md
+      - 7. Measurements: learn/measure.md
+      - 8. Noise and periodic analyses: learn/noise-periodic.md
+      - 9. Monte Carlo: learn/monte-carlo.md
+  - Using ESPice:
+      - Install: using/install.md
+      - Command line: using/cli.md
+      - Dialects: using/dialects.md
+      - Language reference: using/reference.md
+      - Analyses: using/analyses.md
+      - Devices and models: using/devices.md
+      - Output: using/output.md
+      - GPU backend: using/gpu.md
+      - Diagnostics and errors: using/diagnostics.md
+  - Embedding ESPice:
+      - The C API: embed/c-api.md
+      - Zig package and Nix input: embed/packages.md
+  - Accuracy and performance:
+      - performance/index.md
