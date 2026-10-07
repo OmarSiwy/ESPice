@@ -573,9 +573,10 @@ const DividerTests = struct {
         defer gpa.free(m.contributions);
         var total: f64 = 0;
         for (m.contributions, s) |c, want| {
-            // Same step, different eval entry: equal up to the difference's
-            // rounding, which cancellation lifts to ~1e-8 relative.
-            try t.expectApproxEqAbs(want, c.sensitivity, 1e-12 + 1e-6 * @abs(want));
+            // One `Adjoint` serves both, and a unit scale is exact: bit for
+            // bit, except where `.sens` zeroed a roundoff quotient at p = 0
+            // (#91), a rule dcmatch does not apply.
+            if (want != 0) try t.expectEqual(want, c.sensitivity) else try t.expectApproxEqAbs(want, c.sensitivity, 1e-12);
             total += c.variance_contrib;
         }
         try t.expectApproxEqRel(@sqrt(total), m.total_sigma, 1e-12);

@@ -87,10 +87,14 @@ analytic stamps are the upgrade
    changed). `computeBaseline()` is deliberately not called: the baseline
    would freeze the const-Jacobian stamps (resistors) and mask the very
    perturbations being measured.
-2. `evalNewton(x_op)`, keep the nominal residual, factor $J$, and solve
-   $J^{\mathsf T}\lambda = e_{\text{out}}$ (for `v(a,b)` the seed is
-   $e_a - e_b$).
-3. Per parameter from `collectParams`: write $p_j + \delta_j$ with
+2. `sens.Adjoint.init`, shared with `.dcmatch` and `.dcsens` (#193):
+   `eval(x_op)`, keep the nominal residual, factor $J$, and solve
+   $J^{\mathsf T}\lambda = e_{\text{out}}$ (`xf.Output.seed`: for
+   `v(a,b)` the seed is $e_a - e_b$). The nominal takes the full stamp, as
+   every perturbed eval does once `recomputeType` has dropped the
+   constant-Jacobian baseline; until #193 `.sens` took `evalNewton` here,
+   which could difference two summation orders.
+3. Per parameter from `collectParams` (`Adjoint.fd`): write $p_j + \delta_j$ with
    $\delta_j = 10^{-6}|p_j| + 10^{-12}$, re-derive only that device type
    (`recomputeType`), read back the stored step, re-evaluate $F(x_{op})$, and
    take the fused dot. The parameter is restored on every exit path. A
@@ -127,13 +131,13 @@ fixed at $10^{-6}|p| + 10^{-12}$ (relative with an absolute floor).
 ```
 sens(ckt, x_op, params, out):
     ws = workspace(ckt)
-    F0 = evalNewton(x_op); factor(J)
+    F0 = eval(x_op); factor(J)
     lambda = solveT(J, e_out)               # ONE transposed solve
     for p in params:
         p.set(p.nominal + 1e-6*|p| + 1e-12); recomputeType(p.type)
         if TopologyChanged: S[p] = 0; restore; continue
         delta = p.value - p.nominal         # what the parameter actually stored
-        F = evalNewton(x_op)
+        F = eval(x_op)
         S[p] = -dot(lambda, (F - F0)/delta)
         p.restore(); recomputeType(p.type)
 ```

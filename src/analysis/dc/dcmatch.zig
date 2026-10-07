@@ -1,8 +1,8 @@
 //! DC mismatch (Spectre `dcmatch`, HSPICE `.dcmatch`) and DC variation
 //! sensitivity (HSPICE `.dcsens`) of one output at the operating point, by
-//! adjoint sensitivity. One factorization and one transpose solve give
-//! lambda (J^T lambda = e_out); each parameter then costs one
-//! finite-difference re-eval of F(x_op) and a dot with lambda.
+//! adjoint sensitivity, on `.sens`'s `Adjoint`: one factorization and one
+//! transpose solve give lambda (J^T lambda = e_out); each parameter then
+//! costs one finite-difference re-eval of F(x_op) and a dot with lambda.
 //! The parameters come in `Groups`: the deck's variation block, or every
 //! parameter alone at its Pelgrom sigma, sigma^2(p) = A_P^2 / (W·L). The
 //! offset is sigma^2(y) = sum over groups of (dy/dsigma_g)^2.
@@ -10,7 +10,7 @@
 //! dev/analysis/dcmatch.md.
 const std = @import("std");
 const root = @import("../types.zig");
-const adjointFd = @import("../sweep/sens.zig").adjointFd;
+const Adjoint = @import("../sweep/sens.zig").Adjoint;
 const fdStep = @import("../sweep/sens.zig").fdStep;
 
 /// Query options, defined in core/query.zig.
@@ -139,41 +139,6 @@ inline fn pelgromSigma(ref: root.ParamRef) f64 {
     return 1.0;
 }
 
-/// dy/dp = -lambda^T · dF/dp, with dF/dp the forward difference of F(x_op)
-/// against `rhs_nom`. Restores the parameter before returning. Returns 0 when
-/// the step rounds away or the perturbation would change the topology.
-fn fdSensitivity(
-    ckt: *root.Circuit,
-    x_op: []const f64,
-    lambda: []const f64,
-    rhs_nom: []const f64,
-    param: root.ParamRef,
-) !f64 {
-    const n: usize = ckt.n;
-    const orig: f64 = param.get();
-    const delta_req = fdStep(orig);
-
-    // Only this parameter moves and temperature does not, so re-deriving its
-    // own device type is the whole recompute (Circuit.recomputeType).
-    param.set(orig + delta_req);
-    // The step the parameter actually took: an f32 field rounds it.
-    const delta = param.get() - orig;
-    defer {
-        param.set(orig);
-        ckt.recomputeType(param.type) catch unreachable; // restores the checked original parameter
-    }
-    // As in sens.zig: the absolute step at 0 un-collapses an internal node whose
-    // parasitic is nominally 0, and the frozen pattern has no row for it. The
-    // derivative is unrepresentable, not small.
-    ckt.recomputeType(param.type) catch |e| switch (e) {
-        error.TopologyChanged => return 0,
-    };
-
-    if (delta == 0) return 0;
-    ckt.eval(x_op, 0);
-    return -adjointFd(lambda, ckt.rhs[0..n], rhs_nom, 1.0 / delta);
-}
-
 /// Each group's contribution to the mismatch of v(output_node) -
 /// v(output_neg) at `x_op`, over `refs` (`Circuit.collectParams`). Leaves the
 /// circuit's planes at the last perturbed eval and the workspace factored at
@@ -188,30 +153,12 @@ pub fn solve(
     groups: Groups,
     allocator: std.mem.Allocator,
 ) !MismatchResult {
-    const n: usize = ckt.n;
     if (groups.count() == 0) return .{
         .contributions = &.{},
         .total_sigma = 0,
     };
-
-    const buf = try allocator.alloc(f64, 3 * n);
-    defer allocator.free(buf);
-    const lambda = buf[0..n];
-    const e_out = buf[n .. 2 * n];
-    const rhs_nom = buf[2 * n .. 3 * n];
-
-    const ws = try ckt.workspace();
-    ckt.eval(x_op, 0);
-
-    @memcpy(rhs_nom, ckt.rhs[0..n]);
-
-    try ws.slv.factor(ckt.g_vals, ckt.solver_execution);
-
-    root.zeroSimd(e_out[0..n]);
-    e_out[output_node] = 1.0;
-    // `v(a,b)`: the adjoint seed is the node difference.
-    if (output_neg != root.GROUND) e_out[output_neg] = -1.0;
-    ws.slv.solveT(e_out[0..n], lambda[0..n]);
+    const adj = try Adjoint.init(ckt, x_op, .{ .node = output_node, .neg = output_neg, .branch = null }, allocator);
+    defer adj.deinit(allocator);
 
     const contributions = try allocator.alloc(Contribution, groups.count());
     errdefer allocator.free(contributions);
@@ -222,7 +169,13 @@ pub fn solve(
         // The first member is not added to 0, which would turn a -0 into +0.
         var sens: f64 = 0;
         for (groups.members(index), 0..) |m, k| {
-            const d = try fdSensitivity(ckt, x_op, lambda, rhs_nom, refs[m.param]) * m.scale;
+            const p = refs[m.param];
+            const orig = p.get();
+            // A step that rounds away contributes 0.
+            const dydp = adj.fd(ckt, x_op, p, orig + fdStep(orig)) catch |e| switch (e) {
+                error.ZeroDelta => 0,
+            };
+            const d = dydp * m.scale;
             sens = if (k == 0) d else sens + d;
         }
 

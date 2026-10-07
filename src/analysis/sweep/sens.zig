@@ -9,6 +9,7 @@
 //! dev/analysis/sensitivity.md.
 const std = @import("std");
 const root = @import("../types.zig");
+const xf = @import("../dc/xf.zig");
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -53,6 +54,77 @@ pub inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64
     return s;
 }
 
+/// The adjoint of one output at an operating point, shared by `.sens`,
+/// `.dcmatch` and `.dcsens`: λ from J^T λ = e_out, and the nominal F(x_op)
+/// each forward difference subtracts. Both slices are n long.
+pub const Adjoint = struct {
+    lambda: []f64,
+    rhs_nom: []f64,
+
+    /// Evals F at `x_op`, factors J on the circuit workspace and solves for
+    /// λ. Overwrites the circuit's planes and the workspace factorization.
+    /// Errors: OutOfMemory, and SingularMatrix from the factor. Free with
+    /// `deinit` on `allocator`.
+    pub fn init(ckt: *root.Circuit, x_op: []const f64, out: xf.Output, allocator: std.mem.Allocator) !Adjoint {
+        const n: usize = ckt.n;
+        std.debug.assert(x_op.len >= n);
+        const ws = try ckt.workspace();
+        const lambda = try allocator.alloc(f64, n);
+        errdefer allocator.free(lambda);
+        const rhs_nom = try allocator.alloc(f64, n);
+        errdefer allocator.free(rhs_nom);
+        // The full stamp, as every perturbed eval is: `recomputeType` drops
+        // the constant-Jacobian baseline, so an `evalNewton` nominal would
+        // difference two different summations.
+        ckt.eval(x_op, 0);
+        copySimd(rhs_nom, ckt.rhs[0..n]);
+        try ws.slv.factor(ckt.g_vals, ckt.solver_execution);
+        root.zeroSimd(lambda);
+        out.seed(lambda);
+        ws.slv.solveT(lambda, lambda);
+        return .{ .lambda = lambda, .rhs_nom = rhs_nom };
+    }
+
+    /// Frees both slices; `allocator` is the one `init` took.
+    pub fn deinit(self: Adjoint, allocator: std.mem.Allocator) void {
+        allocator.free(self.lambda);
+        allocator.free(self.rhs_nom);
+    }
+
+    /// dy/dp = -λ^T dF/dp by a forward difference that moves `p` to `to`
+    /// and back. Returns 0 when the move would change the topology,
+    /// error.ZeroDelta when it rounds away. Overwrites the circuit's planes.
+    pub fn fd(self: Adjoint, ckt: *root.Circuit, x_op: []const f64, p: root.ParamRef, to: f64) error{ZeroDelta}!f64 {
+        std.debug.assert(self.lambda.len == ckt.n);
+        const orig = p.get();
+        // Only this parameter moves and temperature does not, so re-deriving
+        // its own device type is the whole recompute (Circuit.recomputeType).
+        p.set(to);
+        defer {
+            p.set(orig);
+            ckt.recomputeType(p.type) catch unreachable; // restores the checked original parameter
+        }
+        // A parameter whose nominal value collapses an internal node
+        // (gummel_poon RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the
+        // absolute step at 0 (`fdStep`): `collapse` stops folding c' onto c,
+        // the builder never allocated a distinct c', and the batch reports
+        // TopologyChanged. The perturbed circuit has a node the frozen pattern
+        // lacks, so the derivative is not representable; report 0 rather than
+        // fail the analysis. ngspice never perturbs a topology parameter
+        // (cktsens.c uses per-device analytic sensitivities, not a generic FD).
+        ckt.recomputeType(p.type) catch |e| switch (e) {
+            error.TopologyChanged => return 0,
+        };
+        // Difference against the step actually stored: an f32 parameter
+        // rounds it, and the requested delta would give a wrong derivative,
+        // not a small one.
+        const delta = p.get() - orig;
+        if (delta == 0) return error.ZeroDelta;
+        ckt.eval(x_op, 0);
+        return -adjointFd(self.lambda, ckt.rhs[0..self.lambda.len], self.rhs_nom, 1.0 / delta);
+    }
+};
+
 /// dV(output_node, output_neg)/dp for each of `params` at `x_op`, parallel to
 /// `params` and owned by `allocator`. `x_op` is the executor's operating point
 /// (the full OP ladder; a plain Newton here fails on circuits that need
@@ -71,22 +143,8 @@ pub fn solve(
 ) ![]f64 {
     // No `computeBaseline()`: the baseline would freeze the const-Jacobian
     // stamps (resistors) and mask the very perturbations being measured.
-    const n: usize = ckt.n;
-    const ws = try ckt.workspace();
-
-    ckt.evalNewton(x_op, 0);
-    const rhs_nom = try allocator.alloc(f64, n);
-    defer allocator.free(rhs_nom);
-    copySimd(rhs_nom, ckt.rhs[0..n]);
-    try ws.slv.factor(ckt.g_vals, ckt.solver_execution);
-
-    const lambda = try allocator.alloc(f64, n);
-    defer allocator.free(lambda);
-    root.zeroSimd(lambda);
-    lambda[output_node] = 1.0;
-    // `v(a,b)`: the adjoint seed is the node difference.
-    if (output_neg != root.GROUND) lambda[output_neg] = -1.0;
-    ws.slv.solveT(lambda, lambda);
+    const adj = try Adjoint.init(ckt, x_op, .{ .node = output_node, .neg = output_neg, .branch = null }, allocator);
+    defer adj.deinit(allocator);
 
     const sens = try allocator.alloc(f64, params.len);
     errdefer allocator.free(sens);
@@ -94,7 +152,7 @@ pub fn solve(
     for (params, sens, 0..) |p, *out, index| {
         if (index != 0) try ckt.checkpoint(.{ .phase = .sweep, .completed = index, .total = params.len });
         const orig: f64 = p.get();
-        out.* = try fdAdjoint(ckt, x_op, lambda[0..n], rhs_nom, p, orig + fdStep(orig));
+        out.* = try adj.fd(ckt, x_op, p, orig + fdStep(orig));
         // 0 is the "infinite" default of a 1/p parameter (gummel_poon VAF,
         // IKF: `inv_vaf = 0` unless vaf > 0), where dV/dp tends to 0, while
         // the step lands on a finite p and swaps the term in whole: the
@@ -102,51 +160,12 @@ pub fn solve(
         // (#91). A smooth parameter's quotient barely moves when the step
         // doubles; this one's halves or worse, so it reports 0 as ngspice.
         if (orig == 0 and out.* != 0) {
-            const twice = try fdAdjoint(ckt, x_op, lambda[0..n], rhs_nom, p, 2 * fdStep(0));
+            const twice = try adj.fd(ckt, x_op, p, 2 * fdStep(0));
             if (@abs(twice - out.*) > 0.25 * @abs(out.*)) out.* = 0;
         }
     }
 
     return sens;
-}
-
-/// -λ^T dF/dp by a forward difference that moves `p` to `to` and back.
-/// Returns 0 when the move would change the topology, error.ZeroDelta when
-/// it rounds away.
-fn fdAdjoint(
-    ckt: *root.Circuit,
-    x_op: []const f64,
-    lambda: []const f64,
-    rhs_nom: []const f64,
-    p: root.ParamRef,
-    to: f64,
-) !f64 {
-    const orig = p.get();
-    // Only this parameter moves and temperature does not, so re-deriving
-    // its own device type is the whole recompute (Circuit.recomputeType).
-    p.set(to);
-    defer {
-        p.set(orig);
-        ckt.recomputeType(p.type) catch unreachable; // restores the checked original parameter
-    }
-    // A parameter whose nominal value collapses an internal node
-    // (gummel_poon RC/RE = 0, mos1 RD/RS = 0, ...) is re-wired by the
-    // absolute step at 0 (`fdStep`): `collapse` stops folding c' onto c, the
-    // builder never allocated a distinct c', and the batch reports
-    // TopologyChanged. The perturbed circuit has a node the frozen pattern
-    // lacks, so the derivative is not representable; report 0 rather than
-    // fail the analysis. ngspice never perturbs a topology parameter
-    // (cktsens.c uses per-device analytic sensitivities, not a generic FD).
-    ckt.recomputeType(p.type) catch |e| switch (e) {
-        error.TopologyChanged => return 0,
-    };
-    // Difference against the step actually stored: an f32 parameter
-    // rounds it, and the requested delta would give a wrong derivative,
-    // not a small one.
-    const delta = p.get() - orig;
-    if (delta == 0) return error.ZeroDelta;
-    ckt.evalNewton(x_op, 0);
-    return -adjointFd(lambda, ckt.rhs[0..lambda.len], rhs_nom, 1.0 / delta);
 }
 
 /// ngspice's IF_PRINCIPAL parameter (IOPP/IOPAP in res.c, cap.c, ind.c,
