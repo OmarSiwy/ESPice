@@ -71,17 +71,24 @@ pub fn adjointTf(src: XfSource, y: []const f64, n: usize) Complex {
 
 /// `src`'s input impedance and admittance from its own forward response
 /// `x`: a V card's delivered current is −i_branch per volt, an I card's
-/// terminal voltage v(nodes[1]) − v(nodes[0]) per ampere. A zero reads as
-/// `infinite` in its reciprocal.
+/// terminal voltage v(nodes[1]) − v(nodes[0]) per ampere. A value below
+/// 1/`infinite` in magnitude reads as `infinite` in its reciprocal, ngspice's
+/// tfanal.c rule (|i| < 1e-20 gives 1e20, #199).
 pub fn immittance(src: XfSource, x: []const f64, n: usize) [2]Complex {
-    const one: Complex = .{ .re = 1, .im = 0 };
-    const inf: Complex = .{ .re = infinite, .im = 0 };
     if (src.branch) |br| {
         const y = at(x, n, br).scale(-1);
-        return .{ if (y.magSq() == 0) inf else one.div(y), y };
+        return .{ reciprocal(y), y };
     }
     const z = at(x, n, src.nodes[1]).sub(at(x, n, src.nodes[0]));
-    return .{ z, if (z.magSq() == 0) inf else one.div(z) };
+    return .{ z, reciprocal(z) };
+}
+
+/// 1/v, or `infinite` when |v| < 1/`infinite`. The clamp also keeps
+/// `Complex.div`'s |v|² from underflowing to 0 below |v| ~ 1e-154.
+fn reciprocal(v: Complex) Complex {
+    const floor = 1 / infinite;
+    if (v.magSq() < floor * floor) return .{ .re = infinite, .im = 0 };
+    return (Complex{ .re = 1, .im = 0 }).div(v);
 }
 
 /// Column labels: `tf(name)`, then `zin(name)` and `yin(name)` unless

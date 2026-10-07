@@ -291,7 +291,7 @@ const XfTests = struct {
         try t.expectEqualSlices(f64, &.{ 0, -1, 1, 0 }, &rhs);
     }
 
-    test "xf: immittance reciprocals, and a zero reads as infinite" {
+    test "xf: immittance reciprocals, and a current below 1e-20 reads as infinite" {
         const v: XfSource = .{ .name = "v1", .branch = 3 };
         // i_branch = -0.25 A per volt delivers 0.25 A: 4 ohm, 0.25 S.
         const zy = xf.immittance(v, &.{ 0, 0, 0, -0.25 }, 4);
@@ -303,6 +303,12 @@ const XfTests = struct {
         try t.expectEqual(@as(f64, 500), open[0].re);
         try t.expectApproxEqRel(@as(f64, 2e-3), open[1].re, 1e-15);
         try t.expectEqual(xf.infinite, xf.immittance(i, &.{ 0, 0, 0, 0 }, 4)[1].re);
+        // ngspice's tfanal.c clamp: |i| < 1e-20 is 1e20, at and above it 1/i
+        // (#199). 1e-160 would underflow |y|² to 0 and read inf unclamped.
+        for ([_]f64{ -1e-30, 1e-30, -1e-160, -9.9e-21 }) |cur|
+            try t.expectEqual(xf.infinite, xf.immittance(v, &.{ 0, 0, 0, cur }, 4)[0].re);
+        try t.expectApproxEqRel(@as(f64, 5e19), xf.immittance(v, &.{ 0, 0, 0, -2e-20 }, 4)[0].re, 1e-15);
+        try t.expectEqual(xf.infinite, xf.immittance(i, &.{ 0, 0, 1e-25, 0 }, 4)[1].re);
     }
 
     test "xf: Output seeds and reads a node pair or a branch" {

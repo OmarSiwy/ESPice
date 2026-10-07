@@ -24,8 +24,8 @@ pub const Values = struct {
 /// `options`' output. The gain and Rin come from a unit drive on the input,
 /// Rout from the adjoint solve with e_out. Rin, and Rout for a current
 /// output, are `xf.infinite` (1e20, ngspice's tfanal.c value) when the unit
-/// drive moves no branch current. Overwrites the circuit's planes with the
-/// eval at `x_op` and its workspace's factorization. Returns
+/// drive moves less than 1e-20 A of branch current. Overwrites the circuit's
+/// planes with the eval at `x_op` and its workspace's factorization. Returns
 /// error.SingularMatrix when G is singular once SparseLu has pinned its void
 /// unknowns (#160), and error.OutOfMemory.
 pub fn solve(ckt: *root.Circuit, x_op: []const f64, options: Options, input_branch: u32, allocator: std.mem.Allocator) !Values {
