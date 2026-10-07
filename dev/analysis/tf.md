@@ -47,7 +47,19 @@ when the RHS entry is zero.
 A current output `i(Vx)` puts $e_{\text{out}}$ on Vx's branch row: a unit
 volt on the sensing source. $y[br] = (G^{-1})_{br,br}$ is the branch current
 that volt moves, and as for $R_{\text{in}}$ the resistance Vx sees is
-$R_{\text{out}} = -1/y[br]$ ($+\infty$ when $y[br] = 0$).
+$R_{\text{out}} = -1/y[br]$ (`1e20` when $y[br] = 0$, the value ngspice
+prints there).
+
+Infinite resistances print as `1e20`, ngspice's value (#193): `tfanal.c`
+writes `1e20` for $R_{\text{in}}$ when $|i_{br}| < 10^{-20}$, and its
+current-output clamp gives `1e20` when $y[br] = 0$. Measured with ngspice-45
+on the divider plus an open `V2 c 0 1`: `tf i(V2) V2` prints 0, 1e20, 1e20,
+and `tf v(out) V2` 0, 1e20, 750; the `tf` tests in
+`src/analysis/tests/sweep.zig` pin both. ESPice clamps only an exactly zero
+current, so an $R_{\text{in}}$ above $10^{20}$ (a current in
+$(0, 10^{-20})$) prints its value here and `1e20` in ngspice. `.dcxf`'s
+`zin`/`yin` take the same `1e20` (VACASK's `coredcxf.cpp`), so the two
+analyses agree.
 
 Divergence: ngspice's `tfanal.c` reports $1/\max(10^{-20}, y[br])$ for a
 current output. A passive circuit always gives $y[br] < 0$ under that sign,
@@ -65,7 +77,7 @@ the factorization; no iteration.
 analytic $G$ plane; the analysis is then two dense LU solves ($n$ here is
 small enough that dense beats sparse: one bulk arena, no per-solve
 allocation). Forward solve with $e_{br}$ on the input source's branch row →
-gain + $R_{\text{in}}$ ($R_{\text{in}} = \infty$ when the branch current
+gain + $R_{\text{in}}$ ($R_{\text{in}} = 10^{20}$ when the branch current
 perturbation is exactly zero). Explicit transpose of $G$, second
 factorization, solve with $e_{\text{out}}$ → $R_{\text{out}}$. Defaults:
 input = first source's branch, output = last probe node.
@@ -81,7 +93,7 @@ tf(ckt, x_op, in_branch, out_node):
     J = denseG()
     v = lu_solve(J, e[in_branch])   # forward
     gain = v[out_node]
-    Rin  = v[in_branch] != 0 ? -1/v[in_branch] : inf
+    Rin  = v[in_branch] != 0 ? -1/v[in_branch] : 1e20
     y = lu_solve(J^T, e[out_node])  # adjoint
     Rout = y[out_node]
 ```
@@ -137,8 +149,8 @@ the deck's AC excitation, and publishes the deck's probes (`v(node)`,
 Divergences, recorded:
 
 - An infinite `zin` or `yin` (a V card that moves no current, an I card
-  across a short) is VACASK's finite `1e20`, not `.tf`'s `+inf`, so the
-  row stays finite.
+  across a short) is VACASK's finite `1e20`, the value `.tf` and ngspice
+  print too, so the row stays finite.
 - VACASK saves only `tf` and `zin` by default and `yin` on request; we
   always publish all three.
 - `.dcinc` takes the real part of each source's AC excitation, so a
