@@ -73,14 +73,17 @@ the factorization; no iteration.
 
 ## 2. Flow explanation
 
-`src/analysis/dc/tf.zig`: one `eval()` at $x_{op}$ fills the
-analytic $G$ plane; the analysis is then two dense LU solves ($n$ here is
-small enough that dense beats sparse: one bulk arena, no per-solve
-allocation). Forward solve with $e_{br}$ on the input source's branch row →
-gain + $R_{\text{in}}$ ($R_{\text{in}} = 10^{20}$ when the branch current
-perturbation is exactly zero). Explicit transpose of $G$, second
-factorization, solve with $e_{\text{out}}$ → $R_{\text{out}}$. Defaults:
-input = first source's branch, output = last probe node.
+`src/analysis/dc/tf.zig` is `.dcxf`'s readout (§5) for one source: one
+`eval()` at $x_{op}$ fills the analytic $G$ plane, the circuit workspace's
+sparse solver factors it once, and both solves reuse that factorization.
+Forward solve with the input's unit excitation (`xf.excite`: $e_{br}$ on a V
+card's branch row, a unit current through an I card) → gain (`Output.read`)
++ $R_{\text{in}}$ (`xf.immittance`, $10^{20}$ when the branch current
+perturbation is exactly zero). Adjoint `solveT` with $e_{\text{out}}$
+(`Output.seed`) → $R_{\text{out}}$. Defaults: input = first source's
+branch, output = last probe node. Until #193 `.tf` built a dense copy of $G$
+and factored it with `dense_lu`, O(n²) memory and O(n³) time; the sparse
+path rounds differently in the last bits.
 
 Failure handling: a singular $G$ (floating output at DC) errors out of the
 analysis; no partial results.
@@ -90,11 +93,11 @@ analysis; no partial results.
 ```
 tf(ckt, x_op, in_branch, out_node):
     eval(x_op)                      # analytic G plane
-    J = denseG()
-    v = lu_solve(J, e[in_branch])   # forward
+    lu = sparse_factor(G)
+    v = lu.solve(e[in_branch])      # forward
     gain = v[out_node]
     Rin  = v[in_branch] != 0 ? -1/v[in_branch] : 1e20
-    y = lu_solve(J^T, e[out_node])  # adjoint
+    y = lu.solveT(e[out_node])      # adjoint, same factors
     Rout = y[out_node]
 ```
 
@@ -102,10 +105,8 @@ tf(ckt, x_op, in_branch, out_node):
 
 Not worth a kernel alone (two solves at op-point size). The parallel axis
 is **batching across ensemble lanes**: in Monte-Carlo/corner runs each lane
-has its own linearization: batch the $2L$ dense solves as one blocked
-GETRF/GETRS (or reuse each lane's already-factored sparse Newton matrix:
-forward = `solve`, adjoint = `solveT` on the same factors, zero extra
-factorizations).
+has its own linearization, and each lane's sparse factorization serves its
+forward `solve` and adjoint `solveT`, as the scalar path does.
 
 ```
 kernel tf_batched(lanes):
@@ -170,8 +171,7 @@ the same circuit, every column of all three analyses, both paths) and
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Dense LU forward + transpose solve | none (dense path is below the sparse pipeline's scope) | `src/solver/dense_lu.zig` `factorizeSolve` |
-| The sparse alternative (reuse Newton factors: solve/solveT) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solver/direct.zig`: upgrade path when n grows |
+| Sparse LU forward + transpose solve on one factorization | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solver/direct.zig` `Solver.solve`/`solveT` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `src/solver/converger.zig` |
 
 ---

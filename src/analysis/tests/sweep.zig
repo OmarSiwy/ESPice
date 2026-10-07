@@ -458,12 +458,12 @@ const DividerTests = struct {
         defer gpa.free(x);
         try t.expect((try op.solve(&ckt, x, .{}, &.{}, &.{})).converged);
 
-        const v = try tf.solve(&ckt, x, .{ .output_node = out }, try branchRow(&ckt), out, GROUND, gpa);
+        const v = try tf.solve(&ckt, x, .{ .output_node = out }, try branchRow(&ckt), gpa);
         try t.expectApproxEqRel(@as(f64, 0.75), v.gain, 1e-9);
         try t.expectApproxEqRel(@as(f64, 4000), v.input_resistance, 1e-9);
         try t.expectApproxEqRel(@as(f64, 750), v.output_resistance, 1e-9);
         // A unit current into `out`: the transimpedance and Rin are R1 || R2.
-        const i = try tf.solve(&ckt, x, .{ .output_node = out, .input_nodes = .{ GROUND, out } }, 0, out, GROUND, gpa);
+        const i = try tf.solve(&ckt, x, .{ .output_node = out, .input_nodes = .{ GROUND, out } }, 0, gpa);
         try t.expectApproxEqRel(@as(f64, 750), i.gain, 1e-9);
         try t.expectApproxEqRel(@as(f64, 750), i.input_resistance, 1e-9);
         try t.expectApproxEqRel(@as(f64, 750), i.output_resistance, 1e-9);
@@ -494,11 +494,11 @@ const DividerTests = struct {
             if (is_branch and current == 0) break @intCast(row);
         } else return error.TestUnexpectedResult;
 
-        const i = try tf.solve(&ckt, x, .{ .output_node = n_out, .output_branch = br2 }, br2, n_out, GROUND, gpa);
+        const i = try tf.solve(&ckt, x, .{ .output_node = n_out, .output_branch = br2 }, br2, gpa);
         try t.expectEqual(@as(f64, 0), i.gain);
         try t.expectEqual(@as(f64, 1e20), i.input_resistance);
         try t.expectEqual(@as(f64, 1e20), i.output_resistance);
-        const v = try tf.solve(&ckt, x, .{ .output_node = n_out }, br2, n_out, GROUND, gpa);
+        const v = try tf.solve(&ckt, x, .{ .output_node = n_out }, br2, gpa);
         try t.expectEqual(@as(f64, 0), v.gain);
         try t.expectEqual(@as(f64, 1e20), v.input_resistance);
         try t.expectApproxEqRel(@as(f64, 750), v.output_resistance, 1e-9);
