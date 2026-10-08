@@ -5,7 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
-- `.tf`, `.dcxf` and `.acxf` read a resistance whose current is below 1e-20 A as `1e20`, as ngspice does: a 1e-30 S input path printed 1e30, and one below about 1e-154 S printed `inf` (#199).
+- `.tf` reads a resistance whose branch current is below 1e-20 A as `1e20`, as ngspice does (a 1e-30 S input path printed 1e30); `.dcxf` and `.acxf` keep VACASK's exact-zero rule but no longer print `inf` for an immittance below about 1e-154 (#199).
 - `.tf` prints an infinite input or output resistance (a source that moves no current) as `1e20`, as ngspice does, instead of `inf` (#193).
 - `.qpss` runs on multi-tone harmonic balance (`.hb TONES=`): preconditioned GMRES from the operating point instead of a second two-tone solver; the API `Qpss` drops its unused `gmres_*` fields (#189).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).

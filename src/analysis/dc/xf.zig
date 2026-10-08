@@ -71,9 +71,9 @@ pub fn adjointTf(src: XfSource, y: []const f64, n: usize) Complex {
 
 /// `src`'s input impedance and admittance from its own forward response
 /// `x`: a V card's delivered current is −i_branch per volt, an I card's
-/// terminal voltage v(nodes[1]) − v(nodes[0]) per ampere. A value below
-/// 1/`infinite` in magnitude reads as `infinite` in its reciprocal, ngspice's
-/// tfanal.c rule (|i| < 1e-20 gives 1e20, #199).
+/// terminal voltage v(nodes[1]) − v(nodes[0]) per ampere. An exact zero
+/// reads as `infinite` in its reciprocal, as VACASK does
+/// (coredcxf.cpp:268-282, coreacxf.cpp:484-497); any other value inverts.
 pub fn immittance(src: XfSource, x: []const f64, n: usize) [2]Complex {
     if (src.branch) |br| {
         const y = at(x, n, br).scale(-1);
@@ -83,12 +83,20 @@ pub fn immittance(src: XfSource, x: []const f64, n: usize) [2]Complex {
     return .{ z, reciprocal(z) };
 }
 
-/// 1/v, or `infinite` when |v| < 1/`infinite`. The clamp also keeps
-/// `Complex.div`'s |v|² from underflowing to 0 below |v| ~ 1e-154.
+/// 1/v, or `infinite` at v = 0. Smith's division: it never squares |v|, so a
+/// tiny v inverts to a huge value instead of `Complex.div`'s |v|² underflowing
+/// to 0 and returning inf below |v| ~ 1e-154 (#199). A real v gives exactly
+/// 1/v.re, VACASK's DC `1.0/yin`.
 fn reciprocal(v: Complex) Complex {
-    const floor = 1 / infinite;
-    if (v.magSq() < floor * floor) return .{ .re = infinite, .im = 0 };
-    return (Complex{ .re = 1, .im = 0 }).div(v);
+    if (v.re == 0 and v.im == 0) return .{ .re = infinite, .im = 0 };
+    if (@abs(v.re) >= @abs(v.im)) {
+        const r = v.im / v.re;
+        const d = v.re + v.im * r;
+        return .{ .re = 1 / d, .im = -r / d };
+    }
+    const r = v.re / v.im;
+    const d = v.im + v.re * r;
+    return .{ .re = r / d, .im = -1 / d };
 }
 
 /// Column labels: `tf(name)`, then `zin(name)` and `yin(name)` unless

@@ -51,7 +51,7 @@ pub fn solve(ckt: *root.Circuit, x_op: []const f64, options: Options, input_bran
     xf.excite(src, rhs);
     ws.slv.solve(rhs, x);
     const gain = out.read(x, n).re;
-    const input_resistance = xf.immittance(src, x, n)[0].re;
+    const input_resistance = impedance(src, x, n);
 
     // Adjoint: J^T y = e_out. A voltage output reads Rout back on itself; a
     // current output reads the resistance its sensing source sees, as Rin
@@ -62,7 +62,7 @@ pub fn solve(ckt: *root.Circuit, x_op: []const f64, options: Options, input_bran
     out.seed(rhs);
     ws.slv.solveT(rhs, x);
     const output_resistance = if (out.branch) |br|
-        xf.immittance(.{ .name = "", .branch = br }, x, n)[0].re
+        impedance(.{ .name = "", .branch = br }, x, n)
     else
         out.read(x, n).re;
     return .{
@@ -70,6 +70,15 @@ pub fn solve(ckt: *root.Circuit, x_op: []const f64, options: Options, input_bran
         .input_resistance = input_resistance,
         .output_resistance = output_resistance,
     };
+}
+
+/// `xf.immittance`'s impedance with ngspice's tfanal.c floor on a V card: a
+/// branch current under 1e-20 A per volt reads `xf.infinite` (1e20), not its
+/// reciprocal (#199). `.dcxf` follows VACASK, which clamps only an exact zero.
+fn impedance(src: @import("core").query.XfSource, x: []const f64, n: usize) f64 {
+    std.debug.assert(x.len == n);
+    if (src.branch) |br| if (@abs(x[br]) < 1 / xf.infinite) return xf.infinite;
+    return xf.immittance(src, x, n)[0].re;
 }
 
 /// Contract entry: one real point (transfer_function, input_resistance,
