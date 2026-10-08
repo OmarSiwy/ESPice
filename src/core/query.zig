@@ -605,12 +605,9 @@ pub const Qpss = struct {
     /// Harmonics kept of `f1` and `f2`.
     k1: u16 = 5,
     k2: u16 = 5,
+    /// Newton iterations of the multi-tone HB solve (`.hb`'s `max_iter`).
     max_newton: u16 = 50,
     hb_tol: f64 = 1e-9,
-    /// GMRES restart depth per Newton step.
-    gmres_restart: u16 = 30,
-    gmres_max_restarts: u16 = 10,
-    gmres_tol: f64 = 1e-3,
 };
 
 /// Transient analysis (`.tran`, HSPICE `.op <time>`).

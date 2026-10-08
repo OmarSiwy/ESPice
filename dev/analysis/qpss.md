@@ -3,16 +3,16 @@
 Steady state under multiple incommensurate tones (mixers, blockers,
 intermod).
 
-Multi-tone `.hb TONES=` ([multitone-hb.md](multitone-hb.md)) subsumes this
-card: any number of tones, box or diamond truncation, and a preconditioned
-Krylov solve. `.qpss` stays for its two-sided output and its decks.
-
-`src/analysis/pss/qpss.zig` implements two-tone harmonic balance over the
-$(2K_1+1) \times (2K_2+1)$ mix-product grid with a 2-D DFT operator and
-unpreconditioned matrix-free GMRES. The charge term is the DFT of $q(t)$ at
-every sample (exact for nonlinear charge), as in HB. Preconditioning, MFT
-shooting, autonomous variants, QPAC/QPnoise and a GPU DFT-sandwich kernel
-remain targets.
+`.qpss f1 f2 K1 K2` runs on multi-tone harmonic balance
+([multitone-hb.md](multitone-hb.md)): `src/analysis/pss/qpss.zig` hands the
+$(2K_1+1) \times (2K_2+1)$ box to `mhb.solve` (APFT collocation, Newton with
+the block-diagonal $G_0 + j\omega C_0$ preconditioned GMRES) and keeps only
+the output remap: each mix product $(k, l)$ reads the one-sided line at
+$|k f_1 + l f_2|$, DC as $|X_0|$ and every other line as half its amplitude,
+the two-sided $|X_{kl}|$ (#189). The card's own solver (unpreconditioned
+GMRES from zero, C held at one sample, 2-D DFT basis on searched instants)
+is gone. MFT shooting, autonomous variants, QPAC/QPnoise and a GPU
+DFT-sandwich kernel remain targets.
 
 ## 1. Mathematical specification
 
@@ -50,19 +50,9 @@ constraints, as in autonomous HB/shooting.
 ## 2. Flow and extensions
 
 1. Identify fundamentals + harmonic budget per tone.
-2. Implemented QP-HB path: initialize the spectral coefficients to zero, then
-   Newton on the 2-D spectral residual with matrix-free GMRES and no
-   preconditioner. Incommensurate tones have no sample instants that are
-   exact torus points for both, so an orthogonal DFT basis would leak each
-   tone into every mix product at the level of the phase error; the transform
-   is instead the exact inverse $\Gamma^{-1}$ of the sampling matrix at the
-   chosen instants (one dense LU per analysis). The systems are
-   $2 n\,n_f$ unknowns, at most a few hundred on the fixtures, so GMRES runs
-   unrestarted up to 512 unknowns (restart 30 stalled on a 90-unknown
-   two-tone deck with a 1e4 spread) and at the configured restart depth
-   beyond. The planned preconditioner is node-major, with one sparse
-   $(G_0 + j\omega_{kl} C_0)$ factor per mix product; a sideband-major block
-   preconditioner indexed at $p\,\omega_1$ does not fit this system.
+2. Implemented QP-HB path: `mhb.solve` on the two-tone box, from the DC
+   operating point; see [multitone-hb.md](multitone-hb.md) for the transform
+   and the preconditioner.
 3. Target MFT path: PSS at the carrier first, then Newton on the cycle-boundary
    system; each iteration's $2K_2{+}1$ cycle integrations are independent
    (the natural parallel axis).
@@ -73,8 +63,8 @@ constraints, as in autonomous HB/shooting.
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| QP-HB operator apply (2-D DFT sandwich) | [lptv-block-solves.md](../solvers/lptv-block-solves.md) §"Matrix-free application" | `src/analysis/pss/qpss.zig` |
-| QP-HB preconditioner | [structured-preconditioners.md](../solvers/structured-preconditioners.md) §"Multi-tone generalization" | not implemented; GMRES runs unpreconditioned |
+| QP-HB operator apply (2-D DFT sandwich) | [lptv-block-solves.md](../solvers/lptv-block-solves.md) §"Matrix-free application" | `src/analysis/pss/mhb.zig` (`Operator.matvec`) |
+| QP-HB preconditioner | [structured-preconditioners.md](../solvers/structured-preconditioners.md) §"Multi-tone generalization" | `mhb.Operator.precond`: one $G_0 + j\omega_j C_0$ factor per line, as `FreqSolver` lanes |
 | GMRES core | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/gmres.zig` |
 | MFT: monodromy products per carrier cycle, multi-RHS replay, subspace recycling across cycles | [monodromy-krylov.md](../solvers/monodromy-krylov.md) | not implemented; the $2K_2{+}1$ independent cycles would be the parallel lane axis |
 
@@ -84,4 +74,4 @@ constraints, as in autonomous HB/shooting.
 periodic HB §4.1.3, MFT §4.1.6 verified). MFT boundary-condition detail
 beyond the fetched prose: derived, not source-verified (Kundert/White/
 Sangiovanni book is paywalled). **Implementation status:** two-tone QP-HB
-is present; MFT shooting and the extensions listed above remain targets.
+runs on multi-tone HB; MFT shooting and the extensions listed above remain targets.

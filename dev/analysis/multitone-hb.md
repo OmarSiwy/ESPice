@@ -69,10 +69,10 @@ inverse error of 1e-15 on the same spectrum.
 
 Each Newton step solves J·dx = -F by GMRES (restart 40, relative tolerance
 1e-7). J is never formed: a product is IDFT, G(t) and C(t) at every sample
-(`qpss.gvProduct`), and two DFTs, the charge one scaled by ω per line. This
+(`mhb.gvProduct`), and two DFTs, the charge one scaled by ω per line. This
 is VACASK's sparse block Jacobian applied without storing the blocks. C(t)
 enters at every sample, so nonlinear charge gets an exact Newton, where
-`hb.zig` and `qpss.zig` hold C(t0).
+`hb.zig` holds C(t0).
 
 The right preconditioner is block diagonal, one n x n block G0 + jωj·C0 per
 line, with G0 and C0 the sample means of G(t) and C(t). The blocks share one
@@ -185,14 +185,11 @@ GMRES with the G_0 + j(ω + ω_p)·C_0 lane preconditioner.
 
 ## QPSS
 
-Multi-tone HB subsumes `.qpss`: `.qpss f1 f2 K1 K2` is
-`.hb tones=f1 f2 nharms=K1 K2 intmodmax=K1+K2` with a two-sided output.
+`.qpss f1 f2 K1 K2` runs as `.hb tones=f1 f2 nharms=K1 K2` (the whole
+box) through `mhb.solve`; `qpss.zig` only maps each mix product (k, l) to
+the line at |k f1 + l f2| and publishes the two-sided |X_kl| (#189).
 `src/tests/analyses.zig` checks that every one-sided HB line equals twice
-the QPSS |X_kl| on a square-law mixer over incommensurate tones. `.qpss`
-stays as it is for its card and its decks' output. It is the older solver
-(unpreconditioned GMRES, C at one sample) and new work should target
-`.hb tones=`; retire `.qpss` when a deck needs neither its two-sided
-layout nor its card.
+the QPSS |X_kl| on a square-law mixer over incommensurate tones.
 
 ## Oracles
 

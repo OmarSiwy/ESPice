@@ -773,6 +773,7 @@ PASS	fixtures/tf/ideal_voltage_output.sp
 PASS	fixtures/tf/low_impedance.sp
 PASS	fixtures/tf/negative_bias.sp
 PASS	fixtures/tf/second_source.sp
+PASS	fixtures/tf/tiny_input_conductance.sp
 PASS	fixtures/tran/bench_bypass_burst_clock.sp
 PASS	fixtures/tran/bench_bypass_gated_branch.sp
 PASS	fixtures/tran/bench_bypass_idle_ladder.sp

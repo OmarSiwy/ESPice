@@ -3,7 +3,8 @@
 //! resistive mixer's f_in ± f_LO lines, PAC's magnitudes for PXF, the dense
 //! LU for the Krylov conversion solve, the dense Jacobian Newton for the
 //! one-tone GMRES path, the dense product for `gvProduct` (bit for bit),
-//! transform round trips for the DFT pairs, and the HSPICE [CR .HB]
+//! transform round trips for the DFT pairs, the recomputed
+//! |k*f1 + l*f2| of each qpss box product, and the HSPICE [CR .HB]
 //! truncation examples for the multi-tone spectrum.
 
 const PacTests = struct {
@@ -306,389 +307,41 @@ const PssTests = struct {
 
 const QpssTests = struct {
     const impl = @import("../pss/qpss.zig");
-    const MixGrid = impl.test_access.MixGrid;
-    const buildTransform = impl.test_access.buildTransform;
-    const buildSampleTimes = impl.test_access.buildSampleTimes;
-    const transformWork = impl.test_access.transformWork;
-    const dft2D = impl.test_access.dft2D;
-    const gvProduct = impl.test_access.gvProduct;
-    const transposePattern = impl.test_access.transposePattern;
-    const idft2D = impl.test_access.idft2D;
-    const simdZero = impl.test_access.simdZero;
+    const mhb = @import("../pss/mhb.zig");
     const std = @import("std");
     const testing = std.testing;
 
-    // One incommensurate pair for every basis test, with the transform built
-    // the way the solver builds it: APFT instants, then Γ and its inverse.
-    const tone1: f64 = 1000.0;
-    const tone2: f64 = 1414.213562373095;
-
-    fn makeTransform(
-        alloc: std.mem.Allocator,
-        grid: MixGrid,
-        times: []f64,
-        basis_cos: []f64,
-        basis_sin: []f64,
-        basis_cos_t: []f64,
-        basis_sin_t: []f64,
-    ) !void {
-        buildSampleTimes(times, grid, tone1, tone2);
-        const need = transformWork(grid.nf);
-        const work = try alloc.alloc(f64, need.f64s);
-        defer alloc.free(work);
-        const piv = try alloc.alloc(u32, need.u32s);
-        defer alloc.free(piv);
-        try buildTransform(grid, tone1, tone2, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t, work, piv);
+    test "qpss: every box product reads the one-sided line at its |frequency|" {
+        // Oracle: the product's frequency recomputed from (k, l), and the
+        // two-sided count: DC alone, every other line once from each side.
+        const f1: f64 = 1000;
+        const f2: f64 = 1414.213562373095;
+        const k1: u16 = 3;
+        const k2: u16 = 2;
+        const spec = try mhb.spectrum(testing.allocator, &.{ f1, f2 }, &.{ k1, k2 }, 0, 1);
+        defer spec.deinit(testing.allocator);
+        var lines: [7 * 5]u32 = undefined;
+        impl.boxLines(spec, f1, f2, k1, k2, &lines);
+        var hits: [7 * 5]u8 = @splat(0);
+        for (lines, 0..) |j, flat| {
+            const k: f64 = @floatFromInt(@as(i32, @intCast(flat % 7)) - 3);
+            const l: f64 = @floatFromInt(@as(i32, @intCast(flat / 7)) - 2);
+            try testing.expectEqual(@abs(k * f1 + l * f2), spec.freqs[j]);
+            hits[j] += 1;
+        }
+        try testing.expectEqual(@as(u32, 0), lines[2 * 7 + 3]);
+        try testing.expectEqual(@as(usize, 18), spec.freqs.len);
+        for (hits[0..spec.freqs.len], 0..) |h, j| try testing.expectEqual(@as(u8, if (j == 0) 1 else 2), h);
     }
 
-    test "QPSS: MixGrid flat ↔ signed roundtrip" {
-        const grid = MixGrid.init(3, 2);
-
-        // nf1=7, nf2=5, nf=35
-        try testing.expectEqual(@as(usize, 7), grid.nf1);
-        try testing.expectEqual(@as(usize, 5), grid.nf2);
-        try testing.expectEqual(@as(usize, 35), grid.nf);
-
-        // DC: k=0, l=0 → flat = 2*7 + 3 = 17
-        const dc_flat = grid.flatIdx(0, 0);
-        try testing.expectEqual(@as(usize, 17), dc_flat);
-        const dc_kl = grid.signedKL(dc_flat);
-        try testing.expectEqual(@as(i32, 0), dc_kl.k);
-        try testing.expectEqual(@as(i32, 0), dc_kl.l);
-
-        // k=-3, l=-2 → flat = 0
-        const corner = grid.flatIdx(-3, -2);
-        try testing.expectEqual(@as(usize, 0), corner);
-        const corner_kl = grid.signedKL(corner);
-        try testing.expectEqual(@as(i32, -3), corner_kl.k);
-        try testing.expectEqual(@as(i32, -2), corner_kl.l);
-
-        for (0..grid.nf) |flat| {
-            const kl = grid.signedKL(flat);
-            try testing.expectEqual(flat, grid.flatIdx(kl.k, kl.l));
-        }
-    }
-
-    test "QPSS: MixGrid omega calculation" {
-        const grid = MixGrid.init(2, 1);
-        const f1: f64 = 1e9;
-        const f2: f64 = 1e6;
-
-        // DC: ω = 0
-        const dc = grid.flatIdx(0, 0);
-        try testing.expectApproxEqAbs(@as(f64, 0.0), grid.omega(dc, f1, f2), 1e-10);
-
-        // k=1, l=0: ω = 2π*f1
-        const f1_idx = grid.flatIdx(1, 0);
-        try testing.expectApproxEqAbs(2.0 * std.math.pi * f1, grid.omega(f1_idx, f1, f2), 1e-3);
-
-        // k=1, l=1: ω = 2π*(f1+f2)
-        const sum_idx = grid.flatIdx(1, 1);
-        try testing.expectApproxEqAbs(2.0 * std.math.pi * (f1 + f2), grid.omega(sum_idx, f1, f2), 1e-3);
-    }
-
-    test "QPSS: 2D DFT/IDFT roundtrip" {
-        const grid = MixGrid.init(1, 1); // nf1=3, nf2=3 → nf=9
-        const nf = grid.nf;
-        const n: usize = 2;
-        const sz = n * nf; // 2 * 9 = 18
-
-        const alloc = testing.allocator;
-
-        const basis_cos = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos);
-        const basis_sin = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin);
-        const basis_cos_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos_t);
-        const basis_sin_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin_t);
-        const times = try alloc.alloc(f64, nf);
-        defer alloc.free(times);
-        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
-
-        const x_re = try alloc.alloc(f64, sz);
-        defer alloc.free(x_re);
-        const x_im = try alloc.alloc(f64, sz);
-        defer alloc.free(x_im);
-        for (x_re) |*v| v.* = 0;
-        for (x_im) |*v| v.* = 0;
-
-        const dc_idx = grid.flatIdx(0, 0);
-        x_re[0 * nf + dc_idx] = 1.0;
-        x_re[1 * nf + dc_idx] = 2.0;
-
-        const x_td = try alloc.alloc(f64, sz);
-        defer alloc.free(x_td);
-        idft2D(x_td, x_re, x_im, basis_cos_t, basis_sin_t, n, nf);
-
-        for (0..nf) |s| {
-            try testing.expectApproxEqAbs(@as(f64, 1.0), x_td[0 * nf + s], 1e-12);
-            try testing.expectApproxEqAbs(@as(f64, 2.0), x_td[1 * nf + s], 1e-12);
-        }
-
-        const out_re = try alloc.alloc(f64, sz);
-        defer alloc.free(out_re);
-        const out_im = try alloc.alloc(f64, sz);
-        defer alloc.free(out_im);
-        dft2D(out_re, out_im, x_td, basis_cos, basis_sin, n, nf);
-
-        try testing.expectApproxEqAbs(@as(f64, 1.0), out_re[0 * nf + dc_idx], 1e-12);
-        try testing.expectApproxEqAbs(@as(f64, 2.0), out_re[1 * nf + dc_idx], 1e-12);
-
-        for (0..n) |node| {
-            for (0..nf) |f_idx| {
-                if (f_idx == dc_idx) continue;
-                try testing.expectApproxEqAbs(@as(f64, 0.0), out_re[node * nf + f_idx], 1e-12);
-                try testing.expectApproxEqAbs(@as(f64, 0.0), out_im[node * nf + f_idx], 1e-12);
-            }
-        }
-    }
-
-    test "QPSS: 2D DFT/IDFT roundtrip with non-DC harmonic" {
-        const grid = MixGrid.init(1, 1);
-        const nf = grid.nf; // 3*3 = 9
-        const n: usize = 1;
-
-        const alloc = testing.allocator;
-        const basis_cos = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos);
-        const basis_sin = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin);
-        const basis_cos_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos_t);
-        const basis_sin_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin_t);
-        const times = try alloc.alloc(f64, nf);
-        defer alloc.free(times);
-        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
-
-        // Spectrum: cos at k=1,l=0 (re=0.5) + sin at k=0,l=1 (im=-0.3)
-        var x_re = @as([9]f64, @splat(0));
-        var x_im = @as([9]f64, @splat(0));
-        const f1_idx = grid.flatIdx(1, 0);
-        const f2_idx = grid.flatIdx(0, 1);
-        x_re[f1_idx] = 0.5;
-        x_im[f2_idx] = -0.3; // negative im = positive sin
-
-        // IDFT → DFT roundtrip
-        var td = @as([9]f64, @splat(0));
-        idft2D(&td, &x_re, &x_im, basis_cos_t, basis_sin_t, n, nf);
-
-        var out_re = @as([9]f64, @splat(0));
-        var out_im = @as([9]f64, @splat(0));
-        dft2D(&out_re, &out_im, &td, basis_cos, basis_sin, n, nf);
-
-        // A lone one-sided coefficient round-trips at 0.5x because its conjugate
-        // partner at (-k,-l) is zero. The solver always carries the full
-        // two-sided vector, so its residual is self-consistent.
-        try testing.expectApproxEqAbs(@as(f64, 0.25), out_re[f1_idx], 1e-12);
-        try testing.expectApproxEqAbs(@as(f64, -0.15), out_im[f2_idx], 1e-12);
-
-        // DC should be ~0
-        const dc_idx = grid.flatIdx(0, 0);
-        try testing.expectApproxEqAbs(@as(f64, 0.0), out_re[dc_idx], 1e-12);
-        try testing.expectApproxEqAbs(@as(f64, 0.0), out_im[dc_idx], 1e-12);
-    }
-
-    test "QPSS: sampled two-tone drive is a clean pair of spectral lines" {
-        // Sampling A1*sin(w1 t) + A2*sin(w2 t) at the APFT instants and taking
-        // the 2-D DFT must land the whole signal on (±1,0) and (0,±1); a wrong
-        // time grid smears it across every mix product.
-        const a1: f64 = 1.0;
-        const a2: f64 = 0.5;
-        const grid = MixGrid.init(2, 2);
-        const nf = grid.nf; // 5*5 = 25
-
-        const alloc = testing.allocator;
-        const buf = try alloc.alloc(f64, 6 * nf * nf + 3 * nf);
-        defer alloc.free(buf);
-        const basis_cos = buf[0 .. nf * nf];
-        const basis_sin = buf[nf * nf ..][0 .. nf * nf];
-        const basis_cos_t = buf[2 * nf * nf ..][0 .. nf * nf];
-        const basis_sin_t = buf[3 * nf * nf ..][0 .. nf * nf];
-        const times = buf[4 * nf * nf ..][0..nf];
-        const td = buf[4 * nf * nf + nf ..][0..nf];
-        const out_re = buf[4 * nf * nf + 2 * nf ..][0..nf];
-        const out_im = buf[4 * nf * nf + 3 * nf ..][0..nf];
-
-        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
-
-        const tau = 2.0 * std.math.pi;
-        for (0..nf) |s| {
-            td[s] = a1 * @sin(tau * tone1 * times[s]) + a2 * @sin(tau * tone2 * times[s]);
-        }
-        dft2D(out_re, out_im, td, basis_cos, basis_sin, 1, nf);
-
-        // Two-sided coefficients: |X| = A/2 on each tone's own pair.
-        for (0..nf) |f_idx| {
-            const kl = grid.signedKL(f_idx);
-            const want: f64 = if (kl.l == 0 and (kl.k == 1 or kl.k == -1))
-                a1 / 2.0
-            else if (kl.k == 0 and (kl.l == 1 or kl.l == -1))
-                a2 / 2.0
-            else
-                0.0;
-            const got = @sqrt(out_re[f_idx] * out_re[f_idx] + out_im[f_idx] * out_im[f_idx]);
-            try testing.expectApproxEqAbs(want, got, 1e-9);
-        }
-    }
-
-    test "QPSS: the transform inverts its own forward basis" {
-        // Γ⁻¹Γ = I. Σ_s Γ⁻¹[f][s]·Γ[s][g] = δ_{fg}, and the stored arrays carry
-        // a factor nf and a negated imaginary part (dft2D applies both), so the
-        // real part of that sum reads as nf·δ_{fg} here. At APFT instants the
-        // basis is not orthogonal, so the inverse is computed, not assumed.
-        const grid = MixGrid.init(1, 1);
-        const nf = grid.nf;
-
-        const alloc = testing.allocator;
-        const basis_cos = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos);
-        const basis_sin = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin);
-        const basis_cos_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos_t);
-        const basis_sin_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin_t);
-        const times = try alloc.alloc(f64, nf);
-        defer alloc.free(times);
-        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
-
-        for (0..nf) |f_idx| {
-            for (0..nf) |g_idx| {
-                var dot: f64 = 0;
-                for (0..nf) |s| {
-                    dot += basis_cos[f_idx * nf + s] * basis_cos_t[s * nf + g_idx] +
-                        basis_sin[f_idx * nf + s] * basis_sin_t[s * nf + g_idx];
-                }
-                const expected: f64 = if (f_idx == g_idx) @as(f64, @floatFromInt(nf)) else 0;
-                try testing.expectApproxEqAbs(expected, dot, 1e-10);
-            }
-        }
-    }
-
-    test "QPSS: gvProduct over the pattern matches the dense product bit for bit" {
-        // nf = 9 and 49 straddle the vector width so both the tiled body and the
-        // scalar tail run; each lane must reproduce the ascending-column order.
-        // The oracle is the dense row sum with zeros off the pattern, which
-        // include negative-zero products.
-        const alloc = testing.allocator;
-        var prng = std.Random.DefaultPrng.init(0x5EED);
-        const rnd = prng.random();
-
-        for ([_][2]usize{ .{ 9, 3 }, .{ 49, 13 }, .{ 25, 1 } }) |c| {
-            const nf = c[0];
-            const n = c[1];
-            // Random pattern with every diagonal, as Circuit.freeze builds.
-            var col_ptr: std.ArrayList(u32) = .empty;
-            defer col_ptr.deinit(alloc);
-            var row_idx: std.ArrayList(u32) = .empty;
-            defer row_idx.deinit(alloc);
-            try col_ptr.append(alloc, 0);
-            for (0..n) |col| {
-                for (0..n) |row| if (row == col or rnd.boolean())
-                    try row_idx.append(alloc, @intCast(row));
-                try col_ptr.append(alloc, @intCast(row_idx.items.len));
-            }
-            const nnz = row_idx.items.len;
-            const g_td = try alloc.alloc(f64, nnz * nf);
-            defer alloc.free(g_td);
-            const dense = try alloc.alloc(f64, n * n * nf);
-            defer alloc.free(dense);
-            const v_td = try alloc.alloc(f64, n * nf);
-            defer alloc.free(v_td);
-            const want = try alloc.alloc(f64, n * nf);
-            defer alloc.free(want);
-            const got = try alloc.alloc(f64, n * nf);
-            defer alloc.free(got);
-
-            for (g_td) |*v| v.* = rnd.float(f64) * 0.02 - 0.01;
-            for (v_td) |*v| v.* = rnd.float(f64) * 2000.0 - 1000.0;
-            @memset(dense, 0);
-            for (0..n) |col| for (col_ptr.items[col]..col_ptr.items[col + 1]) |slot| {
-                const row = row_idx.items[slot];
-                @memcpy(dense[(row * n + col) * nf ..][0..nf], g_td[slot * nf ..][0..nf]);
-            };
-
-            for (0..nf) |s| {
-                for (0..n) |row| {
-                    var acc: f64 = 0;
-                    for (0..n) |col| acc += dense[(row * n + col) * nf + s] * v_td[col * nf + s];
-                    want[row * nf + s] = acc;
-                }
-            }
-            gvProduct(got, g_td, v_td, col_ptr.items, row_idx.items, nf);
-            try testing.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
-
-            // The charge term's row-order view of the same pattern: every
-            // entry once, rows in order, columns ascending, slots pointing
-            // back at (row, col).
-            const t = try alloc.alloc(u32, n + 1 + 2 * nnz);
-            defer alloc.free(t);
-            const row_ptr = t[0 .. n + 1];
-            const cols = t[n + 1 ..][0..nnz];
-            const slots = t[n + 1 + nnz ..][0..nnz];
-            transposePattern(col_ptr.items, row_idx.items, row_ptr, cols, slots);
-            try testing.expectEqual(@as(u32, @intCast(nnz)), row_ptr[n]);
-            for (0..n) |row| for (row_ptr[row]..row_ptr[row + 1]) |k| {
-                const col = cols[k];
-                if (k > row_ptr[row]) try testing.expect(cols[k - 1] < col);
-                try testing.expect(slots[k] >= col_ptr.items[col] and slots[k] < col_ptr.items[col + 1]);
-                try testing.expectEqual(@as(u32, @intCast(row)), row_idx.items[slots[k]]);
-            };
-        }
-    }
-
-    test "QPSS: DFT/IDFT roundtrip at n = 512 nodes" {
-        const grid = MixGrid.init(1, 1); // nf=9
-        const nf = grid.nf;
-        const n: usize = 512;
-        const sz = n * nf;
-
-        const alloc = testing.allocator;
-
-        const basis_cos = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos);
-        const basis_sin = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin);
-        const basis_cos_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_cos_t);
-        const basis_sin_t = try alloc.alloc(f64, nf * nf);
-        defer alloc.free(basis_sin_t);
-        const times = try alloc.alloc(f64, nf);
-        defer alloc.free(times);
-        try makeTransform(alloc, grid, times, basis_cos, basis_sin, basis_cos_t, basis_sin_t);
-
-        const x_re = try alloc.alloc(f64, sz);
-        defer alloc.free(x_re);
-        const x_im = try alloc.alloc(f64, sz);
-        defer alloc.free(x_im);
-        simdZero(x_re);
-        simdZero(x_im);
-
-        const dc_idx = grid.flatIdx(0, 0);
-        x_re[300 * nf + dc_idx] = 42.0;
-
-        const x_td = try alloc.alloc(f64, sz);
-        defer alloc.free(x_td);
-        idft2D(x_td, x_re, x_im, basis_cos_t, basis_sin_t, n, nf);
-
-        for (0..nf) |s| {
-            try testing.expectApproxEqAbs(@as(f64, 42.0), x_td[300 * nf + s], 1e-10);
-        }
-        for (0..nf) |s| {
-            try testing.expectApproxEqAbs(@as(f64, 0.0), x_td[0 * nf + s], 1e-10);
-        }
-
-        const out_re = try alloc.alloc(f64, sz);
-        defer alloc.free(out_re);
-        const out_im = try alloc.alloc(f64, sz);
-        defer alloc.free(out_im);
-        dft2D(out_re, out_im, x_td, basis_cos, basis_sin, n, nf);
-
-        try testing.expectApproxEqAbs(@as(f64, 42.0), out_re[300 * nf + dc_idx], 1e-10);
-        try testing.expectApproxEqAbs(@as(f64, 0.0), out_re[0 * nf + dc_idx], 1e-10);
+    test "qpss: a product merged into a commensurate line maps to that line" {
+        // f2 = 2 f1: (-1, 1) and (1, 0) are both 1000 Hz, one kept line.
+        const spec = try mhb.spectrum(testing.allocator, &.{ 1000, 2000 }, &.{ 1, 1 }, 0, 1);
+        defer spec.deinit(testing.allocator);
+        var lines: [9]u32 = undefined;
+        impl.boxLines(spec, 1000, 2000, 1, 1, &lines);
+        try testing.expectEqual(lines[1 * 3 + 2], lines[2 * 3 + 0]);
+        try testing.expectEqual(@as(f64, 1000), spec.freqs[lines[2 * 3 + 0]]);
     }
 };
 
@@ -891,6 +544,61 @@ const MhbTests = struct {
         try testing.expect((try hb.solveSpectrum(&ckt, dense, &.{}, opts, a)).status.converged);
         try testing.expect((try impl.solveOneTone(&ckt, krylov, opts, a)).converged);
         for (dense, krylov) |d, k| try testing.expectApproxEqAbs(d, k, 1e-9);
+    }
+
+    test "mhb: gvProduct over the pattern matches the dense product bit for bit" {
+        // nf = 9 and 49 straddle the vector width so both the tiled body and the
+        // scalar tail run; each lane must reproduce the ascending-column order.
+        // The oracle is the dense row sum with zeros off the pattern, which
+        // include negative-zero products.
+        const alloc = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x5EED);
+        const rnd = prng.random();
+
+        for ([_][2]usize{ .{ 9, 3 }, .{ 49, 13 }, .{ 25, 1 } }) |c| {
+            const nf = c[0];
+            const n = c[1];
+            // Random pattern with every diagonal, as Circuit.freeze builds.
+            var col_ptr: std.ArrayList(u32) = .empty;
+            defer col_ptr.deinit(alloc);
+            var row_idx: std.ArrayList(u32) = .empty;
+            defer row_idx.deinit(alloc);
+            try col_ptr.append(alloc, 0);
+            for (0..n) |col| {
+                for (0..n) |row| if (row == col or rnd.boolean())
+                    try row_idx.append(alloc, @intCast(row));
+                try col_ptr.append(alloc, @intCast(row_idx.items.len));
+            }
+            const nnz = row_idx.items.len;
+            const g_td = try alloc.alloc(f64, nnz * nf);
+            defer alloc.free(g_td);
+            const dense = try alloc.alloc(f64, n * n * nf);
+            defer alloc.free(dense);
+            const v_td = try alloc.alloc(f64, n * nf);
+            defer alloc.free(v_td);
+            const want = try alloc.alloc(f64, n * nf);
+            defer alloc.free(want);
+            const got = try alloc.alloc(f64, n * nf);
+            defer alloc.free(got);
+
+            for (g_td) |*v| v.* = rnd.float(f64) * 0.02 - 0.01;
+            for (v_td) |*v| v.* = rnd.float(f64) * 2000.0 - 1000.0;
+            @memset(dense, 0);
+            for (0..n) |col| for (col_ptr.items[col]..col_ptr.items[col + 1]) |slot| {
+                const row = row_idx.items[slot];
+                @memcpy(dense[(row * n + col) * nf ..][0..nf], g_td[slot * nf ..][0..nf]);
+            };
+
+            for (0..nf) |s| {
+                for (0..n) |row| {
+                    var acc: f64 = 0;
+                    for (0..n) |col| acc += dense[(row * n + col) * nf + s] * v_td[col * nf + s];
+                    want[row * nf + s] = acc;
+                }
+            }
+            impl.gvProduct(got, g_td, v_td, col_ptr.items, row_idx.items, nf);
+            try testing.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
+        }
     }
 };
 

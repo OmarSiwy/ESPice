@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "analysis": "tf",
+  "purpose": "Input source sees only a 1e-30 S path: Rin clamps to 1e20 as in ngspice",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "dVout/dVin = 2 (E1 gain). V1's branch current per volt is 1e-30 A, below the 1e-20 floor of ngspice tfanal.c (fabs(i) < 1e-20 gives input impedance 1e20), so Rin = 1e20, not 1/1e-30 = 1e30 (#199). The ideal VCVS output has zero output resistance. Derived from the ngspice source rule, not an ngspice run."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transfer Function",
+        "match": "exact",
+        "columns": {
+          "transfer_function": {
+            "unit": "V/V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2
+            ]
+          },
+          "input_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1e+20
+            ]
+          },
+          "output_resistance": {
+            "unit": "ohm",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              0
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "9b2f2b507b1b1fafbdfa56c0be3dca31bc2437cdd33dfa17a6d3748d9d7193ca"
+}

@@ -291,7 +291,7 @@ const XfTests = struct {
         try t.expectEqualSlices(f64, &.{ 0, -1, 1, 0 }, &rhs);
     }
 
-    test "xf: immittance reciprocals, and a zero reads as infinite" {
+    test "xf: immittance reciprocals, and only an exact zero reads as infinite" {
         const v: XfSource = .{ .name = "v1", .branch = 3 };
         // i_branch = -0.25 A per volt delivers 0.25 A: 4 ohm, 0.25 S.
         const zy = xf.immittance(v, &.{ 0, 0, 0, -0.25 }, 4);
@@ -303,6 +303,16 @@ const XfTests = struct {
         try t.expectEqual(@as(f64, 500), open[0].re);
         try t.expectApproxEqRel(@as(f64, 2e-3), open[1].re, 1e-15);
         try t.expectEqual(xf.infinite, xf.immittance(i, &.{ 0, 0, 0, 0 }, 4)[1].re);
+        // VACASK clamps only an exact zero (coredcxf.cpp:268-282): a tiny
+        // value inverts, as 1.0/yin does there, and a real one exactly (#199).
+        try t.expectApproxEqRel(@as(f64, 1e30), xf.immittance(v, &.{ 0, 0, 0, -1e-30 }, 4)[0].re, 1e-15);
+        try t.expectApproxEqRel(@as(f64, 1e160), xf.immittance(v, &.{ 0, 0, 0, -1e-160 }, 4)[0].re, 1e-15);
+        try t.expectApproxEqRel(@as(f64, 1e25), xf.immittance(i, &.{ 0, 0, 1e-25, 0 }, 4)[1].re, 1e-15);
+        // A complex 1e-160 phasor: |y|² underflows, Smith's division does
+        // not. 1/(a + ja) = (1 - j)/(2a).
+        const ac = xf.immittance(v, &.{ 0, 0, 0, -1e-160, 0, 0, 0, -1e-160 }, 4)[0];
+        try t.expectApproxEqRel(@as(f64, 5e159), ac.re, 1e-15);
+        try t.expectApproxEqRel(@as(f64, -5e159), ac.im, 1e-15);
     }
 
     test "xf: Output seeds and reads a node pair or a branch" {
@@ -458,15 +468,50 @@ const DividerTests = struct {
         defer gpa.free(x);
         try t.expect((try op.solve(&ckt, x, .{}, &.{}, &.{})).converged);
 
-        const v = try tf.solve(&ckt, x, .{ .output_node = out }, try branchRow(&ckt), out, GROUND, gpa);
+        const v = try tf.solve(&ckt, x, .{ .output_node = out }, try branchRow(&ckt), gpa);
         try t.expectApproxEqRel(@as(f64, 0.75), v.gain, 1e-9);
         try t.expectApproxEqRel(@as(f64, 4000), v.input_resistance, 1e-9);
         try t.expectApproxEqRel(@as(f64, 750), v.output_resistance, 1e-9);
         // A unit current into `out`: the transimpedance and Rin are R1 || R2.
-        const i = try tf.solve(&ckt, x, .{ .output_node = out, .input_nodes = .{ GROUND, out } }, 0, out, GROUND, gpa);
+        const i = try tf.solve(&ckt, x, .{ .output_node = out, .input_nodes = .{ GROUND, out } }, 0, gpa);
         try t.expectApproxEqRel(@as(f64, 750), i.gain, 1e-9);
         try t.expectApproxEqRel(@as(f64, 750), i.input_resistance, 1e-9);
         try t.expectApproxEqRel(@as(f64, 750), i.output_resistance, 1e-9);
+    }
+
+    test "tf: a source that moves no current reads 1e20 ohm, as ngspice does" {
+        // ngspice-45 on the divider plus an open `V2 c 0 1`: `tf i(V2) V2`
+        // prints 0, 1e20, 1e20, and `tf v(out) V2` 0, 1e20, 750.
+        var lib = try Library.init(gpa);
+        defer lib.deinit();
+        var b = try Builder.init(gpa, &lib);
+        const n_in = try b.addNode();
+        const n_out = try b.addNode();
+        const n_c = try b.addNode();
+        try b.addDevice(models.vsource, "", .{ .dc = 10 }, .{}, .{ n_in, GROUND });
+        try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ n_in, n_out });
+        try b.addDevice(models.resistor, "", .{ .r = 3000 }, .{}, .{ n_out, GROUND });
+        try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ n_c, GROUND });
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
+        defer ckt.deinit();
+        const x = try gpa.alloc(f64, ckt.n);
+        defer gpa.free(x);
+        try t.expect((try op.solve(&ckt, x, .{}, &.{}, &.{})).converged);
+        // V2's branch: the one branch row that carries no current.
+        const br2: u32 = for (ckt.current_row, x, 0..) |is_branch, current, row| {
+            if (is_branch and current == 0) break @intCast(row);
+        } else return error.TestUnexpectedResult;
+
+        const i = try tf.solve(&ckt, x, .{ .output_node = n_out, .output_branch = br2 }, br2, gpa);
+        try t.expectEqual(@as(f64, 0), i.gain);
+        try t.expectEqual(@as(f64, 1e20), i.input_resistance);
+        try t.expectEqual(@as(f64, 1e20), i.output_resistance);
+        const v = try tf.solve(&ckt, x, .{ .output_node = n_out }, br2, gpa);
+        try t.expectEqual(@as(f64, 0), v.gain);
+        try t.expectEqual(@as(f64, 1e20), v.input_resistance);
+        try t.expectApproxEqRel(@as(f64, 750), v.output_resistance, 1e-9);
     }
 
     test "dcxf: forward and adjoint transfers agree; dcinc follows the AC drive" {
@@ -538,9 +583,10 @@ const DividerTests = struct {
         defer gpa.free(m.contributions);
         var total: f64 = 0;
         for (m.contributions, s) |c, want| {
-            // Same step, different eval entry: equal up to the difference's
-            // rounding, which cancellation lifts to ~1e-8 relative.
-            try t.expectApproxEqAbs(want, c.sensitivity, 1e-12 + 1e-6 * @abs(want));
+            // One `Adjoint` serves both, and a unit scale is exact: bit for
+            // bit, except where `.sens` zeroed a roundoff quotient at p = 0
+            // (#91), a rule dcmatch does not apply.
+            if (want != 0) try t.expectEqual(want, c.sensitivity) else try t.expectApproxEqAbs(want, c.sensitivity, 1e-12);
             total += c.variance_contrib;
         }
         try t.expectApproxEqRel(@sqrt(total), m.total_sigma, 1e-12);

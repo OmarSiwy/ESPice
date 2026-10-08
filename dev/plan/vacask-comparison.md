@@ -61,7 +61,7 @@ the ngspice-45 source (`src/spicelib/analysis/*.c`) and covers analyses only.
 | Envelope | no | `.envelope`, sample-envelope following (`tran/envelope.zig`) | no |
 | PSS | `pss`: single shooting with the monodromy matrix integrated alongside, driven and autonomous (oscillator, period solved) (`lib/corepss.cpp`) | `.pss`: shooting, dense FD monodromy below 50 unknowns, matrix-free GMRES above; driven, and autonomous with the period solved and one node pinned (`.pss v(osc)`, `.snosc`) (`pss/pss.zig`) | `.pss`, experimental |
 | Harmonic balance | `hb`: any number of tones, box/diamond/hybrid truncation, APFT collocation, sparse block Jacobian on KLU or SuperLU_MT (`lib/corehb*.cpp`) | `.hb`: one tone dense (`pss/hb.zig`); `.hb TONES=` any number of tones, box/diamond (hybrid) truncation, APFT collocation, matrix-free block Jacobian by GMRES with a LaneLu block-diagonal preconditioner, also taken by large one-tone circuits (`pss/mhb.zig`, [multitone-hb.md](../analysis/multitone-hb.md)); magnitudes only | no |
-| Quasi-periodic steady state | `hb` with two or more tones | `.qpss`: two tones, GMRES without a preconditioner (`pss/qpss.zig`) | no |
+| Quasi-periodic steady state | `hb` with two or more tones | `.qpss`: two tones on multi-tone `hb` (`pss/mhb.zig`), two-sided output (`pss/qpss.zig`) | no |
 | Periodic AC | `pac` (shooting) and `hbac` (HB, multi-tone) | `.pac` (shooting) and `.hbac` (one-tone HB); conversion matrix dense, or GMRES with a LaneLu block-diagonal preconditioner past n(2M+1) >= 64 | no |
 | Periodic transfer function | no | `.pxf` (shooting) and `.hbxf` (HB) | no |
 | Periodic noise | `hbnoise` (HB, multi-tone) | `.pnoise` (shooting) | no |
@@ -283,9 +283,9 @@ measurements.
   preconditioner at ω_p = ω + pω₀ replaces the dense LU, and lifts the
   "dense and serial per frequency" ceiling noted at `pac.zig:54`.
 - Multi-tone: generalize the spectrum to box/diamond truncated mixing
-  products. `qpss.zig`'s nonuniform transform covers two tones; VACASK's
+  products. `mhb.zig` takes VACASK's
   oversampled pool with greedy orthogonal selection (`lib/corehbcoloc.cpp`)
-  covers any number.
+  for any number of tones; `.qpss` runs on it (#189).
 - Output complex phasors. `hb.zig` discards phase today.
 
 ### G5. Observability: noise contributions and device operating-point values (S and M)

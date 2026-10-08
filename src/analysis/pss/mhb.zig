@@ -32,7 +32,6 @@ const converger = solvers.converger;
 const dense_lu = solvers.dense_lu;
 const FreqSolver = solvers.freq_solve.FreqSolver;
 const Gmres = solvers.gmres.Gmres;
-const gvProduct = @import("qpss.zig").gvProduct;
 
 /// The `.hb` query, read for its tone list (`f0` then `extra_tones`).
 pub const Options = @import("core").query.Hb;
@@ -314,6 +313,33 @@ fn addOmega(omegas: []const f64, q_hat: []const f64, dst: []f64) void {
         for (omegas[1..], 1..) |w, j| {
             d[2 * j - 1] += w * q[2 * j];
             d[2 * j] -= w * q[2 * j - 1];
+        }
+    }
+}
+
+/// Time-domain Jacobian-vector product w_td[., s] = G(t_s) * v_td[., s] over
+/// the CSC pattern; g_td is slot-major, samples contiguous. Each structural
+/// entry is one axpy over its nt samples, W at a time, with the scalar tail
+/// as the width-one oracle. Each row still sums its columns in ascending
+/// order from +0, and an entry outside the pattern could only add ±0, so for
+/// finite v this is bitwise the dense product. Overwrites every w_td slot.
+pub fn gvProduct(w_td: []f64, g_td: []const f64, v_td: []const f64, col_ptr: []const u32, row_idx: []const u32, nt: usize) void {
+    const W = std.simd.suggestVectorLength(f64) orelse 8;
+    const V = @Vector(W, f64);
+    root.zeroSimd(w_td);
+    for (0..col_ptr.len - 1) |col| {
+        const vc = v_td[col * nt ..][0..nt];
+        for (col_ptr[col]..col_ptr[col + 1]) |slot| {
+            const g = g_td[slot * nt ..][0..nt];
+            const w = w_td[@as(usize, row_idx[slot]) * nt ..][0..nt];
+            var s: usize = 0;
+            while (s + W <= nt) : (s += W) {
+                const gv: V = g[s..][0..W].*;
+                const vv: V = vc[s..][0..W].*;
+                const wv: V = w[s..][0..W].*;
+                w[s..][0..W].* = wv + gv * vv;
+            }
+            while (s < nt) : (s += 1) w[s] += g[s] * vc[s];
         }
     }
 }

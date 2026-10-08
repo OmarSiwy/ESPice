@@ -71,17 +71,32 @@ pub fn adjointTf(src: XfSource, y: []const f64, n: usize) Complex {
 
 /// `src`'s input impedance and admittance from its own forward response
 /// `x`: a V card's delivered current is −i_branch per volt, an I card's
-/// terminal voltage v(nodes[1]) − v(nodes[0]) per ampere. A zero reads as
-/// `infinite` in its reciprocal.
+/// terminal voltage v(nodes[1]) − v(nodes[0]) per ampere. An exact zero
+/// reads as `infinite` in its reciprocal, as VACASK does
+/// (coredcxf.cpp:268-282, coreacxf.cpp:484-497); any other value inverts.
 pub fn immittance(src: XfSource, x: []const f64, n: usize) [2]Complex {
-    const one: Complex = .{ .re = 1, .im = 0 };
-    const inf: Complex = .{ .re = infinite, .im = 0 };
     if (src.branch) |br| {
         const y = at(x, n, br).scale(-1);
-        return .{ if (y.magSq() == 0) inf else one.div(y), y };
+        return .{ reciprocal(y), y };
     }
     const z = at(x, n, src.nodes[1]).sub(at(x, n, src.nodes[0]));
-    return .{ z, if (z.magSq() == 0) inf else one.div(z) };
+    return .{ z, reciprocal(z) };
+}
+
+/// 1/v, or `infinite` at v = 0. Smith's division: it never squares |v|, so a
+/// tiny v inverts to a huge value instead of `Complex.div`'s |v|² underflowing
+/// to 0 and returning inf below |v| ~ 1e-154 (#199). A real v gives exactly
+/// 1/v.re, VACASK's DC `1.0/yin`.
+fn reciprocal(v: Complex) Complex {
+    if (v.re == 0 and v.im == 0) return .{ .re = infinite, .im = 0 };
+    if (@abs(v.re) >= @abs(v.im)) {
+        const r = v.im / v.re;
+        const d = v.re + v.im * r;
+        return .{ .re = 1 / d, .im = -r / d };
+    }
+    const r = v.re / v.im;
+    const d = v.im + v.re * r;
+    return .{ .re = r / d, .im = -1 / d };
 }
 
 /// Column labels: `tf(name)`, then `zin(name)` and `yin(name)` unless

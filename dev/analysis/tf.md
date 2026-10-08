@@ -47,7 +47,19 @@ when the RHS entry is zero.
 A current output `i(Vx)` puts $e_{\text{out}}$ on Vx's branch row: a unit
 volt on the sensing source. $y[br] = (G^{-1})_{br,br}$ is the branch current
 that volt moves, and as for $R_{\text{in}}$ the resistance Vx sees is
-$R_{\text{out}} = -1/y[br]$ ($+\infty$ when $y[br] = 0$).
+$R_{\text{out}} = -1/y[br]$ (`1e20` when $|y[br]| < 10^{-20}$, the value
+ngspice prints there).
+
+Infinite resistances print as `1e20`, ngspice's value (#193): `tfanal.c`
+writes `1e20` for $R_{\text{in}}$ when $|i_{br}| < 10^{-20}$, and its
+current-output clamp gives `1e20` when $y[br] < 10^{-20}$. Measured with ngspice-45
+on the divider plus an open `V2 c 0 1`: `tf i(V2) V2` prints 0, 1e20, 1e20,
+and `tf v(out) V2` 0, 1e20, 750; the `tf` tests in
+`src/analysis/tests/sweep.zig` pin both. `tf.impedance` applies the same
+$|i| < 10^{-20}$ floor (#199), so a current in $(0, 10^{-20})$ also reads
+`1e20` (`tf/tiny_input_conductance`: a 1e-30 S path, Rin 1e20, not 1e30).
+The floor is `.tf`'s alone: `.dcxf` and `.acxf` are VACASK's analyses and
+keep its exact-zero rule (§5).
 
 Divergence: ngspice's `tfanal.c` reports $1/\max(10^{-20}, y[br])$ for a
 current output. A passive circuit always gives $y[br] < 0$ under that sign,
@@ -61,14 +73,17 @@ the factorization; no iteration.
 
 ## 2. Flow explanation
 
-`src/analysis/dc/tf.zig`: one `eval()` at $x_{op}$ fills the
-analytic $G$ plane; the analysis is then two dense LU solves ($n$ here is
-small enough that dense beats sparse: one bulk arena, no per-solve
-allocation). Forward solve with $e_{br}$ on the input source's branch row →
-gain + $R_{\text{in}}$ ($R_{\text{in}} = \infty$ when the branch current
-perturbation is exactly zero). Explicit transpose of $G$, second
-factorization, solve with $e_{\text{out}}$ → $R_{\text{out}}$. Defaults:
-input = first source's branch, output = last probe node.
+`src/analysis/dc/tf.zig` is `.dcxf`'s readout (§5) for one source: one
+`eval()` at $x_{op}$ fills the analytic $G$ plane, the circuit workspace's
+sparse solver factors it once, and both solves reuse that factorization.
+Forward solve with the input's unit excitation (`xf.excite`: $e_{br}$ on a V
+card's branch row, a unit current through an I card) → gain (`Output.read`)
++ $R_{\text{in}}$ (`tf.impedance` over `xf.immittance`, $10^{20}$ when the
+branch current perturbation is below $10^{-20}$). Adjoint `solveT` with $e_{\text{out}}$
+(`Output.seed`) → $R_{\text{out}}$. Defaults: input = first source's
+branch, output = last probe node. Until #193 `.tf` built a dense copy of $G$
+and factored it with `dense_lu`, O(n²) memory and O(n³) time; the sparse
+path rounds differently in the last bits.
 
 Failure handling: a singular $G$ (floating output at DC) errors out of the
 analysis; no partial results.
@@ -78,11 +93,11 @@ analysis; no partial results.
 ```
 tf(ckt, x_op, in_branch, out_node):
     eval(x_op)                      # analytic G plane
-    J = denseG()
-    v = lu_solve(J, e[in_branch])   # forward
+    lu = sparse_factor(G)
+    v = lu.solve(e[in_branch])      # forward
     gain = v[out_node]
-    Rin  = v[in_branch] != 0 ? -1/v[in_branch] : inf
-    y = lu_solve(J^T, e[out_node])  # adjoint
+    Rin  = |v[in_branch]| >= 1e-20 ? -1/v[in_branch] : 1e20
+    y = lu.solveT(e[out_node])      # adjoint, same factors
     Rout = y[out_node]
 ```
 
@@ -90,10 +105,8 @@ tf(ckt, x_op, in_branch, out_node):
 
 Not worth a kernel alone (two solves at op-point size). The parallel axis
 is **batching across ensemble lanes**: in Monte-Carlo/corner runs each lane
-has its own linearization: batch the $2L$ dense solves as one blocked
-GETRF/GETRS (or reuse each lane's already-factored sparse Newton matrix:
-forward = `solve`, adjoint = `solveT` on the same factors, zero extra
-factorizations).
+has its own linearization, and each lane's sparse factorization serves its
+forward `solve` and adjoint `solveT`, as the scalar path does.
 
 ```
 kernel tf_batched(lanes):
@@ -136,9 +149,17 @@ the deck's AC excitation, and publishes the deck's probes (`v(node)`,
 
 Divergences, recorded:
 
-- An infinite `zin` or `yin` (a V card that moves no current, an I card
-  across a short) is VACASK's finite `1e20`, not `.tf`'s `+inf`, so the
-  row stays finite.
+- An infinite `zin` or `yin` is VACASK's finite `1e20`, so the row stays
+  finite. As in VACASK, only an exact zero clamps: `coredcxf.cpp:268-273`
+  (`yin != 0.0 ? 1.0/yin : 1e20` for a V card), `:277-282` (the same on
+  `zin` for an I card), and `coreacxf.cpp:484-488` / `:493-497` on the
+  complex values (VACASK unstable-2026, the benchmarking shell's
+  `vacask-unstable-2026` source). A tiny nonzero value inverts to a huge
+  one, as it does there. ESPice inverts by Smith's division
+  (`xf.reciprocal`), which never squares $|v|$, so a value below
+  $10^{-154}$ inverts instead of reading `inf` (#199); a real value gives
+  exactly `1/v`, VACASK's DC `1.0/yin`. `.tf` alone adds ngspice's
+  $10^{-20}$ floor (§1).
 - VACASK saves only `tf` and `zin` by default and `yin` on request; we
   always publish all three.
 - `.dcinc` takes the real part of each source's AC excitation, so a
@@ -158,8 +179,7 @@ the same circuit, every column of all three analyses, both paths) and
 
 | Phase | Solver doc | Impl |
 |---|---|---|
-| Dense LU forward + transpose solve | none (dense path is below the sparse pipeline's scope) | `src/solver/dense_lu.zig` `factorizeSolve` |
-| The sparse alternative (reuse Newton factors: solve/solveT) | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solver/direct.zig`: upgrade path when n grows |
+| Sparse LU forward + transpose solve on one factorization | [klu-pipeline.md](../solvers/klu-pipeline.md) | `src/solver/direct.zig` `Solver.solve`/`solveT` |
 | Upstream OP | [homotopy-continuation.md](../solvers/homotopy-continuation.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `dc/op.zig`, `src/solver/converger.zig` |
 
 ---
