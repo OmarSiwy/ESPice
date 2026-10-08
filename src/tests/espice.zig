@@ -31,27 +31,8 @@ fn construct(allocator: std.mem.Allocator) !void {
 
 test "Problem: construction releases partial ownership at every allocation failure" {
     try construct(t.allocator);
-    try t.checkAllAllocationFailures(fixed_growth, construct, .{});
+    try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, construct, .{});
 }
-
-/// `t.allocator` that never grows or shrinks a block in place. Whether a
-/// large block grows in place depends on the address space around it, so
-/// through `t.allocator` an arena's chunk count, and with it the allocation
-/// count `checkAllAllocationFailures` replays, can change between runs.
-const fixed_growth: std.mem.Allocator = .{ .ptr = undefined, .vtable = &.{
-    .alloc = struct {
-        fn alloc(_: *anyopaque, n: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
-            return t.allocator.rawAlloc(n, a, ra);
-        }
-    }.alloc,
-    .resize = std.mem.Allocator.noResize,
-    .remap = std.mem.Allocator.noRemap,
-    .free = struct {
-        fn free(_: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
-            t.allocator.rawFree(m, a, ra);
-        }
-    }.free,
-} };
 
 test "Problem: .hdl display-task lines go to Options.display (#127)" {
     var sink: std.Io.Writer.Allocating = .init(t.allocator);
@@ -107,7 +88,7 @@ fn constructAndRun(allocator: std.mem.Allocator) !void {
 
 test "Problem: construction and a full run release everything at every allocation failure" {
     try constructAndRun(t.allocator);
-    try t.checkAllAllocationFailures(fixed_growth, constructAndRun, .{});
+    try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, constructAndRun, .{});
 }
 
 test "Problem: compiled device callbacks preserve allocation errors" {

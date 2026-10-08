@@ -326,6 +326,7 @@ pub fn build(b: *std.Build) void {
     const c_api_mod = M.make(b.path("src/c_api.zig"), &.{
         .{ .name = "espice", .module = espice_mod },
         .{ .name = "espice_h", .module = espice_h }, // c_api.zig pins its enums to the header
+        core_import, // the allocation-failure sweep's fixed_growth
     });
     c_api_mod.link_libc = true;
     for (host_objs) |o| c_api_mod.addObject(o);
@@ -370,7 +371,7 @@ pub fn build(b: *std.Build) void {
     // already carries the device objects.
     const run_c_api_unit_tests = t.run(c_api_mod, &.{}, false);
     run_c_api_tests.setEnvironmentVariable("ZIG", b.graph.zig_exe); // runtime .hdl builds
-    const run_espice_tests = t.run(M.make(b.path("src/tests/espice.zig"), &.{.{ .name = "espice", .module = espice_mod }}), &.{}, true);
+    const run_espice_tests = t.run(M.make(b.path("src/tests/espice.zig"), &.{ .{ .name = "espice", .module = espice_mod }, core_import }), &.{}, true);
     run_espice_tests.setEnvironmentVariable("ZIG", b.graph.zig_exe);
 
     // analysis_mod predates emitKernels, so its `gompute_kernels` import is wired here.

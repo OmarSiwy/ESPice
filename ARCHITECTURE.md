@@ -23,7 +23,7 @@ frontend  core, device
 analysis  core, device, solver, gompute
 output    core
 espice    core, frontend, analysis, output        (src/espice.zig, the Problem facade)
-main      espice                                  (src/main.zig; src/c_api.zig likewise)
+main      espice                                  (src/main.zig; src/c_api.zig likewise, plus core for its tests)
 ```
 
 Enforced by: the wiring in `build.zig` (a module sees only the imports it is
