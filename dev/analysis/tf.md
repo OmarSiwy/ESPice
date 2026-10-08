@@ -55,12 +55,11 @@ writes `1e20` for $R_{\text{in}}$ when $|i_{br}| < 10^{-20}$, and its
 current-output clamp gives `1e20` when $y[br] < 10^{-20}$. Measured with ngspice-45
 on the divider plus an open `V2 c 0 1`: `tf i(V2) V2` prints 0, 1e20, 1e20,
 and `tf v(out) V2` 0, 1e20, 750; the `tf` tests in
-`src/analysis/tests/sweep.zig` pin both. `xf.immittance` applies the same
+`src/analysis/tests/sweep.zig` pin both. `tf.impedance` applies the same
 $|i| < 10^{-20}$ floor (#199), so a current in $(0, 10^{-20})$ also reads
-`1e20` (`tf/tiny_input_conductance`: a 1e-30 S path, Rin 1e20, not 1e30),
-and the clamp keeps `Complex.div`'s $|y|^2$ from underflowing to 0 below
-$|y| \approx 10^{-154}$. `.dcxf`'s and `.acxf`'s `zin`/`yin` share it, so
-the analyses agree.
+`1e20` (`tf/tiny_input_conductance`: a 1e-30 S path, Rin 1e20, not 1e30).
+The floor is `.tf`'s alone: `.dcxf` and `.acxf` are VACASK's analyses and
+keep its exact-zero rule (§5).
 
 Divergence: ngspice's `tfanal.c` reports $1/\max(10^{-20}, y[br])$ for a
 current output. A passive circuit always gives $y[br] < 0$ under that sign,
@@ -79,8 +78,8 @@ the factorization; no iteration.
 sparse solver factors it once, and both solves reuse that factorization.
 Forward solve with the input's unit excitation (`xf.excite`: $e_{br}$ on a V
 card's branch row, a unit current through an I card) → gain (`Output.read`)
-+ $R_{\text{in}}$ (`xf.immittance`, $10^{20}$ when the branch current
-perturbation is below $10^{-20}$). Adjoint `solveT` with $e_{\text{out}}$
++ $R_{\text{in}}$ (`tf.impedance` over `xf.immittance`, $10^{20}$ when the
+branch current perturbation is below $10^{-20}$). Adjoint `solveT` with $e_{\text{out}}$
 (`Output.seed`) → $R_{\text{out}}$. Defaults: input = first source's
 branch, output = last probe node. Until #193 `.tf` built a dense copy of $G$
 and factored it with `dense_lu`, O(n²) memory and O(n³) time; the sparse
@@ -150,10 +149,17 @@ the deck's AC excitation, and publishes the deck's probes (`v(node)`,
 
 Divergences, recorded:
 
-- An infinite `zin` or `yin` (a V card that moves less than 1e-20 A, an
-  I card across less than 1e-20 V) is VACASK's finite `1e20`, the value
-  `.tf` and ngspice print too, so the row stays finite. VACASK clamps only
-  an exact zero, so a `zin` above 1e20 reads 1e20 here (#199).
+- An infinite `zin` or `yin` is VACASK's finite `1e20`, so the row stays
+  finite. As in VACASK, only an exact zero clamps: `coredcxf.cpp:268-273`
+  (`yin != 0.0 ? 1.0/yin : 1e20` for a V card), `:277-282` (the same on
+  `zin` for an I card), and `coreacxf.cpp:484-488` / `:493-497` on the
+  complex values (VACASK unstable-2026, the benchmarking shell's
+  `vacask-unstable-2026` source). A tiny nonzero value inverts to a huge
+  one, as it does there. ESPice inverts by Smith's division
+  (`xf.reciprocal`), which never squares $|v|$, so a value below
+  $10^{-154}$ inverts instead of reading `inf` (#199); a real value gives
+  exactly `1/v`, VACASK's DC `1.0/yin`. `.tf` alone adds ngspice's
+  $10^{-20}$ floor (§1).
 - VACASK saves only `tf` and `zin` by default and `yin` on request; we
   always publish all three.
 - `.dcinc` takes the real part of each source's AC excitation, so a
