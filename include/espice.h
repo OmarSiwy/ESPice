@@ -177,9 +177,9 @@ espice_status espice_ready_queries(espice_problem *, espice_scope,
     uint32_t *ids, size_t capacity, size_t *required);
 /* Runs one quantum of id, or of its first unfinished prerequisite, then
  * writes whatever completed to the output. In binary or ASCII raw or print
- * format the plots reach the file at espice_run_all, which replaces it
- * once; destroying the problem first leaves the file as it was. A terminal
- * id returns its status
+ * format the plots reach the file in one replacement when the last query
+ * ends, as with espice_run_all; destroying the problem before then leaves
+ * the file as it was. A terminal id returns its status
  * without running anything. The first call also runs the deck's .model OPT
  * optimization and MOSRA stress run, if any.
  * OK means the operation returned an event. Inspect its numerical status and

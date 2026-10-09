@@ -324,6 +324,41 @@ test "Problem: publication follows request order and repeated run_all does not d
     try t.expectEqualSlices(u8, before, after);
 }
 
+test "Problem: stepping every query to the end publishes the file run_all writes (#179)" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const stepped_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/stepped.raw", .{tmp.sub_path});
+    defer t.allocator.free(stepped_path);
+    const batch_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/batch.raw", .{tmp.sub_path});
+    defer t.allocator.free(batch_path);
+    // The oracle: the same deck through run_all.
+    {
+        const p = try api.Problem.init(t.allocator, t.io, .{
+            .source = .{ .bytes = .{ .data = deck, .origin = "order.cir" } },
+            .output = .{ .path = batch_path },
+        });
+        defer p.deinit();
+        try p.run_all();
+    }
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = deck, .origin = "order.cir" } },
+        .output = .{ .path = stepped_path },
+    });
+    defer p.deinit();
+    var calls: usize = 0;
+    while (!p.finished() and calls < 10_000) : (calls += 1) {
+        for (0..p.query_count()) |i| _ = try p.advance(@fromBackingInt(@intCast(i)));
+    }
+    try t.expect(p.finished());
+    try t.expectEqual(null, p.output_error());
+    const stepped = try tmp.dir.readFileAlloc(t.io, "stepped.raw", t.allocator, .unlimited);
+    defer t.allocator.free(stepped);
+    const batch = try tmp.dir.readFileAlloc(t.io, "batch.raw", t.allocator, .unlimited);
+    defer t.allocator.free(batch);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, stepped, "Title: query fixture\n"));
+    try t.expectEqualSlices(u8, batch, stepped);
+}
+
 test "Problem: writer failure retains completed results and is reported separately" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
