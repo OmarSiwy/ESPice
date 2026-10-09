@@ -74,11 +74,11 @@ pub const Options = struct {
 };
 
 /// Why publication stopped (`Problem.output_error`): an encoder or file
-/// error from the output session (`publish`, `endStream`) or the Touchstone
+/// error from the output session (`publish`, `endStream`, `finish`) or the Touchstone
 /// file writer (`output.write`), `error.OutOfMemory` included. The session
 /// lookups' `error.InvalidQuery` and `error.ResultUnavailable` mean the
 /// query bookkeeping broke (a bug), reported instead of a panic.
-pub const DeliveryError = errorOf(output.Session.publish) || errorOf(output.Session.endStream) || errorOf(output.write) ||
+pub const DeliveryError = errorOf(output.Session.publish) || errorOf(output.Session.endStream) || errorOf(output.Session.finish) || errorOf(output.write) ||
     errorOf(analysis.session.Session.info) || errorOf(analysis.session.Session.result) || errorOf(analysis.session.Session.query);
 
 fn errorOf(comptime f: anytype) type {
@@ -244,7 +244,9 @@ pub const Problem = struct {
     }
 
     /// Cancels and joins any paused query workers, then frees everything.
-    /// Invalidates every result slice handed out.
+    /// Invalidates every result slice handed out. Plots published since the
+    /// last `run_all` into binary or ASCII raw or `.print` are dropped, and
+    /// the file keeps its old bytes.
     pub fn deinit(self: *Problem) void {
         const a = self.allocator;
         for (self.runs) |*run| run.session.deinit();
@@ -389,8 +391,10 @@ pub const Problem = struct {
     }
 
     /// Runs one quantum of `id`, or of its first unfinished prerequisite, then
-    /// publishes whatever completed. A terminal `id` returns its status
-    /// without running anything. A numerical failure is reported in the
+    /// publishes whatever completed; in binary or ASCII raw or `.print` the
+    /// plots reach the file when `run_all` finishes the output (#179). A
+    /// terminal `id` returns its status without running anything. A
+    /// numerical failure is reported in the
     /// event, not as an error, and an output failure in its
     /// `delivery_error`. `error.InvalidQuery` for an ID outside
     /// `0..query_count()`. The first of `advance`, `advance_ready`,
@@ -456,7 +460,10 @@ pub const Problem = struct {
         if (self.delivery_error != null) return error.DeliveryFailed;
         var output_lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &output_lap, "output finish");
-        try self.delivery.finish();
+        self.delivery.finish(self.io) catch |err| {
+            self.delivery_error = err;
+            return error.DeliveryFailed;
+        };
         if (self.save_path) |path| try self.saveOperatingPoint(path, self.prepared.deck.save_op.?);
         for (self.prepared.deck.stims) |stim| try self.writeStim(stim);
     }

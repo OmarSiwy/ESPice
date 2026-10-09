@@ -1,6 +1,8 @@
 //! Delivery of plots to one output selection, in publish order. The caller
 //! keeps each result alive until `publish` returns, or streams a binary raw
-//! plot's rows as they are computed (`beginStream`).
+//! plot's rows as they are computed (`beginStream`). Plots that share one
+//! file (binary and ASCII raw, `.print`) are appended to one replacement,
+//! each written once, and `finish` renames it over the destination (#179).
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -20,10 +22,17 @@ pub const Session = struct {
     state: enum(u8) { ready, failed } = .ready,
     /// The plot `beginStream` opened, until `endStream` or `abortStream`.
     stream: ?*Stream = null,
+    /// The replacement of a file that holds several plots, from the first
+    /// plot published since the last `finish` until the next one, which
+    /// renames it over the destination; until then the destination keeps its
+    /// old bytes. A batch after a `finish` starts with a copy of the file.
+    pending: ?*Stream = null,
 
     /// Plot 0 in binary raw, written while its query runs: the header with
-    /// the point count left blank, then rows as they arrive. Without a path
-    /// the rows are counted and dropped.
+    /// the point count left blank, then rows as they arrive; `endStream`
+    /// keeps it as `pending`. Without a path the rows are counted and
+    /// dropped. A `pending` replacement opened by `publish` uses only
+    /// `atomic`, `file` and `buffer`.
     const Stream = struct {
         atomic: ?Io.File.Atomic,
         file: Io.File.Writer,
@@ -50,18 +59,20 @@ pub const Session = struct {
         };
     }
 
-    /// Drops an open stream, leaving its destination as it was, and frees
-    /// the path copy.
+    /// Drops an open stream and any plots not yet `finish`ed, leaving the
+    /// destination as it was, and frees the path copy.
     pub fn deinit(self: *Session) void {
         self.abortStream();
+        if (self.pending) |s| self.drop(s);
         if (self.selection.path) |path| self.allocator.free(path);
         self.* = undefined;
     }
 
-    /// Writes the next plot. Plot 0 writes `path`; later ones append to it
-    /// for binary and ASCII raw and `.print` listings, and go to
-    /// `path.<number + 1>` for every other format. Without a path the plot
-    /// is only counted. An invalid plot (`types.ValidationError`) fails
+    /// Writes the next plot. For binary and ASCII raw and `.print`
+    /// listings every plot goes into one file, `path`, which `finish`
+    /// replaces; for every other format plot 0 replaces `path` and later
+    /// ones `path.<number + 1>`, each at once. Without a path the plot is
+    /// only counted. An invalid plot (`types.ValidationError`) fails
     /// before any I/O and is not counted; so does `error.TooManyPlots`
     /// past maxInt(u32) - 1 plots. A writer error is terminal
     /// (`DeliveryFailed` from then on): a partial append cannot be replayed.
@@ -69,25 +80,62 @@ pub const Session = struct {
         if (self.state == .failed) return error.DeliveryFailed;
         if (self.published == std.math.maxInt(u32)) return error.TooManyPlots;
         try types.validatePlot(self.selection.format, plot);
-        const ordinal = self.published;
-
-        if (self.selection.path) |path| {
-            const appends = dispatch.concatenates(self.selection.format);
-            const numbered = if (ordinal != 0 and !appends)
-                try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ path, ordinal + 1 })
-            else
-                null;
-            defer if (numbered) |p| self.allocator.free(p);
-            const written = if (appends and ordinal != 0)
-                dispatch.append(io, path, self.selection.format, plot)
-            else
-                dispatch.write(io, numbered orelse path, self.selection.format, plot);
-            written catch |err| {
-                self.state = .failed;
-                return err;
-            };
-        }
+        if (self.selection.path) |path| self.deliver(io, path, plot) catch |err| {
+            self.state = .failed;
+            return err;
+        };
         self.published += 1;
+    }
+
+    fn deliver(self: *Session, io: Io, path: []const u8, plot: types.Plot) !void {
+        const format = self.selection.format;
+        const ordinal = self.published;
+        if (!dispatch.concatenates(format)) {
+            if (ordinal == 0) return dispatch.write(io, path, format, plot);
+            const numbered = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ path, ordinal + 1 });
+            defer self.allocator.free(numbered);
+            return dispatch.write(io, numbered, format, plot);
+        }
+        // A device or FIFO cannot be renamed over: it takes each plot as it comes.
+        const s = self.pending orelse try self.open(io, path, ordinal != 0) orelse
+            return dispatch.write(io, path, format, plot);
+        self.pending = s;
+        try dispatch.encode(&s.file.interface, format, plot);
+    }
+
+    /// A replacement for the file at `path`, holding the file's bytes when
+    /// `keep`; null when `path` is a device or FIFO.
+    fn open(self: *Session, io: Io, path: []const u8, keep: bool) !?*Stream {
+        if (Io.Dir.cwd().statFile(io, path, .{})) |stat| {
+            if (stat.kind != .file) return null;
+        } else |_| {}
+        const s = try self.allocator.create(Stream);
+        errdefer self.allocator.destroy(s);
+        s.discard = .init(&.{});
+        s.count_at = 0;
+        s.rows_at = 0;
+        s.complex = false;
+        s.atomic = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+        errdefer s.atomic.?.deinit(io);
+        s.file = s.atomic.?.file.writer(io, &s.buffer);
+        if (keep) copy: {
+            const old = Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => break :copy,
+                else => return err, // else: any other open failure is the caller's
+            };
+            defer old.close(io);
+            var rbuf: [8192]u8 = undefined;
+            var reader = old.reader(io, &rbuf);
+            _ = try reader.interface.streamRemaining(&s.file.interface);
+        }
+        return s;
+    }
+
+    /// Closes `s` and deletes its replacement, if any, leaving the
+    /// destination as it was.
+    fn drop(self: *Session, s: *Stream) void {
+        if (s.atomic) |*atomic| atomic.deinit(s.file.io);
+        self.allocator.destroy(s);
     }
 
     /// Opens plot 0 in binary raw for rows the caller writes to the returned
@@ -99,27 +147,21 @@ pub const Session = struct {
     /// until `endStream`, `abortStream` or `deinit`.
     pub fn beginStream(self: *Session, io: Io, plot: types.Plot) !?*Io.Writer {
         if (self.selection.format != .binary or self.published != 0 or self.state == .failed) return null;
+        assert(self.pending == null);
         try types.validatePlot(.binary, plot);
-        const s = try self.allocator.create(Stream);
-        errdefer self.allocator.destroy(s);
-        s.discard = .init(&.{});
-        s.atomic = null;
-        s.count_at = 0;
-        s.rows_at = 0;
-        s.complex = plot.result.is_complex;
         const path = self.selection.path orelse {
+            const s = try self.allocator.create(Stream);
+            s.discard = .init(&.{});
+            s.atomic = null;
+            s.count_at = 0;
+            s.rows_at = 0;
+            s.complex = plot.result.is_complex;
             self.stream = s;
             return s.writer();
         };
-        if (Io.Dir.cwd().statFile(io, path, .{})) |stat| {
-            if (stat.kind != .file) {
-                self.allocator.destroy(s);
-                return null;
-            }
-        } else |_| {}
-        s.atomic = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
-        errdefer s.atomic.?.deinit(io);
-        s.file = s.atomic.?.file.writer(io, &s.buffer);
+        const s = try self.open(io, path, false) orelse return null;
+        errdefer self.drop(s);
+        s.complex = plot.result.is_complex;
         var header: Io.Writer.Allocating = .init(self.allocator);
         defer header.deinit();
         try @import("rawfile.zig").writeHeader(&header.writer, plot, true);
@@ -139,8 +181,9 @@ pub const Session = struct {
     const count_width = 20;
 
     /// Finishes the streamed plot: checks that `npoints` rows of
-    /// `varnames` columns arrived, fills in the point count and replaces the
-    /// destination. Counts as one `publish`. The stream is closed whether
+    /// `varnames` columns arrived and fills in the point count; the plots
+    /// published after it append to the same replacement, which `finish`
+    /// renames over the destination. Counts as one `publish`. The stream is closed whether
     /// or not it succeeds. With a path, any error (a wrong row count
     /// included, `error.DataLengthMismatch`) fails the session; without
     /// one, a wrong count is returned and the session stays usable. Asserts
@@ -159,7 +202,8 @@ pub const Session = struct {
             if (s.file.logicalPos() - s.rows_at != want) return error.DataLengthMismatch;
             var digits: [count_width]u8 = undefined;
             try atomic.file.writePositionalAll(io, try std.fmt.bufPrint(&digits, "{d}", .{npoints}), s.count_at);
-            try atomic.replace(io);
+            self.stream = null;
+            self.pending = s;
         }
         self.published += 1;
     }
@@ -167,16 +211,24 @@ pub const Session = struct {
     /// Drops the streamed plot, if any, leaving the destination as it was.
     pub fn abortStream(self: *Session) void {
         const s = self.stream orelse return;
-        if (s.atomic) |*atomic| atomic.deinit(s.file.io);
-        self.allocator.destroy(s);
+        self.drop(s);
         self.stream = null;
     }
 
-    /// Reports whether delivery has failed. Does not seal the session: every
-    /// `publish` already closed its file, and queries appended later may
-    /// publish more plots.
-    pub fn finish(self: Session) error{DeliveryFailed}!void {
+    /// Publishes the plots appended since the last `finish` with one rename
+    /// over the destination, so a reader sees the old file or every plot.
+    /// `DeliveryFailed` once delivery has failed, leaving the destination
+    /// as it was; a flush or rename error fails the session the same way.
+    /// Does not seal the session: queries appended later may publish more
+    /// plots, and the next `finish` adds them to the file.
+    pub fn finish(self: *Session, io: Io) !void {
         if (self.state == .failed) return error.DeliveryFailed;
+        const s = self.pending orelse return;
+        self.pending = null;
+        defer self.drop(s);
+        errdefer self.state = .failed;
+        try s.file.interface.flush();
+        try s.atomic.?.replace(io);
     }
 };
 
@@ -201,19 +253,82 @@ test "session: finish and later publication preserve raw append order" {
             },
         };
         try session.publish(io, first);
-        try session.finish();
+        try session.finish(io);
         const initial = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
         defer a.free(initial);
         var second = first;
         second.result.plotname = "second";
         try session.publish(io, second);
-        try session.finish();
+        try session.finish(io);
         const complete = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
         defer a.free(complete);
         try std.testing.expect(std.mem.startsWith(u8, complete, initial));
         try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, complete, "Title: session\n"));
         try std.testing.expect(std.mem.indexOf(u8, complete[initial.len..], "Plotname: second\n") != null);
     }
+}
+
+test "session: appended plots are each written once and published at finish (#179)" {
+    for ([_]types.Format{ .binary, .ascii, .print }) |format| {
+        const io = std.testing.io;
+        const a = std.testing.allocator;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/sweep.raw", .{tmp.sub_path});
+        defer a.free(path);
+        try tmp.dir.writeFile(io, .{ .sub_path = "sweep.raw", .data = "old" });
+        // The oracle: each plot encoded alone, back to back.
+        var want: Io.Writer.Allocating = .init(a);
+        defer want.deinit();
+        var session = try Session.init(a, .{ .format = format, .path = path });
+        defer session.deinit();
+        for ([_][]const u8{ "step 1", "step 2", "step 3" }, 0..) |name, k| {
+            const value: [1]f64 = .{@floatFromInt(k)};
+            const plot: types.Plot = .{ .title = "sweep", .result = .{
+                .plotname = name,
+                .varnames = &.{"v(out)"},
+                .is_complex = false,
+                .npoints = 1,
+                .data = &value,
+            } };
+            try session.publish(io, plot);
+            try dispatch.encode(&want.writer, format, plot);
+            const during = try tmp.dir.readFileAlloc(io, "sweep.raw", a, .unlimited);
+            defer a.free(during);
+            try std.testing.expectEqualStrings("old", during);
+        }
+        try session.finish(io);
+        const got = try tmp.dir.readFileAlloc(io, "sweep.raw", a, .unlimited);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(want.written(), got);
+    }
+}
+
+test "session: plots never finished leave the previous file intact (#179)" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plots.raw", .{tmp.sub_path});
+    defer a.free(path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "plots.raw", .data = "previous run" });
+    const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "op", .varnames = &.{"v(out)"}, .is_complex = false, .npoints = 1, .data = &.{1} } };
+    {
+        var session = try Session.init(a, .{ .path = path });
+        defer session.deinit();
+        try session.publish(io, plot);
+        try session.publish(io, plot);
+    }
+    const kept = try tmp.dir.readFileAlloc(io, "plots.raw", a, .unlimited);
+    defer a.free(kept);
+    try std.testing.expectEqualStrings("previous run", kept);
+    // A device takes each plot in place; there is nothing to rename.
+    var device = try Session.init(a, .{ .path = "/dev/null" });
+    defer device.deinit();
+    try device.publish(io, plot);
+    try device.publish(io, plot);
+    try std.testing.expectEqual(null, device.pending);
+    try device.finish(io);
 }
 
 test "session: owned destination and numbered files" {
@@ -237,9 +352,9 @@ test "session: owned destination and numbered files" {
         },
     };
     try session.publish(io, plot);
-    try session.finish();
+    try session.finish(io);
     try session.publish(io, plot);
-    try session.finish();
+    try session.finish(io);
     const first = try tmp.dir.readFileAlloc(io, "plots.csv", a, .unlimited);
     defer a.free(first);
     const second = try tmp.dir.readFileAlloc(io, "plots.csv.2", a, .unlimited);
@@ -273,7 +388,7 @@ test "session: validation preserves destination and permits a corrected publicat
     try std.testing.expectEqualStrings("existing", old);
     plot.result.varnames = &.{ "frequency", "S(1,1)" };
     try session.publish(io, plot);
-    try session.finish();
+    try session.finish(io);
 }
 
 test "session: writer failure is terminal and does not acknowledge output" {
@@ -298,7 +413,7 @@ test "session: writer failure is terminal and does not acknowledge output" {
     try std.testing.expectError(error.FileNotFound, session.publish(io, plot));
     try std.testing.expectEqual(@as(u32, 0), session.published);
     try std.testing.expectError(error.DeliveryFailed, session.publish(io, plot));
-    try std.testing.expectError(error.DeliveryFailed, session.finish());
+    try std.testing.expectError(error.DeliveryFailed, session.finish(io));
 }
 
 test "session: a streamed plot matches the whole-plot encoding but for the padded count" {
@@ -328,6 +443,7 @@ test "session: a streamed plot matches the whole-plot encoding but for the padde
     try (try again.beginStream(io, plot)).?.writeAll(std.mem.sliceAsBytes(&rows));
     try again.endStream(io, 2, 2);
     try std.testing.expectEqual(@as(u32, 1), again.published);
+    try again.finish(io);
     const streamed = try tmp.dir.readFileAlloc(io, "stream.raw", a, .unlimited);
     defer a.free(streamed);
     plot.result.npoints = 2;

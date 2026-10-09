@@ -38,8 +38,11 @@ internal node of a Verilog-A instance `n1`.
 | `sst2` | `hspice` | HSPICE SST2-style binary records | numbered files |
 
 Every file is replaced atomically: it holds either its old contents or the
-complete new result, never half of one. A path that is a device or a FIFO
-(`-r /dev/null`) is written in place.
+complete new result, never half of one. In the formats that append, the
+file is replaced once, when the run ends: until then it keeps its old
+contents, and a run that fails or is interrupted leaves it so. ngspice
+also writes its raw file at the end. A path that is a device or a FIFO
+(`-r /dev/null`) is written in place, plot by plot.
 
 ### Raw files
 

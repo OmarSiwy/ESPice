@@ -39,7 +39,8 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
   later result is appended to the same file, as ngspice does; in the other
   formats result *n* goes to `FILE.n` (`out.csv`, `out.csv.2`,
   `out.csv.3`, ...). The file is replaced atomically, so it holds either
-  the old contents or the complete new result. See [Output](output.md).
+  the old contents or the complete new result; an appended file is
+  replaced once, when the run ends. See [Output](output.md).
 
 `--format=FMT`
 : The output format, default `binary`. Names and aliases: `binary` (`raw`),
