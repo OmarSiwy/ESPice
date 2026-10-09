@@ -748,6 +748,7 @@ PASS	fixtures/stress/vacask_rc.sp
 PASS	fixtures/stress/vacask_ring.sp
 PASS	fixtures/syntax/global_net.sp
 PASS	fixtures/syntax/hspice_suffix.sp
+PASS	fixtures/syntax/ngspice_mod_idiv.sp
 PASS	fixtures/syntax/ngspice_syntax.sp
 PASS	fixtures/syntax/subckt_params.sp
 PASS	fixtures/temp/fine.sp

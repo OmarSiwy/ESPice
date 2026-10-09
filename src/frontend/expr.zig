@@ -358,10 +358,10 @@ pub fn numberLen(text: []const u8) usize {
 }
 
 /// A byte that continues an expression after an operand: the binary and
-/// ternary operator bytes, except `%` and `\`.
+/// ternary operator bytes, `%` and `\` included (`compile` reads both).
 pub fn isOperator(c: u8) bool {
     return switch (c) {
-        '|', '&', '<', '>', '=', '!', '+', '-', '*', '/', '^', '?' => true,
+        '|', '&', '<', '>', '=', '!', '+', '-', '*', '/', '%', '\\', '^', '?' => true,
         else => false,
     };
 }
@@ -777,4 +777,6 @@ test numberLen {
     try std.testing.expectEqual(3, numberLen("1E5"));
     try std.testing.expectEqual(0, numberLen(""));
     try std.testing.expect(isOperator('+') and isOperator('?') and !isOperator(')') and !isOperator(','));
+    // Every byte `compile` reads as a binary operator continues a value (#180).
+    for ("|&<>=!+-*/%\\^?") |c| try std.testing.expect(isOperator(c));
 }
