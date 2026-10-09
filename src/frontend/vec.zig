@@ -12,6 +12,7 @@
 //! values and `.param` names in the file.
 const std = @import("std");
 const spiceNum = @import("lines.zig").hspice.parseNum;
+const plainNumber = @import("lines.zig").plainNumber;
 
 const Error = error{ OutOfMemory, InvalidVector };
 
@@ -335,28 +336,10 @@ fn maskBits(arena: std.mem.Allocator, mask: []const []const u8, digits: []const 
     return on;
 }
 
-/// A plain decimal number, `[+-]` digits, `.`, exponent: no scale suffix,
-/// `inf`, `nan` or hex (the time group is in TUNIT units, SA p.268).
+/// A plain decimal number: no scale suffix, `inf`, `nan` or hex (the time
+/// group is in TUNIT units, SA p.268).
 fn number(text: []const u8) Error!f64 {
-    var i: usize = 0;
-    if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
-    const int = i;
-    while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
-    var frac: usize = 0;
-    if (i < text.len and text[i] == '.') {
-        i += 1;
-        while (i < text.len and std.ascii.isDigit(text[i])) : (frac += 1) i += 1;
-    }
-    if (i - int == 0 or (i - int == 1 and frac == 0 and text[int] == '.')) return error.InvalidVector;
-    if (i < text.len and (text[i] == 'e' or text[i] == 'E')) {
-        i += 1;
-        if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
-        const e = i;
-        while (i < text.len and std.ascii.isDigit(text[i])) i += 1;
-        if (i == e) return error.InvalidVector;
-    }
-    if (i != text.len) return error.InvalidVector;
-    return std.fmt.parseFloat(f64, text) catch error.InvalidVector;
+    return plainNumber(text) orelse error.InvalidVector;
 }
 
 test "a vector file becomes PWL inputs and .dout outputs" {

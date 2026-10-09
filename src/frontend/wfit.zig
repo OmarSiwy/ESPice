@@ -22,6 +22,7 @@ const std = @import("std");
 /// The S-element reader and fitter this file builds on, re-exported for
 /// the grammar oracle (tests/grammar), which imports this module alone.
 pub const sparam = @import("sparam.zig");
+const plainNumber = @import("netlist").lines.plainNumber;
 const Cx = std.math.Complex(f64);
 const Allocator = std.mem.Allocator;
 
@@ -61,7 +62,7 @@ pub fn readRlgcFile(bytes: []const u8) RlgcError!RlgcFile {
         while (it.next()) |t| {
             // Past the largest file ESPice reads; the count check refuses it.
             if (count == nums.len) return error.InvalidRlgcFile;
-            nums[count] = sparam.plainNumber(t) orelse return error.InvalidRlgcFile;
+            nums[count] = plainNumber(t) orelse return error.InvalidRlgcFile;
             count += 1;
         }
     }

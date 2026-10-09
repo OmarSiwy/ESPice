@@ -412,7 +412,7 @@ pub fn build(b: *std.Build) void {
             &.{
                 t.run(netlist_mod, &.{}, false),
                 // The W/S fitters (wfit.zig imports sparam.zig).
-                t.run(M.make(b.path("src/frontend/wfit.zig"), &.{core_import}), &.{}, false),
+                t.run(M.make(b.path("src/frontend/wfit.zig"), &.{ core_import, .{ .name = "netlist", .module = netlist_mod } }), &.{}, false),
                 // build_options: the binder test loads models/diode.va at runtime.
                 t.run(frontend_mod, &.{.{ .name = "build_options", .module = build_options_mod }}, true),
             },
@@ -450,7 +450,7 @@ pub fn build(b: *std.Build) void {
     // the fixture corpus (read from the repo root) and generated inputs.
     const run_grammar = t.run(M.make(b.path("tests/grammar/root.zig"), &.{
         .{ .name = "netlist", .module = netlist_mod },
-        .{ .name = "wfit", .module = M.make(b.path("src/frontend/wfit.zig"), &.{core_import}) },
+        .{ .name = "wfit", .module = M.make(b.path("src/frontend/wfit.zig"), &.{ core_import, .{ .name = "netlist", .module = netlist_mod } }) },
     }), &.{}, false);
     run_grammar.setCwd(b.path("."));
     b.step("test-grammar", "Check every input grammar against the frontend").dependOn(&run_grammar.step);

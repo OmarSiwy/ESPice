@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const plainNumber = @import("netlist").lines.plainNumber;
 const eigen = core.eigen;
 const numerics = core.numerics;
 const Cx = std.math.Complex(f64);
@@ -141,34 +142,6 @@ pub fn readTouchstone(arena: Allocator, bytes: []const u8, ports: usize) Error!R
     raw.values = all[0 .. nf * stride];
     raw.nf = nf;
     return raw;
-}
-
-/// A plain number: decimal or scientific notation (Touchstone 2.0 rule 6;
-/// an HSPICE RLGC file's too), and nothing parseFloat also takes (`inf`,
-/// `nan`, hex, `_`). Null for anything else.
-pub fn plainNumber(t: []const u8) ?f64 {
-    var i: usize = 0;
-    if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
-    const int_start = i;
-    while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
-    const int_digits = i > int_start;
-    var frac_digits = false;
-    if (i < t.len and t[i] == '.') {
-        i += 1;
-        const frac_start = i;
-        while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
-        frac_digits = i > frac_start;
-    }
-    if (!int_digits and !frac_digits) return null;
-    if (i < t.len and (t[i] == 'e' or t[i] == 'E')) {
-        i += 1;
-        if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
-        const exp_start = i;
-        while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
-        if (i == exp_start) return null;
-    }
-    if (i != t.len) return null;
-    return std.fmt.parseFloat(f64, t) catch null;
 }
 
 /// Parses a Touchstone 1.0 file of `ports` ports (`readTouchstone`) into
