@@ -31,27 +31,8 @@ fn construct(allocator: std.mem.Allocator) !void {
 
 test "Problem: construction releases partial ownership at every allocation failure" {
     try construct(t.allocator);
-    try t.checkAllAllocationFailures(fixed_growth, construct, .{});
+    try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, construct, .{});
 }
-
-/// `t.allocator` that never grows or shrinks a block in place. Whether a
-/// large block grows in place depends on the address space around it, so
-/// through `t.allocator` an arena's chunk count, and with it the allocation
-/// count `checkAllAllocationFailures` replays, can change between runs.
-const fixed_growth: std.mem.Allocator = .{ .ptr = undefined, .vtable = &.{
-    .alloc = struct {
-        fn alloc(_: *anyopaque, n: usize, a: std.mem.Alignment, ra: usize) ?[*]u8 {
-            return t.allocator.rawAlloc(n, a, ra);
-        }
-    }.alloc,
-    .resize = std.mem.Allocator.noResize,
-    .remap = std.mem.Allocator.noRemap,
-    .free = struct {
-        fn free(_: *anyopaque, m: []u8, a: std.mem.Alignment, ra: usize) void {
-            t.allocator.rawFree(m, a, ra);
-        }
-    }.free,
-} };
 
 test "Problem: .hdl display-task lines go to Options.display (#127)" {
     var sink: std.Io.Writer.Allocating = .init(t.allocator);
@@ -107,7 +88,7 @@ fn constructAndRun(allocator: std.mem.Allocator) !void {
 
 test "Problem: construction and a full run release everything at every allocation failure" {
     try constructAndRun(t.allocator);
-    try t.checkAllAllocationFailures(fixed_growth, constructAndRun, .{});
+    try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, constructAndRun, .{});
 }
 
 test "Problem: compiled device callbacks preserve allocation errors" {
@@ -341,6 +322,41 @@ test "Problem: publication follows request order and repeated run_all does not d
     const after = try tmp.dir.readFileAlloc(t.io, "ordered.raw", t.allocator, .unlimited);
     defer t.allocator.free(after);
     try t.expectEqualSlices(u8, before, after);
+}
+
+test "Problem: stepping every query to the end publishes the file run_all writes (#179)" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const stepped_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/stepped.raw", .{tmp.sub_path});
+    defer t.allocator.free(stepped_path);
+    const batch_path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/batch.raw", .{tmp.sub_path});
+    defer t.allocator.free(batch_path);
+    // The oracle: the same deck through run_all.
+    {
+        const p = try api.Problem.init(t.allocator, t.io, .{
+            .source = .{ .bytes = .{ .data = deck, .origin = "order.cir" } },
+            .output = .{ .path = batch_path },
+        });
+        defer p.deinit();
+        try p.run_all();
+    }
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = deck, .origin = "order.cir" } },
+        .output = .{ .path = stepped_path },
+    });
+    defer p.deinit();
+    var calls: usize = 0;
+    while (!p.finished() and calls < 10_000) : (calls += 1) {
+        for (0..p.query_count()) |i| _ = try p.advance(@fromBackingInt(@intCast(i)));
+    }
+    try t.expect(p.finished());
+    try t.expectEqual(null, p.output_error());
+    const stepped = try tmp.dir.readFileAlloc(t.io, "stepped.raw", t.allocator, .unlimited);
+    defer t.allocator.free(stepped);
+    const batch = try tmp.dir.readFileAlloc(t.io, "batch.raw", t.allocator, .unlimited);
+    defer t.allocator.free(batch);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, stepped, "Title: query fixture\n"));
+    try t.expectEqualSlices(u8, batch, stepped);
 }
 
 test "Problem: writer failure retains completed results and is reported separately" {

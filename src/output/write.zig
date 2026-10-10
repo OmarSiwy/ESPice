@@ -1,8 +1,10 @@
-//! The one file write every format goes through: validate, encode, and
+//! The one-plot file write every format goes through: validate, encode, and
 //! replace the destination atomically, so it holds the old bytes or the
 //! whole new plot, never a torn one. A destination that is not a regular
 //! file (a device or FIFO, `-r /dev/null`) cannot be renamed over and is
-//! written in place.
+//! written in place. Several plots in one file (`concatenates`) are
+//! `Session`'s: it encodes each into one replacement and renames that once,
+//! at `finish`, so a sweep of P plots writes each plot once (#179).
 const std = @import("std");
 const Io = std.Io;
 const types = @import("types.zig");
@@ -11,16 +13,24 @@ const types = @import("types.zig");
 /// regular file untouched; validation errors leave every destination
 /// untouched.
 pub fn write(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !void {
-    return put(io, path, format, plot, false);
-}
-
-/// Appends `plot` to the file at `path`, creating it if missing. Only for
-/// formats that `concatenates`. The old plots are copied into the
-/// replacement, so the append is atomic too, at O(file size) per call.
-/// Asserts that `format` concatenates.
-pub fn append(io: Io, path: []const u8, format: types.Format, plot: types.Plot) !void {
-    std.debug.assert(concatenates(format));
-    return put(io, path, format, plot, true);
+    try types.validatePlot(format, plot);
+    var buf: [8192]u8 = undefined;
+    // A device or FIFO (`-r /dev/null`) cannot be renamed over: write to it
+    // directly.
+    const stat = Io.Dir.cwd().statFile(io, path, .{}) catch null;
+    if (stat != null and stat.?.kind != .file) {
+        const file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .write_only });
+        defer file.close(io);
+        var fw = file.writer(io, &buf);
+        try encode(&fw.interface, format, plot);
+        return fw.interface.flush();
+    }
+    var atomic = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
+    defer atomic.deinit(io);
+    var fw = atomic.file.writer(io, &buf);
+    try encode(&fw.interface, format, plot);
+    try fw.interface.flush();
+    try atomic.replace(io);
 }
 
 /// Whether one file holds several plots back to back. ngspice writes every
@@ -34,39 +44,8 @@ pub fn concatenates(format: types.Format) bool {
     };
 }
 
-fn put(io: Io, path: []const u8, format: types.Format, plot: types.Plot, keep: bool) !void {
-    try types.validatePlot(format, plot);
-    var buf: [8192]u8 = undefined;
-    // A device or FIFO (`-r /dev/null`) cannot be renamed over: write to it
-    // directly. Appending to one is writing the new plot.
-    const stat = Io.Dir.cwd().statFile(io, path, .{}) catch null;
-    if (stat != null and stat.?.kind != .file) {
-        const file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .write_only });
-        defer file.close(io);
-        var fw = file.writer(io, &buf);
-        try encode(&fw.interface, format, plot);
-        return fw.interface.flush();
-    }
-    var atomic = try Io.Dir.cwd().createFileAtomic(io, path, .{ .replace = true });
-    defer atomic.deinit(io);
-    var fw = atomic.file.writer(io, &buf);
-    const w = &fw.interface;
-    if (keep) copy: {
-        const old = Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
-            error.FileNotFound => break :copy,
-            else => return err, // else: any other open failure is the caller's
-        };
-        defer old.close(io);
-        var rbuf: [8192]u8 = undefined;
-        var reader = old.reader(io, &rbuf);
-        _ = try reader.interface.streamRemaining(w);
-    }
-    try encode(w, format, plot);
-    try w.flush();
-    try atomic.replace(io);
-}
-
-fn encode(w: *Io.Writer, format: types.Format, plot: types.Plot) !void {
+/// Writes `plot` as `format` to `w`, without validating or flushing.
+pub fn encode(w: *Io.Writer, format: types.Format, plot: types.Plot) !void {
     return switch (format) {
         .binary => @import("rawfile.zig").encode(w, plot),
         .ascii => @import("ascii_raw.zig").encode(w, plot),
@@ -89,7 +68,6 @@ test "a character device is written in place, not renamed over" {
         .data = &.{1.0},
     } };
     try write(std.testing.io, "/dev/null", .binary, plot);
-    try append(std.testing.io, "/dev/null", .binary, plot);
 }
 
 test "every format refuses a plot whose data length disagrees with its shape" {
@@ -107,7 +85,7 @@ test "every format refuses a plot whose data length disagrees with its shape" {
     }
 }
 
-test "write replaces and append extends, both atomically" {
+test "write replaces the file" {
     const io = std.testing.io;
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -120,10 +98,7 @@ test "write replaces and append extends, both atomically" {
     try encode(&one.writer, .print, plot);
     try tmp.dir.writeFile(io, .{ .sub_path = "out.txt", .data = "old" });
     try write(io, path, .print, plot);
-    try append(io, path, .print, plot);
     const got = try tmp.dir.readFileAlloc(io, "out.txt", a, .unlimited);
     defer a.free(got);
-    const twice = try std.mem.concat(a, u8, &.{ one.written(), one.written() });
-    defer a.free(twice);
-    try std.testing.expectEqualStrings(twice, got);
+    try std.testing.expectEqualStrings(one.written(), got);
 }

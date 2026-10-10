@@ -74,11 +74,11 @@ pub const Options = struct {
 };
 
 /// Why publication stopped (`Problem.output_error`): an encoder or file
-/// error from the output session (`publish`, `endStream`) or the Touchstone
+/// error from the output session (`publish`, `endStream`, `finish`) or the Touchstone
 /// file writer (`output.write`), `error.OutOfMemory` included. The session
 /// lookups' `error.InvalidQuery` and `error.ResultUnavailable` mean the
 /// query bookkeeping broke (a bug), reported instead of a panic.
-pub const DeliveryError = errorOf(output.Session.publish) || errorOf(output.Session.endStream) || errorOf(output.write) ||
+pub const DeliveryError = errorOf(output.Session.publish) || errorOf(output.Session.endStream) || errorOf(output.Session.finish) || errorOf(output.write) ||
     errorOf(analysis.session.Session.info) || errorOf(analysis.session.Session.result) || errorOf(analysis.session.Session.query);
 
 fn errorOf(comptime f: anytype) type {
@@ -244,7 +244,9 @@ pub const Problem = struct {
     }
 
     /// Cancels and joins any paused query workers, then frees everything.
-    /// Invalidates every result slice handed out.
+    /// Invalidates every result slice handed out. A Problem destroyed
+    /// before its last query ended drops the plots published into binary
+    /// or ASCII raw or `.print`, and the file keeps its old bytes.
     pub fn deinit(self: *Problem) void {
         const a = self.allocator;
         for (self.runs) |*run| run.session.deinit();
@@ -386,8 +388,10 @@ pub const Problem = struct {
     }
 
     /// Runs one quantum of `id`, or of its first unfinished prerequisite, then
-    /// publishes whatever completed. A terminal `id` returns its status
-    /// without running anything. A numerical failure is reported in the
+    /// publishes whatever completed; in binary or ASCII raw or `.print` the
+    /// plots reach the file in one replacement when the last query ends,
+    /// as with `run_all` (#179). A terminal `id` returns its status without
+    /// running anything. A numerical failure is reported in the
     /// event, not as an error, and an output failure in its
     /// `delivery_error`. `error.InvalidQuery` for an ID outside
     /// `0..query_count()`. The first of `advance`, `advance_ready`,
@@ -398,6 +402,7 @@ pub const Problem = struct {
         try self.age();
         var event = try self.session.advance(id);
         self.deliver();
+        self.finishWhenDone();
         event.delivery_error = self.delivery_error;
         return event;
     }
@@ -408,13 +413,34 @@ pub const Problem = struct {
     /// (`error.QueryNotReady`, `error.DuplicateQuery`), `limits.max_parallel`
     /// nonzero (`error.InvalidConcurrency`) and `events` at least as long
     /// as `ids` (`error.BufferTooSmall`); a bad frontier starts nothing.
+    /// Publishes as `advance` does.
     pub fn advance_ready(self: *Problem, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
+        const n = try self.stepReady(ids, limits, events);
+        self.finishWhenDone();
+        for (events[0..n]) |*event| event.delivery_error = self.delivery_error;
+        return n;
+    }
+
+    /// `advance_ready` without finishing the output, which `run_all` does
+    /// itself once the `.step` runs have published too.
+    fn stepReady(self: *Problem, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
         try self.optimize();
         try self.age();
         const n = try self.session.advanceReady(ids, limits, events);
         self.deliver();
-        for (events[0..n]) |*event| event.delivery_error = self.delivery_error;
         return n;
+    }
+
+    /// Finishes the output once every query has ended and published, so
+    /// a caller that steps to the end gets the file `run_all` writes.
+    /// `run_all` alone runs the `.step` variant runs, and publishes their
+    /// plots in a later `finish`.
+    fn finishWhenDone(self: *Problem) void {
+        if (self.delivery_error != null or !self.finished()) return;
+        if (self.next_output != self.session.outputs.items.len) return;
+        self.delivery.finish(self.io) catch |err| {
+            self.delivery_error = err;
+        };
     }
 
     /// Runs every query to completion, publishes the results and finishes
@@ -441,7 +467,7 @@ pub const Problem = struct {
             // Whole-query quanta: nothing here reads intermediate progress,
             // except the in-depth timing, which reports per checkpoint.
             const quantum: Limits = .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.timing_in_depth) .checkpoint else .completion };
-            _ = try self.advance_ready(ids[0..selected], quantum, events);
+            _ = try self.stepReady(ids[0..selected], quantum, events);
         }
         self.deliver();
         for (self.runs) |*run| {
@@ -453,7 +479,10 @@ pub const Problem = struct {
         if (self.delivery_error != null) return error.DeliveryFailed;
         var output_lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &output_lap, "output finish");
-        try self.delivery.finish();
+        self.delivery.finish(self.io) catch |err| {
+            self.delivery_error = err;
+            return error.DeliveryFailed;
+        };
         if (self.save_path) |path| try self.saveOperatingPoint(path, self.prepared.deck.save_op.?);
         for (self.prepared.deck.stims) |stim| try self.writeStim(stim);
     }

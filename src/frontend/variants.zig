@@ -1332,10 +1332,10 @@ pub const Trial = struct {
 const TrialDraw = struct {
     trial: Trial,
 
-    /// The trial's draw for distribution call `f` at `site`. `args` must
-    /// hold at least the nominal value; unlike `OneSigma.sample` there is
-    /// no assert, only the safety-checked read of `args[0]`.
+    /// The trial's draw for distribution call `f` at `site`. Asserts that
+    /// `args` holds at least the nominal value.
     pub fn sample(self: TrialDraw, site: u64, f: expr.Fn, args: []const f64) f64 {
+        std.debug.assert(args.len >= 1);
         const nom = args[0];
         const width = if (args.len > 1) args[1] else 0;
         const gaussian = f == .agauss or f == .gauss;

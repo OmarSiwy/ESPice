@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "`%` and `\\` in .param expressions and after `key=`: with blanks around the operator an expression (#180), with none an ngspice number token whose rest is ignored (#200)",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "10 % 3 = 1: R1=1k. 10 \\ 3 = trunc(10/3) = 3: R2=3k. 7k % 4k = 3k: R3=3k. 7k \\ 2 = 3500: R4=3.5k. Each i(vk)=-1V/Rk. r=2k%3 is the token 2k%3, read as 2k: R5=2k. r=3k\\2 reads 3k: R6=3k.",
+    "cross_check": "ngspice-45 (ngspice -b) agrees on i(v1) and i(v2) as written, and on i(v3) and i(v4) with r3 and r4 braced ({7k %4k}, {7k \\ 2}); unbraced, ngspice refuses r3 with 'unknown parameter (%4k)', as it refuses `r=10 *3`, since it reads no unbraced expression that starts with a digit (dev/research/ngspice-syntax.md §2.1); r5 and r6 as written: ngspice-45 reads r=10%3 and r=10\\3 as 10 (measured 2026-10-18), and inpgtok.c ends a token at blank, tab, =, (, ), comma, a sign, *, / and ^ only"
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "i(v1)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.001
+            ]
+          },
+          "i(v2)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.0003333333333333333
+            ]
+          },
+          "i(v3)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.0003333333333333333
+            ]
+          },
+          "i(v4)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.00028571428571428574
+            ]
+          },
+          "i(v5)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.0005
+            ]
+          },
+          "i(v6)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.0003333333333333333
+            ]
+          }
+        },
+        "row_count": 1
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "75019c2ec1c840c80d1cb864d70bbe04211ec8a684aed672a70e6730e05f8d77"
+}

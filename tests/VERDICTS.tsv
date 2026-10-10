@@ -412,6 +412,7 @@ PASS	fixtures/invalid/pac_zero_lo.sp
 PASS	fixtures/invalid/pnoise_fractional_sidebands.sp
 PASS	fixtures/invalid/pnoise_negative_sidebands.sp
 PASS	fixtures/invalid/pole_unpaired_root.sp
+PASS	fixtures/invalid/positional_operator_field.sp
 PASS	fixtures/invalid/pss_negative_samples.sp
 PASS	fixtures/invalid/pss_zero_frequency.sp
 PASS	fixtures/invalid/pxf_zero_lo.sp
@@ -748,6 +749,7 @@ PASS	fixtures/stress/vacask_rc.sp
 PASS	fixtures/stress/vacask_ring.sp
 PASS	fixtures/syntax/global_net.sp
 PASS	fixtures/syntax/hspice_suffix.sp
+PASS	fixtures/syntax/ngspice_mod_idiv.sp
 PASS	fixtures/syntax/ngspice_syntax.sp
 PASS	fixtures/syntax/subckt_params.sp
 PASS	fixtures/temp/fine.sp

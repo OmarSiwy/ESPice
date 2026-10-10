@@ -120,6 +120,34 @@ pub fn Fields(comptime quotes: []const u8, comptime braces: bool) type {
     };
 }
 
+/// A plain number: decimal or scientific notation (Touchstone 2.0 rule 6;
+/// an HSPICE RLGC or vector file's too), and nothing parseFloat also takes
+/// (`inf`, `nan`, hex, `_`). Null for anything else.
+pub fn plainNumber(t: []const u8) ?f64 {
+    var i: usize = 0;
+    if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
+    const int_start = i;
+    while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+    const int_digits = i > int_start;
+    var frac_digits = false;
+    if (i < t.len and t[i] == '.') {
+        i += 1;
+        const frac_start = i;
+        while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+        frac_digits = i > frac_start;
+    }
+    if (!int_digits and !frac_digits) return null;
+    if (i < t.len and (t[i] == 'e' or t[i] == 'E')) {
+        i += 1;
+        if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
+        const exp_start = i;
+        while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
+        if (i == exp_start) return null;
+    }
+    if (i != t.len) return null;
+    return std.fmt.parseFloat(f64, t) catch null;
+}
+
 const NumParts = struct { base: f64, suffix: []const u8 };
 
 /// The leading decimal literal of `text` and the suffix after it. With
@@ -741,6 +769,16 @@ test Fields {
     try std.testing.expectEqualStrings("{a + b}", h.next().?);
     try std.testing.expectEqualStrings("\"b c\"", h.next().?);
     try std.testing.expect(hspice.Split.isQuote('"') and !ngspice.Split.isQuote('"'));
+}
+
+test plainNumber {
+    // Hand-listed from Touchstone 2.0 rule 6: digits with an optional sign,
+    // point and exponent, and nothing else parseFloat would also take.
+    for ([_][]const u8{ "1", "-2.5", "+.5", "5.", "1e3", "1.5E-3", "-0e+0" }) |text|
+        try std.testing.expect(plainNumber(text) != null);
+    for ([_][]const u8{ "", ".", "+", "-.", ".e5", "1e", "1e+", "1k", "inf", "nan", "0x10", "1_0", " 1" }) |text|
+        try std.testing.expect(plainNumber(text) == null);
+    try std.testing.expectEqual(@as(?f64, -1.5e-3), plainNumber("-1.5e-3"));
 }
 
 test "number literals read as ngspice's INPevaluate" {

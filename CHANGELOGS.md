@@ -9,6 +9,9 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.tf` reads a resistance whose branch current is below 1e-20 A as `1e20`, as ngspice does (a 1e-30 S input path printed 1e30); `.dcxf` and `.acxf` keep VACASK's exact-zero rule but no longer print `inf` for an immittance below about 1e-154 (#199).
 - `.tf` prints an infinite input or output resistance (a source that moves no current) as `1e20`, as ngspice does, instead of `inf` (#193).
 - `.qpss` runs on multi-tone harmonic balance (`.hb TONES=`): preconditioned GMRES from the operating point instead of a second two-tone solver; the API `Qpss` drops its unused `gmres_*` fields (#189).
+- ngspice dialect: a device field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice refuses it, instead of being dropped; `r=10%3` reads 10, as ngspice reads it, instead of 1 (#200).
+- A raw or `.print` file that takes many plots (a `.step` sweep) is written once and replaced at the end of the run, instead of being copied and replaced per plot, which made a sweep of P plots write O(P²) bytes; until then the old file stays whole (#179).
+- An unbraced `key=` value continues past a blank before `%` or `\` as it does before `*` or `/`: `r=7k %4k` is 3k, where it read 7k and refused `%4k` (#180).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
 - `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).

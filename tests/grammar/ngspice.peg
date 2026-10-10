@@ -3,8 +3,10 @@
 
 # §1.10: INPevaluate's number. `d` is an exponent letter; the scale factor is
 # T G MEG K MIL M U N P F A, and the rest of the token is ignored (`10v`,
-# `1k5` = 1000, `3.3.0` = 3.3).
-Number     <- [+\-]? Mantissa Exponent? Scale? [a-z0-9_.]*
+# `1k5` = 1000, `3.3.0` = 3.3). INPgetTok ends a token at `*`, `/` and `^`
+# but not at `%` or `\` (inpgtok.c), so `10%3` is one token, read as 10
+# (#200).
+Number     <- [+\-]? Mantissa Exponent? Scale? [a-z0-9_.%\\]*
 Mantissa   <- [0-9]+ ('.' [0-9]*)? / '.' [0-9]+
 Exponent   <- [ed] [+\-]? [0-9]+
 Scale      <- 'meg' / 'mil' / [tgkmunpfa]
@@ -16,6 +18,11 @@ Expr       <- '{' x Ternary x '}' / "'" x Ternary x "'"
 # ESPice: an unbraced expression after `key=` (`w=2*l`, `r = a + b`);
 # ngspice braces only a bare word there (§2.1, auto-bracing).
 pairexpr   <- &([a-zA-Z_.0-9(+\-!$]) Ternary !wordchar
+# ngspice (#200): a value that starts as a number and runs on through `%` or
+# `\` with no blank (`r=10%3`) is one INPgetTok token, the number with the
+# rest ignored: 10. Unless an operator follows it (`r=10%3 *2`), which only
+# the ESPice expression reads.
+numtok     <- &(Mantissa [a-z0-9_.]* [%\\]) &(Number !wordchar) Word !(x [|&<>=!+\-*/%\\^?])
 
 # §2.2, numparam precedence, loosest first. Unary `-`/`+` take a power chain
 # (`-2^2` = -4) and `!` takes one operand (`!2^0` = 1), as numparam and the
@@ -58,4 +65,7 @@ NotOp      <- '!' !'='
 # value is an expression unless braced, quoted or a lone number.
 field      <- Pair / Group / Expr / Str / Word / [,()=]
 gfield     <- Group / Expr / Str / Word / [,=]
-value      <- Expr / Str / pairexpr / Word
+value      <- Expr / Str / numtok / pairexpr / Word
+# A device's value field that starts with an operator (`R1 a b 10 %3`)
+# parses as a word; ngspice fails the card ("unknown parameter"), so the
+# lowering refuses it, as the frontend does (lower.zig `element`, #200).

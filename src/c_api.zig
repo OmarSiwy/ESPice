@@ -647,25 +647,7 @@ fn status(err: anyerror) u32 {
 // that hit it, and destroy then frees everything (the C contract for a
 // failed call, include/espice.h); the testing allocator checks the frees.
 test "create, append and run_all report OUT_OF_MEMORY at every allocation failure and leak nothing" {
-    const backing: std.mem.Allocator = .{ .ptr = std.testing.allocator.ptr, .vtable = &sweep_vtable };
-    try std.testing.checkAllAllocationFailures(backing, createAppendRun, .{});
-}
-
-/// std.testing.allocator with resize and remap refused: every growth is a
-/// counted allocation, so the sweep's count is deterministic.
-const sweep_vtable: std.mem.Allocator.VTable = .{
-    .alloc = sweepAlloc,
-    .resize = std.mem.Allocator.noResize,
-    .remap = std.mem.Allocator.noRemap,
-    .free = sweepFree,
-};
-
-fn sweepAlloc(_: *anyopaque, n: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-    return std.testing.allocator.rawAlloc(n, alignment, ret);
-}
-
-fn sweepFree(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-    std.testing.allocator.rawFree(memory, alignment, ret);
+    try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, createAppendRun, .{});
 }
 
 fn createAppendRun(gpa: std.mem.Allocator) !void {
