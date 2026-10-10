@@ -25,6 +25,7 @@ pub const Options = @import("core").query.TranNoise;
 const Waveform = @import("types.zig").Waveform;
 
 /// Xorshift64 PRNG with a Box-Muller normal draw: deterministic per seed.
+// ponytail: stays in-tree; std.Random's stream isn't stable across Zig releases and seeded output must be (#196).
 const Xorshift64 = struct {
     state: u64,
 
