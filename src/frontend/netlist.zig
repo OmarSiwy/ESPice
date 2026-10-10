@@ -2521,11 +2521,13 @@ fn Reader(comptime S: type) type {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
             if (rest[0] == '{' or rest[0] == '\'') return r.readValue(f, frame, true, geometry);
-            // A lone number literal (`w=0.5u`) needs no compile.
+            // A lone number literal (`w=0.5u`) needs no compile; nor does
+            // ngspice's `r=10%3`, which it reads as 10 (`junkNumber`, #200).
             if (std.ascii.isDigit(rest[0]) or rest[0] == '.') {
                 const save = f.pos;
                 const w = f.next().?;
-                if (expr.numberLen(w) == w.len and !expr.isOperator(f.nextByte() orelse ' '))
+                const lone = expr.numberLen(w) == w.len or (r.dialect == .ngspice and junkNumber(w));
+                if (lone and !expr.isOperator(f.nextByte() orelse ' '))
                     return .{ .num = S.parseNum(w) orelse return error.ParseError };
                 f.pos = save;
             }
@@ -2536,6 +2538,36 @@ fn Reader(comptime S: type) type {
             if (ops.len == 1 and ops[0].code == .num) return .{ .num = r.scratch.consts.items[ops[0].a] };
             if (ops.len == 1 and ops[0].code == .ident) return r.nameValue(r.scratch.names.items[ops[0].a], frame, geometry);
             return r.fold(mark.ops, frame, geometry);
+        }
+
+        /// Whether ngspice reads field `w` as one number token whose rest it
+        /// ignores: a number that runs on through `%` or `\` (`10%3`, `2k\3`),
+        /// since INPgetTok ends a token at `*`, `/` and `^` but at neither
+        /// of those (inpgtok.c; ngspice-syntax.md §1.10). The ngspice.peg
+        /// `numtok` rule.
+        fn junkNumber(w: []const u8) bool {
+            if (w.len < 2) return false;
+            if (!std.ascii.isDigit(w[0]) and !(w[0] == '.' and std.ascii.isDigit(w[1]))) return false;
+            var i: usize = 1;
+            while (i < w.len and numberByte(w[i])) i += 1;
+            if (i == w.len or (w[i] != '%' and w[i] != '\\')) return false;
+            for (w[i..]) |c| if (!numberByte(c) and c != '%' and c != '\\') return false;
+            return true;
+        }
+
+        /// A byte INPevaluate's token runs on through after its mantissa.
+        fn numberByte(c: u8) bool {
+            return std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '_' or c == '.';
+        }
+
+        /// ngspice fails a card with a field that starts with an operator
+        /// byte that cannot begin a name or value (`R1 a b 10 %3`: "unknown
+        /// parameter"); ESPice refuses it by name instead of reading a
+        /// name `%3` (#200). The ngspice.peg `opstart` rule.
+        fn refuseOperatorField(r: *R, line: []const u8, t: []const u8) Error!void {
+            if (r.dialect != .ngspice or !F.isWord(t)) return;
+            if (std.mem.indexOfScalar(u8, "%\\*/^|&?", t[0]) == null) return;
+            return r.unsupported(line, "an operator where a name or value belongs");
         }
 
         /// HSPICE's manual reads braces as name bytes; the dialect reads
@@ -3183,10 +3215,12 @@ fn Reader(comptime S: type) type {
                     if (t[0] == ')') break;
                     if (t[0] == ',') continue;
                     if (!F.isWord(t)) return error.ParseError;
+                    try r.refuseOperatorField(line, t);
                     try r.nodes.append(arena, t);
                 }
                 const model = f.next() orelse return error.ParseError;
                 if (!F.isWord(model)) return error.ParseError;
+                try r.refuseOperatorField(line, model);
                 try r.positional.append(arena, try r.nameValue(model, frame, false));
             } else if (fixedPins(letter)) |fixed| {
                 const count = if (port_card and mixedPort(f)) 3 else fixed;
@@ -3194,6 +3228,7 @@ fn Reader(comptime S: type) type {
                 for (0..count) |_| {
                     const t = f.next() orelse return error.ParseError;
                     if (!F.isWord(t)) return error.ParseError;
+                    try r.refuseOperatorField(line, t);
                     r.nodes.appendAssumeCapacity(t);
                 }
                 if (letter == 'b') {
@@ -3218,6 +3253,7 @@ fn Reader(comptime S: type) type {
                         f.pos = save;
                         break;
                     }
+                    try r.refuseOperatorField(line, t);
                     try r.nodes.append(arena, t);
                 }
                 const model = r.nodes.pop() orelse return error.ParseError;
@@ -3237,6 +3273,7 @@ fn Reader(comptime S: type) type {
                     try r.card_kv.append(arena, .{ .key = t, .value = try r.kvValue(&f, frame, false) });
                     if (letter == 'x') try kv_text.append(arena, std.mem.trim(u8, f.line[start..f.pos], " \t"));
                 } else {
+                    try r.refuseOperatorField(line, t);
                     try r.positional.append(arena, try r.valueAt(t, &f, frame, true, false));
                 }
             }

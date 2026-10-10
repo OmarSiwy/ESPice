@@ -14,5 +14,11 @@ v3 n3 0 1
 r3 n3 0 r=7k %4k
 v4 n4 0 1
 r4 n4 0 r=7k \ 2
+* With no blank, ngspice reads `2k%3` as one token, INPevaluate's 2k with
+* the rest ignored, since INPgetTok splits at neither `%` nor `\` (#200).
+v5 n5 0 1
+r5 n5 0 r=2k%3
+v6 n6 0 1
+r6 n6 0 r=3k\2
 .op
 .end

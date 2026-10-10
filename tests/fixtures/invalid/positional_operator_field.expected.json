@@ -1,0 +1,15 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "purpose": "#200: a positional field `%3` after a resistor's value is refused by name, as ngspice-45 fails the card, instead of being dropped.",
+ "oracle": {
+  "kind": "diagnostic",
+  "derivation": "#200: ngspice-45 fails 'R1 a 0 10 %3' with \"unknown parameter (%3)\"; ESPice refuses the card (UnsupportedCard)."
+ },
+ "origin": "tests/fixtures/invalid/positional_operator_field.sp",
+ "expect": {
+  "status": "error",
+  "category": "unsupported_input"
+ },
+ "netlist_sha256": "844aa45e11216fd8f315a4851b11ef1b6491b0d9787424564685ce316b7e3e44"
+}

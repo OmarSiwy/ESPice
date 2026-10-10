@@ -412,6 +412,7 @@ PASS	fixtures/invalid/pac_zero_lo.sp
 PASS	fixtures/invalid/pnoise_fractional_sidebands.sp
 PASS	fixtures/invalid/pnoise_negative_sidebands.sp
 PASS	fixtures/invalid/pole_unpaired_root.sp
+PASS	fixtures/invalid/positional_operator_field.sp
 PASS	fixtures/invalid/pss_negative_samples.sp
 PASS	fixtures/invalid/pss_zero_frequency.sp
 PASS	fixtures/invalid/pxf_zero_lo.sp
