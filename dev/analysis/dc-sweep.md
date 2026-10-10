@@ -132,7 +132,7 @@ this exists for Monte Carlo and temperature sweeps
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Warm-point Newton (factor/refactor on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `src/solver/direct.zig` via `converger.newton` |
-| Refactor bypass on linear sweeps (same matrix per point at fixed sources) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig` / memcmp bypass) | `converger.Options.matrix_sig` |
+| Refactor bypass on linear sweeps (same matrix per point at fixed sources) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (value-compare bypass) | `direct.Solver.factor` |
 | Ladder fallback rungs | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `src/analysis/dc/op.zig solveLadder` |
 | Convergence gates, JFNK rung | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/converger.zig` |
 | Chunked lane batching (not implemented) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) §4 (batched-solve discussion) | none |

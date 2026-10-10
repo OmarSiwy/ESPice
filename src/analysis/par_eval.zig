@@ -321,7 +321,7 @@ pub const ParEval = struct {
     fn startWorkers(self: *ParEval) void {
         const epoch0 = self.epoch.load(.acquire);
         for (self.threads) |*th| {
-            th.* = std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, workerMain, .{ self, epoch0 }) catch
+            th.* = std.Thread.spawn(.{ .stack_size = @import("worker.zig").stack_size }, workerMain, .{ self, epoch0 }) catch
                 @panic("ParEval: worker spawn failed");
         }
         self.started = true;

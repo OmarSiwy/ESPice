@@ -143,16 +143,14 @@ pub const SparseLu = struct {
     pattern_epoch: u32 = 0,
 
     /// Allocates every workspace. `q` is borrowed and must outlive the
-    /// SparseLu; `row_idx` is unused until `factor`. Asserts that `q` has n
-    /// entries and `col_ptr` n + 1.
+    /// SparseLu; the row indices arrive with `factor`. Asserts that `q` has
+    /// n entries and `col_ptr` n + 1.
     pub fn init(
         gpa: Allocator,
         n: u32,
         col_ptr: []const u32,
-        row_idx: []const u32,
         q: []const u32,
     ) !Self {
-        _ = row_idx;
         assert(q.len == n);
         assert(col_ptr.len == @as(usize, n) + 1);
         const nnz = col_ptr[n];
@@ -1306,7 +1304,7 @@ test "factor, refactor and both solves leave a small scaled residual on random s
         defer gpa.free(q);
         for (q, 0..) |*c, i| c.* = @intCast(i);
         r.shuffle(u32, q);
-        var lu = try SparseLu.init(gpa, n, sys.col_ptr, sys.row_idx, q);
+        var lu = try SparseLu.init(gpa, n, sys.col_ptr, q);
         defer lu.deinit(gpa);
         lu.factor(gpa, sys.col_ptr, sys.row_idx, sys.vals, 1e-3) catch |err| {
             try testing.expectEqual(error.SingularMatrix, err);
@@ -1370,7 +1368,7 @@ test "a failed replay after a void column with a NaN multiplier leaves w zero" {
     const row_idx = [_]u32{ 0, 3, 0, 1, 2, 3 };
     const vals = [_]f64{ 1, 0.5, 0, 0, 1, 1 };
     const q = [_]u32{ 0, 1, 2, 3 };
-    var lu = try SparseLu.init(gpa, 4, &col_ptr, &row_idx, &q);
+    var lu = try SparseLu.init(gpa, 4, &col_ptr, &q);
     defer lu.deinit(gpa);
     try lu.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
     try testing.expect(lu.void_col[1]);
@@ -1383,14 +1381,14 @@ test "a failed replay after a void column with a NaN multiplier leaves w zero" {
 
 test "the empty and 1x1 systems factor, replay and solve" {
     const gpa = testing.allocator;
-    var empty = try SparseLu.init(gpa, 0, &.{0}, &.{}, &.{});
+    var empty = try SparseLu.init(gpa, 0, &.{0}, &.{});
     defer empty.deinit(gpa);
     try empty.factor(gpa, &.{0}, &.{}, &.{}, 1e-3);
     try empty.refactor(&.{0}, &.{}, 1e-12);
     empty.solve(&.{}, &.{});
     empty.solveT(&.{}, &.{});
 
-    var one = try SparseLu.init(gpa, 1, &.{ 0, 1 }, &.{0}, &.{0});
+    var one = try SparseLu.init(gpa, 1, &.{ 0, 1 }, &.{0});
     defer one.deinit(gpa);
     try one.factor(gpa, &.{ 0, 1 }, &.{0}, &.{4}, 1e-3);
     var x: [1]f64 = undefined;

@@ -85,10 +85,9 @@ Dispatch precedence in our `Solver` (init-time, pattern-only decisions):
    `klu-pipeline.md`).
 
 Value-bypass sits above all engines in `Solver.factor` (memcmp against
-`vcopy`); the symbolic signature sits above the *solver* in
-`converger.newton` (`Options.matrix_sig` vs `ws.factored_sig`): two
-distinct caches, deliberately: the memcmp needs no caller contract, the
-signature costs nothing per iteration. Off-diagonal-source peeling comes
+`vcopy`); it needs no caller contract. A caller-supplied matrix
+signature that skipped even the memcmp was dropped: no caller ever set
+it (#191). Off-diagonal-source peeling comes
 for free through BTF ordering rather than explicit block storage (see
 `btf-permutation.md` for the deviation from full KLU).
 
@@ -96,7 +95,7 @@ When each path wins: tridiag on ladders/chains ($O(n)$ vs $O(n)$-with-
 constants: measured ~5-10× on `rc_ladder_100k`-class shapes); BBD when the
 netlist has repeated-structure partitions; value-bypass on any linear
 circuit between $\Delta t$ changes (transient with fixed step: factor cost
-→ one memcmp per step); signature on all-const-Jacobian circuits under
+→ one memcmp per step), and on all-const-Jacobian circuits under
 sweeps.
 
 ## 3. Pseudo-code, CPU sequential
@@ -114,12 +113,6 @@ Solver.factor(vals):
                        #      on singularity -> demote to flat Lu forever
                        # lu: refactor, fallback full factor (klu-pipeline.md)
   vcopy = vals[0..nnz]
-
-newton iteration (converger.zig):
-  if matrix_sig != 0 and ws.factored_sig == matrix_sig:
-    skip factor entirely                 # symbolic signature bypass
-  else:
-    slv.factor(vals); ws.factored_sig = matrix_sig
 
 thomas_factor(vals):                     # per timestep / Newton iteration
   bp[0] = b[0]; fail if 0 or non-finite
@@ -189,8 +182,8 @@ not source-verified.
 **Our implementation:** `src/solver/direct.zig` (engine dispatch,
 `Solver.factor` vcopy bypass, BBD and tridiagonal demotion),
 `src/solver/tridiag.zig` (`isTridiag`, `TriDiag`), `src/solver/bbd.zig`,
-`src/solver/converger.zig` (`Options.matrix_sig`, `Workspace.factored_sig`).
+`src/solver/converger.zig` (`newton`).
 Fixtures in `tests/fixtures/stress/`: `scaling_rc_ladder_{1k,100k}`
 (tridiagonal path), `scaling_parallel_inverters_{100,2000}` (BBD
-partitions), `scaling_divider_chain` (signature bypass on a linear sweep);
+partitions), `scaling_divider_chain` (value bypass on a linear sweep);
 `tests/fixtures/tran/bench_bypass_*` (bypass correctness).

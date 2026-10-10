@@ -106,8 +106,8 @@ flips, iteration-1 veto, per-row delta-x, residual gate. One acceptance
 implementation means the direct and Krylov paths cannot drift.
 
 - **Direct Newton** computes $\Delta x$ by factor+solveNeg (KLU-style, see
-  `klu-pipeline.md`), with the `matrix_sig` factor-once shortcut for
-  constant Jacobians. This is the default: numeric refactor at
+  `klu-pipeline.md`); `Solver.factor`'s value compare skips the factor
+  for constant Jacobians. This is the default: numeric refactor at
   $O(\mathrm{nnz}(L{+}U))$ is far cheaper than JFNK's per-Krylov-vector
   full circuit evals at every size we bench.
 - **JFNK** is never chosen automatically. `converger.run` uses it only
@@ -133,7 +133,7 @@ newton(ckt, x, opts, hook):
   for iter in 0..max_iter:
     hook.assemble(ckt, x, t)                    # J into vals, F into rhs
     if gmin > 0: vals[diag] += gmin; rhs += gmin * x
-    if matrix_sig miss: slv.factor(vals)        # refactor / full fallback
+    slv.factor(vals)                            # bypass / refactor / full fallback
     slv.solveNeg(rhs, dx)                       # dx = -J \ F
     if max|dx| > clamp: dx *= clamp / max|dx|   # direction-preserving
     # ---- shared acceptance (ngspice order) ----

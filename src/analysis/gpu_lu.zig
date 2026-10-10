@@ -70,7 +70,6 @@ pub const GpuLu = struct {
     dev_gen: ?u32 = null,
     /// A driver call failed: the rest of the query solves on the host.
     poisoned: bool = false,
-    check: bool,
     knobs: Knobs,
     bench: ?*Bench = null,
     st: struct { calls: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0 } = .{},
@@ -130,7 +129,6 @@ pub const GpuLu = struct {
             .d_rhs = d_rhs,
             .d_y = d_y,
             .d_dx = d_dx,
-            .check = knobs.gpu_lu_check,
             .knobs = knobs,
         };
         if (knobs.gpu_lu_bench) |limit| self.bench = Bench.init(gpa, &self.k_ref, limit, knobs.gpu_lu_threads) catch null;
@@ -147,9 +145,9 @@ pub const GpuLu = struct {
     /// (`Circuit.attachLu(null)`).
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
-        if (self.knobs.gpu_stats != .off or self.check or self.bench != null) std.debug.print(
+        if (self.knobs.gpu_stats != .off or self.knobs.gpu_lu_check or self.bench != null) std.debug.print(
             "gpu-lu: calls={d} refactors={d} peels={d} epochs={d} F={d} check_mismatches={d}{s}\n",
-            .{ self.st.calls, self.st.refactors, self.st.peels, self.st.epochs, self.flops, self.st.mismatches, if (self.check) "" else " (unchecked)" },
+            .{ self.st.calls, self.st.refactors, self.st.peels, self.st.epochs, self.flops, self.st.mismatches, if (self.knobs.gpu_lu_check) "" else " (unchecked)" },
         );
         if (self.bench) |b| b.deinit(self);
         self.dropTables();
@@ -176,17 +174,16 @@ pub const GpuLu = struct {
         self.idx = &.{};
     }
 
-    /// `Circuit.deviceSolve`'s body: dx = -A^-1 rhs on the device, with
-    /// `need` false when the caller knows the matrix is unchanged. Null
+    /// `Circuit.deviceSolve`'s body: dx = -A^-1 rhs on the device. Null
     /// when the device did not try (no general LU yet, a declined epoch,
     /// factors it does not hold); false when it tried and the host's exact
     /// factor and solve must run: a device pivot failure, which clears
     /// `slv.factored`, so the host goes straight to the full factor its own
     /// refactor would have fallen back to. A driver error warns once and
     /// returns null for the rest of the query.
-    pub fn solve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool {
+    pub fn solve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64) ?bool {
         if (self.poisoned) return null;
-        return self.trySolve(slv, vals, rhs, dx, need) catch |e| {
+        return self.trySolve(slv, vals, rhs, dx) catch |e| {
             std.debug.print("warning: device LU off for this query ({s})\n", .{@errorName(e)});
             self.poisoned = true;
             self.dev_gen = null;
@@ -194,7 +191,7 @@ pub const GpuLu = struct {
         };
     }
 
-    fn trySolve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) !?bool {
+    fn trySolve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64) !?bool {
         if (comptime backend == null) return null;
         const lu = slv.sparse() orelse return null;
         if (!slv.factored or !lu.factored) return null;
@@ -202,7 +199,7 @@ pub const GpuLu = struct {
         if (lu.tv.items.len != 0) return null;
         if (self.epoch != lu.pattern_epoch) try self.load(slv);
         if (self.declined) return null;
-        const refactor = need and !slv.unchanged(vals);
+        const refactor = !slv.unchanged(vals);
         if (!refactor and self.dev_gen != slv.gen) return null;
         if (refactor) for (lu.void_slots.items) |p| {
             if (vals[p] != 0) return null;
@@ -262,7 +259,7 @@ pub const GpuLu = struct {
             self.dev_gen = slv.gen;
         }
         @memcpy(dx[0..n], self.pin_dx);
-        if (self.check and refactor) try self.checkAgainstHost(slv, rhs, dx);
+        if (self.knobs.gpu_lu_check and refactor) try self.checkAgainstHost(slv, rhs, dx);
         if (self.bench) |b| if (refactor) try b.sample(self, slv, vals, rhs, t1 - t0);
         return true;
     }
@@ -483,7 +480,7 @@ const Bench = struct {
                 chains[side] += mx;
             }
         }
-        std.debug.print("gpu-lu-bench: n={d} F={d} l_levels={d} u_levels={d} head_chain={d}+{d} tail={d} gather_cols={d} samples={d} threads={d} checked={d} mismatches={d} (median us)", .{ lu_ctx.n, lu_ctx.flops, t.l_levels, t.u_levels, chains[0], chains[1], t.n - t.t0, wide, b.s[0].items.len, b.threads, if (lu_ctx.check) lu_ctx.st.refactors else 0, lu_ctx.st.mismatches });
+        std.debug.print("gpu-lu-bench: n={d} F={d} l_levels={d} u_levels={d} head_chain={d}+{d} tail={d} gather_cols={d} samples={d} threads={d} checked={d} mismatches={d} (median us)", .{ lu_ctx.n, lu_ctx.flops, t.l_levels, t.u_levels, chains[0], chains[1], t.n - t.t0, wide, b.s[0].items.len, b.threads, if (lu_ctx.knobs.gpu_lu_check) lu_ctx.st.refactors else 0, lu_ctx.st.mismatches });
         for (&b.s, names) |*s, name| {
             std.mem.sort(f64, s.items, {}, std.sort.asc(f64));
             const m = if (s.items.len == 0) 0 else s.items[s.items.len / 2];

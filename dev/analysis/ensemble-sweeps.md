@@ -144,7 +144,7 @@ former, small circuits the latter.
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Per-trial cold Newton (refactor per trial on frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/direct.zig` via `converger.run` |
-| Workspace/pattern reuse; memcmp/sig refactor bypass for lanes where values repeat | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()`, `converger.Options.matrix_sig` |
+| Workspace/pattern reuse; memcmp/sig refactor bypass for lanes where values repeat | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) | `ckt.workspace()`, `direct.Solver.factor` value compare |
 | Ladder fallback for hard corners | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | not used: a lane that fails plain Newton is recorded as non-converged; `dc/op.zig solveLadder` is the upgrade |
 | Batched GPU solves (not implemented) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) (batched-solve discussion) | none |
 | Within-solve parallel eval | none (eval-side, not solver) | `src/analysis/par_eval.zig` |

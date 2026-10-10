@@ -447,7 +447,7 @@ pub fn simulate(
         const tn_nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         const nr = converger.run(ckt, ws, x_try, t + dt, tn_nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
-            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure retries the step
+            else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure retries the step
         };
 
         if (!nr.converged) {

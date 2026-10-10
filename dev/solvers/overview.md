@@ -80,13 +80,14 @@ slv.solveT(rhs, x);     // x = A^-T rhs, for adjoint analyses
 refactors on the existing pivot sequence and falls back to a full
 re-pivoting factor when the replay fails the growth monitor.
 
-`Params` is a field of the solver (`slv.params`), not an init argument:
+`Params` is a field of the solver (`slv.params`), not an init argument.
+Its one field, and the file-level constants beside it in `direct.zig`:
 
-| Field | Default | Meaning |
+| Name | Default | Meaning |
 |---|---|---|
-| `execution` | serial | scheduler for the BBD block factors |
+| `Params.refactor_growth_limit` | 1e-12 | a replayed pivot below this fraction of its column max forces a full factor; 0 disables. `FreqSolver` raises it to `pivot_tol` (gilbert-peierls-lu.md, "Two replay thresholds") |
 | `pivot_tol` | 1e-3 | threshold partial pivoting keeps the diagonal while \|diag\| >= pivot_tol * column max |
-| `refactor_growth_limit` | 1e-12 | a replayed pivot below this fraction of its column max forces a full factor; 0 disables. `FreqSolver` raises it to `pivot_tol` (gilbert-peierls-lu.md, "Two replay thresholds") |
+| `repivot_fill_cap` | 3 | a re-pivot whose fill outgrows this multiple of the fresh factor's restarts on the previous pivots |
 | `bbd_refine_growth` | 1e3 | a BBD factor with more Schur growth is probed (demoting on failure) and refines every solve |
 
 Only BBD solves refine, and there is no choice of ordering: the ordering is
@@ -127,7 +128,7 @@ defer ws.deinit(gpa);
 
 const opts = solver.converger.optionsFromTolerances(tol, null); // null: max_iter = itl1
 const r = try solver.converger.run(sys, &ws, x, t, opts, hook);
-// r.converged, r.iterations, r.max_dx
+// r.converged, r.iterations
 ```
 
 `run` calls `newton` (direct Newton on `ws.slv`) unless `ESPICE_SOLVER` pins

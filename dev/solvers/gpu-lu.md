@@ -665,8 +665,8 @@ The other paths out:
 - The tridiagonal and BBD engines: the device LU attaches only when
   `direct.Solver` runs the general `SparseLu`. A structured engine that
   demotes to `SparseLu` makes the device path eligible from then on.
-- `matrix_sig` bypass: host logic, one u64 compare; the device skips the
-  scatter and refactor launches.
+- Value bypass: `slv.unchanged(vals)`, host logic; the device skips the
+  upload and refactor launches.
 - Lanes, later: a W-lane refactor returns a per-lane fail mask like
   `LaneLu`, and failed lanes peel to the scalar host path as in
   `freq_solve.zig`'s `solveBatch`.

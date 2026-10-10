@@ -21,7 +21,7 @@ const ratio_max = 30;
 /// 2000 seeded systems: full factor 1.6e3, replay 6.0e3 (backward error
 /// near 1e-10, far under reltol). A lost pivot or a wrong solve misses by
 /// 1/eps.
-const ratio_max_pivoting = ratio_max / (direct.Params{}).pivot_tol;
+const ratio_max_pivoting = ratio_max / direct.pivot_tol;
 /// Dense scratch bound: the families stay at or below this order.
 const n_max = 72;
 

@@ -14,18 +14,6 @@ const integrator = @import("integrator.zig");
 /// `.envelope` query options, defined in core/query.zig.
 pub const Options = @import("core").query.Envelope;
 
-/// Outcome of one envelope run.
-pub const SimResult = struct {
-    /// True when t reached t_stop.
-    completed: bool,
-    /// Accepted outer steps; rejected (halved) attempts are not counted.
-    outer_steps: u32,
-    /// Time of the last envelope point, in seconds.
-    t_final: f64,
-    /// Rows written into the caller's buffer, the t = 0 row included.
-    n_points: u32,
-};
-
 /// Upper bound on envelope rows (core/validate.zig, which query validation shares).
 pub const maxPoints = @import("core").validate.envelopeMaxPoints;
 
@@ -89,7 +77,7 @@ fn newtonAt(
     };
     const r = nr catch |err| switch (err) {
         error.QueryCancelled, error.OutOfMemory => return err,
-        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure rejects the step
+        else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure rejects the step
     };
     if (!r.converged) {
         _ = ckt.stateCtl(.revert);
@@ -105,8 +93,9 @@ fn newtonAt(
 /// Envelope-following transient from `x` into the caller's `rows`:
 /// point-major rows [t, peak_p0, rms_p0, peak_p1, rms_p1, ...]. Asserts
 /// that `rows` holds at least maxPoints(options) * (1 + 2*probes.len)
-/// values. Returns error.EnvelopeDidNotConverge when a step fails at
-/// min_periods_per_step.
+/// values. Returns the rows written, the t = 0 row included, or
+/// error.EnvelopeDidNotConverge when a step fails at min_periods_per_step
+/// or `max_outer_steps` runs out before t_stop.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -114,7 +103,7 @@ pub fn simulate(
     rows: []f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !SimResult {
+) !u32 {
     const n: usize = ckt.n;
     const t_carrier = options.t_carrier;
     const ncols = 1 + 2 * probes.len;
@@ -263,12 +252,8 @@ pub fn simulate(
         }
     }
 
-    return .{
-        .completed = t >= options.t_stop,
-        .outer_steps = outer_steps,
-        .t_final = t,
-        .n_points = outer_steps + 1,
-    };
+    if (!(t >= options.t_stop)) return error.EnvelopeDidNotConverge;
+    return outer_steps + 1;
 }
 
 /// Steps from t_start through `duration` seconds at `dt_coarse`, the last
@@ -318,8 +303,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ncols = 1 + 2 * ctx.probes.len;
     const data = try a.alloc(f64, @as(usize, maxPoints(opts)) * ncols);
     errdefer a.free(data);
-    const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
-    if (!st.completed) return error.EnvelopeDidNotConverge;
+    const npoints: usize = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
 
     // probeNames uses the deck's labels, which also name branch-current rows.
     const labels = try root.probeNames(ctx, null);
@@ -330,7 +314,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         names[2 + p * 2] = try std.fmt.allocPrint(a, "rms({s})", .{l});
     }
 
-    const npoints: usize = st.n_points;
     return .{
         .plotname = "Envelope Analysis",
         .varnames = names,

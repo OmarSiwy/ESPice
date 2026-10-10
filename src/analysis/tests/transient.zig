@@ -783,7 +783,7 @@ const TranTests = struct {
             .dt_init = 1e-10,
             .method = .backward_euler,
         }, gpa);
-        try testing.expect(sim.completed);
+        try testing.expect(sim);
 
         // Both pulse levels must be reached.
         const times = wf.column(0);
@@ -921,7 +921,7 @@ const TranTests = struct {
         var wf = try Waveform.init(gpa, 1, 256);
         defer wf.deinit();
         const sim = try simulate(&ckt, x, &probes, &wf, .{ .t_stop = 1, .dt_init = 0.1, .uic = true }, gpa);
-        try testing.expect(sim.completed);
+        try testing.expect(sim);
         for (0..wf.len) |i| {
             if (wf.time(i) == tc) break;
         } else return error.TestExpectedLanding;
@@ -968,7 +968,7 @@ const TranTests = struct {
         var wf = try Waveform.init(gpa, 1, 256);
         defer wf.deinit();
         const sim = try simulate(&ckt, x, &probes, &wf, .{ .t_stop = 1, .dt_init = 0.1, .uic = true }, gpa);
-        try testing.expect(sim.completed);
+        try testing.expect(sim);
         // uic commits t = 0 without a solve, so every later sample prints once,
         // in order, the step that overshot tc never.
         var lines = std.mem.splitScalar(u8, sink.written(), '\n');

@@ -260,8 +260,8 @@ gmin lives in the device models); an always-on shunt moved `voltage_divider`
 by 2.5e-9 and settled a floating bridge on a common mode ngspice never picks.
 Assemble, factor (BTF + AMD + Gilbert-Peierls, symbolic work done once),
 `solveNeg`, damp, limiting and state gates, convergence test.
-`SingularMatrix` is a plain failure, not an abort. A `matrix_sig` fast path
-skips refactoring when the assembled matrix provably did not change.
+`SingularMatrix` is a plain failure, not an abort. `Solver.factor` skips
+refactoring when the assembled values match the last factor's.
 
 **Rung 2: dynamic gmin.** The factor-adaptation loop of §1, up to 100
 solves at ITL2 each, then a clean ITL1 solve with no shunt.
@@ -379,7 +379,7 @@ newton(ckt, x, gmin, max_iter):
     for iter in 0..max_iter:
         assemble(x)                        # devices stamp F(x), J(x) w/ limiting
         J_diag += gmin; rhs += gmin*x
-        factor(J) unless matrix_sig unchanged
+        factor(J) unless values unchanged
         dx = solve(J, -F)
         x_old = x; x += dx
         limited = apply_device_limits(x, x_old)    # pnjlim/fetlim/limvds
@@ -417,7 +417,7 @@ see [ensemble-sweeps.md](ensemble-sweeps.md).
 | Direct Newton factor/refactor (BTF + AMD + Gilbert-Peierls, frozen pattern) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/solver/direct.zig` |
 | Convergence gates, device limiting, JFNK/GMRES(m) + preconditioning | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/converger.zig` |
 | gmin/source ladder (Gillespie controllers, exact ngspice rules) | [homotopy-continuation.md](../solvers/homotopy-continuation.md) | `src/analysis/dc/op.zig solveLadder` |
-| Factor-once bypass on linear circuits | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig` / memcmp) | `converger.Options.matrix_sig` |
+| Factor-once bypass on linear circuits | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (value compare) | `direct.Solver.factor` |
 | LU (or Jacobi, under `ESPICE_SOLVER=jfnk-nolu`) right preconditioner for JFNK | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `direct.Solver` factors, `converger.jfnk` |
 | GPU level-set refactor (not implemented) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | none |
 

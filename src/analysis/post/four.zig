@@ -124,7 +124,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         defer waveform.deinit();
 
         const tran_result = try tran.simulate(ctx.circuit, x, probes[0..n_probes], &waveform, tran_opts, scratch);
-        if (!tran_result.completed) return error.TransientFailed;
+        if (!tran_result) return error.TransientFailed;
 
         break :blk try analyze(&waveform, 0, if (n_probes == 2) 1 else null, opts.f_fundamental, opts.n_harmonics, scratch);
     };

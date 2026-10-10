@@ -120,9 +120,6 @@ pub const Options = struct {
     gmin: f64 = 1e-12,
     /// Where `gmin` lands instead of every diagonal, when non-empty.
     gmin_stamps: []const GminStamp = &.{},
-    /// Nonzero when the caller knows the matrix is unchanged since the last
-    /// factor with this signature, so `newton` skips the factor.
-    matrix_sig: u64 = 0,
     /// The solve is a cold operating point, ngspice's MODEINITJCT/INITFIX:
     /// the first iterate that passes every gate only switches to INITFLOAT,
     /// without staging device states, and the next must pass too, so
@@ -150,12 +147,9 @@ pub const GminStamp = struct { slot: u32, row: u32, col: u32 };
 pub const Result = struct {
     converged: bool,
     iterations: u16,
-    /// Largest scaled step of the accepted iterate; 0 when not converged.
-    max_dx: f64,
 };
 
-/// Direct Newton: assemble, factor (skipped when `opts.matrix_sig` matches),
-/// solve, accept. Errors are the factorization's and the checkpoint's.
+/// Direct Newton: assemble, factor, solve, accept. Errors are the factorization's and the checkpoint's.
 ///
 /// A converged `x` is the last linearization point x_k, not the x_k+1 of the
 /// final solve, which only feeds the acceptance gates. ngspice's NIiter
@@ -204,12 +198,10 @@ pub fn newton(
         // Before the factor and solve, which may overwrite `v` and `rhs`.
         const load_ok = if (comptime @hasDecl(S, "loadCheck")) sys.loadCheck(x, v, sys.rhs[0..sys.n], opts.reltol, opts.abstol) else true;
         prof.lap(.load);
-        const need = opts.matrix_sig == 0 or ws.factored_sig != opts.matrix_sig;
         // The device LU (dev/solvers/gpu-lu.md) is bitwise this factor and
         // solve; false leaves both to the host.
-        const on_device = if (comptime @hasDecl(S, "deviceSolve")) sys.deviceSolve(slv, v, dx, need) orelse false else false;
-        if (on_device and need) ws.factored_sig = opts.matrix_sig;
-        if (!on_device and need) {
+        const on_device = if (comptime @hasDecl(S, "deviceSolve")) sys.deviceSolve(slv, v, dx) orelse false else false;
+        if (!on_device) {
             slv.factor(v, executionOf(sys)) catch |e| {
                 if (ws.knobs.opdbg) {
                     var nan_cnt: usize = 0;
@@ -221,10 +213,9 @@ pub fn newton(
                 }
                 return e;
             };
-            ws.factored_sig = opts.matrix_sig;
             prof.lap(.factor);
+            slv.solveNeg(sys.rhs, dx);
         }
-        if (!on_device) slv.solveNeg(sys.rhs, dx);
         prof.lap(.solve);
         // The INITFIX pass does not stage: its converged iterate is not the
         // answer, and staging there restarted a Newton-history limiter from a
@@ -246,10 +237,10 @@ pub fn newton(
             init_fix = false;
         } else if (st.converged) {
             @memcpy(x[0..sys.n], x_old[0..sys.n]);
-            return .{ .converged = true, .iterations = iter + 1, .max_dx = st.scaled };
+            return .{ .converged = true, .iterations = iter + 1 };
         }
     }
-    return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
+    return .{ .converged = false, .iterations = opts.max_iter };
 }
 
 /// Adds the loads `newton` stamps on top of `hook.assemble`: the diagonal
@@ -465,7 +456,7 @@ pub fn jfnk(
             @memcpy(x_old, x);
             const limited = applyLimits(sys, x, x_old);
             if (iter > 0 and !limited and load_ok and acceptStep(sys, x))
-                return .{ .converged = true, .iterations = iter + 1, .max_dx = 0 };
+                return .{ .converged = true, .iterations = iter + 1 };
             continue;
         }
 
@@ -564,9 +555,9 @@ pub fn jfnk(
         // Publishes x_k+1: JFNK is not ngspice's iteration, and its inexact
         // steps leave x_k further out than a direct solve does.
         if (iter > 0 and scaled < 1.0 and residual_ok and !limited and load_ok and acceptStep(sys, x))
-            return .{ .converged = true, .iterations = iter + 1, .max_dx = scaled };
+            return .{ .converged = true, .iterations = iter + 1 };
     }
-    return .{ .converged = false, .iterations = opts.max_iter, .max_dx = 0 };
+    return .{ .converged = false, .iterations = opts.max_iter };
 }
 
 /// Solves with `newton`, or with `jfnk` under an `ESPICE_SOLVER` pin (falling
@@ -776,8 +767,6 @@ pub const Workspace = struct {
     x_old: []f64,
     gmres: []f64 = &.{},
     a_vals: []f64 = &.{},
-    /// `Options.matrix_sig` of the current factorization; 0 = none.
-    factored_sig: u64 = 0,
     prof: Prof = .{},
     knobs: Knobs,
 

@@ -18,7 +18,7 @@ pub const Options = @import("core").query.Op;
 const copySimd = root.copySimd;
 const Ic = @import("core").Ic;
 
-const failed: converger.Result = .{ .converged = false, .iterations = 0, .max_dx = 0 };
+const failed: converger.Result = .{ .converged = false, .iterations = 0 };
 
 /// Zeroes `x`, then applies the SPICE MODEINITJCT junction seeds so the first
 /// iteration linearizes at vcrit/vto instead of 0. `x.len` must be `ckt.n`.
@@ -185,7 +185,7 @@ pub fn solveLadder(
                     };
                     total_iter +|= clean.iterations;
                     if (clean.converged)
-                        return .{ .converged = true, .iterations = total_iter, .max_dx = clean.max_dx };
+                        return .{ .converged = true, .iterations = total_iter };
                     break;
                 }
                 copySimd(x_good, x);
@@ -271,7 +271,7 @@ pub fn solveLadder(
     };
     total_iter +|= final.iterations;
     if (final.converged)
-        return .{ .converged = true, .iterations = total_iter, .max_dx = final.max_dx };
+        return .{ .converged = true, .iterations = total_iter };
 
     // Rung 4: JFNK. Damping plus residual backtracking catches circuits
     // where the factored Newton step wedges.
@@ -285,7 +285,7 @@ pub fn solveLadder(
         const jr = try converger.jfnk(ckt, ws, x, 0, copts, root.EvalHook{});
         total_iter +|= jr.iterations;
         if (jr.converged)
-            return .{ .converged = true, .iterations = total_iter, .max_dx = jr.max_dx };
+            return .{ .converged = true, .iterations = total_iter };
     }
 
     var result = try transientOp(ckt, ws, x, options, hold);
@@ -335,7 +335,7 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     ckt.restoreState(saved);
     ckt.setSimState(op_sim);
     try ckt.rebuildBaseline();
-    if (sim == null or !sim.?.completed) return failed;
+    if (sim == null or !sim.?) return failed;
     // A held solve keeps its own holds; only an unheld one holds the
     // capacitor-only nodes at their settled values.
     // The settled x belongs to the device state at t = 1 us, not the

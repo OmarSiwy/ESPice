@@ -31,8 +31,6 @@ pub const Options = tran_types.Options;
 pub const Waveform = tran_types.Waveform;
 /// See types.zig `Column`.
 pub const Column = tran_types.Column;
-/// See types.zig `SimResult`.
-pub const SimResult = tran_types.SimResult;
 /// See types.zig `initialCapacity`.
 pub const initialCapacity = tran_types.initialCapacity;
 
@@ -139,9 +137,9 @@ fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratc
 /// accepted points at t >= t_start into `waveform`. When the loop ends at
 /// t_stop or at `max_steps`, `x` holds the last accepted solution; after a
 /// dt underflow its contents are unspecified (one of the rotating step
-/// buffers was live). `allocator` backs per-run scratch only. A dt
-/// underflow or `max_steps` returns `completed = false`, not an error; the
-/// errors are cancellation, circuit setup and allocation (scratch or
+/// buffers was live). `allocator` backs per-run scratch only. Returns
+/// true on reaching t_stop; a dt underflow or `max_steps` returns false,
+/// not an error; the errors are cancellation, circuit setup and allocation (scratch or
 /// `waveform`). Leaves the device state committed at the last accepted point.
 pub fn simulate(
     ckt: *root.Circuit,
@@ -150,7 +148,7 @@ pub fn simulate(
     waveform: *Waveform,
     options: Options,
     allocator: std.mem.Allocator,
-) !SimResult {
+) !bool {
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
 
@@ -441,7 +439,7 @@ pub fn simulate(
         ckt.clearRejectAt();
         const nr = converger.run(ckt, ws, trial, t_dev, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
-            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure retries the step
+            else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure retries the step
         };
         st.attempts += 1;
         st.nr_iters += nr.iterations;
@@ -460,7 +458,7 @@ pub fn simulate(
                     "tran-stats: DT UNDERFLOW (newton) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
                     .{ t, dt, steps, st.attempts, st.nr_iters },
                 );
-                return .{ .completed = false, .steps = steps, .t_final = t };
+                return false;
             }
             continue;
         }
@@ -532,7 +530,7 @@ pub fn simulate(
                             "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
                             .{ t, dt, steps, st.attempts, st.nr_iters },
                         );
-                        return .{ .completed = false, .steps = steps, .t_final = t };
+                        return false;
                     }
                     continue;
                 }
@@ -679,7 +677,7 @@ pub fn simulate(
     }
 
     if (cur.ptr != x.ptr) simdCopy(x, cur);
-    return .{ .completed = t >= options.t_stop or atStop(t, options.t_stop), .steps = steps, .t_final = t };
+    return t >= options.t_stop or atStop(t, options.t_stop);
 }
 
 /// ngspice's end test (dctran.c:503, AlmostEqualUlps(t, tfinal, 100)): a
@@ -728,7 +726,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer if (!kept) wf.deinit();
     errdefer if (kept) wf.deinit();
     const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, scratch);
-    if (!sim.completed) return error.TimestepTooSmall;
+    if (!sim) return error.TimestepTooSmall;
     // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
     if (opts.snapshot) {
         const names = try root.probeNames(ctx, null);
