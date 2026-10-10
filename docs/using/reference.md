@@ -31,8 +31,9 @@ or `'expression'`. After `key=` an unbraced expression reads too, blanks
 around its operators included (`w=2*l`, `r=7k % 4k`); that is an ESPice
 extension, since ngspice refuses one that starts with a digit. In the
 ngspice dialect a number run straight into `%` or `\` (`r=10%3`) is one
-ngspice token and reads as ngspice reads it, 10. A field that starts with
-an operator where a name or value belongs (`R1 a b 10 %3`) is refused.
+ngspice token and reads as ngspice reads it, 10. A device's value or model
+field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice
+refuses it; node fields are names and are read.
 
 Expressions: `+ - * / ^ **`, `%` (remainder) and `\` (integer division),
 `== != <> < <= > >=`, `&& || !` and `?:`, with `sqrt exp ln log log10 abs

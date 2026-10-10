@@ -63,11 +63,9 @@ NotOp      <- '!' !'='
 # `"..."` is a word to ngspice (§1.9); a group holds no `key=value` (§3.1:
 # a vector ends at its first non-number, and `r=`/`td=` follow it); a pair's
 # value is an expression unless braced, quoted or a lone number.
-field      <- Pair / !opstart Group / Expr / Str / !opstart Word / [,()=]
+field      <- Pair / Group / Expr / Str / Word / [,()=]
 gfield     <- Group / Expr / Str / Word / [,=]
 value      <- Expr / Str / numtok / pairexpr / Word
-# A field that starts with an operator that cannot begin a value (`R1 a b
-# 10 %3`) is no name and no value: ngspice-45 fails the card ("unknown
-# parameter"), and so does the frontend (#200). In a pair's value it
-# continues the expression instead (#180).
-opstart    <- [%\\*/^|&?]
+# A device's value field that starts with an operator (`R1 a b 10 %3`)
+# parses as a word; ngspice fails the card ("unknown parameter"), so the
+# lowering refuses it, as the frontend does (lower.zig `element`, #200).

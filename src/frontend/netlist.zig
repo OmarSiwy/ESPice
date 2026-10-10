@@ -2560,10 +2560,12 @@ fn Reader(comptime S: type) type {
             return std.ascii.isLower(c) or std.ascii.isDigit(c) or c == '_' or c == '.';
         }
 
-        /// ngspice fails a card with a field that starts with an operator
-        /// byte that cannot begin a name or value (`R1 a b 10 %3`: "unknown
-        /// parameter"); ESPice refuses it by name instead of reading a
-        /// name `%3` (#200). The ngspice.peg `opstart` rule.
+        /// ngspice fails a device card whose value or model field starts
+        /// with an operator byte (`R1 a b 10 %3`: "unknown parameter");
+        /// ESPice refuses it by name instead of reading a name `%3` (#200).
+        /// Node fields are names to ngspice and stay read, as do X cards
+        /// and dot cards. tests/grammar/lower.zig `element` refuses the same
+        /// fields.
         fn refuseOperatorField(r: *R, line: []const u8, t: []const u8) Error!void {
             if (r.dialect != .ngspice or !F.isWord(t)) return;
             if (std.mem.indexOfScalar(u8, "%\\*/^|&?", t[0]) == null) return;
@@ -3215,12 +3217,11 @@ fn Reader(comptime S: type) type {
                     if (t[0] == ')') break;
                     if (t[0] == ',') continue;
                     if (!F.isWord(t)) return error.ParseError;
-                    try r.refuseOperatorField(line, t);
                     try r.nodes.append(arena, t);
                 }
                 const model = f.next() orelse return error.ParseError;
                 if (!F.isWord(model)) return error.ParseError;
-                try r.refuseOperatorField(line, model);
+                if (letter != 'x') try r.refuseOperatorField(line, model);
                 try r.positional.append(arena, try r.nameValue(model, frame, false));
             } else if (fixedPins(letter)) |fixed| {
                 const count = if (port_card and mixedPort(f)) 3 else fixed;
@@ -3228,7 +3229,6 @@ fn Reader(comptime S: type) type {
                 for (0..count) |_| {
                     const t = f.next() orelse return error.ParseError;
                     if (!F.isWord(t)) return error.ParseError;
-                    try r.refuseOperatorField(line, t);
                     r.nodes.appendAssumeCapacity(t);
                 }
                 if (letter == 'b') {
@@ -3253,10 +3253,10 @@ fn Reader(comptime S: type) type {
                         f.pos = save;
                         break;
                     }
-                    try r.refuseOperatorField(line, t);
                     try r.nodes.append(arena, t);
                 }
                 const model = r.nodes.pop() orelse return error.ParseError;
+                if (letter != 'x') try r.refuseOperatorField(line, model);
                 try r.positional.append(arena, try r.nameValue(model, frame, false));
             }
 
@@ -3273,7 +3273,7 @@ fn Reader(comptime S: type) type {
                     try r.card_kv.append(arena, .{ .key = t, .value = try r.kvValue(&f, frame, false) });
                     if (letter == 'x') try kv_text.append(arena, std.mem.trim(u8, f.line[start..f.pos], " \t"));
                 } else {
-                    try r.refuseOperatorField(line, t);
+                    if (letter != 'x') try r.refuseOperatorField(line, t);
                     try r.positional.append(arena, try r.valueAt(t, &f, frame, true, false));
                 }
             }
