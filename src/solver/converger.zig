@@ -1,6 +1,6 @@
 //! Newton convergence loops, generic over the system and its assembly hook:
-//! direct Newton (stamp, sparse LU, one solve per step) and JFNK (restarted
-//! GMRES with finite-difference Jacobian products), plus the shared
+//! direct Newton (stamp, sparse LU, one solve per step) and JFNK (one
+//! `gmres.Gmres` cycle on finite-difference Jacobian products), plus the shared
 //! acceptance gates and per-circuit workspace.
 //!
 //! In: a system, its assembly hook and a start x. Out: x at a converged
@@ -23,6 +23,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const direct = @import("direct.zig");
+const Gmres = @import("gmres.zig").Gmres;
 const BbdInfo = @import("core").numerics.BbdInfo;
 const Execution = @import("core").numerics.Execution;
 const num = @import("core").numerics;
@@ -380,12 +381,14 @@ const sqrt_eps: f64 = 0x1p-26; // sqrt(f64 machine epsilon)
 const inf = std.math.inf(f64);
 
 /// Jacobian-free Newton-Krylov: each step solves J dx = -F by one unrestarted cycle of
-/// GMRES(min(30, n)) with finite-difference products J v, left-preconditioned
-/// by the factored Jacobian (Jacobi only under ESPICE_SOLVER=jfnk-nolu).
+/// GMRES(min(30, n)) (`gmres.Gmres`) with finite-difference products J v,
+/// right-preconditioned by the factored Jacobian (Jacobi only under
+/// ESPICE_SOLVER=jfnk-nolu). A cycle that stops short is taken as it stands.
 /// Same gates as `newton`, with the residual gate on F, but a converged `x`
 /// is x_k+1. A failed checkpoint returns `error.QueryCancelled`; the first
 /// call on a workspace allocates its GMRES scratch (`error.OutOfMemory`).
-/// Asserts that `ws` and `x_full` are sized for `sys`.
+/// Asserts that `ws` and `x_full` are sized for `sys` and that `sys` has an
+/// unknown.
 pub fn jfnk(
     sys: anytype,
     ws: *Workspace,
@@ -396,33 +399,56 @@ pub fn jfnk(
 ) !Result {
     const S = Deref(@TypeOf(sys));
     const n: usize = sys.n;
+    assert(n > 0);
     assert(ws.slv.n == n);
     assert(x_full.len >= n);
-    const m: usize = @min(gmres_restart, n);
-    const buf = try ws.ensureGmres(n);
-    var off: usize = 0;
-    const take = struct {
-        fn f(b: []f64, o: *usize, len: usize) []f64 {
-            defer o.* += len;
-            return b[o.*..][0..len];
-        }
-    }.f;
-    const v_basis = take(buf, &off, (m + 1) * n); // Krylov basis, vector-major
-    const h = take(buf, &off, (m + 1) * m); // Hessenberg, row-major
-    const cs = take(buf, &off, m); // Givens rotations
-    const sn = take(buf, &off, m);
-    const g = take(buf, &off, m + 1);
-    const y = take(buf, &off, m);
-    const w = take(buf, &off, n);
-    const x_pert = take(buf, &off, n);
-    const f0 = take(buf, &off, n); // F(x) + gmin * x at the outer iterate
-    const diag = take(buf, &off, n); // Jacobi inverse diagonal
-    assert(off == buf.len); // `ensureGmres` sized exactly these
+    const krylov = try ws.ensureKrylov();
+    const x_pert = ws.jf[0..n];
+    const f0 = ws.jf[n..][0..n]; // F(x) + gmin * x at the outer iterate
+    const b = ws.jf[2 * n ..][0..n]; // -f0, the Krylov right-hand side
+    const diag = ws.jf[3 * n ..][0..n]; // Jacobi inverse diagonal
     const r = ws.dx[0..n]; // becomes dx after the Krylov solve
     const x_old = ws.x_old[0..n];
     const x = x_full[0..n];
     // A null solver is what makes this matrix-free.
     const slv: ?*direct.Solver = if (ws.knobs.pin == .jfnk_nolu) null else &ws.slv;
+
+    // w = (F(x + eps v) - f0) / eps, eps = sqrt(eps_mach) * max(||x||, 1) / ||v||;
+    // M^-1 is `applyPreconditioner`.
+    const Sys = @TypeOf(sys);
+    const Hook = @TypeOf(hook);
+    const FdOp = struct {
+        sys: Sys,
+        hook: Hook,
+        x: []const f64,
+        x_norm: f64 = 0,
+        x_pert: []f64,
+        f0: []const f64,
+        diag: []const f64,
+        slv: ?*direct.Solver,
+        t: f64,
+        opts: Options,
+
+        pub fn matvec(op: *@This(), v: []const f64, w: []f64) void {
+            const v_norm = num.norm2(v);
+            // J 0 = 0 exactly: GMRES's initial residual costs no device eval.
+            if (v_norm == 0) {
+                @memset(w, 0);
+                return;
+            }
+            const eps = if (v_norm > 1e-30) sqrt_eps * op.x_norm / v_norm else sqrt_eps;
+            @memcpy(op.x_pert, op.x);
+            num.axpy(op.x_pert, eps, v);
+            assembleShifted(op.sys, op.x_pert, op.t, op.opts, op.hook);
+            var fd = z.fromSlice(f64, op.sys.rhs[0..w.len]).zip(z.fromSlice(f64, op.f0)).map(FdQuot{ .inv = 1.0 / eps });
+            _ = fd.writeInto(w);
+        }
+
+        pub fn precond(op: *@This(), v: []f64) void {
+            applyPreconditioner(v, op.diag, op.slv);
+        }
+    };
+    var op: FdOp = .{ .sys = sys, .hook = hook, .x = x, .x_pert = x_pert, .f0 = f0, .diag = diag, .slv = slv, .t = t, .opts = opts };
 
     if (comptime @hasDecl(S, "beginSolve")) sys.beginSolve();
     @memcpy(x_old, x);
@@ -446,12 +472,10 @@ pub fn jfnk(
         buildDiagPreconditioner(sys, v, diag);
         if (slv) |s| s.factor(v, executionOf(sys)) catch {};
 
-        // r = -M^-1 f0, beta = ||r||.
+        // ||M^-1 f0||: the preconditioned step already within abstol.
         num.scale(r, -1, f0);
         applyPreconditioner(r, diag, slv);
-        const beta = num.norm2(r);
-
-        if (beta < opts.abstol and residualConverged(sys, hook, x, f0, opts, limit)) {
+        if (num.norm2(r) < opts.abstol and residualConverged(sys, hook, x, f0, opts, limit)) {
             @memset(r, 0);
             @memcpy(x_old, x);
             const limited = applyLimits(sys, x, x_old);
@@ -460,96 +484,14 @@ pub fn jfnk(
             continue;
         }
 
-        num.scale(v_basis[0..n], 1 / beta, r);
-        g[0] = beta;
-        @memset(g[1 .. m + 1], 0);
-
-        // eps_j = sqrt(eps_mach) * max(||x||, 1) / ||v_j||.
-        const x_norm = @max(num.norm2(x), 1.0);
-
-        var jj: usize = 0; // Arnoldi steps completed
-        for (0..m) |j| {
-            const vj = v_basis[j * n ..][0..n];
-            const v_norm = num.norm2(vj);
-            const eps = if (v_norm > 1e-30) sqrt_eps * x_norm / v_norm else sqrt_eps;
-
-            // w = M^-1 (F(x + eps v_j) - f0) / eps.
-            @memcpy(x_pert, x);
-            num.axpy(x_pert, eps, vj);
-            assembleShifted(sys, x_pert, t, opts, hook);
-            const inv_eps = 1.0 / eps;
-            var fd = z.fromSlice(f64, sys.rhs[0..n]).zip(z.fromSlice(f64, f0)).map(FdQuot{ .inv = inv_eps });
-            _ = fd.writeInto(w);
-            applyPreconditioner(w, diag, slv);
-
-            // Modified Gram-Schmidt, sequential dot products.
-            for (0..j + 1) |mi| {
-                const vi = v_basis[mi * n ..][0..n];
-                const hij = num.dot(vi, w);
-                h[mi * m + j] = hij;
-                num.axpy(w, -hij, vi);
-            }
-            const h_jp1 = num.norm2(w);
-            h[(j + 1) * m + j] = h_jp1;
-            if (h_jp1 > 1e-30) {
-                num.scale(v_basis[(j + 1) * n ..][0..n], 1 / h_jp1, w);
-            }
-
-            for (0..j) |k| {
-                const h_k = h[k * m + j];
-                const h_k1 = h[(k + 1) * m + j];
-                h[k * m + j] = cs[k] * h_k + sn[k] * h_k1;
-                h[(k + 1) * m + j] = -sn[k] * h_k + cs[k] * h_k1;
-            }
-            const a_val = h[j * m + j];
-            const b_val = h[(j + 1) * m + j];
-            const r_val = @sqrt(a_val * a_val + b_val * b_val);
-            if (r_val > 1e-30) {
-                cs[j] = a_val / r_val;
-                sn[j] = b_val / r_val;
-            } else {
-                cs[j] = 1.0;
-                sn[j] = 0.0;
-            }
-            h[j * m + j] = r_val;
-            h[(j + 1) * m + j] = 0;
-            const g_j = g[j];
-            const g_j1 = g[j + 1];
-            g[j] = cs[j] * g_j + sn[j] * g_j1;
-            g[j + 1] = -sn[j] * g_j + cs[j] * g_j1;
-            jj = j + 1;
-            if (@abs(g[j + 1]) < opts.abstol * 0.1) break;
-        }
-
-        // y = H^-1 g, then dx = V y.
-        var k = jj;
-        while (k > 0) {
-            k -= 1;
-            var s = g[k];
-            for (k + 1..jj) |kk| s -= h[k * m + kk] * y[kk];
-            const d = h[k * m + k];
-            y[k] = if (@abs(d) > 1e-30) s / d else 0;
-        }
-        // Column by column: each entry still sums in increasing kk.
+        // GMRES stops at ||F + J dx|| <= abstol / 10.
+        num.scale(b, -1, f0);
         @memset(r, 0);
-        for (0..jj) |kk| num.axpy(r, y[kk], v_basis[kk * n ..][0..n]);
-
-        // x_old = x; x += dx; per-row delta test. A non-finite iterate scores
-        // inf: `@max` lowers to maxnum, which would drop a NaN and report a
-        // diverged solve as converged.
-        var scaled: f64 = 0;
-        for (x, x_old, r, 0..) |*xi, *xoi, dxi, i| {
-            const xo = xi.*;
-            const xn = xo + dxi;
-            xoi.* = xo;
-            xi.* = xn;
-            const atol = if (sys.current_row[i]) opts.abstol else opts.vntol;
-            const tcrit = opts.reltol * @max(@abs(xn), @abs(xo)) + atol;
-            const finite = @abs(xn) < inf and @abs(dxi) < inf;
-            scaled = @max(scaled, if (finite) @abs(dxi) / tcrit else inf);
-        }
+        op.x_norm = @max(num.norm2(x), 1.0);
+        _ = krylov.solve(&op, b, r, 0.1 * opts.abstol / num.norm2(b), 0);
 
         // Limiting may clamp x, so it runs before the residual gate.
+        const scaled = updateAndNorm(x, r, x_old, sys.current_row[0..n], opts.reltol, opts.abstol, opts.vntol);
         const limited = applyLimits(sys, x, x_old);
         const residual_ok = residualConverged(sys, hook, x, f0, opts, limit);
         // Publishes x_k+1: JFNK is not ngspice's iteration, and its inexact
@@ -575,7 +517,7 @@ pub fn run(
     defer if (comptime @hasDecl(S, "clearLimits")) sys.clearLimits();
 
     const pin = ws.knobs.pin;
-    if (pin == .jfnk or pin == .jfnk_nolu) {
+    if ((pin == .jfnk or pin == .jfnk_nolu) and sys.n > 0) {
         if (jfnk(sys, ws, x, t, opts, hook)) |r| {
             if (r.converged) return r;
         } else |err| if (err == error.QueryCancelled) return err;
@@ -765,7 +707,10 @@ pub const Workspace = struct {
     slv: direct.Solver,
     dx: []f64,
     x_old: []f64,
-    gmres: []f64 = &.{},
+    /// `jfnk`'s GMRES and its four n-vectors (x_pert, f0, b, diag), made
+    /// on its first call.
+    krylov: ?Gmres = null,
+    jf: []f64 = &.{},
     a_vals: []f64 = &.{},
     prof: Prof = .{},
     knobs: Knobs,
@@ -787,15 +732,16 @@ pub const Workspace = struct {
         };
     }
 
-    fn ensureGmres(self: *Workspace, n: usize) ![]f64 {
-        const m: usize = @min(gmres_restart, n);
-        const total = (m + 1) * n + (m + 1) * m + m + m + (m + 1) + m + 4 * n;
-        if (self.gmres.len < total) {
-            self.slv.gpa.free(self.gmres);
-            self.gmres = &.{};
-            self.gmres = try self.slv.gpa.alloc(f64, total);
+    fn ensureKrylov(self: *Workspace) !*Gmres {
+        if (self.krylov == null) {
+            const gpa = self.slv.gpa;
+            const n = self.slv.n;
+            const jf = try gpa.alloc(f64, 4 * @as(usize, n));
+            errdefer gpa.free(jf);
+            self.krylov = try Gmres.init(gpa, n, @min(gmres_restart, n));
+            self.jf = jf;
         }
-        return self.gmres[0..total];
+        return &self.krylov.?;
     }
 
     /// Scratch of length `nnz` for tran's combined G + alpha*C values, reused
@@ -816,7 +762,8 @@ pub const Workspace = struct {
         self.slv.deinit();
         gpa.free(self.dx);
         gpa.free(self.x_old);
-        gpa.free(self.gmres);
+        if (self.krylov) |*k| k.deinit(gpa);
+        gpa.free(self.jf);
         gpa.free(self.a_vals);
         self.* = undefined;
     }
