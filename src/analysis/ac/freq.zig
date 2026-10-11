@@ -9,6 +9,20 @@ const root = @import("../types.zig");
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 const Dyn = @import("solver").freq_solve.Dyn;
 
+/// The frequencies (Hz) of `sweep` and their ω (rad/s), from one block of
+/// `scratch` that `freeAxis` returns.
+pub fn axis(scratch: std.mem.Allocator, sweep: @import("core").numerics.FreqSweep) !struct { []f64, []f64 } {
+    const n: usize = sweep.count();
+    const block = try scratch.alloc(f64, 2 * n);
+    sweep.fill(block[0..n], block[n..]);
+    return .{ block[0..n], block[n..] };
+}
+
+/// Frees an `axis` block through its `freqs` half.
+pub fn freeAxis(scratch: std.mem.Allocator, freqs: []f64) void {
+    scratch.free(freqs.ptr[0 .. 2 * freqs.len]);
+}
+
 // ponytail: fixed at 64; expose a work budget if a caller needs another
 // latency/throughput tradeoff. One factorization is never split.
 /// Frequencies per progress checkpoint; a multiple of every `FreqSolver.W`.

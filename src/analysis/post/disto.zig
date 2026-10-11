@@ -27,8 +27,6 @@
 //! diodset.c; dev/analysis/distortion.md.
 const std = @import("std");
 const root = @import("../types.zig");
-const simdZero = root.zeroSimd;
-const simdCopy = root.copySimd;
 const dense_lu = @import("solver").dense_lu;
 const num = @import("core").numerics;
 
@@ -137,11 +135,11 @@ pub fn sweep(
     defer term_list.deinit(allocator);
     for (0..n) |b| {
         if (b != 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = b, .total = n });
-        simdCopy(x_pert, x_op[0..n]);
+        root.copySimd(x_pert, x_op[0..n]);
         x_pert[b] += eps;
         ckt.eval(x_pert, 0);
-        simdCopy(g_plus, ckt.g_vals[0..nnz]);
-        simdCopy(c_plus, ckt.c_vals[0..nnz]);
+        root.copySimd(g_plus, ckt.g_vals[0..nnz]);
+        root.copySimd(c_plus, ckt.c_vals[0..nnz]);
         x_pert[b] = x_op[b] - eps;
         ckt.eval(x_pert, 0);
         for (0..n) |a| for (ckt.col_ptr[a]..ckt.col_ptr[a + 1]) |slot| {
@@ -232,7 +230,7 @@ pub fn sweep(
     const omega_f2 = 2.0 * std.math.pi * options.f2_ratio * options.sweep.f_start;
     if (two_tone) {
         const ph2 = options.ac2_phase * std.math.pi / 180.0;
-        simdZero(rhs_work);
+        root.zeroSimd(rhs_work);
         rhs_work[options.drive2_branch] = 0.5 * options.ac2_magnitude * @cos(ph2);
         rhs_work[n + options.drive2_branch] = 0.5 * options.ac2_magnitude * @sin(ph2);
         try solveAt(ckt, x_op, g_dense, c_mat, omega_f2, a_work, dyn_work, rhs_work, v1b);
@@ -246,10 +244,7 @@ pub fn sweep(
         const omega = 2.0 * std.math.pi * f;
 
         // 3a. First order: (G + jwC) V1 = ½ mag · e[drive row].
-        dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega, a_work);
-        ckt.addAcDynDense(x_op, omega, a_work, dyn_work);
-
-        simdZero(rhs_work);
+        root.zeroSimd(rhs_work);
         if (options.drive_branch != root.GROUND) {
             // V card: its own branch row (cktdisto.c:115-116).
             rhs_work[options.drive_branch] = drive_re;
@@ -261,7 +256,7 @@ pub fn sweep(
             rhs_work[n + options.ac_source_node] = -drive_im;
         }
 
-        try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work);
+        try solveAt(ckt, x_op, g_dense, c_mat, omega, a_work, dyn_work, rhs_work, x_work);
 
         // 3b. Second-order rhs, -½ K''(2w)[V1, V1]. The ½ is ngspice's:
         // `g2 = 0.5 * gd / vte` is ½·d²I/dV² (diodset.c:78) and D1n2F1
@@ -271,10 +266,7 @@ pub fn sweep(
         bilinear(terms, row_start, v1_re, v1_im, v1_re, v1_im, -0.5, omega2, rhs_work);
 
         // 3c. Second order: (G + j·2w·C) V2 = -½ K''(V1,V1).
-        dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, omega2, a_work);
-        ckt.addAcDynDense(x_op, omega2, a_work, dyn_work);
-
-        try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work2);
+        try solveAt(ckt, x_op, g_dense, c_mat, omega2, a_work, dyn_work, rhs_work, x_work2);
 
         // 3d. Third order, only when h3 is wanted. The 3f1 current is
         // K''(V1,V2) + ⅙·K'''(V1,V1,V1) at 3w: the 2f1·f1 beat through the
@@ -286,9 +278,7 @@ pub fn sweep(
                 re.* -= d_re / 6.0;
                 im.* -= d_im / 6.0;
             }
-            dense_lu.buildComplexAdmittance(n, nn, g_dense, c_mat, 3.0 * omega, a_work);
-            ckt.addAcDynDense(x_op, 3.0 * omega, a_work, dyn_work);
-            try dense_lu.factorizeSolve(nn, a_work, rhs_work, x_work3);
+            try solveAt(ckt, x_op, g_dense, c_mat, 3.0 * omega, a_work, dyn_work, rhs_work, x_work3);
         }
 
         // 3e. Two tones. The one-sided phasor of ½K''(x,x) at w1+w2 is
@@ -344,17 +334,8 @@ pub fn sweep(
 
         // ngspice's own product: the harmonic vector at every probe, as a
         // sinusoid amplitude (DkerProc).
-        const stride = out.probes.len * 2;
-        for (out.probes, 0..) |row, i| {
-            if (want_h2) {
-                out.h2[k * stride + i * 2] = HARMONIC_SCALE * v2_re[row];
-                out.h2[k * stride + i * 2 + 1] = HARMONIC_SCALE * v2_im[row];
-            }
-            if (want_h3) {
-                out.h3[k * stride + i * 2] = HARMONIC_SCALE * x_work3[row];
-                out.h3[k * stride + i * 2 + 1] = HARMONIC_SCALE * x_work3[n + row];
-            }
-        }
+        if (want_h2) scatter(out.h2, k, out.probes, x_work2);
+        if (want_h3) scatter(out.h3, k, out.probes, x_work3);
     }
 
     // The third-order kernels perturb the planes at every point.
@@ -435,7 +416,7 @@ fn mixedCubic(
     const n2 = n * n;
     const m1 = planes[0 .. 2 * n2];
     const m2 = planes[2 * n2 ..][0 .. 2 * n2];
-    simdZero(planes);
+    root.zeroSimd(planes);
     // (direction, weight into m1, weight into m2); p + q goes through x_work's tail.
     const sum = dst[0..n];
     for (sum, p, q) |*s, a, b| s.* = a + b;
@@ -509,7 +490,7 @@ fn cubicForms(
 ) [2][]const f64 {
     const n = p.len;
     const n2 = n * n;
-    simdZero(cubic);
+    root.zeroSimd(cubic);
 
     // cubic[k·4n ..] holds plane k's T(p,p,p), T(p,q,q), T(p,p,q), T(q,q,q).
     const norm_p = norm(p);
@@ -574,10 +555,10 @@ fn secondDirDeriv(
     // (k, weight) of the stencil's off-centre points.
     const taps = [_]struct { f64, f64 }{ .{ 1, 16 }, .{ -1, 16 }, .{ 2, -1 }, .{ -2, -1 } };
     num.scale(g_out[0..n2], -30.0, g0[0..n2]);
-    simdZero(g_out[n2..]);
+    root.zeroSimd(g_out[n2..]);
     for (taps) |tap| {
         const step = tap[0] * h * scale;
-        simdCopy(x_work, x_op[0..n]);
+        root.copySimd(x_work, x_op[0..n]);
         num.axpy(x_work[0..n], step, u);
         ckt.eval(x_work, 0);
         ckt.denseG(g_tap[0..n2]);

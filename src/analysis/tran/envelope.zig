@@ -7,7 +7,6 @@
 //! Cites Verilog-AMS LRM §9.10 and dev/analysis/mpde-envelope.md.
 const std = @import("std");
 const root = @import("../types.zig");
-const simdCopy = root.copySimd;
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
 
@@ -31,7 +30,7 @@ const Trap = struct {
     pub fn assemble(self: Trap, ckt: *root.Circuit, x: []const f64, t: f64) void {
         ckt.evalNewton(x, t);
         const n: usize = ckt.n;
-        simdCopy(self.q_cur[0..n], ckt.q_vec[0..n]);
+        root.copySimd(self.q_cur[0..n], ckt.q_vec[0..n]);
         integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
     }
     /// G + alpha*C rebuilt into `a_vals`, overwriting the previous return.
@@ -46,7 +45,7 @@ const Trap = struct {
     /// Accepted step: i = alpha*(q - q_prev) - i_prev, then q_prev = q.
     fn accept(self: Trap, n: usize) void {
         integrator.companionAt(.trapezoidal, false, self.i_prev[0..n], self.q_cur[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
-        simdCopy(self.q_prev[0..n], self.q_cur[0..n]);
+        root.copySimd(self.q_prev[0..n], self.q_cur[0..n]);
     }
 };
 
@@ -135,7 +134,7 @@ pub fn simulate(
         };
         // Exact at a DC operating point: q = q(x_op), no dynamic current.
         ckt.eval(x, 0);
-        simdCopy(trap_state.q_prev, ckt.q_vec[0..n]);
+        root.copySimd(trap_state.q_prev, ckt.q_vec[0..n]);
         @memset(trap_state.i_prev, 0);
         break :blk &trap_state;
     } else null;
@@ -165,11 +164,11 @@ pub fn simulate(
     while (t < options.t_stop and outer_steps < options.max_outer_steps) {
         if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
         attempts += 1;
-        simdCopy(x_outer_save, x);
+        root.copySimd(x_outer_save, x);
         ckt.storeState(outer_state);
         if (trap) |tr| {
-            simdCopy(q_save, tr.q_prev);
-            simdCopy(i_save, tr.i_prev);
+            root.copySimd(q_save, tr.q_prev);
+            root.copySimd(i_save, tr.i_prev);
         }
 
         const t_outer_step = @as(f64, @floatFromInt(periods_per_step)) * t_carrier;
@@ -214,11 +213,11 @@ pub fn simulate(
 
         if (!ok) {
             // The outer step was too aggressive: restore and retry shorter.
-            simdCopy(x, x_outer_save);
+            root.copySimd(x, x_outer_save);
             ckt.restoreState(outer_state);
             if (trap) |tr| {
-                simdCopy(tr.q_prev, q_save);
-                simdCopy(tr.i_prev, i_save);
+                root.copySimd(tr.q_prev, q_save);
+                root.copySimd(tr.i_prev, i_save);
             }
             if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
             periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
@@ -297,7 +296,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    simdCopy(x, x_op);
+    root.copySimd(x, x_op);
 
     // `data` is the Result, so it lives on the results arena.
     const ncols = 1 + 2 * ctx.probes.len;

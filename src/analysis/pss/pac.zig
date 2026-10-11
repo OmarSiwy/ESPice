@@ -56,6 +56,13 @@ pub fn sweep(
     return sweepDense(adjoint, ckt, lin, drive, probe_node, freqs, out, options, allocator);
 }
 
+/// `omegas[q]` := 2π·(f_in + (q - n_harm)·f_lo), the angular frequency of
+/// sideband q - n_harm of `f_in` about the fundamental `f_lo`.
+pub fn sidebandOmegas(omegas: []f64, f_in: f64, f_lo: f64, n_harm: usize) void {
+    std.debug.assert(omegas.len == 2 * n_harm + 1);
+    for (omegas, 0..) |*w, q| w.* = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(@as(i32, @intCast(q)) - @as(i32, @intCast(n_harm)))) * f_lo);
+}
+
 /// `sweep` by one dense LU of the real-expanded conversion matrix per
 /// input frequency.
 fn sweepDense(
@@ -114,7 +121,7 @@ fn sweepDense(
         buildConversionMatrix(adjoint, a_work, lin, n, n_sb, nn, nn2, f_in, options);
         if (series != 0) {
             const omegas = dyn_f[0..n_sb];
-            for (omegas, 0..) |*w, q| w.* = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(@as(i32, @intCast(q)) - @as(i32, @intCast(n_harm)))) * options.f_lo);
+            sidebandOmegas(omegas, f_in, options.f_lo, n_harm);
             dynSpectra(ckt, lin, omegas, dyn_f[n_sb..], dyn_hat);
             addDynConversion(adjoint, a_work, lin, ckt.ac_dyn_slots, dyn_hat, n, n_sb, nn, nn2);
         }
@@ -192,7 +199,7 @@ fn sweepKrylov(
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
         if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
-        for (omegas, 0..) |*w, p| w.* = 2.0 * std.math.pi * (f_in + @as(f64, @floatFromInt(@as(i32, @intCast(p)) - @as(i32, @intCast(n_harm)))) * options.f_lo);
+        sidebandOmegas(omegas, f_in, options.f_lo, n_harm);
         try fs.factorEach(omegas);
         root.zeroSimd(rhs);
         if (drive.len != 0) {

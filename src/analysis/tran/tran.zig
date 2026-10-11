@@ -12,7 +12,6 @@ const z = @import("stdpp");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
-const simdCopy = root.copySimd;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -121,7 +120,7 @@ fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratc
     if (!options.uic) return x;
     ckt.setSimState(.{ .t = 0, .dt = 1 / hook.c.ag0, .kind = .tran, .initial_step = true });
     defer ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
-    simdCopy(scratch, x);
+    root.copySimd(scratch, x);
     var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
     nr_opts.residual_tol = std.math.inf(f64);
     ckt.clearRejectAt();
@@ -162,7 +161,7 @@ pub fn simulate(
     // until the first step is accepted, so that step starts from the OP.
     const x_prev = try allocator.alloc(f64, n);
     defer allocator.free(x_prev);
-    simdCopy(x_prev, x);
+    root.copySimd(x_prev, x);
 
     // Row-plane charge state: the dynamic current and the charge ring
     // [cur, prev, prev2, prev3]. Slot 0 takes the charge of each converged
@@ -267,13 +266,13 @@ pub fn simulate(
         ckt.eval(x, 0);
         // A flat q(0) history makes every divided difference vanish, so LTE
         // control runs from the first step.
-        simdCopy(q_hist[1], ckt.q_vec[0..n]);
-        simdCopy(q_hist[2], ckt.q_vec[0..n]);
-        simdCopy(q_hist[3], ckt.q_vec[0..n]);
+        root.copySimd(q_hist[1], ckt.q_vec[0..n]);
+        root.copySimd(q_hist[2], ckt.q_vec[0..n]);
+        root.copySimd(q_hist[3], ckt.q_vec[0..n]);
         if (n_qt > 0) {
             lteSnap(ckt, qt_hist[1], lte_zero, lte_rows);
-            simdCopy(qt_hist[2], qt_hist[1]);
-            simdCopy(qt_hist[3], qt_hist[1]);
+            root.copySimd(qt_hist[2], qt_hist[1]);
+            root.copySimd(qt_hist[3], qt_hist[1]);
         }
     }
     // The LTE history: per state when the tape is live, per row otherwise.
@@ -500,7 +499,7 @@ pub fn simulate(
             // the next residual all see q(trial).
             // `q_fresh`: the converger's `updateStates` already stamped them.
             if (!ckt.q_fresh) ckt.evalQ(trial, t_dev);
-            simdCopy(q_hist[0], ckt.q_vec[0..n]);
+            root.copySimd(q_hist[0], ckt.q_vec[0..n]);
             if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
             // Taken before the ring rotation below.
             const lh = lte_hist.*;
@@ -630,7 +629,7 @@ pub fn simulate(
         if (has_charge and ckt.has_state_q) {
             ckt.evalQ(cur, t);
             integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
-            simdCopy(q_hist[1], ckt.q_vec[0..n]);
+            root.copySimd(q_hist[1], ckt.q_vec[0..n]);
             if (n_qt > 0) {
                 lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
                 integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
@@ -676,7 +675,7 @@ pub fn simulate(
         );
     }
 
-    if (cur.ptr != x.ptr) simdCopy(x, cur);
+    if (cur.ptr != x.ptr) root.copySimd(x, cur);
     return t >= options.t_stop or atStop(t, options.t_stop);
 }
 
@@ -709,7 +708,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const x_op = ctx.x_op;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    simdCopy(x, x_op);
+    root.copySimd(x, x_op);
 
     // The recording is the published result, so it lives in the results
     // arena and `data` is borrowed below. A `.op <time>` snapshot publishes

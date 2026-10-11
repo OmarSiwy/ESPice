@@ -106,7 +106,7 @@ const NoiseTests = struct {
     const Band = impl.test_access.Band;
     const NoiseSource = impl.NoiseSource;
     const nintegrate = impl.test_access.nintegrate;
-    const sourcePsd = impl.test_access.sourcePsd;
+    const sourcePsd = impl.sourcePsd;
     const std = @import("std");
 
     const k_boltzmann = 1.380649e-23;

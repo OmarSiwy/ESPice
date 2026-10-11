@@ -26,6 +26,7 @@
 //! waveform only in the transient phase), #83 (NaN residuals).
 const std = @import("std");
 const root = @import("../types.zig");
+const take = root.take;
 const num = @import("core").numerics;
 const solvers = @import("solver");
 const converger = solvers.converger;
@@ -146,16 +147,9 @@ pub fn spectrum(gpa: std.mem.Allocator, tones: []const f64, nharms: []const u16,
     }
     return .{
         .tones = @intCast(nt),
-        .freqs = try shrink(f64, gpa, freqs, m),
-        .mix = try shrink(i16, gpa, mix, m * nt),
+        .freqs = try gpa.realloc(freqs, m),
+        .mix = try gpa.realloc(mix, m * nt),
     };
-}
-
-fn shrink(comptime T: type, gpa: std.mem.Allocator, buf: []T, len: usize) ![]T {
-    if (gpa.resize(buf, len)) return buf[0..len];
-    const out = try gpa.dupe(T, buf[0..len]);
-    gpa.free(buf);
-    return out;
 }
 
 /// The IDFT/DFT pair between a spectrum block (nf = 2m-1 reals) and nt
@@ -416,6 +410,26 @@ const gmres_tol: f64 = 1e-7;
 const gmres_restart: u32 = 40;
 const gmres_max_restarts: u32 = 20;
 
+/// Zeroes `x_hat` (node-major, `nf` coefficients per node) and seeds each
+/// node's DC coefficient with the DC operating point, solved into
+/// `x_sample`, which cuts the iteration count on biased circuits. Best
+/// effort: a failed solve seeds its last iterate; only cancellation and out
+/// of memory propagate. Asserts that `x_hat` holds `nf` per unknown.
+pub fn dcSeed(ckt: *root.Circuit, x_hat: []f64, x_sample: []f64, nf: usize, tol: converger.Tolerances) !void {
+    const n: usize = ckt.n;
+    std.debug.assert(x_hat.len == n * nf);
+    std.debug.assert(x_sample.len >= n);
+    root.zeroSimd(x_hat);
+    const ws = try ckt.workspace();
+    ckt.setSimState(.{ .kind = .dc });
+    root.zeroSimd(x_sample);
+    _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(tol, null), root.EvalHook{}) catch |err| switch (err) {
+        error.QueryCancelled, error.OutOfMemory => return err,
+        else => {}, // else: the DC seed is best effort
+    };
+    for (0..n) |node| x_hat[node * nf] = x_sample[node];
+}
+
 /// Driven harmonic balance on `spec` (tones `tones` Hz) from the DC
 /// operating point. `x_hat` (n·(2m-1), caller-owned) receives node-major
 /// blocks [dc, c_1, s_1, ...], the last iterate when Newton does not
@@ -454,12 +468,6 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     const arena = try allocator.alloc(f64, len);
     defer allocator.free(arena);
     var off: usize = 0;
-    const take = struct {
-        fn f(a: []f64, o: *usize, l: usize) []f64 {
-            defer o.* += l;
-            return a[o.*..][0..l];
-        }
-    }.f;
     const tr = try transform(spec, tones, take(arena, &off, sizes[0]), allocator);
     const f_hat = take(arena, &off, total);
     const q_hat = take(arena, &off, total);
@@ -480,18 +488,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     for (omegas, spec.freqs) |*w, f| w.* = 2 * std.math.pi * f;
     if (!ckt.has_charge) root.zeroSimd(c_td);
 
-    // DC coefficients from the operating point, as hb.zig.
-    root.zeroSimd(x_hat);
-    {
-        const ws = try ckt.workspace();
-        ckt.setSimState(.{ .kind = .dc });
-        root.zeroSimd(x_sample);
-        _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(options.tol, null), root.EvalHook{}) catch |err| switch (err) {
-            error.QueryCancelled, error.OutOfMemory => return err,
-            else => {}, // else: the DC seed is best effort
-        };
-        for (0..n) |node| x_hat[node * nf] = x_sample[node];
-    }
+    try dcSeed(ckt, x_hat, x_sample, nf, options.tol);
 
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_sample);
     defer fs.deinit();

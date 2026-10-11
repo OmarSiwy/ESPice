@@ -216,7 +216,7 @@ pub const Lin = struct {
             pac.buildConversionMatrix(false, a_work, lin, n, n_sb, nn, nn2, f, pac_opts);
             if (series != 0) {
                 const omegas = dyn_f[0..n_sb];
-                for (omegas, 0..) |*w, q| w.* = 2.0 * std.math.pi * (f + @as(f64, @floatFromInt(@as(i32, @intCast(q)) - @as(i32, @intCast(n_harm)))) * opts.f0);
+                pac.sidebandOmegas(omegas, f, opts.f0, n_harm);
                 pac.dynSpectra(ckt, lin, omegas, dyn_f[n_sb..], dyn_hat);
                 pac.addDynConversion(false, a_work, lin, ckt.ac_dyn_slots, dyn_hat, n, n_sb, nn, nn2);
             }

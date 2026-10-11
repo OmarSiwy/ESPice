@@ -41,11 +41,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     root.zeroSimd(rhs);
     if (ctx.ac_drive.len == nn) @memcpy(rhs, ctx.ac_drive);
 
-    const axis = try scratch.alloc(f64, 2 * n_points);
-    defer scratch.free(axis);
-    const freqs = axis[0..n_points];
-    const omegas = axis[n_points..];
-    opts.sweep.fill(freqs, omegas);
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    defer freq.freeAxis(scratch, freqs);
 
     const names = try root.probeNames(ctx, scale);
     const row_len = names.len * 2;

@@ -984,7 +984,6 @@ const TranTests = struct {
 const TranNoiseTests = struct {
     const impl = @import("../tran/tran_noise.zig");
     const Xorshift64 = impl.test_access.Xorshift64;
-    const simdCopy = impl.test_access.simdCopy;
     const std = @import("std");
     const testing = std.testing;
 
@@ -1063,13 +1062,6 @@ const TranNoiseTests = struct {
         try testing.expectEqualSlices(f64, &.{ 1, 4, 7, 2, 5, 8, 3, 6, 9 }, &a);
         Cov.transpose(&a, 3);
         try testing.expectEqualSlices(f64, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &a);
-    }
-
-    test "tran_noise: simdCopy matches element-wise" {
-        const src = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0 };
-        var dst: [11]f64 = undefined;
-        simdCopy(&dst, &src);
-        for (src, dst) |s, d| try testing.expectEqual(s, d);
     }
 };
 

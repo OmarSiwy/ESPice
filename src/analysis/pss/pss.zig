@@ -13,8 +13,7 @@
 //! §4.6.1 (sources follow their waveform only in the transient phase).
 const std = @import("std");
 const root = @import("../types.zig");
-const simdZero = root.zeroSimd;
-const simdCopy = root.copySimd;
+const take = root.take;
 const num = @import("core").numerics;
 const converger = @import("solver").converger;
 const integrator = @import("../tran/integrator.zig");
@@ -79,7 +78,7 @@ const PeriodHook = struct {
         ckt.evalNewton(x, t);
         if (self.has_charge) {
             const n: usize = ckt.n;
-            simdCopy(self.q_snap[0..n], ckt.q_vec[0..n]);
+            root.copySimd(self.q_snap[0..n], ckt.q_vec[0..n]);
             integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
         }
     }
@@ -123,7 +122,7 @@ fn integrateOnePeriod(
     ckt.setSimState(.{ .t = 0, .dt = dt, .kind = .tran });
     if (has_charge) {
         ckt.eval(x, 0);
-        simdCopy(sc.q_prev[0..n], ckt.q_vec[0..n]);
+        root.copySimd(sc.q_prev[0..n], ckt.q_vec[0..n]);
         // Carry the trapezoid state across the period seam: a converged step
         // leaves i_prev = -f(x), so at x0 it is -rhs. A zero seed loses
         // dt*i0/2 of charge per period. Being a function of x0, it sits
@@ -167,7 +166,7 @@ fn integrateOnePeriod(
         if (has_charge) {
             // Accept: i = alpha*(q - q_prev) - i_prev, then q_prev = q.
             integrator.companionAt(.trapezoidal, false, sc.i_prev[0..n], sc.q_cur[0..n], sc.q_prev[0..n], &.{}, sc.i_prev[0..n], .{ .ag0 = alpha, .ag2 = 0 });
-            simdCopy(sc.q_prev[0..n], sc.q_cur[0..n]);
+            root.copySimd(sc.q_prev[0..n], sc.q_cur[0..n]);
         }
         if (wave.len != 0) {
             const row = wave[(k + 1) * ncols ..][0..ncols];
@@ -187,7 +186,7 @@ inline fn integrateFrom(
     x_end: []f64,
     options: Options,
 ) error{ QueryCancelled, OutOfMemory }!bool {
-    simdCopy(x_end, x0);
+    root.copySimd(x_end, x0);
     return integrateOnePeriod(ckt, ws, sc, x_end, &.{}, &.{}, options);
 }
 
@@ -221,7 +220,7 @@ fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
     const n = ctx.n;
     const inv_eps = 1.0 / ctx.options.fd_epsilon;
 
-    simdCopy(ctx.x_pert[0..n], ctx.x0[0..n]);
+    root.copySimd(ctx.x_pert[0..n], ctx.x0[0..n]);
     num.axpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
     var opts = ctx.options;
     const osc = opts.osc_node;
@@ -236,7 +235,7 @@ fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
     };
     if (!ok) {
         // ponytail: a zero column is safer than propagating NaN.
-        simdZero(w[0..n]);
+        root.zeroSimd(w[0..n]);
         return;
     }
     fdColumn(w[0..n], ctx.x_end_pert, ctx.x_pert, ctx.phi, inv_eps);
@@ -271,7 +270,7 @@ fn denseFdSolve(
     const inv_eps = 1.0 / eps;
 
     for (0..n) |j| {
-        simdCopy(x0_pert[0..n], x0[0..n]);
+        root.copySimd(x0_pert[0..n], x0[0..n]);
         var opts = options;
         if (options.osc_node != root.GROUND and j == options.osc_node) opts.period *= 1 + eps else x0_pert[j] += eps;
 
@@ -319,7 +318,7 @@ fn krylovSolve(
         .n = n,
     };
 
-    simdZero(dx0[0..n]);
+    root.zeroSimd(dx0[0..n]);
 
     _ = krylov.solve(&ctx, neg_phi[0..n], dx0[0..n], options.gmres_tol, options.gmres_max_restarts);
     if (ctx.failure) |err| return err;
@@ -349,7 +348,7 @@ pub fn solve(
     const nnz: usize = ckt.nnz;
     const ncols = 1 + probes.len;
     std.debug.assert(wave.len == 0 or wave.len == (@as(usize, options.n_samples) + 1) * ncols);
-    simdZero(wave);
+    root.zeroSimd(wave);
 
     const use_krylov = n >= krylov_threshold;
 
@@ -363,25 +362,18 @@ pub fn solve(
     const arena = try allocator.alloc(f64, 9 * n + nnz + dense_extra + krylov_extra);
     defer allocator.free(arena);
     var off: usize = 0;
-    const x0 = arena[off..][0..n];
-    off += n;
-    const x_end = arena[off..][0..n];
-    off += n;
-    const phi = arena[off..][0..n];
-    off += n;
-    const x0_pert = arena[off..][0..n];
-    off += n;
-    const x_end_pert = arena[off..][0..n];
-    off += n;
-    const dx0 = arena[off..][0..n];
-    off += n;
+    const x0 = take(arena, &off, n);
+    const x_end = take(arena, &off, n);
+    const phi = take(arena, &off, n);
+    const x0_pert = take(arena, &off, n);
+    const x_end_pert = take(arena, &off, n);
+    const dx0 = take(arena, &off, n);
     var sc = Companion{
-        .q_prev = arena[off..][0..n],
-        .q_cur = arena[off + n ..][0..n],
-        .i_prev = arena[off + 2 * n ..][0..n],
-        .a_vals = arena[off + 3 * n ..][0..nnz],
+        .q_prev = take(arena, &off, n),
+        .q_cur = take(arena, &off, n),
+        .i_prev = take(arena, &off, n),
+        .a_vals = take(arena, &off, nnz),
     };
-    off += 3 * n + nnz;
 
     // The unused path's buffer slices the arena to zero length so both stay
     // mutable []f64.
@@ -398,7 +390,7 @@ pub fn solve(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    simdCopy(x0, x_dc[0..n]);
+    root.copySimd(x0, x_dc[0..n]);
     var opts = options;
     const osc = options.osc_node;
     if (osc != root.GROUND) opts.period = try startOscillator(ckt, ws, &sc, x0, options, allocator);
@@ -417,7 +409,7 @@ pub fn solve(
         }
 
         // x_end + (-1)*x0 is exactly x_end - x0.
-        simdCopy(phi, x_end);
+        root.copySimd(phi, x_end);
         num.axpy(phi, -1.0, x0);
 
         res_norm = num.normInf(phi);
@@ -440,8 +432,8 @@ pub fn solve(
         num.axpy(x0, damping, dx0);
     }
 
-    simdCopy(x_end, x0);
-    if (!try integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts)) simdZero(wave);
+    root.copySimd(x_end, x0);
+    if (!try integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts)) root.zeroSimd(wave);
 
     return .{
         .converged = res_norm < options.shooting_tol,
@@ -531,7 +523,7 @@ fn startOscillator(
         prev = v;
     }
     if (crossings < 2 or !(hi - lo > osc_kick)) return error.OscillatorDidNotStart;
-    simdCopy(x[0..n], Sample.row(record, anchor, steps, n + 1));
+    root.copySimd(x[0..n], Sample.row(record, anchor, steps, n + 1));
     const dt = options.period / @as(f64, @floatFromInt(steps));
     return (last - first) / @as(f64, @floatFromInt(crossings - 1)) * dt;
 }
@@ -567,6 +559,4 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 pub const test_access = if (@import("builtin").is_test) .{
     .krylov_threshold = krylov_threshold,
     .shootingMatvec = shootingMatvec,
-    .simdCopy = simdCopy,
-    .simdZero = simdZero,
 } else {};

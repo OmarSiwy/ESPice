@@ -40,16 +40,16 @@ pub const Spectrum = struct {
 
 const Column = tran.Column;
 
-/// Spectrum of probe `probe_idx`, less probe `neg_idx` when given, over the
-/// last period of `waveform`, which must hold both. `n_harmonics` is
+/// Spectrum of the waveform's first probe, less its second when
+/// `differential`, over the last period of `waveform`, which must hold them. `n_harmonics` is
 /// clamped to 1..max_harmonics.
 /// Returns error.InsufficientData when the waveform is shorter than one
 /// period or the period holds fewer than two samples. `allocator` backs two
 /// n_fft scratch rows, freed before return.
-pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, neg_idx: ?u32, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
+pub fn analyze(waveform: *const tran.Waveform, differential: bool, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
     // Both series are borrowed columns of the recording, never copied.
     const times = waveform.column(0);
-    const values = waveform.column(probe_idx + 1);
+    const values = waveform.column(1);
 
     if (times.len < 2) return error.InsufficientData;
 
@@ -83,8 +83,8 @@ pub fn analyze(waveform: *const tran.Waveform, probe_idx: u32, neg_idx: ?u32, f_
     }
     // `v(a,b)`: interpolation is linear, so the difference of the two
     // resampled columns is the resampled difference.
-    if (neg_idx) |neg| {
-        const neg_vals = waveform.column(neg + 1).from(start_idx);
+    if (differential) {
+        const neg_vals = waveform.column(2).from(start_idx);
         var neg_cursor: usize = 0;
         for (0..n_fft) |k| {
             const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
@@ -126,7 +126,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         const tran_result = try tran.simulate(ctx.circuit, x, probes[0..n_probes], &waveform, tran_opts, scratch);
         if (!tran_result) return error.TransientFailed;
 
-        break :blk try analyze(&waveform, 0, if (n_probes == 2) 1 else null, opts.f_fundamental, opts.n_harmonics, scratch);
+        break :blk try analyze(&waveform, n_probes == 2, opts.f_fundamental, opts.n_harmonics, scratch);
     };
 
     const n_harm: usize = spec.n_harmonics;
@@ -229,5 +229,4 @@ pub fn interpolateAt(times: Column, values: Column, t: f64, cursor: *usize) f64 
 /// Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .extractSpectrum = extractSpectrum,
-    .interpolateAt = interpolateAt,
 } else {};

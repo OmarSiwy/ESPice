@@ -27,11 +27,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer fs.deinit();
 
     const n_points: usize = opts.sweep.count();
-    const axis = try scratch.alloc(f64, 2 * n_points);
-    defer scratch.free(axis);
-    const freqs = axis[0..n_points];
-    const omegas = axis[n_points..];
-    opts.sweep.fill(freqs, omegas);
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    defer freq.freeAxis(scratch, freqs);
 
     const n_rhs: usize = if (opts.tf_only) 1 else opts.sources.len;
     const rhs = try scratch.alloc(f64, @max(n_rhs, 1) * 2 * n);

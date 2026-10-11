@@ -12,7 +12,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const root = @import("../types.zig");
-const simdCopy = root.copySimd;
 const num = @import("core").numerics;
 const combinePlanes = @import("../Circuit.zig").combinePlanes;
 const solvers = @import("solver");
@@ -158,7 +157,7 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) boo
     // Undo the scaling: out = out^(2^s).
     var si: u32 = 0;
     while (si < s) : (si += 1) {
-        simdCopy(H2[0..mm], out[0..mm]);
+        root.copySimd(H2[0..mm], out[0..mm]);
         denseMatMul(m, H2, H2, out);
     }
     return true;
@@ -297,7 +296,7 @@ fn posteriorOk(
 
     // Leading m x m block of the m_max-strided H.
     for (0..mm) |i| {
-        simdCopy(H_copy[i * mm ..][0..mm], H[i * @as(usize, m_max) ..][0..mm]);
+        root.copySimd(H_copy[i * mm ..][0..mm], H[i * @as(usize, m_max) ..][0..mm]);
     }
 
     num.scale(H_copy[0..msq], h_step, H_copy[0..msq]);
@@ -388,7 +387,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (n == 0) return error.EmptyCircuit;
 
     const x = try scratch.alloc(f64, n);
-    simdCopy(x, x_op);
+    root.copySimd(x, x_op);
 
     const gamma = opts.gamma orelse opts.t_stop / 1000.0;
     const h_cap = opts.h_output_cap orelse opts.t_stop / 200.0;
@@ -469,7 +468,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // overwrite the planes.
     const c_vals_saved = try scratch.alloc(f64, ckt.nnz + 1);
     if (ckt.has_charge) {
-        simdCopy(c_vals_saved[0..ckt.nnz], ckt.c_vals[0..ckt.nnz]);
+        root.copySimd(c_vals_saved[0..ckt.nnz], ckt.c_vals[0..ckt.nnz]);
     } else {
         root.zeroSimd(c_vals_saved[0..ckt.nnz]);
     }
@@ -563,7 +562,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             const msq = m * m;
 
             for (0..m) |i| {
-                simdCopy(H_copy[i * m ..][0..m], H_mat[i * m_max_usize ..][0..m]);
+                root.copySimd(H_copy[i * m ..][0..m], H_mat[i * m_max_usize ..][0..m]);
             }
 
             // H_m approximates (C + gamma*G)^-1 C, so hA maps to
@@ -620,7 +619,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         // A non-finite step is a failed step, not a waveform (#51).
         // NaN and inf propagate through the sum.
         if (!std.math.isFinite(num.sum(x_new[0..n]))) return error.MatexDidNotConverge;
-        simdCopy(x[0..n], x_new[0..n]);
+        root.copySimd(x[0..n], x_new[0..n]);
         t += h;
         steps += 1;
         std.mem.swap([]f64, &b_t, &b_th);

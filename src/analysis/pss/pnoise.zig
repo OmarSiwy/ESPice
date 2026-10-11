@@ -151,9 +151,7 @@ pub fn orbitSweep(
     defer allocator.free(transfer);
     const drive = try allocator.alloc(f64, 2 * n);
     defer allocator.free(drive);
-    @memset(drive, 0);
-    if (options.out_node != root.GROUND) drive[options.out_node] = 1;
-    if (options.out_neg != root.GROUND) drive[options.out_neg] = -1;
+    root.outputDrive(drive, options.out_node, options.out_neg);
     const pac_opts: pac.Options = .{
         .f_lo = options.f_fundamental,
         .out_node = options.out_node,
@@ -230,9 +228,7 @@ fn strobed(
     defer allocator.free(transfer);
     const drive = try allocator.alloc(f64, 2 * n);
     defer allocator.free(drive);
-    @memset(drive, 0);
-    if (options.out_node != root.GROUND) drive[options.out_node] = 1;
-    if (options.out_neg != root.GROUND) drive[options.out_neg] = -1;
+    root.outputDrive(drive, options.out_node, options.out_neg);
     const phase = try allocator.alloc(Complex, n_sb);
     defer allocator.free(phase);
     for (phase, 0..) |*e, p| {
@@ -341,11 +337,6 @@ pub fn result(a: std.mem.Allocator, freqs: []const f64, density: []const f64, co
         .data = data,
     };
 }
-
-/// Private implementation access for the analysis test suite; void outside tests.
-pub const test_access = if (@import("builtin").is_test) .{
-    .sourcePsd = sourcePsd,
-} else {};
 
 test samplesFor {
     try std.testing.expectEqual(@as(usize, 64), samplesFor(64, 5));

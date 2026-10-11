@@ -15,7 +15,7 @@
 //! transient phase), #14 (the projection lane kernel).
 const std = @import("std");
 const root = @import("../types.zig");
-const simdCopy = root.copySimd;
+const take = root.take;
 const num = @import("core").numerics;
 const converger = @import("solver").converger;
 const dense_lu = @import("solver").dense_lu;
@@ -132,53 +132,25 @@ pub fn solveSpectrum(
     defer allocator.free(arena);
 
     var off: usize = 0;
-    const f_hat = arena[off..][0..total_unknowns];
-    off += total_unknowns;
-    const x_td = arena[off..][0 .. nt * n];
-    off += nt * n;
-    const f_td = arena[off..][0 .. nt * n];
-    off += nt * n;
-    const q_td = arena[off..][0 .. nt * n];
-    off += nt * n;
-    const c_mat = arena[off..][0 .. n * n];
-    off += n * n;
-    const jac = arena[off..][0 .. total_unknowns * total_unknowns];
-    off += total_unknowns * total_unknowns;
-    const dx_hat = arena[off..][0..total_unknowns];
-    off += total_unknowns;
-    const g_td = arena[off..][0 .. nt * nnz];
-    off += nt * nnz;
-    const c_td = arena[off..][0..if (ppv.len != 0) nt * nnz else 0];
-    off += c_td.len;
-    const basis_cos = arena[off..][0 .. nt * 2 * nh];
-    off += nt * 2 * nh;
-    const basis_sin = arena[off..][0 .. nt * 2 * nh];
-    off += nt * 2 * nh;
-    const x_sample = arena[off..][0..n];
-    off += n;
-    const x_prev = arena[off..][0..total_unknowns];
-    off += total_unknowns;
-    const q_term = arena[off..][0..total_unknowns];
-    off += total_unknowns;
-    const gc = arena[off..][0 .. 2 * nh + 1];
-    off += 2 * nh + 1;
-    const gs = arena[off..][0 .. 2 * nh + 1];
-    off += 2 * nh + 1;
+    const f_hat = take(arena, &off, total_unknowns);
+    const x_td = take(arena, &off, nt * n);
+    const f_td = take(arena, &off, nt * n);
+    const q_td = take(arena, &off, nt * n);
+    const c_mat = take(arena, &off, n * n);
+    const jac = take(arena, &off, total_unknowns * total_unknowns);
+    const dx_hat = take(arena, &off, total_unknowns);
+    const g_td = take(arena, &off, nt * nnz);
+    const c_td = take(arena, &off, if (ppv.len != 0) nt * nnz else 0);
+    const basis_cos = take(arena, &off, nt * 2 * nh);
+    const basis_sin = take(arena, &off, nt * 2 * nh);
+    const x_sample = take(arena, &off, n);
+    const x_prev = take(arena, &off, total_unknowns);
+    const q_term = take(arena, &off, total_unknowns);
+    const gc = take(arena, &off, 2 * nh + 1);
+    const gs = take(arena, &off, 2 * nh + 1);
     std.debug.assert(off == total_f64);
 
-    // Seed the DC coefficients with the DC operating point, which cuts the
-    // iteration count on biased circuits.
-    if (osc == root.GROUND) {
-        root.zeroSimd(x_hat);
-        const ws = try ckt.workspace();
-        ckt.setSimState(.{ .kind = .dc });
-        root.zeroSimd(x_sample);
-        _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(options.tol, null), root.EvalHook{}) catch |err| switch (err) {
-            error.QueryCancelled, error.OutOfMemory => return err,
-            else => {}, // else: the DC seed is best effort
-        };
-        for (0..n) |node| x_hat[node * nf] = x_sample[node];
-    }
+    if (osc == root.GROUND) try mhb.dcSeed(ckt, x_hat, x_sample, nf, options.tol);
 
     // Harmonic-major basis: basis_cos[hi * nt + k] = cos((hi+1)*w0*t_k).
     // The IDFT/DFT read harmonics 1..K; the Jacobian's G(t) spectrum needs
@@ -271,7 +243,7 @@ pub fn solveSpectrum(
             // Rewind and retake the last step at half length along the same
             // `dx_hat`; no Jacobian rebuild.
             step *= 0.5;
-            simdCopy(x_hat, x_prev);
+            root.copySimd(x_hat, x_prev);
             num.axpy(x_hat, step, dx_hat);
             if (osc != root.GROUND) setOmega(&omega0, &period, omega_prev * (1 + step * d_ln_omega));
             retrying = true;
@@ -411,7 +383,7 @@ pub fn solveSpectrum(
         // adjoint are dense-only.
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
-        simdCopy(x_prev, x_hat);
+        root.copySimd(x_prev, x_hat);
         if (osc != root.GROUND) {
             d_ln_omega = dx_hat[omega_col];
             dx_hat[omega_col] = 0;
