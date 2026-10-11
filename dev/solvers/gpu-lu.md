@@ -804,7 +804,8 @@ the refactor and solve bodies; there must be none.
   ordering) before tuning ours.
 
 **E2 results (2026-09-28).** `ESPICE_GPU_LU=1 ESPICE_GPU_LU_CHECK=1
-ESPICE_GPU_LU_BENCH=10` on a `-Dgpu=false` build (device evals on the
+ESPICE_GPU_LU_BENCH=10` on a `-Dgpu=false` build (since #192 the bench and
+the E1 census compile only with `-Dlu-instrument`) (device evals on the
 host; the LU kernels are built anyway), RTX 4060 Laptop, i9-14900HX, load
 average 1.4-2.2. Medians of the first 10 device refactors of the transient
 (the only query for the 100k decks, which start from `uic`), in ms. Device

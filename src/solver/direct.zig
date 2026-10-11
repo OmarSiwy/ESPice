@@ -25,6 +25,9 @@ const z = @import("stdpp");
 
 const Allocator = std.mem.Allocator;
 
+/// `-Dlu-instrument`: the `ZP_LU_STATS` census is compiled in.
+pub const instrument = sparse_lu.instrument;
+
 /// Threshold partial pivoting keeps the diagonal while
 /// |diag| >= pivot_tol * column max (KLU's default 0.001).
 pub const pivot_tol: f64 = 1e-3;
@@ -63,6 +66,7 @@ const probe_ratio_max = 1;
 /// (`espice.zig`); the solver reads no environment.
 pub const Knobs = struct {
     /// `ZP_LU_STATS`: print the BBD census and every full factor's fill.
+    /// Read only under `-Dlu-instrument` (`instrument`).
     stats: bool = false,
     /// `ESPICE_NO_BBD`: force the flat LU, for A/B comparisons.
     no_bbd: bool = false,
@@ -179,18 +183,18 @@ pub const Solver = struct {
 
     fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo, knobs: Knobs) !?BbdEng {
         const info = bbd orelse {
-            if (knobs.stats) std.debug.print("lu-census: no BbdInfo\n", .{});
+            if (instrument and knobs.stats) std.debug.print("lu-census: no BbdInfo\n", .{});
             return null;
         };
         if (knobs.no_bbd) return null;
         const eng = BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
             error.NotApplicable => {
-                if (knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init declined (NotApplicable)\n", .{});
+                if (instrument and knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init declined (NotApplicable)\n", .{});
                 return null;
             },
             error.OutOfMemory => return error.OutOfMemory,
         };
-        if (knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init accepted\n", .{});
+        if (instrument and knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init accepted\n", .{});
         return eng;
     }
 

@@ -45,6 +45,11 @@ pub fn build(b: *std.Build) void {
     // The KCL certificate (src/analysis/certify.zig): off by default, and
     // comptime-gated, so the default build carries none of it.
     bopts.addOption(bool, "certify", b.option(bool, "certify", "Certify every converged Newton point against its KCL residual (corpus diagnostics)") orelse false);
+    // The LU experiments' instrumentation, the E1 census (`ZP_LU_STATS`) and
+    // the E2 device-LU bench (`ESPICE_GPU_LU_BENCH`), dev/solvers/gpu-lu.md:
+    // off by default and comptime-gated, so the shipped binary carries
+    // neither the code nor the environment lookups (#192).
+    bopts.addOption(bool, "lu_instrument", b.option(bool, "lu-instrument", "Compile the LU census (ZP_LU_STATS) and the device-LU bench (ESPICE_GPU_LU_BENCH)") orelse false);
 
     // Release strips DWARF: debug info was ~2/3 of LLVM time, superlinear in
     // function size, and 115 MB of the shipped binary. `-Ddebug-info` puts it
@@ -102,7 +107,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "device_abi", .module = device_abi_mod },
     });
     device_eval_mod.link_libc = true;
-    const solver_mod = M.make(b.path("src/solver/root.zig"), &.{core_import});
+    const solver_mod = M.make(b.path("src/solver/root.zig"), &.{ core_import, .{ .name = "build_options", .module = build_options_mod } });
     // A leaf on core alone, so `zig build test-output` skips the simulator.
     const output_mod = M.make(b.path("src/output/root.zig"), &.{core_import});
 
@@ -514,7 +519,7 @@ pub fn build(b: *std.Build) void {
         const pcore: std.Build.Module.Import = .{ .name = "core", .module = P.make(b.path("src/core/root.zig"), &.{}) };
         const pabi: std.Build.Module.Import = .{ .name = "device_abi", .module = P.make(b.path("src/device/abi.zig"), &.{ pcontract, pcore }) };
         const peval = P.make(b.path("src/device/eval.zig"), &.{ pcontract, pabi, .{ .name = "gompute", .module = gompute.module("gompute") } });
-        const psolver = P.make(b.path("src/solver/root.zig"), &.{pcore});
+        const psolver = P.make(b.path("src/solver/root.zig"), &.{ pcore, .{ .name = "build_options", .module = build_options_mod } });
         const probe = b.addObject(.{ .name = "codegen-probe", .root_module = P.make(b.path("tests/codegen.zig"), &.{ .{ .name = "device_eval", .module = peval }, .{ .name = "solver", .module = psolver } }) });
         const residue = b.addSystemCommand(&.{"python3"});
         residue.addFileArg(b.path("tools/asm_probe.py"));
@@ -634,7 +639,7 @@ pub fn build(b: *std.Build) void {
         const wespice = W.make(b.path("src/espice.zig"), &.{
             wcore,
             .{ .name = "analysis", .module = W.make(b.path("src/analysis/root.zig"), &.{
-                .{ .name = "solver", .module = W.make(b.path("src/solver/root.zig"), &.{wcore}) },
+                .{ .name = "solver", .module = W.make(b.path("src/solver/root.zig"), &.{ wcore, .{ .name = "build_options", .module = build_options_mod } }) },
                 wcore,
                 wdevice,
                 wgompute,

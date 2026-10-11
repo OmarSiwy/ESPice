@@ -161,7 +161,7 @@ of the operating-point ladder in `src/analysis/dc/op.zig`.
 | `ZP_OPDBG` | traces operating-point iterates and ladder rungs |
 | `ZP_NEWTON_DEBUG` | prints per-iterate Newton norms |
 | `ESPICE_HB_TRACE` | traces harmonic-balance iterates |
-| `ZP_LU_STATS` | prints n, nnz and fill per full factor |
+| `ZP_LU_STATS` | prints n, nnz and fill per full factor, then the E1 census; read only by a `-Dlu-instrument` build |
 
 ## Tests
 

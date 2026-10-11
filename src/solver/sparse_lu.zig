@@ -10,6 +10,9 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+
+/// `-Dlu-instrument`: compiles the `ZP_LU_STATS` fill print and census.
+pub const instrument = @import("build_options").lu_instrument;
 const Allocator = std.mem.Allocator;
 
 const NONE: u32 = std.math.maxInt(u32);
@@ -128,7 +131,8 @@ pub const SparseLu = struct {
     /// (`direct` sets its `refactor_growth_limit`); a smaller one is
     /// threshold-pivoted like a zero one (#45).
     keep_min: f64 = 0,
-    /// Print every full factor's fill and census (`direct.Knobs.stats`).
+    /// Print every full factor's fill and census (`direct.Knobs.stats`);
+    /// read only under `instrument`.
     stats: bool = false,
 
     // DFS workspace, `factor` only.
@@ -271,7 +275,7 @@ pub const SparseLu = struct {
             cap = @intFromFloat(@min(self.fill_cap * @as(f64, @floatFromInt(self.base_lu)), 1e18));
         }
         if (try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, cap, false)) {
-            if (self.stats)
+            if (instrument and self.stats)
                 std.debug.print("lu-stats: re-pivot passed {d} L+U entries; keeping the previous pivots\n", .{cap});
             _ = try self.factorPass(gpa, col_ptr, row_idx, vals, pivot_tol, std.math.maxInt(usize), true);
         }
@@ -578,7 +582,7 @@ pub const SparseLu = struct {
 
         // ZP_LU_STATS prints n, nnz and fill per full factor, then the
         // structural census of dev/solvers/gpu-lu.md E1.
-        if (self.stats) {
+        if (instrument and self.stats) {
             std.debug.print("lu-stats: n={d} nnz={d} L={d} U={d} fill={d:.1}x\n", .{
                 n,                 col_ptr[n],
                 self.li.items.len, self.ui.items.len,
