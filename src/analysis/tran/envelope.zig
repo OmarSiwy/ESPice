@@ -18,36 +18,7 @@ pub const maxPoints = @import("core").validate.envelopeMaxPoints;
 
 /// Trapezoidal charge history carried across every envelope step, coarse and
 /// fine alike (trapezoid is one-step, so dt may change between them).
-const Trap = struct {
-    q_prev: []f64,
-    i_prev: []f64,
-    /// q(x) from the last Newton assemble.
-    q_cur: []f64,
-    a_vals: []f64,
-    alpha: f64 = 0,
-
-    /// Companion residual alpha*(q - q_prev) - i_prev, matrix G + alpha*C.
-    pub fn assemble(self: Trap, ckt: *root.Circuit, x: []const f64, t: f64) void {
-        ckt.evalNewton(x, t);
-        const n: usize = ckt.n;
-        root.copySimd(self.q_cur[0..n], ckt.q_vec[0..n]);
-        integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
-    }
-    /// G + alpha*C rebuilt into `a_vals`, overwriting the previous return.
-    pub fn vals(self: Trap, ckt: *root.Circuit) []f64 {
-        ckt.combineGC(self.alpha, self.a_vals);
-        return self.a_vals;
-    }
-    /// One diagonal of G + alpha*C without materializing it (`Circuit.gcAt`).
-    pub fn diagAt(self: Trap, ckt: *root.Circuit, slot: u32) f64 {
-        return ckt.gcAt(self.alpha, slot);
-    }
-    /// Accepted step: i = alpha*(q - q_prev) - i_prev, then q_prev = q.
-    fn accept(self: Trap, n: usize) void {
-        integrator.companionAt(.trapezoidal, false, self.i_prev[0..n], self.q_cur[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
-        root.copySimd(self.q_prev[0..n], self.q_cur[0..n]);
-    }
-};
+const Trap = integrator.Hook(.trapezoidal);
 
 /// One step to absolute time t: a trapezoid step of length dt when the
 /// circuit has charge (`trap`), else a static solve. Returns convergence.
@@ -67,7 +38,7 @@ fn newtonAt(
     opts.max_iter = options.tol.itl4;
     const nr = if (trap) |tr| blk: {
         ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
-        tr.alpha = 2.0 / dt;
+        tr.c = .{ .ag0 = 2.0 / dt, .ag2 = 0 };
         break :blk converger.run(ckt, ws, x, t, opts, tr.*);
     } else blk: {
         // No charge: dt stays 0 and the step is static.
@@ -127,10 +98,13 @@ pub fn simulate(
     var trap_state: Trap = undefined;
     const trap: ?*Trap = if (ckt.has_charge) blk: {
         trap_state = .{
+            .method = {},
+            .c = .{ .ag0 = 0, .ag2 = 0 },
             .q_prev = ts[0..n],
             .i_prev = ts[n..][0..n],
             .q_cur = ts[2 * n ..][0..n],
             .a_vals = try ws.ensureAVals(ckt.nnz),
+            .has_charge = true,
         };
         // Exact at a DC operating point: q = q(x_op), no dynamic current.
         ckt.eval(x, 0);

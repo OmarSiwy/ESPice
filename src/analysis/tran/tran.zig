@@ -72,42 +72,7 @@ const Stats = struct {
 };
 
 /// Newton hook: companion RHS from the q plane, matrix G + ag0*C.
-const TranHook = struct {
-    /// The method this attempt integrates with (BE while order-dropped).
-    method: Method,
-    c: integrator.Coeffs,
-    q_prev: []const f64,
-    i_prev: []const f64, // read by trap only
-    q_prev2: []const f64, // read by gear_2 only
-    a_vals: []f64,
-    has_charge: bool,
-
-    /// Stamps the planes at `x` and adds the companion's dynamic current to
-    /// the residual rows (converger hook).
-    pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
-        ckt.evalNewton(x, t);
-        if (self.has_charge) {
-            const n: usize = ckt.n;
-            switch (self.method) {
-                inline else => |m| integrator.companionAt(m, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev, self.q_prev2, self.i_prev, self.c),
-            }
-        }
-    }
-
-    /// The Newton matrix values: G itself without charge, else G + ag0*C
-    /// rebuilt into `a_vals`, overwriting the previous return.
-    pub fn vals(self: TranHook, ckt: *root.Circuit) []f64 {
-        if (!self.has_charge) return ckt.g_vals;
-        ckt.combineGC(self.c.ag0, self.a_vals);
-        return self.a_vals;
-    }
-
-    /// One diagonal of the combined matrix without materializing it
-    /// (`Circuit.gcAt`); the residual gate calls this per unknown.
-    pub fn diagAt(self: TranHook, ckt: *root.Circuit, slot: u32) f64 {
-        return if (self.has_charge) ckt.gcAt(self.c.ag0, slot) else ckt.g_vals[slot];
-    }
-};
+const TranHook = integrator.Hook(null);
 
 /// The t = 0 row: `x` itself after an operating point. Under uic no
 /// operating point ran and `x` holds only the `.ic` values, which break KVL
@@ -347,6 +312,7 @@ pub fn simulate(
         .i_prev = i_prev,
         .q_prev2 = q_hist[2],
         .a_vals = a_vals,
+        .q_cur = {},
         .has_charge = has_charge,
     }, options), probes);
 
@@ -416,6 +382,7 @@ pub fn simulate(
             .q_prev = q_hist[1],
             .i_prev = i_prev,
             .q_prev2 = q_hist[2],
+            .q_cur = {},
             .a_vals = a_vals,
             .has_charge = has_charge,
         };

@@ -65,37 +65,7 @@ const Companion = struct {
 
 /// Newton hook for one fixed step: residual adds
 /// alpha*(q(x) - q_prev) - i_prev with alpha = 2/dt, matrix G + alpha*C.
-const PeriodHook = struct {
-    alpha: f64,
-    q_prev: []const f64,
-    i_prev: []const f64,
-    /// Receives q(x) of each assemble for the accept update.
-    q_snap: []f64,
-    a_vals: []f64,
-    has_charge: bool,
-
-    pub fn assemble(self: PeriodHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
-        ckt.evalNewton(x, t);
-        if (self.has_charge) {
-            const n: usize = ckt.n;
-            root.copySimd(self.q_snap[0..n], ckt.q_vec[0..n]);
-            integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
-        }
-    }
-
-    /// The step's matrix: G alone without charge, else G + alpha*C in `a_vals`.
-    pub fn vals(self: PeriodHook, ckt: *root.Circuit) []f64 {
-        if (!self.has_charge) return ckt.g_vals;
-        ckt.combineGC(self.alpha, self.a_vals);
-        return self.a_vals;
-    }
-
-    /// One diagonal of the combined matrix without materializing it
-    /// (`Circuit.gcAt`); the residual gate calls this per unknown.
-    pub fn diagAt(self: PeriodHook, ckt: *root.Circuit, slot: u32) f64 {
-        return if (self.has_charge) ckt.gcAt(self.alpha, slot) else ckt.g_vals[slot];
-    }
-};
+const PeriodHook = integrator.Hook(.trapezoidal);
 
 /// Integrates x in place over [0, T] in n_samples trapezoid steps. A
 /// non-empty `wave` receives n_samples+1 point-major rows
@@ -141,11 +111,12 @@ fn integrateOnePeriod(
 
     for (0..steps) |k| {
         const t = options.period * @as(f64, @floatFromInt(k + 1)) / @as(f64, @floatFromInt(steps));
-        const hook = PeriodHook{
-            .alpha = alpha,
+        const hook: PeriodHook = .{
+            .method = {},
+            .c = .{ .ag0 = alpha, .ag2 = 0 },
             .q_prev = sc.q_prev,
             .i_prev = sc.i_prev,
-            .q_snap = sc.q_cur,
+            .q_cur = sc.q_cur,
             .a_vals = sc.a_vals,
             .has_charge = has_charge,
         };
@@ -163,11 +134,7 @@ fn integrateOnePeriod(
         }
         _ = ckt.stateCtl(.commit);
 
-        if (has_charge) {
-            // Accept: i = alpha*(q - q_prev) - i_prev, then q_prev = q.
-            integrator.companionAt(.trapezoidal, false, sc.i_prev[0..n], sc.q_cur[0..n], sc.q_prev[0..n], &.{}, sc.i_prev[0..n], .{ .ag0 = alpha, .ag2 = 0 });
-            root.copySimd(sc.q_prev[0..n], sc.q_cur[0..n]);
-        }
+        if (has_charge) hook.accept(n);
         if (wave.len != 0) {
             const row = wave[(k + 1) * ncols ..][0..ncols];
             row[0] = t;

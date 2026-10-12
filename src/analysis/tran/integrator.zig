@@ -1,10 +1,12 @@
 //! Integration kernels: the companion coefficients, the dynamic-current
-//! recurrence and the CKTterr LTE bound. tran.zig drives them per step;
-//! envelope, tran_noise and pss reuse the companion kernel.
+//! recurrence, the companion step's Newton hook and the CKTterr LTE bound.
+//! tran.zig drives them per step; envelope and pss reuse the hook, and
+//! tran_noise the companion kernel.
 //! Cites ngspice nicomcof.c, niinteg.c, cktterr.c and dctran.c;
 //! dev/analysis/transient-integration.md.
 const std = @import("std");
 const Method = @import("types.zig").Method;
+const num = @import("core").numerics;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -106,6 +108,67 @@ inline fn companionLane(
         .trapezoidal => base - @as(V, @splat(c.ag1)) * @as(V, i_prev[j..][0..w].*),
         .gear_2 => base - @as(V, @splat(c.ag2)) * (b - @as(V, q2[j..][0..w].*)),
         .backward_euler => base,
+    };
+}
+
+/// The converger hook of one companion step: `evalNewton` at x, then the
+/// method's dynamic current (`companionAt`) added to the residual rows; the
+/// matrix is G + ag0·C, or G alone without charge. `fixed` pins a one-step
+/// method at comptime (pss and envelope: the plain trapezoid, ag1 = 1 and
+/// only `c.ag0` read), which also keeps q(x) of every assemble in `q_cur`
+/// for `accept`; null reads `method` and all of `c` per step (tran). `ckt` is a `*Circuit`; tests/codegen.zig probes the hook
+/// against hand-written copies on a stand-in.
+pub fn Hook(comptime fixed: ?Method) type {
+    if (fixed) |m| comptime std.debug.assert(m != .gear_2); // `accept` drops q_prev2
+    return struct {
+        const Self = @This();
+
+        /// The method this attempt integrates with (BE while order-dropped).
+        method: if (fixed == null) Method else void,
+        c: Coeffs,
+        q_prev: []f64,
+        i_prev: []f64, // read by trap only
+        q_prev2: []const f64 = &.{}, // read by gear_2 only
+        /// q(x) of the last assemble.
+        q_cur: if (fixed == null) void else []f64,
+        a_vals: []f64,
+        has_charge: bool,
+
+        /// Stamps the planes at `x` and adds the companion's dynamic current
+        /// to the residual rows.
+        pub fn assemble(self: Self, ckt: anytype, x: []const f64, t: f64) void {
+            ckt.evalNewton(x, t);
+            if (!self.has_charge) return;
+            const n: usize = ckt.n;
+            if (fixed) |m| {
+                num.copySimd(self.q_cur[0..n], ckt.q_vec[0..n]);
+                companionAt(m, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.c.ag0, .ag2 = 0 });
+            } else switch (self.method) {
+                inline else => |m| companionAt(m, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev, self.q_prev2, self.i_prev, self.c),
+            }
+        }
+
+        /// The Newton matrix values: G itself without charge, else G + ag0·C
+        /// rebuilt into `a_vals`, overwriting the previous return.
+        pub fn vals(self: Self, ckt: anytype) []f64 {
+            if (!self.has_charge) return ckt.g_vals;
+            ckt.combineGC(self.c.ag0, self.a_vals);
+            return self.a_vals;
+        }
+
+        /// One diagonal of the combined matrix without materializing it
+        /// (`Circuit.gcAt`); the residual gate calls this per unknown.
+        pub fn diagAt(self: Self, ckt: anytype, slot: u32) f64 {
+            return if (self.has_charge) ckt.gcAt(self.c.ag0, slot) else ckt.g_vals[slot];
+        }
+
+        /// The accepted step of a fixed method: i_prev = its dynamic current
+        /// at `q_cur`, then q_prev = q_cur. Asserts a fixed method.
+        pub fn accept(self: Self, n: usize) void {
+            comptime std.debug.assert(fixed != null);
+            companionAt(fixed.?, false, self.i_prev[0..n], self.q_cur[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.c.ag0, .ag2 = 0 });
+            num.copySimd(self.q_prev[0..n], self.q_cur[0..n]);
+        }
     };
 }
 
