@@ -135,9 +135,10 @@ alone published a branch-current probe such as `i(vin)` as `v(2)`.
 
 **Failure handling.** Coarse-advance or inner-step Newton failure restores the
 outer-step snapshot (state and trapezoid history), halves the outer step and
-retries. The outer loop is bounded by `max_outer_steps`; an early stop
-surfaces as a warning with `t_final`, and `n_points` is exact, so rows are
-never silently truncated.
+retries. The outer loop is bounded by `max_outer_steps`; running out of
+steps before `t_stop` fails the query with `EnvelopeDidNotConverge`, and
+the row count `simulate` returns is exact, so rows are never silently
+truncated.
 
 **Knobs.** `t_carrier` (the one required physical input),
 `carrier_steps_per_period` (fast-axis resolution), `envelope_reltol` (outer

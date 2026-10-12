@@ -26,6 +26,7 @@
 //! waveform only in the transient phase), #83 (NaN residuals).
 const std = @import("std");
 const root = @import("../types.zig");
+const take = root.take;
 const num = @import("core").numerics;
 const solvers = @import("solver");
 const converger = solvers.converger;
@@ -124,37 +125,40 @@ pub fn spectrum(gpa: std.mem.Allocator, tones: []const f64, nharms: []const u16,
             return a.f < b.f or (a.f == b.f and a.idx < b.idx);
         }
     }.lt);
-    const freqs = try gpa.alloc(f64, c.len);
+    // A run of candidates within 1e-14 relative of its head is one line.
+    const runEnd = struct {
+        fn f(cs: []const Cand, head: usize) usize {
+            var end = head + 1;
+            while (end < cs.len and cs[end].f - cs[head].f <= 1e-14 * cs[end].f) end += 1;
+            return end;
+        }
+    }.f;
+    // Counted first, so both tables are allocated at their final size: two
+    // shrinking reallocs could not both be undone when the second failed
+    // after the first had moved (#202).
+    var lines: usize = 0;
+    var head: usize = 0;
+    while (head < c.len) : (lines += 1) head = runEnd(c, head);
+    const freqs = try gpa.alloc(f64, lines);
     errdefer gpa.free(freqs);
-    const mix = try gpa.alloc(i16, c.len * nt);
+    const mix = try gpa.alloc(i16, lines * nt);
     errdefer gpa.free(mix);
     var m: usize = 0;
-    var head: usize = 0;
-    while (head < c.len) {
+    head = 0;
+    while (head < c.len) : (m += 1) {
+        const end = runEnd(c, head);
         var best = head;
-        var end = head + 1;
-        while (end < c.len and c[end].f - c[head].f <= 1e-14 * c[end].f) : (end += 1) {
-            const a = c[end];
+        for (head + 1..end) |j| {
+            const a = c[j];
             const b = c[best];
-            if (a.order < b.order or (a.order == b.order and (!a.mixed and b.mixed or (a.mixed == b.mixed and a.idx < b.idx)))) best = end;
+            if (a.order < b.order or (a.order == b.order and (!a.mixed and b.mixed or (a.mixed == b.mixed and a.idx < b.idx)))) best = j;
         }
         freqs[m] = c[best].f;
         @memcpy(mix[m * nt ..][0..nt], mixes.items[c[best].idx * nt ..][0..nt]);
-        m += 1;
         head = end;
     }
-    return .{
-        .tones = @intCast(nt),
-        .freqs = try shrink(f64, gpa, freqs, m),
-        .mix = try shrink(i16, gpa, mix, m * nt),
-    };
-}
-
-fn shrink(comptime T: type, gpa: std.mem.Allocator, buf: []T, len: usize) ![]T {
-    if (gpa.resize(buf, len)) return buf[0..len];
-    const out = try gpa.dupe(T, buf[0..len]);
-    gpa.free(buf);
-    return out;
+    std.debug.assert(m == lines);
+    return .{ .tones = @intCast(nt), .freqs = freqs, .mix = mix };
 }
 
 /// The IDFT/DFT pair between a spectrum block (nf = 2m-1 reals) and nt
@@ -442,6 +446,26 @@ const gmres_tol: f64 = 1e-7;
 const gmres_restart: u32 = 40;
 const gmres_max_restarts: u32 = 20;
 
+/// Zeroes `x_hat` (node-major, `nf` coefficients per node) and seeds each
+/// node's DC coefficient with the DC operating point, solved into
+/// `x_sample`, which cuts the iteration count on biased circuits. Best
+/// effort: a failed solve seeds its last iterate; only cancellation and out
+/// of memory propagate. Asserts that `x_hat` holds `nf` per unknown.
+pub fn dcSeed(ckt: *root.Circuit, x_hat: []f64, x_sample: []f64, nf: usize, tol: converger.Tolerances) !void {
+    const n: usize = ckt.n;
+    std.debug.assert(x_hat.len == n * nf);
+    std.debug.assert(x_sample.len >= n);
+    root.zeroSimd(x_hat);
+    const ws = try ckt.workspace();
+    ckt.setSimState(.{ .kind = .dc });
+    root.zeroSimd(x_sample);
+    _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(tol, null), root.EvalHook{}) catch |err| switch (err) {
+        error.QueryCancelled, error.OutOfMemory => return err,
+        else => {}, // else: the DC seed is best effort
+    };
+    for (0..n) |node| x_hat[node * nf] = x_sample[node];
+}
+
 /// Driven harmonic balance on `spec` (tones `tones` Hz) from the DC
 /// operating point. `x_hat` (n·(2m-1), caller-owned) receives node-major
 /// blocks [dc, c_1, s_1, ...], the last iterate when Newton does not
@@ -480,12 +504,6 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     const arena = try allocator.alloc(f64, len);
     defer allocator.free(arena);
     var off: usize = 0;
-    const take = struct {
-        fn f(a: []f64, o: *usize, l: usize) []f64 {
-            defer o.* += l;
-            return a[o.*..][0..l];
-        }
-    }.f;
     const tr = try transform(spec, tones, take(arena, &off, sizes[0]), allocator);
     const f_hat = take(arena, &off, total);
     const q_hat = take(arena, &off, total);
@@ -506,18 +524,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     for (omegas, spec.freqs) |*w, f| w.* = 2 * std.math.pi * f;
     if (!ckt.has_charge) root.zeroSimd(c_td);
 
-    // DC coefficients from the operating point, as hb.zig.
-    root.zeroSimd(x_hat);
-    {
-        const ws = try ckt.workspace();
-        ckt.setSimState(.{ .kind = .dc });
-        root.zeroSimd(x_sample);
-        _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(options.tol, null), root.EvalHook{}) catch |err| switch (err) {
-            error.QueryCancelled, error.OutOfMemory => return err,
-            else => {}, // else: the DC seed is best effort
-        };
-        for (0..n) |node| x_hat[node * nf] = x_sample[node];
-    }
+    try dcSeed(ckt, x_hat, x_sample, nf, options.tol);
 
     var fs = try FreqSolver.fromCircuit(allocator, ckt, x_sample);
     defer fs.deinit();

@@ -279,7 +279,7 @@ test "LaneLu(W) lane l is the scalar replay of lane l on random systems, NaN and
         defer gpa.free(q);
         for (q, 0..) |*c, i| c.* = @intCast(i);
         r.shuffle(u32, q);
-        var base = try SparseLu.init(gpa, n, sys.col_ptr, sys.row_idx, q);
+        var base = try SparseLu.init(gpa, n, sys.col_ptr, q);
         defer base.deinit(gpa);
         base.factor(gpa, sys.col_ptr, sys.row_idx, sys.vals, 1e-3) catch continue;
         var ll = try L.init(gpa, &base);

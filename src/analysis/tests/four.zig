@@ -5,7 +5,7 @@
 
 const impl = @import("../post/four.zig");
 const analyze = impl.analyze;
-const interpolateAt = impl.test_access.interpolateAt;
+const interpolateAt = impl.interpolateAt;
 const math = std.math;
 const std = @import("std");
 const tran = @import("../tran/tran.zig");
@@ -174,7 +174,7 @@ test "four: analyze waveform from tran data" {
         try waveform.record(t, &v, &probes);
     }
 
-    const result = try analyze(&waveform, 0, null, f_fund, 9, allocator);
+    const result = try analyze(&waveform, false, f_fund, 9, allocator);
 
     try testing.expectApproxEqAbs(@as(f64, 2.5), result.fundamental, 0.05);
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 0.05);
@@ -200,10 +200,10 @@ test "four: analyze refuses a waveform shorter than one period" {
     var waveform = try tran.Waveform.init(allocator, 1, 8);
     defer waveform.deinit();
     const probes = [_]u32{0};
-    try testing.expectError(error.InsufficientData, analyze(&waveform, 0, null, 1, 9, allocator));
+    try testing.expectError(error.InsufficientData, analyze(&waveform, false, 1, 9, allocator));
     for (0..4) |k| try waveform.record(@as(f64, @floatFromInt(k)) * 0.1, &.{1}, &probes);
     // 0.3 s recorded, a 1 s period asked for.
-    try testing.expectError(error.InsufficientData, analyze(&waveform, 0, null, 1, 9, allocator));
+    try testing.expectError(error.InsufficientData, analyze(&waveform, false, 1, 9, allocator));
 }
 
 test "four: a 2-point FFT reads harmonics past Nyquist as zero" {

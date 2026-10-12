@@ -43,20 +43,15 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     // Every point's AC solution x(ω) and adjoint z(ω) = A⁻ᴴ e_out (the
     // stacked-real transpose solve), so λ = conj(z).
-    const axis = try scratch.alloc(f64, 2 * n_points);
-    defer scratch.free(axis);
-    const freqs = axis[0..n_points];
-    const omegas = axis[n_points..];
-    opts.sweep.fill(freqs, omegas);
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    defer freq.freeAxis(scratch, freqs);
     const sol = try scratch.alloc(f64, 2 * n_points * nn + 2 * nn);
     defer scratch.free(sol);
     const drive = sol[2 * n_points * nn ..][0..nn];
     const e_out = sol[2 * n_points * nn + nn ..][0..nn];
     root.zeroSimd(drive);
     if (ctx.ac_drive.len == nn) @memcpy(drive, ctx.ac_drive);
-    root.zeroSimd(e_out);
-    e_out[opts.output_node] = 1;
-    if (opts.output_neg != root.GROUND) e_out[opts.output_neg] = -1;
+    root.outputDrive(e_out, opts.output_node, opts.output_neg);
     {
         var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
         defer fs.deinit();

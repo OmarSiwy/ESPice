@@ -3,6 +3,7 @@
 //! which imports the leaves for dispatch. File DAG inside src/analysis/:
 //! Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig.
 const std = @import("std");
+const assert = std.debug.assert;
 
 const circuit_mod = @import("Circuit.zig");
 const device_ir = @import("device").abi;
@@ -15,6 +16,25 @@ pub const AcParam = circuit_mod.AcParam;
 pub const GROUND = circuit_mod.GROUND;
 pub const zeroSimd = circuit_mod.zeroSimd;
 pub const copySimd = circuit_mod.copySimd;
+
+/// `e` := the adjoint excitation of the output v(pos) - v(neg): +1 at
+/// `pos`, -1 at `neg`, 0 elsewhere. The ground row is the v(0) = 0 clamp
+/// and never takes one. Asserts that both rows lie in `e`.
+pub fn outputDrive(e: []f64, pos: u32, neg: u32) void {
+    assert(pos < e.len);
+    assert(neg < e.len);
+    zeroSimd(e);
+    if (pos != GROUND) e[pos] = 1;
+    if (neg != GROUND) e[neg] = -1;
+}
+
+/// Carves the next `len` values of `arena` at `off.*` and advances `off`:
+/// one scratch block split into named slices. Asserts that they fit.
+pub fn take(arena: []f64, off: *usize, len: usize) []f64 {
+    assert(off.* + len <= arena.len);
+    defer off.* += len;
+    return arena[off.*..][0..len];
+}
 /// Builds an owning Circuit from protos, for tests. See `Circuit.zig` `init`.
 pub const freeze = circuit_mod.init;
 

@@ -665,8 +665,8 @@ The other paths out:
 - The tridiagonal and BBD engines: the device LU attaches only when
   `direct.Solver` runs the general `SparseLu`. A structured engine that
   demotes to `SparseLu` makes the device path eligible from then on.
-- `matrix_sig` bypass: host logic, one u64 compare; the device skips the
-  scatter and refactor launches.
+- Value bypass: `slv.unchanged(vals)`, host logic; the device skips the
+  upload and refactor launches.
 - Lanes, later: a W-lane refactor returns a per-lane fail mask like
   `LaneLu`, and failed lanes peel to the scalar host path as in
   `freq_solve.zig`'s `solveBatch`.
@@ -804,7 +804,8 @@ the refactor and solve bodies; there must be none.
   ordering) before tuning ours.
 
 **E2 results (2026-09-28).** `ESPICE_GPU_LU=1 ESPICE_GPU_LU_CHECK=1
-ESPICE_GPU_LU_BENCH=10` on a `-Dgpu=false` build (device evals on the
+ESPICE_GPU_LU_BENCH=10` on a `-Dgpu=false` build (since #192 the bench and
+the E1 census compile only with `-Dlu-instrument`) (device evals on the
 host; the LU kernels are built anyway), RTX 4060 Laptop, i9-14900HX, load
 average 1.4-2.2. Medians of the first 10 device refactors of the transient
 (the only query for the 100k decks, which start from `uic`), in ms. Device

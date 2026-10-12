@@ -12,7 +12,6 @@ const z = @import("stdpp");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
-const simdCopy = root.copySimd;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -31,8 +30,6 @@ pub const Options = tran_types.Options;
 pub const Waveform = tran_types.Waveform;
 /// See types.zig `Column`.
 pub const Column = tran_types.Column;
-/// See types.zig `SimResult`.
-pub const SimResult = tran_types.SimResult;
 /// See types.zig `initialCapacity`.
 pub const initialCapacity = tran_types.initialCapacity;
 
@@ -75,42 +72,7 @@ const Stats = struct {
 };
 
 /// Newton hook: companion RHS from the q plane, matrix G + ag0*C.
-const TranHook = struct {
-    /// The method this attempt integrates with (BE while order-dropped).
-    method: Method,
-    c: integrator.Coeffs,
-    q_prev: []const f64,
-    i_prev: []const f64, // read by trap only
-    q_prev2: []const f64, // read by gear_2 only
-    a_vals: []f64,
-    has_charge: bool,
-
-    /// Stamps the planes at `x` and adds the companion's dynamic current to
-    /// the residual rows (converger hook).
-    pub fn assemble(self: TranHook, ckt: *root.Circuit, x: []const f64, t: f64) void {
-        ckt.evalNewton(x, t);
-        if (self.has_charge) {
-            const n: usize = ckt.n;
-            switch (self.method) {
-                inline else => |m| integrator.companionAt(m, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev, self.q_prev2, self.i_prev, self.c),
-            }
-        }
-    }
-
-    /// The Newton matrix values: G itself without charge, else G + ag0*C
-    /// rebuilt into `a_vals`, overwriting the previous return.
-    pub fn vals(self: TranHook, ckt: *root.Circuit) []f64 {
-        if (!self.has_charge) return ckt.g_vals;
-        ckt.combineGC(self.c.ag0, self.a_vals);
-        return self.a_vals;
-    }
-
-    /// One diagonal of the combined matrix without materializing it
-    /// (`Circuit.gcAt`); the residual gate calls this per unknown.
-    pub fn diagAt(self: TranHook, ckt: *root.Circuit, slot: u32) f64 {
-        return if (self.has_charge) ckt.gcAt(self.c.ag0, slot) else ckt.g_vals[slot];
-    }
-};
+const TranHook = integrator.Hook(null);
 
 /// The t = 0 row: `x` itself after an operating point. Under uic no
 /// operating point ran and `x` holds only the `.ic` values, which break KVL
@@ -123,7 +85,7 @@ fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratc
     if (!options.uic) return x;
     ckt.setSimState(.{ .t = 0, .dt = 1 / hook.c.ag0, .kind = .tran, .initial_step = true });
     defer ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
-    simdCopy(scratch, x);
+    root.copySimd(scratch, x);
     var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
     nr_opts.residual_tol = std.math.inf(f64);
     ckt.clearRejectAt();
@@ -139,9 +101,9 @@ fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratc
 /// accepted points at t >= t_start into `waveform`. When the loop ends at
 /// t_stop or at `max_steps`, `x` holds the last accepted solution; after a
 /// dt underflow its contents are unspecified (one of the rotating step
-/// buffers was live). `allocator` backs per-run scratch only. A dt
-/// underflow or `max_steps` returns `completed = false`, not an error; the
-/// errors are cancellation, circuit setup and allocation (scratch or
+/// buffers was live). `allocator` backs per-run scratch only. Returns
+/// true on reaching t_stop; a dt underflow or `max_steps` returns false,
+/// not an error; the errors are cancellation, circuit setup and allocation (scratch or
 /// `waveform`). Leaves the device state committed at the last accepted point.
 pub fn simulate(
     ckt: *root.Circuit,
@@ -150,7 +112,7 @@ pub fn simulate(
     waveform: *Waveform,
     options: Options,
     allocator: std.mem.Allocator,
-) !SimResult {
+) !bool {
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
 
@@ -164,7 +126,7 @@ pub fn simulate(
     // until the first step is accepted, so that step starts from the OP.
     const x_prev = try allocator.alloc(f64, n);
     defer allocator.free(x_prev);
-    simdCopy(x_prev, x);
+    root.copySimd(x_prev, x);
 
     // Row-plane charge state: the dynamic current and the charge ring
     // [cur, prev, prev2, prev3]. Slot 0 takes the charge of each converged
@@ -269,13 +231,13 @@ pub fn simulate(
         ckt.eval(x, 0);
         // A flat q(0) history makes every divided difference vanish, so LTE
         // control runs from the first step.
-        simdCopy(q_hist[1], ckt.q_vec[0..n]);
-        simdCopy(q_hist[2], ckt.q_vec[0..n]);
-        simdCopy(q_hist[3], ckt.q_vec[0..n]);
+        root.copySimd(q_hist[1], ckt.q_vec[0..n]);
+        root.copySimd(q_hist[2], ckt.q_vec[0..n]);
+        root.copySimd(q_hist[3], ckt.q_vec[0..n]);
         if (n_qt > 0) {
             lteSnap(ckt, qt_hist[1], lte_zero, lte_rows);
-            simdCopy(qt_hist[2], qt_hist[1]);
-            simdCopy(qt_hist[3], qt_hist[1]);
+            root.copySimd(qt_hist[2], qt_hist[1]);
+            root.copySimd(qt_hist[3], qt_hist[1]);
         }
     }
     // The LTE history: per state when the tape is live, per row otherwise.
@@ -350,6 +312,7 @@ pub fn simulate(
         .i_prev = i_prev,
         .q_prev2 = q_hist[2],
         .a_vals = a_vals,
+        .q_cur = {},
         .has_charge = has_charge,
     }, options), probes);
 
@@ -419,6 +382,7 @@ pub fn simulate(
             .q_prev = q_hist[1],
             .i_prev = i_prev,
             .q_prev2 = q_hist[2],
+            .q_cur = {},
             .a_vals = a_vals,
             .has_charge = has_charge,
         };
@@ -441,7 +405,7 @@ pub fn simulate(
         ckt.clearRejectAt();
         const nr = converger.run(ckt, ws, trial, t_dev, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
-            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure retries the step
+            else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure retries the step
         };
         st.attempts += 1;
         st.nr_iters += nr.iterations;
@@ -460,7 +424,7 @@ pub fn simulate(
                     "tran-stats: DT UNDERFLOW (newton) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
                     .{ t, dt, steps, st.attempts, st.nr_iters },
                 );
-                return .{ .completed = false, .steps = steps, .t_final = t };
+                return false;
             }
             continue;
         }
@@ -502,7 +466,7 @@ pub fn simulate(
             // the next residual all see q(trial).
             // `q_fresh`: the converger's `updateStates` already stamped them.
             if (!ckt.q_fresh) ckt.evalQ(trial, t_dev);
-            simdCopy(q_hist[0], ckt.q_vec[0..n]);
+            root.copySimd(q_hist[0], ckt.q_vec[0..n]);
             if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
             // Taken before the ring rotation below.
             const lh = lte_hist.*;
@@ -532,7 +496,7 @@ pub fn simulate(
                             "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
                             .{ t, dt, steps, st.attempts, st.nr_iters },
                         );
-                        return .{ .completed = false, .steps = steps, .t_final = t };
+                        return false;
                     }
                     continue;
                 }
@@ -632,7 +596,7 @@ pub fn simulate(
         if (has_charge and ckt.has_state_q) {
             ckt.evalQ(cur, t);
             integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
-            simdCopy(q_hist[1], ckt.q_vec[0..n]);
+            root.copySimd(q_hist[1], ckt.q_vec[0..n]);
             if (n_qt > 0) {
                 lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
                 integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
@@ -678,8 +642,8 @@ pub fn simulate(
         );
     }
 
-    if (cur.ptr != x.ptr) simdCopy(x, cur);
-    return .{ .completed = t >= options.t_stop or atStop(t, options.t_stop), .steps = steps, .t_final = t };
+    if (cur.ptr != x.ptr) root.copySimd(x, cur);
+    return t >= options.t_stop or atStop(t, options.t_stop);
 }
 
 /// ngspice's end test (dctran.c:503, AlmostEqualUlps(t, tfinal, 100)): a
@@ -711,7 +675,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const x_op = ctx.x_op;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    simdCopy(x, x_op);
+    root.copySimd(x, x_op);
 
     // The recording is the published result, so it lives in the results
     // arena and `data` is borrowed below. A `.op <time>` snapshot publishes
@@ -728,7 +692,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer if (!kept) wf.deinit();
     errdefer if (kept) wf.deinit();
     const sim = try simulate(ctx.circuit, x, ctx.probes, &wf, opts, scratch);
-    if (!sim.completed) return error.TimestepTooSmall;
+    if (!sim) return error.TimestepTooSmall;
     // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
     if (opts.snapshot) {
         const names = try root.probeNames(ctx, null);

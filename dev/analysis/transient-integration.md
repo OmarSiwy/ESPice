@@ -459,7 +459,7 @@ Open:
 | Phase | Solver doc | Impl |
 |---|---|---|
 | Per-step Newton on $G + \alpha C$ (numeric refactor when $\alpha$ changes) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md) | `src/solver/direct.zig` via `converger.run` + `TranHook` |
-| Refactor bypass across steps at constant $\alpha$ (linear circuits) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`, value compare) | `converger.Options.matrix_sig`, `direct.Solver.factor` |
+| Refactor bypass across steps at constant $\alpha$ (linear circuits) | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (value compare) | `direct.Solver.factor` |
 | Newton gates / JFNK per step | [newton-raphson-convergence.md](../solvers/newton-raphson-convergence.md) | `src/solver/converger.zig` |
 | GPU level-set refactor (not implemented) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | none |
 

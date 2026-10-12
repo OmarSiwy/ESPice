@@ -73,7 +73,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     var wf = try tran.Waveform.init(scratch, n_probes, tran.initialCapacity(opts.tran));
     defer wf.deinit();
     const sim = try tran.simulate(ctx.circuit, x, probes[0..n_probes], &wf, opts.tran, scratch);
-    if (!sim.completed) return error.TransientFailed;
+    if (!sim) return error.TransientFailed;
 
     const re = try scratch.alloc(f64, 2 * np);
     defer scratch.free(re);

@@ -1,5 +1,5 @@
 //! Matrix-free restarted GMRES(m) with optional right preconditioning, for
-//! the PSS monodromy and QPSS Krylov solves. All workspace is allocated by
+//! JFNK (`converger.jfnk`) and the PSS monodromy and QPSS Krylov solves. All workspace is allocated by
 //! `init`; `solve` allocates nothing. Background:
 //! dev/solvers/monodromy-krylov.md.
 

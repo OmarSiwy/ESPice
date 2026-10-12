@@ -207,7 +207,7 @@ per LTE-limited timestep.
 |---|---|---|
 | One-time factorization of $(C + \gamma G)$ (R-MATEX) | [klu-pipeline.md](../solvers/klu-pipeline.md), [gilbert-peierls-lu.md](../solvers/gilbert-peierls-lu.md), [btf-permutation.md](../solvers/btf-permutation.md), [amd-ordering.md](../solvers/amd-ordering.md) | `src/solver/direct.zig`; small projected solves use `dense_lu.zig` |
 | Arnoldi triangular solves on GPU (level-scheduled or GMRES-replaced) | [gpu-sparse-lu.md](../solvers/gpu-sparse-lu.md) | requirement |
-| Automatic linear-circuit eligibility detection | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (`matrix_sig`) | target; current `.matex` selection is explicit |
+| Automatic linear-circuit eligibility detection | [circuit-matrix-specifics.md](../solvers/circuit-matrix-specifics.md) (value compare) | target; current `.matex` selection is explicit |
 
 ---
 

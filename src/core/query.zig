@@ -512,7 +512,8 @@ pub const HbLptv = struct {
     /// Output row: `.hbac`'s probe, `.hbxf`'s injection point, `.hbnoise`'s
     /// measured node.
     out_node: u32,
-    /// `.hbnoise v(a,b)` reference node; GROUND is single-ended.
+    /// `.hbnoise v(a,b)` reference node; GROUND is single-ended. `validate`
+    /// refuses any other on `.hbac` and `.hbxf`, which read v(out_node).
     out_neg: u32 = 0,
     /// Input (offset) frequency sweep.
     sweep: FreqSweep,

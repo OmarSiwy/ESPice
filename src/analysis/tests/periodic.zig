@@ -116,7 +116,7 @@ const PacTests = struct {
 const PnoiseTests = struct {
     const impl = @import("../pss/pnoise.zig");
     const NoiseSource = impl.NoiseSource;
-    const sourcePsd = impl.test_access.sourcePsd;
+    const sourcePsd = impl.sourcePsd;
     const std = @import("std");
 
     const q_electron = 1.602176634e-19;
@@ -153,22 +153,12 @@ const PssTests = struct {
     const impl = @import("../pss/pss.zig");
     const Options = @import("core").query.Pss;
     const krylov_threshold = impl.test_access.krylov_threshold;
-    const simdCopy = impl.test_access.simdCopy;
-    const simdZero = impl.test_access.simdZero;
     const std = @import("std");
     const testing = std.testing;
 
     test "pss: small systems solve dense, large ones with Krylov" {
         try testing.expect(krylov_threshold > 10);
         try testing.expect(krylov_threshold <= 100);
-    }
-
-    test "pss: simdCopy round-trip" {
-        var a = [_]f64{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-        var b: [10]f64 = undefined;
-        simdZero(&b);
-        simdCopy(&b, &a);
-        for (0..10) |i| try testing.expectEqual(a[i], b[i]);
     }
 
     const analysis = @import("../types.zig");
@@ -421,6 +411,20 @@ const MhbTests = struct {
         try testing.expect(has(spec, 3000)); // the tone's own 6th step
         try testing.expect(has(spec, 3300)); // 4·500 + 1300, order 2 + 1
         try testing.expect(!has(spec, 3800)); // 5·500 + 1300, order 3 + 1
+    }
+
+    test "mhb spectrum: every allocation failure frees what it made (#202)" {
+        // Two tones with commensurate products, so lines merge and the
+        // tables are smaller than the candidate list.
+        const run = struct {
+            fn f(gpa: std.mem.Allocator) !void {
+                const spec = try impl.spectrum(gpa, &.{ 1000, 2000 }, &.{ 2, 2 }, 0, 1);
+                defer spec.deinit(gpa);
+                try testing.expectEqual(@as(usize, 7), spec.freqs.len);
+                try testing.expectEqual(@as(usize, 14), spec.mix.len);
+            }
+        }.f;
+        try testing.checkAllAllocationFailures(testing.allocator, run, .{});
     }
 
     test "mhb spectrum: commensurate products merge onto the lowest order" {

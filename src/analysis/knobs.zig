@@ -11,6 +11,10 @@ const direct = @import("solver").direct;
 /// `Circuit.knobs`, so nothing below the facade reads the environment. Each
 /// field names its variable; dev/ notes cite them.
 pub const Knobs = struct {
+    /// `-Dlu-instrument`: `lu.stats`, `gpu_lu_bench` and `gpu_lu_threads`
+    /// are read; otherwise the facade leaves them unset.
+    pub const instrument = direct.instrument;
+
     newton: converger.Knobs = .{},
     lu: direct.Knobs = .{},
     /// `ESPICE_HB_TRACE`: trace harmonic-balance iterates.
@@ -28,8 +32,8 @@ pub const Knobs = struct {
     gpu_lu_nogather: bool = false,
     /// `ESPICE_GPU_LU_TAIL`: dense-tail columns (0 when unparsable).
     gpu_lu_tail: ?u32 = null,
-    /// `ESPICE_GPU_LU_BENCH`: time the device LU, stopping after this many
-    /// samples (0, or unparsable: never).
+    /// `ESPICE_GPU_LU_BENCH` (`-Dlu-instrument`): time the device LU,
+    /// stopping after this many samples (0, or unparsable: never).
     gpu_lu_bench: ?usize = null,
     /// `ESPICE_GPU_LU_THREADS`: host refactor threads the bench compares.
     gpu_lu_threads: u32 = 8,

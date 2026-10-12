@@ -1151,7 +1151,6 @@ fn knobsFromEnv() analysis.Knobs {
     if (env.get("ESPICE_SOLVER")) |s| k.newton.pin = @TypeOf(k.newton.pin).names.get(s) orelse .auto;
     k.newton.opdbg = env.on("ZP_OPDBG");
     k.newton.newton_debug = env.on("ZP_NEWTON_DEBUG");
-    k.lu.stats = env.on("ZP_LU_STATS");
     k.lu.no_bbd = env.on("ESPICE_NO_BBD");
     if (env.get("ESPICE_LU_PAR")) |v| k.lu.par = v.len > 0 and v[0] == '1';
     k.lu.par_stats = env.on("ESPICE_LU_PAR_STATS");
@@ -1162,8 +1161,11 @@ fn knobsFromEnv() analysis.Knobs {
     k.gpu_lu_check = env.on("ESPICE_GPU_LU_CHECK");
     k.gpu_lu_nogather = env.on("ESPICE_GPU_LU_NOGATHER");
     if (env.get("ESPICE_GPU_LU_TAIL")) |v| k.gpu_lu_tail = std.fmt.parseInt(u32, v, 10) catch 0;
-    if (env.get("ESPICE_GPU_LU_BENCH")) |v| k.gpu_lu_bench = std.fmt.parseInt(usize, v, 10) catch 0;
-    if (env.get("ESPICE_GPU_LU_THREADS")) |v| k.gpu_lu_threads = std.fmt.parseInt(u32, v, 10) catch 8;
+    if (analysis.Knobs.instrument) {
+        k.lu.stats = env.on("ZP_LU_STATS");
+        if (env.get("ESPICE_GPU_LU_BENCH")) |v| k.gpu_lu_bench = std.fmt.parseInt(usize, v, 10) catch 0;
+        if (env.get("ESPICE_GPU_LU_THREADS")) |v| k.gpu_lu_threads = std.fmt.parseInt(u32, v, 10) catch 8;
+    }
     if (env.get("ESPICE_GPU_STATS")) |v| k.gpu_stats = if (std.mem.eql(u8, v, "phases")) .phases else .on;
     k.gpu_block = analysis.Knobs.parseBlock(env.get("ESPICE_GPU_BLOCK"));
     k.gpu_eval_check = env.on("ESPICE_GPU_EVAL_CHECK");

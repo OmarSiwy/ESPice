@@ -161,6 +161,20 @@ breaks §2.1 names its target rung and the plan block that moves it.
 - **Proof**: RESIDUE, per call. Not gated, because the helper's symbol name (`foldVector__func_N`) changes between builds. **P6:** probe the helper body by a stable name (an `export` wrapper in `tests/codegen.zig` around `foldAssoc` itself), or inline it, then gate. Hot-path standing: `normInf` runs once per Newton iteration (`converger.zig:217`), O(n), against an O(fill) factor.
 - **Revisit when**: stdpp exposes the fold body by a stable name, or a profile shows the call.
 
+### S12: companion Newton hook
+
+- **Axis**: policy: the integration method of a companion step, fixed at build time (pss, envelope: the plain trapezoid) or chosen per step (tran: BE, trap, gear-2).
+- **Evidence**: three hooks with the same `vals`/`diagAt` and two with the same trapezoid assemble and accept (tran `TranHook`, pss `PeriodHook`, envelope `Trap`; ponytail audit P9, #195).
+- **Owner**: tran (`src/analysis/tran/integrator.zig` `Hook`).
+- **Rung**: 5, `Hook(comptime fixed: ?Method)`. A fixed method compiles its `companionAt` arm straight in and reads only `c.ag0`, as the hand hooks did; `fixed == null` keeps tran's per-step `inline else` switch, which it already had (rung 4 for data that varies per step). A runtime method field everywhere (rung 4) would add a switch to pss's and envelope's per-iteration assemble. `Hook(.trapezoidal)` is one type, so pss and envelope now share one `converger.run` instantiation. tran_noise keeps its own hook: it stamps with `eval`, not `evalNewton`, and adds the noise injection.
+- **Cost**:
+  - residue: envelope's hook gains a `has_charge` test per `assemble`/`vals`/`diagAt` (its old hook had none; envelope builds the hook only with charge, so the test is always true). pss and tran: none expected (probe below)
+  - change radius for one more fixed-method analysis: one `Hook(m)` alias
+  - interface weight: `Hook`, `accept`
+- **Drills passed**: none drilled
+- **Proof**: pending the first build: `tests/codegen.zig` `gen_hook_trap_assemble=hand_hook_trap_assemble` (pss's `PeriodHook`), `gen_hook_step_assemble=hand_hook_step_assemble` (tran's `TranHook`) and `gen_hook_diag_at=hand_hook_diag_at`, wired into `zig build test` (`test-codegen`). Written without a build (agent builds were refused on 2026-10-18); the gate reports the verdicts.
+- **Revisit when**: tran_noise moves to `evalNewton`, or a fixed analysis needs a two-step method.
+
 ## Drills
 
 Taken from the open GitHub issues (2026-10-17). Radii are counted on the code

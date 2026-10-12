@@ -12,6 +12,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - ngspice dialect: a device field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice refuses it, instead of being dropped; `r=10%3` reads 10, as ngspice reads it, instead of 1 (#200).
 - A raw or `.print` file that takes many plots (a `.step` sweep) is written once and replaced at the end of the run, instead of being copied and replaced per plot, which made a sweep of P plots write O(P²) bytes; until then the old file stays whole (#179).
 - An unbraced `key=` value continues past a blank before `%` or `\` as it does before `*` or `/`: `r=7k %4k` is 3k, where it read 7k and refused `%4k` (#180).
+- API: an `.hbxf` or `.hbac` query with a `v(a,b)` reference (`out_neg`) is refused as invalid, as its netlist card is, instead of silently reading v(a) (#201).
+- A multi-tone `.hb` that runs out of memory while building its spectrum reports `OutOfMemory` instead of freeing a table twice (#202).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
 - `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).

@@ -16,9 +16,11 @@ pub const Quantum = enum(u8) {
     completion,
 };
 
+/// Stack reserved per analysis thread, and per `ParEval` worker.
+pub const stack_size: usize = 512 * 1024 * 1024;
+
 /// Per-worker settings, fixed at `init`.
 pub const Options = struct {
-    stack_size: usize = 512 * 1024 * 1024,
     /// Park on `.nonlinear` checkpoints too. Only `.op` does; other queries
     /// park at outer boundaries and only poll cancellation inside Newton.
     report_nonlinear: bool = false,
@@ -99,7 +101,7 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
                         defer self.mutex.lockUncancelable(self.io);
                         self.main();
                     } else {
-                        self.thread = std.Thread.spawn(.{ .stack_size = self.options.stack_size }, main, .{self}) catch |err| {
+                        self.thread = std.Thread.spawn(.{ .stack_size = stack_size }, main, .{self}) catch |err| {
                             self.state = .created;
                             return err;
                         };

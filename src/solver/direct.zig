@@ -25,11 +25,23 @@ const z = @import("stdpp");
 
 const Allocator = std.mem.Allocator;
 
+/// `-Dlu-instrument`: the `ZP_LU_STATS` census is compiled in.
+pub const instrument = sparse_lu.instrument;
+
+/// Threshold partial pivoting keeps the diagonal while
+/// |diag| >= pivot_tol * column max (KLU's default 0.001).
+pub const pivot_tol: f64 = 1e-3;
+/// A re-pivot whose L plus U outgrows this multiple of the fresh factor's
+/// restarts on the previous pivots (`SparseLu.fill_cap`).
+const repivot_fill_cap: f64 = 3;
+/// A BBD factor whose `Bbd.growth` exceeds this is probed: a refined solve
+/// each way (A and A^T) whose scaled residual misses `probe_ratio_max`
+/// demotes it to the general LU, else every solve on it is refined (#136).
+/// Below it the certificate's ratio stayed under 0.04 (`residual_tests.zig`).
+const bbd_refine_growth: f64 = 1e3;
+
 /// Pivoting knobs. The defaults are the production settings.
 pub const Params = struct {
-    /// Threshold partial pivoting keeps the diagonal while
-    /// |diag| >= pivot_tol * column max (KLU's default 0.001).
-    pivot_tol: f64 = 1e-3,
     /// A refactor whose reused pivot falls below this fraction of its column
     /// max fails, forcing a full re-pivoting factor. 0 disables the monitor.
     /// Permissive for Newton, whose residual gate absorbs an inexact step
@@ -40,15 +52,6 @@ pub const Params = struct {
     /// threshold-pivoting bar (`replayHolds`). dev/solvers/gilbert-peierls-lu.md,
     /// "Two replay thresholds".
     refactor_growth_limit: f64 = 1e-12,
-    /// A re-pivot whose L plus U outgrows this multiple of the fresh
-    /// factor's restarts on the previous pivots (`SparseLu.fill_cap`).
-    repivot_fill_cap: f64 = 3,
-    /// A BBD factor whose `Bbd.growth` exceeds this is probed: a refined
-    /// solve each way (A and A^T) whose scaled residual misses
-    /// `probe_ratio_max` demotes it to the general LU, else every solve on
-    /// it is refined (#136). Below it the certificate's ratio stayed under
-    /// 0.04 (`residual_tests.zig`).
-    bbd_refine_growth: f64 = 1e3,
 };
 
 /// Refinement steps after a BBD solve at most (LAPACK dgerfs' ITMAX).
@@ -63,6 +66,7 @@ const probe_ratio_max = 1;
 /// (`espice.zig`); the solver reads no environment.
 pub const Knobs = struct {
     /// `ZP_LU_STATS`: print the BBD census and every full factor's fill.
+    /// Read only under `-Dlu-instrument` (`instrument`).
     stats: bool = false,
     /// `ESPICE_NO_BBD`: force the flat LU, for A/B comparisons.
     no_bbd: bool = false,
@@ -158,7 +162,7 @@ pub const Solver = struct {
     fn initLu(self: *Self) !SparseLu {
         if (self.q.len == 0) self.q = try computeOrdering(self.gpa, self.n, self.col_ptr, self.row_idx);
         assert(self.q.len == self.n);
-        var lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.row_idx, self.q);
+        var lu = try SparseLu.init(self.gpa, self.n, self.col_ptr, self.q);
         lu.stats = self.knobs.stats;
         return lu;
     }
@@ -179,18 +183,18 @@ pub const Solver = struct {
 
     fn initBbd(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?num.BbdInfo, knobs: Knobs) !?BbdEng {
         const info = bbd orelse {
-            if (knobs.stats) std.debug.print("lu-census: no BbdInfo\n", .{});
+            if (instrument and knobs.stats) std.debug.print("lu-census: no BbdInfo\n", .{});
             return null;
         };
         if (knobs.no_bbd) return null;
         const eng = BbdEng.init(gpa, n, col_ptr, row_idx, info, .{}) catch |err| switch (err) {
             error.NotApplicable => {
-                if (knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init declined (NotApplicable)\n", .{});
+                if (instrument and knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init declined (NotApplicable)\n", .{});
                 return null;
             },
             error.OutOfMemory => return error.OutOfMemory,
         };
-        if (knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init accepted\n", .{});
+        if (instrument and knobs.stats) std.debug.print("lu-census: BbdInfo emitted; Bbd.init accepted\n", .{});
         return eng;
     }
 
@@ -218,7 +222,7 @@ pub const Solver = struct {
     /// schedules the BBD block factors and the multicore refactor; `.{}`
     /// runs serially. A structured engine that meets a singular pivot is
     /// freed for good and the call retries on the general LU, as is a BBD
-    /// factor that fails its refinement probe (`Params.bbd_refine_growth`).
+    /// factor that fails its refinement probe (`bbd_refine_growth`).
     /// `SingularMatrix` leaves no usable factorization, and neither does
     /// `OutOfMemory`: solve only after a successful `factor`. Asserts that
     /// `vals` holds at least the pattern's nnz entries.
@@ -268,13 +272,13 @@ pub const Solver = struct {
             // Thomas has no pivoting, so an MNA branch row's zero diagonal
             // fails here. ponytail: vsource-bearing ladders lose the
             // tridiagonal speed; a 2x2-block-pivot Thomas would recover it.
-            .tri => |*tri| if (tri.factor(vals, self.params.pivot_tol)) |_| {
+            .tri => |*tri| if (tri.factor(vals, pivot_tol)) |_| {
                 self.factored = true;
                 return;
             } else |_| try self.demote(),
             // A singular block, or a Schur reduction too unstable to refine.
             .bbd => |*eng| if (eng.factorWithExecution(vals, execution)) |_| {
-                if (!(eng.growth > self.params.bbd_refine_growth) or self.probeBbd(eng, vals)) {
+                if (!(eng.growth > bbd_refine_growth) or self.probeBbd(eng, vals)) {
                     self.factored = true;
                     return;
                 }
@@ -282,9 +286,9 @@ pub const Solver = struct {
             } else |_| try self.demote(),
         }
         const lu = &self.engine.lu;
-        lu.fill_cap = self.params.repivot_fill_cap;
+        lu.fill_cap = repivot_fill_cap;
         lu.keep_min = self.params.refactor_growth_limit;
-        const ptol = self.params.pivot_tol;
+        const ptol = pivot_tol;
         if (self.factored) {
             if (self.refactorLu(vals, execution)) |_| {
                 if (try self.replayHolds(vals)) return;
@@ -314,7 +318,7 @@ pub const Solver = struct {
     /// probed; check on the host after the sync if that path needs it.
     fn replayHolds(self: *Self, vals: []const f64) !bool {
         const lu = &self.engine.lu;
-        const ptol = self.params.pivot_tol;
+        const ptol = pivot_tol;
         if (!(ptol > 0)) return true;
         if (maxMultiplier(lu) <= 1 / ptol) return true;
         const n: usize = self.n;
@@ -389,7 +393,7 @@ pub const Solver = struct {
     /// The BBD solve, refined against `vcopy` when the factor's Schur
     /// growth says it may not be backward stable (#136).
     fn solveBbd(self: *Self, eng: *BbdEng, comptime transpose: bool, x: []f64) void {
-        if (!(eng.growth > self.params.bbd_refine_growth) or self.vcopy.len == 0) {
+        if (!(eng.growth > bbd_refine_growth) or self.vcopy.len == 0) {
             if (transpose) eng.solveTInPlace(x) else eng.solveInPlace(x);
             return;
         }

@@ -430,7 +430,7 @@ The decks have no oracle, so they live outside `tests/fixtures`. The
 runner checks agreement against ngspice and VACASK as `bench` does, and
 `--timing-in-depth` now prints each query's Newton split: device eval
 (including the GPU wait), matrix load, LU factor, solve, and the step
-update, with n and the LU fill. `ZP_LU_STATS=1` adds the structural census
+update, with n and the LU fill. `ZP_LU_STATS=1` on a `-Dlu-instrument` build adds the structural census
 of `dev/solvers/gpu-lu.md` E1.
 
 Setup: RTX 4060 Laptop, i9-14900HX, `96807bd` rebased on `3559781`,

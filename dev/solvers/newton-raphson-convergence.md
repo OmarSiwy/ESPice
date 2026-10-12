@@ -80,7 +80,7 @@ standard JFNK choice: derived, not source-verified; Kelley's texts are the
 paywalled reference). GMRES($m$): build the Arnoldi relation $J V_j =
 V_{j+1} \bar H_j$ by modified Gram-Schmidt, minimize $\|\beta e_1 - \bar
 H_j y\|_2$ via Givens rotations, $\Delta x = V_j y$; restart at $m$ (ours:
-$m = 30$). Convergence is governed by the spectrum of the *preconditioned*
+one cycle of $m = \min(30, n)$ per Newton step, on `gmres.Gmres`). Convergence is governed by the spectrum of the *preconditioned*
 operator; MNA matrices are non-normal and badly scaled (volts vs amps), so
 unpreconditioned GMRES stalls: preconditioning options, strongest first:
 
@@ -106,8 +106,8 @@ flips, iteration-1 veto, per-row delta-x, residual gate. One acceptance
 implementation means the direct and Krylov paths cannot drift.
 
 - **Direct Newton** computes $\Delta x$ by factor+solveNeg (KLU-style, see
-  `klu-pipeline.md`), with the `matrix_sig` factor-once shortcut for
-  constant Jacobians. This is the default: numeric refactor at
+  `klu-pipeline.md`); `Solver.factor`'s value compare skips the factor
+  for constant Jacobians. This is the default: numeric refactor at
   $O(\mathrm{nnz}(L{+}U))$ is far cheaper than JFNK's per-Krylov-vector
   full circuit evals at every size we bench.
 - **JFNK** is never chosen automatically. `converger.run` uses it only
@@ -133,7 +133,7 @@ newton(ckt, x, opts, hook):
   for iter in 0..max_iter:
     hook.assemble(ckt, x, t)                    # J into vals, F into rhs
     if gmin > 0: vals[diag] += gmin; rhs += gmin * x
-    if matrix_sig miss: slv.factor(vals)        # refactor / full fallback
+    slv.factor(vals)                            # bypass / refactor / full fallback
     slv.solveNeg(rhs, dx)                       # dx = -J \ F
     if max|dx| > clamp: dx *= clamp / max|dx|   # direction-preserving
     # ---- shared acceptance (ngspice order) ----
@@ -160,16 +160,14 @@ pnjlim(vnew, vold, vt, vcrit):                  # ngspice devsup.c, exact
     floor = (vold > 0) ? -vold - 1 : 2*vold - 1
     if vnew < floor: vnew = floor; limited = true
 
-jfnk(ckt, x, opts, hook):                       # GMRES(m), right-precond
+jfnk(ckt, x, opts, hook):                       # one GMRES(m) cycle, right-precond
   for iter in 0..max_iter:
     F0 = residual(x) (+ gmin*x);  build diag precond;  try slv.factor (precond)
-    r = M^-1 * (-F0); beta = ||r||; v0 = r/beta; g = beta*e1
-    for j in 0..m:
-      w = M^-1 * (F(x + eps*v_j) - F0)/eps      # one residual eval per vector
-      modified Gram-Schmidt against v_0..v_j -> h_*j, v_{j+1}
-      Givens-rotate column j; update g; break if |g_{j+1}| small
-    back-solve H y = g;  dx = V y;  damp
-    finalizeStep(...)  # SAME gates as newton
+    if ||M^-1 F0|| < abstol and residual gate: accept or iterate
+    dx = Gmres.solve(op, -F0, x0 = 0, ||F0 + J dx|| <= abstol/10, no restart)
+      # op.matvec(v) = (F(x + eps*v) - F0)/eps, one residual eval per vector
+      # op.precond = M^-1 (LU, or Jacobi under jfnk-nolu); dx = M^-1 V y
+    updateAndNorm(x, dx);  limits;  SAME gates as newton
 ```
 
 ## 4. GPU

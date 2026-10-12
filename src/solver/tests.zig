@@ -1238,7 +1238,7 @@ const PivotTests = struct {
         const row_idx = [_]u32{ 0, 1, 0, 1 };
         const vals = [_]f64{ 0, 1, 1, 1 };
         var q = identity(2);
-        var lu = try SparseLu.init(gpa, 2, &col_ptr, &row_idx, &q);
+        var lu = try SparseLu.init(gpa, 2, &col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &col_ptr, &row_idx, &vals, 0);
         for (lu.udiag) |d| try testing.expect(d != 0);
@@ -1253,7 +1253,7 @@ const PivotTests = struct {
         var csc = DenseCsc(4).from(a);
         const nnz = csc.nnz();
         var q = identity(4);
-        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         lu.fill_cap = 1;
         lu.keep_min = 1e-12;
@@ -2423,7 +2423,7 @@ const LaneLuTests = struct {
         const gpa = testing.allocator;
         const csc = DenseCsc(2).from(.{ .{ 4, 1 }, .{ 1, 3 } });
         var q = identity(2);
-        var base = try sparse_lu.SparseLu.init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var base = try sparse_lu.SparseLu.init(gpa, 2, &csc.col_ptr, &q);
         defer base.deinit(gpa);
         try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
 
@@ -2445,7 +2445,7 @@ const LaneLuTests = struct {
         };
         const csc = DenseCsc(4).from(a);
         var q = identity(4);
-        var base = try sparse_lu.SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var base = try sparse_lu.SparseLu.init(gpa, 4, &csc.col_ptr, &q);
         defer base.deinit(gpa);
         try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
 
@@ -2493,7 +2493,7 @@ const LaneLuTests = struct {
         for (patterns) |a0| {
             const base_csc = DenseCsc(4).from(a0);
             var q = identity(4);
-            var base = try sparse_lu.SparseLu.init(gpa, 4, &base_csc.col_ptr, base_csc.row_idx[0..base_csc.nnz()], &q);
+            var base = try sparse_lu.SparseLu.init(gpa, 4, &base_csc.col_ptr, &q);
             defer base.deinit(gpa);
             try base.factor(gpa, &base_csc.col_ptr, base_csc.row_idx[0..base_csc.nnz()], base_csc.vals[0..base_csc.nnz()], 1e-3);
             const nnz = base_csc.nnz();
@@ -2552,7 +2552,7 @@ const LaneLuTests = struct {
         const a0 = [3][3]f64{ .{ 5, 1, 0 }, .{ 1, 5, 1 }, .{ 0, 1, 5 } };
         const csc = DenseCsc(3).from(a0);
         var q = identity(3);
-        var base = try sparse_lu.SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var base = try sparse_lu.SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer base.deinit(gpa);
         try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         const nnz = csc.nnz();
@@ -2619,7 +2619,7 @@ const LaneLuTests = struct {
         const csc = DenseCsc(5).from(a0);
         const nnz = csc.nnz();
         var q = identity(5);
-        var base = try sparse_lu.SparseLu.init(gpa, 5, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        var base = try sparse_lu.SparseLu.init(gpa, 5, &csc.col_ptr, &q);
         defer base.deinit(gpa);
         try base.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
 
@@ -2668,7 +2668,7 @@ const LaneLuTests = struct {
         const row_idx = [_]u32{ 0, 1, 0, 1, 2 };
         const vals = [_]f64{ 4, 1, 1, 3, 0 };
         var q = identity(3);
-        var base = try sparse_lu.SparseLu.init(gpa, 3, &col_ptr, &row_idx, &q);
+        var base = try sparse_lu.SparseLu.init(gpa, 3, &col_ptr, &q);
         defer base.deinit(gpa);
         try base.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
         try testing.expect(base.void_col[2]);
@@ -2892,7 +2892,7 @@ const SparseTests = struct {
 
     /// L + U entries after `factor` under column order `q`.
     fn luFill(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, vals: []const f64, q: []const u32) !usize {
-        var lu = try SparseLu.init(gpa, n, col_ptr, row_idx, q);
+        var lu = try SparseLu.init(gpa, n, col_ptr, q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, col_ptr, row_idx, vals, 1e-3);
         return lu.li.items.len + lu.ui.items.len;
@@ -3004,7 +3004,7 @@ const SparseTests = struct {
         const b = [3]f64{ 1, 5, 9 };
         const csc = DenseCsc(3).from(a);
         var q = identity(3);
-        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         try checkSolve(3, a, b, &lu);
@@ -3037,7 +3037,7 @@ const SparseTests = struct {
         // The hub (node 0) is deferred: not factored first.
         try testing.expect(q[0] != 0);
 
-        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         try checkSolve(4, a, b, &lu);
@@ -3054,7 +3054,7 @@ const SparseTests = struct {
         const b = [3]f64{ 0, 0, 5 };
         const csc = DenseCsc(3).from(a);
         var q = identity(3);
-        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         try checkSolve(3, a, b, &lu);
@@ -3081,7 +3081,7 @@ const SparseTests = struct {
 
         const csc = DenseCsc(4).from(a);
         var q = identity(4);
-        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
 
@@ -3115,7 +3115,7 @@ const SparseTests = struct {
         };
         var csc = DenseCsc(4).from(a);
         var q = identity(4);
-        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 4, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         try checkSolve(4, a, .{ 1, 2, 3, 4 }, &lu);
@@ -3140,7 +3140,7 @@ const SparseTests = struct {
         const row_idx = [9]u32{ 0, 1, 2, 0, 1, 2, 0, 1, 2 };
         const vals = [9]f64{ 2, 0, 1, 0, 0, 0, 1, 0, 3 };
         var q = identity(3);
-        var lu = try SparseLu.init(gpa, 3, &col_ptr, &row_idx, &q);
+        var lu = try SparseLu.init(gpa, 3, &col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &col_ptr, &row_idx, &vals, 1e-3);
         try testing.expect(lu.void_col[1]);
@@ -3171,9 +3171,9 @@ const SparseTests = struct {
             .{ 2, 1, 1, 0 }, // off-diagonal coupling activates: must re-pivot
         };
         for ([_][2]u32{ .{ 0, 1 }, .{ 1, 0 } }) |q| {
-            var lu = try SparseLu.init(gpa, 2, &col_ptr, &row_idx, &q);
+            var lu = try SparseLu.init(gpa, 2, &col_ptr, &q);
             defer lu.deinit(gpa);
-            var fresh = try SparseLu.init(gpa, 2, &col_ptr, &row_idx, &q);
+            var fresh = try SparseLu.init(gpa, 2, &col_ptr, &q);
             defer fresh.deinit(gpa);
             for (updates) |vals| {
                 try lu.factor(gpa, &col_ptr, &row_idx, &.{ 2, 0, 0, 0 }, 1e-3);
@@ -3200,7 +3200,7 @@ const SparseTests = struct {
         const a = [2][2]f64{ .{ 1, 1 }, .{ 1, 1 } };
         const csc = DenseCsc(2).from(a);
         var q = identity(2);
-        var lu = try SparseLu.init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 2, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try testing.expectError(
             error.SingularMatrix,
@@ -3218,7 +3218,7 @@ const SparseTests = struct {
         const b = [3]f64{ 1, 2, 3 };
         const csc = DenseCsc(3).from(a);
         var q = identity(3);
-        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
 
@@ -3243,7 +3243,7 @@ const SparseTests = struct {
         const singular = [_]f64{ 1, 1, 1, 1, 1 };
         const good = [_]f64{ 4, 1, 1, 3, 2 };
         const q3 = identity(3);
-        var lu = try SparseLu.init(gpa, 3, &col_ptr, &row_idx, &q3);
+        var lu = try SparseLu.init(gpa, 3, &col_ptr, &q3);
         defer lu.deinit(gpa);
         try testing.expectError(error.SingularMatrix, lu.factor(gpa, &col_ptr, &row_idx, &singular, 1e-3));
         for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
@@ -3265,9 +3265,9 @@ const SparseTests = struct {
         };
         const csc = DenseCsc(3).from(a);
         var q = identity(3);
-        var lu1 = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu1 = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer lu1.deinit(gpa);
-        var lu2 = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu2 = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer lu2.deinit(gpa);
         try lu1.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         try lu2.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
@@ -3356,7 +3356,7 @@ const SparseTests = struct {
         var ws = order.Ws.init(ws_buf);
         try order.order(n, &col_ptr, row_idx.items, &q, &ws);
 
-        var lu = try SparseLu.init(gpa, n, &col_ptr, row_idx.items, &q);
+        var lu = try SparseLu.init(gpa, n, &col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &col_ptr, row_idx.items, vals.items, 1e-3);
         try testing.expect(lu.panels.items.len > 0);
@@ -3428,9 +3428,9 @@ const SparseTests = struct {
         defer gpa.free(ws_buf);
         var ws = order.Ws.init(ws_buf);
         try order.order(n, &col_ptr, row_idx.items, &q, &ws);
-        var a = try SparseLu.init(gpa, n, &col_ptr, row_idx.items, &q);
+        var a = try SparseLu.init(gpa, n, &col_ptr, &q);
         defer a.deinit(gpa);
-        var b = try SparseLu.init(gpa, n, &col_ptr, row_idx.items, &q);
+        var b = try SparseLu.init(gpa, n, &col_ptr, &q);
         defer b.deinit(gpa);
 
         var failed: u32 = 0;
@@ -3499,7 +3499,7 @@ const SparseTests = struct {
         };
         var csc = DenseCsc(3).from(a);
         var q = identity(3);
-        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
@@ -3519,7 +3519,7 @@ const SparseTests = struct {
         for (lu.w) |v| try testing.expectEqual(@as(f64, 0), v);
 
         // The full factor that follows must match a fresh solver's.
-        var fresh = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var fresh = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer fresh.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         try fresh.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
@@ -3539,7 +3539,7 @@ const SparseTests = struct {
         };
         var csc = DenseCsc(3).from(a);
         var q = identity(3);
-        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 3, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
         try testing.expectEqualSlices(u32, &.{ 1, 0, 2 }, lu.pinv);
@@ -3557,9 +3557,9 @@ const SparseTests = struct {
         var csc = DenseCsc(4).from(a);
         const nnz = csc.nnz();
         var q = identity(4);
-        var capped = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        var capped = try SparseLu.init(gpa, 4, &csc.col_ptr, &q);
         defer capped.deinit(gpa);
-        var free = try SparseLu.init(gpa, 4, &csc.col_ptr, csc.row_idx[0..nnz], &q);
+        var free = try SparseLu.init(gpa, 4, &csc.col_ptr, &q);
         defer free.deinit(gpa);
         capped.fill_cap = 1;
         try capped.factor(gpa, &csc.col_ptr, csc.row_idx[0..nnz], csc.vals[0..nnz], 1e-3);
@@ -3584,7 +3584,7 @@ const SparseTests = struct {
         const a = [2][2]f64{ .{ 3, 1 }, .{ 1, 2 } };
         const csc = DenseCsc(2).from(a);
         var q = identity(2);
-        var lu = try SparseLu.init(gpa, 2, &csc.col_ptr, csc.row_idx[0..csc.nnz()], &q);
+        var lu = try SparseLu.init(gpa, 2, &csc.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, &csc.col_ptr, csc.row_idx[0..csc.nnz()], csc.vals[0..csc.nnz()], 1e-3);
 
@@ -3601,7 +3601,7 @@ const SparseTests = struct {
     test "SparseLu construction releases storage on every allocation failure" {
         try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, struct {
             fn run(gpa: Allocator) !void {
-                var lu = try SparseLu.init(gpa, 3, &.{ 0, 3, 6, 9 }, &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 }, &.{ 0, 1, 2 });
+                var lu = try SparseLu.init(gpa, 3, &.{ 0, 3, 6, 9 }, &.{ 0, 1, 2 });
                 defer lu.deinit(gpa);
             }
         }.run, .{});
@@ -3794,7 +3794,7 @@ const LuKernelTests = struct {
         defer gpa.free(rhs);
         var rng = std.Random.DefaultPrng.init(0x5EED);
         const r = rng.random();
-        var lu = try SparseLu.init(gpa, c.n, c.col_ptr, c.row_idx, c.q);
+        var lu = try SparseLu.init(gpa, c.n, c.col_ptr, c.q);
         defer lu.deinit(gpa);
         values(c, r, vals);
         try lu.factor(gpa, c.col_ptr, c.row_idx, vals, 1e-3);
@@ -3845,9 +3845,9 @@ const LuKernelTests = struct {
         defer gpa.free(vals);
         var rng = std.Random.DefaultPrng.init(0xB17);
         const r = rng.random();
-        var a = try SparseLu.init(gpa, c.n, c.col_ptr, c.row_idx, c.q);
+        var a = try SparseLu.init(gpa, c.n, c.col_ptr, c.q);
         defer a.deinit(gpa);
-        var b = try SparseLu.init(gpa, c.n, c.col_ptr, c.row_idx, c.q);
+        var b = try SparseLu.init(gpa, c.n, c.col_ptr, c.q);
         defer b.deinit(gpa);
         values(c, r, vals);
         try a.factor(gpa, c.col_ptr, c.row_idx, vals, 1e-3);
@@ -3899,7 +3899,7 @@ const LuKernelTests = struct {
         var csc = DenseCsc(4).from(a);
         var q = identity(4);
         const c: Case = .{ .n = 4, .col_ptr = &csc.col_ptr, .row_idx = csc.row_idx[0..csc.nnz()], .q = &q };
-        var lu = try SparseLu.init(gpa, 4, c.col_ptr, c.row_idx, &q);
+        var lu = try SparseLu.init(gpa, 4, c.col_ptr, &q);
         defer lu.deinit(gpa);
         try lu.factor(gpa, c.col_ptr, c.row_idx, csc.vals[0..csc.nnz()], 1e-3);
         try testing.expect(lu.scaled_pivot[0]);

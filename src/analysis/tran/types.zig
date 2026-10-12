@@ -158,14 +158,3 @@ pub const Waveform = struct {
         self.* = undefined;
     }
 };
-
-/// Outcome of one transient integration.
-pub const SimResult = struct {
-    /// True when t reached t_stop; false when dt fell below dt_min or
-    /// max_steps ran out.
-    completed: bool,
-    /// Accepted steps, the t = 0 point not counted.
-    steps: u32,
-    /// Time of the last accepted point, in seconds.
-    t_final: f64,
-};

@@ -12,7 +12,6 @@
 //! and dev/analysis/transient-noise.md.
 const std = @import("std");
 const root = @import("../types.zig");
-const simdCopy = root.copySimd;
 const converger = @import("solver").converger;
 const dense_lu = @import("solver").dense_lu;
 const numerics = @import("core").numerics;
@@ -25,6 +24,7 @@ pub const Options = @import("core").query.TranNoise;
 const Waveform = @import("types.zig").Waveform;
 
 /// Xorshift64 PRNG with a Box-Muller normal draw: deterministic per seed.
+// ponytail: stays in-tree; std.Random's stream isn't stable across Zig releases and seeded output must be (#196).
 const Xorshift64 = struct {
     state: u64,
 
@@ -401,7 +401,7 @@ pub fn simulate(
         a_vals = try ws.ensureAVals(ckt.nnz);
         q_prev = try allocator.alloc(f64, n);
         ckt.eval(x, 0);
-        simdCopy(q_prev, ckt.q_vec[0..n]);
+        root.copySimd(q_prev, ckt.q_vec[0..n]);
     }
 
     var rng = Xorshift64.init(options.seed);
@@ -442,11 +442,11 @@ pub fn simulate(
         // As in tran.simulate, devices must see the point this attempt
         // targets (§9.10 `$abstime`); a rejected step retries from here.
         ckt.setSimState(.{ .t = t + dt, .dt = dt, .kind = .tran, .initial_step = steps == 0 });
-        simdCopy(x_try, x);
+        root.copySimd(x_try, x);
         const tn_nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         const nr = converger.run(ckt, ws, x_try, t + dt, tn_nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
-            else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure retries the step
+            else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure retries the step
         };
 
         if (!nr.converged) {
@@ -461,7 +461,7 @@ pub fn simulate(
             // The planes are one iterate behind the converged point. Charges
             // only: the next assemble restamps the other planes.
             ckt.evalQ(x_try, t + dt);
-            simdCopy(q_prev, ckt.q_vec[0..n]);
+            root.copySimd(q_prev, ckt.q_vec[0..n]);
         }
 
         if (cov) |*c| {
@@ -470,7 +470,7 @@ pub fn simulate(
             try onoise.?.append(allocator, @sqrt(@max(c.variance(options.out_node, options.out_neg), 0)));
         }
 
-        simdCopy(x, x_try);
+        root.copySimd(x, x_try);
         t = if (land) options.t_break.? else t + dt;
         steps += 1;
 
@@ -493,7 +493,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    simdCopy(x, x_op);
+    root.copySimd(x, x_op);
 
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);
@@ -539,7 +539,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 // Private implementation access for the analysis test suite.
 pub const test_access = if (@import("builtin").is_test) .{
     .Xorshift64 = Xorshift64,
-    .simdCopy = simdCopy,
     .Flicker = Flicker,
     .Covariance = Covariance,
 } else {};

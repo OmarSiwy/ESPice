@@ -14,6 +14,8 @@ const Knobs = @import("knobs.zig").Knobs;
 
 const K = solver.lu_kernels;
 const direct = solver.direct;
+/// `-Dlu-instrument`: compiles the `ESPICE_GPU_LU_BENCH` harness (`Bench`).
+const instrument = direct.instrument;
 
 const artifacts = @import("gompute_kernels");
 const backend: ?gompute.Backend = if (artifacts.has_cuda) .cuda else if (artifacts.has_hip) .hip else null;
@@ -70,7 +72,6 @@ pub const GpuLu = struct {
     dev_gen: ?u32 = null,
     /// A driver call failed: the rest of the query solves on the host.
     poisoned: bool = false,
-    check: bool,
     knobs: Knobs,
     bench: ?*Bench = null,
     st: struct { calls: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0 } = .{},
@@ -130,11 +131,18 @@ pub const GpuLu = struct {
             .d_rhs = d_rhs,
             .d_y = d_y,
             .d_dx = d_dx,
-            .check = knobs.gpu_lu_check,
             .knobs = knobs,
         };
-        if (knobs.gpu_lu_bench) |limit| self.bench = Bench.init(gpa, &self.k_ref, limit, knobs.gpu_lu_threads) catch null;
+        if (instrument) {
+            if (knobs.gpu_lu_bench) |limit| self.bench = Bench.init(gpa, &self.k_ref, limit, knobs.gpu_lu_threads) catch null;
+        }
         return self;
+    }
+
+    /// `bench`, or a comptime null without `-Dlu-instrument`, so no `Bench`
+    /// code is compiled.
+    inline fn benchOf(self: *const Self) ?*Bench {
+        return if (instrument) self.bench else null;
     }
 
     fn pinnedF64(k: *Raw, n: usize) ![]f64 {
@@ -147,11 +155,11 @@ pub const GpuLu = struct {
     /// (`Circuit.attachLu(null)`).
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
-        if (self.knobs.gpu_stats != .off or self.check or self.bench != null) std.debug.print(
+        if (self.knobs.gpu_stats != .off or self.knobs.gpu_lu_check or self.benchOf() != null) std.debug.print(
             "gpu-lu: calls={d} refactors={d} peels={d} epochs={d} F={d} check_mismatches={d}{s}\n",
-            .{ self.st.calls, self.st.refactors, self.st.peels, self.st.epochs, self.flops, self.st.mismatches, if (self.check) "" else " (unchecked)" },
+            .{ self.st.calls, self.st.refactors, self.st.peels, self.st.epochs, self.flops, self.st.mismatches, if (self.knobs.gpu_lu_check) "" else " (unchecked)" },
         );
-        if (self.bench) |b| b.deinit(self);
+        if (self.benchOf()) |b| b.deinit(self);
         self.dropTables();
         const k = &self.k_ref;
         for ([_][]f64{ self.pin_a, self.pin_rhs, self.pin_dx }) |p| k.freePinned(@as([*]u8, @ptrCast(p.ptr))[0 .. @max(p.len, 1) * 8]);
@@ -176,17 +184,16 @@ pub const GpuLu = struct {
         self.idx = &.{};
     }
 
-    /// `Circuit.deviceSolve`'s body: dx = -A^-1 rhs on the device, with
-    /// `need` false when the caller knows the matrix is unchanged. Null
+    /// `Circuit.deviceSolve`'s body: dx = -A^-1 rhs on the device. Null
     /// when the device did not try (no general LU yet, a declined epoch,
     /// factors it does not hold); false when it tried and the host's exact
     /// factor and solve must run: a device pivot failure, which clears
     /// `slv.factored`, so the host goes straight to the full factor its own
     /// refactor would have fallen back to. A driver error warns once and
     /// returns null for the rest of the query.
-    pub fn solve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) ?bool {
+    pub fn solve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64) ?bool {
         if (self.poisoned) return null;
-        return self.trySolve(slv, vals, rhs, dx, need) catch |e| {
+        return self.trySolve(slv, vals, rhs, dx) catch |e| {
             std.debug.print("warning: device LU off for this query ({s})\n", .{@errorName(e)});
             self.poisoned = true;
             self.dev_gen = null;
@@ -194,7 +201,7 @@ pub const GpuLu = struct {
         };
     }
 
-    fn trySolve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64, need: bool) !?bool {
+    fn trySolve(self: *Self, slv: *direct.Solver, vals: []const f64, rhs: []const f64, dx: []f64) !?bool {
         if (comptime backend == null) return null;
         const lu = slv.sparse() orelse return null;
         if (!slv.factored or !lu.factored) return null;
@@ -202,7 +209,7 @@ pub const GpuLu = struct {
         if (lu.tv.items.len != 0) return null;
         if (self.epoch != lu.pattern_epoch) try self.load(slv);
         if (self.declined) return null;
-        const refactor = need and !slv.unchanged(vals);
+        const refactor = !slv.unchanged(vals);
         if (!refactor and self.dev_gen != slv.gen) return null;
         if (refactor) for (lu.void_slots.items) |p| {
             if (vals[p] != 0) return null;
@@ -211,7 +218,7 @@ pub const GpuLu = struct {
         const n = self.n;
         self.st.calls += 1;
         self.stamp +%= 1;
-        const t0 = if (self.bench != null) nowNs() else 0;
+        const t0 = if (self.benchOf() != null) nowNs() else 0;
         if (refactor) {
             @memcpy(self.pin_a, vals[0..self.nnz]);
             try self.d_a.uploadAtAsync(self.pin_a.ptr, 0, self.nnz * 8, &self.stream);
@@ -219,13 +226,13 @@ pub const GpuLu = struct {
         @memcpy(self.pin_rhs, rhs[0..n]);
         try self.d_rhs.uploadAtAsync(self.pin_rhs.ptr, 0, n * 8, &self.stream);
         try self.d_sync.fillAsync(0, K.sync_header * 4, &self.stream);
-        if (self.bench) |b| try b.ev[0].record(&self.stream);
+        if (self.benchOf()) |b| try b.ev[0].record(&self.stream);
         var tab = self.tab;
         var stamp = self.stamp;
         if (refactor) try self.k_ref.launchOn(&self.stream, .{ .x = n }, .{ .x = K.refactor_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_a.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
         });
-        if (self.bench) |b| try b.ev[1].record(&self.stream);
+        if (self.benchOf()) |b| try b.ev[1].record(&self.stream);
         // Heads: one block per run (an empty grid is not a launch).
         if (tab.l_chunks > 0) try self.k_lh.launchOn(&self.stream, .{ .x = tab.l_chunks }, .{ .x = K.solve_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_rhs.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
@@ -233,18 +240,18 @@ pub const GpuLu = struct {
         try self.k_lt.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_sync.argPtr(),
         });
-        if (self.bench) |b| try b.ev[2].record(&self.stream);
+        if (self.benchOf()) |b| try b.ev[2].record(&self.stream);
         try self.k_ut.launchOn(&self.stream, .{ .x = 1 }, .{ .x = K.solve_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_dx.argPtr(), self.d_sync.argPtr(),
         });
         if (tab.u_chunks > 0) try self.k_uh.launchOn(&self.stream, .{ .x = tab.u_chunks }, .{ .x = K.solve_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_y.argPtr(), self.d_dx.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
         });
-        if (self.bench) |b| try b.ev[3].record(&self.stream);
+        if (self.benchOf()) |b| try b.ev[3].record(&self.stream);
         try self.d_dx.downloadAtAsync(self.pin_dx.ptr, 0, n * 8, &self.stream);
         try self.d_sync.downloadAtAsync(self.pin_fail.ptr, 4, 4, &self.stream);
         try self.stream.synchronize();
-        const t1 = if (self.bench != null) nowNs() else 0;
+        const t1 = if (self.benchOf() != null) nowNs() else 0;
 
         if (std.mem.bytesToValue(u32, self.pin_fail[0..4]) != 0) {
             // The lowest failing step: every step below it matched the host,
@@ -262,8 +269,8 @@ pub const GpuLu = struct {
             self.dev_gen = slv.gen;
         }
         @memcpy(dx[0..n], self.pin_dx);
-        if (self.check and refactor) try self.checkAgainstHost(slv, rhs, dx);
-        if (self.bench) |b| if (refactor) try b.sample(self, slv, vals, rhs, t1 - t0);
+        if (self.knobs.gpu_lu_check and refactor) try self.checkAgainstHost(slv, rhs, dx);
+        if (self.benchOf()) |b| if (refactor) try b.sample(self, slv, vals, rhs, t1 - t0);
         return true;
     }
 
@@ -311,7 +318,7 @@ pub const GpuLu = struct {
         errdefer self.d_sync.free();
         try self.d_sync.fillAsync(0, @as(usize, tb.tab.syncLen()) * 4, &self.stream);
         self.stamp = 0;
-        if (self.bench != null) self.idx = try self.gpa.dupe(u32, tb.idx);
+        if (self.benchOf() != null) self.idx = try self.gpa.dupe(u32, tb.idx);
     }
 
     /// Whether an epoch of `flops` over `n` columns goes to the device. An
@@ -483,7 +490,7 @@ const Bench = struct {
                 chains[side] += mx;
             }
         }
-        std.debug.print("gpu-lu-bench: n={d} F={d} l_levels={d} u_levels={d} head_chain={d}+{d} tail={d} gather_cols={d} samples={d} threads={d} checked={d} mismatches={d} (median us)", .{ lu_ctx.n, lu_ctx.flops, t.l_levels, t.u_levels, chains[0], chains[1], t.n - t.t0, wide, b.s[0].items.len, b.threads, if (lu_ctx.check) lu_ctx.st.refactors else 0, lu_ctx.st.mismatches });
+        std.debug.print("gpu-lu-bench: n={d} F={d} l_levels={d} u_levels={d} head_chain={d}+{d} tail={d} gather_cols={d} samples={d} threads={d} checked={d} mismatches={d} (median us)", .{ lu_ctx.n, lu_ctx.flops, t.l_levels, t.u_levels, chains[0], chains[1], t.n - t.t0, wide, b.s[0].items.len, b.threads, if (lu_ctx.knobs.gpu_lu_check) lu_ctx.st.refactors else 0, lu_ctx.st.mismatches });
         for (&b.s, names) |*s, name| {
             std.mem.sort(f64, s.items, {}, std.sort.asc(f64));
             const m = if (s.items.len == 0) 0 else s.items[s.items.len / 2];

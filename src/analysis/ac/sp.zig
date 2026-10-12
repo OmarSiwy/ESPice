@@ -84,11 +84,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // Series z0 inside each ideal port source: the branch row gains −z0·i_br.
     if (!opts.net) for (ports) |port| if (!port.series_z0) fs.addDiagG(port.branch, -port.z0);
 
-    const axis = try scratch.alloc(f64, 2 * n_points);
-    defer scratch.free(axis);
-    const freqs = axis[0..n_points];
-    const omegas = axis[n_points..];
-    opts.sweep.fill(freqs, omegas);
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    defer freq.freeAxis(scratch, freqs);
 
     // One unit drive per port, every one solved against each factorization.
     const rhs = try scratch.alloc(f64, n_ports * nn);

@@ -208,12 +208,12 @@ pub const Circuit = struct {
         kcl_cert.check(self, hook, x, t, opts);
     }
 
-    /// `newton`'s device path: factors `vals` (when `need`) and solves
-    /// dx = -A^-1 rhs on the device. Null without a device LU; see
-    /// `GpuLu.solve` for true and false.
-    pub fn deviceSolve(self: *Circuit, slv: *direct.Solver, vals: []const f64, dx: []f64, need: bool) ?bool {
+    /// `newton`'s device path: factors `vals` and solves dx = -A^-1 rhs on
+    /// the device. Null without a device LU; see `GpuLu.solve` for true and
+    /// false.
+    pub fn deviceSolve(self: *Circuit, slv: *direct.Solver, vals: []const f64, dx: []f64) ?bool {
         const lu = self.lu orelse return null;
-        return lu.solve(slv, vals, self.rhs[0..self.n], dx, need);
+        return lu.solve(slv, vals, self.rhs[0..self.n], dx);
     }
 
     /// Returns the shared Newton/JFNK workspace, building it (and the

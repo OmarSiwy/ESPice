@@ -214,7 +214,7 @@ Two causes, measured on the dumped matrices:
 
 So `factor` also caps a re-pivot. `base_lu` is the L+U count of the last
 factor without a previous sequence. A re-pivot that grows past
-`fill_cap * base_lu` (`Params.repivot_fill_cap = 3`) is abandoned and redone
+`fill_cap * base_lu` (`direct.repivot_fill_cap = 3`) is abandoned and redone
 on the previous pivot sequence, taking every old pivot that is still
 nonzero and threshold-pivoting only where one is zero. That keeps the old
 fill. The refactor's growth monitor still checks the kept pivots, so the

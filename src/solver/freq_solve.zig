@@ -195,7 +195,7 @@ pub const FreqSolver = struct {
         // from the last ω) must pass the full factor's own threshold; at
         // the Newton default of 1e-12 a tape laid at ω = 0 replayed at
         // 1e6 left scaled residuals of 8e3 (#44).
-        slv.params.refactor_growth_limit = slv.params.pivot_tol;
+        slv.params.refactor_growth_limit = direct.pivot_tol;
         // Each ω's values are new; the bypass copy would be nnz2 f64s
         // (3.7 MB on sweep_opamp_wl_5000) that never match.
         slv.dropBypass();

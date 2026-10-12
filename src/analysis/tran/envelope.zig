@@ -7,60 +7,18 @@
 //! Cites Verilog-AMS LRM §9.10 and dev/analysis/mpde-envelope.md.
 const std = @import("std");
 const root = @import("../types.zig");
-const simdCopy = root.copySimd;
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
 
 /// `.envelope` query options, defined in core/query.zig.
 pub const Options = @import("core").query.Envelope;
 
-/// Outcome of one envelope run.
-pub const SimResult = struct {
-    /// True when t reached t_stop.
-    completed: bool,
-    /// Accepted outer steps; rejected (halved) attempts are not counted.
-    outer_steps: u32,
-    /// Time of the last envelope point, in seconds.
-    t_final: f64,
-    /// Rows written into the caller's buffer, the t = 0 row included.
-    n_points: u32,
-};
-
 /// Upper bound on envelope rows (core/validate.zig, which query validation shares).
 pub const maxPoints = @import("core").validate.envelopeMaxPoints;
 
 /// Trapezoidal charge history carried across every envelope step, coarse and
 /// fine alike (trapezoid is one-step, so dt may change between them).
-const Trap = struct {
-    q_prev: []f64,
-    i_prev: []f64,
-    /// q(x) from the last Newton assemble.
-    q_cur: []f64,
-    a_vals: []f64,
-    alpha: f64 = 0,
-
-    /// Companion residual alpha*(q - q_prev) - i_prev, matrix G + alpha*C.
-    pub fn assemble(self: Trap, ckt: *root.Circuit, x: []const f64, t: f64) void {
-        ckt.evalNewton(x, t);
-        const n: usize = ckt.n;
-        simdCopy(self.q_cur[0..n], ckt.q_vec[0..n]);
-        integrator.companionAt(.trapezoidal, true, ckt.rhs[0..n], ckt.q_vec[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
-    }
-    /// G + alpha*C rebuilt into `a_vals`, overwriting the previous return.
-    pub fn vals(self: Trap, ckt: *root.Circuit) []f64 {
-        ckt.combineGC(self.alpha, self.a_vals);
-        return self.a_vals;
-    }
-    /// One diagonal of G + alpha*C without materializing it (`Circuit.gcAt`).
-    pub fn diagAt(self: Trap, ckt: *root.Circuit, slot: u32) f64 {
-        return ckt.gcAt(self.alpha, slot);
-    }
-    /// Accepted step: i = alpha*(q - q_prev) - i_prev, then q_prev = q.
-    fn accept(self: Trap, n: usize) void {
-        integrator.companionAt(.trapezoidal, false, self.i_prev[0..n], self.q_cur[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.alpha, .ag2 = 0 });
-        simdCopy(self.q_prev[0..n], self.q_cur[0..n]);
-    }
-};
+const Trap = integrator.Hook(.trapezoidal);
 
 /// One step to absolute time t: a trapezoid step of length dt when the
 /// circuit has charge (`trap`), else a static solve. Returns convergence.
@@ -80,7 +38,7 @@ fn newtonAt(
     opts.max_iter = options.tol.itl4;
     const nr = if (trap) |tr| blk: {
         ckt.setSimState(.{ .t = t, .dt = dt, .kind = .tran });
-        tr.alpha = 2.0 / dt;
+        tr.c = .{ .ag0 = 2.0 / dt, .ag2 = 0 };
         break :blk converger.run(ckt, ws, x, t, opts, tr.*);
     } else blk: {
         // No charge: dt stays 0 and the step is static.
@@ -89,7 +47,7 @@ fn newtonAt(
     };
     const r = nr catch |err| switch (err) {
         error.QueryCancelled, error.OutOfMemory => return err,
-        else => converger.Result{ .converged = false, .iterations = 0, .max_dx = 0 }, // else: a numerical failure rejects the step
+        else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure rejects the step
     };
     if (!r.converged) {
         _ = ckt.stateCtl(.revert);
@@ -105,8 +63,9 @@ fn newtonAt(
 /// Envelope-following transient from `x` into the caller's `rows`:
 /// point-major rows [t, peak_p0, rms_p0, peak_p1, rms_p1, ...]. Asserts
 /// that `rows` holds at least maxPoints(options) * (1 + 2*probes.len)
-/// values. Returns error.EnvelopeDidNotConverge when a step fails at
-/// min_periods_per_step.
+/// values. Returns the rows written, the t = 0 row included, or
+/// error.EnvelopeDidNotConverge when a step fails at min_periods_per_step
+/// or `max_outer_steps` runs out before t_stop.
 pub fn simulate(
     ckt: *root.Circuit,
     x: []f64,
@@ -114,7 +73,7 @@ pub fn simulate(
     rows: []f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !SimResult {
+) !u32 {
     const n: usize = ckt.n;
     const t_carrier = options.t_carrier;
     const ncols = 1 + 2 * probes.len;
@@ -139,14 +98,17 @@ pub fn simulate(
     var trap_state: Trap = undefined;
     const trap: ?*Trap = if (ckt.has_charge) blk: {
         trap_state = .{
+            .method = {},
+            .c = .{ .ag0 = 0, .ag2 = 0 },
             .q_prev = ts[0..n],
             .i_prev = ts[n..][0..n],
             .q_cur = ts[2 * n ..][0..n],
             .a_vals = try ws.ensureAVals(ckt.nnz),
+            .has_charge = true,
         };
         // Exact at a DC operating point: q = q(x_op), no dynamic current.
         ckt.eval(x, 0);
-        simdCopy(trap_state.q_prev, ckt.q_vec[0..n]);
+        root.copySimd(trap_state.q_prev, ckt.q_vec[0..n]);
         @memset(trap_state.i_prev, 0);
         break :blk &trap_state;
     } else null;
@@ -176,11 +138,11 @@ pub fn simulate(
     while (t < options.t_stop and outer_steps < options.max_outer_steps) {
         if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
         attempts += 1;
-        simdCopy(x_outer_save, x);
+        root.copySimd(x_outer_save, x);
         ckt.storeState(outer_state);
         if (trap) |tr| {
-            simdCopy(q_save, tr.q_prev);
-            simdCopy(i_save, tr.i_prev);
+            root.copySimd(q_save, tr.q_prev);
+            root.copySimd(i_save, tr.i_prev);
         }
 
         const t_outer_step = @as(f64, @floatFromInt(periods_per_step)) * t_carrier;
@@ -225,11 +187,11 @@ pub fn simulate(
 
         if (!ok) {
             // The outer step was too aggressive: restore and retry shorter.
-            simdCopy(x, x_outer_save);
+            root.copySimd(x, x_outer_save);
             ckt.restoreState(outer_state);
             if (trap) |tr| {
-                simdCopy(tr.q_prev, q_save);
-                simdCopy(tr.i_prev, i_save);
+                root.copySimd(tr.q_prev, q_save);
+                root.copySimd(tr.i_prev, i_save);
             }
             if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
             periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
@@ -263,12 +225,8 @@ pub fn simulate(
         }
     }
 
-    return .{
-        .completed = t >= options.t_stop,
-        .outer_steps = outer_steps,
-        .t_final = t,
-        .n_points = outer_steps + 1,
-    };
+    if (!(t >= options.t_stop)) return error.EnvelopeDidNotConverge;
+    return outer_steps + 1;
 }
 
 /// Steps from t_start through `duration` seconds at `dt_coarse`, the last
@@ -312,14 +270,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    simdCopy(x, x_op);
+    root.copySimd(x, x_op);
 
     // `data` is the Result, so it lives on the results arena.
     const ncols = 1 + 2 * ctx.probes.len;
     const data = try a.alloc(f64, @as(usize, maxPoints(opts)) * ncols);
     errdefer a.free(data);
-    const st = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
-    if (!st.completed) return error.EnvelopeDidNotConverge;
+    const npoints: usize = try simulate(ctx.circuit, x, ctx.probes, data, opts, scratch);
 
     // probeNames uses the deck's labels, which also name branch-current rows.
     const labels = try root.probeNames(ctx, null);
@@ -330,7 +287,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         names[2 + p * 2] = try std.fmt.allocPrint(a, "rms({s})", .{l});
     }
 
-    const npoints: usize = st.n_points;
     return .{
         .plotname = "Envelope Analysis",
         .varnames = names,
