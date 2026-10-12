@@ -760,6 +760,20 @@ const MhbTests = struct {
         try testing.expect(!has(spec, 3800)); // 5·500 + 1300, order 3 + 1
     }
 
+    test "mhb spectrum: every allocation failure frees what it made (#202)" {
+        // Two tones with commensurate products, so lines merge and the
+        // tables are smaller than the candidate list.
+        const run = struct {
+            fn f(gpa: std.mem.Allocator) !void {
+                const spec = try impl.spectrum(gpa, &.{ 1000, 2000 }, &.{ 2, 2 }, 0, 1);
+                defer spec.deinit(gpa);
+                try testing.expectEqual(@as(usize, 7), spec.freqs.len);
+                try testing.expectEqual(@as(usize, 14), spec.mix.len);
+            }
+        }.f;
+        try testing.checkAllAllocationFailures(testing.allocator, run, .{});
+    }
+
     test "mhb spectrum: commensurate products merge onto the lowest order" {
         const a = testing.allocator;
         const spec = try impl.spectrum(a, &.{ 1000, 2000 }, &.{ 2, 2 }, 0, 1);

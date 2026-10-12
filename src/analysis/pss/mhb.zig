@@ -126,30 +126,40 @@ pub fn spectrum(gpa: std.mem.Allocator, tones: []const f64, nharms: []const u16,
             return a.f < b.f or (a.f == b.f and a.idx < b.idx);
         }
     }.lt);
-    const freqs = try gpa.alloc(f64, c.len);
+    // A run of candidates within 1e-14 relative of its head is one line.
+    const runEnd = struct {
+        fn f(cs: []const Cand, head: usize) usize {
+            var end = head + 1;
+            while (end < cs.len and cs[end].f - cs[head].f <= 1e-14 * cs[end].f) end += 1;
+            return end;
+        }
+    }.f;
+    // Counted first, so both tables are allocated at their final size: two
+    // shrinking reallocs could not both be undone when the second failed
+    // after the first had moved (#202).
+    var lines: usize = 0;
+    var head: usize = 0;
+    while (head < c.len) : (lines += 1) head = runEnd(c, head);
+    const freqs = try gpa.alloc(f64, lines);
     errdefer gpa.free(freqs);
-    const mix = try gpa.alloc(i16, c.len * nt);
+    const mix = try gpa.alloc(i16, lines * nt);
     errdefer gpa.free(mix);
     var m: usize = 0;
-    var head: usize = 0;
-    while (head < c.len) {
+    head = 0;
+    while (head < c.len) : (m += 1) {
+        const end = runEnd(c, head);
         var best = head;
-        var end = head + 1;
-        while (end < c.len and c[end].f - c[head].f <= 1e-14 * c[end].f) : (end += 1) {
-            const a = c[end];
+        for (head + 1..end) |j| {
+            const a = c[j];
             const b = c[best];
-            if (a.order < b.order or (a.order == b.order and (!a.mixed and b.mixed or (a.mixed == b.mixed and a.idx < b.idx)))) best = end;
+            if (a.order < b.order or (a.order == b.order and (!a.mixed and b.mixed or (a.mixed == b.mixed and a.idx < b.idx)))) best = j;
         }
         freqs[m] = c[best].f;
         @memcpy(mix[m * nt ..][0..nt], mixes.items[c[best].idx * nt ..][0..nt]);
-        m += 1;
         head = end;
     }
-    return .{
-        .tones = @intCast(nt),
-        .freqs = try gpa.realloc(freqs, m),
-        .mix = try gpa.realloc(mix, m * nt),
-    };
+    std.debug.assert(m == lines);
+    return .{ .tones = @intCast(nt), .freqs = freqs, .mix = mix };
 }
 
 /// The IDFT/DFT pair between a spectrum block (nf = 2m-1 reals) and nt
