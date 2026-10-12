@@ -236,6 +236,9 @@ pub fn validate(query: requests.Query, n: u32) !void {
             if (o.method != .nlp) _ = try elements(&.{ bands, n, bands, n, 4 });
         },
         .hbac, .hbxf, .hbnoise => |o| {
+            // A `v(a,b)` reference is `.hbnoise`'s alone: `.hbac` and `.hbxf`
+            // read v(out_node), and their cards refuse one (#201).
+            if (query != .hbnoise and o.out_neg != 0) return error.InvalidQueryOptions;
             try validate(.{ .hb = o.hb() }, n);
             const bands = 2 * @as(usize, o.n_sidebands) + 1;
             _ = try elements(&.{ bands, n, bands, n, 4 });

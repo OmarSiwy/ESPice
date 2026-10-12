@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- API: an `.hbxf` or `.hbac` query with a `v(a,b)` reference (`out_neg`) is refused as invalid, as its netlist card is, instead of silently reading v(a) (#201).
 - A multi-tone `.hb` that runs out of memory while building its spectrum reports `OutOfMemory` instead of freeing a table twice (#202).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).

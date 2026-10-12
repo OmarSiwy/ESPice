@@ -19,6 +19,18 @@ test "query boundary rejects nonfinite values and nonterminating sweeps" {
     try validate(.{ .temp = .{ .t_start = -40, .t_stop = -10 } }, 4);
 }
 
+test "query boundary refuses a v(a,b) reference on .hbxf and .hbac (#201)" {
+    const t = std.testing;
+    const lptv: requests.HbLptv = .{ .f0 = 1e3, .out_node = 1, .out_neg = 2, .sweep = .{ .f_start = 10, .f_stop = 100 } };
+    try t.expectError(error.InvalidQueryOptions, validate(.{ .hbxf = lptv }, 4));
+    try t.expectError(error.InvalidQueryOptions, validate(.{ .hbac = lptv }, 4));
+    // `.hbnoise` measures v(a,b), and a single-ended `.hbxf` still passes.
+    try validate(.{ .hbnoise = lptv }, 4);
+    var single = lptv;
+    single.out_neg = 0;
+    try validate(.{ .hbxf = single }, 4);
+}
+
 test "query boundary checks derived frequencies, dimensions and nested controls" {
     const t = std.testing;
     const invalid = [_]requests.Query{
