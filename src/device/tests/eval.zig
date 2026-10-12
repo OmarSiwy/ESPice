@@ -694,6 +694,48 @@ test "mutable evaluation captures per-instance data without GPU residency" {
     try std.testing.expectEqual(@as(f64, -3), typed.instances[1].first_value);
 }
 
+test "systf: the vtable names every $systf call, so the host can refuse it; such a device stays off the GPU" {
+    // #197: before ABI 29 the host could not see these calls, and a release
+    // build evaluated `inst.systf.?` on a null binding (validateHost checks
+    // it only in Debug).
+    const D = struct {
+        pub const contract_abi: u32 = contract.abi_version;
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const systf_calls = [_]contract.Systf{ .{ .name = "$probe" }, .{ .name = "$note", .tok = 7 } };
+        pub const Model = struct {};
+        pub const Instance = struct {
+            systf: ?*const contract.SystfHost = null,
+        };
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const v = x[0].sub(x[1]);
+            return contract.rows(@This(), S, .{ v, v.neg() });
+        }
+    };
+    comptime impl.checkHost(D);
+    const vt = deviceVtable(D, "m");
+    try std.testing.expectEqual(@as(usize, 2), vt.systf_calls.len);
+    try std.testing.expectEqualStrings("$probe", vt.systf_calls[0].name);
+    try std.testing.expectEqualStrings("$note", vt.systf_calls[1].name);
+    try std.testing.expectEqual(@as(u32, 7), vt.systf_calls[1].tok);
+    try std.testing.expectEqual(impl.test_access.GpuRefusal.systf, comptime impl.test_access.gpuRefusal(D).?);
+    // A device that calls none lists none.
+    const R = struct {
+        pub const contract_abi: u32 = contract.abi_version;
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        pub const Instance = struct {};
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const v = x[0].sub(x[1]);
+            return contract.rows(@This(), S, .{ v, v.neg() });
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 0), deviceVtable(R, "r").systf_calls.len);
+}
+
 test "permuteInPlace: moves every row to dst[k], cycles and fixed points alike" {
     var prng = std.Random.DefaultPrng.init(0x9e37);
     const r = prng.random();

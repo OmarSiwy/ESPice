@@ -170,6 +170,13 @@ prints at the accepted points too, not per Newton iteration, and
 `$monitor` does not print (VerA warns W0850). The built-in models keep
 their display tasks silent.
 
+A system function or task that no standard defines, such as
+`$my_monitor(V(out))`, is a VPI system function (LRM §12.32): its meaning
+comes from a VPI application. VerA warns W0852 naming it. ESPice loads no
+VPI application yet, so an instance of a module that calls one is an error,
+`UnregisteredSystf`, naming the call. A task call is refused too, even
+though nothing reads its value.
+
 When a model does not compile, VerA's diagnostics (file, line, error code)
 print and the deck fails. An instance parameter the module does not
 declare, or a card with the wrong number of nodes, is an error

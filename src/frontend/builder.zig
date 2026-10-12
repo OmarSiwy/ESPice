@@ -545,6 +545,13 @@ pub const NetBuilder = struct {
             const dev = self.nl.device(e);
             const t = loadedType(b.lib, dev) orelse continue;
             const vt = b.lib.vtable(t);
+            // LRM 12.32: a `$name` the compiler left to a VPI application. No
+            // application is loaded (#197), and the LRM fixes no value for an
+            // unregistered one, so refuse the instance rather than invent one.
+            if (vt.systf_calls.len != 0) {
+                if (!@import("builtin").is_test) std.log.err("{s}: module '{s}' calls `{s}`: no VPI application registered (LRM 12.32), so its value is unknown; see #198", .{ dev.name, vt.name, vt.systf_calls[0].name });
+                return error.UnregisteredSystf;
+            }
 
             const mblob = try arena.alignedAlloc(u8, .@"16", vt.model_size);
             vt.init_model(mblob.ptr);

@@ -1082,11 +1082,19 @@ pub fn ProtoStore(comptime D: type) type {
         const Self = @This();
 
         /// Stages one instance. The rows live on `staging_gpa`, never the
-        /// caller's allocator. On failure no column grows.
+        /// caller's allocator. On failure no column grows. Binds the host's
+        /// §12.32 application into `Instance.systf` when D calls one, and
+        /// asserts there is one: `contract.validateHost` checks the binding
+        /// only in Debug, and generated code unwraps it in every mode.
         pub fn append(self: *Self, model: D.Model, instance: D.Instance, nodes: [n_u]u32) !void {
+            var inst = instance;
+            if (comptime @hasDecl(D, "systf_calls") and D.systf_calls.len != 0) {
+                inst.systf = VpiHost(D).systf(&model);
+                std.debug.assert(inst.systf != null);
+            }
             try self.models.append(staging_gpa, model);
             errdefer _ = self.models.pop();
-            try self.instances.append(staging_gpa, instance);
+            try self.instances.append(staging_gpa, inst);
             errdefer _ = self.instances.pop();
             try self.nodes.append(staging_gpa, nodes);
         }
@@ -2433,7 +2441,9 @@ fn isVera(comptime D: type) bool {
 ///   evaluation, unless the status latch is their only eval write
 ///   (`statusOnlyMutable`);
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
-///   `limiter_previous` the host advances on its own Instance copy.
+///   `limiter_previous` the host advances on its own Instance copy;
+/// - devices with `systf_calls`, whose `Instance.systf` is a host function
+///   pointer (LRM §12.32) a GPU thread cannot call.
 ///
 /// `State` without `limit` that VerA does not declare `.path_latch` (the
 /// `.history` class: switches, delay lines, Laplace and pole filters) is
@@ -2456,11 +2466,12 @@ fn gpuEligible(comptime D: type) bool {
 
 /// Why `gpuEligible` turns D down, one tag per rule above in order. The
 /// inventory test in tests/eval.zig pins it per built-in model.
-const GpuRefusal = enum { mutable_eval, newton_history };
+const GpuRefusal = enum { mutable_eval, newton_history, systf };
 
 fn gpuRefusal(comptime D: type) ?GpuRefusal {
     if (@hasDecl(D, "mutable_eval") and D.mutable_eval and !statusOnlyMutable(D)) return .mutable_eval;
     if (@hasDecl(D, "advanceIteration") or @hasDecl(D, "checkConvergence")) return .newton_history;
+    if (@hasDecl(D, "systf_calls") and D.systf_calls.len != 0) return .systf;
     return null;
 }
 
@@ -2882,29 +2893,37 @@ fn CtlKernel(comptime D: type, comptime block_size: u32) type {
     };
 }
 
-/// What this simulator offers devices, checked by `contract.validateHost`.
-/// It supports Newton iteration hooks and mutable evaluation, and registers
-/// no VPI `$systf` functions (LRM §12.32), so a model that calls one fails
-/// to build instead of reading a null `Instance.systf` at run time.
-// ponytail: add `pub fn systf(*const Model) ?*const contract.SystfHost` when a
-// model needs one, and fill every partial (LRM §12.22.1).
-const VpiHost = struct {
-    pub const iteration_hooks = true;
-    /// The batch runs `setup` once before `initState` (after `.options tnom`
-    /// is on the card), and `reprep` reruns it after every parameter or
-    /// temperature write.
-    pub const calls_setup = true;
-    pub const mutable_eval = true;
-    /// Every small-signal matrix adds the device's `acDyn` terms
-    /// (`Hooks.ac_dyn`).
-    pub const calls_ac_dyn = true;
-};
+/// What this simulator offers D, checked by `contract.validateHost`: Newton
+/// iteration hooks, mutable evaluation, and the VPI application behind D's
+/// `$systf` calls (LRM §12.32).
+fn VpiHost(comptime D: type) type {
+    return struct {
+        pub const iteration_hooks = true;
+        /// The batch runs `setup` once before `initState` (after `.options tnom`
+        /// is on the card), and `reprep` reruns it after every parameter or
+        /// temperature write.
+        pub const calls_setup = true;
+        pub const mutable_eval = true;
+        /// Every small-signal matrix adds the device's `acDyn` terms
+        /// (`Hooks.ac_dyn`).
+        pub const calls_ac_dyn = true;
+        /// The application `ProtoStore.append` binds into `Instance.systf`.
+        /// ESPice loads none yet, so null: the host refuses such a device by
+        /// name before staging it (`DeviceVtable.systf_calls`), since the
+        /// LRM fixes no value for an unregistered systf.
+        // ponytail: null until a VPI application loads (#197, VerA's
+        // `analog_run` deviceCall/deviceOut); answer from it then.
+        pub fn systf(_: *const D.Model) ?*const contract.SystfHost {
+            return null;
+        }
+    };
+}
 
 /// Compile error unless this host provides everything D requires. The check
 /// lives here rather than in `contract.validate` because a device compiled to
 /// a `.so` cannot know which simulator will load it.
 pub fn checkHost(comptime D: type) void {
-    contract.validateHost(VpiHost, D);
+    contract.validateHost(VpiHost(D), D);
 }
 
 /// Exports D under the runtime device ABI (`arp_abi_version`,
@@ -2953,6 +2972,7 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             .proto_create = protoCreate,
             .proto_add = protoAdd,
             .unknown_names = &unknown_names,
+            .systf_calls = if (@hasDecl(D, "systf_calls")) &D.systf_calls else &.{},
         };
 
         const unknown_names: [n_u][]const u8 = blk: {
@@ -3043,6 +3063,10 @@ comptime {
                 } else gompute.exportRaw("arp_nop_" ++ decl_name, &placeholder);
             } else {
                 checkHost(D);
+                // A built-in has no `.hdl` card for the host to refuse by name.
+                if (@hasDecl(D, "systf_calls") and D.systf_calls.len != 0)
+                    @compileError("built-in model " ++ decl_name ++ " calls " ++ D.systf_calls[0].name ++
+                        ": no VPI application is registered (LRM 12.32), so its value is unknown; see #197");
                 if (@hasDecl(D, "eval")) {
                     const Export = struct {
                         fn get() callconv(.c) *const DeviceVtable {

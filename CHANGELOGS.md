@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- A Verilog-A instance whose module calls a user `$systf` function or task (LRM 12.32) is refused by name, `UnregisteredSystf`, since ESPice loads no VPI application; a release build used to call through a null binding at its first evaluation (#197).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
 - `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).

@@ -636,7 +636,9 @@ pub const GpuPayload = struct {
 //     `layoutHash` recurses into by-value struct fields (no layout moved);
 //     the ngspice-port junction models' Model PODs gain `gmin__`, their gmin
 //     default being `$simparam("gmin")` (#78).
-pub const abi_version: u32 = 28;
+// 29: `DeviceVtable.systf_calls`, the LRM 12.32 `$name` calls a device leaves
+//     to a VPI application, so the host can refuse one by name (#197).
+pub const abi_version: u32 = 29;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -673,6 +675,11 @@ pub const DeviceVtable = struct {
     /// internal nets, then the branch flows (`flowZ28...`, mangled `flow(`).
     /// Empty when the device does not say.
     unknown_names: []const []const u8 = &.{},
+    /// VerA's `systf_calls`: each `$name` call the device leaves to a VPI
+    /// application (LRM 12.32), one per source call. Every one calls through
+    /// `Instance.systf`, so the host must refuse an instance of a device
+    /// whose names no application registered before staging it.
+    systf_calls: []const contract.Systf = &.{},
 };
 
 /// Hash of every type that crosses the object boundary, the compiler
