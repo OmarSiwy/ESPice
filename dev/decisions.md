@@ -161,6 +161,20 @@ breaks §2.1 names its target rung and the plan block that moves it.
 - **Proof**: RESIDUE, per call. Not gated, because the helper's symbol name (`foldVector__func_N`) changes between builds. **P6:** probe the helper body by a stable name (an `export` wrapper in `tests/codegen.zig` around `foldAssoc` itself), or inline it, then gate. Hot-path standing: `normInf` runs once per Newton iteration (`converger.zig:217`), O(n), against an O(fill) factor.
 - **Revisit when**: stdpp exposes the fold body by a stable name, or a profile shows the call.
 
+### S12: VPI `$systf` application
+
+- **Axis**: plugin: the LRM §12.32 application behind each `$name` VerA leaves to a host (`contract.Systf`, W0852).
+- **Evidence**: VerA's contract requires a host binding for every device with `systf_calls`, and the owner wants VAMS modules and testbenches that call one to run (#197). Today there are no applications: `VpiHost(D).systf` returns null, and `NetBuilder.addDynDevices` refuses such an instance by name (`UnregisteredSystf`) from `DeviceVtable.systf_calls` (device ABI 29).
+- **Owner**: device. `VpiHost(D).systf` names the application, `ProtoStore.append` binds it into every staged `Instance.systf` and asserts it. The frontend owns the refusal.
+- **Rung**: 8, a function pointer in the Instance. VerA's contract fixes the shape (`SystfHost.call`), because a function pointer cannot be generic over the AD family. No device evaluates through it yet.
+- **Cost**:
+  - residue: none today. Once loading lands, one indirect call per `$systf` site per eval, on such devices only; `gpuRefusal` (`.systf`) keeps them on the host
+  - change radius for VPI loading: `VpiHost(D).systf`, a C-ABI forward in eval.zig (a Zig-ABI `SystfHost` cannot cross the `.so`), the loader, and the refusal (narrowed to unregistered names)
+  - interface weight: `DeviceVtable.systf_calls`
+- **Drills passed**: none drilled
+- **Proof**: n/a (cold, rung fixed by VerA's contract)
+- **Revisit when**: VPI loading lands (#197, VerA changes V1-V5 listed in dev/reviews/2026-10-18-systf-host.md), or VerA marks task calls (V1), when a task-position call becomes a no-op with a warning.
+
 ## Drills
 
 Taken from the open GitHub issues (2026-10-17). Radii are counted on the code
