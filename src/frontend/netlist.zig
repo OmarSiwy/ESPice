@@ -301,6 +301,9 @@ pub const Deck = struct {
     /// everything, as with no `.save` card or a `.save all`.
     saves: []const []const u8,
     foreign: []const Foreign,
+    /// `.options vpi="app.so"` paths as written (relative to the deck): VPI
+    /// applications to load (LRM 12.33, #197).
+    vpi_apps: []const []const u8 = &.{},
     /// `.meas` cards; their strings borrow the parse arena.
     measures: []const core.Measure,
     /// `.step` cards in deck order; the last varies fastest.
@@ -1004,6 +1007,7 @@ fn Reader(comptime S: type) type {
         mosra: ?Mosra = null,
         appendmodels: std.ArrayList(AppendModel) = .empty,
         foreign: std.ArrayList(Foreign) = .empty,
+        vpi_apps: std.ArrayList([]const u8) = .empty,
         measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
         /// `.data` and `.variation` blocks: first and one-past-last line.
@@ -1232,6 +1236,7 @@ fn Reader(comptime S: type) type {
                     .nodeset = try nodeValues(arena, r.nodeset_cards.items, nets),
                     .saves = if (r.save_all) &.{} else r.saves.items,
                     .foreign = r.foreign.items,
+                    .vpi_apps = r.vpi_apps.items,
                     .measures = r.measures.items,
                     .steps = r.steps.items,
                     .data = r.data.items,
@@ -1755,6 +1760,30 @@ fn Reader(comptime S: type) type {
             return args.items;
         }
 
+        /// A `.options` card that sets `vpi=` (ESPice's, #197): each
+        /// `vpi="app.so"` names a VPI application (LRM 12.33) for `vpi_apps`,
+        /// path case kept; the card's other options read as any `.options`.
+        fn readVpiOptions(r: *R, line: []const u8) Error!void {
+            var f = F.init(line);
+            _ = f.next(); // the card
+            var rest: std.ArrayList(u8) = .empty;
+            try rest.appendSlice(r.arena, ".options");
+            while (f.next()) |t| {
+                if (std.mem.eql(u8, t, "vpi")) {
+                    const eq = f.next() orelse return r.failed(line, error.ParseError);
+                    if (eq[0] != '=') return r.failed(line, error.ParseError);
+                    try r.vpi_apps.append(r.arena, r.pathOf(&f) catch |err| return r.failed(line, err));
+                    continue;
+                }
+                try rest.append(r.arena, ' ');
+                try rest.appendSlice(r.arena, t);
+            }
+            var g = F.init(rest.items);
+            _ = g.next();
+            const args = r.readArgs(&g) catch |err| return r.failed(line, err);
+            try r.config.append(r.arena, .{ .temp = false, .args = args, .line = r.written(line) });
+        }
+
         /// True for a `.step` directive line.
         fn isStep(line: []const u8) bool {
             var f = F.init(line);
@@ -1776,6 +1805,7 @@ fn Reader(comptime S: type) type {
             // schedule for an OS-level restore [CR .STORE]; the results do not
             // depend on it.
             if (c == .store) return std.log.warn("netlist: .store: checkpoints are not written; the run is not restartable", .{});
+            if (c == .options and setsKey(line, "vpi")) return r.readVpiOptions(line);
             const args = r.readArgs(&f) catch |err| return r.failed(line, err);
             switch (c) {
                 .step => try r.steps.append(r.arena, r.readStep(args) catch |err| return r.failed(line, err)),

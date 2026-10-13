@@ -71,7 +71,18 @@ pub const Options = struct {
     /// above 1 that is several threads at once, so the writer must
     /// serialize them. It must outlive the Problem.
     display: ?*std.Io.Writer = null,
+    /// VPI applications (LRM 12.33) to load before the deck's `.hdl` models,
+    /// as given; the deck may add more with `.options vpi=`. They need `vpi`.
+    vpi_apps: []const []const u8 = &.{},
+    /// The VPI host that loads them, which the espice executable supplies;
+    /// null in an embedding, where any application is `VpiUnavailable`.
+    /// It must outlive the Problem.
+    vpi: ?*const Vpi = null,
 };
+
+/// The VPI host interface (`Options.vpi`) and its errors.
+pub const Vpi = frontend.Library.Vpi;
+pub const VpiError = frontend.Library.VpiError;
 
 /// Why publication stopped (`Problem.output_error`): an encoder or file
 /// error from the output session (`publish`, `endStream`) or the Touchstone
@@ -185,8 +196,9 @@ pub const Problem = struct {
         self.library = try frontend.Library.init(allocator);
         errdefer self.library.deinit();
         self.library.toolchain = try toolchainFromEnv(a, options.hdl_toolchain);
+        self.library.vpi = options.vpi;
         const ast = try frontend.prepare(io, scratch, options.source, options.dialect, options.live_params);
-        try frontend.loadModels(io, &self.library, scratch, ast, self.origin);
+        try frontend.loadModels(io, &self.library, scratch, ast, self.origin, options.vpi_apps);
         timingLap(io, &lap, "frontend (source, parsing, HDL)");
         self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");

@@ -1082,19 +1082,16 @@ pub fn ProtoStore(comptime D: type) type {
         const Self = @This();
 
         /// Stages one instance. The rows live on `staging_gpa`, never the
-        /// caller's allocator. On failure no column grows. Binds the host's
-        /// §12.32 application into `Instance.systf` when D calls one, and
-        /// asserts there is one: `contract.validateHost` checks the binding
-        /// only in Debug, and generated code unwraps it in every mode.
+        /// caller's allocator. On failure no column grows. Asserts that a
+        /// device calling a §12.32 `$name` has its application bound
+        /// (`DeviceVtable.bind_systf`): `contract.validateHost` checks the
+        /// binding only in Debug, and generated code unwraps it in every mode.
         pub fn append(self: *Self, model: D.Model, instance: D.Instance, nodes: [n_u]u32) !void {
-            var inst = instance;
-            if (comptime @hasDecl(D, "systf_calls") and D.systf_calls.len != 0) {
-                inst.systf = VpiHost(D).systf(&model);
-                std.debug.assert(inst.systf != null);
-            }
+            if (comptime @hasDecl(D, "systf_calls") and D.systf_calls.len != 0)
+                std.debug.assert(instance.systf != null);
             try self.models.append(staging_gpa, model);
             errdefer _ = self.models.pop();
-            try self.instances.append(staging_gpa, inst);
+            try self.instances.append(staging_gpa, instance);
             errdefer _ = self.instances.pop();
             try self.nodes.append(staging_gpa, nodes);
         }
@@ -2907,12 +2904,10 @@ fn VpiHost(comptime D: type) type {
         /// Every small-signal matrix adds the device's `acDyn` terms
         /// (`Hooks.ac_dyn`).
         pub const calls_ac_dyn = true;
-        /// The application `ProtoStore.append` binds into `Instance.systf`.
-        /// ESPice loads none yet, so null: the host refuses such a device by
-        /// name before staging it (`DeviceVtable.systf_calls`), since the
-        /// LRM fixes no value for an unregistered systf.
-        // ponytail: null until a VPI application loads (#197, VerA's
-        // `analog_run` deviceCall/deviceOut); answer from it then.
+        /// Null: ESPice binds the application per instance instead, through
+        /// `DeviceVtable.bind_systf`, because it is chosen at run time (a
+        /// `--vpi` application, or a no-op for task calls only) and refused
+        /// by name before staging when there is none (`DeviceVtable.systf_calls`).
         pub fn systf(_: *const D.Model) ?*const contract.SystfHost {
             return null;
         }
@@ -2972,8 +2967,16 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             .proto_create = protoCreate,
             .proto_add = protoAdd,
             .unknown_names = &unknown_names,
-            .systf_calls = if (@hasDecl(D, "systf_calls")) &D.systf_calls else &.{},
+            .systf_calls = if (has_systf) &D.systf_calls else &.{},
+            .bind_systf = if (has_systf) bindSystf else null,
         };
+
+        const has_systf = @hasDecl(D, "systf_calls") and D.systf_calls.len != 0;
+
+        fn bindSystf(instance: [*]u8, host: *const contract.SystfHost) void {
+            const i: *D.Instance = @ptrCast(@alignCast(instance));
+            i.systf = host;
+        }
 
         const unknown_names: [n_u][]const u8 = blk: {
             var out: [n_u][]const u8 = undefined;

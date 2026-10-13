@@ -114,9 +114,18 @@ fn loadData(io: std.Io, session: std.mem.Allocator, foreign: []const netlist.For
 
 /// Compiles and loads into `lib` the HDL models `nl` (from `prepare` on a
 /// deck at `origin`) includes, paths relative to the deck's directory.
-/// Fails with `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`)
-/// and with the loader's error for a model that does not compile.
-pub fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, nl: netlist.Netlist, origin: []const u8) !void {
+/// First loads the VPI applications `apps` names (`--vpi`, as given) and the
+/// deck's `.options vpi=` (relative to the deck), since a registration
+/// decides how a model compiles (LRM 12.32.1).
+/// Fails with `OsdiUnsupported` on any OSDI include (`pre_osdi`, `osdi`),
+/// with `Library.loadVpiApp`'s error for an application, and with the
+/// loader's error for a model that does not compile.
+pub fn loadModels(io: std.Io, lib: *device.Library, session: std.mem.Allocator, nl: netlist.Netlist, origin: []const u8, apps: []const []const u8) !void {
+    for (apps) |app| try lib.loadVpiApp(app);
+    for (nl.deck.vpi_apps) |app| try lib.loadVpiApp(if (std.fs.path.isAbsolute(app))
+        app
+    else
+        try std.fs.path.join(session, &.{ std.fs.path.dirname(origin) orelse ".", app }));
     const foreign = nl.deck.foreign;
     var paths: std.ArrayList([]const u8) = .empty;
     for (foreign) |f| {

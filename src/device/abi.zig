@@ -636,9 +636,10 @@ pub const GpuPayload = struct {
 //     `layoutHash` recurses into by-value struct fields (no layout moved);
 //     the ngspice-port junction models' Model PODs gain `gmin__`, their gmin
 //     default being `$simparam("gmin")` (#78).
-// 29: `DeviceVtable.systf_calls`, the LRM 12.32 `$name` calls a device leaves
-//     to a VPI application, so the host can refuse one by name (#197).
-pub const abi_version: u32 = 29;
+// 30: `DeviceVtable.systf_calls`, the LRM 12.32 `$name` calls a device leaves
+//     to a VPI application, so the host can refuse one by name, and
+//     `bind_systf`, which binds the application into an Instance blob (#197).
+pub const abi_version: u32 = 30;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.
@@ -680,7 +681,16 @@ pub const DeviceVtable = struct {
     /// `Instance.systf`, so the host must refuse an instance of a device
     /// whose names no application registered before staging it.
     systf_calls: []const contract.Systf = &.{},
+    /// Writes `host` into an Instance blob's `systf`. Non-null exactly when
+    /// `systf_calls` is non-empty; the host calls it before `proto_add`.
+    /// `host` must outlive every batch the instance reaches.
+    bind_systf: ?*const fn (instance: [*]u8, host: *const contract.SystfHost) void = null,
 };
+
+/// VerA's LRM 12.32 call table entry and the application a device calls
+/// through, re-exported for hosts that do not import the contract.
+pub const Systf = contract.Systf;
+pub const SystfHost = contract.SystfHost;
 
 /// Hash of every type that crosses the object boundary, the compiler
 /// version, backend and mode, and `abi_version`. Both sides compile this same
@@ -701,6 +711,7 @@ pub fn layoutHash() u64 {
             std.mem.Allocator,   DeviceStatus,        DeviceResult(void),
             DeviceResult(Batch), DeviceResult(Proto), Param,
             SimState,            StatusHit,           std.Io.Writer,
+            contract.Systf,      contract.SystfHost,
         }) |T| h = hashType(h, T);
         h = mix(h, abi_version);
         break :blk h;
