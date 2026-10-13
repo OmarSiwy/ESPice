@@ -1,0 +1,12 @@
+// A 1 kohm resistor whose analog block also calls a §12.32 user system task,
+// as a testbench monitor would. Nothing reads the task's value, so with no
+// VPI application registered the call should do nothing: I = V / 1k.
+`include "disciplines.vams"
+module va_systf_task(p, n);
+    inout p, n;
+    electrical p, n;
+    analog begin
+        $espice_note(V(p, n));
+        I(p, n) <+ V(p, n) / 1k;
+    end
+endmodule

@@ -1,0 +1,10 @@
+// A conductance plus a §12.32 user system function whose value feeds the
+// contribution. No standard defines `$espice_sample` (VerA W0852), and
+// ESPice loads no VPI application to define it, so its value is unknown.
+`include "disciplines.vams"
+module va_systf_value(p, n);
+    inout p, n;
+    electrical p, n;
+    parameter real g = 1e-3;
+    analog I(p, n) <+ g * V(p, n) + 1e-3 * $espice_sample(V(p, n));
+endmodule
