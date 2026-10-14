@@ -93,6 +93,9 @@ const Runner = struct {
 /// The `--backend` every run gets; `--backend cuda` checks the GPU path
 /// against the same expectations. Set once in `main`, before any worker.
 var backend_name: []const u8 = "cpu";
+/// The C VPI application build.zig compiles for the decks marked
+/// `* VPI FIXTURE` (`--vpi-fixture`, #197); no path in a deck can name it.
+var vpi_fixture: ?[]const u8 = null;
 /// Per-case failure detail, printed under the case's FAIL line.
 threadlocal var diagnostics: ?*Io.Writer = null;
 fn diagnostic(comptime fmt: []const u8, args: anytype) void {
@@ -109,12 +112,12 @@ pub fn main(init: std.process.Init) !u8 {
     var list = equal(app, "--list");
     var update_verdicts = false;
     var metamorphic_mode = false;
-    const Flag = enum(u8) { list, filter, jobs, timeout, backend, update_verdicts, metamorphic };
+    const Flag = enum(u8) { list, filter, jobs, timeout, backend, update_verdicts, metamorphic, vpi_fixture };
     const flags = std.StaticStringMap(Flag).initComptime(.{
         .{ "--list", .list },       .{ "--filter", .filter },
         .{ "--jobs", .jobs },       .{ "--timeout", .timeout },
         .{ "--backend", .backend }, .{ "--update-verdicts", .update_verdicts },
-        .{ "--metamorphic", .metamorphic },
+        .{ "--metamorphic", .metamorphic }, .{ "--vpi-fixture", .vpi_fixture },
     });
     while (args.next()) |arg| {
         switch (flags.get(arg) orelse return error.UnknownArgument) {
@@ -125,6 +128,7 @@ pub fn main(init: std.process.Init) !u8 {
             .backend => backend_name = args.next() orelse return error.MissingArgument,
             .update_verdicts => update_verdicts = true,
             .metamorphic => metamorphic_mode = true,
+            .vpi_fixture => vpi_fixture = args.next() orelse return error.MissingArgument,
         }
     }
     if (jobs == 0) return error.InvalidWorkerCount;
@@ -424,8 +428,16 @@ fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: 
     var events: [2]Event = undefined;
     var select: Io.Select(Event) = .init(io, &events);
     defer select.cancelDiscard();
+    const base = [_][]const u8{ app, "--backend", backend_name, "--format=binary", "-b", "-r", output, "--tokenizer", tokenizer orelse "ngspice", std.fs.path.basename(netlist) };
+    var with_vpi: [base.len + 2][]const u8 = undefined;
+    const argv: []const []const u8 = if (try marksVpiFixture(a, io, netlist)) blk: {
+        @memcpy(with_vpi[0..base.len], &base);
+        with_vpi[base.len] = "--vpi";
+        with_vpi[base.len + 1] = vpi_fixture orelse return error.MissingVpiFixture;
+        break :blk &with_vpi;
+    } else &base;
     const options: std.process.RunOptions = .{
-        .argv = &.{ app, "--backend", backend_name, "--format=binary", "-b", "-r", output, "--tokenizer", tokenizer orelse "ngspice", std.fs.path.basename(netlist) },
+        .argv = argv,
         .cwd = .{ .path = std.fs.path.dirname(netlist).? },
         .stdout_limit = .limited(1024 * 1024),
         .stderr_limit = .limited(1024 * 1024),
@@ -436,6 +448,18 @@ fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: 
         .process => |result| result,
         .timeout => error.Timeout,
     };
+}
+
+/// Whether the deck's header holds `* VPI FIXTURE`.
+fn marksVpiFixture(a: Allocator, io: Io, netlist: []const u8) !bool {
+    // An unreadable deck fails in the simulator, which names it.
+    const source = Io.Dir.cwd().readFileAlloc(io, netlist, a, .unlimited) catch return false;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |text| {
+        if (text.len == 0 or text[0] != '*') continue;
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, text[1..], " \t"), "VPI FIXTURE")) return true;
+    }
+    return false;
 }
 
 fn requireSuccess(result: std.process.RunResult) !void {
@@ -471,6 +495,8 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
         .{ "WrongNodeCount", "inconsistent_circuit" },
         .{ "OsdiUnsupported", "unsupported_input" },
         .{ "UnregisteredSystf", "unsupported_input" },
+        .{ "VpiSecondSystfModule", "unsupported_input" },
+        .{ "VpiAnalogCallbackUnsupported", "unsupported_input" },
         .{ "UnpairedPoleRoot", "unsupported_input" },
         .{ "unsupported_input", "unsupported_input" },
     });

@@ -475,6 +475,17 @@ pub fn build(b: *std.Build) void {
     };
     const fixture_catalog = @import("tests/fixture_catalog.zig").create(b);
     const fixture_imports: []const std.Build.Module.Import = &.{.{ .name = "fixture_catalog", .module = fixture_catalog }};
+    // The C VPI application the `* VPI FIXTURE` decks load (#197), against
+    // VerA's vpi_user.h. Its `vpi_*` calls stay undefined here and resolve
+    // against the espice executable at dlopen (`rdynamic`).
+    const vpi_fixture = b.addLibrary(.{
+        .name = "vpi_gain",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    vpi_fixture.root_module.addCSourceFile(.{ .file = b.path("tests/fixtures/hdl/veriloga_vpi_app.assets/vpi_gain.c"), .flags = &.{ "-std=c11", "-Wall", "-Werror" } });
+    vpi_fixture.root_module.addIncludePath(vera.path("src/vpi"));
+    vpi_fixture.linker_allow_shlib_undefined = true;
     const correctness = b.addExecutable(.{
         .name = "test-correctness",
         .root_module = MH.make(b.path("tests/test_correctness.zig"), fixture_imports),
@@ -482,6 +493,8 @@ pub fn build(b: *std.Build) void {
     const run_correctness = b.addRunArtifact(correctness);
     run_correctness.setCwd(b.path("."));
     run_correctness.addArtifactArg2(exe, .{});
+    run_correctness.addArg("--vpi-fixture");
+    run_correctness.addArtifactArg(vpi_fixture);
     run_correctness.setEnvironmentVariable("ZIG", b.graph.zig_exe); // runtime .hdl builds
     run_correctness.addPassthruArgs();
     test_step.dependOn(&run_correctness.step);
@@ -491,6 +504,8 @@ pub fn build(b: *std.Build) void {
     const run_metamorphic = b.addRunArtifact(correctness);
     run_metamorphic.setCwd(b.path("."));
     run_metamorphic.addArtifactArg2(exe, .{});
+    run_metamorphic.addArg("--vpi-fixture");
+    run_metamorphic.addArtifactArg(vpi_fixture);
     run_metamorphic.addArg("--metamorphic");
     run_metamorphic.addPassthruArgs();
     b.step("test-metamorphic", "Check that metamorphic rewrites of the fixture decks keep their results").dependOn(&run_metamorphic.step);
@@ -501,6 +516,8 @@ pub fn build(b: *std.Build) void {
     const run_gpu_corpus = b.addRunArtifact(correctness);
     run_gpu_corpus.setCwd(b.path("."));
     run_gpu_corpus.addArtifactArg2(exe, .{});
+    run_gpu_corpus.addArg("--vpi-fixture");
+    run_gpu_corpus.addArtifactArg(vpi_fixture);
     run_gpu_corpus.setEnvironmentVariable("ZIG", b.graph.zig_exe); // runtime .hdl builds
     // One deck at a time: the device path waits on the GPU every Newton
     // iterate, and concurrent CUDA contexts time-slice one GPU, so two decks

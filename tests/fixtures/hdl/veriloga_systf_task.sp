@@ -1,4 +1,4 @@
-* KNOWN GAP: VerA's contract.Systf does not say whether a $systf call is a task, so ESPice refuses a task-position call too (UnregisteredSystf) instead of running it as a no-op (#197)
+* KNOWN GAP: VerA's contract.Systf marks no task calls until VerA#83 (V1), so ESPice refuses this task-position call (UnregisteredSystf) instead of running it as a no-op that warns "$espice_note: no VPI application registered (LRM 12.32); the call does nothing" (#197)
 * A Verilog-A resistor that calls an unregistered $systf as a task: the call changes nothing, so v(out) = 0.5 V
 * Expected results: veriloga_systf_task.expected.json
 .hdl "veriloga_systf_task.assets/va_systf_task.va"
