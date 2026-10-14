@@ -177,6 +177,73 @@ declare, or a card with the wrong number of nodes, is an error
 appears in the results as `v(<instance>#<net>)`, the name ngspice gives an
 OSDI device's internal node.
 
+### VPI applications { #vpi-applications }
+
+A system function or task that no standard defines, such as
+`$espice_gain(2.0)` or a testbench's `$my_monitor(V(out))`, is a VPI system
+function (LRM §12.32): a VPI application defines it, and VerA warns W0852
+naming it. Load the application, a C shared library that exports
+`vlog_startup_routines` (LRM §12.33.2), with `--vpi app.so` or, in the deck,
+`.options vpi="app.so"` (relative to the deck):
+
+```c
+#include "vpi_user.h"   /* VerA's src/vpi/vpi_user.h */
+
+static PLI_INT32 gain_calltf(p_cb_data cb)
+{
+  vpiHandle call = vpi_handle(vpiSysTfCall, NULL);
+  s_vpi_value v = { .format = vpiRealVal };
+  vpi_get_value(vpi_handle_by_index(call, 1), &v);
+  vpi_put_value(call, &v, NULL, vpiNoDelay);   /* the call's value */
+  return 0;
+}
+
+static void register_gain(void)
+{
+  static char name[] = "$espice_gain";
+  s_vpi_analog_systf_data d = { .type = vpiAnalogSysFunc, .sysfunctype = vpiRealFunc,
+                                .tfname = name, .calltf = gain_calltf };
+  vpi_register_analog_systf(&d);
+}
+
+void (*vlog_startup_routines[])(void) = { register_gain, 0 };
+```
+
+Build it as a shared library with its `vpi_*` symbols left undefined
+(`zig cc -shared -I<VerA>/src/vpi gain.c -o gain.so`); they resolve
+against the `espice` executable when it loads the application. The ESPice
+library (the C API, an embedding) loads no application: there it is
+`VpiUnavailable`.
+
+What ESPice supports, and what it refuses by name:
+
+- a calltf that returns a value and its partials (`derivtf`, LRM §12.22.1)
+  and puts output arguments (LRM §12.22.2);
+- an application that registers an analog callback (`acbAbsTime`,
+  `acbAcceptedPoint` and the rest of LRM §12.31.3) before the simulation
+  starts is refused, `VpiAnalogCallbackUnsupported` (#198);
+- a second module in one run that calls a `$systf` is refused,
+  `VpiSecondSystfModule`.
+
+These limits return a value instead of refusing, so check for them in your
+application:
+
+- inside calltf, `vpi_get(vpiAnalogTime)` and the other analog time and
+  frequency queries read 0, until VerA#83;
+- `vpi_get_value` on a net that is not one of the call's arguments reads
+  NaN;
+- an analog callback registered during the run (from calltf) is not
+  caught, and never fires;
+- one module per run may call a `$systf`, and calltf must be stateless:
+  every instance of the module shares one call object, so state kept per
+  call handle is shared by all of them.
+
+A call no application registered is an error, `UnregisteredSystf`, naming
+the call, since the LRM gives it no value. A task call whose value nothing
+reads is refused the same way for now. Once VerA marks task calls, it will
+run as a no-op with the warning `$name: no VPI application registered (LRM
+12.32); the call does nothing`.
+
 ### OSDI is not loaded
 
 ESPice never loads OSDI binaries. A `pre_osdi` or `.osdi_include` card,

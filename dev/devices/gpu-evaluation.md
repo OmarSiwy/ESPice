@@ -22,7 +22,8 @@ on top of the downloaded planes.
 - `gpuEligible` refuses `mutable_eval` (except a device whose only eval
   write is VerA's `vera_status__` latch, which `GpuContext.syncStatus`
   downloads for `Hooks.status` at the end of the query), Newton-history
-  hooks and `State` without `limit`, unless VerA declares that state `.path_latch` (the
+  hooks, LRM §12.32 `systf_calls` (`Instance.systf` is a host function
+  pointer, #197) and `State` without `limit`, unless VerA declares that state `.path_latch` (the
   §5.6.1.2 latches alone: b3soidd, b3soifd, hicumL2, hisim2, kinduc, mes),
   which is what the state and control kernels carry. It admits
   held-variable devices (the Meyer MOS models mos1/2/3/6/9, bsim4va,

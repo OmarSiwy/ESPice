@@ -199,6 +199,7 @@ anyway.
 | URC model with `K <= 0` or `K = 1` | NaN or meaningless ladder | `InvalidParameterValue` |
 | URC card without `l=` | zero length | unit length |
 | Verilog-A `$simparam("gmin")` during gmin stepping | the deck gmin | the stepped gmin |
+| `.options vpi="app.so"` (Spectre: `options vpi="app.so"`) | not an option | ESPice's own: loads a VPI application, as `--vpi` does; see [VPI applications](devices.md#vpi-applications) |
 | a `.temp` list and a single `.temp` in one deck | no list form | the last card wins |
 | `.ic` with `.tran` but without `uic` | held during the transient's operating point | used only under `uic` |
 | `.store` | checkpoints the process | warning; no checkpoint written |

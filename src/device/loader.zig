@@ -38,6 +38,10 @@ pub const BuildPaths = struct {
     /// The Zig compiler that builds the device. It must be the version this
     /// espice was built with.
     zig: []const u8 = "zig",
+    /// The loaded VPI applications' vpiIntFunc analog functions (LRM
+    /// 12.32.1): a call to one compiles as an integer, so they are part of
+    /// the cache key too.
+    int_systfs: []const []const u8 = &.{},
 };
 
 /// A compiled and opened device, not yet registered.
@@ -91,7 +95,7 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     const module_name = switch (hdl) {
         .va => blk: {
             const dir = std.fs.path.dirname(path) orelse ".";
-            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = &.{dir}, .diags = &bag, .display = .record }) catch |err| {
+            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = &.{dir}, .diags = &bag, .display = .record, .int_systfs = paths.int_systfs }) catch |err| {
                 printDiags(&bag);
                 return err;
             };
@@ -237,6 +241,10 @@ fn inputKey(io: std.Io, gpa: std.mem.Allocator, hdl: Hdl, path: []const u8, sour
     inline for (.{ "contract", "dyn", "gompute", "device_abi", "core", "stdpp", "zig" }) |f| {
         h.update(&.{0});
         h.update(@field(paths, f));
+    }
+    for (paths.int_systfs) |name| {
+        h.update(&.{1});
+        h.update(name);
     }
     const host_layout = ir.layoutHash();
     h.update(std.mem.asBytes(&host_layout));

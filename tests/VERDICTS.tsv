@@ -297,10 +297,12 @@ PASS	fixtures/hdl/veriloga_res_divider.sp
 PASS	fixtures/hdl/veriloga_simparam.sp
 PASS	fixtures/hdl/veriloga_simparam_homotopy.sp
 PASS	fixtures/hdl/veriloga_strobe.sp
+XFAIL	fixtures/hdl/veriloga_systf_task.sp
 PASS	fixtures/hdl/veriloga_table_snapshot.sp
 PASS	fixtures/hdl/veriloga_timer_rearm.sp
 PASS	fixtures/hdl/veriloga_transition_reject.sp
 PASS	fixtures/hdl/veriloga_unknown_param.sp
+PASS	fixtures/hdl/veriloga_vpi_app.sp
 PASS	fixtures/hdl/veriloga_wide_ladder.sp
 PASS	fixtures/hdl/veriloga_wrong_node_count.sp
 PASS	fixtures/hspice/ac_poi.sp
@@ -438,6 +440,7 @@ PASS	fixtures/invalid/trannoise_zero_step.sp
 PASS	fixtures/invalid/unknown_instance_parameter.sp
 PASS	fixtures/invalid/unresolved_parameter.sp
 PASS	fixtures/invalid/vdmos_pchan_refused.sp
+PASS	fixtures/invalid/veriloga_systf_value_refused.sp
 PASS	fixtures/layout/capacitive_divider_tran.sp
 PASS	fixtures/layout/coupled_ac.sp
 PASS	fixtures/layout/fanout_tran.sp

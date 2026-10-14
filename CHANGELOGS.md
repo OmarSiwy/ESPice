@@ -14,6 +14,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - An unbraced `key=` value continues past a blank before `%` or `\` as it does before `*` or `/`: `r=7k %4k` is 3k, where it read 7k and refused `%4k` (#180).
 - API: an `.hbxf` or `.hbac` query with a `v(a,b)` reference (`out_neg`) is refused as invalid, as its netlist card is, instead of silently reading v(a) (#201).
 - A multi-tone `.hb` that runs out of memory while building its spectrum reports `OutOfMemory` instead of freeing a table twice (#202).
+- VPI applications: `--vpi app.so` or `.options vpi="app.so"` loads a C VPI application whose analog system functions a Verilog-A model's `$systf` calls reach (LRM 12.32); a call no application registers is refused by name, `UnregisteredSystf`, where a release build used to call through a null binding. Limits: inside calltf the analog time reads 0 (until VerA#83), a non-argument net reads NaN, analog callbacks registered mid-run are not caught, and one `$systf` module per run with a stateless calltf (#197).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
 - `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).

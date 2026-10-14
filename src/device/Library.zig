@@ -27,6 +27,53 @@ sources: std.ArrayList([]const u8) = .empty,
 /// Where `load` finds the Zig compiler and the evaluator sources. Borrowed;
 /// it must outlive every `load`.
 toolchain: Toolchain = .{},
+/// The VPI host (LRM 12.32/12.33) behind `--vpi` and `.options vpi=`, which
+/// the espice executable supplies; null in a library build. Borrowed.
+vpi: ?*const Vpi = null,
+/// Whether `loadVpiApp` loaded at least one application.
+vpi_loaded: bool = false,
+/// The application each loaded type with `systf_calls` calls through, once
+/// `load` attached it (`Vpi.attach`). A handful at most: VerA's VPI holds
+/// one design (VerA#84).
+systf_hosts: std.ArrayList(SystfBinding) = .empty,
+
+pub const SystfBinding = struct { t: DeviceType, host: *const abi.SystfHost };
+
+/// The VPI application host. The executable implements it over VerA's
+/// `vpi` module, so the `vpi_*` symbols an application calls are exported
+/// from the executable alone, never from a library that embeds ESPice.
+/// Every call is serialized by the implementation.
+pub const Vpi = struct {
+    ctx: *anyopaque,
+    /// Opens the application at `path` and runs its `vlog_startup_routines`
+    /// (LRM 12.33.2). Loading one path twice is a no-op.
+    load_app: *const fn (ctx: *anyopaque, path: []const u8) VpiError!void,
+    /// The analog functions registered as vpiIntFunc (LRM 12.32.1), which
+    /// compile as integers; borrowed until the next `load_app`.
+    int_systfs: *const fn (ctx: *anyopaque) []const []const u8,
+    /// Whether an application registered an analog system task or function
+    /// named `name` (with its `$`).
+    registered: *const fn (ctx: *anyopaque, name: []const u8) bool,
+    /// Builds VerA's design of the module at `source_path` and binds `calls`
+    /// (a loaded device's `systf_calls`) to it; returns what its instances
+    /// call through, valid for the life of the process.
+    attach: *const fn (ctx: *anyopaque, source_path: []const u8, calls: []const abi.Systf) VpiError!*const abi.SystfHost,
+};
+
+/// Why a VPI step failed, each one logged with what it names:
+/// `VpiApplicationUnloadable` (dlopen failed), `VpiNoStartupRoutines` (the
+/// library exports no `vlog_startup_routines`), `VpiSecondSystfModule` (a
+/// second module calls a `$systf`; VerA's VPI holds one design, VerA#84),
+/// `VpiAnalogCallbackUnsupported` (an LRM 12.31.3 analog callback, #198),
+/// `VpiDesignFailed` (VerA could not build the module's design).
+pub const VpiError = error{
+    VpiApplicationUnloadable,
+    VpiNoStartupRoutines,
+    VpiSecondSystfModule,
+    VpiAnalogCallbackUnsupported,
+    VpiDesignFailed,
+    OutOfMemory,
+};
 
 /// Where `load` finds its compiler, sources and build cache, so a host that
 /// ships ESPice in its own bundle can point at the files inside it (#13). A
@@ -84,6 +131,7 @@ pub fn deinit(self: *Library) void {
     for (self.names.items[builtin_count..]) |name| self.gpa.free(name);
     for (self.sources.items) |path| self.gpa.free(path);
     self.sources.deinit(self.gpa);
+    self.systf_hosts.deinit(self.gpa);
     self.names.deinit(self.gpa);
     self.vtables.deinit(self.gpa);
     self.digital.deinit(self.gpa);
@@ -143,10 +191,54 @@ pub fn register(self: *Library, module: []const u8, vt: *const abi.DeviceVtable,
 
 /// Why `load` failed: `RuntimeHdlUnsupported` on wasm, `HdlShareNotFound`
 /// when `toolchain.share` holds no evaluator sources, `TooManyDeviceTypes`
-/// when the id space is full, out of memory, a canceled task group, or the
-/// first file's `loader.Error` in `files` order. Files before the failing one
-/// stay registered; none after it are.
-pub const LoadError = error{ RuntimeHdlUnsupported, HdlShareNotFound, TooManyDeviceTypes } || std.mem.Allocator.Error || std.Io.Cancelable || loader.Error;
+/// when the id space is full, out of memory, a canceled task group, the
+/// first file's `loader.Error` in `files` order, or a `VpiError` attaching a
+/// module that calls a `$systf`. Files before the failing one stay
+/// registered; none after it are.
+pub const LoadError = error{ RuntimeHdlUnsupported, HdlShareNotFound, TooManyDeviceTypes } || std.mem.Allocator.Error || std.Io.Cancelable || loader.Error || VpiError;
+
+/// Loads the VPI application at `path` (`--vpi`, `.options vpi=`) and runs
+/// its startup routines. Call before `load`: a registration decides how a
+/// module compiles (LRM 12.32.1). Fails with `VpiUnavailable` when this
+/// build has no VPI host (`vpi` null: an embedding library), else with the
+/// host's `VpiError`.
+pub fn loadVpiApp(self: *Library, path: []const u8) (error{VpiUnavailable} || VpiError)!void {
+    const v = self.vpi orelse {
+        if (!@import("builtin").is_test) std.log.err("vpi: {s}: this build loads no VPI applications; run the espice executable", .{path});
+        return error.VpiUnavailable;
+    };
+    try v.load_app(v.ctx, path);
+    self.vpi_loaded = true;
+}
+
+/// The application type `t` calls its `$systf`s through; null when no
+/// application is loaded, or `t` calls none.
+pub fn systfHost(self: *const Library, t: DeviceType) ?*const abi.SystfHost {
+    for (self.systf_hosts.items) |b| if (b.t == t) return b.host;
+    return null;
+}
+
+/// Whether `call` is a system task (its value unused), when VerA says;
+/// false (a used value) on a contract that does not mark tasks (VerA#83).
+pub fn isSystfTask(call: abi.Systf) bool {
+    return if (@hasField(abi.Systf, "task")) call.task else false;
+}
+
+/// What an instance whose every unregistered `$systf` call is a task calls
+/// through: nothing reads a task's value, so 0 with zero partials, and its
+/// arguments keep their values (`out` null). Never bound for a used value.
+pub const no_vpi_app: abi.SystfHost = .{ .ctx = undefined, .call = noVpiApp };
+
+fn noVpiApp(_: *anyopaque, _: usize, _: []const f64, partials: []f64) f64 {
+    @memset(partials, 0);
+    return 0;
+}
+
+/// Whether a loaded application registered `name` (LRM 12.32).
+pub fn systfRegistered(self: *const Library, name: []const u8) bool {
+    const v = self.vpi orelse return false;
+    return self.vpi_loaded and v.registered(v.ctx, name);
+}
 
 /// Compiles, opens and registers each HDL source not loaded yet (loader.zig).
 /// The generated devices build against `toolchain.share`, else the sources
@@ -172,6 +264,7 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) LoadError!voi
         if (!@import("builtin").is_test) std.log.warn("hdl: {s} holds no device/eval.zig; point the toolchain share path at the share/espice directory zig build installs", .{share});
         return error.HdlShareNotFound;
     }
+    const int_systfs: []const []const u8 = if (self.vpi) |v| (if (self.vpi_loaded) v.int_systfs(v.ctx) else &.{}) else &.{};
     try self.loadWith(io, files, if (installed) .{
         .work_dir = work_dir,
         .contract = try std.fs.path.join(a, &.{ share, "vera", "tools", "contract.zig" }),
@@ -181,6 +274,7 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) LoadError!voi
         .core = try std.fs.path.join(a, &.{ share, "core", "root.zig" }),
         .stdpp = try std.fs.path.join(a, &.{ share, "stdpp", "root.zig" }),
         .zig = zig,
+        .int_systfs = int_systfs,
     } else .{
         .work_dir = work_dir,
         .contract = build_options.contract_path,
@@ -190,6 +284,7 @@ pub fn load(self: *Library, io: std.Io, files: []const []const u8) LoadError!voi
         .core = build_options.core_path,
         .stdpp = build_options.stdpp_path,
         .zig = zig,
+        .int_systfs = int_systfs,
     });
 }
 
@@ -207,7 +302,19 @@ pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: lo
     try loader.prepareAll(self.gpa, io, todo.files, self.names.items[builtin_count..], paths, results);
     try self.sources.ensureUnusedCapacity(self.gpa, todo.resolved.len);
     for (results, todo.resolved) |result, resolved| {
-        if (try result) |prepared| _ = try self.register(prepared.name(), prepared.vtable, prepared.digital);
+        if (try result) |prepared| {
+            const t = try self.register(prepared.name(), prepared.vtable, prepared.digital);
+            for (prepared.vtable.systf_calls) |c| if (isSystfTask(c) and !self.systfRegistered(c.name))
+                std.log.warn("{s}: no VPI application registered (LRM 12.32); the call does nothing", .{c.name});
+            // LRM 12.32: bind the module's `$systf` calls to the loaded
+            // application. Without one, `NetBuilder` refuses or no-ops each
+            // call by name.
+            if (prepared.vtable.systf_calls.len != 0 and self.vpi_loaded) {
+                const v = self.vpi.?;
+                try self.systf_hosts.ensureUnusedCapacity(self.gpa, 1);
+                self.systf_hosts.appendAssumeCapacity(.{ .t = t, .host = try v.attach(v.ctx, resolved, prepared.vtable.systf_calls) });
+            }
+        }
         self.sources.appendAssumeCapacity(try self.gpa.dupe(u8, resolved));
     }
     std.debug.assert(self.vtables.items.len == self.names.items.len);

@@ -175,6 +175,21 @@ breaks §2.1 names its target rung and the plan block that moves it.
 - **Proof**: pending the first build: `tests/codegen.zig` `gen_hook_trap_assemble=hand_hook_trap_assemble` (pss's `PeriodHook`), `gen_hook_step_assemble=hand_hook_step_assemble` (tran's `TranHook`) and `gen_hook_diag_at=hand_hook_diag_at`, wired into `zig build test` (`test-codegen`). Written without a build (agent builds were refused on 2026-10-18); the gate reports the verdicts.
 - **Revisit when**: tran_noise moves to `evalNewton`, or a fixed analysis needs a two-step method.
 
+### S13: VPI `$systf` application
+
+- **Axis**: plugin: the LRM §12.32 application behind each `$name` VerA leaves to a host (`contract.Systf`, W0852), chosen at run time (`--vpi`, `.options vpi=`).
+- **Evidence**: user C applications loaded by path today (`tests/fixtures/hdl/veriloga_vpi_app.sp`), plus the no-application case (task no-op, used value refused).
+- **Owner**: device. `Library` owns the bindings (`systf_hosts`) and the `Vpi` interface; `NetBuilder.addDynDevices` binds each instance (`DeviceVtable.bind_systf`) or refuses it (`UnregisteredSystf`); `src/vpi_host.zig` (the executable) implements `Vpi` over VerA's `vpi` module.
+- **Rung**: 8, twice, both at cold boundaries. `Library.Vpi` is a vtable because the implementation must live in the executable (its `vpi_*` exports must not reach libespice), so a build-time parameter (rung 5) cannot pick it. `Instance.systf` is a function pointer because VerA's contract fixes `SystfHost.call`.
+- **Cost**:
+  - residue: one indirect call, one mutex lock and VerA's deviceCall per `$systf` site per eval, on such devices only; `gpuRefusal` (`.systf`) keeps them on the host. Cold: no built-in calls one, no benchmark deck does
+  - change radius for per-instance or multi-module VPI (VerA#84): `src/vpi_host.zig` `attach`/`call`
+  - interface weight: `DeviceVtable.systf_calls`, `bind_systf` (ABI 30), `Library.Vpi` (four functions)
+- **Drills passed**: none drilled
+- **Proof**: n/a (cold)
+- **Revisit when**: VerA#83 lands (`Systf.task`: a task call becomes a no-op; the point setter: `call` passes the analysis time), VerA#84 lands (several modules, per-instance state), or #198 (analog callbacks).
+- **Accepted exception**: `src/vpi_host.zig` holds process-global mutable state (`host`). VerA's VPI is process-global and its `Lib.systf` callback carries no context, so the state cannot live in a value. Every entry holds `host.mutex`.
+
 ## Drills
 
 Taken from the open GitHub issues (2026-10-17). Radii are counted on the code

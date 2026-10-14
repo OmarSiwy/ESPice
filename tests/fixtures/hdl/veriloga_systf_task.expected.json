@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "#197: an unregistered $systf called as a task (nothing reads its value) is a no-op; the module is a 1 kohm resistor",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "The task's value is never read, so the branch is I = V/1k whatever the call returns. 1 kohm under 1 kohm from 1 V: v(out) = 1*1k/(1k+1k) = 0.5 V, i(vin) = -1/2k = -5e-4 A. No value of the $systf enters the derivation."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "row_count": 1,
+        "columns": {
+          "v(out)": {
+            "values": [
+              0.5
+            ],
+            "unit": "V",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          },
+          "i(vin)": {
+            "values": [
+              -0.0005
+            ],
+            "unit": "A",
+            "rtol": 1e-06,
+            "atol": 1e-09
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "94dc14a7b65e3d19ed80b4c70c543bae7605e942cd6a39e19a4e3fcbec8d0447"
+}

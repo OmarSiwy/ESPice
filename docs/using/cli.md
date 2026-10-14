@@ -23,6 +23,7 @@ Usage: espice [OPTION]... FILE...
       --plan                  Print the DAG without running analyses
       --timing-in-depth       Time preparation, queries, and individual steps
       --tokenizer=FMT         ngspice|hspice|spectre
+      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
   -v, --version               Version
 ```
 
@@ -52,6 +53,13 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
 : The netlist dialect: `ngspice` (default, alias `ng`), `hspice` (`hs`) or
   `spectre` (`scs`). The single-dash spelling `-tokenizer=hspice` works
   too. See [Dialects](dialects.md).
+
+`--vpi=APP`
+: Load the VPI application `APP`, a shared library exporting
+  `vlog_startup_routines` (LRM 12.33.2), before the deck's `.hdl` models.
+  Its analog system functions answer the models' `$name` calls. Repeat it
+  for several applications; a deck adds its own with `.options vpi=`. See
+  [VPI applications](devices.md#vpi-applications).
 
 `--backend=BE`
 : Where device models are evaluated: `cpu` (default), `auto`, `cuda` or

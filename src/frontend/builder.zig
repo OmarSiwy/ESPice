@@ -548,6 +548,22 @@ pub const NetBuilder = struct {
         }
     }
 
+    /// The application an instance of type `t` calls its LRM 12.32 `$name`s
+    /// through: the loaded one (`Library.systfHost`), or `no_vpi_app` when
+    /// every call no application registered is a task, whose value nothing
+    /// reads (`Library.loadWith` warned for each). A call whose value is used
+    /// and that nothing registered is refused by name, `UnregisteredSystf`:
+    /// the LRM fixes no value for it. While VerA's `contract.Systf` does not
+    /// mark tasks (VerA#83), every unregistered call is refused.
+    fn systfHostFor(lib: *const Library, t: DeviceType, instance: []const u8, vt: *const batch.DeviceVtable) error{UnregisteredSystf}!*const batch.SystfHost {
+        for (vt.systf_calls) |c| {
+            if (lib.systfRegistered(c.name) or Library.isSystfTask(c)) continue;
+            if (!@import("builtin").is_test) std.log.err("{s}: module '{s}' calls `{s}`: no VPI application registered (LRM 12.32), so its value is unknown; see #198", .{ instance, vt.name, c.name });
+            return error.UnregisteredSystf;
+        }
+        return lib.systfHost(t) orelse &Library.no_vpi_app;
+    }
+
     /// Adds the runtime-loaded (.hdl) devices, cards shaped `<name> node...
     /// <model>`, through their vtables. Call after `build`, before the freeze.
     /// UnknownParameter for a card key neither blob declares, WrongNodeCount
@@ -560,6 +576,7 @@ pub const NetBuilder = struct {
             const dev = self.nl.device(e);
             const t = loadedType(b.lib, dev) orelse continue;
             const vt = b.lib.vtable(t);
+            const systf_host = if (vt.systf_calls.len != 0) try systfHostFor(b.lib, t, dev.name, vt) else null;
 
             const mblob = try arena.alignedAlloc(u8, .@"16", vt.model_size);
             vt.init_model(mblob.ptr);
@@ -616,6 +633,7 @@ pub const NetBuilder = struct {
                 }
             }
 
+            if (systf_host) |h| vt.bind_systf.?(iblob.ptr, h);
             const proto = try b.protoOf(t);
             try vt.proto_add(proto.ctx, b.gpa, mblob.ptr, iblob.ptr, nodes.ptr).unwrap();
             // `%m` in a display task and a `$fatal` refusal name the
