@@ -163,17 +163,18 @@ breaks §2.1 names its target rung and the plan block that moves it.
 
 ### S12: VPI `$systf` application
 
-- **Axis**: plugin: the LRM §12.32 application behind each `$name` VerA leaves to a host (`contract.Systf`, W0852).
-- **Evidence**: VerA's contract requires a host binding for every device with `systf_calls`, and the owner wants VAMS modules and testbenches that call one to run (#197). Today there are no applications: `VpiHost(D).systf` returns null, and `NetBuilder.addDynDevices` refuses such an instance by name (`UnregisteredSystf`) from `DeviceVtable.systf_calls` (device ABI 29).
-- **Owner**: device. `VpiHost(D).systf` names the application, `ProtoStore.append` binds it into every staged `Instance.systf` and asserts it. The frontend owns the refusal.
-- **Rung**: 8, a function pointer in the Instance. VerA's contract fixes the shape (`SystfHost.call`), because a function pointer cannot be generic over the AD family. No device evaluates through it yet.
+- **Axis**: plugin: the LRM §12.32 application behind each `$name` VerA leaves to a host (`contract.Systf`, W0852), chosen at run time (`--vpi`, `.options vpi=`).
+- **Evidence**: user C applications loaded by path today (`tests/fixtures/hdl/veriloga_vpi_app.sp`), plus the no-application case (task no-op, used value refused).
+- **Owner**: device. `Library` owns the bindings (`systf_hosts`) and the `Vpi` interface; `NetBuilder.addDynDevices` binds each instance (`DeviceVtable.bind_systf`) or refuses it (`UnregisteredSystf`); `src/vpi_host.zig` (the executable) implements `Vpi` over VerA's `vpi` module.
+- **Rung**: 8, twice, both at cold boundaries. `Library.Vpi` is a vtable because the implementation must live in the executable (its `vpi_*` exports must not reach libespice), so a build-time parameter (rung 5) cannot pick it. `Instance.systf` is a function pointer because VerA's contract fixes `SystfHost.call`.
 - **Cost**:
-  - residue: none today. Once loading lands, one indirect call per `$systf` site per eval, on such devices only; `gpuRefusal` (`.systf`) keeps them on the host
-  - change radius for VPI loading: `VpiHost(D).systf`, a C-ABI forward in eval.zig (a Zig-ABI `SystfHost` cannot cross the `.so`), the loader, and the refusal (narrowed to unregistered names)
-  - interface weight: `DeviceVtable.systf_calls`
+  - residue: one indirect call, one mutex lock and VerA's deviceCall per `$systf` site per eval, on such devices only; `gpuRefusal` (`.systf`) keeps them on the host. Cold: no built-in calls one, no benchmark deck does
+  - change radius for per-instance or multi-module VPI (VerA#84): `src/vpi_host.zig` `attach`/`call`
+  - interface weight: `DeviceVtable.systf_calls`, `bind_systf` (ABI 30), `Library.Vpi` (four functions)
 - **Drills passed**: none drilled
-- **Proof**: n/a (cold, rung fixed by VerA's contract)
-- **Revisit when**: VPI loading lands (#197, VerA changes V1-V5 listed in dev/reviews/2026-10-18-systf-host.md), or VerA marks task calls (V1), when a task-position call becomes a no-op with a warning.
+- **Proof**: n/a (cold)
+- **Revisit when**: VerA#83 lands (`Systf.task`: a task call becomes a no-op; the point setter: `call` passes the analysis time), VerA#84 lands (several modules, per-instance state), or #198 (analog callbacks).
+- **Accepted exception**: `src/vpi_host.zig` holds process-global mutable state (`host`). VerA's VPI is process-global and its `Lib.systf` callback carries no context, so the state cannot live in a value. Every entry holds `host.mutex`.
 
 ## Drills
 
