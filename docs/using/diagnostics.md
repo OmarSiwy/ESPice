@@ -130,7 +130,12 @@ Error: measure  t50 : out of interval
 | `CompilerGone` | the Zig compiler could not be started for `.hdl`: put Zig 0.17.0 on `PATH` or set `ZIG` |
 | `HdlShareNotFound` | an embedder's toolchain share path (`Options.hdl_toolchain`, C `share_path`) holds no `device/eval.zig`; point it at the installed `share/espice` |
 | VerA diagnostics (file, line, error code) | the Verilog-A source does not compile |
-| `UnregisteredSystf` | an instance's module calls a system function or task no standard defines (`$my_fn(...)`, VerA warning W0852); it needs a VPI application (LRM 12.32), and ESPice loads none yet |
+| `UnregisteredSystf` | an instance's module calls a system function or task no standard defines (`$my_fn(...)`, VerA warning W0852) and no loaded VPI application registers it; load one with `--vpi` |
+| `VpiApplicationUnloadable`, `VpiNoStartupRoutines` | a `--vpi` or `.options vpi=` library does not open, or exports no `vlog_startup_routines` |
+| `VpiSecondSystfModule` | a second module calls a `$systf`; one per run is supported |
+| `VpiAnalogCallbackUnsupported` | the VPI application registers an analog callback (`acbAbsTime`, ...), which ESPice does not run yet (#198) |
+| `VpiDesignFailed` | VerA could not build the VPI design of the module |
+| `VpiUnavailable` | a VPI application in a build without a VPI host (the C API, an embedding) |
 
 See [Verilog-A](devices.md#your-own-verilog-a) for the requirements.
 

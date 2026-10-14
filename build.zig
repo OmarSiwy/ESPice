@@ -245,9 +245,19 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "espice",
-        .root_module = M.make(b.path("src/main.zig"), &.{.{ .name = "espice", .module = espice_mod }}),
+        .root_module = M.make(b.path("src/main.zig"), &.{
+            .{ .name = "espice", .module = espice_mod },
+            // The VPI host (src/vpi_host.zig, #197): VerA's `vpi` module and
+            // its `vpi_*` C routines live in the executable alone.
+            .{ .name = "vera_vpi", .module = vera.module("vpi") },
+            .{ .name = "fastvaf", .module = vera.module("vera") },
+            .{ .name = "contract", .module = contract_mod },
+        }),
     });
     exe.root_module.link_libc = true;
+    // A dlopen'd VPI application resolves `vpi_*` against the executable's
+    // dynamic symbols (LRM 12.33.2), so export them.
+    exe.rdynamic = true;
     // The self-hosted backend emits unoptimized code whatever the mode says,
     // so every Release build goes through LLVM; Debug keeps the fast backend.
     exe.use_llvm = optimize != .debug;

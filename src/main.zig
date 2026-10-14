@@ -3,6 +3,7 @@
 //! usage error.
 const std = @import("std");
 const problem = @import("espice");
+const vpi_host = @import("vpi_host.zig");
 
 /// std reserves a 256 KB alternate signal stack per thread for stack-overflow
 /// traces, as zero-filled TLS: every thread of every compilation unit pays it
@@ -31,6 +32,8 @@ pub fn main(init: std.process.Init) !u8 {
     _ = args.skip();
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(init.gpa);
+    var vpi_apps: std.ArrayList([]const u8) = .empty;
+    defer vpi_apps.deinit(init.gpa);
     var dialect: problem.Dialect = .ngspice;
     var selection: problem.Selection = .{};
     var backend: problem.Request = .cpu;
@@ -53,6 +56,7 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --plan                  Print the DAG without running analyses
                 \\      --timing-in-depth       Time preparation, queries, and individual steps
                 \\      --tokenizer=FMT         ngspice|hspice|spectre
+                \\      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
                 \\  -v, --version               Version
                 \\
             , .{});
@@ -82,6 +86,8 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (optionValue(arg, "", "--jobs", &args)) |value| {
             max_parallel = std.fmt.parseInt(u16, value orelse return usageFail(), 10) catch return usageFail();
             if (max_parallel == 0) return usageFail();
+        } else if (optionValue(arg, "", "--vpi", &args)) |value| {
+            try vpi_apps.append(init.gpa, value orelse return usageFail());
         } else if (optionValue(arg, "-tokenizer", "--tokenizer", &args)) |value| {
             dialect = problem.parseDialect(value orelse return usageFail()) orelse return usageFail();
         } else if (arg.len > 0 and arg[0] == '-') {
@@ -91,6 +97,8 @@ pub fn main(init: std.process.Init) !u8 {
     }
     if (paths.items.len == 0) return usageFail();
 
+    // One per process: VerA's VPI is process-global.
+    const vpi = vpi_host.init(init.gpa, init.io);
     var failed = false;
     for (paths.items) |path| {
         if (timing_in_depth) std.debug.print("timing: {s}\n", .{path});
@@ -108,6 +116,8 @@ pub fn main(init: std.process.Init) !u8 {
             },
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,
+            .vpi_apps = vpi_apps.items,
+            .vpi = vpi,
         }) catch |err| {
             std.debug.print("Error: {s}: {s}\n", .{ path, @errorName(err) });
             failed = true;
