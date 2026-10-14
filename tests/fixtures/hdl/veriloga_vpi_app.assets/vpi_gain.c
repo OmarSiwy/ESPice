@@ -2,6 +2,7 @@
  * LRM 12.32: it registers the analog system function $espice_gain(g), whose
  * calltf puts its argument back on the call (12.30), so the call's value is
  * g. Stateless and with no derivtf: g is a constant, so every partial is 0. */
+#include <stddef.h>
 #include "vpi_user.h"
 
 static PLI_INT32 gain_calltf(p_cb_data cb)

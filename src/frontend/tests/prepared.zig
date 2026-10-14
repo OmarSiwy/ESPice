@@ -278,7 +278,7 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expectEqual(node, prepared.deck.queries[1].noise.out_node);
     try std.testing.expect(!prepared.deck.queries[1].noise.integrated);
     try std.testing.expect(prepared.deck.queries[2].noise.integrated);
-    try std.testing.expectEqualStrings("r1", prepared.deck.queries[3].sens.cards[2].name);
+    try std.testing.expectEqualStrings("r1", prepared.deck.queries[3].sens.card_names.get(device.Library.builtin("resistor"), 0).?);
     try std.testing.expectEqual(requests.Method.backward_euler, prepared.deck.queries[4].tran.method);
     try std.testing.expect(prepared.deck.queries[4].tran.uic);
     try std.testing.expectEqual(@as(usize, 1), prepared.deck.ic.len);
@@ -306,7 +306,7 @@ test "prepared metadata and query identities outlive parse storage" {
     try std.testing.expect(appended[3].noise.integrated);
     try std.testing.expectEqual(requests.Method.backward_euler, appended[4].tran.method);
     try std.testing.expectEqual(prepared.deck.deck_tol.reltol, appended[4].tran.tol.reltol);
-    try std.testing.expectEqualStrings("r1", appended[5].sens.cards[2].name);
+    try std.testing.expectEqualStrings("r1", appended[5].sens.card_names.get(device.Library.builtin("resistor"), 0).?);
     for ([_][]const u8{
         "r3 2 0 1k",            ".model rm r(r=1k)", ".hdl \"part.va\"", ".include \"part.cir\"",
         ".param p=1",           ".options temp=12",  ".temp 12",         ".subckt unused a b\n.ends",
