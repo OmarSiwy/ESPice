@@ -218,13 +218,25 @@ library (the C API, an embedding) loads no application: there it is
 What ESPice supports, and what it refuses by name:
 
 - a calltf that returns a value and its partials (`derivtf`, LRM §12.22.1)
-  and puts output arguments (LRM §12.22.2). It must be stateless: every
-  instance of a module shares one call object;
-- one module per run that calls a `$systf` (`VpiSecondSystfModule`);
-- no analog callbacks (`acbAbsTime`, `acbAcceptedPoint` and the rest of
-  LRM §12.31.3): an application that registers one is
-  `VpiAnalogCallbackUnsupported` (#198);
-- a calltf asking for the analog time reads 0 for now.
+  and puts output arguments (LRM §12.22.2);
+- an application that registers an analog callback (`acbAbsTime`,
+  `acbAcceptedPoint` and the rest of LRM §12.31.3) before the simulation
+  starts is refused, `VpiAnalogCallbackUnsupported` (#198);
+- a second module in one run that calls a `$systf` is refused,
+  `VpiSecondSystfModule`.
+
+These limits return a value instead of refusing, so check for them in your
+application:
+
+- inside calltf, `vpi_get(vpiAnalogTime)` and the other analog time and
+  frequency queries read 0, until VerA#83;
+- `vpi_get_value` on a net that is not one of the call's arguments reads
+  NaN;
+- an analog callback registered during the run (from calltf) is not
+  caught, and never fires;
+- one module per run may call a `$systf`, and calltf must be stateless:
+  every instance of the module shares one call object, so state kept per
+  call handle is shared by all of them.
 
 A call no application registered is an error, `UnregisteredSystf`, naming
 the call, since the LRM gives it no value. A task call whose value nothing

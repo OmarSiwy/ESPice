@@ -5,7 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
-- VPI applications: `--vpi app.so` or `.options vpi="app.so"` loads a C VPI application whose analog system functions a Verilog-A model's `$systf` calls reach (LRM 12.32); a call no application registers is refused by name, `UnregisteredSystf`, where a release build used to call through a null binding (#197).
+- VPI applications: `--vpi app.so` or `.options vpi="app.so"` loads a C VPI application whose analog system functions a Verilog-A model's `$systf` calls reach (LRM 12.32); a call no application registers is refused by name, `UnregisteredSystf`, where a release build used to call through a null binding. Limits: inside calltf the analog time reads 0 (until VerA#83), a non-argument net reads NaN, analog callbacks registered mid-run are not caught, and one `$systf` module per run with a stateless calltf (#197).
 - A refactor that runs out of memory during its replay check no longer lets the next `factor` with the previous values skip refactoring onto the overwritten LU (#182).
 - BSIM2 (LEVEL=5) gate, bulk and drain charges follow ngspice's b2eval.c: the gate capacitance read 30% high in saturation, and a reversed device charged the wrong source side (#168).
 - `.tran ... uic` lands on `tstep` and restarts at order 1 there, as ngspice does: Gear-2 on an LC tank read vmax 5% above ngspice 45 (#166).
