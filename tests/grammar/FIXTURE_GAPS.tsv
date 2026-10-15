@@ -76,6 +76,7 @@ hspice.peg	Subckt	'.macro'
 hspice.peg	Temp	'.temperature'
 hspice.peg	Temp	(s? '=')
 hspice.peg	Vec	s
+hspice.peg	body	(!ends card)*
 hspice.peg	card	Cond
 hspice.peg	card	Control
 hspice.peg	cond	(('(' x Ternary x ')' rest) / (Ternary rest))
