@@ -160,13 +160,13 @@ pnjlim(vnew, vold, vt, vcrit):                  # ngspice devsup.c, exact
     floor = (vold > 0) ? -vold - 1 : 2*vold - 1
     if vnew < floor: vnew = floor; limited = true
 
-jfnk(ckt, x, opts, hook):                       # one GMRES(m) cycle, right-precond
+jfnk(ckt, x, opts, hook):                       # one GMRES(m) cycle, left-precond
   for iter in 0..max_iter:
     F0 = residual(x) (+ gmin*x);  build diag precond;  try slv.factor (precond)
-    if ||M^-1 F0|| < abstol and residual gate: accept or iterate
-    dx = Gmres.solve(op, -F0, x0 = 0, ||F0 + J dx|| <= abstol/10, no restart)
-      # op.matvec(v) = (F(x + eps*v) - F0)/eps, one residual eval per vector
-      # op.precond = M^-1 (LU, or Jacobi under jfnk-nolu); dx = M^-1 V y
+    b = -M^-1 F0; if ||b|| < abstol and residual gate: accept or iterate
+    dx = Gmres.solve(op, b, x0 = 0, ||b - op(dx)|| <= abstol/10, no restart)
+      # op(v) = M^-1 (F(x + eps*v) - F0)/eps, one residual eval per vector;
+      # M^-1 is the LU, or Jacobi under jfnk-nolu
     updateAndNorm(x, dx);  limits;  SAME gates as newton
 ```
 
