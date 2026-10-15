@@ -136,7 +136,7 @@ pub fn Hook(comptime fixed: ?Method) type {
 
         /// Stamps the planes at `x` and adds the companion's dynamic current
         /// to the residual rows.
-        pub fn assemble(self: Self, ckt: anytype, x: []const f64, t: f64) void {
+        pub fn assemble(self: *const Self, ckt: anytype, x: []const f64, t: f64) void {
             ckt.evalNewton(x, t);
             if (!self.has_charge) return;
             const n: usize = ckt.n;
@@ -150,7 +150,7 @@ pub fn Hook(comptime fixed: ?Method) type {
 
         /// The Newton matrix values: G itself without charge, else G + ag0·C
         /// rebuilt into `a_vals`, overwriting the previous return.
-        pub fn vals(self: Self, ckt: anytype) []f64 {
+        pub fn vals(self: *const Self, ckt: anytype) []f64 {
             if (!self.has_charge) return ckt.g_vals;
             ckt.combineGC(self.c.ag0, self.a_vals);
             return self.a_vals;
@@ -158,13 +158,13 @@ pub fn Hook(comptime fixed: ?Method) type {
 
         /// One diagonal of the combined matrix without materializing it
         /// (`Circuit.gcAt`); the residual gate calls this per unknown.
-        pub fn diagAt(self: Self, ckt: anytype, slot: u32) f64 {
+        pub fn diagAt(self: *const Self, ckt: anytype, slot: u32) f64 {
             return if (self.has_charge) ckt.gcAt(self.c.ag0, slot) else ckt.g_vals[slot];
         }
 
         /// The accepted step of a fixed method: i_prev = its dynamic current
         /// at `q_cur`, then q_prev = q_cur. Asserts a fixed method.
-        pub fn accept(self: Self, n: usize) void {
+        pub fn accept(self: *const Self, n: usize) void {
             comptime std.debug.assert(fixed != null);
             companionAt(fixed.?, false, self.i_prev[0..n], self.q_cur[0..n], self.q_prev[0..n], &.{}, self.i_prev[0..n], .{ .ag0 = self.c.ag0, .ag2 = 0 });
             num.copySimd(self.q_prev[0..n], self.q_cur[0..n]);

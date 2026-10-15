@@ -382,7 +382,7 @@ const inf = std.math.inf(f64);
 
 /// Jacobian-free Newton-Krylov: each step solves J dx = -F by one unrestarted cycle of
 /// GMRES(min(30, n)) (`gmres.Gmres`) with finite-difference products J v,
-/// right-preconditioned by the factored Jacobian (Jacobi only under
+/// left-preconditioned by the factored Jacobian (Jacobi only under
 /// ESPICE_SOLVER=jfnk-nolu). A cycle that stops short is taken as it stands.
 /// Same gates as `newton`, with the residual gate on F, but a converged `x`
 /// is x_k+1. A failed checkpoint returns `error.QueryCancelled`; the first
@@ -405,7 +405,7 @@ pub fn jfnk(
     const krylov = try ws.ensureKrylov();
     const x_pert = ws.jf[0..n];
     const f0 = ws.jf[n..][0..n]; // F(x) + gmin * x at the outer iterate
-    const b = ws.jf[2 * n ..][0..n]; // -f0, the Krylov right-hand side
+    const b = ws.jf[2 * n ..][0..n]; // -M^-1 f0, the Krylov right-hand side
     const diag = ws.jf[3 * n ..][0..n]; // Jacobi inverse diagonal
     const r = ws.dx[0..n]; // becomes dx after the Krylov solve
     const x_old = ws.x_old[0..n];
@@ -413,8 +413,12 @@ pub fn jfnk(
     // A null solver is what makes this matrix-free.
     const slv: ?*direct.Solver = if (ws.knobs.pin == .jfnk_nolu) null else &ws.slv;
 
-    // w = (F(x + eps v) - f0) / eps, eps = sqrt(eps_mach) * max(||x||, 1) / ||v||;
-    // M^-1 is `applyPreconditioner`.
+    // w = M^-1 (F(x + eps v) - f0) / eps, eps = sqrt(eps_mach) * max(||x||, 1) / ||v||:
+    // left preconditioning inside the operator, so GMRES's residual and
+    // stop are on M^-1 (F + J dx), as the hand-rolled solver's were.
+    // Right preconditioning (a `precond` decl) left the 2x2 circle test
+    // (solver tests) 1e-6 from its root; the hand-rolled left form landed
+    // within 1e-8.
     const Sys = @TypeOf(sys);
     const Hook = @TypeOf(hook);
     const FdOp = struct {
@@ -442,10 +446,7 @@ pub fn jfnk(
             assembleShifted(op.sys, op.x_pert, op.t, op.opts, op.hook);
             var fd = z.fromSlice(f64, op.sys.rhs[0..w.len]).zip(z.fromSlice(f64, op.f0)).map(FdQuot{ .inv = 1.0 / eps });
             _ = fd.writeInto(w);
-        }
-
-        pub fn precond(op: *@This(), v: []f64) void {
-            applyPreconditioner(v, op.diag, op.slv);
+            applyPreconditioner(w, op.diag, op.slv);
         }
     };
     var op: FdOp = .{ .sys = sys, .hook = hook, .x = x, .x_pert = x_pert, .f0 = f0, .diag = diag, .slv = slv, .t = t, .opts = opts };
@@ -473,9 +474,11 @@ pub fn jfnk(
         if (slv) |s| s.factor(v, executionOf(sys)) catch {};
 
         // ||M^-1 f0||: the preconditioned step already within abstol.
-        num.scale(r, -1, f0);
-        applyPreconditioner(r, diag, slv);
-        if (num.norm2(r) < opts.abstol and residualConverged(sys, hook, x, f0, opts, limit)) {
+        // b = -M^-1 f0, beta = ||b||.
+        num.scale(b, -1, f0);
+        applyPreconditioner(b, diag, slv);
+        const beta = num.norm2(b);
+        if (beta < opts.abstol and residualConverged(sys, hook, x, f0, opts, limit)) {
             @memset(r, 0);
             @memcpy(x_old, x);
             const limited = applyLimits(sys, x, x_old);
@@ -484,11 +487,10 @@ pub fn jfnk(
             continue;
         }
 
-        // GMRES stops at ||F + J dx|| <= abstol / 10.
-        num.scale(b, -1, f0);
+        // GMRES stops at ||M^-1 (F + J dx)|| <= abstol / 10.
         @memset(r, 0);
         op.x_norm = @max(num.norm2(x), 1.0);
-        _ = krylov.solve(&op, b, r, 0.1 * opts.abstol / num.norm2(b), 0);
+        _ = krylov.solve(&op, b, r, 0.1 * opts.abstol / beta, 0);
 
         // Limiting may clamp x, so it runs before the residual gate.
         const scaled = updateAndNorm(x, r, x_old, sys.current_row[0..n], opts.reltol, opts.abstol, opts.vntol);

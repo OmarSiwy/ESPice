@@ -172,7 +172,7 @@ breaks §2.1 names its target rung and the plan block that moves it.
   - change radius for one more fixed-method analysis: one `Hook(m)` alias
   - interface weight: `Hook`, `accept`
 - **Drills passed**: none drilled
-- **Proof**: pending the first build: `tests/codegen.zig` `gen_hook_trap_assemble=hand_hook_trap_assemble` (pss's `PeriodHook`), `gen_hook_step_assemble=hand_hook_step_assemble` (tran's `TranHook`) and `gen_hook_diag_at=hand_hook_diag_at`, wired into `zig build test` (`test-codegen`). Written without a build (agent builds were refused on 2026-10-18); the gate reports the verdicts.
+- **Proof**: pending the first build: `tests/codegen.zig` `gen_hook_trap_assemble=hand_hook_trap_assemble` (pss's `PeriodHook`), `gen_hook_step_assemble=hand_hook_step_assemble` (tran's `TranHook`) and `gen_hook_diag_at=hand_hook_diag_at`, wired into `zig build test` (`test-codegen`). The first gate (2026-10-18) found RESIDUE on both assemble pairs: with `self: Self` (by value, about 110 bytes) the generic hook loaded and spilled every field before the opaque `evalNewton` call, which may write the memory the hook points at, while the hand code read them after it (+5 and +15 instructions, the spills). The methods now take `self: *const Self` (§2.12: large and non-mutating); `gen_hook_diag_at` was already NEGATIVE. Verdicts after the change: pending the next gate.
 - **Revisit when**: tran_noise moves to `evalNewton`, or a fixed analysis needs a two-step method.
 
 ### S13: VPI `$systf` application
