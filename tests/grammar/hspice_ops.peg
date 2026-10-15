@@ -1,0 +1,6 @@
+# HSPICE's multiplicative operators, `*` and `/` only: the manual's operator
+# table has no `%` and no `\` (dev/research/hspice-syntax.md X2, UG08
+# pp. 279-283, Table 19). The frontend refuses a deck that uses either as an
+# operator, quoted, braced or bare (src/frontend/lines.zig
+# hspice.remainder_ops, #203).
+MulOp      <- '*' !'*' / '/'

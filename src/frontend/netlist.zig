@@ -2563,12 +2563,18 @@ fn Reader(comptime S: type) type {
         /// ngspice fails a device card whose value or model field starts
         /// with an operator byte (`R1 a b 10 %3`: "unknown parameter");
         /// ESPice refuses it by name instead of reading a name `%3` (#200).
-        /// Node fields are names to ngspice and stay read, as do X cards
-        /// and dot cards. tests/grammar/lower.zig `element` refuses the same
-        /// fields.
+        /// In HSPICE, which has no `%` or `\` operator, a field led by one
+        /// is refused the same way (#203). Node fields are names and stay
+        /// read, as do X cards and dot cards. tests/grammar/lower.zig
+        /// `element` refuses the same fields.
         fn refuseOperatorField(r: *R, line: []const u8, t: []const u8) Error!void {
-            if (r.dialect != .ngspice or !F.isWord(t)) return;
-            if (std.mem.indexOfScalar(u8, "%\\*/^|&?", t[0]) == null) return;
+            if (!F.isWord(t)) return;
+            const leads: []const u8 = switch (r.dialect) {
+                .ngspice => "%\\*/^|&?",
+                .hspice => "%\\",
+                .spectre => "",
+            };
+            if (std.mem.indexOfScalar(u8, leads, t[0]) == null) return;
             return r.unsupported(line, "an operator where a name or value belongs");
         }
 

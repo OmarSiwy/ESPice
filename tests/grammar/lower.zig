@@ -1094,8 +1094,14 @@ const L = struct {
             } else {
                 // ngspice fails a device whose value or model field starts
                 // with an operator (`r1 a b 10 %3`: "unknown parameter"), and
-                // so does the frontend (netlist.zig refuseOperatorField, #200).
-                if (l.dialect == .ngspice and std.mem.indexOfScalar(u8, "%\\*/^|&?", l.text(f)[0]) != null) return error.Refused;
+                // so does the frontend (netlist.zig refuseOperatorField, #200);
+                // HSPICE has no `%` or `\` operator to lead one (#203).
+                const leads: []const u8 = switch (l.dialect) {
+                    .ngspice => "%\\*/^|&?",
+                    .hspice => "%\\",
+                    .spectre => "",
+                };
+                if (std.mem.indexOfScalar(u8, leads, l.text(f)[0]) != null) return error.Refused;
                 try positional.append(l.arena, try l.field(f, frame, true));
             }
         }

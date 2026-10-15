@@ -1,0 +1,4 @@
+# A Spectre statement translated to a SPICE card (lower_spectre.zig) keeps
+# Spectre's multiplicative operators: `%` is one (spectre.peg MulOp), `\`
+# is not (src/frontend/lines.zig spectre.remainder_ops, #203).
+MulOp      <- '*' !'*' / [/%]

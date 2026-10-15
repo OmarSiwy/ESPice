@@ -47,8 +47,8 @@ OrOp       <- '||'
 AndOp      <- '&&'
 CmpOp      <- '==' / '!=' / '<=' / '>=' / '<' / '>'
 AddOp      <- [+\-]
-# ESPice: `%` and `\` too, as in every dialect (one expression compiler).
-MulOp      <- '*' !'*' / [/%\\]
+# MulOp is the composition's: hspice_ops.peg for an HSPICE deck,
+# spectre_ops.peg for a Spectre statement translated to a SPICE card.
 PowOp      <- '^' / '**'
 SignOp     <- [+\-]
 NotOp      <- '!' !'='

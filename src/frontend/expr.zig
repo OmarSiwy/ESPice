@@ -14,6 +14,9 @@ const std = @import("std");
 /// roll it back with `Scratch.mark` and `Scratch.reset`. `fold` and `eval`
 /// fail only with `OutOfMemory`.
 pub const Error = error{ OutOfMemory, ParseError };
+/// `compile`'s errors: `UnsupportedCard` for `%` or `\` used as an operator
+/// in a dialect without it (`S.remainder_ops`, #203).
+pub const CompileError = Error || error{UnsupportedCard};
 /// Absent operand.
 pub const none = std.math.maxInt(u32);
 
@@ -134,9 +137,10 @@ pub const Scratch = struct {
 /// Compiles the expression starting at `text[pos]` into `s` and returns
 /// where it ends. Grammar: ternary `?:` loosest, then `||`, `&&`,
 /// comparisons, `+ -`, `* /`, `^`/`**` (all left associative); unary `-`/`+`
-/// bind below power. Nesting deeper than `max_depth` is a ParseError.
-/// Invalidates slices of `s`'s tables, which grow in `gpa`.
-pub fn compile(comptime S: type, gpa: std.mem.Allocator, s: *Scratch, text: []const u8, pos: usize) Error!usize {
+/// bind below power. Nesting deeper than `max_depth` is a ParseError;
+/// `%` or `\` after an operand, where `S.remainder_ops` lacks it, is
+/// `UnsupportedCard`. Invalidates slices of `s`'s tables, which grow in `gpa`.
+pub fn compile(comptime S: type, gpa: std.mem.Allocator, s: *Scratch, text: []const u8, pos: usize) CompileError!usize {
     var p: Compiler(S) = .{ .text = text, .pos = pos, .gpa = gpa, .s = s };
     try p.bin(0);
     return p.pos;
@@ -144,7 +148,7 @@ pub fn compile(comptime S: type, gpa: std.mem.Allocator, s: *Scratch, text: []co
 
 /// `compile` over the whole of `text`; trailing input is a ParseError.
 /// Invalidates slices of `s`'s tables, which grow in `gpa`.
-pub fn compileAll(comptime S: type, gpa: std.mem.Allocator, s: *Scratch, text: []const u8) Error!void {
+pub fn compileAll(comptime S: type, gpa: std.mem.Allocator, s: *Scratch, text: []const u8) CompileError!void {
     var p: Compiler(S) = .{ .text = text, .gpa = gpa, .s = s };
     try p.bin(0);
     if (p.peek() != null) return error.ParseError;
@@ -170,16 +174,16 @@ fn Compiler(comptime S: type) type {
             return if (p.pos < p.text.len) p.text[p.pos] else null;
         }
 
-        fn emit(p: *P, op: Op) Error!void {
+        fn emit(p: *P, op: Op) CompileError!void {
             try p.s.ops.append(p.gpa, op);
         }
 
-        fn name(p: *P, n: []const u8) Error!u32 {
+        fn name(p: *P, n: []const u8) CompileError!u32 {
             try p.s.names.append(p.gpa, n);
             return @intCast(p.s.names.items.len - 1);
         }
 
-        fn bin(p: *P, min_prec: u8) Error!void {
+        fn bin(p: *P, min_prec: u8) CompileError!void {
             if (p.depth == max_depth) return error.ParseError;
             p.depth += 1;
             defer p.depth -= 1;
@@ -195,6 +199,9 @@ fn Compiler(comptime S: type) type {
                     try p.emit(.{ .code = .call, .a = @backingInt(Fn.ternary), .b = 3 });
                     continue;
                 }
+                // A dialect without `%` or `\` refuses the deck by name
+                // rather than end the expression before it (#203).
+                if ((c == '%' or c == '\\') and std.mem.indexOfScalar(u8, S.remainder_ops, c) == null) return error.UnsupportedCard;
                 const power = c == '*' and p.pos + 1 < p.text.len and p.text[p.pos + 1] == '*';
                 const prec: u8 = switch (c) {
                     '|' => 1,
@@ -247,7 +254,7 @@ fn Compiler(comptime S: type) type {
 
         // Every recursion passes through `bin` or `unary`, so the guard in
         // both bounds them all.
-        fn unary(p: *P) Error!void {
+        fn unary(p: *P) CompileError!void {
             if (p.depth == max_depth) return error.ParseError;
             p.depth += 1;
             defer p.depth -= 1;
@@ -273,7 +280,7 @@ fn Compiler(comptime S: type) type {
 
         /// A probe argument: up to `,` `)` or a blank, kept as a name (node
         /// `10` is a node, and a node `1n` must not read as 1e-9).
-        fn nodeArg(p: *P) Error![]const u8 {
+        fn nodeArg(p: *P) CompileError![]const u8 {
             _ = p.peek();
             const start = p.pos;
             while (p.pos < p.text.len) : (p.pos += 1) {
@@ -284,7 +291,7 @@ fn Compiler(comptime S: type) type {
             return p.text[start..p.pos];
         }
 
-        fn atom(p: *P) Error!void {
+        fn atom(p: *P) CompileError!void {
             const c = p.peek() orelse return error.ParseError;
             if (c == '"' or c == '\'' or c == '(') {
                 p.pos += 1;
@@ -358,7 +365,8 @@ pub fn numberLen(text: []const u8) usize {
 }
 
 /// A byte that continues an expression after an operand: the binary and
-/// ternary operator bytes, `%` and `\` included (`compile` reads both).
+/// ternary operator bytes, `%` and `\` included. `compile` reads those two
+/// where the dialect has them and refuses them elsewhere (#203).
 pub fn isOperator(c: u8) bool {
     return switch (c) {
         '|', '&', '<', '>', '=', '!', '+', '-', '*', '/', '%', '\\', '^', '?' => true,
@@ -779,4 +787,21 @@ test numberLen {
     try std.testing.expect(isOperator('+') and isOperator('?') and !isOperator(')') and !isOperator(','));
     // Every byte `compile` reads as a binary operator continues a value (#180).
     for ("|&<>=!+-*/%\\^?") |c| try std.testing.expect(isOperator(c));
+}
+
+test "% and \\ are operators in ngspice and Spectre (%) and refused in HSPICE (#203)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const lines = @import("lines.zig");
+    // Hand-computed: 10 % 3 = 1, trunc(10 / 3) = 3.
+    try std.testing.expectEqual(1, (try testFold(a, "10 % 3")).num);
+    try std.testing.expectEqual(3, (try testFold(a, "10 \\ 3")).num);
+    var s: Scratch = .{};
+    try compileAll(lines.spectre, a, &s, "10 % 3");
+    for ([_][]const u8{ "10 % 3", "10\\3", "2*(7 % 4)" }) |text|
+        try std.testing.expectError(error.UnsupportedCard, compileAll(lines.hspice, a, &s, text));
+    try std.testing.expectError(error.UnsupportedCard, compileAll(lines.spectre, a, &s, "10 \\ 3"));
+    // `*` and `/` are every dialect's.
+    try compileAll(lines.hspice, a, &s, "6 * 2 / 3");
 }

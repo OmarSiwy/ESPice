@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- HSPICE dialect: `%` and `\` are no longer expression operators, as HSPICE's manual has neither; a card that uses one is refused by name. Spectre keeps `%` and drops `\` (#203).
 - ngspice dialect: a device field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice refuses it, instead of being dropped; `r=10%3` reads 10, as ngspice reads it, instead of 1 (#200).
 - A raw or `.print` file that takes many plots (a `.step` sweep) is written once and replaced at the end of the run, instead of being copied and replaced per plot, which made a sweep of P plots write O(P²) bytes; until then the old file stays whole (#179).
 - An unbraced `key=` value continues past a blank before `%` or `\` as it does before `*` or `/`: `r=7k %4k` is 3k, where it read 7k and refused `%4k` (#180).

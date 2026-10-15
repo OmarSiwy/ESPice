@@ -324,6 +324,9 @@ fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
 pub const ngspice = struct {
     /// The first line is the deck title, not a card.
     pub const title_line = true;
+    /// Operator bytes beyond `* /` at their level: numparam's remainder and
+    /// integer division (ngspice-syntax.md §2.2).
+    pub const remainder_ops = "%\\";
     /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
     /// Field splitter over one logical line.
@@ -444,6 +447,10 @@ pub const ngspice = struct {
 pub const hspice = struct {
     /// The first line is the deck title, not a card.
     pub const title_line = true;
+    /// Operator bytes beyond `* /` at their level: none. The manual's
+    /// operator table has no `%` or `\` (hspice-syntax.md X2, UG08
+    /// pp. 279-283), and a deck that uses one is refused (#203).
+    pub const remainder_ops = "";
     /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
     /// Field splitter over one logical line.
@@ -595,6 +602,9 @@ pub const hspice = struct {
 pub const spectre = struct {
     /// §1.2: line 1 of the top-level netlist is the title (UG p.29, p.50).
     pub const title_line = true;
+    /// Operator bytes beyond `* /` at their level: `%`, which ESPice reads
+    /// (tests/grammar/spectre.peg MulOp); `\` is no Spectre operator (#203).
+    pub const remainder_ops = "%";
     /// Cards are case-sensitive: the text is parsed as written.
     pub const fold_case = false;
     /// Field splitter over one logical line.

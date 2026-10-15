@@ -1,7 +1,8 @@
 //! A Spectre statement tree (spectre.peg) -> SPICE cards and each device
 //! card's letter: the oracle's own reading of dev/frontend.md "Spectre
 //! dialect", from the tree, not from src/frontend/spectre.zig. The cards then
-//! take the SPICE oracle's path (spice_cards.peg + hspice.peg, lower.zig).
+//! take the SPICE oracle's path (spice_cards.peg + spectre_ops.peg + hspice.peg,
+//! lower.zig): HSPICE's cards with Spectre's `%` operator (#203).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const peg = @import("peg.zig");
