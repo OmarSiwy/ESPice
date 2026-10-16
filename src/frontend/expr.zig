@@ -14,8 +14,9 @@ const std = @import("std");
 /// roll it back with `Scratch.mark` and `Scratch.reset`. `fold` and `eval`
 /// fail only with `OutOfMemory`.
 pub const Error = error{ OutOfMemory, ParseError };
-/// `compile`'s errors: `UnsupportedCard` for `%` or `\` used as an operator
-/// in a dialect without it (`S.remainder_ops`, #203).
+/// `compile`'s errors: `UnsupportedCard` for `%` or `\` used as an operator,
+/// or a unary `!`, in a dialect without it (`S.remainder_ops`,
+/// `S.unary_not`, #203).
 pub const CompileError = Error || error{UnsupportedCard};
 /// Absent operand.
 pub const none = std.math.maxInt(u32);
@@ -270,6 +271,8 @@ fn Compiler(comptime S: type) type {
                     try p.bin(6);
                 },
                 '!' => {
+                    // HSPICE has no unary `!` (#203).
+                    if (!S.unary_not) return error.UnsupportedCard;
                     p.pos += 1;
                     try p.unary();
                     try p.emit(.{ .code = .not });
@@ -804,4 +807,19 @@ test "% and \\ are operators in ngspice and Spectre (%) and refused in HSPICE (#
     try std.testing.expectError(error.UnsupportedCard, compileAll(lines.spectre, a, &s, "10 \\ 3"));
     // `*` and `/` are every dialect's.
     try compileAll(lines.hspice, a, &s, "6 * 2 / 3");
+}
+
+test "unary ! is refused in HSPICE, read elsewhere (#203)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const lines = @import("lines.zig");
+    // Hand-computed: !0 + 1 = 2.
+    try std.testing.expectEqual(2, (try testFold(a, "!0+1")).num);
+    var s: Scratch = .{};
+    try compileAll(lines.spectre, a, &s, "!0+1");
+    try std.testing.expectError(error.UnsupportedCard, compileAll(lines.hspice, a, &s, "!0+1"));
+    try std.testing.expectError(error.UnsupportedCard, compileAll(lines.hspice, a, &s, "(a<b) && !(a==b)"));
+    // `!=` is HSPICE's.
+    try compileAll(lines.hspice, a, &s, "(a<b) && (a!=b)");
 }

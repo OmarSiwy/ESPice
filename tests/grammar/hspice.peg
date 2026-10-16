@@ -7,7 +7,7 @@
 # comment (`10pf`, `1.5volts`). HSPICE forbids an exponent and a scale
 # together (`1e-6u`, UG08 p. 49), and so does ESPice (#203): the lowering
 # refuses a card holding one (lower.zig; a field that is no Number is an
-# Ident), and Num below takes none in an expression.
+# Ident), and hspice_ops.peg's Num takes none in an expression.
 Number     <- [+\-]? Mantissa Exponent? Scale? [a-z0-9_.]*
 Mantissa   <- [0-9]+ ('.' [0-9]*)? / '.' [0-9]+
 Exponent   <- [ed] [+\-]? [0-9]+
@@ -33,13 +33,13 @@ Cmp        <- Add (x CmpOp x Add)*
 Add        <- Mul (x AddOp x Mul)*
 Mul        <- Pow (x MulOp x Pow)*
 Pow        <- Unary (x PowOp x Unary)*
-Unary      <- SignOp x Pow / NotOp x Unary / atom
+# Unary is the composition's (hspice_ops.peg, spectre_ops.peg).
 atom       <- Paren / Probe / Call / Num / Ref
 Paren      <- '(' x Ternary x ')'
 Probe      <- [vi] x '(' x Pname (x ',' x Pname)? x ')'
 Pname      <- (![ \t,()\n] .)+
 Call       <- Ref x '(' x (Ternary (x ',' x Ternary)*)? x ')'
-Num        <- Mantissa ([e] [+\-]? [0-9]+ !Scale)? !([e] [+\-]? [0-9]) [a-z]*
+# Num is the composition's (hspice_ops.peg, spectre_ops.peg).
 # No `!` in a name: `a!=b` is an inequality (ngspice manual §2.8.5's `!=`),
 # and no corpus deck or case names a parameter with one.
 Ref        <- [a-zA-Z_$] [a-zA-Z0-9_.$]*
@@ -53,7 +53,6 @@ AddOp      <- [+\-]
 # spectre_ops.peg for a Spectre statement translated to a SPICE card.
 PowOp      <- '^' / '**'
 SignOp     <- [+\-]
-NotOp      <- '!' !'='
 
 # A field, a field inside a group, a pair's value, and HSPICE's `[a, b]`
 # vector (`hblin=[1, -1]` on a P port) (spice_cards.peg). A quote only

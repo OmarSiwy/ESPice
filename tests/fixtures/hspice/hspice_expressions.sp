@@ -5,7 +5,7 @@
 .parameters a=2 b=3
 .param f(x)='x*2'
 .func g(x, y) 'x+y'
-.param t1='(a<b) && !(a==b) || 0'
+.param t1='(a<b) && (a!=b) || 0'
 .param t2="a^3"
 .param t3='a>b ? 10 : 20'
 .subckt load n rv=1k

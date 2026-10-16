@@ -2,3 +2,7 @@
 # Spectre's multiplicative operators: `%` is one (spectre.peg MulOp), `\`
 # is not (src/frontend/lines.zig spectre.remainder_ops, #203).
 MulOp      <- '*' !'*' / [/%]
+# Spectre's unary `!` (spectre.peg SignOp).
+Unary      <- SignOp x Pow / NotOp x Unary / atom
+NotOp      <- '!' !'='
+Num        <- Mantissa ([e] [+\-]? [0-9]+)? [a-z]*

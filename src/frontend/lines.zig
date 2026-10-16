@@ -327,6 +327,8 @@ pub const ngspice = struct {
     /// Operator bytes beyond `* /` at their level: numparam's remainder and
     /// integer division (ngspice-syntax.md §2.2).
     pub const remainder_ops = "%\\";
+    /// Unary `!` is numparam's logical not (ngspice-syntax.md §2.2).
+    pub const unary_not = true;
     /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
     /// Field splitter over one logical line.
@@ -451,6 +453,9 @@ pub const hspice = struct {
     /// operator table has no `%` or `\` (hspice-syntax.md X2, UG08
     /// pp. 279-283), and a deck that uses one is refused (#203).
     pub const remainder_ops = "";
+    /// No unary `!` either: the manual's table lists `!=` only (X2), and a
+    /// deck that negates with `!` is refused (#203).
+    pub const unary_not = false;
     /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
     /// Field splitter over one logical line.
@@ -640,6 +645,8 @@ pub const spectre = struct {
     /// Operator bytes beyond `* /` at their level: `%`, which ESPice reads
     /// (tests/grammar/spectre.peg MulOp); `\` is no Spectre operator (#203).
     pub const remainder_ops = "%";
+    /// Unary `!`, which ESPice reads (tests/grammar/spectre.peg SignOp).
+    pub const unary_not = true;
     /// Cards are case-sensitive: the text is parsed as written.
     pub const fold_case = false;
     /// Field splitter over one logical line.

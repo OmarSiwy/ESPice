@@ -395,6 +395,7 @@ PASS	fixtures/invalid/hb_fractional_harmonics.sp
 PASS	fixtures/invalid/hb_negative_frequency.sp
 PASS	fixtures/invalid/hspice_exponent_scale.sp
 PASS	fixtures/invalid/hspice_percent_operator.sp
+PASS	fixtures/invalid/hspice_unary_not.sp
 PASS	fixtures/invalid/level57_refused.sp
 PASS	fixtures/invalid/matex_negative_step.sp
 PASS	fixtures/invalid/mc_fractional_trials.sp

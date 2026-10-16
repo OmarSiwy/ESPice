@@ -36,9 +36,9 @@ field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice
 refuses it; node fields are names and are read.
 
 Expressions: `+ - * / ^ **`, `%` (remainder) and `\` (integer division),
-`== != <> < <= > >=`, `&& || !` and `?:`. An HSPICE deck has neither `%`
-nor `\`, as HSPICE's manual has none, and a card that uses one is refused;
-a Spectre netlist has `%` but not `\`. Functions: `sqrt exp ln log log10 abs
+`== != <> < <= > >=`, `&& || !` and `?:`. An HSPICE deck has no `%`, `\`
+or unary `!`, as HSPICE's manual has none, and a card that uses one is
+refused; a Spectre netlist has `%` but not `\`. Functions: `sqrt exp ln log log10 abs
 floor ceil min max pow sin cos tan atan` (or `arctan`) `tanh ternary_fcn`.
 Values that fold to a constant also take `pwr sqr int nint sgn sinh cosh
 asin acos asinh acosh atanh`, `%`, `\` and the user functions of `.func`;

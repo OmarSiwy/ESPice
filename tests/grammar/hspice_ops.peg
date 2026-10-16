@@ -4,3 +4,9 @@
 # operator, quoted, braced or bare (src/frontend/lines.zig
 # hspice.remainder_ops, #203).
 MulOp      <- '*' !'*' / '/'
+# X2: no unary `!` either (the table lists `!=` only); ESPice refuses one
+# (src/frontend/lines.zig hspice.unary_not, #203).
+Unary      <- SignOp x Pow / atom
+# T3: an expression's number takes no exponent followed by a scale factor
+# (`1e-6u`), which HSPICE forbids (#203).
+Num        <- Mantissa ([e] [+\-]? [0-9]+ !Scale)? !([e] [+\-]? [0-9]) [a-z]*

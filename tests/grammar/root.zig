@@ -533,7 +533,7 @@ const card_cases = struct {
     fn exprs(comptime open: []const u8, comptime close: []const u8) [6][]const u8 {
         return .{
             "t\nr1 1 0 " ++ open ++ "1+2*3**2" ++ close ++ "\nr2 1 0 " ++ open ++ "2^3^2" ++ close ++ "\nr3 1 0 " ++ open ++ "(1<2)&&(3>=3)||0" ++ close ++ "\n",
-            "t\nr1 1 0 " ++ open ++ "1==1?5:6" ++ close ++ "\nr2 1 0 " ++ open ++ "!0+1" ++ close ++ "\nr3 1 0 " ++ open ++ "-2^2+10" ++ close ++ "\nr4 1 0 " ++ open ++ "2*-3+10" ++ close ++ "\n",
+            "t\nr1 1 0 " ++ open ++ "1==1?5:6" ++ close ++ "\nr2 1 0 " ++ open ++ "(1!=0)+1" ++ close ++ "\nr3 1 0 " ++ open ++ "-2^2+10" ++ close ++ "\nr4 1 0 " ++ open ++ "2*-3+10" ++ close ++ "\n",
             "t\nr1 1 0 " ++ open ++ "sqrt(4)+abs(-1)+exp(0)+ln(1)+log10(10)+min(1,2)+max(1,2)+pow(2,3)" ++ close ++ "\n",
             "t\nr1 1 0 " ++ open ++ "sin(0)+cos(0)+tan(0)+atan(0)+tanh(0)+floor(1.5)+ceil(1.5)" ++ close ++ "\n",
             "t\n.param a=1 b=" ++ open ++ "a*2" ++ close ++ " c=-1\nr1 1 0 " ++ open ++ "a+b-c" ++ close ++ "\n.if (a==1)\nr2 1 0 1k\n.elseif (a==2)\nr2 1 0 2k\n.else\nr2 1 0 3k\n.endif\n",
@@ -542,6 +542,7 @@ const card_cases = struct {
     }
     const ngspice = common ++ exprs("{", "}") ++ [_][]const u8{
         "t\nr1 1 0 {7%3}\nr2 1 0 {7\\2}\nr3 1 0 {1<>2}\n",
+        "t\nr1 1 0 {!0+1}\n",
         "t\nr1 1 0 {sqr(3)+int(2.5)+nint(2.5)+sgn(-2)+sinh(0)+cosh(0)+arctan(0)}\n",
         "t\nr1 1 0 {asin(0)+acos(1)+asinh(0)+acosh(1)+atanh(0)+ternary_fcn(1,2,3)+pwr(2,2)}\n",
         "t\n.func g(x,y) {x+y}\nr1 1 0 {g(1,2)}\n",
