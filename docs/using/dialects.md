@@ -32,7 +32,9 @@ are split and a handful of meanings.
 | Default TNOM, circuit temperature | 27 °C, 27 °C | 25 °C, run at TNOM | 27 °C, 27 °C |
 
 The ngspice and HSPICE suffix tables are `t g meg k m mil u n p f a`
-(case-insensitive), and `d` works as an exponent (`1d-3`). Spectre's are case-sensitive: `P` (peta), `T`, `G`,
+(case-insensitive), and `d` works as an exponent (`1d-3`). HSPICE forbids
+an exponent and a suffix in one number, so an HSPICE deck that writes
+`1e-6u` is refused; ngspice reads it as 1e-12. Spectre's are case-sensitive: `P` (peta), `T`, `G`,
 `M` (mega), `K` or `k`, `m` (milli), `u`, `n`, `p`, `f`, `a` (atto), and
 `%` or `c` for 10^-2.
 

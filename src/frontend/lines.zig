@@ -593,7 +593,42 @@ pub const hspice = struct {
     pub fn parseNum(text: []const u8) ?f64 {
         return parseSpiceNum(text, true);
     }
+
+    /// Whether `line` holds a number with both an exponent and a scale
+    /// factor (`1e-6u`), which HSPICE forbids (hspice-syntax.md T3, UG08
+    /// p. 49): a deck that writes one is refused (#203). A number starts
+    /// after a byte that cannot continue a name, so `n1e3k` is a name.
+    /// tests/grammar/lower.zig refuses the same lines.
+    pub fn exponentWithScale(line: []const u8) bool {
+        for (0..line.len) |i| {
+            if (i > 0 and (std.ascii.isAlphanumeric(line[i - 1]) or line[i - 1] == '_' or line[i - 1] == '.')) continue;
+            var j = i;
+            if (line[j] == '+' or line[j] == '-') j += 1;
+            var digits = false;
+            while (j < line.len and std.ascii.isDigit(line[j])) : (j += 1) digits = true;
+            if (j < line.len and line[j] == '.') {
+                j += 1;
+                while (j < line.len and std.ascii.isDigit(line[j])) : (j += 1) digits = true;
+            }
+            if (!digits or j == line.len or std.mem.indexOfScalar(u8, "eEdD", line[j]) == null) continue;
+            j += 1;
+            if (j < line.len and (line[j] == '+' or line[j] == '-')) j += 1;
+            const exponent = j;
+            while (j < line.len and std.ascii.isDigit(line[j])) j += 1;
+            if (j == exponent or j == line.len) continue;
+            if (std.mem.indexOfScalar(u8, "tgxkmunpfaTGXKMUNPFA", line[j]) != null) return true;
+        }
+        return false;
+    }
 };
+
+test "hspice.exponentWithScale finds a number with an exponent and a scale (#203)" {
+    // Hand-listed from T3: an exponent and a scale together, never a name.
+    for ([_][]const u8{ "r1 a 0 1e-6u", "c1 a 0 c=2.5e3p", "v1 a 0 '1d3k*2'", "r1 a 0 -1e+2meg" }) |line|
+        try std.testing.expect(hspice.exponentWithScale(line));
+    for ([_][]const u8{ "r1 a 0 1e-6", "r1 a 0 1u", "r1 n1e3k 0 1k", "r1 a 0 1e3v", "r1 a 0 1e", "r1 a_1e3k 0 1" }) |line|
+        try std.testing.expect(!hspice.exponentWithScale(line));
+}
 
 /// Spectre: the title line, case kept, `*` comment lines, `//` comments, `\`
 /// or `+` continuation, and HSPICE's rules in a `simulator lang=spice`

@@ -196,6 +196,9 @@ const L = struct {
         l.config_lines = .init(l.arena);
         var roots = l.t.children(null);
         const deck = roots.next() orelse return;
+        // HSPICE forbids an exponent and a scale factor together, in a field
+        // or an expression, and so does the frontend (#203).
+        if (l.dialect == .hspice and netlist.lines.hspice.exponentWithScale(l.text(deck))) return error.Refused;
         // Walk 1: declarations at the top level (and subcircuit names at any
         // depth: their names are global, §2.5).
         try l.declare(deck, &l.globals, true);

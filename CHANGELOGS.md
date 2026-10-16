@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- HSPICE dialect: a number with both an exponent and a scale factor (`1e-6u`) is refused, as HSPICE forbids it (#203).
 - HSPICE dialect: `%` and `\` are no longer expression operators, as HSPICE's manual has neither; a card that uses one is refused by name. Spectre keeps `%` and drops `\` (#203).
 - ngspice dialect: a device field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice refuses it, instead of being dropped; `r=10%3` reads 10, as ngspice reads it, instead of 1 (#200).
 - A raw or `.print` file that takes many plots (a `.step` sweep) is written once and replaced at the end of the run, instead of being copied and replaced per plot, which made a sweep of P plots write O(P²) bytes; until then the old file stays whole (#179).

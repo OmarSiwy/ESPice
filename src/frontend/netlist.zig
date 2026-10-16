@@ -1092,6 +1092,11 @@ fn Reader(comptime S: type) type {
             while (try split.next()) |line| {
                 if (std.mem.trim(u8, line, " \t").len > 0) try r.lines.append(arena, line);
             }
+            // HSPICE forbids an exponent and a scale factor together (#203).
+            if (dialect == .hspice) for (r.lines.items) |line| if (lines.hspice.exponentWithScale(line)) {
+                r.card = line;
+                return r.unsupported(line, "a number with both an exponent and a scale factor (`1e-6u`)");
+            };
             // Spectre statements become the SPICE cards the walks read.
             if (dialect == .spectre) {
                 const translated = try spectre.translate(arena, r.lines.items, &r.kinds);
