@@ -33,7 +33,10 @@ extension, since ngspice refuses one that starts with a digit. In the
 ngspice dialect a number run straight into `%` or `\` (`r=10%3`) is one
 ngspice token and reads as ngspice reads it, 10. A device's value or model
 field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice
-refuses it; node fields are names and are read.
+refuses it; node fields are names and are read. In the HSPICE dialect an
+unquoted expression after `key=` must start with a letter and hold no
+blank (`w=l*2`), as HSPICE requires; `w=2*l` or `w=l * 2` needs quotes and
+is refused without them.
 
 Expressions: `+ - * / ^ **`, `%` (remainder) and `\` (integer division),
 `== != <> < <= > >=`, `&& || !` and `?:`. An HSPICE deck has no `%`, `\`

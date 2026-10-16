@@ -278,6 +278,7 @@ const L = struct {
                 var a = l.t.children(c);
                 while (a.next()) |as| if (l.kind(as) == l.r.assign) {
                     const key = l.text(l.t.child(as, l.r.key).?);
+                    try l.strictValue(valueRow(l, as));
                     try scope.put(l.arena, key, .{ .row = valueRow(l, as) });
                     if (scope == &l.globals) try l.global_keys.append(l.arena, key);
                 } else if (l.kind(as) == l.r.funcdef) try l.defineFunc(as);
@@ -300,6 +301,7 @@ const L = struct {
             var a = l.t.children(card);
             while (a.next()) |as| if (l.kind(as) == l.r.assign) {
                 const key = l.text(l.t.child(as, l.r.key).?);
+                try l.strictValue(valueRow(l, as));
                 try scope.put(l.arena, key, .{ .row = valueRow(l, as) });
                 if (scope == &l.globals) try l.global_keys.append(l.arena, key);
             } else if (l.kind(as) == l.r.funcdef) try l.defineFunc(as);
@@ -353,6 +355,7 @@ const L = struct {
         while (it.next()) |c| {
             if (l.kind(c) == l.r.key) try formals.append(l.arena, l.text(c)) else body = c;
         }
+        try l.strictValue(body);
         try l.funcs.put(l.arena, name, .{ .formals = formals.items, .body = body });
     }
 
@@ -396,6 +399,16 @@ const L = struct {
                 }
             }
         }
+    }
+
+    /// HSPICE reads an unquoted value only as a number or as an expression
+    /// that starts with a letter and holds no blank, as the frontend does
+    /// (netlist.zig checkBare, CR10 p. 238, #203).
+    fn strictValue(l: *const L, row: u32) Error!void {
+        if (l.dialect != .hspice) return;
+        const k = l.kind(row);
+        if (k != l.r.ternary and k != l.r.word) return;
+        if (!netlist.lines.hspice.bareValue(l.text(row))) return error.Refused;
     }
 
     /// The row holding an assignment's value: the child after its key.
@@ -529,6 +542,7 @@ const L = struct {
 
     /// A `key=value` value as the frontend reads it (`kvValue`).
     fn pairValue(l: *L, row: u32, frame: *const Frame) Error!Value {
+        try l.strictValue(row);
         const k = l.kind(row);
         if (k == l.r.path) return .{ .name = std.mem.trim(u8, l.text(row), "\"'") };
         // `key="x"`: the frontend reads the quotes as a parenthesis.
@@ -1263,6 +1277,7 @@ const L = struct {
         var it = l.t.children(def);
         while (it.next()) |c| if (l.kind(c) == l.r.pair) {
             const key = l.text(l.t.child(c, l.r.key).?);
+            try l.strictValue(valueRow(l, c));
             try scope.put(l.arena, key, .{ .row = valueRow(l, c) });
         };
     }

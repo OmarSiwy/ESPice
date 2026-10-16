@@ -25,7 +25,7 @@ are split and a handful of meanings.
 | Inline comment | `;` or `//` anywhere; `$` after a blank or comma | `$` after a blank, a comma or a number | `//` |
 | Continuation | `+` on the next line; `\\` at line end joins with no blank | `+` on the next line; ` \` at line end, or `\\` to join with no blank | `+` on the next line, or `\` at line end |
 | Quotes | `'...'` and `"..."` keep comment characters | `'...'` and `"..."` keep `$` | `"..."` strings |
-| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'` or a bare parameter name; `{...}` too, with a note (an ESPice extension) | bare (`r=2*a`) |
+| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'`, a bare parameter name, or after `key=` an unquoted one that starts with a letter and holds no blank (`w=l*2`); `{...}` too, with a note (an ESPice extension) | bare (`r=2*a`) |
 | `M` / `m` suffix | milli, either case | milli, either case | `M` mega, `m` milli |
 | `x` suffix | none | mega | none |
 | Includes, `.alter` | `.include`, `.lib`, `.alter` | `.include`, `.lib`, `.alter` | `include "f" [section=s]`; no `.alter` |

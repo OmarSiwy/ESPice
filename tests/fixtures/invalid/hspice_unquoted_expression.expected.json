@@ -1,0 +1,16 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "tokenizer": "hspice",
+ "purpose": "#203: an unquoted `key=` expression that starts with a digit is refused by name in an HSPICE deck (CR10 p. 238).",
+ "oracle": {
+  "kind": "diagnostic",
+  "derivation": "#203: CR10 p. 238 reads an unquoted expression only when it begins with a letter and holds no space; ESPice refuses r=2*rv (UnsupportedCard)."
+ },
+ "origin": "tests/fixtures/invalid/hspice_unquoted_expression.sp",
+ "expect": {
+  "status": "error",
+  "category": "unsupported_input"
+ },
+ "netlist_sha256": "b136a7bc293076f5f38ad8064920c0613e45eba65b471261ad520ae708a9817a"
+}

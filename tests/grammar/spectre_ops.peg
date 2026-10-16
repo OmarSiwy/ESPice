@@ -6,3 +6,5 @@ MulOp      <- '*' !'*' / [/%]
 Unary      <- SignOp x Pow / NotOp x Unary / atom
 NotOp      <- '!' !'='
 Num        <- Mantissa ([e] [+\-]? [0-9]+)? [a-z]*
+# A translated Spectre value is bare, blanks around its operators allowed.
+pairexpr   <- &([a-zA-Z_.0-9(+\-!$]) Ternary !wordchar

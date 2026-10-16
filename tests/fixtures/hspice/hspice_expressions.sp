@@ -18,9 +18,9 @@ r2 n2 0 '1k*t2' $ comment
 v3 n3 0 1
 r3 n3 0 \
 '1k*t1'
-* `*` and `/` continue an unquoted value across blanks; `%` and `\` are no
-* HSPICE operators (#203, invalid/hspice_percent_operator.sp).
+* An unquoted value starts with a letter and holds no blank (CR10 p. 238);
+* `%` and `\` are no HSPICE operators (#203, invalid/hspice_*.sp).
 v4 n4 0 1
-r4 n4 0 r=6k * 2 / 3
+r4 n4 0 r=b*4k/3
 .op
 .end

@@ -1525,7 +1525,20 @@ fn Reader(comptime S: type) type {
             defer r.scratch.reset(mark);
             const start = f.pos;
             f.pos = try expr.compile(S, r.arena, &r.scratch, f.line, f.pos);
+            try r.checkBare(f.line[start..f.pos]);
             return f.line[start..f.pos];
+        }
+
+        /// HSPICE reads an unquoted value only as a number or as an
+        /// expression that starts with a letter and holds no blank
+        /// (`lines.hspice.bareValue`); anything else is refused by name
+        /// (#203). tests/grammar/lower.zig `strictValue` refuses the same.
+        fn checkBare(r: *R, text: []const u8) Error!void {
+            if (r.dialect != .hspice or lines.hspice.bareValue(text)) return;
+            // A quoted expression is no bare one.
+            const t = std.mem.trimLeft(u8, text, " \t");
+            if (t.len > 0 and (t[0] == '"' or t[0] == '\'' or t[0] == '{')) return;
+            return r.unsupported(r.card, "an unquoted expression that does not start with a letter, or holds a blank (quote it)");
         }
 
         /// Reads a `.model` card under `frame` into a new row; `global`
@@ -2538,7 +2551,9 @@ fn Reader(comptime S: type) type {
             }
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
+            const start = f.pos;
             f.pos = try expr.compile(S, r.arena, &r.scratch, f.line, f.pos);
+            try r.checkBare(f.line[start..f.pos]);
             const ops = r.scratch.ops.items[mark.ops..];
             if (ops.len == 1 and ops[0].code == .num) return .{ .num = r.scratch.consts.items[ops[0].a] };
             if (ops.len == 1 and ops[0].code == .ident) return r.nameValue(r.scratch.names.items[ops[0].a], frame, geometry);

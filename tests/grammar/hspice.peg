@@ -18,9 +18,8 @@ Scale      <- 'meg' / 'mil' / [tgxkmunpfa]
 # expression too, as in ngspice, with a note (#153; dev/frontend.md).
 Expr       <- "'" x Ternary x "'" / '"' x Ternary x '"' / '{' x Ternary x '}'
 
-# X1: after `key=`, an unquoted expression (`x=cos(2)+sin(2)`). ESPice:
-# blanks may sit around its operators.
-pairexpr   <- &([a-zA-Z_.0-9(+\-!$]) Ternary !wordchar
+# X1: after `key=`, an unquoted expression; pairexpr is the composition's
+# (hspice_ops.peg, spectre_ops.peg).
 
 # X2: HSPICE documents the operators (`+ - * / ** ^ < <= > >= == != && ||
 # ?:`) but no precedence. ESPice compiles every dialect's expressions with
