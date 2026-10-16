@@ -977,8 +977,6 @@ fn Reader(comptime S: type) type {
         /// `Frame.models_mark` splits it by instance.
         instance_models: std.ArrayList(struct { name: []const u8, row: u32 }) = .empty,
         globals: Scope = .empty,
-        /// Set once the HSPICE brace note is logged (`noteBrace`).
-        brace_noted: bool = false,
         /// The global `.param` names in deck order, for `foldGlobals`.
         global_keys: std.ArrayList([]const u8) = .empty,
         global_scopes: [1]*const Scope = undefined,
@@ -1517,7 +1515,7 @@ fn Reader(comptime S: type) type {
         fn paramText(r: *R, f: *F) Error![]const u8 {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
-            if (rest[0] == '{' or rest[0] == '\'') {
+            if ((rest[0] == '{' and !F.isWord(rest)) or rest[0] == '\'') {
                 const t = f.next().?;
                 return if (!F.isWord(t)) F.body(t) else t;
             }
@@ -2500,7 +2498,6 @@ fn Reader(comptime S: type) type {
         /// `readValue` whose first field `t` is already read.
         fn valueAt(r: *R, t: []const u8, f: *F, frame: *const Frame, subst_names: bool, geometry: bool) Error!Value {
             if (!F.isWord(t)) {
-                if (t[0] == '{') r.noteBrace();
                 if (t[0] == '{' or F.isQuote(t[0])) return r.exprValue(F.body(t), frame, geometry);
                 return error.ParseError;
             }
@@ -2538,7 +2535,9 @@ fn Reader(comptime S: type) type {
         fn kvValue(r: *R, f: *F, frame: *const Frame, geometry: bool) Error!Value {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
-            if (rest[0] == '{' or rest[0] == '\'') return r.readValue(f, frame, true, geometry);
+            // HSPICE reads a brace as a name byte, so `{...}` is a word there
+            // and goes to the bare-value rules (#203).
+            if ((rest[0] == '{' and !F.isWord(rest)) or rest[0] == '\'') return r.readValue(f, frame, true, geometry);
             // A lone number literal (`w=0.5u`) needs no compile; nor does
             // ngspice's `r=10%3`, which it reads as 10 (`junkNumber`, #200).
             if (std.ascii.isDigit(rest[0]) or rest[0] == '.') {
@@ -2596,14 +2595,6 @@ fn Reader(comptime S: type) type {
             };
             if (std.mem.indexOfScalar(u8, leads, t[0]) == null) return;
             return r.unsupported(line, "an operator where a name or value belongs");
-        }
-
-        /// HSPICE's manual reads braces as name bytes; the dialect reads
-        /// `{expr}` as ngspice does and says so once per deck (#153).
-        fn noteBrace(r: *R) void {
-            if (r.dialect != .hspice or r.brace_noted) return;
-            r.brace_noted = true;
-            if (!@import("builtin").is_test) std.log.info("netlist: `{{...}}` expressions are an ESPice extension, not HSPICE syntax; HSPICE quotes them ('...')", .{});
         }
 
         /// A bare name: substituted when a scope defines it.

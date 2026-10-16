@@ -145,8 +145,8 @@ Word       <- Number !wordchar / Ident
 Ident      <- (wordchar / '[' wordchar* ']')+
 Str        <- '"' (!'"' .)* '"'
 
-namechar   <- ![ \t\n,=()'"{}] .
-wordchar   <- ![ \t\n,=()'"{}\[\]] .
+# namechar and wordchar are the dialect file's: braces are name bytes in
+# HSPICE (hspice_ops.peg) and delimit an expression in ngspice.
 s          <- [ \t]+
 rest       <- (!nl .)*
 nl         <- '\n'

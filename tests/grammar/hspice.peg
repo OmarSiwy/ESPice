@@ -13,10 +13,8 @@ Mantissa   <- [0-9]+ ('.' [0-9]*)? / '.' [0-9]+
 Exponent   <- [ed] [+\-]? [0-9]+
 Scale      <- 'meg' / 'mil' / [tgxkmunpfa]
 
-# T2, X1: `'expr'` and `"expr"` are expressions. HSPICE's manual does not
-# read braces (it turns `{}` into `[]` inside names). ESPice: `{expr}` is an
-# expression too, as in ngspice, with a note (#153; dev/frontend.md).
-Expr       <- "'" x Ternary x "'" / '"' x Ternary x '"' / '{' x Ternary x '}'
+# T2, X1: `'expr'` and `"expr"` are expressions; Expr is the composition's
+# (hspice_ops.peg, spectre_ops.peg).
 
 # X1: after `key=`, an unquoted expression; pairexpr is the composition's
 # (hspice_ops.peg, spectre_ops.peg).

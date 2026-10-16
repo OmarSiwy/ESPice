@@ -1,0 +1,16 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "tokenizer": "hspice",
+ "purpose": "#203 (reversing #153): in an HSPICE deck `{rv*2}` is a name, as the manual reads braces, so a resistor valued by it is refused (UnresolvedParameter).",
+ "oracle": {
+  "kind": "diagnostic",
+  "derivation": "#203: HSPICE's manual reads braces as name bytes (hspice-syntax.md T2); an unknown name as a resistor value is refused."
+ },
+ "origin": "tests/fixtures/invalid/hspice_brace_expression.sp",
+ "expect": {
+  "status": "error",
+  "category": "unsupported_input"
+ },
+ "netlist_sha256": "baf1aac78748b377d3d5113483273684a4f81aed76c22f51fb2b2df898f047e6"
+}

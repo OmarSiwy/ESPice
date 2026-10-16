@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- HSPICE dialect: braces are name bytes again, as HSPICE's manual reads them, so `{expr}` is no longer an expression and `R1 a 0 {rv}` is refused; this reverses #153's reading (#203, #153).
 - HSPICE dialect: an unquoted expression after `key=` must start with a letter and hold no blank, as HSPICE requires; any other (`w=2*l`, `w=l * 2`) is refused and needs quotes (#203).
 - HSPICE dialect: a unary `!` is refused, as HSPICE's manual has none (`!=` stays) (#203).
 - HSPICE dialect: a number with both an exponent and a scale factor (`1e-6u`) is refused, as HSPICE forbids it (#203).

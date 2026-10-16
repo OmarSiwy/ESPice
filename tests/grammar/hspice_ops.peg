@@ -16,3 +16,9 @@ Num        <- Mantissa ([e] [+\-]? [0-9]+ !Scale)? !([e] [+\-]? [0-9]) [a-z]*
 # refuses one holding a blank, as the frontend does (lower.zig strictValue,
 # netlist.zig checkBare, #203).
 pairexpr   <- &[a-zA-Z] Ternary !wordchar
+# T2: `'expr'` and `"expr"` are expressions. Braces are not: the manual
+# reads them as name bytes (it turns `{}` into `[]` inside names), so
+# `{rv*2}` is a name (#203, reversing #153's reading).
+Expr       <- "'" x Ternary x "'" / '"' x Ternary x '"'
+namechar   <- ![ \t\n,=()'"] .
+wordchar   <- ![ \t\n,=()'"\[\]] .
