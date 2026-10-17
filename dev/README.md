@@ -31,15 +31,10 @@ retired paths and their replacements.
 
 | Area | Pages |
 |---|---|
-| Frontend | [frontend.md](frontend.md): netlist bytes to `Prepared`, stage by stage, with measurements; [preparation performance](Problem/preparation-performance.md); [sky130.md](sky130.md): what the sky130 PDK decks need, and parity with ngspice on them |
+| Frontend | [frontend.md](frontend.md): netlist bytes to `Prepared`, stage by stage, with measurements; [preparation performance](Problem/preparation-performance.md)|
 | Devices | [devices/models.md](devices/models.md): attribution, licensing and ngspice-conformance fixes per model; [devices/abi.md](devices/abi.md): the device ABI and its identity rules; [devices/iteration-lifecycle.md](devices/iteration-lifecycle.md): Verilog-AMS iteration hooks; [devices/gpu-evaluation.md](devices/gpu-evaluation.md): device planes on the GPU, the wait schedule and the `auto` cost model; [devices/verilog-digital.md](devices/verilog-digital.md): `.v` digital devices, A2D/D2A and the `ttol` cost; [devices/w-s-elements.md](devices/w-s-elements.md): HSPICE W and S elements, their rational fits and accuracy |
 | Analyses | [analysis/](analysis/README.md): one page per analysis |
 | Solvers | [solvers/](solvers/README.md): sparse LU, ordering, Newton, continuation, measured performance |
-| Conformance | [conformance-phase2.md](conformance-phase2.md): root causes and fix recipes for the decks the retired `issues.md` indexed; [verilog-ams-conformance-plan.md](verilog-ams-conformance-plan.md): the Verilog-AMS audit checklist |
-| Transmission lines | [vera-gaps.md](vera-gaps.md): the VerA features the Verilog-A lines needed, and what is still open; [native-transmission-line-migration.md](native-transmission-line-migration.md): the migration audit |
-| Playground | [playground.md](playground.md): how espice.wasm is checked against the native build, its stack size and simd128 |
-| Toolchain | [zig-backend.md](zig-backend.md): self-hosted x86_64 backend miscompiles that changed Debug results, with their workarounds |
-| Plans | [plan/optimize.md](plan/optimize.md): open work streams; [plan/vacask-comparison.md](plan/vacask-comparison.md): feature and speed comparison with VACASK, ranked gaps |
 
 Model sources live in `models/`. Shared data lives in `src/core/`, devices
 and HDL loading in `src/device/`, construction in `src/frontend/`, execution
@@ -66,7 +61,7 @@ SPICE conformance.
 
 Describe the code as it is. A divergence from ngspice or VACASK, or a
 retired experiment, is recorded on the topical page with its measurements
-and fallback (the proof rule in `AGENTS.md`). Session handoffs and branch
+and fallback. Session handoffs and branch
 logs do not belong here: fold what lasts into the topical page and delete
 the rest.
 
