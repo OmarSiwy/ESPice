@@ -44,7 +44,9 @@
           config.allowUnfree = true;
         };
 
-        zig = zig-overlay.packages.${system}."0.17.0";
+        # The overlay's newest master build (0.18.0-dev.349+d924f83bf on 2026-10-18),
+        # for its auto-vectorizer (#205). Untested on ESPice so far.
+        zig = zig-overlay.packages.${system}.master;
 
         commonInputs = [
           zig
