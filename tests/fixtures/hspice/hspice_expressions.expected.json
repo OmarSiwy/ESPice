@@ -2,10 +2,10 @@
   "schema_version": 1,
   "analysis": "op",
   "tokenizer": "hspice",
-  "purpose": "HSPICE quoted expressions (&& || ! == < > ^ ?:), .func, .param f(x), .parameters, a subcircuit with a default and an instance parameter, .global, $ and \\ line syntax, each read by a simulated deck",
+  "purpose": "HSPICE quoted expressions (&& || == != < > ^ ?:), .func, .param f(x), .parameters, a subcircuit with a default and an instance parameter, .global, $ and \\ line syntax, an unquoted letter-led `key=` expression, each read by a simulated deck",
   "oracle": {
     "kind": "analytic",
-    "derivation": "a=2, b=3. x1: rv=f(g(1,2))*1k=6k, r1=rv*t3/20 with t3=20: 6k, i(vdd)=-1/6k. r2=1k*2^3=8k. r3=1k*t1, t1=(2<3)&&!(2==3)||0=1: 1k."
+    "derivation": "a=2, b=3. x1: rv=f(g(1,2))*1k=6k, r1=rv*t3/20 with t3=20: 6k, i(vdd)=-1/6k. r2=1k*2^3=8k. r3=1k*t1, t1=(2<3)&&(2!=3)||0=1: 1k. r4: r=b*4k/3=3*4k/3=4k, i(v4)=-1/4k (#203)."
   },
   "expect": {
     "status": "success",
@@ -37,6 +37,14 @@
             "values": [
               -0.001
             ]
+          },
+          "i(v4)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-15,
+            "values": [
+              -0.00025
+            ]
           }
         },
         "row_count": 1
@@ -45,5 +53,5 @@
     "finite_values_required": true,
     "all_requested_analyses_must_complete": true
   },
-  "netlist_sha256": "8c41813fedc19ca2386ea4ade71f76064dadb2073ff013f54636d8436ec7f730"
+  "netlist_sha256": "7964f7ba772defe12871c22b5bf0fb0afa6d35f803fcdfb0bdb1652e9bc3f214"
 }

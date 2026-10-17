@@ -25,14 +25,16 @@ are split and a handful of meanings.
 | Inline comment | `;` or `//` anywhere; `$` after a blank or comma | `$` after a blank, a comma or a number | `//` |
 | Continuation | `+` on the next line; `\\` at line end joins with no blank | `+` on the next line; ` \` at line end, or `\\` to join with no blank | `+` on the next line, or `\` at line end |
 | Quotes | `'...'` and `"..."` keep comment characters | `'...'` and `"..."` keep `$` | `"..."` strings |
-| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'` or a bare parameter name; `{...}` too, with a note (an ESPice extension) | bare (`r=2*a`) |
+| Expressions | `{...}`, `'...'` or a bare parameter name | `'...'`, a bare parameter name, or after `key=` an unquoted one that starts with a letter and holds no blank (`w=l*2`); braces are name bytes, as in HSPICE, so `{...}` is no expression, and a behavioural (`VOL=`, `TABLE`) or `.meas` card holding one is refused | bare (`r=2*a`) |
 | `M` / `m` suffix | milli, either case | milli, either case | `M` mega, `m` milli |
 | `x` suffix | none | mega | none |
 | Includes, `.alter` | `.include`, `.lib`, `.alter` | `.include`, `.lib`, `.alter` | `include "f" [section=s]`; no `.alter` |
 | Default TNOM, circuit temperature | 27 °C, 27 °C | 25 °C, run at TNOM | 27 °C, 27 °C |
 
 The ngspice and HSPICE suffix tables are `t g meg k m mil u n p f a`
-(case-insensitive), and `d` works as an exponent (`1d-3`). Spectre's are case-sensitive: `P` (peta), `T`, `G`,
+(case-insensitive), and `d` works as an exponent (`1d-3`). HSPICE forbids
+an exponent and a suffix in one number, so an HSPICE deck that writes
+`1e-6u` is refused; ngspice reads it as 1e-12. Spectre's are case-sensitive: `P` (peta), `T`, `G`,
 `M` (mega), `K` or `k`, `m` (milli), `u`, `n`, `p`, `f`, `a` (atto), and
 `%` or `c` for 10^-2.
 

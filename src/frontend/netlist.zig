@@ -1032,8 +1032,6 @@ fn Reader(comptime S: type) type {
         /// `Frame.models_mark` splits it by instance.
         instance_models: std.ArrayList(struct { name: []const u8, row: u32 }) = .empty,
         globals: Scope = .empty,
-        /// Set once the HSPICE brace note is logged (`noteBrace`).
-        brace_noted: bool = false,
         /// The global `.param` names in deck order, for `foldGlobals`.
         global_keys: std.ArrayList([]const u8) = .empty,
         global_scopes: [1]*const Scope = undefined,
@@ -1149,6 +1147,11 @@ fn Reader(comptime S: type) type {
             while (try split.next()) |line| {
                 if (std.mem.trim(u8, line, " \t").len > 0) try r.lines.append(arena, line);
             }
+            // HSPICE forbids an exponent and a scale factor together (#203).
+            if (dialect == .hspice) for (r.lines.items) |line| if (lines.hspice.exponentWithScale(line)) {
+                r.card = line;
+                return r.unsupported(line, "a number with both an exponent and a scale factor (`1e-6u`)");
+            };
             // Spectre statements become the SPICE cards the walks read.
             if (dialect == .spectre) {
                 const translated = try spectre.translate(arena, r.lines.items);
@@ -1571,7 +1574,7 @@ fn Reader(comptime S: type) type {
         fn paramText(r: *R, f: *F) Error![]const u8 {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
-            if (rest[0] == '{' or rest[0] == '\'') {
+            if ((rest[0] == '{' and !F.isWord(rest)) or rest[0] == '\'') {
                 const t = f.next().?;
                 return if (!F.isWord(t)) F.body(t) else t;
             }
@@ -1579,7 +1582,20 @@ fn Reader(comptime S: type) type {
             defer r.scratch.reset(mark);
             const start = f.pos;
             f.pos = try expr.compile(S, r.arena, &r.scratch, f.line, f.pos);
+            try r.checkBare(f.line[start..f.pos]);
             return f.line[start..f.pos];
+        }
+
+        /// HSPICE reads an unquoted value only as a number or as an
+        /// expression that starts with a letter and holds no blank
+        /// (`lines.hspice.bareValue`); anything else is refused by name
+        /// (#203). tests/grammar/lower.zig `strictValue` refuses the same.
+        fn checkBare(r: *R, text: []const u8) Error!void {
+            if (r.dialect != .hspice or lines.hspice.bareValue(text)) return;
+            // A quoted expression is no bare one.
+            const t = std.mem.trimLeft(u8, text, " \t");
+            if (t.len > 0 and (t[0] == '"' or t[0] == '\'' or t[0] == '{')) return;
+            return r.unsupported(r.card, "an unquoted expression that does not start with a letter, or holds a blank (quote it)");
         }
 
         /// Reads a `.model` card under `frame` into a new row; `global`
@@ -2589,7 +2605,6 @@ fn Reader(comptime S: type) type {
         /// `readValue` whose first field `t` is already read.
         fn valueAt(r: *R, t: []const u8, f: *F, frame: *const Frame, subst_names: bool, geometry: bool) Error!Value {
             if (!F.isWord(t)) {
-                if (t[0] == '{') r.noteBrace();
                 if (t[0] == '{' or F.isQuote(t[0])) return r.exprValue(F.body(t), frame, geometry);
                 return error.ParseError;
             }
@@ -2630,7 +2645,9 @@ fn Reader(comptime S: type) type {
         fn kvValue(r: *R, f: *F, frame: *const Frame, geometry: bool) Error!Value {
             const rest = f.rest();
             if (rest.len == 0) return error.ParseError;
-            if (rest[0] == '{' or rest[0] == '\'') return r.readValue(f, frame, true, geometry);
+            // HSPICE reads a brace as a name byte, so `{...}` is a word there
+            // and goes to the bare-value rules (#203).
+            if ((rest[0] == '{' and !F.isWord(rest)) or rest[0] == '\'') return r.readValue(f, frame, true, geometry);
             // A lone number literal (`w=0.5u`) needs no compile; nor does
             // ngspice's `r=10%3`, which it reads as 10 (`junkNumber`, #200).
             if (std.ascii.isDigit(rest[0]) or rest[0] == '.') {
@@ -2643,7 +2660,9 @@ fn Reader(comptime S: type) type {
             }
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
+            const start = f.pos;
             f.pos = try expr.compile(S, r.arena, &r.scratch, f.line, f.pos);
+            try r.checkBare(f.line[start..f.pos]);
             const ops = r.scratch.ops.items[mark.ops..];
             if (ops.len == 1 and ops[0].code == .num) return .{ .num = r.scratch.consts.items[ops[0].a] };
             if (ops.len == 1 and ops[0].code == .ident) return r.nameValue(r.scratch.names.items[ops[0].a], frame, geometry);
@@ -2673,21 +2692,19 @@ fn Reader(comptime S: type) type {
         /// ngspice fails a device card whose value or model field starts
         /// with an operator byte (`R1 a b 10 %3`: "unknown parameter");
         /// ESPice refuses it by name instead of reading a name `%3` (#200).
-        /// Node fields are names to ngspice and stay read, as do X cards
-        /// and dot cards. tests/grammar/lower.zig `element` refuses the same
-        /// fields.
+        /// In HSPICE, which has no `%` or `\` operator, a field led by one
+        /// is refused the same way (#203). Node fields are names and stay
+        /// read, as do X cards and dot cards. tests/grammar/lower.zig
+        /// `element` refuses the same fields.
         fn refuseOperatorField(r: *R, line: []const u8, t: []const u8) Error!void {
-            if (r.dialect != .ngspice or !F.isWord(t)) return;
-            if (std.mem.indexOfScalar(u8, "%\\*/^|&?", t[0]) == null) return;
+            if (!F.isWord(t)) return;
+            const leads: []const u8 = switch (r.dialect) {
+                .ngspice => "%\\*/^|&?",
+                .hspice => "%\\",
+                .spectre => "",
+            };
+            if (std.mem.indexOfScalar(u8, leads, t[0]) == null) return;
             return r.unsupported(line, "an operator where a name or value belongs");
-        }
-
-        /// HSPICE's manual reads braces as name bytes; the dialect reads
-        /// `{expr}` as ngspice does and says so once per deck (#153).
-        fn noteBrace(r: *R) void {
-            if (r.dialect != .hspice or r.brace_noted) return;
-            r.brace_noted = true;
-            if (!@import("builtin").is_test) std.log.info("netlist: `{{...}}` expressions are an ESPice extension, not HSPICE syntax; HSPICE quotes them ('...')", .{});
         }
 
         /// A bare name: substituted when a scope defines it.
@@ -2714,6 +2731,12 @@ fn Reader(comptime S: type) type {
             var stims: [2]u32 = @splat(0);
             var global_level: ?measure.Levels = null;
             for (r.meas_lines.items) |line| {
+                // HSPICE writes a measure's expression as `par('...')` or
+                // quoted; a brace is a name byte there, and a measure card
+                // holding one is refused, not skipped (#203). lower.zig
+                // `prescan` refuses the same.
+                if (r.dialect == .hspice and std.mem.indexOfScalar(u8, line, '{') != null)
+                    return r.unsupported(line, "a braced expression (HSPICE quotes expressions: '...')");
                 var f = F.init(line);
                 var text = f.rest();
                 const head = f.next().?[1..];
@@ -3412,6 +3435,11 @@ fn Reader(comptime S: type) type {
         fn behaviouralCard(r: *R, line: []const u8, head: []const u8, letter: u8, f_in: F, frame: *const Frame, form: Form) Error!void {
             const arena = r.arena;
             var f = f_in;
+            // HSPICE quotes these expressions (`VOL='...'`, `TABLE '...'`);
+            // a brace is a name byte there, and the form takes no name with
+            // one (#203). tests/grammar/lower.zig `element` refuses the same.
+            if (r.dialect == .hspice and std.mem.indexOfScalar(u8, f.rest(), '{') != null)
+                return r.unsupported(line, "a braced expression (HSPICE quotes expressions: '...')");
             r.nodes.clearRetainingCapacity();
             r.positional.clearRetainingCapacity();
             r.card_kv.clearRetainingCapacity();

@@ -1,0 +1,16 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "tokenizer": "hspice",
+ "purpose": "#203: `%` used as an operator in an HSPICE deck is refused by name (UnsupportedCard), since HSPICE documents no `%` operator.",
+ "oracle": {
+  "kind": "diagnostic",
+  "derivation": "#203: the HSPICE manual's operator table (UG08 pp. 279-283) has no `%`; ESPice refuses the card."
+ },
+ "origin": "tests/fixtures/invalid/hspice_percent_operator.sp",
+ "expect": {
+  "status": "error",
+  "category": "unsupported_input"
+ },
+ "netlist_sha256": "e8be8217f38411967d3d1315aa30ab0681576a3b3fba872119a6342fc741131e"
+}

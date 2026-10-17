@@ -9,6 +9,12 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 - `.tf` reads a resistance whose branch current is below 1e-20 A as `1e20`, as ngspice does (a 1e-30 S input path printed 1e30); `.dcxf` and `.acxf` keep VACASK's exact-zero rule but no longer print `inf` for an immittance below about 1e-154 (#199).
 - `.tf` prints an infinite input or output resistance (a source that moves no current) as `1e20`, as ngspice does, instead of `inf` (#193).
 - `.qpss` runs on multi-tone harmonic balance (`.hb TONES=`): preconditioned GMRES from the operating point instead of a second two-tone solver; the API `Qpss` drops its unused `gmres_*` fields (#189).
+- HSPICE dialect: an E/F/G/H behavioural form (`VOL=`, `CUR=`, `VALUE=`, `TABLE`, ...) or a `.meas`/`.check`/`.power`/`.stim` card holding a brace is refused; a malformed HSPICE measure with braces is no longer skipped with a warning (#203).
+- HSPICE dialect: braces are name bytes again, as HSPICE's manual reads them, so `{expr}` is no longer an expression and `R1 a 0 {rv}` is refused; this reverses #153's reading (#203, #153).
+- HSPICE dialect: an unquoted expression after `key=` must start with a letter and hold no blank, as HSPICE requires; any other (`w=2*l`, `w=l * 2`) is refused and needs quotes (#203).
+- HSPICE dialect: a unary `!` is refused, as HSPICE's manual has none (`!=` stays) (#203).
+- HSPICE dialect: a number with both an exponent and a scale factor (`1e-6u`) is refused, as HSPICE forbids it (#203).
+- HSPICE dialect: `%` and `\` are no longer expression operators, as HSPICE's manual has neither; a card that uses one is refused by name. Spectre keeps `%` and drops `\` (#203).
 - ngspice dialect: a device field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice refuses it, instead of being dropped; `r=10%3` reads 10, as ngspice reads it, instead of 1 (#200).
 - A raw or `.print` file that takes many plots (a `.step` sweep) is written once and replaced at the end of the run, instead of being copied and replaced per plot, which made a sweep of P plots write O(P²) bytes; until then the old file stays whole (#179).
 - An unbraced `key=` value continues past a blank before `%` or `\` as it does before `*` or `/`: `r=7k %4k` is 3k, where it read 7k and refused `%4k` (#180).

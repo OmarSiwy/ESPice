@@ -59,6 +59,11 @@ PowOp      <- '^' / '**'
 SignOp     <- [+\-]
 NotOp      <- '!' !'='
 
+# A name's and a word's bytes (spice_cards.peg): braces delimit an
+# expression, so they are neither.
+namechar   <- ![ \t\n,=()'"{}] .
+wordchar   <- ![ \t\n,=()'"{}\[\]] .
+
 # A field, a field inside a group, and a pair's value (spice_cards.peg).
 # `"..."` is a word to ngspice (§1.9); a group holds no `key=value` (§3.1:
 # a vector ends at its first non-number, and `r=`/`td=` follow it); a pair's

@@ -324,6 +324,11 @@ fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
 pub const ngspice = struct {
     /// The first line is the deck title, not a card.
     pub const title_line = true;
+    /// Operator bytes beyond `* /` at their level: numparam's remainder and
+    /// integer division (ngspice-syntax.md §2.2).
+    pub const remainder_ops = "%\\";
+    /// Unary `!` is numparam's logical not (ngspice-syntax.md §2.2).
+    pub const unary_not = true;
     /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
     /// Field splitter over one logical line.
@@ -444,12 +449,19 @@ pub const ngspice = struct {
 pub const hspice = struct {
     /// The first line is the deck title, not a card.
     pub const title_line = true;
+    /// Operator bytes beyond `* /` at their level: none. The manual's
+    /// operator table has no `%` or `\` (hspice-syntax.md X2, UG08
+    /// pp. 279-283), and a deck that uses one is refused (#203).
+    pub const remainder_ops = "";
+    /// No unary `!` either: the manual's table lists `!=` only (X2), and a
+    /// deck that negates with `!` is refused (#203).
+    pub const unary_not = false;
     /// Cards are case-insensitive: the text is lowercased before parsing.
     pub const fold_case = true;
-    /// Field splitter over one logical line.
-    /// Braces delimit an expression as in ngspice, an ESPice extension:
-    /// HSPICE's manual reads them as name bytes (#153).
-    pub const Split = Fields("'\"", true);
+    /// Field splitter over one logical line. Braces are name bytes, as
+    /// HSPICE's manual reads them (hspice-syntax.md T2), not an expression
+    /// (#203, reversing #153's reading).
+    pub const Split = Fields("'\"", false);
 
     /// Logical-line iterator; a joined line is allocated in `arena`.
     pub const Lines = struct {
@@ -586,7 +598,72 @@ pub const hspice = struct {
     pub fn parseNum(text: []const u8) ?f64 {
         return parseSpiceNum(text, true);
     }
+
+    /// Whether `line` holds a number with both an exponent and a scale
+    /// factor (`1e-6u`), which HSPICE forbids (hspice-syntax.md T3, UG08
+    /// p. 49): a deck that writes one is refused (#203). A number starts
+    /// after a byte that cannot continue a name, so `n1e3k` is a name.
+    /// tests/grammar/lower.zig refuses the same lines.
+    pub fn exponentWithScale(line: []const u8) bool {
+        for (0..line.len) |i| {
+            if (i > 0 and (std.ascii.isAlphanumeric(line[i - 1]) or line[i - 1] == '_' or line[i - 1] == '.')) continue;
+            var j = i;
+            if (line[j] == '+' or line[j] == '-') j += 1;
+            var digits = false;
+            while (j < line.len and std.ascii.isDigit(line[j])) : (j += 1) digits = true;
+            if (j < line.len and line[j] == '.') {
+                j += 1;
+                while (j < line.len and std.ascii.isDigit(line[j])) : (j += 1) digits = true;
+            }
+            if (!digits or j == line.len or std.mem.indexOfScalar(u8, "eEdD", line[j]) == null) continue;
+            j += 1;
+            if (j < line.len and (line[j] == '+' or line[j] == '-')) j += 1;
+            const exponent = j;
+            while (j < line.len and std.ascii.isDigit(line[j])) j += 1;
+            if (j == exponent or j == line.len) continue;
+            if (std.mem.indexOfScalar(u8, "tgxkmunpfaTGXKMUNPFA", line[j]) != null) return true;
+        }
+        return false;
+    }
+
+    /// Whether `text`, an unquoted value after `key=`, is one HSPICE takes:
+    /// a number, or an expression that starts with a letter and holds no
+    /// blank (hspice-syntax.md X1, CR10 p. 238: "unless the expression
+    /// begins with an alphabetic character and contains no spaces"). Any
+    /// other expression needs quotes, and is refused without them (#203).
+    pub fn bareValue(text: []const u8) bool {
+        const t = std.mem.trim(u8, text, " \t");
+        if (t.len == 0) return false;
+        if (std.ascii.isAlphabetic(t[0])) return std.mem.indexOfAny(u8, t, " \t") == null;
+        // A number: sign, mantissa, then exponent, scale and unit bytes.
+        var i: usize = 0;
+        if (t[0] == '+' or t[0] == '-') i = 1;
+        if (i == t.len) return false;
+        if (!std.ascii.isDigit(t[i]) and !(t[i] == '.' and i + 1 < t.len and std.ascii.isDigit(t[i + 1]))) return false;
+        for (t[i..], i..) |c, k| {
+            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.') continue;
+            if ((c == '+' or c == '-') and std.mem.indexOfScalar(u8, "eEdD", t[k - 1]) != null) continue;
+            return false;
+        }
+        return true;
+    }
 };
+
+test "hspice.bareValue: a number, or a letter-led expression with no blank (#203)" {
+    // Hand-listed from CR10 p. 238.
+    for ([_][]const u8{ "1k", "-1", "+.5", "2.5e-3", "10pf", "a", "x*2+b", "v(1,0)*2", " cos(2)+sin(2) " }) |text|
+        try std.testing.expect(hspice.bareValue(text));
+    for ([_][]const u8{ "", "2*a", "6k * 2 / 3", "a + b", "(a+b)", "-a", "!a", ".", "1k-1" }) |text|
+        try std.testing.expect(!hspice.bareValue(text));
+}
+
+test "hspice.exponentWithScale finds a number with an exponent and a scale (#203)" {
+    // Hand-listed from T3: an exponent and a scale together, never a name.
+    for ([_][]const u8{ "r1 a 0 1e-6u", "c1 a 0 c=2.5e3p", "v1 a 0 '1d3k*2'", "r1 a 0 -1e+2meg" }) |line|
+        try std.testing.expect(hspice.exponentWithScale(line));
+    for ([_][]const u8{ "r1 a 0 1e-6", "r1 a 0 1u", "r1 n1e3k 0 1k", "r1 a 0 1e3v", "r1 a 0 1e", "r1 a_1e3k 0 1" }) |line|
+        try std.testing.expect(!hspice.exponentWithScale(line));
+}
 
 /// Spectre: the title line, case kept, `*` comment lines, `//` comments, `\`
 /// or `+` continuation, and HSPICE's rules in a `simulator lang=spice`
@@ -595,6 +672,11 @@ pub const hspice = struct {
 pub const spectre = struct {
     /// §1.2: line 1 of the top-level netlist is the title (UG p.29, p.50).
     pub const title_line = true;
+    /// Operator bytes beyond `* /` at their level: `%`, which ESPice reads
+    /// (tests/grammar/spectre.peg MulOp); `\` is no Spectre operator (#203).
+    pub const remainder_ops = "%";
+    /// Unary `!`, which ESPice reads (tests/grammar/spectre.peg SignOp).
+    pub const unary_not = true;
     /// Cards are case-sensitive: the text is parsed as written.
     pub const fold_case = false;
     /// Field splitter over one logical line.
@@ -764,9 +846,12 @@ test Fields {
     try std.testing.expect(!f.takeEq());
     try std.testing.expectEqual('v', f.nextByte());
     try std.testing.expect(F.isWord("abc") and !F.isWord("=") and !F.isWord("'x'") and !F.isWord("{x}"));
-    // HSPICE: `"` quotes too, and braces delimit an expression (#153).
-    var h = hspice.Split.init("{a + b} \"b c\"");
-    try std.testing.expectEqualStrings("{a + b}", h.next().?);
+    // HSPICE: `"` quotes too, and braces are name bytes (#203).
+    var h = hspice.Split.init("{a+b} {a b} \"b c\"");
+    try std.testing.expectEqualStrings("{a+b}", h.next().?);
+    try std.testing.expectEqualStrings("{a", h.next().?);
+    try std.testing.expectEqualStrings("b}", h.next().?);
+    try std.testing.expect(hspice.Split.isWord("{x}"));
     try std.testing.expectEqualStrings("\"b c\"", h.next().?);
     try std.testing.expect(hspice.Split.isQuote('"') and !ngspice.Split.isQuote('"'));
 }

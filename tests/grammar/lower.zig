@@ -196,6 +196,9 @@ const L = struct {
         l.config_lines = .init(l.arena);
         var roots = l.t.children(null);
         const deck = roots.next() orelse return;
+        // HSPICE forbids an exponent and a scale factor together, in a field
+        // or an expression, and so does the frontend (#203).
+        if (l.dialect == .hspice and netlist.lines.hspice.exponentWithScale(l.text(deck))) return error.Refused;
         // Walk 1: declarations at the top level (and subcircuit names at any
         // depth: their names are global, §2.5).
         try l.declare(deck, &l.globals, true);
@@ -275,6 +278,7 @@ const L = struct {
                 var a = l.t.children(c);
                 while (a.next()) |as| if (l.kind(as) == l.r.assign) {
                     const key = l.text(l.t.child(as, l.r.key).?);
+                    try l.strictValue(valueRow(l, as));
                     try scope.put(l.arena, key, .{ .row = valueRow(l, as) });
                     if (scope == &l.globals) try l.global_keys.append(l.arena, key);
                 } else if (l.kind(as) == l.r.funcdef) try l.defineFunc(as);
@@ -297,6 +301,7 @@ const L = struct {
             var a = l.t.children(card);
             while (a.next()) |as| if (l.kind(as) == l.r.assign) {
                 const key = l.text(l.t.child(as, l.r.key).?);
+                try l.strictValue(valueRow(l, as));
                 try scope.put(l.arena, key, .{ .row = valueRow(l, as) });
                 if (scope == &l.globals) try l.global_keys.append(l.arena, key);
             } else if (l.kind(as) == l.r.funcdef) try l.defineFunc(as);
@@ -350,6 +355,7 @@ const L = struct {
         while (it.next()) |c| {
             if (l.kind(c) == l.r.key) try formals.append(l.arena, l.text(c)) else body = c;
         }
+        try l.strictValue(body);
         try l.funcs.put(l.arena, name, .{ .formals = formals.items, .body = body });
     }
 
@@ -379,6 +385,9 @@ const L = struct {
                 // `.step [lin|dec|oct] [param] name ...`
                 var words = std.mem.tokenizeAny(u8, l.text(c), " \t,=()");
                 const head = words.next() orelse "";
+                // An HSPICE measure card holding a brace is refused, as the
+                // frontend's readMeasures refuses it (#203).
+                if (l.dialect == .hspice and std.mem.indexOfScalar(u8, l.text(c), '{') != null and measureCard(head)) return error.Refused;
                 if (std.mem.eql(u8, head, ".connect")) {
                     const a = words.next() orelse continue;
                     const b = words.next() orelse continue;
@@ -393,6 +402,16 @@ const L = struct {
                 }
             }
         }
+    }
+
+    /// HSPICE reads an unquoted value only as a number or as an expression
+    /// that starts with a letter and holds no blank, as the frontend does
+    /// (netlist.zig checkBare, CR10 p. 238, #203).
+    fn strictValue(l: *const L, row: u32) Error!void {
+        if (l.dialect != .hspice) return;
+        const k = l.kind(row);
+        if (k != l.r.ternary and k != l.r.word) return;
+        if (!netlist.lines.hspice.bareValue(l.text(row))) return error.Refused;
     }
 
     /// The row holding an assignment's value: the child after its key.
@@ -534,6 +553,7 @@ const L = struct {
 
     /// A `key=value` value as the frontend reads it (`kvValue`).
     fn pairValue(l: *L, row: u32, frame: *const Frame) Error!Value {
+        try l.strictValue(row);
         const k = l.kind(row);
         if (k == l.r.path) return .{ .name = std.mem.trim(u8, l.text(row), "\"'") };
         // `key="x"`: the frontend reads the quotes as a parenthesis.
@@ -1072,6 +1092,10 @@ const L = struct {
         // frontend/pattern.zig refuses a PAT Z (high-impedance) state (#63).
         if ((letter == 'v' or letter == 'i') and l.patZ(fields.items[n..])) return error.Refused;
         if (l.rewritten(letter, fields.items[n..])) {
+            // HSPICE quotes a behavioural form's expression; a brace there is
+            // a name byte no form takes, as the frontend refuses (#203).
+            if (l.dialect == .hspice and std.mem.indexOfScalar(u8, "efgh", letter) != null)
+                for (fields.items) |f| if (std.mem.indexOfScalar(u8, l.text(f), '{') != null) return error.Refused;
             // LAPLACE, POLE and DELAY keep their letter and control nodes;
             // the other forms become a two-terminal B card.
             const form = if (words.items.len > 2) words.items[2] else "";
@@ -1102,8 +1126,14 @@ const L = struct {
             } else {
                 // ngspice fails a device whose value or model field starts
                 // with an operator (`r1 a b 10 %3`: "unknown parameter"), and
-                // so does the frontend (netlist.zig refuseOperatorField, #200).
-                if (l.dialect == .ngspice and std.mem.indexOfScalar(u8, "%\\*/^|&?", l.text(f)[0]) != null) return error.Refused;
+                // so does the frontend (netlist.zig refuseOperatorField, #200);
+                // HSPICE has no `%` or `\` operator to lead one (#203).
+                const leads: []const u8 = switch (l.dialect) {
+                    .ngspice => "%\\*/^|&?",
+                    .hspice => "%\\",
+                    .spectre => "",
+                };
+                if (std.mem.indexOfScalar(u8, leads, l.text(f)[0]) != null) return error.Refused;
                 try positional.append(l.arena, try l.field(f, frame, true));
             }
         }
@@ -1162,6 +1192,15 @@ const L = struct {
     /// True for a card the frontend builds as another device: a behavioural
     /// E/F/G/H form (§3.2), a behavioural R, or a B source, whose
     /// expression holds node probes.
+    /// The OtherKind cards the frontend reads as measures (`.meas` in its
+    /// card table): `.meas`, `.measure`, `.jitter`, `.check`, `.dout`,
+    /// `.biaschk`, `.power`, `.stim`, `.stimuli`.
+    fn measureCard(head: []const u8) bool {
+        const heads = [_][]const u8{ ".meas", ".measure", ".jitter", ".check", ".dout", ".biaschk", ".power", ".stim", ".stimuli" };
+        for (heads) |h| if (std.mem.eql(u8, head, h)) return true;
+        return false;
+    }
+
     fn rewritten(l: *L, letter: u8, tail: []const u32) bool {
         if (tail.len == 0) return false;
         const first = l.text(tail[0]);
@@ -1262,6 +1301,7 @@ const L = struct {
         var it = l.t.children(def);
         while (it.next()) |c| if (l.kind(c) == l.r.pair) {
             const key = l.text(l.t.child(c, l.r.key).?);
+            try l.strictValue(valueRow(l, c));
             try scope.put(l.arena, key, .{ .row = valueRow(l, c) });
         };
     }

@@ -1,0 +1,24 @@
+# HSPICE's multiplicative operators, `*` and `/` only: the manual's operator
+# table has no `%` and no `\` (dev/research/hspice-syntax.md X2, UG08
+# pp. 279-283, Table 19). The frontend refuses a deck that uses either as an
+# operator, quoted, braced or bare (src/frontend/lines.zig
+# hspice.remainder_ops, #203).
+MulOp      <- '*' !'*' / '/'
+# X2: no unary `!` either (the table lists `!=` only); ESPice refuses one
+# (src/frontend/lines.zig hspice.unary_not, #203).
+Unary      <- SignOp x Pow / atom
+# T3: an expression's number takes no exponent followed by a scale factor
+# (`1e-6u`), which HSPICE forbids (#203).
+Num        <- Mantissa ([e] [+\-]? [0-9]+ !Scale)? !([e] [+\-]? [0-9]) [a-z]*
+# X1, CR10 p. 238: an unquoted expression after `key=` "begins with an
+# alphabetic character and contains no spaces" (`x=cos(2)+sin(2)`); any
+# other needs quotes. The grammar takes a letter-led one, and the lowering
+# refuses one holding a blank, as the frontend does (lower.zig strictValue,
+# netlist.zig checkBare, #203).
+pairexpr   <- &[a-zA-Z] Ternary !wordchar
+# T2: `'expr'` and `"expr"` are expressions. Braces are not: the manual
+# reads them as name bytes (it turns `{}` into `[]` inside names), so
+# `{rv*2}` is a name (#203, reversing #153's reading).
+Expr       <- "'" x Ternary x "'" / '"' x Ternary x '"'
+namechar   <- ![ \t\n,=()'"] .
+wordchar   <- ![ \t\n,=()'"\[\]] .

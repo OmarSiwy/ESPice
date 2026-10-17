@@ -33,10 +33,15 @@ extension, since ngspice refuses one that starts with a digit. In the
 ngspice dialect a number run straight into `%` or `\` (`r=10%3`) is one
 ngspice token and reads as ngspice reads it, 10. A device's value or model
 field that starts with an operator (`R1 a b 10 %3`) is refused, as ngspice
-refuses it; node fields are names and are read.
+refuses it; node fields are names and are read. In the HSPICE dialect an
+unquoted expression after `key=` must start with a letter and hold no
+blank (`w=l*2`), as HSPICE requires; `w=2*l` or `w=l * 2` needs quotes and
+is refused without them.
 
 Expressions: `+ - * / ^ **`, `%` (remainder) and `\` (integer division),
-`== != <> < <= > >=`, `&& || !` and `?:`, with `sqrt exp ln log log10 abs
+`== != <> < <= > >=`, `&& || !` and `?:`. An HSPICE deck has no `%`, `\`
+or unary `!`, as HSPICE's manual has none, and a card that uses one is
+refused; a Spectre netlist has `%` but not `\`. Functions: `sqrt exp ln log log10 abs
 floor ceil min max pow sin cos tan atan` (or `arctan`) `tanh ternary_fcn`.
 Values that fold to a constant also take `pwr sqr int nint sgn sinh cosh
 asin acos asinh acosh atanh`, `%`, `\` and the user functions of `.func`;

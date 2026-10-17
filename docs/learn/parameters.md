@@ -44,8 +44,9 @@ In a behavioural `B` source, expressions can also read `v(node)`,
 
 The ngspice dialect also accepts an expression in single quotes
 (`R1 a b '2*rval'`) and a bare parameter name as a value (`R1 a b rval`).
-HSPICE itself takes only those two forms; the HSPICE dialect also reads
-`{...}`, with a note that braces are not HSPICE syntax.
+HSPICE takes only those two forms, and so does the HSPICE dialect: braces
+are name bytes there, as in HSPICE, so `{...}` is no expression (#203; the
+dialect read it as one from #153 until then).
 See [dialects](../using/dialects.md).
 
 ## Scope

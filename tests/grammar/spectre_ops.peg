@@ -1,0 +1,14 @@
+# A Spectre statement translated to a SPICE card (lower_spectre.zig) keeps
+# Spectre's multiplicative operators: `%` is one (spectre.peg MulOp), `\`
+# is not (src/frontend/lines.zig spectre.remainder_ops, #203).
+MulOp      <- '*' !'*' / [/%]
+# Spectre's unary `!` (spectre.peg SignOp).
+Unary      <- SignOp x Pow / NotOp x Unary / atom
+NotOp      <- '!' !'='
+Num        <- Mantissa ([e] [+\-]? [0-9]+)? [a-z]*
+# A translated Spectre value is bare, blanks around its operators allowed.
+pairexpr   <- &([a-zA-Z_.0-9(+\-!$]) Ternary !wordchar
+# A translated Spectre card's quotes and braces, as before #203.
+Expr       <- "'" x Ternary x "'" / '"' x Ternary x '"' / '{' x Ternary x '}'
+namechar   <- ![ \t\n,=()'"{}] .
+wordchar   <- ![ \t\n,=()'"{}\[\]] .
