@@ -1,0 +1,16 @@
+{
+ "schema_version": 1,
+ "analysis": "op",
+ "tokenizer": "hspice",
+ "purpose": "#203: a braced expression in an HSPICE E VOL= form is refused by name; HSPICE quotes it.",
+ "oracle": {
+  "kind": "diagnostic",
+  "derivation": "#203: HSPICE reads braces as name bytes (T2) and writes the expression quoted; ESPice refuses the card (UnsupportedCard)."
+ },
+ "origin": "tests/fixtures/invalid/hspice_brace_behavioural.sp",
+ "expect": {
+  "status": "error",
+  "category": "unsupported_input"
+ },
+ "netlist_sha256": "565abe6362ca1159cd6bac9bfcf45c90958201ca2b9455474e8b1af4bcfe6ff3"
+}

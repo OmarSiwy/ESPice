@@ -392,7 +392,9 @@ PASS	fixtures/invalid/floating_sense_node_op.sp
 PASS	fixtures/invalid/four_zero_fundamental.sp
 PASS	fixtures/invalid/hb_fractional_harmonics.sp
 PASS	fixtures/invalid/hb_negative_frequency.sp
+PASS	fixtures/invalid/hspice_brace_behavioural.sp
 PASS	fixtures/invalid/hspice_brace_expression.sp
+PASS	fixtures/invalid/hspice_brace_measure.sp
 PASS	fixtures/invalid/hspice_exponent_scale.sp
 PASS	fixtures/invalid/hspice_percent_operator.sp
 PASS	fixtures/invalid/hspice_unary_not.sp

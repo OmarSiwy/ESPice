@@ -2621,6 +2621,12 @@ fn Reader(comptime S: type) type {
             var stims: [2]u32 = @splat(0);
             var global_level: ?measure.Levels = null;
             for (r.meas_lines.items) |line| {
+                // HSPICE writes a measure's expression as `par('...')` or
+                // quoted; a brace is a name byte there, and a measure card
+                // holding one is refused, not skipped (#203). lower.zig
+                // `prescan` refuses the same.
+                if (r.dialect == .hspice and std.mem.indexOfScalar(u8, line, '{') != null)
+                    return r.unsupported(line, "a braced expression (HSPICE quotes expressions: '...')");
                 var f = F.init(line);
                 var text = f.rest();
                 const head = f.next().?[1..];
@@ -3311,6 +3317,11 @@ fn Reader(comptime S: type) type {
         fn behaviouralCard(r: *R, line: []const u8, head: []const u8, letter: u8, f_in: F, frame: *const Frame, form: Form) Error!void {
             const arena = r.arena;
             var f = f_in;
+            // HSPICE quotes these expressions (`VOL='...'`, `TABLE '...'`);
+            // a brace is a name byte there, and the form takes no name with
+            // one (#203). tests/grammar/lower.zig `element` refuses the same.
+            if (r.dialect == .hspice and std.mem.indexOfScalar(u8, f.rest(), '{') != null)
+                return r.unsupported(line, "a braced expression (HSPICE quotes expressions: '...')");
             r.nodes.clearRetainingCapacity();
             r.positional.clearRetainingCapacity();
             r.card_kv.clearRetainingCapacity();

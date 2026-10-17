@@ -385,6 +385,9 @@ const L = struct {
                 // `.step [lin|dec|oct] [param] name ...`
                 var words = std.mem.tokenizeAny(u8, l.text(c), " \t,=()");
                 const head = words.next() orelse "";
+                // An HSPICE measure card holding a brace is refused, as the
+                // frontend's readMeasures refuses it (#203).
+                if (l.dialect == .hspice and std.mem.indexOfScalar(u8, l.text(c), '{') != null and measureCard(head)) return error.Refused;
                 if (std.mem.eql(u8, head, ".connect")) {
                     const a = words.next() orelse continue;
                     const b = words.next() orelse continue;
@@ -1081,6 +1084,10 @@ const L = struct {
         // frontend/pattern.zig refuses a PAT Z (high-impedance) state (#63).
         if ((letter == 'v' or letter == 'i') and l.patZ(fields.items[n..])) return error.Refused;
         if (l.rewritten(letter, fields.items[n..])) {
+            // HSPICE quotes a behavioural form's expression; a brace there is
+            // a name byte no form takes, as the frontend refuses (#203).
+            if (l.dialect == .hspice and std.mem.indexOfScalar(u8, "efgh", letter) != null)
+                for (fields.items) |f| if (std.mem.indexOfScalar(u8, l.text(f), '{') != null) return error.Refused;
             // LAPLACE, POLE and DELAY keep their letter and control nodes;
             // the other forms become a two-terminal B card.
             const form = if (words.items.len > 2) words.items[2] else "";
@@ -1177,6 +1184,15 @@ const L = struct {
     /// True for a card the frontend builds as another device: a behavioural
     /// E/F/G/H form (§3.2), a behavioural R, or a B source, whose
     /// expression holds node probes.
+    /// The OtherKind cards the frontend reads as measures (`.meas` in its
+    /// card table): `.meas`, `.measure`, `.jitter`, `.check`, `.dout`,
+    /// `.biaschk`, `.power`, `.stim`, `.stimuli`.
+    fn measureCard(head: []const u8) bool {
+        const heads = [_][]const u8{ ".meas", ".measure", ".jitter", ".check", ".dout", ".biaschk", ".power", ".stim", ".stimuli" };
+        for (heads) |h| if (std.mem.eql(u8, head, h)) return true;
+        return false;
+    }
+
     fn rewritten(l: *L, letter: u8, tail: []const u32) bool {
         if (tail.len == 0) return false;
         const first = l.text(tail[0]);

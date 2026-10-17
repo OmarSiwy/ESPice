@@ -5,6 +5,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- HSPICE dialect: an E/F/G/H behavioural form (`VOL=`, `CUR=`, `VALUE=`, `TABLE`, ...) or a `.meas`/`.check`/`.power`/`.stim` card holding a brace is refused; a malformed HSPICE measure with braces is no longer skipped with a warning (#203).
 - HSPICE dialect: braces are name bytes again, as HSPICE's manual reads them, so `{expr}` is no longer an expression and `R1 a 0 {rv}` is refused; this reverses #153's reading (#203, #153).
 - HSPICE dialect: an unquoted expression after `key=` must start with a letter and hold no blank, as HSPICE requires; any other (`w=2*l`, `w=l * 2`) is refused and needs quotes (#203).
 - HSPICE dialect: a unary `!` is refused, as HSPICE's manual has none (`!=` stays) (#203).
