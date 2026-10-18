@@ -598,7 +598,7 @@ test "set_homotopy writes gmin__ and source_scale__ on every row and reruns setu
 test "a status-latch-only device stays GPU-eligible and reports its latched status" {
     const D = struct {
         pub const mutable_eval = true;
-        pub const contract_abi: u32 = 6;
+        pub const vera_version = contract.vera_version;
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
         pub const Model = struct { limit: f64 = 4 };
@@ -647,7 +647,7 @@ test "a status-latch-only device stays GPU-eligible and reports its latched stat
 test "mutable evaluation captures per-instance data without GPU residency" {
     const D = struct {
         pub const mutable_eval = true;
-        pub const contract_abi: u32 = 6;
+        pub const vera_version = contract.vera_version;
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
         pub const Model = struct {};
@@ -699,7 +699,7 @@ test "systf: the vtable names every $systf call and binds the application per in
     // them, and a release build evaluated `inst.systf.?` on a null binding
     // (validateHost checks it only in Debug).
     const D = struct {
-        pub const contract_abi: u32 = contract.abi_version;
+        pub const vera_version = contract.vera_version;
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
         pub const systf_calls = [_]contract.Systf{ .{ .name = "$probe" }, .{ .name = "$note", .tok = 7 } };
@@ -735,7 +735,7 @@ test "systf: the vtable names every $systf call and binds the application per in
     try std.testing.expect(iblob.systf.? == &app);
     // A device that calls none lists none and binds nothing.
     const R = struct {
-        pub const contract_abi: u32 = contract.abi_version;
+        pub const vera_version = contract.vera_version;
         pub const U = enum(u8) { p, n };
         pub const num_ports: usize = 2;
         pub const Model = struct {};

@@ -1593,7 +1593,7 @@ fn Reader(comptime S: type) type {
         fn checkBare(r: *R, text: []const u8) Error!void {
             if (r.dialect != .hspice or lines.hspice.bareValue(text)) return;
             // A quoted expression is no bare one.
-            const t = std.mem.trimLeft(u8, text, " \t");
+            const t = std.mem.trimStart(u8, text, " \t");
             if (t.len > 0 and (t[0] == '"' or t[0] == '\'' or t[0] == '{')) return;
             return r.unsupported(r.card, "an unquoted expression that does not start with a letter, or holds a blank (quote it)");
         }

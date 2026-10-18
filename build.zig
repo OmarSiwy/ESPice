@@ -440,6 +440,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         core,
         .{ .name = "fastvaf", .module = vera.module("vera") },
         .{ .name = "vera_sim", .module = vera.module("sim") },
+        .{ .name = "vera_digital", .module = vera.module("digital") },
         build_options,
     }) };
     device.module.link_libc = true;

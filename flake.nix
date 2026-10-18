@@ -58,11 +58,11 @@
           dontInstall = true;
           buildPhase = ''
             export HOME="$TMPDIR" ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zgc"
-            zig build --fetch=all
+            zig build --fetch
             cp -r "$TMPDIR/zgc/p" "$out"
           '';
           outputHashMode = "recursive";
-          outputHash = "sha256-IkkUnW1gcZ0M7WXm9O1YDfD4lFCPzWPtIR9vDmlNFio=";
+          outputHash = "sha256-gLrCavMM45elnnW6V4x5PsUmxVDmXw5bLcdZJgfpQNk=";
         };
 
         gpuPkgs = [

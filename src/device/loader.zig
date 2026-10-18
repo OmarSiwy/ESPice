@@ -10,7 +10,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const fastvaf = @import("fastvaf");
-const digital = @import("vera_sim").digital;
+const digital = @import("vera_digital");
 /// `digital.emitDevice`'s result. VerA keeps the type itself private.
 const DeviceZig = @typeInfo(@typeInfo(@TypeOf(digital.emitDevice)).@"fn".return_type.?).error_union.payload;
 const ir = @import("device_abi");
@@ -461,7 +461,7 @@ pub const Error = error{
     std.process.ExecutablePathAllocError ||
     std.Io.Dir.StatFileError ||
     fastvaf.Error ||
-    digital.Error ||
+    @import("vera_sim").digital.Error ||
     std.Io.Dir.CreateDirPathError ||
     std.Io.Dir.OpenError ||
     std.Io.Dir.DeleteFileError ||
