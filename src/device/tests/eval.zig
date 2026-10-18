@@ -1181,23 +1181,17 @@ test "snapLimited returns the iterate for a few-ulp limited leg and keeps a real
     try std.testing.expectEqual(@as(f64, 99.0), lx[2]);
 }
 
-test "GPU inventory: the models gpuEligible turns down, with the rule" {
-    // dev/devices/gpu-evaluation.md, "Inventory" (#139): every row here is
-    // a built-in that stays on the host on a GPU run. Bringing one over
-    // deletes its row; a model that newly falls back adds one.
+test "GPU inventory: every built-in model evaluates on the GPU" {
+    // dev/devices/gpu-evaluation.md, "Inventory" (#139): gpuEligible turns
+    // down no built-in; a model that newly falls back fails here.
     const Why = impl.test_access.GpuRefusal;
-    const host_only = std.StaticStringMap(Why).initComptime(.{
-        .{ "coupled_ltra", .mutable_eval },  .{ "coupled_ltra3", .mutable_eval },
-        .{ "coupled_ltra4", .mutable_eval }, .{ "ltra", .mutable_eval },
-        .{ "txl", .mutable_eval },
-    });
     const models = @import("models");
     @setEvalBranchQuota(1_000_000);
     inline for (@typeInfo(models).@"struct".decl_names) |name| {
         const D = @field(models, name);
         if (comptime @hasDecl(D, "eval")) {
             const got: ?Why = comptime impl.test_access.gpuRefusal(D);
-            std.testing.expectEqual(host_only.get(name), got) catch |e| {
+            std.testing.expectEqual(@as(?Why, null), got) catch |e| {
                 std.debug.print("gpu inventory: {s}\n", .{name});
                 return e;
             };

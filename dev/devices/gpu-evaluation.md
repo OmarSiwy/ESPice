@@ -59,7 +59,6 @@ fails the test until this page and the test agree.
 |---|---|---|---|
 | timer-only state | vsource, isource | device; their timer state never runs (`skipsTimerState`), breakpoints come from the model | done |
 | `.history` state | cswitch, vswitch, tline, lossy_tline, coupled_tlines, vcvs_delay, vccs_delay, vcvs_laplace, vccs_laplace, vcvs_pole, vccs_pole, sparam_1..4, wline_1..4, mosvar, r3_cmc | device eval, host-stepped (below) | done (#139) |
-| `mutable_eval` (refused) | ltra, coupled_ltra, coupled_ltra3, coupled_ltra4, txl | host: eval writes a `vera_timepoint` cache, and the lines convolve an inline history (ltra: five `[8192]f64` arrays, 328 KB an Instance) in one serial loop per instance. Tried host-stepped with a pull before each host walk (below): ltra_tran_long_run_past_8192 went from 27 s to 760 s on CUDA, bench_tline_ltra1_1_line from 0.44 s to 2.69 s, and coupled_ltra/3/4 and txl failed to launch (local depots 307,000 / 453,656 / 612,416 / 165,264 B) | #163 |
 
 Host-stepped (`eval.gpuHostStepped`, `BatchGpu.stepped`): eval, the
 per-iterate cost, runs on the device. `updateState`, `commit_state` and
@@ -83,15 +82,12 @@ and match their oracles under `--backend cuda`. In safe builds,
 last pushed, so a launch path that skips `pushStepped` crashes instead of
 running on stale state.
 
-Follow-up for the refused lines (ltra, coupled_ltra*, txl): their history
-is inline in the Instance (ltra 5 x 8192 f64), and eval walks it serially
-in one thread. Being resident needs (1) the sparse derivative layout or a
-split eval, to bring the coupled_ltra and txl frames under the limit;
-(2) the history as device buffers sized at prepare and appended once per
-accepted step by a small kernel, rather than a 328 KB Instance round-trip;
-and (3) the convolution split across a warp per instance, since one GPU
-thread walking 8192 taps is the 27 s to 760 s above. Each of the three is
-a separate change, and none is in #139.
+The lossy lines (ltra, coupled_ltra, coupled_ltra3, coupled_ltra4, txl)
+evaluate on the device: eval writes only its own resident Instance (the
+`vera_timepoint` cache `tp0_t` beside the status latch), so
+`statusOnlyMutable` admits them. Their history is inline in the Instance
+(ltra 5 x 8192 f64) and one thread walks the convolution serially; device
+stepping and the VerA frame fix are #204 and #206.
 
 Build and backend gates, which apply whatever the rule says:
 
@@ -117,9 +113,6 @@ Build and backend gates, which apply whatever the rule says:
   `DeviceKernel`) brings mvsg to 46,320 B (ptxas 153 s, 5.7 GB) and
   bsimcmg to 18,544 B (77 s, 2.3 GB). Making it the GPU default belongs to
   the models-upstream work.
-- `eval.hip_host_only` (l_utsoi): LLVM 21 segfaults compiling its AMDGCN
-  kernel, so the HIP image has a placeholder and HIP runs evaluate it on the
-  host; CUDA is unaffected. Untested on hardware (no AMD GPU here).
 - `auto` no longer demotes one batch whose heavy image the driver has not
   compiled yet. It declines the GPU for the whole query
   (`ImageNotCompiled`), so a GPU run never leaves a heavy model on one host

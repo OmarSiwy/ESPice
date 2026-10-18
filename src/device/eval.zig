@@ -2484,13 +2484,12 @@ fn gpuHostStepped(comptime D: type) bool {
     return !(@hasDecl(D, "state_class") and D.state_class == .path_latch);
 }
 
-/// Whether D is `mutable_eval` only for VerA's §9.7.3 status latch: eval
-/// writes `vera_status__` of its own instance and nothing else, which a
-/// device thread does on its resident Instance as the host does. A
-/// `vera_timepoint` cache (`tp0_t`) or §9.21.1 table state (`table_ready`)
-/// keeps the device on the host.
+/// Whether D's eval writes only its own instance: VerA's §9.7.3 status
+/// latch (`vera_status__`) and its `vera_timepoint` cache (`tp0_t`), which
+/// a device thread writes on its resident Instance as the host does.
+/// §9.21.1 table state (`table_ready`) keeps the device on the host.
 fn statusOnlyMutable(comptime D: type) bool {
-    return @hasDecl(D, "status_sites") and !@hasField(D.Instance, "tp0_t") and !@hasField(D.Instance, "table_ready");
+    return @hasDecl(D, "status_sites") and !@hasField(D.Instance, "table_ready");
 }
 
 /// Whether D's GPU eval kernel is paired with a `StateKernel`.
@@ -3039,15 +3038,6 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
 
 fn placeholder(_: u64) callconv(gompute.kernel_callconv) void {}
 
-/// Models whose AMDGCN kernel LLVM cannot compile: the HIP image carries a
-/// placeholder for them, so a HIP run evaluates them on the host ("no kernel
-/// image in this build"); CUDA still builds them. l_utsoi (L-UTSOI 102.9.0):
-/// LLVM 21 segfaults in `zig build-obj -target amdgcn-amdhsa -mcpu
-/// gfx1100+trap_handler -Ofast` (2026-10-18).
-// ponytail: a name list until the LLVM amdgcn segfault on l_utsoi (#169) is fixed
-// upstream; drop the row then. No AMD hardware runs these kernels here.
-const hip_host_only = std.StaticStringMap(void).initComptime(.{.{"l_utsoi"}});
-
 // As the build root, export every model in `models`: its GPU kernels (or a
 // no-op placeholder when it is not GPU-eligible) in a device compilation, and
 // its `arp_device_<name>` vtable getter on the host.
@@ -3057,7 +3047,7 @@ comptime {
             const D = @field(@import("models"), decl_name);
             if (gompute.is_device) {
                 const block_size = ir.gpu_block_size;
-                if (gpuEligible(D) and !(builtin.cpu.arch == .amdgcn and hip_host_only.has(decl_name))) {
+                if (gpuEligible(D)) {
                     gompute.exportRaw(kernelName(D), &DeviceKernel(D, block_size).run);
                     if (hasStateKernel(D)) gompute.exportRaw(stateKernelName(D), &StateKernel(D, block_size).run);
                     if (hasCtlKernel(D)) gompute.exportRaw(ctlKernelName(D), &CtlKernel(D, block_size).run);
