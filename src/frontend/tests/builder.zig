@@ -165,10 +165,11 @@ test "transmission-line cards route to their convolution algorithms" {
         var circuit = try b.compile();
         compiled = true;
         defer circuit.deinit();
-        // The lines hold their history as §5.10 state, staged per converged solve.
+        // The lines hold their history as §5.10 state, staged per converged
+        // solve, and evaluate on the GPU too (#171).
         try std.testing.expect(circuit.batches[0].hooks.commit_state == null);
         try std.testing.expect(circuit.batches[0].hooks.update_state != null);
-        try std.testing.expect(circuit.batches[0].hooks.gpu_payload == null);
+        try std.testing.expect(circuit.batches[0].hooks.gpu_payload != null);
     }
 }
 

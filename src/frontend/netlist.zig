@@ -3396,6 +3396,8 @@ fn Reader(comptime S: type) type {
                     }
                     try r.nodes.append(arena, t);
                 }
+                // ngspice reads `X1 a b sub params: p=1` (numparam's subcircuit call).
+                if (letter == 'x' and r.dialect == .ngspice and r.nodes.items.len > 0 and std.mem.eql(u8, r.nodes.items[r.nodes.items.len - 1], "params:")) _ = r.nodes.pop();
                 const model = r.nodes.pop() orelse return error.ParseError;
                 if (letter != 'x') try r.refuseOperatorField(line, model);
                 try r.positional.append(arena, try r.nameValue(model, frame, false));

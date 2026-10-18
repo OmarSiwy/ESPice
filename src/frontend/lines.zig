@@ -631,10 +631,18 @@ pub const hspice = struct {
     /// blank (hspice-syntax.md X1, CR10 p. 238: "unless the expression
     /// begins with an alphabetic character and contains no spaces"). Any
     /// other expression needs quotes, and is refused without them (#203).
+    /// A blank inside a call's parentheses is no blank of the expression:
+    /// the manual's own `.PARAM x=AGAUSS(1k, 100, 3)` holds them.
     pub fn bareValue(text: []const u8) bool {
         const t = std.mem.trim(u8, text, " \t");
         if (t.len == 0) return false;
-        if (std.ascii.isAlphabetic(t[0])) return std.mem.indexOfAny(u8, t, " \t") == null;
+        if (std.ascii.isAlphabetic(t[0])) {
+            var depth: usize = 0;
+            for (t) |c| {
+                if (c == '(') depth += 1 else if (c == ')') depth -|= 1 else if (depth == 0 and (c == ' ' or c == '\t')) return false;
+            }
+            return true;
+        }
         // A number: sign, mantissa, then exponent, scale and unit bytes.
         var i: usize = 0;
         if (t[0] == '+' or t[0] == '-') i = 1;
@@ -651,9 +659,9 @@ pub const hspice = struct {
 
 test "hspice.bareValue: a number, or a letter-led expression with no blank (#203)" {
     // Hand-listed from CR10 p. 238.
-    for ([_][]const u8{ "1k", "-1", "+.5", "2.5e-3", "10pf", "a", "x*2+b", "v(1,0)*2", " cos(2)+sin(2) " }) |text|
+    for ([_][]const u8{ "1k", "-1", "+.5", "2.5e-3", "10pf", "a", "x*2+b", "v(1,0)*2", " cos(2)+sin(2) ", "agauss(1k, 100, 3)", "opt1(1k, 100, 10k)*2" }) |text|
         try std.testing.expect(hspice.bareValue(text));
-    for ([_][]const u8{ "", "2*a", "6k * 2 / 3", "a + b", "(a+b)", "-a", "!a", ".", "1k-1" }) |text|
+    for ([_][]const u8{ "", "2*a", "6k * 2 / 3", "a + b", "(a+b)", "-a", "!a", ".", "1k-1", "f(a) + 1", "agauss(1k, 1) *2" }) |text|
         try std.testing.expect(!hspice.bareValue(text));
 }
 

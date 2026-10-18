@@ -568,6 +568,7 @@ const card_cases = struct {
         "t\nr1 1 0 1x\nr2 1 0 2mil\n",
         "t\nr1 1 0 '1!=2'\nr2 1 0 '(1<=2)+(2>1)+5/2'\n",
         "t\n.model c1 cpl r = '1' l = 1e-9 c=1e-12 g=0 length=1\n",
+        "t\nr1 1 0 '2.5e-3*2e3'\n",
         "t\n.control\nrun\n.endc\nr1 1 0 1k\n.save\n",
         "t\np1 a 0 port=1 hblin = [ 1 , -1 ]\nr1 a 0 50\nv1 b 0 pulse(0 '1' sin(1) 1n)\n",
         "t\n.param s=\"a b\"\nr1 1 0 1k\n",
@@ -744,8 +745,8 @@ test "rlgc: cases, corpus, exhaustive, coverage" {
     const a = arena.allocator();
     const g = try grammar(a, "rlgc.peg");
     const cases = [_][]const u8{
-        "* one line\n1\n2.5e-7 * L\n1e-10, 5\n", "2 (1 2 3) [4 5 6]", "5 1 2", "", "1.5 1 2", "1 1",
-        "2 1 2 3 4",                                "1 1 2 3 4 5 6 7",    "1 1n 2", "1 nan 2", "1;2;3", "1\t{2}\r\n3 *c",
+        "* one line\n1\n2.5e-7 * L\n1e-10, 5\n", "2 (1 2 3) [4 5 6]", "5 1 2",  "",        "1.5 1 2", "1 1",
+        "2 1 2 3 4",                             "1 1 2 3 4 5 6 7",   "1 1n 2", "1 nan 2", "1;2;3",   "1\t{2}\r\n3 *c",
         "+1 -2e-3 .5",
     };
     var bad: usize = 0;
@@ -1046,7 +1047,7 @@ fn generated(comptime d: netlist.Dialect, comptime lines_file: []const u8, compt
                 continue;
             }
             gop.value_ptr.* = 1;
-            if (std.mem.indexOf(u8, listed, key) != null) continue;
+            if (std.mem.indexOf(u8, listed, try std.fmt.allocPrint(s, "{t}\t{s}\n", .{ d, key })) != null) continue;
             const small = try shrink(s, d, lg, sg, cg, lines_only, v, true);
             std.debug.print("--- {s}, shrunk:\n{s}\n", .{ key, small });
             _ = if (d == .spectre) try compareSpectre(s, lg, sg, cg, "shrunk", small) else try compareDeck(s, d, lg, cg, "shrunk", small);
@@ -1117,4 +1118,3 @@ test "hspice netlist: generated" {
 test "spectre netlist: generated" {
     try generated(.spectre, "spectre_lines.peg", &.{ "spice_cards.peg", "spectre_ops.peg", "hspice.peg" }, "line", 3000);
 }
-

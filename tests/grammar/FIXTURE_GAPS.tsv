@@ -3,8 +3,8 @@
 # grammar node. The test fails on a missing or stale row.
 hspice.peg	Assign	s
 hspice.peg	Block	(!('.enddata' !namechar) rest nl)
-hspice.peg	CmpOp	'!='
 hspice.peg	CmpOp	'<='
+hspice.peg	CmpOp	'=='
 hspice.peg	CmpOp	'>='
 hspice.peg	Cond	('.if' !namechar s? cond nl body (Elseif nl body)* (Else nl body)? '.endif' rest)
 hspice.peg	Control	('.control' !namechar rest nl (!('.endc' !namechar) rest nl)* '.endc' rest)
@@ -46,6 +46,7 @@ hspice.peg	LPair	Expr
 hspice.peg	LPair	s
 hspice.peg	Mantissa	('.' [...]+)
 hspice.peg	Nodeset	('.nodeset' !namechar fields?)
+hspice.peg	Num	([...] [...]? [...]+ !Scale)
 hspice.peg	Number	[...]
 hspice.peg	Options	'.opt'
 hspice.peg	Options	'.opts'
@@ -71,10 +72,12 @@ hspice.peg	PowOp	'**'
 hspice.peg	Probe	(x ',' x Pname)
 hspice.peg	Save	('.save' !namechar fields?)
 hspice.peg	Scale	'mil'
+hspice.peg	SignOp	[...]
 hspice.peg	Str	('\"' (!'\"' .)* '\"')
 hspice.peg	Subckt	'.macro'
 hspice.peg	Temp	'.temperature'
 hspice.peg	Temp	(s? '=')
+hspice.peg	Unary	(SignOp x Pow)
 hspice.peg	Vec	s
 hspice.peg	body	(!ends card)*
 hspice.peg	card	Cond
@@ -89,7 +92,6 @@ hspice.peg	gfield	Group
 hspice.peg	pathkey	'citifile'
 hspice.peg	pathkey	'rlgcfile'
 hspice.peg	ports	('params:' s?)
-hspice.peg	value	Word
 hspice_lines.peg	EndRun	(!eol .)
 hspice_lines.peg	EndRun	NextRun
 hspice_lines.peg	EndRun	blank
@@ -106,7 +108,6 @@ hspice_lines.peg	keep_break	blank
 hspice_lines.peg	more	(glue_break Glue)
 hspice_lines.peg	numtok	([...]? ((digit+ ('.' digit*)?) / ('.' digit+)) ([...] [...]? digit+)? [...]* &'$')
 hspice_lines.peg	plus_break	blank
-hspice_lines.peg	plus_break	skip
 hspice_lines.peg	qbreak	(('\\\\' blank* eol blank*) / (blank '\\' blank* eol))
 hspice_lines.peg	quoted	qbreak
 hspice_lines.peg	skip	(blank* eol)

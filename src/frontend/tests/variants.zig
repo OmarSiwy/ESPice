@@ -102,7 +102,8 @@ test "the live-value fast path writes what a rebuild would" {
         \\.op
         \\.end
     , true);
-    // A point that takes a value across zero rebuilds.
+    // A point that takes a value across zero rebuilds; the probe itself
+    // maps around the zero slot (#130).
     try expectFastMatchesRebuild(
         \\rebuild path
         \\.param g=0
@@ -113,7 +114,7 @@ test "the live-value fast path writes what a rebuild would" {
         \\.step param g list 0 5
         \\.op
         \\.end
-    , false);
+    , true);
 }
 
 test "Monte Carlo draws depend only on seed, trial and site; LHS strata cover each trial once" {

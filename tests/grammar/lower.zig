@@ -746,12 +746,12 @@ const L = struct {
             fn f(n: []const u8, x: f64) ?f64 {
                 const m = std.math;
                 const table = .{
-                    .{ "sqr", x * x },   .{ "sqrt", @sqrt(x) },                       .{ "sin", @sin(x) },      .{ "cos", @cos(x) },
-                    .{ "exp", @exp(x) }, .{ "ln", @log(x) },                          .{ "log", @log(x) },      .{ "log10", @log10(x) },
-                    .{ "arctan", m.atan(x) }, .{ "atan", m.atan(x) },                 .{ "abs", @abs(x) },      .{ "int", @trunc(x) },
-                    .{ "nint", halfEven(x) }, .{ "sinh", m.sinh(x) },                   .{ "cosh", m.cosh(x) },   .{ "tanh", m.tanh(x) },
-                    .{ "sgn", m.sign(x) }, .{ "ceil", @ceil(x) },                     .{ "floor", @floor(x) },  .{ "asin", m.asin(x) },
-                    .{ "acos", m.acos(x) }, .{ "asinh", m.asinh(x) },                 .{ "acosh", m.acosh(x) }, .{ "atanh", m.atanh(x) },
+                    .{ "sqr", x * x },        .{ "sqrt", @sqrt(x) },    .{ "sin", @sin(x) },      .{ "cos", @cos(x) },
+                    .{ "exp", @exp(x) },      .{ "ln", @log(x) },       .{ "log", @log(x) },      .{ "log10", @log10(x) },
+                    .{ "arctan", m.atan(x) }, .{ "atan", m.atan(x) },   .{ "abs", @abs(x) },      .{ "int", @trunc(x) },
+                    .{ "nint", halfEven(x) }, .{ "sinh", m.sinh(x) },   .{ "cosh", m.cosh(x) },   .{ "tanh", m.tanh(x) },
+                    .{ "sgn", m.sign(x) },    .{ "ceil", @ceil(x) },    .{ "floor", @floor(x) },  .{ "asin", m.asin(x) },
+                    .{ "acos", m.acos(x) },   .{ "asinh", m.asinh(x) }, .{ "acosh", m.acosh(x) }, .{ "atanh", m.atanh(x) },
                     .{ "tan", @tan(x) },
                 };
                 inline for (table) |e| if (std.mem.eql(u8, n, e[0])) return e[1];
@@ -882,9 +882,9 @@ const L = struct {
     /// The query kind an analysis card word names (netlist.zig `cards`).
     fn analysisName(word: []const u8) ?[]const u8 {
         const map = std.StaticStringMap([]const u8).initComptime(.{
-            .{ "acphasenoise", "noise" }, .{ "envlp", "envelope" }, .{ "hbosc", "hb" }, .{ "snosc", "pss" },
-            .{ "montecarlo", "mc" },       .{ "sn", "pss" },         .{ "snac", "pac" }, .{ "snnoise", "pnoise" },
-            .{ "snxf", "pxf" },            .{ "ptdnoise", "pnoise" }, .{ "trannoise", "tran_noise" }, .{ "lin", "sp" },
+            .{ "acphasenoise", "noise" }, .{ "envlp", "envelope" },  .{ "hbosc", "hb" },             .{ "snosc", "pss" },
+            .{ "montecarlo", "mc" },      .{ "sn", "pss" },          .{ "snac", "pac" },             .{ "snnoise", "pnoise" },
+            .{ "snxf", "pxf" },           .{ "ptdnoise", "pnoise" }, .{ "trannoise", "tran_noise" }, .{ "lin", "sp" },
             .{ "net", "sp" },
         });
         return map.get(word) orelse word;
@@ -1246,10 +1246,12 @@ const L = struct {
     /// Flattens an X card: its subcircuit's statements under a child frame.
     fn instance(l: *L, head: []const u8, fields: []const u32, words: []const []const u8, frame: *const Frame) Error!void {
         if (frame.depth >= depth_max or words.len == 0) return error.Refused;
-        const sname = words[words.len - 1];
+        // ngspice: `X1 a b sub params: p=1`, as netlist.zig readDevice.
+        const named = if (l.dialect == .ngspice and words.len > 1 and std.mem.eql(u8, words[words.len - 1], "params:")) words[0 .. words.len - 1] else words;
+        const sname = named[named.len - 1];
         const def = l.subckts.get(sname) orelse return error.Refused;
         const ports = try l.subcktPorts(def);
-        const nodes = words[0 .. words.len - 1];
+        const nodes = named[0 .. named.len - 1];
         if (nodes.len != ports.len) return error.Refused;
         var actuals = try l.arena.alloc([]const u8, nodes.len);
         for (nodes, 0..) |node, i| {
