@@ -71,6 +71,8 @@ pub const Builder = struct {
     node_instance: std.ArrayList(u32) = .empty,
     /// Some node has no DC path, so the operating point needs the transient fallback.
     needs_tran_op: bool = false,
+    /// An instance calls a `$systf` through a loaded VPI application.
+    calls_vpi: bool = false,
     /// `.options tnom` in degrees Celsius, ngspice's `CKTnomTemp`
     /// (cktsopt.c:71-73, default 27 degC from cktntask.c:127): the temperature
     /// a model card without its own TNOM/TREF was extracted at. `deriveModel`
@@ -346,6 +348,7 @@ pub const Builder = struct {
 
         const ckt = try Circuit.freeze(gpa, self.n, intern_bytes, intern_offs, self.protos.items, self.proto_types.items, bbd.info, .{
             .needs_tran_op = self.needs_tran_op,
+            .vpi = if (self.calls_vpi) self.lib.vpi else null,
             .digital = self.lib.digital.items,
         });
 
@@ -633,7 +636,10 @@ pub const NetBuilder = struct {
                 }
             }
 
-            if (systf_host) |h| vt.bind_systf.?(iblob.ptr, h);
+            if (systf_host) |h| {
+                vt.bind_systf.?(iblob.ptr, h);
+                if (h != &Library.no_vpi_app) b.calls_vpi = true;
+            }
             const proto = try b.protoOf(t);
             try vt.proto_add(proto.ctx, b.gpa, mblob.ptr, iblob.ptr, nodes.ptr).unwrap();
             // `%m` in a display task and a `$fatal` refusal name the

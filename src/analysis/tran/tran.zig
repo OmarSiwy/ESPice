@@ -66,6 +66,7 @@ const Stats = struct {
     nr_iters: u64 = 0,
     rej_newton: u64 = 0,
     rej_state: u64 = 0,
+    rej_vpi: u64 = 0,
     rej_lte: u64 = 0,
     order_drops: u64 = 0,
     bp_landings: u64 = 0,
@@ -303,6 +304,11 @@ pub fn simulate(
         }
     }.call;
 
+    // LRM 12.31.3 sees the transient proper, not the OPtran fallback.
+    const vpi = if (options.sources_at_zero) null else ckt.vpi;
+    const vpi_point: @import("device").Library.AnalogPoint = .{ .kind = .tran, .start = options.t_start, .stop = options.t_stop, .max_step = effective_dt_max };
+    if (vpi) |v| v.point(v.ctx, vpi_point);
+
     // tstart suppresses output, never the solve: [0, t_start) is integrated
     // with full history and not recorded.
     if (options.t_start <= 0) try waveform.record(0, try uicStart(ckt, ws, x, x_try, .{
@@ -315,6 +321,7 @@ pub fn simulate(
         .q_cur = {},
         .has_charge = has_charge,
     }, options), probes);
+    if (vpi) |v| v.accept(v.ctx, true, false);
 
     var cur: []f64 = x;
     var trial: []f64 = x_try;
@@ -348,6 +355,8 @@ pub fn simulate(
     var bp_clamped = false;
     var bp_save_dt: f64 = options.t_stop / 50.0;
     var attempted_dt = dt;
+    // vpiTransientFailConverge re-solves of one step, bounded as VerA bounds them.
+    var vpi_again: u32 = 0;
 
     while (t < options.t_stop and !atStop(t, options.t_stop) and steps < options.max_steps) {
         if (st.attempts != 0) try ckt.checkpoint(.{
@@ -374,6 +383,12 @@ pub fn simulate(
             .initial_step = steps == 0,
             .final_step = t + dt >= options.t_stop,
         });
+        if (vpi) |v| {
+            var p = vpi_point;
+            p.t = t + dt;
+            p.dt = dt;
+            v.point(v.ctx, p);
+        }
         const eff_method: Method = if (use_be) .backward_euler else options.method;
         const cf = integrator.coeffs(eff_method, dt, dt_prev, options.xmu);
         const hook = TranHook{
@@ -459,51 +474,73 @@ pub fn simulate(
         var dt_next = if (steps == 0) dt else @min(dt * 2.0, effective_dt_max);
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
+        // CKTterr reads the charge of the published point. The converger
+        // returns x_k+1 while the planes hold q(x_k) (or a JFNK matvec's x),
+        // so re-read q at the solution: the LTE, advanceCurrent and the next
+        // residual all see q(trial).
+        // `q_fresh`: the converger's `updateStates` already stamped them.
         if (has_charge) {
-            // CKTterr reads the charge of the published point. The converger
-            // returns x_k+1 while the planes hold q(x_k) (or a JFNK matvec's
-            // x), so re-read q at the solution: the LTE, advanceCurrent and
-            // the next residual all see q(trial).
-            // `q_fresh`: the converger's `updateStates` already stamped them.
             if (!ckt.q_fresh) ckt.evalQ(trial, t_dev);
             root.copySimd(q_hist[0], ckt.q_vec[0..n]);
             if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
-            // Taken before the ring rotation below.
-            const lh = lte_hist.*;
-            const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
-            const lte: integrator.LteIn = .{
-                .dt = dt,
-                .dt1 = dt_prev,
-                .dt2 = dt_prev2,
-                .reltol = options.tol.reltol,
-                .abstol = options.tol.abstol,
-                .chgtol = options.tol.chgtol,
-                .trtol = options.tol.trtol,
-            };
-
-            if (steps > 0) {
-                const del = integrator.stepBound(W, eff_method, eff_method, lq, lte_ip, cf, lte);
-                if (del < 0.9 * dt) {
-                    st.rej_lte += 1;
-                    _ = ckt.stateCtl(.revert);
-                    // Retry at the LTE's dt and the same order
-                    // (dctran.c:966 `CKTdelta = newdelta`); only a Newton
-                    // failure drops the order. del < 0.9*dt here, so every
-                    // retry shrinks.
-                    dt = del;
-                    if (dt < options.dt_min) {
-                        if (stats_on) std.debug.print(
-                            "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
-                            .{ t, dt, steps, st.attempts, st.nr_iters },
-                        );
-                        return false;
-                    }
-                    continue;
+        }
+        // Taken before the ring rotation below.
+        const lh = lte_hist.*;
+        const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
+        const lte: integrator.LteIn = .{
+            .dt = dt,
+            .dt1 = dt_prev,
+            .dt2 = dt_prev2,
+            .reltol = options.tol.reltol,
+            .abstol = options.tol.abstol,
+            .chgtol = options.tol.chgtol,
+            .trtol = options.tol.trtol,
+        };
+        if (has_charge and steps > 0) {
+            const del = integrator.stepBound(W, eff_method, eff_method, lq, lte_ip, cf, lte);
+            if (del < 0.9 * dt) {
+                st.rej_lte += 1;
+                _ = ckt.stateCtl(.revert);
+                // Retry at the LTE's dt and the same order (dctran.c:966
+                // `CKTdelta = newdelta`); only a Newton failure drops the
+                // order. del < 0.9*dt here, so every retry shrinks.
+                dt = del;
+                if (dt < options.dt_min) {
+                    if (stats_on) std.debug.print(
+                        "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
+                        .{ t, dt, steps, st.attempts, st.nr_iters },
+                    );
+                    return false;
                 }
-                // Growth capped at 2x per accepted step, as in ngspice.
-                dt_next = @min(@max(del, options.dt_min), 2.0 * dt, effective_dt_max);
+                continue;
             }
+            // Growth capped at 2x per accepted step, as in ngspice.
+            dt_next = @min(@max(del, options.dt_min), 2.0 * dt, effective_dt_max);
+        }
 
+        // LRM 12.31.3 acbConvergenceTest, last before acceptance: a rejection
+        // (or 12.36 vpiRejectTransientStep) backs up to half the step from
+        // the last accepted point, as VerA's own walk does; 12.36
+        // vpiTransientFailConverge solves the same step again.
+        if (vpi) |v| switch (v.verdict(v.ctx)) {
+            .accept => vpi_again = 0,
+            .reject => {
+                st.rej_vpi += 1;
+                _ = ckt.stateCtl(.revert);
+                dt /= 2.0;
+                if (dt < options.dt_min) return false;
+                continue;
+            },
+            .again => {
+                st.rej_vpi += 1;
+                _ = ckt.stateCtl(.revert);
+                vpi_again += 1;
+                if (vpi_again == 60) return false;
+                continue;
+            },
+        };
+
+        if (has_charge) {
             // Order promotion (dctran.c:901-913): recompute the trunc at
             // order 2 and adopt min(2*dt, del2) as the next dt whether or not
             // the order changes, as ngspice's `CKTdelta = newdelta` does.
@@ -609,6 +646,9 @@ pub fn simulate(
         // ngspice neither steps onto TSTART nor prints it: dctran.c dumps
         // the accepted points at t >= CKTinitTime and nothing else (#167).
         if (t >= options.t_start) try waveform.record(t, cur, probes);
+        // Before the breakpoint search below, so a time a callback forces
+        // from this point is landed on.
+        if (vpi) |v| v.accept(v.ctx, false, t >= options.t_stop or atStop(t, options.t_stop));
 
         // Clamp dt to land on the next breakpoint, skipping those within
         // min_break of now (ngspice CKTminBreak merge).
@@ -637,8 +677,8 @@ pub fn simulate(
     });
     if (stats_on) {
         std.debug.print(
-            "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
-            .{ n_qt, steps, st.attempts, st.nr_iters, st.rej_newton, st.rej_lte, st.rej_state, st.order_drops, st.bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
+            "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d} vpi={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
+            .{ n_qt, steps, st.attempts, st.nr_iters, st.rej_newton, st.rej_lte, st.rej_state, st.rej_vpi, st.order_drops, st.bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
         );
     }
 

@@ -186,6 +186,11 @@ fn usageFail() u8 {
     return 2;
 }
 
+test {
+    // Analyzed only from `main` otherwise, which no test build reaches.
+    std.testing.refAllDecls(vpi_host);
+}
+
 test "optionValue: separate, joined, missing and empty values" {
     const t = std.testing;
     var args = std.mem.splitScalar(u8, "out.raw", ' ');

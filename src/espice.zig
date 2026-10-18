@@ -83,6 +83,8 @@ pub const Options = struct {
 /// The VPI host interface (`Options.vpi`) and its errors.
 pub const Vpi = frontend.Library.Vpi;
 pub const VpiError = frontend.Library.VpiError;
+pub const VpiAnalogPoint = frontend.Library.AnalogPoint;
+pub const VpiVerdict = frontend.Library.Verdict;
 
 /// Why publication stopped (`Problem.output_error`): an encoder or file
 /// error from the output session (`publish`, `endStream`, `finish`) or the Touchstone

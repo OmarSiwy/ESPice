@@ -1,8 +1,8 @@
 //! The VPI application host behind `--vpi` and `.options vpi=`: a user
 //! application `.so` (LRM 12.33.2 `vlog_startup_routines`) in -> its §12.32
-//! registrations, and each `.hdl` module's `$systf` calls bound to their
-//! calltf through VerA's `vpi` module (`analog_run.attach` under a stub
-//! `Lib`, which hands back VerA's deviceCall/deviceOut).
+//! registrations, each `.hdl` module's `$systf` calls bound to their calltf
+//! through VerA's `vpi` module (an `analog_run.Binding` over a calls-only
+//! `Lib`), and the §12.31.3 analog callbacks driven by `.op` and `.tran`.
 //! Lives in the executable, so the `vpi_*` symbols an application resolves
 //! are exported from it alone (`rdynamic`), never from libespice.
 //! The sequence is VerA's tests/vpi_host.zig `analogHost`; #197, #198.
@@ -33,10 +33,8 @@ const Host = struct {
     attached: ?[]const u8 = null,
     /// That module's `systf_calls`, in its device image (never unloaded).
     calls: []const contract.Systf = &.{},
-    /// VerA's deviceCall/deviceOut, which `analog_run.attach` hands to
-    /// `Lib.systf`.
-    call: ?vpi.analog_run.HostCall = null,
-    out: ?vpi.analog_run.HostOut = null,
+    /// The attached module's calls, over VerA's installed design.
+    binding: vpi.analog_run.Binding = .{},
 };
 
 const App = struct { path: []const u8, lib: std.DynLib };
@@ -56,6 +54,10 @@ const interface: espice.Vpi = .{
     .int_systfs = intSystfs,
     .registered = registered,
     .attach = attach,
+    .point = point,
+    .verdict = verdict,
+    .accept = accept,
+    .next_forced = nextForced,
 };
 
 fn loadApp(_: *anyopaque, path: []const u8) VpiError!void {
@@ -92,9 +94,9 @@ fn registered(_: *anyopaque, name: []const u8) bool {
 }
 
 /// Opens VerA's design of the module at `source_path` (compiled again here:
-/// a cached `.hdl` build carries no design) and binds `calls` to it, then
-/// runs the build-time callbacks (compiletf, derivtf, cbEndOfCompile,
-/// cbStartOfSimulation) and refuses any §12.31.3 analog callback by name.
+/// a cached `.hdl` build carries no design), binds `calls` to it and runs
+/// the build-time callbacks (compiletf, derivtf, cbEndOfCompile,
+/// cbStartOfSimulation).
 fn attach(_: *anyopaque, source_path: []const u8, calls: []const contract.Systf) VpiError!*const contract.SystfHost {
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
@@ -114,64 +116,93 @@ fn attach(_: *anyopaque, source_path: []const u8, calls: []const contract.Systf)
         return error.VpiDesignFailed;
     };
     defer res.deinit();
-    vpi.open(host.gpa, res.lowered) catch |err| {
+    vpi.open(host.gpa, &res) catch |err| {
         std.log.err("vpi: {s}: VerA cannot build the module's design ({s})", .{ source_path, @errorName(err) });
         return error.VpiDesignFailed;
     };
     host.calls = calls;
-    try vpi.analog_run.attach(stub_lib);
-    vpi.systf.buildCalls();
+    try host.binding.attach(stub_lib, null);
     vpi.callback.endOfCompile();
-    try refuseAnalogCallbacks();
     vpi.callback.startOfSimulation();
-    try refuseAnalogCallbacks();
     host.attached = try host.gpa.dupe(u8, source_path);
     return &systf_host;
 }
 
-/// §12.31.3's analog callbacks need ESPice to drive them per accepted point
-/// and to let them force or reject times (#198); refused by name until then.
-// ponytail: checked after cbEndOfCompile and cbStartOfSimulation only; one a
-// calltf registers later is not seen. Check in `call` once #198 runs them.
-fn refuseAnalogCallbacks() VpiError!void {
-    const cbs = vpi.callback.all(host.gpa, null) catch return error.OutOfMemory;
-    defer host.gpa.free(cbs);
-    const cb = vpi.callback;
-    for (cbs) |h| {
-        var d: cb.CbData = undefined;
-        cb.vpi_get_cb_info(h, &d);
-        if (d.reason < cb.acbInitialStep or d.reason > cb.acbAcceptedPoint) continue;
-        const names = [_][]const u8{ "acbInitialStep", "acbFinalStep", "acbAbsTime", "acbElapsedTime", "acbConvergenceTest", "acbAcceptedPoint" };
-        std.log.err("vpi: the application registers {s} (LRM 12.31.3), an analog callback ESPice does not run yet; see #198", .{names[@intCast(d.reason - cb.acbInitialStep)]});
-        return error.VpiAnalogCallbackUnsupported;
-    }
-}
-
 /// What every instance of the attached module calls through: VerA's
-/// deviceCall/deviceOut under `mutex`. Supported contract: a stateless
-/// calltf. Every instance shares one call object (VerA#84), so state an
-/// application keeps per call handle is shared by every instance.
-// ponytail: a calltf reading vpiAnalogTime gets VerA's own walk's time (0),
-// until VerA's `analog_run` point setter (VerA#83) lets `call` pass the
-// SimState's.
+/// `Binding.call`/`output` under `mutex`. Every instance shares one call
+/// object (VerA#84), so state an application keeps per call handle is
+/// shared by every instance.
 const systf_host: contract.SystfHost = .{ .ctx = undefined, .call = call, .out = out };
 
 fn call(_: *anyopaque, k: usize, args: []const f64, partials: []f64) f64 {
-    std.debug.assert(partials.len == args.len);
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
-    return host.call.?(k, args.ptr, args.len, partials.ptr);
+    return host.binding.call(0, k, args, partials);
 }
 
 fn out(_: *anyopaque, k: usize, j: usize, args: []const f64, partials: []f64) f64 {
-    std.debug.assert(partials.len == args.len);
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
-    return host.out.?(k, j, args.ptr, args.len, partials.ptr);
+    return host.binding.output(0, k, j, args, partials);
+}
+
+/// §12.9/§12.18 answer for `p` from here on, calltf included, and the
+/// solution is open to §12.36 vpiTransientFailConverge and, past the first,
+/// vpiRejectTransientStep.
+fn point(_: *anyopaque, p: espice.VpiAnalogPoint) void {
+    host.mutex.lockUncancelable(host.io);
+    defer host.mutex.unlock(host.io);
+    const kind: vpi.analog_run.Kind = switch (p.kind) {
+        .op => .op,
+        .tran => .tran,
+    };
+    vpi.analog_run.setPoint(.{ .kind = kind, .start = p.start, .stop = p.stop, .max_step = p.max_step }, p.t, p.dt, 0);
+    const b = &host.binding;
+    b.have_solution = true;
+    b.open_step = p.dt > 0;
+    b.awaiting = true;
+    b.reject_step = false;
+    b.fail_converge = false;
+}
+
+/// acbConvergenceTest on the published solution: every callback runs, and
+/// any non-zero return rejects it (VerA's reading).
+fn verdict(_: *anyopaque) espice.VpiVerdict {
+    host.mutex.lockUncancelable(host.io);
+    defer host.mutex.unlock(host.io);
+    const b = &host.binding;
+    if (vpi.callback.convergenceRejected() or b.reject_step) return .reject;
+    return if (b.fail_converge) .again else .accept;
+}
+
+/// VerA's `Binding.accept` order: acbInitialStep, the due timed callbacks,
+/// acbAcceptedPoint (not on the first solution), acbFinalStep.
+fn accept(_: *anyopaque, first: bool, last: bool) void {
+    host.mutex.lockUncancelable(host.io);
+    defer host.mutex.unlock(host.io);
+    const b = &host.binding;
+    const cb = vpi.callback;
+    b.open_step = false;
+    b.awaiting = false;
+    b.t_accepted = vpi.analog_run.time();
+    if (first) cb.fireAnalog(cb.acbInitialStep);
+    cb.fireTimed(b.t_accepted);
+    if (!first) cb.fireAnalog(cb.acbAcceptedPoint);
+    if (last) {
+        cb.fireAnalog(cb.acbFinalStep);
+        vpi.analog_run.setPoint(null, b.t_accepted, 0, 0);
+    }
+}
+
+fn nextForced(_: *anyopaque, after: f64) ?f64 {
+    host.mutex.lockUncancelable(host.io);
+    defer host.mutex.unlock(host.io);
+    return vpi.callback.nextForced(after, std.math.inf(f64));
 }
 
 /// The device side of VerA's analog walk, reduced to the call table: ESPice
-/// solves the circuit itself, so `analog_run` never solves through it.
+/// solves and walks the circuit itself, so `analog_run` never solves through
+/// it.
 const stub_lib: vpi.analog_run.Lib = .{
     .open = stubOpen,
     .solve = stubSolve,
@@ -213,10 +244,7 @@ fn stubValues(_: [*]f64) callconv(.c) void {}
 fn stubAc(_: f64, _: [*]f64, _: [*]f64) callconv(.c) bool {
     return false;
 }
-fn bindCalls(c: ?vpi.analog_run.HostCall, o: ?vpi.analog_run.HostOut) callconv(.c) void {
-    host.call = c;
-    host.out = o;
-}
+fn bindCalls(_: ?*anyopaque, _: ?vpi.analog_run.HostCall, _: ?vpi.analog_run.HostOut) callconv(.c) void {}
 fn nSystf() callconv(.c) usize {
     return host.calls.len;
 }

@@ -5,6 +5,7 @@
 const std = @import("std");
 const abi = @import("device_abi");
 const numerics = @import("core").numerics;
+const Library = @import("Library.zig");
 const Circuit = @This();
 
 /// Owns every slice below.
@@ -43,6 +44,9 @@ has_state_q: bool,
 /// The builder found a node with only capacitors to it, so the operating
 /// point falls back to ngspice's OPtran. From `Facts` at the freeze.
 needs_tran_op: bool = false,
+/// The VPI host whose LRM 12.31.3 callbacks `.op` and `.tran` drive: set
+/// when an instance calls a `$systf` through an attached application.
+vpi: ?*const Library.Vpi = null,
 
 /// Topology facts `freeze` records on the Circuit.
 pub const Facts = struct {
@@ -52,6 +56,7 @@ pub const Facts = struct {
     /// Per `DeviceType`, whether the type runs a digital engine
     /// (`Library.digital`); types past its end are analog.
     digital: []const bool = &.{},
+    vpi: ?*const Library.Vpi = null,
 };
 
 /// Builds the pattern from every proto and finalizes each into a batch
@@ -137,6 +142,7 @@ pub fn freeze(
     }
     return .{
         .needs_tran_op = facts.needs_tran_op,
+        .vpi = facts.vpi,
         .allocator = allocator,
         .n = n,
         .nnz = nnz,

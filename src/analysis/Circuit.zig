@@ -125,6 +125,8 @@ pub const Circuit = struct {
 
     /// Capacitor-only nodes have a charge-defined startup, not a unique static OP.
     needs_tran_op: bool = false,
+    /// See `device.Circuit.vpi`.
+    vpi: ?*const @import("device").Library.Vpi = null,
 
     /// Node names as one flat table: `nodeName(i)` is
     /// `intern_bytes[intern_offs[i]..intern_offs[i+1]]`, empty for a branch
@@ -449,6 +451,7 @@ pub const Circuit = struct {
             .g_base = &.{},
             .c_base = &.{},
             .needs_tran_op = data.needs_tran_op,
+            .vpi = data.vpi,
             .intern_bytes = data.intern_bytes,
             .intern_offs = data.intern_offs,
             .bbd = data.bbd,
@@ -1045,11 +1048,15 @@ pub const Circuit = struct {
         return if (best == std.math.inf(f64)) null else best;
     }
 
-    /// Returns the earliest device breakpoint after `t`, or null.
+    /// Returns the earliest device breakpoint or VPI forced time (LRM
+    /// 12.31.3 acbAbsTime/acbElapsedTime) after `t`, or null.
     pub fn nextBreakpoint(self: *const Circuit, t: f64) ?f64 {
         var best = std.math.inf(f64);
         for (self.batches) |b| if (b.hooks.next_breakpoint) |f| {
             if (f(b.ctx, t)) |bp| best = @min(best, bp);
+        };
+        if (self.vpi) |v| if (v.next_forced(v.ctx, t)) |f| {
+            best = @min(best, f);
         };
         return if (best == std.math.inf(f64)) null else best;
     }

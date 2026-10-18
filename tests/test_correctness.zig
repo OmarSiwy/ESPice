@@ -114,9 +114,9 @@ pub fn main(init: std.process.Init) !u8 {
     var metamorphic_mode = false;
     const Flag = enum(u8) { list, filter, jobs, timeout, backend, update_verdicts, metamorphic, vpi_fixture };
     const flags = std.StaticStringMap(Flag).initComptime(.{
-        .{ "--list", .list },       .{ "--filter", .filter },
-        .{ "--jobs", .jobs },       .{ "--timeout", .timeout },
-        .{ "--backend", .backend }, .{ "--update-verdicts", .update_verdicts },
+        .{ "--list", .list },               .{ "--filter", .filter },
+        .{ "--jobs", .jobs },               .{ "--timeout", .timeout },
+        .{ "--backend", .backend },         .{ "--update-verdicts", .update_verdicts },
         .{ "--metamorphic", .metamorphic }, .{ "--vpi-fixture", .vpi_fixture },
     });
     while (args.next()) |arg| {
@@ -433,7 +433,8 @@ fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: 
     const argv: []const []const u8 = if (try marksVpiFixture(a, io, netlist)) blk: {
         @memcpy(with_vpi[0..base.len], &base);
         with_vpi[base.len] = "--vpi";
-        with_vpi[base.len + 1] = vpi_fixture orelse return error.MissingVpiFixture;
+        // Absolute, as `app` is: the deck runs from its own directory.
+        with_vpi[base.len + 1] = try Io.Dir.cwd().realPathFileAlloc(io, vpi_fixture orelse return error.MissingVpiFixture, a);
         break :blk &with_vpi;
     } else &base;
     const options: std.process.RunOptions = .{
@@ -496,7 +497,6 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
         .{ "OsdiUnsupported", "unsupported_input" },
         .{ "UnregisteredSystf", "unsupported_input" },
         .{ "VpiSecondSystfModule", "unsupported_input" },
-        .{ "VpiAnalogCallbackUnsupported", "unsupported_input" },
         .{ "UnpairedPoleRoot", "unsupported_input" },
         .{ "unsupported_input", "unsupported_input" },
     });

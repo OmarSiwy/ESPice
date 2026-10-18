@@ -380,6 +380,12 @@ fn floatingHolds(ckt: *root.Circuit, x: []const f64, gpa: std.mem.Allocator) ![]
 /// Contract entry: the executor's solved ctx.x_op, one point per probe.
 pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
     const x = ctx.x_op;
+    // LRM 12.31.3: the one solution is the first and the last. It has no
+    // earlier time to back up to, so acbConvergenceTest is not asked.
+    if (ctx.circuit.vpi) |v| {
+        v.point(v.ctx, .{ .kind = .op });
+        v.accept(v.ctx, true, true);
+    }
     const names = try root.probeNames(ctx, null);
     const data = try ctx.allocator.alloc(f64, names.len);
     for (ctx.probes, data) |node, *out| out.* = x[node];

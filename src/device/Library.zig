@@ -58,19 +58,43 @@ pub const Vpi = struct {
     /// (a loaded device's `systf_calls`) to it; returns what its instances
     /// call through, valid for the life of the process.
     attach: *const fn (ctx: *anyopaque, source_path: []const u8, calls: []const abi.Systf) VpiError!*const abi.SystfHost,
+    /// LRM 12.31.3, driven by `.op` and `.tran` once a module is attached:
+    /// `point` publishes the solution about to be attempted, `verdict` asks
+    /// whether it stands (acbConvergenceTest, 12.36), `accept` delivers
+    /// acbInitialStep/acbAbsTime/acbElapsedTime/acbAcceptedPoint/acbFinalStep
+    /// for the solution last published, and `next_forced` is the earliest
+    /// acbAbsTime/acbElapsedTime strictly after `after`, a time the transient
+    /// lands on.
+    point: *const fn (ctx: *anyopaque, p: AnalogPoint) void,
+    verdict: *const fn (ctx: *anyopaque) Verdict,
+    accept: *const fn (ctx: *anyopaque, first: bool, last: bool) void,
+    next_forced: *const fn (ctx: *anyopaque, after: f64) ?f64,
 };
+
+/// The solution an analysis is attempting: LRM 12.18's bounds and 12.9's time.
+pub const AnalogPoint = struct {
+    kind: enum { op, tran },
+    start: f64 = 0,
+    stop: f64 = 0,
+    max_step: f64 = 0,
+    t: f64 = 0,
+    dt: f64 = 0,
+};
+
+/// `reject`: an acbConvergenceTest returned non-zero or vpiRejectTransientStep
+/// ran, so back up; `again`: vpiTransientFailConverge, so solve the same time
+/// again.
+pub const Verdict = enum { accept, reject, again };
 
 /// Why a VPI step failed, each one logged with what it names:
 /// `VpiApplicationUnloadable` (dlopen failed), `VpiNoStartupRoutines` (the
 /// library exports no `vlog_startup_routines`), `VpiSecondSystfModule` (a
 /// second module calls a `$systf`; VerA's VPI holds one design, VerA#84),
-/// `VpiAnalogCallbackUnsupported` (an LRM 12.31.3 analog callback, #198),
 /// `VpiDesignFailed` (VerA could not build the module's design).
 pub const VpiError = error{
     VpiApplicationUnloadable,
     VpiNoStartupRoutines,
     VpiSecondSystfModule,
-    VpiAnalogCallbackUnsupported,
     VpiDesignFailed,
     OutOfMemory,
 };

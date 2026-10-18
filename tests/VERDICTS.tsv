@@ -297,12 +297,13 @@ PASS	fixtures/hdl/veriloga_res_divider.sp
 PASS	fixtures/hdl/veriloga_simparam.sp
 PASS	fixtures/hdl/veriloga_simparam_homotopy.sp
 PASS	fixtures/hdl/veriloga_strobe.sp
-XFAIL	fixtures/hdl/veriloga_systf_task.sp
+PASS	fixtures/hdl/veriloga_systf_task.sp
 PASS	fixtures/hdl/veriloga_table_snapshot.sp
 PASS	fixtures/hdl/veriloga_timer_rearm.sp
 PASS	fixtures/hdl/veriloga_transition_reject.sp
 PASS	fixtures/hdl/veriloga_unknown_param.sp
 PASS	fixtures/hdl/veriloga_vpi_app.sp
+PASS	fixtures/hdl/veriloga_vpi_callbacks.sp
 PASS	fixtures/hdl/veriloga_wide_ladder.sp
 PASS	fixtures/hdl/veriloga_wrong_node_count.sp
 PASS	fixtures/hspice/ac_poi.sp

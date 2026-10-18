@@ -219,21 +219,21 @@ What ESPice supports, and what it refuses by name:
 
 - a calltf that returns a value and its partials (`derivtf`, LRM §12.22.1)
   and puts output arguments (LRM §12.22.2);
-- an application that registers an analog callback (`acbAbsTime`,
-  `acbAcceptedPoint` and the rest of LRM §12.31.3) before the simulation
-  starts is refused, `VpiAnalogCallbackUnsupported` (#198);
+- the LRM §12.31.3 analog callbacks in `.op` and `.tran` (#198):
+  acbInitialStep, acbAcceptedPoint and acbFinalStep on each accepted
+  solution; acbAbsTime and acbElapsedTime force a transient solution at
+  their time; a non-zero acbConvergenceTest, or §12.36
+  vpiRejectTransientStep, backs up to half the step; §12.36
+  vpiTransientFailConverge solves the step again;
 - a second module in one run that calls a `$systf` is refused,
   `VpiSecondSystfModule`.
 
 These limits return a value instead of refusing, so check for them in your
 application:
 
-- inside calltf, `vpi_get(vpiAnalogTime)` and the other analog time and
-  frequency queries read 0, until VerA#83;
+- the other analyses (`.dc`, `.ac`, ...) deliver no analog callbacks;
 - `vpi_get_value` on a net that is not one of the call's arguments reads
   NaN;
-- an analog callback registered during the run (from calltf) is not
-  caught, and never fires;
 - one module per run may call a `$systf`, and calltf must be stateless:
   every instance of the module shares one call object, so state kept per
   call handle is shared by all of them.

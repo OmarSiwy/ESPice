@@ -133,7 +133,6 @@ Error: measure  t50 : out of interval
 | `UnregisteredSystf` | an instance's module calls a system function or task no standard defines (`$my_fn(...)`, VerA warning W0852) and no loaded VPI application registers it; load one with `--vpi` |
 | `VpiApplicationUnloadable`, `VpiNoStartupRoutines` | a `--vpi` or `.options vpi=` library does not open, or exports no `vlog_startup_routines` |
 | `VpiSecondSystfModule` | a second module calls a `$systf`; one per run is supported |
-| `VpiAnalogCallbackUnsupported` | the VPI application registers an analog callback (`acbAbsTime`, ...), which ESPice does not run yet (#198) |
 | `VpiDesignFailed` | VerA could not build the VPI design of the module |
 | `VpiUnavailable` | a VPI application in a build without a VPI host (the C API, an embedding) |
 
