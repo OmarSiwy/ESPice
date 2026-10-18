@@ -62,7 +62,7 @@
             cp -r "$TMPDIR/zgc/p" "$out"
           '';
           outputHashMode = "recursive";
-          outputHash = "sha256-iww4xuugEAszcvQgL1vrwrv9vydsIbNmhhBooG0qqA0=";
+          outputHash = "sha256-pb65Ah7wSVS5QCf8+gDVx4qcabBgnuWhXKH5QQ3lPdE=";
         };
 
         gpuPkgs = [
