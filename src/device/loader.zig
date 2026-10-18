@@ -142,17 +142,12 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     };
     // The vtable crosses the dlopen boundary with Zig calling convention and
     // auto layout, so the library must match the host's backend and mode
-    // (`layoutHash` checks both). The orchestrator builds only with LLVM, so a
-    // self-hosted host cannot load HDL.
-    if (builtin.zig_backend != .stage2_llvm) {
-        std.debug.print("loader: this espice is a Debug build; runtime .hdl needs one built with -Doptimize=ReleaseFast (the default)\n", .{});
-        return error.HdlNeedsLlvmHost;
-    }
+    // (`layoutHash` checks both).
     var options: fastvaf.orchestrator.Options = .{
         .work_dir = paths.work_dir,
         .name = module_name,
         .optimize = builtin.mode,
-        .backend = .llvm,
+        .backend = if (builtin.zig_backend == .stage2_llvm) .llvm else .self_hosted,
         .modules = &modules,
         .zig_exe = paths.zig,
     };
@@ -435,7 +430,6 @@ fn recordInputs(io: std.Io, work_root: []const u8, key: [32]u8, module_name: []c
 /// - `DigitalFailed`: VerA cannot make a device of the `.v` design (E1103);
 ///   its diagnostics are printed.
 /// - `HdlCodegenRefused`: VerA's codegen refused the model (E0515); printed.
-/// - `HdlNeedsLlvmHost`: this espice was not built with LLVM.
 /// - `GeneratedDeviceDoesNotCompile`: the generated device failed to build,
 ///   an engine bug; the compiler's errors are printed.
 /// - `NotArpDevice`, `WrongAbiVersion`, `LayoutMismatch`: the built library
@@ -452,7 +446,6 @@ pub const Error = error{
     UnsupportedHdlExtension,
     NameTooLong,
     HdlCodegenRefused,
-    HdlNeedsLlvmHost,
     GeneratedDeviceDoesNotCompile,
     NotArpDevice,
     WrongAbiVersion,
