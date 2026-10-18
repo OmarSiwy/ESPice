@@ -350,31 +350,59 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     };
 }
 
-/// A hold at its value in `x` on every row whose static Jacobian at `x` is
-/// all zero (a capacitor-only node), so a static Newton is not singular
-/// there. Evaluates `ckt` at `x` and clears the limiters. Caller owns the
+/// A hold at its value in `x` on one row of every floating component of the
+/// static Jacobian at `x`, so a static Newton is not singular there. A
+/// component floats when shifting all its node voltages together leaves
+/// every row unchanged (each row's node columns sum to zero): a
+/// capacitor-only node, or an island behind a 0 V source or a resistor
+/// (#90). Evaluates `ckt` at `x` and clears the limiters. Caller owns the
 /// result.
 fn floatingHolds(ckt: *root.Circuit, x: []const f64, gpa: std.mem.Allocator) ![]converger.Force {
     std.debug.assert(x.len == ckt.n);
     ckt.eval(x, 0);
     ckt.clearLimits();
-    const live = try gpa.alloc(bool, ckt.n);
-    defer gpa.free(live);
-    @memset(live, false);
-    for (ckt.row_idx[0..ckt.nnz], ckt.g_vals[0..ckt.nnz]) |r, g| {
-        if (g != 0) live[r] = true;
-    }
-    var count: usize = 0;
-    for (live) |l| count += @intFromBool(!l);
-    const holds = try gpa.alloc(converger.Force, count);
-    var k: usize = 0;
-    for (live, 0..) |l, i| if (!l) {
-        holds[k] = .{ .slot = ckt.diag_slots[i], .row = @intCast(i), .value = x[i] };
-        k += 1;
+    const n = ckt.n;
+    const parent = try gpa.alloc(u32, n);
+    defer gpa.free(parent);
+    const sum = try gpa.alloc(f64, 2 * n); // row sums over node columns, then |G| row sums
+    defer gpa.free(sum);
+    const grounded = try gpa.alloc(bool, n);
+    defer gpa.free(grounded);
+    for (parent, 0..) |*p, i| p.* = @intCast(i);
+    @memset(sum, 0);
+    @memset(grounded, false);
+    const find = struct {
+        fn f(par: []u32, start: u32) u32 {
+            var i = start;
+            while (par[i] != i) : (i = par[i]) par[i] = par[par[i]];
+            return i;
+        }
+    }.f;
+    for (0..n) |c| for (ckt.col_ptr[c]..ckt.col_ptr[c + 1]) |p| {
+        const r = ckt.row_idx[p];
+        const g = ckt.g_vals[p];
+        if (g == 0) continue;
+        parent[find(parent, r)] = find(parent, @intCast(c));
+        if (!ckt.current_row[c]) sum[r] += g;
+        sum[n + r] += @abs(g);
     };
-    std.debug.assert(k == count);
-    std.debug.assert(live[root.GROUND]);
-    return holds;
+    for (0..n) |r| {
+        if (@abs(sum[r]) > 64 * std.math.floatEps(f64) * sum[n + r]) grounded[find(parent, @intCast(r))] = true;
+    }
+    std.debug.assert(grounded[find(parent, root.GROUND)]);
+    // One hold per floating root, on its first node row (else its first row).
+    var holds: std.ArrayList(converger.Force) = .empty;
+    errdefer holds.deinit(gpa);
+    for (0..n) |i| {
+        const root_i = find(parent, @intCast(i));
+        if (grounded[root_i]) continue;
+        const k = for (0..n) |j| {
+            if (!ckt.current_row[j] and find(parent, @intCast(j)) == root_i) break j;
+        } else i;
+        try holds.append(gpa, .{ .slot = ckt.diag_slots[k], .row = @intCast(k), .value = x[k] });
+        grounded[root_i] = true;
+    }
+    return holds.toOwnedSlice(gpa);
 }
 
 /// Contract entry: the executor's solved ctx.x_op, one point per probe.
