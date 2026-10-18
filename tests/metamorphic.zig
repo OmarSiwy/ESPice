@@ -114,6 +114,15 @@ fn cards(a: Allocator, src: []const u8) Allocator.Error!?[]const Card {
     return out.items;
 }
 
+/// Whether a `.option(s)` card in `cs` sets `name`.
+fn setsOption(cs: []const Card, name: []const u8) bool {
+    for (cs) |c| {
+        if (c.element or c.tokens.len == 0 or !std.ascii.startsWithIgnoreCase(c.tokens[0], ".option")) continue;
+        for (c.tokens[1..]) |t| if (std.ascii.startsWithIgnoreCase(t, name)) return true;
+    }
+    return false;
+}
+
 /// A SPICE number (ngspice manual §2.1.2): mantissa, optional exponent,
 /// optional scale factor, trailing letters ignored. Null when `s` is not one.
 pub fn number(s: []const u8) ?f64 {
@@ -129,7 +138,7 @@ pub fn number(s: []const u8) ?f64 {
     const base = std.fmt.parseFloat(f64, s[0..i]) catch return null;
     const rest = s[i..];
     const scales = [_]struct { []const u8, f64 }{
-        .{ "meg", 1e6 }, .{ "mil", 25.4e-6 }, .{ "t", 1e12 }, .{ "g", 1e9 }, .{ "k", 1e3 },
+        .{ "meg", 1e6 }, .{ "mil", 25.4e-6 }, .{ "t", 1e12 }, .{ "g", 1e9 },   .{ "k", 1e3 },
         .{ "m", 1e-3 },  .{ "u", 1e-6 },      .{ "n", 1e-9 }, .{ "p", 1e-12 }, .{ "f", 1e-15 },
     };
     for (scales) |sc| if (std.ascii.startsWithIgnoreCase(rest, sc[0])) return base * sc[1];
@@ -145,6 +154,8 @@ fn isGround(node: []const u8) bool {
 /// the rewrite has nothing to act on.
 pub fn rewrite(a: Allocator, src: []const u8, kind: Kind) Allocator.Error!?Variant {
     const cs = try cards(a, src) orelse return null;
+    // `.options rshunt` shunts every node, a split's new one too, and no scale reaches it.
+    if ((kind == .split or kind == .scale) and setsOption(cs, "rshunt")) return null;
     const title_end = std.mem.indexOfScalar(u8, src, '\n') orelse return null;
     var v: Variant = .{ .kind = kind, .text = "" };
     var out: std.ArrayList(u8) = .empty;
@@ -259,6 +270,10 @@ test "each rewrite keeps the relation it states" {
     const dd = (try rewrite(a, "t\nv1 a 0 1\nd1 a k dm\ne1 o 0 k 0 2\n.model dm d\n", .rename)).?;
     try testing.expectEqualStrings("t\nv1 m3 0 1\nd1 m3 m2 dm\ne1 m1 0 m2 0 2\n.model dm d\n", dd.text);
     try testing.expectEqual(null, try rewrite(a, "t\nv1 a 0 1\nd1 a 0 dm\n.model dm d\n", .scale));
+    // `.options rshunt` shunts every node, a split's new one too, and no scale reaches it.
+    const shunted = "t\nVin in 0 10\nR1 in out 1k\nC1 out 0 1p\n.options rshunt=1k\n.op\n.end\n";
+    try testing.expectEqual(null, try rewrite(a, shunted, .split));
+    try testing.expectEqual(null, try rewrite(a, shunted, .scale));
     // Out of scope: a MOSFET, a POLY source, a pair on an R, an I card under `scale`.
     try testing.expectEqual(null, try rewrite(a, "t\nm1 d g 0 0 nm\n.model nm nmos\n", .reorder));
     try testing.expectEqual(null, try rewrite(a, "t\ne1 o 0 poly(1) a 0 0 1\n", .reorder));

@@ -2,6 +2,7 @@
 PASS	fixtures/ac/bench_adversarial_extreme_values.sp
 PASS	fixtures/ac/bench_bjt_common_emitter.sp
 PASS	fixtures/ac/bench_medium_ladder_filter.sp
+PASS	fixtures/ac/bsim2_cs_gain.sp
 PASS	fixtures/ac/bsim4_zero_bias_junction_cap.sp
 PASS	fixtures/ac/buffered_two_poles.sp
 PASS	fixtures/ac/current_source_rc.sp
@@ -35,6 +36,7 @@ PASS	fixtures/ac/divider_phase_90.sp
 PASS	fixtures/ac/divider_phase_minus90.sp
 PASS	fixtures/ac/floating_ac_source.sp
 PASS	fixtures/ac/hfet2_zero_vds_gds.sp
+PASS	fixtures/ac/hicum2_collapsed_resistors.sp
 PASS	fixtures/ac/kinduc_k_exact.sp
 PASS	fixtures/ac/lane_tail_15.sp
 PASS	fixtures/ac/lane_tail_16.sp
@@ -324,6 +326,7 @@ PASS	fixtures/hspice/gmindc.sp
 PASS	fixtures/hspice/gshunt.sp
 PASS	fixtures/hspice/hblin_mixer.sp
 PASS	fixtures/hspice/hblin_noise.sp
+PASS	fixtures/hspice/hspice_expressions.sp
 PASS	fixtures/hspice/laplace_source.sp
 PASS	fixtures/hspice/lin_line.sp
 PASS	fixtures/hspice/lin_mixed_mode.sp
@@ -500,7 +503,9 @@ PASS	fixtures/noise/differential_unbalanced.sp
 PASS	fixtures/noise/isrc_input_total.sp
 PASS	fixtures/noise/jfet_channel.sp
 PASS	fixtures/noise/ngspice_mos1_cs.sp
+PASS	fixtures/noise/ngspice_mos2_cs.sp
 PASS	fixtures/noise/ngspice_mos3_cs.sp
+PASS	fixtures/noise/ngspice_mos3_mos9_channel.sp
 PASS	fixtures/noise/noise_table_lin_clamp.sp
 PASS	fixtures/noise/noise_table_lin_interior.sp
 PASS	fixtures/noise/noise_table_log_clamp.sp
@@ -565,6 +570,7 @@ PASS	fixtures/op/ltra_op_series_resistance.sp
 PASS	fixtures/op/mfactor_parallel_copies.sp
 PASS	fixtures/op/milliohm_load.sp
 PASS	fixtures/op/millivolt_supply.sp
+PASS	fixtures/op/mos6_default_kc.sp
 PASS	fixtures/op/mos_level_card_spellings.sp
 PASS	fixtures/op/negative_supply.sp
 PASS	fixtures/op/nodeset_latch.sp
@@ -759,6 +765,8 @@ PASS	fixtures/stress/vacask_rc.sp
 PASS	fixtures/stress/vacask_ring.sp
 PASS	fixtures/syntax/global_net.sp
 PASS	fixtures/syntax/hspice_suffix.sp
+PASS	fixtures/syntax/ngspice_expressions.sp
+PASS	fixtures/syntax/ngspice_lines.sp
 PASS	fixtures/syntax/ngspice_mod_idiv.sp
 PASS	fixtures/syntax/ngspice_syntax.sp
 PASS	fixtures/syntax/subckt_params.sp
