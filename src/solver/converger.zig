@@ -487,10 +487,12 @@ pub fn jfnk(
             continue;
         }
 
-        // GMRES stops at ||M^-1 (F + J dx)|| <= abstol / 10.
+        // GMRES stops at ||M^-1 (F + J dx)|| <= abstol / 10, but takes at
+        // least one Arnoldi step: a beta already under that would otherwise
+        // return dx = 0 and stall on the residual gate.
         @memset(r, 0);
         op.x_norm = @max(num.norm2(x), 1.0);
-        _ = krylov.solve(&op, b, r, 0.1 * opts.abstol / beta, 0);
+        _ = krylov.solve(&op, b, r, @min(0.1 * opts.abstol / beta, 0.5), 0);
 
         // Limiting may clamp x, so it runs before the residual gate.
         const scaled = updateAndNorm(x, r, x_old, sys.current_row[0..n], opts.reltol, opts.abstol, opts.vntol);
