@@ -2435,8 +2435,8 @@ fn isVera(comptime D: type) bool {
 
 /// Whether D gets GPU kernels. Excluded, and kept on the host:
 /// - `mutable_eval` devices, whose first-call snapshots need exclusive
-///   evaluation, unless the status latch is their only eval write
-///   (`statusOnlyMutable`);
+///   evaluation, unless the status latch and timepoint cache are their only
+///   eval writes (`statusOnlyMutable`);
 /// - Newton-history devices (`advanceIteration`/`checkConvergence`), whose
 ///   `limiter_previous` the host advances on its own Instance copy;
 /// - devices with `systf_calls`, whose `Instance.systf` is a host function
@@ -2485,11 +2485,13 @@ fn gpuHostStepped(comptime D: type) bool {
 }
 
 /// Whether D's eval writes only its own instance: VerA's §9.7.3 status
-/// latch (`vera_status__`) and its `vera_timepoint` cache (`tp0_t`), which
-/// a device thread writes on its resident Instance as the host does.
-/// §9.21.1 table state (`table_ready`) keeps the device on the host.
+/// latch (`status_sites`) and/or its `vera_timepoint` cache (`tp0_t`; ltra
+/// has the cache and no latch), which a device thread writes on its
+/// resident Instance as the host does. §9.21.1 table state (`table_ready`)
+/// keeps the device on the host.
 fn statusOnlyMutable(comptime D: type) bool {
-    return @hasDecl(D, "status_sites") and !@hasField(D.Instance, "table_ready");
+    const latch_or_cache = @hasDecl(D, "status_sites") or @hasField(D.Instance, "tp0_t");
+    return latch_or_cache and !@hasField(D.Instance, "table_ready");
 }
 
 /// Whether D's GPU eval kernel is paired with a `StateKernel`.

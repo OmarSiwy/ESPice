@@ -84,8 +84,8 @@ running on stale state.
 
 The lossy lines (ltra, coupled_ltra, coupled_ltra3, coupled_ltra4, txl)
 evaluate on the device: eval writes only its own resident Instance (the
-`vera_timepoint` cache `tp0_t` beside the status latch), so
-`statusOnlyMutable` admits them. Their history is inline in the Instance
+`vera_timepoint` cache `tp0_t`, plus the status latch on all but ltra),
+so `statusOnlyMutable` admits them. Their history is inline in the Instance
 (ltra 5 x 8192 f64) and one thread walks the convolution serially; device
 stepping and the VerA frame fix are #204 and #206.
 
