@@ -251,7 +251,11 @@ pub const Problem = struct {
         if (self.prepared.tuning == null) self.session.markLastTemplateReader();
         var point = options.point;
         if (self.save_path != null or self.prepared.deck.stims.len != 0) point.measures_only = false;
-        const jobs = if (self.prepared.deck.queries.len == 0)
+        // No analysis card runs an OP, unless it would have no columns (a
+        // title-only deck): ngspice runs nothing there either.
+        const jobs = if (self.prepared.deck.queries.len == 0 and self.prepared.deck.probes.len == 0)
+            &[_]Query{}
+        else if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
             try withPoint(scratch, self.prepared.deck.queries, point);
