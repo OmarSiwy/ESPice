@@ -1,12 +1,12 @@
 .{
     .name = .espice,
-    .version = "1.0.0",
+    .version = "1.1.0",
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .vera = .{
-            .url = "git+https://github.com/OmarSiwy/VerA#1160a578a0563ddab0a9778294dfd004bd6b8348",
-            .hash = "vera-0.10.2-fzAu7CI8YgGsSi8Lig6NxiCFm5ZAFqr1IFr08nm50VLo",
+            .url = "git+https://github.com/OmarSiwy/VerA#4887c2dc045192d905fac45f869d5c2a92d27e07",
+            .hash = "vera-0.10.3-fzAu7FRAYgHSRAdG1k4trCXmcWiIUXrk7j7VE16dizJZ",
         },
         .stdpp = .{
             .url = "git+https://github.com/OmarSiwy/stdpp#0b28ace3209b709ffe6dbc898ba2117b035b77e1",

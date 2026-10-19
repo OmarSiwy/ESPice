@@ -62,7 +62,7 @@
             cp -r "$TMPDIR/zgc/p" "$out"
           '';
           outputHashMode = "recursive";
-          outputHash = "sha256-pb65Ah7wSVS5QCf8+gDVx4qcabBgnuWhXKH5QQ3lPdE=";
+          outputHash = "sha256-Eod+z8eTJMxjg3aSBJh/Ron2g7q2SiaO4p8xji03a5w=";
         };
 
         gpuPkgs = [
@@ -108,7 +108,7 @@
           }:
           pkgs.stdenv.mkDerivation {
             pname = if cuda then "espice-cuda" else "espice";
-            version = "1.0.0";
+            version = "1.1.0";
             inherit src;
             nativeBuildInputs = [
               zig

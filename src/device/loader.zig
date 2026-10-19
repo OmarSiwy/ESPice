@@ -150,6 +150,9 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
         .backend = if (builtin.zig_backend == .stage2_llvm) .llvm else .self_hosted,
         .modules = &modules,
         .zig_exe = paths.zig,
+        // The host's libc, not what the compiler detects: a Nix sandbox
+        // detects musl, whose libc.so a glibc espice cannot load.
+        .target = "native-native-" ++ @tagName(builtin.target.abi),
     };
     // One build tree per (source, host ABI, module set): VerA's writer prunes
     // its tree, so unrelated sources must not share one, and a stable path
