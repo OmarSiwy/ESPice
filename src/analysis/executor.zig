@@ -56,6 +56,7 @@ pub const Config = struct {
     final_plan: bool = false,
     /// Developer switches the facade read from the environment.
     knobs: types.Knobs = .{},
+
     /// The facade's record of whether the GPU driver is up, shared by every
     /// query of the Problem; null prices the driver setup in every query.
     gpu_driver: ?*gpu.Driver = null,
@@ -80,6 +81,9 @@ pub fn validateBackend(config: Config) !void {
     if (config.solver_threads == 0 or config.device_threads == 0) return error.InvalidThreadCount;
 }
 
+/// Lanes per batch: the CPU's f64 vector width (4 on AVX2, 8 on AVX-512).
+pub const lane_width = std.simd.suggestVectorLength(f64) orelse 4;
+
 /// One query: its own Circuit instance, work and result arenas, and worker.
 /// Heap-pinned because the worker and the progress callback hold its address.
 pub const Executor = struct {
@@ -102,6 +106,13 @@ pub const Executor = struct {
     built: bool = false,
     /// `RunCtx.stream` for this query.
     stream: ?*std.Io.Writer = null,
+    /// Queries this one runs as the other lanes of its batch, on its own
+    /// worker (`Session` groups them); empty for a lone query.
+    peers: []const *Executor = &.{},
+    /// The session row, for settling a batch's peers.
+    row: u32 = 0,
+    /// A peer's failure, set by its batch; `published` holds its success.
+    peer_failure: ?QueryError = null,
 
     /// What one `wait` saw: a checkpoint, the result, an error or a cancel.
     pub const Outcome = Controller.Outcome;
@@ -272,7 +283,82 @@ pub const Executor = struct {
     // iterate if that turns out slow.
     fn execute(ctx: *anyopaque) QueryError!types.Result {
         const self: *Executor = @ptrCast(@alignCast(ctx));
+        if (self.peers.len != 0) return self.executeBatch();
         try self.materialize();
+        const res = self.runQuery() catch |err| {
+            try self.refuseLatched();
+            return err;
+        };
+        try self.refuseLatched();
+        return res;
+    }
+
+    /// Runs this query and its `peers` as one lane batch: each builds its
+    /// circuit, then the operating points solve as lanes (`op.solveLanes`)
+    /// and each publishes as it would alone. A batch whose devices print
+    /// display tasks runs its queries one after another instead. Every peer
+    /// ends with `published` or `peer_failure`; returns this query's own.
+    fn executeBatch(self: *Executor) QueryError!types.Result {
+        const g = 1 + self.peers.len;
+        std.debug.assert(g <= lane_width and self.job == .op);
+        var members: [lane_width]*Executor = undefined;
+        members[0] = self;
+        @memcpy(members[1..g], self.peers);
+        var outcomes: [lane_width]QueryError!types.Result = @splat(error.QueryCancelled);
+        defer for (members[1..g], outcomes[1..g]) |p, o| {
+            if (o) |r| p.published = r else |err| p.peer_failure = err;
+        };
+        // Lanes whose circuit built, as indices into `members`.
+        var live: [lane_width]usize = undefined;
+        var n_live: usize = 0;
+        for (members[0..g], 0..) |e, k| {
+            e.materialize() catch |err| {
+                outcomes[k] = err;
+                continue;
+            };
+            e.circuit.progress = self.controller.callback();
+            live[n_live] = k;
+            n_live += 1;
+        }
+        if (n_live != 0 and (try members[live[0]].sayNames()).len != 0) {
+            for (live[0..n_live]) |k| outcomes[k] = members[k].finishAlone();
+            return outcomes[0];
+        }
+        var ckts: [lane_width]*types.Circuit = undefined;
+        var xs: [lane_width][]f64 = undefined;
+        var options: op.Options = undefined;
+        for (live[0..n_live], 0..) |k, l| {
+            const e = members[k];
+            e.circuit.setSimState(.{ .kind = if (e.job.op.tran_op) .ic else .dc });
+            options = e.opStart() catch |err| {
+                for (live[0..n_live]) |j| outcomes[j] = err;
+                return outcomes[0];
+            };
+            ckts[l] = &e.circuit;
+            xs[l] = e.x.?;
+        }
+        var solved: [lane_width]op.LaneOutcome = undefined;
+        if (n_live != 0) op.solveLanes(lane_width, ckts[0..n_live], xs[0..n_live], options, self.deck.nodeset, self.deck.ic, solved[0..n_live]) catch |err| {
+            for (live[0..n_live]) |k| outcomes[k] = err;
+            return outcomes[0];
+        };
+        for (live[0..n_live], solved[0..n_live]) |k, o| {
+            const e = members[k];
+            outcomes[k] = blk: {
+                const r = o catch |err| break :blk err;
+                if (!r.converged) break :blk error.OpDidNotConverge;
+                e.circuit.setSimState(.{ .kind = if (e.job.op.tran_op) .ic else .dc });
+                break :blk e.finish();
+            };
+            e.refuseLatched() catch |err| {
+                outcomes[k] = err;
+            };
+        }
+        return outcomes[0];
+    }
+
+    /// `execute` past `materialize`, for a batch lane that runs alone.
+    fn finishAlone(self: *Executor) QueryError!types.Result {
         const res = self.runQuery() catch |err| {
             try self.refuseLatched();
             return err;
@@ -341,17 +427,7 @@ pub const Executor = struct {
             },
         });
         if (self.job == .op) {
-            self.x = try self.work.allocator().alloc(f64, self.circuit.n);
-            @memset(self.x.?, 0);
-            var options = self.job.op;
-            if (self.deck.op_guess.len != 0) {
-                std.debug.assert(self.deck.op_guess.len == self.circuit.n);
-                @memcpy(self.x.?, self.deck.op_guess);
-                options.warm_start = true;
-            } else if (options.warm_start and self.deck.warm_op.len != 0) {
-                std.debug.assert(self.deck.warm_op.len == self.circuit.n);
-                @memcpy(self.x.?, self.deck.warm_op);
-            } else options.warm_start = false;
+            const options = try self.opStart();
             const solved = try op.solve(&self.circuit, self.x.?, options, self.deck.nodeset, self.deck.ic);
             if (!solved.converged) return error.OpDidNotConverge;
             if (gpu_context) |g| try g.syncHostState();
@@ -364,6 +440,28 @@ pub const Executor = struct {
             for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;
             for (self.deck.uic_ic) |ic| self.x.?[ic.node] = ic.value;
         }
+        return self.finish();
+    }
+
+    /// The operating point's start: `x` from the deck's guess, the
+    /// template's warm point or zero, and the options that start implies.
+    fn opStart(self: *Executor) !op.Options {
+        self.x = try self.work.allocator().alloc(f64, self.circuit.n);
+        @memset(self.x.?, 0);
+        var options = self.job.op;
+        if (self.deck.op_guess.len != 0) {
+            std.debug.assert(self.deck.op_guess.len == self.circuit.n);
+            @memcpy(self.x.?, self.deck.op_guess);
+            options.warm_start = true;
+        } else if (options.warm_start and self.deck.warm_op.len != 0) {
+            std.debug.assert(self.deck.warm_op.len == self.circuit.n);
+            @memcpy(self.x.?, self.deck.warm_op);
+        } else options.warm_start = false;
+        return options;
+    }
+
+    /// The analysis proper, from `x` (the operating point, or a `uic` start).
+    fn finish(self: *Executor) !types.Result {
         const run_ctx: types.RunCtx = .{
             .circuit = &self.circuit,
             .x_op = self.x.?,

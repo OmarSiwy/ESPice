@@ -132,6 +132,19 @@ fn solveLadder(
         error.SingularMatrix => null,
         else => return e, // else: only a singular Jacobian moves on to the next rung
     };
+    return afterPlain(ckt, ws, x, options, hold, plain);
+}
+
+/// Rungs 2 to 5 of `solveLadder`, given the plain rung's outcome (null: a
+/// singular Jacobian): returns it when it converged.
+fn afterPlain(
+    ckt: *root.Circuit,
+    ws: *converger.Workspace,
+    x: []f64,
+    options: Options,
+    hold: []const converger.Force,
+    plain: ?converger.Result,
+) !converger.Result {
     if (ws.knobs.opdbg)
         std.debug.print("ladder: plain conv={?}\n", .{if (plain) |p| p.converged else null});
     if (plain) |p| {
@@ -403,6 +416,90 @@ fn floatingHolds(ckt: *root.Circuit, x: []const f64, gpa: std.mem.Allocator) ![]
     }
     return holds.toOwnedSlice(gpa);
 }
+
+/// `solve` for the lanes of one batch, each lane bitwise its own `solve`
+/// (dev/research/lane-batched-simulation.md §6, the `.op` ladder). The
+/// setup and the plain rung run as lanes; a lane the plain rung leaves
+/// unconverged or singular peels to its own scalar ladder from rung 2 (class
+/// E: the stepping rungs are not masked yet). A batch with nodesets, a
+/// floating start, a JFNK pin or `-Dcertify` runs every lane's scalar
+/// `solve`. Lane l's outcome lands in `out[l]`; the call itself fails only
+/// when the lane solve does (out of memory), which fails every lane.
+/// Asserts 1 <= `ckts.len` <= W and that `xs` and `out` match it.
+pub fn solveLanes(
+    comptime W: usize,
+    ckts: []const *root.Circuit,
+    xs: []const []f64,
+    options: Options,
+    nodeset: []const Ic,
+    ic: []const Ic,
+    out: []LaneOutcome,
+) !void {
+    const g = ckts.len;
+    std.debug.assert(g >= 1 and g <= W and xs.len == g and out.len == g);
+    const c0 = ckts[0];
+    const held = if (options.tran_op) ic else &.{};
+    const pin = c0.knobs.newton.pin;
+    const laned = W > 1 and g > 1 and nodeset.len == 0 and !(c0.needs_tran_op and held.len == 0) and
+        (pin == .auto or pin == .direct) and !root.Circuit.certify;
+    if (!laned) {
+        for (ckts, xs, out) |c, x, *o| o.* = solve(c, x, options, nodeset, ic);
+        return;
+    }
+    const lane_system = @import("solver").lane_system;
+    const System = lane_system.LaneSystem(W, root.Circuit, root.EvalHook);
+    const L = @import("solver").lanes.Lanes(W);
+    // Unused lanes repeat lane 0 and stay inactive.
+    var lanes: [W]*root.Circuit = undefined;
+    var wss: [W]*converger.Workspace = undefined;
+    for (&lanes, &wss, 0..) |*c, *w, l| {
+        c.* = ckts[if (l < g) l else 0];
+        if (l < g) {
+            c.*.setSimState(.{ .kind = if (options.tran_op) .ic else .dc, .initial_step = true });
+            if (!options.warm_start) coldStart(c.*, xs[l]);
+            try c.*.computeBaseline();
+            w.* = try c.*.workspace();
+        } else w.* = wss[0];
+    }
+    const gpa = wss[0].slv.gpa;
+    const force = try gpa.alloc(converger.Force, held.len);
+    defer gpa.free(force);
+    for (held, force) |h, *f| f.* = .{ .slot = c0.diag_slots[h.node], .row = h.node, .value = h.value };
+
+    var sys = try System.init(gpa, lanes, .{});
+    defer sys.deinit(gpa);
+    sys.active = @truncate(@as(u64, std.math.maxInt(L.Mask)) >> @intCast(W - g));
+    var lws = try converger.LaneWorkspace(W).init(gpa, wss);
+    defer lws.deinit(gpa);
+    const xv = try gpa.alloc(L.V, c0.n);
+    defer gpa.free(xv);
+    for (xs, 0..) |x, l| System.putLane(xv, x, l);
+    // The plain rung, as `newtonRun` and `converger.run` run it.
+    var copts = converger.optionsFromTolerances(options.tol, null);
+    copts.gmin = 0;
+    copts.init_fix = !options.warm_start;
+    copts.force = force;
+    const res = converger.newtonLanes(W, &sys, &lws, xv, @splat(0), copts, System.LaneHook{});
+    sys.clearLimits();
+    const plain = try res;
+    for (xs, 0..) |x, l| System.getLane(x, xv, l);
+
+    for (ckts, xs, out, 0..) |c, x, *o, l| {
+        const bit = @as(L.Mask, 1) << @intCast(l);
+        const p: ?converger.Result = if (plain.singular & bit != 0) null else .{ .converged = plain.converged & bit != 0, .iterations = plain.iterations[l] };
+        const r = afterPlain(c, wss[l], x, options, force, p) catch |e| {
+            o.* = e;
+            continue;
+        };
+        // As `solve` ends.
+        if (r.converged) _ = c.stateCtl(.commit);
+        c.setSimState(.{ .kind = if (options.tran_op) .ic else .dc });
+        o.* = r;
+    }
+}
+
+/// One lane's `solve` outcome.
+pub const LaneOutcome = root.ErrorOf(solve)!converger.Result;
 
 /// Contract entry: the executor's solved ctx.x_op, one point per probe.
 pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
