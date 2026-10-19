@@ -185,3 +185,65 @@ export fn hand_num_norminf(x: [*]const f64, n: usize) f64 {
     }
     return @bitCast(m);
 }
+
+// ---- Lanes(1) primitives (lane-batched-simulation.md §3.1): each lane
+// primitive at W = 1 against the scalar operation it replaces. ----
+
+const L1 = solver.lanes.Lanes(1);
+
+export fn gen_lanes_splat(x: f64) f64 {
+    return L1.splat(x);
+}
+
+export fn hand_lanes_splat(x: f64) f64 {
+    return x;
+}
+
+export fn gen_lanes_any(m: bool) bool {
+    return L1.any(@intFromBool(m));
+}
+
+export fn hand_lanes_any(m: bool) bool {
+    return m;
+}
+
+export fn gen_lanes_all(m: bool) bool {
+    return L1.all(@intFromBool(m));
+}
+
+export fn hand_lanes_all(m: bool) bool {
+    return m;
+}
+
+export fn gen_lanes_select(a: f64, b: f64, c: f64) f64 {
+    return L1.select(L1.cmp(.lte, a, b), a, c);
+}
+
+export fn hand_lanes_select(a: f64, b: f64, c: f64) f64 {
+    return if (a <= b) a else c;
+}
+
+export fn gen_lanes_cmp(a: f64, b: f64) bool {
+    return L1.any(L1.cmp(.lt, a, b) & ~L1.cmp(.eq, a, 0));
+}
+
+export fn hand_lanes_cmp(a: f64, b: f64) bool {
+    return a < b and !(a == 0);
+}
+
+export fn gen_lanes_lane(v: f64) f64 {
+    return L1.lane(v, 0);
+}
+
+export fn hand_lanes_lane(v: f64) f64 {
+    return v;
+}
+
+export fn gen_lanes_each(a: f64, b: f64, out: *f64) void {
+    var it = L1.each(L1.cmp(.gt, a, b));
+    while (it.next()) |l| out.* += L1.lane(a, l);
+}
+
+export fn hand_lanes_each(a: f64, b: f64, out: *f64) void {
+    if (a > b) out.* += a;
+}
