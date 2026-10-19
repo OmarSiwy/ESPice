@@ -480,3 +480,79 @@ test "lane batches: OP and .dc rows at several temperatures group into batches a
     try t.expect(batched > 0 and dc_batched > 0);
     try t.expectEqualSlices(u64, @ptrCast(out[0]), @ptrCast(out[1]));
 }
+
+test "lane batches: a NaN value, failing, peeling and re-pivoting lanes leave the others bitwise and fail as they do alone" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    const mid = try b.addNode();
+    const low = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 3 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ vin, mid });
+    try b.addDevice(models.diode, "", &.{ .is = 1e-14 }, &.{}, .{ mid, low });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ low, GROUND });
+    try b.addDevice(models.diode, "", &.{ .is = 1e-12 }, &.{}, .{ low, GROUND });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    // Variant k writes the first resistor's `r`.
+    var probe = try @import("../types.zig").Circuit.instantiate(&prepared, t.allocator);
+    defer probe.deinit();
+    const params = try probe.collectParams();
+    const r_ref: u32 = for (params, 0..) |p, k| {
+        if (p.type == builtin("resistor") and p.index == 0 and std.mem.eql(u8, p.param_name, "r")) break @intCast(k);
+    } else return error.TestUnexpectedResult;
+    const values = [_]f64{ 1e3, 2e3, std.math.nan(f64), 1e-30, 5e3, -1e3, 0, 1e12, 7e3, 10, 1e-9 };
+    var labels: [values.len][]const u8 = undefined;
+    var starts: [values.len + 1]u32 = undefined;
+    var refs: [values.len]u32 = undefined;
+    var temps: [values.len]?f64 = undefined;
+    for (&labels, starts[0..values.len], &refs, &temps, 0..) |*l, *s0, *r, *tc, k| {
+        l.* = "r";
+        s0.* = @intCast(k);
+        r.* = r_ref;
+        tc.* = null;
+    }
+    starts[values.len] = values.len;
+    var deck = bareDeck(&.{ vin, mid, low }, &.{ "v(in)", "v(mid)", "v(low)" });
+    deck.variants = .{ .labels = &labels, .temp_c = &temps, .starts = &starts, .refs = &refs, .values = &values };
+    deck.cards = &.{.{ .type = builtin("vsource"), .index = 0, .name = "v1" }};
+    const target: requests.Dc.SweepTarget = .{ .device = .{ .type = builtin("vsource") } };
+    var jobs: [2 * values.len]requests.Query = undefined;
+    for (jobs[0..values.len], jobs[values.len..], 0..) |*o, *d, k| {
+        o.* = .{ .op = .{ .tol = .{ .variant = @intCast(k) } } };
+        d.* = .{ .dc = .{ .target = target, .start = -1, .stop = 3, .step = 0.5, .tol = .{ .variant = @intCast(k) } } };
+    }
+    const Row = struct { status: Status, failure: ?@import("../session.zig").Failure, data: []f64 };
+    var rows: [2][jobs.len]Row = undefined;
+    var batched: usize = 0;
+    for ([_]bool{ false, true }, &rows) |lanes, *out| {
+        var config: @import("../executor.zig").Config = .{};
+        config.knobs.lanes = lanes;
+        var s = Session.init(t.allocator, t.io, &prepared, &deck, config);
+        defer s.deinit();
+        var ids: [jobs.len]requests.QueryId = undefined;
+        _ = try s.append(&jobs, &ids);
+        try s.runAll(.{ .max_parallel = 1, .quantum = .completion });
+        for (s.rows.items(.executor)) |e| if (e) |x| {
+            batched += x.peers.len;
+        };
+        for (ids, out) |id, *r| {
+            const q = try s.info(id);
+            r.* = .{ .status = q.status, .failure = q.failure, .data = &.{} };
+            if (q.status == .complete) r.data = try t.allocator.dupe(f64, (try s.result(id)).data);
+        }
+    }
+    defer for (rows) |rs| for (rs) |r| t.allocator.free(r.data);
+    try t.expect(batched > 0);
+    var completed: usize = 0;
+    for (rows[0], rows[1]) |a, c| {
+        try t.expectEqual(a.status, c.status);
+        try t.expectEqual(a.failure, c.failure);
+        try t.expectEqualSlices(u64, @ptrCast(a.data), @ptrCast(c.data));
+        completed += @intFromBool(a.status == .complete);
+    }
+    // Some lanes must fail for the test to mean anything, and most finish.
+    try t.expect(completed > jobs.len / 2 and completed < jobs.len);
+}
