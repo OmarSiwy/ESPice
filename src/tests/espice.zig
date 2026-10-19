@@ -993,7 +993,7 @@ fn runJobs(tmp: *const std.testing.TmpDir, jobs: u16, warm_start: bool) !JobsRun
         .output = .{ .path = path },
         .backend = .{ .final_plan = true },
         .max_parallel = jobs,
-        .warm_start = warm_start,
+        .point = .{ .warm_start = warm_start },
     });
     defer p.deinit();
     try p.run_all();
@@ -1187,4 +1187,238 @@ test "Problem: .save, .stim and .meas output release everything at every allocat
         defer t.allocator.free(text);
         try t.expect(std.mem.startsWith(u8, text, "* write\n"));
     }
+}
+
+/// What one run of a deck under `point` gives: the `.meas` text (stdout,
+/// then stderr), every point's `.tran` card values as bits, and the
+/// accepted transient points, summed over its transients.
+const MeasureRun = struct {
+    text: []u8,
+    bits: []u64,
+    steps: usize,
+
+    fn deinit(r: MeasureRun) void {
+        t.allocator.free(r.text);
+        t.allocator.free(r.bits);
+    }
+};
+
+fn measureRun(source: api.Source, dialect: api.Dialect, point: api.requests.PointOptions) !MeasureRun {
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = source, .dialect = dialect, .point = point });
+    defer p.deinit();
+    try p.run_all();
+    var text: std.Io.Writer.Allocating = .init(t.allocator);
+    errdefer text.deinit();
+    try p.print_measures(&text.writer, &text.writer);
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(t.allocator);
+    for (p.prepared.deck.measures) |m| if (m.analysis == .tran) try names.append(t.allocator, m.name);
+    // Each of these decks runs one `.tran` per point.
+    var first: ?api.QueryId = null;
+    var points: usize = 0;
+    var steps: usize = 0;
+    for (0..p.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        const info = try p.query_info(id);
+        if (!info.requested) continue;
+        if (first == null) first = id;
+        if (info.kind != .tran) continue;
+        points += 1;
+        const r = try p.result(id);
+        steps += r.npoints;
+        if (point.measures_only) try t.expect(r.varnames.len <= names.items.len * 2 + 1);
+    }
+    const values = try t.allocator.alloc(f64, points * names.items.len);
+    errdefer t.allocator.free(values);
+    const reasons = try t.allocator.alloc(api.Problem.Reason, points);
+    defer t.allocator.free(reasons);
+    try p.point_measures(first.?, names.items, values, reasons);
+    return .{ .text = try text.toOwnedSlice(), .bits = @ptrCast(values), .steps = steps };
+}
+
+/// Every `.meas` card form the transient watch has a rule for, over a
+/// 1 MHz sine into an RC; the last card resolves at 3 us of 6 us.
+const every_card =
+    \\every card
+    \\v1 s 0 sin(0 1 1meg)
+    \\r1 s o 1k
+    \\c1 o 0 0.1n
+    \\.tran 1n 6u
+    \\.meas tran tw when v(s)=0.5 rise=2 td=0.5u
+    \\.meas tran tv when v(s)=v(o) cross=3
+    \\.meas tran d1 trig v(s) val=0.5 rise=1 targ v(o) val=0.2 rise=1
+    \\.meas tran d2 trig at=1u targ v(o) val=0 fall=1
+    \\.meas tran f1 find v(o) when v(s)=0.5 fall=2
+    \\.meas tran f2 find v(o) at=2.5u
+    \\.meas tran g1 deriv v(o) when v(s)=0 cross=3
+    \\.meas tran g2 deriv v(s) at=1.2u
+    \\.meas tran mx max v(o) from=1u to=2u
+    \\.meas tran mn min v(o) from=1u to=2u
+    \\.meas tran mxa max_at v(o) from=1u to=2u
+    \\.meas tran mna min_at v(o) from=1u to=2u
+    \\.meas tran p2 pp v(o) from=0.5u to=3u
+    \\.meas tran av avg v(o) from=1u to=2u
+    \\.meas tran rm rms v(s) from=0.3u to=1.3u
+    \\.meas tran ig integ v(o) from=0 to=2.2u
+    \\.meas tran pr param='d1*2+mx'
+    \\.meas tran nv when v(s)=5 rise=1 to=3u
+    \\.end
+    \\
+;
+
+test "measures_only and early_stop: every .meas tran fixture measures as the stored run, to the bit" {
+    const decks = [_]struct { api.Source, api.Dialect }{
+        .{ .{ .file = "tests/fixtures/tran/bbd_ten_cells.sp" }, .ngspice },
+        .{ .{ .file = "tests/fixtures/tran/zero_abstol_vntol.sp" }, .ngspice },
+        .{ .{ .file = "tests/fixtures/tran/trap_maxord1_ngspice.sp" }, .ngspice },
+        .{ .{ .file = "tests/fixtures/tran/zero_vntol_chgtol.sp" }, .ngspice },
+        .{ .{ .file = "tests/fixtures/tran/gear_maxord6_ngspice.sp" }, .ngspice },
+        .{ .{ .file = "tests/fixtures/optimize/rc_delay_fit.sp" }, .hspice },
+        .{ .{ .file = "tests/fixtures/optimize/bisection_rc_max.sp" }, .hspice },
+        .{ .{ .file = "tests/fixtures/hspice/meas_events.sp" }, .hspice },
+        .{ .{ .file = "tests/fixtures/hspice/meas_forms.sp" }, .hspice },
+        .{ .{ .file = "tests/fixtures/hspice/fft_meas.sp" }, .hspice },
+        .{ .{ .file = "tests/fixtures/variants/monte_tran_meas.sp" }, .hspice },
+        .{ .{ .file = "tests/fixtures/regression/ota_buffer_large_step.sp" }, .ngspice },
+        .{ .{ .file = "tests/fixtures/regression/ota_buffer_large_step_0p88.sp" }, .ngspice },
+        .{ .{ .bytes = .{ .data = every_card, .origin = "every.sp" } }, .ngspice },
+    };
+    const modes = [_]api.requests.PointOptions{
+        .{ .measures_only = true },
+        .{ .early_stop = true },
+        .{ .measures_only = true, .early_stop = true },
+    };
+    for (decks) |d| {
+        const want = try measureRun(d[0], d[1], .{});
+        defer want.deinit();
+        for (modes) |mode| {
+            const got = try measureRun(d[0], d[1], mode);
+            defer got.deinit();
+            errdefer std.debug.print("deck {s}, {any}\n", .{ switch (d[0]) {
+                .file => |f| f,
+                .bytes => |b| b.origin,
+            }, mode });
+            try t.expectEqualStrings(want.text, got.text);
+            try t.expectEqualSlices(u64, want.bits, got.bits);
+            try t.expect(got.steps <= want.steps);
+        }
+    }
+}
+
+test "early_stop: every card resolves by 3 us of 6 us, so the run ends near halfway" {
+    const source: api.Source = .{ .bytes = .{ .data = every_card, .origin = "every.sp" } };
+    const full = try measureRun(source, .ngspice, .{});
+    defer full.deinit();
+    const cut = try measureRun(source, .ngspice, .{ .early_stop = true });
+    defer cut.deinit();
+    std.debug.print("every_card steps: full {d}, early stop {d}\n", .{ full.steps, cut.steps });
+    try t.expect(cut.steps * 10 < full.steps * 6);
+    // Only `nv`, whose event never happens, has no value.
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, full.text, "Error"));
+    try t.expectEqualSlices(u64, full.bits, cut.bits);
+}
+
+/// An RC whose 50% delay is about 70 ps at 1k and 7 ns at 100k.
+const abort_deck =
+    \\abort bound
+    \\.param rv=1k
+    \\v1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)
+    \\r1 in out {rv}
+    \\c1 out 0 0.1p
+    \\.tran 1p 10n
+    \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1
+    \\.end
+    \\
+;
+
+test "points: abort_after fails only the points still unresolved past it, early_stop keeps the others' values" {
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = abort_deck, .origin = "abort.sp" } }, .live_params = &.{"rv"} });
+    defer p.deinit();
+    const rows = [_]f64{ 1e3, 100e3, 2e3 };
+    const plain = p.append_points(&rows, rows.len, .{}) catch |e| {
+        std.debug.print("append: {s}\n", .{@errorName(e)});
+        return e;
+    };
+    const bounded = try p.append_points(&rows, rows.len, .{ .measures_only = true, .early_stop = true, .abort_after = 1e-9 });
+    p.run_all() catch |err| try t.expectEqual(error.MeasureBoundExceeded, err);
+    errdefer std.debug.print("abort test: plain {d}, bounded {d}\n", .{ @backingInt(plain), @backingInt(bounded) });
+    var want: [3]f64 = undefined;
+    var want_why: [3]api.Problem.Reason = undefined;
+    p.point_measures(plain, &.{"tpd"}, &want, &want_why) catch |e| {
+        std.debug.print("plain: {s}\n", .{@errorName(e)});
+        return e;
+    };
+    var got: [3]f64 = undefined;
+    var why: [3]api.Problem.Reason = undefined;
+    p.point_measures(bounded, &.{"tpd"}, &got, &why) catch |e| {
+        std.debug.print("bounded: {s}\n", .{@errorName(e)});
+        return e;
+    };
+    try t.expectEqualSlices(api.Problem.Reason, &.{ .ok, .ok, .ok }, &want_why);
+    try t.expectEqualSlices(api.Problem.Reason, &.{ .ok, .aborted, .ok }, &why);
+    try t.expect(std.math.isNan(got[1]));
+    try t.expectEqual(@as(u64, @bitCast(want[0])), @as(u64, @bitCast(got[0])));
+    try t.expectEqual(@as(u64, @bitCast(want[2])), @as(u64, @bitCast(got[2])));
+    // The bounded points stopped near their delay, not at 10 ns.
+    var lens: [2]usize = .{ 0, 0 };
+    for (0..p.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        const info = try p.query_info(id);
+        if (info.kind != .tran or info.status != .complete) continue;
+        const r = try p.result(id);
+        lens[@intFromBool(@backingInt(id) >= @backingInt(bounded))] += r.npoints;
+        if (@backingInt(id) >= @backingInt(bounded)) try t.expectEqual(@as(usize, 3), r.varnames.len);
+    }
+    std.debug.print("abort test steps: plain {d}, bounded {d}\n", .{ lens[0], lens[1] });
+    try t.expect(lens[1] * 3 < lens[0]);
+}
+
+test "points: tangent slopes of .tran measures match central finite differences" {
+    const source =
+        \\tangents
+        \\.param rv=1k cv=0.1p
+        \\v1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)
+        \\r1 in out {rv}
+        \\c1 out 0 {cv}
+        \\.tran 1p 2n 0 2p
+        \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1
+        \\.meas tran vf find v(out) at=0.3n
+        \\.meas tran ig integ v(out) from=0 to=1n
+        \\.end
+        \\
+    ;
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "tangents.sp" } }, .live_params = &.{ "rv", "cv" } });
+    defer p.deinit();
+    const x = [2]f64{ 1e3, 0.1e-12 };
+    const names = [_][]const u8{ "tpd", "vf", "ig" };
+    // early_stop too: one row past resolution keeps the tangents' events.
+    const tangent = try p.append_points(&x, 1, .{ .tangent_step = 1e-6, .early_stop = true, .measures_only = true });
+    // Central differences, each parameter moved by 1e-3 of itself.
+    const rel = 1e-3;
+    var rows: [4][2]f64 = .{ x, x, x, x };
+    for (0..2) |k| {
+        rows[2 * k][k] *= 1 + rel;
+        rows[2 * k + 1][k] *= 1 - rel;
+    }
+    const fd = try p.append_points(@ptrCast(&rows), 4, .{});
+    try p.run_all();
+    var slopes: [3 * 2]f64 = undefined;
+    try p.point_tangents(tangent, 1, &names, &slopes);
+    var values: [4 * 3]f64 = undefined;
+    var why: [4]api.Problem.Reason = undefined;
+    try p.point_measures(fd, &names, &values, &why);
+    var worst: f64 = 0;
+    defer std.debug.print("tangents vs central differences: worst relative gap {e}\n", .{worst});
+    for (0..3) |c| for (0..2) |k| {
+        const central = (values[(2 * k) * 3 + c] - values[(2 * k + 1) * 3 + c]) / (2 * rel * x[k]);
+        const got = slopes[c * 2 + k];
+        errdefer std.debug.print("card {s}, param {d}: tangent {e}, central {e}\n", .{ names[c], k, got, central });
+        worst = @max(worst, @abs(got - central) / @abs(central));
+        try t.expectApproxEqRel(central, got, 1e-3);
+    };
+    // The slopes don't change the point's own values.
+    var own: [3]f64 = undefined;
+    var own_why: [1]api.Problem.Reason = undefined;
+    try p.point_measures(tangent, &names, &own, &own_why);
+    try t.expectEqual(api.Problem.Reason.ok, own_why[0]);
 }

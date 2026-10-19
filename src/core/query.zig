@@ -659,19 +659,25 @@ pub const Tran = struct {
 };
 
 /// The points API's per-point requests (`Problem.append_points`), carried
-/// on each point's transient. Only `warm_start` acts yet; the others are
-/// accepted and change nothing.
+/// on each point's transient (analysis/tran/tran.zig `run`). None changes a
+/// `.tran` card's value, but `warm_start` may within Newton's tolerances.
 pub const PointOptions = struct {
-    /// Record no waveform, only `.meas` results.
+    /// Record only the columns the `.tran` cards read.
     measures_only: bool = false,
-    /// End the transient once every `.meas` card has resolved.
+    /// End the transient once every `.tran` card has resolved; its
+    /// waveform then stops there.
     early_stop: bool = false,
     /// Start the operating point from the template's nominal one
     /// (`Deck.warm_op`) instead of the cold start, falling back to the full
     /// ladder when that fails.
     warm_start: bool = false,
-    /// Seconds past which an unresolved `.meas` aborts the point; 0 is off.
+    /// Seconds past which a `.tran` card still unresolved fails the
+    /// transient with `error.MeasureBoundExceeded`; 0 is off.
     abort_after: f64 = 0,
+    /// Above 0: also integrate, per live parameter, the first-order
+    /// prediction of the point with that parameter moved by this times
+    /// its magnitude (`Tran.tangents`), for d(measure)/d(parameter).
+    tangent_step: f64 = 0,
 };
 
 /// Transient noise: a transient with sampled noise sources, or the noise

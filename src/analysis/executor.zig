@@ -377,6 +377,7 @@ pub const Executor = struct {
             .allocator = self.results.allocator(),
             .scratch_allocator = self.allocator,
             .stream = self.stream,
+            .measures = self.deck.measures,
         };
         var res = try run(&run_ctx, self.job);
         // Copies of one card at several temperatures keep apart by name.

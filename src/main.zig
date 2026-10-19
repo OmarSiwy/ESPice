@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !u8 {
     var show_plan = false;
     var plan_only = false;
     var timing_in_depth = false;
-    var warm_start = false;
+    var point: problem.requests.PointOptions = .{};
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             std.debug.print(
@@ -59,6 +59,9 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --print-dag             Print the next query frontier before running
                 \\      --plan                  Print the DAG without running analyses
                 \\      --timing-in-depth       Time preparation, queries, and individual steps
+                \\      --measures-only         Keep only the .tran columns the .meas cards read
+                \\      --early-stop            End each .tran once its .meas cards have resolved
+                \\      --abort-after=T         Fail a .tran still missing a .meas value past T seconds
                 \\      --warm-start            Start each transient's OP from the nominal one
                 \\      --tokenizer=FMT         ngspice|hspice|spectre
                 \\      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
@@ -79,8 +82,15 @@ pub fn main(init: std.process.Init) !u8 {
             show_plan = true;
         } else if (std.mem.eql(u8, arg, "--timing-in-depth")) {
             timing_in_depth = true;
+        } else if (std.mem.eql(u8, arg, "--measures-only")) {
+            point.measures_only = true;
+        } else if (std.mem.eql(u8, arg, "--early-stop")) {
+            point.early_stop = true;
         } else if (std.mem.eql(u8, arg, "--warm-start")) {
-            warm_start = true;
+            point.warm_start = true;
+        } else if (optionValue(arg, "", "--abort-after", &args)) |value| {
+            point.abort_after = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
+            if (!(point.abort_after > 0) or std.math.isInf(point.abort_after)) return usageFail();
         } else if (optionValue(arg, "-r", "--rawfile", &args)) |value| {
             selection.path = value orelse return usageFail();
         } else if (optionValue(arg, "", "--format", &args)) |value| {
@@ -121,7 +131,7 @@ pub fn main(init: std.process.Init) !u8 {
             },
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,
-            .warm_start = warm_start,
+            .point = point,
             .vpi_apps = vpi_apps.items,
             .vpi = vpi,
         }) catch |err| {
