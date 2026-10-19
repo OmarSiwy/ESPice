@@ -484,7 +484,7 @@ pub const NetBuilder = struct {
 
         // A SoA row: 68 bytes over its columns (it held a 42-byte port too).
         comptime {
-            std.debug.assert(@sizeOf(VCard) == 72);
+            if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(VCard) == 72);
         }
     };
 
