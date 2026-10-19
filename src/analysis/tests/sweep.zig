@@ -1,6 +1,7 @@
 //! DC and sweep-family tests: the pure helpers of dc, xf, dcmatch, sens and
 //! temp_sweep, then every DC analysis on a resistive divider whose answers
-//! are closed-form. The helpers check against hand-computed values or a
+//! are closed-form, and the transient's tangent blocks against reruns at
+//! each row. The helpers check against hand-computed values or a
 //! second path (materialize-then-dot for `adjointFd`, bit for bit).
 
 const DcmatchTests = struct {
@@ -700,6 +701,62 @@ const DividerTests = struct {
         try t.expectEqual(temp_c, ckt.temp_c);
 
         try t.expectError(error.DcSweepSourceNotFound, dc.run(&ctx, .{ .target = .{ .device = .{ .type = Library.builtin("isource") } } }));
+    }
+
+    test "tran: tangent blocks match the transient run at each row, to first order" {
+        const tran = @import("../tran/tran.zig");
+        var lib = try Library.init(gpa);
+        defer lib.deinit();
+        var b = try Builder.init(gpa, &lib);
+        _ = try b.addNode();
+        _ = try b.addNode();
+        try b.addDevice(models.vsource, "", .{ .dc = 0.5, .waveform = 2, .sin_vo = 0.5, .sin_va = 1, .sin_freq = 1e3 }, .{}, .{ vin, GROUND });
+        try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, out });
+        try b.addDevice(models.capacitor, "", .{ .c = 1e-7 }, .{}, .{ out, GROUND });
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
+        defer ckt.deinit();
+        const x = try gpa.alloc(f64, ckt.n);
+        defer gpa.free(x);
+        try t.expect((try op.solve(&ckt, x, .{}, &.{}, &.{})).converged);
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        var ctx = try ctxFor(&ckt, x, arena.allocator());
+        const refs = try ckt.collectParams();
+        const ri = try paramIndex(refs, "r", 1000);
+        const ci = try paramIndex(refs, "c", 1e-7);
+        // Row 1 moves R by 1e-4, row 2 moves C by 1e-4. A huge TRTOL keeps
+        // the LTE off the grid, so every run steps on the same times.
+        ctx.variants = .{ .labels = &.{ "", "", "" }, .temp_c = &.{ null, null, null }, .axis = &.{ 0, 0, 0 }, .starts = &.{ 0, 0, 1, 2 }, .refs = &.{ ri, ci }, .values = &.{ 1000.1, 1.0001e-7 } };
+        const opts: tran.Options = .{ .t_stop = 2e-3, .dt_init = 1e-5, .dt_max = 1e-5, .tol = .{ .trtol = 1e12 } };
+        const plain = try tran.run(&ctx, opts);
+        var with = opts;
+        with.tangents = &.{ 1, 2 };
+        const tangents = try tran.run(&ctx, with);
+        const len = plain.npoints;
+        try t.expectEqual(3 * len, tangents.npoints);
+        try t.expectEqualSlices(f64, plain.data, tangents.data[0 .. 2 * len]);
+        for ([_]analysis.ParamRef{ refs[ri], refs[ci] }, [_]f64{ 1000.1, 1.0001e-7 }, 1..) |ref, value, k| {
+            const nominal = ref.get();
+            ref.set(value);
+            try ckt.recompute();
+            const row = try tran.run(&ctx, opts);
+            ref.set(nominal);
+            try ckt.recompute();
+            try t.expectEqual(len, row.npoints);
+            const block = tangents.data[2 * len * k ..][0 .. 2 * len];
+            var moved: f64 = 0;
+            for (0..len) |p| moved = @max(moved, @abs(row.data[2 * p + 1] - plain.data[2 * p + 1]));
+            try t.expect(moved > 1e-5);
+            // The error is second order in the step, from the base run's
+            // matrix standing in for the row's: 0.3% of the move for C.
+            for (0..len) |p| {
+                try t.expectEqual(row.data[2 * p], block[2 * p]);
+                try t.expectApproxEqAbs(row.data[2 * p + 1], block[2 * p + 1], 1e-2 * moved);
+            }
+        }
+        try t.expectEqual(@as(f64, 1000), refs[ri].get());
     }
 
     const R2Lanes = struct {

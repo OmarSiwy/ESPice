@@ -5,6 +5,8 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+- `OPTIMIZE=` on a `.tran` card takes its Jacobian from tangents integrated along the trial point's own transient, without its time-grid noise: a 32-stage MOS1 chain fit 1.49x fewer instructions and an RSS of 7e-11 instead of 4e-5; `ZP_NO_TANGENTS` restores the finite difference (#97).
+
 ## 1.1.0 (2026-10-19)
 
 - VPI applications: the LRM §12.31.3 analog callbacks run in `.op` and `.tran`: acbAbsTime/acbElapsedTime force a solution at their time, an acbConvergenceTest rejection or vpiRejectTransientStep backs up to half the step, vpiTransientFailConverge solves it again, and acbInitialStep/acbAcceptedPoint/acbFinalStep fire on each accepted solution; calltf reads the analysis time (#198).

@@ -137,7 +137,8 @@ of a four-device circuit, and the sweep dominates).
 
 ### Direct sensitivities
 
-When every query of the optimized card is a `.dc` sweep, the Jacobian
+When every query of the optimized card is a `.dc` sweep or a transient
+(below), the Jacobian
 comes from the trial point's own sweep instead of n more sweeps. The
 solver always batches then, and the facade runs only row 0, with the n
 Jacobian rows as `Dc.tangents`. At each converged sweep point `dc.zig`
@@ -158,9 +159,7 @@ Jacobian.
 The grid polish points (#95) are not a Jacobian, so they run as full
 sweeps. The printed evaluation count still counts each Jacobian point, though it
 costs a few evaluations and one back substitution per sweep point
-instead of a sweep. Transient and AC goals keep the finite-difference
-points: a transient tangent needs the sensitivity integrated along the
-trajectory, and that is not built.
+instead of a sweep. AC goals keep the finite-difference points.
 
 Measured (callgrind, ReleaseFast, `-Dcpu=x86_64_v3`, `--jobs=1`): a
 two-parameter common-source DC fit (two goals on a 181-point sweep)
@@ -173,6 +172,65 @@ goals do not fix W and R apart. On every `.dc` deck of
 `tests/fixtures/optimize/` the printed optimum, stop reason and
 evaluation count are unchanged; the per-iteration table moves in its
 fourth digit on the first steps.
+
+A transient goal takes the same route (`Tran.tangents`): each row's
+block is its first-order trajectory on the trial point's own time grid,
+integrated alongside it. At the operating point and at every accepted
+step, `tran.zig` evaluates the step's residual R at the base solution x
+(the companion's dynamic current over the base's charge history, under
+the device state the step's Newton solved with), factors A = G + ag0·C
+at x (G alone at the operating point), and for each row evaluates
+R(x, row) with the row's parameter values, charge history and dynamic
+current, and solves dx = -A⁻¹ (R(x, row) - R(x)). The row's point is
+x + dx; its charge q(x + dx), dynamic current and device state (Meyer
+`$prev`, delay lines) are committed as the base commits its own, so the
+row carries its own history to the next step. Each row keeps its device
+state, parameter values included, as a `Circuit.SavedState` swapped in
+for its turn, so a row costs two device evaluations, a charge
+evaluation, a back substitution and two state copies per accepted step,
+and the base run one more evaluation and factorization; rejected steps
+cost the rows nothing. The tangent is taken on the base's grid, so the
+measured Jacobian has no time-grid noise, which the finite difference
+of two separately stepped transients does have.
+
+The base matrix A stands in for the row's own, so the prediction's error
+is second order in the parameter step: on an RC driven by a sine, a
+1e-3 step in C is off by up to 3.4% of its move and a step in R by
+0.07%, a 1e-6 step a thousand times less (`src/analysis/tests/sweep.zig`
+checks a 1e-4 step to 1%). The rows need an operating point the transient
+solves on its own and host device state, so the facade keeps the
+finite-difference points for `uic`, `.ic` holds, a capacitor-only node
+(OPtran), VPI callbacks and a GPU backend (`Problem.tangentable`).
+`ZP_NO_TANGENTS` forces the finite-difference points everywhere, for
+A/B runs.
+
+Measured (ReleaseFast, `-Dcpu=x86_64_v3`, `--jobs=1`, against
+`ZP_NO_TANGENTS=1` on the same binary), MOS1 inverter chains (Meyer caps,
+20 fF loads) fitting NMOS and PMOS W to the rise and fall delays the
+chain has at 8u/14u, `parmin=1e-12`:
+
+| Deck | Jacobian | Iter / evals | Final RSS | Callgrind Ir | Wall (hyperfine) |
+|---|---|---|---|---|---|
+| 32 stages | finite difference | 8 / 38 | 3.9e-5 | 7.43e9 | 1.050 s |
+| 32 stages | tangents | 10 / 31 | 7.4e-11 | 4.98e9 | 0.686 s |
+| 128 stages | finite difference | 6 / 19 | 6.3e-6 | | 2.94 s |
+| 128 stages | tangents | 11 / 50 | 2.4e-8 | | 8.36 s |
+| `rc_delay_fit` | finite difference | 7 / 15 | 9.2e-16 | | 15.8 ms |
+| `rc_delay_fit` | tangents | 7 / 15 | 8.4e-16 | | 18.8 ms |
+
+A round of the trial point with its two tangent rows costs 2.3
+transients on the 32-stage chain (4.5e8 Ir against 1.96e8 per
+finite-difference transient), not three. The larger gain is the path:
+the finite difference of two separately stepped transients carries
+time-grid noise that stalls both chain fits in RELIN at goal errors of
+1e-3 to 5e-3, while the tangent fits reach the generating widths (32
+stages: W 7.9997u/14.001u, goal errors under 1e-5). The 128-stage fit
+therefore runs longer, to a 270x lower RSS. A three-device RC is
+slower: the per-step state copies and the extra factorization outweigh
+the one transient they replace. `rc_delay_fit` keeps its optimum
+(1.442693e3) and evaluation count; every `.dc` deck of
+`tests/fixtures/optimize/` is byte-identical, and every deck gives the
+same bytes at `--jobs=1` and 3.
 
 The points do not use the structural lanes of `sweep/lanes.zig`.
 Those lanes solve one operating point per lane and publish its probes.
@@ -310,5 +368,8 @@ run another way:
   two-parameter bisection.
 - `core/bisect.zig` unit tests: a divider bisected from its passing side,
   and pass/fail with a non-bracketing pair of limits.
+- `src/analysis/tests/sweep.zig`: the `.dc` tangent blocks against the
+  closed-form first-order prediction, and the `.tran` tangent blocks
+  against a transient rerun at each row on the same grid.
 - The output with `--jobs=4` is byte-identical to `--jobs=1` on
   `two_param_ladder` and `rc_delay_fit`.
