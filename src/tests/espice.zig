@@ -977,6 +977,74 @@ test "same deck, same bytes: run twice, any solver_threads, any device_threads" 
     }
 }
 
+/// The raw file and `.meas` text a final-plan run of `source` writes at
+/// `jobs`, as the CLI runs it. Caller frees both.
+fn runJobs(source: []const u8, tmp: *const std.testing.TmpDir, jobs: u16) !struct { []u8, []u8 } {
+    var name_buf: [32]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "jobs{d}.raw", .{jobs});
+    const path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+    defer t.allocator.free(path);
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = source, .origin = "jobs.sp" } },
+        .dialect = .hspice,
+        .output = .{ .path = path },
+        .backend = .{ .final_plan = true },
+        .max_parallel = jobs,
+    });
+    defer p.deinit();
+    try p.run_all();
+    var measures: std.Io.Writer.Allocating = .init(t.allocator);
+    errdefer measures.deinit();
+    var errors: std.Io.Writer.Allocating = .init(t.allocator);
+    defer errors.deinit();
+    try p.print_measures(&measures.writer, &errors.writer);
+    try t.expectEqual(@as(usize, 0), errors.written().len);
+    const raw = try tmp.dir.readFileAlloc(t.io, name, t.allocator, .unlimited);
+    return .{ raw, try measures.toOwnedSlice() };
+}
+
+test "a .data sweep writes the same bytes at every --jobs, its bin-moving points included" {
+    // Points 3 and 5 move M1 to the other bin, so they run as variant
+    // sessions in the same pool; the rest are rows of one template.
+    const sweep =
+        \\sweep jobs
+        \\.param wn=1u rl=1k
+        \\V1 d 0 2
+        \\V2 g 0 pulse(0 2 1n 1n 1n 5n 20n)
+        \\R1 d o 'rl'
+        \\M1 o g 0 0 nm l=1u w='wn'
+        \\C1 o 0 1p
+        \\.model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5 kp=2m
+        \\.model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=0.7 kp=1m
+        \\.data pts wn rl
+        \\+ 1u 1k
+        \\+ 1.05u 2k
+        \\+ 2u 1k
+        \\+ 1.1u 500
+        \\+ 2.05u 3k
+        \\+ 0.95u 1.5k
+        \\.enddata
+        \\.tran 0.1n 20n sweep data=pts
+        \\.meas tran tf trig v(g) val=1 rise=1 targ v(o) val=1 fall=1
+        \\.end
+        \\
+    ;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const raw, const measures = try runJobs(sweep, &tmp, 1);
+    defer t.allocator.free(raw);
+    defer t.allocator.free(measures);
+    try t.expectEqual(@as(usize, 6), std.mem.count(u8, raw, "Plotname: Transient Analysis ("));
+    try t.expectEqual(@as(usize, 6), std.mem.count(u8, measures, "tf "));
+    for ([_]u16{ 2, 3, 8 }) |jobs| {
+        const again_raw, const again_measures = try runJobs(sweep, &tmp, jobs);
+        defer t.allocator.free(again_raw);
+        defer t.allocator.free(again_measures);
+        try t.expectEqualSlices(u8, raw, again_raw);
+        try t.expectEqualStrings(measures, again_measures);
+    }
+}
+
 test "Problem: an optimization takes the same path one point at a time and batched" {
     const fit =
         \\* common-source stage: fit the width and load to two points of the transfer curve
