@@ -33,6 +33,7 @@ pub fn LaneSolver(comptime W: usize) type {
 
         /// Lane l's own solver, borrowed; all on one pattern.
         lanes: [W]*direct.Solver,
+        n: u32,
         /// The replay over `lanes[lead]`'s tape; null while no lane has a
         /// factored sparse LU.
         lu: ?LaneLu(W) = null,
@@ -57,7 +58,7 @@ pub fn LaneSolver(comptime W: usize) type {
                 assert(s.vcopy.len == s0.col_ptr[s0.n]);
                 assert(s.params.refactor_growth_limit == s0.params.refactor_growth_limit);
             }
-            return .{ .lanes = lanes, .scratch = try gpa.alloc(f64, s0.col_ptr[s0.n] + @as(usize, s0.n)), .gpa = gpa };
+            return .{ .lanes = lanes, .n = s0.n, .scratch = try gpa.alloc(f64, s0.col_ptr[s0.n] + @as(usize, s0.n)), .gpa = gpa };
         }
 
         pub fn deinit(self: *Self) void {

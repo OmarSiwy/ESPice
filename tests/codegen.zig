@@ -200,7 +200,7 @@ export fn hand_lanes_splat(x: f64) f64 {
 }
 
 export fn gen_lanes_any(m: bool) bool {
-    return L1.any(@intFromBool(m));
+    return L1.any(m);
 }
 
 export fn hand_lanes_any(m: bool) bool {
@@ -208,7 +208,7 @@ export fn hand_lanes_any(m: bool) bool {
 }
 
 export fn gen_lanes_all(m: bool) bool {
-    return L1.all(@intFromBool(m));
+    return L1.all(m);
 }
 
 export fn hand_lanes_all(m: bool) bool {
@@ -224,11 +224,19 @@ export fn hand_lanes_select(a: f64, b: f64, c: f64) f64 {
 }
 
 export fn gen_lanes_cmp(a: f64, b: f64) bool {
-    return L1.any(L1.cmp(.lt, a, b) & ~L1.cmp(.eq, a, 0));
+    return L1.any(L1.both(L1.cmp(.lt, a, b), L1.not(L1.cmp(.eq, a, 0))));
 }
 
 export fn hand_lanes_cmp(a: f64, b: f64) bool {
     return a < b and !(a == 0);
+}
+
+export fn gen_lanes_either(a: f64, b: f64) bool {
+    return L1.either(L1.cmp(.gt, a, b), L1.cmp(.neq, b, b));
+}
+
+export fn hand_lanes_either(a: f64, b: f64) bool {
+    return a > b or b != b;
 }
 
 export fn gen_lanes_lane(v: f64) f64 {
@@ -321,6 +329,16 @@ export fn gen_newton(sys: *NSys, ws: *converger.Workspace, x: [*]f64, t: f64, op
 export fn hand_newton(sys: *NSys, ws: *converger.Workspace, x: [*]f64, t: f64, opts: *const converger.Options, out: *converger.Result) u16 {
     out.* = old_newton.newton(sys, ws, x[0..sys.n], t, opts.*, NHook{}) catch |e| return @intFromError(e);
     return 0;
+}
+
+// The delta gate alone: the lane-generic `updateAndNorm` at W = 1 against
+// its scalar original.
+export fn gen_update_and_norm(x: [*]f64, dx: [*]const f64, x_old: [*]f64, cur: [*]const bool, n: usize, reltol: f64, abstol: f64, vntol: f64) f64 {
+    return converger.updateAndNorm(1, x[0..n], dx[0..n], x_old[0..n], cur[0..n], reltol, abstol, vntol, true);
+}
+
+export fn hand_update_and_norm(x: [*]f64, dx: [*]const f64, x_old: [*]f64, cur: [*]const bool, n: usize, reltol: f64, abstol: f64, vntol: f64) f64 {
+    return old_newton.updateAndNorm(x[0..n], dx[0..n], x_old[0..n], cur[0..n], reltol, abstol, vntol);
 }
 
 const old_newton = struct {
