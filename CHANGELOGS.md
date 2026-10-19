@@ -5,6 +5,16 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 
 ## Unreleased
 
+## 1.1.0 (2026-10-19)
+
+- VPI applications: the LRM §12.31.3 analog callbacks run in `.op` and `.tran`: acbAbsTime/acbElapsedTime force a solution at their time, an acbConvergenceTest rejection or vpiRejectTransientStep backs up to half the step, vpiTransientFailConverge solves it again, and acbInitialStep/acbAcceptedPoint/acbFinalStep fire on each accepted solution; calltf reads the analysis time (#198).
+- VerA is pinned at v0.10.3 and Zig 0.18 is the toolchain: `vera_version` replaces `contract_abi`, and VPI calls go through VerA's `analog_run.Binding` (#206).
+- A Debug espice loads runtime `.hdl` models, building each with its own backend; a loaded model links the host's libc, so the Nix package loads one inside the sandbox.
+- OPtran's static solve holds one node per floating component, so an island holding a DC element (a source behind a series short, a subcircuit resistor) converges again.
+- A JFNK solve takes at least one GMRES step, so a small preconditioned residual no longer stalls it (#190).
+- HSPICE dialect: a bare expression may hold blanks inside a call's parentheses, as the manual's `AGAUSS(1k, 100, 3)` does (#203).
+- ngspice dialect: an X card's `params:` keyword is read.
+- `ltra` evaluates on the GPU, as the other lossy lines do (#171).
 - The device layout hash covers the GPU payload and scatter tapes, and the unused `held` payload flag is gone; device ABI 29, so cached `.hdl` builds rebuild once (#186).
 - `.tf` reads a resistance whose branch current is below 1e-20 A as `1e20`, as ngspice does (a 1e-30 S input path printed 1e30); `.dcxf` and `.acxf` keep VACASK's exact-zero rule but no longer print `inf` for an immittance below about 1e-154 (#199).
 - `.tf` prints an infinite input or output resistance (a source that moves no current) as `1e20`, as ngspice does, instead of `inf` (#193).
