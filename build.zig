@@ -214,7 +214,7 @@ pub fn build(b: *Build) void {
         }, true)} },
         .{ "test-core", "Run shared data and numerics tests", &.{t.run(g.core, &.{}, false)} },
         .{ "test-solver", "Run solver tests", &.{t.run(g.solver, &.{}, false)} },
-        .{ "test-output", "Run waveform writer tests", &.{t.run(g.output, &.{}, false)} },
+        .{ "test-output", "Run waveform writer tests", &.{ t.run(g.output, &.{}, false), t.run(g.measure, &.{}, false) } },
         .{ "test-device", "Run device catalog, evaluator and ABI tests", &.{
             t.run(g.device, &.{}, true),
             t.run(g.abi, &.{}, false),
@@ -393,6 +393,7 @@ const Graph = struct {
     builder: *Module,
     frontend: *Module,
     output: *Module,
+    measure: *Module,
     espice: *Module,
 };
 
@@ -455,12 +456,14 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     }) };
     device.module.link_libc = libc;
     const solver = c.make(b.path("src/solver/root.zig"), &.{ core, build_options });
-    const analysis = c.make(b.path("src/analysis/root.zig"), &.{ .{ .name = "solver", .module = solver }, core, device, gomp, build_options });
+    // `.meas` evaluation: output prints it, a transient watches its cards resolve.
+    const measure: Import = .{ .name = "measure", .module = c.make(b.path("src/output/measure.zig"), &.{core}) };
+    const analysis = c.make(b.path("src/analysis/root.zig"), &.{ .{ .name = "solver", .module = solver }, core, device, gomp, build_options, measure });
     analysis.link_libc = libc;
     const netlist: Import = .{ .name = "netlist", .module = c.make(b.path("src/frontend/netlist.zig"), &.{core}) };
     const builder: Import = .{ .name = "builder", .module = c.make(b.path("src/frontend/builder.zig"), &.{ core, device, netlist }) };
     const frontend = c.make(b.path("src/frontend/root.zig"), &.{ core, device, netlist, builder });
-    const output = c.make(b.path("src/output/root.zig"), &.{core});
+    const output = c.make(b.path("src/output/root.zig"), &.{ core, measure });
     return .{
         .core = core.module,
         .abi = abi.module,
@@ -477,6 +480,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         .builder = builder.module,
         .frontend = frontend,
         .output = output,
+        .measure = measure.module,
         .espice = c.make(b.path("src/espice.zig"), &.{
             core,
             .{ .name = "analysis", .module = analysis },
