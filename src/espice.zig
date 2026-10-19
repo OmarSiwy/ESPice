@@ -657,25 +657,22 @@ pub const Problem = struct {
         try self.optimize();
         try self.age();
         try self.openStream();
-        const ids = try self.allocator.alloc(QueryId, self.query_count());
-        defer self.allocator.free(ids);
-        const events = try self.allocator.alloc(Advance, @min(ids.len, self.limits.max_parallel));
-        defer self.allocator.free(events);
-        while (!self.finished()) {
-            const n = try self.ready_queries(.all, ids);
-            if (n == 0) return error.SchedulingFailure;
-            // The same bounded frontier `print` marks NEXT for a run_all preview.
-            const selected = @min(n, events.len);
-            // Whole-query quanta: nothing here reads intermediate progress,
-            // except the in-depth timing, which reports per checkpoint.
-            const quantum: Limits = .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.session.config.timing_in_depth) .checkpoint else .completion };
-            _ = try self.stepReady(ids[0..selected], quantum, events);
+        // Whole-query quanta: nothing here reads intermediate progress,
+        // except the in-depth timing, which reports per checkpoint. The
+        // variant runs share the pool, after the main session's ready queries.
+        var pool: analysis.session.Pool = try .init(self.allocator, self.io, .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.session.config.timing_in_depth) .checkpoint else .completion });
+        defer pool.deinit();
+        try pool.add(&self.session);
+        for (self.runs) |*run| try pool.add(&run.session);
+        while (true) {
+            pool.fill(&self.session);
+            for (self.runs) |*run| pool.fill(&run.session);
+            if (!pool.wait()) break;
+            self.deliverRuns();
         }
-        self.deliverFrom(&self.session, &self.next_output);
-        for (self.runs) |*run| {
-            try runSession(&run.session, self.limits.max_parallel);
-            self.deliverFrom(&run.session, &run.next_output);
-        }
+        self.deliverRuns();
+        if (!self.finished()) return error.SchedulingFailure;
+        for (self.runs) |*run| if (!run.session.finished()) return error.SchedulingFailure;
         if (self.session.failure()) |err| return err;
         for (self.runs) |*run| if (run.session.failure()) |err| return err;
         if (self.delivery_error != null) return error.DeliveryFailed;
@@ -979,7 +976,7 @@ pub const Problem = struct {
         defer session.deinit();
         var id: [1]QueryId = undefined;
         _ = try session.append(&.{.{ .tran = m.tran }}, &id);
-        try runSession(&session, self.limits.max_parallel);
+        try session.runAll(.{ .max_parallel = self.limits.max_parallel, .quantum = .completion });
         if (session.failure()) |err| return err;
         const aged = try analysis.mosra.age(a, m, try session.result(id[0]));
         if (m.aged_runs) self.prepared.deck.variants.values = aged.values;
@@ -1061,7 +1058,7 @@ pub const Problem = struct {
         defer session.deinit();
         const ids = try a.alloc(QueryId, jobs.len);
         _ = try session.append(jobs, ids);
-        try runSession(&session, self.limits.max_parallel);
+        try session.runAll(.{ .max_parallel = self.limits.max_parallel, .quantum = .completion });
         first.clearRetainingCapacity();
         if (try session.operatingPoint(ids[0])) |x| try first.appendSlice(self.allocator, x);
         const values = try a.alloc(f64, deck.measures.len);
@@ -1084,6 +1081,17 @@ pub const Problem = struct {
                 if (measure.analysis == info.kind) r.* = measure.goalError(values[card]).?;
             }
         };
+    }
+
+    /// Publishes what has completed, the main session's results first, then
+    /// each variant run's once every earlier one has published all of its.
+    fn deliverRuns(self: *Problem) void {
+        self.deliverFrom(&self.session, &self.next_output);
+        if (self.next_output != self.session.outputs.items.len) return;
+        for (self.runs) |*run| {
+            self.deliverFrom(&run.session, &run.next_output);
+            if (run.next_output != run.session.outputs.items.len) return;
+        }
     }
 
     /// Publishes `session`'s completed results in request order from
@@ -1206,21 +1214,6 @@ fn queryFailure(session: *const analysis.session.Session, id: QueryId) !?anyerro
         if ((try session.info(dep)).failure) |cause| return cause;
     };
     return info.failure orelse error.QueryCancelled;
-}
-
-/// Runs every query of a variant run's session to completion, whole
-/// queries at a time.
-fn runSession(session: *analysis.session.Session, max_parallel: u16) !void {
-    const gpa = session.allocator;
-    const ids = try gpa.alloc(QueryId, session.count());
-    defer gpa.free(ids);
-    const events = try gpa.alloc(Advance, @max(1, @min(ids.len, max_parallel)));
-    defer gpa.free(events);
-    while (!session.finished()) {
-        const n = try session.readyQueries(.all, ids);
-        if (n == 0) return error.SchedulingFailure;
-        _ = try session.advanceReady(ids[0..@min(n, events.len)], .{ .max_parallel = max_parallel, .quantum = .completion }, events);
-    }
 }
 
 /// Appends `session`'s completed Monte Carlo trial results of `kind`.
