@@ -22,6 +22,7 @@ Usage: espice [OPTION]... FILE...
       --print-dag             Print the next query frontier before running
       --plan                  Print the DAG without running analyses
       --timing-in-depth       Time preparation, queries, and individual steps
+      --warm-start            Start each transient's OP from the nominal one
       --tokenizer=FMT         ngspice|hspice|spectre
       --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
   -v, --version               Version
@@ -74,7 +75,10 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
 `--jobs=N`
 : Run up to N analyses at once (default 1, must be at least 1). Analyses
   form a dependency graph: an `.ac` needs the operating point, a `.noise`
-  can share it. Independent analyses run in parallel.
+  can share it. Independent analyses run in parallel, and a finished one
+  is replaced at once. In a sweep each point's transient starts as soon as
+  its operating point is done. Results and output bytes are the same at
+  every N.
 
 `--plan`
 : Print the query graph and exit without simulating:
@@ -118,6 +122,15 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
     timing: output finish: 0.000336ms
     timing: run total (analysis, scheduling, output): 0.330372ms
     ```
+
+`--warm-start`
+: Solve the nominal circuit's transient operating point once, then start
+  every transient's operating point from it (a `.step`, `.data` or Monte
+  Carlo point) instead of the cold start. A point whose warm start fails
+  takes the full ladder. The guess is the same for every point, so results
+  do not depend on `--jobs` or point order, but they may differ from a cold
+  run within the Newton tolerances. A point with its own topology (a model
+  bin that moves) starts cold.
 
 `-b`, `--batch`
 : Accepted for ngspice compatibility. ESPice always runs in batch mode.

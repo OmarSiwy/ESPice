@@ -79,6 +79,7 @@ Usage: espice [OPTION]... FILE...
       --print-dag             Print the next query frontier before running
       --plan                  Print the DAG without running analyses
       --timing-in-depth       Time preparation, queries, and individual steps
+      --warm-start            Start each transient's OP from the nominal one
       --tokenizer=FMT         ngspice|hspice|spectre
   -v, --version               Version
 ```

@@ -348,7 +348,10 @@ pub const Executor = struct {
                 std.debug.assert(self.deck.op_guess.len == self.circuit.n);
                 @memcpy(self.x.?, self.deck.op_guess);
                 options.warm_start = true;
-            }
+            } else if (options.warm_start and self.deck.warm_op.len != 0) {
+                std.debug.assert(self.deck.warm_op.len == self.circuit.n);
+                @memcpy(self.x.?, self.deck.warm_op);
+            } else options.warm_start = false;
             const solved = try op.solve(&self.circuit, self.x.?, options, self.deck.nodeset, self.deck.ic);
             if (!solved.converged) return error.OpDidNotConverge;
             if (gpu_context) |g| try g.syncHostState();

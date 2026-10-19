@@ -78,6 +78,11 @@ pub const Options = struct {
     /// null in an embedding, where any application is `VpiUnavailable`.
     /// It must outlive the Problem.
     vpi: ?*const Vpi = null,
+    /// Start every transient's operating point from the template's nominal
+    /// one, solved once at init (`PointOptions.warm_start`), instead of the
+    /// cold start; the nominal OP itself, and a point whose warm start fails,
+    /// take the full ladder. Variant runs with their own topology start cold.
+    warm_start: bool = false,
 };
 
 /// The VPI host interface (`Options.vpi`) and its errors.
@@ -243,8 +248,14 @@ pub const Problem = struct {
         if (self.prepared.tuning == null) self.session.markLastTemplateReader();
         const jobs = if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
-        else
-            self.prepared.deck.queries;
+        else if (options.warm_start) blk: {
+            const warm = try scratch.dupe(Query, self.prepared.deck.queries);
+            for (warm) |*job| if (job.* == .tran) {
+                job.tran.point.warm_start = true;
+            };
+            try self.solveWarmOp(warm);
+            break :blk warm;
+        } else self.prepared.deck.queries;
         const ids = try scratch.alloc(QueryId, jobs.len);
         _ = try self.append_queries(jobs, ids);
         self.runs = try a.alloc(Run, self.prepared.runs.len);
@@ -414,6 +425,7 @@ pub const Problem = struct {
         try self.age();
         const template_jobs = if (deck.queries.len == 0) &[_]Query{.{ .op = .{ .tol = deck.deck_tol } }} else deck.queries;
         try self.checkOutput(&self.prepared, template_jobs);
+        if (options.warm_start) try self.solveWarmOp(template_jobs);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -456,6 +468,28 @@ pub const Problem = struct {
         _ = try self.session.appendAt(jobs, templates, ids);
         for (refused, 0..) |r, i| if (r) |err| for (ids[i * j ..][0..j]) |id| self.session.refuse(id, err) catch unreachable;
         return ids[0];
+    }
+
+    /// Solves the template's nominal operating point into `Deck.warm_op`,
+    /// once, with the tolerances of the first transient in `jobs`; nothing
+    /// without one. A nominal point that does not converge leaves it empty,
+    /// so every point starts cold.
+    fn solveWarmOp(self: *Problem, jobs: []const Query) !void {
+        if (self.prepared.deck.warm_op.len != 0) return;
+        const tran = for (jobs) |job| {
+            if (job == .tran) break job.tran;
+        } else return;
+        var tol = tran.tol;
+        tol.variant = null;
+        tol.temp_c = null;
+        var deck = self.prepared.deck;
+        var session = analysis.session.Session.init(self.workerAllocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
+        defer session.deinit();
+        var id: [1]QueryId = undefined;
+        _ = try session.append(&.{.{ .op = .{ .tol = tol, .tran_op = true } }}, &id);
+        try session.runAll(.{ .quantum = .completion });
+        const x = try session.operatingPoint(id[0]) orelse return;
+        self.prepared.deck.warm_op = try self.arena.allocator().dupe(f64, x);
     }
 
     /// Why a point produced no value, or not all of them: the C API's

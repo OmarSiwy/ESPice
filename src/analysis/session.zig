@@ -881,12 +881,13 @@ fn hashFields(h: *std.hash.Wyhash, value: anytype) void {
 }
 
 /// The OP a query needs first: its tolerances, transient-flavoured for
-/// time-domain kinds. Null for `.op` itself and a `uic` start.
+/// time-domain kinds, warm when a transient point asks. Null for `.op`
+/// itself and a `uic` start.
 fn prerequisite(job: requests.Query) ?requests.Op {
     if (job == .op or job.uic()) return null;
     return .{ .tol = switch (job) {
         inline else => |o| o.tol,
-    }, .tran_op = @as(requests.Kind, job).transient() };
+    }, .tran_op = @as(requests.Kind, job).transient(), .warm_start = job == .tran and job.tran.point.warm_start };
 }
 
 fn connector(ascii: bool, last: bool) []const u8 {
@@ -1019,6 +1020,8 @@ test prerequisite {
     const tran = prerequisite(.{ .tran = .{ .t_stop = 1e-6, .tol = .{ .reltol = 1e-4 } } }).?;
     try std.testing.expect(tran.tran_op);
     try std.testing.expectEqual(@as(f64, 1e-4), tran.tol.reltol);
+    try std.testing.expect(!tran.warm_start);
+    try std.testing.expect(prerequisite(.{ .tran = .{ .t_stop = 1e-6, .point = .{ .warm_start = true } } }).?.warm_start);
     const ac = prerequisite(.{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 1e3 } } }).?;
     try std.testing.expect(!ac.tran_op);
     try std.testing.expect(!ac.warm_start);

@@ -272,8 +272,11 @@ pub const Dcinc = struct {
 /// The DC operating point (`.op`), which most other analyses also run first.
 pub const Op = struct {
     tol: Tolerances = .{},
-    /// Newton starts from the caller's `x` instead of the cold start; the
-    /// executor sets it when `Deck.op_guess` is given.
+    /// Newton starts from `Deck.warm_op` instead of the cold start, and
+    /// falls back to the full ladder when that fails; cold while the deck
+    /// has none. A transient's prerequisite takes it from
+    /// `PointOptions.warm_start`. The executor also sets it when
+    /// `Deck.op_guess` is given.
     warm_start: bool = false,
     /// This operating point starts a transient (ngspice MODETRANOP), so
     /// waveform sources evaluate at t = 0 instead of at their DC value. The
@@ -655,15 +658,17 @@ pub const Tran = struct {
     point: PointOptions = .{},
 };
 
-/// The points API's per-point requests (`Problem.append_points`). Accepted
-/// and carried on each point's transient; the engine does not act on them
-/// yet, so a point's results are the same with any of them.
+/// The points API's per-point requests (`Problem.append_points`), carried
+/// on each point's transient. Only `warm_start` acts yet; the others are
+/// accepted and change nothing.
 pub const PointOptions = struct {
     /// Record no waveform, only `.meas` results.
     measures_only: bool = false,
     /// End the transient once every `.meas` card has resolved.
     early_stop: bool = false,
-    /// Start the operating point from the template's nominal one.
+    /// Start the operating point from the template's nominal one
+    /// (`Deck.warm_op`) instead of the cold start, falling back to the full
+    /// ladder when that fails.
     warm_start: bool = false,
     /// Seconds past which an unresolved `.meas` aborts the point; 0 is off.
     abort_after: f64 = 0,

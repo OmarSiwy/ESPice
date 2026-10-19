@@ -878,6 +878,9 @@ pub const Tuning = struct {
     /// The `.option seed` draw (trial 1), when the deck takes one, so a
     /// point keeps the nominal circuit's mismatch sample.
     trial: ?Trial,
+    /// Each live name to its slot, compared as `index` does, so `set`
+    /// costs one lookup per name, not a scan of every live name.
+    slots: std.HashMapUnmanaged([]const u8, u32, NameContext, std.hash_map.default_max_load_percentage) = .empty,
     /// Template 0 (the nominal circuit, `circuit` null) and those built
     /// where no writes could make the point, oldest first, all in `gpa`;
     /// `Session.templates` numbers them the same way.
@@ -939,6 +942,13 @@ pub const Tuning = struct {
         t.* = .{ .gpa = gpa, .arenas = .{ .init(gpa), .init(gpa) }, .planner = undefined, .values = try scratch.dupe(f64, nl.live.nominal), .next = try scratch.dupe(f64, nl.live.nominal), .trial = null };
         errdefer for (&t.arenas) |*a| a.deinit();
         t.planner = try Planner.init(lib, sim, t.arenas[0].allocator(), nl, nominal, cards, "");
+        const names: NameContext = .{ .fold = nl.deck.dialect != .spectre };
+        try t.slots.ensureTotalCapacityContext(scratch, @intCast(nl.live.names.len), names);
+        // The first of two names that compare equal wins, as a scan finds it.
+        for (nl.live.names, 0..) |name, k| {
+            const gop = t.slots.getOrPutAssumeCapacityContext(name, names);
+            if (!gop.found_existing) gop.value_ptr.* = @intCast(k);
+        }
         try t.templates.ensureTotalCapacity(gpa, 1);
         errdefer t.templates.deinit(gpa);
         t.templates.appendAssumeCapacity(try .of(gpa, null, nl.live.nominal, t.planner.kept));
@@ -1010,13 +1020,25 @@ pub const Tuning = struct {
     /// The live slot `setAt` takes for `name`, compared as `set` does.
     /// `UnknownParameter` for a name that is not live.
     pub fn index(t: *const Tuning, name: []const u8) !u32 {
-        const nl = t.planner.nl;
-        for (nl.live.names, 0..) |live, k| {
-            const same = if (nl.deck.dialect == .spectre) std.mem.eql(u8, live, name) else std.ascii.eqlIgnoreCase(live, name);
-            if (same) return @intCast(k);
-        }
-        return error.UnknownParameter;
+        const names: NameContext = .{ .fold = t.planner.nl.deck.dialect != .spectre };
+        return t.slots.getContext(name, names) orelse error.UnknownParameter;
     }
+
+    /// Name equality as the dialect spells it: case-insensitive but in Spectre.
+    const NameContext = struct {
+        fold: bool,
+
+        pub fn hash(c: NameContext, name: []const u8) u64 {
+            if (!c.fold) return std.hash.Wyhash.hash(0, name);
+            var h: std.hash.Wyhash = .init(0);
+            for (name) |ch| h.update(&.{std.ascii.toLower(ch)});
+            return h.final();
+        }
+
+        pub fn eql(c: NameContext, a: []const u8, b: []const u8) bool {
+            return if (c.fold) std.ascii.eqlIgnoreCase(a, b) else std.mem.eql(u8, a, b);
+        }
+    };
 
     /// Appends a row with no writes, labelled `refused`, and returns the
     /// table: the row of a point `set` refused, so its queries stay its
