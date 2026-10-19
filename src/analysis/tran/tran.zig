@@ -1090,19 +1090,17 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .data = wf.data(),
         .measured = if (streamed) try stream.?.measured(a) else &.{},
     };
-    // The base waveform, then each row's block on the same time points.
+    // Each row's block on the base run's time points.
     const block = wf.data().len;
-    const len = wf.len;
-    const data = try a.alloc(f64, block * (1 + tg.wf.len));
-    @memcpy(data[0..block], wf.data());
-    for (tg.wf, 1..) |w, k| @memcpy(data[k * block ..][0..block], w.data());
-    wf.deinit();
+    const blocks = try a.alloc(f64, block * tg.wf.len);
+    for (tg.wf, 0..) |w, k| @memcpy(blocks[k * block ..][0..block], w.data());
     return .{
         .plotname = plotname,
         .varnames = names,
         .is_complex = false,
-        .npoints = len * (1 + tg.wf.len),
-        .data = data,
+        .npoints = wf.len,
+        .data = wf.data(),
+        .tangents = blocks,
     };
 }
 

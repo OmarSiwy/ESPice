@@ -1497,3 +1497,77 @@ test "Problem.append_points: measures equal the CLI's printed .meas of the same 
     }
     try t.expectEqual(@as(usize, 16), k);
 }
+
+test "Options.measures: run_all prints each point's .meas block as it ends, the bytes print_measures writes, at any max_parallel" {
+    var swept: std.ArrayList(u8) = .empty;
+    defer swept.deinit(t.allocator);
+    try swept.appendSlice(t.allocator, points_body ++ ".data pts rv cv\n");
+    for (0..12) |k| try swept.print(t.allocator, "+ {e} {e}\n", .{ 1e3 * @as(f64, @floatFromInt(k + 1)), 0.5e-12 });
+    // The last row never reaches 0.5 V: an error line and a NaN.
+    try swept.appendSlice(t.allocator, "+ 1e6 1e-12\n.enddata\n.tran 10p 40n sweep data=pts\n" ++ points_meas);
+    const source: api.Source = .{ .bytes = .{ .data = swept.items, .origin = "data.sp" } };
+    var want: std.Io.Writer.Allocating = .init(t.allocator);
+    defer want.deinit();
+    {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = source, .dialect = .hspice });
+        defer p.deinit();
+        try p.run_all();
+        try p.print_measures(&want.writer, &want.writer);
+    }
+    try t.expect(std.mem.count(u8, want.written(), "Measurements for Transient Analysis") == 13);
+    for ([_]u16{ 1, 4 }) |jobs| {
+        var got: std.Io.Writer.Allocating = .init(t.allocator);
+        defer got.deinit();
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = source, .dialect = .hspice, .max_parallel = jobs, .point = .{ .measures_only = true }, .measures = .{ .out = &got.writer, .err = &got.writer } });
+        defer p.deinit();
+        try p.run_all();
+        // Every block is out before run_all returns.
+        try t.expectEqualStrings(want.written(), got.written());
+        try p.print_measures(&got.writer, &got.writer);
+        try t.expectEqualStrings(want.written(), got.written());
+    }
+}
+
+test "Options.point.tangent_step with live parameters: the deck's own transient prints the tangents append_points gives" {
+    const source =
+        \\deck tangents
+        \\.param rv=1k cv=0.1p
+        \\v1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)
+        \\r1 in out {rv}
+        \\c1 out 0 {cv}
+        \\.tran 1p 2n 0 2p
+        \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1
+        \\.meas tran ig integ v(out) from=0 to=1n
+        \\.end
+        \\
+    ;
+    const live = [_][]const u8{ "rv", "cv" };
+    const own = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "t.sp" } }, .live_params = &live, .point = .{ .tangent_step = 1e-6 } });
+    defer own.deinit();
+    try own.run_all();
+    var printed: std.Io.Writer.Allocating = .init(t.allocator);
+    defer printed.deinit();
+    try own.print_tangents(&printed.writer);
+
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "t.sp" } }, .live_params = &live });
+    defer p.deinit();
+    const first = try p.append_points(&.{ 1e3, 0.1e-12 }, 1, .{ .tangent_step = 1e-6 });
+    try p.run_all();
+    var slopes: [2 * 2]f64 = undefined;
+    try p.point_tangents(first, 1, &.{ "tpd", "ig" }, &slopes);
+    var want: std.Io.Writer.Allocating = .init(t.allocator);
+    defer want.deinit();
+    try want.writer.writeAll("\n  Tangents for Transient Analysis\n\n");
+    for ([_][]const u8{ "tpd", "ig" }, 0..) |name, c| for (live, 0..) |param, k| {
+        try t.expect(std.math.isFinite(slopes[c * 2 + k]));
+        try want.writer.print("d({s})/d({s}) = {e:.6}\n", .{ name, param, slopes[c * 2 + k] });
+    };
+    try t.expectEqualStrings(want.written(), printed.written());
+    // The deck's own run publishes its rows alone, the tangent rows apart.
+    for (0..own.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        if ((try own.query_info(id)).kind != .tran) continue;
+        const r = try own.result(id);
+        try t.expectEqual(2 * r.npoints * r.varnames.len, r.tangents.len);
+    }
+}

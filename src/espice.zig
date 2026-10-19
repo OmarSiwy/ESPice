@@ -83,7 +83,16 @@ pub const Options = struct {
     /// `measures_only` is dropped for a deck with `.save` or `.stim`, which
     /// read every column.
     point: requests.PointOptions = .{},
+    /// Where `run_all` prints each result's `.meas` block as soon as it and
+    /// every result before it have ended, flushing both writers, instead of
+    /// leaving them all to `print_measures`; the optimization summaries
+    /// come first. The same bytes in the same order as `print_measures`
+    /// alone, at any `max_parallel`. Both writers must outlive the Problem.
+    measures: ?MeasureWriters = null,
 };
+
+/// `Options.measures`: the `.meas` values and the cards' error lines.
+pub const MeasureWriters = struct { out: *std.Io.Writer, err: *std.Io.Writer };
 
 /// The VPI host interface (`Options.vpi`) and its errors.
 pub const Vpi = frontend.Library.Vpi;
@@ -138,6 +147,8 @@ pub const Problem = struct {
     /// `Options.live_params` as live slots (`Tuning.index`), resolved once
     /// so a point of `append_points` costs no name lookups.
     live: []const u32 = &.{},
+    /// `Options.live_params`, as given.
+    live_names: []const []const u8 = &.{},
     /// Where an HSPICE `.save` writes the operating point; null without one.
     save_path: ?[]const u8 = null,
     /// Where `.save` and `.stim` files go: beside the output file, as HSPICE
@@ -166,9 +177,18 @@ pub const Problem = struct {
     /// Each transient appended with `PointOptions.tangent_step`: the step
     /// of each live parameter its tangent rows took (`point_tangents`).
     tangent_steps: std.AutoHashMapUnmanaged(QueryId, []const f64) = .empty,
+    /// `Options.measures`, how far `run_all` has printed to it, and the
+    /// first error printing there, which `print_measures` returns.
+    measures_to: ?MeasureWriters = null,
+    measure_cursor: MeasureCursor = .{},
+    measure_error: ?anyerror = null,
 
     /// A variant run's queries and its next result to publish.
     const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
+
+    /// The next `.meas` block to print: whether the optimization summaries
+    /// are out, the session (0 the main one, k the k-th run's) and its output.
+    const MeasureCursor = struct { headed: bool = false, session: usize = 0, next: usize = 0 };
 
     /// Parses and prepares `options.source`, then queues the deck's analyses
     /// (a lone `.op` when the deck names none). Nothing runs yet.
@@ -223,6 +243,9 @@ pub const Problem = struct {
             const live = try a.alloc(u32, options.live_params.len);
             for (options.live_params, live) |name, *k| k.* = try t.index(name);
             self.live = live;
+            const names = try a.alloc([]const u8, options.live_params.len);
+            for (names, options.live_params) |*name, given| name.* = try a.dupe(u8, given);
+            self.live_names = names;
         }
         self.out_dir = try a.dupe(u8, if (options.output.path) |out| std.fs.path.dirname(out) orelse "." else ".");
         if (self.prepared.deck.save_op) |save| {
@@ -242,6 +265,7 @@ pub const Problem = struct {
         execution.gpu_driver = &self.gpu_driver;
         if (analysis.gpu_available and execution.backend != .cpu) raiseJitCache();
         execution.display = options.display;
+        self.measures_to = options.measures;
         self.session = analysis.session.Session.init(self.workerAllocator(), io, &self.prepared.circuit, &self.prepared.deck, execution);
         errdefer self.session.deinit();
         // An optimization's sessions run before this one; nothing after it
@@ -251,13 +275,20 @@ pub const Problem = struct {
         if (self.prepared.tuning == null) self.session.markLastTemplateReader();
         var point = options.point;
         if (self.save_path != null or self.prepared.deck.stims.len != 0) point.measures_only = false;
-        const jobs = if (self.prepared.deck.queries.len == 0)
+        const jobs = try withPoint(scratch, if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
-            try withPoint(scratch, self.prepared.deck.queries, point);
+            self.prepared.deck.queries, point);
         if (point.warm_start) try self.solveWarmOp(jobs);
+        // `tangent_step` on the deck's own transients: tangent rows at the
+        // nominal live values, which `print_tangents` reads.
+        const steps = try scratch.alloc([]const f64, jobs.len);
+        if (point.tangent_step > 0) try self.tangentDeck(jobs, point.tangent_step, steps);
         const ids = try scratch.alloc(QueryId, jobs.len);
         _ = try self.append_queries(jobs, ids);
+        if (point.tangent_step > 0) for (jobs, ids, steps) |job, id, s| if (job == .tran) {
+            try self.tangent_steps.put(a, id, s);
+        };
         self.runs = try a.alloc(Run, self.prepared.runs.len);
         for (self.runs, self.prepared.runs, 0..) |*run, *prep, k| {
             errdefer for (self.runs[0..k]) |*done| done.session.deinit();
@@ -272,8 +303,25 @@ pub const Problem = struct {
         return self;
     }
 
+    /// Gives each transient of `jobs` one tangent row per live parameter
+    /// at its nominal value, moved by `h` as `append_points` moves it, and
+    /// its steps in `steps`. `error.NoLiveParameters` without live
+    /// parameters, `error.TangentsUnavailable` for a transient that cannot
+    /// integrate them.
+    fn tangentDeck(self: *Problem, jobs: []Query, h: f64, steps: [][]const f64) !void {
+        const tuning = self.prepared.tuning orelse return error.NoLiveParameters;
+        const values = try self.arena.allocator().alloc(f64, self.live.len);
+        for (values, self.live) |*v, k| v.* = tuning.values[k];
+        const current = self.session.template;
+        defer self.session.template = current;
+        for (jobs, steps) |*job, *s| if (job.* == .tran) {
+            if (!self.tangentable(job.*)) return error.TangentsUnavailable;
+            job.tran.tangents = try self.tangentRows(tuning, values, h, s);
+        };
+    }
+
     /// A copy of `queries` whose transients carry `point`.
-    fn withPoint(a: std.mem.Allocator, queries: []const Query, point: requests.PointOptions) ![]const Query {
+    fn withPoint(a: std.mem.Allocator, queries: []const Query, point: requests.PointOptions) ![]Query {
         const copy = try a.dupe(Query, queries);
         for (copy) |*q| if (q.* == .tran) {
             q.tran.point = point;
@@ -821,8 +869,10 @@ pub const Problem = struct {
             for (self.runs) |*run| pool.fill(&run.session);
             if (!pool.wait()) break;
             self.deliverRuns();
+            self.printReady();
         }
         self.deliverRuns();
+        self.printReady();
         if (!self.finished()) return error.SchedulingFailure;
         for (self.runs) |*run| if (!run.session.finished()) return error.SchedulingFailure;
         if (self.session.failure()) |err| return err;
@@ -997,13 +1047,18 @@ pub const Problem = struct {
     /// phase and periodic noise), in request order, as ngspice prints them,
     /// then the Monte Carlo statistics of each tran, AC and DC card. Cards
     /// that cannot be measured are reported on `err`.
-    pub fn print_measures(self: *const Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
+    /// With `Options.measures`, it writes only what `run_all` has not
+    /// printed there, and returns the first error printing there.
+    pub fn print_measures(self: *Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
         const measures = self.prepared.deck.measures;
-        for (self.optimization, 0..) |*lm, k| try printOptimization(out, lm, &self.prepared.tuner.?, k, measures);
-        for (self.bisection, 0..) |*b, k| try printBisection(out, b, &self.prepared.tuner.?, k, measures);
+        if (self.measures_to != null) {
+            if (self.measure_error) |e| return e;
+            try self.printMeasuresFrom(&self.measure_cursor, out, err, false);
+        } else {
+            var cursor: MeasureCursor = .{};
+            try self.printMeasuresFrom(&cursor, out, err, false);
+        }
         if (measures.len == 0) return;
-        try printSessionMeasures(&self.session, out, err, measures);
-        for (self.runs) |*run| try printSessionMeasures(&run.session, out, err, measures);
         // Statistics over the Monte Carlo trials of each analysis kind.
         var trials: std.ArrayList(Result) = .empty;
         defer trials.deinit(self.allocator);
@@ -1012,6 +1067,69 @@ pub const Problem = struct {
             try monteTrials(self.allocator, &self.session, kind, &trials);
             for (self.runs) |*run| try monteTrials(self.allocator, &run.session, kind, &trials);
             if (trials.items.len != 0) try output.printMeasureStatistics(out, measures, kind, trials.items);
+        }
+    }
+
+    /// With `Options.point.tangent_step`, writes d(card)/d(live parameter)
+    /// of every `.tran` card at the deck's first transient
+    /// (`point_tangents`), one `d(card)/d(param) = value` line each; NaN
+    /// where a card has no value. Nothing without tangents.
+    pub fn print_tangents(self: *const Problem, out: *std.Io.Writer) !void {
+        const id = for (self.session.outputs.items) |id| {
+            if (self.tangent_steps.contains(id)) break id;
+        } else return;
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(self.allocator);
+        for (self.prepared.deck.measures) |m| if (m.analysis == .tran) try names.append(self.allocator, m.name);
+        if (names.items.len == 0) return;
+        const p = self.live.len;
+        const slopes = try self.allocator.alloc(f64, names.items.len * p);
+        defer self.allocator.free(slopes);
+        try self.point_tangents(id, 1, names.items, slopes);
+        try out.writeAll("\n  Tangents for Transient Analysis\n\n");
+        for (names.items, 0..) |name, c| for (self.live_names, 0..) |param, k| {
+            try out.print("d({s})/d({s}) = {e:.6}\n", .{ name, param, slopes[c * p + k] });
+        };
+    }
+
+    /// Prints to `Options.measures` every `.meas` block whose turn has come
+    /// and flushes; the first error stops it for good.
+    fn printReady(self: *Problem) void {
+        const to = self.measures_to orelse return;
+        if (self.measure_error != null) return;
+        self.printMeasuresFrom(&self.measure_cursor, to.out, to.err, true) catch |e| {
+            self.measure_error = e;
+            return;
+        };
+        to.out.flush() catch |e| {
+            self.measure_error = e;
+        };
+        to.err.flush() catch |e| {
+            self.measure_error = e;
+        };
+    }
+
+    /// The optimization summaries, then each session's `.meas` blocks in
+    /// request order (`printQueryMeasures`) from `cursor` on; with `wait`,
+    /// it stops at the first result still running, else it skips those.
+    fn printMeasuresFrom(self: *const Problem, cursor: *MeasureCursor, out: *std.Io.Writer, err: *std.Io.Writer, wait: bool) !void {
+        const measures = self.prepared.deck.measures;
+        if (!cursor.headed) {
+            for (self.optimization, 0..) |*lm, k| try printOptimization(out, lm, &self.prepared.tuner.?, k, measures);
+            for (self.bisection, 0..) |*b, k| try printBisection(out, b, &self.prepared.tuner.?, k, measures);
+            cursor.headed = true;
+        }
+        if (measures.len == 0) return;
+        while (cursor.session <= self.runs.len) : ({
+            cursor.session += 1;
+            cursor.next = 0;
+        }) {
+            const session = if (cursor.session == 0) &self.session else &self.runs[cursor.session - 1].session;
+            while (cursor.next < session.outputs.items.len) : (cursor.next += 1) {
+                const id = session.outputs.items[cursor.next];
+                if (wait and !(try session.info(id)).status.terminal()) return;
+                try printQueryMeasures(session, id, out, err, measures);
+            }
         }
     }
 
@@ -1102,7 +1220,7 @@ pub const Problem = struct {
         return switch (job) {
             .dc => true,
             // Tangents carry Gear-2's charge history only (validate.zig).
-            .tran => |o| !o.uic and !o.snapshot and !o.sources_at_zero and self.prepared.deck.ic.len == 0 and @intFromEnum(o.method) <= @intFromEnum(requests.Method.gear_2) and
+            .tran => |o| !o.uic and !o.snapshot and !o.sources_at_zero and self.prepared.deck.ic.len == 0 and @backingInt(o.method) <= @backingInt(requests.Method.gear_2) and
                 !c.needs_tran_op and c.vpi == null and self.session.config.backend == .cpu,
             else => false,
         };
@@ -1382,35 +1500,32 @@ fn monteTrials(gpa: std.mem.Allocator, session: *const analysis.session.Session,
 }
 
 /// Block `k` of query `id`'s result: its own run at 0, else the
-/// prediction at its `k`-th tangent row (`Tran.tangents`), which follow
-/// the run's own points on the same times.
+/// prediction at its `k`-th tangent row (`Result.tangents`).
 fn block(session: *const analysis.session.Session, id: QueryId, k: usize) !Result {
     var res = try session.result(id);
-    const job = try session.query(id);
-    if (job != .tran or job.tran.tangents.len == 0) return res;
-    std.debug.assert(k <= job.tran.tangents.len);
-    res.npoints /= job.tran.tangents.len + 1;
+    if (k == 0) return res;
     const n = res.npoints * res.varnames.len;
-    res.data = res.data[k * n ..][0..n];
+    std.debug.assert(k * n <= res.tangents.len);
+    res.data = res.tangents[(k - 1) * n ..][0..n];
+    res.tangents = &.{};
+    res.measured = &.{};
     return res;
 }
 
-/// `.meas` results over one session's completed results of every kind a
+/// `.meas` results over query `id`'s result when it completed, of a kind a
 /// card can read; a transient's own run, not its tangent blocks. A sweep
 /// point's block names its row and label, and prints NaN for each card
 /// without a value, a failed point's for all.
-fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.Writer, err: *std.Io.Writer, measures: []const @import("core").Measure) !void {
-    for (session.outputs.items) |id| {
-        const info = try session.info(id);
-        switch (info.kind) {
-            .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => {},
-            else => continue,
-        }
-        const point: ?output.MeasurePoint = if (variantOf(try session.query(id))) |v| .{ .row = v, .label = session.deck.variants.labels[v] } else null;
-        if (info.status == .complete) {
-            try output.printMeasures(out, err, measures, info.kind, try block(session, id, 0), point);
-        } else if (point) |p| if (info.status.terminal()) try output.printFailedMeasures(out, measures, info.kind, p);
+fn printQueryMeasures(session: *const analysis.session.Session, id: QueryId, out: *std.Io.Writer, err: *std.Io.Writer, measures: []const @import("core").Measure) !void {
+    const info = try session.info(id);
+    switch (info.kind) {
+        .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => {},
+        else => return,
     }
+    const point: ?output.MeasurePoint = if (variantOf(try session.query(id))) |v| .{ .row = v, .label = session.deck.variants.labels[v] } else null;
+    if (info.status == .complete) {
+        try output.printMeasures(out, err, measures, info.kind, try block(session, id, 0), point);
+    } else if (point) |p| if (info.status.terminal()) try output.printFailedMeasures(out, measures, info.kind, p);
 }
 
 /// The optimizer's summary, after HSPICE's: one line per accepted

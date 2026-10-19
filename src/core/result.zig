@@ -40,6 +40,10 @@ pub const Result = struct {
     /// the columns it reads, which are not in `data`; empty, or a card's
     /// `scans == 0`, where a card reads `data`.
     measured: []const Measured = &.{},
+    /// A transient's tangent rows (`Tran.tangents`): one more block of
+    /// `data`'s shape per row, on the same times, each the first-order
+    /// prediction of the run at that row. Empty without them.
+    tangents: []const f64 = &.{},
 };
 
 /// A `.meas` card measured as its run went: each of its passes over the

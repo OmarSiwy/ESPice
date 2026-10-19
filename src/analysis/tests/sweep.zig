@@ -639,8 +639,9 @@ const DividerTests = struct {
         with.tangents = &.{ 1, 2 };
         const tangents = try tran.run(&ctx, with);
         const len = plain.npoints;
-        try t.expectEqual(3 * len, tangents.npoints);
-        try t.expectEqualSlices(f64, plain.data, tangents.data[0 .. 2 * len]);
+        try t.expectEqual(len, tangents.npoints);
+        try t.expectEqualSlices(f64, plain.data, tangents.data);
+        try t.expectEqual(2 * 2 * len, tangents.tangents.len);
         for ([_]analysis.ParamRef{ refs[ri], refs[ci] }, [_]f64{ 1000.1, 1.0001e-7 }, 1..) |ref, value, k| {
             const nominal = ref.get();
             ref.set(value);
@@ -649,7 +650,7 @@ const DividerTests = struct {
             ref.set(nominal);
             try ckt.recompute();
             try t.expectEqual(len, row.npoints);
-            const block = tangents.data[2 * len * k ..][0 .. 2 * len];
+            const block = tangents.tangents[2 * len * (k - 1) ..][0 .. 2 * len];
             var moved: f64 = 0;
             for (0..len) |p| moved = @max(moved, @abs(row.data[2 * p + 1] - plain.data[2 * p + 1]));
             try t.expect(moved > 1e-5);
