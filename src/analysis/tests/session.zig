@@ -425,3 +425,48 @@ test "--jobs determinism: results are byte-identical across lane counts and sche
         try t.expectEqualSlices(u64, @ptrCast(serial), @ptrCast(got));
     };
 }
+
+test "lane batches: OP rows at several temperatures group into batches and each equals its run alone, bitwise" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 3 }, &.{}, .{ vin, GROUND });
+    var prev = vin;
+    for (0..4) |_| {
+        const mid = try b.addNode();
+        try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ prev, mid });
+        try b.addDevice(models.diode, "", &.{ .is = 1e-14 }, &.{}, .{ mid, GROUND });
+        prev = mid;
+    }
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    const deck = bareDeck(&.{ vin, prev }, &.{ "v(in)", "v(out)" });
+    // More rows than one batch holds, and a lone tolerance set that groups
+    // with nobody.
+    const temps = [_]f64{ -40, 0, 27, 85, 150, 27, 400, 1000, 60, -10 };
+    var jobs: [temps.len + 1]requests.Query = undefined;
+    for (jobs[0..temps.len], temps) |*j, temp| j.* = .{ .op = .{ .tol = .{ .temp_c = temp } } };
+    jobs[temps.len] = .{ .op = .{ .tol = .{ .reltol = 1e-4 } } };
+    var out: [2][]f64 = undefined;
+    var batched: usize = 0;
+    for ([_]bool{ false, true }, &out) |lanes, *o| {
+        var config: @import("../executor.zig").Config = .{};
+        config.knobs.lanes = lanes;
+        var s = Session.init(t.allocator, t.io, &prepared, &deck, config);
+        defer s.deinit();
+        var ids: [jobs.len]requests.QueryId = undefined;
+        _ = try s.append(&jobs, &ids);
+        try s.runAll(.{ .max_parallel = 2, .quantum = .completion });
+        try t.expectEqual(null, s.failure());
+        for (s.rows.items(.executor)) |e| batched += e.?.peers.len;
+        var list: std.ArrayList(f64) = .empty;
+        errdefer list.deinit(t.allocator);
+        for (ids) |id| try list.appendSlice(t.allocator, (try s.result(id)).data);
+        o.* = try list.toOwnedSlice(t.allocator);
+    }
+    defer for (out) |o| t.allocator.free(o);
+    try t.expect(batched > 0);
+    try t.expectEqualSlices(u64, @ptrCast(out[0]), @ptrCast(out[1]));
+}
