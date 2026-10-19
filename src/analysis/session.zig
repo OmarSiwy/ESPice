@@ -728,19 +728,33 @@ pub const Session = struct {
                 components += 1;
             };
         try writer.print("Problem: {d} requested queries, {d} total queries, {d} components\n", .{ self.outputs.items.len, self.rows.len, components });
+        // Each component's rows in row order, CSR by component (a
+        // component is numbered by its first row), so the tree is one pass.
+        const starts = try a.alloc(u32, self.rows.len + 1);
+        defer a.free(starts);
+        @memset(starts, 0);
+        for (self.rows.items(.component)) |c| starts[c + 1] += 1;
+        for (1..starts.len) |c| starts[c] += starts[c - 1];
+        const members = try a.alloc(u32, self.rows.len);
+        defer a.free(members);
+        const fill = try a.dupe(u32, starts[0..self.rows.len]);
+        defer a.free(fill);
+        for (self.rows.items(.component), 0..) |c, j| {
+            members[fill[c]] = @intCast(j);
+            fill[c] += 1;
+        }
         for (self.rows.items(.component), 0..) |component, i| {
             if (component != i or !self.containsComponent(options.scope, component)) continue;
             components -= 1;
             continuations[0] = components != 0;
             try writer.print("{s} Component {d}\n", .{ connector(options.ascii, components == 0), component });
+            const rows = members[starts[component]..starts[component + 1]];
             var last_query: usize = i;
-            for (0..self.rows.len) |j| {
-                if (self.rows.items(.component)[j] == component and self.contains(options.scope, j) and
-                    self.rows.items(.requested)[j]) last_query = j;
+            for (rows) |j| {
+                if (self.contains(options.scope, j) and self.rows.items(.requested)[j]) last_query = j;
             }
-            for (0..self.rows.len) |j| {
-                if (self.rows.items(.component)[j] != component or !self.contains(options.scope, j) or
-                    !self.rows.items(.requested)[j]) continue;
+            for (rows) |j| {
+                if (!self.contains(options.scope, j) or !self.rows.items(.requested)[j]) continue;
                 try self.printQuery(writer, j, 1, j == last_query, continuations, next[0..n_next], seen, options.ascii);
             }
             // A scope naming an implicit prerequisite still shows that query.
