@@ -541,8 +541,10 @@ fn simulateWith(
     var attempted_dt = dt;
     // vpiTransientFailConverge re-solves of one step, bounded as VerA bounds them.
     var vpi_again: u32 = 0;
-    // Every `.meas` card resolved under `options.point.early_stop`.
+    // Every `.meas` card resolved under `options.point.early_stop`, and
+    // since the row before (`settled`).
     var resolved = false;
+    var settled = false;
 
     while (t < options.t_stop and !atStop(t, options.t_stop) and steps < options.max_steps) {
         if (st.attempts != 0) try ckt.checkpoint(.{
@@ -896,8 +898,14 @@ fn simulateWith(
             w.feed(waveform.data(), waveform.len, past);
             if (past and w.open > 0) return error.MeasureBoundExceeded;
             if (options.point.early_stop and w.open == 0) {
-                resolved = true;
-                break;
+                // A tangent's event can come a row after the run's own.
+                // ponytail: one row covers a step small next to the row
+                // spacing; past that, run tangents without early stop.
+                if (tangents == null or settled) {
+                    resolved = true;
+                    break;
+                }
+                settled = true;
             }
         };
 

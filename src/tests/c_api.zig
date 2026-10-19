@@ -673,3 +673,39 @@ test "C points: early stop and measures_only keep each point's values, abort_aft
     try t.expectEqual(@as(u64, @bitCast(want[0])), @as(u64, @bitCast(got[0])));
     try t.expectEqual(@as(u64, @bitCast(want[2])), @as(u64, @bitCast(got[2])));
 }
+
+test "C points: copy_point_tangents gives d(measure)/d(live parameter), and NaN without tangent_step" {
+    const t = std.testing;
+    const deck = "C tangents\n.param rv=1k\nV1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)\nR1 in out {rv}\nC1 out 0 0.1p\n.tran 1p 2n\n" ++
+        ".meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1\n.end\n";
+    const live = [_]c.espice_bytes{.{ .data = "rv", .len = 2 }};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = &live;
+    options.live_param_count = 1;
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
+    defer _ = c.espice_destroy(handle);
+    const rows = [_]f64{ 1e3, 2e3 };
+    var points: c.espice_points_options = std.mem.zeroes(c.espice_points_options);
+    points.struct_size = @sizeOf(c.espice_points_options);
+    points.tangent_step = 1e-6;
+    var first: u32 = 0;
+    try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &points, &first));
+    var plain: u32 = 0;
+    try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, 1, null, &plain));
+    try t.expectEqual(@as(u32, 0), c.espice_run_all(handle));
+    const names = [_]c.espice_bytes{.{ .data = "tpd", .len = 3 }};
+    var slopes: [2]f64 = undefined;
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_tangents(handle, first, 2, &names, 1, &slopes));
+    // tpd is near RC ln 2 (the 0.1 ns ramp shortens it): about 0.1p ln 2 per ohm.
+    for (slopes) |s| try t.expectApproxEqRel(0.1e-12 * @log(2.0), s, 0.15);
+    var none: [1]f64 = undefined;
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_tangents(handle, plain, 1, &names, 1, &none));
+    try t.expect(std.math.isNan(none[0]));
+    // An options struct from before tangent_step still reads.
+    points.struct_size = @offsetOf(c.espice_points_options, "tangent_step");
+    try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, 1, &points, &plain));
+}

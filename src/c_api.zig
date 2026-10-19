@@ -107,6 +107,7 @@ const PointsOptions = extern struct {
     early_stop: u32,
     warm_start: u32,
     abort_after: f64,
+    tangent_step: f64,
 };
 const Scope = extern struct { kind: u32, id: u32 };
 const Progress = extern struct { phase: u32, reserved: u32 = 0, completed: u64, total: u64 };
@@ -589,9 +590,13 @@ export fn espice_append_points(handle: ?*Token, values: ?[*]const f64, count: us
     var config: api.requests.PointOptions = .{};
     if (options) |o| {
         // Fields appended later are read only when `struct_size` covers them.
-        if (o.struct_size < @sizeOf(PointsOptions)) return h.fail(error.AbiMismatch);
+        if (o.struct_size < @offsetOf(PointsOptions, "tangent_step")) return h.fail(error.AbiMismatch);
         if (o.measures_only > 1 or o.early_stop > 1 or o.warm_start > 1 or !(o.abort_after >= 0) or std.math.isInf(o.abort_after)) return h.fail(error.InvalidArgument);
         config = .{ .measures_only = o.measures_only == 1, .early_stop = o.early_stop == 1, .warm_start = o.warm_start == 1, .abort_after = o.abort_after };
+        if (o.struct_size >= @sizeOf(PointsOptions)) {
+            if (!(o.tangent_step >= 0) or std.math.isInf(o.tangent_step)) return h.fail(error.InvalidArgument);
+            config.tangent_step = o.tangent_step;
+        }
     }
     const id = h.problem.append_points(rows, count, config) catch |err| return h.fail(err);
     first.* = @backingInt(id);
@@ -609,6 +614,19 @@ export fn espice_copy_point_measures(handle: ?*Token, first_id: u32, count: usiz
     for (name_bytes, keys) |b, *key| key.* = constSlice(u8, b.data, b.len) catch |err| return h.fail(err);
     // `Reason` is u32-backed, so the caller's array holds the codes as is.
     h.problem.point_measures(@fromBackingInt(@intCast(first_id)), keys, values, @ptrCast(codes)) catch |err| return h.fail(err);
+    return 0;
+}
+
+export fn espice_copy_point_tangents(handle: ?*Token, first_id: u32, count: usize, names: ?[*]const Bytes, measure_count: usize, out: ?[*]f64) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
+    const name_bytes = constSlice(Bytes, names, measure_count) catch |err| return h.fail(err);
+    const len = std.math.mul(usize, count, measure_count) catch |err| return h.fail(err);
+    const total = std.math.mul(usize, len, h.problem.live.len) catch |err| return h.fail(err);
+    const values = mutableSlice(f64, out, total) catch |err| return h.fail(err);
+    const keys = allocator.alloc([]const u8, measure_count) catch |err| return h.fail(err);
+    defer allocator.free(keys);
+    for (name_bytes, keys) |b, *key| key.* = constSlice(u8, b.data, b.len) catch |err| return h.fail(err);
+    h.problem.point_tangents(@fromBackingInt(@intCast(first_id)), count, keys, values) catch |err| return h.fail(err);
     return 0;
 }
 
@@ -708,6 +726,8 @@ fn status(err: anyerror) u32 {
         // Points API: no live parameters, a deck that sweeps already, a
         // measure name no card has.
         error.NoLiveParameters, error.SweptTemplate, error.UnknownMeasure => .invalid_argument,
+        // Points API: tangents on a transient that cannot integrate them.
+        error.TangentsUnavailable => .invalid_argument,
         error.BufferTooSmall => .buffer_too_small,
         error.OutOfMemory => .out_of_memory,
         error.InvalidQuery => .invalid_query,

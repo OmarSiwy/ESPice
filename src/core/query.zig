@@ -670,6 +670,10 @@ pub const PointOptions = struct {
     /// Seconds past which a `.tran` card still unresolved fails the
     /// transient with `error.MeasureBoundExceeded`; 0 is off.
     abort_after: f64 = 0,
+    /// Above 0: also integrate, per live parameter, the first-order
+    /// prediction of the point with that parameter moved by this times
+    /// its magnitude (`Tran.tangents`), for d(measure)/d(parameter).
+    tangent_step: f64 = 0,
 };
 
 /// Transient noise: a transient with sampled noise sources, or the noise

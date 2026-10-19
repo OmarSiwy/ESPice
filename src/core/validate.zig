@@ -193,6 +193,9 @@ pub fn validate(query: requests.Query, n: u32) !void {
             try timeStep(o.dt_max orelse o.t_stop / 50);
             if (o.max_steps == std.math.maxInt(u32)) return error.InvalidQueryOptions;
             if (o.tangents.len != 0 and (o.uic or o.snapshot or o.sources_at_zero)) return error.InvalidQueryOptions;
+            // Tangents carry Gear-2's charge history (q1, q2) only, so a
+            // higher Gear order would integrate them with a wrong companion.
+            if (o.tangents.len != 0 and @intFromEnum(o.method) > @intFromEnum(requests.Method.gear_2)) return error.InvalidQueryOptions;
         },
         .tran_noise => |o| {
             if (o.dt_max < o.dt_min or o.dt_min > o.dt_init or o.max_steps == std.math.maxInt(u32)) return error.InvalidQueryOptions;
@@ -434,5 +437,9 @@ test "validateDeck refuses a variant past the deck's table" {
     // u32 overflow of first + count is still past the table.
     try std.testing.expectError(error.InvalidQueryOptions, validateDeck(.{ .mc = .{ .variants = .{ .first = std.math.maxInt(u32), .count = 2 } } }, 2, &deck));
     try std.testing.expectError(error.InvalidQueryOptions, validateDeck(.{ .dc = .{ .target = .temp, .tangents = &.{2} } }, 2, &deck));
+    // Tangents carry Gear-2's history only (TODO "Transient tangents under Gear-3..6").
+    try validateDeck(.{ .tran = .{ .t_stop = 1e-9, .method = .gear_2, .tangents = &.{1} } }, 2, &deck);
+    try std.testing.expectError(error.InvalidQueryOptions, validateDeck(.{ .tran = .{ .t_stop = 1e-9, .method = .gear_3, .tangents = &.{1} } }, 2, &deck));
+    try validateDeck(.{ .tran = .{ .t_stop = 1e-9, .method = .gear_6 } }, 2, &deck);
     try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .device = .{ .type = @fromBackingInt(0) } } } }, 2, &deck));
 }

@@ -290,6 +290,12 @@ typedef struct {
     uint32_t early_stop;    /* 1: end a .tran once its measures resolve */
     uint32_t warm_start;    /* 0: cold; 1: from the template's nominal OP */
     double abort_after;     /* t past which an unresolved measure aborts; 0 = off */
+    /* > 0: also integrate, per live parameter p, the first-order prediction
+     * of the point with p moved by tangent_step * |p| (tangent_step when
+     * p = 0), for espice_copy_point_tangents. Read only when struct_size
+     * covers it. INVALID_ARGUMENT ("TangentsUnavailable") for a .tran that
+     * cannot: uic, .ic, Gear order 3..6, VPI, a GPU backend. */
+    double tangent_step;
 } espice_points_options;
 
 /* Appends count points: values is [count][live_param_count] row-major, in
@@ -321,6 +327,14 @@ espice_status espice_append_points(espice_problem *, const double *values,
 espice_status espice_copy_point_measures(espice_problem *, uint32_t first_id,
     size_t count, const espice_bytes *names, size_t measure_count,
     double *out, uint32_t *reasons);
+/* d(measure)/d(live parameter) of the .tran measures names at count points
+ * appended with tangent_step, into out[count][measure_count][live_param_count]:
+ * each measure over the parameter's tangent prediction minus over the point's
+ * own run, over the step. NaN for a point that failed or has no tangents, a
+ * measure without a value in either, or a step the template refused. Errors
+ * as espice_copy_point_measures; nothing is written on failure. */
+espice_status espice_copy_point_tangents(espice_problem *, uint32_t first_id,
+    size_t count, const espice_bytes *names, size_t measure_count, double *out);
 /* The number of points the executor runs together on this problem's
  * backend: 1 today. Advisory: it changes speed, never results. */
 espice_status espice_lane_width(espice_problem *, uint32_t *out);

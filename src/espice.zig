@@ -163,6 +163,9 @@ pub const Problem = struct {
     /// Whether a query of this Problem brought the GPU driver up, which every
     /// session's queries read through `ExecutionConfig.gpu_driver`.
     gpu_driver: analysis.GpuDriver = .{},
+    /// Each transient appended with `PointOptions.tangent_step`: the step
+    /// of each live parameter its tangent rows took (`point_tangents`).
+    tangent_steps: std.AutoHashMapUnmanaged(QueryId, []const f64) = .empty,
 
     /// A variant run's queries and its next result to publish.
     const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
@@ -415,8 +418,15 @@ pub const Problem = struct {
     /// All-or-nothing. `error.NoLiveParameters` without
     /// `Options.live_params`, `error.SweptTemplate` for a deck whose
     /// analyses already sweep (`.step`, `.data`, `.alter`, Monte Carlo),
-    /// `error.InvalidArgument` for zero points. Asserts that `values` holds
-    /// `count` rows.
+    /// `error.InvalidArgument` for zero points, `error.TangentsUnavailable`
+    /// for `options.tangent_step` on a transient that cannot integrate
+    /// tangents (`tangentable`, a Gear-3..6 method). Asserts that `values`
+    /// holds `count` rows.
+    ///
+    /// With `options.tangent_step` h, each point's transient also integrates
+    /// the first-order prediction (`Tran.tangents`) of the point with live
+    /// parameter k moved by h·|value| (h when the value is 0), one per
+    /// parameter; `point_tangents` reads the measures' slopes off them.
     pub fn append_points(self: *Problem, values: []const f64, count: usize, options: requests.PointOptions) !QueryId {
         const tuning = self.prepared.tuning orelse return error.NoLiveParameters;
         const p = self.live.len;
@@ -430,6 +440,8 @@ pub const Problem = struct {
         try self.age();
         const template_jobs = if (deck.queries.len == 0) &[_]Query{.{ .op = .{ .tol = deck.deck_tol } }} else deck.queries;
         try self.checkOutput(&self.prepared, template_jobs);
+        const tangent = options.tangent_step > 0;
+        if (tangent) for (template_jobs) |job| if (job == .tran and !self.tangentable(job)) return error.TangentsUnavailable;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -437,6 +449,8 @@ pub const Problem = struct {
         const jobs = try a.alloc(Query, count * j);
         const templates = try a.alloc(u32, count * j);
         const refused = try a.alloc(?analysis.session.PointError, count);
+        // Each point's tangent rows and steps, kept with its transient.
+        const steps = try a.alloc([]const f64, count);
         // A built template becomes the session's current one; `set_params`
         // rows appended later keep theirs.
         const current = self.session.template;
@@ -459,19 +473,59 @@ pub const Problem = struct {
                 break :blk 0;
             };
             const row = deck.variants.count() - 1;
+            const rows: []const u32 = if (tangent and refused[i] == null) try self.tangentRows(tuning, values[i * p ..][0..p], options.tangent_step, &steps[i]) else &.{};
+            if (rows.len == 0) steps[i] = &.{};
             for (template_jobs, jobs[i * j ..][0..j], templates[i * j ..][0..j]) |job, *copy, *t| {
                 copy.* = job;
                 switch (copy.*) {
                     inline else => |*o| o.tol.variant = row,
                 }
-                if (copy.* == .tran) copy.tran.point = options;
+                if (copy.* == .tran) {
+                    copy.tran.point = options;
+                    copy.tran.tangents = rows;
+                }
                 t.* = template;
             }
         }
         const ids = try a.alloc(QueryId, jobs.len);
         _ = try self.session.appendAt(jobs, templates, ids);
         for (refused, 0..) |r, i| if (r) |err| for (ids[i * j ..][0..j]) |id| self.session.refuse(id, err) catch unreachable;
+        if (tangent) for (jobs, ids, 0..) |job, id, k| if (job == .tran and steps[k / j].len != 0) {
+            try self.tangent_steps.put(self.arena.allocator(), id, steps[k / j]);
+        };
         return ids[0];
+    }
+
+    /// One variant row per live parameter of the point at `values`, that
+    /// parameter moved by `h`·|value| (`h` at 0), and the steps into
+    /// `steps.*`; a row `set_params` refuses gets a NaN step. Both live in
+    /// the Problem's arena: the queries hold the rows.
+    fn tangentRows(self: *Problem, tuning: @typeInfo(@FieldType(frontend.Prepared, "tuning")).optional.child, values: []const f64, h: f64, steps: *[]const f64) ![]const u32 {
+        const a = self.arena.allocator();
+        const deck = &self.prepared.deck;
+        const rows = try a.alloc(u32, values.len);
+        const dp = try a.alloc(f64, values.len);
+        const moved = try a.dupe(f64, values);
+        defer a.free(moved);
+        for (rows, dp, 0..) |*row, *d, k| {
+            d.* = if (values[k] == 0) h else h * @abs(values[k]);
+            moved[k] = values[k] + d.*;
+            defer moved[k] = values[k];
+            try self.session.templates.ensureUnusedCapacity(self.session.allocator, 1);
+            if (tuning.setAt(&self.prepared.circuit, deck.variants, self.live, moved)) |change| {
+                if (change.built) |c| self.session.addTemplate(c) catch unreachable;
+                deck.variants = change.variants;
+            } else |err| switch (err) {
+                error.UnsupportedCard, error.ModelBinNotFound, error.InvalidArgument => {
+                    deck.variants = try tuning.refusedRow(deck.variants);
+                    d.* = std.math.nan(f64);
+                },
+                else => |e| return e,
+            }
+            row.* = deck.variants.count() - 1;
+        }
+        steps.* = dp;
+        return rows;
     }
 
     /// Why a point produced no value, or not all of them: the C API's
@@ -575,12 +629,63 @@ pub const Problem = struct {
                 var why: Reason = .measure_not_found;
                 if (source) |q| {
                     // Cards of one analysis share its evaluation.
-                    if (evaluated != q) output.measureOutcomes(measures, kind, try session.result(q), values, missing);
+                    if (evaluated != q) output.measureOutcomes(measures, kind, try block(&self.session, q, 0), values, missing);
                     evaluated = q;
                     dst.* = values[card];
                     if (!missing[card]) why = .measure_unresolved;
                 }
                 if (std.math.isNan(dst.*) and reason.* == .ok) reason.* = why;
+            }
+        }
+    }
+
+    /// The slopes d(card)/d(live parameter) of the `.tran` cards `names` at
+    /// `count` points appended with `PointOptions.tangent_step`, starting
+    /// at `first`, into `out` (`count` × `names.len` × live parameters,
+    /// row-major): each card over the parameter's tangent prediction minus
+    /// over the point's own run, over the step. NaN where either has no
+    /// value, for a point that failed or was appended without tangents,
+    /// for a card of another analysis, and for a step `set_params` refused.
+    /// Errors as `point_measures`. Asserts `out.len == count * names.len *
+    /// live parameters`.
+    pub fn point_tangents(self: *const Problem, first: QueryId, count: usize, names: []const []const u8, out: []f64) !void {
+        const p = self.live.len;
+        std.debug.assert(out.len == count * names.len * p);
+        const measures = self.prepared.deck.measures;
+        const a = self.allocator;
+        // Validates the names and points and gives each point's reason.
+        const base = try a.alloc(f64, count * names.len);
+        defer a.free(base);
+        const reasons = try a.alloc(Reason, count);
+        defer a.free(reasons);
+        try self.point_measures(first, names, base, reasons);
+        const values = try a.alloc(f64, measures.len);
+        defer a.free(values);
+        const v0 = try a.alloc(f64, measures.len);
+        defer a.free(v0);
+        @memset(out, std.math.nan(f64));
+        const outputs = self.session.outputs.items;
+        var at = std.mem.indexOfScalar(QueryId, outputs, first).?;
+        for (0..count) |i| {
+            // Point i's queries share one variant row; its transient carries the steps.
+            const row = variantOf(try self.session.query(outputs[at]));
+            var tran: ?QueryId = null;
+            while (at < outputs.len and variantOf(try self.session.query(outputs[at])) == row) : (at += 1) {
+                if (tran == null and self.tangent_steps.contains(outputs[at])) tran = outputs[at];
+            }
+            const q = tran orelse continue;
+            if ((try self.session.info(q)).status != .complete) continue;
+            const steps = self.tangent_steps.get(q).?;
+            std.debug.assert(steps.len == p);
+            output.measureValues(measures, .tran, try block(&self.session, q, 0), v0);
+            for (steps, 0..) |h, k| {
+                output.measureValues(measures, .tran, try block(&self.session, q, k + 1), values);
+                for (names, 0..) |name, c| {
+                    const card = for (measures, 0..) |m, n| {
+                        if (std.ascii.eqlIgnoreCase(m.name, name)) break n;
+                    } else unreachable; // `point_measures` checked every name
+                    out[(i * names.len + c) * p + k] = (values[card] - v0[card]) / h;
+                }
             }
         }
     }
@@ -962,13 +1067,14 @@ pub const Problem = struct {
     /// Whether `job` can give the optimizer its Jacobian as tangents of its
     /// own run. A transient cannot from an operating point it does not
     /// solve on its own (`uic`, `.ic` holds, a capacitor-only node's
-    /// OPtran), under VPI callbacks, or off the CPU: its rows swap host
+    /// OPtran), under Gear-3..6, under VPI callbacks, or off the CPU: its rows swap host
     /// device state (`Tran.tangents`).
     fn tangentable(self: *const Problem, job: Query) bool {
         const c = &self.prepared.circuit;
         return switch (job) {
             .dc => true,
-            .tran => |o| !o.uic and !o.snapshot and !o.sources_at_zero and self.prepared.deck.ic.len == 0 and
+            // Tangents carry Gear-2's charge history only (validate.zig).
+            .tran => |o| !o.uic and !o.snapshot and !o.sources_at_zero and self.prepared.deck.ic.len == 0 and @intFromEnum(o.method) <= @intFromEnum(requests.Method.gear_2) and
                 !c.needs_tran_op and c.vpi == null and self.session.config.backend == .cpu,
             else => false,
         };
@@ -1251,14 +1357,28 @@ fn monteTrials(gpa: std.mem.Allocator, session: *const analysis.session.Session,
     }
 }
 
+/// Block `k` of query `id`'s result: its own run at 0, else the
+/// prediction at its `k`-th tangent row (`Tran.tangents`), which follow
+/// the run's own points on the same times.
+fn block(session: *const analysis.session.Session, id: QueryId, k: usize) !Result {
+    var res = try session.result(id);
+    const job = try session.query(id);
+    if (job != .tran or job.tran.tangents.len == 0) return res;
+    std.debug.assert(k <= job.tran.tangents.len);
+    res.npoints /= job.tran.tangents.len + 1;
+    const n = res.npoints * res.varnames.len;
+    res.data = res.data[k * n ..][0..n];
+    return res;
+}
+
 /// `.meas` results over one session's completed results of every kind a
-/// card can read.
+/// card can read; a transient's own run, not its tangent blocks.
 fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.Writer, err: *std.Io.Writer, measures: []const @import("core").Measure) !void {
     for (session.outputs.items) |id| {
         const info = try session.info(id);
         if (info.status != .complete) continue;
         switch (info.kind) {
-            .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
+            .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => try output.printMeasures(out, err, measures, info.kind, try block(session, id, 0)),
             else => {},
         }
     }

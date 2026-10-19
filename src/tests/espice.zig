@@ -1242,3 +1242,53 @@ test "points: abort_after fails only the points still unresolved past it, early_
     std.debug.print("abort test steps: plain {d}, bounded {d}\n", .{ lens[0], lens[1] });
     try t.expect(lens[1] * 3 < lens[0]);
 }
+
+test "points: tangent slopes of .tran measures match central finite differences" {
+    const source =
+        \\tangents
+        \\.param rv=1k cv=0.1p
+        \\v1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)
+        \\r1 in out {rv}
+        \\c1 out 0 {cv}
+        \\.tran 1p 2n 0 2p
+        \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1
+        \\.meas tran vf find v(out) at=0.3n
+        \\.meas tran ig integ v(out) from=0 to=1n
+        \\.end
+        \\
+    ;
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "tangents.sp" } }, .live_params = &.{ "rv", "cv" } });
+    defer p.deinit();
+    const x = [2]f64{ 1e3, 0.1e-12 };
+    const names = [_][]const u8{ "tpd", "vf", "ig" };
+    // early_stop too: one row past resolution keeps the tangents' events.
+    const tangent = try p.append_points(&x, 1, .{ .tangent_step = 1e-6, .early_stop = true, .measures_only = true });
+    // Central differences, each parameter moved by 1e-3 of itself.
+    const rel = 1e-3;
+    var rows: [4][2]f64 = .{ x, x, x, x };
+    for (0..2) |k| {
+        rows[2 * k][k] *= 1 + rel;
+        rows[2 * k + 1][k] *= 1 - rel;
+    }
+    const fd = try p.append_points(@ptrCast(&rows), 4, .{});
+    try p.run_all();
+    var slopes: [3 * 2]f64 = undefined;
+    try p.point_tangents(tangent, 1, &names, &slopes);
+    var values: [4 * 3]f64 = undefined;
+    var why: [4]api.Problem.Reason = undefined;
+    try p.point_measures(fd, &names, &values, &why);
+    var worst: f64 = 0;
+    defer std.debug.print("tangents vs central differences: worst relative gap {e}\n", .{worst});
+    for (0..3) |c| for (0..2) |k| {
+        const central = (values[(2 * k) * 3 + c] - values[(2 * k + 1) * 3 + c]) / (2 * rel * x[k]);
+        const got = slopes[c * 2 + k];
+        errdefer std.debug.print("card {s}, param {d}: tangent {e}, central {e}\n", .{ names[c], k, got, central });
+        worst = @max(worst, @abs(got - central) / @abs(central));
+        try t.expectApproxEqRel(central, got, 1e-3);
+    };
+    // The slopes don't change the point's own values.
+    var own: [3]f64 = undefined;
+    var own_why: [1]api.Problem.Reason = undefined;
+    try p.point_measures(tangent, &names, &own, &own_why);
+    try t.expectEqual(api.Problem.Reason.ok, own_why[0]);
+}
