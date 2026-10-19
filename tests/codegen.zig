@@ -247,3 +247,340 @@ export fn gen_lanes_each(a: f64, b: f64, out: *f64) void {
 export fn hand_lanes_each(a: f64, b: f64, out: *f64) void {
     if (a > b) out.* += a;
 }
+
+// ---- converger.newton at W = 1 (lane-batched-simulation.md §3.1, the
+// phase 1 gate): the lane-generic `newton` against a frozen copy of the
+// scalar one it replaced (92f7f024, converger.zig:63-675 excerpts), on a
+// stand-in system whose device calls are opaque. ----
+
+const converger = solver.converger;
+
+extern fn probe_newton_eval(x: [*]const f64, len: usize, t: f64) void;
+extern fn probe_newton_limits(x: [*]f64, x_old: [*]const f64, len: usize) bool;
+extern fn probe_newton_states(x: [*]const f64, len: usize) f64;
+extern fn probe_newton_device(x: [*]const f64, len: usize) bool;
+extern fn probe_newton_load(x: [*]const f64, rhs: [*]const f64, len: usize) bool;
+extern fn probe_newton_iter(x_old: [*]const f64, len: usize) void;
+extern fn probe_newton_follows(x: [*]const f64, len: usize, t: f64) void;
+extern fn probe_newton_checkpoint(completed: u16) bool;
+
+const NSys = struct {
+    n: u32,
+    nnz: u32,
+    diag_slots: []const u32,
+    rhs: []f64,
+    current_row: []const bool,
+    g_vals: []f64,
+    solver_execution: num.Execution = .{},
+
+    pub const Event = struct { phase: enum { nonlinear }, completed: u16, total: u16 };
+
+    pub fn beginSolve(_: *NSys) void {}
+    pub fn checkpoint(_: *NSys, e: Event) error{QueryCancelled}!void {
+        if (!probe_newton_checkpoint(e.completed)) return error.QueryCancelled;
+    }
+    pub fn advanceIteration(_: *NSys, x_old: []const f64) void {
+        probe_newton_iter(x_old.ptr, x_old.len);
+    }
+    pub fn loadCheck(_: *NSys, x: []const f64, _: []const f64, rhs: []const f64, _: f64, _: f64) bool {
+        return probe_newton_load(x.ptr, rhs.ptr, x.len);
+    }
+    pub fn evalFollows(_: *const NSys, x: []const f64, t: f64, _: bool) void {
+        probe_newton_follows(x.ptr, x.len, t);
+    }
+    pub fn applyLimits(_: *const NSys, x: []f64, x_old: []const f64) bool {
+        return probe_newton_limits(x.ptr, x_old.ptr, x.len);
+    }
+    pub fn checkConvergence(_: *const NSys, x: []const f64) bool {
+        return probe_newton_device(x.ptr, x.len);
+    }
+    pub fn updateStates(_: *NSys, x: []const f64) ?f64 {
+        const r = probe_newton_states(x.ptr, x.len);
+        return if (r == r) r else null;
+    }
+};
+
+const NHook = struct {
+    pub fn assemble(_: NHook, sys: *NSys, x: []const f64, t: f64) void {
+        probe_newton_eval(x.ptr, x.len, t);
+        _ = sys;
+    }
+    pub fn vals(_: NHook, sys: *NSys) []f64 {
+        return sys.g_vals;
+    }
+    pub fn diagAt(_: NHook, sys: *NSys, slot: u32) f64 {
+        return sys.g_vals[slot];
+    }
+};
+
+export fn gen_newton(sys: *NSys, ws: *converger.Workspace, x: [*]f64, t: f64, opts: *const converger.Options, out: *converger.Result) u16 {
+    out.* = converger.newton(sys, ws, x[0..sys.n], t, opts.*, NHook{}) catch |e| return @intFromError(e);
+    return 0;
+}
+
+export fn hand_newton(sys: *NSys, ws: *converger.Workspace, x: [*]f64, t: f64, opts: *const converger.Options, out: *converger.Result) u16 {
+    out.* = old_newton.newton(sys, ws, x[0..sys.n], t, opts.*, NHook{}) catch |e| return @intFromError(e);
+    return 0;
+}
+
+const old_newton = struct {
+    const assert = std.debug.assert;
+    const inf = std.math.inf(f64);
+    const Execution = num.Execution;
+    const Options = converger.Options;
+    const Result = converger.Result;
+    const Workspace = converger.Workspace;
+    const force_g = converger.force_g;
+
+    const Reject = enum { converged, first_iter, delta, limited, flipped, residual, device, runaway };
+
+    fn Deref(comptime P: type) type {
+        return if (@typeInfo(P) == .pointer) @typeInfo(P).pointer.child else P;
+    }
+
+    fn executionOf(sys: anytype) Execution {
+        return if (comptime @hasField(Deref(@TypeOf(sys)), "solver_execution")) sys.solver_execution else .{};
+    }
+
+    fn newton(
+        sys: anytype,
+        ws: *Workspace,
+        x: []f64,
+        t: f64,
+        opts: Options,
+        hook: anytype,
+    ) !Result {
+        const S = Deref(@TypeOf(sys));
+        assert(ws.slv.n == sys.n);
+        assert(ws.dx.len >= sys.n);
+        assert(ws.x_old.len >= sys.n);
+        assert(x.len >= sys.n);
+        const slv = &ws.slv;
+        const dx = ws.dx;
+        const x_old = ws.x_old;
+        var iter: u16 = 0;
+        var init_fix = opts.init_fix;
+        var limit: f64 = x_plausible;
+        if (comptime @hasDecl(S, "beginSolve")) sys.beginSolve();
+        const prof = &ws.prof;
+
+        while (iter < opts.max_iter) : (iter += 1) {
+            if (comptime @hasDecl(S, "checkpoint")) if (iter != 0)
+                try sys.checkpoint(.{ .phase = .nonlinear, .completed = iter, .total = opts.max_iter });
+            if (comptime @hasDecl(S, "advanceIteration")) if (iter != 0) sys.advanceIteration(x_old);
+            prof.start();
+            hook.assemble(sys, x, t);
+            prof.lap(.eval);
+            const v = hook.vals(sys);
+            loadExtras(sys, v, x, opts);
+            if (iter == 0) limit = plausibleLimit(sys, x[0..sys.n], sys.rhs[0..sys.n], v);
+            var norm_f: f64 = 0; // read only by the traces
+            if (ws.knobs.newton_debug or ws.knobs.opdbg) {
+                norm_f = num.normInf(sys.rhs[0..sys.n]);
+            }
+            if (ws.knobs.newton_debug)
+                std.debug.print("  it={d} |F|={e} x={any}\n", .{ iter, norm_f, x[0..@min(sys.n, 8)] });
+            // Before the factor and solve, which may overwrite `v` and `rhs`.
+            const load_ok = if (comptime @hasDecl(S, "loadCheck")) sys.loadCheck(x, v, sys.rhs[0..sys.n], opts.reltol, opts.abstol) else true;
+            prof.lap(.load);
+            // The device LU (dev/solvers/gpu-lu.md) is bitwise this factor and
+            // solve; false leaves both to the host.
+            const on_device = if (comptime @hasDecl(S, "deviceSolve")) sys.deviceSolve(slv, v, dx) orelse false else false;
+            if (!on_device) {
+                slv.factor(v, executionOf(sys)) catch |e| {
+                    if (ws.knobs.opdbg) {
+                        var nan_cnt: usize = 0;
+                        for (v[0..sys.nnz]) |vi| {
+                            if (!std.math.isFinite(vi)) nan_cnt += 1;
+                        }
+                        const max_x = num.normInf(x[0..sys.n]);
+                        std.debug.print("  newton it={d} FACTOR FAIL {} nan_vals={d} max|x|={e:.3} |F|={e:.3}\n", .{ iter, e, nan_cnt, max_x, norm_f });
+                    }
+                    return e;
+                };
+                prof.lap(.factor);
+                slv.solveNeg(sys.rhs, dx);
+            }
+            prof.lap(.solve);
+            // The INITFIX pass does not stage: its converged iterate is not the
+            // answer, and staging there restarted a Newton-history limiter from a
+            // stale value, so the extra pass solved F(lim(x)) = 0 (#53).
+            const st = finalizeStep(sys, hook, x, dx, x_old, sys.rhs, v, iter, t, opts, limit, load_ok, !init_fix);
+            prof.lap(.update);
+            if (ws.knobs.opdbg) {
+                var fi: usize = 0;
+                var di: usize = 0;
+                for (0..sys.n) |i| {
+                    if (@abs(sys.rhs[i]) > @abs(sys.rhs[fi])) fi = i;
+                    if (@abs(dx[i]) > @abs(dx[di])) di = i;
+                }
+                const name_fi = sysNodeName(sys, @intCast(fi));
+                const name_di = sysNodeName(sys, @intCast(di));
+                std.debug.print("  newton it={d} |F|={e:.3}@{d}({s}) dx={e:.3}@{d}({s}) x={e:.3} scaled={e:.3} conv={} why={s}\n", .{ iter, norm_f, fi, name_fi, dx[di], di, name_di, x[di], st.scaled, st.converged, @tagName(st.why) });
+            }
+            if (st.converged and init_fix) {
+                init_fix = false;
+            } else if (st.converged) {
+                @memcpy(x[0..sys.n], x_old[0..sys.n]);
+                return .{ .converged = true, .iterations = iter + 1 };
+            }
+        }
+        return .{ .converged = false, .iterations = opts.max_iter };
+    }
+
+    fn loadExtras(sys: anytype, v: []f64, x: []const f64, opts: Options) void {
+        assert(x.len >= sys.n);
+        assert(v.len >= sys.nnz);
+        loadGmin(sys, v, sys.rhs[0..sys.n], x, opts);
+        for (opts.force) |f| {
+            v[f.slot] += force_g;
+            sys.rhs[f.row] += force_g * (x[f.row] - f.value);
+        }
+    }
+
+    fn residualGate(opts: Options, diag: f64, xi: f64) f64 {
+        const scale = @abs(diag);
+        // A zero diagonal is a voltage-defined branch row (V/E/H source): it is
+        // gated at scale 1, a loose 10*(reltol*|x| + vntol) that an exact
+        // solution's O(gain * eps) residual (a 1e9-gain E source reads 2.7e-8)
+        // still passes, but that refuses x = 0 when the only residual sits on
+        // such a row (#152).
+        const s = if (scale == 0) 1.0 else scale;
+        return @max(opts.residual_tol, 10.0 * s * (opts.reltol * @abs(xi) + opts.vntol));
+    }
+
+    fn sysNodeName(sys: anytype, idx: u32) []const u8 {
+        const S = Deref(@TypeOf(sys));
+        if (comptime @hasDecl(S, "nodeName")) return sys.nodeName(idx);
+        return "?";
+    }
+
+    const Step = struct { converged: bool, scaled: f64, why: Reject = .converged };
+
+    const x_plausible = 1e9;
+
+    fn plausibleLimit(sys: anytype, x: []const f64, f: []const f64, vals: []const f64) f64 {
+        var g: f64 = 1;
+        for (sys.diag_slots[0..sys.n]) |slot| g = @max(g, @abs(vals[slot]));
+        const scale = @min(@max(num.normInf(x), num.normInf(f) * g), 1e18);
+        // Negated, so a NaN start keeps the floor.
+        return if (!(1e3 * scale > x_plausible)) x_plausible else 1e3 * scale;
+    }
+
+    fn plausible(x: []const f64, limit: f64) bool {
+        const block = 64;
+        var i: usize = 0;
+        while (i + block <= x.len) : (i += block) {
+            var bad: u64 = 0;
+            for (x[i..][0..block]) |xi| bad |= @intFromBool(!(@abs(xi) <= limit));
+            if (bad != 0) return false;
+        }
+        var bad: u64 = 0;
+        for (x[i..]) |xi| bad |= @intFromBool(!(@abs(xi) <= limit));
+        return bad == 0;
+    }
+
+    fn residualMisses(opts: Options, residual: []const f64, x: []const f64, vals: []const f64, diag_slots: []const u32) usize {
+        assert(residual.len >= x.len);
+        assert(diag_slots.len >= x.len);
+        var misses: usize = 0;
+        for (residual[0..x.len], x, diag_slots[0..x.len]) |ri, xi, slot|
+            misses += @intFromBool(!(@abs(ri) <= residualGate(opts, vals[slot], xi)));
+        return misses;
+    }
+
+    fn finalizeStep(
+        sys: anytype,
+        hook: anytype,
+        x: []f64,
+        dx: []const f64,
+        x_old: []f64,
+        residual: []const f64,
+        vals: []const f64,
+        iter: u16,
+        t: f64,
+        opts: Options,
+        limit: f64,
+        load_ok: bool,
+        stage: bool,
+    ) Step {
+        const S = Deref(@TypeOf(sys));
+        const n = sys.n;
+        assert(residual.len >= n);
+        assert(vals.len >= sys.nnz);
+        const scaled = updateAndNorm(x[0..n], dx[0..n], x_old[0..n], sys.current_row[0..n], opts.reltol, opts.abstol, opts.vntol);
+
+        // The first-iterate and delta gates are already decided and neither
+        // reads the limiter, so the next assemble at the limited x is certain:
+        // a system that batches its limit pass with that eval may start both.
+        if (comptime @hasDecl(S, "evalFollows")) {
+            if ((iter == 0 or scaled >= 1.0) and iter + 1 < opts.max_iter) sys.evalFollows(x, t, false);
+        }
+
+        const limited = if (comptime @hasDecl(S, "applyLimits")) sys.applyLimits(x, x_old) else false;
+
+        if (limited) return .{ .converged = false, .scaled = scaled, .why = .limited };
+        if (iter == 0) return .{ .converged = false, .scaled = scaled, .why = .first_iter };
+        if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
+        if (!plausible(x[0..n], limit)) return .{ .converged = false, .scaled = scaled, .why = .runaway };
+        if (residualMisses(opts, residual[0..n], x[0..n], vals, sys.diag_slots[0..n]) != 0)
+            return .{ .converged = false, .scaled = scaled, .why = .residual };
+        if (!load_ok) return .{ .converged = false, .scaled = scaled, .why = .device };
+        if (comptime @hasDecl(S, "checkConvergence")) {
+            if (!sys.checkConvergence(x)) return .{ .converged = false, .scaled = scaled, .why = .device };
+        }
+        // Last, at the x_k `newton` publishes: staging per iterate re-entered every
+        // model core once per instance per iteration (18% of
+        // scaling/parallel_inverters_100), and devices whose core reads the
+        // staged latches (cswitch/vswitch hysteresis) saw F change mid-solve.
+        // A device that flips here forces one more iterate.
+        // Before staging: a device whose eval reads its staged history (LTRA
+        // appends the point it stages) would see this x twice (#53).
+        if (comptime @hasDecl(S, "certify") and S.certify) if (stage) sys.certifyPoint(hook, x_old[0..n], t, opts);
+        if (comptime @hasDecl(S, "updateStates")) if (stage) {
+            if (sys.updateStates(x_old[0..n])) |_| return .{ .converged = false, .scaled = scaled, .why = .flipped };
+        };
+        // The first-iterate and delta gates passed.
+        assert(iter > 0);
+        assert(!(scaled >= 1.0));
+        return .{ .converged = true, .scaled = scaled };
+    }
+
+    fn loadGmin(sys: anytype, vals: ?[]f64, rhs: ?[]f64, x: []const f64, opts: Options) void {
+        if (!(opts.gmin > 0)) return;
+        const gmin = opts.gmin;
+        const stamps = opts.gmin_stamps;
+        if (vals) |v| {
+            if (stamps.len > 0) {
+                for (stamps) |g| v[g.slot] += gmin;
+            } else for (sys.diag_slots[0..sys.n]) |slot| v[slot] += gmin;
+        }
+        if (rhs) |r| {
+            if (stamps.len > 0) {
+                for (stamps) |g| r[g.row] += gmin * x[g.col];
+            } else for (r[0..sys.n], x[0..sys.n]) |*ri, xi| ri.* += gmin * xi;
+        }
+    }
+
+    fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
+        // Up front, so the loop carries no per-slice bounds checks.
+        assert(dx.len >= x.len);
+        assert(x_old.len >= x.len);
+        assert(current_row.len >= x.len);
+        var worst: i64 = 0;
+        for (x, dx[0..x.len], x_old[0..x.len], current_row[0..x.len]) |*xi, d, *xoi, cur| {
+            const xo = xi.*;
+            const xn = xo + d;
+            xoi.* = xo;
+            xi.* = xn;
+            const tol = reltol * @max(@abs(xn), @abs(xo)) + (if (cur) abstol else vntol);
+            const finite = @abs(xn) < inf and @abs(d) < inf;
+            const q = @abs(d) / tol;
+            const score: f64 = if (!finite) inf else if (q == q) q else 0;
+            worst = @max(worst, @as(i64, @bitCast(score)));
+        }
+        const result: f64 = @bitCast(worst);
+        assert(!(result < 0));
+        return result;
+    }
+};

@@ -689,13 +689,13 @@ pub const Prof = struct {
     /// limiting and the convergence gates.
     pub const Phase = enum(u3) { eval, load, factor, solve, update };
 
-    fn start(p: *Prof) void {
+    pub fn start(p: *Prof) void {
         const io = p.io orelse return;
         p.last = .now(io, .awake);
         p.counts[0] += 1;
     }
 
-    fn lap(p: *Prof, phase: Phase) void {
+    pub fn lap(p: *Prof, phase: Phase) void {
         comptime assert(@typeInfo(Phase).@"enum".field_names.len == @typeInfo(@FieldType(Prof, "ns")).array.len);
         const io = p.io orelse return;
         const now: std.Io.Timestamp = .now(io, .awake);
