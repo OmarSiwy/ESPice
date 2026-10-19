@@ -10,12 +10,17 @@ const Kind = core.query.Kind;
 const nan = std.math.nan(f64);
 const assert = std.debug.assert;
 
+/// A sweep point's row in the variant table and its label (`rv=1k, ...`),
+/// which names its `.meas` block.
+pub const Point = struct { row: u32, label: []const u8 };
+
 /// Writes every card in `measures` that targets `analysis`, evaluated over
 /// `result`, under ngspice's heading. Writes nothing when none targets it.
 /// A card that names a missing vector or whose event never happens writes
-/// ngspice's error line to `err` and no value. A PARAM card reads NaN for
-/// any card past the 256th.
-pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysis: Kind, result: core.Result) Writer.Error!void {
+/// ngspice's error line to `err` and no value; at a sweep `point`, which
+/// the heading names, it also writes `name = NaN`. A PARAM card reads NaN
+/// for any card past the 256th.
+pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysis: Kind, result: core.Result, point: ?Point) Writer.Error!void {
     // As ngspice's measure.c, PARAM cards read every other card's result,
     // so those are evaluated first; each card still prints in deck order.
     // ponytail: a fixed table; cards past the 256th read as NaN to a PARAM.
@@ -26,26 +31,11 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
         if (!targets(m, analysis, result) or m.func == .param or i >= values.len) continue;
         values[i] = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
     }
-    var heading = false;
+    var headed = false;
     for (measures, 0..) |m, i| {
         if (!targets(m, analysis, result)) continue;
-        if (!heading) {
-            heading = true;
-            try out.print("\n  Measurements for {s} Analysis\n\n", .{switch (analysis) {
-                .tran => "Transient",
-                .tran_noise => "Transient Noise",
-                .ac => "AC",
-                .sp => "SP",
-                .fft => "FFT",
-                .dcmatch => "DC Mismatch",
-                .acmatch => "AC Mismatch",
-                .lstb => "Loop Stability",
-                .phasenoise => "Phase Noise",
-                .pnoise => "Periodic Time-Dependent Noise",
-                .op => "Operating Point",
-                else => "DC", // else: any other analysis takes the DC heading; a kind with its own title adds an arm
-            }});
-        }
+        if (!headed) try writeHeading(out, analysis, point);
+        headed = true;
         const w: Wave = .{ .result = result, .analysis = analysis, .values = &values };
         const value = evaluate(out, m, w) catch |e| switch (e) {
             error.WriteFailed => return error.WriteFailed,
@@ -58,8 +48,41 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
                 break :blk nan;
             },
         };
+        if (point != null and std.math.isNan(value)) try out.print("{s:<20}=  NaN\n", .{m.name});
         if (m.func == .param and i < values.len) values[i] = value;
     }
+}
+
+/// `print` for a sweep point whose `analysis` failed: its heading and
+/// `name = NaN` for every card of that analysis.
+pub fn printFailed(out: *Writer, measures: []const core.Measure, analysis: Kind, point: Point) Writer.Error!void {
+    var headed = false;
+    for (measures) |m| {
+        if (m.analysis != analysis) continue;
+        if (!headed) try writeHeading(out, analysis, point);
+        headed = true;
+        try out.print("{s:<20}=  NaN\n", .{m.name});
+    }
+}
+
+/// ngspice's block heading, naming the sweep point when there is one.
+fn writeHeading(out: *Writer, analysis: Kind, point: ?Point) Writer.Error!void {
+    try out.print("\n  Measurements for {s} Analysis", .{switch (analysis) {
+        .tran => "Transient",
+        .tran_noise => "Transient Noise",
+        .ac => "AC",
+        .sp => "SP",
+        .fft => "FFT",
+        .dcmatch => "DC Mismatch",
+        .acmatch => "AC Mismatch",
+        .lstb => "Loop Stability",
+        .phasenoise => "Phase Noise",
+        .pnoise => "Periodic Time-Dependent Noise",
+        .op => "Operating Point",
+        else => "DC", // else: any other analysis takes the DC heading; a kind with its own title adds an arm
+    }});
+    if (point) |p| try out.print(", point {d} ({s})", .{ p.row, p.label });
+    try out.writeAll("\n\n");
 }
 
 /// Evaluates every card in `measures` that targets `analysis` over
@@ -1381,7 +1404,7 @@ test "measurements match ngspice on a sampled ramp" {
     var err_buf: [256]u8 = undefined;
     var out: Writer = .fixed(&out_buf);
     var err: Writer = .fixed(&err_buf);
-    try print(&out, &err, &cards, .tran, result);
+    try print(&out, &err, &cards, .tran, result, null);
     // Rise 1 of v(a) happens in the first interval, where ngspice only
     // initialises its counters: it is measured on the next one, by
     // extrapolating that segment (exact here, as v(a) is a line).
@@ -1414,7 +1437,7 @@ test "a _CONT FIND or DERIV at a fixed AT= has one event and prints one line" {
     try std.testing.expectEqualSlices(f64, &.{ 1.5, -1 }, &values);
     var buf: [256]u8 = undefined;
     var out: Writer = .fixed(&buf);
-    try print(&out, &out, &cards, .tran, ramp);
+    try print(&out, &out, &cards, .tran, ramp, null);
     try std.testing.expectEqualStrings(
         \\
         \\  Measurements for Transient Analysis
@@ -1459,7 +1482,7 @@ test "every function over a result with no samples reads NaN or zero, never pani
             .avg, .min, .max, .min_at, .max_at, .pp, .check_slew, .check_forbid, .check_require, .check_level, .dout => try std.testing.expectEqual(0, v),
             else => try std.testing.expect(std.math.isNan(v)), // else: every other function has no value over no samples
         };
-        try print(&sink.writer, &sink.writer, &cards, .tran, result);
+        try print(&sink.writer, &sink.writer, &cards, .tran, result, null);
         var out: [3]f64 = undefined;
         try sample(.{ .vec = "v(a)" }, result, &.{ -1, 0, 9 }, &out);
         for (out) |v| try std.testing.expect(std.math.isNan(v));
@@ -1637,7 +1660,7 @@ test "crossings, windows, NaN samples and a single point match ngspice 45" {
         var buf: [2048]u8 = undefined;
         var out: Writer = .fixed(&buf);
         var sink: Writer.Discarding = .init(&.{});
-        try print(&out, &sink.writer, case[1], .tran, case[0]);
+        try print(&out, &sink.writer, case[1], .tran, case[0], null);
         const heading = "\n  Measurements for Transient Analysis\n\n";
         try std.testing.expectEqualStrings(heading, out.buffered()[0..heading.len]);
         try std.testing.expectEqualStrings(case[2], out.buffered()[heading.len..]);

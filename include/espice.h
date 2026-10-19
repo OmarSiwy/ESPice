@@ -304,8 +304,9 @@ typedef struct {
  * query id. Points are consecutive in request order: point k's analyses
  * follow point k-1's (an implicit operating point may sit between ids).
  * A point the template cannot hold (TOPOLOGY_CHANGED,
- * MODEL_BIN_NOT_FOUND, INVALID_PARAMETER) is appended already failed with
- * that reason. All-or-nothing. INVALID_ARGUMENT for count 0, a problem
+ * MODEL_BIN_NOT_FOUND, INVALID_PARAMETER, or OTHER with query error
+ * "PointRefused" when a device rejects its values as the circuit builds)
+ * is appended already failed with that reason. All-or-nothing. INVALID_ARGUMENT for count 0, a problem
  * created without live_params ("NoLiveParameters"), a deck whose analyses
  * already sweep (.step, .data, .alter, Monte Carlo: "SweptTemplate"),
  * an options flag above 1, or a negative or non-finite abort_after;

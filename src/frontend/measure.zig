@@ -114,9 +114,9 @@ pub fn parse(arena: std.mem.Allocator, text: []const u8, ctx: anytype, default: 
                 try stdParams(arena, &m.first, analysis, rest[1..k], ctx);
             }
             if (!hasAt(m.first)) {
-                // A bare FIND reads a one-row plot (`.dcmatch`, `.lstb` margins).
+                // A bare FIND reads a one-row plot (`.dcmatch`, `.lstb` margins, `.op`).
                 if (k == rest.len) {
-                    if (func != .find or (analysis != .dcmatch and analysis != .lstb)) return error.ParseError;
+                    if (func != .find or (analysis != .dcmatch and analysis != .lstb and analysis != .op)) return error.ParseError;
                 } else try when(arena, &m.second, analysis, rest[k + 1 ..], ctx);
             }
         },

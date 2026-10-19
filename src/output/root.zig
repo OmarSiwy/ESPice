@@ -15,6 +15,8 @@ pub const validateQuery = types.validateQuery;
 pub const write = @import("write.zig").write;
 /// `.meas` results in ngspice's print format.
 pub const printMeasures = @import("measure").print;
+pub const printFailedMeasures = @import("measure").printFailed;
+pub const MeasurePoint = @import("measure").Point;
 /// `.meas` statistics over Monte Carlo trials.
 pub const printMeasureStatistics = @import("measure").printStatistics;
 /// Every `.meas` card's value over one result; see `measure.evaluateAll`.

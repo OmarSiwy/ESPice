@@ -1201,6 +1201,25 @@ const abort_deck =
     \\
 ;
 
+/// The RC deck of the C points tests (src/tests/c_api.zig), here as a
+/// 16-row `.data` sweep for the CLI's `.meas` printout.
+const points_body =
+    \\points rc
+    \\.param rv=1k cv=1p
+    \\vdd vdd 0 1
+    \\rl vdd 0 1k
+    \\vin in 0 pwl(0 0 10p 1)
+    \\r1 in out rv
+    \\c1 out 0 cv
+    \\
+;
+const points_meas =
+    \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1
+    \\.meas tran e integ par('-v(in)*i(vin)') from=0 to=40n
+    \\.end
+    \\
+;
+
 test "points: abort_after fails only the points still unresolved past it, early_stop keeps the others' values" {
     const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = abort_deck, .origin = "abort.sp" } }, .live_params = &.{"rv"} });
     defer p.deinit();
@@ -1291,4 +1310,59 @@ test "points: tangent slopes of .tran measures match central finite differences"
     var own_why: [1]api.Problem.Reason = undefined;
     try p.point_measures(tangent, &names, &own, &own_why);
     try t.expectEqual(api.Problem.Reason.ok, own_why[0]);
+}
+
+test "Problem.append_points: measures equal the CLI's printed .meas of the same rows as a .data sweep" {
+    var rows: [16][2]f64 = undefined;
+    for (&rows, 0..) |*row, k| row.* = .{ 1e3 * @as(f64, @floatFromInt(k / 4 + 1)), 0.25e-12 * @as(f64, @floatFromInt(k % 4 + 1)) };
+    // The last row's RC = 1 us never reaches 0.5 V: tpd is NaN there.
+    rows[15] = .{ 1e6, 1e-12 };
+    var swept: std.ArrayList(u8) = .empty;
+    defer swept.deinit(t.allocator);
+    try swept.appendSlice(t.allocator, points_body ++ ".data pts rv cv\n");
+    for (rows) |p| try swept.print(t.allocator, "+ {e} {e}\n", .{ p[0], p[1] });
+    try swept.appendSlice(t.allocator, ".enddata\n.tran 10p 40n sweep data=pts\n" ++ points_meas);
+    const cli = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = swept.items, .origin = "data.sp" } }, .dialect = .hspice });
+    defer cli.deinit();
+    try cli.run_all();
+    var printed: std.Io.Writer.Allocating = .init(t.allocator);
+    defer printed.deinit();
+    var errors: std.Io.Writer.Allocating = .init(t.allocator);
+    defer errors.deinit();
+    try cli.print_measures(&printed.writer, &errors.writer);
+
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = points_body ++ ".tran 10p 40n\n" ++ points_meas, .origin = "points.sp" } },
+        .dialect = .hspice,
+        .live_params = &.{ "rv", "cv" },
+    });
+    defer p.deinit();
+    const first = try p.append_points(@ptrCast(&rows), rows.len, .{});
+    try p.run_all();
+    var values: [16 * 2]f64 = undefined;
+    var reasons: [16]api.Problem.Reason = undefined;
+    try p.point_measures(first, &.{ "tpd", "e" }, &values, &reasons);
+    try t.expectEqual(api.Problem.Reason.measure_unresolved, reasons[15]);
+
+    // Each block: a heading naming the row, then one line per card.
+    var lines = std.mem.splitScalar(u8, printed.written(), '\n');
+    var k: usize = 0;
+    var card: usize = 0;
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "Measurements for Transient Analysis") != null) {
+            var want: [64]u8 = undefined;
+            try t.expect(std.mem.indexOf(u8, line, try std.fmt.bufPrint(&want, "point {d} (", .{k})) != null);
+            k += 1;
+            card = 0;
+            continue;
+        }
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        var fields = std.mem.tokenizeScalar(u8, line[eq + 1 ..], ' ');
+        const got = try std.fmt.parseFloat(f64, fields.next().?);
+        const want = values[(k - 1) * 2 + card];
+        try t.expectEqualStrings(if (card == 0) "tpd" else "e", std.mem.trim(u8, line[0..eq], " "));
+        if (std.math.isNan(want)) try t.expect(std.math.isNan(got)) else try t.expectApproxEqRel(want, got, 1e-5);
+        card += 1;
+    }
+    try t.expectEqual(@as(usize, 16), k);
 }

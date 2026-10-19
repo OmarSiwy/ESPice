@@ -709,3 +709,385 @@ test "C points: copy_point_tangents gives d(measure)/d(live parameter), and NaN 
     points.struct_size = @offsetOf(c.espice_points_options, "tangent_step");
     try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, 1, &points, &plain));
 }
+
+// Points API (include/espice.h, design doc dev/research/lane-batched-simulation.md
+// §10 and the §11 phase 0 gate).
+
+/// An RC step response: v(in) ramps to 1 V in 10 ps through r1 = rv into
+/// c1 = cv; vdd holds 1 V across rl. tpd is RC ln 2 shifted by the ramp,
+/// e the energy vin delivers (about cv · 1 V²), leak vdd's current (-1 mA).
+/// Bare parameter names, which both dialects read.
+const rc_deck =
+    \\points rc
+    \\.param rv=1k cv=1p
+    \\vdd vdd 0 1
+    \\rl vdd 0 1k
+    \\vin in 0 pwl(0 0 10p 1)
+    \\r1 in out rv
+    \\c1 out 0 cv
+    \\.tran 10p 40n
+    \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1
+    \\.meas tran e integ par('-v(in)*i(vin)') from=0 to=40n
+    \\.meas op leak find i(vdd)
+    \\.end
+    \\
+;
+const rc_live = [_]c.espice_bytes{ .{ .data = "rv", .len = 2 }, .{ .data = "cv", .len = 2 } };
+const rc_names = [_]c.espice_bytes{ .{ .data = "tpd", .len = 3 }, .{ .data = "E", .len = 1 }, .{ .data = "leak", .len = 4 } };
+
+/// The 16 (rv, cv) points of the gate: a 4 x 4 grid.
+fn rcGrid() [16][2]f64 {
+    var rows: [16][2]f64 = undefined;
+    for (&rows, 0..) |*row, k| row.* = .{ 1e3 * @as(f64, @floatFromInt(k / 4 + 1)), 0.25e-12 * @as(f64, @floatFromInt(k % 4 + 1)) };
+    return rows;
+}
+
+/// A problem over `deck` with `live` declared live.
+fn createLive(deck: []const u8, live: []const c.espice_bytes) !*c.espice_problem {
+    return createDialect(deck, live, c.ESPICE_NGSPICE);
+}
+
+fn createDialect(deck: []const u8, live: []const c.espice_bytes, dialect: u32) !*c.espice_problem {
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.dialect = dialect;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = live.ptr;
+    options.live_param_count = live.len;
+    options.max_parallel = 4;
+    var handle: ?*c.espice_problem = null;
+    var diagnostic: [64]u8 = @splat(0);
+    std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_create(&options, &handle, &diagnostic, diagnostic.len)) catch |err| {
+        std.debug.print("create: {s}\n", .{std.mem.sliceTo(&diagnostic, 0)});
+        return err;
+    };
+    return handle.?;
+}
+
+/// Appends `rows` as points, runs them, and copies `names` of each into
+/// `out` and its reason into `reasons`.
+fn runPoints(h: *c.espice_problem, rows: []const f64, count: usize, names: []const c.espice_bytes, out: []f64, reasons: []u32) !void {
+    var first: u32 = c.ESPICE_NO_QUERY;
+    errdefer printError(h);
+    try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_append_points(h, rows.ptr, count, null, &first));
+    _ = c.espice_run_all(h);
+    try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_copy_point_measures(h, first, count, names.ptr, names.len, out.ptr, reasons.ptr));
+}
+
+fn printError(h: *c.espice_problem) void {
+    var buf: [64]u8 = @splat(0);
+    var needed: usize = 0;
+    _ = c.espice_error_message(h, &buf, buf.len, &needed);
+    std.debug.print("espice_error_message: {s}\n", .{std.mem.sliceTo(&buf, 0)});
+}
+
+fn expectSameBits(want: []const f64, got: []const f64) !void {
+    try std.testing.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
+}
+
+test "C points: 16 points measure tpd, energy and leakage analytically, and match the .data sweep bit for bit" {
+    const t = std.testing;
+    const grid = rcGrid();
+    const rows: []const f64 = @ptrCast(&grid);
+    // HSPICE, the dialect of the .data deck below.
+    const h = try createDialect(rc_deck, &rc_live, c.ESPICE_HSPICE);
+    defer _ = c.espice_destroy(h);
+    var lane: u32 = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_lane_width(h, &lane));
+    try t.expectEqual(@as(u32, 1), lane);
+    var got: [16 * 3]f64 = undefined;
+    var reasons: [16]u32 = undefined;
+    try runPoints(h, rows, 16, &rc_names, &got, &reasons);
+    for (grid, 0..) |p, k| {
+        try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), reasons[k]);
+        // After a ramp of T, v(out) = 1 - (RC/T)(e^(T/RC) - 1) e^(-t/RC).
+        const rc = p[0] * p[1];
+        const ramp: f64 = 10e-12;
+        const tpd = rc * @log(2 * rc / ramp * (@exp(ramp / rc) - 1)) - ramp / 2;
+        try t.expectApproxEqRel(tpd, got[k * 3], 1e-3);
+        // The source charges c1 through the ramp, then steps the rest.
+        const a = 1 / ramp;
+        const v_end = a * (ramp - rc * (1 - @exp(-ramp / rc)));
+        const energy = p[1] * (a * a * (ramp * ramp / 2 - rc * rc + rc * (ramp + rc) * @exp(-ramp / rc)) + 1 - v_end);
+        try t.expectApproxEqRel(energy, got[k * 3 + 1], 1e-3);
+        try t.expectApproxEqRel(-1e-3, got[k * 3 + 2], 1e-9);
+    }
+
+    // The same deck sweeping the same rows through .data.
+    var swept: std.ArrayList(u8) = .empty;
+    defer swept.deinit(t.allocator);
+    try swept.appendSlice(t.allocator, rc_deck[0 .. std.mem.indexOf(u8, rc_deck, ".tran").?]);
+    try swept.appendSlice(t.allocator, ".data pts rv cv\n");
+    for (grid) |p| try swept.print(t.allocator, "+ {e} {e}\n", .{ p[0], p[1] });
+    try swept.appendSlice(t.allocator, ".enddata\n.tran 10p 40n sweep data=pts\n");
+    try swept.appendSlice(t.allocator, rc_deck[std.mem.indexOf(u8, rc_deck, ".meas").?..]);
+    const handle = try createDialect(swept.items, &.{}, c.ESPICE_HSPICE);
+    defer _ = c.espice_destroy(handle);
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(handle));
+    // A swept deck's points start at its first requested query.
+    var count: u32 = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(handle, &count));
+    const first = for (0..count) |id| {
+        var info: c.espice_query_info = undefined;
+        try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_get_query_info(handle, @intCast(id), &info));
+        if (info.requested == 1) break @as(u32, @intCast(id));
+    } else return error.NoRequestedQuery;
+    var data: [16 * 3]f64 = undefined;
+    var data_reasons: [16]u32 = undefined;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_copy_point_measures(handle, first, 16, &rc_names, 3, &data, &data_reasons));
+    try t.expectEqualSlices(u32, &reasons, &data_reasons);
+    try expectSameBits(&got, &data);
+}
+
+test "C points: rows do not depend on order, batching or the other points" {
+    const grid = rcGrid();
+    var want: [16 * 3]f64 = undefined;
+    var reasons: [16]u32 = undefined;
+    {
+        const h = try createLive(rc_deck, &rc_live);
+        defer _ = c.espice_destroy(h);
+        try runPoints(h, @ptrCast(&grid), 16, &rc_names, &want, &reasons);
+    }
+    // Shuffled: a fixed permutation.
+    var order: [16]usize = undefined;
+    for (&order, 0..) |*o, k| o.* = (k * 7 + 3) % 16;
+    var shuffled: [16][2]f64 = undefined;
+    for (order, 0..) |o, k| shuffled[k] = grid[o];
+    var got: [16 * 3]f64 = undefined;
+    {
+        const h = try createLive(rc_deck, &rc_live);
+        defer _ = c.espice_destroy(h);
+        try runPoints(h, @ptrCast(&shuffled), 16, &rc_names, &got, &reasons);
+    }
+    for (order, 0..) |o, k| try expectSameBits(want[o * 3 ..][0..3], got[k * 3 ..][0..3]);
+    // Appended in calls of 5, 1 and 10 to one problem, running between.
+    {
+        const h = try createLive(rc_deck, &rc_live);
+        defer _ = c.espice_destroy(h);
+        var at: usize = 0;
+        for ([_]usize{ 5, 1, 10 }) |n| {
+            try runPoints(h, @ptrCast(grid[at..][0..n]), n, &rc_names, got[at * 3 ..][0 .. n * 3], reasons[at..][0..n]);
+            at += n;
+        }
+        try expectSameBits(&want, &got);
+    }
+    // Each point alone on its own problem.
+    for (grid, 0..) |p, k| {
+        const h = try createLive(rc_deck, &rc_live);
+        defer _ = c.espice_destroy(h);
+        try runPoints(h, &p, 1, &rc_names, got[k * 3 ..][0..3], reasons[k..][0..1]);
+        try expectSameBits(want[k * 3 ..][0..3], got[k * 3 ..][0..3]);
+    }
+}
+
+/// A deck whose `bad` point fails with `reason` (a measure-level reason
+/// when `card` names the one measure it leaves NaN; null for a failed
+/// point, all NaN), while `good` runs.
+const ReasonCase = struct {
+    deck: []const u8,
+    live: []const []const u8,
+    names: []const []const u8,
+    good: []const f64,
+    bad: []const f64,
+    reason: u32,
+    card: ?usize = null,
+};
+
+const reason_cases = [_]ReasonCase{
+    // A non-finite value.
+    .{ .deck = rc_deck, .live = &.{ "rv", "cv" }, .names = &.{ "tpd", "e", "leak" }, .good = &.{ 1e3, 1e-12 }, .bad = &.{ std.math.nan(f64), 1e-12 }, .reason = c.ESPICE_REASON_INVALID_PARAMETER },
+    .{ .deck = rc_deck, .live = &.{ "rv", "cv" }, .names = &.{ "tpd", "e", "leak" }, .good = &.{ 1e3, 1e-12 }, .bad = &.{ 1e3, std.math.inf(f64) }, .reason = c.ESPICE_REASON_INVALID_PARAMETER },
+    // RC = 1 us: v(out) never reaches 0.5 V in 40 ns; e and leak still resolve.
+    .{ .deck = rc_deck, .live = &.{ "rv", "cv" }, .names = &.{ "tpd", "e", "leak" }, .good = &.{ 1e3, 1e-12 }, .bad = &.{ 1e6, 1e-12 }, .reason = c.ESPICE_REASON_MEASURE_UNRESOLVED, .card = 0 },
+    // A top-level .if flips with sel.
+    .{
+        .deck = "if flip\n.param sel=0 rv=1k\nv1 in 0 1\nr1 in out {rv}\n.if (sel == 0)\nr2 out 0 1k\n.else\nr2 out 0 3k\nr3 out 0 3k\n.endif\n.op\n.meas op vo find v(out)\n.end\n",
+        .live = &.{ "sel", "rv" }, .names = &.{"vo"}, .good = &.{ 0, 2e3 }, .bad = &.{ 1, 2e3 }, .reason = c.ESPICE_REASON_TOPOLOGY_CHANGED,
+    },
+    // No bin holds W = 5u.
+    .{
+        .deck = "bins\n.param wn=1u\nv1 d 0 1\nv2 g 0 2\nm1 d g 0 0 nm l=1u w={wn}\n" ++
+            ".model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5\n" ++
+            ".model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=1.7\n.op\n.meas op id find i(v1)\n.end\n",
+        .live = &.{"wn"}, .names = &.{"id"}, .good = &.{2e-6}, .bad = &.{5e-6}, .reason = c.ESPICE_REASON_MODEL_BIN_NOT_FOUND,
+    },
+    // v/rb = 1 + v^2 has a root only for rb <= 0.5.
+    .{
+        .deck = "no root\n.param rb=0.1\nb1 0 n i=1+v(n)*v(n)\nr1 n 0 {rb}\n.op\n.meas op vn find v(n)\n.end\n",
+        .live = &.{"rb"}, .names = &.{"vn"}, .good = &.{0.1}, .bad = &.{1e3}, .reason = c.ESPICE_REASON_NO_CONVERGENCE,
+    },
+    // The same once time passes 1 ns at k = 1e9: the transient loses its root.
+    .{
+        .deck = "lost root\n.param k=0\nb1 0 n i=time*k+v(n)*v(n)\nr1 n 0 1k\n.tran 10p 2n\n.meas tran vn find v(n) at=0.5n\n.end\n",
+        .live = &.{"k"}, .names = &.{"vn"}, .good = &.{0}, .bad = &.{1e9}, .reason = c.ESPICE_REASON_TIMESTEP_TOO_SMALL,
+    },
+    // v(b) = g v(a) and v(a) = v(b) leave both undetermined at g = 1; the
+    // AC matrix is singular (the operating point still solves).
+    .{
+        .deck = "singular\n.param g=0.5\nv1 in 0 1 ac 1\nr1 in 0 1k\ne1 b 0 a 0 {g}\ne2 a 0 b 0 1\nr2 a in 1k\nr3 b 0 1k\n.ac lin 3 500 2k\n.meas ac vb find vm(b) at=1k\n.end\n",
+        .live = &.{"g"}, .names = &.{"vb"}, .good = &.{0.5}, .bad = &.{1}, .reason = c.ESPICE_REASON_SINGULAR_MATRIX,
+    },
+    // The txl Padé fit fails and the model $fatal's.
+    .{
+        .deck = "refused fit\n.param lv=1u cl=1p\nv1 a 0 dc 1\nr1 b 0 50\ny1 a 0 b 0 line\n.model line txl r=1 l={lv} g=0 c={cl} length=1\n.op\n.meas op vb find v(b)\n.end\n",
+        .live = &.{ "lv", "cl" }, .names = &.{"vb"}, .good = &.{ 1e-6, 1e-12 }, .bad = &.{ 1e200, 1e-200 }, .reason = c.ESPICE_REASON_DEVICE_REFUSED,
+    },
+    // A lossless txl (r = 0) has no fit: UnsupportedTransmissionLineParameters.
+    .{
+        .deck = "lossless\n.param rv=1\nv1 a 0 dc 1\nr1 b 0 50\ny1 a 0 b 0 line\n.model line txl r={rv} l=1n g=0 c=1p length=1\n.op\n.meas op vb find v(b)\n.end\n",
+        .live = &.{"rv"}, .names = &.{"vb"}, .good = &.{1}, .bad = &.{0}, .reason = c.ESPICE_REASON_OTHER,
+    },
+};
+
+fn bytes(names: []const []const u8, out: []c.espice_bytes) []const c.espice_bytes {
+    for (names, out[0..names.len]) |n, *b| b.* = .{ .data = n.ptr, .len = n.len };
+    return out[0..names.len];
+}
+
+test "C points: each reason from a deck built for it; NaN where it fails, the other points untouched" {
+    const t = std.testing;
+    for (reason_cases, 0..) |case, n| {
+        errdefer std.debug.print("reason case {d}: {s}\n", .{ n, case.deck });
+        var live_buf: [4]c.espice_bytes = undefined;
+        var name_buf: [4]c.espice_bytes = undefined;
+        const live = bytes(case.live, &live_buf);
+        const names = bytes(case.names, &name_buf);
+        const p = live.len;
+        const m = names.len;
+        // good, bad, good on one problem; good alone on another.
+        var rows: [12]f64 = undefined;
+        @memcpy(rows[0..p], case.good);
+        @memcpy(rows[p..][0..p], case.bad);
+        @memcpy(rows[2 * p ..][0..p], case.good);
+        var got: [12]f64 = undefined;
+        var reasons: [3]u32 = undefined;
+        const h = try createLive(case.deck, live);
+        defer _ = c.espice_destroy(h);
+        try runPoints(h, &rows, 3, names, got[0 .. 3 * m], &reasons);
+        try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), reasons[0]);
+        try t.expectEqual(case.reason, reasons[1]);
+        try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), reasons[2]);
+        for (got[m..][0..m], 0..) |v, k| {
+            const nan = case.card == null or case.card == k;
+            try t.expectEqual(nan, std.math.isNan(v));
+        }
+        var alone: [4]f64 = undefined;
+        var alone_reason: [1]u32 = undefined;
+        const g = try createLive(case.deck, live);
+        defer _ = c.espice_destroy(g);
+        try runPoints(g, case.good, 1, names, alone[0..m], &alone_reason);
+        try expectSameBits(alone[0..m], got[0..m]);
+        try expectSameBits(alone[0..m], got[2 * m ..][0..m]);
+        for (alone[0..m]) |v| try t.expect(std.math.isFinite(v));
+    }
+}
+
+test "C points: a measure over a missing vector or analysis is MEASURE_NOT_FOUND at every point" {
+    const t = std.testing;
+    const deck = "no ac\n.param rv=1k\nv1 in 0 dc 1 ac 1\nr1 in out {rv}\nr2 out 0 1k\n.op\n.meas op vo find v(out)\n" ++
+        ".meas ac g find vm(out) at=1k\n.meas op none find v(nowhere)\n.end\n";
+    const h = try createLive(deck, rc_live[0..1]);
+    defer _ = c.espice_destroy(h);
+    for ([_][]const u8{ "g", "none" }) |missing| {
+        const names = [_]c.espice_bytes{ .{ .data = "vo", .len = 2 }, .{ .data = missing.ptr, .len = missing.len } };
+        var out: [4]f64 = undefined;
+        var reasons: [2]u32 = undefined;
+        try runPoints(h, &.{ 1e3, 3e3 }, 2, &names, &out, &reasons);
+        try t.expectEqualSlices(u32, &.{ c.ESPICE_REASON_MEASURE_NOT_FOUND, c.ESPICE_REASON_MEASURE_NOT_FOUND }, &reasons);
+        try t.expectApproxEqRel(0.5, out[0], 1e-12);
+        try t.expectApproxEqRel(0.25, out[2], 1e-12);
+        try t.expect(std.math.isNan(out[1]) and std.math.isNan(out[3]));
+    }
+}
+
+test "C points: a failed point's queries report their error" {
+    const t = std.testing;
+    const h = try createLive(rc_deck, &rc_live);
+    defer _ = c.espice_destroy(h);
+    const rows = [_]f64{ std.math.nan(f64), 1e-12 };
+    var first: u32 = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_append_points(h, &rows, 1, null, &first));
+    var info: c.espice_query_info = undefined;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_get_query_info(h, first, &info));
+    try t.expectEqual(@as(u32, c.ESPICE_QUERY_FAILED), info.status);
+    var name: [64]u8 = undefined;
+    var needed: usize = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_error_message(h, first, &name, name.len, &needed));
+    try t.expectEqualStrings("NonFiniteParameter", std.mem.sliceTo(&name, 0));
+}
+
+test "C points: argument errors change nothing" {
+    const t = std.testing;
+    const invalid: u32 = c.ESPICE_INVALID_ARGUMENT;
+    const h = try createLive(rc_deck, &rc_live);
+    defer _ = c.espice_destroy(h);
+    var before: u32 = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(h, &before));
+    const row = [_]f64{ 1e3, 1e-12 };
+    var first: u32 = 77;
+    try t.expectEqual(invalid, c.espice_append_points(h, &row, 0, null, &first));
+    try t.expectEqual(invalid, c.espice_append_points(h, null, 1, null, &first));
+    try t.expectEqual(invalid, c.espice_append_points(h, &row, 1, null, null));
+    var o: c.espice_points_options = std.mem.zeroes(c.espice_points_options);
+    o.struct_size = @sizeOf(c.espice_points_options);
+    for (0..6) |case| {
+        var bad = o;
+        switch (case) {
+            0 => bad.measures_only = 2,
+            1 => bad.early_stop = 2,
+            2 => bad.warm_start = 2,
+            3 => bad.abort_after = -1,
+            4 => bad.abort_after = std.math.nan(f64),
+            5 => bad.abort_after = std.math.inf(f64),
+            else => unreachable,
+        }
+        try t.expectEqual(invalid, c.espice_append_points(h, &row, 1, &bad, &first));
+    }
+    var short = o;
+    short.struct_size = @offsetOf(c.espice_points_options, "abort_after");
+    try t.expectEqual(@as(u32, c.ESPICE_ABI_MISMATCH), c.espice_append_points(h, &row, 1, &short, &first));
+    try t.expectEqual(@as(u32, 77), first);
+    var after: u32 = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(h, &after));
+    try t.expectEqual(before, after);
+    // Valid options, every flag set, are accepted.
+    o = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 1, .abort_after = 1 };
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_append_points(h, &row, 1, &o, &first));
+
+    // Unfinished queries, an unknown measure, a bad first_id.
+    var out: [3]f64 = @splat(-1);
+    var reasons: [1]u32 = .{99};
+    try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), c.espice_copy_point_measures(h, first, 1, &rc_names, 3, &out, &reasons));
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(h));
+    const unknown = [_]c.espice_bytes{.{ .data = "nope", .len = 4 }};
+    try t.expectEqual(invalid, c.espice_copy_point_measures(h, first, 1, &unknown, 1, &out, &reasons));
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_QUERY), c.espice_copy_point_measures(h, first, 2, &rc_names, 3, &out, &reasons));
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_QUERY), c.espice_copy_point_measures(h, c.ESPICE_NO_QUERY, 1, &rc_names, 3, &out, &reasons));
+    try t.expectEqual(@as(u32, c.ESPICE_INVALID_QUERY), c.espice_copy_point_measures(h, after + 1000, 1, &rc_names, 3, &out, &reasons));
+    try t.expectEqual(invalid, c.espice_copy_point_measures(h, first, 1, null, 3, &out, &reasons));
+    try t.expectEqual(invalid, c.espice_copy_point_measures(h, first, 1, &rc_names, 3, null, &reasons));
+    try t.expectEqual(invalid, c.espice_copy_point_measures(h, first, 1, &rc_names, 3, &out, null));
+    try t.expectEqualSlices(f64, &.{ -1, -1, -1 }, &out);
+    try t.expectEqual(@as(u32, 99), reasons[0]);
+    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_copy_point_measures(h, first, 1, &rc_names, 3, &out, &reasons));
+    try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), reasons[0]);
+    try t.expectEqual(invalid, c.espice_lane_width(h, null));
+
+    // No live parameters; a template that sweeps already.
+    const plain = try createLive(rc_deck, &.{});
+    defer _ = c.espice_destroy(plain);
+    try t.expectEqual(invalid, c.espice_append_points(plain, null, 1, null, &first));
+    try expectDiagnostic(plain, "NoLiveParameters");
+    const stepped = try createLive("stepped\n.param rv=1k cv=1p\nv1 in 0 1\nr1 in out {rv}\nc1 out 0 {cv}\n.step param cv list 1p 2p\n.op\n.end\n", rc_live[0..1]);
+    defer _ = c.espice_destroy(stepped);
+    try t.expectEqual(invalid, c.espice_append_points(stepped, &row, 1, null, &first));
+    try expectDiagnostic(stepped, "SweptTemplate");
+}
+
+fn expectDiagnostic(h: *c.espice_problem, want: []const u8) !void {
+    var buf: [64]u8 = undefined;
+    var needed: usize = 0;
+    try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_error_message(h, &buf, buf.len, &needed));
+    try std.testing.expectEqualStrings(want, std.mem.sliceTo(&buf, 0));
+}
