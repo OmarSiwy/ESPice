@@ -992,18 +992,83 @@ pub const Tuning = struct {
     /// `values` have the same length.
     pub fn set(t: *Tuning, nominal: *const device.Circuit, current: core.Variants, names: []const []const u8, values: []const f64) !Change {
         std.debug.assert(names.len == values.len);
-        std.debug.assert(t.template < t.templates.items.len);
-        const p = &t.planner;
-        const nl = p.nl;
         @memcpy(t.next, t.values);
         for (names, values) |name, v| {
             if (!std.math.isFinite(v)) return error.InvalidArgument;
-            const k = for (nl.live.names, 0..) |live, k| {
-                const same = if (nl.deck.dialect == .spectre) std.mem.eql(u8, live, name) else std.ascii.eqlIgnoreCase(live, name);
-                if (same) break k;
-            } else return error.UnknownParameter;
+            t.next[try t.index(name)] = v;
+        }
+        return t.commit(nominal, current);
+    }
+
+    /// `set` with the names already resolved by `index`: `ks[i]` is the
+    /// live slot of `values[i]`, so a point costs no name lookups.
+    pub fn setAt(t: *Tuning, nominal: *const device.Circuit, current: core.Variants, ks: []const u32, values: []const f64) !Change {
+        std.debug.assert(ks.len == values.len);
+        @memcpy(t.next, t.values);
+        for (ks, values) |k, v| {
+            if (!std.math.isFinite(v)) return error.InvalidArgument;
             t.next[k] = v;
         }
+        return t.commit(nominal, current);
+    }
+
+    /// The live slot `setAt` takes for `name`, compared as `set` does.
+    /// `UnknownParameter` for a name that is not live.
+    pub fn index(t: *const Tuning, name: []const u8) !u32 {
+        const nl = t.planner.nl;
+        for (nl.live.names, 0..) |live, k| {
+            const same = if (nl.deck.dialect == .spectre) std.mem.eql(u8, live, name) else std.ascii.eqlIgnoreCase(live, name);
+            if (same) return @intCast(k);
+        }
+        return error.UnknownParameter;
+    }
+
+    /// Appends a row with no writes, labelled `refused`, and returns the
+    /// table: the row of a point `set` refused, so its queries stay its
+    /// own (`Problem.append_points`). The values and templates are untouched.
+    pub fn refusedRow(t: *Tuning, current: core.Variants) !core.Variants {
+        const p = &t.planner;
+        try t.seed(current);
+        try t.labels.ensureUnusedCapacity(p.sim, 1);
+        try t.temps.ensureUnusedCapacity(p.sim, 1);
+        try t.axes.ensureUnusedCapacity(p.sim, 1);
+        try t.starts.ensureUnusedCapacity(p.sim, 1);
+        t.labels.appendAssumeCapacity("refused");
+        t.temps.appendAssumeCapacity(null);
+        t.axes.appendAssumeCapacity(0);
+        t.starts.appendAssumeCapacity(@intCast(t.refs.items.len));
+        return t.table();
+    }
+
+    /// Copies the deck's table on the first row appended.
+    fn seed(t: *Tuning, current: core.Variants) !void {
+        if (t.seeded) return;
+        const p = &t.planner;
+        try t.labels.appendSlice(p.sim, current.labels);
+        try t.temps.appendSlice(p.sim, current.temp_c);
+        try t.axes.appendSlice(p.sim, current.axis);
+        try t.starts.appendSlice(p.sim, if (current.starts.len == 0) &.{0} else current.starts);
+        try t.refs.appendSlice(p.sim, current.refs);
+        try t.write_values.appendSlice(p.sim, current.values);
+        t.seeded = true;
+    }
+
+    fn table(t: *const Tuning) core.Variants {
+        return .{
+            .labels = t.labels.items,
+            .temp_c = t.temps.items,
+            .axis = t.axes.items,
+            .starts = t.starts.items,
+            .refs = t.refs.items,
+            .values = t.write_values.items,
+        };
+    }
+
+    /// `set` once `t.next` holds the point's values.
+    fn commit(t: *Tuning, nominal: *const device.Circuit, current: core.Variants) !Change {
+        std.debug.assert(t.template < t.templates.items.len);
+        const p = &t.planner;
+        const nl = p.nl;
         var label: std.ArrayList(u8) = .empty;
         for (nl.tunable, 0..) |k, i| try label.print(p.sim, "{s}{s}={d}", .{ if (i == 0) "" else ", ", nl.live.names[k], t.next[k] });
         if (t.planned != t.template) try t.open(t.template, nominal);
@@ -1017,15 +1082,7 @@ pub const Tuning = struct {
         const pt: Point = .{ .label = label.items, .axis = 0, .live = t.next, .trial = t.trial };
         // Room for the row and a template first, so nothing fails after
         // the template list grows.
-        if (!t.seeded) {
-            try t.labels.appendSlice(p.sim, current.labels);
-            try t.temps.appendSlice(p.sim, current.temp_c);
-            try t.axes.appendSlice(p.sim, current.axis);
-            try t.starts.appendSlice(p.sim, if (current.starts.len == 0) &.{0} else current.starts);
-            try t.refs.appendSlice(p.sim, current.refs);
-            try t.write_values.appendSlice(p.sim, current.values);
-            t.seeded = true;
-        }
+        try t.seed(current);
         try t.labels.ensureUnusedCapacity(p.sim, 1);
         try t.temps.ensureUnusedCapacity(p.sim, 1);
         try t.axes.ensureUnusedCapacity(p.sim, 1);
@@ -1071,14 +1128,7 @@ pub const Tuning = struct {
         t.axes.appendAssumeCapacity(0);
         t.starts.appendAssumeCapacity(@intCast(t.refs.items.len));
         @memcpy(t.values, t.next);
-        return .{ .template = t.template, .built = built, .variants = .{
-            .labels = t.labels.items,
-            .temp_c = t.temps.items,
-            .axis = t.axes.items,
-            .starts = t.starts.items,
-            .refs = t.refs.items,
-            .values = t.write_values.items,
-        } };
+        return .{ .template = t.template, .built = built, .variants = t.table() };
     }
 };
 

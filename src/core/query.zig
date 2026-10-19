@@ -650,6 +650,22 @@ pub const Tran = struct {
     /// does per sweep point. Each adds a block of the same time points after
     /// the waveform's own. Not with `uic`, `snapshot` or `sources_at_zero`.
     tangents: []const u32 = &.{},
+    /// What `Problem.append_points` asked of this point.
+    point: PointOptions = .{},
+};
+
+/// The points API's per-point requests (`Problem.append_points`). Accepted
+/// and carried on each point's transient; the engine does not act on them
+/// yet, so a point's results are the same with any of them.
+pub const PointOptions = struct {
+    /// Record no waveform, only `.meas` results.
+    measures_only: bool = false,
+    /// End the transient once every `.meas` card has resolved.
+    early_stop: bool = false,
+    /// Start the operating point from the template's nominal one.
+    warm_start: bool = false,
+    /// Seconds past which an unresolved `.meas` aborts the point; 0 is off.
+    abort_after: f64 = 0,
 };
 
 /// Transient noise: a transient with sampled noise sources, or the noise

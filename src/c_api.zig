@@ -36,6 +36,20 @@ comptime {
     pin(api.Format, .{});
     pin(api.Status, .{ .failed = "QUERY_FAILED" });
     pin(api.requests.Kind, .{});
+    pin(api.Problem.Reason, .{
+        .ok = "REASON_OK",
+        .no_convergence = "REASON_NO_CONVERGENCE",
+        .timestep_too_small = "REASON_TIMESTEP_TOO_SMALL",
+        .singular_matrix = "REASON_SINGULAR_MATRIX",
+        .measure_not_found = "REASON_MEASURE_NOT_FOUND",
+        .measure_unresolved = "REASON_MEASURE_UNRESOLVED",
+        .aborted = "REASON_ABORTED",
+        .model_bin_not_found = "REASON_MODEL_BIN_NOT_FOUND",
+        .topology_changed = "REASON_TOPOLOGY_CHANGED",
+        .invalid_parameter = "REASON_INVALID_PARAMETER",
+        .device_refused = "REASON_DEVICE_REFUSED",
+        .other = "REASON_OTHER",
+    });
     pin(@FieldType(@typeInfo(@FieldType(api.QueryInfo, "progress")).optional.child, "phase"), .{ .dc = "DC_PHASE" });
 }
 
@@ -89,6 +103,16 @@ const CreateOptions = extern struct {
 const DisplayFn = fn (text: [*]const u8, len: usize, user: ?*anyopaque) callconv(.c) void;
 comptime {
     if (@sizeOf(CreateOptions) != @sizeOf(header.espice_create_options)) @compileError("espice_create_options drifted from CreateOptions");
+}
+const PointsOptions = extern struct {
+    struct_size: u32,
+    measures_only: u32,
+    early_stop: u32,
+    warm_start: u32,
+    abort_after: f64,
+};
+comptime {
+    if (@sizeOf(PointsOptions) != @sizeOf(header.espice_points_options)) @compileError("espice_points_options drifted from PointsOptions");
 }
 const Scope = extern struct { kind: u32, id: u32 };
 const Progress = extern struct { phase: u32, reserved: u32 = 0, completed: u64, total: u64 };
@@ -543,6 +567,46 @@ export fn espice_query_error_message(handle: ?*Token, id: u32, buffer: ?[*]u8, c
     return copyString(h, if (q.failure) |err| @errorName(err) else "", buffer, capacity, required);
 }
 
+export fn espice_append_points(handle: ?*Token, values: ?[*]const f64, count: usize, options: ?*const PointsOptions, first_id: ?*u32) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
+    const first = first_id orelse return h.fail(error.InvalidArgument);
+    const len = std.math.mul(usize, count, h.problem.live.len) catch |err| return h.fail(err);
+    const rows = constSlice(f64, values, len) catch |err| return h.fail(err);
+    var config: api.requests.PointOptions = .{};
+    if (options) |o| {
+        // Fields appended later are read only when `struct_size` covers them.
+        if (o.struct_size < @sizeOf(PointsOptions)) return h.fail(error.AbiMismatch);
+        if (o.measures_only > 1 or o.early_stop > 1 or o.warm_start > 1 or !(o.abort_after >= 0) or std.math.isInf(o.abort_after)) return h.fail(error.InvalidArgument);
+        config = .{ .measures_only = o.measures_only == 1, .early_stop = o.early_stop == 1, .warm_start = o.warm_start == 1, .abort_after = o.abort_after };
+    }
+    const id = h.problem.append_points(rows, count, config) catch |err| return h.fail(err);
+    first.* = @backingInt(id);
+    return 0;
+}
+
+export fn espice_copy_point_measures(handle: ?*Token, first_id: u32, count: usize, names: ?[*]const Bytes, measure_count: usize, out: ?[*]f64, reasons: ?[*]u32) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
+    const name_bytes = constSlice(Bytes, names, measure_count) catch |err| return h.fail(err);
+    const len = std.math.mul(usize, count, measure_count) catch |err| return h.fail(err);
+    const values = mutableSlice(f64, out, len) catch |err| return h.fail(err);
+    const codes = mutableSlice(u32, reasons, count) catch |err| return h.fail(err);
+    const keys = allocator.alloc([]const u8, measure_count) catch |err| return h.fail(err);
+    defer allocator.free(keys);
+    for (name_bytes, keys) |b, *key| key.* = constSlice(u8, b.data, b.len) catch |err| return h.fail(err);
+    // `Reason` is u32-backed, so the caller's array holds the codes as is.
+    h.problem.point_measures(@fromBackingInt(@intCast(first_id)), keys, values, @ptrCast(codes)) catch |err| return h.fail(err);
+    return 0;
+}
+
+export fn espice_lane_width(handle: ?*Token, out: ?*u32) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
+    const destination = out orelse return h.fail(error.InvalidArgument);
+    // ponytail: points run one query at a time; lane batching (TODO.md
+    // phase 1) makes this the executor's group width.
+    destination.* = 1;
+    return 0;
+}
+
 /// A C (pointer, length) pair as a slice. NULL is allowed only at length 0.
 fn constSlice(comptime T: type, ptr: ?[*]const T, len: usize) ![]const T {
     if (len == 0) return &.{};
@@ -627,6 +691,9 @@ fn status(err: anyerror) u32 {
         error.InvalidAnalysisArguments, error.InvalidQueryOptions, error.UnsupportedDirectiveMutation => .invalid_argument,
         // A live parameter name the deck does not define or declare.
         error.UnknownParameter => .invalid_argument,
+        // Points API: no live parameters, a deck that sweeps already, a
+        // measure name no card has.
+        error.NoLiveParameters, error.SweptTemplate, error.UnknownMeasure => .invalid_argument,
         error.BufferTooSmall => .buffer_too_small,
         error.OutOfMemory => .out_of_memory,
         error.InvalidQuery => .invalid_query,

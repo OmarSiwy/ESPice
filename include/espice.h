@@ -239,6 +239,91 @@ espice_status espice_error_message(espice_problem *, char *, size_t, size_t *req
 espice_status espice_query_error_message(espice_problem *, uint32_t id,
     char *, size_t, size_t *required);
 
+/* Points: one deck as a template, run at many rows of its live_params
+ * values. A point is a .step-like sweep point appended to the problem's
+ * DAG, so espice_run_all (or espice_advance_ready) runs it, and its query
+ * ids work with every call above. A point's measures and reason depend
+ * only on the deck and its values, never on count, order, max_parallel or
+ * the other points.
+ *
+ * Energy per transition is a .meas over a supply current, e.g.
+ *   .meas tran e_rise integ par('-v(vdd)*i(vdd)') from=1n to=2n
+ * and leakage the operating point's supply current,
+ *   .meas op leak find i(vdd)
+ * which reads the point's .op, else the operating point its transient
+ * starts from. */
+
+/* Why a point produced no value, or not all of them
+ * (espice_copy_point_measures). The first nonzero reason wins. */
+typedef enum {
+    ESPICE_REASON_OK = 0,
+    /* OpDidNotConverge, HbDidNotConverge, PzDidNotConverge, ... */
+    ESPICE_REASON_NO_CONVERGENCE = 1,
+    ESPICE_REASON_TIMESTEP_TOO_SMALL = 2,
+    /* SingularMatrix, FloatingNode */
+    ESPICE_REASON_SINGULAR_MATRIX = 3,
+    /* A measure names a vector, or an analysis, the point lacks. */
+    ESPICE_REASON_MEASURE_NOT_FOUND = 4,
+    /* A measure's event never happened; its value is NaN. */
+    ESPICE_REASON_MEASURE_UNRESOLVED = 5,
+    /* espice_points_options.abort_after passed with a measure unresolved. */
+    ESPICE_REASON_ABORTED = 6,
+    /* No model bin holds the point's geometry. */
+    ESPICE_REASON_MODEL_BIN_NOT_FOUND = 7,
+    /* The values change the topology (a node collapses, a device appears)
+     * or flip a top-level .if. */
+    ESPICE_REASON_TOPOLOGY_CHANGED = 8,
+    /* A non-finite value, or one a device rejects (NonFiniteParameter). */
+    ESPICE_REASON_INVALID_PARAMETER = 9,
+    /* A device refused the point (DeviceRefused). */
+    ESPICE_REASON_DEVICE_REFUSED = 10,
+    /* Any other failure; espice_query_error_message names it. */
+    ESPICE_REASON_OTHER = 255
+} espice_reason;
+
+/* NULL options select all zeros. struct_size must cover every field;
+ * fields appended later are read only when it covers them. */
+typedef struct {
+    uint32_t struct_size;
+    uint32_t measures_only; /* 1: record no waveforms */
+    uint32_t early_stop;    /* 1: end a point once its measures resolve */
+    uint32_t warm_start;    /* 0: cold; 1: from the template's nominal OP */
+    double abort_after;     /* t past which an unresolved measure aborts; 0 = off */
+} espice_points_options;
+
+/* Appends count points: values is [count][live_param_count] row-major, in
+ * espice_create_options.live_params order. Each point runs every analysis
+ * of the deck, as a .step point would; *first_id receives point 0's first
+ * query id. Points are consecutive in request order: point k's analyses
+ * follow point k-1's (an implicit operating point may sit between ids).
+ * A point the template cannot hold (TOPOLOGY_CHANGED,
+ * MODEL_BIN_NOT_FOUND, INVALID_PARAMETER) is appended already failed with
+ * that reason. All-or-nothing. INVALID_ARGUMENT for count 0, a problem
+ * created without live_params ("NoLiveParameters"), a deck whose analyses
+ * already sweep (.step, .data, .alter, Monte Carlo: "SweptTemplate"),
+ * an options flag above 1, or a negative or non-finite abort_after;
+ * ABI_MISMATCH for a struct_size short of this struct. The first call
+ * also runs the deck's .model OPT optimization and MOSRA stress run. */
+espice_status espice_append_points(espice_problem *, const double *values,
+    size_t count, const espice_points_options *options, uint32_t *first_id);
+/* Copies the .meas results names (case-insensitive) of count points
+ * starting at first_id into out, [count][measure_count] row-major, and
+ * each point's espice_reason into reasons[count]. A point is a run of
+ * consecutive requested queries on one sweep row: a point appended above,
+ * a point of a swept deck, or every query of an unswept deck. A measure
+ * reads the point's first analysis of its kind. A failed point reads NaN
+ * throughout; otherwise NaN marks a measure with no value, and the reason
+ * names the first such. INVALID_ARGUMENT for a name no .meas card has
+ * ("UnknownMeasure"); INVALID_QUERY for a first_id that is not a requested
+ * query or fewer than count points after it; RESULT_UNAVAILABLE while a
+ * query of those points is unfinished. Nothing is written on failure. */
+espice_status espice_copy_point_measures(espice_problem *, uint32_t first_id,
+    size_t count, const espice_bytes *names, size_t measure_count,
+    double *out, uint32_t *reasons);
+/* The number of points the executor runs together on this problem's
+ * backend: 1 today. Advisory: it changes speed, never results. */
+espice_status espice_lane_width(espice_problem *, uint32_t *out);
+
 #ifdef __cplusplus
 }
 #endif

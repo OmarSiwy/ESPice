@@ -20,7 +20,7 @@ const analyses = std.StaticStringMap(Kind).initComptime(.{
     .{ "tran", .tran },       .{ "ac", .ac },                .{ "dc", .dc },
     .{ "fft", .fft },         .{ "trannoise", .tran_noise }, .{ "dcmatch", .dcmatch },
     .{ "acmatch", .acmatch }, .{ "lstb", .lstb },            .{ "phasenoise", .phasenoise },
-    .{ "ptdnoise", .pnoise }, .{ "sp", .sp },
+    .{ "ptdnoise", .pnoise }, .{ "sp", .sp },                .{ "op", .op },
 });
 /// `.lstb`'s margins-plot columns, each a measure of its own:
 /// `.meas lstb pm phase_margin` [CR .MEASURE LSTB].

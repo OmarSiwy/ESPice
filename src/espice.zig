@@ -130,6 +130,9 @@ pub const Problem = struct {
     /// The variant row `set_params` last made, which queries appended
     /// since then run at; null before any call.
     variant: ?u32 = null,
+    /// `Options.live_params` as live slots (`Tuning.index`), resolved once
+    /// so a point of `append_points` costs no name lookups.
+    live: []const u32 = &.{},
     timing_in_depth: bool = false,
     /// Where an HSPICE `.save` writes the operating point; null without one.
     save_path: ?[]const u8 = null,
@@ -205,6 +208,12 @@ pub const Problem = struct {
         self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
         errdefer self.prepared.deinit();
+        self.live = &.{};
+        if (self.prepared.tuning) |t| {
+            const live = try a.alloc(u32, options.live_params.len);
+            for (options.live_params, live) |name, *k| k.* = try t.index(name);
+            self.live = live;
+        }
         self.save_path = null;
         self.out_dir = try a.dupe(u8, if (options.output.path) |out| std.fs.path.dirname(out) orelse "." else ".");
         if (self.prepared.deck.save_op) |save| {
@@ -379,6 +388,189 @@ pub const Problem = struct {
         self.session.template = change.template;
         self.prepared.deck.variants = change.variants;
         self.variant = change.variants.count() - 1;
+    }
+
+    /// Appends `count` points, each the deck's analyses run at one row of
+    /// `values` (`count` rows of `Options.live_params` values, row-major),
+    /// as a `.step` point would run them, and returns point 0's first
+    /// query id. Points are consecutive in request order (implicit
+    /// operating points sit between their ids). Each point is one
+    /// `set_params` row; a point it refuses is still appended, its queries
+    /// failed with `TopologyChanged` (a topology change or a flipped
+    /// top-level `.if`), `ModelBinNotFound` or `NonFiniteParameter`. The
+    /// first call also runs the deck's `.model OPT` and MOSRA runs.
+    ///
+    /// All-or-nothing. `error.NoLiveParameters` without
+    /// `Options.live_params`, `error.SweptTemplate` for a deck whose
+    /// analyses already sweep (`.step`, `.data`, `.alter`, Monte Carlo),
+    /// `error.InvalidArgument` for zero points. Asserts that `values` holds
+    /// `count` rows.
+    pub fn append_points(self: *Problem, values: []const f64, count: usize, options: requests.PointOptions) !QueryId {
+        const tuning = self.prepared.tuning orelse return error.NoLiveParameters;
+        const p = self.live.len;
+        std.debug.assert(values.len == count * p);
+        if (count == 0) return error.InvalidArgument;
+        const deck = &self.prepared.deck;
+        for (deck.queries) |job| switch (job) {
+            inline else => |o| if (o.tol.variant != null) return error.SweptTemplate,
+        };
+        try self.optimize();
+        try self.age();
+        const template_jobs = if (deck.queries.len == 0) &[_]Query{.{ .op = .{ .tol = deck.deck_tol } }} else deck.queries;
+        try self.checkOutput(&self.prepared, template_jobs);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const j = template_jobs.len;
+        const jobs = try a.alloc(Query, count * j);
+        const templates = try a.alloc(u32, count * j);
+        const refused = try a.alloc(?analysis.session.PointError, count);
+        // A built template becomes the session's current one; `set_params`
+        // rows appended later keep theirs.
+        const current = self.session.template;
+        defer self.session.template = current;
+        for (0..count) |i| {
+            try self.session.templates.ensureUnusedCapacity(self.session.allocator, 1);
+            refused[i] = null;
+            const template = if (tuning.setAt(&self.prepared.circuit, deck.variants, self.live, values[i * p ..][0..p])) |change| blk: {
+                if (change.built) |c| self.session.addTemplate(c) catch unreachable;
+                deck.variants = change.variants;
+                break :blk change.template;
+            } else |err| blk: {
+                refused[i] = switch (err) {
+                    error.UnsupportedCard => error.TopologyChanged,
+                    error.ModelBinNotFound => error.ModelBinNotFound,
+                    error.InvalidArgument => error.NonFiniteParameter,
+                    else => |e| return e,
+                };
+                deck.variants = try tuning.refusedRow(deck.variants);
+                break :blk 0;
+            };
+            const row = deck.variants.count() - 1;
+            for (template_jobs, jobs[i * j ..][0..j], templates[i * j ..][0..j]) |job, *copy, *t| {
+                copy.* = job;
+                switch (copy.*) {
+                    inline else => |*o| o.tol.variant = row,
+                }
+                if (copy.* == .tran) copy.tran.point = options;
+                t.* = template;
+            }
+        }
+        const ids = try a.alloc(QueryId, jobs.len);
+        _ = try self.session.appendAt(jobs, templates, ids);
+        for (refused, 0..) |r, i| if (r) |err| for (ids[i * j ..][0..j]) |id| self.session.refuse(id, err) catch unreachable;
+        return ids[0];
+    }
+
+    /// Why a point produced no value, or not all of them: the C API's
+    /// ESPICE_REASON_* codes.
+    pub const Reason = enum(u32) {
+        ok = 0,
+        no_convergence = 1,
+        timestep_too_small = 2,
+        singular_matrix = 3,
+        measure_not_found = 4,
+        measure_unresolved = 5,
+        aborted = 6,
+        model_bin_not_found = 7,
+        topology_changed = 8,
+        invalid_parameter = 9,
+        device_refused = 10,
+        other = 255,
+
+        /// The reason a query that failed with `err` gives.
+        pub fn of(err: anyerror) Reason {
+            return switch (err) {
+                error.OpDidNotConverge, error.HbDidNotConverge, error.QpssDidNotConverge, error.PzDidNotConverge, error.MatexDidNotConverge, error.EnvelopeDidNotConverge, error.PacDidNotConverge => .no_convergence,
+                error.TimestepTooSmall => .timestep_too_small,
+                error.SingularMatrix, error.FloatingNode => .singular_matrix,
+                error.MeasureBoundExceeded => .aborted,
+                error.ModelBinNotFound => .model_bin_not_found,
+                error.TopologyChanged, error.NoiseTopologyChanged => .topology_changed,
+                error.NonFiniteParameter => .invalid_parameter,
+                error.DeviceRefused => .device_refused,
+                // `err` is anyerror: the full name stays with the query
+                // (`QueryInfo.failure`).
+                else => .other,
+            };
+        }
+    };
+
+    /// Writes the `.meas` cards `names` (case-insensitive) of `reasons.len`
+    /// points into `out` (`reasons.len` rows of `names.len`, row-major),
+    /// and each point's reason. A point is a run of consecutive requested
+    /// queries on one variant row, starting at `first`: each point of
+    /// `append_points` or of a swept deck, or the whole of an unswept deck.
+    /// A card reads the point's first analysis of its kind, and an `op`
+    /// card the point's own operating point when it has no `.op`. A point
+    /// that failed reads NaN everywhere with its failure's reason; else NaN
+    /// where a card found no value, the reason naming the first such card
+    /// (`measure_not_found` for a missing vector or analysis,
+    /// `measure_unresolved` for an event that never happened).
+    ///
+    /// `error.UnknownMeasure` for a name no card has, `error.InvalidQuery`
+    /// for a `first` that is not a requested query or fewer points after
+    /// it, `error.ResultUnavailable` while one of them is unfinished;
+    /// nothing is written then. Asserts `out.len == reasons.len * names.len`.
+    pub fn point_measures(self: *const Problem, first: QueryId, names: []const []const u8, out: []f64, reasons: []Reason) !void {
+        std.debug.assert(out.len == reasons.len * names.len);
+        const session = &self.session;
+        const measures = self.prepared.deck.measures;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const cards = try a.alloc(u32, names.len);
+        for (names, cards) |name, *card| card.* = for (measures, 0..) |m, k| {
+            if (std.ascii.eqlIgnoreCase(m.name, name)) break @intCast(k);
+        } else return error.UnknownMeasure;
+        const outputs = session.outputs.items;
+        const start = std.mem.indexOfScalar(QueryId, outputs, first) orelse return error.InvalidQuery;
+        // Point k's queries are outputs[ends[k]..ends[k + 1]].
+        const ends = try a.alloc(usize, reasons.len + 1);
+        ends[0] = start;
+        for (ends[1..], ends[0..reasons.len]) |*end, begin| {
+            if (begin == outputs.len) return error.InvalidQuery;
+            const row = variantOf(try session.query(outputs[begin]));
+            var e = begin;
+            while (e < outputs.len and variantOf(try session.query(outputs[e])) == row) : (e += 1) {
+                if (!(try session.info(outputs[e])).status.terminal()) return error.ResultUnavailable;
+            }
+            end.* = e;
+        }
+        const nan = std.math.nan(f64);
+        const values = try a.alloc(f64, measures.len);
+        const missing = try a.alloc(bool, measures.len);
+        for (reasons, 0..) |*reason, k| {
+            const row = out[k * names.len ..][0..names.len];
+            @memset(row, nan);
+            const ids = outputs[ends[k]..ends[k + 1]];
+            reason.* = for (ids) |id| {
+                if (try queryFailure(session, id)) |err| break .of(err);
+            } else .ok;
+            if (reason.* != .ok) continue;
+            var evaluated: ?QueryId = null;
+            for (cards, row) |card, *dst| {
+                const kind = measures[card].analysis;
+                var source: ?QueryId = null;
+                for (ids) |id| if ((try session.info(id)).kind == kind) {
+                    source = id;
+                    break;
+                };
+                if (source == null and kind == .op) for (ids) |id| if ((try session.info(id)).dependency) |dep| {
+                    source = dep;
+                    break;
+                };
+                var why: Reason = .measure_not_found;
+                if (source) |q| {
+                    // Cards of one analysis share its evaluation.
+                    if (evaluated != q) output.measureOutcomes(measures, kind, try session.result(q), values, missing);
+                    evaluated = q;
+                    dst.* = values[card];
+                    if (!missing[card]) why = .measure_unresolved;
+                }
+                if (std.math.isNan(dst.*) and reason.* == .ok) reason.* = why;
+            }
+        }
     }
 
     /// Refuses, before anything runs, the first of `queries` whose result
@@ -997,6 +1189,25 @@ pub const Problem = struct {
     }
 };
 
+/// The variant row `job` runs at, or null for the nominal circuit.
+fn variantOf(job: Query) ?u32 {
+    return switch (job) {
+        inline else => |o| o.tol.variant,
+    };
+}
+
+/// The error query `id` ended with, its prerequisite's for a query that
+/// never ran because of it; null when it completed. Asserts it is terminal.
+fn queryFailure(session: *const analysis.session.Session, id: QueryId) !?anyerror {
+    const info = try session.info(id);
+    std.debug.assert(info.status.terminal());
+    if (info.status == .complete) return null;
+    if (info.failure) |err| if (err == error.DependencyFailed) if (info.dependency) |dep| {
+        if ((try session.info(dep)).failure) |cause| return cause;
+    };
+    return info.failure orelse error.QueryCancelled;
+}
+
 /// Runs every query of a variant run's session to completion, whole
 /// queries at a time.
 fn runSession(session: *analysis.session.Session, max_parallel: u16) !void {
@@ -1029,7 +1240,7 @@ fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.W
         const info = try session.info(id);
         if (info.status != .complete) continue;
         switch (info.kind) {
-            .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
+            .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
             else => {},
         }
     }

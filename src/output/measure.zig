@@ -42,6 +42,7 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
                 .lstb => "Loop Stability",
                 .phasenoise => "Phase Noise",
                 .pnoise => "Periodic Time-Dependent Noise",
+                .op => "Operating Point",
                 else => "DC", // else: any other analysis takes the DC heading; a kind with its own title adds an arm
             }});
         }
@@ -67,13 +68,26 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
 /// whose event never happens, reads NaN.
 /// Asserts that `out.len == measures.len`.
 pub fn evaluateAll(measures: []const core.Measure, analysis: Kind, result: core.Result, out: []f64) void {
+    evaluateOutcomes(measures, analysis, result, out, null);
+}
+
+/// `evaluateAll`, also setting `missing[i]` (when given, parallel to
+/// `measures`) for a card that names a vector `result` lacks, ngspice's
+/// "no such vector", and clearing it for every other card.
+pub fn evaluateOutcomes(measures: []const core.Measure, analysis: Kind, result: core.Result, out: []f64, missing: ?[]bool) void {
     assert(out.len == measures.len);
     @memset(out, nan);
+    if (missing) |ms| @memset(ms, false);
     var discard_buf: [64]u8 = undefined;
     var discard: Writer.Discarding = .init(&discard_buf);
-    for ([_]bool{ false, true }) |param| for (measures, out) |m, *v| {
+    for ([_]bool{ false, true }) |param| for (measures, out, 0..) |m, *v, i| {
         if (!targets(m, analysis, result) or (m.func == .param) != param) continue;
-        v.* = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = out }) catch nan;
+        v.* = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = out }) catch |e| blk: {
+            if (e == error.NoSuchVector) if (missing) |ms| {
+                ms[i] = true;
+            };
+            break :blk nan;
+        };
     };
 }
 

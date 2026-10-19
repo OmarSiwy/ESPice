@@ -22,7 +22,11 @@ const validateDeck = @import("core").validate.validateDeck;
 /// prerequisite ended without one (`error.DependencyFailed`). Names are part
 /// of the API: `c_api.zig` maps some to status codes.
 pub const Failure = execution.QueryError || types.ErrorOf(execution.Executor.create) ||
-    types.ErrorOf(execution.Executor.start) || error{DependencyFailed};
+    types.ErrorOf(execution.Executor.start) || error{DependencyFailed} || PointError;
+/// Why a point of `Problem.append_points` was refused before it ran
+/// (`Session.refuse`): a value that needs another topology or flips a
+/// top-level `.if`, a geometry no model bin holds, a non-finite value.
+pub const PointError = error{ TopologyChanged, ModelBinNotFound, NonFiniteParameter };
 
 /// A row index into the session, stable for its lifetime.
 pub const QueryId = requests.QueryId;
@@ -183,6 +187,14 @@ pub const Session = struct {
     /// is shorter than `jobs`, a validation error for the first bad job, or
     /// `error.TooManyQueries` past u32 rows.
     pub fn append(self: *Session, jobs: []const requests.Query, ids: []QueryId) !usize {
+        return self.appendAt(jobs, null, ids);
+    }
+
+    /// `append` with job k instantiating `templates[k]` (as `template`
+    /// numbers them) instead of `template`, so one call can hold points on
+    /// several templates. Asserts `templates` matches `jobs` in length.
+    pub fn appendAt(self: *Session, jobs: []const requests.Query, templates: ?[]const u32, ids: []QueryId) !usize {
+        if (templates) |t| std.debug.assert(t.len == jobs.len);
         if (ids.len < jobs.len) return error.BufferTooSmall;
         if (jobs.len == 0) return 0;
         const max_rows = std.math.add(usize, self.rows.len, std.math.mul(usize, jobs.len, 2) catch return error.TooManyQueries) catch return error.TooManyQueries;
@@ -195,9 +207,9 @@ pub const Session = struct {
         try candidate.ensureTotalCapacity(self.allocator, max_rows);
         for (0..self.rows.len) |i| candidate.appendAssumeCapacity(self.rows.get(i));
         const new_ids = try a.alloc(QueryId, jobs.len);
-        const template = self.template;
-        std.debug.assert(template <= self.templates.items.len);
-        for (jobs, new_ids) |job, *id| {
+        for (jobs, new_ids, 0..) |job, *id, k| {
+            const template = if (templates) |t| t[k] else self.template;
+            std.debug.assert(template <= self.templates.items.len);
             try validateDeck(job, self.topology.n, self.deck);
             const owned = try copyValue(a, job);
             var dependency = none;
@@ -241,6 +253,20 @@ pub const Session = struct {
         self.request_arenas.appendAssumeCapacity(arena);
         @memcpy(ids[0..jobs.len], new_ids);
         return jobs.len;
+    }
+
+    /// Ends pending query `id`, and its pending prerequisite, with `err`
+    /// before anything runs: a point `Problem.append_points` could not set.
+    /// The prerequisite must be the query's own (no other row reads it).
+    pub fn refuse(self: *Session, id: QueryId, err: PointError) !void {
+        const i = try self.index(id);
+        const dep = self.rows.items(.dependency)[i];
+        for ([_]QueryId{ id, dep }) |row| if (row != none) {
+            const r = @backingInt(row);
+            std.debug.assert(self.rows.items(.executor)[r] == null);
+            self.rows.items(.status)[r] = .failed;
+            self.rows.items(.failure)[r] = err;
+        };
     }
 
     /// Makes `circuit` the template of every row appended from now on
