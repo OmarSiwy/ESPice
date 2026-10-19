@@ -10,6 +10,7 @@ pub const fft = @import("fft.zig");
 pub const gmres = @import("gmres.zig");
 pub const converger = @import("converger.zig");
 pub const lanes = @import("lanes.zig");
+pub const lane_solver = @import("lane_solver.zig");
 
 test {
     _ = @import("tests.zig");
@@ -17,6 +18,7 @@ test {
     _ = @import("sparse_lu.zig");
     _ = @import("lane_lu.zig");
     _ = @import("lanes.zig");
+    _ = @import("lane_solver.zig");
     _ = @import("tridiag.zig");
     _ = @import("order.zig");
     _ = @import("bbd.zig");

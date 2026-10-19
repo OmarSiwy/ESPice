@@ -190,12 +190,12 @@ pub fn LaneLu(comptime W: usize) type {
             return bad;
         }
 
-        /// SparseLu.solve for W lanes. `b_in` and `x` may alias. Unlike the
-        /// scalar path there is no zero skip in either sweep, so a zero result
-        /// can differ from SparseLu's in sign, and a lane whose factors hold
-        /// an Inf or NaN can turn 0 * Inf into NaN where SparseLu skipped it.
-        /// A lane `refactor` masked holds garbage. Asserts that `b_in` has n
-        /// entries, `x` at least n, and that the planes still fit `base`.
+        /// SparseLu.solve for W lanes, bitwise its result per lane: a lane
+        /// whose y[k] is zero subtracts +0, which leaves every value as
+        /// SparseLu's zero skip does, signed zeros included. `b_in` and `x`
+        /// may alias. A lane `refactor` masked holds garbage. Asserts that
+        /// `b_in` has n entries, `x` at least n, and that the planes still
+        /// fit `base`.
         pub fn solve(self: *Self, b_in: []const V, x: []V) void {
             const b = self.base;
             assert(b_in.len == self.n);
@@ -211,11 +211,13 @@ pub fn LaneLu(comptime W: usize) type {
             const y = self.y;
             const pinv = b.pinv;
 
+            const zero: V = @splat(0);
             for (b_in, 0..) |bi, r| y[pinv[r]] = bi;
 
             for (0..self.n) |k| {
                 const yk = y[k];
-                for (lp[k]..lp[k + 1]) |p| y[li[p]] -= lx[p] * yk;
+                const live = yk != zero;
+                for (lp[k]..lp[k + 1]) |p| y[li[p]] -= @select(f64, live, lx[p] * yk, zero);
             }
 
             var k = self.n;
@@ -223,7 +225,8 @@ pub fn LaneLu(comptime W: usize) type {
                 k -= 1;
                 const zk = y[k] / udiag[k];
                 y[k] = zk;
-                for (up[k]..up[k + 1]) |p| y[ui[p]] -= ux[p] * zk;
+                const live = zk != zero;
+                for (up[k]..up[k + 1]) |p| y[ui[p]] -= @select(f64, live, ux[p] * zk, zero);
             }
 
             for (b.q, 0..) |c, j| x[c] = y[j];
@@ -355,8 +358,7 @@ fn expectLanesReplay(comptime W: usize) !void {
             for (xs, xt, lx, lxt) |a, at, vx, vt| {
                 const x_l: [W]f64 = vx;
                 const t_l: [W]f64 = vt;
-                // solve: equal up to the sign of a zero; solveT: bitwise.
-                try testing.expect(a == x_l[l]);
+                try testing.expectEqual(@as(u64, @bitCast(a)), @as(u64, @bitCast(x_l[l])));
                 try testing.expectEqual(@as(u64, @bitCast(at)), @as(u64, @bitCast(t_l[l])));
             }
         }
