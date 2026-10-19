@@ -85,6 +85,8 @@ pub fn fallsBack(req: Request, explicit: bool, e: InitError) bool {
 /// init and retains device 0's primary context, so call it when reporting a
 /// failure.
 pub fn detectedHardware() []const u8 {
+    // wasm has no drivers to load (and gompute's loader lock needs sched_yield).
+    if (comptime @import("builtin").cpu.arch.isWasm()) return "none";
     var compute = gompute.runtime.dynamic.Compute.init(null) catch return "none";
     defer compute.deinit();
     return switch (compute.backend) {

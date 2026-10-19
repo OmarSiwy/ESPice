@@ -104,8 +104,10 @@ pub const Group = struct {
 pub const Kv = struct { key: []const u8, value: Value };
 
 comptime {
-    std.debug.assert(@sizeOf(Value) == 24);
-    std.debug.assert(@sizeOf(Kv) == 40);
+    if (@sizeOf(usize) == 8) {
+        std.debug.assert(@sizeOf(Value) == 24);
+        std.debug.assert(@sizeOf(Kv) == 40);
+    }
     std.debug.assert(@sizeOf(Span) == 8);
 }
 

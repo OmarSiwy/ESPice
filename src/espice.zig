@@ -1339,6 +1339,12 @@ fn timingLap(io: std.Io, start: *?std.Io.Timestamp, label: []const u8) void {
     start.* = std.Io.Timestamp.now(io, .awake);
 }
 
+/// libc's getenv; null on wasm, which links no libc and has no environment.
+fn getenv(name: [*:0]const u8) ?[*:0]const u8 {
+    if (comptime @import("builtin").cpu.arch.isWasm()) return null;
+    return std.c.getenv(name);
+}
+
 /// `given` with each null path the environment sets filled in, copied into
 /// `a`: `zig` from `$ZIG`, and `cache_dir` from `$ESPICE_CACHE/hdl`, else
 /// `$XDG_CACHE_HOME/espice/hdl`, else `$HOME/.cache/espice/hdl`, else
@@ -1347,7 +1353,7 @@ fn timingLap(io: std.Io, start: *?std.Io.Timestamp, label: []const u8) void {
 fn toolchainFromEnv(a: std.mem.Allocator, given: HdlToolchain) !HdlToolchain {
     const env = struct {
         fn get(name: [*:0]const u8) ?[]const u8 {
-            const v = std.mem.span(std.c.getenv(name) orelse return null);
+            const v = std.mem.span(getenv(name) orelse return null);
             return if (v.len == 0) null else v;
         }
     }.get;
@@ -1359,7 +1365,7 @@ fn toolchainFromEnv(a: std.mem.Allocator, given: HdlToolchain) !HdlToolchain {
         try std.fs.path.join(a, &.{ d, ".cache", "espice", "hdl" })
     else
         try std.fs.path.join(a, &.{ env("TMPDIR") orelse "/tmp", "espice-cache", "hdl" });
-    const zig = given.zig orelse if (std.c.getenv("ZIG")) |z| std.mem.span(z) else null;
+    const zig = given.zig orelse if (getenv("ZIG")) |z| std.mem.span(z) else null;
     return .{
         .zig = if (zig) |z| try a.dupe(u8, z) else null,
         .share = if (given.share) |d| try a.dupe(u8, d) else null,
@@ -1387,10 +1393,10 @@ fn raiseJitCache() void {
 fn knobsFromEnv() analysis.Knobs {
     const env = struct {
         fn get(name: [:0]const u8) ?[]const u8 {
-            return std.mem.span(std.c.getenv(name) orelse return null);
+            return std.mem.span(getenv(name) orelse return null);
         }
         fn on(name: [:0]const u8) bool {
-            return std.c.getenv(name) != null;
+            return getenv(name) != null;
         }
     };
     var k: analysis.Knobs = .{};

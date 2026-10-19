@@ -82,11 +82,12 @@ fn frequency(value: f64) !void {
 /// Returns the product of `factors`, rejecting any slab too large for 64 f64
 /// planes of it to be byte-addressable. A representability ceiling for the
 /// unchecked arithmetic downstream, not a memory budget.
-fn elements(factors: []const usize) !usize {
-    var count: usize = 1;
-    for (factors) |factor| count = std.math.mul(usize, count, factor) catch return error.InvalidQueryOptions;
+fn elements(factors: []const u64) !usize {
+    // u64, so a caller's `n + 1` cannot wrap a 32-bit usize to a small count.
+    var count: u64 = 1;
+    for (factors) |factor| count = std.math.mul(u64, count, factor) catch return error.InvalidQueryOptions;
     if (count > std.math.maxInt(usize) / (64 * @sizeOf(f64))) return error.InvalidQueryOptions;
-    return count;
+    return @intCast(count);
 }
 
 /// reltol and trtol scale every acceptance test and step bound, so they must
@@ -158,8 +159,8 @@ pub fn validate(query: requests.Query, n: u32) !void {
                 if (@hasField(@TypeOf(o), field)) try frequency(@field(o, field));
             }
             if (@hasField(@TypeOf(o), "gmres_restart")) {
-                _ = try elements(&.{ @as(usize, o.gmres_restart) + 1, @as(usize, o.gmres_restart) + 1 });
-                _ = try elements(&.{ @as(usize, o.gmres_restart) + 1, n });
+                _ = try elements(&.{ @as(u64, o.gmres_restart) + 1, @as(u64, o.gmres_restart) + 1 });
+                _ = try elements(&.{ @as(u64, o.gmres_restart) + 1, n });
             }
         },
     }
@@ -167,20 +168,20 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .dc => |o| {
             const inner = if (o.points.len > 0) o.points.len else try sweep(o.start, o.stop, o.step);
             const outer = if (!o.hasOuter()) 1 else if (o.points2.len > 0) o.points2.len else try sweep(o.start2, o.stop2, o.step2);
-            _ = try elements(&.{ inner, outer, o.tangents.len + 1, @as(usize, n) + 1 });
+            _ = try elements(&.{ inner, outer, o.tangents.len + 1, @as(u64, n) + 1 });
         },
         .temp => |o| {
             // The current temperature driver and numPoints are ascending only.
             if (o.t_step <= 0) return error.InvalidQueryOptions;
             try kelvin(@min(o.t_start, o.t_stop));
             const count = try sweep(o.t_start, o.t_stop, o.t_step);
-            _ = try elements(&.{ count, @as(usize, n) + 1 });
+            _ = try elements(&.{ count, @as(u64, n) + 1 });
             try validate(.{ .dc = o.dc_options }, n);
         },
         .mc => |o| {
             if (o.variation < 0) return error.InvalidQueryOptions;
             try validate(.{ .dc = o.dc_options }, n);
-            _ = try elements(&.{ o.n_trials, @as(usize, n) + 1 });
+            _ = try elements(&.{ o.n_trials, @as(u64, n) + 1 });
         },
         .tran => |o| {
             if (o.dt_min > o.dt_init) return error.InvalidQueryOptions;
@@ -228,7 +229,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
         .pss => |o| {
             if (o.n_samples == std.math.maxInt(u32)) return error.InvalidQueryOptions;
             try timeStep(o.period / @as(f64, @floatFromInt(o.n_samples)));
-            _ = try elements(&.{ @as(usize, o.n_samples) + 1, @as(usize, n) + 1 });
+            _ = try elements(&.{ @as(u64, o.n_samples) + 1, @as(u64, n) + 1 });
         },
         .phasenoise => |o| {
             if (o.osc_node == 0 or o.carrier == 0 or o.carrier > o.n_harmonics) return error.InvalidQueryOptions;
@@ -261,7 +262,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
                 for (o.extra_tones, o.extra_harmonics) |f, h| {
                     try positive(f);
                     if (h == 0 or h > std.math.maxInt(i16)) return error.InvalidQueryOptions;
-                    box = try elements(&.{ box, 2 * @as(usize, h) + 1 });
+                    box = try elements(&.{ box, 2 * @as(u64, h) + 1 });
                     top += f * @as(f64, @floatFromInt(h));
                 }
                 if (box > mhb_max_box) return error.InvalidQueryOptions;
@@ -278,7 +279,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
             // Runs as `.hb TONES=f1 f2 NHARMS=k1 k2`: the same box limits.
             if (o.k1 == 0 and o.k2 == 0) return error.InvalidQueryOptions;
             if (o.k1 > std.math.maxInt(i16) or o.k2 > std.math.maxInt(i16)) return error.InvalidQueryOptions;
-            const box = try elements(&.{ 2 * @as(usize, o.k1) + 1, 2 * @as(usize, o.k2) + 1 });
+            const box = try elements(&.{ 2 * @as(u64, o.k1) + 1, 2 * @as(u64, o.k2) + 1 });
             if (box > mhb_max_box) return error.InvalidQueryOptions;
             _ = try elements(&.{ box, box, 2 * n });
             try frequency(o.f1 * @as(f64, @floatFromInt(@max(o.k1, 1))) + o.f2 * @as(f64, @floatFromInt(@max(o.k2, 1))));
@@ -296,14 +297,14 @@ pub fn validate(query: requests.Query, n: u32) !void {
                 return error.InvalidQueryOptions;
             try timeStep(o.t_carrier / @as(f64, @floatFromInt(o.carrier_steps_per_period)));
             try positive(o.t_carrier * @as(f64, @floatFromInt(o.max_periods_per_step)));
-            _ = try elements(&.{ envelopeMaxPoints(o), 2 * @as(usize, n) + 1 });
+            _ = try elements(&.{ envelopeMaxPoints(o), 2 * @as(u64, n) + 1 });
         },
         .matex => |o| {
             try timeStep(o.gamma orelse o.t_stop / 1000);
             try timeStep(o.h_output_cap orelse o.t_stop / 200);
-            _ = try elements(&.{ @as(usize, o.m_max) + 1, @as(usize, o.m_max) + 1 });
-            _ = try elements(&.{ @as(usize, o.m_max) + 1, n });
-            _ = try elements(&.{ matexEstPoints(o), @as(usize, n) + 1 });
+            _ = try elements(&.{ @as(u64, o.m_max) + 1, @as(u64, o.m_max) + 1 });
+            _ = try elements(&.{ @as(u64, o.m_max) + 1, n });
+            _ = try elements(&.{ matexEstPoints(o), @as(u64, n) + 1 });
         },
         .tf, .pz => {
             _ = try elements(&.{ n, n });

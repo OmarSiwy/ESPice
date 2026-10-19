@@ -1150,7 +1150,7 @@ pub const Circuit = struct {
     /// Returns the netlist name of unknown `node`, or "" for a branch unknown
     /// or a row past the circuit.
     pub fn nodeName(self: *const Circuit, node: u32) []const u8 {
-        if (@as(usize, node) + 1 < self.intern_offs.len)
+        if (@as(u64, node) + 1 < self.intern_offs.len) // u64: maxInt(u32) + 1 wraps a 32-bit usize
             return self.intern_bytes[self.intern_offs[node]..self.intern_offs[node + 1]];
         return "";
     }

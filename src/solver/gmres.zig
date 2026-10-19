@@ -121,7 +121,9 @@ pub const Gmres = struct {
 
         var total_iters: u32 = 0;
 
-        for (0..@as(u64, max_restarts) + 1) |_| {
+        // u64: a usize range could not hold maxInt(u32) + 1 on 32-bit.
+        var cycle: u64 = 0;
+        while (cycle <= max_restarts) : (cycle += 1) {
             op.matvec(x[0..n], self.r[0..n]);
             self.residual(b[0..n]);
 

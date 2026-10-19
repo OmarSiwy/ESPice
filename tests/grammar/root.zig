@@ -1019,7 +1019,7 @@ fn generated(comptime d: netlist.Dialect, comptime lines_file: []const u8, compt
         const s = scratch.allocator();
         var body: std.ArrayList(u8) = .empty;
         try body.appendSlice(s, "t\n");
-        for (0..1 + rng.uintLessThan(usize, 3)) |_| {
+        for (0..1 + @as(usize, @intCast(rng.uintLessThan(u64, 3)))) |_| {
             if (try g.sentence(s, unit_rule, 16)) |stmt| try body.appendSlice(s, stmt);
         }
         const mutant = try std.mem.concat(s, u8, &.{ "t\n", try g.mutate(s, body.items[2..]) });
