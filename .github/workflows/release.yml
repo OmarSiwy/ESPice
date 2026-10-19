@@ -31,13 +31,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: mlugg/setup-zig@v2
+      # The flake's Zig, the one test.yml and nix.yml build with.
+      - uses: cachix/install-nix-action@v31
         with:
-          version: 0.17.0
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: omarsiwy
+          skipPush: true
 
       - name: Build
         run: >
-          zig build
+          nix develop .#ci -c zig build
           -Doptimize=ReleaseFast
           -Dtarget=${{ matrix.target }}
           -Dcpu=${{ matrix.cpu }}

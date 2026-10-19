@@ -107,9 +107,9 @@ pub fn build(b: *Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(vera.path("tools/contract.zig"), .prefix, "share/espice/vera/tools/contract.zig").step);
 
     var roots: std.ArrayList(gompute_build.KernelRoot) = .empty;
-    for (models, g.one_models) |m, one| {
+    for (models, g.kernel_models) |m, one| {
         if (!gpu_kernels or gpu_host_only.has(m.name)) continue;
-        const imports = b.allocator.dupe(Import, &.{ .{ .name = "models", .module = one }, contract, .{ .name = "device_abi", .module = g.abi } }) catch @panic("OOM");
+        const imports = b.allocator.dupe(Import, &.{ .{ .name = "models", .module = one }, g.kernel_contract, g.kernel_abi }) catch @panic("OOM");
         roots.append(b.allocator, .{
             .name = m.name,
             .root = b.path("src/device/eval.zig"),
@@ -374,7 +374,12 @@ const Graph = struct {
     abi: *Module,
     eval: *Module,
     models: *Module,
-    one_models: []*Module,
+    /// Target-less twins of the device models, `contract` and `abi` for the GPU kernel
+    /// roots: each kernel compile inherits its root's GPU target. A pinned -Dtarget on the
+    /// host modules would compile them as host code inside the amdgcn/nvptx object.
+    kernel_models: []*Module,
+    kernel_contract: Import,
+    kernel_abi: Import,
     objs: []*Compile,
     device: *Module,
     solver: *Module,
@@ -406,14 +411,23 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     const wf = b.addWriteFiles();
     var agg: std.ArrayList(u8) = .empty;
     const dev_mods = b.allocator.alloc(*Module, models.len) catch @panic("OOM");
-    const one_models = b.allocator.alloc(*Module, models.len) catch @panic("OOM");
+    const kernel_models = b.allocator.alloc(*Module, models.len) catch @panic("OOM");
+    const kmake = struct {
+        fn f(owner: *Build, root: Build.LazyPath, imports: []const Import) *Module {
+            return owner.createModule(.{ .root_source_file = root, .strip = true, .imports = imports });
+        }
+    }.f;
+    const k_contract: Import = .{ .name = "contract", .module = kmake(b, vera.module("contract").root_source_file.?, &.{}) };
+    const k_abi: Import = .{ .name = "device_abi", .module = kmake(b, b.path("src/device/abi.zig"), &.{ k_contract, .{ .name = "core", .module = kmake(b, b.path("src/core/ids.zig"), &.{}) } }) };
     const objs = b.allocator.alloc(*Compile, models.len) catch @panic("OOM");
-    for (models, gen, dev_mods, one_models, objs) |m, src, *dm, *one, *obj| {
+    for (models, gen, dev_mods, kernel_models, objs) |m, src, *dm, *kone, *obj| {
         const line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
         agg.appendSlice(b.allocator, line) catch @panic("OOM");
         dm.* = dev.make(src, &.{contract});
-        one.* = dev.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), line), &.{.{ .name = m.name, .module = dm.* }});
-        const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one.* }, .{ .name = "device_abi", .module = abi_dev }, gomp });
+        const one_src = wf.add(b.fmt("{s}/models.zig", .{m.name}), line);
+        const one = dev.make(one_src, &.{.{ .name = m.name, .module = dm.* }});
+        kone.* = kmake(b, one_src, &.{.{ .name = m.name, .module = kmake(b, src, &.{k_contract}) }});
+        const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one }, .{ .name = "device_abi", .module = abi_dev }, gomp });
         host.link_libc = true;
         // The callconv(.auto) vtable gains a hidden *StackTrace when tracing is on.
         host.error_tracing = c.optimize == .debug;
@@ -444,7 +458,9 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         .abi = abi.module,
         .eval = eval,
         .models = models_mod,
-        .one_models = one_models,
+        .kernel_models = kernel_models,
+        .kernel_contract = k_contract,
+        .kernel_abi = k_abi,
         .objs = objs,
         .device = device.module,
         .solver = solver,
