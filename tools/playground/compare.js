@@ -82,6 +82,8 @@ function rows(r) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "espice-cmp-"));
   let compared = 0, skipped = 0, failed = 0, xfail = 0, unexposed = 0, values = 0, worst = 0, worstAt = "";
   let stackPeak = 0, stackPeakAt = "";
+  // Instantiate espice.wasm before the first deck, so that deck is painted too.
+  await pg.simulate("load\n.end\n").catch(() => {});
   for (const deck of decks) {
     const text = fs.readFileSync(deck, "utf8");
     if (pg.unsupported(text)) { skipped++; continue; }
