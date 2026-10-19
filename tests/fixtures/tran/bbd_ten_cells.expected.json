@@ -80,5 +80,6 @@
         "atol": 0
       }
     ]
-  }
+  },
+  "netlist_sha256": "66378ea267b14ceee9d1d690bbe09b68133866f889d90d43a0eae26dd74da52f"
 }
