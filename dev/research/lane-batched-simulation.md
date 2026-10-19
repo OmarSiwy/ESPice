@@ -1,6 +1,15 @@
 # Lane-batched simulation: research and design
 
-**Status: research and design only; nothing here is implemented.**
+**Status:** phase 1's lane core is implemented except the executor grouping
+pass: `solver/lanes.zig` (`Lanes(W)`), `solver/lane_solver.zig`
+(`LaneSolver(W)`: `LaneLu` with per-lane peel), `solver/lane_system.zig`
+(the deinterleaved lane system), `converger.newtonLanes` and
+`analysis/lane_circuit.zig` (`LaneCircuit(W)`). `newton` at W = 1 is
+IDENTICAL in `zig build test-codegen`. Two departures from §3.1: masks
+combine through `both`, `either` and `not` (at W = 1 a bitwise `&` of two
+flags lowers to different code than the scalar `and`), and Newton's loop
+exit and the delta gate's finite test keep their scalar form at W = 1 for
+the same reason. Everything past phase 1 is design only.
 
 **What it does.** A deck sweeps one subcircuit (`.step`, `.data`, `.mc`,
 `.temp`, `.alter`) and expands into independent sweep-point queries. The

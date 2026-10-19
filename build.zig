@@ -280,7 +280,7 @@ pub fn build(b: *Build) void {
         const residue = b.addSystemCommand(&.{"python3"});
         residue.addFileArg(b.path("tools/asm_probe.py"));
         residue.addFileArg(probe.getEmittedAsm());
-        residue.addArgs(&.{ "gen_dual_mul=hand_dual_mul", "gen_engine_solve=hand_engine_solve", "gen_hook_trap_assemble=hand_hook_trap_assemble", "gen_hook_step_assemble=hand_hook_step_assemble", "gen_hook_diag_at=hand_hook_diag_at", "gen_num_dot=hand_num_dot", "gen_num_sum=hand_num_sum", "gen_num_norminf=hand_num_norminf" });
+        residue.addArgs(&.{ "gen_dual_mul=hand_dual_mul", "gen_engine_solve=hand_engine_solve", "gen_hook_trap_assemble=hand_hook_trap_assemble", "gen_hook_step_assemble=hand_hook_step_assemble", "gen_hook_diag_at=hand_hook_diag_at", "gen_num_dot=hand_num_dot", "gen_num_sum=hand_num_sum", "gen_num_norminf=hand_num_norminf", "gen_lanes_splat=hand_lanes_splat", "gen_lanes_any=hand_lanes_any", "gen_lanes_all=hand_lanes_all", "gen_lanes_select=hand_lanes_select", "gen_lanes_cmp=hand_lanes_cmp", "gen_lanes_either=hand_lanes_either", "gen_lanes_lane=hand_lanes_lane", "gen_lanes_each=hand_lanes_each", "gen_newton=hand_newton", "gen_update_and_norm=hand_update_and_norm" });
         b.step("test-codegen", "Judge the residue probes in tests/codegen.zig").dependOn(&residue.step);
         test_step.dependOn(&residue.step);
     }

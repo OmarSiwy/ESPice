@@ -44,6 +44,7 @@ VECTOR_MNEMONIC = re.compile(
 SCALAR_BITWISE = re.compile(r"^v?(andn?p[sd]|orp[sd]|xorp[sd]|pandn?|por|pxor[dq]?)$")
 WIDE_REGISTER = re.compile(r"\b[yz]mm\d+\b")
 CONST_POOL = re.compile(r"\.LCPI\d+_\d+")
+JUMP_TABLE = re.compile(r"\.LJTI\d+_\d+")
 LOCAL_LABEL = re.compile(r"\.L[A-Za-z_]*\d+(?:_\d+)?")
 
 
@@ -115,12 +116,30 @@ def parse_constants(text):
     return {k: "|".join(v) for k, v in pools.items()}
 
 
+def parse_jump_tables(text):
+    """`.LJTI3_0:` followed by `.long .LBB3_7-.LJTI3_0` (or `.quad .LBB3_7`) lines: name -> targets."""
+    tables, current = {}, None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.endswith(":"):
+            label = line[:-1]
+            current = label if JUMP_TABLE.fullmatch(label) else None
+            if current:
+                tables[current] = []
+            continue
+        if current and (line.startswith(".long") or line.startswith(".quad")):
+            tables[current].append(line.split(None, 1)[1].split("-", 1)[0].strip())
+        elif line and not line.startswith("#"):
+            current = None
+    return tables
+
+
 def body(text, symbol):
     """Instruction lines of `symbol`, with jump targets rewritten to instruction indices.
 
     Labels (`.LBB0_3:`, Zig's `.Ltmp12:` debug labels) are dropped. A branch to a label
     becomes `@<index of the instruction the label points at>`, so two bodies that differ
-    only in label numbering compare equal.
+    only in label numbering compare equal. A jump table becomes the list of its targets.
     """
     lines, labels, inside = [], {}, False
     for raw in text.splitlines():
@@ -142,8 +161,17 @@ def body(text, symbol):
         lines.append(code)
     if not inside:
         return None
+    tables = parse_jump_tables(text)
+
+    def table(m):
+        targets = tables.get(m.group(0))
+        if targets is None or any(t not in labels for t in targets):
+            return m.group(0)
+        return "jt[" + ",".join(f"@{labels[t]}" for t in targets) + "]"
+
     out = []
     for code in lines:
+        code = JUMP_TABLE.sub(table, code)
         out.append(LOCAL_LABEL.sub(lambda m: f"@{labels[m.group(0)]}" if m.group(0) in labels else m.group(0), code))
     return out
 
@@ -294,6 +322,14 @@ def self_test():
     o = "other:\n\tvmulss xmm0, xmm0, dword ptr [rip + .LCPI2_0]\n\tret\n\t.size other, 1\n"
     assert probe(pool + g + h + o, "gen", "hand")[0] == "IDENTICAL"
     assert probe(pool + g + h + o, "gen", "other")[0] == "EQUIVALENT"
+
+    # Jump tables compare by their targets, not by label number.
+    jt = ".LJTI0_0:\n\t.long .LBB0_1-.LJTI0_0\n\t.long .LBB0_2-.LJTI0_0\n.LJTI1_0:\n\t.long .LBB1_1-.LJTI1_0\n\t.long .LBB1_2-.LJTI1_0\n"
+    g = "gen:\n\tlea rsi, [rip + .LJTI0_0]\n\tjmp rax\n.LBB0_1:\n\tret\n.LBB0_2:\n\tud2\n\t.size gen, 1\n"
+    h = g.replace("gen", "hand").replace("0_", "1_")
+    assert probe(jt + g + h, "gen", "hand")[0] == "IDENTICAL"
+    flipped = jt.replace(".LBB1_1-", ".LBBX-").replace(".LBB1_2-", ".LBB1_1-").replace(".LBBX-", ".LBB1_2-")
+    assert probe(flipped + g + h, "gen", "hand")[0] == "EQUIVALENT"
 
     # Register allocation differs only.
     g = "gen:\n\tmov rax, rdi\n\tret\n\t.size gen, 1\n"

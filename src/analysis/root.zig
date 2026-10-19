@@ -33,6 +33,7 @@ test {
     _ = @import("tests/integration.zig");
     _ = @import("tests/jacobian.zig");
     _ = @import("tests/certify.zig");
+    _ = @import("tests/lane_circuit.zig");
     _ = @import("post/mosra.zig");
     _ = @import("knobs.zig");
     _ = @import("par_eval.zig");
