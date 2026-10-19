@@ -27,6 +27,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const take = root.take;
+const pss = @import("pss.zig");
 const num = @import("core").numerics;
 const solvers = @import("solver");
 const converger = solvers.converger;
@@ -37,8 +38,7 @@ const Gmres = solvers.gmres.Gmres;
 /// The `.hb` query, read for its tone list (`f0` then `extra_tones`).
 pub const Options = @import("core").query.Hb;
 
-/// The Newton outcome, shared with pss and hb.
-pub const SolveResult = @import("pss.zig").SolveResult;
+const SolveResult = pss.SolveResult;
 
 /// The kept spectral lines, DC first, then by ascending frequency. Line j
 /// is `freqs[j]` Hz, the mixing product Σ_i mix[j*tones + i]·f_i.
@@ -330,7 +330,7 @@ fn addOmega(omegas: []const f64, q_hat: []const f64, dst: []f64) void {
 pub fn gvProduct(w_td: []f64, g_td: []const f64, v_td: []const f64, col_ptr: []const u32, row_idx: []const u32, nt: usize) void {
     const W = std.simd.suggestVectorLength(f64) orelse 8;
     const V = @Vector(W, f64);
-    root.zeroSimd(w_td);
+    @memset(w_td, 0);
     for (0..col_ptr.len - 1) |col| {
         const vc = v_td[col * nt ..][0..nt];
         for (col_ptr[col]..col_ptr[col + 1]) |slot| {
@@ -455,10 +455,10 @@ pub fn dcSeed(ckt: *root.Circuit, x_hat: []f64, x_sample: []f64, nf: usize, tol:
     const n: usize = ckt.n;
     std.debug.assert(x_hat.len == n * nf);
     std.debug.assert(x_sample.len >= n);
-    root.zeroSimd(x_hat);
+    @memset(x_hat, 0);
     const ws = try ckt.workspace();
     ckt.setSimState(.{ .kind = .dc });
-    root.zeroSimd(x_sample);
+    @memset(x_sample, 0);
     _ = converger.run(ckt, ws, x_sample, 0, converger.optionsFromTolerances(tol, null), root.EvalHook{}) catch |err| switch (err) {
         error.QueryCancelled, error.OutOfMemory => return err,
         else => {}, // else: the DC seed is best effort
@@ -522,7 +522,7 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
     const x_sample = take(arena, &off, n);
     std.debug.assert(off == len);
     for (omegas, spec.freqs) |*w, f| w.* = 2 * std.math.pi * f;
-    if (!ckt.has_charge) root.zeroSimd(c_td);
+    if (!ckt.has_charge) @memset(c_td, 0);
 
     try dcSeed(ckt, x_hat, x_sample, nf, options.tol);
 
@@ -560,13 +560,13 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
             addOmega(omegas, q_hat, f_hat);
         }
 
-        const residual = residualNorm(f_hat);
+        const residual = num.normInf(f_hat);
         if (ckt.knobs.hb_trace) std.debug.print("MHB iter={d} res={e} step={e}\n", .{ iter, residual, step });
         if (residual < options.hb_tol) return .{ .converged = true, .iterations = iter + 1, .residual_norm = residual };
 
         if (iter != 0 and !(residual <= prev_residual) and step > min_step) {
             step *= 0.5;
-            root.copySimd(x_hat, x_prev);
+            num.copySimd(x_hat, x_prev);
             num.axpy(x_hat, step, dx);
             retrying = true;
             continue;
@@ -588,10 +588,10 @@ pub fn solve(ckt: *root.Circuit, x_hat: []f64, spec: Spectrum, tones: []const f6
         try fs.factorEach(omegas);
 
         num.scale(f_hat, -1, f_hat);
-        root.zeroSimd(dx);
+        @memset(dx, 0);
         const gr = gmres.solve(&op, f_hat, dx, gmres_tol, gmres_max_restarts);
         if (ckt.knobs.hb_trace) std.debug.print("  gmres it={d} res={e} conv={}\n", .{ gr.iterations, gr.residual, gr.converged });
-        root.copySimd(x_prev, x_hat);
+        num.copySimd(x_prev, x_hat);
         num.axpy(x_hat, step, dx);
     }
     // f_hat was negated for the last solve; its norm is the same.
@@ -708,7 +708,7 @@ pub fn orbit(ckt: *root.Circuit, opts: Options, allocator: std.mem.Allocator) !O
     const st = try solve(ckt, x_hat, spec, tones[0..count], opts, allocator);
     if (!st.converged) return error.HbDidNotConverge;
     const tr = try transform(spec, tones[0..count], tr_buf, allocator);
-    root.zeroSimd(p.c);
+    @memset(p.c, 0);
     sample(ckt, tr, nf, 1 / (spec.freqs[1] * @as(f64, @floatFromInt(nt))), x_hat, td[3 * n * nt + 2 * nnz * nt ..], p);
     return .{ .spec = spec, .tr = tr, .x_td = p.x, .g_td = p.g, .c_td = p.c, .buf = buf };
 }
@@ -732,17 +732,8 @@ pub fn solveOneTone(ckt: *root.Circuit, x_hat: []f64, options: Options, allocato
     return solve(ckt, x_hat, spec, &tones, options, allocator);
 }
 
-/// max |r[i]|, NaN when any entry is NaN. `num.normInf` skips NaN by
-/// contract, so a NaN residual would read as converged and HB would
-/// publish NaN (#83).
-pub fn residualNorm(r: []const f64) f64 {
-    return if (std.math.isNan(num.sum(r))) std.math.nan(f64) else num.normInf(r);
-}
-
 /// Private implementation access for the analysis test suite; void outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .transform = transform,
     .transformSamples = transformSamples,
-    .idft = idft,
-    .dft = dft,
 } else {};

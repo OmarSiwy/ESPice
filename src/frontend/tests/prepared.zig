@@ -18,15 +18,6 @@ fn build(sim_arena: std.mem.Allocator, parse_arena: std.mem.Allocator, nl: netli
     return input.build(&lib, sim_arena, parse_arena, nl);
 }
 
-/// Every batch's parameters, stamped with the batch's type as analysis does.
-fn collectTyped(circuit: *const device.Circuit, gpa: std.mem.Allocator, refs: *std.ArrayList(device.abi.ParamRef)) !void {
-    for (circuit.batches, circuit.batch_types) |batch, t| {
-        const first = refs.items.len;
-        try batch.hooks.collect_params(batch.ctx, gpa, refs).unwrap();
-        for (refs.items[first..]) |*ref| ref.type = t;
-    }
-}
-
 fn prepare(io: std.Io, session: std.mem.Allocator, source: input.Source, dialect: input.Dialect) !netlist.Netlist {
     return input.prepare(io, session, source, dialect, &.{});
 }
@@ -473,11 +464,10 @@ test "prepared bindings retain model fields and exclude runtime state from param
     var prepared = try build(session.allocator(), parse_arena.allocator(), nl);
     defer prepared.deinit();
     _ = parse_arena.reset(.free_all);
-    var refs: std.ArrayList(device.abi.ParamRef) = .empty;
-    try collectTyped(&prepared.circuit, session.allocator(), &refs);
+    const refs = try @import("../variants.zig").collect(session.allocator(), &prepared.circuit);
     var saw_pub = false;
     var resistors: u32 = 0;
-    for (refs.items) |ref| {
+    for (refs) |ref| {
         if (std.mem.eql(u8, ref.param_name, "pubZ")) {
             // 125 * 1e-20: ngspice INPevaluate bits for `1.25e-18`.
             try std.testing.expectEqual(@as(f64, 125) * @as(f64, 1e-20), ref.get());
@@ -648,4 +638,46 @@ test "a .mosra plans one aged row per reliability time, the total last" {
         const bad = try mosraDeck(pa.allocator(), case[0], case[1]);
         try std.testing.expectError(error.UnsupportedCard, build(sa.allocator(), pa.allocator(), bad));
     }
+}
+
+/// Reads, builds and frees `src` with every table on arenas over `gpa`.
+fn prepareAndBuild(gpa: std.mem.Allocator, lib: *const device.Library, src: []const u8) !void {
+    var session = std.heap.ArenaAllocator.init(gpa);
+    defer session.deinit();
+    var parse_arena = std.heap.ArenaAllocator.init(gpa);
+    defer parse_arena.deinit();
+    const nl = try input.prepare(std.testing.io, parse_arena.allocator(), .{ .bytes = .{ .data = src, .origin = "sweep.cir" } }, .ngspice, &.{});
+    var prepared = try input.build(lib, session.allocator(), parse_arena.allocator(), nl);
+    prepared.deinit();
+}
+
+test "every allocation in prepare and build can fail without a leak" {
+    var lib = try device.Library.init(std.testing.allocator);
+    defer lib.deinit();
+    // Subcircuits (a BBD permutation), a port, a sensed source, a B tape, a
+    // `.step` plan and three analyses: each owns allocations of its own.
+    const src =
+        \\alloc sweep
+        \\.subckt rc p q
+        \\r1 p m 1k
+        \\c1 m q 1p
+        \\.ends
+        \\.param rv=1k
+        \\V1 in 0 DC 1 AC 1 portnum 1
+        \\x1 in mid rc
+        \\x2 mid 0 rc
+        \\R2 mid 0 {rv}
+        \\L1 mid out 1u
+        \\F1 out 0 V1 2
+        \\B1 b 0 v=v(in)*2
+        \\Rb b 0 1k
+        \\.step param rv list 1k 2k
+        \\.op
+        \\.ac dec 2 1 1k
+        \\.tran 1n 10n
+        \\.end
+        \\
+    ;
+    try prepareAndBuild(std.testing.allocator, &lib, src);
+    try std.testing.checkAllAllocationFailures(core.testing.fixed_growth, prepareAndBuild, .{ &lib, src });
 }

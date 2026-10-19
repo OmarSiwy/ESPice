@@ -14,7 +14,7 @@ test "modelName inverts byName" {
     try std.testing.expectEqual(@as(?[]const u8, null), catalog.modelName(u8));
 }
 
-const no_paths: loader.BuildPaths = .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "", .core = "", .stdpp = "" };
+const no_paths: loader.BuildPaths = .{ .work_dir = "", .contract = "", .dyn = "", .gompute = "", .device_abi = "", .core = "" };
 
 test "loading no files registers nothing" {
     var lib = try Library.init(std.testing.allocator);

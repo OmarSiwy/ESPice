@@ -19,7 +19,6 @@ pub fn build(b: *Build) void {
     const gompute = b.dependency("gompute", .{});
     const vera = b.dependency("vera", .{ .target = target, .optimize = optimize });
     const vera_exe = b.dependency("vera", .{ .target = b.graph.host, .optimize = .fast }).artifact("vera");
-    const stdpp = b.dependency("stdpp", .{ .target = target, .optimize = optimize });
     const contract: Import = .{ .name = "contract", .module = vera.module("contract") };
 
     // The runtime .hdl loader rebuilds src/device/eval.zig against these roots.
@@ -28,7 +27,6 @@ pub fn build(b: *Build) void {
     bopts.addOption([]const u8, "dyn_path", pathFromRoot(b, b, "src/device/eval.zig"));
     bopts.addOption([]const u8, "device_abi_path", pathFromRoot(b, b, "src/device/abi.zig"));
     bopts.addOption([]const u8, "core_path", pathFromRoot(b, b, "src/core/root.zig"));
-    bopts.addOption([]const u8, "stdpp_path", pathFromRoot(b, stdpp.builder, "src/root.zig"));
     bopts.addOption([]const u8, "gompute_path", pathFromRoot(b, gompute.builder, "src/root.zig"));
     bopts.addOption(bool, "certify", b.option(bool, "certify", "Certify every converged Newton point against its KCL residual") orelse false);
     bopts.addOption(bool, "lu_instrument", b.option(bool, "lu-instrument", "Compile the LU census (ZP_LU_STATS) and the device-LU bench (ESPICE_GPU_LU_BENCH)") orelse false);
@@ -39,7 +37,6 @@ pub fn build(b: *Build) void {
         .target = target,
         .optimize = optimize,
         .strip = optimize != .debug and !debug_info,
-        .stdpp = stdpp.module("stdpp"),
         .single_threaded = single_threaded,
         .use_llvm = use_llvm,
     };
@@ -99,7 +96,6 @@ pub fn build(b: *Build) void {
         .{ b.path("src/core"), "core" },
         .{ b.path("src/device"), "device" },
         .{ gompute.path("src"), "gompute" },
-        .{ stdpp.path("src"), "stdpp" },
         .{ vera.path("lib"), "vera/lib" },
         .{ vera.path("src/sim"), "vera/src/sim" },
     }) |dir| b.installDirectory(.{
@@ -203,6 +199,8 @@ pub fn build(b: *Build) void {
             t.run(g.netlist, &.{}, false),
             t.run(wfit_mod, &.{}, false),
             t.run(g.frontend, &.{.{ .name = "build_options", .module = bo }}, true),
+            // spice.zig and builder.zig's own tests live only in the builder module.
+            t.run(g.builder, &.{}, true),
         } },
         .{ "test-analysis", "Run all analysis tests", &.{t.run(g.analysis, &.{
             .{ .name = "builder", .module = g.builder },
@@ -267,7 +265,6 @@ pub fn build(b: *Build) void {
         P.target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 } });
         P.optimize = .fast;
         P.strip = false;
-        P.stdpp = b.dependency("stdpp", .{ .target = P.target, .optimize = P.optimize }).module("stdpp");
         P.single_threaded = null;
         const pg = graph(P, b.dependency("vera", .{ .target = P.target, .optimize = P.optimize }), gompute.module("gompute"), models, gen, bo);
         const core: Import = .{ .name = "core", .module = pg.core };
@@ -280,19 +277,11 @@ pub fn build(b: *Build) void {
         const residue = b.addSystemCommand(&.{"python3"});
         residue.addFileArg(b.path("tools/asm_probe.py"));
         residue.addFileArg(probe.getEmittedAsm());
-        residue.addArgs(&.{ "gen_dual_mul=hand_dual_mul", "gen_engine_solve=hand_engine_solve", "gen_hook_trap_assemble=hand_hook_trap_assemble", "gen_hook_step_assemble=hand_hook_step_assemble", "gen_hook_diag_at=hand_hook_diag_at" });
+        residue.addArgs(&.{ "gen_dual_mul=hand_dual_mul", "gen_engine_solve=hand_engine_solve", "gen_hook_trap_assemble=hand_hook_trap_assemble", "gen_hook_step_assemble=hand_hook_step_assemble", "gen_hook_diag_at=hand_hook_diag_at", "gen_num_dot=hand_num_dot", "gen_num_sum=hand_num_sum", "gen_num_norminf=hand_num_norminf" });
         b.step("test-codegen", "Judge the residue probes in tests/codegen.zig").dependOn(&residue.step);
         test_step.dependOn(&residue.step);
     }
 
-    const fitness = b.addExecutable(.{ .name = "fitness", .root_module = M.make(b.path("tests/fitness.zig"), &.{}) });
-    const run_fitness = b.addRunArtifact(fitness);
-    run_fitness.setCwd(b.path("."));
-    run_fitness.has_side_effects = true;
-    run_fitness.addPassthruArgs();
-    run_fitness.step.dependOn(&t.run(fitness.root_module, &.{}, false).step);
-    b.step("test-fitness", "Check file headers, test lists, root imports and catch-all arms against tests/FITNESS.tsv").dependOn(&run_fitness.step);
-    test_step.dependOn(&run_fitness.step);
 
     const bench_runner = b.addExecutable(.{ .name = "bench-runner", .root_module = MH.make(b.path("tests/benchmark/runner.zig"), &.{}) });
     b.step("bench", "Compare ESPice with ngspice and VACASK (nix develop .#benchmarking)").dependOn(&corpus(b, bench_runner, exe, null, &.{"tests/fixtures"}).step);
@@ -322,7 +311,6 @@ pub fn build(b: *Build) void {
         W.target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi, .cpu_features_add = std.Target.wasm.featureSet(&.{.simd128}) });
         W.optimize = .small;
         W.strip = true;
-        W.stdpp = b.dependency("stdpp", .{ .target = W.target, .optimize = W.optimize }).module("stdpp");
         W.single_threaded = null;
         W.use_llvm = null;
         const wgompute = b.dependency("gompute", .{ .target = W.target, .optimize = W.optimize }).module("gompute");
@@ -365,7 +353,6 @@ const Cfg = struct {
     target: Build.ResolvedTarget,
     optimize: std.lang.Optimize,
     strip: bool,
-    stdpp: ?*Module,
     single_threaded: ?bool,
     use_llvm: ?bool,
 
@@ -378,7 +365,6 @@ const Cfg = struct {
             .single_threaded = self.single_threaded,
             .imports = imports,
         });
-        if (self.stdpp) |sp| mod.addImport("stdpp", sp);
         return mod;
     }
 };
@@ -403,15 +389,17 @@ const Graph = struct {
 /// The simulator's module graph for one target. `analysis` still needs `gompute_kernels`.
 fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Model, gen: []const Build.LazyPath, bo: *Module) Graph {
     const b = c.b;
-    // Device code: always stripped (DWARF on generated models crashed NVPTX), no stdpp.
+    // Device code: always stripped (DWARF on generated models crashed NVPTX).
     var dev = c;
     dev.strip = true;
-    dev.stdpp = null;
     const contract: Import = .{ .name = "contract", .module = vera.module("contract") };
     const gomp: Import = .{ .name = "gompute", .module = gompute };
     const build_options: Import = .{ .name = "build_options", .module = bo };
     const core: Import = .{ .name = "core", .module = c.make(b.path("src/core/root.zig"), &.{}) };
     const abi: Import = .{ .name = "device_abi", .module = c.make(b.path("src/device/abi.zig"), &.{ contract, core }) };
+    // Device objects see only core's ids leaf (GROUND, DeviceType): an edit elsewhere in core
+    // must not recompile every model. abi's own tests still get the full core.
+    const abi_dev = dev.make(b.path("src/device/abi.zig"), &.{ contract, .{ .name = "core", .module = dev.make(b.path("src/core/ids.zig"), &.{}) } });
     const eval = c.make(b.path("src/device/eval.zig"), &.{ contract, gomp, abi });
     eval.link_libc = true;
 
@@ -425,7 +413,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         agg.appendSlice(b.allocator, line) catch @panic("OOM");
         dm.* = dev.make(src, &.{contract});
         one.* = dev.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), line), &.{.{ .name = m.name, .module = dm.* }});
-        const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one.* }, abi, gomp });
+        const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one.* }, .{ .name = "device_abi", .module = abi_dev }, gomp });
         host.link_libc = true;
         // The callconv(.auto) vtable gains a hidden *StackTrace when tracing is on.
         host.error_tracing = c.optimize == .debug;

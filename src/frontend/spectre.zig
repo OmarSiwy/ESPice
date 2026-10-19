@@ -16,7 +16,9 @@ pub const Error = error{ OutOfMemory, ParseError, UnsupportedCard };
 /// SPICE cards and, parallel to them, each device card's letter (0 for a
 /// card that is no Spectre instance, whose name carries its own).
 pub const Translated = struct {
+    /// The SPICE cards, in `translate`'s arena.
     lines: []const []const u8,
+    /// `kinds[i]` is card i's device letter, 0 for none; `kinds.len == lines.len`.
     kinds: []const u8,
 };
 
@@ -486,6 +488,9 @@ const T = struct {
     /// Open braces: `if` branches, a `statistics` block, a model group, a
     /// function body.
     blocks: std.ArrayList(Block) = .empty,
+    /// One-line `if` statements nested inside the one being read; past
+    /// `Expr.depth_max` the line is a ParseError, not a stack overflow.
+    if_depth: u32 = 0,
 
     /// A subcircuit whose `.subckt` card waits for its body's
     /// `parameters`: the card's index, its name and ports, its defaults.
@@ -493,12 +498,12 @@ const T = struct {
     const Block = union(enum) { cond, skip, group: struct { name: []const u8, master: []const u8, kv: []const Param }, func };
 
     fn emit(t: *T, comptime fmt: []const u8, args: anytype) Error!void {
-        try t.out.append(t.arena, try std.fmt.allocPrint(t.arena, fmt, args));
+        try t.out.append(t.arena, try t.arena.print(fmt, args));
     }
 
     fn device(t: *T, letter: u8, comptime fmt: []const u8, args: anytype) Error!void {
         assert(letter != 0);
-        const card = try std.fmt.allocPrint(t.arena, fmt, args);
+        const card = try t.arena.print(fmt, args);
         try t.out.append(t.arena, card);
         try t.kinds.appendNTimes(t.arena, 0, t.out.items.len - 1 - t.kinds.items.len);
         try t.kinds.append(t.arena, letter);
@@ -632,7 +637,7 @@ const T = struct {
             return;
         }
         if (toks.len < 2 or toks[0].kind != .word or !toks[1].is(":")) return error.ParseError;
-        const bin = try std.fmt.allocPrint(t.arena, "{s}.{s}", .{ g.name, toks[0].text });
+        const bin = try t.arena.print("{s}.{s}", .{ g.name, toks[0].text });
         try t.modelCard(bin, g.master, g.kv, try params(t.arena, toks[2..]));
     }
 
@@ -690,6 +695,9 @@ const T = struct {
     /// `if (cond) {`, `if (cond) stmt`, and `} else ...` (§4.12).
     fn cond(t: *T, toks: []const Tok, card: []const u8) Error!void {
         if (toks.len == 0 or !toks[0].is("(")) return error.ParseError;
+        if (t.if_depth == Expr.depth_max) return error.ParseError;
+        t.if_depth += 1;
+        defer t.if_depth -= 1;
         var depth: usize = 0;
         var close: usize = 0;
         for (toks, 0..) |tok, i| {
@@ -800,7 +808,7 @@ const T = struct {
         var end = toks.len;
         if (end > 1 and toks[end - 1].is(";")) end -= 1;
         const last = &t.out.items[t.out.items.len - 1];
-        last.* = try std.fmt.allocPrint(t.arena, "{s} {s}", .{ last.*, try expression(t.arena, toks[1..end]) });
+        last.* = try t.arena.print("{s} {s}", .{ last.*, try expression(t.arena, toks[1..end]) });
     }
 
     /// A statement led by a name: an analysis, a control statement or an
@@ -823,7 +831,7 @@ const T = struct {
         }
         if (i < toks.len and toks[i].kind == .word and !(i + 1 < toks.len and toks[i + 1].is("="))) {
             const kw = toks[i].text;
-            if (analysis_kinds.has(kw)) return t.analysis(name, kw, nodes.items, toks[i + 1 ..]);
+            if (analysis_kinds.has(kw)) return t.analysis(kw, nodes.items, toks[i + 1 ..]);
             if (!paren) if (control_kinds.get(kw)) |c| return t.control(c, toks[i + 1 ..]);
         }
         // An instance: without parentheses, the master is the last bare word
@@ -942,13 +950,10 @@ const T = struct {
         try pos.append(t.arena, ')');
     }
 
-    fn analysis(t: *T, name: []const u8, kind: []const u8, nodes: []const []const u8, toks: []const Tok) Error!void {
-        _ = name;
+    fn analysis(t: *T, kind: []const u8, nodes: []const []const u8, toks: []const Tok) Error!void {
         if (t.subckts.items.len > 0) return error.UnsupportedCard;
-        var body = toks;
-        if (body.len > 0 and body[body.len - 1].is("{")) return error.UnsupportedCard; // child analyses
-        const ps = try params(t.arena, body);
-        body = &.{};
+        if (toks.len > 0 and toks[toks.len - 1].is("{")) return error.UnsupportedCard; // child analyses
+        const ps = try params(t.arena, toks);
         const num = struct {
             fn of(arena: Allocator, list: []const Param, key: []const u8) Error!?[]const u8 {
                 const v = find(list, key) orelse return null;
@@ -961,7 +966,7 @@ const T = struct {
                 return error.UnsupportedCard;
             };
             const stop = try num(t.arena, ps, "stop") orelse return error.ParseError;
-            const step = try num(t.arena, ps, "step") orelse try std.fmt.allocPrint(t.arena, "\"({s}/50)\"", .{std.mem.trim(u8, stop, "\"")});
+            const step = try num(t.arena, ps, "step") orelse try t.arena.print("\"({s}/50)\"", .{std.mem.trim(u8, stop, "\"")});
             const start = try num(t.arena, ps, "start");
             const maxstep = try num(t.arena, ps, "maxstep");
             // ponytail: `method` becomes the deck's `.options method`, so a
@@ -992,8 +997,8 @@ const T = struct {
         if (std.mem.eql(u8, kind, "noise")) {
             const src = find(ps, "iprobe") orelse return error.UnsupportedCard;
             const out = switch (nodes.len) {
-                1 => try std.fmt.allocPrint(t.arena, "v({s})", .{nodes[0]}),
-                2 => try std.fmt.allocPrint(t.arena, "v({s},{s})", .{ nodes[0], nodes[1] }),
+                1 => try t.arena.print("v({s})", .{nodes[0]}),
+                2 => try t.arena.print("v({s},{s})", .{ nodes[0], nodes[1] }),
                 else => return error.UnsupportedCard,
             };
             return t.emit(".noise {s} {s} {s}", .{ out, src[0].text, try t.sweep(ps, true) });
@@ -1006,19 +1011,19 @@ const T = struct {
     fn sweep(t: *T, ps: []const Param, ac: bool) Error![]const u8 {
         if (find(ps, "values")) |v| {
             const vals = try vector(t.arena, v);
-            return std.fmt.allocPrint(t.arena, "poi {d} {s}", .{ vals.len, try std.mem.join(t.arena, " ", vals) });
+            return t.arena.print("poi {d} {s}", .{ vals.len, try std.mem.join(t.arena, " ", vals) });
         }
         const start = try value(t.arena, find(ps, "start") orelse return error.UnsupportedCard);
         const stop = try value(t.arena, find(ps, "stop") orelse return error.UnsupportedCard);
-        if (find(ps, "dec")) |n| return std.fmt.allocPrint(t.arena, "dec {s} {s} {s}", .{ try value(t.arena, n), start, stop });
+        if (find(ps, "dec")) |n| return t.arena.print("dec {s} {s} {s}", .{ try value(t.arena, n), start, stop });
         if (find(ps, "lin")) |n| {
-            if (ac) return std.fmt.allocPrint(t.arena, "lin {s} {s} {s}", .{ try value(t.arena, n), start, stop });
+            if (ac) return t.arena.print("lin {s} {s} {s}", .{ try value(t.arena, n), start, stop });
             const q = "\"";
-            return std.fmt.allocPrint(t.arena, "{s} {s} \"(({s}-{s})/{s})\"", .{ start, stop, std.mem.trim(u8, stop, q), std.mem.trim(u8, start, q), std.mem.trim(u8, try value(t.arena, n), q) });
+            return t.arena.print("{s} {s} \"(({s}-{s})/{s})\"", .{ start, stop, std.mem.trim(u8, stop, q), std.mem.trim(u8, start, q), std.mem.trim(u8, try value(t.arena, n), q) });
         }
         if (find(ps, "step")) |s| {
             if (ac) return error.UnsupportedCard;
-            return std.fmt.allocPrint(t.arena, "{s} {s} {s}", .{ start, stop, try value(t.arena, s) });
+            return t.arena.print("{s} {s} {s}", .{ start, stop, try value(t.arena, s) });
         }
         return error.UnsupportedCard;
     }
@@ -1066,7 +1071,7 @@ fn value(arena: Allocator, toks: []const Tok) Error![]const u8 {
 /// string, in quotes when it is an expression.
 fn quoted(arena: Allocator, text: []const u8) Error![]const u8 {
     if (text[0] == '"' or std.mem.indexOfAny(u8, text, "()+*/%?:<>=!&|") == null and !std.mem.startsWith(u8, text, "-")) return text;
-    return std.fmt.allocPrint(arena, "\"{s}\"", .{text});
+    return arena.print("\"{s}\"", .{text});
 }
 
 /// A vector's elements as SPICE text (§5).
@@ -1138,4 +1143,8 @@ test "translate keeps each device card's letter in a column parallel to the card
     try testing.expectEqualStrings("rv", letters.items);
     // The SPICE region's card names its own letter.
     try testing.expectEqual(@as(u8, 0), out.kinds[out.kinds.len - 1]);
+}
+
+test {
+    _ = @import("tests/spectre.zig");
 }

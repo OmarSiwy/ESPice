@@ -72,13 +72,15 @@ const MatexTests = struct {
     const std = @import("std");
     const testing = std.testing;
 
-    test "expmSmall: an inf entry is refused, not halved forever (#125)" {
+    test "expmSmall: an inf or NaN entry is refused, not halved forever (#125)" {
         var H = [_]f64{ std.math.inf(f64), 0, 0, 1 };
         var out: [4]f64 = undefined;
         var scratch: [20]f64 = undefined;
         var piv: [3]u32 = undefined;
         try testing.expect(!expmSmall(2, &H, &out, &scratch, &piv));
         H = .{ 1, -std.math.inf(f64), 0, 1 };
+        try testing.expect(!expmSmall(2, &H, &out, &scratch, &piv));
+        H = .{ 1, 0, std.math.nan(f64), 1 };
         try testing.expect(!expmSmall(2, &H, &out, &scratch, &piv));
     }
 
@@ -245,6 +247,7 @@ const TranTests = struct {
     const integrator = impl.test_access.integrator;
     const root = @import("../types.zig");
     const simulate = impl.simulate;
+    const Method = @import("core").query.Method;
     const std = @import("std");
     const testing = std.testing;
 
@@ -308,12 +311,10 @@ const TranTests = struct {
         }
     }
 
-    test "predict: the stdpp pipeline matches its .byRef() pull oracle" {
-        const z = @import("stdpp");
-        const Predict = impl.test_access.Predict;
+    test "predict: matches cur + xfact*(cur - prev) bit for bit at every length and offset" {
         var prng = std.Random.DefaultPrng.init(0x9ed1);
         const r = prng.random();
-        const L = 200; // past 3x the widest lane count, so every tail runs
+        const L = 200;
         var cur: [L + 3]f64 = undefined;
         var prev: [L + 3]f64 = undefined;
         for (&cur, &prev) |*c, *p| {
@@ -322,22 +323,66 @@ const TranTests = struct {
         }
         cur[5] = std.math.nan(f64);
         prev[9] = std.math.inf(f64);
+        cur[17] = -0.0;
+        prev[17] = 0.0;
         const xfact = 0.37;
         for (0..L) |len| for (0..4) |off| {
             const c = cur[off..][0..len];
-            const p = prev[off..][0..len];
-            var fast: [L]f64 = undefined;
-            var slow: [L]f64 = undefined;
-            impl.test_access.predict(fast[0..len], c, p, xfact);
-            var src = z.fromSlice(f64, c);
-            var it = src.byRef().zip(z.fromSlice(f64, p)).map(Predict{ .xfact = xfact });
-            try testing.expectEqual(len, it.writeInto(slow[0..len]));
-            // Bit for bit; NaN payloads may differ between the paths.
-            for (slow[0..len], fast[0..len]) |a, b| {
-                if (std.math.isNan(a) and std.math.isNan(b)) continue;
-                try testing.expectEqual(@as(u64, @bitCast(a)), @as(u64, @bitCast(b)));
+            // `prev` may run past `cur`; only cur.len entries are read.
+            const p = prev[off..][0 .. len + 3 - off];
+            var got: [L]f64 = @splat(std.math.nan(f64));
+            impl.test_access.predict(got[0..len], c, p, xfact);
+            for (got[0..len], c, p[0..len]) |g, cv, pv| {
+                const want = cv + xfact * (cv - pv);
+                if (std.math.isNan(want)) {
+                    try testing.expect(std.math.isNan(g));
+                } else try testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(g)));
             }
         };
+    }
+
+    /// R (1 kOhm) and C (1 nF) from node 1 to ground, tau = 1 us. The
+    /// caller deinits it.
+    fn rcCircuit(gpa: std.mem.Allocator) !root.Circuit {
+        const models = @import("models");
+        const evaluator = @import("device_eval");
+        const RStore = evaluator.ProtoStore(models.resistor);
+        const rstore = try gpa.create(RStore);
+        rstore.* = .{};
+        try rstore.append(&.{ .r = 1e3 }, &.{}, .{ 1, 0 });
+        const CStore = evaluator.ProtoStore(models.capacitor);
+        const cstore = try gpa.create(CStore);
+        cstore.* = .{};
+        try cstore.append(&.{ .c = 1e-9 }, &.{}, .{ 1, 0 });
+        const protos = [_]evaluator.Proto{
+            .{ .ctx = rstore, .type_name = @typeName(models.resistor), .pattern = RStore.addPattern, .finalize = RStore.finalize, .destroy = RStore.destroy, .apply_perm = RStore.applyPerm },
+            .{ .ctx = cstore, .type_name = @typeName(models.capacitor), .pattern = CStore.addPattern, .finalize = CStore.finalize, .destroy = CStore.destroy, .apply_perm = CStore.applyPerm },
+        };
+        const intern_bytes = try gpa.dupe(u8, "00");
+        const intern_offs = try gpa.dupe(u32, &.{ 0, 1, 2 });
+        return root.freeze(gpa, 2, intern_bytes, intern_offs, &protos, &@as([protos.len]@import("device").DeviceType, @splat(.unset)), null);
+    }
+
+    /// One run of every transient-family entry over `ckt` from v(1) = 1,
+    /// results on an arena over `gpa` and scratch on `gpa` itself.
+    fn runFamily(gpa: std.mem.Allocator, ckt: *root.Circuit) !void {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        var x_op = [_]f64{ 0, 1 };
+        const ctx: root.RunCtx = .{ .circuit = ckt, .x_op = &x_op, .probes = &.{1}, .source_node = 0, .source_branch = 0, .allocator = arena.allocator(), .scratch_allocator = gpa };
+        _ = try impl.run(&ctx, .{ .t_stop = 2e-6, .dt_init = 2e-7 });
+        _ = try impl.run(&ctx, .{ .t_stop = 2e-6, .dt_init = 2e-7, .snapshot = true });
+        const noise = @import("../tran/tran_noise.zig");
+        _ = try noise.run(&ctx, .{ .t_stop = 1e-6, .dt_init = 2e-7, .dt_max = 2e-7 });
+        _ = try noise.run(&ctx, .{ .t_stop = 1e-6, .dt_init = 2e-7, .dt_max = 2e-7, .sde = true, .out_node = 1 });
+        _ = try @import("../tran/envelope.zig").run(&ctx, .{ .t_carrier = 2e-7, .t_stop = 1e-6, .carrier_steps_per_period = 4 });
+        _ = try @import("../tran/matex.zig").run(&ctx, .{ .t_stop = 2e-6, .max_points = 64 });
+    }
+
+    test "tran, trannoise, envelope and matex: every allocation failure unwinds without a leak" {
+        var ckt = try rcCircuit(testing.allocator);
+        defer ckt.deinit();
+        try testing.checkAllAllocationFailures(testing.allocator, runFamily, .{&ckt});
     }
 
     test "almostEqualUlps: the ulp count runs straight across zero" {
@@ -421,7 +466,7 @@ const TranTests = struct {
         try testing.expectEqualSlices(u64, @ptrCast(&want), @ptrCast(&i_cur));
     }
 
-    test "rebaseCurrent: vector kernel is bit-identical to its w=1 oracle" {
+    test "rebaseCurrent: bit-identical to the per-element formula at every length" {
         var prng = std.Random.DefaultPrng.init(0x7e1a);
         const r = prng.random();
         // Lengths straddle the vector width so every tail length runs.
@@ -438,8 +483,8 @@ const TranTests = struct {
             if (len > 1) q_old[len - 1] = std.math.nan(f64);
             var ora = vec;
             const alpha = 2.0 / (r.float(f64) * 1e-9 + 1e-12);
-            integrator.rebaseCurrent(W, vec[0..len], q_new[0..len], q_old[0..len], alpha);
-            integrator.rebaseCurrent(1, ora[0..len], q_new[0..len], q_old[0..len], alpha);
+            integrator.rebaseCurrent(vec[0..len], q_new[0..len], q_old[0..len], alpha);
+            for (ora[0..len], q_new[0..len], q_old[0..len]) |*o, a, b| o.* = o.* + alpha * (a - b);
             try testing.expectEqualSlices(u64, @ptrCast(ora[0..len]), @ptrCast(vec[0..len]));
         }
     }
@@ -460,7 +505,7 @@ const TranTests = struct {
         // min can land in the vector body or the tail.
         for (1..L + 1) |len| {
             const s: [4][]const f64 = .{ q[0][0..len], q[1][0..len], q[2][0..len], q[3][0..len] };
-            for ([_]impl.Method{ .backward_euler, .trapezoidal, .gear_2 }) |m| for ([_]impl.Method{ .backward_euler, .trapezoidal, .gear_2 }) |cm| {
+            for ([_]Method{ .backward_euler, .trapezoidal, .gear_2 }) |m| for ([_]Method{ .backward_euler, .trapezoidal, .gear_2 }) |cm| {
                 const vec = integrator.stepBound(W, m, cm, s, ip[0..len], c, lte);
                 const ora = integrator.stepBound(1, m, cm, s, ip[0..len], c, lte);
                 try testing.expectEqual(@as(u64, @bitCast(ora)), @as(u64, @bitCast(vec)));
@@ -468,11 +513,31 @@ const TranTests = struct {
         }
     }
 
+    // A NaN or inf charge or current must not vanish into the min: a float
+    // @min or @max drops NaN, which would accept the step at a growing dt.
+    test "stepBound: a non-finite history entry gives a NaN bound" {
+        const L = 2 * 8 + 3; // vector body and tail at every lane width
+        const lte: integrator.LteIn = .{ .dt = 1e-9, .dt1 = 1e-9, .dt2 = 1e-9, .reltol = 1e-3, .abstol = 1e-12, .chgtol = 1e-14, .trtol = 7 };
+        const c: integrator.Coeffs = .{ .ag0 = 1e9, .ag2 = 0.5e9 };
+        const methods = [_]Method{ .backward_euler, .trapezoidal, .gear_2 };
+        for (methods) |m| for (0..5) |slot| for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64) }) |bad| for ([_]usize{ 0, L - 1 }) |at| {
+            // Backward Euler's divided difference never reads prev3.
+            if (m == .backward_euler and slot == 3) continue;
+            var h: [5][L]f64 = undefined;
+            for (&h, 0..) |*col, k| for (col, 0..) |*v, j| {
+                v.* = @as(f64, @floatFromInt(j + 1)) * 1e-12 / @as(f64, @floatFromInt(k + 1));
+            };
+            h[slot][at] = bad;
+            const del = integrator.stepBound(W, m, m, .{ &h[0], &h[1], &h[2], &h[3] }, &h[4], c, lte);
+            try testing.expect(std.math.isNan(del));
+        };
+    }
+
     test "companionAt: every method, both modes, matches its per-element formula bit for bit" {
         var prng = std.Random.DefaultPrng.init(0xc0a1);
         const r = prng.random();
         const cap = 3 * W + 2;
-        inline for ([_]impl.Method{ .backward_euler, .trapezoidal, .gear_2 }) |m| {
+        inline for (comptime std.enums.values(Method)) |m| {
             inline for (.{ false, true }) |acc| for (0..cap) |len| {
                 var q: [3][cap]f64 = undefined;
                 var ip: [cap]f64 = undefined;
@@ -488,9 +553,10 @@ const TranTests = struct {
                 for (0..len) |j| {
                     const d = c.ag0 * (q[0][j] - q[1][j]);
                     const h: f64 = switch (m) {
+                        .backward_euler => 0,
                         .trapezoidal => ip[j],
                         .gear_2 => c.ag2 * (q[1][j] - q[2][j]),
-                        else => 0,
+                        else => q[2][j], // gear-3..6: q2 is `gearHistory`'s g
                     };
                     ora[j] = if (!acc) d - h else (ora[j] + d) - h;
                 }
@@ -532,12 +598,129 @@ const TranTests = struct {
         }
     }
 
+    test "gearAg: exact on every polynomial of degree <= k, any step history" {
+        var prng = std.Random.DefaultPrng.init(0x6ea2);
+        const r = prng.random();
+        for (3..7) |k| for (0..20) |_| {
+            var dts: [7]f64 = undefined;
+            for (&dts) |*d| d.* = 1e-9 * (0.25 + 1.75 * r.float(f64));
+            const ag = integrator.gearAg(@intCast(k), &dts);
+            // d/dt (t - t_n)^p at t_n is 1 for p = 1, else 0; offsets in
+            // units of dt keep each term O(1).
+            for (0..k + 1) |p| {
+                var sum: f64 = 0;
+                var mag: f64 = 0;
+                var s_i: f64 = 0;
+                for (0..k + 1) |i| {
+                    if (i > 0) s_i += dts[i - 1];
+                    const term = ag[i] * std.math.pow(f64, -s_i / dts[0], @floatFromInt(p));
+                    sum += term;
+                    mag += @abs(term);
+                }
+                const want: f64 = if (p == 1) 1 / dts[0] else 0;
+                try testing.expectApproxEqAbs(want, sum, 1e-11 * mag);
+            }
+            for (ag[k + 1 ..]) |a| try testing.expectEqual(@as(f64, 0), a);
+        };
+        // Equal steps give the textbook BDF3 row: (11/6, -3, 3/2, -1/3)/h.
+        const ag3 = integrator.gearAg(3, &@as([3]f64, @splat(1)));
+        for (ag3[0..4], [_]f64{ 11.0 / 6.0, -3, 1.5, -1.0 / 3.0 }) |a, want| try testing.expectApproxEqAbs(want, a, 1e-14);
+    }
+
+    test "gearHistory: the per-element sum it folds" {
+        var prng = std.Random.DefaultPrng.init(0x91b7);
+        const r = prng.random();
+        var store: [7][5]f64 = undefined;
+        for (&store) |*h| for (h) |*v| {
+            v.* = r.float(f64) - 0.5;
+        };
+        var q: [7][]f64 = undefined;
+        for (&q, &store) |*v, *h| v.* = h;
+        const ag: [7]f64 = .{ 9, -4, 1.5, -0.25, 0.75, -2, 0.5 };
+        for (3..7) |k| {
+            var g: [5]f64 = undefined;
+            integrator.gearHistory(&g, q[0 .. k + 1], ag);
+            for (g, 0..) |got, j| {
+                var want: f64 = 0;
+                for (2..k + 1) |i| want += ag[i] * (store[1][j] - store[i][j]);
+                try testing.expectApproxEqAbs(want, got, 1e-15);
+            }
+        }
+    }
+
+    // The general cktterr loop is the oracle of the vector kernel at orders
+    // 1 and 2, bit for bit: the same divisions in the same order.
+    test "stepBoundGear: matches stepBound bit for bit at orders 1 and 2" {
+        var prng = std.Random.DefaultPrng.init(0x3c1e);
+        const r = prng.random();
+        const L = 2 * W + 3;
+        var q: [4][L]f64 = undefined;
+        var ip: [L]f64 = undefined;
+        for (&q) |*h| for (h) |*v| {
+            v.* = (r.float(f64) - 0.5) * 1e-12;
+        };
+        for (&ip) |*v| v.* = (r.float(f64) - 0.5) * 1e-3;
+        const lte: integrator.LteIn = .{ .dt = 1.3e-9, .dt1 = 0.7e-9, .dt2 = 2.1e-9, .reltol = 1e-3, .abstol = 1e-12, .chgtol = 1e-14, .trtol = 7 };
+        const dts = [_]f64{ lte.dt, lte.dt1, lte.dt2 };
+        const c: integrator.Coeffs = .{ .ag0 = 1.1e9, .ag2 = 0.3e9 };
+        const s: [4][]const f64 = .{ &q[0], &q[1], &q[2], &q[3] };
+        const methods = [_]Method{ .backward_euler, .trapezoidal, .gear_2 };
+        for (methods) |m| for (methods) |cm| {
+            const want = integrator.stepBound(1, m, cm, s, &ip, c, lte);
+            const got = integrator.stepBoundGear(m, cm, &s, &ip, &.{}, c, lte, &dts);
+            try testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
+        };
+    }
+
+    test "stepBoundGear: a non-finite entry gives a NaN bound; a smooth history its order's root" {
+        const L = 5;
+        var h: [9][L]f64 = undefined; // 8 charge slots, then i_prev
+        const dts: [7]f64 = @splat(1e-9);
+        const lte: integrator.LteIn = .{ .dt = 1e-9, .dt1 = 1e-9, .dt2 = 1e-9, .reltol = 1e-3, .abstol = 1e-12, .chgtol = 1e-14, .trtol = 7 };
+        const c: integrator.Coeffs = .{ .ag0 = 1e9, .ag2 = 0 };
+        var g: [L]f64 = @splat(0);
+        for (3..7) |k| {
+            const m = integrator.gear(@intCast(k));
+            for (0..k + 2) |slot| for ([_]f64{ std.math.nan(f64), std.math.inf(f64) }) |bad| {
+                for (&h, 0..) |*col, i| for (col, 0..) |*v, j| {
+                    v.* = @as(f64, @floatFromInt(j + 1)) * 1e-12 / @as(f64, @floatFromInt(i + 1));
+                };
+                h[slot][L - 1] = bad;
+                var q: [8][]const f64 = undefined;
+                for (&q, h[0..8]) |*v, *col| v.* = col;
+                try testing.expect(std.math.isNan(integrator.stepBoundGear(m, m, q[0 .. k + 2], &h[8], &g, c, lte, &dts)));
+            };
+            // q = t^(k+1) on a unit grid: the (k+1)-th divided difference is
+            // exactly 1 (in units of dt^-(k+1)), so del = (trtol*tol/(coeff*1))^(1/k).
+            var q: [8][]const f64 = undefined;
+            var col: [8][1]f64 = undefined;
+            for (&col, 0..) |*v, i| v[0] = std.math.pow(f64, -@as(f64, @floatFromInt(i)) * 1e-9, @floatFromInt(k + 1));
+            for (&q, &col) |*v, *cc| v.* = cc;
+            const ip = [_]f64{0};
+            const del = integrator.stepBoundGear(m, .backward_euler, q[0 .. k + 2], &ip, g[0..1], c, lte, &dts);
+            const i_new = c.ag0 * (col[0][0] - col[1][0]);
+            const tol = @max(lte.abstol + lte.reltol * @abs(i_new), lte.reltol * @max(@max(@abs(col[0][0]), @abs(col[1][0])), lte.chgtol) / 1e-9);
+            const want = std.math.pow(f64, lte.trtol * tol / @max(lte.abstol, integrator.lteCoeff(m)), 1 / @as(f64, @floatFromInt(k)));
+            try testing.expectApproxEqRel(want, del, 1e-6);
+        }
+    }
+
+    test "maxGrowth: under each order's measured zero-stability ratio" {
+        const bound = [_]f64{ 2.414, 2.414, 1.618, 1.280, 1.127, 1.044 }; // orders 1..6 (gear-2's for 1..2)
+        for (std.enums.values(Method)) |m| {
+            try testing.expect(integrator.maxGrowth(m) < bound[integrator.order(m) - 1]);
+        }
+    }
+
     // Matches ngspice cktterr.c:24-34. gear_2 must read gearCoeff[1] (.2222222222), not
     // trapCoeff[1] (.08333333333), which would give a 1.63x looser dt bound.
     test "lteCoeff: ngspice gearCoeff/trapCoeff tables" {
         try testing.expectEqual(@as(f64, 0.5), integrator.lteCoeff(.backward_euler));
         try testing.expectEqual(@as(f64, 0.08333333333), integrator.lteCoeff(.trapezoidal));
         try testing.expectEqual(@as(f64, 0.2222222222), integrator.lteCoeff(.gear_2));
+        // gearCoeff[2..5]: the BDF-k error constants 3/22, 12/125, 10/137, 20/343.
+        for ([_]f64{ 3.0 / 22.0, 12.0 / 125.0, 10.0 / 137.0, 20.0 / 343.0 }, 3..) |want, k|
+            try testing.expectApproxEqRel(want, integrator.lteCoeff(integrator.gear(@intCast(k))), 1e-9);
         // The bound is trtol*tol/(coeff*|dd|) under a sqrt, so the ratio a gear
         // deck's dt moves by is sqrt(trapCoeff[1]/gearCoeff[1]) = 0.6124.
         try testing.expectApproxEqRel(
@@ -670,8 +853,8 @@ const TranTests = struct {
         const CStore = evaluator.ProtoStore(Cap);
         const cstore = try gpa.create(CStore);
         cstore.* = .{};
-        try cstore.append(.{ .c = 7.398e-15 }, .{}, .{ 1, 0 }); // load cap, node 1 -> ground
-        try cstore.append(.{ .c = 5.0e-17 }, .{}, .{ 1, 2 }); // parasitic, node 1 -> node 2
+        try cstore.append(&.{ .c = 7.398e-15 }, &.{}, .{ 1, 0 }); // load cap, node 1 -> ground
+        try cstore.append(&.{ .c = 5.0e-17 }, &.{}, .{ 1, 2 }); // parasitic, node 1 -> node 2
 
         const protos = [_]Proto{.{
             .ctx = cstore,
@@ -728,7 +911,7 @@ const TranTests = struct {
         const VStore = evaluator.ProtoStore(Vsrc);
         const vstore = try gpa.create(VStore);
         vstore.* = .{};
-        try vstore.append(.{
+        try vstore.append(&.{
             .waveform = 1,
             .pulse_v1 = 0.0,
             .pulse_v2 = 5.0,
@@ -737,12 +920,12 @@ const TranTests = struct {
             .pulse_tf = 1e-12,
             .pulse_pw = 4e-9,
             .pulse_per = 20e-9,
-        }, .{}, .{ 1, 0, 2 });
+        }, &.{}, .{ 1, 0, 2 });
 
         const RStore = evaluator.ProtoStore(Res);
         const rstore = try gpa.create(RStore);
         rstore.* = .{};
-        try rstore.append(.{ .r = 1000.0 }, .{}, .{ 1, 0 });
+        try rstore.append(&.{ .r = 1000.0 }, &.{}, .{ 1, 0 });
 
         const protos = [_]Proto{
             .{
@@ -772,7 +955,7 @@ const TranTests = struct {
 
         const x = try gpa.alloc(f64, 3);
         defer gpa.free(x);
-        root.zeroSimd(x);
+        @memset(x, 0);
 
         const probes = [_]u32{1};
         var wf = try Waveform.init(gpa, 1, 512);
@@ -819,7 +1002,7 @@ const TranTests = struct {
         const Store = evaluator.ProtoStore(D);
         const store = try gpa.create(Store);
         store.* = .{};
-        try store.append(.{}, .{}, .{ 1, 0 });
+        try store.append(&.{}, &.{}, .{ 1, 0 });
         const protos = [_]evaluator.Proto{.{
             .ctx = store,
             .type_name = "one",
@@ -916,7 +1099,7 @@ const TranTests = struct {
         defer ckt.deinit();
         const x = try gpa.alloc(f64, 2);
         defer gpa.free(x);
-        root.zeroSimd(x);
+        @memset(x, 0);
         const probes = [_]u32{1};
         var wf = try Waveform.init(gpa, 1, 256);
         defer wf.deinit();
@@ -960,10 +1143,10 @@ const TranTests = struct {
         defer sink.deinit();
         var display: root.Display = .{ .names = &.{&.{"n1"}}, .staged = .init(gpa), .out = &sink.writer };
         defer display.staged.deinit();
-        ckt.attachDisplay(&display);
+        ckt.display = &display;
         const x = try gpa.alloc(f64, 2);
         defer gpa.free(x);
-        root.zeroSimd(x);
+        @memset(x, 0);
         const probes = [_]u32{1};
         var wf = try Waveform.init(gpa, 1, 256);
         defer wf.deinit();
@@ -1065,15 +1248,21 @@ const TranNoiseTests = struct {
     }
 };
 
-/// Integrator order by a manufactured solution, through `Session`: an RC
-/// discharge from v(0) = 1 with the closed form exp(-t/τ). The LTE bound is
-/// switched off (trtol huge), so the grid is the start-up ramp from h/100
-/// doubling to dt_max = h, and every grid is the same grid scaled by h. The
-/// max error over the accepted points then scales as h^p; the observed p
-/// over h = τ/50, τ/100, τ/200 must sit within 0.05 of the method's order.
-/// The next error term pulls p low by O(h/τ): measured 0.984 and 0.992 for
-/// backward Euler, 1.986 and 1.993 for trapezoidal and Gear-2, so the band
-/// is three times the worst gap and a wrong order (off by 1) cannot pass.
+/// Integrator order by a manufactured solution, through `Session`. Two
+/// circuits with closed forms, each started by `.ic` under uic:
+///   RC: v(0) = 1 discharging through 1 kOhm into 1 uF, v = exp(-t/tau);
+///   series RLC (10 Ohm, 1 mH, 1 uF): v_C(0) = 1, i(0) = 0, underdamped,
+///   v = e^(-a t) (cos(wd t) + (a/wd) sin(wd t)), a = R/2L, wd^2 = 1/LC - a^2.
+/// The LTE bound is switched off (trtol huge), so the grid is the start-up
+/// ramp from h/100 doubling to dt_max = h, and every grid is the same grid
+/// scaled by h. The max error over the accepted points then scales as h^p,
+/// and the observed p over three steps h, h/2, h/4 must sit within `band` of
+/// the method's order. The next error term pulls p low by O(h/tau) or
+/// O(wd h). RC measured 0.984 and 0.992 for backward Euler, 1.986 and 1.993
+/// for trapezoidal and Gear-2, so its band is three times the worst gap. The
+/// RLC's gap, from a 2x2 reference march of the same grid, is 0.04 for
+/// backward Euler (0.962, 0.981) and 0.006 for the others; its band is 0.1.
+/// A wrong order (off by 1) passes neither.
 const OrderTests = struct {
     const std = @import("std");
     const t = std.testing;
@@ -1085,15 +1274,33 @@ const OrderTests = struct {
     const models = @import("models");
     const GROUND = @import("../types.zig").GROUND;
 
-    const tau: f64 = 1e-3;
-    const t_stop = 2 * tau;
+    const Kind = enum { rc, rlc };
 
-    /// Max |v - exp(-t/τ)| over the accepted points of one run at step `h`.
-    fn maxError(lib: *const Library, method: requests.Method, h: f64) !f64 {
+    fn exact(kind: Kind, time: f64) f64 {
+        return switch (kind) {
+            .rc => @exp(-time / 1e-3),
+            .rlc => blk: {
+                const a: f64 = 10.0 / (2 * 1e-3);
+                const wd = @sqrt(1.0 / (1e-3 * 1e-6) - a * a);
+                break :blk @exp(-a * time) * (@cos(wd * time) + a / wd * @sin(wd * time));
+            },
+        };
+    }
+
+    /// Max |v - exact| over the accepted points of one run to `t_stop` at
+    /// step `h` (dt_init and dt_max) and LTE scale `trtol`.
+    fn maxError(lib: *const Library, kind: Kind, method: requests.Method, t_stop: f64, h: f64, trtol: f64) !f64 {
         var b = try Builder.init(t.allocator, lib);
         const out = try b.addNode();
-        try b.addDevice(models.resistor, "", .{ .r = 1e3 }, .{}, .{ out, GROUND });
-        try b.addDevice(models.capacitor, "", .{ .c = 1e-6 }, .{}, .{ out, GROUND });
+        switch (kind) {
+            .rc => try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ out, GROUND }),
+            .rlc => {
+                const mid = try b.addNode();
+                try b.addDevice(models.resistor, "", &.{ .r = 10 }, &.{}, .{ out, mid });
+                try b.addDevice(models.inductor, "", &.{ .l = 1e-3 }, &.{}, .{ mid, GROUND });
+            },
+        }
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-6 }, &.{}, .{ out, GROUND });
         var prepared = try b.compile();
         defer prepared.deinit();
         const deck: core.Deck = .{
@@ -1104,7 +1311,7 @@ const OrderTests = struct {
             .output_node = 0,
             .ac_drive = &.{},
             .title = "",
-            .n_devices = 2,
+            .n_devices = if (kind == .rc) 2 else 3,
             .ic = &.{.{ .node = out, .value = 1 }},
             .deck_tol = .{},
             .deck_temp = null,
@@ -1122,7 +1329,7 @@ const OrderTests = struct {
             .dt_max = h,
             .method = method,
             .uic = true,
-            .tol = .{ .trtol = 1e30 },
+            .tol = .{ .trtol = trtol },
         } };
         var ids: [1]requests.QueryId = undefined;
         _ = try s.append(&.{query}, &ids);
@@ -1134,37 +1341,187 @@ const OrderTests = struct {
         const res = try s.result(ids[0]);
         try t.expectEqual(@as(usize, 2), res.varnames.len);
         // h/100 doubling to h, then h steps: about t_stop / h points.
-        try t.expect(res.npoints >= @as(usize, @intFromFloat(t_stop / h)));
+        if (trtol > 1e29) try t.expect(res.npoints >= @as(usize, @intFromFloat(t_stop / h)));
         var worst: f64 = 0;
         for (0..res.npoints) |i| {
             const time = res.data[2 * i];
-            worst = @max(worst, @abs(res.data[2 * i + 1] - @exp(-time / tau)));
+            worst = @max(worst, @abs(res.data[2 * i + 1] - exact(kind, time)));
         }
         try t.expect(worst > 0);
         return worst;
     }
 
-    test "integrators converge at their theoretical order on an RC discharge" {
+    test "integrators converge at their theoretical order on RC and RLC" {
         var lib = try Library.init(t.allocator);
         defer lib.deinit();
-        const cases = [_]struct { requests.Method, f64 }{
+        const cases = [_]struct { Kind, f64, f64 }{
+            .{ .rc, 2e-3, 0.05 }, // two time constants
+            .{ .rlc, 2e-4, 0.1 }, // about one ringing period, 2 pi / wd
+        };
+        const methods = [_]struct { requests.Method, f64 }{
             .{ .backward_euler, 1 },
             .{ .trapezoidal, 2 },
             .{ .gear_2, 2 },
         };
-        for (cases) |case| {
-            const method, const order = case;
+        for (cases) |case| for (methods) |m| {
+            const kind, const t_stop, const band = case;
+            const method, const order = m;
+            const h0 = t_stop / if (kind == .rc) @as(f64, 100) else 200;
             var errs: [3]f64 = undefined;
-            for (&errs, 0..) |*e, k| e.* = try maxError(&lib, method, t_stop / 100 / std.math.pow(f64, 2, @floatFromInt(k)));
+            for (&errs, 0..) |*e, k| e.* = try maxError(&lib, kind, method, t_stop, h0 / std.math.pow(f64, 2, @floatFromInt(k)), 1e30);
             for (0..2) |k| {
                 const observed = std.math.log2(errs[k] / errs[k + 1]);
-                try t.expect(@abs(observed - order) <= 0.05);
+                if (!(@abs(observed - order) <= band)) {
+                    std.debug.print("order: {t} {t} observed {d:.4}, want {d} +- {d}\n", .{ kind, method, observed, order, band });
+                    return error.TestUnexpectedOrder;
+                }
+            }
+        };
+    }
+
+    // The step loop's order control under the ngspice LTE (trtol 7) on the
+    // default dt_max = t_stop/50 grid: every gear-k climbs past order 2
+    // (ZP_TRAN_STATS by_order, e.g. RLC gear-6 {3, 11, 5, 5, 14, 24}) on
+    // the same 62 accepted points as gear-2, and its error drops 7x (RC,
+    // 1.78e-4 to 2.52e-5, the BE start-up's floor) to 10x (RLC, 1.12e-2 to
+    // 8.43e-4 at k >= 4). A loop stuck at order 2 gives gear-2's error.
+    test "gear-3..6 through the step loop beat gear-2 at equal steps" {
+        var lib = try Library.init(t.allocator);
+        defer lib.deinit();
+        for ([_]struct { Kind, f64 }{ .{ .rc, 2e-3 }, .{ .rlc, 2e-4 } }) |case| {
+            const kind, const t_stop = case;
+            const e2 = try maxError(&lib, kind, .gear_2, t_stop, t_stop / 50, 7);
+            for ([_]requests.Method{ .gear_3, .gear_4, .gear_5, .gear_6 }) |m| {
+                const e = try maxError(&lib, kind, m, t_stop, t_stop / 50, 7);
+                if (!(e < e2 / 4)) {
+                    std.debug.print("{t} {t}: error {e:.3}, gear-2 {e:.3}\n", .{ kind, m, e, e2 });
+                    return error.TestUnexpectedError;
+                }
             }
         }
     }
 };
 
+/// Gear-3..6 order by the same two closed forms, marched with the
+/// integrator's own kernels (`gearAg`, `gearHistory`) at one fixed order:
+/// a `Session` run starts at BE on a h/100 ramp, whose O(h^2) start-up error
+/// buries an O(h^k) one, so this march seeds the k history points from the
+/// closed form instead. RC: q' = -v/R with q = Cv. RLC: q = (Cv, Li),
+/// (Cv)' = -i and (Li)' = v - Ri, solved per step as a 2x2. A Python replica
+/// of the march, and this test, measure every observed order on h =
+/// t_stop/40, /80, /160 within 0.11 of k (2.953 to 5.979), so the band is 0.2.
+const GearOrderTests = struct {
+    const std = @import("std");
+    const t = std.testing;
+    const integrator = @import("../tran/tran.zig").test_access.integrator;
+    const Kind = OrderTests.Kind;
+    // OrderTests' element values.
+    const r_rc: f64 = 1e3;
+    const R = 10.0;
+    const L = 1e-3;
+    const C = 1e-6;
+
+    /// The closed form's charges at `time`: [Cv, Li] (Li for the RLC only).
+    fn charges(kind: Kind, time: f64) [2]f64 {
+        const v = OrderTests.exact(kind, time);
+        if (kind == .rc) return .{ C * v, 0 };
+        const a: f64 = R / (2 * L);
+        const wd = @sqrt(1.0 / (L * C) - a * a);
+        // i = -C dv/dt = e^(-a t) sin(wd t) / (wd L).
+        return .{ C * v, @exp(-a * time) * @sin(wd * time) / wd };
+    }
+
+    /// Max |v - exact| of an order-k march to `t_stop`; step i is
+    /// h * w[i >> level], or h when `w` is empty, so level j refines level 0
+    /// by halving every step of it.
+    fn maxError(kind: Kind, k: u8, t_stop: f64, h: f64, w: []const f64, level: u5) f64 {
+        const step = struct {
+            fn f(hh: f64, ww: []const f64, lv: u5, i: usize) f64 {
+                return if (ww.len == 0) hh else hh * ww[i >> lv];
+            }
+        }.f;
+        // Slot i holds q_{n-i}; slot 0 is the point being solved.
+        var store: [7][2]f64 = undefined;
+        var time: f64 = 0;
+        for (0..k) |j| {
+            if (j > 0) time += step(h, w, level, j - 1);
+            store[k - j] = charges(kind, time);
+        }
+        const m: usize = if (kind == .rc) 1 else 2;
+        var worst: f64 = 0;
+        var s: usize = k - 1;
+        while (time < t_stop * (1 - 1e-12)) : (s += 1) {
+            var dts: [7]f64 = undefined;
+            for (dts[0..k], 0..) |*d, i| d.* = step(h, w, level, s - i);
+            const ag = integrator.gearAg(k, &dts);
+            var g: [2]f64 = undefined;
+            var q: [7][]f64 = undefined;
+            for (q[0 .. k + 1], store[0 .. k + 1]) |*v, *col| v.* = col[0..m];
+            integrator.gearHistory(g[0..m], q[0 .. k + 1], ag);
+            // ag0*(q - q1) - g is the charge's derivative.
+            const b0 = ag[0] * store[1][0] + g[0];
+            const v = if (kind == .rc) b0 / (ag[0] * C + 1 / r_rc) else blk: {
+                const b1 = ag[0] * store[1][1] + g[1];
+                // [ag0 C, 1; -1, ag0 L + R] [v; i] = [b0; b1]
+                const d22 = ag[0] * L + R;
+                const v = (b0 * d22 - b1) / (ag[0] * C * d22 + 1);
+                store[0][1] = L * (b1 + v) / d22;
+                break :blk v;
+            };
+            store[0][0] = C * v;
+            time += dts[0];
+            worst = @max(worst, @abs(v - OrderTests.exact(kind, time)));
+            std.mem.copyBackwards([2]f64, store[1..], store[0..6]);
+        }
+        return worst;
+    }
+
+    fn observed(kind: Kind, k: u8, t_stop: f64, w: []const f64) [2]f64 {
+        var errs: [3]f64 = undefined;
+        for (&errs, 0..) |*e, j| e.* = maxError(kind, k, t_stop, t_stop / 40 / std.math.pow(f64, 2, @floatFromInt(j)), w, @intCast(j));
+        return .{ std.math.log2(errs[0] / errs[1]), std.math.log2(errs[1] / errs[2]) };
+    }
+
+    const cases = [_]struct { Kind, f64 }{ .{ .rc, 2e-3 }, .{ .rlc, 2e-4 } };
+
+    test "Gear-3..6 converge at their order at a fixed order and step" {
+        for (cases) |case| for (3..7) |k| {
+            for (observed(case[0], @intCast(k), case[1], &.{})) |p| {
+                if (!(@abs(p - @as(f64, @floatFromInt(k))) <= 0.2)) {
+                    std.debug.print("gear-{d} {t}: observed order {d:.4}\n", .{ k, case[0], p });
+                    return error.TestUnexpectedOrder;
+                }
+            }
+        };
+    }
+
+    // Steps drawn as a random walk whose ratios stay within the order's
+    // `maxGrowth` both ways (clamped to [h/2, 2h]); refinement halves each
+    // step, so the ratios stay inside the bound at every level. This seed
+    // measures k - 0.15 to k - 0.003; a Python replica on other seeds went
+    // down to k - 0.49, as the grid is only piecewise uniform, so the band is
+    // 0.5 low and 0.2 high.
+    test "Gear-3..6 converge to the closed form under random step ratios within maxGrowth" {
+        var prng = std.Random.DefaultPrng.init(0x9ea6);
+        const r = prng.random();
+        for (cases) |case| for (3..7) |k| {
+            const rho = integrator.maxGrowth(integrator.gear(@intCast(k)));
+            var w: [200]f64 = undefined;
+            w[0] = 1;
+            for (w[1..], w[0 .. w.len - 1]) |*x, prev| x.* = std.math.clamp(prev * (1 / rho + (rho - 1 / rho) * r.float(f64)), 0.5, 2);
+            for (observed(case[0], @intCast(k), case[1], &w)) |p| {
+                const kf: f64 = @floatFromInt(k);
+                if (!(p >= kf - 0.5 and p <= kf + 0.2)) {
+                    std.debug.print("gear-{d} {t} variable: observed order {d:.4}\n", .{ k, case[0], p });
+                    return error.TestUnexpectedOrder;
+                }
+            }
+        };
+    }
+};
+
 test {
+    _ = GearOrderTests;
     _ = EnvelopeTests;
     _ = MatexTests;
     _ = OrderTests;

@@ -81,6 +81,9 @@
               zig
               pkgs.python3
             ];
+            # One global cache per Zig store path: two builds of the same Zig version
+            # sharing ~/.cache/zig evict each other's build runner on every `zig build`.
+            shellHook = ''export ZIG_GLOBAL_CACHE_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/zig-${builtins.baseNameOf zig}"'';
           };
           default = pkgs.mkShell {
             inputsFrom = [ ci ];

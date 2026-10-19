@@ -46,3 +46,24 @@ test "FSDB header, strings and samples" {
     try std.testing.expectEqualStrings("\x02\x00ac\x02\x00AC\x09\x00frequency\x06\x00v(out)", blob[20..][0..27]);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&data), blob[47..]);
 }
+
+test "FSDB round-trips header, strings and sample bits" {
+    var buf: [512]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    const nan_payload: f64 = @bitCast(@as(u64, 0x7ff8_0000_0000_beef));
+    const data = [_]f64{ 0, -0.0, 5e-324, nan_payload, std.math.inf(f64), -1e308 };
+    const names = [_][]const u8{ "time", "v(a)", "" };
+    try encode(&w, .{ .title = "", .result = .{ .plotname = "Transient", .varnames = &names, .is_complex = false, .npoints = 2, .data = &data } });
+    var r: Io.Reader = .fixed(w.buffered());
+    try std.testing.expectEqualStrings(magic, try r.take(4));
+    try std.testing.expectEqual(version, try r.takeInt(u32, .little));
+    try std.testing.expectEqual(@as(u32, 3), try r.takeInt(u32, .little));
+    try std.testing.expectEqual(@as(u32, 2), try r.takeInt(u32, .little));
+    try std.testing.expectEqual(@as(u32, 0), try r.takeInt(u32, .little));
+    for ([_][]const u8{ "", "Transient" } ++ names) |want| {
+        const len = try r.takeInt(u16, .little);
+        try std.testing.expectEqualStrings(want, try r.take(len));
+    }
+    for (data) |x| try std.testing.expectEqual(@as(u64, @bitCast(x)), try r.takeInt(u64, .native));
+    try std.testing.expectError(error.EndOfStream, r.takeByte());
+}

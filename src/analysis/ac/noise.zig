@@ -25,9 +25,12 @@ pub const Options = @import("core").query.Noise;
 
 /// The per-interval geometry `nintegrate` needs (ngspice noisean.c:436-439).
 const Band = struct { del_freq: f64, del_ln_freq: f64, ln_freq: f64, ln_last_freq: f64 };
+comptime {
+    std.debug.assert(@sizeOf(Band) == 32);
+}
 
 /// `exp`, linear past 700 so a steep fit cannot overflow (ngspice ninteg.c:24).
-inline fn limexp(x: f64) f64 {
+fn limexp(x: f64) f64 {
     return if (x > 700.0) @exp(@as(f64, 700.0)) * (1.0 + x - 700.0) else @exp(x);
 }
 
@@ -48,7 +51,7 @@ fn nintegrate(dens: f64, ln_dens: f64, ln_last_dens: f64, b: Band) f64 {
 /// The source's unit-coefficient PSD at `f`: white plus flicker / f^ef plus
 /// its table, in A^2/Hz. At f <= 0 the flicker half has no value and drops
 /// out. `coeff` is not in it: it scales the transfer (`transfer`).
-pub inline fn sourcePsd(src: NoiseSource, f: f64) f64 {
+pub fn sourcePsd(src: NoiseSource, f: f64) f64 {
     const tab = src.tableAt(f);
     if (src.flicker == 0 or f <= 0) return src.white + tab;
     return src.white + src.flicker / std.math.pow(f64, f, src.ef) + tab;
@@ -223,13 +226,13 @@ pub fn sweep(
 fn sampled(ckt: *root.Circuit, x_op: []const f64, srcs: []const NoiseSource, freqs: []const f64, s: @import("core").query.NoiseSample, opts: Options, gpa: std.mem.Allocator) ![]f64 {
     const f_top = s.max_fold * s.fs;
     const k_max: i64 = @intFromFloat(@ceil(s.max_fold) + 1);
-    var grid: std.ArrayList(f64) = .empty;
+    var grid: std.ArrayList(f64) = try .initCapacity(gpa, freqs.len * @as(usize, @intCast(2 * k_max + 1)));
     defer grid.deinit(gpa);
     for (freqs) |f| {
         var k = -k_max;
         while (k <= k_max) : (k += 1) {
             const g = @abs(f + @as(f64, @floatFromInt(k)) * s.fs);
-            if (g > 0 and g <= f_top) try grid.append(gpa, g);
+            if (g > 0 and g <= f_top) grid.appendAssumeCapacity(g);
         }
     }
     std.mem.sort(f64, grid.items, {}, std.sort.asc(f64));
@@ -293,11 +296,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var columns: Columns = .{};
     var per_source: ?PerSource = null;
+    const per_buf = try scratch.alloc(f64, if (opts.contributions) srcs.len * (@as(usize, n_points) + 2) else 0);
+    defer scratch.free(per_buf);
     if (opts.contributions) {
         columns = try Columns.build(a, ctx.circuit.batches, ctx.circuit.batch_types, opts.card_names, srcs.len);
-        const ps = try a.alloc(f64, srcs.len * (@as(usize, n_points) + 2));
-        @memset(ps, 0);
-        per_source = .{ .dens = ps[0 .. srcs.len * n_points], .out = ps[srcs.len * n_points ..][0..srcs.len], .in = ps[srcs.len * (n_points + 1) ..] };
+        @memset(per_buf, 0);
+        per_source = .{ .dens = per_buf[0 .. srcs.len * n_points], .out = per_buf[srcs.len * n_points ..][0..srcs.len], .in = per_buf[srcs.len * (n_points + 1) ..] };
     }
 
     const integrated = try sweep(ctx.circuit, x_op, srcs, freqs, density, in_density, per_source, opts, scratch);

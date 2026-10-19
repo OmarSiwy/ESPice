@@ -79,9 +79,9 @@ test "jfnk vs newton: divider OP agrees to 1e-9" {
     var b = try Builder.init(testing.allocator, &lib);
     const vin = try b.addNode();
     const out = try b.addNode();
-    try b.addDevice(@import("models").vsource, "", .{ .dc = 10 }, .{}, .{ vin, GROUND });
-    try b.addDevice(@import("models").resistor, "", .{ .r = 1000 }, .{}, .{ vin, out });
-    try b.addDevice(@import("models").resistor, "", .{ .r = 3000 }, .{}, .{ out, GROUND });
+    try b.addDevice(@import("models").vsource, "", &.{ .dc = 10 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(@import("models").resistor, "", &.{ .r = 1000 }, &.{}, .{ vin, out });
+    try b.addDevice(@import("models").resistor, "", &.{ .r = 3000 }, &.{}, .{ out, GROUND });
     var prepared = try b.compile();
     defer prepared.deinit();
     var ckt = try analysis.Circuit.instantiate(&prepared, testing.allocator);
@@ -116,17 +116,17 @@ test "jfnk: 100-diode ladder converges" {
     defer lib.deinit();
     var b = try Builder.init(testing.allocator, &lib);
     const vin = try b.addNode();
-    try b.addDevice(@import("models").vsource, "", .{ .dc = 5 }, .{}, .{ vin, GROUND });
+    try b.addDevice(@import("models").vsource, "", &.{ .dc = 5 }, &.{}, .{ vin, GROUND });
 
     // vin -R- n1 -R- n2 ... -R- gnd, a diode from every n to ground.
     var prev: u32 = vin;
     for (0..n_diodes) |_| {
         const mid = try b.addNode();
-        try b.addDevice(@import("models").resistor, "", .{ .r = 100 }, .{}, .{ prev, mid });
-        try b.addDevice(@import("models").diode, "", .{ .is = 1e-14 }, .{}, .{ mid, GROUND });
+        try b.addDevice(@import("models").resistor, "", &.{ .r = 100 }, &.{}, .{ prev, mid });
+        try b.addDevice(@import("models").diode, "", &.{ .is = 1e-14 }, &.{}, .{ mid, GROUND });
         prev = mid;
     }
-    try b.addDevice(@import("models").resistor, "", .{ .r = 100 }, .{}, .{ prev, GROUND });
+    try b.addDevice(@import("models").resistor, "", &.{ .r = 100 }, &.{}, .{ prev, GROUND });
 
     var prepared = try b.compile();
     defer prepared.deinit();
@@ -195,11 +195,11 @@ test "OPtran: the published x satisfies KCL at the device state the operating po
     var b = try Builder.init(t.allocator, &lib);
     const out = try b.addNode();
     const fl = try b.addNode();
-    try b.addDevice(models.vsource, "", .{ .waveform = 1, .pulse_v2 = 1, .pulse_td = 1e-7 }, .{}, .{ out, analysis.GROUND });
-    try b.addDevice(models.resistor, "", .{ .r = 1e3 }, .{}, .{ out, analysis.GROUND });
+    try b.addDevice(models.vsource, "", &.{ .waveform = 1, .pulse_v2 = 1, .pulse_td = 1e-7 }, &.{}, .{ out, analysis.GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ out, analysis.GROUND });
     // fl reaches only capacitors: the static rows are singular there.
-    try b.addDevice(models.capacitor, "", .{ .c = 1e-12 }, .{}, .{ fl, analysis.GROUND });
-    try b.addDevice(models.capacitor, "", .{ .c = 1e-12 }, .{}, .{ fl, out });
+    try b.addDevice(models.capacitor, "", &.{ .c = 1e-12 }, &.{}, .{ fl, analysis.GROUND });
+    try b.addDevice(models.capacitor, "", &.{ .c = 1e-12 }, &.{}, .{ fl, out });
     b.needs_tran_op = true;
     var prepared = try b.compile();
     defer prepared.deinit();

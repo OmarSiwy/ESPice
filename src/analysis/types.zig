@@ -1,7 +1,8 @@
 //! Shared analysis context: the circuit, the run context and the result type
 //! every analysis leaf needs. Leaves import this file, never ../root.zig,
 //! which imports the leaves for dispatch. File DAG inside src/analysis/:
-//! Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig.
+//! Circuit.zig -> types.zig -> leaves / executor.zig -> root.zig. Cites
+//! nothing.
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -14,8 +15,6 @@ pub const EvalHook = circuit_mod.EvalHook;
 pub const Display = circuit_mod.Display;
 pub const AcParam = circuit_mod.AcParam;
 pub const GROUND = circuit_mod.GROUND;
-pub const zeroSimd = circuit_mod.zeroSimd;
-pub const copySimd = circuit_mod.copySimd;
 
 /// `e` := the adjoint excitation of the output v(pos) - v(neg): +1 at
 /// `pos`, -1 at `neg`, 0 elsewhere. The ground row is the v(0) = 0 clamp
@@ -23,7 +22,7 @@ pub const copySimd = circuit_mod.copySimd;
 pub fn outputDrive(e: []f64, pos: u32, neg: u32) void {
     assert(pos < e.len);
     assert(neg < e.len);
-    zeroSimd(e);
+    @memset(e, 0);
     if (pos != GROUND) e[pos] = 1;
     if (neg != GROUND) e[neg] = -1;
 }
@@ -38,7 +37,6 @@ pub fn take(arena: []f64, off: *usize, len: usize) []f64 {
 /// Builds an owning Circuit from protos, for tests. See `Circuit.zig` `init`.
 pub const freeze = circuit_mod.init;
 
-pub const CardRef = @import("core").query.CardRef;
 pub const CardNames = @import("core").query.CardNames;
 pub const ParamRef = device_ir.ParamRef;
 pub const NoiseSource = device_ir.NoiseSource;
@@ -103,9 +101,9 @@ pub fn probeNames(ctx: *const RunCtx, first: ?[]const u8) ![]const []const u8 {
     for (ctx.probes, names[extra..]) |row, *out| {
         const label = ctx.circuit.nodeName(row);
         out.* = if (label.len == 0)
-            try std.fmt.allocPrint(a, "v({d})", .{row})
+            try a.print("v({d})", .{row})
         else
-            try std.fmt.allocPrint(a, "v({s})", .{label});
+            try a.print("v({s})", .{label});
     }
     return names;
 }

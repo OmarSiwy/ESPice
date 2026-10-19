@@ -35,7 +35,7 @@ fn cscMulVec(
     x: []const f64,
     y: []f64,
 ) void {
-    root.zeroSimd(y[0..n]);
+    num.zeroSimd(y[0..n]);
     for (0..n) |j| {
         const xj = x[j];
         if (xj == 0) continue;
@@ -89,54 +89,19 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) boo
     denseMatMul(m, H4, H2, T); // H^6
 
     // Even part.
-    {
-        var i: usize = 0;
-        const b2v: V = @splat(b[2]);
-        const b4v: V = @splat(b[4]);
-        const b6v: V = @splat(b[6]);
-        while (i + W <= mm) : (i += W) {
-            const h2v: V = H2[i..][0..W].*;
-            const h4v: V = H4[i..][0..W].*;
-            const h6v: V = T[i..][0..W].*;
-            Vmat[i..][0..W].* = b2v * h2v + b4v * h4v + b6v * h6v;
-        }
-        while (i < mm) : (i += 1) {
-            Vmat[i] = b[2] * H2[i] + b[4] * H4[i] + b[6] * T[i];
-        }
-    }
+    for (Vmat, H2, H4, T) |*v, h2, h4, h6| v.* = b[2] * h2 + b[4] * h4 + b[6] * h6;
     for (0..m) |i| Vmat[i * m + i] += b[0];
 
     // Odd part: T becomes the inner polynomial, then U = H*T.
-    {
-        var i: usize = 0;
-        const b3v: V = @splat(b[3]);
-        const b5v: V = @splat(b[5]);
-        while (i + W <= mm) : (i += W) {
-            const h2v: V = H2[i..][0..W].*;
-            const h4v: V = H4[i..][0..W].*;
-            T[i..][0..W].* = b3v * h2v + b5v * h4v;
-        }
-        while (i < mm) : (i += 1) {
-            T[i] = b[3] * H2[i] + b[5] * H4[i];
-        }
-    }
+    for (T, H2, H4) |*o, h2, h4| o.* = b[3] * h2 + b[5] * h4;
     for (0..m) |i| T[i * m + i] += b[1];
 
     denseMatMul(m, H, T, U);
 
     // out = V + U, H = V - U.
-    {
-        var i: usize = 0;
-        while (i + W <= mm) : (i += W) {
-            const uv: V = U[i..][0..W].*;
-            const vv: V = Vmat[i..][0..W].*;
-            out[i..][0..W].* = vv + uv;
-            H[i..][0..W].* = vv - uv;
-        }
-        while (i < mm) : (i += 1) {
-            out[i] = Vmat[i] + U[i];
-            H[i] = Vmat[i] - U[i];
-        }
+    for (out[0..mm], H[0..mm], U, Vmat) |*o, *h, u, v| {
+        o.* = v + u;
+        h.* = v - u;
     }
 
     const piv = piv_buf[0..m];
@@ -157,7 +122,7 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) boo
     // Undo the scaling: out = out^(2^s).
     var si: u32 = 0;
     while (si < s) : (si += 1) {
-        root.copySimd(H2[0..mm], out[0..mm]);
+        num.copySimd(H2[0..mm], out[0..mm]);
         denseMatMul(m, H2, H2, out);
     }
     return true;
@@ -166,6 +131,8 @@ fn expmSmall(m: usize, H: []f64, out: []f64, scratch: []f64, piv_buf: []u32) boo
 /// C = A*B for m x m row-major matrices; C must not alias A or B.
 /// Vectorized over W adjacent output columns, each lane summing k in
 /// 0..m order, so every element rounds exactly as the scalar loop would.
+/// The lanes are output columns, not one loop's iterations: the plain i-k-j
+/// loop vectorizes too but measured 1.1-2.7x slower (m = 30..5).
 fn denseMatMul(m: usize, A: []const f64, B: []const f64, C: []f64) void {
     for (0..m) |i| {
         const a_row = A[i * m ..][0..m];
@@ -227,7 +194,7 @@ fn arnoldi(
 
     num.scale(V_basis[0..nn], 1.0 / beta, v[0..nn]);
 
-    root.zeroSimd(H[0 .. @as(usize, m_max) * m_max]);
+    num.zeroSimd(H[0 .. @as(usize, m_max) * m_max]);
 
     var j: u32 = 0;
     while (j < m_max) : (j += 1) {
@@ -296,7 +263,7 @@ fn posteriorOk(
 
     // Leading m x m block of the m_max-strided H.
     for (0..mm) |i| {
-        root.copySimd(H_copy[i * mm ..][0..mm], H[i * @as(usize, m_max) ..][0..mm]);
+        num.copySimd(H_copy[i * mm ..][0..mm], H[i * @as(usize, m_max) ..][0..mm]);
     }
 
     num.scale(H_copy[0..msq], h_step, H_copy[0..msq]);
@@ -345,7 +312,7 @@ fn collectTransitionSpots(allocator: std.mem.Allocator, ckt: *root.Circuit, t_st
 fn evalSourceRhs(ckt: *root.Circuit, t: f64, b_out: []f64) void {
     const n: usize = ckt.n;
     // b_out doubles as the zero state vector; the eval result overwrites it.
-    root.zeroSimd(b_out[0..n]);
+    num.zeroSimd(b_out[0..n]);
     ckt.setSimState(.{ .t = t, .kind = .tran });
     ckt.eval(b_out, t);
     num.scale(b_out[0..n], -1.0, ckt.rhs[0..n]);
@@ -387,7 +354,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (n == 0) return error.EmptyCircuit;
 
     const x = try scratch.alloc(f64, n);
-    root.copySimd(x, x_op);
+    num.copySimd(x, x_op);
 
     const gamma = opts.gamma orelse opts.t_stop / 1000.0;
     const h_cap = opts.h_output_cap orelse opts.t_stop / 200.0;
@@ -407,7 +374,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const combined_vals = try scratch.alloc(f64, ckt.nnz + 1);
     const nnz: usize = ckt.nnz;
     if (ckt.has_charge)
-        combinePlanes(W, combined_vals[0..nnz], ckt.c_vals[0..nnz], ckt.g_vals[0..nnz], gamma)
+        combinePlanes(combined_vals[0..nnz], ckt.c_vals[0..nnz], ckt.g_vals[0..nnz], gamma)
     else
         num.scale(combined_vals[0..nnz], gamma, ckt.g_vals[0..nnz]);
     combined_vals[nnz] = 0;
@@ -468,9 +435,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // overwrite the planes.
     const c_vals_saved = try scratch.alloc(f64, ckt.nnz + 1);
     if (ckt.has_charge) {
-        root.copySimd(c_vals_saved[0..ckt.nnz], ckt.c_vals[0..ckt.nnz]);
+        @memcpy(c_vals_saved[0..ckt.nnz], ckt.c_vals[0..ckt.nnz]);
     } else {
-        root.zeroSimd(c_vals_saved[0..ckt.nnz]);
+        @memset(c_vals_saved[0..ckt.nnz], 0);
     }
 
     while (t < opts.t_stop and steps < 10_000_000) {
@@ -496,19 +463,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         // MATEX eq. 5, the exact update for piecewise-linear sources:
         //   x(t+h) = expm(hA) [x(t) + A^-1 b(t) + A^-2 db]
         //          - A^-1 b(t+h) - A^-2 db,     db = (b(t+h) - b(t))/h
-        {
-            const inv_h = 1.0 / h;
-            const ihv: V = @splat(inv_h);
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const bt: V = b_t[i..][0..W].*;
-                const bth: V = b_th[i..][0..W].*;
-                db_vec[i..][0..W].* = ihv * (bth - bt);
-            }
-            while (i < n) : (i += 1) {
-                db_vec[i] = (b_th[i] - b_t[i]) * inv_h;
-            }
-        }
+        const inv_h = 1.0 / h;
+        for (db_vec, b_t, b_th) |*d, bt, bth| d.* = inv_h * (bth - bt);
 
         negGinvMul(&slv_g, b_th[0..n], ainv_bth[0..n]);
         // A^-2 db = -G^-1 C (-G^-1 db); db_vec is free scratch after this.
@@ -516,18 +472,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         cscMulVec(nn, ckt.col_ptr, ckt.row_idx, c_vals_saved, pwl_tmp[0..n], db_vec[0..n]);
         negGinvMul(&slv_g, db_vec[0..n], ainv2_db[0..n]);
 
-        {
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const xv: V = x[i..][0..W].*;
-                const a1: V = ainv_bt[i..][0..W].*;
-                const a2: V = ainv2_db[i..][0..W].*;
-                v_vec[i..][0..W].* = xv + a1 + a2;
-            }
-            while (i < n) : (i += 1) {
-                v_vec[i] = x[i] + ainv_bt[i] + ainv2_db[i];
-            }
-        }
+        for (v_vec, x, ainv_bt, ainv2_db) |*v, xv, a1, a2| v.* = xv + a1 + a2;
 
         // expm(hA) z = g(S) S z for S = (C + gamma*G)^-1 C, the
         // shift-inverted operator, and g(mu) = exp((h/gamma)(1 - 1/mu)) / mu.
@@ -556,13 +501,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         if (!ar.converged) return error.MatexDidNotConverge;
         if (ar.m == 0) {
             // Zero vector: only the correction terms remain.
-            root.zeroSimd(x_new[0..n]);
+            num.zeroSimd(x_new[0..n]);
         } else {
             const m: usize = ar.m;
             const msq = m * m;
 
             for (0..m) |i| {
-                root.copySimd(H_copy[i * m ..][0..m], H_mat[i * m_max_usize ..][0..m]);
+                num.copySimd(H_copy[i * m ..][0..m], H_mat[i * m_max_usize ..][0..m]);
             }
 
             // H_m approximates (C + gamma*G)^-1 C, so hA maps to
@@ -576,7 +521,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             try dense_lu.factorize(m, H_copy[0..msq], piv);
 
             for (0..m) |j| {
-                root.zeroSimd(arnoldi_tmp1[0..m]);
+                num.zeroSimd(arnoldi_tmp1[0..m]);
                 arnoldi_tmp1[j] = 1.0;
                 dense_lu.solveFactored(m, H_copy[0..msq], piv, arnoldi_tmp1[0..m], arnoldi_tmp1[0..m]);
                 for (0..m) |i| H_inv[i * m + j] = arnoldi_tmp1[i];
@@ -594,7 +539,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             if (!expmSmall(m, H_copy, expm_out, expm_scratch, piv_all)) return error.MatexDidNotConverge;
 
             // x_new = beta * V_m * expm(T) * u
-            root.zeroSimd(x_new[0..n]);
+            num.zeroSimd(x_new[0..n]);
             for (0..m) |k| {
                 const coeff = ar.beta * num.dot(expm_out[k * m ..][0..m], u);
                 const vk = V_basis[k * n ..][0..n];
@@ -603,23 +548,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         }
 
         // Subtract the correction terms A^-1 b(t+h) + A^-2 db.
-        {
-            var i: usize = 0;
-            while (i + W <= n) : (i += W) {
-                const xv: V = x_new[i..][0..W].*;
-                const a1: V = ainv_bth[i..][0..W].*;
-                const a2: V = ainv2_db[i..][0..W].*;
-                x_new[i..][0..W].* = xv - a1 - a2;
-            }
-            while (i < n) : (i += 1) {
-                x_new[i] = x_new[i] - ainv_bth[i] - ainv2_db[i];
-            }
-        }
+        for (x_new, ainv_bth, ainv2_db) |*xv, a1, a2| xv.* = xv.* - a1 - a2;
 
         // A non-finite step is a failed step, not a waveform (#51).
         // NaN and inf propagate through the sum.
         if (!std.math.isFinite(num.sum(x_new[0..n]))) return error.MatexDidNotConverge;
-        root.copySimd(x[0..n], x_new[0..n]);
+        num.copySimd(x[0..n], x_new[0..n]);
         t += h;
         steps += 1;
         std.mem.swap([]f64, &b_t, &b_th);

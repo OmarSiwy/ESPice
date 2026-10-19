@@ -38,8 +38,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const rhs = try scratch.alloc(f64, nn);
     defer scratch.free(rhs);
-    root.zeroSimd(rhs);
-    if (ctx.ac_drive.len == nn) @memcpy(rhs, ctx.ac_drive);
+    if (ctx.ac_drive.len == nn) @memcpy(rhs, ctx.ac_drive) else @memset(rhs, 0);
 
     const freqs, const omegas = try freq.axis(scratch, opts.sweep);
     defer freq.freeAxis(scratch, freqs);

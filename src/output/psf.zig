@@ -25,7 +25,7 @@ pub fn encode(w: *Io.Writer, plot: Plot) !void {
     try w.writeAll("\"real\" FLOAT DOUBLE\n");
     if (complex) try w.writeAll("\"complex\" COMPLEX DOUBLE\n");
 
-    const has_sweep = plot.result.npoints > 1 and names.len > 0;
+    const has_sweep = plot.result.npoints > 1;
     const first_trace: usize = @intFromBool(has_sweep);
     if (has_sweep) {
         try w.writeAll("SWEEP\n");

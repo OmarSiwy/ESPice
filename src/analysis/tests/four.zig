@@ -83,7 +83,7 @@ test "four: pure cosine has zero THD" {
     const result = try spectrumOf(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), result.harmonics[0].mag, 1e-10);
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.thd_percent, 1e-6);
 }
 
@@ -101,7 +101,7 @@ test "four: DC offset is reported correctly" {
     const result = try spectrumOf(&samples, 9, allocator);
 
     try testing.expectApproxEqAbs(dc_offset, result.dc, 1e-10);
-    try testing.expectApproxEqAbs(@as(f64, 1.0), result.fundamental, 1e-10);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), result.harmonics[0].mag, 1e-10);
 }
 
 test "four: square wave THD ~ 48.3%" {
@@ -125,7 +125,7 @@ test "four: square wave THD ~ 48.3%" {
     const result = try spectrumOf(&samples, 9, allocator);
 
     // Fundamental magnitude: (4/pi) * 1 = 1.2732
-    try testing.expectApproxEqAbs(@as(f64, 4.0 / math.pi), result.fundamental, 1e-3);
+    try testing.expectApproxEqAbs(@as(f64, 4.0 / math.pi), result.harmonics[0].mag, 1e-3);
 
     // 3rd harmonic = (4/pi)/3 = 0.4244
     try testing.expectApproxEqAbs(@as(f64, 4.0 / (3.0 * math.pi)), result.harmonics[2].mag, 1e-3);
@@ -151,7 +151,7 @@ test "four: known amplitude and phase" {
 
     const result = try spectrumOf(&samples, 9, allocator);
 
-    try testing.expectApproxEqAbs(amp, result.fundamental, 1e-8);
+    try testing.expectApproxEqAbs(amp, result.harmonics[0].mag, 1e-8);
     try testing.expectApproxEqAbs(45.0, result.harmonics[0].phase_deg, 0.1);
 }
 
@@ -176,7 +176,7 @@ test "four: analyze waveform from tran data" {
 
     const result = try analyze(&waveform, false, f_fund, 9, allocator);
 
-    try testing.expectApproxEqAbs(@as(f64, 2.5), result.fundamental, 0.05);
+    try testing.expectApproxEqAbs(@as(f64, 2.5), result.harmonics[0].mag, 0.05);
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.dc, 0.05);
     try testing.expectApproxEqAbs(@as(f64, 0.0), result.thd_percent, 1.0);
 }
@@ -220,4 +220,40 @@ test {
     // In-file tests of the other post-processors.
     _ = @import("../post/disto.zig");
     _ = @import("../post/fft.zig");
+}
+
+test "four: a differential probe is the spectrum of the difference" {
+    const a = testing.allocator;
+    var pair = try tran.Waveform.init(a, 2, 300);
+    defer pair.deinit();
+    var diff = try tran.Waveform.init(a, 1, 300);
+    defer diff.deinit();
+    // Uneven steps, so the two columns resample between samples.
+    var t: f64 = 0;
+    while (t < 2.0) : (t += 0.0071 + 0.003 * @sin(37 * t)) {
+        const p = 1.5 * @sin(2 * math.pi * t) + 0.3;
+        const n = 0.4 * @cos(4 * math.pi * t) - 0.3;
+        try pair.record(t, &.{ p, n }, &.{ 0, 1 });
+        try diff.record(t, &.{p - n}, &.{0});
+    }
+    const want = try analyze(&diff, false, 1, 9, a);
+    const got = try analyze(&pair, true, 1, 9, a);
+    try testing.expectApproxEqAbs(want.dc, got.dc, 1e-12);
+    try testing.expectApproxEqAbs(want.thd_percent, got.thd_percent, 1e-9);
+    for (want.harmonics[0..9], got.harmonics[0..9]) |w, g| try testing.expectApproxEqAbs(w.mag, g.mag, 1e-12);
+}
+
+test "four: analyze reports every allocation failure" {
+    var waveform = try tran.Waveform.init(testing.allocator, 1, 64);
+    defer waveform.deinit();
+    for (0..64) |k| {
+        const t = @as(f64, @floatFromInt(k)) / 32;
+        try waveform.record(t, &.{@sin(2 * math.pi * t)}, &.{0});
+    }
+    const S = struct {
+        fn run(gpa: std.mem.Allocator, w: *const tran.Waveform) !void {
+            _ = try analyze(w, false, 1, 9, gpa);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, S.run, .{&waveform});
 }

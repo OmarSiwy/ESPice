@@ -70,3 +70,43 @@ test "binary raw: complex plot" {
     } }, "Title: test ac\nDate: Thu Jan  1 00:00:00 1970\nPlotname: AC Analysis\nFlags: complex\n" ++
         "No. Variables: 2\nNo. Points: 2\nVariables:\n\t0\tfrequency\tfrequency\n\t1\tvdd#branch\tcurrent\nBinary:\n");
 }
+
+test "binary raw round-trips every f64 bit pattern, NaN payloads included" {
+    const a = std.testing.allocator;
+    // Specials, then pseudo-random bit patterns: whatever the bits, the
+    // reader gets them back.
+    var data: [2 * 64]f64 = undefined;
+    const specials = [_]u64{ 0, 0x8000_0000_0000_0000, 1, 0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000, 0x7ff8_0000_0000_0001, 0xfff4_0000_dead_beef, 0x7fef_ffff_ffff_ffff };
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    for (&data, 0..) |*x, i| x.* = @bitCast(if (i < specials.len) specials[i] else prng.random().int(u64));
+    for ([_]bool{ false, true }) |complex| {
+        const plot: Plot = .{ .title = "rt", .result = .{
+            .plotname = "p",
+            .varnames = &.{ "time", "v(x)" },
+            .is_complex = complex,
+            .npoints = if (complex) 32 else 64,
+            .data = &data,
+        } };
+        var out: Io.Writer.Allocating = .init(a);
+        defer out.deinit();
+        try encode(&out.writer, plot);
+        const blob = out.written();
+        const marker = "Binary:\n";
+        const at = std.mem.indexOf(u8, blob, marker).? + marker.len;
+        const points = "No. Points: ";
+        const p = std.mem.indexOf(u8, blob, points).? + points.len;
+        const nl = std.mem.indexOfScalarPos(u8, blob, p, '\n').?;
+        try std.testing.expectEqual(plot.result.npoints, try std.fmt.parseInt(usize, blob[p..nl], 10));
+        try std.testing.expectEqual(data.len * @sizeOf(f64), blob.len - at);
+        var back: [data.len]u64 = undefined;
+        @memcpy(std.mem.sliceAsBytes(&back), blob[at..]);
+        try std.testing.expectEqualSlices(u64, @ptrCast(&data), &back);
+    }
+}
+
+test "binary raw with no points is the header alone" {
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try encode(&w, .{ .title = "t", .result = .{ .plotname = "p", .varnames = &.{"time"}, .is_complex = false, .npoints = 0, .data = &.{} } });
+    try std.testing.expect(std.mem.endsWith(u8, w.buffered(), "No. Points: 0\nVariables:\n\t0\ttime\ttime\nBinary:\n"));
+}

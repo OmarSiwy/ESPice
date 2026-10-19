@@ -116,7 +116,7 @@ test "hessenbergReduce: preserves eigenvalues" {
         1, 1, 4,
     };
 
-    var scratch: [3]f64 = undefined;
+    var scratch: [6]f64 = undefined; // hessenbergReduce needs 2n
     hessenbergReduce(3, &h, &scratch);
 
     try testing.expectApproxEqAbs(@as(f64, 0.0), h[2 * 3 + 0], 1e-12);

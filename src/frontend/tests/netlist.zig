@@ -53,20 +53,14 @@ test "HDL includes are foreign models; ordinary includes are inert" {
     try std.testing.expectEqual(@as(usize, 0), nl.deck.analyses.len);
 }
 
-test "case folding SIMD matches W=1 at every boundary" {
+test "case folding lowercases every byte and counts newlines, at every length" {
     var prng = std.Random.DefaultPrng.init(0xa5c11);
     var src: [257]u8 = undefined;
-    var expected: [257]u8 = undefined;
-    var actual: [257]u8 = undefined;
-    for (0..20) |_| {
-        prng.random().bytes(&src);
-        inline for (.{ 1, 16, 32, 64 }) |width| for (0..src.len + 1) |n| {
-            const count = lines.normalize(1, expected[0..n], src[0..n]);
-            try std.testing.expectEqual(count, lines.normalize(width, actual[0..n], src[0..n]));
-            try std.testing.expectEqualSlices(u8, expected[0..n], actual[0..n]);
-            try std.testing.expectEqual(std.mem.countScalar(u8, src[0..n], '\n'), count);
-            for (src[0..n], actual[0..n]) |before, after| try std.testing.expectEqual(std.ascii.toLower(before), after);
-        };
+    var out: [257]u8 = undefined;
+    prng.random().bytes(&src);
+    for (0..src.len + 1) |n| {
+        try std.testing.expectEqual(std.mem.countScalar(u8, src[0..n], '\n'), lines.normalize(out[0..n], src[0..n]));
+        for (src[0..n], out[0..n]) |before, after| try std.testing.expectEqual(std.ascii.toLower(before), after);
     }
 }
 
@@ -107,7 +101,7 @@ test "source: nested relative includes select only requested case-insensitive co
     try tmp.dir.writeFile(io, .{ .sub_path = "deck.sp", .data = "Title\n.LIB 'Models/lib.sp' TT\n.end\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "Models/lib.sp", .data = ".lib ss ; ignored corner\n.include missing.sp\n.endl ss\n.lib tt $ selected corner\n.inc 'res.sp'\n.endl TT ; close\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "Models/res.sp", .data = "R1 out 0 1k\n" });
-    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
+    const path = try std.testing.allocator.print(".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
     defer std.testing.allocator.free(path);
     const text = try source.load(io, std.testing.allocator, path);
     defer std.testing.allocator.free(text);
@@ -159,7 +153,7 @@ test "source.expand: every allocation failure surfaces as OutOfMemory" {
     try tmp.dir.writeFile(io, .{ .sub_path = "a.dat", .data = "1 1k\n2 3k\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "b.dat", .data = "9k, 0.5\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "deck.ic0", .data = ".ic v(out)=0.5\n" });
-    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
+    const path = try std.testing.allocator.print(".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
     defer std.testing.allocator.free(path);
     const src =
         \\expand under allocation failure
@@ -417,7 +411,7 @@ test "an analysis card inside a subcircuit is refused (#165)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for ([_][]const u8{ ".tran 1n 2n", ".op", ".temp 50" }) |card| {
-        const src = try std.fmt.allocPrint(arena.allocator(), "t\n.subckt s a\nr1 a 0 1k\n{s}\n.ends\nx1 1 s\n", .{card});
+        const src = try arena.allocator().print("t\n.subckt s a\nr1 a 0 1k\n{s}\n.ends\nx1 1 s\n", .{card});
         try std.testing.expectError(error.UnsupportedCard, parse(arena.allocator(), src));
     }
     // Its legal neighbour: the same card after `.ends`.
@@ -428,7 +422,7 @@ test "a block close with no block open is refused (#162)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for ([_][]const u8{ ".enddata", ".end_variation", ".ends", ".endif" }) |close| {
-        const src = try std.fmt.allocPrint(arena.allocator(), "t\nr1 1 0 1k\n{s}\n.op\n", .{close});
+        const src = try arena.allocator().print("t\nr1 1 0 1k\n{s}\n.op\n", .{close});
         try std.testing.expectError(error.ParseError, parse(arena.allocator(), src));
     }
     // Its legal neighbour: the same close after its open.
@@ -443,7 +437,7 @@ test "parameters: ngspice power unary logical and ternary precedence" {
         "-2**2", "2**3**2", "2*3**2", "1<2?3:4", "1+2*3", "1>2?3:4>3?5:6", "!(1<2)||2>=2&&3!=4", "0?1/0:5", "-2^2", "2^3^2", "0==2<3", "log(exp(2))", "log10(100)", "ln(exp(2))",
     };
     for (expressions, [_]f64{ -4, 64, 18, 3, 7, 5, 1, 5, -4, 64, 1, 2, 2, 2 }) |expression, expected| {
-        const src = try std.fmt.allocPrint(arena.allocator(), "precedence\n.param value={s}\nr1 a 0 {{value}}\n.end\n", .{expression});
+        const src = try arena.allocator().print("precedence\n.param value={s}\nr1 a 0 {{value}}\n.end\n", .{expression});
         const nl = try parse(arena.allocator(), src);
         try std.testing.expectEqual(expected, try numeric((try device(nl, "r1")).positional[0]));
     }
@@ -559,7 +553,7 @@ test "model bins: all four geometry bounds include the one nanometer tolerance" 
     );
     for (0..nl.deviceCount()) |e| try std.testing.expectEqualStrings("nm.0", nl.device(.from(e)).positional[0].name);
     for ([_][]const u8{ "l=0.9985u w=3.5u", "l=2.0015u w=3.5u", "l=1.5u w=2.9985u", "l=1.5u w=4.0015u" }) |geometry| {
-        const src = try std.fmt.allocPrint(arena.allocator(), "outside bin\n.model nm.0 nmos(level=1 lmin=1u lmax=2u wmin=3u wmax=4u)\nm1 d g 0 0 nm {s}\n.end\n", .{geometry});
+        const src = try arena.allocator().print("outside bin\n.model nm.0 nmos(level=1 lmin=1u lmax=2u wmin=3u wmax=4u)\nm1 d g 0 0 nm {s}\n.end\n", .{geometry});
         try std.testing.expectError(error.ModelBinNotFound, parse(arena.allocator(), src));
     }
 }
@@ -568,7 +562,7 @@ test "model bins: invalid scale cannot silently select unscaled geometry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     for ([_][]const u8{ "0", "-1", "missing" }) |scale| {
-        const src = try std.fmt.allocPrint(arena.allocator(), "invalid scale\n.option scale={s}\n.model nm nmos(level=1)\nm1 d g 0 0 nm l=1u w=1u\n.end\n", .{scale});
+        const src = try arena.allocator().print("invalid scale\n.option scale={s}\n.model nm nmos(level=1)\nm1 d g 0 0 nm l=1u w=1u\n.end\n", .{scale});
         try std.testing.expectError(error.ParseError, parse(arena.allocator(), src));
     }
 }
@@ -887,7 +881,7 @@ test ".step reaches a .model value that reads the swept name" {
     const a = arena.allocator();
     // The model card precedes the .step card that makes isat live (#65).
     for ([_][]const u8{ "is={isat}", "is=isat" }) |value| {
-        const src = try std.fmt.allocPrint(a, "s\n.param isat=1e-14\nd1 a 0 dm\n.model dm d {s}\n.step param isat list 1e-14 2e-14\n.end\n", .{value});
+        const src = try a.print("s\n.param isat=1e-14\nd1 a 0 dm\n.model dm d {s}\n.step param isat list 1e-14 2e-14\n.end\n", .{value});
         const nl = try parse(a, src);
         try std.testing.expectEqual(@as(usize, 1), nl.live.slots.len);
         try std.testing.expectEqual(@as(f64, 1e-14), try parameter(nl.models[0].kv, "is"));

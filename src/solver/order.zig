@@ -16,7 +16,9 @@ const NONE: u32 = std.math.maxInt(u32);
 
 /// Bump allocator over a caller-owned u32 slab, with mark/release.
 pub const Ws = struct {
+    /// The borrowed slab.
     buf: []u32,
+    /// Words handed out, from the front of `buf`.
     used: usize = 0,
 
     /// Borrows `buf`, which must outlive every slice handed out.
@@ -305,7 +307,7 @@ fn compact(adj: []u32, top: usize, pe: []u32, len: []const u32, live_a: []const 
         const o = adj[src] & ~span_tag;
         const l = len[o];
         adj[dst] = first[o];
-        std.mem.copyForwards(u32, adj[dst + 1 ..][0 .. l - 1], adj[src + 1 ..][0 .. l - 1]);
+        @memmove(adj[dst + 1 ..][0 .. l - 1], adj[src + 1 ..][0 .. l - 1]);
         pe[o] = @intCast(dst);
         dst += l;
         src += l;
@@ -723,5 +725,47 @@ test "order and amd return permutations and restore the workspace on random patt
                 seen[c] = true;
             }
         }
+    }
+}
+
+test "order and amd on every slab too short fail with OutOfWorkspace, restore the workspace, and never write past it" {
+    // The analogue of an allocation-failure sweep for the slab allocator:
+    // each length from 0 up either fails cleanly or returns the same
+    // order as the full slab.
+    var prng = std.Random.DefaultPrng.init(0x0de8);
+    const r = prng.random();
+    const n = 24;
+    var col_ptr: [n + 1]u32 = undefined;
+    var row_idx: [n * n]u32 = undefined;
+    var nnz: u32 = 0;
+    col_ptr[0] = 0;
+    for (0..n) |j| {
+        for (0..n) |i| {
+            if (i != j and r.float(f64) >= 0.2) continue;
+            row_idx[nnz] = @intCast(i);
+            nnz += 1;
+        }
+        col_ptr[j + 1] = nnz;
+    }
+    const canary: u32 = 0xdead_beef;
+    var buf: [wsSize(n, n * n) + 1]u32 = undefined;
+    inline for (.{ order, amd }) |f| {
+        const full = wsSize(n, nnz);
+        var want: [n]u32 = undefined;
+        var ws = Ws.init(buf[0..full]);
+        try f(n, &col_ptr, row_idx[0..nnz], &want, &ws);
+        var passed = false;
+        for (0..full + 1) |len| {
+            buf[len] = canary;
+            var q: [n]u32 = undefined;
+            ws = Ws.init(buf[0..len]);
+            if (f(n, &col_ptr, row_idx[0..nnz], &q, &ws)) |_| {
+                try std.testing.expectEqualSlices(u32, &want, &q);
+                passed = true;
+            } else |err| try std.testing.expectEqual(error.OutOfWorkspace, err);
+            try std.testing.expectEqual(@as(usize, 0), ws.used);
+            try std.testing.expectEqual(canary, buf[len]);
+        }
+        try std.testing.expect(passed);
     }
 }

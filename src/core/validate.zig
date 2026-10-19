@@ -367,3 +367,69 @@ fn dcTargetExists(target: requests.Dc.SweepTarget, deck: *const Deck) !void {
     }
     return error.DcSweepSourceNotFound;
 }
+
+test "an empty circuit validates nothing" {
+    try std.testing.expectError(error.InvalidQueryOptions, validate(.{ .op = .{} }, 0));
+    try validate(.{ .op = .{} }, 1);
+}
+
+test "sweep counts the points of an ascending or descending grid, and refuses one it cannot step" {
+    try std.testing.expectEqual(@as(usize, 11), try sweep(0, 1, 0.1));
+    try std.testing.expectEqual(@as(usize, 5), try sweep(4, 0, -1));
+    try std.testing.expectEqual(@as(usize, 1), try sweep(3, 3, 1));
+    try std.testing.expectError(error.InvalidQueryOptions, sweep(0, 1, 0));
+    try std.testing.expectError(error.InvalidQueryOptions, sweep(0, 1, -1));
+    try std.testing.expectError(error.InvalidQueryOptions, sweep(0, 1e10, 1e-10));
+    // One step of 1 cannot move 1e20.
+    try std.testing.expectError(error.InvalidQueryOptions, sweep(1e20, 1e20 + 1e5, 1));
+}
+
+test "elements refuses a product past the 64-plane ceiling or one that overflows" {
+    try std.testing.expectEqual(@as(usize, 24), try elements(&.{ 2, 3, 4 }));
+    try std.testing.expectEqual(@as(usize, 1), try elements(&.{}));
+    const ceiling = std.math.maxInt(usize) / (64 * @sizeOf(f64));
+    try std.testing.expectEqual(ceiling, try elements(&.{ceiling}));
+    try std.testing.expectError(error.InvalidQueryOptions, elements(&.{ceiling + 1}));
+    try std.testing.expectError(error.InvalidQueryOptions, elements(&.{ std.math.maxInt(usize), 2 }));
+}
+
+test "envelopeMaxPoints and matexEstPoints bound their tables" {
+    // 1 s of 1 ms carriers, at least 4 periods a step: 250 steps + 2.
+    try std.testing.expectEqual(@as(u32, 252), envelopeMaxPoints(.{ .t_carrier = 1e-3, .t_stop = 1, .min_periods_per_step = 4 }));
+    // The outer-step cap wins when it is the smaller.
+    try std.testing.expectEqual(@as(u32, 12), envelopeMaxPoints(.{ .t_carrier = 1e-3, .t_stop = 1, .max_outer_steps = 10 }));
+    // Default output cap t_stop / 200: 400 rows; the 256 floor; the max_points ceiling.
+    try std.testing.expectEqual(@as(u32, 400), matexEstPoints(.{ .t_stop = 1 }));
+    try std.testing.expectEqual(@as(u32, 256), matexEstPoints(.{ .t_stop = 1, .h_output_cap = 0.5 }));
+    try std.testing.expectEqual(@as(u32, 300), matexEstPoints(.{ .t_stop = 1, .max_points = 300, .h_output_cap = 1e-6 }));
+}
+
+test "validateDeck refuses a variant past the deck's table" {
+    const deck: Deck = .{
+        .probes = &.{},
+        .probe_labels = &.{},
+        .source_node = 0,
+        .source_branch = 0,
+        .output_node = 0,
+        .ac_drive = &.{},
+        .title = "",
+        .n_devices = 0,
+        .ic = &.{},
+        .deck_tol = .{},
+        .deck_temp = null,
+        .deck_method = null,
+        .queries = &.{},
+        .bindings = .{ .v_names = &.{}, .i_names = &.{}, .v_branches = &.{}, .v_pos = &.{}, .v_neg = &.{}, .i_pos = &.{}, .i_neg = &.{}, .v_distof1 = &.{}, .ports = &.{} },
+        .cards = &.{},
+        .ac_overrides = &.{},
+        .variants = .{ .labels = &.{ "a", "b" }, .temp_c = &.{ null, null }, .axis = &.{ 0, 1 }, .starts = &.{ 0, 0, 0 } },
+    };
+    try validateDeck(.{ .op = .{ .tol = .{ .variant = 1 } } }, 2, &deck);
+    try std.testing.expectError(error.InvalidQueryOptions, validateDeck(.{ .op = .{ .tol = .{ .variant = 2 } } }, 2, &deck));
+    try validateDeck(.{ .mc = .{ .variants = .{ .first = 1, .count = 1 } } }, 2, &deck);
+    try std.testing.expectError(error.InvalidQueryOptions, validateDeck(.{ .mc = .{ .variants = .{ .first = 1, .count = 2 } } }, 2, &deck));
+    // u32 overflow of first + count is still past the table.
+    try std.testing.expectError(error.InvalidQueryOptions, validateDeck(.{ .mc = .{ .variants = .{ .first = std.math.maxInt(u32), .count = 2 } } }, 2, &deck));
+    try std.testing.expectError(error.InvalidQueryOptions, validateDeck(.{ .dc = .{ .target = .temp, .tangents = &.{2} } }, 2, &deck));
+    try std.testing.expectError(error.DcSweepSourceNotFound, validateDeck(.{ .dc = .{ .target = .{ .device = .{ .type = @fromBackingInt(0) } } } }, 2, &deck));
+}

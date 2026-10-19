@@ -149,7 +149,7 @@ pub const Executor = struct {
         if (initial == null) try self.installVariant();
         try self.bindAcOverrides();
         self.controller = Controller.init(io, self, execute, .{ .report_nonlinear = job == .op });
-        self.circuit.setProgress(self.controller.callback());
+        self.circuit.progress = self.controller.callback();
         return self;
     }
 
@@ -190,7 +190,7 @@ pub const Executor = struct {
                 }
             } else return error.InvalidAcOverride;
         }
-        self.circuit.bindAcParams(mapped);
+        self.circuit.ac_params = mapped;
     }
 
     /// Runs the query up to where `quantum` lets it stop, without waiting.
@@ -265,11 +265,11 @@ pub const Executor = struct {
     fn runQuery(self: *Executor) !types.Result {
         var par: ?ParEval = null;
         if (self.config.device_threads > 1) {
-            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.circuit.trash_slot, self.config.device_threads);
-            self.circuit.attachParEval(&par.?);
+            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, self.config.device_threads);
+            self.circuit.par_eval = &par.?;
         }
         defer {
-            self.circuit.attachParEval(null);
+            self.circuit.par_eval = null;
             if (par) |*p| p.deinit();
         }
         const gpu_context = try self.prepareGpu();
@@ -281,7 +281,7 @@ pub const Executor = struct {
         };
         const lu_context = self.prepareGpuLu();
         defer {
-            self.circuit.attachLu(null);
+            self.circuit.lu = null;
             if (lu_context) |l| l.deinit();
         }
         // §9.4 display tasks print to stdout by default, unbuffered, so each
@@ -290,8 +290,8 @@ pub const Executor = struct {
         const out = self.config.display orelse &stdout.interface;
         var display: types.Display = .{ .names = try self.sayNames(), .staged = .init(self.allocator), .out = out };
         defer display.staged.deinit();
-        if (display.names.len != 0) self.circuit.attachDisplay(&display);
-        defer self.circuit.attachDisplay(null);
+        if (display.names.len != 0) self.circuit.display = &display;
+        defer self.circuit.display = null;
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
@@ -343,8 +343,8 @@ pub const Executor = struct {
         };
         var res = try run(&run_ctx, self.job);
         // Copies of one card at several temperatures keep apart by name.
-        if (queryTemp(self.job)) |temp| res.plotname = try std.fmt.allocPrint(self.results.allocator(), "{s} (temp={d})", .{ res.plotname, temp });
-        if (queryVariant(self.job)) |v| res.plotname = try std.fmt.allocPrint(self.results.allocator(), "{s} ({s})", .{ res.plotname, self.deck.variants.labels[v] });
+        if (queryTemp(self.job)) |temp| res.plotname = try self.results.allocator().print("{s} (temp={d})", .{ res.plotname, temp });
+        if (queryVariant(self.job)) |v| res.plotname = try self.results.allocator().print("{s} ({s})", .{ res.plotname, self.deck.variants.labels[v] });
         return res;
     }
 
@@ -386,7 +386,7 @@ pub const Executor = struct {
             return null;
         };
         context.forced = forced;
-        self.circuit.attachLu(context);
+        self.circuit.lu = context;
         return context;
     }
 
@@ -511,45 +511,4 @@ fn run(ctx: *const types.RunCtx, job: requests.Query) !types.Result {
     switch (job) {
         inline else => |opts, tag| return module(tag).run(ctx, opts),
     }
-}
-
-const Tolerances = @import("core").numerics.Tolerances;
-
-comptime {
-    for (@typeInfo(requests.Kind).@"enum".field_names) |name|
-        validate(module(@field(requests.Kind, name)));
-}
-
-/// Checks at comptime that analysis module `T` exposes
-/// `run(*const types.RunCtx, T.Options) !types.Result` and that `Options`
-/// carries `tol: Tolerances`, so a drifted signature fails here with a
-/// readable error instead of deep in dispatch.
-fn validate(comptime T: type) void {
-    const name = @typeName(T);
-
-    if (!@hasDecl(T, "Options"))
-        @compileError(name ++ ": contract requires `pub const Options`");
-    if (@typeInfo(T.Options) != .@"struct")
-        @compileError(name ++ ".Options must be a struct");
-
-    if (!@hasField(T.Options, "tol"))
-        @compileError(name ++ ".Options must have field `tol: Tolerances`");
-    if (@FieldType(T.Options, "tol") != Tolerances)
-        @compileError(name ++ ".Options.tol must be Tolerances");
-
-    if (!@hasDecl(T, "run"))
-        @compileError(name ++ ": contract requires `pub fn run(*const types.RunCtx, T.Options) !types.Result`");
-
-    const info = @typeInfo(@TypeOf(T.run));
-    if (info != .@"fn")
-        @compileError(name ++ ".run must be a function");
-    const f = info.@"fn";
-    if (f.param_types.len != 2 or
-        f.param_types[0] != *const types.RunCtx or
-        f.param_types[1] != T.Options)
-        @compileError(name ++ ".run: expected params (*const types.RunCtx, " ++ name ++ ".Options)");
-
-    const ret = @typeInfo(f.return_type.?);
-    if (ret != .error_union or ret.error_union.payload != types.Result)
-        @compileError(name ++ ".run must return !types.Result");
 }

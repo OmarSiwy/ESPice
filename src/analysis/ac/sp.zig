@@ -25,6 +25,8 @@ const noise = @import("noise.zig");
 const root = @import("../types.zig");
 const Complex = @import("core").numerics.Complex;
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
+/// The voltage of a node in a stacked solution; ground reads zero.
+const at = @import("../dc/xf.zig").at;
 
 /// A port is a netlist vsource: `node` and `neg` are its terminals, `branch`
 /// its MNA branch-current unknown. Adding −z0 to the branch row diagonal
@@ -49,6 +51,7 @@ const gd_step = 1e-5;
 /// Contract entry: opts.ports (or the deck's drive source as port 1), the
 /// full S-matrix per frequency, then `.lin`'s columns (`linNames`).
 /// Complex, point-major (frequency, S11, S12, ..., Snn, ...).
+/// error.InvalidQueryOptions for a `.net` query past two legs.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
@@ -62,6 +65,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // Solves run over the legs; every published matrix is over the modes.
     const ports = basis.legs;
     const n_ports = ports.len;
+    // `netRow`'s fixed 2x2 scratch, over legs: a balanced port is two.
+    // core/validate.zig does not bound it.
+    if (opts.net and n_ports > 2) return error.InvalidQueryOptions;
     const n_points: usize = opts.sweep.count();
 
     const names = if (opts.lin) |lin| try linNames(a, n_ports, lin) else blk: {
@@ -90,7 +96,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // One unit drive per port, every one solved against each factorization.
     const rhs = try scratch.alloc(f64, n_ports * nn);
     defer scratch.free(rhs);
-    root.zeroSimd(rhs);
+    @memset(rhs, 0);
     for (ports, 0..) |port, p| {
         if (port.branch != Port.no_branch) {
             rhs[p * nn + port.branch] = 1.0;
@@ -125,11 +131,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-/// The voltage of `node` in the stacked solution `x`; ground is zero.
-inline fn nodeV(x: []const f64, n: usize, node: u32) Complex {
-    return if (node == root.GROUND) Complex.zero else .{ .re = x[node], .im = x[n + node] };
-}
-
 /// Writes column p of S, driven with a unit source on port p's branch
 /// (incident wave 1/(2√z0_p)), into the stacked (re, im) S-matrix `s_row`
 /// of one frequency.
@@ -138,8 +139,8 @@ fn writeColumn(n: usize, ports: []const Port, x: []const f64, s_row: []f64, p: u
     const a_p = 1.0 / (2.0 * @sqrt(ports[p].z0));
     for (ports, 0..) |port, k| {
         const br: usize = port.branch;
-        var v_k = nodeV(x, n, port.node);
-        if (port.neg != root.GROUND) v_k = v_k.sub(nodeV(x, n, port.neg));
+        var v_k = at(x, n, port.node);
+        if (port.neg != root.GROUND) v_k = v_k.sub(at(x, n, port.neg));
         const i_k = Complex{ .re = -x[br], .im = -x[n + br] };
         const b_k = v_k.sub(i_k.scale(port.z0)).scale(1.0 / (2.0 * @sqrt(port.z0)));
         const s = b_k.scale(1.0 / a_p);
@@ -164,7 +165,7 @@ fn netRow(n: usize, ports: []const Port, x: []const f64, s_row: []f64) void {
         const xj = x[j * 2 * n ..][0 .. 2 * n];
         for (ports, 0..) |port, k| {
             // Transposed: row j is drive j.
-            vt[j * np + k] = nodeV(xj, n, port.node).sub(nodeV(xj, n, port.neg));
+            vt[j * np + k] = at(xj, n, port.node).sub(at(xj, n, port.neg));
             it[j * np + k] = if (port.branch != Port.no_branch)
                 .{ .re = -xj[port.branch], .im = -xj[n + port.branch] }
             else
@@ -321,24 +322,24 @@ fn linNames(a: std.mem.Allocator, n_ports: usize, lin: Lin) ![]const []const u8 
     const noisy = lin.noise and n_ports >= 2;
     const names = try a.alloc([]const u8, columns(n_ports, lin));
     names[0] = "frequency";
-    var at: usize = 1;
+    var col: usize = 1;
     for ("SYZH") |x| {
         const w = if (x == 'H') @min(n_ports, 2) else n_ports;
         if (w < 2 and x == 'H') continue;
         for (0..w) |i| for (0..w) |j| {
-            names[at] = try std.fmt.allocPrint(a, "{c}({d},{d})", .{ x, i + 1, j + 1 });
-            at += 1;
+            names[col] = try std.fmt.allocPrint(a, "{c}({d},{d})", .{ x, i + 1, j + 1 });
+            col += 1;
         };
     }
     if (lin.group_delay) for (names[1..][0..m]) |name| {
-        names[at] = try std.fmt.allocPrint(a, "TD({s})", .{name});
-        at += 1;
+        names[col] = try std.fmt.allocPrint(a, "TD({s})", .{name});
+        col += 1;
     };
     if (n_ports >= 2) {
-        @memcpy(names[at..][0..stab_names.len], &stab_names);
-        at += stab_names.len;
+        @memcpy(names[col..][0..stab_names.len], &stab_names);
+        col += stab_names.len;
     }
-    if (noisy) @memcpy(names[at..], &noise_names);
+    if (noisy) @memcpy(names[col..], &noise_names);
     return names;
 }
 
@@ -421,7 +422,7 @@ fn linColumns(ctx: *const root.RunCtx, fs: *FreqSolver, basis: *const Basis, ome
         // over its legs (`Basis.voltageWeight`).
         const e = try scratch.alloc(f64, 2 * nn);
         defer scratch.free(e);
-        root.zeroSimd(e);
+        @memset(e, 0);
         for (pq, 0..) |q, i| for (ports, 0..) |port, l| {
             const w = basis.voltageWeight(q, l);
             if (w == 0) continue;
@@ -787,6 +788,22 @@ test Basis {
     defer c.deinit(testing.allocator);
     try testing.expectEqual([2]usize{ 2, 1 }, c.pair);
     try testing.expectError(error.InvalidQueryOptions, Basis.init(testing.allocator, &ports, .{ false, true }));
+    // Every allocation failure, and the late option error, frees the rest.
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn f(gpa: std.mem.Allocator, ps: []const Port, common: [2]bool) !void {
+            var basis = Basis.init(gpa, ps, common) catch |e| switch (e) {
+                error.InvalidQueryOptions => return,
+                else => return e,
+            };
+            basis.deinit(gpa);
+        }
+    }.f, .{ &ports, [2]bool{ false, true } });
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn f(gpa: std.mem.Allocator, ps: []const Port) !void {
+            var basis = try Basis.init(gpa, ps, .{ false, false });
+            basis.deinit(gpa);
+        }
+    }.f, .{&ports});
 }
 
 test linNames {

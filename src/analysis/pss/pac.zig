@@ -115,8 +115,8 @@ fn sweepDense(
     var fi: usize = 0;
     while (sw.next()) |f_in| : (fi += 1) {
         if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
-        root.zeroSimd(a_work);
-        root.zeroSimd(rhs_work);
+        @memset(a_work, 0);
+        @memset(rhs_work, 0);
 
         buildConversionMatrix(adjoint, a_work, lin, n, n_sb, nn, nn2, f_in, options);
         if (series != 0) {
@@ -201,12 +201,12 @@ fn sweepKrylov(
         if (fi != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = fi, .total = freqs.len });
         sidebandOmegas(omegas, f_in, options.f_lo, n_harm);
         try fs.factorEach(omegas);
-        root.zeroSimd(rhs);
+        @memset(rhs, 0);
         if (drive.len != 0) {
             @memcpy(rhs[n_harm * n ..][0..n], drive[0..n]);
             @memcpy(rhs[nn + n_harm * n ..][0..n], drive[n..]);
         }
-        root.zeroSimd(x);
+        @memset(x, 0);
         // Where the dense LU would report a singular matrix.
         if (!gmres.solve(&op, rhs, x, krylov_tol, krylov_max_restarts).converged) return error.PacDidNotConverge;
 
@@ -253,7 +253,7 @@ fn ConversionOp(comptime adjoint: bool) type {
             const nn = self.n_sb * n;
             const nnz: usize = self.lin.col_ptr[n];
             const n_samples = self.lin.g_hat.len / nnz;
-            root.zeroSimd(w);
+            @memset(w, 0);
             for (0..self.n_sb) |p| for (0..self.n_sb) |q| {
                 const m: i32 = @as(i32, @intCast(p)) - @as(i32, @intCast(q));
                 const bin = mapHarmonicToFftBin(m, n_samples) orelse continue;
@@ -573,7 +573,7 @@ pub fn result(a: std.mem.Allocator, freqs: []const f64, transfer: []const Comple
     names[0] = "frequency";
     for (0..n_sb) |k| {
         const harmonic = @as(i32, @intCast(k)) - @as(i32, n_harmonics);
-        names[1 + k] = try std.fmt.allocPrint(a, "tf_h{d}", .{harmonic});
+        names[1 + k] = try a.print("tf_h{d}", .{harmonic});
     }
     const ncols = names.len;
     const data = try a.alloc(f64, n_freqs * ncols * 2);
@@ -677,4 +677,14 @@ test ConversionOp {
         op.matvec(&v, &got);
         for (want, got) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-12);
     }
+}
+
+test "spectra frees its FFT buffer on allocation failure" {
+    var td: [16]f64 = @splat(1);
+    var hat: [16]Complex = undefined;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(gpa: std.mem.Allocator, x: []const f64, out: []Complex) !void {
+            try spectra(x, 8, out, gpa);
+        }
+    }.f, .{ &td, &hat });
 }

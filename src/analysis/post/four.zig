@@ -29,9 +29,8 @@ const max_harmonics = Options.max_harmonics;
 pub const Spectrum = struct {
     /// Mean over the period.
     dc: f64,
-    /// Amplitude of harmonic 1, the THD denominator.
-    fundamental: f64,
     /// harmonics[h] is harmonic h + 1; only the first `n_harmonics` are set.
+    /// harmonics[0].mag, the fundamental, is the THD denominator.
     harmonics: [max_harmonics]Harmonic,
     n_harmonics: usize,
     /// Harmonics 2..n_harmonics against the fundamental, as ngspice counts it.
@@ -44,8 +43,8 @@ const Column = tran.Column;
 /// `differential`, over the last period of `waveform`, which must hold them. `n_harmonics` is
 /// clamped to 1..max_harmonics.
 /// Returns error.InsufficientData when the waveform is shorter than one
-/// period or the period holds fewer than two samples. `allocator` backs two
-/// n_fft scratch rows, freed before return.
+/// period or the period holds fewer than two samples. `allocator` backs one
+/// 2·n_fft scratch block, freed before return.
 pub fn analyze(waveform: *const tran.Waveform, differential: bool, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
     // Both series are borrowed columns of the recording, never copied.
     const times = waveform.column(0);
@@ -67,34 +66,27 @@ pub fn analyze(waveform: *const tran.Waveform, differential: bool, f_fund: f64, 
     const n_fft = fft_mod.nextPow2(raw_count);
     const n_fft_f: f64 = @floatFromInt(n_fft);
 
-    const re = try allocator.alloc(f64, n_fft);
+    const re = try allocator.alloc(f64, 2 * n_fft);
     defer allocator.free(re);
-    const im = try allocator.alloc(f64, n_fft);
-    defer allocator.free(im);
+    const im = re[n_fft..];
+    @memset(im, 0);
 
     // n_fft uniform points on [t_start, t_end). The targets increase, so one
     // cursor walks the window forward: O(window + n_fft), no search per sample.
-    const win_times = times.from(start_idx);
-    const win_vals = values.from(start_idx);
-    var cursor: usize = 0;
-    for (0..n_fft) |k| {
-        const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
-        re[k] = interpolateAt(win_times, win_vals, t_target, &cursor);
-    }
     // `v(a,b)`: interpolation is linear, so the difference of the two
     // resampled columns is the resampled difference.
-    if (differential) {
-        const neg_vals = waveform.column(2).from(start_idx);
-        var neg_cursor: usize = 0;
-        for (0..n_fft) |k| {
-            const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
-            re[k] -= interpolateAt(win_times, neg_vals, t_target, &neg_cursor);
-        }
+    const win_times = times.from(start_idx);
+    const win_vals = values.from(start_idx);
+    const neg_vals = if (differential) waveform.column(2).from(start_idx) else win_vals;
+    var cursor: usize = 0;
+    var neg_cursor: usize = 0;
+    for (re[0..n_fft], 0..) |*r, k| {
+        const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
+        r.* = interpolateAt(win_times, win_vals, t_target, &cursor);
+        if (differential) r.* -= interpolateAt(win_times, neg_vals, t_target, &neg_cursor);
     }
 
-    root.zeroSimd(im);
-
-    fft_mod.fft(re, im);
+    fft_mod.fft(re[0..n_fft], im);
 
     return extractSpectrum(re, im, n_fft, n_harmonics);
 }
@@ -132,7 +124,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_harm: usize = spec.n_harmonics;
     const npoints = 1 + n_harm;
     const names = try a.dupe([]const u8, &.{ "harmonic", "frequency", "magnitude", "phase_deg" });
-    errdefer a.free(names); // entries are literals
     const data = try a.alloc(f64, npoints * 4);
     data[0..4].* = .{ 0, 0, spec.dc, 0 };
     for (0..n_harm) |h| {
@@ -147,9 +138,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     return .{
         .plotname = if (opts.label.len == 0)
-            try std.fmt.allocPrint(a, "Fourier Analysis (THD = {d:.4} %)", .{spec.thd_percent})
+            try a.print("Fourier Analysis (THD = {d:.4} %)", .{spec.thd_percent})
         else
-            try std.fmt.allocPrint(a, "Fourier Analysis {s} (THD = {d:.4} %)", .{ opts.label, spec.thd_percent }),
+            try a.print("Fourier Analysis {s} (THD = {d:.4} %)", .{ opts.label, spec.thd_percent }),
         .varnames = names,
         .is_complex = false,
         .npoints = npoints,
@@ -189,7 +180,6 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: 
 
     return .{
         .dc = dc,
-        .fundamental = fund_mag,
         .harmonics = harmonics,
         .n_harmonics = n_harm,
         .thd_percent = thd_percent,

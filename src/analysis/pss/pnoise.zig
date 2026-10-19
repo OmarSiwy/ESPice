@@ -20,14 +20,6 @@ pub const NoiseSource = root.NoiseSource;
 /// The `.pnoise` query; `.hbnoise` and `.phasenoise` fill one in for `orbitSweep`.
 pub const Options = @import("core").query.Pnoise;
 
-/// Outcome of a pnoise sweep.
-pub const SweepStatus = struct {
-    /// sqrt of the trapezoid integral of the density over the sweep, in V.
-    total_noise: f64,
-    /// False when the shooting stopped short; the density is about its last period.
-    pss_converged: bool,
-};
-
 /// S(f) = white + flicker/|f|^ef at one sideband, from one time sample's
 /// coefficients.
 pub inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 {
@@ -41,7 +33,9 @@ pub inline fn sourcePsd(white: f64, flicker: f64, ef: f64, f_sideband: f64) f64 
 /// Periodic noise density at `options.out_node` (minus `out_neg`), in
 /// V^2/Hz, about the shooting PSS from `x_dc`: `pac.orbit` then
 /// `orbitSweep`. The caller owns freqs and density, both sweep-count long.
-pub fn sweep(
+/// Returns false when the shooting stopped short; the density is then about
+/// its last period.
+fn sweep(
     ckt: *root.Circuit,
     x_dc: []const f64,
     noise_sources: []const NoiseSource,
@@ -49,7 +43,7 @@ pub fn sweep(
     density: []f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !SweepStatus {
+) !bool {
     const n_sb = 2 * @as(usize, options.n_sidebands) + 1;
     const orb = try pac.orbit(ckt, x_dc, .{
         .tol = options.tol,
@@ -61,10 +55,8 @@ pub fn sweep(
         .newton_tol = options.pss_newton_tol,
     }, allocator);
     defer allocator.free(orb.wave);
-    return .{
-        .total_noise = try orbitSweep(ckt, orb, noise_sources, freqs, density, options, allocator),
-        .pss_converged = orb.converged,
-    };
+    try orbitSweep(ckt, orb, noise_sources, freqs, density, options, allocator);
+    return orb.converged;
 }
 
 /// Orbit samples per period for `n_sb` sidebands: at least `requested`, a
@@ -79,8 +71,7 @@ pub fn samplesFor(requested: usize, n_sb: usize) usize {
 /// 2*(2M+1) and freqs.len == density.len. Reads `out_node`, `out_neg`,
 /// `sweep`, `f_fundamental`, `n_sidebands` and `strobe` from `options`
 /// (a set `strobe` gives the time-dependent density at that instant, as
-/// `.ptdnoise`); the `pss_*` fields are the orbit provider's. Returns the
-/// rms noise over the sweep in V (sqrt of the trapezoid integral).
+/// `.ptdnoise`); the `pss_*` fields are the orbit provider's.
 ///
 /// Each source is a stationary unit noise n(t) scaled by a periodic
 /// amplitude a(t) = sqrt(PSD(t)) (white and flicker parts separately), so
@@ -103,7 +94,7 @@ pub fn orbitSweep(
     density: []f64,
     options: Options,
     allocator: std.mem.Allocator,
-) !f64 {
+) !void {
     const n: usize = ckt.n;
     const n_srcs = noise_sources.len;
     const m_max: usize = options.n_sidebands;
@@ -160,7 +151,6 @@ pub fn orbitSweep(
     };
     try pac.sweep(true, ckt, lin, drive, 0, freqs, transfer, pac_opts, allocator);
 
-    var integrated_noise: f64 = 0;
     for (freqs, density, 0..) |f_out, *total, fi| {
         const h = transfer[fi * nn ..][0..nn];
         total.* = 0;
@@ -186,10 +176,7 @@ pub fn orbitSweep(
                 total.* += sourcePsd(w.magSq() * whiteShape(noise_sources[lead], f_sb), fl.magSq(), exponent[lead], f_sb);
             }
         }
-        if (fi > 0) integrated_noise += 0.5 * (density[fi - 1] + total.*) * (f_out - freqs[fi - 1]);
     }
-
-    return @sqrt(integrated_noise);
 }
 
 /// Periodic time-dependent noise (HSPICE `.ptdnoise`): the density, over
@@ -200,7 +187,7 @@ pub fn orbitSweep(
 /// with H^(p)_m the adjoint transfer from input sideband m to the output at
 /// f + p*f0. Averaged over t it is the power the output receives from f,
 /// summed over output sidebands. Cost: 2M+1 adjoint solves per point,
-/// against one for `.pnoise`. Returns the rms noise at `t` over the sweep.
+/// against one for `.pnoise`.
 fn strobed(
     ckt: *root.Circuit,
     lin: pac.Linearization,
@@ -213,7 +200,7 @@ fn strobed(
     options: Options,
     t: f64,
     allocator: std.mem.Allocator,
-) !f64 {
+) !void {
     const n: usize = ckt.n;
     const n_srcs = noise_sources.len;
     const m_max: usize = options.n_sidebands;
@@ -236,7 +223,6 @@ fn strobed(
         e.* = .{ .re = @cos(w), .im = @sin(w) };
     }
 
-    var integrated: f64 = 0;
     var sw = options.sweep.iter();
     var fi: usize = 0;
     while (sw.next()) |f| : (fi += 1) {
@@ -272,9 +258,7 @@ fn strobed(
             }
         }
         density[fi] = total;
-        if (fi > 0) integrated += 0.5 * (density[fi - 1] + total) * (f - freqs[fi - 1]);
     }
-    return @sqrt(integrated);
 }
 
 /// One orbit sample's white amplitude: coeff·sqrt(white), or coeff alone for
@@ -310,20 +294,20 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const density_buf = try scratch.alloc(f64, n_points);
     defer scratch.free(density_buf);
 
-    const st = try sweep(ctx.circuit, x_op, srcs, freqs_buf, density_buf, opts, scratch);
+    const pss_converged = try sweep(ctx.circuit, x_op, srcs, freqs_buf, density_buf, opts, scratch);
     if (opts.strobe) |t| {
         var res = try result(ctx.allocator, freqs_buf, density_buf, "ptdnoise_density", "");
-        res.plotname = try std.fmt.allocPrint(ctx.allocator, "Periodic Time-Dependent Noise Analysis (time={e}){s}", .{ t, if (st.pss_converged) "" else " (PSS not converged)" });
+        res.plotname = try ctx.allocator.print("Periodic Time-Dependent Noise Analysis (time={e}){s}", .{ t, if (pss_converged) "" else " (PSS not converged)" });
         return res;
     }
-    return result(ctx.allocator, freqs_buf, density_buf, "pnoise_density", if (st.pss_converged) "Periodic Noise Analysis" else "Periodic Noise Analysis (PSS not converged)");
+    return result(ctx.allocator, freqs_buf, density_buf, "pnoise_density", if (pss_converged) "Periodic Noise Analysis" else "Periodic Noise Analysis (PSS not converged)");
 }
 
 /// The periodic-noise shape, shared with `.hbnoise`: point-major rows
-/// (frequency, `column`) in `a`. `column` and `plotname` are literals.
+/// (frequency, `column`) in the results arena `a`. `column` and `plotname`
+/// are literals.
 pub fn result(a: std.mem.Allocator, freqs: []const f64, density: []const f64, column: []const u8, plotname: []const u8) !root.Result {
     const names = try a.dupe([]const u8, &.{ "frequency", column });
-    errdefer a.free(names); // entries are literals
     const data = try a.alloc(f64, freqs.len * 2);
     for (freqs, density, 0..) |f, d, i| {
         data[i * 2] = f;

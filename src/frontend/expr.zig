@@ -113,6 +113,12 @@ const hspice_fns = blk: {
 /// One postfix op.
 pub const Op = struct { code: Code, a: u32 = 0, b: u32 = 0 };
 
+comptime {
+    // A row of the postfix tape: a 1-byte opcode and two u32 operands.
+    std.debug.assert(@sizeOf(Code) == 1 and @sizeOf(Fn) == 1);
+    std.debug.assert(@sizeOf(Op) == 12);
+}
+
 /// Compile output before parameters are spliced in.
 pub const Scratch = struct {
     ops: std.ArrayList(Op) = .empty,
@@ -822,4 +828,8 @@ test "unary ! is refused in HSPICE, read elsewhere (#203)" {
     try std.testing.expectError(error.UnsupportedCard, compileAll(lines.hspice, a, &s, "(a<b) && !(a==b)"));
     // `!=` is HSPICE's.
     try compileAll(lines.hspice, a, &s, "(a<b) && (a!=b)");
+}
+
+test {
+    _ = @import("tests/expr.zig");
 }

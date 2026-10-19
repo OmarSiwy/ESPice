@@ -1,7 +1,7 @@
 name: test
 
 # The merge gate (TESTING.md § Gates): every unit suite, the codegen probes,
-# the fitness check and the full fixture corpus with its verdict name list,
+# and the full fixture corpus with its verdict name list,
 # in the shipped mode (ReleaseSafe: LLVM with every safety check on).
 # ponytail: no Debug job. Debug builds use the self-hosted backend, which
 # diverges from LLVM (#25: numeric results, a pthread_create EINVAL, an

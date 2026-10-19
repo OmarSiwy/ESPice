@@ -1,7 +1,7 @@
 //! Numeric types and kernels shared by every layer: vector helpers, complex
 //! arithmetic, the frequency grid, solver tolerances and the BBD partition.
 //! Cites ngspice acan.c (the `.ac` grid and its stop tolerance), LAPACK
-//! dnrm2 (`norm2`'s rescaling) and AGENTS.md §2.11 (stdpp pipelines).
+//! dnrm2 (`norm2`'s rescaling).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -17,44 +17,28 @@ pub const Execution = struct {
     lu_threads: u8 = 1,
 };
 
-// Elementwise helpers are exact at any width. `dot` and `sum` reassociate
-// (stdpp `foldAssoc`: fixed lane accumulators, one fixed combine order), so
-// every caller rounds the same way, but not like an ordered scalar fold.
-// Zig 0.17 ships with LLVM's loop vectorizer off, so a plain `for` stays
-// scalar; stdpp pipelines are what emit the vector code.
-const z = @import("stdpp");
+// Elementwise helpers are plain loops, exact at any width; LLVM's loop
+// vectorizer (on since Zig 0.18) emits their vector code. `dot` and `sum`
+// reassociate into `fold_lanes` strict accumulators (a strict ordered float
+// sum never vectorizes), so every caller rounds the same way, but not like
+// an ordered scalar fold. Strict IEEE throughout: a NaN or inf entry
+// propagates exactly as in the ordered loop, with no fast-math gate.
 
-/// Lanewise float add; stdpp's `ops.add` wraps, which floats reject.
-pub const add = z.lanewise(addFn);
-fn addFn(a: anytype, b: anytype) @TypeOf(a) {
-    return a + b;
+const abs_mask: u64 = 0x7fff_ffff_ffff_ffff;
+
+/// Independent accumulators of `dot` and `sum`, which the vectorizer maps
+/// to four AVX2 registers. Strict on purpose: fast-math would need a NaN
+/// input scan that costs more than it saves (0.5 vs 0.18 cycles/entry).
+const fold_lanes = 16;
+
+/// Reduces `fold_lanes` accumulators by pairwise halving, a fixed order.
+fn combine(acc: *[fold_lanes]f64) f64 {
+    var w: usize = fold_lanes / 2;
+    while (w > 0) : (w /= 2) for (acc[0..w], acc[w..][0..w]) |*p, q| {
+        p.* += q;
+    };
+    return acc[0];
 }
-const mul = z.lanewise(mulFn);
-fn mulFn(p: anytype) @TypeOf(p.left) {
-    return p.left * p.right;
-}
-const diff = z.lanewise(diffFn);
-fn diffFn(p: anytype) @TypeOf(p.left) {
-    return p.left - p.right;
-}
-const absMax = z.lanewise(absMaxFn);
-fn absMaxFn(a: anytype, b: anytype) @TypeOf(a) {
-    return @max(a, @abs(b));
-}
-const Axpy = struct {
-    pub const lanewise = true;
-    a: f64,
-    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
-        return p.left + z.splat(@TypeOf(p.left), self.a) * p.right;
-    }
-};
-const Scale = struct {
-    pub const lanewise = true;
-    a: f64,
-    pub fn call(self: *@This(), x: anytype) @TypeOf(x) {
-        return z.splat(@TypeOf(x), self.a) * x;
-    }
-};
 
 /// Up to this length `zeroSimd` and `copySimd` store vectors inline. A
 /// `memset` or `memcpy` call costs 70 to 140 Ir at any length, most of a
@@ -100,20 +84,17 @@ pub fn copySimd(dst: []f64, src: []const f64) void {
 }
 
 /// dst[i] += a * src[i] over dst.len. `src` may be `dst` itself; a shifted
-/// overlap is unspecified, since the vector path loads a block before it
-/// stores it. Asserts that `src` has at least dst.len entries.
+/// overlap is unspecified. Asserts that `src` has at least dst.len entries.
 pub fn axpy(dst: []f64, a: f64, src: []const f64) void {
     assert(src.len >= dst.len);
-    var it = z.fromSlice(f64, dst).zip(z.fromSlice(f64, src[0..dst.len])).map(Axpy{ .a = a });
-    _ = it.writeInto(dst);
+    for (dst, src[0..dst.len]) |*d, x| d.* += a * x;
 }
 
 /// dst[i] = a * src[i] over dst.len. Aliasing as `axpy`. Asserts that
 /// `src` has at least dst.len entries.
 pub fn scale(dst: []f64, a: f64, src: []const f64) void {
     assert(src.len >= dst.len);
-    var it = z.fromSlice(f64, src[0..dst.len]).map(Scale{ .a = a });
-    _ = it.writeInto(dst);
+    for (dst, src[0..dst.len]) |*d, x| d.* = a * x;
 }
 
 /// dst[i] = a[i] - b[i] over dst.len. Either input may be `dst` itself; a
@@ -122,32 +103,49 @@ pub fn scale(dst: []f64, a: f64, src: []const f64) void {
 pub fn sub(dst: []f64, a: []const f64, b: []const f64) void {
     assert(a.len >= dst.len);
     assert(b.len >= dst.len);
-    var it = z.fromSlice(f64, a[0..dst.len]).zip(z.fromSlice(f64, b[0..dst.len])).map(diff);
-    _ = it.writeInto(dst);
+    for (dst, a[0..dst.len], b[0..dst.len]) |*d, x, y| d.* = x - y;
 }
 
 /// Σ a[i]·b[i] over a.len. Reassociated: fixed per target, but not the
-/// rounding of an ordered loop. Asserts that `b` has at least a.len
-/// entries.
+/// rounding of an ordered loop. Strict IEEE, never fast-math: a NaN entry
+/// always reaches the result, and `dense_lu`'s forward solve and `bbd`'s
+/// Schur update rely on that to fail on a NaN factor. Asserts that `b`
+/// has at least a.len entries.
 pub fn dot(a: []const f64, b: []const f64) f64 {
     assert(b.len >= a.len);
-    var it = z.fromSlice(f64, a).zip(z.fromSlice(f64, b[0..a.len])).map(mul);
-    return it.foldAssoc(@as(f64, 0), add);
+    var acc: [fold_lanes]f64 = @splat(0);
+    var i: usize = 0;
+    while (i + fold_lanes <= a.len) : (i += fold_lanes) {
+        for (&acc, a[i..][0..fold_lanes], b[i..][0..fold_lanes]) |*s, x, y| s.* += x * y;
+    }
+    var tail: f64 = 0;
+    for (a[i..], b[i..a.len]) |x, y| tail += x * y;
+    return combine(&acc) + tail;
 }
 
 /// Σ buf[i], reassociated like `dot`.
 pub fn sum(buf: []const f64) f64 {
-    var it = z.fromSlice(f64, buf);
-    return it.foldAssoc(@as(f64, 0), add);
+    var acc: [fold_lanes]f64 = @splat(0);
+    var i: usize = 0;
+    while (i + fold_lanes <= buf.len) : (i += fold_lanes) {
+        for (&acc, buf[i..][0..fold_lanes]) |*s, x| s.* += x;
+    }
+    var tail: f64 = 0;
+    for (buf[i..]) |x| tail += x;
+    return combine(&acc) + tail;
 }
 
-/// max |buf[i]|, 0 for an empty slice; NaN entries are skipped like @max does.
+/// max |buf[i]|, 0 for an empty slice, NaN when any entry is NaN: the
+/// convergence and growth norm, so a NaN entry must not read as small.
+/// Exact, and +inf with -inf gives inf.
 pub fn normInf(buf: []const f64) f64 {
-    // Max is exact, so any lane grouping equals the scalar fold bit for bit.
-    var it = z.fromSlice(f64, buf);
-    const m = it.foldAssoc(@as(f64, 0), absMax);
-    assert(m >= 0); // The fold starts at 0 and @max skips NaN.
-    return m;
+    // An i64 max over the |x| bit patterns: for non-negative floats the
+    // integer order is the float order, and a NaN's pattern sorts above
+    // inf. It vectorizes where a float @max does not, and float @max
+    // would drop the NaN.
+    var m: i64 = 0;
+    for (buf) |v| m = @max(m, @as(i64, @bitCast(@as(u64, @bitCast(v)) & abs_mask)));
+    return @bitCast(m);
 }
 
 /// Euclidean norm of `buf` that neither overflows nor underflows: the
@@ -159,12 +157,12 @@ pub fn norm2(buf: []const f64) f64 {
     // Below this an underflowed square could cost more than one ulp per entry.
     const tiny = std.math.floatMin(f64) / std.math.floatEps(f64);
     if (ss >= tiny and ss < std.math.inf(f64)) return @sqrt(ss);
-    const amax = normInf(buf); // skips NaN entries
-    if (amax == std.math.inf(f64)) return amax;
+    // An inf entry wins over a NaN one, as in hypot.
+    for (buf) |x| if (@abs(x) == std.math.inf(f64)) return @abs(x);
     if (std.math.isNan(ss)) return ss;
+    const amax = normInf(buf);
     if (amax == 0) return 0;
-    // ponytail: plain loop, reached only past the f64 square range; a
-    // stdpp pipeline if a caller ever lives there.
+    // ponytail: ordered scalar loop, reached only past the f64 square range.
     var acc: f64 = 0;
     for (buf) |x| {
         const t = x / amax;
@@ -184,52 +182,6 @@ test "norm2: overflow, underflow and non-finite entries" {
     try std.testing.expectEqual(std.math.inf(f64), norm2(&.{ 1, -std.math.inf(f64), std.math.nan(f64) }));
     try std.testing.expect(std.math.isNan(norm2(&.{ 1, std.math.nan(f64) })));
     try std.testing.expect(std.math.isNan(norm2(&.{ 1e300, std.math.nan(f64) })));
-}
-
-test "vector helpers run on stdpp's SIMD path" {
-    // lane_count is null when a callback is not lanewise or the backend has
-    // no vector form; other self-hosted backends run the scalar fallback.
-    const builtin = @import("builtin");
-    if (builtin.zig_backend != .stage2_llvm and builtin.zig_backend != .stage2_x86_64) return;
-    const s: []const f64 = &.{};
-    const pair = z.fromSlice(f64, s).zip(z.fromSlice(f64, s));
-    inline for (.{ @TypeOf(pair.map(Axpy{ .a = 0 })), @TypeOf(z.fromSlice(f64, s).map(Scale{ .a = 0 })), @TypeOf(pair.map(diff)), @TypeOf(pair.map(mul)), @TypeOf(z.fromSlice(f64, s)) }) |T|
-        comptime std.debug.assert(T.lane_count != null);
-}
-
-test "vector helpers match their per-element formulas" {
-    var prng = std.Random.DefaultPrng.init(0x5eed);
-    const r = prng.random();
-    var x: [3 * 8 * vec_len + 1]f64 = undefined;
-    var y: [3 * 8 * vec_len + 1]f64 = undefined;
-    for (0..x.len + 1) |len| {
-        for (x[0..len], y[0..len]) |*u, *v| {
-            u.* = r.float(f64) - 0.5;
-            v.* = r.float(f64) - 0.5;
-        }
-        var got = y;
-        axpy(got[0..len], 0.3, x[0..len]);
-        for (0..len) |i| try std.testing.expectEqual(y[i] + 0.3 * x[i], got[i]);
-        sub(got[0..len], y[0..len], x[0..len]);
-        for (0..len) |i| try std.testing.expectEqual(y[i] - x[i], got[i]);
-        scale(got[0..len], -2.0, x[0..len]);
-        for (0..len) |i| try std.testing.expectEqual(-2.0 * x[i], got[i]);
-        var mx: f64 = 0;
-        for (x[0..len]) |u| mx = @max(mx, @abs(u));
-        try std.testing.expectEqual(mx, normInf(x[0..len]));
-        var acc: f64 = 0;
-        for (x[0..len], y[0..len]) |u, v| acc += u * v;
-        try std.testing.expectApproxEqAbs(acc, dot(x[0..len], y[0..len]), 1e-12);
-        acc = 0;
-        for (x[0..len]) |u| acc += u;
-        try std.testing.expectApproxEqAbs(acc, sum(x[0..len]), 1e-12);
-    }
-    // NaN lanes are skipped in the vector body and the tail alike.
-    var with_nan: [2 * vec_len + 1]f64 = @splat(1);
-    with_nan[1] = std.math.nan(f64);
-    with_nan[2 * vec_len] = std.math.nan(f64);
-    with_nan[vec_len] = -4;
-    try std.testing.expectEqual(@as(f64, 4), normInf(&with_nan));
 }
 
 /// One diagonal block of a bordered-block-diagonal (BBD) row partition.
@@ -512,50 +464,74 @@ test "FreqSweep matches the ngspice grids the oracles were taken on" {
     try t.expect(single.next() == null);
 }
 
-test "vector helpers match their stdpp pull-path oracle at every length and offset" {
-    // `.byRef()` hides random access, so the same pipeline runs the scalar
-    // pull path. Small integers make every reassociated sum exact, so the
-    // folds must agree with it bit for bit too. 256 entries is past 3x the
-    // widest f64 vector and past stdpp's 64-entry fold cutoff.
+test "vector helpers match a naive scalar oracle at every length and offset" {
+    // Small integers make every reassociated sum exact, so the folds must
+    // agree with the ordered loop bit for bit. 260 entries is past 3x the
+    // widest f64 vector and past many `fold_lanes` blocks.
     const t = std.testing;
     var prng = std.Random.DefaultPrng.init(0x0c0e);
     const r = prng.random();
-    var xs: [260]f64 = undefined;
-    var ys: [260]f64 = undefined;
+    var xs: [264]f64 = undefined;
+    var ys: [264]f64 = undefined;
     for (&xs, &ys) |*u, *v| {
         u.* = @floatFromInt(r.intRangeAtMost(i8, -8, 8));
         v.* = @floatFromInt(r.intRangeAtMost(i8, -8, 8));
     }
-    var want: [256]f64 = undefined;
-    var got: [256]f64 = undefined;
-    for (0..257) |len| for (0..4) |off| {
+    var want: [260]f64 = undefined;
+    var got: [260]f64 = undefined;
+    for (0..261) |len| for (0..4) |off| {
         const x = xs[off..][0..len];
         const y = ys[off..][0..len];
 
-        var pair = z.fromSlice(f64, x).zip(z.fromSlice(f64, y));
-        try t.expectEqual(pair.byRef().map(mul).foldAssoc(@as(f64, 0), add), dot(x, y));
-        var single = z.fromSlice(f64, x);
-        try t.expectEqual(single.byRef().foldAssoc(@as(f64, 0), add), sum(x));
-        single = z.fromSlice(f64, x);
-        try t.expectEqual(single.byRef().foldAssoc(@as(f64, 0), absMax), normInf(x));
+        var d: f64 = 0;
+        var s: f64 = 0;
+        var m: f64 = 0;
+        for (x, y) |u, v| {
+            d += u * v;
+            s += u;
+            m = @max(m, @abs(u));
+        }
+        try t.expectEqual(d, dot(x, y));
+        try t.expectEqual(s, sum(x));
+        try t.expectEqual(m, normInf(x));
 
-        @memcpy(want[0..len], y);
+        for (want[0..len], y, x) |*w, v, u| w.* = v + 3 * u;
         @memcpy(got[0..len], y);
-        var acc = z.fromSlice(f64, want[0..len]).zip(z.fromSlice(f64, x));
-        _ = acc.byRef().map(Axpy{ .a = 3 }).writeInto(want[0..len]);
         axpy(got[0..len], 3, x);
         try t.expectEqualSlices(f64, want[0..len], got[0..len]);
 
-        single = z.fromSlice(f64, x);
-        _ = single.byRef().map(Scale{ .a = -2 }).writeInto(want[0..len]);
+        for (want[0..len], x) |*w, u| w.* = -2 * u;
         scale(got[0..len], -2, x);
         try t.expectEqualSlices(f64, want[0..len], got[0..len]);
 
-        pair = z.fromSlice(f64, x).zip(z.fromSlice(f64, y));
-        _ = pair.byRef().map(diff).writeInto(want[0..len]);
+        for (want[0..len], x, y) |*w, u, v| w.* = u - v;
         sub(got[0..len], x, y);
         try t.expectEqualSlices(f64, want[0..len], got[0..len]);
     };
+}
+
+test "dot and sum give the ordered loop's IEEE answer on a non-finite entry or result" {
+    const t = std.testing;
+    const inf = std.math.inf(f64);
+    const nan = std.math.nan(f64);
+    // In the accumulator blocks and in the tail.
+    for ([_]usize{ 0, 63, 64, 130, 199 }) |at| {
+        var x: [200]f64 = @splat(1);
+        x[at] = nan;
+        try t.expect(std.math.isNan(dot(&x, &x)));
+        try t.expect(std.math.isNan(sum(&x)));
+        x[at] = inf;
+        try t.expectEqual(inf, dot(&x, &x));
+        try t.expectEqual(inf, sum(&x));
+        x[at] = -inf;
+        try t.expectEqual(-inf, sum(&x));
+        try t.expectEqual(inf, normInf(&x));
+    }
+    // inf - inf: the ordered loop's NaN.
+    try t.expect(std.math.isNan(sum(&.{ inf, -inf })));
+    // Finite entries whose sum overflows: inf, as the ordered loop gives.
+    try t.expectEqual(inf, sum(&.{ 1e308, 1e308 }));
+    try t.expectEqual(inf, dot(&.{ 1e200, 1e200 }, &.{ 1e200, 1e200 }));
 }
 
 test "vector helpers accept dst itself as their source" {
@@ -569,6 +545,25 @@ test "vector helpers accept dst itself as their source" {
     for (buf) |v| try t.expectEqual(@as(f64, 0), v);
 }
 
+test "normInf equals a naive NaN-propagating max at every length, NaN, inf, -0 and subnormals planted" {
+    var prng = std.Random.DefaultPrng.init(0xA85);
+    const r = prng.random();
+    var buf: [204]f64 = undefined;
+    const specials = [_]f64{ std.math.nan(f64), -std.math.nan(f64), -std.math.inf(f64), -0.0, 4.9e-324, -1e308 };
+    for (0..201) |n| for (0..3) |off| for (0..specials.len + 1) |k| {
+        const s = buf[off..][0..n];
+        for (s) |*v| v.* = (r.float(f64) - 0.5) * 1e3;
+        if (n > 0 and k < specials.len) s[r.uintLessThan(usize, n)] = specials[k];
+        var want: f64 = 0;
+        var nan = false;
+        for (s) |v| {
+            if (std.math.isNan(v)) nan = true else if (@abs(v) > want) want = @abs(v);
+        }
+        const got = normInf(s);
+        if (nan) try std.testing.expect(std.math.isNan(got)) else try std.testing.expectEqual(want, got);
+    };
+}
+
 test "normInf of signed zeros and infinities, and of nothing" {
     const t = std.testing;
     const inf = std.math.inf(f64);
@@ -577,6 +572,7 @@ test "normInf of signed zeros and infinities, and of nothing" {
     var buf: [2 * vec_len + 3]f64 = @splat(1);
     buf[buf.len - 1] = -inf;
     try t.expectEqual(inf, normInf(&buf));
+    try t.expectEqual(@as(f64, 1e-310), normInf(&.{ 5e-324, -1e-310 }));
     try t.expectEqual(@as(f64, 0), dot(&.{}, &.{}));
     try t.expectEqual(@as(f64, 0), sum(&.{}));
 }
@@ -631,4 +627,67 @@ test "FreqSweep.fill writes the poi list and its angular frequencies" {
     var rad_only: [3]f64 = undefined;
     poi.fill(null, &rad_only);
     try t.expectEqualSlices(f64, &rad, &rad_only);
+}
+
+test "Complex arithmetic on exact values, and div inverts mul" {
+    const t = std.testing;
+    const a: Complex = .{ .re = 3, .im = -4 };
+    const b: Complex = .{ .re = 0.5, .im = 2 };
+    try t.expectEqual(@as(f64, 5), a.mag());
+    try t.expectEqual(@as(f64, 25), a.magSq());
+    try t.expectEqual(Complex{ .re = 3.5, .im = -2 }, a.add(b));
+    try t.expectEqual(Complex{ .re = 2.5, .im = -6 }, a.sub(b));
+    // (3 - 4i)(0.5 + 2i) = 1.5 + 8 + (6 - 2)i.
+    try t.expectEqual(Complex{ .re = 9.5, .im = 4 }, a.mul(b));
+    try t.expectEqual(Complex{ .re = -6, .im = 8 }, a.scale(-2));
+    try t.expectEqual(a, a.mul(b).div(b));
+    try t.expectEqual(Complex.zero, a.mul(.zero));
+}
+
+test "norm2 agrees with the plain square root of the ordered sum, and scales by |c|" {
+    // A power-of-two scale that keeps every entry normal is exact, so the
+    // scaled norm is |c| times the norm to rounding, on the fast path and
+    // on the rescaled one (squares past the f64 range either way).
+    const t = std.testing;
+    var prng = std.Random.DefaultPrng.init(0x2022);
+    const r = prng.random();
+    var x: [37]f64 = undefined;
+    var y: [37]f64 = undefined;
+    for (0..x.len + 1) |len| {
+        for (x[0..len]) |*v| v.* = r.float(f64) * 2 - 1;
+        var acc: f64 = 0;
+        for (x[0..len]) |v| acc += v * v;
+        const base = norm2(x[0..len]);
+        try t.expectApproxEqRel(@sqrt(acc), base, 1e-14);
+        for ([_]f64{ 0x1p-990, 0x1p-600, 0x1p600, 0x1p1000, -0x1p-3 }) |c| {
+            for (x[0..len], y[0..len]) |u, *v| v.* = c * u;
+            try t.expectApproxEqRel(@abs(c) * base, norm2(y[0..len]), 1e-13);
+        }
+    }
+}
+
+test "FreqSweep.fill and the iterator write exactly at(k), and a geometric grid ascends" {
+    const t = std.testing;
+    const grids = [_]FreqSweep{
+        .{ .f_start = 1, .f_stop = 1e6, .points = 7 },
+        .{ .f_start = 10, .f_stop = 730, .points = 3, .land_on_stop = true },
+        .{ .f_start = 3, .f_stop = 1e3, .points = 5, .kind = .oct },
+        .{ .f_start = 0, .f_stop = 5, .points = 6, .kind = .lin },
+    };
+    var hz: [64]f64 = undefined;
+    var rad: [64]f64 = undefined;
+    for (grids) |g| {
+        const n = g.count();
+        g.fill(hz[0..n], rad[0..n]);
+        var it = g.iter();
+        for (0..n) |k| {
+            try t.expectEqual(g.at(@intCast(k)), hz[k]);
+            try t.expectEqual(2 * std.math.pi * hz[k], rad[k]);
+            try t.expectEqual(hz[k], it.next().?);
+            if (k > 0) try t.expect(hz[k] > hz[k - 1]);
+        }
+        try t.expectEqual(null, it.next());
+        // Every point stays within the stop tolerance of f_stop.
+        try t.expect(hz[n - 1] <= g.f_stop * (1 + 1e-2));
+    }
 }

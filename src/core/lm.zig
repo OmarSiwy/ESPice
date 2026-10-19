@@ -46,6 +46,17 @@ pub const Options = struct {
     absin: f64 = 0,
     /// Bisection only: an absolute measure tolerance replacing RELOUT; 0 is unset.
     absout: f64 = 0,
+
+    /// How many times larger than a non-zero `x0` its finite-difference
+    /// step is, when PARMIN makes that step more than 1% of the value, else
+    /// null. Such a step can jump past a bound (W = 5u with PARMIN = 0.1
+    /// steps 1e-4), and the Jacobian point lands far from `x0` (#96). An
+    /// explicit step (`del != 0`) or `x0 == 0`, PARMIN's own case, is fine.
+    pub fn stepOverreach(o: Options, x0: f64, del: f64) ?f64 {
+        if (del != 0 or x0 == 0) return null;
+        const ratio = o.difsiz * @max(@abs(x0), o.parmin) / @abs(x0);
+        return if (ratio > 0.01) ratio else null;
+    }
 };
 
 /// Why the optimizer stopped; `running` until it has. `relin`, `relout`,
@@ -197,13 +208,23 @@ pub const Lm = struct {
 
     /// Takes the residuals of `points()`, `m` per point in the same order;
     /// a NaN marks a point that could not be evaluated. Fails only when the
-    /// arena cannot grow `history`. Asserts that the run is still going and
-    /// that there is one residual vector per point.
+    /// arena cannot grow `history`, and then before it changes anything, so
+    /// the same residuals can be fed again. Asserts that the run is still
+    /// going and that there is one residual vector per point.
     pub fn feed(s: *Lm, residuals_all: []const f64) std.mem.Allocator.Error!void {
         const n = s.n;
         const m = s.m;
         assert(s.status == .running);
         assert(residuals_all.len == @as(usize, s.pending) * m);
+        // Every phase but the Jacobian records at most one row (`record`);
+        // the Jacobian phase records none, so the batched feed `jacobian`
+        // makes after a record cannot fail.
+        if (s.phase != .jacobian) {
+            try s.history.rss.ensureUnusedCapacity(s.arena, 1);
+            try s.history.lambda.ensureUnusedCapacity(s.arena, 1);
+            try s.history.evaluations.ensureUnusedCapacity(s.arena, 1);
+            try s.history.x.ensureUnusedCapacity(s.arena, n);
+        }
         // A start or trial point counts alone; its batched Jacobian points
         // count when the Jacobian phase consumes them.
         const anchored = s.phase == .start or s.phase == .trial;
@@ -217,7 +238,7 @@ pub const Lm = struct {
                 @memcpy(s.r, residuals);
                 s.rss = rss;
                 if (!std.math.isFinite(rss)) return s.stop(.failed);
-                try s.record();
+                s.record();
                 if (rss == 0) return s.stop(.relout);
                 return s.jacobian(residuals_all[m..]);
             },
@@ -253,7 +274,7 @@ pub const Lm = struct {
                 s.rss = rss;
                 s.lambda /= s.opts.cut;
                 s.iterations += 1;
-                try s.record();
+                s.record();
                 if (rel_in < s.opts.relin) return s.stop(.relin);
                 if (rss == 0 or rel_out < s.opts.relout) return s.stop(.relout);
                 if (s.iterations >= s.opts.itropt) return s.stop(.itropt);
@@ -274,7 +295,7 @@ pub const Lm = struct {
                     @memcpy(s.x, s.pts[p * n ..][0..n]);
                     @memcpy(s.r, residuals[p * m ..][0..m]);
                     s.rss = best_rss;
-                    try s.record();
+                    s.record();
                 }
                 if (s.rss == 0 or !s.polishPoints()) {
                     s.status = s.final;
@@ -343,11 +364,13 @@ pub const Lm = struct {
         return false;
     }
 
-    fn record(s: *Lm) !void {
-        try s.history.rss.append(s.arena, s.rss);
-        try s.history.lambda.append(s.arena, s.lambda);
-        try s.history.evaluations.append(s.arena, s.evaluations);
-        try s.history.x.appendSlice(s.arena, s.x);
+    /// Appends the accepted iterate to `history`, into the room `feed`
+    /// reserved.
+    fn record(s: *Lm) void {
+        s.history.rss.appendAssumeCapacity(s.rss);
+        s.history.lambda.appendAssumeCapacity(s.lambda);
+        s.history.evaluations.appendAssumeCapacity(s.evaluations);
+        s.history.x.appendSliceAssumeCapacity(s.x);
         assert(s.history.x.items.len == s.history.rss.items.len * s.n);
     }
 
@@ -684,4 +707,52 @@ test cholesky {
     var indefinite = [_]f64{ 1, 2, 2, 1 };
     var b = [_]f64{ 1, 1 };
     try std.testing.expect(!cholesky(&indefinite, &b, 2));
+}
+
+test "a feed that runs out of memory leaves the run as it was, and the run then finishes" {
+    // Rosenbrock again, through an arena over a failing allocator: a failed
+    // feed must change nothing, and the history columns stay row-aligned.
+    try std.testing.checkAllAllocationFailures(@import("testing.zig").fixed_growth, struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            const F = struct {
+                fn eval(x: []const f64, r: []f64) void {
+                    r[0] = 10 * (x[1] - x[0] * x[0]);
+                    r[1] = 1 - x[0];
+                }
+            };
+            var lm = try Lm.init(arena.allocator(), &.{ -1.2, 1 }, &.{ -5, -5 }, &.{ 5, 5 }, &.{ 0, 0 }, &.{ 0, 0 }, 2, .{ .itropt = 30 }, true);
+            var buf: [6]f64 = undefined;
+            while (lm.points().len != 0) {
+                const pts = lm.points();
+                for (0..pts.len / 2) |p| F.eval(pts[p * 2 ..][0..2], buf[p * 2 ..][0..2]);
+                const before = lm;
+                lm.feed(buf[0..pts.len]) catch |err| {
+                    try std.testing.expectEqual(before.evaluations, lm.evaluations);
+                    try std.testing.expectEqual(before.phase, lm.phase);
+                    try std.testing.expectEqual(before.pending, lm.pending);
+                    try std.testing.expectEqual(before.rss, lm.rss);
+                    const rows = lm.history.rss.items.len;
+                    try std.testing.expectEqual(rows, lm.history.lambda.items.len);
+                    try std.testing.expectEqual(rows, lm.history.evaluations.items.len);
+                    try std.testing.expectEqual(rows * 2, lm.history.x.items.len);
+                    return err;
+                };
+            }
+            try std.testing.expect(lm.status != .failed);
+        }
+    }.run, .{});
+}
+
+test "stepOverreach flags a parameter PARMIN dwarfs, not zero or an explicit step" {
+    const o: Options = .{};
+    // W = 5u: step 1e-3 * 0.1 = 1e-4, 20x the value.
+    try std.testing.expectApproxEqRel(@as(f64, 20), o.stepOverreach(5e-6, 0).?, 1e-12);
+    try std.testing.expectEqual(@as(?f64, null), o.stepOverreach(5e-6, 1e-9));
+    try std.testing.expectEqual(@as(?f64, null), o.stepOverreach(0, 0));
+    // |x0| >= PARMIN: the step is DIFSIZ relative, 0.1%.
+    try std.testing.expectEqual(@as(?f64, null), o.stepOverreach(3.0, 0));
+    // Exactly at the 1% edge (|x0| = PARMIN / 10) is still fine.
+    try std.testing.expectEqual(@as(?f64, null), o.stepOverreach(0.01, 0));
 }

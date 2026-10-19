@@ -600,6 +600,17 @@ const Wave = struct {
     /// Scale value of the event `c` names; NaN when it never happens
     /// (ngspice com_measure_when).
     fn when(w: Wave, c: Clause) !f64 {
+        var t: [1]f64 = .{nan};
+        _ = try w.crossings(c, &t);
+        return t[0];
+    }
+
+    /// The events `c` names into `times`, in one scan: `times[k]` is what
+    /// `when` returns for `c` with its count raised by k. Returns how many
+    /// were found, at most `times.len`. A clause with no count or a LAST
+    /// count names one event.
+    fn crossings(w: Wave, c: Clause, times: []f64) !usize {
+        assert(times.len > 0);
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
         const y2: ?Column = if (c.vec2.len > 0) try w.waveform(c.vec2, c.ops2, c.vectype) else null;
@@ -615,6 +626,8 @@ const Wave = struct {
         var prev: f64 = 0;
         var prev2: f64 = 0;
         var prev_x: f64 = 0;
+        var want = c;
+        var n: usize = 0;
         for (0..w.len()) |i| {
             const v = y.get(i);
             const xv = x.get(i);
@@ -656,9 +669,21 @@ const Wave = struct {
                     if (c.rise != core.measure_last) pending = true;
                 }
                 const hit = prev_x + (prev_level - prev) * (xv - prev_x) / (v - prev - level + prev_level);
-                if (cross == c.cross or rise == c.rise or fall == c.fall) return hit;
+                // Counters move by at most one per sample, so the event the
+                // raised count names comes on a later sample.
+                if (cross == want.cross or rise == want.rise or fall == want.fall) {
+                    times[n] = hit;
+                    n += 1;
+                    if (n == times.len) return n;
+                    if (cross == want.cross) want.cross += 1;
+                    if (rise == want.rise) want.rise += 1;
+                    if (fall == want.fall) want.fall += 1;
+                }
                 if (pending) {
-                    if (c.cross == core.measure_unset and c.rise == core.measure_unset and c.fall == core.measure_unset) return hit;
+                    if (c.cross == core.measure_unset and c.rise == core.measure_unset and c.fall == core.measure_unset) {
+                        times[n] = hit;
+                        return n + 1;
+                    }
                     if (c.cross == core.measure_last or c.rise == core.measure_last or c.fall == core.measure_last) last = hit;
                     pending = false;
                 }
@@ -668,7 +693,9 @@ const Wave = struct {
             if (y2 != null) prev2 = v2;
             prev_x = xv;
         }
-        return last;
+        if (std.math.isNan(last)) return n;
+        times[n] = last;
+        return n + 1;
     }
 
     /// Violations of check `k` on `c`'s waveform (`ref`'s is the reference
@@ -863,19 +890,12 @@ const Wave = struct {
     /// unless it counts falls or crossings) after `c.td`: each event time
     /// minus the least-squares line through event time against index, the
     /// ideal clock the edges recover. OutOfInterval below three events.
-    // ponytail: each event rescans the waveform from its start, O(N events);
-    // one scan collecting every crossing when clocks get long.
+    /// Reads the first 4096 events.
     fn jitter(w: Wave, c: Clause) !Jitter {
         var times: [4096]f64 = undefined;
-        var n: usize = 0;
-        while (n < times.len) : (n += 1) {
-            var e = c;
-            const k: i32 = @intCast(n + 1);
-            if (c.fall > 0) e.fall = k else if (c.cross > 0) e.cross = k else e.rise = k;
-            const t = try w.when(e);
-            if (std.math.isNan(t)) break;
-            times[n] = t;
-        }
+        var e = c;
+        if (c.fall > 0) e.fall = 1 else if (c.cross > 0) e.cross = 1 else e.rise = 1;
+        const n = try w.crossings(e, &times);
         assert(n <= times.len);
         if (n < 3) return error.OutOfInterval;
         const count: f64 = @floatFromInt(n);
@@ -1040,7 +1060,8 @@ fn almostEqualUlps(a: f64, b: f64) bool {
     return @abs(ordered(a) -% ordered(b)) <= 100;
 }
 
-/// C's `%.*e`: at least two exponent digits and an explicit sign.
+/// C's `%.*e`, digit for digit: the exact binary value rounded half-to-even
+/// (glibc's default), at least two exponent digits and an explicit sign.
 fn sci(x: f64, comptime precision: u8) Sci {
     return .{ .x = x, .precision = precision };
 }
@@ -1050,13 +1071,93 @@ const Sci = struct {
     precision: u8,
 
     pub fn format(s: Sci, w: *Writer) Writer.Error!void {
-        var buf: [64]u8 = undefined;
-        const t = std.fmt.float.render(&buf, s.x, .{ .mode = .scientific, .precision = s.precision }) catch return w.writeAll("?");
-        const e = std.mem.indexOfScalar(u8, t, 'e') orelse return w.writeAll(t);
-        const exp = std.fmt.parseInt(i32, t[e + 1 ..], 10) catch return w.writeAll(t);
-        try w.print("{s}e{c}{d:0>2}", .{ t[0..e], @as(u8, if (exp < 0) '-' else '+'), @abs(exp) });
+        if (!std.math.isFinite(s.x)) {
+            var buf: [64]u8 = undefined;
+            return w.writeAll(std.fmt.float.render(&buf, s.x, .{ .mode = .scientific }) catch "?");
+        }
+        // The exact decimal of an f64 has at most 767 significant digits.
+        var mem: [4096]u8 = undefined;
+        var fba: std.heap.FixedBufferAllocator = .init(&mem);
+        const exact, const k = exactDecimal(fba.allocator(), @abs(s.x)) catch return w.writeAll("?");
+        const q = @as(usize, s.precision) + 1;
+        var d: [32]u8 = @splat('0');
+        const n = @min(exact.len, q);
+        @memcpy(d[0..n], exact[0..n]);
+        var e10: i32 = @as(i32, @intCast(exact.len)) - 1 + k;
+        if (exact.len > q) {
+            const r = exact[q];
+            const odd = (d[q - 1] - '0') & 1 == 1;
+            const rest = std.mem.trimEnd(u8, exact[q + 1 ..], "0").len != 0;
+            if (r > '5' or (r == '5' and (rest or odd))) {
+                var i = q;
+                while (i > 0) : (i -= 1) {
+                    if (d[i - 1] != '9') {
+                        d[i - 1] += 1;
+                        break;
+                    }
+                    d[i - 1] = '0';
+                } else {
+                    d[0] = '1'; // 9.99..9 carried into 10.00..0
+                    e10 += 1;
+                }
+            }
+        }
+        if (s.x == 0) e10 = 0;
+        if (std.math.signbit(s.x)) try w.writeByte('-');
+        try w.writeByte(d[0]);
+        if (q > 1) try w.print(".{s}", .{d[1..q]});
+        try w.print("e{c}{d:0>2}", .{ @as(u8, if (e10 < 0) '-' else '+'), @abs(e10) });
     }
 };
+
+/// The exact decimal digits of finite `x >= 0` and their exponent: `x = digits × 10^k`.
+/// An f64 is m·2^e exactly, and 2^-e = 5^e / 10^e, so the digits are an integer.
+fn exactDecimal(a: std.mem.Allocator, x: f64) !struct { []const u8, i32 } {
+    const Big = std.math.big.int.Managed;
+    const bits: u64 = @bitCast(x);
+    const biased: i32 = @intCast(bits >> 52 & 0x7ff);
+    const frac = bits & (1 << 52) - 1;
+    const m = if (biased == 0) frac else frac | 1 << 52;
+    const e = @as(i32, @max(biased, 1)) - 1075;
+    var d = try Big.initSet(a, m);
+    if (e >= 0) {
+        try d.shiftLeft(&d, @intCast(e));
+    } else {
+        var five = try Big.initSet(a, 5);
+        try five.pow(&five, @intCast(-e));
+        try d.mul(&d, &five);
+    }
+    return .{ try d.toString(a, 10, .lower), @min(e, 0) };
+}
+
+test "sci matches C %e digit for digit" {
+    const libc = struct {
+        extern "c" fn snprintf(buf: [*]u8, n: usize, fmt: [*:0]const u8, ...) c_int;
+    };
+    const cases = [_]f64{
+        0,                      -0.0,                       1,        -1,
+        1.0000005,              2.5e-7,                     0.125,    9.9999995,
+        9.9999996,              std.math.floatTrueMin(f64), 5e-324,   2.2250738585072014e-308,
+        std.math.floatMax(f64), 1e300,                      123456.5, 0.1,
+        999999.5,               1e-5,                       -3.25e10, 7.0000005e-12,
+    };
+    var prng: std.Random.DefaultPrng = .init(0x5c1);
+    const rand = prng.random();
+    var buf: [64]u8 = undefined;
+    var want: [64]u8 = undefined;
+    for (0..20000 + cases.len) |i| {
+        const x: f64 = if (i < cases.len) cases[i] else blk: {
+            const v: f64 = @bitCast(rand.int(u64));
+            break :blk if (std.math.isFinite(v)) v else 1.5;
+        };
+        inline for (.{ 5, 6 }) |p| {
+            var w: Writer = .fixed(&buf);
+            try w.print("{f}", .{sci(x, p)});
+            const len: usize = @intCast(libc.snprintf(&want, want.len, "%.*e", @as(c_int, p), x));
+            try std.testing.expectEqualStrings(want[0..len], w.buffered());
+        }
+    }
+}
 
 test "measurements match ngspice on a sampled ramp" {
     // v(a) = t on t = 0..4, sampled every 1; v(b) falls 4..0.
@@ -1244,4 +1345,156 @@ test "malformed PARAM postfix reads NaN" {
     const deep: [33]core.MeasureOp = @splat(.{ .num = 1 });
     try std.testing.expect(std.math.isNan(paramValue(&deep, &.{})));
     try std.testing.expectEqual(-6, paramValue(&.{ .{ .num = 2 }, .{ .measure = 0 }, .pow, .neg, .{ .num = 2 }, .sub }, &.{2}));
+}
+
+test "crossings, windows, NaN samples and a single point match ngspice 45" {
+    // Each expected listing is what ngspice 45 prints for the same cards over
+    // the same samples, loaded from an ASCII raw file; a failed card prints
+    // nothing to `out`.
+    const tri: core.Result = .{ .plotname = "t", .varnames = &.{ "time", "v(a)" }, .is_complex = false, .npoints = 9, .data = &.{ 0, 0, 1, 2, 2, 0, 3, 2, 4, 0, 5, 2, 6, 0, 7, 2, 8, 0 } };
+    const with_nan: core.Result = .{ .plotname = "t", .varnames = &.{ "time", "v(a)" }, .is_complex = false, .npoints = 5, .data = &.{ 0, 0, 1, 1, 2, nan, 3, 3, 4, 2 } };
+    const one: core.Result = .{ .plotname = "t", .varnames = &.{ "time", "v(a)" }, .is_complex = false, .npoints = 1, .data = &.{ 0, 5 } };
+    const last = core.measure_last;
+    const a: Clause = .{ .vec = "v(a)" };
+    const tri_cards = [_]core.Measure{
+        // RISE=1 falls in the first interval, which only primes the counters:
+        // ngspice reports the next crossing, the fall at 1.5.
+        .{ .analysis = .tran, .name = "r1", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .rise = 1 } },
+        .{ .analysis = .tran, .name = "r2", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .rise = 2 } },
+        .{ .analysis = .tran, .name = "f1", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .fall = 1 } },
+        .{ .analysis = .tran, .name = "c1", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .cross = 1 } },
+        .{ .analysis = .tran, .name = "c3", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .cross = 3 } },
+        .{ .analysis = .tran, .name = "fl", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .fall = last } },
+        .{ .analysis = .tran, .name = "rl", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .rise = last } },
+        .{ .analysis = .tran, .name = "cl", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .cross = last } },
+        .{ .analysis = .tran, .name = "w0", .func = .when, .first = .{ .vec = "v(a)", .val = 1 } },
+        .{ .analysis = .tran, .name = "tt", .func = .trig_targ, .first = .{ .vec = "v(a)", .val = 1, .rise = 2 }, .second = .{ .vec = "v(a)", .val = 1, .fall = 2 } },
+        .{ .analysis = .tran, .name = "x", .func = .find, .first = .{ .vec = "v(a)", .at = 2.25 } },
+        .{ .analysis = .tran, .name = "mx", .func = .max, .first = .{ .vec = "v(a)", .from = 0.5, .to = 3.5 } },
+        .{ .analysis = .tran, .name = "av", .func = .avg, .first = .{ .vec = "v(a)", .to = 4 } },
+        .{ .analysis = .tran, .name = "ig", .func = .integ, .first = .{ .vec = "v(a)", .from = 0.5, .to = 3.5 } },
+        .{ .analysis = .tran, .name = "rm", .func = .rms, .first = a },
+        .{ .analysis = .tran, .name = "pp", .func = .pp, .first = a },
+        .{ .analysis = .tran, .name = "mn", .func = .min, .first = .{ .vec = "v(a)", .from = 1, .to = 3 } },
+        .{ .analysis = .tran, .name = "wd", .func = .when, .first = .{ .vec = "v(a)", .val = 1, .td = 2.6 } },
+    };
+    const sparse_cards = [_]core.Measure{
+        .{ .analysis = .tran, .name = "mx", .func = .max, .first = a },
+        .{ .analysis = .tran, .name = "mn", .func = .min, .first = a },
+        .{ .analysis = .tran, .name = "w", .func = .when, .first = .{ .vec = "v(a)", .val = 1.5 } },
+        .{ .analysis = .tran, .name = "w2", .func = .when, .first = .{ .vec = "v(a)", .val = 2.5, .fall = 1 } },
+        .{ .analysis = .tran, .name = "x", .func = .find, .first = .{ .vec = "v(a)", .at = 0.5 } },
+        .{ .analysis = .tran, .name = "x0", .func = .find, .first = .{ .vec = "v(a)", .at = 0 } },
+        .{ .analysis = .tran, .name = "av", .func = .avg, .first = a },
+        .{ .analysis = .tran, .name = "ig", .func = .integ, .first = a },
+        .{ .analysis = .tran, .name = "rm", .func = .rms, .first = a },
+        .{ .analysis = .tran, .name = "pp", .func = .pp, .first = a },
+    };
+    const cases = [_]struct { core.Result, []const core.Measure, []const u8 }{
+        .{
+            tri, &tri_cards,
+            \\r1                  =   1.50000e+00
+            \\r2                  =   2.50000e+00
+            \\f1                  =   1.50000e+00
+            \\c3                  =   2.50000e+00
+            \\fl                  =   7.50000e+00
+            \\rl                  =   6.50000e+00
+            \\cl                  =   7.50000e+00
+            \\w0                  =   1.50000e+00
+            \\tt                  =  1.000000e+00 targ=  3.500000e+00 trig=  2.500000e+00
+            \\x                   =  5.000000e-01
+            \\mx                  =  2.000000e+00 at=  3.000000e+00
+            \\av                  =  1.000000e+00 from=  0.000000e+00 to=  5.000000e+00
+            \\ig                  =   2.50000e+00 from=  5.00000e-01 to=  3.50000e+00
+            \\rm                  =   1.47196e+00 from=  0.00000e+00 to=  8.00000e+00
+            \\pp                  =  2.000000e+00 from=  0.000000e+00 to=  0.000000e+00
+            \\mn                  =  0.000000e+00 at=  2.000000e+00
+            \\wd                  =   4.50000e+00
+            \\
+        },
+        .{
+            with_nan, &sparse_cards,
+            \\mx                  =  3.000000e+00 at=  3.000000e+00
+            \\mn                  =  0.000000e+00 at=  0.000000e+00
+            \\w2                  =   3.50000e+00
+            \\x                   =  5.000000e-01
+            \\x0                  =  0.000000e+00
+            \\pp                  =  3.000000e+00 from=  0.000000e+00 to=  0.000000e+00
+            \\
+        },
+        .{
+            one, &sparse_cards,
+            \\mx                  =  5.000000e+00 at=  0.000000e+00
+            \\mn                  =  5.000000e+00 at=  0.000000e+00
+            \\ig                  =   0.00000e+00 from=  0.00000e+00 to=  0.00000e+00
+            \\pp                  =  0.000000e+00 from=  0.000000e+00 to=  0.000000e+00
+            \\
+        },
+    };
+    for (cases) |case| {
+        var buf: [2048]u8 = undefined;
+        var out: Writer = .fixed(&buf);
+        var sink: Writer.Discarding = .init(&.{});
+        try print(&out, &sink.writer, case[1], .tran, case[0]);
+        const heading = "\n  Measurements for Transient Analysis\n\n";
+        try std.testing.expectEqualStrings(heading, out.buffered()[0..heading.len]);
+        try std.testing.expectEqualStrings(case[2], out.buffered()[heading.len..]);
+    }
+}
+
+test "one crossings scan finds what when finds for each raised count" {
+    // A two-tone wave on uneven steps, crossing 0.2 and the second vector.
+    var data: [3 * 400]f64 = undefined;
+    var t: f64 = 0;
+    for (0..400) |i| {
+        data[3 * i ..][0..3].* = .{ t, @sin(t) + 0.5 * @sin(3.1 * t), 0.3 * @cos(0.7 * t) };
+        t += 0.05 + 0.04 * @abs(@sin(11 * t));
+    }
+    const r: core.Result = .{ .plotname = "t", .varnames = &.{ "time", "v(a)", "v(b)" }, .is_complex = false, .npoints = 400, .data = &data };
+    const w: Wave = .{ .result = r, .analysis = .tran };
+    for ([_]Clause{
+        .{ .vec = "v(a)", .val = 0.2, .rise = 1 },
+        .{ .vec = "v(a)", .val = 0.2, .fall = 2 },
+        .{ .vec = "v(a)", .val = 0.2, .cross = 1, .td = 3 },
+        .{ .vec = "v(a)", .vec2 = "v(b)", .rise = 1, .from = 1, .to = 25 },
+    }) |c| {
+        var times: [64]f64 = undefined;
+        const n = try w.crossings(c, &times);
+        try std.testing.expect(n >= 3 and n < times.len);
+        for (0..n + 1) |k| {
+            var e = c;
+            const raise: i32 = @intCast(k);
+            if (c.rise > 0) e.rise += raise else if (c.fall > 0) e.fall += raise else e.cross += raise;
+            const want = try w.when(e);
+            if (k == n) try std.testing.expect(std.math.isNan(want)) else try std.testing.expectEqual(want, times[k]);
+        }
+    }
+}
+
+test "jitter: an ideal clock has none, an alternating one its residual" {
+    // Low from 0, then rising through 0.5 at each edge time (a 0.1-wide ramp
+    // centred on it) and falling back 1 later. An edge in the first interval
+    // would be ngspice's primed count, read off the next segment.
+    const cases = [_]struct { [4]f64, f64, f64, f64 }{
+        .{ .{ 0.55, 2.55, 4.55, 6.55 }, 2, 0, 0 },
+        // Least squares: period 10.1/5, residuals -0.02, 0.06, -0.06, 0.02.
+        .{ .{ 0.55, 2.65, 4.55, 6.65 }, 2.02, @sqrt(0.002), 0.12 },
+    };
+    for (cases) |case| {
+        var data: [2 + 2 * 4 * 4]f64 = @splat(0);
+        for (case[0], 0..) |e, k| data[2 + 8 * k ..][0..8].* = .{ e - 0.05, 0, e + 0.05, 1, e + 0.95, 1, e + 1.05, 0 };
+        const r: core.Result = .{ .plotname = "t", .varnames = &.{ "time", "v(c)" }, .is_complex = false, .npoints = 17, .data = &data };
+        const j = try (Wave{ .result = r, .analysis = .tran }).jitter(.{ .vec = "v(c)", .val = 0.5 });
+        try std.testing.expectEqual(4, j.edges);
+        try std.testing.expectApproxEqAbs(case[1], j.period, 1e-12);
+        try std.testing.expectApproxEqAbs(case[2], j.rms, 1e-12);
+        try std.testing.expectApproxEqAbs(case[3], j.pp, 1e-12);
+    }
+}
+
+test "sci prints C's %e: signed exponent of two digits or more" {
+    for ([_]f64{ 0, -1.5e-300, 1e100, 12345.678, std.math.inf(f64), nan }, [_][]const u8{ "0.000000e+00", "-1.500000e-300", "1.000000e+100", "1.234568e+04", "inf", "nan" }) |x, want| {
+        var buf: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(want, try std.fmt.bufPrint(&buf, "{f}", .{sci(x, 6)}));
+    }
 }

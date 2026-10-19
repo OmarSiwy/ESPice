@@ -48,7 +48,7 @@ From source:
 ```sh
 git clone https://github.com/OmarSiwy/ESPice
 cd ESPice
-nix develop     # Zig 0.17 and the GPU toolchain
+nix develop     # Zig 0.18 (dev.349) and the GPU toolchain
 zig build       # zig-out/bin/espice, plus device kernels for the detected GPU arch
 ```
 
@@ -136,7 +136,7 @@ ESPice compiles the source itself through VerA and never loads OSDI: a
 `.control` commands are skipped with a warning. The first load of a model builds a shared library, which
 takes a few seconds and needs:
 
-- the Zig compiler espice was built with (0.17.0) on `PATH`, or its path in
+- the Zig compiler espice was built with (0.18.0-dev.349) on `PATH`, or its path in
   `$ZIG`;
 - a release build of espice (any `-Doptimize` but `Debug`, which cannot load
   the library);

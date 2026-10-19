@@ -1,7 +1,6 @@
 //! DC and sweep-family tests: the pure helpers of dc, xf, dcmatch, sens and
 //! temp_sweep, then every DC analysis on a resistive divider whose answers
-//! are closed-form. The helpers check against hand-computed values or a
-//! second path (materialize-then-dot for `adjointFd`, bit for bit).
+//! are closed-form. The helpers check against hand-computed values.
 
 const DcmatchTests = struct {
     const impl = @import("../dc/dcmatch.zig");
@@ -9,115 +8,26 @@ const DcmatchTests = struct {
     const root = @import("../types.zig");
     const std = @import("std");
 
-    test "pelgromSigma — real coefficients" {
-        const ref = root.ParamRef{
-            .ptr = undefined,
-            .param_name = "vth0",
-            .index = 0,
-            .is_instance = false,
-            .primary = false,
-            .pelgrom_ap = 4e-3, // 4 mV·um
-            .area_wl = 1e-12, // 1 um^2
+    test "pelgromSigma: A_P / sqrt(W·L), unit without Pelgrom data, 0 for mfactor" {
+        // 4 mV·um over 1 um^2: 4e-3 / sqrt(1e-12) = 4000.
+        const cases = [_]struct { name: []const u8, ap: f64, wl: f64, want: f64 }{
+            .{ .name = "vth0", .ap = 4e-3, .wl = 1e-12, .want = 4e3 },
+            .{ .name = "vth0", .ap = 0, .wl = 1e-12, .want = 1 },
+            .{ .name = "vth0", .ap = 4e-3, .wl = 0, .want = 1 },
+            .{ .name = "vth0", .ap = 0, .wl = 0, .want = 1 },
+            .{ .name = "mfactor", .ap = 0, .wl = 0, .want = 0 },
         };
-        const sigma = pelgromSigma(ref);
-        // sigma = 4e-3 / sqrt(1e-12) = 4e-3 / 1e-6 = 4000
-        try std.testing.expectApproxEqRel(sigma, 4e3, 1e-12);
-    }
-
-    test "pelgromSigma — unit fallback when pelgrom_ap is zero" {
-        const ref = root.ParamRef{
-            .ptr = undefined,
-            .param_name = "vth0",
-            .index = 0,
-            .is_instance = false,
-            .primary = false,
-            .pelgrom_ap = 0,
-            .area_wl = 1e-12,
-        };
-        try std.testing.expectEqual(pelgromSigma(ref), 1.0);
-    }
-
-    test "pelgromSigma — unit fallback when area_wl is zero" {
-        const ref = root.ParamRef{
-            .ptr = undefined,
-            .param_name = "vth0",
-            .index = 0,
-            .is_instance = false,
-            .primary = false,
-            .pelgrom_ap = 4e-3,
-            .area_wl = 0,
-        };
-        try std.testing.expectEqual(pelgromSigma(ref), 1.0);
-    }
-
-    test "pelgromSigma — both zero gives unit fallback" {
-        const ref = root.ParamRef{
-            .ptr = undefined,
-            .param_name = "vth0",
-            .index = 0,
-            .is_instance = false,
-            .primary = false,
-        };
-        try std.testing.expectEqual(pelgromSigma(ref), 1.0);
+        for (cases) |c| {
+            const ref: root.ParamRef = .{ .ptr = undefined, .param_name = c.name, .index = 0, .is_instance = false, .primary = false, .pelgrom_ap = c.ap, .area_wl = c.wl };
+            try std.testing.expectApproxEqRel(c.want, pelgromSigma(ref), 1e-12);
+        }
     }
 };
 
 const SensTests = struct {
     const impl = @import("../sweep/sens.zig");
-    const W = impl.test_access.W;
-    const adjointFd = impl.adjointFd;
-    const copySimd = impl.test_access.copySimd;
     const std = @import("std");
     const testing = std.testing;
-
-    /// Scalar oracle for adjointFd: materialize dF/dp, then dot with the same
-    /// lane fold.
-    fn adjointFdOracle(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
-        var dfdp: [64]f64 = undefined;
-        for (0..lambda.len) |i| dfdp[i] = (pert[i] - nom[i]) * inv_delta;
-        const V = @Vector(W, f64);
-        var acc: V = @splat(0.0);
-        var i: usize = 0;
-        while (i + W <= lambda.len) : (i += W) {
-            const av: V = lambda[i..][0..W].*;
-            const bv: V = dfdp[i..][0..W].*;
-            acc += av * bv;
-        }
-        const arr: [W]f64 = acc;
-        var s: f64 = 0;
-        for (arr) |v| s += v;
-        while (i < lambda.len) : (i += 1) s += lambda[i] * dfdp[i];
-        return s;
-    }
-
-    test "adjointFd: matches the materialize-then-dot oracle bit for bit" {
-        var prng = std.Random.DefaultPrng.init(0xfeed);
-        const rng = prng.random();
-        var lambda: [64]f64 = undefined;
-        var pert: [64]f64 = undefined;
-        var nom: [64]f64 = undefined;
-        for (0..64) |i| {
-            lambda[i] = rng.floatNorm(f64);
-            nom[i] = rng.floatNorm(f64);
-            pert[i] = nom[i] + 1e-7 * rng.floatNorm(f64);
-        }
-        // every length across the vector boundary, plus the empty and tail cases
-        for (0..65) |n| {
-            const inv_delta = 1.0 / 1e-7;
-            try testing.expectEqual(
-                adjointFdOracle(lambda[0..n], pert[0..n], nom[0..n], inv_delta),
-                adjointFd(lambda[0..n], pert[0..n], nom[0..n], inv_delta),
-            );
-        }
-    }
-
-    test "adjointFd: known value" {
-        // dF/dp = (pert - nom) / delta = (2,4,6)/2 = (1,2,3); λ·dF/dp = 4+10+18 = 32
-        const lambda = [_]f64{ 4.0, 5.0, 6.0 };
-        const nom = [_]f64{ 0.0, 0.0, 0.0 };
-        const pert = [_]f64{ 2.0, 4.0, 6.0 };
-        try testing.expectApproxEqAbs(@as(f64, 32.0), adjointFd(&lambda, &pert, &nom, 0.5), 1e-15);
-    }
 
     test "fdStep: relative to the parameter, absolute only at 0 (#85)" {
         // IS = 1e-14 steps by 1e-20, not by a 1e-12 floor that is 100 IS.
@@ -136,13 +46,6 @@ const SensTests = struct {
         try testing.expect(!impl.isSensParam("bsource", "coefZ5b3Z5d"));
         try testing.expect(impl.isSensParam("gummel_poon", "VAR"));
         try testing.expect(impl.isSensParam("resistor", "mfactor"));
-    }
-
-    test "copySimd: round-trip" {
-        var dst: [5]f64 = undefined;
-        const src = [_]f64{ 1.0, 2.0, 3.0, 4.0, 5.0 };
-        copySimd(&dst, &src);
-        for (dst, src) |d, s| try testing.expectEqual(s, d);
     }
 };
 
@@ -212,8 +115,8 @@ const GroupsTests = struct {
             try t.expectEqual(@as(u32, @intCast(i)), m[0].param);
             try t.expectEqual(@as(f64, 1), m[0].scale);
         }
-        try t.expectApproxEqRel(@as(f64, 4e3), g.sigma(0), 1e-12);
-        try t.expectEqual(@as(f64, 1), g.sigma(1));
+        try t.expectApproxEqRel(@as(f64, 4e3), g.sigmas[0], 1e-12);
+        try t.expectEqual(@as(f64, 1), g.sigmas[1]);
 
         const none = try Groups.init(t.allocator, &.{}, .{});
         defer none.deinit(t.allocator);
@@ -232,7 +135,7 @@ const GroupsTests = struct {
         try t.expectEqual(@as(f64, 0.2), m0[1].scale);
         try t.expectEqual(@as(u32, 1), g.members(1)[0].param);
         // The members already carry the sigma, so the group's own is 1.
-        try t.expectEqual(@as(f64, 1), g.sigma(0));
+        try t.expectEqual(@as(f64, 1), g.sigmas[0]);
         const label = try g.label(t.allocator, undefined, &refs, 1);
         defer t.allocator.free(label);
         try t.expectEqualStrings("b", label);
@@ -396,9 +299,9 @@ const DividerTests = struct {
         const n_out = try b.addNode();
         try t.expectEqual(vin, n_in);
         try t.expectEqual(out, n_out);
-        try b.addDevice(models.vsource, "", .{ .dc = 10 }, .{}, .{ n_in, GROUND });
-        try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ n_in, n_out });
-        try b.addDevice(models.resistor, "", .{ .r = 3000 }, .{}, .{ n_out, GROUND });
+        try b.addDevice(models.vsource, "", &.{ .dc = 10 }, &.{}, .{ n_in, GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ n_in, n_out });
+        try b.addDevice(models.resistor, "", &.{ .r = 3000 }, &.{}, .{ n_out, GROUND });
         return b.compile();
     }
 
@@ -488,10 +391,10 @@ const DividerTests = struct {
         const n_in = try b.addNode();
         const n_out = try b.addNode();
         const n_c = try b.addNode();
-        try b.addDevice(models.vsource, "", .{ .dc = 10 }, .{}, .{ n_in, GROUND });
-        try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ n_in, n_out });
-        try b.addDevice(models.resistor, "", .{ .r = 3000 }, .{}, .{ n_out, GROUND });
-        try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ n_c, GROUND });
+        try b.addDevice(models.vsource, "", &.{ .dc = 10 }, &.{}, .{ n_in, GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ n_in, n_out });
+        try b.addDevice(models.resistor, "", &.{ .r = 3000 }, &.{}, .{ n_out, GROUND });
+        try b.addDevice(models.vsource, "", &.{ .dc = 1 }, &.{}, .{ n_c, GROUND });
         var prepared = try b.compile();
         defer prepared.deinit();
         var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
@@ -771,6 +674,12 @@ const DividerTests = struct {
         const again = try mc.run(&ctx, .{ .n_trials = 8, .variation = 0.05, .seed = 7 });
         try t.expectEqual(@as(usize, 8), first.npoints);
         try t.expectEqualSlices(f64, first.data, again.data);
+        // Trial k's draw depends only on the seed and k: a shorter run is a
+        // prefix, and another seed moves the trials.
+        const prefix = try mc.run(&ctx, .{ .n_trials = 3, .variation = 0.05, .seed = 7 });
+        try t.expectEqualSlices(f64, first.data[0..prefix.data.len], prefix.data);
+        const other = try mc.run(&ctx, .{ .n_trials = 8, .variation = 0.05, .seed = 8 });
+        try t.expect(!std.mem.eql(f64, first.data, other.data));
         try expectNominals(&ckt);
     }
 

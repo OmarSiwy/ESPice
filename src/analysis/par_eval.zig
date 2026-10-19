@@ -35,6 +35,11 @@ const EvalTask = struct {
     last: u32,
 };
 
+comptime {
+    // Claimed one per `fetchAdd`; all three fields are read together.
+    std.debug.assert(@sizeOf(EvalTask) == 12);
+}
+
 /// Stamps instances [first, last) of one batch in `mode`. The serial path's
 /// per-mode dispatch.
 pub fn stampRange(b: Batch, pl: *const Planes, first: u32, last: u32, x: []const f64, t: f64, comptime mode: Mode) void {
@@ -170,7 +175,8 @@ pub const ParEval = struct {
     /// chunks of roughly equal `count * instanceWeight` work, about eight
     /// per lane, so a fast lane can take a slow lane's share. Threads start
     /// lazily on the first `run`. `batches` must outlive it; free it with
-    /// `deinit`. Asserts that `trash_slot == nnz`. Fails with
+    /// `deinit`. Plane index `nnz` is the trash slot (`Circuit.trash_slot`),
+    /// whose stamps are dropped. Fails with
     /// `error.OutOfMemory` on allocation or when the tapes hold more than
     /// 2^32 positions. A single-threaded build runs one lane.
     pub fn init(
@@ -180,10 +186,8 @@ pub const ParEval = struct {
         nnz: u32,
         n: u32,
         has_charge: bool,
-        trash_slot: u32,
         n_lanes_req: u32,
     ) !ParEval {
-        std.debug.assert(trash_slot == nnz);
         // Single-threaded (wasm): one lane whatever `n_lanes_req` asks.
         const n_lanes: u32 = if (builtin.single_threaded) 1 else @max(n_lanes_req, 1);
 
@@ -211,7 +215,7 @@ pub const ParEval = struct {
         // would need 32 GB per plane.
         if (n_slot > std.math.maxInt(u32) or n_row > std.math.maxInt(u32)) return error.OutOfMemory;
 
-        const slots = try Gather.build(gpa, slot_tapes, nnz, trash_slot);
+        const slots = try Gather.build(gpa, slot_tapes, nnz, nnz);
         errdefer slots.deinit(gpa);
         const rows = try Gather.build(gpa, row_tapes, n, n);
         errdefer rows.deinit(gpa);
@@ -538,6 +542,13 @@ test "Gather lists each cell's positions in tape order, ground dropped" {
     defer g.deinit(gpa);
     try std.testing.expectEqualSlices(u32, &.{ 0, 2, 3, 6 }, g.seg);
     try std.testing.expectEqualSlices(u32, &.{ 1, 4, 6, 0, 3, 5 }, g.src);
+    // No cells, or only ground entries: every run is empty.
+    for ([_][]const []const u32{ &.{}, &.{&.{ 0, 0 }} }) |only_ground| {
+        const e = try Gather.build(gpa, only_ground, 0, 0);
+        defer e.deinit(gpa);
+        try std.testing.expectEqualSlices(u32, &.{0}, e.seg);
+        try std.testing.expectEqual(@as(usize, 0), e.src.len);
+    }
 }
 
 test "cutBlocks tiles every cell, 16-aligned, with a cut at nnz" {

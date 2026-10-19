@@ -15,7 +15,6 @@ const tran = @import("../tran/tran.zig");
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Op;
 
-const copySimd = root.copySimd;
 const Ic = @import("core").Ic;
 
 const failed: converger.Result = .{ .converged = false, .iterations = 0 };
@@ -23,7 +22,7 @@ const failed: converger.Result = .{ .converged = false, .iterations = 0 };
 /// Zeroes `x`, then applies the SPICE MODEINITJCT junction seeds so the first
 /// iteration linearizes at vcrit/vto instead of 0. `x.len` must be `ckt.n`.
 pub fn coldStart(ckt: *root.Circuit, x: []f64) void {
-    root.zeroSimd(x);
+    @memset(x, 0);
     ckt.seedJunctions(x);
 }
 
@@ -103,7 +102,7 @@ pub fn nodesetLadder(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, opt
 /// to OPtran. Takes the caller's Workspace so dc.zig can fall back to it
 /// mid-sweep. Returns error.FloatingNode when a node has no DC path to
 /// ground outside a TRANOP.
-pub fn solveLadder(
+fn solveLadder(
     ckt: *root.Circuit,
     ws: *converger.Workspace,
     x: []f64,
@@ -131,7 +130,7 @@ pub fn solveLadder(
     // picks.
     const plain = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, !options.warm_start) catch |e| switch (e) {
         error.SingularMatrix => null,
-        else => return e,
+        else => return e, // else: only a singular Jacobian moves on to the next rung
     };
     if (ws.knobs.opdbg)
         std.debug.print("ladder: plain conv={?}\n", .{if (plain) |p| p.converged else null});
@@ -168,7 +167,7 @@ pub fn solveLadder(
             try ckt.computeBaseline();
             const r = newtonRun(ckt, ws, x, options.tol, hold, gmin_val, stamps, options.tol.itl2, !have_good) catch |e| switch (e) {
                 error.SingularMatrix => failed,
-                else => return e,
+                else => return e, // else: only a singular Jacobian is a failed step
             };
             total_iter +|= r.iterations;
             if (ws.knobs.opdbg)
@@ -188,7 +187,7 @@ pub fn solveLadder(
                         return .{ .converged = true, .iterations = total_iter };
                     break;
                 }
-                copySimd(x_good, x);
+                @memcpy(x_good, x);
                 have_good = true;
                 good_gmin = gmin_val;
                 // An easy step accelerates (capped at the start factor); a
@@ -209,7 +208,7 @@ pub fn solveLadder(
                 if (factor < 1.00005) break; // wedged against the last good step
                 factor = @sqrt(@sqrt(factor));
                 gmin_val = good_gmin / factor;
-                if (have_good) copySimd(x, x_good) else coldStart(ckt, x);
+                if (have_good) @memcpy(x, x_good) else coldStart(ckt, x);
             }
         }
         ckt.setHomotopy(gtarget, 1.0); // rung 3 rebuilds the baseline
@@ -234,7 +233,7 @@ pub fn solveLadder(
             for (scaled, hold) |*s, h| s.value = h.value * lambda;
             const sr = newtonRun(ckt, ws, x, options.tol, scaled, 0.0, &.{}, options.tol.itl2, lambda_good < 0.0) catch |e| switch (e) {
                 error.SingularMatrix => failed,
-                else => {
+                else => { // else: only a singular Jacobian is a failed step; the rest unwinds the models
                     ckt.restoreModels();
                     ckt.setHomotopy(options.tol.gmin, 1.0);
                     try ckt.rebuildBaseline();
@@ -247,7 +246,7 @@ pub fn solveLadder(
             if (sr.converged) {
                 if (lambda >= 1.0) break; // full sources reached
                 lambda_good = lambda;
-                copySimd(x_good, x);
+                @memcpy(x_good, x);
                 delta *= 1.5;
                 lambda = @min(lambda + delta, 1.0);
             } else {
@@ -256,7 +255,7 @@ pub fn solveLadder(
                 // Nothing converged yet means the lambda = 0 start failed, and
                 // a retry would be the same cold solve.
                 if (lambda_good < 0.0) break;
-                copySimd(x, x_good);
+                @memcpy(x, x_good);
                 lambda = @min(lambda_good + delta, 1.0);
             }
         }
@@ -267,7 +266,7 @@ pub fn solveLadder(
 
     const final = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |e| switch (e) {
         error.SingularMatrix => failed,
-        else => return e,
+        else => return e, // else: only a singular Jacobian moves on to JFNK
     };
     total_iter +|= final.iterations;
     if (final.converged)
@@ -307,7 +306,7 @@ pub fn solveLadder(
 /// event or delay history runs ahead of the operating point's t = 0.
 fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: Options, hold: []const converger.Force) !converger.Result {
     const opa = ws.slv.gpa;
-    root.zeroSimd(x);
+    @memset(x, 0);
     // The held rows start at their values, where the capacitors keep them.
     for (hold) |h| x[h.row] = h.value;
     var wf = try tran.Waveform.init(opa, 0, 16);
@@ -317,8 +316,8 @@ fn transientOp(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options: 
     const op_sim = ckt.sim;
     // Its steps are no analysis's accepted points, so display tasks stay quiet.
     const display = ckt.display;
-    ckt.attachDisplay(null);
-    defer ckt.attachDisplay(display);
+    ckt.display = null;
+    defer ckt.display = display;
     const sim = tran.simulate(ckt, x, &.{}, &wf, .{
         .tol = options.tol,
         .t_stop = 1e-6,
@@ -526,10 +525,10 @@ fn forceNodeset(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options:
     copts.force = force;
     const r = converger.run(ckt, ws, x, 0, copts, root.EvalHook{}) catch |e| switch (e) {
         error.SingularMatrix => failed,
-        else => return e,
+        else => return e, // else: only a singular Jacobian fails the forcing step
     };
     if (ws.knobs.opdbg) std.debug.print("ladder: nodeset conv={} it={d}\n", .{ r.converged, r.iterations });
-    if (!r.converged) copySimd(x, start);
+    if (!r.converged) @memcpy(x, start);
     return r.converged;
 }
 

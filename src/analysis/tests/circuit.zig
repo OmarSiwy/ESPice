@@ -1,6 +1,6 @@
 //! Circuit pattern, plane-kernel, stamp and lifecycle tests. Oracles: a
-//! comparison sort for the radix-sorted CSC pattern, each plane kernel's
-//! W == 1 instantiation, a full stamp for the baseline-seeded Newton stamp,
+//! comparison sort for the radix-sorted CSC pattern, the scalar
+//! expression for the plane kernel, a full stamp for the baseline-seeded Newton stamp,
 //! the serial stamp for the threaded ones (bit for bit), the plane accessors
 //! against each other, and `checkAllAllocationFailures` for setup leaks.
 
@@ -55,27 +55,34 @@ test "pattern CSC matches comparison sort across radix digits" {
     }
 }
 
-test "combined circuit planes match W=1 with tails and aliased output" {
-    const W = std.simd.suggestVectorLength(f64) orelse 1;
+test "combinePlanes equals the scalar g + alpha*c at every length, offset and alias" {
     var random = std.Random.DefaultPrng.init(0x4321);
-    var g: [3 * W + 1]f64 = undefined;
+    const len_max = 200;
+    var g: [len_max + 3]f64 = undefined;
     var c: [g.len]f64 = undefined;
-    var actual: [g.len]f64 = undefined;
-    var expected: [g.len]f64 = undefined;
-    for (0..g.len + 1) |n| {
-        for (&g, &c) |*gv, *cv| {
-            gv.* = random.random().float(f64) - 0.5;
-            cv.* = random.random().float(f64) - 0.5;
-        }
-        for ([_]f64{ 0, -1, 0.125, 1e12 }) |alpha| {
-            combinePlanes(1, expected[0..n], g[0..n], c[0..n], alpha);
-            combinePlanes(W, actual[0..n], g[0..n], c[0..n], alpha);
-            try std.testing.expectEqualSlices(f64, expected[0..n], actual[0..n]);
-            @memcpy(actual[0..n], g[0..n]);
-            combinePlanes(W, actual[0..n], actual[0..n], c[0..n], alpha);
-            try std.testing.expectEqualSlices(f64, expected[0..n], actual[0..n]);
-        }
+    var out: [g.len]f64 = undefined;
+    for (&g, &c) |*gv, *cv| {
+        gv.* = random.random().float(f64) - 0.5;
+        cv.* = random.random().float(f64) - 0.5;
     }
+    // Specials ride through bit for bit: NaN, both infinities, -0, a denormal.
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), -0.0, 4.9e-324 }, 0..) |v, k| {
+        g[7 * k + 1] = v;
+        c[11 * k + 2] = v;
+    }
+    for (0..len_max + 1) |n| for (0..3) |off| for ([_]f64{ 0, -1, 0.125, 1e12 }) |alpha| {
+        const gs = g[off..][0..n];
+        const cs = c[off..][0..n];
+        combinePlanes(out[off..][0..n], gs, cs, alpha);
+        for (out[off..][0..n], gs, cs) |o, gv, cv| {
+            const e = gv + alpha * cv;
+            try std.testing.expectEqual(@as(u64, @bitCast(e)), @as(u64, @bitCast(o)));
+        }
+        // `out` aliasing `g` gives the same bits.
+        var alias = g;
+        combinePlanes(alias[off..][0..n], alias[off..][0..n], cs, alpha);
+        try std.testing.expectEqualSlices(u64, @ptrCast(out[off..][0..n]), @ptrCast(alias[off..][0..n]));
+    };
 }
 
 const Builder = @import("builder").Builder;
@@ -91,13 +98,13 @@ const t = std.testing;
 fn ladder(lib: *const Library, stages: usize) !Prepared {
     var b = try Builder.init(t.allocator, lib);
     const vin = try b.addNode();
-    try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ vin, types.GROUND });
+    try b.addDevice(models.vsource, "", &.{ .dc = 1 }, &.{}, .{ vin, types.GROUND });
     var prev = vin;
     for (0..stages) |_| {
         const mid = try b.addNode();
-        try b.addDevice(models.resistor, "", .{ .r = 1e3 }, .{}, .{ prev, mid });
-        try b.addDevice(models.capacitor, "", .{ .c = 1e-9 }, .{}, .{ mid, types.GROUND });
-        try b.addDevice(models.diode, "", .{ .is = 1e-14, .cjo = 1e-12 }, .{}, .{ mid, types.GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ prev, mid });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-9 }, &.{}, .{ mid, types.GROUND });
+        try b.addDevice(models.diode, "", &.{ .is = 1e-14, .cjo = 1e-12 }, &.{}, .{ mid, types.GROUND });
         prev = mid;
     }
     return b.compile();
@@ -201,10 +208,10 @@ test "threaded stamps equal the serial stamp bit for bit at every lane count" {
     // 0 asks for one lane; 24 is more lanes than the 19 instances. Every
     // pass twice, so a position left stale by the last pass would show.
     for ([_]u32{ 0, 1, 2, 3, 5, 8, 24 }) |lanes| {
-        var par = try ParEval.init(t.allocator, t.io, ckt.batches, nnz, n, ckt.has_charge, ckt.trash_slot, lanes);
+        var par = try ParEval.init(t.allocator, t.io, ckt.batches, nnz, n, ckt.has_charge, lanes);
         defer par.deinit();
-        ckt.attachParEval(&par);
-        defer ckt.attachParEval(null);
+        ckt.par_eval = &par;
+        defer ckt.par_eval = null;
         for (0..2) |_| {
             ckt.eval(x, 0);
             try take.expectSame(full, &ckt);
@@ -385,8 +392,13 @@ fn setUpEverything(gpa: std.mem.Allocator, prepared: *const Prepared) !void {
     _ = try ckt.collectParams();
     const saved = try ckt.saveState(gpa);
     saved.deinit(gpa);
-    var par = try ParEval.init(gpa, t.io, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, ckt.trash_slot, 3);
+    var par = try ParEval.init(gpa, t.io, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, 3);
     par.deinit();
+    var copy = try types.Circuit.fromSnapshot(prepared, &ckt, gpa);
+    copy.deinit();
+    // Last: the move empties `ckt`, whose deferred deinit then frees nothing.
+    var moved = try types.Circuit.fromSnapshotMove(prepared, &ckt, gpa);
+    moved.deinit();
 }
 
 test "every allocation in circuit setup can fail without a leak" {

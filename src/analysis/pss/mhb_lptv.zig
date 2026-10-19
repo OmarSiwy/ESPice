@@ -103,7 +103,7 @@ const Linear = struct {
                 const wave = td[slot * nt ..][0..nt];
                 const c = coef[which * nf ..][0..nf];
                 for (c, 0..) |*v, a| v.* = num.dot(wave, tr.fwd[a * nt ..][0..nt]);
-                for (ph[which * nf ..][0..nf], 0..) |*v, k| v.* = linePhasor(c, nf, k);
+                for (ph[which * nf ..][0..nf], 0..) |*v, k| v.* = linePhasor(c, k);
             }
             for (0..nf) |p| for (0..nf) |q| {
                 const k = diff[p * nf + q];
@@ -168,7 +168,7 @@ const Linear = struct {
             w.writeByte(']') catch unreachable;
             for (names[1 + k * stride ..][0..stride]) |*name| {
                 const tail = name.*[std.mem.indexOfScalar(u8, name.*, '(') orelse name.*.len ..];
-                const renamed = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ prefix, w.buffered(), tail });
+                const renamed = try a.print("{s}{s}{s}", .{ prefix, w.buffered(), tail });
                 a.free(name.*);
                 name.* = renamed;
             }
@@ -178,8 +178,8 @@ const Linear = struct {
 
 /// Sideband `k` (signed line h = k - (nf-1)/2) of the real HB coefficients
 /// `c` = [dc, c_1, s_1, ...]: the phasor of e^(j·2π·f_h·t), (c_h ∓ j·s_h)/2.
-fn linePhasor(c: []const f64, nf: usize, k: usize) Complex {
-    const h = @as(i64, @intCast(k)) - @as(i64, @intCast(nf / 2));
+fn linePhasor(c: []const f64, k: usize) Complex {
+    const h = @as(i64, @intCast(k)) - @as(i64, @intCast(c.len / 2));
     if (h == 0) return .{ .re = c[0], .im = 0 };
     const j: usize = @intCast(@abs(h));
     const s = c[2 * j];
@@ -320,7 +320,7 @@ pub fn noise(ctx: *const root.RunCtx, opts: Options) !root.Result {
         for (0..2 * ns) |i| {
             const a = td[i * nt ..][0..nt];
             for (hat, 0..) |*h, c| h.* = num.dot(a, tr.fwd[c * nt ..][0..nt]);
-            for (amp[i * nf ..][0..nf], 0..) |*q, k| q.* = linePhasor(hat, nf, k);
+            for (amp[i * nf ..][0..nf], 0..) |*q, k| q.* = linePhasor(hat, k);
         }
     }
 
@@ -404,12 +404,12 @@ test linePhasor {
     // conjugates and sum back to the real coefficients.
     const c = [_]f64{ 0.5, 0.3, -0.2, 0.1, 0.4 };
     const nf = c.len;
-    const dc = linePhasor(&c, nf, nf / 2);
+    const dc = linePhasor(&c, nf / 2);
     try std.testing.expectEqual(@as(f64, 0.5), dc.re);
     try std.testing.expectEqual(@as(f64, 0), dc.im);
     for (1..3) |h| {
-        const pos = linePhasor(&c, nf, nf / 2 + h);
-        const neg = linePhasor(&c, nf, nf / 2 - h);
+        const pos = linePhasor(&c, nf / 2 + h);
+        const neg = linePhasor(&c, nf / 2 - h);
         try std.testing.expectEqual(pos.re, neg.re);
         try std.testing.expectEqual(pos.im, -neg.im);
         // Re{2·X·e^(jωt)} at t = 0 is c_h, at ωt = π/2 it is s_h.

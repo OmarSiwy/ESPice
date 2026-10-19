@@ -33,8 +33,6 @@ pub const BuildPaths = struct {
     device_abi: []const u8,
     /// The core module, for the ids the ABI names.
     core: []const u8,
-    /// stdpp's module root; core imports it.
-    stdpp: []const u8,
     /// The Zig compiler that builds the device. It must be the version this
     /// espice was built with.
     zig: []const u8 = "zig",
@@ -95,7 +93,16 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     const module_name = switch (hdl) {
         .va => blk: {
             const dir = std.fs.path.dirname(path) orelse ".";
-            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = &.{dir}, .diags = &bag, .display = .record, .int_systfs = paths.int_systfs }) catch |err| {
+            va = fastvaf.compileSourceOpts(gpa, source, .build, .{
+                // VAMS-2.3, as the built-ins compile (build.zig `.std`): 2023
+                // reserves names models still declare (BSIM-CMG 112's `expm1`).
+                .file_name = path,
+                .include_dirs = &.{dir},
+                .diags = &bag,
+                .display = .record,
+                .int_systfs = paths.int_systfs,
+                .language = .vams_2_3,
+            }) catch |err| {
                 printDiags(&bag);
                 return err;
             };
@@ -130,8 +137,7 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     const modules = [_]fastvaf.orchestrator.Module{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
-        .{ .name = "stdpp", .root = paths.stdpp },
-        .{ .name = "core", .root = paths.core, .deps = &.{"stdpp"} },
+        .{ .name = "core", .root = paths.core },
         .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
         .{ .name = "sim", .root = try std.fs.path.join(arena, &.{ vera_root, "src/sim/root.zig" }), .deps = &.{ "contract", "base", "diag", "frontend", "kernels" } },
@@ -187,7 +193,7 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     // overwrite a mapped file.
     const generation = 1;
     const target = builtin.target;
-    const library = try std.fmt.allocPrint(gpa, "{s}{s}.{d}{s}", .{
+    const library = try gpa.print("{s}{s}.{d}{s}", .{
         target.libPrefix(), module_name, generation, target.dynamicLibSuffix(),
     });
     defer gpa.free(library);
@@ -236,7 +242,7 @@ fn inputKey(io: std.Io, gpa: std.mem.Allocator, hdl: Hdl, path: []const u8, sour
     h.update(&.{0}); // 'va' ++ 'ssign' is not 'v' ++ 'assign'
     const dir = std.fs.path.dirname(path) orelse ".";
     if (!try hashCode(io, gpa, &h, hdl, dir, path, source, 0)) return null;
-    inline for (.{ "contract", "dyn", "gompute", "device_abi", "core", "stdpp", "zig" }) |f| {
+    inline for (.{ "contract", "dyn", "gompute", "device_abi", "core", "zig" }) |f| {
         h.update(&.{0});
         h.update(@field(paths, f));
     }
@@ -403,7 +409,7 @@ fn cachedLoad(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, wo
     const lock = dir.createFile(io, "build.lock", .{ .truncate = false, .lock = .exclusive }) catch return null;
     defer lock.close(io);
     const target = builtin.target;
-    const so = std.fmt.allocPrint(gpa, "{s}/{s}{s}.1{s}", .{ work_dir, target.libPrefix(), module_name, target.dynamicLibSuffix() }) catch return null;
+    const so = gpa.print("{s}/{s}{s}.1{s}", .{ work_dir, target.libPrefix(), module_name, target.dynamicLibSuffix() }) catch return null;
     defer gpa.free(so);
     out.vtable = loadDevice(so) catch return null;
     return out;
@@ -640,7 +646,7 @@ test "the loader takes every Verilog-A and Verilog extension the frontend routes
 test "inputKey keys a .va and a .v source apart" {
     const g = std.testing.allocator;
     const io = std.testing.io;
-    const paths: BuildPaths = .{ .work_dir = ".", .contract = "c", .dyn = "d", .gompute = "g", .device_abi = "a", .core = "k", .stdpp = "s" };
+    const paths: BuildPaths = .{ .work_dir = ".", .contract = "c", .dyn = "d", .gompute = "g", .device_abi = "a", .core = "k" };
     const va = (try inputKey(io, g, .va, "m.va", "ssign y;\n", paths)).?;
     const v = (try inputKey(io, g, .v, "m.v", "assign y;\n", paths)).?;
     try std.testing.expect(!std.mem.eql(u8, &va, &v));

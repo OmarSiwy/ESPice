@@ -8,10 +8,10 @@
 //! Verilog-AMS LRM §4.5, §5.10.2, §9.10 and §9.17.2; #161;
 //! dev/analysis/transient-integration.md.
 const std = @import("std");
-const z = @import("stdpp");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
+const num = @import("core").numerics;
 
 const W = std.simd.suggestVectorLength(f64) orelse 8;
 
@@ -22,8 +22,7 @@ const tran_types = @import("types.zig");
 /// The swept plot's name and scale column (`session.schemaOf` reports them).
 pub const plotname = "Transient Analysis";
 pub const scale = "time";
-/// See types.zig `Method`.
-pub const Method = tran_types.Method;
+const Method = tran_types.Method;
 /// See types.zig `Options`.
 pub const Options = tran_types.Options;
 /// See types.zig `Waveform`.
@@ -33,31 +32,11 @@ pub const Column = tran_types.Column;
 /// See types.zig `initialCapacity`.
 pub const initialCapacity = tran_types.initialCapacity;
 
-/// trial = cur + xfact·(cur - prev), the MODEINITPRED extrapolation, over
-/// the pair (cur, prev) as a stdpp zip item.
-const Predict = struct {
-    pub const lanewise = true;
-    xfact: f64,
-    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
-        return p.left + z.splat(@TypeOf(p.left), self.xfact) * (p.left - p.right);
-    }
-};
-
-/// Writes the MODEINITPRED first iterate into `trial[0..cur.len]`; `prev`
-/// must be at least as long as `cur`. Elementwise, so the SIMD path and the
-/// `.byRef()` pull path give the same bits (tests/transient.zig).
+/// Writes the MODEINITPRED first iterate, trial = cur + xfact·(cur - prev),
+/// into `trial[0..cur.len]`; `prev` must be at least as long as `cur`.
 fn predict(trial: []f64, cur: []const f64, prev: []const f64, xfact: f64) void {
-    var it = z.fromSlice(f64, cur).zip(z.fromSlice(f64, prev[0..cur.len])).map(Predict{ .xfact = xfact });
-    comptime std.debug.assert(!simd_backend or @TypeOf(it).lane_count != null);
-    _ = it.writeInto(trial[0..cur.len]);
+    for (trial[0..cur.len], cur, prev[0..cur.len]) |*t, c, p| t.* = c + xfact * (c - p);
 }
-
-/// stdpp lowers to vector blocks only on these backends; elsewhere the same
-/// pipeline runs its scalar fallback.
-const simd_backend = blk: {
-    const b = @import("builtin").zig_backend;
-    break :blk b == .stage2_llvm or b == .stage2_x86_64;
-};
 
 /// ZP_TRAN_STATS step-economics counters: wall time in a slow transient is
 /// attempts x Newton iterations x eval cost, and these say which factor.
@@ -70,6 +49,8 @@ const Stats = struct {
     rej_lte: u64 = 0,
     order_drops: u64 = 0,
     bp_landings: u64 = 0,
+    /// Accepted steps per integration order 1..6.
+    by_order: [6]u64 = @splat(0),
 };
 
 /// Newton hook: companion RHS from the q plane, matrix G + ag0*C.
@@ -86,10 +67,10 @@ fn uicStart(ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, scratc
     if (!options.uic) return x;
     ckt.setSimState(.{ .t = 0, .dt = 1 / hook.c.ag0, .kind = .tran, .initial_step = true });
     defer ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
-    root.copySimd(scratch, x);
+    num.copySimd(scratch, x);
     var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
     nr_opts.residual_tol = std.math.inf(f64);
-    ckt.clearRejectAt();
+    ckt.reject_at = null;
     const nr = converger.run(ckt, ws, scratch, 0, nr_opts, hook) catch |err| switch (err) {
         error.QueryCancelled, error.OutOfMemory => return err,
         else => null, // else: a numerical failure keeps the `.ic` row
@@ -119,26 +100,31 @@ pub fn simulate(
 
     const ws = try ckt.workspace();
     // A device's `request_reject_at` retries the step ending at that time.
-    ckt.landRejects(true);
-    defer ckt.landRejects(false);
+    ckt.land_rejects = true;
+    defer ckt.land_rejects = false;
     const x_try = try allocator.alloc(f64, n);
     defer allocator.free(x_try);
     // The accepted point before `cur`, for the predictor. Equal to `cur`
     // until the first step is accepted, so that step starts from the OP.
     const x_prev = try allocator.alloc(f64, n);
     defer allocator.free(x_prev);
-    root.copySimd(x_prev, x);
+    num.copySimd(x_prev, x);
 
-    // Row-plane charge state: the dynamic current and the charge ring
-    // [cur, prev, prev2, prev3]. Slot 0 takes the charge of each converged
-    // attempt; the companion residual reads slots 1 and 2.
+    // Row-plane charge state, one block: the dynamic current, then the
+    // charge ring [cur, prev, prev2, ...]. Slot 0 takes the charge of each
+    // converged attempt; the companion residual reads slots 1 and 2. The LTE
+    // at order k reads k + 2 slots, so the ring holds max(4, top + 2), and
+    // a gear-3..6 run keeps its step's `gearHistory` g in one more part.
+    const top_order = integrator.order(options.method);
+    const n_hist: usize = @max(4, top_order + 2);
+    const n_parts: usize = 1 + n_hist + @intFromBool(top_order >= 3);
     var a_vals: []f64 = &.{};
-    var i_prev: []f64 = &.{};
-    var q_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
-    defer if (has_charge) {
-        allocator.free(i_prev);
-        for (q_hist) |q| allocator.free(q);
-    };
+    const row_state = try allocator.alloc(f64, if (has_charge) n_parts * n else 0);
+    defer allocator.free(row_state);
+    const i_prev = row_state[0 .. row_state.len / n_parts];
+    var q_ring = ring(row_state, n_parts);
+    const q_hist = q_ring[0..n_hist];
+    const g_row = q_ring[n_hist];
 
     // The LTE runs per device charge state, as ngspice's CKTterr does
     // (ckttrunc.c and the per-device trunc routines), not per matrix row:
@@ -157,12 +143,9 @@ pub fn simulate(
     // tape holds L*i and each M*i as separate states, which bind where
     // INDflux does not. With a K card, `lteSnap` zeroes the inductor and
     // kinduc tape spans (a flat zero history never binds) and appends the row
-    // plane at every current row, since an inductor's branch row sums exactly
-    // its INDflux. Both are resolved here, once: `lte_zero` holds the
-    // [offset, end) tape spans to clear.
-    // ponytail: every current row is appended (V-source rows carry no charge
-    // and stay inert); take only the inductors' rows once Circuit exposes the
-    // tape's rhs_idx.
+    // plane at every inductor current row, since an inductor's branch row
+    // sums exactly its INDflux. Both are resolved here, once: `lte_zero`
+    // holds the [offset, end) tape spans to clear.
     var lte_rows: []u32 = &.{};
     var lte_zero: [][2]u32 = &.{};
     defer allocator.free(lte_rows);
@@ -171,7 +154,11 @@ pub fn simulate(
         if (!std.mem.eql(u8, kb.type_name, "kinduc")) continue;
         var rows: std.ArrayList(u32) = .empty;
         errdefer rows.deinit(allocator);
-        for (ckt.current_row[0..n], 0..) |is_cur, r| if (is_cur) try rows.append(allocator, @intCast(r));
+        const is_l = try allocator.alloc(bool, n);
+        defer allocator.free(is_l);
+        @memset(is_l, false);
+        ckt.markCurrentRowsOf("inductor", is_l);
+        for (is_l, 0..) |l, r| if (l) try rows.append(allocator, @intCast(r));
         lte_rows = try rows.toOwnedSlice(allocator);
         var spans: std.ArrayList([2]u32) = .empty;
         errdefer spans.deinit(allocator);
@@ -195,12 +182,13 @@ pub fn simulate(
             for (rows, dst[n_tape..]) |r, *d| d.* = c.q_vec[r];
         }
     }.call;
-    var qt_i_prev: []f64 = &.{};
-    var qt_hist: [4][]f64 = .{ &.{}, &.{}, &.{}, &.{} };
-    defer if (n_qt > 0) {
-        allocator.free(qt_i_prev);
-        for (qt_hist) |q| allocator.free(q);
-    };
+    // The same layout over the n_lt LTE states.
+    const lte_state = try allocator.alloc(f64, if (n_qt > 0) n_parts * n_lt else 0);
+    defer allocator.free(lte_state);
+    const qt_i_prev = lte_state[0 .. lte_state.len / n_parts];
+    var qt_ring = ring(lte_state, n_parts);
+    const qt_hist = qt_ring[0..n_hist];
+    const qt_g = qt_ring[n_hist];
 
     // uic skipped op.solve, so do its device bookkeeping here: latch power-on
     // FSM state under `initial_step` (§5.10.2), commit it, and leave a static
@@ -219,33 +207,25 @@ pub fn simulate(
 
     if (has_charge) {
         a_vals = try ws.ensureAVals(ckt.nnz);
-        i_prev = try allocator.alloc(f64, n);
-        root.zeroSimd(i_prev);
-        for (&q_hist) |*q| q.* = try allocator.alloc(f64, n);
-        if (n_qt > 0) {
-            qt_i_prev = try allocator.alloc(f64, n_lt);
-            root.zeroSimd(qt_i_prev);
-            for (&qt_hist) |*q| q.* = try allocator.alloc(f64, n_lt);
-        }
+        num.zeroSimd(i_prev);
+        num.zeroSimd(qt_i_prev);
         // No setSimState first: q_prev must be the charge the operating point
         // saw, so this eval runs in the static state op.solve left behind.
         ckt.eval(x, 0);
         // A flat q(0) history makes every divided difference vanish, so LTE
         // control runs from the first step.
-        root.copySimd(q_hist[1], ckt.q_vec[0..n]);
-        root.copySimd(q_hist[2], ckt.q_vec[0..n]);
-        root.copySimd(q_hist[3], ckt.q_vec[0..n]);
+        for (q_hist[1..]) |h| num.copySimd(h, ckt.q_vec[0..n]);
         if (n_qt > 0) {
             lteSnap(ckt, qt_hist[1], lte_zero, lte_rows);
-            root.copySimd(qt_hist[2], qt_hist[1]);
-            root.copySimd(qt_hist[3], qt_hist[1]);
+            for (qt_hist[2..]) |h| num.copySimd(h, qt_hist[1]);
         }
     }
     // The LTE history: per state when the tape is live, per row otherwise.
     // Same kernel either way, so the row path is the scalar oracle for the
-    // tape path. The pointer follows the ring rotation.
-    const lte_hist: *[4][]f64 = if (n_qt > 0) &qt_hist else &q_hist;
+    // tape path. The slice is the ring, so it follows the rotation.
+    const lte_hist: []const []const f64 = if (n_qt > 0) qt_hist else q_hist;
     const lte_ip: []const f64 = if (n_qt > 0) qt_i_prev else i_prev;
+    const lte_g: []const f64 = if (n_qt > 0) qt_g else g_row;
 
     // Seed absdelay rings with the operating point: the first §4.5.7
     // zHistPush fills the whole ring with (0, v_op), so no delay line reads
@@ -335,17 +315,21 @@ pub fn simulate(
     if (nextBp(ckt, echo_bps[0..n_echo], null, min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
     dt /= 10.0;
     if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
-    // CKTdeltaOld[] starts at CKTmaxStep (dctran.c:312), which the first
-    // divided differences read.
-    var dt_prev: f64 = effective_dt_max;
-    var dt_prev2: f64 = effective_dt_max;
+    // The accepted steps [dt_prev, dt_prev2, ...], newest first. CKTdeltaOld[]
+    // starts at CKTmaxStep (dctran.c:312), which the first divided
+    // differences read.
+    var dt_old: [6]f64 = @splat(effective_dt_max);
     var steps: u32 = 0;
     const stats_on = ckt.knobs.tran_stats;
     var st: Stats = .{};
-    // Order control: start at BE, promote to the configured method when the
-    // LTE allows, and drop back to BE at breakpoints so trap does not ring
-    // after a source edge.
-    var use_be: bool = true;
+    // Order control: start at BE (order 1), promote to the configured method
+    // when the LTE allows, and drop back to BE at breakpoints so trap does
+    // not ring after a source edge. Gear-3..6 then moves one order at a time
+    // (see the order control after acceptance); `order_run` counts the
+    // accepted steps in a row at `run_order`.
+    var order: u8 = 1;
+    var run_order: u8 = 1;
+    var order_run: u32 = 0;
     // ngspice's CKTbreaks[0] as the next step starts: the first breakpoint
     // past t + min_break, and whether dt_next was clamped onto it. Landing is
     // tested after the step is accepted, so a rejected step leaves no stale
@@ -389,14 +373,23 @@ pub fn simulate(
             p.dt = dt;
             v.point(v.ctx, p);
         }
-        const eff_method: Method = if (use_be) .backward_euler else options.method;
-        const cf = integrator.coeffs(eff_method, dt, dt_prev, options.xmu);
+        const eff_method = methodAt(options.method, order);
+        // Gear-3..6 solves its coefficients from the whole step history
+        // and folds the older charges into g once per attempt.
+        const gear_hi = order >= 3;
+        const dts: [7]f64 = [1]f64{dt} ++ dt_old;
+        var ag: [7]f64 = undefined;
+        const cf: integrator.Coeffs = if (gear_hi) blk: {
+            ag = integrator.gearAg(order, &dts);
+            integrator.gearHistory(g_row, q_hist[0 .. order + 1], ag);
+            break :blk .{ .ag0 = ag[0], .ag2 = 0 };
+        } else integrator.coeffs(eff_method, dt, dt_old[0], options.xmu);
         const hook = TranHook{
             .method = eff_method,
             .c = cf,
             .q_prev = q_hist[1],
             .i_prev = i_prev,
-            .q_prev2 = q_hist[2],
+            .q_prev2 = if (gear_hi) g_row else q_hist[2],
             .q_cur = {},
             .a_vals = a_vals,
             .has_charge = has_charge,
@@ -406,9 +399,9 @@ pub fn simulate(
         // first iterate extrapolates the last two accepted points by
         // dt/dt_prev and is limited against the last accepted one. HFET and
         // MESA divide by the step two back instead (CKTdeltaOld[2]).
-        const xfact = dt / dt_prev;
+        const xfact = dt / dt_old[0];
         predict(trial, cur, prev, xfact);
-        ckt.predictFirstIterate(trial, cur, prev, dt / dt_prev2);
+        ckt.predictFirstIterate(trial, cur, prev, dt / dt_old[1]);
         ckt.evalFollowsFirst(trial, t_dev);
         _ = ckt.applyLimits(trial, cur);
         // ngspice's transient Newton accepts on the per-row delta test alone
@@ -417,7 +410,7 @@ pub fn simulate(
         // is not iterated again.
         var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         nr_opts.residual_tol = std.math.inf(f64);
-        ckt.clearRejectAt();
+        ckt.reject_at = null;
         const nr = converger.run(ckt, ws, trial, t_dev, nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
             else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure retries the step
@@ -430,8 +423,8 @@ pub fn simulate(
             // Restore FSM devices to the last accepted state.
             _ = ckt.stateCtl(.revert);
             // Cut dt by 8 and drop to order 1 in one retry (dctran.c:815, :823).
-            if (!use_be) st.order_drops += 1;
-            use_be = true;
+            if (order > 1) st.order_drops += 1;
+            order = 1;
             dt /= 8.0;
             if (dt < options.dt_min) {
                 // The stats block at the bottom is skipped by this return.
@@ -462,7 +455,7 @@ pub fn simulate(
         if (dt > state_eps and ckt.stateCtl(.query)) {
             st.rej_state += 1;
             _ = ckt.stateCtl(.revert);
-            use_be = true;
+            order = 1;
             dt = @max(0.25 * dt, state_eps);
             continue;
         }
@@ -481,30 +474,39 @@ pub fn simulate(
         // `q_fresh`: the converger's `updateStates` already stamped them.
         if (has_charge) {
             if (!ckt.q_fresh) ckt.evalQ(trial, t_dev);
-            root.copySimd(q_hist[0], ckt.q_vec[0..n]);
+            num.copySimd(q_hist[0], ckt.q_vec[0..n]);
             if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
+            if (gear_hi and n_qt > 0) integrator.gearHistory(qt_g, qt_hist[0 .. order + 1], ag);
         }
         // Taken before the ring rotation below.
-        const lh = lte_hist.*;
-        const lq: [4][]const f64 = .{ lh[0], lh[1], lh[2], lh[3] };
+        const lq: [4][]const f64 = .{ lte_hist[0], lte_hist[1], lte_hist[2], lte_hist[3] };
         const lte: integrator.LteIn = .{
             .dt = dt,
-            .dt1 = dt_prev,
-            .dt2 = dt_prev2,
+            .dt1 = dt_old[0],
+            .dt2 = dt_old[1],
             .reltol = options.tol.reltol,
             .abstol = options.tol.abstol,
             .chgtol = options.tol.chgtol,
             .trtol = options.tol.trtol,
         };
+        // This step's own bound, read again by the gear order control.
+        var del: f64 = undefined;
         if (has_charge and steps > 0) {
-            const del = integrator.stepBound(W, eff_method, eff_method, lq, lte_ip, cf, lte);
-            if (del < 0.9 * dt) {
+            del = if (gear_hi)
+                integrator.stepBoundGear(eff_method, eff_method, lte_hist, lte_ip, lte_g, cf, lte, &dts)
+            else
+                integrator.stepBound(W, eff_method, eff_method, lq, lte_ip, cf, lte);
+            if (!(del >= 0.9 * dt)) {
                 st.rej_lte += 1;
                 _ = ckt.stateCtl(.revert);
                 // Retry at the LTE's dt and the same order (dctran.c:966
                 // `CKTdelta = newdelta`); only a Newton failure drops the
-                // order. del < 0.9*dt here, so every retry shrinks.
-                dt = del;
+                // order. del < 0.9*dt here, so every retry shrinks. A NaN
+                // bound (a non-finite charge) retries as a Newton failure.
+                if (std.math.isNan(del)) {
+                    order = 1;
+                    dt /= 8.0;
+                } else dt = del;
                 if (dt < options.dt_min) {
                     if (stats_on) std.debug.print(
                         "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
@@ -514,8 +516,9 @@ pub fn simulate(
                 }
                 continue;
             }
-            // Growth capped at 2x per accepted step, as in ngspice.
-            dt_next = @min(@max(del, options.dt_min), 2.0 * dt, effective_dt_max);
+            // Growth capped at 2x per accepted step, as in ngspice, and
+            // lower at gear-3..6 (`maxGrowth`).
+            dt_next = @min(@max(del, options.dt_min), integrator.maxGrowth(eff_method) * dt, effective_dt_max);
         }
 
         // LRM 12.31.3 acbConvergenceTest, last before acceptance: a rejection
@@ -544,27 +547,57 @@ pub fn simulate(
             // Order promotion (dctran.c:901-913): recompute the trunc at
             // order 2 and adopt min(2*dt, del2) as the next dt whether or not
             // the order changes, as ngspice's `CKTdelta = newdelta` does.
-            if (steps > 0 and use_be) {
-                const trial_del = integrator.stepBound(W, options.method, eff_method, lq, lte_ip, cf, lte);
-                const nd2 = @min(2.0 * dt, trial_del);
-                if (nd2 > 1.05 * dt) use_be = false;
-                dt_next = @min(@max(nd2, options.dt_min), effective_dt_max);
-                if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
+            st.by_order[order - 1] += 1;
+            order_run = if (order == run_order) order_run + 1 else 1;
+            run_order = order;
+            if (steps > 0 and order == 1) {
+                const trial_del = integrator.stepBound(W, methodAt(options.method, 2), eff_method, lq, lte_ip, cf, lte);
+                // A NaN probe (prev3 non-finite) keeps BE and the step.
+                if (!std.math.isNan(trial_del)) {
+                    const nd2 = @min(2.0 * dt, trial_del);
+                    if (nd2 > 1.05 * dt) order = 2;
+                    dt_next = @min(@max(nd2, options.dt_min), effective_dt_max);
+                    if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
+                }
+            } else if (steps > 0 and top_order >= 3 and order_run > order) {
+                // Gear-3..6 order control, an espice policy (dctran.c stops
+                // at order 2): after order + 1 accepted steps at one order,
+                // move one order up or down (not below 2) when that order's
+                // CKTterr bound beats this one's by 5%, the margin of the
+                // 1-to-2 promotion; the next step is then that bound under
+                // the new order's `maxGrowth`.
+                // ponytail: one order per change; DASSL-style selection on
+                // error trends would move faster.
+                var best = del;
+                var best_order = order;
+                for ([_]u8{ order + 1, order - 1 }) |k| {
+                    if (k > top_order or k < 2) continue;
+                    const d = integrator.stepBoundGear(methodAt(options.method, k), eff_method, lte_hist, lte_ip, lte_g, cf, lte, &dts);
+                    if (d > 1.05 * best) {
+                        best = d;
+                        best_order = k;
+                    }
+                }
+                if (best_order != order) {
+                    order = best_order;
+                    dt_next = @min(@max(best, options.dt_min), integrator.maxGrowth(methodAt(options.method, order)) * dt, effective_dt_max);
+                    if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
+                }
             }
 
             // The dynamic current under the method actually used. Both index
             // spaces run it: ngspice keeps it per state in
             // CKTstates[0][qcap+1], where CKTterr's volttol reads it.
-            integrator.advanceCurrent(eff_method, i_prev, q_hist[0], q_hist[1], q_hist[2], cf);
+            integrator.advanceCurrent(eff_method, i_prev, q_hist[0], q_hist[1], if (gear_hi) g_row else q_hist[2], cf);
             if (n_qt > 0)
-                integrator.advanceCurrent(eff_method, qt_i_prev, qt_hist[0], qt_hist[1], qt_hist[2], cf);
+                integrator.advanceCurrent(eff_method, qt_i_prev, qt_hist[0], qt_hist[1], if (gear_hi) qt_g else qt_hist[2], cf);
 
-            // [cur, prev, prev2, prev3] -> [stale, cur, prev, prev2].
-            std.mem.rotate([]f64, &q_hist, 3);
-            if (n_qt > 0) std.mem.rotate([]f64, &qt_hist, 3);
+            // [cur, prev, prev2, ...] -> [stale, cur, prev, ...].
+            std.mem.rotate([]f64, q_hist, n_hist - 1);
+            if (n_qt > 0) std.mem.rotate([]f64, qt_hist, n_hist - 1);
         }
-        dt_prev2 = dt_prev;
-        dt_prev = dt;
+        std.mem.copyBackwards(f64, dt_old[1..], dt_old[0 .. dt_old.len - 1]);
+        dt_old[0] = dt;
 
         // Rotate the slices; accepted states need no copy.
         const stale = prev;
@@ -596,7 +629,7 @@ pub fn simulate(
                     std.mem.indexOfScalar(f64, echo_bps[0..n_echo], bp) == null;
             if (landed) {
                 st.bp_landings += 1;
-                use_be = true;
+                order = 1;
                 // Re-emit one line delay later; dedupe within min_break and
                 // drop when the table is full.
                 if (echo_td) |td_| {
@@ -632,11 +665,11 @@ pub fn simulate(
         // `evalQ` computes the same q bits as `eval`, charges only.
         if (has_charge and ckt.has_state_q) {
             ckt.evalQ(cur, t);
-            integrator.rebaseCurrent(W, i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
-            root.copySimd(q_hist[1], ckt.q_vec[0..n]);
+            integrator.rebaseCurrent(i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
+            num.copySimd(q_hist[1], ckt.q_vec[0..n]);
             if (n_qt > 0) {
                 lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
-                integrator.rebaseCurrent(W, qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
+                integrator.rebaseCurrent(qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
                 // Swap, not copy: slot 0 is the ring's scratch slot, and the
                 // next accepted attempt overwrites it before any read.
                 std.mem.swap([]f64, &qt_hist[0], &qt_hist[1]);
@@ -677,13 +710,31 @@ pub fn simulate(
     });
     if (stats_on) {
         std.debug.print(
-            "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d} vpi={d}] order_drops={d} bp_landings={d} avg_dt={e:.3}\n",
-            .{ n_qt, steps, st.attempts, st.nr_iters, st.rej_newton, st.rej_lte, st.rej_state, st.rej_vpi, st.order_drops, st.bp_landings, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
+            "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d} vpi={d}] order_drops={d} bp_landings={d} by_order={any} avg_dt={e:.3}\n",
+            .{ n_qt, steps, st.attempts, st.nr_iters, st.rej_newton, st.rej_lte, st.rej_state, st.rej_vpi, st.order_drops, st.bp_landings, st.by_order, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
         );
     }
 
-    if (cur.ptr != x.ptr) root.copySimd(x, cur);
+    if (cur.ptr != x.ptr) num.copySimd(x, cur);
     return t >= options.t_stop or atStop(t, options.t_stop);
+}
+
+/// Parts 1..parts-1 of `block`, which holds `parts` (at most 10: gear-6's
+/// eight charge slots and g) equal parts (all empty for an empty block): the
+/// slots after the leading dynamic-current part. Entries past parts - 1 are
+/// empty.
+fn ring(block: []f64, parts: usize) [9][]f64 {
+    const m = block.len / parts;
+    var out: [9][]f64 = @splat(block[0..0]);
+    for (out[0 .. parts - 1], 1..) |*o, i| o.* = block[i * m ..][0..m];
+    return out;
+}
+
+/// The method an order-`k` step integrates with: BE at 1, else `top` itself
+/// when it stops at order 2 (trap, gear-2, or BE), else gear-k.
+fn methodAt(top: Method, k: u8) Method {
+    if (k == 1) return .backward_euler;
+    return if (integrator.order(top) <= 2) top else integrator.gear(k);
 }
 
 /// ngspice's end test (dctran.c:503, AlmostEqualUlps(t, tfinal, 100)): a
@@ -715,7 +766,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const x_op = ctx.x_op;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    root.copySimd(x, x_op);
+    num.copySimd(x, x_op);
 
     // The recording is the published result, so it lives in the results
     // arena and `data` is borrowed below. A `.op <time>` snapshot publishes
@@ -761,7 +812,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 pub const test_access = if (@import("builtin").is_test) .{
     .W = W,
     .integrator = integrator,
-    .Predict = Predict,
     .predict = predict,
     .almostEqualUlps = almostEqualUlps,
 } else {};

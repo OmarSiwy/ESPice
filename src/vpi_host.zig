@@ -23,9 +23,9 @@ const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
-    /// Loaded applications, never closed: their calltf pointers live in
-    /// VerA's registry for the life of the process.
-    apps: std.ArrayList(App) = .empty,
+    /// Paths of the loaded applications. Each library stays open for the
+    /// life of the process: its calltf pointers live in VerA's registry.
+    apps: std.ArrayList([]const u8) = .empty,
     /// `vpi.systf.intAnalogNames` after the latest load.
     int_names: []const []const u8 = &.{},
     names_arena: std.heap.ArenaAllocator,
@@ -36,8 +36,6 @@ const Host = struct {
     /// The attached module's calls, over VerA's installed design.
     binding: vpi.analog_run.Binding = .{},
 };
-
-const App = struct { path: []const u8, lib: std.DynLib };
 
 var host: Host = undefined;
 
@@ -63,7 +61,7 @@ const interface: espice.Vpi = .{
 fn loadApp(_: *anyopaque, path: []const u8) VpiError!void {
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
-    for (host.apps.items) |a| if (std.mem.eql(u8, a.path, path)) return;
+    for (host.apps.items) |a| if (std.mem.eql(u8, a, path)) return;
     var lib = std.DynLib.open(path) catch |err| {
         std.log.err("vpi: {s}: cannot open the application ({s})", .{ path, @errorName(err) });
         return error.VpiApplicationUnloadable;
@@ -74,9 +72,13 @@ fn loadApp(_: *anyopaque, path: []const u8) VpiError!void {
         std.log.err("vpi: {s} exports no vlog_startup_routines (LRM 12.33.2), so it registers nothing", .{path});
         return error.VpiNoStartupRoutines;
     };
-    const owned = try host.gpa.dupe(u8, path);
-    errdefer host.gpa.free(owned);
-    try host.apps.append(host.gpa, .{ .path = owned, .lib = lib });
+    {
+        errdefer lib.close();
+        try host.apps.ensureUnusedCapacity(host.gpa, 1);
+        host.apps.appendAssumeCapacity(try host.gpa.dupe(u8, path));
+    }
+    // From here the library stays open and listed: its calltfs enter
+    // VerA's registry, even if the name list below fails.
     vpi.runStartupTable(table);
     host.int_names = try vpi.systf.intAnalogNames(host.names_arena.allocator());
 }

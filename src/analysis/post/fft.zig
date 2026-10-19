@@ -14,7 +14,7 @@ pub const Options = @import("core").query.Fft;
 
 /// HSPICE's window `n` of `np` [SA Ch.15 Table 56], `alfa` shaping GAUSS and
 /// KAISER.
-pub fn window(kind: Options.Window, n: usize, np: usize, alfa: f64) f64 {
+fn window(kind: Options.Window, n: usize, np: usize, alfa: f64) f64 {
     const x: f64 = @floatFromInt(n);
     const m: f64 = @floatFromInt(np);
     const c = 2 * std.math.pi * x / (m - 1);
@@ -116,7 +116,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const names = try a.dupe([]const u8, &.{ "frequency", opts.label });
     return .{
-        .plotname = try std.fmt.allocPrint(a, "FFT Analysis {s}", .{opts.label}),
+        .plotname = try a.print("FFT Analysis {s}", .{opts.label}),
         .varnames = names,
         .is_complex = true,
         .npoints = rows,

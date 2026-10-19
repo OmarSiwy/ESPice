@@ -10,7 +10,7 @@ zig fetch --save git+https://github.com/OmarSiwy/ESPice#main
 ```
 
 Pin a revision after 1.0.0: the `libespice` lazy path used below was added
-after that release. ESPice's own dependencies (VerA, Gompute, stdpp) come
+after that release. ESPice's own dependencies (VerA, Gompute) come
 along through its `build.zig.zon`.
 
 The package exposes the C API. Link the static library and translate the

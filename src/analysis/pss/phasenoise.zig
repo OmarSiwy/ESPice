@@ -135,7 +135,7 @@ fn periodic(ckt: *root.Circuit, x_hat: []const f64, f0: f64, srcs: []const root.
     for (freqs, offsets) |*f, fm| f.* = fm + k * f0;
     const orb = try hb.orbit(x_hat, n, f0, pnoise.samplesFor(@max(min_samples, 2 * nf), nf), true, allocator);
     defer allocator.free(orb.wave);
-    _ = try pnoise.orbitSweep(ckt, orb, srcs, freqs, out, .{
+    try pnoise.orbitSweep(ckt, orb, srcs, freqs, out, .{
         .tol = opts.tol,
         .out_node = opts.osc_node,
         .sweep = .{ .kind = .poi, .points = @intCast(freqs.len), .list = freqs, .f_start = freqs[0], .f_stop = freqs[freqs.len - 1] },

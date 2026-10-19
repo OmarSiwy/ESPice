@@ -401,7 +401,7 @@ pub fn simulate(
         a_vals = try ws.ensureAVals(ckt.nnz);
         q_prev = try allocator.alloc(f64, n);
         ckt.eval(x, 0);
-        root.copySimd(q_prev, ckt.q_vec[0..n]);
+        numerics.copySimd(q_prev, ckt.q_vec[0..n]);
     }
 
     var rng = Xorshift64.init(options.seed);
@@ -442,7 +442,7 @@ pub fn simulate(
         // As in tran.simulate, devices must see the point this attempt
         // targets (§9.10 `$abstime`); a rejected step retries from here.
         ckt.setSimState(.{ .t = t + dt, .dt = dt, .kind = .tran, .initial_step = steps == 0 });
-        root.copySimd(x_try, x);
+        numerics.copySimd(x_try, x);
         const tn_nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
         const nr = converger.run(ckt, ws, x_try, t + dt, tn_nr_opts, hook) catch |err| switch (err) {
             error.QueryCancelled, error.OutOfMemory => return err,
@@ -461,16 +461,18 @@ pub fn simulate(
             // The planes are one iterate behind the converged point. Charges
             // only: the next assemble restamps the other planes.
             ckt.evalQ(x_try, t + dt);
-            root.copySimd(q_prev, ckt.q_vec[0..n]);
+            numerics.copySimd(q_prev, ckt.q_vec[0..n]);
         }
 
         if (cov) |*c| {
             ckt.eval(x_try, t + dt);
             try c.step(ckt, dt, &flicker, options.scale);
-            try onoise.?.append(allocator, @sqrt(@max(c.variance(options.out_node, options.out_neg), 0)));
+            // Clamps round-off below zero; not @max, which would turn NaN into 0.
+            const v = c.variance(options.out_node, options.out_neg);
+            try onoise.?.append(allocator, @sqrt(if (v < 0) 0 else v));
         }
 
-        root.copySimd(x, x_try);
+        numerics.copySimd(x, x_try);
         t = if (land) options.t_break.? else t + dt;
         steps += 1;
 
@@ -493,7 +495,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    root.copySimd(x, x_op);
+    @memcpy(x, x_op);
 
     const srcs = try ctx.circuit.collectNoiseSources(x_op, scratch);
     defer scratch.free(srcs);

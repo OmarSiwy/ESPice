@@ -170,12 +170,15 @@ prints at the accepted points too, not per Newton iteration, and
 `$monitor` does not print (VerA warns W0850). The built-in models keep
 their display tasks silent.
 
-When a model does not compile, VerA's diagnostics (file, line, error code)
-print and the deck fails. An instance parameter the module does not
-declare, or a card with the wrong number of nodes, is an error
-(`UnknownParameter`, `WrongNodeCount`). An internal net of the module
-appears in the results as `v(<instance>#<net>)`, the name ngspice gives an
-OSDI device's internal node.
+A `.hdl` file compiles as Verilog-AMS 2.3, as the built-in models do, so a
+model may declare a function a later standard reserves (BSIM-CMG 112's
+`expm1`). When a model does not compile, VerA's diagnostics (file, line,
+error code) print and the deck fails. An instance parameter the module does
+not declare, or a card with more nodes than the module has ports, is an error
+(`UnknownParameter`, `WrongNodeCount`). A card that omits trailing ports
+leaves them floating, as ngspice does for an OSDI card (BSIM-CMG's `t`). An
+internal net or a floating port of the module appears in the results as
+`v(<instance>#<net>)`, the name ngspice gives an OSDI device's internal node.
 
 ### VPI applications { #vpi-applications }
 

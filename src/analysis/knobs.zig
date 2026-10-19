@@ -58,3 +58,13 @@ pub const Knobs = struct {
         return if (v >= 1 and v <= 1024) v else 64;
     }
 };
+
+test "Knobs.parseBlock" {
+    const parseBlock = Knobs.parseBlock;
+    try std.testing.expectEqual(@as(u32, 64), parseBlock(null));
+    try std.testing.expectEqual(@as(u32, 32), parseBlock("32"));
+    try std.testing.expectEqual(@as(u32, 1), parseBlock("1"));
+    try std.testing.expectEqual(@as(u32, 1024), parseBlock("1024"));
+    for ([_][]const u8{ "0", "1025", "", "-8", "64x", "99999999999" }) |bad|
+        try std.testing.expectEqual(@as(u32, 64), parseBlock(bad));
+}

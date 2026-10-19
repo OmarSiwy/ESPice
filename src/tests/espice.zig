@@ -1007,3 +1007,54 @@ test "Problem: an optimization takes the same path one point at a time and batch
     try t.expectEqualSlices(f64, a.history.x.items, b.history.x.items);
     try t.expectEqualSlices(f64, a.history.rss.items, b.history.rss.items);
 }
+
+/// `set_params`, an append at the new value, and its run.
+fn tuneAndRun(allocator: std.mem.Allocator) !void {
+    const p = try api.Problem.init(allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = "tuned oom\n.param rv=1k\nV1 in 0 1\nR1 in out {rv}\nR2 out 0 1k\n.op\n.end\n", .origin = "tuned.cir" } },
+        .live_params = &.{"rv"},
+    });
+    defer p.deinit();
+    try p.run_all();
+    try p.set_params(&.{"rv"}, &.{3e3});
+    var id: [1]api.QueryId = undefined;
+    _ = try p.append_directives(".op", &id);
+    try p.run_all();
+}
+
+test "Problem.set_params: every allocation failure leaves nothing behind" {
+    try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, tuneAndRun, .{});
+}
+
+/// A run that writes a raw file, `.save` and `.stim` files into `dir`, then
+/// prints its `.meas` results: each allocation on those paths fails once.
+fn saveStimMeasure(allocator: std.mem.Allocator, dir: []const u8) !void {
+    const out = try std.fmt.allocPrint(allocator, "{s}/a.raw", .{dir});
+    defer allocator.free(out);
+    const p = try api.Problem.init(allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = "write\nv1 a 0 pwl(0 0 1n 1)\nr1 a 0 1k\n.tran 0.5n 1n\n.save type=ic\n" ++
+            ".stim tran pwl filename=rc v0=v(a) node1=b node2=0 npoints=3\n.meas tran vmax max v(a)\n.end\n", .origin = "write.sp" } },
+        .dialect = .hspice,
+        .output = .{ .path = out },
+    });
+    defer p.deinit();
+    // An output failure is DeliveryFailed by contract; the sweep wants its cause.
+    p.run_all() catch |err| return if (err == error.DeliveryFailed) p.output_error().? else err;
+    var sink: std.Io.Writer.Allocating = .init(allocator);
+    defer sink.deinit();
+    // The sink is a `Writer.Allocating`: WriteFailed is its OOM.
+    p.print_measures(&sink.writer, &sink.writer) catch |err| return if (err == error.WriteFailed) error.OutOfMemory else err;
+}
+
+test "Problem: .save, .stim and .meas output release everything at every allocation failure" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer t.allocator.free(dir);
+    try t.checkAllAllocationFailures(@import("core").testing.fixed_growth, saveStimMeasure, .{dir});
+    for ([_][]const u8{ "rc.pwl0_tr0", "write.ic0" }) |name| {
+        const text = try tmp.dir.readFileAlloc(t.io, name, t.allocator, .unlimited);
+        defer t.allocator.free(text);
+        try t.expect(std.mem.startsWith(u8, text, "* write\n"));
+    }
+}

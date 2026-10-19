@@ -10,13 +10,10 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const xf = @import("../dc/xf.zig");
-
-const W = std.simd.suggestVectorLength(f64) orelse 8;
+const num = @import("core").numerics;
 
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Sens;
-
-const copySimd = root.copySimd;
 
 /// Forward-difference step for a parameter at `orig`: ngspice's relative
 /// 1e-6 (cktsens.c `Sens_Delta`), absolute 1e-12 only at 0. An absolute
@@ -24,34 +21,6 @@ const copySimd = root.copySimd;
 /// (#85). `.sens`, `.dcmatch` and `.acmatch` share it.
 pub fn fdStep(orig: f64) f64 {
     return if (orig == 0) 1e-12 else 1e-6 * @abs(orig);
-}
-
-/// Returns λ^T · (pert - nom) · inv_delta, the adjoint dot of a forward
-/// difference, over `lambda.len` rows. Deterministic for a given target: the
-/// summation order is fixed by the lane width, so `.sens` and `.dcmatch`
-/// (which shares it) reproduce run to run.
-/// Asserts that `pert` and `nom` are at least as long as `lambda`.
-pub inline fn adjointFd(lambda: []const f64, pert: []const f64, nom: []const f64, inv_delta: f64) f64 {
-    const n = lambda.len;
-    std.debug.assert(pert.len >= n and nom.len >= n);
-    // The difference is fused into the dot, so no n-element scratch is
-    // written or reloaded. The W-lane accumulator, its left-to-right fold
-    // and the scalar tail fix the order; the oracle test pins it bit for bit.
-    const V = @Vector(W, f64);
-    const id: V = @splat(inv_delta);
-    var acc: V = @splat(0.0);
-    var i: usize = 0;
-    while (i + W <= n) : (i += W) {
-        const lv: V = lambda[i..][0..W].*;
-        const rp: V = pert[i..][0..W].*;
-        const rn: V = nom[i..][0..W].*;
-        acc += lv * ((rp - rn) * id);
-    }
-    const arr: [W]f64 = acc;
-    var s: f64 = 0;
-    for (arr) |v| s += v;
-    while (i < n) : (i += 1) s += lambda[i] * ((pert[i] - nom[i]) * inv_delta);
-    return s;
 }
 
 /// The adjoint of one output at an operating point, shared by `.sens`,
@@ -77,9 +46,9 @@ pub const Adjoint = struct {
         // the constant-Jacobian baseline, so an `evalNewton` nominal would
         // difference two different summations.
         ckt.eval(x_op, 0);
-        copySimd(rhs_nom, ckt.rhs[0..n]);
+        @memcpy(rhs_nom, ckt.rhs[0..n]);
         try ws.slv.factor(ckt.g_vals, ckt.solver_execution);
-        root.zeroSimd(lambda);
+        @memset(lambda, 0);
         out.seed(lambda);
         ws.slv.solveT(lambda, lambda);
         return .{ .lambda = lambda, .rhs_nom = rhs_nom };
@@ -121,7 +90,11 @@ pub const Adjoint = struct {
         const delta = p.get() - orig;
         if (delta == 0) return error.ZeroDelta;
         ckt.eval(x_op, 0);
-        return -adjointFd(self.lambda, ckt.rhs[0..self.lambda.len], self.rhs_nom, 1.0 / delta);
+        // dF = F(p + δ) − F(p) in the plane itself; `num.dot`'s fixed fold
+        // keeps `.sens` and `.dcmatch` (which shares it) bit-reproducible.
+        const df = ckt.rhs[0..self.lambda.len];
+        num.sub(df, df, self.rhs_nom);
+        return -num.dot(self.lambda, df) / delta;
     }
 };
 
@@ -241,9 +214,3 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .data = data,
     };
 }
-
-/// Private implementation access for the analysis test suite.
-pub const test_access = if (@import("builtin").is_test) .{
-    .W = W,
-    .copySimd = copySimd,
-} else {};

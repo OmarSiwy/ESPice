@@ -90,7 +90,7 @@ test "write replaces the file" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/out.txt", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/out.txt", .{tmp.sub_path});
     defer a.free(path);
     const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "p", .varnames = &.{"v(a)"}, .is_complex = false, .npoints = 1, .data = &.{1.0} } };
     var one: Io.Writer.Allocating = .init(a);

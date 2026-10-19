@@ -72,7 +72,7 @@ pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
     }
     for (lines) |*line| {
         if (line.len == 0 or (line.*[0] != 'v' and line.*[0] != 'i')) continue;
-        const at = try keyword(arena, line.*) orelse continue;
+        const at = keyword(line.*) orelse continue;
         line.* = source(arena, line.*, at, defs) catch |err| {
             if (!@import("builtin").is_test) switch (err) {
                 error.InvalidPattern => std.log.warn("pattern: cannot read '{s}'", .{line.*}),
@@ -84,11 +84,13 @@ pub fn rewrite(arena: std.mem.Allocator, lines: [][]const u8) Error!void {
     }
 }
 
-/// Offset of the `pat` word in a card, past its name and two nodes.
-fn keyword(arena: std.mem.Allocator, line: []const u8) Error!?usize {
-    const toks = try tokens(arena, line);
-    if (toks.len < 4) return null;
-    for (toks[3..]) |t| {
+/// Offset of the `pat` word in a card, past its name and two nodes. Reads
+/// the words in place: most V and I cards have none, and pay no allocation.
+fn keyword(line: []const u8) ?usize {
+    var it: Words = .{ .text = line };
+    for (0..3) |_| _ = it.next() orelse return null;
+    if (it.peek() == null) return null;
+    while (it.next()) |t| {
         if (std.mem.eql(u8, t, "pat") or std.mem.startsWith(u8, t, "pat(")) return t.ptr - line.ptr;
     }
     return null;
@@ -117,7 +119,7 @@ fn source(arena: std.mem.Allocator, line: []const u8, at: usize, defs: std.Strin
         points += 2;
         if (points > max_points) return error.InvalidPattern;
         const ramp = if (rank(s) > rank(prev)) p[3] else p[4];
-        const edge = try std.fmt.allocPrint(arena, "({s})+{d}*({s})", .{ p[2], k, p[5] });
+        const edge = try arena.print("({s})+{d}*({s})", .{ p[2], k, p[5] });
         try out.print(arena, " '{s}-({s})/2' {s} '{s}+({s})/2' {s}", .{ edge, ramp, try level(arena, p, prev), edge, ramp, try level(arena, p, s) });
     }
     try out.append(arena, ')');
@@ -135,9 +137,9 @@ fn rank(state: u8) u8 {
 /// A state's level as a PWL value: vhi, vlo, or their mean for `m`.
 fn level(arena: std.mem.Allocator, p: []const []const u8, state: u8) Error![]const u8 {
     return switch (state) {
-        '1' => try std.fmt.allocPrint(arena, "'{s}'", .{p[0]}),
-        '0' => try std.fmt.allocPrint(arena, "'{s}'", .{p[1]}),
-        else => try std.fmt.allocPrint(arena, "'0.5*(({s})+({s}))'", .{ p[0], p[1] }),
+        '1' => try arena.print("'{s}'", .{p[0]}),
+        '0' => try arena.print("'{s}'", .{p[1]}),
+        else => try arena.print("'0.5*(({s})+({s}))'", .{ p[0], p[1] }),
     };
 }
 
@@ -194,19 +196,29 @@ fn sequence(arena: std.mem.Allocator, toks: []const []const u8, i: *usize, defs:
     return out.items;
 }
 
-/// Blank-separated words, with `[`, `]` and `=` as words of their own.
-fn tokens(arena: std.mem.Allocator, text: []const u8) Error![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < text.len) {
-        const c = text[i];
-        if (c == ' ' or c == '\t' or c == ',') {
-            i += 1;
-        } else if (c == '[' or c == ']' or c == '=') {
-            try out.append(arena, text[i .. i + 1]);
+/// Blank-separated words of `text`, with `[`, `]` and `=` as words of
+/// their own; a quoted run stays inside its word. Borrows `text`.
+const Words = struct {
+    text: []const u8,
+    pos: usize = 0,
+
+    fn peek(w: Words) ?[]const u8 {
+        var copy = w;
+        return copy.next();
+    }
+
+    fn next(w: *Words) ?[]const u8 {
+        const text = w.text;
+        var i = w.pos;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == ',')) i += 1;
+        if (i == text.len) {
+            w.pos = i;
+            return null;
+        }
+        const start = i;
+        if (text[i] == '[' or text[i] == ']' or text[i] == '=') {
             i += 1;
         } else {
-            const start = i;
             var quote: ?u8 = null;
             while (i < text.len) : (i += 1) {
                 const b = text[i];
@@ -216,9 +228,17 @@ fn tokens(arena: std.mem.Allocator, text: []const u8) Error![]const []const u8 {
                     quote = b;
                 } else if (std.mem.indexOfScalar(u8, " \t,[]=", b) != null) break;
             }
-            try out.append(arena, text[start..i]);
         }
+        w.pos = i;
+        return text[start..i];
     }
+};
+
+/// Every word of `text` (`Words`), in `arena`.
+fn tokens(arena: std.mem.Allocator, text: []const u8) Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it: Words = .{ .text = text };
+    while (it.next()) |t| try out.append(arena, t);
     return out.items;
 }
 
@@ -305,7 +325,7 @@ test "a .pat name nests as deep as its definition" {
     // p0 = [b1] and pK = [p(K-1)]: pK is K+1 levels deep.
     var lines: [34][]const u8 = undefined;
     lines[0] = ".pat p0=[b1]";
-    for (1..33) |k| lines[k] = try std.fmt.allocPrint(a, ".pat p{d}=[p{d}]", .{ k, k - 1 });
+    for (1..33) |k| lines[k] = try a.print(".pat p{d}=[p{d}]", .{ k, k - 1 });
     // p31 is 32 deep, the limit.
     lines[32] = "v1 1 0 pat (5 0 0 1n 1n 1n p31)";
     try rewrite(a, lines[0..33]);
@@ -314,4 +334,24 @@ test "a .pat name nests as deep as its definition" {
     lines[32] = ".pat p32=[p31]";
     lines[33] = "v1 1 0 pat (5 0 0 1n 1n 1n p32)";
     try std.testing.expectError(error.InvalidPattern, rewrite(a, &lines));
+}
+
+test "words split on blanks, commas and the bracket and `=` bytes; quotes hold" {
+    var it: Words = .{ .text = " b10,[a]=  'x y'z\t" };
+    for ([_][]const u8{ "b10", "[", "a", "]", "=", "'x y'z" }) |want| try std.testing.expectEqualStrings(want, it.next().?);
+    try std.testing.expectEqual(null, it.next());
+    try std.testing.expectEqual(null, keyword("v1 a"));
+    try std.testing.expectEqual(null, keyword("v1 a 0"));
+    try std.testing.expectEqual(@as(?usize, 7), keyword("v1 a 0 pat(1 0 0 1n 1n 1n b1)"));
+}
+
+fn rewriteAll(gpa: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var cards = [_][]const u8{ ".pat a1=b10 r=1", "v1 1 0 pat (5 0 1n 1n 2n 5n [a1 b0m] r=1 rb=2)", "i1 1 0 pat 1 0 0 1n 1n 1n b01" };
+    try rewrite(arena.allocator(), &cards);
+}
+
+test "rewrite: every allocation failure surfaces as OutOfMemory" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, rewriteAll, .{});
 }

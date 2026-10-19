@@ -26,13 +26,12 @@
 //! dev/analysis/pole-zero.md.
 const std = @import("std");
 const root = @import("../types.zig");
-const types = @import("core").numerics;
 const dense_lu = @import("solver").dense_lu;
 const freq_solve = @import("solver").freq_solve;
 const qr = @import("core").eigen;
 const qz = @import("qz.zig");
 
-const Complex = types.Complex;
+const Complex = @import("core").numerics.Complex;
 const GROUND = root.GROUND;
 
 /// Query options, defined in core/query.zig.

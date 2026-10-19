@@ -22,6 +22,7 @@ page is design, not code.
 | [homotopy-continuation.md](homotopy-continuation.md) | gmin / source / pseudo-transient stepping, the ngspice ladder and our five-rung OP ladder | ngspice cktop.c (fetched), Kelley & Keyes (derived) |
 | [solver-perf-2026-09.md](solver-perf-2026-09.md) | Measured solver profile per deck, kernel changes with before/after numbers, retired experiments, open follow-ups | callgrind + hyperfine on this repo |
 | [refactor-tape-2026-09.md](refactor-tape-2026-09.md) | Negative result: SIMD restructuring of the large-matrix refactor | callgrind + hyperfine on this repo |
+| [nan-propagation.md](nan-propagation.md) | NaN/Inf policy (NaN-failing comparisons, the NaN-propagating norm, strict sums, gated fast-math), every gate that catches a non-finite value, the NaN-blind spots left on purpose, open holes | this repo's code and its tests |
 
 ## Design targets (partly or not implemented)
 

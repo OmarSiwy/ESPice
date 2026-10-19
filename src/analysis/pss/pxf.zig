@@ -29,8 +29,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const drive = try scratch.alloc(f64, 2 * n);
     defer scratch.free(drive);
-    @memset(drive, 0);
-    drive[opts.out_node] = 1;
+    root.outputDrive(drive, opts.out_node, root.GROUND);
     const lin = try pac.settle(ctx.circuit, ctx.x_op, opts, scratch);
     defer lin.deinit(scratch);
     try pac.sweep(true, ctx.circuit, lin, drive, 0, freqs_buf, transfer, opts, scratch);
@@ -39,7 +38,8 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
 /// PXF's published shape, shared with `.hbxf`: point-major complex rows
 /// (frequency, pxf_h{m}(node) for every sideband then node) from
-/// `pac.sweep(true, ...)`'s `freqs_buf` and `transfer`.
+/// `pac.sweep(true, ...)`'s `freqs_buf` and `transfer`, allocated in the
+/// results arena `ctx.allocator`.
 pub fn result(ctx: *const root.RunCtx, freqs_buf: []const f64, transfer: []const Complex, n_harmonics: u16, plotname: []const u8) !root.Result {
     const a = ctx.allocator;
     const n: usize = ctx.circuit.n;
@@ -49,11 +49,6 @@ pub fn result(ctx: *const root.RunCtx, freqs_buf: []const f64, transfer: []const
     const ncols = 1 + n_transfers;
     const names = try a.alloc([]const u8, ncols);
     names[0] = "frequency";
-    var done: usize = 0;
-    errdefer {
-        for (names[1..][0..done]) |s| a.free(s);
-        a.free(names);
-    }
     const n_harm: usize = n_harmonics;
     for (0..n_sb) |sb| {
         const harmonic = @as(i32, @intCast(sb)) - @as(i32, @intCast(n_harm));
@@ -62,10 +57,9 @@ pub fn result(ctx: *const root.RunCtx, freqs_buf: []const f64, transfer: []const
             // Unlabeled rows (branch and internal unknowns) take their row
             // index, so column names stay unique.
             names[1 + sb * n + node] = if (label.len == 0)
-                try std.fmt.allocPrint(a, "pxf_h{d}({d})", .{ harmonic, node })
+                try a.print("pxf_h{d}({d})", .{ harmonic, node })
             else
-                try std.fmt.allocPrint(a, "pxf_h{d}({s})", .{ harmonic, label });
-            done += 1;
+                try a.print("pxf_h{d}({s})", .{ harmonic, label });
         }
     }
 

@@ -97,8 +97,7 @@ pub const Xf = struct {
         defer scratch.free(transfer);
         const drive = try scratch.alloc(f64, 2 * n);
         defer scratch.free(drive);
-        @memset(drive, 0);
-        drive[opts.out_node] = 1;
+        root.outputDrive(drive, opts.out_node, root.GROUND);
         const lin = try linearize(ctx.circuit, opts, .ac, scratch);
         defer lin.deinit(scratch);
         try pac.sweep(true, ctx.circuit, lin, drive, 0, freqs, transfer, pacOptions(opts), scratch);
@@ -126,7 +125,7 @@ pub const Noise = struct {
         defer scratch.free(density);
         const orb = try orbit(ctx.circuit, opts, scratch);
         defer scratch.free(orb.wave);
-        _ = try pnoise.orbitSweep(ctx.circuit, orb, srcs, freqs, density, .{
+        try pnoise.orbitSweep(ctx.circuit, orb, srcs, freqs, density, .{
             .tol = opts.tol,
             .out_node = opts.out_node,
             .out_neg = opts.out_neg,
@@ -197,7 +196,7 @@ pub const Lin = struct {
         const names = try a.alloc([]const u8, 1 + np * np + @intFromBool(noisy));
         names[0] = "frequency";
         for (0..np) |i| for (0..np) |j| {
-            names[1 + i * np + j] = try std.fmt.allocPrint(a, "S({d},{d})", .{ i + 1, j + 1 });
+            names[1 + i * np + j] = try a.print("S({d},{d})", .{ i + 1, j + 1 });
         };
         if (noisy) names[names.len - 1] = "NF";
         const n_points: usize = opts.sweep.count();
@@ -212,7 +211,7 @@ pub const Lin = struct {
         var k: usize = 0;
         while (sw.next()) |f| : (k += 1) {
             if (k != 0) try ckt.checkpoint(.{ .phase = .frequency, .completed = k, .total = n_points });
-            root.zeroSimd(a_work);
+            @memset(a_work, 0);
             pac.buildConversionMatrix(false, a_work, lin, n, n_sb, nn, nn2, f, pac_opts);
             if (series != 0) {
                 const omegas = dyn_f[0..n_sb];
@@ -277,7 +276,7 @@ pub const Lin = struct {
             defer scratch.free(freqs);
             const srcs = try ckt.collectNoiseSources(ctx.x_op, scratch);
             defer scratch.free(srcs);
-            _ = try pnoise.orbitSweep(ckt, orb, srcs, freqs, dev, .{
+            try pnoise.orbitSweep(ckt, orb, srcs, freqs, dev, .{
                 .tol = opts.tol,
                 .out_node = ports[1].node,
                 .out_neg = ports[1].neg,

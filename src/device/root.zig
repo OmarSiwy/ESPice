@@ -27,6 +27,7 @@ pub const has = cat.has;
 test {
     _ = cat;
     _ = @import("tests/catalog.zig");
+    _ = @import("tests/jacobian_fd.zig");
     _ = Circuit;
     _ = Library;
     _ = loader;

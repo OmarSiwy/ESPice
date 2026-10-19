@@ -87,9 +87,6 @@ const CreateOptions = extern struct {
     display_user: ?*anyopaque,
 };
 const DisplayFn = fn (text: [*]const u8, len: usize, user: ?*anyopaque) callconv(.c) void;
-comptime {
-    if (@sizeOf(CreateOptions) != @sizeOf(header.espice_create_options)) @compileError("espice_create_options drifted from CreateOptions");
-}
 const Scope = extern struct { kind: u32, id: u32 };
 const Progress = extern struct { phase: u32, reserved: u32 = 0, completed: u64, total: u64 };
 const QueryInfo = extern struct {
@@ -127,7 +124,25 @@ const PrintOptions = extern struct {
 };
 
 // The extern records above are AoS on purpose: each crosses the boundary
-// whole, once per call.
+// whole, once per call. Each is pinned to its header struct, field by field.
+comptime {
+    pinLayout(Bytes, header.espice_bytes);
+    pinLayout(CreateOptions, header.espice_create_options);
+    pinLayout(Scope, header.espice_scope);
+    pinLayout(Progress, header.espice_progress);
+    pinLayout(QueryInfo, header.espice_query_info);
+    pinLayout(Advance, header.espice_advance_event);
+    pinLayout(ResultInfo, header.espice_result_info);
+    pinLayout(PrintOptions, header.espice_print_options);
+}
+
+/// Fails the build unless `C` (the header's struct) has `Z`'s size and
+/// every field of `Z` at the same offset, under the same name.
+fn pinLayout(comptime Z: type, comptime C: type) void {
+    if (@sizeOf(Z) != @sizeOf(C)) @compileError(@typeName(C) ++ " drifted in size from " ++ @typeName(Z));
+    for (@typeInfo(Z).@"struct".field_names) |name|
+        if (@offsetOf(Z, name) != @offsetOf(C, name)) @compileError(@typeName(C) ++ "." ++ name ++ " drifted from " ++ @typeName(Z));
+}
 
 /// `espice_problem`: a C handle is a `handles` token, never an address.
 const Token = opaque {};
@@ -525,7 +540,8 @@ export fn espice_print(handle: ?*Token, options: ?*const PrintOptions, buffer: ?
     }
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
-    h.problem.print(&writer.writer, config) catch |err| return h.fail(err);
+    // `Writer.Allocating` reports running out of memory as WriteFailed.
+    h.problem.print(&writer.writer, config) catch |err| return h.fail(if (err == error.WriteFailed) error.OutOfMemory else err);
     return copyString(h, writer.written(), buffer, capacity, required);
 }
 
@@ -670,4 +686,311 @@ fn createAppendRun(gpa: std.mem.Allocator) !void {
 fn expectOk(code: u32) !void {
     if (code == @backingInt(Code.out_of_memory)) return error.OutOfMemory;
     if (code != 0) return error.UnexpectedStatus;
+}
+
+test "status: every documented error maps to its include/espice.h code" {
+    const cases = [_]struct { anyerror, Code }{
+        .{ error.InvalidArgument, .invalid_argument },     .{ error.InvalidConcurrency, .invalid_argument },
+        .{ error.InvalidComponent, .invalid_argument },    .{ error.QueryNotReady, .invalid_argument },
+        .{ error.DuplicateQuery, .invalid_argument },      .{ error.InvalidAnalysisArguments, .invalid_argument },
+        .{ error.InvalidQueryOptions, .invalid_argument }, .{ error.UnsupportedDirectiveMutation, .invalid_argument },
+        .{ error.UnknownParameter, .invalid_argument },    .{ error.BufferTooSmall, .buffer_too_small },
+        .{ error.OutOfMemory, .out_of_memory },            .{ error.TooManyProblems, .out_of_memory },
+        .{ error.InvalidQuery, .invalid_query },           .{ error.ResultUnavailable, .result_unavailable },
+        .{ error.AbiMismatch, .abi_mismatch },             .{ error.InvalidHandle, .invalid_handle },
+        // The header's FAILED: numerical, I/O and output failures, and
+        // set_params' bin and topology refusals.
+        .{ error.SingularMatrix, .failed },                .{ error.FileNotFound, .failed },
+        .{ error.ModelBinNotFound, .failed },              .{ error.UnsupportedCard, .failed },
+        .{ error.Overflow, .failed },
+    };
+    for (cases) |case| try std.testing.expectEqual(@backingInt(case[1]), status(case[0]));
+}
+
+test "writeTruncated: as much as fits, NUL-terminated; nothing past the buffer" {
+    for ([_]struct { usize, []const u8 }{ .{ 0, "" }, .{ 1, "" }, .{ 3, "ab" }, .{ 4, "abc" }, .{ 7, "abc" } }) |case| {
+        var buffer: [8]u8 = @splat('x');
+        writeTruncated(buffer[0..case[0]], "abc");
+        if (case[0] != 0) try std.testing.expectEqualStrings(case[1], std.mem.sliceTo(&buffer, 0));
+        try std.testing.expect(std.mem.allEqual(u8, buffer[@min(case[0], case[1].len + 1)..], 'x'));
+    }
+}
+
+// The table is process-global: this test leaves every slot it took free
+// again, except the one it retires on purpose.
+test "handles: a full table refuses create without leaking, and a retired slot never matches again" {
+    const t = std.testing;
+    var dummy: Handle = undefined;
+    var tokens: [handles.capacity]*Token = undefined;
+    var n: usize = 0;
+    defer for (tokens[0..n]) |token| {
+        _ = handles.remove(token) catch unreachable;
+    };
+    while (handles.insert(&dummy)) |token| : (n += 1) tokens[n] = token else |err| try t.expectEqual(error.TooManyProblems, err);
+    try t.expectEqual(@as(usize, handles.capacity - 1), n);
+    // A full table: create builds the Problem, then frees it (the testing
+    // allocator checks) and reports OUT_OF_MEMORY through its diagnostic.
+    const deck = "full\nV1 a 0 1\nR1 a 0 1k\n.op\n.end\n";
+    var options: CreateOptions = undefined;
+    espice_default_options(&options);
+    options.source_kind = 1;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    try t.expectError(error.TooManyProblems, create(t.allocator, &options));
+    var out: ?*Token = @ptrFromInt(8);
+    var diagnostic: [32]u8 = undefined;
+    try t.expectEqual(@backingInt(Code.out_of_memory), espice_create(&options, &out, &diagnostic, diagnostic.len));
+    try t.expect(out == null);
+    try t.expectEqualStrings("TooManyProblems", std.mem.sliceTo(&diagnostic, 0));
+    // Every token still names its own slot, and a slot-0 value names none.
+    for (tokens[0..n]) |token| try t.expectEqual(&dummy, try handles.get(token));
+    try t.expectError(error.InvalidHandle, handles.get(@ptrFromInt(@as(usize, 1) << handles.index_bits)));
+    // Free one slot; its old token is stale, the slot's next token differs.
+    const old = tokens[n - 1];
+    n -= 1;
+    _ = try handles.remove(old);
+    try t.expectError(error.InvalidHandle, handles.get(old));
+    try t.expectError(error.InvalidHandle, handles.remove(old));
+    const next = try handles.insert(&dummy);
+    try t.expect(next != old);
+    try t.expectEqual(@as(handles.Index, @truncate(@intFromPtr(old))), @as(handles.Index, @truncate(@intFromPtr(next))));
+    // A slot at the last generation is retired on remove, not reused.
+    const index: handles.Index = @truncate(@intFromPtr(next));
+    handles.generation[index] = std.math.maxInt(handles.Generation);
+    const last: *Token = @ptrFromInt(@as(usize, handles.generation[index]) << handles.index_bits | index);
+    const free_len = handles.free_len;
+    try t.expectEqual(&dummy, try handles.remove(last));
+    try t.expectEqual(free_len, handles.free_len);
+    try t.expectError(error.InvalidHandle, handles.get(last));
+    try t.expectError(error.InvalidHandle, handles.get(next));
+}
+
+// Stateful fuzz (TESTING-METHODOLOGY 2.1 item 10): random espice_* calls on
+// up to three live problems, stale and forged handles mixed in. The model
+// predicts every status code from include/espice.h alone: what was
+// appended, which directive text maps to which id, what run_all completed,
+// what was destroyed. `advance` leaves the queries it may have touched
+// `.unknown` until a query_info observes them. Problems come from
+// `create(testing.allocator)`, so a leak on any path fails the test.
+test "C ABI stateful fuzz: random call sequences match a model of valid states and leak nothing" {
+    const t = std.testing;
+    const ok: u32 = 0;
+    const code = struct {
+        fn of(c: Code) u32 {
+            return @backingInt(c);
+        }
+    }.of;
+    const deck = "C fuzz\n.param rv=1k\nV1 in 0 dc 1 ac 1\nR1 in out {rv}\nC1 out 0 1u\n.op\n.end\n";
+    const directives = [_][]const u8{ ".ac dec 1 1 10", ".tran 1u 3u", ".dc v1 0 1 0.5", ".op" };
+    const State = enum { pending, complete, unknown };
+    const Live = struct {
+        token: *Token,
+        /// Query ids `0..n`, with the model's state of each.
+        states: [32]State = undefined,
+        n: u32 = 0,
+        /// The id `.op` got since the last set_params: only an OP is
+        /// shared by an identical append; every other card is a new query.
+        op: ?u32 = null,
+        last_error: []const u8 = "",
+    };
+    const live_name = [_]Bytes{.{ .data = "rv", .len = 2 }};
+    for ([_]u64{ 1, 2, 3, 4 }) |seed| {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const random = prng.random();
+        var live: [3]Live = undefined;
+        var live_len: usize = 0;
+        var stale: [64]*Token = undefined;
+        var stale_len: usize = 0;
+        defer for (live[0..live_len]) |p| {
+            _ = espice_destroy(p.token);
+        };
+        for (0..200) |_| {
+            const step = random.uintLessThan(u8, 12);
+            if (live_len == 0 or (step == 0 and live_len < live.len)) {
+                var options: CreateOptions = undefined;
+                espice_default_options(&options);
+                options.source_kind = 1;
+                options.source = .{ .data = deck.ptr, .len = deck.len };
+                options.live_params = &live_name;
+                options.live_param_count = 1;
+                live[live_len] = .{ .token = try create(t.allocator, &options) };
+                live[live_len].states[0] = .pending; // the deck's .op
+                live[live_len].n = 1;
+                live[live_len].op = 0;
+                live_len += 1;
+                continue;
+            }
+            const p = &live[random.uintLessThan(usize, live_len)];
+            const k = random.uintLessThan(u32, p.n);
+            var n: usize = 0;
+            var u: u32 = 0;
+            switch (step) {
+                0, 1 => if (p.n + 2 <= p.states.len) {
+                    const which = random.uintLessThan(usize, directives.len);
+                    const text = directives[which];
+                    var id: u32 = no_query;
+                    // A sizing call first: nothing is appended.
+                    try t.expectEqual(code(.buffer_too_small), espice_append_directives(p.token, .{ .data = text.ptr, .len = text.len }, null, 0, &n));
+                    try t.expectEqual(@as(usize, 1), n);
+                    try t.expectEqual(ok, espice_query_count(p.token, &u));
+                    try t.expectEqual(p.n, u);
+                    p.last_error = "BufferTooSmall";
+                    try t.expectEqual(ok, espice_append_directives(p.token, .{ .data = text.ptr, .len = text.len }, (&id)[0..1], 1, &n));
+                    if (text[1] == 'o' and p.op != null) try t.expectEqual(p.op.?, id) else {
+                        // A new card, perhaps with its .op prerequisite; an
+                        // .op text may instead be such an existing prerequisite.
+                        try t.expectEqual(ok, espice_query_count(p.token, &u));
+                        try t.expect(id < u and (id >= p.n or text[1] == 'o'));
+                        for (p.states[p.n..u]) |*s| s.* = .pending;
+                        p.n = u;
+                        if (text[1] == 'o') p.op = id;
+                    }
+                },
+                2 => {
+                    // Malformed input: a device card, or no analysis card.
+                    const text = if (random.boolean()) "R9 in 0 1k" else "* nothing";
+                    var id: u32 = no_query;
+                    try t.expectEqual(code(.invalid_argument), espice_append_directives(p.token, .{ .data = text.ptr, .len = text.len }, (&id)[0..1], 1, &n));
+                    try t.expectEqual(no_query, id);
+                    try t.expectEqual(ok, espice_query_count(p.token, &u));
+                    try t.expectEqual(p.n, u);
+                    p.last_error = if (text[0] == 'R') "UnsupportedDirectiveMutation" else "InvalidAnalysisArguments";
+                },
+                3 => {
+                    var event: Advance = undefined;
+                    const bad = random.uintLessThan(u8, 4) == 0;
+                    const id = if (bad) p.n + random.uintAtMost(u32, 3) else k;
+                    if (bad) {
+                        try t.expectEqual(code(.invalid_query), espice_advance(p.token, id, &event));
+                        p.last_error = "InvalidQuery";
+                    } else {
+                        try t.expectEqual(ok, espice_advance(p.token, id, &event));
+                        try t.expectEqual(id, event.requested);
+                        for (p.states[0..p.n]) |*s| if (s.* == .pending) {
+                            s.* = .unknown;
+                        };
+                    }
+                },
+                4 => {
+                    var ids: [32]u32 = undefined;
+                    try t.expectEqual(ok, espice_ready_queries(p.token, .{ .kind = 0, .id = 0 }, &ids, ids.len, &n));
+                    var events: [32]Advance = undefined;
+                    var required: usize = 0;
+                    if (n > 0 and random.boolean()) {
+                        // A duplicate frontier starts nothing.
+                        const twice = [_]u32{ ids[0], ids[0] };
+                        try t.expectEqual(code(.invalid_argument), espice_advance_ready(p.token, &twice, 2, 2, &events, events.len, &required));
+                        p.last_error = "DuplicateQuery";
+                    } else {
+                        try t.expectEqual(ok, espice_advance_ready(p.token, &ids, n, random.uintAtMost(u32, 3) + 1, &events, events.len, &required));
+                        try t.expectEqual(n, required);
+                        for (ids[0..n], events[0..n]) |id, e| try t.expectEqual(id, e.requested);
+                        for (p.states[0..p.n]) |*s| if (s.* == .pending) {
+                            s.* = .unknown;
+                        };
+                    }
+                },
+                5 => {
+                    try t.expectEqual(ok, espice_run_all(p.token));
+                    @memset(p.states[0..p.n], .complete);
+                },
+                6 => {
+                    var info: QueryInfo = undefined;
+                    try t.expectEqual(ok, espice_get_query_info(p.token, k, &info));
+                    try t.expectEqual(k, info.id);
+                    try t.expectEqual(@as(u32, 0), info.failure_code);
+                    const complete = header.ESPICE_COMPLETE;
+                    switch (p.states[k]) {
+                        .pending => try t.expectEqual(@as(u32, header.ESPICE_PENDING), info.status),
+                        .complete => try t.expectEqual(@as(u32, complete), info.status),
+                        .unknown => {
+                            try t.expect(info.status <= complete); // pending, paused or complete
+                            if (info.status == complete) p.states[k] = .complete;
+                        },
+                    }
+                },
+                7 => {
+                    var result: ResultInfo = undefined;
+                    const got = espice_get_result_info(p.token, k, &result);
+                    var view: ?[*]const f64 = null;
+                    var len: usize = 7;
+                    const viewed = espice_result_view(p.token, k, &view, &len);
+                    try t.expectEqual(got, viewed);
+                    if (got == ok) {
+                        try t.expect(p.states[k] != .pending);
+                        p.states[k] = .complete;
+                        try t.expectEqual(result.value_count, len);
+                        // Any capacity: short is BUFFER_TOO_SMALL and untouched.
+                        var values: [512]f64 = @splat(-1);
+                        const capacity = random.uintAtMost(usize, @min(values.len, len + 1));
+                        try t.expectEqual(if (capacity < len) code(.buffer_too_small) else ok, espice_copy_result(p.token, k, &values, capacity, &n));
+                        try t.expectEqual(len, n);
+                        if (capacity < len) {
+                            try t.expect(std.mem.allEqual(f64, &values, -1));
+                            p.last_error = "BufferTooSmall";
+                        } else try t.expectEqualSlices(f64, view.?[0..len], values[0..len]);
+                    } else {
+                        try t.expectEqual(code(.result_unavailable), got);
+                        try t.expect(p.states[k] != .complete);
+                        try t.expect(view == null and len == 0);
+                        p.last_error = "ResultUnavailable";
+                    }
+                },
+                8 => {
+                    // One fault per call: the header leaves the order of an
+                    // unknown name and a NaN in one call unspecified.
+                    const unknown = random.uintLessThan(u8, 4) == 0;
+                    const value: f64 = if (!unknown and random.uintLessThan(u8, 3) == 0)
+                        std.math.nan(f64)
+                    else
+                        500 + @as(f64, @floatFromInt(random.uintLessThan(u32, 5000)));
+                    const names = [_]Bytes{.{ .data = "zz", .len = 2 }};
+                    const values = [_]f64{value};
+                    const got = espice_set_params(p.token, if (unknown) &names else &live_name, &values, 1);
+                    if (unknown or std.math.isNan(value)) {
+                        try t.expectEqual(code(.invalid_argument), got);
+                        p.last_error = if (unknown) "UnknownParameter" else "InvalidArgument";
+                    } else {
+                        try t.expectEqual(ok, got);
+                        // `.op` now names a new OP, at the new value.
+                        p.op = null;
+                    }
+                },
+                9 => {
+                    // The diagnostic names the last failure, and reading it
+                    // (a sizing failure included) does not replace it.
+                    var message: [64]u8 = undefined;
+                    try t.expectEqual(code(.buffer_too_small), espice_error_message(p.token, null, 0, &n));
+                    try t.expectEqual(p.last_error.len + 1, n);
+                    try t.expectEqual(ok, espice_error_message(p.token, &message, message.len, &n));
+                    try t.expectEqualStrings(p.last_error, std.mem.sliceTo(&message, 0));
+                },
+                10 => {
+                    // A forged token: never a live one's bits, by construction.
+                    const bits = random.int(usize) | 1;
+                    const forged: *Token = @ptrFromInt(bits);
+                    if (for (live[0..live_len]) |q| {
+                        if (q.token == forged) break true;
+                    } else false) continue;
+                    try t.expectEqual(code(.invalid_handle), espice_query_count(forged, &u));
+                    try t.expectEqual(code(.invalid_handle), espice_destroy(forged));
+                    try t.expectEqual(code(.invalid_argument), espice_run_all(null));
+                },
+                11 => {
+                    try t.expectEqual(ok, espice_destroy(p.token));
+                    if (stale_len < stale.len) {
+                        stale[stale_len] = p.token;
+                        stale_len += 1;
+                    }
+                    p.* = live[live_len - 1];
+                    live_len -= 1;
+                },
+                else => unreachable, // else: uintLessThan(u8, 12)
+            }
+            if (stale_len > 0) {
+                const old = stale[random.uintLessThan(usize, stale_len)];
+                try t.expectEqual(code(.invalid_handle), espice_query_count(old, &u));
+                try t.expectEqual(code(.invalid_handle), espice_destroy(old));
+            }
+        }
+    }
 }

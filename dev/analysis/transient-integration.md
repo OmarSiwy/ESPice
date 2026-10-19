@@ -1,6 +1,6 @@
 # Transient Integration
 
-BE / trapezoidal / Gear-2, TR-BDF2, LTE-based step control, breakpoints,
+BE / trapezoidal / Gear-2..6, TR-BDF2, LTE-based step control, breakpoints,
 charge conservation.
 
 ## 1. Mathematical specification
@@ -79,6 +79,29 @@ $$
 $$
 
 one axpy over the nnz combines the analytic $G$ and $C$ planes.
+
+**Gear-3..6 / BDF-k** (`gear_3` .. `gear_6`, variable order up to $k$).
+ngspice's `nicomcof.c` coefficients, solved per step from the real step
+history. With $s_i = t_m - t_{m-i}$, $\dot q_m \approx \sum_{i=0}^{k} a_i\,
+q_{m-i}$ where
+
+$$
+\sum_i a_i = 0,\qquad \sum_i a_i\,\frac{s_i}{h} = -\frac1h,\qquad
+\sum_i a_i \Big(\frac{s_i}{h}\Big)^j = 0\quad (j = 2..k),
+$$
+
+factored as `nicomcof.c` does (Doolittle without pivoting, the first column
+$(1, 0, \dots)$ skipped): `integrator.gearAg`. The residual is
+$F_{\text{dyn}} = a_0 (q_m - q_{m-1}) - g$ with
+$g = \sum_{i \ge 2} a_i (q_{m-1} - q_{m-i})$, constant over the Newton
+solve: `gearHistory` folds it once per attempt, and the companion kernel
+reads it where gear-2 reads $q_{m-2}$, so the Newton loop costs the same at
+every order. Gear-2 keeps its closed form (bit for bit the old path).
+
+**ngspice difference.** ngspice parses `maxord` up to 6 but `dctran.c:900`
+only ever raises the order from 1 to 2, so `method=gear maxord=6` runs
+Gear-2 there (`tran/gear_maxord6_ngspice`, #56). The frontend keeps that:
+the ngspice dialect never selects `gear_3..6`; a query does.
 
 ### TR-BDF2
 
@@ -301,7 +324,39 @@ offset into the 33 ns wavefront. Drop to BE at every landed breakpoint.
 - $h < \texttt{dt\_min}$: hard failure ("timestep too small"); a truncated
   waveform is never returned as complete.
 
-Growth is capped at $2\times$ per accepted step.
+Growth is capped at $2\times$ per accepted step (orders 1 and 2).
+
+**Gear-3..6 order control** (an espice policy; ngspice has none above 2).
+After $k+1$ accepted steps in a row at order $k \ge 2$, `CKTterr` is
+recomputed at $k+1$ (if $\le$ the configured top) and at $k-1$ (if $\ge 2$),
+reading $k+3$ charge points and the step history; the order moves one step
+to whichever bound beats the current order's by 5% (the margin of the
+1-to-2 promotion), and the next step is that bound. The LTE at order $k$
+uses `gearCoeff[k-1]` (cktterr.c: .1363636364, .096, .07299270073,
+.05830903790, the BDF error constants 3/22, 12/125, 10/137, 20/343) and the
+$k$-th root (`exp(log(del)/k)`, as cktterr.c). Breakpoints, Newton failures
+and state flips still drop to order 1. Histories are sized once from the
+configured order: $\max(4, k+2)$ charge slots plus $g$, per index space.
+
+**Step-ratio limits.** Variable-step BDF-$k$ is zero-stable under a
+constant growth ratio $\omega$ only for $\omega <$ 2.414, 1.618, 1.280,
+1.127, 1.044 at $k$ = 2..6 (Grigorieff 1983; re-measured with a
+$\dot y = 0$ march of these coefficients: 2.4142, 1.6168, 1.2799, 1.1263,
+and BDF-6 decaying at 1.04 but growing $10^{2}$ in 1500 steps at 1.045). A
+run of steps each grown by the cap is exactly such a ratio, so the cap
+(`integrator.maxGrowth`) sits under each threshold: 2 at orders 1-2
+(ngspice), 1.5, 1.2, 1.1, 1.03 at 3-6. Shrinking is not capped: a lone
+small ratio scales a parasitic mode by a bounded factor, i.i.d. ratios in
+$[0.2, \text{cap}]$ stayed stable in the same march, and the $k+1$-step wait
+keeps order changes from compounding.
+
+Measured: at fixed order and step (history seeded from the closed form)
+the observed orders on RC and underdamped RLC are 2.953-2.987,
+3.934-3.974, 4.915-4.974, 5.899-5.979 for $k$ = 3..6; under random step
+ratios within the caps, $k - 0.15$ to $k$. Through the step loop at trtol 7
+on the default $t_{stop}/50$ grid, gear-3..6 reach order $k$ (`ZP_TRAN_STATS`
+`by_order`) and cut the error 7x (RC) to 10x (RLC) against gear-2 on the
+same accepted points.
 
 **Tolerance knobs.** `reltol`/`abstol` enter both Newton acceptance and
 `volttol`; `chgtol` (1e-14) floors the charge scale in `chargetol`; `trtol`
@@ -491,8 +546,9 @@ Open:
 
 - `src/analysis/tran/tran.zig`: step loop, order control, breakpoints,
   per-state LTE history, INDflux handling.
-- `src/analysis/tran/integrator.zig`: `coeffs`, `advanceCurrent`,
-  `companionAt`, `stepBound`.
+- `src/analysis/tran/integrator.zig`: `coeffs`, `gearAg`, `gearHistory`,
+  `maxGrowth`, `advanceCurrent`, `companionAt`, `stepBound`,
+  `stepBoundGear`.
 - `src/solver/converger.zig`: per-step Newton.
 - Fixtures: `tests/fixtures/tran/` (`bench_tran_fourbitadder`,
   `bench_tran_rc_pulse`, the `bench_tline_*` breakpoint-echo decks,

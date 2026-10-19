@@ -27,20 +27,6 @@ const Gmres = @import("gmres.zig").Gmres;
 const BbdInfo = @import("core").numerics.BbdInfo;
 const Execution = @import("core").numerics.Execution;
 const num = @import("core").numerics;
-const z = @import("stdpp");
-
-const mul = z.lanewise(mulFn);
-fn mulFn(p: anytype) @TypeOf(p.left) {
-    return p.left * p.right;
-}
-/// (left - right) * inv: the finite-difference Jacobian product.
-const FdQuot = struct {
-    pub const lanewise = true;
-    inv: f64,
-    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
-        return (p.left - p.right) * z.splat(@TypeOf(p.left), self.inv);
-    }
-};
 
 /// `ESPICE_SOLVER` overrides `run`'s choice: direct, jfnk (LU-preconditioned
 /// GMRES) or jfnk-nolu (Jacobi-preconditioned, no factorization at all).
@@ -94,7 +80,6 @@ pub const Tolerances = @import("core").numerics.Tolerances;
 /// 100 (niiter.c:38), so ITL2 and ITL4 only steer the callers' own
 /// iteration-count heuristics, never the Newton loop itself.
 pub fn optionsFromTolerances(tol: Tolerances, max_iter_override: ?u16) Options {
-    comptime assert(100 <= std.math.maxInt(u16));
     return .{
         .max_iter = @max(max_iter_override orelse tol.itl1, 100),
         .abstol = tol.abstol,
@@ -143,6 +128,11 @@ pub const Force = struct { slot: u32, row: u32, value: f64 };
 /// One `gmin` load: `vals[slot] += gmin` and `rhs[row] += gmin * x[col]`,
 /// the residual form of a conductance at (row, col).
 pub const GminStamp = struct { slot: u32, row: u32, col: u32 };
+comptime {
+    // Per-entry tables the loads walk: no padding.
+    assert(@sizeOf(Force) == 16);
+    assert(@sizeOf(GminStamp) == 12);
+}
 
 /// Outcome of a nonlinear solve.
 pub const Result = struct {
@@ -249,8 +239,8 @@ pub fn newton(
 /// `sys.rhs`. `v` is `hook.vals(sys)`. Asserts that `x` holds n entries
 /// and `v` nnz.
 pub fn loadExtras(sys: anytype, v: []f64, x: []const f64, opts: Options) void {
-    std.debug.assert(x.len >= sys.n);
-    std.debug.assert(v.len >= sys.nnz);
+    assert(x.len >= sys.n);
+    assert(v.len >= sys.nnz);
     loadGmin(sys, v, sys.rhs[0..sys.n], x, opts);
     for (opts.force) |f| {
         v[f.slot] += force_g;
@@ -279,7 +269,7 @@ fn sysNodeName(sys: anytype, idx: u32) []const u8 {
     return "?";
 }
 
-const Step = struct { converged: bool, scaled: f64, flipped: bool = false, why: Reject = .converged };
+const Step = struct { converged: bool, scaled: f64, why: Reject = .converged };
 
 /// The floor of the largest |x| an accepted iterate may hold. Every
 /// acceptance test is relative: the delta test to |x|, the residual gate to
@@ -306,10 +296,35 @@ fn plausibleLimit(sys: anytype, x: []const f64, f: []const f64, vals: []const f6
     return if (!(1e3 * scale > x_plausible)) x_plausible else 1e3 * scale;
 }
 
-/// Whether every unknown is finite and within `limit`.
+/// Whether every unknown is finite and within `limit`. Chunked: each
+/// 64-unknown block is a branchless OR the loop vectorizer takes, with one
+/// branch per block; `!(a <= b)` fails NaN too. 0.07-0.09 ns per unknown
+/// against the early-return loop's 0.54 (ReleaseFast, n = 64 to 16384).
 fn plausible(x: []const f64, limit: f64) bool {
-    for (x) |xi| if (!(@abs(xi) <= limit)) return false;
-    return true;
+    const block = 64;
+    var i: usize = 0;
+    while (i + block <= x.len) : (i += block) {
+        var bad: u64 = 0;
+        for (x[i..][0..block]) |xi| bad |= @intFromBool(!(@abs(xi) <= limit));
+        if (bad != 0) return false;
+    }
+    var bad: u64 = 0;
+    for (x[i..]) |xi| bad |= @intFromBool(!(@abs(xi) <= limit));
+    return bad == 0;
+}
+
+/// Rows whose |F_i| exceeds `residualGate`, NaN included. A branchless
+/// count, not an early return: it runs only on an iterate that passed the
+/// delta gate, where it nearly always passes and reads every row anyway.
+/// 0.52 ns per row against the early-return loop's 1.22 (ReleaseFast, n =
+/// 64 to 16384).
+fn residualMisses(opts: Options, residual: []const f64, x: []const f64, vals: []const f64, diag_slots: []const u32) usize {
+    assert(residual.len >= x.len);
+    assert(diag_slots.len >= x.len);
+    var misses: usize = 0;
+    for (residual[0..x.len], x, diag_slots[0..x.len]) |ri, xi, slot|
+        misses += @intFromBool(!(@abs(ri) <= residualGate(opts, vals[slot], xi)));
+    return misses;
 }
 
 /// Applies `dx` and runs the acceptance gates in order: device limiting,
@@ -350,11 +365,8 @@ fn finalizeStep(
     if (iter == 0) return .{ .converged = false, .scaled = scaled, .why = .first_iter };
     if (scaled >= 1.0) return .{ .converged = false, .scaled = scaled, .why = .delta };
     if (!plausible(x[0..n], limit)) return .{ .converged = false, .scaled = scaled, .why = .runaway };
-    for (0..n) |i| {
-        // Negated, so a NaN residual fails too.
-        if (!(@abs(residual[i]) <= residualGate(opts, vals[sys.diag_slots[i]], x[i])))
-            return .{ .converged = false, .scaled = scaled, .why = .residual };
-    }
+    if (residualMisses(opts, residual[0..n], x[0..n], vals, sys.diag_slots[0..n]) != 0)
+        return .{ .converged = false, .scaled = scaled, .why = .residual };
     if (!load_ok) return .{ .converged = false, .scaled = scaled, .why = .device };
     if (comptime @hasDecl(S, "checkConvergence")) {
         if (!sys.checkConvergence(x)) return .{ .converged = false, .scaled = scaled, .why = .device };
@@ -368,7 +380,7 @@ fn finalizeStep(
     // appends the point it stages) would see this x twice (#53).
     if (comptime @hasDecl(S, "certify") and S.certify) if (stage) sys.certifyPoint(hook, x_old[0..n], t, opts);
     if (comptime @hasDecl(S, "updateStates")) if (stage) {
-        if (sys.updateStates(x_old[0..n])) |_| return .{ .converged = false, .scaled = scaled, .flipped = true, .why = .flipped };
+        if (sys.updateStates(x_old[0..n])) |_| return .{ .converged = false, .scaled = scaled, .why = .flipped };
     };
     // The first-iterate and delta gates passed.
     assert(iter > 0);
@@ -444,8 +456,9 @@ pub fn jfnk(
             @memcpy(op.x_pert, op.x);
             num.axpy(op.x_pert, eps, v);
             assembleShifted(op.sys, op.x_pert, op.t, op.opts, op.hook);
-            var fd = z.fromSlice(f64, op.sys.rhs[0..w.len]).zip(z.fromSlice(f64, op.f0)).map(FdQuot{ .inv = 1.0 / eps });
-            _ = fd.writeInto(w);
+            // The finite-difference product; a plain loop LLVM vectorizes.
+            const inv = 1.0 / eps;
+            for (w, op.sys.rhs[0..w.len], op.f0[0..w.len]) |*wi, fi, f0i| wi.* = (fi - f0i) * inv;
             applyPreconditioner(w, op.diag, op.slv);
         }
     };
@@ -552,14 +565,17 @@ pub fn run(
 /// and its residual form, gmin * x[col], to `rhs` when non-null.
 fn loadGmin(sys: anytype, vals: ?[]f64, rhs: ?[]f64, x: []const f64, opts: Options) void {
     if (!(opts.gmin > 0)) return;
-    if (opts.gmin_stamps.len > 0) {
-        for (opts.gmin_stamps) |g| {
-            if (vals) |v| v[g.slot] += opts.gmin;
-            if (rhs) |r| r[g.row] += opts.gmin * x[g.col];
-        }
-    } else for (0..sys.n) |i| {
-        if (vals) |v| v[sys.diag_slots[i]] += opts.gmin;
-        if (rhs) |r| r[i] += opts.gmin * x[i];
+    const gmin = opts.gmin;
+    const stamps = opts.gmin_stamps;
+    if (vals) |v| {
+        if (stamps.len > 0) {
+            for (stamps) |g| v[g.slot] += gmin;
+        } else for (sys.diag_slots[0..sys.n]) |slot| v[slot] += gmin;
+    }
+    if (rhs) |r| {
+        if (stamps.len > 0) {
+            for (stamps) |g| r[g.row] += gmin * x[g.col];
+        } else for (r[0..sys.n], x[0..sys.n]) |*ri, xi| ri.* += gmin * xi;
     }
 }
 
@@ -591,8 +607,7 @@ fn applyPreconditioner(r: []f64, diag: []const f64, slv: ?*direct.Solver) void {
             return;
         }
     }
-    var it = z.fromSlice(f64, r).zip(z.fromSlice(f64, diag[0..r.len])).map(mul);
-    _ = it.writeInto(r);
+    for (r, diag[0..r.len]) |*ri, di| ri.* *= di;
 }
 
 fn applyLimits(sys: anytype, x: []f64, x_old: []f64) bool {
@@ -633,45 +648,30 @@ pub const test_access = if (@import("builtin").is_test) .{ .updateAndNorm = upda
 
 /// x_old = x; x += dx; returns max |dx| / (reltol * max(|x|, |x_old|) + atol),
 /// atol = abstol on current rows, vntol elsewhere. A row whose new x or dx
-/// is NaN or infinite scores inf: `@max` lowers to maxnum, which would drop
-/// a NaN and pass a diverged step. Max is exact and order-independent, so
-/// the vector body and scalar tail agree bitwise with a plain scalar loop.
+/// is NaN or infinite scores inf; a zero step on a zero tolerance (0/0)
+/// scores 0. The max runs on the i64 bit patterns of the nonnegative
+/// scores: exact and order-independent, and the loop vectorizes (float
+/// `@max` keeps it scalar: 1.2 against 0.8 ns per row).
 fn updateAndNorm(x: []f64, dx: []const f64, x_old: []f64, current_row: []const bool, reltol: f64, abstol: f64, vntol: f64) f64 {
-    const W = std.simd.suggestVectorLength(f64) orelse 1;
-    const V = @Vector(W, f64);
-    const rel: V = @splat(reltol);
-    const abs_i: V = @splat(abstol);
-    const abs_v: V = @splat(vntol);
-    const inf_v: V = @splat(inf);
-    // Up front, so the vector body carries no per-slice bounds checks.
+    // Up front, so the loop carries no per-slice bounds checks.
     assert(dx.len >= x.len);
     assert(x_old.len >= x.len);
     assert(current_row.len >= x.len);
-    var worst_v: V = @splat(0);
-    var i: usize = 0;
-    while (i + W <= x.len) : (i += W) {
-        const xo: V = x[i..][0..W].*;
-        const d: V = dx[i..][0..W].*;
-        const cur: @Vector(W, bool) = current_row[i..][0..W].*;
-        const xn = xo + d;
-        x_old[i..][0..W].* = xo;
-        x[i..][0..W].* = xn;
-        const tol = rel * @max(@abs(xn), @abs(xo)) + @select(f64, cur, abs_i, abs_v);
-        const finite = (@abs(xn) < inf_v) & (@abs(d) < inf_v);
-        worst_v = @max(worst_v, @select(f64, finite, @abs(d) / tol, inf_v));
-    }
-    var worst: f64 = @reduce(.Max, worst_v);
-    for (x[i..], dx[i..], x_old[i..], current_row[i..x.len]) |*xi, dxi, *xoi, is_cur| {
+    var worst: i64 = 0;
+    for (x, dx[0..x.len], x_old[0..x.len], current_row[0..x.len]) |*xi, d, *xoi, cur| {
         const xo = xi.*;
+        const xn = xo + d;
         xoi.* = xo;
-        xi.* = xo + dxi;
-        const atol = if (is_cur) abstol else vntol;
-        const tol = reltol * @max(@abs(xi.*), @abs(xo)) + atol;
-        const finite = @abs(xi.*) < inf and @abs(dxi) < inf;
-        worst = @max(worst, if (finite) @abs(dxi) / tol else inf);
+        xi.* = xn;
+        const tol = reltol * @max(@abs(xn), @abs(xo)) + (if (cur) abstol else vntol);
+        const finite = @abs(xn) < inf and @abs(d) < inf;
+        const q = @abs(d) / tol;
+        const score: f64 = if (!finite) inf else if (q == q) q else 0;
+        worst = @max(worst, @as(i64, @bitCast(score)));
     }
-    assert(!(worst < 0));
-    return worst;
+    const result: f64 = @bitCast(worst);
+    assert(!(result < 0));
+    return result;
 }
 
 /// `--timing-in-depth` wall-time split of `newton`, summed over every solve
@@ -715,12 +715,15 @@ pub const Workspace = struct {
     /// on its first call.
     krylov: ?Gmres = null,
     jf: []f64 = &.{},
+    /// tran's G + alpha*C values, grown by `ensureAVals`.
     a_vals: []f64 = &.{},
     prof: Prof = .{},
     knobs: Knobs,
 
     /// Borrows `col_ptr` and `row_idx` for the workspace's lifetime. Caller
-    /// frees with `deinit` and the same allocator. Asserts that `col_ptr`
+    /// frees with `deinit` and the same allocator. Fails as
+    /// `direct.Solver.init` does (out of memory, or the ordering's
+    /// `OutOfWorkspace`), leaving nothing allocated. Asserts that `col_ptr`
     /// has n + 1 entries.
     pub fn init(gpa: std.mem.Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32, bbd: ?BbdInfo, knobs: Knobs, lu_knobs: direct.Knobs) !Workspace {
         assert(col_ptr.len == @as(usize, n) + 1);
@@ -773,37 +776,77 @@ pub const Workspace = struct {
     }
 };
 
-test "FdQuot and mul run on stdpp's SIMD path and match its pull path bitwise" {
-    const builtin = @import("builtin");
-    if (builtin.zig_backend == .stage2_llvm or builtin.zig_backend == .stage2_x86_64) {
-        const e: []const f64 = &.{};
-        const pair = z.fromSlice(f64, e).zip(z.fromSlice(f64, e));
-        comptime std.debug.assert(@TypeOf(pair.map(FdQuot{ .inv = 0 })).lane_count != null);
-        comptime std.debug.assert(@TypeOf(pair.map(mul)).lane_count != null);
-    }
-    var prng = std.Random.DefaultPrng.init(0xFD);
+test "the Jacobi preconditioner scales each row by its inverse diagonal" {
+    var r = [_]f64{ 2, -3, 4, std.math.nan(f64) };
+    const diag = [_]f64{ 0.5, 2, -0.25, 1, 9 };
+    applyPreconditioner(&r, &diag, null);
+    try std.testing.expectEqualSlices(f64, &.{ 1, -6, -1 }, r[0..3]);
+    try std.testing.expect(std.math.isNan(r[3]));
+}
+
+test "plausible and residualMisses match a scalar oracle at every length, NaN and inf included" {
+    var prng = std.Random.DefaultPrng.init(0xC0);
     const r = prng.random();
-    var left: [84]f64 = undefined;
-    var right: [84]f64 = undefined;
-    for (&left, &right) |*u, *v| {
-        u.* = r.float(f64) - 0.5;
-        v.* = r.float(f64) - 0.5;
-    }
-    left[5] = std.math.nan(f64);
-    right[40] = std.math.inf(f64);
-    var fast: [84]f64 = undefined;
-    var slow: [84]f64 = undefined;
-    // Past 4 unrolled blocks of the widest f64 vector, at every misalignment.
-    for (0..81) |len| for (0..4) |off| {
-        const lv = left[off..][0..len];
-        const rv = right[off..][0..len];
-        inline for (.{ FdQuot{ .inv = 1e7 }, mul }) |f| {
-            var it = z.fromSlice(f64, lv).zip(z.fromSlice(f64, rv)).map(f);
-            try std.testing.expectEqual(len, it.writeInto(fast[0..len]));
-            var src = z.fromSlice(f64, lv);
-            var pull = src.byRef().zip(z.fromSlice(f64, rv)).map(f);
-            try std.testing.expectEqual(len, pull.writeInto(slow[0..len]));
-            for (fast[0..len], slow[0..len]) |a, b| try std.testing.expectEqual(@as(u64, @bitCast(b)), @as(u64, @bitCast(a)));
+    const len_max = 200;
+    var x: [len_max]f64 = undefined;
+    var res: [len_max]f64 = undefined;
+    var vals: [len_max + 1]f64 = undefined;
+    var slots: [len_max]u32 = undefined;
+    const opts: Options = .{};
+    for (0..len_max + 1) |n| for (0..4) |plant| {
+        for (x[0..n], res[0..n], slots[0..n], 0..) |*xi, *ri, *si, i| {
+            xi.* = (r.float(f64) - 0.5) * 10;
+            ri.* = (r.float(f64) - 0.5) * 1e-8;
+            si.* = @intCast((i * 7) % (len_max + 1));
         }
+        for (&vals, 0..) |*v, i| v.* = if (i % 5 == 0) 0 else r.float(f64) * 1e-2;
+        if (n > 0) {
+            const at = r.uintLessThan(usize, n);
+            switch (plant) {
+                0 => {},
+                1 => {
+                    x[at] = std.math.nan(f64);
+                    res[at] = std.math.nan(f64);
+                },
+                2 => {
+                    x[at] = -std.math.inf(f64);
+                    res[at] = std.math.inf(f64);
+                },
+                else => x[at] = 5, // else: plant 3, exactly at the limit (plausible)
+            }
+        }
+        var want_plausible = true;
+        var want_misses: usize = 0;
+        for (0..n) |i| {
+            if (!(@abs(x[i]) <= 5)) want_plausible = false;
+            const diag = @abs(vals[slots[i]]);
+            const scale = if (diag == 0) 1.0 else diag;
+            const gate = @max(opts.residual_tol, 10.0 * scale * (opts.reltol * @abs(x[i]) + opts.vntol));
+            if (!(@abs(res[i]) <= gate)) want_misses += 1;
+        }
+        try std.testing.expectEqual(want_plausible, plausible(x[0..n], 5));
+        try std.testing.expectEqual(want_misses, residualMisses(opts, res[0..n], x[0..n], &vals, slots[0..n]));
     };
+}
+
+test "loadGmin stamps the diagonal or the listed stamps, into vals and rhs independently" {
+    const Sys = struct { n: u32 = 3, diag_slots: []const u32 = &.{ 0, 4, 8 } };
+    const sys: Sys = .{};
+    const x = [_]f64{ 1, -2, 3 };
+    var vals: [9]f64 = @splat(0);
+    var rhs: [3]f64 = @splat(1);
+    loadGmin(&sys, &vals, &rhs, &x, .{ .gmin = 0.5 });
+    try std.testing.expectEqualSlices(f64, &.{ 0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5 }, &vals);
+    try std.testing.expectEqualSlices(f64, &.{ 1.5, 0, 2.5 }, &rhs);
+    // Stamps: (row 0, col 2) at slot 6, twice; rhs only.
+    const stamps = [_]GminStamp{ .{ .slot = 6, .row = 0, .col = 2 }, .{ .slot = 6, .row = 0, .col = 2 } };
+    loadGmin(&sys, null, &rhs, &x, .{ .gmin = 0.25, .gmin_stamps = &stamps });
+    try std.testing.expectEqualSlices(f64, &.{ 3, 0, 2.5 }, &rhs);
+    loadGmin(&sys, &vals, null, &x, .{ .gmin = 0.25, .gmin_stamps = &stamps });
+    try std.testing.expectEqual(@as(f64, 0.5), vals[6]);
+    // Zero, negative and NaN gmin load nothing.
+    const before = vals;
+    for ([_]f64{ 0, -1, std.math.nan(f64) }) |g| loadGmin(&sys, &vals, &rhs, &x, .{ .gmin = g });
+    try std.testing.expectEqualSlices(f64, &before, &vals);
+    try std.testing.expectEqualSlices(f64, &.{ 3, 0, 2.5 }, &rhs);
 }

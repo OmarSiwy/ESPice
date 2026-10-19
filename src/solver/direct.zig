@@ -21,7 +21,6 @@ const order_mod = @import("order.zig");
 const bbd_mod = @import("bbd.zig");
 const lu_kernels = @import("lu_kernels.zig");
 const num = @import("core").numerics;
-const z = @import("stdpp");
 
 const Allocator = std.mem.Allocator;
 
@@ -277,8 +276,9 @@ pub const Solver = struct {
                 return;
             } else |_| try self.demote(),
             // A singular block, or a Schur reduction too unstable to refine.
-            .bbd => |*eng| if (eng.factorWithExecution(vals, execution)) |_| {
-                if (!(eng.growth > bbd_refine_growth) or self.probeBbd(eng, vals)) {
+            // BBD wants one value per pattern entry: drop the trash slot past it.
+            .bbd => |*eng| if (eng.factorWithExecution(vals[0..self.col_ptr[self.n]], execution)) |_| {
+                if (!(eng.growth > bbd_refine_growth) or (self.probeOne(eng, false, vals[0..self.col_ptr[self.n]]) and self.probeOne(eng, true, vals[0..self.col_ptr[self.n]]))) {
                     self.factored = true;
                     return;
                 }
@@ -288,14 +288,13 @@ pub const Solver = struct {
         const lu = &self.engine.lu;
         lu.fill_cap = repivot_fill_cap;
         lu.keep_min = self.params.refactor_growth_limit;
-        const ptol = pivot_tol;
         if (self.factored) {
             if (self.refactorLu(vals, execution)) |_| {
                 if (try self.replayHolds(vals)) return;
             } else |_| {}
             self.factored = false;
         }
-        try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, ptol);
+        try lu.factor(self.gpa, self.col_ptr, self.row_idx, vals, pivot_tol);
         self.factored = true;
     }
 
@@ -318,9 +317,14 @@ pub const Solver = struct {
     /// probed; check on the host after the sync if that path needs it.
     fn replayHolds(self: *Self, vals: []const f64) !bool {
         const lu = &self.engine.lu;
-        const ptol = pivot_tol;
-        if (!(ptol > 0)) return true;
-        if (maxMultiplier(lu) <= 1 / ptol) return true;
+        comptime assert(pivot_tol > 0);
+        // A replay checks only its pivots. A NaN in L fails the bound below
+        // and then the probe, and the full factor refuses the matrix.
+        // ponytail: a NaN U entry from a replay reaches the solve, and shows
+        // in x unless its column's x is exactly 0; scanning U here cost
+        // 0.4-3.6% of a replay. Fold an OR into each refactor kernel's U
+        // store if that hole matters.
+        if (maxMultiplier(lu) <= 1 / pivot_tol) return true;
         const n: usize = self.n;
         if (self.probe.len == 0) self.probe = try self.gpa.alloc(f64, 3 * n);
         assert(self.probe.len == 3 * n);
@@ -339,7 +343,7 @@ pub const Solver = struct {
             }
             norm_1 = @max(norm_1, col);
         }
-        const norm_inf = maxAbs(rows);
+        const norm_inf = num.normInf(rows);
         const nf: f64 = @floatFromInt(n);
         inline for (.{ false, true }) |transpose| {
             probeRhs(r);
@@ -351,9 +355,9 @@ pub const Solver = struct {
                 if (transpose) r[j] -= vals[p] * x[i] else r[i] -= vals[p] * x[j];
             };
             const a_norm = if (transpose) norm_1 else norm_inf;
-            const ratio = maxAbs(r) / (a_norm * maxAbs(x) * nf * std.math.floatEps(f64));
+            const ratio = num.normInf(r) / (a_norm * num.normInf(x) * nf * std.math.floatEps(f64));
             // Negated, so a NaN ratio fails too.
-            if (!(ratio <= replay_ratio_max / ptol)) return false;
+            if (!(ratio <= replay_ratio_max / pivot_tol)) return false;
         }
         return true;
     }
@@ -404,14 +408,10 @@ pub const Solver = struct {
     }
 
     /// Solves a fixed pseudo-random right-hand side on the fresh factor of
-    /// `vals`, both ways, refines each, and reports whether both scaled
-    /// residuals meet `probe_ratio_max`. Refinement in working precision
-    /// cannot recover a Schur reduction whose error outgrows the solution,
-    /// which this catches before any caller solves.
-    fn probeBbd(self: *Self, eng: *BbdEng, vals: []const f64) bool {
-        return self.probeOne(eng, false, vals) and self.probeOne(eng, true, vals);
-    }
-
+    /// `vals` (A, or A^T with `transpose`), refines it, and reports whether
+    /// the scaled residual meets `probe_ratio_max`. Refinement in working
+    /// precision cannot recover a Schur reduction whose error outgrows the
+    /// solution, which this catches before any caller solves.
     fn probeOne(self: *Self, eng: *BbdEng, comptime transpose: bool, vals: []const f64) bool {
         const n = self.n;
         const b = self.refine_buf[0..n];
@@ -435,6 +435,7 @@ pub const Solver = struct {
             s[row] += @abs(vals[p]);
         };
         const nf: f64 = @floatFromInt(n);
+        // A NaN in the refined solve or its residual fails the probe.
         const ratio = num.normInf(r) / (num.normInf(s) * num.normInf(x) * nf * std.math.floatEps(f64));
         return ratio <= probe_ratio_max;
     }
@@ -526,30 +527,18 @@ fn parWorthIt(lu: *const sparse_lu.SparseLu, knobs: Knobs) bool {
 const replay_ratio_max = 30.0;
 
 /// The largest |L| entry over the steps the refactor's growth monitor
-/// covers. A replay writes L as v / d, so its smallest accepted pivot
-/// ratio is 1 / max(1, this), whichever kernel ran it (tape, columns,
-/// threads). Scale-accepted steps are left out: their pivots sit decades
-/// below the raw column by design. Runs on every replay, so it is the
-/// vector `normInf`, which skips NaN; a NaN multiplier reaches the solve,
-/// whose NaN the Newton gates refuse.
+/// covers, NaN when any L entry is NaN. A replay writes L as v / d, so
+/// its smallest accepted pivot ratio is 1 / max(1, this), whichever kernel
+/// ran it (tape, columns, threads). Scale-accepted steps are left out of
+/// the max: their pivots sit decades below the raw column by design.
 fn maxMultiplier(lu: *const sparse_lu.SparseLu) f64 {
     const lx = lu.lx.items;
-    if (std.mem.indexOfScalar(bool, lu.scaled_pivot, true) == null) return num.normInf(lx);
+    const all = num.normInf(lx);
+    if (std.math.isNan(all) or std.mem.indexOfScalar(bool, lu.scaled_pivot, true) == null) return all;
     var m: f64 = 0;
     for (0..lu.n) |k| {
         if (lu.scaled_pivot[k]) continue;
         m = @max(m, num.normInf(lx[lu.lp[k]..lu.lp[k + 1]]));
-    }
-    return m;
-}
-
-/// max |s[i]|, 0 for an empty slice; NaN when any entry is NaN, unlike
-/// `numerics.normInf`, which skips NaN. The probe's norms, cold.
-fn maxAbs(s: []const f64) f64 {
-    var m: f64 = 0;
-    for (s) |v| {
-        if (std.math.isNan(v)) return v;
-        m = @max(m, @abs(v));
     }
     return m;
 }
@@ -593,33 +582,37 @@ fn computeOrdering(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []cons
     return q;
 }
 
-/// IEEE equality per element (-0 == +0, NaN != NaN) and equal lengths.
-/// stdpp's mismatch search: four vector blocks per branch.
+/// IEEE equality per element (-0 == +0, NaN != NaN) and equal lengths,
+/// not `std.mem.eql`'s bytes. Chunked: each 64-entry block is a branchless
+/// OR the loop vectorizer takes, one branch per block: 0.08-0.10 ns per
+/// entry against 0.12-0.17 for the iterator-library `eq` it replaced
+/// (ReleaseFast, n = 64 to 16384).
 fn simdEql(a: []const f64, b: []const f64) bool {
-    return z.fromSlice(f64, a).eq(z.fromSlice(f64, b));
+    if (a.len != b.len) return false;
+    const block = 64;
+    var i: usize = 0;
+    while (i + block <= a.len) : (i += block) {
+        var ne: u64 = 0;
+        for (a[i..][0..block], b[i..][0..block]) |x, y| ne |= @intFromBool(!(x == y));
+        if (ne != 0) return false;
+    }
+    var ne: u64 = 0;
+    for (a[i..], b[i..]) |x, y| ne |= @intFromBool(!(x == y));
+    return ne == 0;
 }
 
 const testing = std.testing;
 
 test simdEql {
-    const builtin = @import("builtin");
-    // Other self-hosted backends run stdpp's scalar fallback.
-    if (builtin.zig_backend == .stage2_llvm or builtin.zig_backend == .stage2_x86_64)
-        comptime std.debug.assert(@TypeOf(z.fromSlice(f64, &.{})).lane_count != null);
     const Ref = struct {
         fn scalar(a: []const f64, b: []const f64) bool {
             if (a.len != b.len) return false;
             for (a, b) |x, y| if (x != y) return false;
             return true;
         }
-        fn pull(a: []const f64, b: []const f64) bool {
-            var src = z.fromSlice(f64, a);
-            return src.byRef().eq(z.fromSlice(f64, b));
-        }
         fn check(a: []const f64, b: []const f64) !void {
             const want = scalar(a, b);
             try testing.expectEqual(want, simdEql(a, b));
-            try testing.expectEqual(want, pull(a, b));
         }
     };
     var buf_a: [208]f64 = undefined;
@@ -687,4 +680,63 @@ test "Solver: a tridiagonal pattern with a zero diagonal demotes to the pivoting
     try testing.expect(s.unchanged(&vals));
     vals[3] = std.math.nan(f64);
     try testing.expect(!s.unchanged(&vals));
+}
+
+test "Solver: dropBypass makes every factor refactor; solveNeg is -solve" {
+    // A = [4 1 0 1; 1 4 1 0; 0 1 4 1; 1 0 1 4], a ring: not tridiagonal, so
+    // the general LU.
+    const gpa = testing.allocator;
+    const col_ptr = [_]u32{ 0, 3, 6, 9, 12 };
+    const row_idx = [_]u32{ 0, 1, 3, 0, 1, 2, 1, 2, 3, 0, 2, 3 };
+    const vals = [_]f64{ 4, 1, 1, 1, 4, 1, 1, 4, 1, 1, 1, 4 };
+    var s = try Solver.init(gpa, 4, &col_ptr, &row_idx, null, .{});
+    defer s.deinit();
+    try testing.expect(s.engine == .lu);
+    try s.factor(&vals, .{});
+    const gen = s.gen;
+    try s.factor(&vals, .{});
+    try testing.expectEqual(gen, s.gen);
+    s.dropBypass();
+    try testing.expect(!s.unchanged(&vals));
+    try s.factor(&vals, .{});
+    try testing.expectEqual(gen +% 1, s.gen);
+    // A [1 2 3 4] = [10 12 18 20].
+    const b = [_]f64{ 10, 12, 18, 20 };
+    var x: [4]f64 = undefined;
+    s.solve(&b, &x);
+    for (x, [_]f64{ 1, 2, 3, 4 }) |xi, want| try testing.expectApproxEqAbs(want, xi, 1e-13);
+    var y = b;
+    s.solveNeg(&y, &y); // aliased
+    for (y, [_]f64{ 1, 2, 3, 4 }) |yi, want| try testing.expectApproxEqAbs(-want, yi, 1e-13);
+}
+
+test "Solver: a singular matrix fails factor with SingularMatrix and leaves no factor" {
+    // The ring pattern above with columns 0 and 1 both [1 1 0 0]^T: rank 3.
+    const gpa = testing.allocator;
+    const col_ptr = [_]u32{ 0, 3, 6, 9, 12 };
+    const row_idx = [_]u32{ 0, 1, 3, 0, 1, 2, 1, 2, 3, 0, 2, 3 };
+    const vals = [_]f64{ 1, 1, 0, 1, 1, 0, 0, 2, 3, 1, 5, 7 };
+    var s = try Solver.init(gpa, 4, &col_ptr, &row_idx, null, .{});
+    defer s.deinit();
+    try testing.expectError(error.SingularMatrix, s.factor(&vals, .{}));
+    try testing.expect(!s.factored);
+    try testing.expect(!s.unchanged(&vals));
+}
+
+test "maxMultiplier is NaN when an L entry is NaN, scale-accepted steps included" {
+    const gpa = testing.allocator;
+    // diag(4) plus A[2][0]: L[2][0] is the only multiplier. A replay
+    // fails on a NaN there, so the test plants it in the factors.
+    const col_ptr = [_]u32{ 0, 2, 3, 4 };
+    const row_idx = [_]u32{ 0, 2, 1, 2 };
+    const q = [_]u32{ 0, 1, 2 };
+    var lu = try sparse_lu.SparseLu.init(gpa, 3, &col_ptr, &q);
+    defer lu.deinit(gpa);
+    try lu.factor(gpa, &col_ptr, &row_idx, &.{ 4, 1, 4, 4 }, pivot_tol);
+    try testing.expectError(error.SingularMatrix, lu.refactor(&col_ptr, &.{ 4, std.math.nan(f64), 4, 4 }, 1e-12));
+    try lu.refactor(&col_ptr, &.{ 4, 1, 4, 4 }, 1e-12);
+    lu.lx.items[0] = std.math.nan(f64);
+    try testing.expect(std.math.isNan(maxMultiplier(&lu)));
+    lu.scaled_pivot[1] = true;
+    try testing.expect(std.math.isNan(maxMultiplier(&lu)));
 }

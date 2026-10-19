@@ -9,6 +9,7 @@ const std = @import("std");
 const root = @import("../types.zig");
 const converger = @import("solver").converger;
 const integrator = @import("integrator.zig");
+const num = @import("core").numerics;
 
 /// `.envelope` query options, defined in core/query.zig.
 pub const Options = @import("core").query.Envelope;
@@ -108,7 +109,7 @@ pub fn simulate(
         };
         // Exact at a DC operating point: q = q(x_op), no dynamic current.
         ckt.eval(x, 0);
-        root.copySimd(trap_state.q_prev, ckt.q_vec[0..n]);
+        num.copySimd(trap_state.q_prev, ckt.q_vec[0..n]);
         @memset(trap_state.i_prev, 0);
         break :blk &trap_state;
     } else null;
@@ -138,11 +139,11 @@ pub fn simulate(
     while (t < options.t_stop and outer_steps < options.max_outer_steps) {
         if (attempts != 0) try ckt.checkpoint(.{ .phase = .transient, .completed = attempts });
         attempts += 1;
-        root.copySimd(x_outer_save, x);
+        num.copySimd(x_outer_save, x);
         ckt.storeState(outer_state);
         if (trap) |tr| {
-            root.copySimd(q_save, tr.q_prev);
-            root.copySimd(i_save, tr.i_prev);
+            num.copySimd(q_save, tr.q_prev);
+            num.copySimd(i_save, tr.i_prev);
         }
 
         const t_outer_step = @as(f64, @floatFromInt(periods_per_step)) * t_carrier;
@@ -187,11 +188,11 @@ pub fn simulate(
 
         if (!ok) {
             // The outer step was too aggressive: restore and retry shorter.
-            root.copySimd(x, x_outer_save);
+            num.copySimd(x, x_outer_save);
             ckt.restoreState(outer_state);
             if (trap) |tr| {
-                root.copySimd(tr.q_prev, q_save);
-                root.copySimd(tr.i_prev, i_save);
+                num.copySimd(tr.q_prev, q_save);
+                num.copySimd(tr.i_prev, i_save);
             }
             if (periods_per_step == options.min_periods_per_step) return error.EnvelopeDidNotConverge;
             periods_per_step = @max(periods_per_step / 2, options.min_periods_per_step);
@@ -270,7 +271,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const x = try scratch.alloc(f64, x_op.len);
     defer scratch.free(x);
-    root.copySimd(x, x_op);
+    @memcpy(x, x_op);
 
     // `data` is the Result, so it lives on the results arena.
     const ncols = 1 + 2 * ctx.probes.len;

@@ -19,14 +19,14 @@ const take = root.take;
 const num = @import("core").numerics;
 const converger = @import("solver").converger;
 const dense_lu = @import("solver").dense_lu;
+const pss = @import("pss.zig");
 const pac = @import("pac.zig");
 const mhb = @import("mhb.zig");
 
 /// The `.hb` query; `extra_tones` or `phasors` route it to `mhb.zig`.
 pub const Options = @import("core").query.Hb;
 
-/// The Newton outcome, shared with pss and qpss.
-pub const SolveResult = @import("pss.zig").SolveResult;
+const SolveResult = pss.SolveResult;
 
 /// `solveSpectrum`'s outcome: the Newton status and the fundamental the
 /// spectrum is at, `Options.f0` unless the solve was autonomous.
@@ -50,14 +50,6 @@ const min_step: f64 = 1.0 / 1024.0;
 /// K = 8, 3.6x at 9 nodes and K = 32, and 16x at 44 nodes and K = 8.
 fn useGmres(n: usize, nf: usize) bool {
     return n >= 10 or n * nf >= 512;
-}
-
-/// Magnitude of harmonic k >= 1 from one probe's spectrum
-/// [dc, cos_1, sin_1, ..., cos_K, sin_K].
-fn magnitude(spectrum: []const f64, k: u16) f64 {
-    const c = spectrum[2 * @as(usize, k) - 1];
-    const s = spectrum[2 * @as(usize, k)];
-    return @sqrt(c * c + s * s);
 }
 
 /// Harmonic balance from the DC operating point, keeping every unknown's
@@ -199,7 +191,7 @@ pub fn solveSpectrum(
                 c_td[slot * nt + k] = c;
             };
             if (k == 0) {
-                if (ckt.has_charge) ckt.denseC(c_mat) else root.zeroSimd(c_mat);
+                if (ckt.has_charge) ckt.denseC(c_mat) else @memset(c_mat, 0);
             }
         }
 
@@ -221,7 +213,7 @@ pub fn solveSpectrum(
         // q(t) = a cos(w_h t) + b sin(w_h t), dq/dt = w_h b cos - w_h a sin,
         // so the cos row takes +w_h*Q_sin and the sin row -w_h*Q_cos.
         // They are linear in w0, so q_term is also dF/d(ln w0).
-        root.zeroSimd(q_term);
+        @memset(q_term, 0);
         if (ckt.has_charge) for (0..n) |node| {
             project(q_td[node * nt ..][0..nt], basis_cos, basis_sin, kc, ks);
             for (1..nh + 1) |h| {
@@ -232,7 +224,7 @@ pub fn solveSpectrum(
         };
         num.axpy(f_hat, 1.0, q_term);
 
-        const max_residual = mhb.residualNorm(f_hat);
+        const max_residual = num.normInf(f_hat);
         if (ckt.knobs.hb_trace) std.debug.print("HB iter={d} res={e} step={e} normx={e}\n", .{ iter, max_residual, step, num.normInf(x_hat) });
         if (max_residual < options.hb_tol) {
             solved = .{ .status = .{ .converged = true, .iterations = iter + 1, .residual_norm = max_residual }, .f0 = if (osc == root.GROUND) options.f0 else omega0 / (2.0 * std.math.pi) };
@@ -243,7 +235,7 @@ pub fn solveSpectrum(
             // Rewind and retake the last step at half length along the same
             // `dx_hat`; no Jacobian rebuild.
             step *= 0.5;
-            root.copySimd(x_hat, x_prev);
+            num.copySimd(x_hat, x_prev);
             num.axpy(x_hat, step, dx_hat);
             if (osc != root.GROUND) setOmega(&omega0, &period, omega_prev * (1 + step * d_ln_omega));
             retrying = true;
@@ -266,7 +258,7 @@ pub fn solveSpectrum(
         // onto harmonics past K keeps the Jacobian exact for the sampled
         // residual. The h != m blocks are how a nonlinearity couples
         // harmonics.
-        root.zeroSimd(jac);
+        @memset(jac, 0);
 
         // Pattern slots only: a structurally zero entry has G(t) = 0, whose
         // projections are the +0 already in jac.
@@ -372,7 +364,7 @@ pub fn solveSpectrum(
             const piv = try allocator.alloc(u32, total_unknowns);
             defer allocator.free(piv);
             try dense_lu.factorize(total_unknowns, jac, piv);
-            root.zeroSimd(f_hat);
+            @memset(f_hat, 0);
             f_hat[omega_col] = 1;
             dense_lu.solveFactoredT(total_unknowns, jac, piv, f_hat, ppv);
             return done;
@@ -383,7 +375,7 @@ pub fn solveSpectrum(
         // adjoint are dense-only.
         try dense_lu.factorizeSolveNeg(total_unknowns, jac, f_hat[0..total_unknowns], dx_hat);
 
-        root.copySimd(x_prev, x_hat);
+        num.copySimd(x_prev, x_hat);
         if (osc != root.GROUND) {
             d_ln_omega = dx_hat[omega_col];
             dx_hat[omega_col] = 0;
@@ -445,11 +437,8 @@ fn project(g: []const f64, basis_cos: []const f64, basis_sin: []const f64, gc: [
 
 const project_lanes = std.simd.suggestVectorLength(f64) orelse 4;
 
-/// `project` on W lanes; W == 1 is the scalar oracle. A hand kernel, not
-/// `num.dot`: nt is 2(2K+1), 34 at the default K = 8, under stdpp's
-/// 64-element scalar cutoff, and this kernel measured 2.2x faster there
-/// and 1.2x at K = 16 and 32 (#14). One pass over g yields both the cos
-/// and the sin sum.
+/// `project` on W lanes; W == 1 is the scalar oracle. One pass over g
+/// yields both the cos and the sin sum (#14).
 fn projectLanes(comptime W: comptime_int, g: []const f64, basis_cos: []const f64, basis_sin: []const f64, gc: []f64, gs: []f64) void {
     const V = @Vector(W, f64);
     const nt = g.len;
@@ -506,7 +495,7 @@ pub fn seed(x_hat: []f64, orb: pac.Orbit, n: usize, osc: u32) void {
     std.debug.assert(nf * n == x_hat.len and nh > 0);
     const ns = orb.samples(n);
     const ns_f: f64 = @floatFromInt(ns);
-    root.zeroSimd(x_hat);
+    @memset(x_hat, 0);
     for (0..ns) |k| {
         const x = orb.state(k, n);
         for (0..n) |node| {
@@ -605,7 +594,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         row[0] = @as(f64, @floatFromInt(k)) * st.f0;
         for (ctx.probes, 0..) |node, p| {
             const spec = x_hat[node * nf ..][0..nf];
-            row[p + 1] = if (k == 0) spec[0] else magnitude(spec, @intCast(k));
+            row[p + 1] = if (k == 0) spec[0] else std.math.hypot(spec[2 * k - 1], spec[2 * k]);
         }
     }
     return .{
@@ -709,4 +698,36 @@ test projectLanes {
     g[17] = std.math.inf(f64);
     projectLanes(project_lanes, &g, &basis, &basis, &gc, &gs);
     for (gc) |v| try std.testing.expect(std.math.isPositiveInf(v));
+}
+
+test "seed shifts time so the osc node's fundamental is a pure cosine" {
+    // Oracle: a time shift. The osc node (1) is a pure sine, phase pi/2, so
+    // seed must return the spectrum of x(t + T/4); sampled on 32 points that
+    // is the orbit read 8 samples later.
+    const gpa = std.testing.allocator;
+    const n = 2;
+    const nf = 5;
+    const ns = 32;
+    const x_hat = [n * nf]f64{ 0.5, 0.1, -0.2, 0.03, 0.04, 1.0, 0, 0.8, 0.1, -0.05 };
+    const orb = try orbit(&x_hat, n, 1e3, ns, true, gpa);
+    defer gpa.free(orb.wave);
+    var back: [n * nf]f64 = undefined;
+    seed(&back, orb, n, 1);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.8), back[nf + 1], 1e-12);
+    try std.testing.expectEqual(@as(f64, 0), back[nf + 2]);
+    const shifted = try orbit(&back, n, 1e3, ns, true, gpa);
+    defer gpa.free(shifted.wave);
+    for (0..ns) |k| for (shifted.state(k, n), orb.state((k + ns / 4) % ns, n)) |got, want| {
+        try std.testing.expectApproxEqAbs(want, got, 1e-12);
+    };
+}
+
+test "orbit frees its table and wave on every allocation failure" {
+    const x_hat = [_]f64{ 0.5, 0.1, -0.2 };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn f(gpa: std.mem.Allocator, x: []const f64) !void {
+            const orb = try orbit(x, 1, 1e3, 8, true, gpa);
+            gpa.free(orb.wave);
+        }
+    }.f, .{&x_hat});
 }

@@ -145,12 +145,12 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const data = try a.alloc(f64, per * opts.sources.len);
     errdefer a.free(data);
     if (opts.tf_only) {
-        root.zeroSimd(rhs);
+        @memset(rhs, 0);
         out.seed(rhs);
         ws.slv.solveT(rhs, x);
         for (opts.sources, data) |s, *d| d.* = adjointTf(s, x, n).re;
     } else for (opts.sources, 0..) |s, i| {
-        root.zeroSimd(rhs);
+        @memset(rhs, 0);
         excite(s, rhs);
         ws.slv.solve(rhs, x);
         const zy = immittance(s, x, n);
@@ -185,7 +185,7 @@ pub const Inc = struct {
         defer ctx.scratch_allocator.free(buf);
         const rhs = buf[0..n];
         const x = buf[n..];
-        if (ctx.ac_drive.len == 0) root.zeroSimd(rhs) else @memcpy(rhs, ctx.ac_drive[0..n]);
+        if (ctx.ac_drive.len == 0) @memset(rhs, 0) else @memcpy(rhs, ctx.ac_drive[0..n]);
         ws.slv.solve(rhs, x);
 
         const data = try a.alloc(f64, ctx.probes.len);

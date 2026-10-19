@@ -35,11 +35,14 @@ pub const TriDiag = struct {
     const Self = @This();
 
     n: u32,
-    /// CSC slots of A[i,i-1], A[i,i] and A[i,i+1]; NONE when absent.
+    /// CSC slots of A[i,i-1], A[i,i] and A[i,i+1]; NONE when absent. The
+    /// three are slices of one `3n` allocation, `a_pos` first.
     a_pos: []u32,
     b_pos: []u32,
     c_pos: []u32,
-    /// Modified diagonal, elimination multiplier and super-diagonal value.
+    /// Modified diagonal, elimination multiplier (`mul[0]` unused) and
+    /// super-diagonal value (`cv[n-1]` unused); one `3n` allocation, `bp`
+    /// first. Valid only after a successful `factor`.
     bp: []f64,
     mul: []f64,
     cv: []f64,
@@ -49,36 +52,23 @@ pub const TriDiag = struct {
     /// nonsingular matrices too.
     pub const FactorError = error{SingularMatrix};
 
-    /// Builds the slot maps. Borrows nothing. Free with `deinit`. Asserts
-    /// that the pattern passes `isTridiag`, which needs n >= 3.
-    pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) !Self {
+    /// Builds the slot maps, O(nnz). Borrows nothing. Free with `deinit`.
+    /// Asserts that the pattern passes `isTridiag`, which needs n >= 3.
+    pub fn init(gpa: Allocator, n: u32, col_ptr: []const u32, row_idx: []const u32) Allocator.Error!Self {
         assert(isTridiag(n, col_ptr, row_idx));
-
-        const a_pos = try gpa.alloc(u32, n);
-        errdefer gpa.free(a_pos);
-        const b_pos = try gpa.alloc(u32, n);
-        errdefer gpa.free(b_pos);
-        const c_pos = try gpa.alloc(u32, n);
-        errdefer gpa.free(c_pos);
-        const bp = try gpa.alloc(f64, n);
-        errdefer gpa.free(bp);
-        const mul = try gpa.alloc(f64, n);
-        errdefer gpa.free(mul);
-
+        const pos = try gpa.alloc(u32, 3 * @as(usize, n));
+        errdefer gpa.free(pos);
+        const fac = try gpa.alloc(f64, 3 * @as(usize, n));
         var self = Self{
             .n = n,
-            .a_pos = a_pos,
-            .b_pos = b_pos,
-            .c_pos = c_pos,
-            .bp = bp,
-            .mul = mul,
-            .cv = try gpa.alloc(f64, n),
+            .a_pos = pos[0..n],
+            .b_pos = pos[n .. 2 * n],
+            .c_pos = pos[2 * n ..],
+            .bp = fac[0..n],
+            .mul = fac[n .. 2 * n],
+            .cv = fac[2 * n ..],
         };
-
-        @memset(self.a_pos, NONE);
-        @memset(self.b_pos, NONE);
-        @memset(self.c_pos, NONE);
-
+        @memset(pos, NONE);
         for (0..n) |j| {
             for (col_ptr[j]..col_ptr[j + 1]) |p| {
                 const r = row_idx[p];
@@ -91,14 +81,14 @@ pub const TriDiag = struct {
                 }
             }
         }
-
         return self;
     }
 
     /// Frees the slot maps and factors.
     pub fn deinit(self: *Self, gpa: Allocator) void {
-        inline for (.{ self.a_pos, self.b_pos, self.c_pos }) |s| gpa.free(s);
-        inline for (.{ self.bp, self.mul, self.cv }) |s| gpa.free(s);
+        gpa.free(self.a_pos.ptr[0 .. 3 * @as(usize, self.n)]);
+        gpa.free(self.bp.ptr[0 .. 3 * @as(usize, self.n)]);
+        self.* = undefined;
     }
 
     /// Thomas forward sweep, O(n). Fails when a modified pivot is zero or
@@ -210,5 +200,95 @@ test "TriDiag: random diagonally dominant ladders solve both ways; NaN, Inf and 
         vals[bad] = if (r.boolean()) std.math.nan(f64) else std.math.inf(f64);
         try testing.expectError(error.SingularMatrix, td.factor(vals[0..p], 1e-3));
         vals[bad] = keep;
+    }
+}
+
+test "TriDiag: the pivot test passes at exactly pivot_tol times the entry below and fails one ulp under" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    // [b0 0 0; 1 1 0; 0 0.5 1], CSC. Step 0's pivot b0 meets 1e-3 * |1|.
+    const col_ptr = [_]u32{ 0, 2, 4, 5 };
+    const row_idx = [_]u32{ 0, 1, 1, 2, 2 };
+    var vals = [_]f64{ 1e-3, 1, 1, 0.5, 1 };
+    var td = try TriDiag.init(gpa, 3, &col_ptr, &row_idx);
+    defer td.deinit(gpa);
+    try td.factor(&vals, 1e-3);
+    vals[0] = std.math.nextAfter(f64, 1e-3, 0);
+    try testing.expectError(error.SingularMatrix, td.factor(&vals, 1e-3));
+    // A zero tolerance still refuses a zero pivot.
+    vals[0] = 0;
+    try testing.expectError(error.SingularMatrix, td.factor(&vals, 0));
+    vals[0] = -0.0;
+    try testing.expectError(error.SingularMatrix, td.factor(&vals, 0));
+}
+
+test "TriDiag: LAPACK scaled residual on wide-range ladders, and init under every allocation failure" {
+    const testing = std.testing;
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7d1b);
+    const r = prng.random();
+    const n = 40;
+    var col_ptr: [n + 1]u32 = undefined;
+    var row_idx: [3 * n]u32 = undefined;
+    var vals: [3 * n]f64 = undefined;
+    var p: u32 = 0;
+    col_ptr[0] = 0;
+    for (0..n) |j| {
+        for (j -| 1..@min(j + 2, n)) |i| {
+            row_idx[p] = @intCast(i);
+            p += 1;
+        }
+        col_ptr[j + 1] = p;
+    }
+    try testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, struct {
+        fn run(a: Allocator, cp: []const u32, ri: []const u32) !void {
+            var t = try TriDiag.init(a, n, cp, ri);
+            t.deinit(a);
+        }
+    }.run, .{ col_ptr[0..], row_idx[0..p] });
+    var td = try TriDiag.init(gpa, n, &col_ptr, row_idx[0..p]);
+    defer td.deinit(gpa);
+    for (0..50) |_| {
+        // Column j scaled by 10^e, e in [-12, 12]: an RC ladder with
+        // conductances across decades. Column dominance keeps every pivot
+        // above its column, so Thomas factors without pivoting.
+        for (0..n) |j| {
+            const s = std.math.pow(f64, 10, @floatFromInt(r.intRangeAtMost(i32, -12, 12)));
+            var off: f64 = 0;
+            var diag: u32 = 0;
+            for (col_ptr[j]..col_ptr[j + 1]) |q| {
+                if (row_idx[q] == j) {
+                    diag = @intCast(q);
+                } else {
+                    vals[q] = s * (2 * r.float(f64) - 1);
+                    off += @abs(vals[q]);
+                }
+            }
+            vals[diag] = off + s * (0.1 + r.float(f64));
+        }
+        try td.factor(vals[0..p], 1e-3);
+        var b: [n]f64 = undefined;
+        for (&b) |*v| v.* = 2 * r.float(f64) - 1;
+        inline for (.{ false, true }) |transpose| {
+            var x = b;
+            if (transpose) td.solveT(&x) else td.solve(&x);
+            // LAPACK's ||A x - b|| / (||A|| ||x|| n eps) in max norms, with
+            // n max|a_ij| bounding ||A||: under 30 for a backward-stable
+            // solve, ~1/(n eps) for a wrong one.
+            var rmax: f64 = 0;
+            var amax: f64 = 0;
+            var xmax: f64 = 0;
+            var res: [n]f64 = b;
+            for (0..n) |j| for (col_ptr[j]..col_ptr[j + 1]) |q| {
+                const i = row_idx[q];
+                if (transpose) res[j] -= vals[q] * x[i] else res[i] -= vals[q] * x[j];
+                amax = @max(amax, @abs(vals[q]));
+            };
+            for (res, x) |ri, xi| {
+                rmax = @max(rmax, @abs(ri));
+                xmax = @max(xmax, @abs(xi));
+            }
+            try testing.expect(rmax / (n * amax * xmax * n * std.math.floatEps(f64)) <= 30);
+        }
     }
 }

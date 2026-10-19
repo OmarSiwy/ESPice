@@ -65,7 +65,7 @@ pub fn declineKind(e: InitError) Decline {
     return switch (e) {
         Error.NotEnoughGpuWork, Error.ImageNotCompiled => .policy,
         Error.CircuitNotEligible => .capability,
-        else => .machine,
+        else => .machine, // else: every driver and allocator error is the machine saying no
     };
 }
 
@@ -172,19 +172,6 @@ pub const Driver = struct {
     up: std.atomic.Value(bool) = .init(false),
 };
 
-/// `ESPICE_GPU_STATS`: print the cost model's inputs and the residency split,
-/// and the wall-time split at teardown.
-fn statsOn(knobs: Knobs) bool {
-    return knobs.gpu_stats != .off;
-}
-
-/// Names a batch that has a GPU payload but stays on the host, where it is
-/// correct but slower.
-fn reportDemote(on: bool, model: []const u8, why: []const u8, count: u32) void {
-    if (!on) return;
-    std.debug.print("note: GPU batch '{s}' ({d} instances) stays on the CPU: {s}\n", .{ model, count, why });
-}
-
 /// Monotonic nanoseconds, for the cost probe and `Prof`.
 fn nowNs() u64 {
     var ts: std.c.timespec = undefined;
@@ -208,7 +195,8 @@ const Prof = struct {
     lim: u64 = 0,
     /// `ESPICE_GPU_STATS=phases`: a sync after each eval stage, so the
     /// stage times below add up to the device time (upload+clear, eval
-    /// kernels, reduce, download). Serializes the pipeline; diagnosis only.
+    /// kernels, reduce level 1, level 2, download). Serializes the
+    /// pipeline; diagnosis only.
     phases: bool = false,
     phase: [5]u64 = @splat(0),
     /// Host waits on the stream, all causes.
@@ -239,7 +227,7 @@ const Prof = struct {
         );
         if (self.phases) std.debug.print(
             "gpu-prof: phases per eval us: upload+clear={d:.1} eval={d:.1} reduce1={d:.1} reduce2={d:.1} download={d:.1}\n",
-            .{ us(self.phase[0], self.evals), us(self.phase[1], self.evals), us(self.phase[2], self.evals), us(self.phase[4], self.evals), us(self.phase[3], self.evals) },
+            .{ us(self.phase[0], self.evals), us(self.phase[1], self.evals), us(self.phase[2], self.evals), us(self.phase[3], self.evals), us(self.phase[4], self.evals) },
         );
     }
 };
@@ -608,7 +596,7 @@ pub const GpuContext = struct {
     pub fn init(gpa: std.mem.Allocator, host: Host, driver: ?*Driver, explicit: bool, threads: u32, evals: f64) InitError!*Self {
         if (comptime backend == null) return Error.NoGpuArtifacts;
         const knobs = host.knobs;
-        const report = explicit or statsOn(knobs);
+        const report = explicit or knobs.gpu_stats != .off;
 
         var n_gpu: usize = 0;
         for (host.batches) |b| {
@@ -662,7 +650,7 @@ pub const GpuContext = struct {
 
         // Every eligible batch demoted; `batches[0]` below needs one.
         if (n_up == 0) return Error.CircuitNotEligible;
-        if (statsOn(knobs)) std.debug.print(
+        if (knobs.gpu_stats != .off) std.debug.print(
             "gpu-stats: resident batches={d} (host-stepped {d}) host batches={d} charge planes={s} lte tape={s}\n",
             .{ n_up, n_stepped, n_cpu, if (resident_charge) "device" else "host-only", if (tape_ok) "device" else "row-plane" },
         );
@@ -734,7 +722,7 @@ pub const GpuContext = struct {
         else
             &.{};
 
-        if (statsOn(knobs)) std.debug.print("gpu-stats: stage={d} pieces={d} cells={d}\n", .{ order.n_stage, order.n_pieces, layout.cells(n_planes) });
+        if (knobs.gpu_stats != .off) std.debug.print("gpu-stats: stage={d} pieces={d} cells={d}\n", .{ order.n_stage, order.n_pieces, layout.cells(n_planes) });
         // Charge-free planes read zero until a host batch stamps them.
         @memset(pin_planes, 0);
         var v_stage: [4]Buffer = undefined;
@@ -776,7 +764,7 @@ pub const GpuContext = struct {
             .stream = stream,
             .resident_charge = resident_charge,
             .chk = chk,
-            .prof = .{ .on = statsOn(knobs), .phases = knobs.gpu_stats == .phases },
+            .prof = .{ .on = knobs.gpu_stats != .off, .phases = knobs.gpu_stats == .phases },
             .fuse = !knobs.gpu_nofuse,
         };
         if (driver) |d| d.up.store(true, .monotonic);
@@ -793,7 +781,7 @@ pub const GpuContext = struct {
         const get = b.hooks.gpu_payload orelse return false;
         const p = get(b.ctx);
         const image = imageOf(p.kernel) orelse {
-            reportDemote(report, b.type_name, "no kernel image in this build", p.count);
+            if (report) std.debug.print("note: GPU batch '{s}' ({d} instances) stays on the CPU: no kernel image in this build\n", .{ b.type_name, p.count });
             return false;
         };
         const heavy = image.len >= heavy_image_bytes;
@@ -825,7 +813,7 @@ pub const GpuContext = struct {
         if (b.hooks.q_tape != null) if (qtpName(&qtp_name, p.kernel)) |name| {
             qtp_kernel = gompute.rawKernelByName(backend.?, name, 0) catch |e| switch (e) {
                 error.KernelNotFound => null,
-                else => return e,
+                else => return e, // else: any other driver error is fatal for the batch
             };
         };
         errdefer if (qtp_kernel) |*k| k.deinit();
@@ -906,7 +894,7 @@ pub const GpuContext = struct {
     /// query with too few evals is declined before the probe.
     const Cost = struct {
         fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool) !void {
-            const stats = statsOn(host.knobs);
+            const stats = host.knobs.gpu_stats != .off;
             const init_us: f64 = if (driver_up) 0 else cost_init_us;
             // The probe costs three host evals; a query with few more than
             // that cannot repay the setup.
@@ -1057,37 +1045,44 @@ pub const GpuContext = struct {
             defer gpa.free(seg_slot);
             const seg_row = try gpa.alloc(u32, layout.nr + 1);
             defer gpa.free(seg_row);
-            try permute(gpa, slot_tapes, trash_slot, seg_slot, perm_slot);
-            try permute(gpa, row_tapes, trash_row, seg_row, perm_row);
+            permute(slot_tapes, trash_slot, seg_slot, perm_slot);
+            permute(row_tapes, trash_row, seg_row, perm_row);
             const spaces = [2][]const u32{ seg_slot, seg_row };
 
             // g, rhs, c, q: slot, row, slot, row.
             var stage_base: [4]usize = .{ 0, n_slot, n_slot + n_row, 2 * n_slot + n_row };
             if (n_planes == 2) stage_base[2..].* = .{ 0, 0 };
-            var seg1: std.ArrayList(u32) = .empty;
-            errdefer seg1.deinit(gpa);
+            var pieces_per_pair: usize = 0;
+            for (spaces) |seg| for (seg[0 .. seg.len - 1], seg[1..]) |a, b| {
+                pieces_per_pair += (b - a + chunk - 1) / chunk;
+            };
+            const n_pieces = pieces_per_pair * (n_planes / 2);
+            const seg1 = try gpa.alloc(u32, 2 * n_pieces);
+            errdefer gpa.free(seg1);
             const n_cells = layout.cells(n_planes);
             const seg2 = try gpa.alloc(u32, 2 * n_cells);
             errdefer gpa.free(seg2);
             var cell: usize = 0;
+            var piece: u32 = 0;
             for (0..n_planes) |plane| {
                 const seg = spaces[plane % 2];
                 const base: u32 = @intCast(stage_base[plane]);
                 for (0..seg.len - 1) |i| {
-                    seg2[2 * cell] = @intCast(seg1.items.len / 2);
+                    seg2[2 * cell] = piece;
                     var at = seg[i];
-                    while (at < seg[i + 1]) : (at += chunk)
-                        try seg1.appendSlice(gpa, &.{ base + at, base + @min(at + chunk, seg[i + 1]) });
-                    seg2[2 * cell + 1] = @intCast(seg1.items.len / 2);
+                    while (at < seg[i + 1]) : (at += chunk) {
+                        seg1[2 * piece ..][0..2].* = .{ base + at, base + @min(at + chunk, seg[i + 1]) };
+                        piece += 1;
+                    }
+                    seg2[2 * cell + 1] = piece;
                     cell += 1;
                 }
             }
-            std.debug.assert(cell == n_cells);
-            const n_pieces = seg1.items.len / 2;
+            std.debug.assert(cell == n_cells and piece == n_pieces);
             return .{
                 .perm_slot = perm_slot,
                 .perm_row = perm_row,
-                .seg1 = try seg1.toOwnedSlice(gpa),
+                .seg1 = seg1,
                 .seg2 = seg2,
                 .stage_base = stage_base,
                 .n_stage = n_stage,
@@ -1100,7 +1095,7 @@ pub const GpuContext = struct {
         /// end). Trash contributions go to the tail after the runs, each on
         /// its own cell: the kernel stores through the tape unconditionally,
         /// and a shared cell would be a contended write.
-        fn permute(gpa: std.mem.Allocator, tapes: []const []const u32, trash: u32, seg: []u32, perm: []u32) !void {
+        fn permute(tapes: []const []const u32, trash: u32, seg: []u32, perm: []u32) void {
             std.debug.assert(seg.len >= 1);
             @memset(seg, 0);
             for (tapes) |tape| for (tape) |dest| {
@@ -1111,8 +1106,8 @@ pub const GpuContext = struct {
                 run += s.*;
                 s.* = run;
             }
-            const cursor = try gpa.dupe(u32, seg);
-            defer gpa.free(cursor);
+            // `seg[c]` is cell c's cursor: it ends at cell c + 1's start,
+            // so the shift below restores the starts.
             var tail: u32 = run;
             var k: usize = 0;
             for (tapes) |tape| for (tape) |dest| {
@@ -1120,11 +1115,13 @@ pub const GpuContext = struct {
                     perm[k] = tail;
                     tail += 1;
                 } else {
-                    perm[k] = cursor[dest];
-                    cursor[dest] += 1;
+                    perm[k] = seg[dest];
+                    seg[dest] += 1;
                 }
                 k += 1;
             };
+            std.mem.copyBackwards(u32, seg[1..], seg[0 .. seg.len - 1]);
+            seg[0] = 0;
             std.debug.assert(k == perm.len and tail == perm.len);
         }
     };
@@ -1142,7 +1139,7 @@ pub const GpuContext = struct {
         v.bytes -= byte_off;
         v.handle = switch (@typeInfo(@TypeOf(base.handle))) {
             .int => base.handle + byte_off,
-            else => @ptrFromInt(@intFromPtr(base.handle) + byte_off),
+            else => @ptrFromInt(@intFromPtr(base.handle) + byte_off), // else: HIP hands out pointers
         };
         return v;
     }
@@ -1330,9 +1327,9 @@ pub const GpuContext = struct {
         try self.launchReduce(&self.d_seg1, &self.d_stage, &self.d_mid, self.n_pieces);
         try self.phaseLap(2);
         try self.launchReduce(&self.d_seg2, &self.d_mid, &self.d_planes, self.n_cells);
-        try self.phaseLap(4);
-        try self.d_planes.downloadAtAsync(self.pinnedBuf(buf).ptr, 0, self.n_cells * @sizeOf(f64), &self.stream);
         try self.phaseLap(3);
+        try self.d_planes.downloadAtAsync(self.pinnedBuf(buf).ptr, 0, self.n_cells * @sizeOf(f64), &self.stream);
+        try self.phaseLap(4);
         // `pin_tape` is about to hold buffer `buf`'s tape, or stale bytes.
         self.tape_buf = null;
         if (charge) try self.enqueueTape(buf, sim_at);
@@ -1920,11 +1917,15 @@ pub const GpuContext = struct {
 // device writes latches, so no field has two writers today.
 fn mergeInstances(host: []u8, base: []const u8, device: []const u8) bool {
     std.debug.assert(host.len == base.len and base.len == device.len);
-    var wrote = false;
+    // Branchless, so it vectorizes: 0.065 against 0.40 ns/byte for the
+    // `if`/`else` store (1 MiB, 1% host writes, i9-14900HX).
+    var wrote: u8 = 0;
     for (host, base, device) |*h, b, d| {
-        if (h.* != b) wrote = true else h.* = d;
+        const mine = h.* != b;
+        wrote |= @intFromBool(mine);
+        h.* = if (mine) h.* else d;
     }
-    return wrote;
+    return wrote != 0;
 }
 
 test "mergeInstances keeps host parameter writes and device latches" {
@@ -1981,16 +1982,6 @@ test detectedHardware {
     // does not depend on the build's images.
     const name = detectedHardware();
     try std.testing.expect(std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "cuda") or std.mem.eql(u8, name, "hip"));
-}
-
-test "Knobs.parseBlock" {
-    const parseBlock = Knobs.parseBlock;
-    try std.testing.expectEqual(@as(u32, 64), parseBlock(null));
-    try std.testing.expectEqual(@as(u32, 32), parseBlock("32"));
-    try std.testing.expectEqual(@as(u32, 1), parseBlock("1"));
-    try std.testing.expectEqual(@as(u32, 1024), parseBlock("1024"));
-    for ([_][]const u8{ "0", "1025", "", "-8", "64x", "99999999999" }) |bad|
-        try std.testing.expectEqual(@as(u32, 64), parseBlock(bad));
 }
 
 test qtpName {
@@ -2124,24 +2115,239 @@ test "Order reduces each cell in the serial stamp's order" {
 }
 
 test "Order.permute is a stable counting sort with trash in the tail" {
-    const gpa = std.testing.allocator;
     const trash: u32 = 3;
     const tapes = [_][]const u32{ &.{ 2, 3, 0, 2 }, &.{}, &.{ 3, 0, 2 } };
     var seg: [5]u32 = undefined;
     var perm: [7]u32 = undefined;
-    try GpuContext.Order.permute(gpa, &tapes, trash, &seg, &perm);
+    GpuContext.Order.permute(&tapes, trash, &seg, &perm);
     // Cells 0, 1, 2, trash: runs of 2, 0, 3, 0; the two trash entries after.
     try std.testing.expectEqualSlices(u32, &.{ 0, 2, 2, 5, 5 }, &seg);
     try std.testing.expectEqualSlices(u32, &.{ 2, 5, 0, 3, 6, 1, 4 }, &perm);
 }
 
 test "Order.permute on empty tapes" {
-    const gpa = std.testing.allocator;
     const tapes = [_][]const u32{ &.{}, &.{} };
     var seg: [3]u32 = undefined;
     var perm: [0]u32 = .{};
-    try GpuContext.Order.permute(gpa, &tapes, 1, &seg, &perm);
+    GpuContext.Order.permute(&tapes, 1, &seg, &perm);
     try std.testing.expectEqualSlices(u32, &.{ 0, 0, 0 }, &seg);
+}
+
+test "Order.permute: random tapes against the stable-sort ranks" {
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    var dests: [300]u32 = undefined;
+    var perm: [300]u32 = undefined;
+    var seg: [10]u32 = undefined; // nine cells
+    for (0..200) |_| {
+        const len = rnd.uintLessThan(usize, dests.len + 1);
+        const trash = rnd.uintLessThan(u32, 9);
+        for (dests[0..len]) |*d| d.* = rnd.uintLessThan(u32, 9);
+        const cut = rnd.uintLessThan(usize, len + 1);
+        const all = dests[0..len];
+        GpuContext.Order.permute(&.{ all[0..cut], all[cut..] }, trash, &seg, perm[0..len]);
+        var n_live: u32 = 0;
+        for (all) |d| n_live += @intFromBool(d != trash);
+        // A live entry's rank: live entries of lower cells, then earlier
+        // entries of its own. Trash ranks after every live entry, in order.
+        for (all, 0..) |d, k| {
+            var want: u32 = if (d == trash) n_live else 0;
+            if (d != trash) for (all) |e| {
+                want += @intFromBool(e != trash and e < d);
+            };
+            for (all[0..k]) |e| want += @intFromBool(e == d);
+            try std.testing.expectEqual(want, perm[k]);
+        }
+        for (seg, 0..) |s, c| {
+            var want: u32 = 0;
+            for (all) |e| want += @intFromBool(e != trash and e < c);
+            try std.testing.expectEqual(want, s);
+        }
+    }
+}
+
+fn buildOrderAndFree(gpa: std.mem.Allocator, slot_tapes: []const []const u32, row_tapes: []const []const u32) !void {
+    const order = try GpuContext.Order.build(gpa, slot_tapes, row_tapes, 2, 1, .{ .ng = 3, .nr = 2 }, 4);
+    order.deinit(gpa);
+}
+
+test "Order.build frees everything on every allocation failure" {
+    // Cell 0's run spans two pieces.
+    var slots: [160]u32 = undefined;
+    for (&slots, 0..) |*d, i| d.* = ([_]u32{ 0, 2, 1, 0 })[i % 4];
+    const rows = [_]u32{ 0, 1, 0 };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, buildOrderAndFree, .{ &[_][]const u32{ &slots, &.{} }, &[_][]const u32{ &rows, &.{} } });
+}
+
+test "Order.build: no contributions, and a stage past u32" {
+    const gpa = std.testing.allocator;
+    const order = try GpuContext.Order.build(gpa, &.{&.{}}, &.{&.{}}, 1, 0, .{ .ng = 2, .nr = 1 }, 4);
+    defer order.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), order.n_stage);
+    try std.testing.expectEqual(@as(usize, 0), order.n_pieces);
+    // Every cell is an empty range of pieces.
+    try std.testing.expectEqualSlices(u32, &@as([12]u32, @splat(0)), order.seg2);
+
+    // Only the lengths are read before the bar, so a dangling base is safe.
+    const huge = @as([*]const u32, @ptrFromInt(@alignOf(u32)))[0 .. std.math.maxInt(u32) - GpuContext.Order.chunk + 1];
+    try std.testing.expectError(Error.CircuitNotEligible, GpuContext.Order.build(gpa, &.{huge}, &.{&.{}}, 0, 0, .{ .ng = 1, .nr = 1 }, 2));
+}
+
+test "mergeInstances matches the bytewise rule at every length and offset" {
+    var prng = std.Random.DefaultPrng.init(0xbeef);
+    const rnd = prng.random();
+    var host: [204]u8 = undefined;
+    var base: [204]u8 = undefined;
+    var dev: [204]u8 = undefined;
+    var want: [204]u8 = undefined;
+    for (0..201) |n| for (0..4) |off| {
+        const h = host[off..][0..n];
+        const b = base[3 - off ..][0..n];
+        const d = dev[(off + 1) % 4 ..][0..n];
+        rnd.bytes(b);
+        rnd.bytes(d);
+        @memcpy(h, b);
+        var wrote = false;
+        for (h) |*x| if (rnd.uintLessThan(u8, 16) == 0) {
+            x.* +%= 1 + rnd.uintLessThan(u8, 255); // never a multiple of 256
+            wrote = true;
+        };
+        for (want[0..n], h, b, d) |*w, x, y, z| w.* = if (x != y) x else z;
+        try std.testing.expectEqual(wrote, mergeInstances(h, b, d));
+        try std.testing.expectEqualSlices(u8, want[0..n], h);
+    };
+}
+
+test "Cost.gpuWins at its bars and on infinities" {
+    const W = GpuContext.Cost;
+    // `cost_min_ratio` exactly passes.
+    try std.testing.expect(W.gpuWins(cost_min_ratio * 100, 100, 1e6, 0));
+    // Setup: 1.3 * (init + 1e5) < 1e6 holds below init = 669,230.8 us.
+    try std.testing.expect(W.gpuWins(1000, 100, 1000, 669_000));
+    try std.testing.expect(!W.gpuWins(1000, 100, 1000, 670_000));
+    try std.testing.expect(!W.gpuWins(1000, std.math.inf(f64), 1000, 0));
+    // Unbounded evals: inf < inf is false, so the CPU.
+    try std.testing.expect(!W.gpuWins(1000, 100, std.math.inf(f64), 0));
+}
+
+/// A batch for `Cost.admit` that busy-waits `spin_ns` per eval and counts
+/// its evals.
+const StubBatch = struct {
+    spin_ns: u64,
+    evals: u32 = 0,
+
+    fn eval(ctx: *anyopaque, _: *const Planes, _: u32, _: u32, _: []const f64, _: f64) void {
+        const self: *StubBatch = @ptrCast(@alignCast(ctx));
+        self.evals += 1;
+        const t0 = nowNs();
+        while (nowNs() - t0 < self.spin_ns) {}
+    }
+
+    fn payload(_: *anyopaque) device_ir.GpuPayload {
+        return .{
+            .kernel = "",
+            .count = 1,
+            .n_u = 2,
+            .models = &.{},
+            .model_of = &.{},
+            .instances = &.{},
+            .gath = &.{},
+            .rhs_idx = &.{},
+            .slots = &.{ 0, 1 },
+            .lim_kernel = "",
+            .ctl_kernel = "",
+            .reduce_kernel = "",
+            .lim_x = &.{},
+            .states = &.{},
+            .lim_active = false,
+        };
+    }
+
+    fn batch(self: *StubBatch, hooks: *const device_ir.Hooks) device_ir.Batch {
+        return .{ .ctx = self, .eval = eval, .eval_newton = eval, .count = 1, .n_u = 2, .has_charge = false, .has_const_jacobian = false, .type_name = "stub", .hooks = hooks };
+    }
+};
+
+test "Cost.admit prices a measured host eval and leaves the planes alone" {
+    const gpa = std.testing.allocator;
+    // `admit` reads only `gpu_payload` off the hooks.
+    var gpu_hooks: device_ir.Hooks = undefined;
+    gpu_hooks.gpu_payload = StubBatch.payload;
+    var host_hooks: device_ir.Hooks = undefined;
+    host_hooks.gpu_payload = null;
+    var vals: [8]f64 = @splat(7);
+    const planes: Planes = .{ .g_vals = vals[0..2], .c_vals = vals[2..4], .rhs = vals[4..6], .q_vec = vals[6..8] };
+    const Case = struct { spin_ns: u64, evals: f64, driver_up: bool, admitted: bool, probed: bool };
+    const cases = [_]Case{
+        // Too few evals: declined before the probe.
+        .{ .spin_ns = 2_000_000, .evals = 19, .driver_up = true, .admitted = false, .probed = false },
+        // A free host eval never repays the 40 us launch floor.
+        .{ .spin_ns = 0, .evals = 1e6, .driver_up = true, .admitted = false, .probed = true },
+        // >= 2 ms against <= 0.28 ms + 0.12 of it on the device.
+        .{ .spin_ns = 2_000_000, .evals = 1e6, .driver_up = true, .admitted = true, .probed = true },
+        // The same, but 20 evals cannot repay a cold 350 ms driver setup.
+        .{ .spin_ns = 2_000_000, .evals = 20, .driver_up = false, .admitted = false, .probed = true },
+    };
+    for (cases) |c| {
+        var dev: StubBatch = .{ .spin_ns = c.spin_ns };
+        var other: StubBatch = .{ .spin_ns = 0 };
+        const batches = [_]device_ir.Batch{ other.batch(&host_hooks), dev.batch(&gpu_hooks) };
+        const host: Host = .{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} };
+        const got = GpuContext.Cost.admit(gpa, host, 1, c.evals, c.driver_up);
+        if (c.admitted) try got else try std.testing.expectError(Error.NotEnoughGpuWork, got);
+        try std.testing.expectEqual(@as(u32, if (c.probed) 3 else 0), dev.evals);
+        try std.testing.expectEqual(@as(u32, 0), other.evals);
+        try std.testing.expectEqualSlices(f64, &@as([8]f64, @splat(7)), &vals);
+    }
+}
+
+test markerPath {
+    var buf: [64]u8 = undefined;
+    const Want = struct { knobs: Knobs, prefix: ?[]const u8 };
+    for ([_]Want{
+        .{ .knobs = .{ .xdg_cache_home = "/x", .home = "/h" }, .prefix = "/x/espice/gpu-jit/" },
+        .{ .knobs = .{ .home = "/h" }, .prefix = "/h/.cache/espice/gpu-jit/" },
+        .{ .knobs = .{}, .prefix = null },
+        // Past the buffer: no marker, not a truncated one.
+        .{ .knobs = .{ .home = "/hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh" }, .prefix = null },
+    }) |w| {
+        const got = markerPath(&buf, "image", w.knobs);
+        const prefix = w.prefix orelse {
+            try std.testing.expect(got == null);
+            continue;
+        };
+        try std.testing.expect(std.mem.startsWith(u8, got.?, prefix));
+        const hash = got.?[prefix.len..];
+        try std.testing.expectEqual(@as(usize, 16), hash.len);
+        for (hash) |ch| try std.testing.expect(std.ascii.isHex(ch));
+    }
+    // The name is keyed on the image bytes.
+    var other: [64]u8 = undefined;
+    try std.testing.expect(!std.mem.eql(u8, markerPath(&buf, "image", .{ .home = "/h" }).?, markerPath(&other, "imagf", .{ .home = "/h" }).?));
+}
+
+test "markWarm makes imageWarm true for that image only" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [64]u8 = undefined;
+    const knobs: Knobs = .{ .xdg_cache_home = try std.fmt.bufPrint(&root, ".zig-cache/tmp/{s}", .{&tmp.sub_path}) };
+    try std.testing.expect(!imageWarm("a", knobs));
+    markWarm("a", knobs);
+    try std.testing.expect(imageWarm("a", knobs));
+    try std.testing.expect(!imageWarm("b", knobs));
+    // A second mark, with both directories present, is harmless.
+    markWarm("a", knobs);
+    try std.testing.expect(imageWarm("a", knobs));
+}
+
+test "without kernel images init declines as the machine and auto falls back" {
+    if (comptime backend != null) return error.SkipZigTest;
+    const empty: Planes = .{ .g_vals = &.{}, .c_vals = &.{}, .rhs = &.{}, .q_vec = &.{} };
+    const host: Host = .{ .batches = &.{}, .planes = empty, .n = 0, .trash_slot = 0, .has_charge = false, .knobs = .{} };
+    const got = GpuContext.init(std.testing.allocator, host, null, true, 1, 1e6);
+    try std.testing.expectError(Error.NoGpuArtifacts, got);
+    try std.testing.expect(!available);
+    try std.testing.expect(fallsBack(.auto, false, Error.NoGpuArtifacts));
 }
 
 /// Private access for the analysis test suite.

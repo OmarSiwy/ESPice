@@ -20,12 +20,6 @@ fn writeRecord(w: *Io.Writer, data: []const u8) !void {
     try w.writeInt(i32, @intCast(data.len), .little);
 }
 
-fn writeRecordI32(w: *Io.Writer, value: i32) !void {
-    var buf: [4]u8 = undefined;
-    std.mem.writeInt(i32, &buf, value, .little);
-    try writeRecord(w, &buf);
-}
-
 /// Writes `plot`. Asserts at most 64 variables (`types.validateSchema`
 /// enforces it) and one sample row per point.
 pub fn encode(w: *Io.Writer, plot: Plot) !void {
@@ -39,14 +33,14 @@ pub fn encode(w: *Io.Writer, plot: Plot) !void {
     try w.print(header, args);
     try w.writeInt(i32, header_len, .little);
 
-    try writeRecordI32(w, @intCast(nvars));
+    try writeRecord(w, &std.mem.toBytes(std.mem.nativeToLittle(i32, @intCast(nvars))));
     var names: [name_slot * names_max]u8 = @splat(0);
     for (plot.result.varnames, 0..) |name, i| {
         const len = @min(name.len, name_slot - 1);
         @memcpy(names[i * name_slot ..][0..len], name[0..len]);
     }
     try writeRecord(w, names[0 .. nvars * name_slot]);
-    try writeRecordI32(w, @intFromBool(plot.result.is_complex));
+    try writeRecord(w, &std.mem.toBytes(std.mem.nativeToLittle(i32, @intFromBool(plot.result.is_complex))));
     for (0..plot.result.npoints) |pt| try writeRecord(w, std.mem.sliceAsBytes(plot.point(pt)));
 }
 
@@ -72,4 +66,31 @@ test "SST2 cuts names to 15 bytes plus a NUL" {
     const names = blob[4 + header.len + 4 + 12 + 4 ..][0 .. 2 * name_slot];
     const pad: [12]u8 = @splat(0);
     try std.testing.expectEqualStrings("v(a_very_long_n\x00v(b)" ++ pad, names);
+}
+
+test "SST2 round-trips every record and its sample bits" {
+    var buf: [512]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    const nan_payload: f64 = @bitCast(@as(u64, 0xfff8_0000_0000_0042));
+    const data = [_]f64{ 1, -0.0, 5e-324, nan_payload, 2, std.math.inf(f64), 3, -7 };
+    try encode(&w, .{ .title = "t", .result = .{ .plotname = "AC", .varnames = &.{ "frequency", "v(o)" }, .is_complex = true, .npoints = 2, .data = &data } });
+    var r: Io.Reader = .fixed(w.buffered());
+    // Each record: i32 length, payload, the same length again.
+    const S = struct {
+        fn record(rd: *Io.Reader) ![]const u8 {
+            const len: usize = @intCast(try rd.takeInt(i32, .little));
+            const payload = try rd.take(len);
+            try std.testing.expectEqual(@as(i32, @intCast(len)), try rd.takeInt(i32, .little));
+            return payload;
+        }
+    };
+    try std.testing.expectEqualStrings("SST2 t AC nvars=2 npoints=2", try S.record(&r));
+    try std.testing.expectEqual(@as(i32, 2), std.mem.readInt(i32, (try S.record(&r))[0..4], .little));
+    try std.testing.expectEqualStrings("frequency" ++ "\x00\x00\x00\x00\x00\x00\x00" ++ "v(o)" ++ "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", try S.record(&r));
+    try std.testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, (try S.record(&r))[0..4], .little));
+    for (0..2) |pt| {
+        const row = try S.record(&r);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(data[pt * 4 ..][0..4]), row);
+    }
+    try std.testing.expectError(error.EndOfStream, r.takeByte());
 }

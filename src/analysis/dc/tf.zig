@@ -7,6 +7,7 @@
 const std = @import("std");
 const root = @import("../types.zig");
 const xf = @import("xf.zig");
+const XfSource = @import("core").query.XfSource;
 
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Tf;
@@ -42,12 +43,12 @@ pub fn solve(ckt: *root.Circuit, x_op: []const f64, options: Options, input_bran
     const out: xf.Output = .{ .node = options.output_node, .neg = options.output_neg, .branch = options.output_branch };
     // A V card drives its own branch row. An I card has no branch row, so the
     // unit current goes into its node pair (`.tf v(out) Iin`).
-    const src: @import("core").query.XfSource = if (options.input_nodes) |pair|
+    const src: XfSource = if (options.input_nodes) |pair|
         .{ .name = "", .branch = null, .nodes = pair }
     else
         .{ .name = "", .branch = input_branch };
 
-    root.zeroSimd(rhs);
+    @memset(rhs, 0);
     xf.excite(src, rhs);
     ws.slv.solve(rhs, x);
     const gain = out.read(x, n).re;
@@ -58,7 +59,7 @@ pub fn solve(ckt: *root.Circuit, x_op: []const f64, options: Options, input_bran
     // does for a V card: y[br] = (J^-1)[br][br] is the branch current a unit
     // volt on that source moves. ngspice's tfanal.c takes 1/MAX(1e-20, y[br]),
     // which is 1e20 for every passive circuit (dev/analysis/tf.md).
-    root.zeroSimd(rhs);
+    @memset(rhs, 0);
     out.seed(rhs);
     ws.slv.solveT(rhs, x);
     const output_resistance = if (out.branch) |br|
@@ -75,7 +76,7 @@ pub fn solve(ckt: *root.Circuit, x_op: []const f64, options: Options, input_bran
 /// `xf.immittance`'s impedance with ngspice's tfanal.c floor on a V card: a
 /// branch current under 1e-20 A per volt reads `xf.infinite` (1e20), not its
 /// reciprocal (#199). `.dcxf` follows VACASK, which clamps only an exact zero.
-fn impedance(src: @import("core").query.XfSource, x: []const f64, n: usize) f64 {
+fn impedance(src: XfSource, x: []const f64, n: usize) f64 {
     std.debug.assert(x.len == n);
     if (src.branch) |br| if (@abs(x[br]) < 1 / xf.infinite) return xf.infinite;
     return xf.immittance(src, x, n)[0].re;

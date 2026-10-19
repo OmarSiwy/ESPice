@@ -58,10 +58,12 @@ fn bias(comptime D: type, u: usize, name: []const u8) f64 {
     return 0.0313;
 }
 
-const Report = struct { worst: f64, entries: u32 };
+/// `bad` counts the entries past `rtol`, NaN included: `@max` drops a NaN,
+/// so `worst` alone would pass one.
+const Report = struct { worst: f64, entries: u32, bad: u32 };
 
 /// Checks D's G and C against central differences at the bias point;
-/// returns the worst |J - FD| / (|J| + row max) seen.
+/// returns the worst |J - FD| / (|J| + row max) seen and the failures.
 fn checkModel(comptime D: type, lib: *const Library, check_c: bool) !Report {
     const name = comptime @import("device").modelName(D).?;
     const field_names = @typeInfo(D.U).@"enum".field_names;
@@ -71,7 +73,7 @@ fn checkModel(comptime D: type, lib: *const Library, check_c: bool) !Report {
     for (&nodes) |*nd| nd.* = try b.addNode();
     var model: D.Model = .{};
     if (lib.vtable(comptime Library.builtin(name)).derive) |derive| derive(@ptrCast(&model));
-    try b.addDevice(D, "", model, .{}, nodes);
+    try b.addDevice(D, "", &model, &.{}, nodes);
     var prepared = try b.compile();
     defer prepared.deinit();
     var ckt = try types.Circuit.instantiate(&prepared, t.allocator);
@@ -123,7 +125,7 @@ fn checkModel(comptime D: type, lib: *const Library, check_c: bool) !Report {
         }
     }
 
-    var report: Report = .{ .worst = 0, .entries = 0 };
+    var report: Report = .{ .worst = 0, .entries = 0, .bad = 0 };
     const jacs = [_]*const [n_max * n_max]f64{ &g, &c };
     const fds = [_]*const [n_max * n_max]f64{ &fd_g, &fd_c };
     const planes: usize = if (check_c) 2 else 1;
@@ -138,7 +140,10 @@ fn checkModel(comptime D: type, lib: *const Library, check_c: bool) !Report {
                 if (scale == 0) continue;
                 report.entries += 1;
                 const rel = err / scale;
-                if (!(rel <= rtol)) std.debug.print("{s}: row {d} col {d}: J {e} FD {e}\n", .{ name, i, j, d, fd[i * n + j] });
+                if (!(rel <= rtol)) {
+                    std.debug.print("{s}: row {d} col {d}: J {e} FD {e}\n", .{ name, i, j, d, fd[i * n + j] });
+                    report.bad += 1;
+                }
                 report.worst = @max(report.worst, rel);
             }
         }
@@ -155,7 +160,7 @@ test "every built-in model's Jacobian matches a central difference at a smooth b
         const report = try checkModel(@field(models, name), &lib, comptime !c_not_dq.has(name));
         // A model that stamps nothing checks nothing.
         try t.expect(report.entries > 0);
-        if (!(report.worst <= rtol)) failed += 1;
+        if (report.bad != 0) failed += 1;
     }
     try t.expectEqual(@as(u32, 0), failed);
 }

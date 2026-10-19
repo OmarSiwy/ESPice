@@ -20,7 +20,7 @@ const Allocator = std.mem.Allocator;
 
 // Dense only wins for tiny systems. medium/ladder_filter (n = 41) spent 90%
 // of its run in dense 82^3/3 factors per omega; the sparse refactor is O(nnz).
-const DENSE_THRESHOLD: u32 = 16;
+const dense_threshold: u32 = 16;
 
 /// The part of A(ω) beyond G + jωC over the ω of one `solveBatch` call:
 /// entry e adds re + j·im at source CSC slot `slots[e]`, its term at
@@ -63,7 +63,7 @@ pub const FreqSolver = struct {
         sp: Sparse,
     };
 
-    /// n <= DENSE_THRESHOLD: owned n x n row-major G and C, assembled per
+    /// n <= dense_threshold: owned n x n row-major G and C, assembled per
     /// frequency into the reused 2n x 2n LU slab. The borrowed source
     /// pattern places `Dyn` entries; empty from `initDense`.
     const Dense = struct {
@@ -146,7 +146,7 @@ pub const FreqSolver = struct {
         try ckt.linearizeAc(x_op);
         const n: u32 = @intCast(ckt.n);
 
-        if (n <= DENSE_THRESHOLD) {
+        if (n <= dense_threshold) {
             const nu: usize = n;
             const g = try allocator.alloc(f64, nu * nu);
             ckt.denseG(g);
@@ -480,17 +480,23 @@ pub const FreqSolver = struct {
         const allocator = self.gpa;
         assert(omegas.len > 0);
         self.held_id.clearRetainingCapacity();
+        // Every ω at most is held, so no append below allocates.
+        try self.held_id.ensureTotalCapacity(allocator, omegas.len);
         switch (self.strategy) {
             .dense => |*d| {
                 const nn: usize = self.nn;
                 if (d.held.len != omegas.len * nn * nn) {
+                    // Both before either is replaced: a held block without its
+                    // pivot rows passed this length check on the next call.
+                    const held = try allocator.alloc(f64, omegas.len * nn * nn);
+                    errdefer allocator.free(held);
+                    const held_piv = try allocator.alloc(u32, omegas.len * nn);
                     allocator.free(d.held);
                     allocator.free(d.held_piv);
-                    d.held = &.{};
-                    d.held_piv = &.{};
-                    d.held = try allocator.alloc(f64, omegas.len * nn * nn);
-                    d.held_piv = try allocator.alloc(u32, omegas.len * nn);
+                    d.held = held;
+                    d.held_piv = held_piv;
                 }
+                assert(d.held_piv.len * nn == d.held.len);
                 for (omegas, 0..) |omega, k| {
                     const a = d.held[k * nn * nn ..][0 .. nn * nn];
                     const piv = d.held_piv[k * nn ..][0..nn];
@@ -504,7 +510,7 @@ pub const FreqSolver = struct {
                             p.* = @intCast(i);
                             a[i * nn + i] = 1;
                         }
-                        try self.held_id.append(allocator, @intCast(k));
+                        self.held_id.appendAssumeCapacity(@intCast(k));
                     };
                 }
             },
@@ -546,16 +552,18 @@ pub const FreqSolver = struct {
     /// Lays a fresh pivot tape by a full factor at `omegas[tape]` and
     /// replays it into every LaneLu group. `held_id` receives the ω it
     /// cannot replay, every ω when A(omegas[tape]) is singular (no group is
-    /// built then). Returns how many ω that holds.
+    /// built then). Returns how many ω that holds. Asserts that `held_id`
+    /// has room for every ω (`factorEach` reserves it).
     fn replayTape(self: *Self, sp: *Sparse, omegas: []const f64, tape: usize) !usize {
         const gpa = self.gpa;
         const LL = lane_lu.LaneLu(W);
         freeHeld(gpa, sp);
         self.held_id.clearRetainingCapacity();
+        assert(self.held_id.capacity >= omegas.len);
         sp.slv.factored = false;
         setOmegaSparse(self.n, sp, omegas[tape], .{}, 0) catch |err| {
             if (err != error.SingularMatrix) return err;
-            for (0..omegas.len) |k| try self.held_id.append(gpa, @intCast(k));
+            for (0..omegas.len) |k| self.held_id.appendAssumeCapacity(@intCast(k));
             return omegas.len;
         };
         const lu = sp.slv.sparse() orelse return error.UnsupportedEngine;
@@ -574,7 +582,7 @@ pub const FreqSolver = struct {
             for (0..W) |l| ow[l] = omegas[base + @min(l, cnt - 1)];
             const bad = h.refactor(Stacked(W).of(sp, ow, .{}, base, cnt), sp.slv.params.refactor_growth_limit);
             for (0..cnt) |l| if ((bad >> @intCast(l)) & 1 != 0)
-                try self.held_id.append(gpa, @intCast(base + l));
+                self.held_id.appendAssumeCapacity(@intCast(base + l));
         }
         return self.held_id.items.len;
     }
@@ -909,4 +917,121 @@ inline fn buildStackedRealPattern(
         }
     }
     assert(p == sr_row_idx.len);
+}
+
+const testing = std.testing;
+
+/// G = 2 on the diagonal and -1 between ring neighbours (0 and n - 1
+/// included), C = `c_diag` on the diagonal: a pattern no structured engine
+/// takes, so the stacked 2n system gets the sparse LU.
+const Ring = struct {
+    const n_max = 24;
+    col_ptr: [n_max + 1]u32 = undefined,
+    row_idx: [3 * n_max]u32 = undefined,
+    g: [3 * n_max]f64 = undefined,
+    c: [3 * n_max]f64 = undefined,
+
+    fn init(n: u32, c_diag: f64) Ring {
+        assert(n >= 3);
+        assert(n <= n_max);
+        var r: Ring = .{};
+        var p: u32 = 0;
+        for (0..n) |j| {
+            r.col_ptr[j] = p;
+            var rows = [3]u32{ @intCast((j + n - 1) % n), @intCast(j), @intCast((j + 1) % n) };
+            std.mem.sort(u32, &rows, {}, std.sort.asc(u32));
+            for (rows) |i| {
+                r.row_idx[p] = i;
+                r.g[p] = if (i == j) 2 else -1;
+                r.c[p] = if (i == j) c_diag else 0;
+                p += 1;
+            }
+        }
+        r.col_ptr[n] = p;
+        return r;
+    }
+};
+
+fn everyEntryPoint(gpa: Allocator, n: u32) !void {
+    const ring: Ring = .init(n, 1e-3);
+    const nnz = ring.col_ptr[n];
+    var fs = try FreqSolver.fromPlanes(gpa, n, ring.col_ptr[0 .. n + 1], ring.row_idx[0..nnz], ring.g[0..nnz], ring.c[0..nnz]);
+    defer fs.deinit();
+    const nn: usize = 2 * @as(usize, n);
+    var rhs: [2 * Ring.n_max]f64 = @splat(0);
+    rhs[0] = 1;
+    var x: [2 * Ring.n_max * 5]f64 = undefined;
+    try fs.solve(1e3, rhs[0..nn], x[0..nn]);
+    const omegas = [_]f64{ 1, 1e2, 1e4, 1e6, 1e8 };
+    const dyn: Dyn = .{ .slots = &.{ 0, 1, 1_000_000 }, .re = &(@as([15]f64, @splat(0.5))), .im = &(@as([15]f64, @splat(0.25))) };
+    try fs.solveBatch(&omegas, dyn, rhs[0..nn], x[0 .. omegas.len * nn], false);
+    try fs.solveBatch(&omegas, .{}, rhs[0..nn], x[0 .. omegas.len * nn], true);
+    try fs.factorEach(&omegas);
+    var each: [2 * Ring.n_max * 5]f64 = @splat(1);
+    fs.solveEach(each[0 .. omegas.len * nn], x[0 .. omegas.len * nn], false);
+}
+
+test "FreqSolver: every entry point frees all it holds on every allocation failure (#83)" {
+    // n = 4 takes the dense strategy, n = 20 the sparse lanes. Any error but
+    // OutOfMemory would be an allocation failure reported as a numerical one.
+    inline for (.{ 4, 20 }) |n|
+        try testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, everyEntryPoint, .{@as(u32, n)});
+}
+
+test "FreqSolver: a dense factorEach that fails to grow keeps its held factors consistent" {
+    // Grows from one held ω to three; the pivot rows' allocation fails. The
+    // next factorEach of the same count must still allocate both.
+    const ring: Ring = .init(4, 1e-3);
+    const nnz = ring.col_ptr[4];
+    for (0..2) |fail_at| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var fs = try FreqSolver.fromPlanes(failing.allocator(), 4, ring.col_ptr[0..5], ring.row_idx[0..nnz], ring.g[0..nnz], ring.c[0..nnz]);
+        defer fs.deinit();
+        try testing.expect(fs.strategy == .dense);
+        try fs.factorEach(&.{1});
+        failing.fail_index = failing.alloc_index + fail_at;
+        const omegas = [_]f64{ 1, 10, 100 };
+        try testing.expectError(error.OutOfMemory, fs.factorEach(&omegas));
+        failing.fail_index = std.math.maxInt(usize);
+        try fs.factorEach(&omegas);
+        var rhs: [3 * 8]f64 = @splat(0);
+        for (0..3) |k| rhs[k * 8] = 1;
+        var x: [3 * 8]f64 = undefined;
+        fs.solveEach(&rhs, &x, false);
+        // Each held factor solves its own ω: compare with a fresh solve.
+        for (omegas, 0..) |w, k| {
+            var want: [8]f64 = undefined;
+            try fs.solve(w, rhs[k * 8 ..][0..8], &want);
+            for (want, x[k * 8 ..][0..8]) |a, b| try testing.expectApproxEqAbs(a, b, 1e-12);
+        }
+    }
+}
+
+test "slotCol and stackedPos place every slot of a pattern with empty columns" {
+    // Columns 1 and 3 are empty: col_ptr = 0 2 2 5 5 6.
+    const col_ptr = [_]u32{ 0, 2, 2, 5, 5, 6 };
+    const want_col = [_]usize{ 0, 0, 2, 2, 2, 4 };
+    for (want_col, 0..) |j, slot| try testing.expectEqual(j, slotCol(&col_ptr, @intCast(slot)));
+    // A slot at nnz (a ground entry) maps one past the last column.
+    try testing.expectEqual(@as(usize, 5), slotCol(&col_ptr, 6));
+    // Stacked column j holds column j's G rows then its ωC rows; column
+    // n + j starts at 2 nnz with -ωC then G.
+    for (0..6) |slot| {
+        const j = want_col[slot];
+        const cs = col_ptr[j];
+        const len = col_ptr[j + 1] - cs;
+        const q = stackedPos(&col_ptr, @intCast(slot));
+        try testing.expectEqual(2 * cs + (slot - cs), q[0]);
+        try testing.expectEqual(q[0] + len, q[1]);
+        try testing.expectEqual(12 + q[0], q[2]);
+        try testing.expectEqual(q[2] + len, q[3]);
+    }
+}
+
+test "addDense writes the stacked-real [Re -Im; Im Re] image of one complex entry" {
+    var a: [16]f64 = @splat(0);
+    addDense(2, 4, &a, 1, 0, 3, 5);
+    // Row-major 4 x 4: (1,0) += 3, (3,0) += 5, (1,2) -= 5, (3,2) += 3.
+    const want = [16]f64{ 0, 0, 0, 0, 3, 0, -5, 0, 0, 0, 0, 0, 5, 0, 3, 0 };
+    try testing.expectEqualSlices(f64, &want, &a);
 }

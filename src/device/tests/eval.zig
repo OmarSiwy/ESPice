@@ -232,7 +232,7 @@ test "equal cards share one Model row until a parameter is collected" {
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
     for ([_]f64{ 1000, 50, 1000 }, [_][2]u32{ .{ 1, 2 }, .{ 2, 0 }, .{ 1, 0 } }) |r, nodes|
-        try proto.append(.{ .r = r }, .{}, nodes);
+        try proto.append(&.{ .r = r }, &.{}, nodes);
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -304,8 +304,8 @@ test "collect_noise emits a correlated source's rows contiguously, with coeff, g
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
-    try proto.append(.{}, .{}, .{ 2, 1 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 2, 1 });
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -363,7 +363,7 @@ test "prepared device instances share tapes and isolate parameters and accepted 
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
     // A dense 3x3 pattern; row 3 and slot 9 take the ground writes.
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
@@ -451,8 +451,8 @@ test "a live timer schedule reaches next_breakpoint" {
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
-    try proto.append(.{}, .{}, .{ 2, 1 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 2, 1 });
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -519,8 +519,8 @@ test "iteration hooks gather each instance and preserve accepted-time state" {
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
-    try proto.append(.{}, .{}, .{ 2, 1 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 2, 1 });
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -564,8 +564,8 @@ test "set_homotopy writes gmin__ and source_scale__ on every row and reruns setu
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{ .r = 1 }, .{}, .{ 1, 2 });
-    try proto.append(.{ .r = 3 }, .{}, .{ 2, 1 });
+    try proto.append(&.{ .r = 1 }, &.{}, .{ 1, 2 });
+    try proto.append(&.{ .r = 3 }, &.{}, .{ 2, 1 });
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -619,8 +619,8 @@ test "a status-latch-only device stays GPU-eligible and reports its latched stat
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
-    try proto.append(.{}, .{}, .{ 2, 1 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 2, 1 });
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -669,8 +669,8 @@ test "mutable evaluation captures per-instance data without GPU residency" {
     comptime impl.checkHost(D);
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
-    try proto.append(.{}, .{}, .{ 2, 1 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 2, 1 });
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -821,7 +821,7 @@ test "analog initial reruns after a revert rolls its held results back" {
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
     const template = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -897,7 +897,7 @@ test "a held-variable device that limits is resident, its state half deferred to
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
     const batch = try ProtoStore(D).finalize(&proto, a, .{
         .col_ptr = &.{ 0, 3, 6, 9 },
         .row_idx = &.{ 0, 1, 2, 0, 1, 2, 0, 1, 2 },
@@ -1102,8 +1102,8 @@ test "ac_dyn: every frequency once, ragged tails included" {
     };
     const a = std.testing.allocator;
     var proto: ProtoStore(D) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
-    try proto.append(.{}, .{}, .{ 2, 1 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 2, 1 });
     const batch = try ProtoStore(D).finalize(&proto, a, dense3).unwrap();
     defer batch.hooks.deinit(batch.ctx, a);
     const lw = std.simd.suggestVectorLength(f64) orelse 1;
@@ -1146,8 +1146,8 @@ test "finalize leaves nothing of its allocator behind when an allocation fails" 
             const proto = try gpa.create(ProtoStore(D));
             proto.* = .{};
             defer ProtoStore(D).destroy(proto, gpa);
-            try proto.append(.{}, .{}, .{ 1, 2 });
-            try proto.append(.{}, .{}, .{ 2, 0 });
+            try proto.append(&.{}, &.{}, .{ 1, 2 });
+            try proto.append(&.{}, &.{}, .{ 2, 0 });
             const batch = try ProtoStore(D).finalize(proto, gpa, dense3).unwrap();
             batch.hooks.deinit(batch.ctx, gpa);
         }
@@ -1161,7 +1161,7 @@ test "finalize starts a batch before its analog initial block, whatever the allo
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const a = fba.allocator();
     var proto: ProtoStore(Conductance) = .{};
-    try proto.append(.{}, .{}, .{ 1, 2 });
+    try proto.append(&.{}, &.{}, .{ 1, 2 });
     const batch = try ProtoStore(Conductance).finalize(&proto, a, dense3).unwrap();
     defer batch.hooks.deinit(batch.ctx, a);
     const typed: *DeviceBatch(Conductance) = @ptrCast(@alignCast(batch.ctx));

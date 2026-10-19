@@ -59,9 +59,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // The last two points, for the predictor, carried across outer blocks as
     // ngspice's state rotation is (dctrcurv.c:290). The analysis' first
     // point fills both, so the second point starts from the first.
-    const hist = try scratch.alloc(f64, 2 * ckt.n);
+    // Then `tangentRows`' scratch, sized once for the sweep: F(x) and dx,
+    // and the saved values of the widest row's writes.
+    var widest: usize = 0;
+    for (opts.tangents) |row| widest = @max(widest, ctx.variants.writes(row)[0].len);
+    const hist = try scratch.alloc(f64, 2 * ckt.n + if (opts.tangents.len == 0) 0 else 2 * ckt.n + widest);
     defer scratch.free(hist);
-    @memset(hist, 0);
+    @memset(hist[0 .. 2 * ckt.n], 0);
     const force = try scratch.alloc(converger.Force, ctx.nodeset.len);
     defer scratch.free(force);
     for (force, ctx.nodeset) |*f, ns| f.* = .{ .slot = ckt.diag_slots[ns.node], .row = ns.node, .value = ns.value };
@@ -136,8 +140,9 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget.Param) ?roo
 /// Each point warm-starts from the previous solution; the first point, and
 /// any point whose warm Newton fails, cold-starts through the `.nodeset`
 /// step (`nodeset`) and the full OP ladder, as dctrcurv.c's CKTop calls do.
-/// `hist` (2 * n) holds the last two points and is left holding this block's
-/// last two, for the next block's predictor. `first_block` marks the
+/// `hist[0 .. 2 * n]` holds the last two points and is left holding this
+/// block's last two, for the next block's predictor; the rest is
+/// `tangentRows`' scratch. `first_block` marks the
 /// analysis' first block, whose first point also fills the older slot.
 fn runSerial(
     ctx: *const root.RunCtx,
@@ -153,9 +158,9 @@ fn runSerial(
     first_block: bool,
 ) !void {
     const x = hist[0..ckt.n];
+    const x_prev = hist[ckt.n..][0..ckt.n];
     // Rows in one block: every point of every outer level.
     const block = data.len / ncols / (1 + opts.tangents.len);
-    const x_prev = hist[ckt.n..];
 
     // The pattern is frozen, so one workspace (one symbolic factorization)
     // serves every point.
@@ -200,7 +205,7 @@ fn runSerial(
                 converged = r.converged;
             } else |e| switch (e) {
                 error.SingularMatrix => {},
-                else => return e,
+                else => return e, // else: only a singular warm guess falls to the ladder
             }
         }
         if (!converged) {
@@ -216,7 +221,7 @@ fn runSerial(
             // Each sweep point is an accepted point for device state.
             _ = ckt.stateCtl(.commit);
             for (ctx.probes, row[1..]) |node, *out| out.* = x[node];
-            if (opts.tangents.len != 0) try tangentRows(ctx, ckt, ws, x, opts.tangents, data[(block + first + pt) * ncols ..], block * ncols, ncols);
+            if (opts.tangents.len != 0) try tangentRows(ctx, ckt, ws, x, opts.tangents, hist[2 * ckt.n ..], data[(block + first + pt) * ncols ..], block * ncols, ncols);
             cold = false;
             // ngspice copies state0 into state1 after the first point
             // (dctrcurv.c:457-462), so the second point's MODEINITPRED
@@ -233,15 +238,13 @@ fn runSerial(
 /// x - J⁻¹ (F(x, row) - F(x)), F with every parameter as the row writes it
 /// and J factored at `x`, so one solve per row replaces the Newton solve of
 /// a sweep at that row. Row k's probes go to `out[k * stride + 1 ..]`; NaN
-/// when J at `x` is singular. Leaves every parameter as it found it.
-fn tangentRows(ctx: *const root.RunCtx, ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, tangents: []const u32, out: []f64, stride: usize, ncols: usize) !void {
+/// when J at `x` is singular. `buf` holds 2n values plus the widest row's
+/// writes. Leaves every parameter as it found it.
+fn tangentRows(ctx: *const root.RunCtx, ckt: *root.Circuit, ws: *converger.Workspace, x: []const f64, tangents: []const u32, buf: []f64, out: []f64, stride: usize, ncols: usize) !void {
     const n = ckt.n;
     const params = try ckt.collectParams();
-    const scratch = ctx.scratch_allocator;
-    const buf = try scratch.alloc(f64, 2 * n);
-    defer scratch.free(buf);
     const rhs = buf[0..n];
-    const dx = buf[n..];
+    const dx = buf[n..][0..n];
     // A full stamp: the baseline would hold the const-Jacobian devices
     // (resistors) at their nominal values, as in sens.zig.
     ckt.eval(x, 0);
@@ -257,8 +260,7 @@ fn tangentRows(ctx: *const root.RunCtx, ckt: *root.Circuit, ws: *converger.Works
             continue;
         }
         const refs, const values = ctx.variants.writes(row);
-        const saved = try scratch.alloc(f64, refs.len);
-        defer scratch.free(saved);
+        const saved = buf[2 * n ..][0..refs.len];
         for (refs, values, saved) |r, value, *old| {
             old.* = params[r].get();
             params[r].set(value);

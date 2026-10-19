@@ -1,13 +1,12 @@
 //! Shared data every layer speaks: numerics, query requests, the deck,
-//! results, the name pool and the shared ids. Imports nothing but std and
-//! stdpp, which AGENTS.md §2.8 counts as part of std.
+//! results, the name pool and the shared ids. Imports nothing but std.
 const std = @import("std");
 
 /// The process-wide general-purpose allocator. SmpAllocator does not build
 /// single-threaded (the wasm playground), so there it is the page allocator,
 /// which on wasm is WasmAllocator.
 pub const gpa: std.mem.Allocator = if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
-/// Vector kernels (stdpp), complex numbers, the frequency grid and the
+/// Vector kernels, complex numbers, the frequency grid and the
 /// solver tolerances.
 pub const numerics = @import("numerics.zig");
 /// One options struct per analysis, and the `Query` union over them.
@@ -66,4 +65,5 @@ test {
     _ = eigen;
     _ = query;
     _ = deck;
+    _ = validate;
 }

@@ -33,7 +33,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const n_rhs: usize = if (opts.tf_only) 1 else opts.sources.len;
     const rhs = try scratch.alloc(f64, @max(n_rhs, 1) * 2 * n);
     defer scratch.free(rhs);
-    root.zeroSimd(rhs);
+    @memset(rhs, 0);
     if (opts.tf_only) out.seed(rhs) else for (opts.sources, 0..) |s, i| dcxf.excite(s, rhs[i * 2 * n ..]);
 
     const per: usize = if (opts.tf_only) 1 else 3;

@@ -46,29 +46,42 @@ pub const Limits = struct {
 /// the block's border footprint, the border nodes it touches, mapped by `loc`.
 pub const Bbd = struct {
     const Self = @This();
-    const VecLen = std.simd.suggestVectorLength(f64) orelse 1;
-    const Vec = @Vector(VecLen, f64);
 
-    // Per-block metadata, nb entries each.
-    blk_start: []u32, // first global row/col
-    blk_s: []u32, // block size s
-    blk_m: []u32, // border footprint m
-    blk_a_off: []u32, // arena offsets of A_i, W_i, F_i
+    /// Per-block metadata, `nb` entries each, all slices of one `8 nb`
+    /// allocation (`blk_start` first): the block's first global row and
+    /// column, its size s, its border footprint m, the arena offsets of
+    /// A_i, W_i and F_i, and its offsets into `piv` (s entries) and `loc`
+    /// (m entries).
+    blk_start: []u32,
+    blk_s: []u32,
+    blk_m: []u32,
+    blk_a_off: []u32,
     blk_w_off: []u32,
     blk_f_off: []u32,
-    blk_piv_off: []u32, // offset into `piv`, s entries
-    blk_loc_off: []u32, // offset into `loc`, m entries
+    blk_piv_off: []u32,
+    blk_loc_off: []u32,
 
-    b: u32, // border size, >= 1 (ground)
+    /// Border size, at least 1 (ground).
+    b: u32,
+    /// Block count.
     nb: u32,
+    /// Every A_i, W_i, F_i, then S; rewritten by each factor.
     arena: []f64,
-    s_off: u32, // arena offset of S
+    /// Arena offset of S (b x b row-major).
+    s_off: u32,
+    /// Block pivots, LAPACK convention per block (`dense_lu.factorize`).
     piv: []u32,
+    /// S's pivots.
     s_piv: []u32,
-    loc: []u32, // footprint slot -> border position
-    border_node: []u32, // border position -> global node
-    dst: []u32, // CSC entry p -> arena index it accumulates into
-    bg: []f64, // border scratch, b entries
+    /// Footprint slot -> border position.
+    loc: []u32,
+    /// Border position -> global node.
+    border_node: []u32,
+    /// CSC entry p -> the arena index it accumulates into.
+    dst: []u32,
+    /// Border scratch, b entries.
+    bg: []f64,
+    /// The allocator `init` got; `deinit` frees with it.
     gpa: Allocator,
     /// The last factor's Schur growth, max(|S|, max_i |F_i| |A_i^-1 E_i|)
     /// over max |A|, entrywise maxima. The block elimination never pivots
@@ -139,22 +152,16 @@ pub const Bbd = struct {
         }
         for (sets) |*s| std.mem.sort(u32, s.items, {}, std.sort.asc(u32));
 
-        const blk_start = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_start);
-        const blk_s = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_s);
-        const blk_m = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_m);
-        const blk_a_off = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_a_off);
-        const blk_w_off = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_w_off);
-        const blk_f_off = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_f_off);
-        const blk_piv_off = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_piv_off);
-        const blk_loc_off = try gpa.alloc(u32, nb);
-        errdefer gpa.free(blk_loc_off);
+        const blk = try gpa.alloc(u32, 8 * @as(usize, nb));
+        errdefer gpa.free(blk);
+        const blk_start = blk[0..nb];
+        const blk_s = blk[nb..][0..nb];
+        const blk_m = blk[2 * nb ..][0..nb];
+        const blk_a_off = blk[3 * nb ..][0..nb];
+        const blk_w_off = blk[4 * nb ..][0..nb];
+        const blk_f_off = blk[5 * nb ..][0..nb];
+        const blk_piv_off = blk[6 * nb ..][0..nb];
+        const blk_loc_off = blk[7 * nb ..][0..nb];
 
         // `dst` and the offsets are u32; a larger arena falls back to the
         // flat LU. Every offset is below the running `arena_len`.
@@ -261,14 +268,7 @@ pub const Bbd = struct {
     /// Frees every slab with the allocator `init` got.
     pub fn deinit(self: *Self) void {
         const gpa = self.gpa;
-        gpa.free(self.blk_start);
-        gpa.free(self.blk_s);
-        gpa.free(self.blk_m);
-        gpa.free(self.blk_a_off);
-        gpa.free(self.blk_w_off);
-        gpa.free(self.blk_f_off);
-        gpa.free(self.blk_piv_off);
-        gpa.free(self.blk_loc_off);
+        gpa.free(self.blk_start.ptr[0 .. 8 * @as(usize, self.nb)]);
         gpa.free(self.arena);
         gpa.free(self.piv);
         gpa.free(self.s_piv);
@@ -287,7 +287,7 @@ pub const Bbd = struct {
     /// value per pattern entry.
     pub fn factorWithExecution(self: *Self, vals: []const f64, execution: num.Execution) error{SingularMatrix}!void {
         assert(vals.len == self.dst.len);
-        simdZero(self.arena);
+        @memset(self.arena, 0);
         for (vals, self.dst) |v, d| self.arena[d] += v;
         const amax = num.normInf(self.arena);
         var fw: f64 = 0;
@@ -309,7 +309,7 @@ pub const Bbd = struct {
             const lo = self.loc[self.blk_loc_off[bi]..][0..m];
             for (lo, 0..) |gr, r| {
                 for (lo, 0..) |gc, c| {
-                    sd[@as(usize, gr) * bsz + gc] -= dotSimd(f[r * s ..][0..s], w[c * s ..][0..s]);
+                    sd[@as(usize, gr) * bsz + gc] -= num.dot(f[r * s ..][0..s], w[c * s ..][0..s]);
                 }
             }
             fw = @max(fw, num.normInf(f) * num.normInf(w));
@@ -409,7 +409,7 @@ pub const Bbd = struct {
             const lo = self.loc[self.blk_loc_off[bi]..][0..m];
             const xi = x[self.blk_start[bi]..][0..s];
             for (lo, 0..) |g, j| {
-                self.bg[g] -= dotSimd(coupling[j * s ..][0..s], xi);
+                self.bg[g] -= num.dot(coupling[j * s ..][0..s], xi);
             }
         }
 
@@ -437,30 +437,6 @@ pub const Bbd = struct {
                 dense_lu.solveFactoredT(s, a, self.piv[self.blk_piv_off[bi]..][0..s], xi, xi);
             }
         }
-    }
-
-    // Vector stores beat the memset call on this per-factor arena.
-    inline fn simdZero(buf: []f64) void {
-        const zero: Vec = @splat(0);
-        var i: usize = 0;
-        while (i + VecLen <= buf.len) : (i += VecLen) {
-            buf[i..][0..VecLen].* = zero;
-        }
-        for (buf[i..]) |*v| v.* = 0;
-    }
-
-    fn dotSimd(a: []const f64, c: []const f64) f64 {
-        assert(a.len == c.len);
-        var acc: Vec = @splat(0);
-        var i: usize = 0;
-        while (i + VecLen <= a.len) : (i += VecLen) {
-            const av: Vec = a[i..][0..VecLen].*;
-            const cv: Vec = c[i..][0..VecLen].*;
-            acc += av * cv;
-        }
-        var sum = @reduce(.Add, acc);
-        while (i < a.len) : (i += 1) sum += a[i] * c[i];
-        return sum;
     }
 };
 

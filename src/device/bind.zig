@@ -45,30 +45,20 @@ pub fn apply(target: anytype, params: []const Param) BindStatus {
 
 fn applyKv(target: anytype, params: []const Param) !void {
     const T = @TypeOf(target.*);
-    // BSIMSOI's Model has ~1600 fields, each lowered and alias-scanned at
+    // BSIMSOI's Model has ~1600 fields, each lowered and alias-resolved at
     // comptime.
     @setEvalBranchQuota(1_000_000);
-    // A field whose key's `keyBit` no pair sets skips the scan: an instance
-    // card binds a dozen pairs against BSIM4's ~1000 fields.
-    var seen: u64 = 0;
-    for (params) |p| seen |= keyBit(p.key);
+    const keys = Keys(T).table;
+    const first = firstPairs(keys, params);
     const info = @typeInfo(T).@"struct";
     inline for (info.field_names, info.field_types) |field_name, field_type| {
         if (comptime isScalar(field_type)) {
-            // Card keys are lowercased at parse; VA fields keep their spec
-            // spelling (BSIMSOI `VTH0`).
-            const key = comptime blk: {
-                var buf: [field_name.len]u8 = undefined;
-                for (field_name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
-                const frozen = buf;
-                break :blk frozen;
-            };
-            if (try number(params, seen, &key)) |num| {
+            if (try number(params, first[comptime slot(keys, lowered(field_name))])) |num| {
                 @field(target.*, field_name) = try castField(field_type, num);
                 markGiven(target, field_name);
             } else {
                 inline for (comptime aliasesOf(field_name)) |alias| {
-                    if (try number(params, seen, alias)) |num| {
+                    if (try number(params, first[comptime slot(keys, alias)])) |num| {
                         @field(target.*, field_name) = try castField(field_type, num);
                         markGiven(target, field_name);
                     }
@@ -84,51 +74,101 @@ fn applyKv(target: anytype, params: []const Param) !void {
 /// `params`.
 pub fn markKnown(comptime T: type, params: []const Param, known: []bool) void {
     std.debug.assert(known.len == params.len);
-    @setEvalBranchQuota(1_000_000);
-    var seen: u64 = 0;
-    for (params) |p| seen |= keyBit(p.key);
-    const info = @typeInfo(T).@"struct";
-    inline for (info.field_names, info.field_types) |field_name, field_type| {
-        if (comptime isScalar(field_type)) {
-            const key = comptime blk: {
-                var buf: [field_name.len]u8 = undefined;
-                for (field_name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
-                const frozen = buf;
-                break :blk frozen;
-            };
-            markKey(params, seen, &key, known);
-            inline for (comptime aliasesOf(field_name)) |alias| markKey(params, seen, alias, known);
-        }
+    const keys = Keys(T).table;
+    for (params, known) |p, *hit| {
+        if (slotOf(keys, p.key) != null) hit.* = true;
     }
 }
 
-fn markKey(params: []const Param, seen: u64, key: []const u8, known: []bool) void {
-    if (seen & keyBit(key) == 0) return;
-    for (params, known) |p, *hit| if (std.mem.eql(u8, p.key, key)) {
-        hit.* = true;
+/// `firstPairs` slot of a key no pair names.
+const absent = std.math.maxInt(u32);
+
+/// For each of `keys`, the index of the first pair keyed so, or `absent`.
+/// One binary search per pair, so a card costs O(pairs), not O(fields).
+fn firstPairs(comptime keys: []const []const u8, params: []const Param) [keys.len]u32 {
+    std.debug.assert(params.len < absent);
+    var first: [keys.len]u32 = @splat(absent);
+    if (keys.len == 0) return first;
+    for (params, 0..) |p, i| if (slotOf(keys, p.key)) |k| {
+        if (first[k] == absent) first[k] = @intCast(i);
+    };
+    return first;
+}
+
+/// The value of `params[index]`, or null when `index` is `absent`. Errors
+/// rather than letting a recognized field fall back to its default.
+fn number(params: []const Param, index: u32) !?f64 {
+    if (index == absent) return null;
+    const value = params[index].value orelse return error.UnresolvedParameter;
+    if (!std.math.isFinite(value)) return error.NonFiniteParameter;
+    return value;
+}
+
+/// The keys `apply` binds on a `T`, sorted and unique: every scalar field's
+/// lowercased name and its `aliasesOf`. A key's index is its `firstPairs`
+/// slot. Two fields may share a key (`vto` is a field and `vt0`'s alias).
+fn Keys(comptime T: type) type {
+    return struct {
+        const table: []const []const u8 = blk: {
+            @setEvalBranchQuota(10_000_000);
+            const info = @typeInfo(T).@"struct";
+            var n: usize = 0;
+            for (info.field_names, info.field_types) |name, ty| {
+                if (isScalar(ty)) n += 1 + aliasesOf(name).len;
+            }
+            var all: [n][]const u8 = undefined;
+            var i: usize = 0;
+            for (info.field_names, info.field_types) |name, ty| {
+                if (!isScalar(ty)) continue;
+                all[i] = lowered(name);
+                i += 1;
+                for (aliasesOf(name)) |alias| {
+                    all[i] = alias;
+                    i += 1;
+                }
+            }
+            std.mem.sortUnstable([]const u8, &all, {}, keyLess);
+            var unique: usize = 0;
+            for (all) |key| {
+                // Keys are never empty: "" would bind nothing anyway.
+                std.debug.assert(key.len > 0);
+                if (unique > 0 and std.mem.eql(u8, all[unique - 1], key)) continue;
+                all[unique] = key;
+                unique += 1;
+            }
+            const frozen = all;
+            break :blk frozen[0..unique];
+        };
     };
 }
 
-/// The value of the first pair keyed `key`, or null when there is none.
-/// Errors rather than letting a recognized field fall back to its default.
-/// `seen` is the `keyBit` union of `params`' keys.
-fn number(params: []const Param, seen: u64, key: []const u8) !?f64 {
-    // Keys are field names and aliases, never empty: "" has no `keyBit`, so
-    // it would always read as absent.
-    std.debug.assert(key.len > 0);
-    if (seen & keyBit(key) == 0) return null;
-    for (params) |p| if (std.mem.eql(u8, p.key, key)) {
-        const value = p.value orelse return error.UnresolvedParameter;
-        if (!std.math.isFinite(value)) return error.NonFiniteParameter;
-        return value;
-    };
-    return null;
+fn keyLess(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
-/// One of 64 bits from a key's first byte and length; 0 for "".
-fn keyBit(key: []const u8) u64 {
-    if (key.len == 0) return 0;
-    return @as(u64, 1) << @truncate(key[0] *% 7 +% @as(u8, @truncate(key.len)));
+fn keyOrder(key: []const u8, item: []const u8) std.math.Order {
+    return std.mem.order(u8, key, item);
+}
+
+/// The index of `key` in the sorted `keys`, or null.
+fn slotOf(keys: []const []const u8, key: []const u8) ?usize {
+    return std.sort.binarySearch([]const u8, keys, key, keyOrder);
+}
+
+/// `slotOf` for a key `Keys` is known to hold.
+fn slot(comptime keys: []const []const u8, comptime key: []const u8) usize {
+    return comptime slotOf(keys, key).?;
+}
+
+/// `s` lowercased: card keys are lowercased at parse, VA fields keep their
+/// spec spelling (BSIMSOI `VTH0`).
+fn lowered(comptime s: []const u8) []const u8 {
+    comptime {
+        var buf: [s.len]u8 = undefined;
+        for (s, &buf) |c, *o| o.* = std.ascii.toLower(c);
+        const frozen = buf;
+        return &frozen;
+    }
 }
 
 /// Sets the `<field>__given` flag VerA emits for LRM §9.19 `$param_given`, if
@@ -337,4 +377,160 @@ test BindStatus {
             });
         }
     }
+}
+
+/// The binder before `Keys`: every field scans every pair. Kept as the
+/// oracle the differential test checks `apply` and `markKnown` against.
+const linear = struct {
+    fn apply(target: anytype, params: []const Param) BindStatus {
+        bindAll(target, params) catch |err| return switch (err) {
+            error.UnresolvedParameter => .unresolved_parameter,
+            error.NonFiniteParameter => .non_finite_parameter,
+            error.ParameterOutOfRange => .parameter_out_of_range,
+        };
+        return .ok;
+    }
+
+    fn bindAll(target: anytype, params: []const Param) !void {
+        const info = @typeInfo(@TypeOf(target.*)).@"struct";
+        inline for (info.field_names, info.field_types) |field_name, field_type| {
+            if (comptime isScalar(field_type)) {
+                if (try firstNumber(params, comptime lowered(field_name))) |num| {
+                    @field(target.*, field_name) = try castField(field_type, num);
+                    markGiven(target, field_name);
+                } else {
+                    inline for (comptime aliasesOf(field_name)) |alias| {
+                        if (try firstNumber(params, alias)) |num| {
+                            @field(target.*, field_name) = try castField(field_type, num);
+                            markGiven(target, field_name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn markKnown(comptime T: type, params: []const Param, known: []bool) void {
+        const info = @typeInfo(T).@"struct";
+        inline for (info.field_names, info.field_types) |field_name, field_type| {
+            if (comptime isScalar(field_type)) {
+                markKey(params, comptime lowered(field_name), known);
+                inline for (comptime aliasesOf(field_name)) |alias| markKey(params, alias, known);
+            }
+        }
+    }
+
+    fn markKey(params: []const Param, key: []const u8, known: []bool) void {
+        for (params, known) |p, *hit| if (std.mem.eql(u8, p.key, key)) {
+            hit.* = true;
+        };
+    }
+
+    fn firstNumber(params: []const Param, key: []const u8) !?f64 {
+        for (params) |p| if (std.mem.eql(u8, p.key, key)) {
+            const value = p.value orelse return error.UnresolvedParameter;
+            if (!std.math.isFinite(value)) return error.NonFiniteParameter;
+            return value;
+        };
+        return null;
+    }
+};
+
+test "apply and markKnown match the linear-scan oracle on random cards" {
+    // Shared keys (`vto` is a field and `vt0`'s alias), two aliases (`cjo`),
+    // VerA escapes, a mixed-case field, a narrow int, a non-scalar field.
+    const M = struct {
+        vt0: f64 = 0,
+        vto: f64 = 0,
+        vto__given: bool = false,
+        cjo: f64 = 0,
+        cjo__given: bool = false,
+        noisy: bool = true,
+        u0Z: f64 = 0,
+        typeZ: i64 = 1,
+        abZ5f_cd: f64 = 0,
+        VTH0: f64 = 0,
+        b: u8 = 0,
+        list: [2]f64 = .{ 0, 0 },
+    };
+    const key_pool = [_][]const u8{
+        "vt0",  "vto",        "cjo",  "cj0",  "cj", "noisy",  "noise",    "u0",      "u0z",
+        "type", "typez",      "vth0", "VTH0", "b",  "ab__cd", "abz5f_cd", "unknown", "",
+        "list", "vto__given",
+    };
+    const inf = std.math.inf(f64);
+    const value_pool = [_]?f64{ 1, -2.5, 0, 300, 0.5, 1e300, null, std.math.nan(f64), inf, -inf };
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    const random = prng.random();
+    var params: [12]Param = undefined;
+    for (0..20_000) |_| {
+        const card = params[0..random.uintLessThan(usize, params.len + 1)];
+        for (card) |*p| p.* = .{
+            .key = key_pool[random.uintLessThan(usize, key_pool.len)],
+            .value = value_pool[random.uintLessThan(usize, value_pool.len)],
+        };
+        var got: M = .{};
+        var want: M = .{};
+        try std.testing.expectEqual(linear.apply(&want, card), apply(&got, card));
+        try std.testing.expectEqual(want, got);
+        var known_got: [params.len]bool = @splat(false);
+        var known_want: [params.len]bool = @splat(false);
+        markKnown(M, card, known_got[0..card.len]);
+        linear.markKnown(M, card, known_want[0..card.len]);
+        try std.testing.expectEqual(known_want, known_got);
+    }
+}
+
+test "the first pair for a key decides, even when it is null or non-finite" {
+    const M = struct { b: u8 = 0, b__given: bool = false };
+    var m: M = .{};
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{ .{ .key = "b", .value = 1 }, .{ .key = "b", .value = null } }));
+    try std.testing.expectEqual(M{ .b = 1, .b__given = true }, m);
+    try std.testing.expectEqual(BindStatus.unresolved_parameter, apply(&m, &.{ .{ .key = "b", .value = null }, .{ .key = "b", .value = 2 } }));
+    try std.testing.expectEqual(BindStatus.non_finite_parameter, apply(&m, &.{ .{ .key = "b", .value = std.math.nan(f64) }, .{ .key = "b", .value = 2 } }));
+    try std.testing.expectEqual(M{ .b = 1, .b__given = true }, m);
+}
+
+test "aliases: probed only when the own key is absent, in table order" {
+    const M = struct { vt0: f64 = 0, vto: f64 = 0, cjo: f64 = 0 };
+    var m: M = .{};
+    // `vt0` is present, so its alias `vto` is never probed for `vt0`, but
+    // `vto` is the `vto` field's own key: the null still fails there.
+    try std.testing.expectEqual(BindStatus.unresolved_parameter, apply(&m, &.{ .{ .key = "vt0", .value = 1 }, .{ .key = "vto", .value = null } }));
+    // One key binds both the field it names and the field it aliases.
+    m = .{};
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{.{ .key = "vto", .value = 5 }}));
+    try std.testing.expectEqual(M{ .vt0 = 5, .vto = 5 }, m);
+    // `cj0` probes before `cj`: its null fails though `cj` has a value.
+    try std.testing.expectEqual(BindStatus.unresolved_parameter, apply(&m, &.{ .{ .key = "cj", .value = 4 }, .{ .key = "cj0", .value = null } }));
+    // A null alias is harmless when the own key binds first.
+    const C = struct { cjo: f64 = 0 };
+    var c: C = .{};
+    try std.testing.expectEqual(BindStatus.ok, apply(&c, &.{ .{ .key = "cj", .value = null }, .{ .key = "cjo", .value = 7 } }));
+    try std.testing.expectEqual(C{ .cjo = 7 }, c);
+}
+
+test "absent keys leave defaults; card keys match lowercased names exactly" {
+    const M = struct { VTH0: f64 = 0.5, VTH0__given: bool = false, w: f64 = 1 };
+    var m: M = .{};
+    // Callers lowercase card keys; an uppercase key names nothing.
+    const params = [_]Param{ .{ .key = "VTH0", .value = 9 }, .{ .key = "x", .value = 1 } };
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &params));
+    try std.testing.expectEqual(M{}, m);
+    var known: [params.len]bool = @splat(false);
+    markKnown(M, &params, &known);
+    try std.testing.expectEqual([_]bool{ false, false }, known);
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{.{ .key = "vth0", .value = 0.7 }}));
+    try std.testing.expectEqual(M{ .VTH0 = 0.7, .VTH0__given = true }, m);
+}
+
+test "a type without scalar fields binds nothing" {
+    const M = struct { list: [2]f64 = .{ 1, 2 } };
+    var m: M = .{};
+    const params = [_]Param{.{ .key = "list", .value = null }};
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &params));
+    try std.testing.expectEqual(BindStatus.ok, apply(&m, &.{}));
+    var known: [1]bool = .{false};
+    markKnown(M, &params, &known);
+    try std.testing.expect(!known[0]);
 }

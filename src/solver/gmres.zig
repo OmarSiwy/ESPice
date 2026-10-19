@@ -1,6 +1,11 @@
 //! Matrix-free restarted GMRES(m) with optional right preconditioning, for
-//! JFNK (`converger.jfnk`) and the PSS monodromy and QPSS Krylov solves. All workspace is allocated by
-//! `init`; `solve` allocates nothing. Background:
+//! JFNK (`converger.jfnk`) and the PSS monodromy and QPSS Krylov solves.
+//!
+//! In: an operator `op.matvec`, a right-hand side and a start x. Out: x
+//! with ||b - A x|| <= tol ||b||, or the best iterate and its true
+//! residual. All workspace is allocated by `init`; `solve` allocates
+//! nothing. Cites Saad and Schultz, "GMRES" (SIAM J. Sci. Stat. Comput.
+//! 7(3), 1986: Arnoldi with modified Gram-Schmidt, Givens QR of H) and
 //! dev/solvers/monodromy-krylov.md.
 
 const std = @import("std");
@@ -25,11 +30,14 @@ pub const Gmres = struct {
     /// Restart depth.
     m: u32,
 
+    /// The one allocation every slice below is carved from, so `init` has
+    /// a single failure point and `deinit` a single free.
+    slab: []f64,
     /// Arnoldi basis: v_k is v_basis[k*n..][0..n], m + 1 vectors.
     v_basis: []f64,
     /// Upper Hessenberg, (m + 1) x m row-major.
     h: []f64,
-    /// Givens rotations.
+    /// Givens rotations, m entries each.
     cs: []f64,
     sn: []f64,
     /// Rotated right-hand side, m + 1 entries.
@@ -40,47 +48,42 @@ pub const Gmres = struct {
     w: []f64,
     r: []f64,
 
-    /// Allocates (m + 1)(n + m) + 2n + 4m + 1 f64s. Asserts that n and m
+    /// Allocates (m + 1)(n + m) + 2n + 4m + 1 f64s in one block. Asserts that n and m
     /// are positive. Caller frees with `deinit` and the same allocator.
     pub fn init(gpa: Allocator, n: u32, m: u32) !Self {
         assert(n > 0);
         assert(m > 0);
         const nu: usize = n;
         const mu: usize = m;
-
-        const v_basis = try gpa.alloc(f64, (mu + 1) * nu);
-        errdefer gpa.free(v_basis);
-        const h = try gpa.alloc(f64, (mu + 1) * mu);
-        errdefer gpa.free(h);
-        const cs = try gpa.alloc(f64, mu);
-        errdefer gpa.free(cs);
-        const sn = try gpa.alloc(f64, mu);
-        errdefer gpa.free(sn);
-        const g_ws = try gpa.alloc(f64, mu + 1);
-        errdefer gpa.free(g_ws);
-        const y_ws = try gpa.alloc(f64, mu);
-        errdefer gpa.free(y_ws);
-        const w_ws = try gpa.alloc(f64, nu);
-        errdefer gpa.free(w_ws);
-        const r_ws = try gpa.alloc(f64, nu);
-
-        return .{
+        const slab = try gpa.alloc(f64, (mu + 1) * (nu + mu) + 2 * nu + 4 * mu + 1);
+        var rest = slab;
+        const take = struct {
+            fn f(buf: *[]f64, len: usize) []f64 {
+                const head = buf.*[0..len];
+                buf.* = buf.*[len..];
+                return head;
+            }
+        }.f;
+        const self: Self = .{
             .n = n,
             .m = m,
-            .v_basis = v_basis,
-            .h = h,
-            .cs = cs,
-            .sn = sn,
-            .g = g_ws,
-            .y = y_ws,
-            .w = w_ws,
-            .r = r_ws,
+            .slab = slab,
+            .v_basis = take(&rest, (mu + 1) * nu),
+            .h = take(&rest, (mu + 1) * mu),
+            .cs = take(&rest, mu),
+            .sn = take(&rest, mu),
+            .g = take(&rest, mu + 1),
+            .y = take(&rest, mu),
+            .w = take(&rest, nu),
+            .r = take(&rest, nu),
         };
+        assert(rest.len == 0);
+        return self;
     }
 
     /// Frees the workspace; `gpa` must be the allocator `init` got.
     pub fn deinit(self: *Self, gpa: Allocator) void {
-        inline for (.{ self.v_basis, self.h, self.cs, self.sn, self.g, self.y, self.w, self.r }) |s| gpa.free(s);
+        gpa.free(self.slab);
         self.* = undefined;
     }
 
@@ -297,6 +300,75 @@ pub const Gmres = struct {
 fn givensRotation(a: anytype, b: @TypeOf(a)) struct { c: @TypeOf(a), s: @TypeOf(a) } {
     if (b == 0) return .{ .c = 1, .s = 0 };
     if (a == 0) return .{ .c = 0, .s = std.math.sign(b) };
-    const r = @sqrt(a * a + b * b);
+    // hypot, not @sqrt(a * a + b * b): the squares underflowed to r = 0 (and
+    // c = inf) at |a|, |b| near 1e-160, and overflowed near 1e155.
+    const r = std.math.hypot(a, b);
     return .{ .c = a / r, .s = b / r };
+}
+
+const testing = std.testing;
+
+test "Gmres.init carves disjoint slices that tile its one slab, and frees on failure" {
+    inline for (.{ .{ 1, 1 }, .{ 7, 3 }, .{ 30, 30 }, .{ 5, 40 } }) |c| {
+        var g = try Gmres.init(testing.allocator, c[0], c[1]);
+        defer g.deinit(testing.allocator);
+        const parts = [_][]f64{ g.v_basis, g.h, g.cs, g.sn, g.g, g.y, g.w, g.r };
+        var off: usize = 0;
+        for (parts) |p| {
+            // In order and back to back: disjoint, and nothing left over.
+            try testing.expectEqual(@intFromPtr(g.slab.ptr) + off * @sizeOf(f64), @intFromPtr(p.ptr));
+            off += p.len;
+        }
+        try testing.expectEqual(g.slab.len, off);
+        try testing.expectEqual(@as(usize, (c[1] + 1) * (c[0] + c[1]) + 2 * c[0] + 4 * c[1] + 1), off);
+    }
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, Gmres.init(failing.allocator(), 4, 2));
+}
+
+test "givensRotation zeroes the second component and is orthonormal" {
+    const cases = [_][2]f64{ .{ 3, 4 }, .{ -3, 4 }, .{ 3, -4 }, .{ 0, -2 }, .{ 0, 2 }, .{ 5, 0 }, .{ -5, 0 }, .{ 1e-300, 1e-300 }, .{ 1e-300, -3e-301 }, .{ 1e200, 1e200 } };
+    for (cases) |c| {
+        const rot = givensRotation(c[0], c[1]);
+        try testing.expectApproxEqAbs(@as(f64, 1), rot.c * rot.c + rot.s * rot.s, 1e-15);
+        const lower = -rot.s * c[0] + rot.c * c[1];
+        const upper = rot.c * c[0] + rot.s * c[1];
+        try testing.expectApproxEqAbs(@as(f64, 0), lower, 1e-15 * @max(@abs(c[0]), @abs(c[1])));
+        // The norm, scaled so the oracle's squares neither overflow nor underflow.
+        const m = @max(@abs(c[0]), @abs(c[1]));
+        const norm = m * @sqrt((c[0] / m) * (c[0] / m) + (c[1] / m) * (c[1] / m));
+        try testing.expectApproxEqRel(norm, @abs(upper), 1e-15);
+    }
+}
+
+test "GMRES: an operator that returns NaN never converges and stops within its budget" {
+    const NanOp = struct {
+        pub fn matvec(_: *const @This(), v: []const f64, w: []f64) void {
+            for (w, v) |*wi, vi| wi.* = vi * std.math.nan(f64);
+        }
+    };
+    var g = try Gmres.init(testing.allocator, 6, 3);
+    defer g.deinit(testing.allocator);
+    const b = [_]f64{ 1, 2, 3, 4, 5, 6 };
+    var x = [_]f64{ 1, 0, 0, 0, 0, 0 };
+    const res = g.solve(&NanOp{}, &b, &x, 1e-10, 2);
+    try testing.expect(!res.converged);
+    try testing.expect(res.iterations <= 3 * 3);
+    try testing.expect(!(res.residual <= 1e-10));
+}
+
+test "GMRES: the identity converges in one Arnoldi step to b exactly" {
+    const Id = struct {
+        pub fn matvec(_: *const @This(), v: []const f64, w: []f64) void {
+            @memcpy(w, v);
+        }
+    };
+    var g = try Gmres.init(testing.allocator, 5, 4);
+    defer g.deinit(testing.allocator);
+    const b = [_]f64{ 1, -2, 0.5, 8, -0.25 };
+    var x: [5]f64 = @splat(0);
+    const res = g.solve(&Id{}, &b, &x, 1e-14, 0);
+    try testing.expect(res.converged);
+    try testing.expectEqual(@as(u32, 1), res.iterations);
+    for (b, x) |bi, xi| try testing.expectApproxEqRel(bi, xi, 4 * std.math.floatEps(f64));
 }

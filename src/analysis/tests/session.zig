@@ -184,9 +184,9 @@ test "session shares one OP prerequisite and gates its dependents on it" {
     var b = try Builder.init(t.allocator, &lib);
     const vin = try b.addNode();
     const out = try b.addNode();
-    try b.addDevice(models.vsource, "", .{ .dc = 10 }, .{}, .{ vin, GROUND });
-    try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, out });
-    try b.addDevice(models.resistor, "", .{ .r = 3000 }, .{}, .{ out, GROUND });
+    try b.addDevice(models.vsource, "", &.{ .dc = 10 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ vin, out });
+    try b.addDevice(models.resistor, "", &.{ .r = 3000 }, &.{}, .{ out, GROUND });
     var prepared = try b.compile();
     defer prepared.deinit();
     const deck = bareDeck(&.{out}, &.{"v(out)"});
@@ -259,7 +259,7 @@ test "a failed implicit OP's own error is the session failure, not DependencyFai
     defer lib.deinit();
     var b = try Builder.init(t.allocator, &lib);
     const vin = try b.addNode();
-    try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ vin, GROUND });
+    try b.addDevice(models.vsource, "", &.{ .dc = 1 }, &.{}, .{ vin, GROUND });
     var prepared = try b.compile();
     defer prepared.deinit();
     const deck = bareDeck(&.{vin}, &.{"v(vin)"});
@@ -289,8 +289,8 @@ test "schemaOf names the plot and scale column a transient and an AC sweep publi
     defer lib.deinit();
     var b = try Builder.init(t.allocator, &lib);
     const vin = try b.addNode();
-    try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ vin, GROUND });
-    try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, GROUND });
+    try b.addDevice(models.vsource, "", &.{ .dc = 1 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ vin, GROUND });
     var prepared = try b.compile();
     defer prepared.deinit();
     const deck = bareDeck(&.{vin}, &.{"v(vin)"});
@@ -328,9 +328,9 @@ test "schemaOf predicts the columns envelope and noise publish (#83)" {
     var b = try Builder.init(t.allocator, &lib);
     const vin = try b.addNode();
     const out = try b.addNode();
-    try b.addDevice(models.vsource, "", .{ .dc = 1 }, .{}, .{ vin, GROUND });
-    try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, out });
-    try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ out, GROUND });
+    try b.addDevice(models.vsource, "", &.{ .dc = 1 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ vin, out });
+    try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ out, GROUND });
     var prepared = try b.compile();
     defer prepared.deinit();
     const deck = bareDeck(&.{ vin, out }, &.{ "v(vin)", "v(out)" });
@@ -352,4 +352,76 @@ test "schemaOf predicts the columns envelope and noise publish (#83)" {
         const schema = try @import("../session.zig").schemaOf(t.allocator, &prepared, &deck, q);
         try t.expectEqual(res.varnames.len, schema.columns);
     }
+}
+
+/// Runs every query in `jobs` to completion over `prepared`, `device_threads`
+/// stamp lanes. With a seed, each round's ready set runs at once in an order
+/// shuffled by it; without one, one at a time in row order. Returns each
+/// requested result's data, concatenated, owned by the caller.
+fn runAll(prepared: *const @import("device").Circuit, deck: *const Deck, jobs: []const requests.Query, device_threads: u32, seed: ?u64) ![]f64 {
+    const t = std.testing;
+    var s = Session.init(t.allocator, t.io, prepared, deck, .{ .device_threads = device_threads });
+    defer s.deinit();
+    var ids: [8]requests.QueryId = undefined;
+    _ = try s.append(jobs, ids[0..jobs.len]);
+    var prng = std.Random.DefaultPrng.init(seed orelse 0);
+    var ready: [16]requests.QueryId = undefined;
+    var events: [16]@import("../session.zig").Advance = undefined;
+    var rounds: usize = 0;
+    while (!s.finished()) : (rounds += 1) {
+        try t.expect(rounds < 16);
+        const n = try s.readyQueries(.all, &ready);
+        try t.expect(n > 0);
+        if (seed != null) prng.random().shuffle(requests.QueryId, ready[0..n]);
+        const limits: @import("../session.zig").Limits = .{ .max_parallel = if (seed == null) 1 else @intCast(n), .quantum = .completion };
+        _ = try s.advanceReady(ready[0..n], limits, &events);
+    }
+    try t.expectEqual(null, s.failure());
+    var out: std.ArrayList(f64) = .empty;
+    errdefer out.deinit(t.allocator);
+    for (ids[0..jobs.len]) |id| try out.appendSlice(t.allocator, (try s.result(id)).data);
+    return out.toOwnedSlice(t.allocator);
+}
+
+test "--jobs determinism: results are byte-identical across lane counts and scheduler orders" {
+    // TESTING-METHODOLOGY 2.1 item 6: `--jobs=1` against N, plus a seeded
+    // permutation of each round's ready set. The oracle is the serial run.
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 1 }, &.{}, .{ vin, GROUND });
+    var prev = vin;
+    for (0..8) |_| {
+        const mid = try b.addNode();
+        try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ prev, mid });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-9 }, &.{}, .{ mid, GROUND });
+        try b.addDevice(models.diode, "", &.{ .is = 1e-14, .cjo = 1e-12 }, &.{}, .{ mid, GROUND });
+        prev = mid;
+    }
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    const drive = try t.allocator.alloc(f64, 2 * @as(usize, prepared.n));
+    defer t.allocator.free(drive);
+    @memset(drive, 0);
+    drive[prev] = 1e-3; // 1 mA AC into the last stage.
+    var deck = bareDeck(&.{ vin, prev }, &.{ "v(in)", "v(out)" });
+    deck.ac_drive = drive;
+    // Two OP prerequisites (two tolerance sets), so two components race.
+    const jobs = [_]requests.Query{
+        .{ .op = .{} },
+        .{ .ac = .{ .sweep = .{ .f_start = 1e3, .f_stop = 1e9 } } },
+        .{ .tran = .{ .t_stop = 2e-6 } },
+        .{ .tran = .{ .t_stop = 1e-6, .tol = .{ .reltol = 1e-4 } } },
+        .{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 1e6 }, .tol = .{ .reltol = 1e-4 } } },
+    };
+    const serial = try runAll(&prepared, &deck, &jobs, 1, null);
+    defer t.allocator.free(serial);
+    try t.expect(serial.len > jobs.len);
+    for ([_]u32{ 1, 4 }) |lanes| for ([_]u64{ 1, 2, 3 }) |seed| {
+        const got = try runAll(&prepared, &deck, &jobs, lanes, seed);
+        defer t.allocator.free(got);
+        try t.expectEqualSlices(u64, @ptrCast(serial), @ptrCast(got));
+    };
 }

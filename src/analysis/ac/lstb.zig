@@ -14,6 +14,7 @@ const root = @import("../types.zig");
 const core = @import("core");
 const Complex = core.numerics.Complex;
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
+const at = @import("../dc/xf.zig").at;
 const Dyn = @import("solver").freq_solve.Dyn;
 
 /// Query options, defined in core/query.zig.
@@ -100,11 +101,6 @@ fn responses(opts: Options, n: usize, x: []const f64) Responses {
     return r;
 }
 
-fn at(x: []const f64, n: usize, r: u32) Complex {
-    if (r == root.GROUND) return .zero;
-    return .{ .re = x[r], .im = x[n + r] };
-}
-
 /// Contract entry. The sweep plot is complex (frequency, loop_gain,
 /// loop_gain_forward, loop_gain_reverse, y11, y12, y21, y22); with
 /// `margins` it is one real row instead (see `Margins`).
@@ -128,7 +124,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const rhs = try scratch.alloc(f64, 4 * n);
     defer scratch.free(rhs);
-    root.zeroSimd(rhs);
+    @memset(rhs, 0);
     fill(opts, n, rhs);
 
     const loop = try scratch.alloc(Complex, n_points);

@@ -130,7 +130,6 @@ pub const Problem = struct {
     /// The variant row `set_params` last made, which queries appended
     /// since then run at; null before any call.
     variant: ?u32 = null,
-    timing_in_depth: bool = false,
     /// Where an HSPICE `.save` writes the operating point; null without one.
     save_path: ?[]const u8 = null,
     /// Where `.save` and `.stim` files go: beside the output file, as HSPICE
@@ -172,23 +171,26 @@ pub const Problem = struct {
         try analysis.validateBackend(options.backend);
         const self = try allocator.create(Problem);
         errdefer allocator.destroy(self);
-        self.allocator = allocator;
-        self.io = io;
-        self.timing_in_depth = options.timing_in_depth;
-        self.allocation_mutex = .init;
-        self.arena = std.heap.ArenaAllocator.init(allocator);
+        // The undefined fields are set below, each before its first read.
+        // An optimization keeps the parse arena: its tuner re-evaluates the netlist.
+        // `self` is heap-allocated, so the arena keeps its address.
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .arena = .init(allocator),
+            .library = undefined,
+            .prepared = undefined,
+            .session = undefined,
+            .delivery = undefined,
+            .limits = .{ .max_parallel = options.max_parallel },
+            .parse_arena = .init(allocator),
+        };
         errdefer self.arena.deinit();
         const a = self.arena.allocator();
         self.origin = try a.dupe(u8, switch (options.source) {
             .file => |path| path,
             .bytes => |bytes| bytes.origin,
         });
-        self.optimization = &.{};
-        self.bisection = &.{};
-        self.degradation = null;
-        // An optimization keeps the parse arena: its tuner re-evaluates the netlist.
-        // `self` is heap-allocated, so the arena keeps its address.
-        self.parse_arena = .init(allocator);
         var keep_parse = false;
         defer if (!keep_parse) {
             self.parse_arena.?.deinit();
@@ -205,7 +207,6 @@ pub const Problem = struct {
         self.prepared = try frontend.build(&self.library, a, scratch, ast);
         timingLap(io, &lap, "Problem creation (expansion, binding, topology)");
         errdefer self.prepared.deinit();
-        self.save_path = null;
         self.out_dir = try a.dupe(u8, if (options.output.path) |out| std.fs.path.dirname(out) orelse "." else ".");
         if (self.prepared.deck.save_op) |save| {
             // `FILE=x.ic` names the `.ic#` family (one file per `.alter` run in
@@ -218,15 +219,9 @@ pub const Problem = struct {
         }
         self.delivery = try output.Session.init(allocator, options.output);
         errdefer self.delivery.deinit();
-        self.limits = .{ .max_parallel = options.max_parallel };
-        self.next_output = 0;
-        self.delivery_error = null;
-        self.streaming = null;
-        self.variant = null;
         var execution = options.backend;
         execution.timing_in_depth = options.timing_in_depth;
         execution.knobs = knobsFromEnv();
-        self.gpu_driver = .{};
         execution.gpu_driver = &self.gpu_driver;
         if (analysis.gpu_available and execution.backend != .cpu) raiseJitCache();
         execution.display = options.display;
@@ -324,9 +319,10 @@ pub const Problem = struct {
     /// When `ids` is too short this is a sizing call: nothing is validated or
     /// added. Otherwise the append is all-or-nothing: a query the output
     /// format cannot hold, or any other failure, leaves the DAG and `ids`
-    /// unchanged. An existing identical query returns its old ID. After
-    /// `set_params`, a query that names no variant of its own runs at the
-    /// values the last call set.
+    /// unchanged. An `.op` identical to an existing OP, an implicit
+    /// prerequisite included, returns that OP's ID; every other query gets
+    /// a new ID. After `set_params`, a query that names no variant of its
+    /// own runs at the values the last call set.
     pub fn append_queries(self: *Problem, queries: []const Query, ids: []QueryId) !usize {
         if (ids.len < queries.len) return queries.len;
         const jobs: []const Query = if (self.variant) |v| blk: {
@@ -415,7 +411,7 @@ pub const Problem = struct {
         try self.optimize();
         try self.age();
         var event = try self.session.advance(id);
-        self.deliver();
+        self.deliverFrom(&self.session, &self.next_output);
         self.finishWhenDone();
         event.delivery_error = self.delivery_error;
         return event;
@@ -441,7 +437,7 @@ pub const Problem = struct {
         try self.optimize();
         try self.age();
         const n = try self.session.advanceReady(ids, limits, events);
-        self.deliver();
+        self.deliverFrom(&self.session, &self.next_output);
         return n;
     }
 
@@ -464,7 +460,7 @@ pub const Problem = struct {
     /// then. Calling it again is a no-op for finished queries and publishes
     /// nothing twice.
     pub fn run_all(self: *Problem) !void {
-        var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
+        var lap = if (self.session.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &lap, "run total (analysis, scheduling, output)");
         try self.optimize();
         try self.age();
@@ -480,25 +476,29 @@ pub const Problem = struct {
             const selected = @min(n, events.len);
             // Whole-query quanta: nothing here reads intermediate progress,
             // except the in-depth timing, which reports per checkpoint.
-            const quantum: Limits = .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.timing_in_depth) .checkpoint else .completion };
+            const quantum: Limits = .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.session.config.timing_in_depth) .checkpoint else .completion };
             _ = try self.stepReady(ids[0..selected], quantum, events);
         }
-        self.deliver();
+        self.deliverFrom(&self.session, &self.next_output);
         for (self.runs) |*run| {
             try runSession(&run.session, self.limits.max_parallel);
-            self.deliverFrom(&run.session, &run.next_output, run.session.deck.title);
+            self.deliverFrom(&run.session, &run.next_output);
         }
         if (self.session.failure()) |err| return err;
         for (self.runs) |*run| if (run.session.failure()) |err| return err;
         if (self.delivery_error != null) return error.DeliveryFailed;
-        var output_lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
+        var output_lap = if (self.session.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         defer timingLap(self.io, &output_lap, "output finish");
         self.delivery.finish(self.io) catch |err| {
             self.delivery_error = err;
             return error.DeliveryFailed;
         };
-        if (self.save_path) |path| try self.saveOperatingPoint(path, self.prepared.deck.save_op.?);
-        for (self.prepared.deck.stims) |stim| try self.writeStim(stim);
+        // Both build their text in a `Writer.Allocating`, which reports
+        // running out of memory as `error.WriteFailed`.
+        if (self.save_path) |path| self.saveOperatingPoint(path, self.prepared.deck.save_op.?) catch |err|
+            return if (err == error.WriteFailed) error.OutOfMemory else err;
+        for (self.prepared.deck.stims) |stim| self.writeStim(stim) catch |err|
+            return if (err == error.WriteFailed) error.OutOfMemory else err;
     }
 
     /// Writes an HSPICE `.stim` card's file from the main session's first
@@ -519,14 +519,15 @@ pub const Problem = struct {
         var times: std.ArrayList(f64) = .empty;
         defer times.deinit(gpa);
         const width = res.varnames.len;
+        try times.ensureTotalCapacity(gpa, if (stim.times.len != 0) stim.times.len else if (stim.npoints > 1) stim.npoints else res.npoints);
         if (stim.times.len != 0) {
-            try times.appendSlice(gpa, stim.times);
+            times.appendSliceAssumeCapacity(stim.times);
         } else if (stim.npoints > 1) {
             const to = @min(stim.to, res.data[(res.npoints - 1) * width]);
-            for (0..stim.npoints) |k| try times.append(gpa, stim.from + (to - stim.from) * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(stim.npoints - 1)));
+            for (0..stim.npoints) |k| times.appendAssumeCapacity(stim.from + (to - stim.from) * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(stim.npoints - 1)));
         } else for (0..res.npoints) |k| {
             const t = res.data[k * width];
-            if (t >= stim.from and t <= stim.to) try times.append(gpa, t);
+            if (t >= stim.from and t <= stim.to) times.appendAssumeCapacity(t);
         }
         // Column-major: signal k's samples at values[k * n ..].
         const n = times.items.len;
@@ -730,6 +731,8 @@ pub const Problem = struct {
                     if (job != .dc) break false;
                 } else true;
                 const lm = &self.optimization[base];
+                if (base == 0) for (t.initial, t.spec.dels, t.names) |x0, del, name| if (t.options.stepOverreach(x0, del)) |ratio|
+                    std.log.warn("optimize {s}: {s} = {e} is far below PARMIN = {e}, so its finite-difference step is {d:.0}x the value and can land on a bound; set PARMIN near the parameter's scale", .{ t.spec.name, name, x0, t.options.parmin, ratio });
                 lm.* = try core.lm.Lm.init(a, t.initial, t.spec.lo, t.spec.hi, t.spec.dels, t.spec.grid, @intCast(t.results.len), t.options, direct or self.limits.max_parallel > 1);
                 try self.search(t, template.items, base, lm, direct);
                 break :blk lm.x;
@@ -870,16 +873,13 @@ pub const Problem = struct {
         };
     }
 
-    /// Publishes completed results in request order, stopping at the first
-    /// unfinished query or the first output failure.
-    fn deliver(self: *Problem) void {
-        self.deliverFrom(&self.session, &self.next_output, self.prepared.deck.title);
-    }
-
-    fn deliverFrom(self: *Problem, session: *const analysis.session.Session, next_output: *usize, deck_title: []const u8) void {
+    /// Publishes `session`'s completed results in request order from
+    /// `next_output.*`, stopping at the first unfinished query or the first
+    /// output failure.
+    fn deliverFrom(self: *Problem, session: *const analysis.session.Session, next_output: *usize) void {
         if (self.delivery_error != null) return;
         while (next_output.* < session.outputs.items.len) : (next_output.* += 1) {
-            const delivered = self.deliverOne(session, session.outputs.items[next_output.*], deck_title) catch |err| {
+            const delivered = self.deliverOne(session, session.outputs.items[next_output.*]) catch |err| {
                 self.delivery_error = err;
                 return;
             };
@@ -893,7 +893,7 @@ pub const Problem = struct {
     /// session lookups fail only if Session breaks that bookkeeping; the
     /// error then stops delivery like any output failure instead of
     /// aborting a C host.
-    fn deliverOne(self: *Problem, session: *const analysis.session.Session, id: QueryId, deck_title: []const u8) DeliveryError!bool {
+    fn deliverOne(self: *Problem, session: *const analysis.session.Session, id: QueryId) DeliveryError!bool {
         const status = (try session.info(id)).status;
         if (!status.terminal()) return false;
         if (session == &self.session and self.streaming == id) {
@@ -906,14 +906,14 @@ pub const Problem = struct {
             try self.delivery.endStream(self.io, res.npoints, res.varnames.len);
         } else if (status == .complete) {
             const res = try session.result(id);
-            var lap = if (self.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
+            var lap = if (self.session.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
             defer timingLap(self.io, &lap, "output delivery");
             const job = try session.query(id);
             // An `.sp` carries its ports' z0, which a Touchstone output records (#60).
             var z0: std.ArrayList(f64) = .empty;
             defer z0.deinit(self.allocator);
             if (job == .sp) try modeZ0(self.allocator, job.sp.ports, &z0);
-            const plot: output.Plot = .{ .title = deck_title, .result = res, .z0 = z0.items };
+            const plot: output.Plot = .{ .title = session.deck.title, .result = res, .z0 = z0.items };
             try self.delivery.publish(self.io, plot);
             if (job == .sp) if (job.sp.lin) |lin| if (lin.touchstone)
                 try self.writeTouchstone(lin.file, plot);

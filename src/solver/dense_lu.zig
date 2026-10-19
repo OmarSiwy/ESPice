@@ -6,12 +6,12 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const scale = @import("core").numerics.scale;
+const num = @import("core").numerics;
 
 // ponytail: rank-8 panels are the only blocking; 2-D register tiling of the
 // trailing update is next if dense solves dominate again.
 
-/// A pivot fell below eps^2.
+/// A pivot fell below eps^2 or was not finite.
 pub const Error = error{Singular};
 
 const W = std.simd.suggestVectorLength(f64) orelse 1;
@@ -19,9 +19,17 @@ const V = @Vector(W, f64);
 /// Pivot magnitudes below eps^2 (4.9e-32) count as zero.
 const singular_tol: f64 = std.math.floatEps(f64) * std.math.floatEps(f64);
 
+/// Whether pivot `p` fails the factor: below `singular_tol`, inf or NaN.
+/// The pivot search never picks a NaN over a finite candidate, but strict
+/// elimination carries any NaN entry into some later pivot, so every NaN
+/// input fails here.
+inline fn badPivot(p: f64) bool {
+    return !(@abs(p) >= singular_tol and @abs(p) <= std.math.floatMax(f64));
+}
+
 /// x = A^-1 b in one elimination pass, O(n^3). Destroys `a`; `b` and `x`
 /// must not alias. `Singular` when a pivot falls below eps^2 in absolute
-/// terms (a NaN pivot passes); `x` is then partial. Asserts that `a` holds
+/// terms or is not finite; `x` is then partial. Asserts that `a` holds
 /// n x n entries, `b` and `x` at least n each, and that `b` is not `x`.
 pub fn factorizeSolve(n: usize, a: []f64, b: []const f64, x: []f64) Error!void {
     return factorizeSolveImpl(n, a, b, x, false);
@@ -45,17 +53,17 @@ pub fn factorize(n: usize, a: []f64, piv: []u32) Error!void {
     for (0..n) |k| {
         const max_row = pivotRow(n, a, k);
         piv[k] = @intCast(max_row);
-        if (max_row != k) swapRowsSimd(a, n, k, max_row);
+        if (max_row != k) swapRows(a, n, k, max_row);
 
         const pivot = a[k * n + k];
-        if (@abs(pivot) < singular_tol) return error.Singular;
+        if (badPivot(pivot)) return error.Singular;
         const inv_pivot = @as(f64, 1.0) / pivot;
         const row_k = a[k * n ..][0..n];
         for (k + 1..n) |ii| {
             const factor = a[ii * n + k] * inv_pivot;
             a[ii * n + k] = factor;
             const row_i = a[ii * n ..][0..n];
-            elimRowSimd(row_i, row_k, factor, k + 1, n);
+            elimRow(row_i, row_k, factor, k + 1, n);
         }
     }
 }
@@ -75,11 +83,18 @@ pub fn solveFactored(n: usize, lu: []const f64, piv: []const u32, b: []const f64
         if (piv[k] != k) std.mem.swap(f64, &x[k], &x[piv[k]]);
     }
 
-    for (0..n) |k| {
-        const xk = x[k];
-        if (xk == 0) continue; // sparse right-hand sides are common
-        fmsSolveSimd(lu, x, n, k, xk);
-    }
+    // Forward through unit-lower L, a row at a time: contiguous dots over
+    // x from its first nonzero, since leading zeros stay zero (sparse
+    // right-hand sides are common). The column sweep this replaces
+    // gathered one double per cache line: 2.2x slower at n = 8 to 64, 4.7x
+    // at n = 512 (ReleaseFast, i9-14900HX).
+    var f: usize = 0;
+    while (f < n and x[f] == 0) f += 1;
+    // `numerics.dot`'s 16 strict accumulators vectorize and keep NaN and
+    // Inf exact; fast-math could drop a NaN the solve must return.
+    if (f < n) for (f + 1..n) |i| {
+        x[i] -= num.dot(lu[i * n ..][f..i], x[f..i]);
+    };
 
     backSubstitute(n, lu, x);
 }
@@ -94,14 +109,20 @@ pub fn solveFactoredT(n: usize, lu: []const f64, piv: []const u32, b: []const f6
     assert(x.len >= n);
     if (x.ptr != b.ptr) @memcpy(x[0..n], b[0..n]);
 
-    for (0..n) |i| {
-        x[i] = subtractColumnDot(n, lu, x, i, 0, i) / lu[i * n + i];
+    // Both sweeps run over rows of the factor, contiguous, as axpys: x[j]
+    // is final once its own row is reached, and row j then updates every
+    // x it couples to. Strided column dots were 2.7x slower on the L^T
+    // sweep at n = 64, 5x at n = 512.
+    for (0..n) |j| {
+        const row = lu[j * n ..][0..n];
+        x[j] /= row[j];
+        elimRow(x, row, x[j], j + 1, n);
     }
 
-    var i = n;
-    while (i > 0) {
-        i -= 1;
-        x[i] = subtractColumnDot(n, lu, x, i, i + 1, n);
+    var j = n;
+    while (j > 1) {
+        j -= 1;
+        elimRow(x, lu[j * n ..][0..n], x[j], 0, j);
     }
 
     var k = n;
@@ -127,59 +148,16 @@ pub fn buildComplexAdmittance(
     assert(g_dense.len >= n * n);
     assert(c_mat.len >= n * n);
     assert(a.len >= nn * nn);
-    const neg_omega = -omega;
-    const omega_v: V = @splat(omega);
-    const neg_omega_v: V = @splat(neg_omega);
     for (0..n) |row| {
-        const g_row = g_dense[row * n ..][0..n];
-        const c_row = c_mat[row * n ..][0..n];
-        const a_tl = a[row * nn ..];
-        const a_bl = a[(n + row) * nn ..];
-
-        var col: usize = 0;
-        while (col + W <= n) : (col += W) {
-            const gv: V = g_row[col..][0..W].*;
-            const cv: V = c_row[col..][0..W].*;
-
-            const p_tl: *[W]f64 = a_tl[col..][0..W];
-            p_tl.* = gv;
-            const p_tr: *[W]f64 = a_tl[n + col ..][0..W];
-            p_tr.* = neg_omega_v * cv;
-            const p_bl: *[W]f64 = a_bl[col..][0..W];
-            p_bl.* = omega_v * cv;
-            const p_br: *[W]f64 = a_bl[n + col ..][0..W];
-            p_br.* = gv;
-        }
-        while (col < n) : (col += 1) {
-            const g_val = g_row[col];
-            const c_val = c_row[col];
-            a_tl[col] = g_val;
-            a_tl[n + col] = neg_omega * c_val;
-            a_bl[col] = omega * c_val;
-            a_bl[n + col] = g_val;
+        const top = a[row * nn ..][0..nn];
+        const bot = a[(n + row) * nn ..][0..nn];
+        for (g_dense[row * n ..][0..n], c_mat[row * n ..][0..n], top[0..n], top[n..], bot[0..n], bot[n..]) |g, c, *tl, *tr, *bl, *br| {
+            tl.* = g;
+            tr.* = -omega * c;
+            bl.* = omega * c;
+            br.* = g;
         }
     }
-}
-
-/// x[i] - sum over j in [start, end) of lu[j*n + i] * x[j]: W-lane
-/// partial sums, one reduce, then the scalar tail.
-inline fn subtractColumnDot(n: usize, lu: []const f64, x: []const f64, i: usize, start: usize, end: usize) f64 {
-    assert(i < n);
-    assert(end <= n);
-    var acc: V = @splat(0.0);
-    var j = start;
-    // ponytail: strided column gather; keep a transposed factor copy
-    // if this ever shows up in a profile.
-    while (j + W <= end) : (j += W) {
-        var col_vals: [W]f64 = undefined;
-        inline for (0..W) |w| col_vals[w] = lu[(j + w) * n + i];
-        const cv: V = col_vals;
-        const xv: V = x[j..][0..W].*;
-        acc += cv * xv;
-    }
-    var sum = x[i] - @reduce(.Add, acc);
-    while (j < end) : (j += 1) sum -= lu[j * n + i] * x[j];
-    return sum;
 }
 
 /// Gives every structurally void unknown (row i and column i all zero) a
@@ -203,7 +181,7 @@ fn factorizeSolveImpl(n: usize, a: []f64, b: []const f64, x: []f64, comptime neg
     assert(x.len >= n);
     if (n > 0) assert(b.ptr != x.ptr);
     if (negate) {
-        scale(x[0..n], -1, b[0..n]);
+        num.scale(x[0..n], -1, b[0..n]);
     } else {
         @memcpy(x[0..n], b[0..n]);
     }
@@ -214,9 +192,9 @@ fn factorizeSolveImpl(n: usize, a: []f64, b: []const f64, x: []f64, comptime neg
 
     for (0..n) |k| {
         const max_row = pivotRow(n, a, k);
-        if (@abs(a[max_row * n + k]) < singular_tol) return error.Singular;
+        if (badPivot(a[max_row * n + k])) return error.Singular;
         if (max_row != k) {
-            swapRowsSimd(a, n, k, max_row);
+            swapRows(a, n, k, max_row);
             std.mem.swap(f64, &x[k], &x[max_row]);
         }
         const pivot = a[k * n + k];
@@ -225,7 +203,7 @@ fn factorizeSolveImpl(n: usize, a: []f64, b: []const f64, x: []f64, comptime neg
         for (k + 1..n) |ii| {
             const factor = a[ii * n + k] * inv_pivot;
             const row_i = a[ii * n ..][0..n];
-            elimRowSimd(row_i, row_k, factor, k + 1, n);
+            elimRow(row_i, row_k, factor, k + 1, n);
             x[ii] -= factor * x[k];
         }
     }
@@ -264,7 +242,7 @@ fn eliminateBlocked(n: usize, a: []f64, piv: []u32, x: []f64, comptime mode: Mod
         // updates of rows k0..k-1, which are final by then.
         for (k0 + 1..kb) |k| {
             const row = a[k * n ..][0..n];
-            for (k0..k) |kk| elimRowSimd(row, a[kk * n ..][0..n], row[kk], kb, n);
+            for (k0..k) |kk| elimRow(row, a[kk * n ..][0..n], row[kk], kb, n);
         }
         for (kb..n) |i| panelUpdate(a[i * n ..][0..n], a, n, k0, kb);
     }
@@ -278,9 +256,9 @@ inline fn panelStep(n: usize, a: []f64, piv: []u32, x: []f64, k: usize, kb: usiz
     assert(kb <= n);
     const max_row = pivotRow(n, a, k);
     if (mode == .factor) piv[k] = @intCast(max_row);
-    if (@abs(a[max_row * n + k]) < singular_tol) return false;
+    if (badPivot(a[max_row * n + k])) return false;
     if (max_row != k) {
-        swapRowsSimd(a, n, k, max_row);
+        swapRows(a, n, k, max_row);
         if (mode == .solve) std.mem.swap(f64, &x[k], &x[max_row]);
     }
     const inv_pivot = @as(f64, 1.0) / a[k * n + k];
@@ -288,7 +266,7 @@ inline fn panelStep(n: usize, a: []f64, piv: []u32, x: []f64, k: usize, kb: usiz
     for (k + 1..n) |ii| {
         const factor = a[ii * n + k] * inv_pivot;
         a[ii * n + k] = factor;
-        elimRowSimd(a[ii * n ..][0..n], row_k, factor, k + 1, kb);
+        elimRow(a[ii * n ..][0..n], row_k, factor, k + 1, kb);
         if (mode == .solve) x[ii] -= factor * x[k];
     }
     return true;
@@ -296,8 +274,9 @@ inline fn panelStep(n: usize, a: []f64, piv: []u32, x: []f64, k: usize, kb: usiz
 
 /// row[kb..n] -= row[kk] * a[kk, kb..n] for kk in [k0, kb), term by
 /// term in increasing kk, which rounds like `kb - k0` separate
-/// `elimRowSimd` calls. Four independent vector chains hide the
-/// subtract latency.
+/// `elimRow` calls. Four independent vector chains hide the
+/// subtract latency; the plain loop with kk outer (one `elimRow` per kk)
+/// measured 1.4x slower at n = 128 and 1.7x at n = 64.
 inline fn panelUpdate(row: []f64, a: []const f64, n: usize, k0: usize, kb: usize) void {
     var j = kb;
     while (j + 4 * W <= n) : (j += 4 * W) {
@@ -346,8 +325,7 @@ fn pivotRow(n: usize, a: []const f64, k: usize) usize {
     return max_row;
 }
 
-/// U x = y in place: per row, W-lane partial sums, one reduce, the
-/// scalar tail, then the divide.
+/// U x = y in place: per row, a dot over the row's tail, then the divide.
 fn backSubstitute(n: usize, a: []const f64, x: []f64) void {
     assert(a.len >= n * n);
     assert(x.len >= n);
@@ -355,61 +333,28 @@ fn backSubstitute(n: usize, a: []const f64, x: []f64) void {
     while (ki > 0) {
         ki -= 1;
         const row = a[ki * n ..][0..n];
-        var acc: V = @splat(@as(f64, 0));
-        var j = ki + 1;
-        while (j + W <= n) : (j += W) {
-            const av: V = row[j..][0..W].*;
-            const xv: V = x[j..][0..W].*;
-            acc += av * xv;
-        }
-        var sum = x[ki] - @reduce(.Add, acc);
-        while (j < n) : (j += 1) sum -= row[j] * x[j];
-        x[ki] = sum / row[ki];
+        x[ki] = (x[ki] - num.dot(row[ki + 1 ..], x[ki + 1 .. n])) / row[ki];
     }
 }
 
-/// row_i[start..n] -= factor * row_k[start..n].
-inline fn elimRowSimd(row_i: []f64, row_k: []const f64, factor: f64, start: usize, n: usize) void {
-    const fv: V = @splat(factor);
-    var j = start;
-    while (j + W <= n) : (j += W) {
-        const kv: V = row_k[j..][0..W].*;
-        const p: *[W]f64 = row_i[j..][0..W];
-        const cur: V = p.*;
-        p.* = cur - fv * kv;
-    }
-    while (j < n) : (j += 1) row_i[j] -= factor * row_k[j];
+/// row_i[start..n] -= factor * row_k[start..n]. A plain loop: LLVM
+/// vectorizes it behind a runtime alias check.
+inline fn elimRow(row_i: []f64, row_k: []const f64, factor: f64, start: usize, n: usize) void {
+    for (row_i[start..n], row_k[start..n]) |*a, b| a.* -= factor * b;
 }
 
-fn swapRowsSimd(a: []f64, n: usize, r1: usize, r2: usize) void {
+fn swapRows(a: []f64, n: usize, r1: usize, r2: usize) void {
     assert(r1 < n);
     assert(r2 < n);
-    var j: usize = 0;
-    while (j + W <= n) : (j += W) {
-        const p1: *[W]f64 = a[r1 * n + j ..][0..W];
-        const p2: *[W]f64 = a[r2 * n + j ..][0..W];
-        const tmp = p1.*;
-        p1.* = p2.*;
-        p2.* = tmp;
+    for (a[r1 * n ..][0..n], a[r2 * n ..][0..n]) |*p, *q| {
+        const t = p.*;
+        p.* = q.*;
+        q.* = t;
     }
-    while (j < n) : (j += 1) std.mem.swap(f64, &a[r1 * n + j], &a[r2 * n + j]);
 }
 
-/// x[i] -= xk * lu[i*n + k] for i in (k, n), gathering column k.
-fn fmsSolveSimd(lu: []const f64, x: []f64, n: usize, k: usize, xk: f64) void {
-    assert(k < n);
-    const xkv: V = @splat(xk);
-    var ii = k + 1;
-    while (ii + W <= n) : (ii += W) {
-        var lv: [W]f64 = undefined;
-        inline for (0..W) |w| lv[w] = lu[(ii + w) * n + k];
-        const lvu: V = lv;
-        const p: *[W]f64 = x[ii..][0..W];
-        const cur: V = p.*;
-        p.* = cur - xkv * lvu;
-    }
-    while (ii < n) : (ii += 1) x[ii] -= xk * lu[ii * n + k];
-}
+/// Private kernels for src/solver/tests.zig; empty outside test builds.
+pub const test_access = if (@import("builtin").is_test) .{ .backSubstitute = backSubstitute } else {};
 
 const testing = std.testing;
 
@@ -515,4 +460,53 @@ test "a void unknown solves to x_i = b_i, blocked and unblocked (#160)" {
         try testing.expect(scaledResidual(n, a0, x, b, false) <= 1e4);
         try testing.expect(scaledResidual(n, a0, x2, b, false) <= 1e4);
     }
+}
+
+test "the singular threshold is |pivot| < eps^2 exactly, blocked and unblocked" {
+    const gpa = testing.allocator;
+    for ([_]usize{ 3, blocked_min + 1 }) |n| {
+        const buf = try gpa.alloc(f64, n * n + 2 * n);
+        defer gpa.free(buf);
+        const a = buf[0 .. n * n];
+        const b = buf[n * n ..][0..n];
+        const x = buf[n * n + n ..][0..n];
+        const piv = try gpa.alloc(u32, n);
+        defer gpa.free(piv);
+        @memset(b, 1);
+        // c I with c = eps^2 factors and solves to 1/c exactly; one ulp
+        // below is singular.
+        for ([_]f64{ singular_tol, std.math.nextAfter(f64, singular_tol, 0) }, [_]bool{ true, false }) |c, ok| {
+            for (a, 0..) |*v, k| v.* = if (k / n == k % n) c else 0;
+            if (factorizeSolve(n, a, b, x)) |_| {
+                try testing.expect(ok);
+                for (x) |v| try testing.expectEqual(1 / c, v);
+            } else |_| try testing.expect(!ok);
+            for (a, 0..) |*v, k| v.* = if (k / n == k % n) c else 0;
+            try testing.expectEqual(ok, if (factorize(n, a, piv)) |_| true else |_| false);
+        }
+    }
+}
+
+test "a NaN or inf entry anywhere fails the factor, blocked and unblocked" {
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x7a7);
+    const r = prng.random();
+    for ([_]usize{ 1, 2, 5, blocked_min + 3 }) |n| for (0..20) |i| {
+        const buf = try gpa.alloc(f64, 2 * n * n + 2 * n);
+        defer gpa.free(buf);
+        const a = buf[0 .. n * n];
+        const a2 = buf[n * n ..][0 .. n * n];
+        const b = buf[2 * n * n ..][0..n];
+        const x = buf[2 * n * n + n ..][0..n];
+        const piv = try gpa.alloc(u32, n);
+        defer gpa.free(piv);
+        for (a) |*v| v.* = 2 * r.float(f64) - 1;
+        for (b) |*v| v.* = 1 + r.float(f64);
+        // The diagonal first: a NaN pivot used to pass the eps^2 test.
+        const at = if (i == 0) 0 else r.uintLessThan(usize, n * n);
+        a[at] = if (i % 2 == 0) std.math.nan(f64) else -std.math.inf(f64);
+        @memcpy(a2, a);
+        try testing.expectError(error.Singular, factorizeSolve(n, a, b, x));
+        try testing.expectError(error.Singular, factorize(n, a2, piv));
+    };
 }

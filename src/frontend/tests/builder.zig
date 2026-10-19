@@ -10,10 +10,9 @@ const applySourceWaveform = builder.test_access.applySourceWaveform;
 const pwlSlot = builder.test_access.pwlSlot;
 const pwlCapacity = builder.test_access.pwlCapacity;
 const Wave = builder.test_access.Wave;
-const castField = builder.test_access.castField;
+const castField = device.abi.bind.castField;
 const bindKv = builder.test_access.bindKv;
 const ta = builder.test_access;
-const z = @import("stdpp");
 
 fn card(name: []const u8, positional: []const Value) netlist.Netlist.View {
     return .{ .name = name, .kind = 'v', .pins = &.{}, .positional = positional, .kv = &.{}, .model = null, .subckt_instance = 0 };
@@ -367,7 +366,6 @@ test "compile frees the BBD permutation it does not return" {
     defer if (!compiled) b.deinit();
     var nb = try builder.NetBuilder.init(a, &b, nl);
     try nb.build();
-    try nb.tagSubcircuitNodes();
     var circuit = try b.compile();
     compiled = true;
     circuit.deinit();
@@ -579,8 +577,14 @@ test "publish orders .sp ports by portnum and refuses a gapped or doubled set" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectError(error.MissingPortNumber, publishPorts(a, "V1 a 0 0 AC 1 portnum 2\nR1 a 0 50\n"));
-    try std.testing.expectError(error.DuplicatePortNumber, publishPorts(a, "V1 a 0 0 AC 1 portnum 1\nV2 b 0 0 AC 1 portnum 1\nR1 a b 50\n"));
+    // A duplicate wins over a gap wherever it sits, as in vsrctemp.c.
+    inline for ([_]struct { []const u8, anyerror }{
+        .{ "V1 a 0 0 AC 1 portnum 2\nR1 a 0 50\n", error.MissingPortNumber },
+        .{ "V1 a 0 0 AC 1 portnum 1\nV2 b 0 0 AC 1 portnum 3\nR1 a b 50\n", error.MissingPortNumber },
+        .{ "V1 a 0 0 AC 1 portnum 1\nV2 b 0 0 AC 1 portnum 1\nR1 a b 50\n", error.DuplicatePortNumber },
+        .{ "V1 a 0 0 AC 1 portnum 5\nV2 b 0 0 AC 1 portnum 5\nR1 a b 50\n", error.DuplicatePortNumber },
+    }) |case| try std.testing.expectError(case[1], publishPorts(a, case[0]));
+    try std.testing.expectEqual(@as(usize, 0), (try publishPorts(a, "V1 a 0 0 AC 1\nR1 a 0 50\n")).len);
     const ports = try publishPorts(a, "V2 b 0 0 AC 1 portnum 2 z0 75\nV1 a 0 0 AC 1 portnum 1\nR1 a b 50\n");
     try std.testing.expectEqual(@as(usize, 2), ports.len);
     try std.testing.expectEqual(@as(f64, 50), ports[0].z0);
@@ -610,7 +614,6 @@ test "publish maps .sp port rows through the BBD permutation" {
     defer if (!compiled) b.deinit();
     var nb = try builder.NetBuilder.init(a, &b, nl);
     try nb.build();
-    try nb.tagSubcircuitNodes();
     var perm: ?[]const u32 = null;
     var circuit = try b.compilePerm(&perm);
     compiled = true;
@@ -664,26 +667,6 @@ test "HSPICE W card fits a lossy line onto wline_1" {
     try nb.build();
     try std.testing.expectEqual(@as(usize, 1), b.protos.items.len);
     try std.testing.expectEqualStrings(device.vtable("wline_1").name, b.protos.items[0].type_name);
-}
-
-test "stdpp max over port numbers matches its pull-path oracle" {
-    // portList's pipeline at every length to past 3×32 u16 lanes, and four
-    // misalignments; values include 0 (not a port) and the u16 maximum.
-    var prng = std.Random.DefaultPrng.init(0x9047);
-    const rnd = prng.random();
-    var buf: [3 * 32 + 8]u16 = undefined;
-    for (&buf) |*v| v.* = switch (rnd.uintLessThan(u8, 8)) {
-        0 => 0,
-        1 => std.math.maxInt(u16),
-        else => rnd.int(u16),
-    };
-    for (0..4) |off| for (0..buf.len - off) |len| {
-        const xs = buf[off..][0..len];
-        var fast = z.fromSlice(u16, xs);
-        var src = z.fromSlice(u16, xs);
-        var slow = src.byRef();
-        try std.testing.expectEqual(slow.max(), fast.max());
-    };
 }
 
 /// The scans `branch_index` replaced (#177): the first V, else the first L,
@@ -752,6 +735,23 @@ test "the branch-name index answers as the first-match scans did, duplicates inc
     try std.testing.expectEqual(nb.l.len - 1, ta.lRow(&nb, "v1").?);
 }
 
+test "BBD: no permutation without two instances, and no row past u32" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const lib = try device.Library.init(arena.allocator());
+    var b = try Builder.init(std.testing.allocator, &lib);
+    defer b.deinit();
+    for (0..3) |_| _ = try b.addNode();
+    try std.testing.expectEqual(null, try ta.computeBbd(&b)); // untagged
+    // One instance, a coupling row and a top-level row still order nothing.
+    for ([_][2]u32{ .{ 1, 2 }, .{ 2, 2 }, .{ 2, 5 }, .{ 3, 0 }, .{ 0, 7 } }) |tag| try ta.tagNodeInstance(&b, tag[0], tag[1]);
+    try std.testing.expectEqual(null, try ta.computeBbd(&b));
+    const n = b.n;
+    b.n = std.math.maxInt(u32);
+    try std.testing.expectError(error.TooManyNodes, b.addNode());
+    b.n = n;
+}
+
 test "BBD blocks follow first-seen instance order over sparse instance ordinals" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -763,10 +763,10 @@ test "BBD blocks follow first-seen instance order over sparse instance ordinals"
     // both (coupling), row 5 top level, row 6 never tagged.
     for ([_][2]u32{ .{ 1, 3 }, .{ 2, 1 }, .{ 3, 3 }, .{ 4, 1 }, .{ 4, 3 }, .{ 5, 0 } }) |tag|
         try ta.tagNodeInstance(&b, tag[0], tag[1]);
-    const bbd = try ta.computeBbd(&b);
-    const perm = bbd.perm.?;
+    const bbd = (try ta.computeBbd(&b)).?;
+    const perm = bbd.perm;
     defer std.testing.allocator.free(perm);
-    const info = bbd.info.?;
+    const info = bbd.info;
     defer std.testing.allocator.free(info.blocks);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 3, 2, 4, 5, 6 }, perm);
     try std.testing.expectEqual(@as(usize, 2), info.blocks.len);

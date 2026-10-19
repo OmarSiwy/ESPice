@@ -2,8 +2,12 @@
 //! and the `.lstb` double-injection formulas. Oracles: the chunked stream
 //! against one whole-grid `FreqSolver` batch; the PSD shapes and ngspice's
 //! three `nintegrate` branches against their closed forms; `.lstb` against
-//! A·β through an ideal voltage break. Also pulls in the in-file tests of
-//! acmatch, lstb and sp.
+//! A·β through an ideal voltage break. Then metamorphic relations and
+//! certificates on built circuits: reciprocity Z12 = Z21 and impedance
+//! scaling on a passive RLC network (each solution checked by its
+//! residual), AC at ω = 0 against the finite difference of two operating
+//! points, and the diode operating point against hand KCL. Also pulls in
+//! the in-file tests of acmatch, lstb and sp.
 
 const StreamTests = struct {
     const freq = @import("../ac/freq.zig");
@@ -38,7 +42,7 @@ const StreamTests = struct {
         // The stream reads only the checkpoint callback and the (empty)
         // frequency-dependent table from Circuit.
         var ckt: root.Circuit = undefined;
-        ckt.setProgress(.{ .ctx = &probe, .yield_fn = Probe.checkpoint });
+        ckt.progress = .{ .ctx = &probe, .yield_fn = Probe.checkpoint };
         ckt.ac_dyn_slots = &.{};
         for ([_]bool{ false, true }) |adjoint| {
             const whole = try a.alloc(f64, frequencies.len * 4);
@@ -84,7 +88,7 @@ const StreamTests = struct {
         const rhs = [_]f64{ 1, 0, 0, 0, 0, 1, 0, 0.5 };
         var whole: [omegas.len * rhs.len]f64 = undefined;
         var ckt: root.Circuit = undefined;
-        ckt.setProgress(null);
+        ckt.progress = null;
         ckt.ac_dyn_slots = &.{};
         for (0..omegas.len + 1) |len| {
             try fs.solveBatch(omegas[0..len], .{}, &rhs, whole[0 .. len * rhs.len], true);
@@ -205,10 +209,221 @@ const LstbTests = struct {
     }
 };
 
+const CircuitTests = struct {
+    const std = @import("std");
+    const t = std.testing;
+    const analysis = @import("../types.zig");
+    const Builder = @import("builder").Builder;
+    const Library = @import("device").Library;
+    const FreqSolver = @import("solver").freq_solve.FreqSolver;
+    const models = @import("models");
+    const op = @import("../dc/op.zig");
+    const tf = @import("../dc/tf.zig");
+    const sp = @import("../ac/sp.zig");
+    const GROUND = analysis.GROUND;
+    const gpa = t.allocator;
+
+    /// A non-symmetric passive RLC network on nodes 1..3 with R, L and C
+    /// scaled for impedance level `k`: R·k, L·k, C/k.
+    fn rlc(lib: *const Library, k: f64) !@import("device").Circuit {
+        var b = try Builder.init(gpa, lib);
+        const n1 = try b.addNode();
+        const n2 = try b.addNode();
+        const n3 = try b.addNode();
+        try b.addDevice(models.resistor, "", &.{ .r = 100 * k }, &.{}, .{ n1, GROUND });
+        try b.addDevice(models.inductor, "", &.{ .l = 1e-3 * k }, &.{}, .{ n1, n2 });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-9 / k }, &.{}, .{ n2, GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 50 * k }, &.{}, .{ n2, n3 });
+        try b.addDevice(models.capacitor, "", &.{ .c = 2e-9 / k }, &.{}, .{ n3, GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 300 * k }, &.{}, .{ n3, n1 });
+        try b.addDevice(models.inductor, "", &.{ .l = 1e-5 * k }, &.{}, .{ n3, GROUND });
+        return b.compile();
+    }
+
+    const omegas = [_]f64{ 2 * std.math.pi * 1e3, 2 * std.math.pi * 1e5, 2 * std.math.pi * 1e6, 2 * std.math.pi * 1e7 };
+    const port_a: u32 = 1;
+    const port_b: u32 = 3;
+
+    /// Unit current injections into `port_a` then `port_b`, solved at every
+    /// `omegas` point into `x` (point-major, two stacked 2n blocks each).
+    /// Each solution is certified by its scaled residual
+    /// ‖(G + jωC)x − b‖∞ ≤ 64·eps·(‖A‖∞‖x‖∞ + ‖b‖∞) on the circuit's planes.
+    fn injections(ckt: *analysis.Circuit, x: []f64) !void {
+        const n = ckt.n;
+        const x_op = try gpa.alloc(f64, n);
+        defer gpa.free(x_op);
+        @memset(x_op, 0);
+        var fs = try FreqSolver.fromCircuit(gpa, ckt, x_op);
+        defer fs.deinit();
+        const rhs = try gpa.alloc(f64, 4 * n);
+        defer gpa.free(rhs);
+        @memset(rhs, 0);
+        rhs[port_a] = 1;
+        rhs[2 * n + port_b] = 1;
+        try fs.solveBatch(&omegas, .{}, rhs, x, false);
+
+        const r = try gpa.alloc(f64, 2 * n);
+        defer gpa.free(r);
+        const row_abs = try gpa.alloc(f64, n);
+        defer gpa.free(row_abs);
+        for (omegas, 0..) |w, k| for (0..2) |j| {
+            const xs = x[(2 * k + j) * 2 * n ..][0 .. 2 * n];
+            const b = rhs[j * 2 * n ..][0 .. 2 * n];
+            @memcpy(r, b);
+            for (r) |*v| v.* = -v.*;
+            @memset(row_abs, 0);
+            for (0..n) |col| for (ckt.col_ptr[col]..ckt.col_ptr[col + 1]) |p| {
+                const row = ckt.row_idx[p];
+                const g = ckt.g_vals[p];
+                const c = w * ckt.c_vals[p];
+                r[row] += g * xs[col] - c * xs[n + col];
+                r[n + row] += g * xs[n + col] + c * xs[col];
+                row_abs[row] += @abs(g) + @abs(c);
+            };
+            var a_norm: f64 = 0;
+            var x_norm: f64 = 0;
+            for (row_abs) |v| a_norm = @max(a_norm, v);
+            for (xs) |v| x_norm = @max(x_norm, @abs(v));
+            const bound = 64 * std.math.floatEps(f64) * (a_norm * x_norm + 1);
+            // `!(|r| <= bound)` fails a NaN too, which `@max` would drop.
+            for (r) |v| if (!(@abs(v) <= bound)) return error.TestUnexpectedResult;
+        };
+    }
+
+    fn z(x: []const f64, n: usize, k: usize, drive: usize, node: u32) [2]f64 {
+        const xs = x[(2 * k + drive) * 2 * n ..][0 .. 2 * n];
+        return .{ xs[node], xs[n + node] };
+    }
+
+    test "passive RLC: reciprocity Z12 = Z21, and R·k, L·k, C/k scales every Z by k" {
+        var lib = try Library.init(gpa);
+        defer lib.deinit();
+        var zs: [2][omegas.len][3][2]f64 = undefined; // per k: Z11, Z12, Z21
+        for ([_]f64{ 1, 7 }, &zs) |k, *zk| {
+            var prepared = try rlc(&lib, k);
+            defer prepared.deinit();
+            var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
+            defer ckt.deinit();
+            const n = ckt.n;
+            const x = try gpa.alloc(f64, omegas.len * 4 * n);
+            defer gpa.free(x);
+            try injections(&ckt, x);
+            for (zk, 0..) |*zp, p| {
+                zp.* = .{ z(x, n, p, 0, port_a), z(x, n, p, 0, port_b), z(x, n, p, 1, port_a) };
+                // Z21 (drive a, read b) = Z12 (drive b, read a).
+                const mag = @abs(zp[1][0]) + @abs(zp[1][1]);
+                try t.expect(mag > 0);
+                for (0..2) |c| try t.expectApproxEqAbs(zp[1][c], zp[2][c], 1e-12 * mag);
+            }
+        }
+        for (zs[0], zs[1]) |z1, z7| for (z1, z7) |a, b| for (a, b) |va, vb| {
+            try t.expectApproxEqAbs(7 * va, vb, 1e-10 * (@abs(a[0]) + @abs(a[1])) * 7);
+        };
+    }
+
+    /// 5 V through 1 kOhm into a diode (IS = 1e-14, N = 1) at 27 °C.
+    fn diodeBias(lib: *const Library) !@import("device").Circuit {
+        var b = try Builder.init(gpa, lib);
+        const n_in = try b.addNode();
+        const n_mid = try b.addNode();
+        try t.expectEqual(mid, n_mid);
+        try b.addDevice(models.vsource, "", &.{ .dc = 5 }, &.{}, .{ n_in, GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ n_in, n_mid });
+        try b.addDevice(models.diode, "", &.{ .is = 1e-14 }, &.{}, .{ n_mid, GROUND });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-9 }, &.{}, .{ n_mid, GROUND });
+        return b.compile();
+    }
+    const mid: u32 = 2;
+    /// Tight enough that Newton's own stopping error is far below the FD
+    /// and KCL tolerances below.
+    const tight: op.Options = .{ .tol = .{ .reltol = 1e-10, .vntol = 1e-12, .abstol = 1e-15 } };
+
+    test "diode op: KCL at the solved point by hand; AC at ω = 0 and .tf equal the FD of two operating points" {
+        var lib = try Library.init(gpa);
+        defer lib.deinit();
+        var prepared = try diodeBias(&lib);
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
+        defer ckt.deinit();
+        const n = ckt.n;
+        const x = try gpa.alloc(f64, 3 * n);
+        defer gpa.free(x);
+        const x_op = x[0..n];
+        try t.expect((try op.solve(&ckt, x_op, tight, &.{}, &.{})).converged);
+
+        // Certificate: (5 − v)/R = IS·(exp(v/Vt) − 1), with the diode
+        // model's own k/q (ngspice's) at 300.15 K. Its junction gmin
+        // (1e-12 S, 0.7 pA here) sits below the bound.
+        const v = x_op[mid];
+        const vt = 1.38064852e-23 / 1.6021766208e-19 * 300.15;
+        const i_r = (5 - v) / 1000;
+        try t.expectApproxEqAbs(i_r, 1e-14 * (@exp(v / vt) - 1), 1e-9 * i_r);
+
+        var br: u32 = 0;
+        for (ckt.current_row, 0..) |is_branch, i| if (is_branch) {
+            br = @intCast(i);
+        };
+        // AC at ω = 0: the unit drive on the source's branch row.
+        const ac = blk: {
+            var fs = try FreqSolver.fromCircuit(gpa, &ckt, x_op);
+            defer fs.deinit();
+            const rhs = try gpa.alloc(f64, 2 * n);
+            defer gpa.free(rhs);
+            @memset(rhs, 0);
+            rhs[br] = 1;
+            const xs = try gpa.alloc(f64, 2 * n);
+            defer gpa.free(xs);
+            try fs.solveBatch(&.{0}, .{}, rhs, xs, false);
+            try t.expectEqual(@as(f64, 0), xs[n + mid]);
+            break :blk xs[mid];
+        };
+        const gain = (try tf.solve(&ckt, x_op, .{ .output_node = mid }, br, gpa)).gain;
+
+        // dv/dVin by a central difference of two tight operating points;
+        // h = 10 mV moves the diode current 0.2 %, so truncation is ~1e-6.
+        const refs = try ckt.collectParams();
+        const dc = for (refs) |r| {
+            if (std.mem.eql(u8, r.param_name, "dc") and r.get() == 5) break r;
+        } else return error.TestUnexpectedResult;
+        const h = 1e-2;
+        for ([_]f64{ 5 + h, 5 - h }, [_][]f64{ x[n..][0..n], x[2 * n ..][0..n] }) |vin, xs| {
+            dc.set(vin);
+            try ckt.recompute();
+            try t.expect((try op.solve(&ckt, xs, tight, &.{}, &.{})).converged);
+        }
+        dc.set(5);
+        try ckt.recompute();
+        const fd = (x[n + mid] - x[2 * n + mid]) / (2 * h);
+        try t.expect(fd > 0 and fd < 0.01);
+        try t.expectApproxEqRel(fd, ac, 1e-5);
+        try t.expectApproxEqRel(ac, gain, 1e-12);
+    }
+
+    test "sp: a .net query refuses more than two legs, a balanced port counting twice" {
+        var lib = try Library.init(gpa);
+        defer lib.deinit();
+        var prepared = try rlc(&lib, 1);
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
+        defer ckt.deinit();
+        const x = try gpa.alloc(f64, ckt.n);
+        defer gpa.free(x);
+        @memset(x, 0);
+        const Port = @import("core").query.Port;
+        const ports = [_]Port{
+            .{ .node = 1, .branch = Port.no_branch, .balanced = .{ .node = 2, .branch = Port.no_branch } },
+            .{ .node = 3, .branch = Port.no_branch },
+        };
+        const ctx: analysis.RunCtx = .{ .circuit = &ckt, .x_op = x, .probes = &.{}, .source_node = 1, .source_branch = 0, .allocator = gpa, .scratch_allocator = gpa };
+        try t.expectError(error.InvalidQueryOptions, sp.run(&ctx, .{ .sweep = .{ .f_start = 1, .f_stop = 1 }, .net = true, .ports = &ports }));
+    }
+};
+
 test {
     _ = StreamTests;
     _ = NoiseTests;
     _ = LstbTests;
+    _ = CircuitTests;
     // The in-file tests of the frequency-domain drivers.
     _ = @import("../ac/acmatch.zig");
     _ = @import("../ac/lstb.zig");

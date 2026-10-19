@@ -218,7 +218,7 @@ fn hasAlter(src: []const u8) bool {
     var lines = std.mem.splitScalar(u8, src, '\n');
     _ = lines.first();
     while (lines.next()) |line| {
-        if (eqlLower(firstWord(std.mem.trim(u8, line, " \t\r")), ".alter")) return true;
+        if (std.ascii.eqlIgnoreCase(firstWord(std.mem.trim(u8, line, " \t\r")), ".alter")) return true;
     }
     return false;
 }
@@ -235,11 +235,11 @@ fn searchDirs(arena: std.mem.Allocator, origin: []const u8, src: []const u8) ![]
     while (lines.next()) |line| {
         var tokens = Fields.init(std.mem.trim(u8, line, " \t\r"));
         const head = tokens.next() orelse continue;
-        if (!eqlLower(head, ".option") and !eqlLower(head, ".options") and !eqlLower(head, ".opt")) continue;
+        if (!std.ascii.eqlIgnoreCase(head, ".option") and !std.ascii.eqlIgnoreCase(head, ".options") and !std.ascii.eqlIgnoreCase(head, ".opt")) continue;
         while (tokens.next()) |key| {
             if (!Fields.isWord(key) or !tokens.takeEq()) continue;
             const value = word(&tokens) catch continue orelse continue;
-            if (eqlLower(key, "search")) try dirs.append(arena, try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(origin) orelse ".", value }));
+            if (std.ascii.eqlIgnoreCase(key, "search")) try dirs.append(arena, try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(origin) orelse ".", value }));
         }
     }
     return dirs.items;
@@ -274,7 +274,8 @@ fn locate(io: Io, gpa: std.mem.Allocator, search: Search, path: []const u8, name
 /// top-level card of the same name, `.model` the model of that name,
 /// `.subckt ... .ends` the subcircuit of that name, and `.lib file sec`
 /// the `.lib` line naming the same file; `.del lib file sec` removes one.
-/// Any other card is appended (`.param`: the last definition wins). A deck
+/// Any other card is appended (`.param`: the last definition wins); a
+/// blank line is no card and is dropped from the later runs. A deck
 /// without `.alter` is returned as its single run, unchanged. Runs borrow
 /// `src` or live in `arena`. InvalidAlter for a nameless `.model`,
 /// `.subckt` or `.lib`, a `.del` other than `.del lib`, or a `.del` that
@@ -298,19 +299,22 @@ pub fn splitAlters(arena: std.mem.Allocator, src: []const u8) ![]const []const u
             pending.?.text = src[@intFromPtr(pending.?.text.ptr) - @intFromPtr(src.ptr) .. at + line.len];
             continue;
         }
+        // A blank line is no card, and a `+` after it still continues the
+        // card before it.
+        if (next != null and t.len == 0) continue;
         if (pending) |c| {
             if (block) |*b| try b.append(arena, c) else try cards.append(arena, c);
             pending = null;
         }
         if (next == null) break;
         const head = firstWord(t);
-        if (eqlLower(head, ".alter") or eqlLower(head, ".end")) {
+        if (std.ascii.eqlIgnoreCase(head, ".alter") or std.ascii.eqlIgnoreCase(head, ".end")) {
             if (block) |b| {
                 try apply(arena, &cards, b.items);
                 try runs.append(arena, try render(arena, title, cards.items));
             } else base_end = at;
             block = null;
-            if (eqlLower(head, ".end")) break;
+            if (std.ascii.eqlIgnoreCase(head, ".end")) break;
             block = .empty;
             continue;
         }
@@ -333,24 +337,20 @@ fn firstWord(t: []const u8) []const u8 {
     return t[0 .. std.mem.indexOfAny(u8, t, " \t") orelse t.len];
 }
 
-fn eqlLower(text: []const u8, lower: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(text, lower);
-}
-
 /// `e:<name>`, `model:<name>`, `subckt:<name>`, `lib:<file>`, `del:<file>`
 /// or "" for a card that only appends.
 fn keyOf(arena: std.mem.Allocator, t: []const u8) ![]const u8 {
     if (t.len == 0 or t[0] == '*') return "";
     var fields = Fields.init(t);
     const head = fields.next() orelse return "";
-    const kind: []const u8 = if (std.ascii.isAlphabetic(head[0])) "e" else if (eqlLower(head, ".model")) "model" else if (eqlLower(head, ".subckt")) "subckt" else if (eqlLower(head, ".lib")) "lib" else if (eqlLower(head, ".del")) "del" else if (eqlLower(head, ".ends")) "ends" else return "";
-    if (std.mem.eql(u8, kind, "e") or std.mem.eql(u8, kind, "ends")) return std.ascii.allocLowerString(arena, try std.fmt.allocPrint(arena, "{s}:{s}", .{ kind, head }));
+    const kind: []const u8 = if (std.ascii.isAlphabetic(head[0])) "e" else if (std.ascii.eqlIgnoreCase(head, ".model")) "model" else if (std.ascii.eqlIgnoreCase(head, ".subckt")) "subckt" else if (std.ascii.eqlIgnoreCase(head, ".lib")) "lib" else if (std.ascii.eqlIgnoreCase(head, ".del")) "del" else if (std.ascii.eqlIgnoreCase(head, ".ends")) "ends" else return "";
+    if (std.mem.eql(u8, kind, "e") or std.mem.eql(u8, kind, "ends")) return std.ascii.allocLowerString(arena, try arena.print("{s}:{s}", .{ kind, head }));
     if (std.mem.eql(u8, kind, "del")) {
         const what = fields.next() orelse return error.InvalidAlter;
-        if (!eqlLower(what, "lib")) return error.InvalidAlter;
+        if (!std.ascii.eqlIgnoreCase(what, "lib")) return error.InvalidAlter;
     }
     const name = (word(&fields) catch return error.InvalidAlter) orelse return error.InvalidAlter;
-    return std.ascii.allocLowerString(arena, try std.fmt.allocPrint(arena, "{s}:{s}", .{ kind, name }));
+    return std.ascii.allocLowerString(arena, try arena.print("{s}:{s}", .{ kind, name }));
 }
 
 /// The span of cards a `.subckt` card at `i` opens, through its `.ends`.
@@ -368,7 +368,7 @@ fn apply(arena: std.mem.Allocator, cards: *std.ArrayList(Card), block: []const C
         const c = block[i];
         const n = unitLen(block, i);
         defer i += n;
-        const target = if (std.mem.startsWith(u8, c.key, "del:")) try std.fmt.allocPrint(arena, "lib:{s}", .{c.key[4..]}) else c.key;
+        const target = if (std.mem.startsWith(u8, c.key, "del:")) try arena.print("lib:{s}", .{c.key[4..]}) else c.key;
         const replaceable = target.len != 0 and !std.mem.startsWith(u8, target, "ends:");
         // Top-level cards only: skip subcircuit bodies.
         var k: usize = 0;
@@ -532,7 +532,7 @@ fn appendData(io: Io, gpa: std.mem.Allocator, search: Search, path: []const u8, 
         }
         const raw = lines.next() orelse break;
         const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len != 0 and eqlLower(firstWord(line), ".enddata")) break;
+        if (line.len != 0 and std.ascii.eqlIgnoreCase(firstWord(line), ".enddata")) break;
         tokens = Fields.init(if (line.len != 0 and line[0] == '*') "" else line);
     }
     if (names.items.len == 0) return error.InvalidData;
@@ -696,7 +696,7 @@ test ".load: the top deck names the default file, FILE=x.ic reads x.ic0" {
     try tmp.dir.writeFile(io, .{ .sub_path = "deck.ic0", .data = ".nodeset\n+ a= 1.0000\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "run.ic0", .data = ".ic v(b)=2\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "inc.sp", .data = ".load\n" });
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
     // Each inlined file ends in blank lines; only the cards matter here.
     try std.testing.expectEqualStrings("t\n.nodeset\n+ a= 1.0000", std.mem.trimEnd(u8, try expand(io, std.testing.allocator, a, path, "t\n.include 'inc.sp'\n"), "\n"));
     try std.testing.expectEqualStrings("t\n.ic v(b)=2", std.mem.trimEnd(u8, try expand(io, std.testing.allocator, a, path, "t\n.load file='run.ic'\n"), "\n"));
@@ -712,7 +712,7 @@ test "Spectre include: sections, SPICE files, and the includer's mode after" {
     try tmp.dir.writeFile(io, .{ .sub_path = "lib.scs", .data = "library l\nsection tt\nr1 (a 0) resistor r=1\ninclude \"r.sp\"\nendsection tt\nsection ss\nr1 (a 0) resistor r=2\nendsection\nendlibrary l\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "r.sp", .data = "r2 a 0 3\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "c.inc", .data = "simulator lang=spectre\nc1 (a 0) capacitor c=1p\nsimulator lang=spice\nc2 a 0 2p\n" });
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.scs", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/deck.scs", .{tmp.sub_path});
     const Case = struct { []const u8, anyerror![]const u8 };
     for ([_]Case{
         .{ "t\ninclude \"lib.scs\" section=tt // corner\n", "t\nr1 (a 0) resistor r=1\nsimulator lang=spice\nr2 a 0 3\nsimulator lang=spectre\n" },
@@ -740,7 +740,7 @@ test "external .data: MER stacks files, LAM sets them side by side" {
     try tmp.dir.writeFile(io, .{ .sub_path = "b.txt", .data = "5 6\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "c.txt", .data = "* sweep points\n$ x\n-1.5k\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "h.txt", .data = "x\n1\n" });
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/deck.sp", .{tmp.sub_path});
     const Case = struct { []const u8, anyerror![]const u8 };
     for ([_]Case{
         .{ "t\n.data d MER\n+ FILE='a.txt' x=1 y=2\n+ FILE='b.txt' y=1\n.enddata\n.end\n", "t\n.data d x y\n+ 1 2\n+ 3 4\n+ 5 5\n.enddata\n.end\n\n" },
@@ -755,4 +755,8 @@ test "external .data: MER stacks files, LAM sets them side by side" {
         const got = load(io, a, path);
         if (case[1]) |want| try std.testing.expectEqualStrings(want, try got) else |err| try std.testing.expectError(err, got);
     }
+}
+
+test {
+    _ = @import("tests/source.zig");
 }

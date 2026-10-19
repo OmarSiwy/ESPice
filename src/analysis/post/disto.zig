@@ -38,7 +38,7 @@ pub const Options = @import("core").query.Disto;
 /// own product, the second- and third-harmonic solution sampled at `probes`,
 /// point-major with (re, im) adjacent; left empty, that order is not
 /// computed at all.
-pub const Out = struct {
+const Out = struct {
     freqs: []f64,
     hd2: []f64,
     v1_mag: []f64,
@@ -79,7 +79,7 @@ pub const Out = struct {
 /// `freqs` in length, that each non-empty `h2`/`h3` holds
 /// `freqs.len * probes.len * 2` values, and that a two-tone output comes
 /// with `options.f2_ratio > 0`.
-pub fn sweep(
+fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
     out: Out,
@@ -135,11 +135,11 @@ pub fn sweep(
     defer term_list.deinit(allocator);
     for (0..n) |b| {
         if (b != 0) try ckt.checkpoint(.{ .phase = .prepare, .completed = b, .total = n });
-        root.copySimd(x_pert, x_op[0..n]);
+        @memcpy(x_pert, x_op[0..n]);
         x_pert[b] += eps;
         ckt.eval(x_pert, 0);
-        root.copySimd(g_plus, ckt.g_vals[0..nnz]);
-        root.copySimd(c_plus, ckt.c_vals[0..nnz]);
+        @memcpy(g_plus, ckt.g_vals[0..nnz]);
+        @memcpy(c_plus, ckt.c_vals[0..nnz]);
         x_pert[b] = x_op[b] - eps;
         ckt.eval(x_pert, 0);
         for (0..n) |a| for (ckt.col_ptr[a]..ckt.col_ptr[a + 1]) |slot| {
@@ -205,14 +205,15 @@ pub fn sweep(
     // Two-tone scratch: the F2 response V1b (and its conjugate's imaginary
     // part), the f1-f2 response, the IM right-hand side and solution, and
     // the two 2n·n G/C slabs `mixedCubic` accumulates.
-    const im_work = try allocator.alloc(f64, if (two_tone) 5 * nn + (if (want_im3) 4 * n2 else 0) else 0);
+    const t2: usize = if (two_tone) nn else 0;
+    const im_work = try allocator.alloc(f64, 5 * t2 + (if (want_im3) 4 * n2 else 0));
     defer allocator.free(im_work);
-    const v1b = im_work[0..if (two_tone) nn else 0];
-    const v1b_cim = im_work[if (two_tone) nn else 0..][0..if (two_tone) n else 0];
-    const v2m = im_work[if (two_tone) 2 * nn else 0..][0..if (two_tone) nn else 0];
-    const x_im = im_work[if (two_tone) 3 * nn else 0..][0..if (two_tone) nn else 0];
-    const t3 = im_work[if (two_tone) 4 * nn else 0..][0..if (two_tone) nn else 0];
-    const m_planes = im_work[if (two_tone) 5 * nn else 0..];
+    const v1b = im_work[0..t2];
+    const v1b_cim = im_work[t2..][0 .. t2 / 2];
+    const v2m = im_work[2 * t2 ..][0..t2];
+    const x_im = im_work[3 * t2 ..][0..t2];
+    const t3 = im_work[4 * t2 ..][0..t2];
+    const m_planes = im_work[5 * t2 ..];
 
     const v1_re = x_work[0..n];
     const v1_im = x_work[n..nn];
@@ -230,7 +231,7 @@ pub fn sweep(
     const omega_f2 = 2.0 * std.math.pi * options.f2_ratio * options.sweep.f_start;
     if (two_tone) {
         const ph2 = options.ac2_phase * std.math.pi / 180.0;
-        root.zeroSimd(rhs_work);
+        @memset(rhs_work, 0);
         rhs_work[options.drive2_branch] = 0.5 * options.ac2_magnitude * @cos(ph2);
         rhs_work[n + options.drive2_branch] = 0.5 * options.ac2_magnitude * @sin(ph2);
         try solveAt(ckt, x_op, g_dense, c_mat, omega_f2, a_work, dyn_work, rhs_work, v1b);
@@ -244,7 +245,7 @@ pub fn sweep(
         const omega = 2.0 * std.math.pi * f;
 
         // 3a. First order: (G + jwC) V1 = ½ mag · e[drive row].
-        root.zeroSimd(rhs_work);
+        @memset(rhs_work, 0);
         if (options.drive_branch != root.GROUND) {
             // V card: its own branch row (cktdisto.c:115-116).
             rhs_work[options.drive_branch] = drive_re;
@@ -353,7 +354,11 @@ fn solveAt(ckt: *root.Circuit, x_op: []const f64, g_dense: []const f64, c_mat: [
 
 /// One nonzero of the second-order kernels: d²F[row]/dx_a dx_b (`coeff`)
 /// and d²Q[row]/dx_a dx_b (`qcoeff`).
+/// `bilinear` reads 24 of its 32 bytes (`row` only orders the terms).
 const Term = struct { row: u32, a: u32, b: u32, coeff: f64, qcoeff: f64 };
+comptime {
+    std.debug.assert(@sizeOf(Term) == 32);
+}
 
 /// dst (stacked 2n) := scale·(F''(a, b) + jω·Q''(a, b)), the complex
 /// bilinear form of the second-order kernels `terms` (rows `row_start`) on
@@ -416,7 +421,7 @@ fn mixedCubic(
     const n2 = n * n;
     const m1 = planes[0 .. 2 * n2];
     const m2 = planes[2 * n2 ..][0 .. 2 * n2];
-    root.zeroSimd(planes);
+    @memset(planes, 0);
     // (direction, weight into m1, weight into m2); p + q goes through x_work's tail.
     const sum = dst[0..n];
     for (sum, p, q) |*s, a, b| s.* = a + b;
@@ -490,7 +495,7 @@ fn cubicForms(
 ) [2][]const f64 {
     const n = p.len;
     const n2 = n * n;
-    root.zeroSimd(cubic);
+    @memset(cubic, 0);
 
     // cubic[k·4n ..] holds plane k's T(p,p,p), T(p,q,q), T(p,p,q), T(q,q,q).
     const norm_p = norm(p);
@@ -555,10 +560,10 @@ fn secondDirDeriv(
     // (k, weight) of the stencil's off-centre points.
     const taps = [_]struct { f64, f64 }{ .{ 1, 16 }, .{ -1, 16 }, .{ 2, -1 }, .{ -2, -1 } };
     num.scale(g_out[0..n2], -30.0, g0[0..n2]);
-    root.zeroSimd(g_out[n2..]);
+    @memset(g_out[n2..], 0);
     for (taps) |tap| {
         const step = tap[0] * h * scale;
-        root.copySimd(x_work, x_op[0..n]);
+        @memcpy(x_work, x_op[0..n]);
         num.axpy(x_work[0..n], step, u);
         ckt.eval(x_work, 0);
         ckt.denseG(g_tap[0..n2]);
@@ -573,13 +578,7 @@ fn secondDirDeriv(
 
 /// dst[row] := (Σ_a s[row·n + a] · w[a]) · scale.
 fn contract(s: []const f64, w: []const f64, scale: f64, dst: []f64) void {
-    const n = w.len;
-    for (dst, 0..) |*d, row| {
-        var acc: f64 = 0;
-        const s_row = s[row * n ..][0..n];
-        for (s_row, w) |sv, wv| acc += sv * wv;
-        d.* = acc * scale;
-    }
+    for (dst, 0..) |*d, row| d.* = num.dot(s[row * w.len ..][0..w.len], w) * scale;
 }
 
 /// Contract entry: drive the `DISTOF1` card's branch (opts.drive_branch,
@@ -656,7 +655,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     }
 
     const names = try a.dupe([]const u8, &.{ "frequency", "hd2", "v1_mag", "v2_mag" });
-    errdefer a.free(names); // entries are literals
     const ncols = names.len;
     const data = try a.alloc(f64, n_points * ncols);
     for (0..n_points) |i| {

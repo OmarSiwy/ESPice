@@ -234,18 +234,11 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
     // `.options tnom` is a model-card default (b4set.c:1950): models read it
     // as they are derived, before the pattern freezes.
     b.nom_temp_c = deck_opts.tnom_c;
-    b.reltol = deck_opts.tol.reltol;
-    b.abstol = deck_opts.tol.abstol;
-    b.vntol = deck_opts.tol.vntol;
-    b.gmin = deck_opts.tol.gmin;
-    try b.reserveNodes(nl.graph.vertexCount());
+    b.tol = deck_opts.tol;
 
     if (nl.deck.draw_seed and run.point == null and !variants.any(nl.deck)) try variants.drawOnce(parse_arena, nl);
     var nb = try builder.NetBuilder.init(parse_arena, &b, nl.*);
     try nb.build();
-    try nb.tagSubcircuitNodes();
-    // Runtime-loaded HDL devices, after the built-in ones and before the freeze.
-    try nb.addDynDevices();
 
     // The card table outlives the Builder; its names live on the parse arena.
     const cards = try sim_arena.dupe(requests.CardRef, b.cards.items);

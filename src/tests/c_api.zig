@@ -562,3 +562,79 @@ test "C random create/append/advance/result/destroy sequences match a model of v
         }
     }
 }
+
+/// v(out) of `deck`'s operating point, through one handle's whole life.
+fn dividerOut(handle: *c.espice_problem) !f64 {
+    if (c.espice_run_all(handle) != c.ESPICE_OK) return error.RunFailed;
+    var values: [8]f64 = undefined;
+    var n: usize = 0;
+    if (c.espice_copy_result(handle, 0, &values, values.len, &n) != c.ESPICE_OK) return error.CopyFailed;
+    var name: [16]u8 = undefined;
+    for (0..n) |k| {
+        var len: usize = 0;
+        if (c.espice_copy_result_name(handle, 0, @intCast(k), &name, name.len, &len) != c.ESPICE_OK) return error.NameFailed;
+        if (std.mem.eql(u8, std.mem.sliceTo(&name, 0), "v(out)")) return values[k];
+    }
+    return error.MissingColumn;
+}
+
+/// A divider of R1 = `r1` ohm over 1k, as a deck in `buf`.
+fn dividerDeck(buf: []u8, r1: u32) ![]const u8 {
+    return std.fmt.bufPrint(buf, "C threads\nV1 in 0 1\nR1 in out {d}\nR2 out 0 1k\n.op\n.end\n", .{r1});
+}
+
+// Independent handles from several threads at once (include/espice.h:
+// "calls on them may run concurrently from any threads"), the handle table
+// churning under them. Oracle: every call OK, every divider at its closed
+// form, every destroyed token INVALID_HANDLE however its slot was reused.
+test "C handles on different threads run concurrently and stay independent" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    const Worker = struct {
+        fn run(r1: u32, failures: *std.atomic.Value(u32)) void {
+            body(r1) catch {
+                _ = failures.fetchAdd(1, .monotonic);
+            };
+        }
+        fn body(r1: u32) !void {
+            var buf: [128]u8 = undefined;
+            for (0..4) |_| {
+                const handle = try createDeck(try dividerDeck(&buf, r1));
+                const got = try dividerOut(handle);
+                if (@abs(got - 1e3 / (1e3 + @as(f64, @floatFromInt(r1)))) > 1e-12) return error.WrongValue;
+                if (c.espice_destroy(handle) != c.ESPICE_OK) return error.DestroyFailed;
+                var u: u32 = 0;
+                if (c.espice_query_count(handle, &u) != c.ESPICE_INVALID_HANDLE) return error.StaleHandleAnswered;
+                if (c.espice_destroy(handle) != c.ESPICE_INVALID_HANDLE) return error.DoubleDestroyAccepted;
+            }
+        }
+    };
+    var failures: std.atomic.Value(u32) = .init(0);
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, i| thread.* = try std.Thread.spawn(.{}, Worker.run, .{ @as(u32, @intCast(1000 * (i + 1))), &failures });
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
+}
+
+// One handle, its calls serialized by join, made from three threads: the
+// handle carries no thread affinity.
+test "C a handle created on one thread runs on another and is destroyed on a third" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    var buf: [128]u8 = undefined;
+    const handle = try createDeck(try dividerDeck(&buf, 3000));
+    var got: anyerror!f64 = error.NotRun;
+    const Run = struct {
+        fn run(h: *c.espice_problem, out: *anyerror!f64) void {
+            out.* = dividerOut(h);
+        }
+        fn destroy(h: *c.espice_problem, out: *u32) void {
+            out.* = c.espice_destroy(h);
+        }
+    };
+    (try std.Thread.spawn(.{}, Run.run, .{ handle, &got })).join();
+    try std.testing.expectApproxEqRel(@as(f64, 0.25), try got, 1e-12);
+    var destroyed: u32 = 99;
+    (try std.Thread.spawn(.{}, Run.destroy, .{ handle, &destroyed })).join();
+    try std.testing.expectEqual(@as(u32, c.ESPICE_OK), destroyed);
+    var u: u32 = 0;
+    try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_HANDLE), c.espice_query_count(handle, &u));
+}

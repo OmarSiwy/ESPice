@@ -86,11 +86,18 @@ pub const Bisect = struct {
 
     /// Takes the goal errors of `points()` in order; NaN marks a test whose
     /// measure found no value or whose simulation failed. Fails only when
-    /// the arena cannot grow `history`. Asserts that the search is still
-    /// running and that there is one error per point.
-    pub fn feed(s: *Bisect, residuals: []const f64) !void {
+    /// the arena cannot grow `history`, and then before it changes
+    /// anything. Asserts that the search is still running and that there is
+    /// one error per point.
+    pub fn feed(s: *Bisect, residuals: []const f64) std.mem.Allocator.Error!void {
         assert(s.status == .running);
         assert(residuals.len == s.pending);
+        if (s.pending == 1) {
+            try s.history.lo.ensureUnusedCapacity(s.arena, 1);
+            try s.history.hi.ensureUnusedCapacity(s.arena, 1);
+            try s.history.x.ensureUnusedCapacity(s.arena, 1);
+            try s.history.r.ensureUnusedCapacity(s.arena, 1);
+        }
         s.evaluations += s.pending;
         if (s.method == .bisection) for (residuals) |r| if (std.math.isNan(r)) return s.stop(.failed);
         if (s.pending == 2) {
@@ -102,10 +109,10 @@ pub const Bisect = struct {
         } else {
             const t = s.pts[0];
             const r = residuals[0];
-            try s.history.lo.append(s.arena, s.lo);
-            try s.history.hi.append(s.arena, s.hi);
-            try s.history.x.append(s.arena, t);
-            try s.history.r.append(s.arena, r);
+            s.history.lo.appendAssumeCapacity(s.lo);
+            s.history.hi.appendAssumeCapacity(s.hi);
+            s.history.x.appendAssumeCapacity(t);
+            s.history.r.appendAssumeCapacity(r);
             s.iterations += 1;
             // The passing side of the window moves to a pass, the other to a fail.
             if (s.passes(r) == s.pass_hi) s.hi = t else s.lo = t;
@@ -333,4 +340,30 @@ test "ABSOUT holds the latest error in measure units, RELOUT the goal error itse
     try solve(&rel, F{});
     try std.testing.expectEqual(.converged, rel.status);
     try std.testing.expectEqual(@as(u32, 2), rel.iterations);
+}
+
+test "a feed that runs out of memory leaves the search as it was" {
+    try std.testing.checkAllAllocationFailures(@import("testing.zig").fixed_growth, struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            var s = Bisect.init(arena.allocator(), .bisection, 0, 1e3, 0, 1, .{ .relin = 1e-9, .itropt = 40 });
+            var r: [2]f64 = undefined;
+            while (s.points().len != 0) {
+                const pts = s.points();
+                for (pts, r[0..pts.len]) |x, *e| e.* = x - 700;
+                const before = s;
+                s.feed(r[0..pts.len]) catch |err| {
+                    try std.testing.expectEqual(before.evaluations, s.evaluations);
+                    try std.testing.expectEqual(before.iterations, s.iterations);
+                    try std.testing.expectEqual(before.lo, s.lo);
+                    try std.testing.expectEqual(before.hi, s.hi);
+                    try std.testing.expectEqual(s.iterations, s.history.lo.items.len);
+                    try std.testing.expectEqual(s.iterations, s.history.r.items.len);
+                    return err;
+                };
+            }
+            try std.testing.expectEqual(.converged, s.status);
+        }
+    }.run, .{});
 }

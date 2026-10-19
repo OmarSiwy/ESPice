@@ -51,3 +51,10 @@ test "CITIfile 2-port write" {
         "DATA S[1,1] RI\nDATA S[2,1] RI\nVAR_LIST_BEGIN\n1e9\n2e9\nVAR_LIST_END\n" ++
         "BEGIN\n5e-1,-3e-1\n4e-1,-2e-1\nEND\nBEGIN\n1e-1,-5e-2\n2e-1,-4e-2\nEND\n", w.buffered());
 }
+
+test "CITIfile skips columns that are not S parameters" {
+    var buf: [256]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try encode(&w, .{ .title = "c", .result = .{ .plotname = "sp", .varnames = &.{ "frequency", "NFMIN", "v(S_1_1)" }, .is_complex = true, .npoints = 1, .data = &.{ 1, 0, 9, 9, 0.5, -0.5 } } });
+    try std.testing.expectEqualStrings("CITIFILE A.01.01\nNAME sp\nVAR FREQ MAG 1\nDATA S[1,1] RI\nVAR_LIST_BEGIN\n1e0\nVAR_LIST_END\nBEGIN\n5e-1,-5e-1\nEND\n", w.buffered());
+}

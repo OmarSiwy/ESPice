@@ -147,19 +147,20 @@ breaks §2.1 names its target rung and the plan block that moves it.
 - **Proof**: n/a (rung 9); `layout_hash` refuses a mismatched `.so`
 - **Revisit when**: untrusted models must be sandboxed.
 
-### S11: stdpp pipelines in `core.numerics`
+### S11: plain loops in `core.numerics` (replaced stdpp pipelines, 2026-10-19)
 
-- **Axis**: policy: one lanewise callback per helper (`axpy`, `scale`, `sub`, `dot`, `sum`, `normInf`) over stdpp's comptime pipeline.
-- **Evidence**: six helpers today, each with a `.byRef()` differential test.
+- **Axis**: policy: plain Zig loops written in the forms Zig 0.18's re-enabled LLVM loop vectorizer handles, instead of stdpp's comptime iterator pipelines. stdpp is no longer a dependency.
+- **Evidence** (0.18.0-dev.349, ReleaseFast, i9-14900HX AVX2, f64, ns/elem at n = 1024 / 16384):
+  - map/axpy plain 0.078 / 0.19 against stdpp 0.11 / 0.23;
+  - integer count 0.058 / 0.11 against 0.19 / 0.20;
+  - early-exit NaN search in 64-wide integer-OR blocks 0.092 / 0.120 against 0.137 / 0.170;
+  - blocked convergence check 0.155 / 0.20 against 0.234 / 0.264;
+  - max|x| as an i64 bit-pattern max 0.153 / 0.152 against 0.140 / 0.138 (exact, NaN propagates; float `@max` drops NaN).
+- **Float sums**: `dot`/`sum` are strict loops over 16 independent accumulators with a fixed pairwise combine, not fast-math. Callers detect NaN through these results (`lm` rss, `mhb.zig` `isNan(num.sum(r))`). Under `@setFloatMode(.optimized)` a NaN input is not guaranteed to reach the result, and the input gate that would restore that cost more than fast-math saved (about 0.5 vs 0.18 cycles/entry). Within 15% of ungated fast-math. A `@Vector(16)` + `@reduce(.Add)` form is shorter but slower, because a strict float `@reduce` is an ordered, sequential chain of adds.
 - **Owner**: core (`src/core/numerics.zig`).
-- **Rung**: 5, comptime-fused iterator pipeline. The vectorizer is off in Zig 0.17 (§2.11), so a plain loop (rung 1) is scalar.
-- **Cost**:
-  - residue: **measured, not zero.** `normInf` (2026-10-17, `-mcpu=x86_64_v3`): `gen` 67 instructions, 1 call: an out-of-line `foldVector` call per invocation for lengths ≥ 64, scalar inline below. A hand 4-wide, 4-accumulator loop: 108 instructions, 0 calls. The residue is one call and a 32-byte stack spill per `normInf`, never per element. The vector body sits in the helper.
-  - change radius for one more helper: 0 bodies
-  - interface weight: the lanewise callback contract
-- **Drills passed**: none drilled
-- **Proof**: RESIDUE, per call. Not gated, because the helper's symbol name (`foldVector__func_N`) changes between builds. **P6:** probe the helper body by a stable name (an `export` wrapper in `tests/codegen.zig` around `foldAssoc` itself), or inline it, then gate. Hot-path standing: `normInf` runs once per Newton iteration (`converger.zig:217`), O(n), against an O(fill) factor.
-- **Revisit when**: stdpp exposes the fold body by a stable name, or a profile shows the call.
+- **Rung**: 1, plain loop.
+- **Proof**: every converted loop verified from the assembly (packed ymm in the loop body; `tools/asm_probe.py`, `-mcpu=x86_64_v3`), with the pairs listed for `tests/codegen.zig`. Each kernel also has a differential test against a naive scalar loop (lengths 0..260, 4 offsets, NaN/±Inf planted).
+- **Revisit when**: the minimum Zig drops below 0.18 (the vectorizer is off in 0.16/0.17), or a profile shows one of these loops lost its vector form.
 
 ### S12: companion Newton hook
 

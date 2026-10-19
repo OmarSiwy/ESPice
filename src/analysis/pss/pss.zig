@@ -42,7 +42,7 @@ const max_settle_periods: usize = 2000;
 /// The `.pss` query. With `osc_node` set, `period` is only the first guess.
 pub const Options = @import("core").query.Pss;
 
-/// Outcome of a periodic solve (shared by pss, hb and qpss).
+/// Outcome of a periodic solve (shooting, HB, multi-tone HB and qpss).
 pub const SolveResult = struct {
     converged: bool,
     /// Newton (shooting or spectral) iterations taken.
@@ -92,7 +92,7 @@ fn integrateOnePeriod(
     ckt.setSimState(.{ .t = 0, .dt = dt, .kind = .tran });
     if (has_charge) {
         ckt.eval(x, 0);
-        root.copySimd(sc.q_prev[0..n], ckt.q_vec[0..n]);
+        num.copySimd(sc.q_prev[0..n], ckt.q_vec[0..n]);
         // Carry the trapezoid state across the period seam: a converged step
         // leaves i_prev = -f(x), so at x0 it is -rhs. A zero seed loses
         // dt*i0/2 of charge per period. Being a function of x0, it sits
@@ -153,7 +153,7 @@ inline fn integrateFrom(
     x_end: []f64,
     options: Options,
 ) error{ QueryCancelled, OutOfMemory }!bool {
-    root.copySimd(x_end, x0);
+    num.copySimd(x_end, x0);
     return integrateOnePeriod(ckt, ws, sc, x_end, &.{}, &.{}, options);
 }
 
@@ -187,7 +187,7 @@ fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
     const n = ctx.n;
     const inv_eps = 1.0 / ctx.options.fd_epsilon;
 
-    root.copySimd(ctx.x_pert[0..n], ctx.x0[0..n]);
+    num.copySimd(ctx.x_pert[0..n], ctx.x0[0..n]);
     num.axpy(ctx.x_pert[0..n], ctx.options.fd_epsilon, v[0..n]);
     var opts = ctx.options;
     const osc = opts.osc_node;
@@ -202,7 +202,7 @@ fn shootingMatvec(ctx: *ShootingKrylovCtx, v: []const f64, w: []f64) void {
     };
     if (!ok) {
         // ponytail: a zero column is safer than propagating NaN.
-        root.zeroSimd(w[0..n]);
+        @memset(w[0..n], 0);
         return;
     }
     fdColumn(w[0..n], ctx.x_end_pert, ctx.x_pert, ctx.phi, inv_eps);
@@ -237,7 +237,7 @@ fn denseFdSolve(
     const inv_eps = 1.0 / eps;
 
     for (0..n) |j| {
-        root.copySimd(x0_pert[0..n], x0[0..n]);
+        num.copySimd(x0_pert[0..n], x0[0..n]);
         var opts = options;
         if (options.osc_node != root.GROUND and j == options.osc_node) opts.period *= 1 + eps else x0_pert[j] += eps;
 
@@ -285,7 +285,7 @@ fn krylovSolve(
         .n = n,
     };
 
-    root.zeroSimd(dx0[0..n]);
+    @memset(dx0[0..n], 0);
 
     _ = krylov.solve(&ctx, neg_phi[0..n], dx0[0..n], options.gmres_tol, options.gmres_max_restarts);
     if (ctx.failure) |err| return err;
@@ -315,7 +315,7 @@ pub fn solve(
     const nnz: usize = ckt.nnz;
     const ncols = 1 + probes.len;
     std.debug.assert(wave.len == 0 or wave.len == (@as(usize, options.n_samples) + 1) * ncols);
-    root.zeroSimd(wave);
+    @memset(wave, 0);
 
     const use_krylov = n >= krylov_threshold;
 
@@ -357,7 +357,7 @@ pub fn solve(
     try ckt.computeBaseline();
     const ws = try ckt.workspace();
 
-    root.copySimd(x0, x_dc[0..n]);
+    num.copySimd(x0, x_dc[0..n]);
     var opts = options;
     const osc = options.osc_node;
     if (osc != root.GROUND) opts.period = try startOscillator(ckt, ws, &sc, x0, options, allocator);
@@ -376,7 +376,7 @@ pub fn solve(
         }
 
         // x_end + (-1)*x0 is exactly x_end - x0.
-        root.copySimd(phi, x_end);
+        num.copySimd(phi, x_end);
         num.axpy(phi, -1.0, x0);
 
         res_norm = num.normInf(phi);
@@ -399,8 +399,8 @@ pub fn solve(
         num.axpy(x0, damping, dx0);
     }
 
-    root.copySimd(x_end, x0);
-    if (!try integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts)) root.zeroSimd(wave);
+    num.copySimd(x_end, x0);
+    if (!try integrateOnePeriod(ckt, ws, &sc, x_end, probes, wave, opts)) @memset(wave, 0);
 
     return .{
         .converged = res_norm < options.shooting_tol,
@@ -490,7 +490,7 @@ fn startOscillator(
         prev = v;
     }
     if (crossings < 2 or !(hi - lo > osc_kick)) return error.OscillatorDidNotStart;
-    root.copySimd(x[0..n], Sample.row(record, anchor, steps, n + 1));
+    num.copySimd(x[0..n], Sample.row(record, anchor, steps, n + 1));
     const dt = options.period / @as(f64, @floatFromInt(steps));
     return (last - first) / @as(f64, @floatFromInt(crossings - 1)) * dt;
 }
@@ -525,5 +525,4 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 /// Private implementation access for the analysis test suite; void outside tests.
 pub const test_access = if (@import("builtin").is_test) .{
     .krylov_threshold = krylov_threshold,
-    .shootingMatvec = shootingMatvec,
 } else {};

@@ -1,6 +1,7 @@
 //! Host walks over a batch slice: each runs one device hook over every
 //! batch in order. `Circuit` walks all of its batches; the GPU context walks
-//! the ones it keeps on the host, or all of them after a fault.
+//! the ones it keeps on the host, or all of them after a fault. Cites
+//! nothing: these drive ESPice's own `device.abi.Hooks`.
 const device_ir = @import("device").abi;
 
 const Batch = device_ir.Batch;

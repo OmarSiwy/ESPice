@@ -64,3 +64,27 @@ test "CSV with no points is the header row alone" {
     try encode(&w, .{ .title = "csv", .result = .{ .plotname = "Transient", .varnames = &.{ "time", "v(out)" }, .is_complex = false, .npoints = 0, .data = &.{} } });
     try std.testing.expectEqualStrings("time,v(out)\n", w.buffered());
 }
+
+test "CSV round-trips every value through parseFloat, bit for bit" {
+    const a = std.testing.allocator;
+    var data: [3 * 40]f64 = undefined;
+    const specials = [_]f64{ 0, -0.0, 5e-324, -2.2250738585072014e-308, std.math.floatMax(f64), std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0.1, 1.0 / 3.0 };
+    var prng: std.Random.DefaultPrng = .init(0xc5f);
+    for (&data, 0..) |*x, i| x.* = if (i < specials.len) specials[i] else @bitCast(prng.random().int(u64) & ~@as(u64, 0x7ff0_0000_0000_0000) | 0x3000_0000_0000_0000);
+    var out: Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try encode(&out.writer, .{ .title = "t", .result = .{ .plotname = "p", .varnames = &.{ "time", "v(a)", "i(b)" }, .is_complex = false, .npoints = 40, .data = &data } });
+    var lines = std.mem.splitScalar(u8, out.written(), '\n');
+    try std.testing.expectEqualStrings("time,v(a),i(b)", lines.next().?);
+    var i: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        var fields = std.mem.splitScalar(u8, line, ',');
+        while (fields.next()) |f| : (i += 1) {
+            const back = try std.fmt.parseFloat(f64, f);
+            if (std.math.isNan(data[i])) try std.testing.expect(std.math.isNan(back)) else try std.testing.expectEqual(@as(u64, @bitCast(data[i])), @as(u64, @bitCast(back)));
+        }
+    }
+    try std.testing.expectEqual(data.len, i);
+    try std.testing.expectEqual(null, lines.next());
+}

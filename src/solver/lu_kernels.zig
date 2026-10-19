@@ -190,11 +190,9 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
                 column(true, &sh.w, t, x, val, a, sy, stamp, sh, tid, nt, k)
             else
                 column(false, val, t, x, val, a, sy, stamp, sh, tid, nt, k);
+            if (bad) _ = @atomicRmw(u32, &sy[1], .Max, t.n - k, .monotonic);
             Sy.barrier();
-            if (tid == 0) {
-                if (bad) _ = @atomicRmw(u32, &sy[1], .Max, t.n - k, .monotonic);
-                Sy.release(&(sy + sync_header)[k], stamp);
-            }
+            if (tid == 0) Sy.release(&(sy + sync_header)[k], stamp);
             return true;
         }
 
@@ -215,7 +213,8 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
 
         /// Column k's replay on `w`: the block's scratch (`local`, indexed
         /// from the column's first slot, discard slot last) or `val` itself.
-        /// Returns whether a pivot test failed.
+        /// Returns whether a pivot test failed or a slot this lane checked
+        /// holds a NaN or inf.
         inline fn column(comptime local: bool, w: anytype, t: Tab, x: P(u32), val: P(f64), a: P(f64), sy: P(u32), stamp: u32, sh: anytype, tid: u32, nt: u32, k: u32) bool {
             const done = sy + sync_header;
             const base = x[t.coff + k];
@@ -341,7 +340,9 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
                 if (dv == 0 or !std.math.isFinite(dv)) {
                     bad = true;
                 } else {
-                    // cmax is a max: exact in any order, NaN ignored alike.
+                    // cmax is a max: exact in any order. It drops a NaN
+                    // the host's bit-pattern max keeps; the slot scan below
+                    // fails that step instead.
                     var cm: f64 = @abs(dv);
                     var l = diag + 1 + tid;
                     while (l < end) : (l += nt) {
@@ -363,12 +364,18 @@ pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type {
                     }
                 }
             }
-            if (local) {
-                Sy.barrier();
-                s = tid;
-                while (s < width) : (s += nt) val[base + s] = w[s];
+            // Every slot is final. A NaN or inf L or U entry fails the step,
+            // as `refactorColumns`' stores flag it; the barrier because
+            // other lanes wrote this lane's slots.
+            Sy.barrier();
+            var nonfinite: u1 = 0;
+            s = tid;
+            while (s < width) : (s += nt) {
+                const v = w[o + s];
+                nonfinite |= @intFromBool(!std.math.isFinite(v));
+                if (local) val[base + s] = v;
             }
-            return bad;
+            return bad or nonfinite != 0;
         }
 
         /// Forward solve: y = L^-1 P (-rhs), each row's subtractions in
@@ -601,12 +608,19 @@ pub const HostSy = struct {
 /// Host buffers for one `runHost` call; `sync` must be zeroed once after
 /// the tables are built, and `stamp` must grow by one per call.
 pub const HostBufs = struct {
+    /// The index buffer `build` returned (`Tables.idx`), `n_idx` words.
     idx: []const u32,
+    /// Factor values, `n_val` slots laid out as `Tab.coff` says.
     val: []f64,
+    /// A's values in CSC order.
     a: []const f64,
+    /// The residual; the solve returns dx = -A^-1 rhs.
     rhs: []const f64,
+    /// Solve scratch, n entries; holds z = U^-1 L^-1 P (-rhs) afterwards.
     y: []f64,
+    /// The Newton step, n entries.
     dx: []f64,
+    /// `Tab.syncLen()` words of tickets and done stamps.
     sync: []u32,
 };
 
@@ -667,10 +681,10 @@ fn runHostCap(comptime cap: u32, t: Tab, b: HostBufs, stamp: u32, threads: u32) 
 
 const SparseLu = @import("sparse_lu.zig").SparseLu;
 
-/// The refactor kernel body on host threads: one pivot epoch's tables and
-/// buffers.
-const HostFactor = struct {
-    const Self = @This();
+/// The refactor kernel body as a multicore host refactor (dev/solvers/
+/// gpu-lu.md option 3): one pivot epoch's tables and buffers. Its factors
+/// are bitwise `SparseLu.refactor`'s, so callers may pick it by speed.
+pub const HostRefactor = struct {
     const H = Kernels(HostSy, col_max, 1);
 
     /// `SparseLu.pattern_epoch` the tables were built from.
@@ -683,7 +697,7 @@ const HostFactor = struct {
 
     /// Builds the tables for `lu`'s current factor (4 bytes per flop).
     /// Caller owns the result; free with `deinit`.
-    pub fn init(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64) !Self {
+    pub fn init(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64) !HostRefactor {
         var tb = try build(gpa, lu, col_ptr, growth, .{});
         errdefer tb.deinit(gpa);
         const val = try gpa.alloc(f64, tb.tab.n_val);
@@ -694,54 +708,12 @@ const HostFactor = struct {
         return .{ .epoch = lu.pattern_epoch, .tb = tb, .val = val, .sync = sync };
     }
 
-    /// Frees the tables and buffers; `self` is undefined afterwards.
-    pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
+    /// Frees the tables and buffers; `lu` stays the caller's.
+    pub fn deinit(self: *HostRefactor, gpa: std.mem.Allocator) void {
         self.tb.deinit(gpa);
         gpa.free(self.val);
         gpa.free(self.sync);
         self.* = undefined;
-    }
-
-    /// Refactors `a` (A's values in CSC order) on the caller plus
-    /// `threads - 1` tasks of `io`, at most 15 (none when null). False when
-    /// a pivot test fails; the factors are then unusable.
-    pub fn refactor(self: *Self, a: []const f64, io: ?std.Io, threads: u32) bool {
-        assert(self.sync.len == self.tb.tab.syncLen());
-        assert(self.val.len == self.tb.tab.n_val);
-        const W = struct {
-            fn work(t: Tab, x: [*]u32, val: [*]f64, av: [*]f64, sy: [*]u32, stamp: u32) void {
-                var sh: H.Shared = undefined;
-                while (H.refactor(t, x, val, av, sy, stamp, &sh, 0, 1)) {}
-            }
-        };
-        self.stamp +%= 1;
-        @memset(self.sync[0..sync_header], 0);
-        const args = .{ self.tb.tab, self.tb.idx.ptr, self.val.ptr, @constCast(a.ptr), self.sync.ptr, self.stamp };
-        var futures: [15]std.Io.Future(void) = undefined;
-        const extra = if (io != null) @min(@max(threads, 1) - 1, futures.len) else 0;
-        for (futures[0..extra]) |*f| f.* = io.?.async(W.work, args);
-        @call(.auto, W.work, args);
-        for (futures[0..extra]) |*f| f.await(io.?);
-        assert(self.sync[1] <= self.tb.tab.n);
-        return self.sync[1] == 0;
-    }
-};
-
-/// The refactor kernel body as a multicore host refactor (dev/solvers/
-/// gpu-lu.md option 3). Its factors are bitwise `SparseLu.refactor`'s, so
-/// callers may pick it by speed.
-pub const HostRefactor = struct {
-    f: HostFactor,
-
-    /// Builds the tables for `lu`'s current factor (4 bytes per flop).
-    /// Caller owns the result; free with `deinit`.
-    pub fn init(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64) !HostRefactor {
-        return .{ .f = try .init(gpa, lu, col_ptr, growth) };
-    }
-
-    /// Frees the tables and buffers; `lu` stays the caller's.
-    pub fn deinit(self: *HostRefactor, gpa: std.mem.Allocator) void {
-        self.f.deinit(gpa);
     }
 
     /// `lu.refactor(col_ptr, vals, growth)`, with the `growth` `init` got,
@@ -752,21 +724,37 @@ pub const HostRefactor = struct {
     /// on the epoch the tables were built from.
     pub fn run(self: *HostRefactor, lu: *SparseLu, vals: []const f64, io: std.Io, threads: u32) error{SingularMatrix}!void {
         assert(lu.factored);
-        assert(lu.pattern_epoch == self.f.epoch);
+        assert(lu.pattern_epoch == self.epoch);
+        assert(self.sync.len == self.tb.tab.syncLen());
+        assert(self.val.len == self.tb.tab.n_val);
         for (lu.void_slots.items) |p| {
             if (vals[p] != 0) return error.SingularMatrix;
         }
-        if (!self.f.refactor(vals, io, threads)) return error.SingularMatrix;
-        const t = self.f.tb.tab;
-        const x = self.f.tb.idx;
-        const val = self.f.val;
+        const Work = struct {
+            fn work(t: Tab, x: [*]u32, val: [*]f64, av: [*]f64, sy: [*]u32, stamp: u32) void {
+                var sh: H.Shared = undefined;
+                while (H.refactor(t, x, val, av, sy, stamp, &sh, 0, 1)) {}
+            }
+        };
+        self.stamp +%= 1;
+        @memset(self.sync[0..sync_header], 0);
+        const args = .{ self.tb.tab, self.tb.idx.ptr, self.val.ptr, @constCast(vals.ptr), self.sync.ptr, self.stamp };
+        var futures: [15]std.Io.Future(void) = undefined;
+        const extra = @min(@max(threads, 1) - 1, futures.len);
+        for (futures[0..extra]) |*f| f.* = io.async(Work.work, args);
+        @call(.auto, Work.work, args);
+        for (futures[0..extra]) |*f| f.await(io);
+        const t = self.tb.tab;
+        assert(self.sync[1] <= t.n);
+        if (self.sync[1] != 0) return error.SingularMatrix;
+        const x = self.tb.idx;
         for (0..t.n) |k| {
             const base = x[t.coff + k];
             const nuk = lu.up[k + 1] - lu.up[k];
             const nlk = lu.lp[k + 1] - lu.lp[k];
-            @memcpy(lu.ux.items[lu.up[k]..][0..nuk], val[base..][0..nuk]);
-            lu.udiag[k] = val[base + nuk];
-            @memcpy(lu.lx.items[lu.lp[k]..][0..nlk], val[base + nuk + 1 ..][0..nlk]);
+            @memcpy(lu.ux.items[lu.up[k]..][0..nuk], self.val[base..][0..nuk]);
+            lu.udiag[k] = self.val[base + nuk];
+            @memcpy(lu.lx.items[lu.lp[k]..][0..nlk], self.val[base + nuk + 1 ..][0..nlk]);
         }
     }
 };

@@ -57,12 +57,14 @@ pub fn age(arena: std.mem.Allocator, m: core.Mosra, res: core.Result) !Aged {
     const names = try arena.alloc([]const u8, 1 + cols * n);
     names[0] = "reltime";
     for (m.names, 0..) |name, i| {
-        names[1 + cols * i] = try std.fmt.allocPrint(arena, "delvto({s})", .{name});
-        names[2 + cols * i] = try std.fmt.allocPrint(arena, "mulu0({s})", .{name});
-        if (cols == 3) names[3 + cols * i] = try std.fmt.allocPrint(arena, "life({s})", .{name});
+        names[1 + cols * i] = try arena.print("delvto({s})", .{name});
+        names[2 + cols * i] = try arena.print("mulu0({s})", .{name});
+        if (cols == 3) names[3 + cols * i] = try arena.print("life({s})", .{name});
     }
     const data = try arena.alloc(f64, m.rel_times.len * names.len);
-    var values: std.ArrayList(f64) = .empty;
+    var per_time: usize = n;
+    for (m.mulu0[0..n]) |slot| per_time += @intFromBool(slot != core.Mosra.no_param);
+    var values: std.ArrayList(f64) = try .initCapacity(arena, m.rel_times.len * per_time);
     for (m.rel_times, 0..) |t_rel, k| {
         const row = data[k * names.len ..][0..names.len];
         row[0] = t_rel;
@@ -75,8 +77,8 @@ pub fn age(arena: std.mem.Allocator, m: core.Mosra, res: core.Result) !Aged {
             row[1 + cols * i] = dvth;
             row[2 + cols * i] = mulu0;
             if (m.deg_f) |deg_f| row[3 + cols * i] = lifetime(.{ sum[i], sum[n + i] }, .{ md.hcin, md.tn }, deg_f);
-            try values.append(arena, m.delvto_fresh[i] + dvth);
-            if (m.mulu0[i] != core.Mosra.no_param) try values.append(arena, m.mulu0_fresh[i] * mulu0);
+            values.appendAssumeCapacity(m.delvto_fresh[i] + dvth);
+            if (m.mulu0[i] != core.Mosra.no_param) values.appendAssumeCapacity(m.mulu0_fresh[i] * mulu0);
         }
     }
     return .{ .values = values.items, .table = .{
@@ -222,4 +224,18 @@ fn testMosra(pmos: bool) core.Mosra {
         .delvto_fresh = &.{0},
         .mulu0_fresh = &.{1},
     };
+}
+
+test "age: every allocation failure is reported" {
+    const S = struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            var m = testMosra(false);
+            m.deg_f = 0.05;
+            const data = [_]f64{ 0, 1.5, 1.2, 0, 1e-6, 1.5, 1.2, 0 };
+            _ = try age(arena.allocator(), m, .{ .plotname = "", .varnames = &.{ "time", "d", "g", "s" }, .is_complex = false, .npoints = 2, .data = &data });
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, S.run, .{});
 }

@@ -39,7 +39,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     const rhs = try scratch.alloc(f64, 2 * n);
     defer scratch.free(rhs);
-    root.zeroSimd(rhs);
+    @memset(rhs, 0);
     rhs[opts.probe_branch] = 1.0;
 
     const names = try a.dupe([]const u8, &.{ "frequency", "loop_gain" });

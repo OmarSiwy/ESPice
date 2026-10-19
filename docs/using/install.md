@@ -74,8 +74,9 @@ the directory layout intact if you move it.
 
 ## From source
 
-You need Zig 0.17.0 and nothing else; the Zig dependencies (VerA, Gompute,
-stdpp) are pinned in `build.zig.zon` and fetched by the build.
+You need Zig 0.18.0-dev.349 (the flake's `nix develop` provides it) and nothing
+else; the Zig dependencies (VerA, Gompute) are pinned in `build.zig.zon` and
+fetched by the build.
 
 ```sh
 git clone https://github.com/OmarSiwy/ESPice

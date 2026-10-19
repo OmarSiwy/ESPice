@@ -142,3 +142,46 @@ export fn gen_hook_diag_at(h: *const TrapHook, ckt: *Ckt, slot: u32) f64 {
 export fn hand_hook_diag_at(h: *const TrapHook, ckt: *Ckt, slot: u32) f64 {
     return if (h.has_charge) ckt.gcAt(h.c.ag0, slot) else ckt.g_vals[slot];
 }
+
+// ---- core.numerics kernels keep their vector form (S11): each `gen_` calls the
+// production function; each `hand_` is the scalar loop the vectorizer must beat.
+// NEGATIVE means the production loop is vectorized where the scalar one is not,
+// so a change that turns a kernel scalar again fails this step. ----
+
+export fn gen_num_dot(a: [*]const f64, b: [*]const f64, n: usize) f64 {
+    return @call(.always_inline, num.dot, .{ a[0..n], b[0..n] });
+}
+
+export fn hand_num_dot(a: [*]const f64, b: [*]const f64, n: usize) f64 {
+    var s: f64 = 0;
+    for (a[0..n], b[0..n]) |x, y| s += x * y;
+    return s;
+}
+
+export fn gen_num_sum(x: [*]const f64, n: usize) f64 {
+    return @call(.always_inline, num.sum, .{x[0..n]});
+}
+
+export fn hand_num_sum(x: [*]const f64, n: usize) f64 {
+    var s: f64 = 0;
+    for (x[0..n]) |v| s += v;
+    return s;
+}
+
+export fn gen_num_norminf(x: [*]const f64, n: usize) f64 {
+    return @call(.always_inline, num.normInf, .{x[0..n]});
+}
+
+/// normInf's own rule (an i64 max of the sign-cleared bit pattern, so NaN
+/// wins) one element at a time on integer registers; the barrier keeps it
+/// scalar, so the pair judges vector against scalar. A float `@abs` here would
+/// lower to `vandpd xmm`, which the probe counts as vector work.
+export fn hand_num_norminf(x: [*]const f64, n: usize) f64 {
+    var m: u64 = 0;
+    for (x[0..n]) |v| {
+        const k = @as(u64, @bitCast(v)) & 0x7fff_ffff_ffff_ffff;
+        if (k > m) m = k;
+        std.mem.doNotOptimizeAway(m);
+    }
+    return @bitCast(m);
+}

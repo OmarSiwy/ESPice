@@ -95,11 +95,11 @@ pub const GpuLu = struct {
         var k_uh = try gompute.rawKernelByName(be, "arp_lu_uhead", 0);
         errdefer k_uh.deinit();
         const pin_a = try pinnedF64(&k_ref, nnz);
-        errdefer k_ref.freePinned(std.mem.sliceAsBytes(pin_a));
+        errdefer freePinnedF64(&k_ref, pin_a);
         const pin_rhs = try pinnedF64(&k_ref, n);
-        errdefer k_ref.freePinned(std.mem.sliceAsBytes(pin_rhs));
+        errdefer freePinnedF64(&k_ref, pin_rhs);
         const pin_dx = try pinnedF64(&k_ref, n);
-        errdefer k_ref.freePinned(std.mem.sliceAsBytes(pin_dx));
+        errdefer freePinnedF64(&k_ref, pin_dx);
         const pin_fail = try k_ref.allocPinned(4);
         errdefer k_ref.freePinned(pin_fail);
         var d_a = try k_ref.alloc(@max(nnz, 1) * 8);
@@ -145,14 +145,23 @@ pub const GpuLu = struct {
         return if (instrument) self.bench else null;
     }
 
+    /// Page-locked `[]f64` of length `n`, backed by at least one element so
+    /// even n = 0 has a pointer; release with `freePinnedF64`.
     fn pinnedF64(k: *Raw, n: usize) ![]f64 {
         const bytes = try k.allocPinned(@max(n, 1) * @sizeOf(f64));
         return @as([*]f64, @ptrCast(@alignCast(bytes.ptr)))[0..n];
     }
 
+    /// Frees a `pinnedF64` slice. Not `sliceAsBytes`: it maps an empty
+    /// slice to a pointerless `&.{}`, which `freePinned` skips, leaking the
+    /// one-element backing.
+    fn freePinnedF64(k: *Raw, p: []f64) void {
+        k.freePinned(@as([*]u8, @ptrCast(p.ptr))[0 .. @max(p.len, 1) * @sizeOf(f64)]);
+    }
+
     /// Prints the `ESPICE_GPU_STATS`/check/bench summary, then frees every
     /// device and pinned buffer and `self`. Detach it first
-    /// (`Circuit.attachLu(null)`).
+    /// (set `Circuit.lu` to null).
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         if (self.knobs.gpu_stats != .off or self.knobs.gpu_lu_check or self.benchOf() != null) std.debug.print(
@@ -162,7 +171,7 @@ pub const GpuLu = struct {
         if (self.benchOf()) |b| b.deinit(self);
         self.dropTables();
         const k = &self.k_ref;
-        for ([_][]f64{ self.pin_a, self.pin_rhs, self.pin_dx }) |p| k.freePinned(@as([*]u8, @ptrCast(p.ptr))[0 .. @max(p.len, 1) * 8]);
+        for ([_][]f64{ self.pin_a, self.pin_rhs, self.pin_dx }) |p| freePinnedF64(k, p);
         k.freePinned(self.pin_fail);
         for ([_]*Buffer{ &self.d_a, &self.d_rhs, &self.d_y, &self.d_dx }) |b| b.free();
         self.stream.deinit();
@@ -509,6 +518,11 @@ const Bench = struct {
         gpa.destroy(b);
     }
 };
+
+test "GpuLu.init without kernel images is NoGpuArtifacts" {
+    if (comptime backend != null) return error.SkipZigTest;
+    try std.testing.expectError(error.NoGpuArtifacts, GpuLu.init(std.testing.allocator, 4, 8, .{}));
+}
 
 test "GpuLu.admits: the flop bars and the empty matrix" {
     const admits = GpuLu.admits;

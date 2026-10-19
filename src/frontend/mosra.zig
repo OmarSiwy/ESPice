@@ -92,7 +92,7 @@ pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netli
         const mu = mulu0.get(key) orelse core.Mosra.no_param;
         const md = models.items[src[k]];
         if (mu == core.Mosra.no_param and (md.titmu != 0 or md.hcimu != 0))
-            return refuse(line, try std.fmt.allocPrint(scratch, "mobility aging (titmu, hcimu) on {s}, whose model {s} has no mulu0 (only bsim3 has one)", .{ d.name, mm.name }));
+            return refuse(line, try scratch.print("mobility aging (titmu, hcimu) on {s}, whose model {s} has no mulu0 (only bsim3 has one)", .{ d.name, mm.name }));
         if (d.pins.len < 3) return refuse(line, "a bound MOSFET with fewer than three terminals");
         var t: [3]u32 = undefined;
         for (&t, d.pins[0..3]) |*row, pin| {
@@ -160,7 +160,7 @@ pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netli
     var refs: std.ArrayList(u32) = .empty;
     starts[0] = 0;
     for (times.items, labels, temps, starts[1..]) |t, *label, *temp, *start| {
-        label.* = try std.fmt.allocPrint(sim, "reltime={d}", .{t});
+        label.* = try sim.print("reltime={d}", .{t});
         temp.* = null;
         for (delvto_refs.items, mulu0_refs.items) |dv, mu| {
             try refs.append(sim, dv);
@@ -168,18 +168,14 @@ pub fn plan(sim: std.mem.Allocator, scratch: std.mem.Allocator, nl: *const Netli
         }
         start.* = @intCast(refs.items.len);
     }
+    // Placeholder row values until `Problem.age` writes the aged ones.
+    const values = try sim.alloc(f64, refs.items.len);
+    @memset(values, 0);
     return .{
         .mosra = mosra,
-        .variants = .{ .labels = labels, .temp_c = temps, .axis = times.items, .starts = starts, .refs = refs.items, .values = try zeros(sim, refs.items.len) },
+        .variants = .{ .labels = labels, .temp_c = temps, .axis = times.items, .starts = starts, .refs = refs.items, .values = values },
         .fanout = .{ .global = .{ .first = 0, .count = rows, .nominal = true } },
     };
-}
-
-/// Placeholder row values until `Problem.age` writes the aged ones.
-fn zeros(sim: std.mem.Allocator, n: usize) ![]f64 {
-    const v = try sim.alloc(f64, n);
-    @memset(v, 0);
-    return v;
 }
 
 /// A `.model name MOSRA LEVEL=1 ...` card's parameters; any other level or

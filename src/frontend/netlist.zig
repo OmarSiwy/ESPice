@@ -58,6 +58,28 @@ pub const Value = union(enum) {
     expr: Span,
     /// `name(args)`: a source waveform or a `v(...)`/`i(...)` output.
     group: Group,
+
+    /// The number; null for a name, an unfolded expression or a group.
+    pub fn number(v: Value) ?f64 {
+        return switch (v) {
+            .num => |n| n,
+            else => null,
+        };
+    }
+
+    /// `args[i]` as a number; null past the end or for a non-number.
+    pub fn numberAt(args: []const Value, i: usize) ?f64 {
+        return if (i < args.len) args[i].number() else null;
+    }
+
+    /// `args[i]` as a bare word; null past the end or for a non-name.
+    pub fn nameAt(args: []const Value, i: usize) ?[]const u8 {
+        if (i >= args.len) return null;
+        return switch (args[i]) {
+            .name => |n| n,
+            else => null,
+        };
+    }
 };
 
 /// `name(args)`, held as one slice: `items[0]` is the name (a `.name`
@@ -84,6 +106,7 @@ pub const Kv = struct { key: []const u8, value: Value };
 comptime {
     std.debug.assert(@sizeOf(Value) == 24);
     std.debug.assert(@sizeOf(Kv) == 40);
+    std.debug.assert(@sizeOf(Span) == 8);
 }
 
 /// Vertex payload: the net's flattened name in `Netlist.pool`.
@@ -106,6 +129,13 @@ pub const Device = struct {
 
 /// Nets by devices; a device's pins are its member list, in terminal order.
 pub const Hypergraph = csr.BipartiteHypergraph(Net, Device);
+
+comptime {
+    // `Hypergraph` keeps devices SoA: 29 bytes a row over six columns, no padding.
+    var row: usize = 0;
+    for (@typeInfo(Device).@"struct".field_types) |t| row += @sizeOf(t);
+    std.debug.assert(row == 29 and @sizeOf(Net) == 4);
+}
 
 /// A `.model` card: `kind` is the type word (`nmos`, `d`, a VA module name).
 pub const Model = struct { name: []const u8, kind: []const u8, kv: []const Kv };
@@ -240,6 +270,7 @@ pub const Live = struct {
         arg: u32 = 0,
         table: Table,
 
+        /// The table `row` indexes.
         pub const Table = enum(u8) { values, kvs, groups };
     };
 
@@ -574,6 +605,8 @@ fn SiteDraw(comptime D: type) type {
         ops: []const u32,
         keys: []const u64,
 
+        /// The draw for call `f` at op `i` of the slot's postfix: the
+        /// inner sampler's, under that call's site key. O(log sites).
         pub fn value(self: @This(), i: usize, f: expr.Fn, args: []const f64) f64 {
             const at: u32 = self.base + @as(u32, @intCast(i));
             const k = std.sort.lowerBound(u32, self.ops, at, struct {
@@ -807,7 +840,7 @@ pub fn parseLive(arena: Allocator, src: []const u8, dialect: Dialect, live: []co
 /// The cards and their strings live in `arena`.
 pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error || error{UnsupportedDirectiveMutation})![]Analysis {
     const lower = try arena.alloc(u8, text.len);
-    _ = lines.normalize(1, lower, text);
+    _ = lines.normalize(lower, text);
     var r: Reader(lines.ngspice) = try .init(arena, text, lower, .ngspice);
     r.global_scopes = .{&r.globals};
     var src: lines.ngspice.Lines = .{ .rest = lower, .arena = arena };
@@ -1123,7 +1156,7 @@ fn Reader(comptime S: type) type {
             var line_hint: usize = undefined;
             const text: []const u8 = if (S.fold_case) blk: {
                 const buf = try arena.alloc(u8, src.len);
-                line_hint = lines.normalize(std.simd.suggestVectorLength(u8) orelse 1, buf, src);
+                line_hint = lines.normalize(buf, src);
                 break :blk buf;
             } else blk: {
                 line_hint = std.mem.countScalar(u8, src, '\n');
@@ -1141,7 +1174,7 @@ fn Reader(comptime S: type) type {
                 title = std.mem.trim(u8, src[0..nl], " \t\r");
                 split.rest = if (nl < text.len) text[nl + 1 ..] else "";
             }
-            try r.lines.ensureTotalCapacity(arena, line_hint);
+            try r.lines.ensureTotalCapacityPrecise(arena, line_hint);
             // A line left blank (`\\` glued to a blank line, or a lone `\\` at the
             // end) is no card (#164, #38).
             while (try split.next()) |line| {
@@ -1165,10 +1198,17 @@ fn Reader(comptime S: type) type {
                 error.UnsupportedPattern => return error.UnsupportedCard,
             };
             try r.hg.ensureTotalCapacity(arena, line_hint + 1, line_hint, 3 * line_hint);
-            try r.pool.reserve(arena, @intCast(@min(2 * line_hint, none - 1)));
+            // Sized from the line count, so a flat deck never regrows them:
+            // about one device name and one new net per card.
+            const names_hint: u32 = @intCast(@min(2 * line_hint, none - 1));
+            try r.pool.reserve(arena, names_hint);
+            try r.net_of.ensureTotalCapacity(arena, names_hint + 1);
             try r.values.ensureTotalCapacity(arena, line_hint);
+            // One `key=value` row per `=` of a flat deck.
+            try r.kvs.ensureTotalCapacity(arena, std.mem.countScalar(u8, text, '='));
 
             var top_devices: std.ArrayList(u32) = .empty;
+            try top_devices.ensureTotalCapacityPrecise(arena, r.lines.items.len);
             var model_lines: std.ArrayList(ModelLine) = .empty;
             var directive_lines: std.ArrayList(u32) = .empty;
             try r.declarations(&top_devices, &model_lines, &directive_lines);
@@ -1337,6 +1377,7 @@ fn Reader(comptime S: type) type {
             pool: *const InternPool,
             net_of: []const u32,
             dialect: Dialect,
+            /// The net `name` names, 0 for ground, `none` for no net.
             pub fn node(self: NetLookup, name: []const u8) u32 {
                 if (isGround(self.dialect, name)) return 0;
                 const n = self.pool.find(name) orelse return none;
@@ -1805,8 +1846,10 @@ fn Reader(comptime S: type) type {
             return true;
         }
 
-        /// The widest `a:b` range one `MONTE=list(...)` entry expands to.
-        const max_trials = 1 << 24;
+        /// Trials one `MONTE=list(...)` names in all, its `a:b` ranges
+        /// expanded: each is an argument row of 24 B, so a short card
+        /// cannot ask for gigabytes. A million runs is past any budget.
+        const max_trials = 1 << 20;
 
         fn readArgs(r: *R, f: *F) Error![]const Value {
             const top: Frame = .{ .scopes = &r.global_scopes };
@@ -1818,13 +1861,16 @@ fn Reader(comptime S: type) type {
                     // `MONTE=list(10 20:30)`, parentheses optional: the trial
                     // numbers follow `list`, each `a:b` range expanded.
                     try args.append(r.arena, .{ .name = "list" });
+                    var trials: f64 = 0;
                     while (f.next()) |n| {
                         if (n[0] == ')') break;
                         if (n[0] == '(' or n[0] == ',') continue;
                         const colon = std.mem.indexOfScalar(u8, n, ':') orelse n.len;
                         const lo = S.parseNum(n[0..colon]) orelse return error.ParseError;
                         const hi = if (colon == n.len) lo else S.parseNum(n[colon + 1 ..]) orelse return error.ParseError;
-                        if (!(lo >= 1 and hi >= lo and hi <= std.math.maxInt(u32) and hi - lo < max_trials) or lo != @trunc(lo) or hi != @trunc(hi)) return error.ParseError;
+                        if (!(lo >= 1 and hi >= lo and hi <= std.math.maxInt(u32)) or lo != @trunc(lo) or hi != @trunc(hi)) return error.ParseError;
+                        trials += hi - lo + 1;
+                        if (trials > max_trials) return error.ParseError;
                         var k = lo;
                         while (k <= hi) : (k += 1) try args.append(r.arena, .{ .num = k });
                     }
@@ -1894,7 +1940,7 @@ fn Reader(comptime S: type) type {
                 },
                 .options => try r.config.append(r.arena, .{ .temp = false, .args = args, .line = r.written(line) }),
                 .ic => try r.ic_cards.append(r.arena, args),
-                .sample => r.sample = r.readSample(args) catch |err| return r.failed(line, err),
+                .sample => r.sample = readSample(args) catch |err| return r.failed(line, err),
                 .mosra => r.mosra = try r.readMosra(line, args),
                 .appendmodel => {
                     // `.appendmodel src mosra dst nmos`; HSPICE's other
@@ -1922,7 +1968,7 @@ fn Reader(comptime S: type) type {
                     .group => |g| if (g.args().len == 1 and (std.ascii.eqlIgnoreCase(g.name(), "v") or std.ascii.eqlIgnoreCase(g.name(), "i"))) {
                         var buf: [24]u8 = undefined;
                         const name = nodeText(g.args()[0], &buf) orelse continue;
-                        const label = try std.fmt.allocPrint(r.arena, "{c}({s})", .{ std.ascii.toLower(g.name()[0]), name });
+                        const label = try r.arena.print("{c}({s})", .{ std.ascii.toLower(g.name()[0]), name });
                         try r.saves.append(r.arena, std.ascii.lowerString(label, label));
                     },
                     .name => |n| if (std.ascii.eqlIgnoreCase(n, "all")) {
@@ -1964,8 +2010,7 @@ fn Reader(comptime S: type) type {
         /// HSPICE `.sample FS= [TOL=] [NUMF=] [MAXFLD=] [BETA=]` [CR .SAMPLE].
         /// TOL and NUMF size HSPICE's adaptive fold count; MAXFLD bounds it
         /// here, so they are checked and unused.
-        fn readSample(r: *R, args: []const Value) Error!core.query.NoiseSample {
-            _ = r;
+        fn readSample(args: []const Value) Error!core.query.NoiseSample {
             var s: core.query.NoiseSample = .{ .fs = 0 };
             var i: usize = 0;
             while (i + 1 < args.len) : (i += 2) {
@@ -2359,7 +2404,7 @@ fn Reader(comptime S: type) type {
                     const plain = F.isWord(t) and S.parseNum(if (t[t.len - 1] == '%') t[0 .. t.len - 1] else t) != null;
                     var row: Variation = .{ .per_device = local or element, .dist = .gauss, .model = model, .letter = letter, .param = key, .value = 1, .relative = false };
                     if (plain) {
-                        const v = try r.percentValue(&f) orelse return r.failed(line, error.ParseError);
+                        const v = percentValue(&f) orelse return r.failed(line, error.ParseError);
                         row.value = v.value;
                         row.relative = v.relative;
                     } else {
@@ -2402,8 +2447,7 @@ fn Reader(comptime S: type) type {
         }
 
         /// A number, optionally followed by (or ending in) `%`.
-        fn percentValue(r: *R, f: *F) Error!?struct { value: f64, relative: bool } {
-            _ = r;
+        fn percentValue(f: *F) ?struct { value: f64, relative: bool } {
             const t = f.next() orelse return null;
             const pct = t[t.len - 1] == '%';
             const n = S.parseNum(if (pct) t[0 .. t.len - 1] else t) orelse return null;
@@ -2431,7 +2475,7 @@ fn Reader(comptime S: type) type {
                 dist = dists.get(p) orelse return r.failed(line, error.UnsupportedCard);
             }
             if (param.len == 0) return r.failed(line, error.ParseError);
-            const v = try r.percentValue(f) orelse return r.failed(line, error.ParseError);
+            const v = percentValue(f) orelse return r.failed(line, error.ParseError);
             // A Gaussian's value is its 3-sigma spread [SA Ch.20 "Variations
             // Specified Using DEV and LOT"]; `Variation.value` holds one sigma.
             const value = if (dist == .gauss) v.value / 3 else v.value;
@@ -2770,9 +2814,9 @@ fn Reader(comptime S: type) type {
                     jitters += 1;
                     const kind = f.next() orelse "";
                     text = if (jitters == 1)
-                        try std.fmt.allocPrint(r.arena, "{s} jitter jitter {s}", .{ kind, f.rest() })
+                        try r.arena.print("{s} jitter jitter {s}", .{ kind, f.rest() })
                     else
-                        try std.fmt.allocPrint(r.arena, "{s} jitter{d} jitter {s}", .{ kind, jitters, f.rest() });
+                        try r.arena.print("{s} jitter{d} jitter {s}", .{ kind, jitters, f.rest() });
                 } else text = f.rest();
                 const m = measure.parse(r.arena, text, r, last, r.dialect == .hspice) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
@@ -2806,7 +2850,7 @@ fn Reader(comptime S: type) type {
                 try window.print(r.arena, " {s}", .{t});
             }
             for ([_][]const u8{ "avg", "rms", "max", "min" }) |func| {
-                const text = try std.fmt.allocPrint(r.arena, "tran power{d}_{s} {s} {s}{s}", .{ serial, func, func, wave, window.items });
+                const text = try r.arena.print("tran power{d}_{s} {s} {s}{s}", .{ serial, func, func, wave, window.items });
                 try r.measures.append(r.arena, try measure.parse(r.arena, text, r, .tran, true));
             }
         }
@@ -2875,7 +2919,7 @@ fn Reader(comptime S: type) type {
                     // An output variable: `v(a)`, `i(r1)`, `par('...')`.
                     if (f.nextByte() == '(') while (f.next()) |p| if (p[0] == ')') break;
                     const ovar = std.mem.trim(u8, f.line[start..f.pos], " \t");
-                    const text = try std.fmt.allocPrint(r.arena, "tran s find {s} at=0", .{ovar});
+                    const text = try r.arena.print("tran s find {s} at=0", .{ovar});
                     var m = try measure.parse(r.arena, text, r, .tran, true);
                     m.name = name orelse blk: {
                         if (m.first.ops.len != 0) return error.ParseError;
@@ -2914,8 +2958,8 @@ fn Reader(comptime S: type) type {
                 if (!std.mem.eql(u8, f.next() orelse continue, name)) continue;
                 const p = f.next() orelse return error.ParseError;
                 const n = f.next() orelse return error.ParseError;
-                if (isGround(r.dialect, n)) return std.fmt.allocPrint(r.arena, "par('v({s})*i({s})')", .{ p, name });
-                return std.fmt.allocPrint(r.arena, "par('(v({s})-v({s}))*i({s})')", .{ p, n, name });
+                if (isGround(r.dialect, n)) return r.arena.print("par('v({s})*i({s})')", .{ p, name });
+                return r.arena.print("par('(v({s})-v({s}))*i({s})')", .{ p, n, name });
             }
             return error.ParseError;
         }
@@ -2938,9 +2982,9 @@ fn Reader(comptime S: type) type {
                 .num => .{ .num = consts[op.a] },
                 .vprobe, .iprobe => {
                     const letter = if (op.code == .vprobe) "v" else "i";
-                    try out.append(r.arena, .{ .vector = try std.fmt.allocPrint(r.arena, "{s}({s})", .{ letter, names[op.a] }) });
+                    try out.append(r.arena, .{ .vector = try r.arena.print("{s}({s})", .{ letter, names[op.a] }) });
                     if (op.b == expr.none) continue;
-                    try out.append(r.arena, .{ .vector = try std.fmt.allocPrint(r.arena, "{s}({s})", .{ letter, names[op.b] }) });
+                    try out.append(r.arena, .{ .vector = try r.arena.print("{s}({s})", .{ letter, names[op.b] }) });
                     try out.append(r.arena, .sub);
                     continue;
                 },
@@ -3288,7 +3332,7 @@ fn Reader(comptime S: type) type {
             }
             // Without braces it is not ngspice's form: the plain R path rejects it.
             const e = eq orelse return null;
-            return try std.fmt.allocPrint(r.arena, "b{s} {s} {s} i={{v({s},{s})/({s})*({s})}} tc1={{{s}}} tc2={{{s}}} reciproctc=1", .{ head, n1, n2, n1, n2, e, m, tc1, tc2 });
+            return try r.arena.print("b{s} {s} {s} i={{v({s},{s})/({s})*({s})}} tc1={{{s}}} tc2={{{s}}} reciproctc=1", .{ head, n1, n2, n1, n2, e, m, tc1, tc2 });
         }
 
         /// The letter `kinds` gives row `row` of `lines`, 0 when its name
@@ -3445,7 +3489,7 @@ fn Reader(comptime S: type) type {
             r.nodes.clearRetainingCapacity();
             r.positional.clearRetainingCapacity();
             r.card_kv.clearRetainingCapacity();
-            for (0..2) |_| try r.nodes.append(arena, try r.word(&f));
+            for (0..2) |_| try r.nodes.append(arena, try word(&f));
             _ = f.next();
             const by_current = letter == 'f' or letter == 'h';
             var w: std.ArrayList(u8) = .empty;
@@ -3453,7 +3497,7 @@ fn Reader(comptime S: type) type {
                 .refused, .kind => return r.unsupported(line, "unsupported controlled-source form"),
                 .laplace, .pole, .delay => {
                     if (by_current) return r.unsupported(line, "unsupported controlled-source form");
-                    for (0..2) |_| try r.nodes.append(arena, try r.word(&f));
+                    for (0..2) |_| try r.nodes.append(arena, try word(&f));
                     var n_num: usize = 0;
                     while (f.next()) |t| {
                         if (t[0] == ',' or t[0] == '(' or t[0] == ')') continue;
@@ -3549,12 +3593,12 @@ fn Reader(comptime S: type) type {
                 });
                 const k = keys.get(kv.key) orelse return r.unsupported(line, "unsupported controlled-source parameter");
                 switch (k) {
-                    's' => w = try wrapped(arena, "(", w.items, try std.fmt.allocPrint(arena, ")*({e})", .{x})),
+                    's' => w = try wrapped(arena, "(", w.items, try arena.print(")*({e})", .{x})),
                     'a' => if (x != 0) {
                         w = try wrapped(arena, "abs(", w.items, ")");
                     },
-                    'x' => w = try wrapped(arena, "min(", w.items, try std.fmt.allocPrint(arena, ",{e})", .{x})),
-                    'n' => w = try wrapped(arena, "max(", w.items, try std.fmt.allocPrint(arena, ",{e})", .{x})),
+                    'x' => w = try wrapped(arena, "min(", w.items, try arena.print(",{e})", .{x})),
+                    'n' => w = try wrapped(arena, "max(", w.items, try arena.print(",{e})", .{x})),
                     't' => {
                         if (n_tc == tc.len) return error.ParseError;
                         tc[n_tc] = kv;
@@ -3606,7 +3650,7 @@ fn Reader(comptime S: type) type {
         }
 
         /// The next node or source name, past any `(`, `)` or `,`.
-        fn word(_: *R, f: *F) Error![]const u8 {
+        fn word(f: *F) Error![]const u8 {
             while (f.next()) |t| {
                 if (t[0] == ',' or t[0] == '(' or t[0] == ')') continue;
                 if (!F.isWord(t)) return error.ParseError;
@@ -3626,9 +3670,9 @@ fn Reader(comptime S: type) type {
         /// One controlling quantity as expression text: `v(a,b)` over the
         /// next two nodes, or `i(vname)` over the next source name.
         fn controlText(r: *R, w: *std.ArrayList(u8), f: *F, by_current: bool) Error!void {
-            if (by_current) return w.print(r.arena, "i({s})", .{try r.word(f)});
-            const a = try r.word(f);
-            const b = try r.word(f);
+            if (by_current) return w.print(r.arena, "i({s})", .{try word(f)});
+            const a = try word(f);
+            const b = try word(f);
             if (isGround(r.dialect, b)) return w.print(r.arena, "v({s})", .{a});
             try w.print(r.arena, "v({s},{s})", .{ a, b });
         }
@@ -3734,7 +3778,7 @@ fn Reader(comptime S: type) type {
             const h = it.next() orelse return error.ParseError;
             const s = it.next() orelse return error.ParseError;
             if (it.next() != null) return r.unsupported(line, "multi-tone HBLIN band");
-            return std.fmt.allocPrint(r.arena, "{s} hblin_h={s} hblin_s={s} {s}", .{ line[0..at], h, s, line[close + 1 ..] });
+            return r.arena.print("{s} hblin_h={s} hblin_s={s} {s}", .{ line[0..at], h, s, line[close + 1 ..] });
         }
 
         fn isModel(r: *R, name: []const u8) bool {
@@ -3776,7 +3820,7 @@ fn Reader(comptime S: type) type {
             };
             for (pos.items[0..mi]) |p| try nodes.append(r.arena, switch (p) {
                 .name => |n| n,
-                .num => |v| try std.fmt.allocPrint(r.arena, "{d}", .{v}),
+                .num => |v| try r.arena.print("{d}", .{v}),
                 else => unreachable,
             });
             try pos.replaceRange(r.arena, 0, mi, &.{});
@@ -3922,7 +3966,7 @@ fn Reader(comptime S: type) type {
                     const value: Value = .{ .num = if (comptime std.mem.eql(u8, s[0], "gshunt")) 1 / v else v };
                     const pins = [2]VertexId{ .from(net), ground };
                     const net_name = r.pool.str(r.hg.vertices.items(.name)[net]);
-                    const name = try r.internName(try std.fmt.allocPrint(r.arena, "{c}.{s}.{s}", .{ s[1], s[0], net_name }));
+                    const name = try r.internName(try r.arena.print("{c}.{s}.{s}", .{ s[1], s[0], net_name }));
                     _ = r.hg.addEdge(r.arena, .{
                         .kind = s[1],
                         .name = name,
@@ -4202,4 +4246,6 @@ test {
     _ = @import("vec.zig");
     _ = @import("tests/netlist.zig");
     _ = @import("tests/fuzz.zig");
+    _ = @import("tests/lines.zig");
+    _ = @import("tests/cards.zig");
 }

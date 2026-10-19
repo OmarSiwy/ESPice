@@ -219,8 +219,7 @@ pub const Planner = struct {
         return @intCast(p.labels.items.len);
     }
 
-    fn refuse(p: *const Planner, line: []const u8, what: []const u8) error{UnsupportedCard} {
-        _ = p;
+    fn refuse(_: *const Planner, line: []const u8, what: []const u8) error{UnsupportedCard} {
         if (!@import("builtin").is_test) std.log.err("variants: {s}: {s}", .{ what, line });
         return error.UnsupportedCard;
     }
@@ -384,7 +383,7 @@ pub const Planner = struct {
             const nominal = try expr.eval(p.scratch, &p.stack, ops, p.nl.consts, p.nl.live.nominal, null);
             if ((at != 0) != (nominal != 0)) return p.refuse(label, "a top-level .if condition reads a swept parameter and selects another branch at this point");
         }
-        try p.setLive(pt);
+        try setPoint(p.scratch, &p.stack, p.nl, pt);
         var moved = false;
         var crossed = false;
         for (p.nominal_slots, 0..) |nominal, k| {
@@ -415,10 +414,6 @@ pub const Planner = struct {
         return .row;
     }
 
-    fn setLive(p: *Planner, pt: Point) !void {
-        try setPoint(p.scratch, &p.stack, p.nl, pt);
-    }
-
     /// Finds, with one rebuild at perturbed live values, whether every
     /// parameter the live values reach holds one of them unchanged. Then a
     /// point writes its values straight to those parameters (the C2 fast
@@ -427,7 +422,7 @@ pub const Planner = struct {
     fn probe(p: *Planner, pt: Point) !Fast {
         if (p.force_rebuild) return .rebuild;
         const fast = try p.probeIdentity();
-        try p.setLive(pt);
+        try setPoint(p.scratch, &p.stack, p.nl, pt);
         return fast;
     }
 
@@ -1171,15 +1166,9 @@ pub fn circuitOf(lib: *const device.Library, gpa: std.mem.Allocator, scratch: st
     var compiled = false;
     errdefer if (!compiled) b.deinit();
     b.nom_temp_c = deck_opts.tnom_c;
-    b.reltol = deck_opts.tol.reltol;
-    b.abstol = deck_opts.tol.abstol;
-    b.vntol = deck_opts.tol.vntol;
-    b.gmin = deck_opts.tol.gmin;
-    try b.reserveNodes(nl.graph.vertexCount());
+    b.tol = deck_opts.tol;
     var nb = try builder.NetBuilder.init(scratch, &b, nl.*);
     try nb.build();
-    try nb.tagSubcircuitNodes();
-    try nb.addDynDevices();
     var perm: ?[]const u32 = null;
     const c = try b.compilePerm(&perm);
     compiled = true;
@@ -1437,4 +1426,13 @@ test "normal quantile is monotone across the tail seam" {
         prev = x;
     }
     try std.testing.expect(std.math.isNan(normalQuantile(0)));
+}
+
+test crossesZero {
+    // (from, to, crosses): reaching, leaving and crossing zero count; -0 is 0.
+    for ([_]struct { f64, f64, bool }{
+        .{ 1, 2, false },  .{ -1, -2, false }, .{ 0, -0.0, false }, .{ 0, 0, false },
+        .{ 0, 1e-300, true }, .{ 1, 0, true },  .{ 1, -1, true },   .{ -1, 1, true },
+        .{ 5e-324, -5e-324, true },
+    }) |c| try std.testing.expectEqual(c[2], crossesZero(c[0], c[1]));
 }

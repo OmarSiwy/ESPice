@@ -33,10 +33,8 @@ const StateCtlOp = device_ir.StateCtlOp;
 const ParEval = par_eval.ParEval;
 const BbdInfo = numerics.BbdInfo;
 
-/// `numerics.zeroSimd`, re-exported so the leaves reach it through types.zig.
-pub const zeroSimd = numerics.zeroSimd;
-/// `numerics.copySimd`, re-exported like `zeroSimd`.
-pub const copySimd = numerics.copySimd;
+const zeroSimd = numerics.zeroSimd;
+const copySimd = numerics.copySimd;
 
 /// The developer switches; see knobs.zig.
 pub const Knobs = @import("knobs.zig").Knobs;
@@ -84,9 +82,10 @@ pub const Display = struct {
 
 /// Frozen topology plus the mutable device and solver state of one query.
 ///
-/// Field order is the hot/cold split: the pattern, the planes, the batch table
-/// and the eval flags come first and are what every solve streams; the rest is
-/// read once per analysis or less.
+/// One per query, read through a pointer once per eval or solve, never per
+/// entry: the hot data is the slices it points at (pattern, planes,
+/// batches), each a contiguous SoA column. Zig reorders an auto-layout
+/// struct's fields, so declaration order here is for the reader only.
 pub const Circuit = struct {
     col_ptr: []u32,
     row_idx: []u32,
@@ -142,16 +141,19 @@ pub const Circuit = struct {
     solver_execution: numerics.Execution = .{},
     /// The facade's developer switches (`Knobs`), set by the executor.
     knobs: Knobs = .{},
-    /// Executor-owned threaded stamp; null means serial eval.
+    /// Executor-owned threaded stamp, borrowed: set it to null before
+    /// freeing it. Null means serial eval.
     par_eval: ?*ParEval = null,
     /// The executor's GPU evaluation context, borrowed while attached
     /// (`attachGpu`); null means every batch stamps on the host.
     gpu: ?*GpuContext = null,
-    /// The executor's device LU, borrowed while attached (`attachLu`),
-    /// independent of `gpu`: a deck whose devices all evaluate on the host
-    /// can still factor on the device. Null means the host factors.
+    /// The executor's device LU that `deviceSolve` routes through, borrowed:
+    /// set it to null before freeing it. Independent of `gpu`: a deck whose
+    /// devices all evaluate on the host can still factor on the device. Null
+    /// means the host factors.
     lu: ?*GpuLu = null,
     /// Executor-owned display output; null when no batch has `Hooks.say`.
+    /// Borrowed: set it to null before freeing it.
     display: ?*Display = null,
     /// The temperature `setCircuitTemp` last installed, in degrees Celsius;
     /// the devices' own 27 until then. A sweep restores it from here.
@@ -165,6 +167,7 @@ pub const Circuit = struct {
     /// False when `batches` are the template's own (`instantiateMove`): the
     /// template frees them.
     owns_batches: bool = true,
+    /// Where `checkpoint` reports; null reports nowhere.
     progress: ?progress_api.Callback = null,
 
     /// "The planes hold the linearization at this x_op." Set by `linearize`,
@@ -180,7 +183,8 @@ pub const Circuit = struct {
     /// iterate at the same time.
     land_rejects: bool = false,
     /// The earliest rejection time the last `updateStates` recorded under
-    /// `land_rejects`, or null.
+    /// `land_rejects`, or null. The transient clears it before an attempt
+    /// that may fail without staging any.
     reject_at: ?f64 = null,
     /// `q_vec` and the q tapes hold the charges at the x the last
     /// `updateStates` staged, which computed them on the way (`acceptStates`).
@@ -195,8 +199,10 @@ pub const Circuit = struct {
     load_check: ?LoadCheck = null,
     /// `collectParams` memo. The refs point into frozen batch storage.
     param_refs: ?[]ParamRef = null,
-    /// Parameters with a frequency-domain value, filled by the executor.
-    /// Empty on every deck without one. Owned by the query work arena.
+    /// Parameters with a frequency-domain value, which `linearizeAc` swaps
+    /// to their AC values. Set by the executor; owned by the query work
+    /// arena, which outlives every `linearizeAc`. Empty on every deck
+    /// without one.
     ac_params: []AcParam = &.{},
     /// The KCL certificate's record under `-Dcertify`; void otherwise.
     cert: if (kcl_cert.enabled) kcl_cert.Tally else void = if (kcl_cert.enabled) .{} else {},
@@ -268,8 +274,8 @@ pub const Circuit = struct {
         return ok;
     }
 
-    // The executor's setup, one transform per field it used to assign. None
-    // touches the planes or a device parameter, so none clears `lin`.
+    // The executor's setup. None touches the planes or a device parameter,
+    // so none clears `lin`.
 
     /// Installs the query's solver threading and the facade's developer
     /// switches. Asserts that `workspace` has not run yet, since it reads
@@ -278,29 +284,6 @@ pub const Circuit = struct {
         std.debug.assert(self.ws == null);
         self.solver_execution = execution;
         self.knobs = knobs;
-    }
-
-    /// Routes `checkpoint` to `callback`, or nowhere when null.
-    pub fn setProgress(self: *Circuit, callback: ?progress_api.Callback) void {
-        self.progress = callback;
-    }
-
-    /// Installs the parameters `linearizeAc` swaps to their AC values.
-    /// `params` must outlive every `linearizeAc` (the query work arena).
-    pub fn bindAcParams(self: *Circuit, params: []AcParam) void {
-        self.ac_params = params;
-    }
-
-    /// Stamps through `par` from now on, or serially when null. `par` is
-    /// borrowed and must outlive the attachment; detach before freeing it.
-    pub fn attachParEval(self: *Circuit, par: ?*ParEval) void {
-        self.par_eval = par;
-    }
-
-    /// Stages the devices' display lines in `display` from now on, or drops
-    /// them when null. `display` is borrowed: attach null before freeing it.
-    pub fn attachDisplay(self: *Circuit, display: ?*Display) void {
-        self.display = display;
     }
 
     /// Evaluates the resident batches through `g` from now on and moves the
@@ -328,25 +311,6 @@ pub const Circuit = struct {
         self.bindPlanes(g.restorePlanes());
     }
 
-    /// Routes `deviceSolve` through `lu`, or nowhere when null. `lu` is
-    /// borrowed: attach null before freeing it.
-    pub fn attachLu(self: *Circuit, lu: ?*GpuLu) void {
-        self.lu = lu;
-    }
-
-    /// Makes `updateStates` record a device's step-reject time in `reject_at`
-    /// for the transient to land on, instead of returning it (`on`), or
-    /// return it again (`!on`).
-    pub fn landRejects(self: *Circuit, on: bool) void {
-        self.land_rejects = on;
-    }
-
-    /// Forgets the reject time the last `updateStates` recorded, before an
-    /// attempt that may fail without staging any.
-    pub fn clearRejectAt(self: *Circuit) void {
-        self.reject_at = null;
-    }
-
     /// Reports progress to the owning worker. Fails only when the query was
     /// cancelled.
     pub fn checkpoint(self: *Circuit, event: progress_api.Event) error{QueryCancelled}!void {
@@ -357,14 +321,8 @@ pub const Circuit = struct {
     /// fresh device and solver state. `template` must outlive it and must never
     /// have been evaluated. Free it with `deinit`.
     pub fn instantiate(template: *const Prepared, allocator: std.mem.Allocator) !Circuit {
-        const batches = try allocator.alloc(Batch, template.batches.len);
-        errdefer allocator.free(batches);
-        var count: usize = 0;
-        errdefer for (batches[0..count]) |batch| batch.hooks.deinit(batch.ctx, allocator);
-        for (template.batches, batches) |source, *target| {
-            target.* = try source.hooks.instantiate(source.ctx, allocator).unwrap();
-            count += 1;
-        }
+        const batches = try copyBatches(allocator, template.batches, "instantiate");
+        errdefer freeBatches(allocator, batches);
         return allocate(template.*, allocator, batches, false);
     }
 
@@ -385,14 +343,8 @@ pub const Circuit = struct {
     pub fn fromSnapshot(template: *const Prepared, source: *const Circuit, allocator: std.mem.Allocator) !Circuit {
         if (source.n != template.n or source.col_ptr.ptr != template.col_ptr.ptr)
             return error.IncompatibleDependency;
-        const batches = try allocator.alloc(Batch, source.batches.len);
-        errdefer allocator.free(batches);
-        var count: usize = 0;
-        errdefer for (batches[0..count]) |batch| batch.hooks.deinit(batch.ctx, allocator);
-        for (source.batches, batches) |original, *target| {
-            target.* = try original.hooks.snapshot(original.ctx, allocator).unwrap();
-            count += 1;
-        }
+        const batches = try copyBatches(allocator, source.batches, "snapshot");
+        errdefer freeBatches(allocator, batches);
         var ckt = try allocate(template.*, allocator, batches, false);
         ckt.sim = source.sim;
         ckt.temp_c = source.temp_c;
@@ -478,10 +430,7 @@ pub const Circuit = struct {
         self.load_check = null;
         if (self.param_refs) |refs| gpa.free(refs);
         self.param_refs = null;
-        if (self.owns_batches) {
-            for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
-            gpa.free(self.batches);
-        }
+        if (self.owns_batches) freeBatches(gpa, self.batches);
         self.batches = &.{};
         // g_base/c_base unconditionally: a failed computeBaseline can leave
         // them allocated with has_baseline false.
@@ -511,23 +460,14 @@ pub const Circuit = struct {
 
         /// Frees every snapshot; `gpa` must be the allocator `saveState` took.
         pub fn deinit(self: SavedState, gpa: std.mem.Allocator) void {
-            for (self.batches) |b| b.hooks.deinit(b.ctx, gpa);
-            gpa.free(self.batches);
+            freeBatches(gpa, self.batches);
         }
     };
 
     /// Returns a copy of every batch's device state. The caller frees it
     /// with `SavedState.deinit`.
     pub fn saveState(self: *const Circuit, gpa: std.mem.Allocator) !SavedState {
-        const batches = try gpa.alloc(Batch, self.batches.len);
-        errdefer gpa.free(batches);
-        var count: usize = 0;
-        errdefer for (batches[0..count]) |b| b.hooks.deinit(b.ctx, gpa);
-        for (self.batches, batches) |b, *copy| {
-            copy.* = try b.hooks.snapshot(b.ctx, gpa).unwrap();
-            count += 1;
-        }
-        return .{ .batches = batches };
+        return .{ .batches = try copyBatches(gpa, self.batches, "snapshot") };
     }
 
     /// Overwrites `saved` with the current device state, allocating nothing.
@@ -593,6 +533,18 @@ pub const Circuit = struct {
             if (b.hooks.q_tape) |f| total += @intCast(f(b.ctx).len);
         }
         return total;
+    }
+
+    /// Sets `mask[row]` for each branch-current row of the batches named
+    /// `type_name`, a subset of `current_row`. The transient takes the
+    /// inductor rows from it on a coupled-inductor deck. Asserts that `mask`
+    /// holds `n` entries.
+    pub fn markCurrentRowsOf(self: *const Circuit, type_name: []const u8, mask: []bool) void {
+        std.debug.assert(mask.len == self.n);
+        for (self.batches) |b| {
+            const mark = b.hooks.mark_current_rows orelse continue;
+            if (std.mem.eql(u8, b.type_name, type_name)) mark(b.ctx, mask);
+        }
     }
 
     /// Concatenates every batch's live charge tape into `dst`. Asserts `dst`
@@ -823,7 +775,7 @@ pub const Circuit = struct {
     /// alone. Asserts `out` holds at least `nnz` entries.
     pub fn combineGC(self: *const Circuit, alpha: f64, out: []f64) void {
         std.debug.assert(out.len >= self.nnz);
-        combinePlanes(std.simd.suggestVectorLength(f64) orelse 1, out[0..self.nnz], self.g_vals[0..self.nnz], self.c_vals[0..self.nnz], alpha);
+        combinePlanes(out[0..self.nnz], self.g_vals[0..self.nnz], self.c_vals[0..self.nnz], alpha);
     }
 
     /// Writes G as a dense row-major `n*n` matrix into `out`. O(n^2).
@@ -949,7 +901,7 @@ pub const Circuit = struct {
     /// device asks the step to be rejected at, or null. A second call
     /// before the next commit or revert (a flip that forced another
     /// iterate, a continuation rung) reverts first, since `stateCtl(.revert)`
-    /// is exact only across one `updateState`. Under `landRejects(true)` the
+    /// is exact only across one `updateState`. Under `land_rejects` the
     /// reject time goes to `reject_at` and this returns null. Stages the
     /// attached `Display` lines for the next `stateCtl`.
     pub fn updateStates(self: *Circuit, x: []const f64) ?f64 {
@@ -1204,6 +1156,26 @@ pub const Circuit = struct {
     }
 };
 
+/// Returns one copy of each of `sources` made by `Hooks.<hook>`
+/// (`instantiate` or `snapshot`). Caller frees it with `freeBatches`.
+/// Fails with the hook's error, leaving nothing allocated.
+fn copyBatches(gpa: std.mem.Allocator, sources: []const Batch, comptime hook: []const u8) ![]Batch {
+    const batches = try gpa.alloc(Batch, sources.len);
+    errdefer gpa.free(batches);
+    var count: usize = 0;
+    errdefer for (batches[0..count]) |b| b.hooks.deinit(b.ctx, gpa);
+    for (sources, batches) |source, *copy| {
+        copy.* = try @field(source.hooks, hook)(source.ctx, gpa).unwrap();
+        count += 1;
+    }
+    return batches;
+}
+
+fn freeBatches(gpa: std.mem.Allocator, batches: []const Batch) void {
+    for (batches) |b| b.hooks.deinit(b.ctx, gpa);
+    gpa.free(batches);
+}
+
 /// The rows `Circuit.loadCheck` tests, their CSC entries row by row, and
 /// the last iterate's current, entries and x. One allocation per slice,
 /// freed with the workspace.
@@ -1297,18 +1269,11 @@ pub fn init(
     return Circuit.allocate(prepared, prepared.allocator, prepared.batches, true);
 }
 
-/// Writes `out = g + alpha*c` over independent CSC entries. `W == 1` is the
-/// scalar oracle and the tail. `out` may alias `g`. Asserts that the three
-/// slices have one length.
-pub fn combinePlanes(comptime W: usize, out: []f64, g: []const f64, c: []const f64, alpha: f64) void {
-    std.debug.assert(out.len == g.len and out.len == c.len);
-    const V = @Vector(W, f64);
-    const scale: V = @splat(alpha);
-    var i: usize = 0;
-    while (i + W <= out.len) : (i += W) {
-        const gv: V = g[i..][0..W].*;
-        const cv: V = c[i..][0..W].*;
-        out[i..][0..W].* = gv + scale * cv;
-    }
-    if (comptime W > 1) combinePlanes(1, out[i..], g[i..], c[i..], alpha);
+/// Writes `out = g + alpha*c` over independent CSC entries, rounded as the
+/// scalar expression (no FMA contraction). `out` may alias `g`. Asserts
+/// that the three slices have one length.
+pub fn combinePlanes(out: []f64, g: []const f64, c: []const f64, alpha: f64) void {
+    std.debug.assert(out.len == g.len);
+    std.debug.assert(out.len == c.len);
+    for (out, g, c) |*o, gv, cv| o.* = gv + alpha * cv;
 }

@@ -13,6 +13,10 @@ pub const Name = enum(u32) {
         return @backingInt(n);
     }
 };
+comptime {
+    // The map stores bare ids, so its entries are 4 bytes.
+    assert(@sizeOf(Name) == 4);
+}
 
 /// Deduplicating string table. Names live in one byte buffer; the map holds
 /// only ids and hashes the stored bytes on demand. Capacity: maxInt(u32)
@@ -70,9 +74,18 @@ pub const InternPool = struct {
         return n;
     }
 
-    /// Pre-sizes the map for `names` distinct names.
+    /// Pre-sizes the map and the offsets for `names` distinct names in all,
+    /// so interning that many grows neither. Only capacity changes, also on
+    /// error.
     pub fn reserve(p: *InternPool, gpa: Allocator, names: u32) Allocator.Error!void {
         try p.map.ensureTotalCapacityContext(gpa, names, .{ .pool = p });
+        try p.offs.ensureTotalCapacity(gpa, @as(usize, names) + 1);
+    }
+
+    /// Pre-sizes the byte buffer for `bytes` bytes of names in all (a source
+    /// length bounds them). Only capacity changes, also on error.
+    pub fn reserveBytes(p: *InternPool, gpa: Allocator, bytes: usize) Allocator.Error!void {
+        try p.bytes.ensureTotalCapacity(gpa, bytes);
     }
 
     /// Returns the id of `s` if it was interned, without adding it.
@@ -143,4 +156,21 @@ test "a failed intern leaves the pool as it was" {
             }
         }
     }.run, .{});
+}
+
+test "reserve sizes every column, so interning that much never reallocates" {
+    const gpa = std.testing.allocator;
+    var p: InternPool = .{};
+    defer p.deinit(gpa);
+    try p.reserve(gpa, 50);
+    try p.reserveBytes(gpa, 50 * 3);
+    const bytes = p.bytes.items.ptr;
+    const offs = p.offs.items.ptr;
+    for (0..50) |i| {
+        var buf: [8]u8 = undefined;
+        _ = try p.intern(gpa, try std.fmt.bufPrint(&buf, "n{d:0>2}", .{i}));
+    }
+    try std.testing.expectEqual(bytes, p.bytes.items.ptr);
+    try std.testing.expectEqual(offs, p.offs.items.ptr);
+    try std.testing.expectEqualStrings("n07", p.str(p.find("n07").?));
 }

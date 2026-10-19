@@ -307,6 +307,7 @@ PASS	fixtures/hdl/veriloga_unknown_param.sp
 PASS	fixtures/hdl/veriloga_vpi_app.sp
 PASS	fixtures/hdl/veriloga_vpi_callbacks.sp
 PASS	fixtures/hdl/veriloga_wide_ladder.sp
+PASS	fixtures/hdl/veriloga_trailing_port_floats.sp
 PASS	fixtures/hdl/veriloga_wrong_node_count.sp
 PASS	fixtures/hspice/ac_poi.sp
 PASS	fixtures/hspice/behavioural_sources.sp
@@ -794,6 +795,7 @@ PASS	fixtures/tf/low_impedance.sp
 PASS	fixtures/tf/negative_bias.sp
 PASS	fixtures/tf/second_source.sp
 PASS	fixtures/tf/tiny_input_conductance.sp
+PASS	fixtures/tran/bbd_ten_cells.sp
 PASS	fixtures/tran/bench_bypass_burst_clock.sp
 PASS	fixtures/tran/bench_bypass_gated_branch.sp
 PASS	fixtures/tran/bench_bypass_idle_ladder.sp

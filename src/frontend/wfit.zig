@@ -180,12 +180,14 @@ pub const Line = struct {
 };
 
 /// NotPositiveDefinite: L0 or C0 is not (a lossless line needs both).
-pub const Error = sparam.Error || error{NotPositiveDefinite};
+/// NoFitBand: the modes' delay and loss corners span no finite band of at
+/// most 60 decades (a zero or infinite length, an L0·C0 that overflows).
+pub const Error = sparam.Error || error{ NotPositiveDefinite, NoFitBand };
 
 /// Fits `p`'s modes with at most `sections` second-order sections per
 /// function; allocates the section tables, and the fit scratch, in `arena`.
-/// Fails when L0 or C0 is not positive definite. Asserts that `p.n` is 1
-/// to `max_n`.
+/// Fails when L0 or C0 is not positive definite, or with `NoFitBand`.
+/// Asserts that `p.n` is 1 to `max_n`.
 pub fn fitLine(arena: Allocator, p: Rlgc, sections: usize) Error!Line {
     const n = p.n;
     std.debug.assert(n >= 1 and n <= max_n);
@@ -254,6 +256,9 @@ pub fn fitLine(arena: Allocator, p: Rlgc, sections: usize) Error!Line {
     }
     lo /= 100;
     hi *= 100;
+    // No finite corner (a zero or infinite delay, an overflowing L0·C0), or
+    // a band too wide to sample: nothing to fit over.
+    if (!(lo > 0 and lo <= hi and hi < std.math.inf(f64) and hi / lo < 1e60)) return error.NoFitBand;
     line.band = .{ lo, hi };
     const per_decade = 30;
     const nf = 1 + @as(usize, @intFromFloat(@ceil(@log10(hi / lo) * per_decade)));
@@ -334,6 +339,10 @@ fn modalCx(x: [max_n][max_n]Cx, tv: Mat, ti: Mat, mi: usize, comptime kind: enum
 }
 
 const testing = std.testing;
+
+test {
+    _ = sparam;
+}
 
 /// The fitted line's exact response check: Yc and P at f against the fit.
 fn evalRational(r: Rational, f: f64) Cx {
@@ -431,4 +440,37 @@ test "Rlgc.zy: DC is R0 and G0, Gd rolls off at fgd, INCLUDERSIMAG drops the ski
     try testing.expectApproxEqRel(1e-3 + 1e-9 * 1e9 / @sqrt(2.0), at.y[0][0].re, 1e-12);
     p.rs_imag = true;
     try testing.expectApproxEqRel(w * 1e-6 + 1e-3 * @sqrt(1e9), p.zy(1e9).z[0][0].im, 1e-12);
+}
+
+test "fitLine refuses a line with no finite band instead of overflowing the grid" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // Lossless, so the delay corner 1/τ is the only one: τ = 0 and τ = ∞.
+    for ([_]f64{ 0, std.math.inf(f64) }) |length| {
+        var p: Rlgc = .{ .n = 1, .length = length };
+        p.l[0][0] = 250e-9;
+        p.c[0][0] = 100e-12;
+        try testing.expectError(error.NoFitBand, fitLine(arena, p, 4));
+    }
+    // L0·C0 overflows: τ = ∞ at any length.
+    var p: Rlgc = .{ .n = 1, .length = 1 };
+    p.l[0][0] = 1e200;
+    p.c[0][0] = 1e200;
+    try testing.expectError(error.NoFitBand, fitLine(arena, p, 4));
+}
+
+fn fitLossyPair(gpa: Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    var p: Rlgc = .{ .n = 2, .length = 0.1 };
+    p.l = .{ .{ 9.13e-9, 3.3e-9, 0, 0 }, .{ 3.3e-9, 9.13e-9, 0, 0 }, @splat(0), @splat(0) };
+    p.c = .{ .{ 0.365e-12, -0.09e-12, 0, 0 }, .{ -0.09e-12, 0.365e-12, 0, 0 }, @splat(0), @splat(0) };
+    p.r[0][0] = 0.2;
+    p.r[1][1] = 0.2;
+    _ = try fitLine(arena_state.allocator(), p, 2);
+}
+
+test "fitLine fails cleanly at every allocation" {
+    try testing.checkAllAllocationFailures(testing.allocator, fitLossyPair, .{});
 }

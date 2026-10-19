@@ -14,7 +14,6 @@ const dcmatch = @import("../dc/dcmatch.zig");
 const fdStep = @import("../sweep/sens.zig").fdStep;
 const num = @import("core").numerics;
 const Complex = num.Complex;
-const z = @import("stdpp");
 const FreqSolver = @import("solver").freq_solve.FreqSolver;
 
 /// Query options, defined in core/query.zig.
@@ -49,8 +48,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer scratch.free(sol);
     const drive = sol[2 * n_points * nn ..][0..nn];
     const e_out = sol[2 * n_points * nn + nn ..][0..nn];
-    root.zeroSimd(drive);
-    if (ctx.ac_drive.len == nn) @memcpy(drive, ctx.ac_drive);
+    if (ctx.ac_drive.len == nn) @memcpy(drive, ctx.ac_drive) else @memset(drive, 0);
     root.outputDrive(e_out, opts.output_node, opts.output_neg);
     {
         var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
@@ -155,7 +153,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
             const d = dy[g * n_points + k];
             // One sigma of the group: its dy/dσ; without a variation
             // block the column is dy/dp and the sigma scales it here.
-            const s = d.scale(groups.sigma(g));
+            const s = d.scale(groups.sigmas[g]);
             const dm = (y.re * s.re + y.im * s.im) / mag;
             const dp = (y.re * s.im - y.im * s.re) / (mag * mag);
             var_m += dm * dm;
@@ -194,53 +192,42 @@ fn adjointProducts(col_ptr: []const u32, row_idx: []const u32, n: usize, x: []co
 }
 
 /// Σ u[slot]·(dg[slot] + jω·dc[slot]), u = re + j·im: λᵀ dA(ω) x.
+// fast-math: the four sums in one reassociated pass (2x the four strict
+// dots at nnz = 16384, from reading each stream once). The gate falls back
+// to the strict dots when the result is not finite, so a NaN or Inf from an
+// input reaches the column; nothing downstream needs it detected.
 fn sensitivity(re: []const f64, im: []const f64, dg: []const f64, dc: []const f64, omega: f64) Complex {
+    const fast = sensitivityFast(re, im, dg, dc, omega);
+    if (std.math.isFinite(fast.re) and std.math.isFinite(fast.im)) return fast;
     return .{
         .re = num.dot(re, dg) - omega * num.dot(im, dc),
         .im = num.dot(im, dg) + omega * num.dot(re, dc),
     };
 }
 
+fn sensitivityFast(re: []const f64, im: []const f64, dg: []const f64, dc: []const f64, omega: f64) Complex {
+    @setFloatMode(.optimized);
+    var rg: f64 = 0;
+    var id: f64 = 0;
+    var ig: f64 = 0;
+    var rd: f64 = 0;
+    for (re, im[0..re.len], dg[0..re.len], dc[0..re.len]) |r, i, g, c| {
+        rg += r * g;
+        id += i * c;
+        ig += i * g;
+        rd += r * c;
+    }
+    return .{ .re = rg - omega * id, .im = ig + omega * rd };
+}
+
 /// dst[i] = (v[i] − v0[i]) / delta over dst.len.
 fn diffQuot(dst: []f64, v: []const f64, v0: []const f64, delta: f64) void {
-    var it = z.fromSlice(f64, v[0..dst.len]).zip(z.fromSlice(f64, v0[0..dst.len])).map(DiffQuot{ .delta = delta });
-    _ = it.writeInto(dst);
-}
-const DiffQuot = struct {
-    pub const lanewise = true;
-    delta: f64,
-    pub fn call(self: *@This(), p: anytype) @TypeOf(p.left) {
-        return (p.left - p.right) / z.splat(@TypeOf(p.left), self.delta);
-    }
-};
-
-test diffQuot {
-    // SIMD path engaged, and bit-exact against the `.byRef()` pull path:
-    // elementwise, so no reassociation. Lengths cross every lane boundary.
-    const builtin = @import("builtin");
-    var buf: [3 * 64 + 4]f64 = undefined;
-    for (&buf, 0..) |*v, i| v.* = @as(f64, @floatFromInt(i % 17)) - 8.5;
-    var out: [buf.len]f64 = undefined;
-    for (0..buf.len - 3) |len| for (0..3) |off| {
-        const v = buf[off..][0..len];
-        const v0 = buf[3 - off ..][0..len];
-        if (builtin.zig_backend == .stage2_llvm or builtin.zig_backend == .stage2_x86_64) {
-            const It = @TypeOf(z.fromSlice(f64, v).zip(z.fromSlice(f64, v0)).map(DiffQuot{ .delta = 1 }));
-            comptime std.debug.assert(It.lane_count != null);
-        }
-        diffQuot(out[0..len], v, v0, 1e-3);
-        var l = z.fromSlice(f64, v);
-        var r = z.fromSlice(f64, v0);
-        var slow = l.byRef().zip(r.byRef()).map(DiffQuot{ .delta = 1e-3 });
-        var want: [buf.len]f64 = undefined;
-        try std.testing.expectEqual(len, slow.writeInto(want[0..len]));
-        try std.testing.expectEqualSlices(f64, want[0..len], out[0..len]);
-    };
+    for (dst, v[0..dst.len], v0[0..dst.len]) |*d, a, b| d.* = (a - b) / delta;
 }
 
 test sensitivity {
     // Against the per-slot complex fold it replaces, λᵀ(dG + jω dC)x, on a
-    // two-column pattern whose nnz sweeps past stdpp's dot cutoff (64).
+    // two-column pattern whose nnz sweeps past dot's 16-accumulator blocks.
     var prng = std.Random.DefaultPrng.init(0x5eed);
     const rnd = prng.random();
     const n = 96;
@@ -286,5 +273,15 @@ test sensitivity {
         const tol = 8 * @as(f64, @floatFromInt(nnz + 2)) * std.math.floatEps(f64) * mass;
         try std.testing.expectApproxEqAbs(want.re, got.re, tol);
         try std.testing.expectApproxEqAbs(want.im, got.im, tol);
+    }
+    // A NaN or Inf input reaches the result through the strict fallback.
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64) }) |bad| {
+        for ([_]usize{ 0, 17, 95 }) |at| {
+            const saved = dg[at];
+            dg[at] = bad;
+            const got = sensitivity(re[0..n], im[0..n], dg[0..n], dc[0..n], omega);
+            try std.testing.expect(!std.math.isFinite(got.re) or !std.math.isFinite(got.im));
+            dg[at] = saved;
+        }
     }
 }

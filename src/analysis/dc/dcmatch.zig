@@ -45,7 +45,8 @@ pub const Groups = struct {
     /// `count() + 1` offsets into `list`: group g is `list[starts[g]..starts[g + 1]]`.
     starts: []const u32,
     list: []Member,
-    /// Per group; see `sigma`.
+    /// Per group, the sigma its column is multiplied by for its spread: 1
+    /// when the column is already per sigma.
     sigmas: []f64,
     /// Per group, borrowed from `Variations`; empty without a variation block.
     labels: []const []const u8,
@@ -53,6 +54,9 @@ pub const Groups = struct {
     /// A parameter ordinal and the factor its dy/dp enters its group with:
     /// its one-sigma step, or 1 without a variation block.
     pub const Member = struct { param: u32, scale: f64 };
+    comptime {
+        std.debug.assert(@sizeOf(Member) == 16); // 4 bytes of padding after `param`
+    }
 
     /// Builds the groups over `refs`; free them with `deinit` and the same
     /// allocator. `labels` stays borrowed from `vars`.
@@ -113,12 +117,6 @@ pub const Groups = struct {
         return self.list[self.starts[g]..self.starts[g + 1]];
     }
 
-    /// The sigma group `g`'s column is multiplied by for its spread: 1 when
-    /// the column is already per sigma.
-    pub fn sigma(self: Groups, g: usize) f64 {
-        return self.sigmas[g];
-    }
-
     /// Group `g`'s column label: the variation label, or, unlabelled,
     /// `<type>#<index>.<param>` of its first member. Caller owns the string
     /// and frees it with `a`.
@@ -130,7 +128,7 @@ pub const Groups = struct {
 };
 
 /// The parameter's mismatch sigma (not sigma^2): A_P / sqrt(W·L).
-inline fn pelgromSigma(ref: root.ParamRef) f64 {
+fn pelgromSigma(ref: root.ParamRef) f64 {
     if (ref.pelgrom_ap > 0 and ref.area_wl > 0) return ref.pelgrom_ap / @sqrt(ref.area_wl);
     // The device count is drawn, not a process variable.
     if (std.mem.eql(u8, ref.param_name, "mfactor")) return 0.0;
@@ -179,7 +177,7 @@ pub fn solve(
             sens = if (k == 0) d else sens + d;
         }
 
-        const sigma_p = groups.sigma(index);
+        const sigma_p = groups.sigmas[index];
         const var_contrib = sens * sens * sigma_p * sigma_p;
         total_var += var_contrib;
 

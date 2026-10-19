@@ -352,3 +352,28 @@ pub fn jfetDeviceId(level: u16) error{UnsupportedDevice}!DeviceId {
 pub fn mesDeviceId(level: u16) error{UnsupportedDevice}!DeviceId {
     return levelId("MESFET", &mes_levels, level);
 }
+
+// Each LEVEL table names a level once; `levelId` takes the first match.
+comptime {
+    for ([_][]const Level{ &mos_levels, &bjt_levels, &diode_levels, &jfet_levels, &mes_levels }) |table| {
+        for (table, 0..) |a, i| for (table[i + 1 ..]) |b| if (a.level == b.level) @compileError("duplicate LEVEL in a device table");
+    }
+}
+
+test "LEVEL tables follow inpdomod.c, and an unknown level is UnsupportedDevice" {
+    std.testing.log_level = .err; // An unknown level logs a warning.
+    // Each pair: the level and the device inpdomod.c (or HSPICE) names.
+    inline for (.{ .{ 1, DeviceId.mos1 }, .{ 3, DeviceId.mos3 }, .{ 8, DeviceId.bsim3 }, .{ 49, DeviceId.bsim3 }, .{ 54, DeviceId.bsim4va }, .{ 14, DeviceId.bsim4va } }) |c|
+        if (comptime has(@tagName(c[1]))) try std.testing.expectEqual(c[1], try mosfetDeviceId(c[0]));
+    if (comptime has("gummel_poon")) try std.testing.expectEqual(.gummel_poon, try bjtDeviceId(2));
+    if (comptime has("diode")) try std.testing.expectEqual(.diode, try diodeDeviceId(3));
+    for ([_]u16{ 0, 7, 11, 999, 65535 }) |level| {
+        try std.testing.expectError(error.UnsupportedDevice, mosfetDeviceId(level));
+        try std.testing.expectError(error.UnsupportedDevice, bjtDeviceId(level));
+        try std.testing.expectError(error.UnsupportedDevice, diodeDeviceId(level));
+        try std.testing.expectError(error.UnsupportedDevice, jfetDeviceId(level));
+        try std.testing.expectError(error.UnsupportedDevice, mesDeviceId(level));
+    }
+    try std.testing.expectEqual(.vsource, letter_map.get("v").?);
+    try std.testing.expectEqual(null, letter_map.get("m"));
+}

@@ -170,6 +170,11 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
                 const Lanes = @Vector(width(ls), F);
                 const T = @This();
 
+                comptime {
+                    // The value, then the lanes with no gap.
+                    std.debug.assert(@sizeOf(T) == std.mem.alignForward(usize, @sizeOf(f64) + @sizeOf(Lanes), @alignOf(f64)));
+                }
+
                 /// Where lane `l` sits in `d`.
                 fn pos(comptime l: usize) usize {
                     return @popCount(ls & ((@as(L, 1) << l) - 1));
@@ -767,7 +772,9 @@ fn NoiseFamily(comptime D: type) type {
 fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime layout: Layout, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
-    @setFloatMode(.optimized);
+    // Strict float mode, as everywhere here: `.optimized` grants `nnan`,
+    // which would make the `* mf` of a NaN residual poison before
+    // SparseLu's isFinite check sees it (see `fma_ok`).
     const n_u = comptime contract.nU(D);
     const has_limit = comptime @hasDecl(D, "limit");
     const reads = comptime contract.derivReads(D);
@@ -943,7 +950,6 @@ inline fn anyNonzero(comptime w: usize, v: @Vector(w, f64)) bool {
 /// same charges, plus the staging `updateState` does, off one core run.
 fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, sim: SimState, batch: anytype) void {
     @setEvalBranchQuota(1_000_000);
-    @setFloatMode(.optimized);
     const n_u = comptime contract.nU(D);
     const q_row = comptime writtenRows(D, "q_rows");
     var id: u32 = first;
@@ -1087,14 +1093,17 @@ pub fn ProtoStore(comptime D: type) type {
         /// device calling a §12.32 `$name` has its application bound
         /// (`DeviceVtable.bind_systf`): `contract.validateHost` checks the
         /// binding only in Debug, and generated code unwraps it in every mode.
-        pub fn append(self: *Self, model: D.Model, instance: D.Instance, nodes: [n_u]u32) !void {
+        /// Reads `model` and `instance` through pointers, copied straight into
+        /// the rows: a delay line's Instance carries its history (wline_4:
+        /// 2 MB), and by-value temporaries of it overflowed a Debug stack.
+        pub fn append(self: *Self, model: *const D.Model, instance: *const D.Instance, nodes: [n_u]u32) !void {
             if (comptime @hasDecl(D, "systf_calls") and D.systf_calls.len != 0)
                 std.debug.assert(instance.systf != null);
-            try self.models.append(staging_gpa, model);
-            errdefer _ = self.models.pop();
-            try self.instances.append(staging_gpa, instance);
-            errdefer _ = self.instances.pop();
+            try self.models.ensureUnusedCapacity(staging_gpa, 1);
+            try self.instances.ensureUnusedCapacity(staging_gpa, 1);
             try self.nodes.append(staging_gpa, nodes);
+            self.models.addOneAssumeCapacity().* = model.*;
+            self.instances.addOneAssumeCapacity().* = instance.*;
         }
 
         /// `Proto.pattern`: adds every (row, col) the device's structural
@@ -2849,7 +2858,6 @@ fn QTapeKernel(comptime D: type, comptime block_size: u32) type {
             instances: gompute.GlobalPtr(D.Instance),
             tape: gompute.GlobalPtr(f64),
         ) callconv(gompute.kernel_callconv) void {
-            @setFloatMode(.optimized);
             const tid = gompute.globalIdX(block_size);
             if (tid >= count) return;
             const id: usize = @intCast(tid);
@@ -3033,7 +3041,7 @@ fn Impl(comptime D: type, comptime device_name: []const u8) type {
             const store: *Store = @ptrCast(@alignCast(ctx));
             const m: *const D.Model = @ptrCast(@alignCast(model));
             const i: *const D.Instance = @ptrCast(@alignCast(instance));
-            return ir.DeviceResult(void).fromLocal(store.append(m.*, i.*, nodes[0..n_u].*));
+            return ir.DeviceResult(void).fromLocal(store.append(m, i, nodes[0..n_u].*));
         }
     };
 }

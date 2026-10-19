@@ -200,7 +200,8 @@ espice_status espice_advance_ready(espice_problem *, const uint32_t *ids, size_t
  * .stim files are not written. A second call runs nothing twice. */
 espice_status espice_run_all(espice_problem *);
 /* Appends the analysis cards in directives and writes each one's id to ids.
- * A card identical to an existing query gets the old id. All-or-nothing: on
+ * An .op identical to an existing operating point gets the old id; every
+ * other card is a new query with a new id. All-or-nothing: on
  * any failure, the DAG and ids are unchanged. */
 espice_status espice_append_directives(espice_problem *, espice_bytes directives,
     uint32_t *ids, size_t capacity, size_t *required);

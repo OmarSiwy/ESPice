@@ -92,7 +92,7 @@ pub const Session = struct {
         const ordinal = self.published;
         if (!dispatch.concatenates(format)) {
             if (ordinal == 0) return dispatch.write(io, path, format, plot);
-            const numbered = try std.fmt.allocPrint(self.allocator, "{s}.{d}", .{ path, ordinal + 1 });
+            const numbered = try self.allocator.print("{s}.{d}", .{ path, ordinal + 1 });
             defer self.allocator.free(numbered);
             return dispatch.write(io, numbered, format, plot);
         }
@@ -164,7 +164,8 @@ pub const Session = struct {
         s.complex = plot.result.is_complex;
         var header: Io.Writer.Allocating = .init(self.allocator);
         defer header.deinit();
-        try @import("rawfile.zig").writeHeader(&header.writer, plot, true);
+        // An Allocating writer fails only when it cannot grow.
+        @import("rawfile.zig").writeHeader(&header.writer, plot, true) catch return error.OutOfMemory;
         const field = "No. Points: 0\n";
         const at = std.mem.indexOf(u8, header.written(), field).? + field.len - 2;
         const w = &s.file.interface;
@@ -238,7 +239,7 @@ test "session: finish and later publication preserve raw append order" {
         const a = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plots.raw", .{tmp.sub_path});
+        const path = try a.print(".zig-cache/tmp/{s}/plots.raw", .{tmp.sub_path});
         defer a.free(path);
         var session = try Session.init(a, .{ .format = format, .path = path });
         defer session.deinit();
@@ -274,7 +275,7 @@ test "session: appended plots are each written once and published at finish (#17
         const a = std.testing.allocator;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/sweep.raw", .{tmp.sub_path});
+        const path = try a.print(".zig-cache/tmp/{s}/sweep.raw", .{tmp.sub_path});
         defer a.free(path);
         try tmp.dir.writeFile(io, .{ .sub_path = "sweep.raw", .data = "old" });
         // The oracle: each plot encoded alone, back to back.
@@ -309,7 +310,7 @@ test "session: plots never finished leave the previous file intact (#179)" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plots.raw", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/plots.raw", .{tmp.sub_path});
     defer a.free(path);
     try tmp.dir.writeFile(io, .{ .sub_path = "plots.raw", .data = "previous run" });
     const plot: types.Plot = .{ .title = "t", .result = .{ .plotname = "op", .varnames = &.{"v(out)"}, .is_complex = false, .npoints = 1, .data = &.{1} } };
@@ -336,7 +337,7 @@ test "session: owned destination and numbered files" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plots.csv", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/plots.csv", .{tmp.sub_path});
     defer a.free(path);
     var session = try Session.init(a, .{ .format = .csv, .path = path });
     defer session.deinit();
@@ -367,7 +368,7 @@ test "session: validation preserves destination and permits a corrected publicat
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plot.s1p", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/plot.s1p", .{tmp.sub_path});
     defer a.free(path);
     try tmp.dir.writeFile(io, .{ .sub_path = "plot.s1p", .data = "existing" });
     var session = try Session.init(a, .{ .format = .touchstone, .path = path });
@@ -396,7 +397,7 @@ test "session: writer failure is terminal and does not acknowledge output" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/missing/plot.raw", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/missing/plot.raw", .{tmp.sub_path});
     defer a.free(path);
     var session = try Session.init(a, .{ .path = path });
     defer session.deinit();
@@ -421,7 +422,7 @@ test "session: a streamed plot matches the whole-plot encoding but for the padde
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/stream.raw", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/stream.raw", .{tmp.sub_path});
     defer a.free(path);
     const rows = [_]f64{ 0, 1.5, 1e-9, 2.5 };
     var plot: types.Plot = .{ .title = "t", .result = .{
@@ -498,7 +499,7 @@ test "session: an aborted stream leaves the destination as it was" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/plot.raw", .{tmp.sub_path});
+    const path = try a.print(".zig-cache/tmp/{s}/plot.raw", .{tmp.sub_path});
     defer a.free(path);
     try tmp.dir.writeFile(io, .{ .sub_path = "plot.raw", .data = "existing" });
     var session = try Session.init(a, .{ .path = path });
@@ -510,4 +511,38 @@ test "session: an aborted stream leaves the destination as it was" {
     const old = try tmp.dir.readFileAlloc(io, "plot.raw", a, .unlimited);
     defer a.free(old);
     try std.testing.expectEqualStrings("existing", old);
+}
+
+test "session: every allocation failure is reported and leaks nothing" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try a.print(".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const S = struct {
+        fn run(gpa: std.mem.Allocator, base: []const u8) !void {
+            const io = std.testing.io;
+            var path_buf: [256]u8 = undefined;
+            const rows = [_]f64{ 0, 1 };
+            const stream: types.Plot = .{ .title = "t", .result = .{ .plotname = "tran", .varnames = &.{ "time", "v(a)" }, .is_complex = false, .npoints = 0, .data = &.{} } };
+            const op: types.Plot = .{ .title = "t", .result = .{ .plotname = "op", .varnames = &.{"v(a)"}, .is_complex = false, .npoints = 1, .data = &.{1} } };
+            // Streamed binary raw, then an appended plot, then the rename.
+            var raw = try Session.init(gpa, .{ .path = try std.fmt.bufPrint(&path_buf, "{s}/a.raw", .{base}) });
+            defer raw.deinit();
+            try (try raw.beginStream(io, stream)).?.writeAll(std.mem.sliceAsBytes(&rows));
+            try raw.endStream(io, 1, 2);
+            try raw.publish(io, op);
+            try raw.finish(io);
+            // Numbered one-plot files, and a pathless stream.
+            var csv = try Session.init(gpa, .{ .format = .csv, .path = try std.fmt.bufPrint(&path_buf, "{s}/a.csv", .{base}) });
+            defer csv.deinit();
+            try csv.publish(io, op);
+            try csv.publish(io, op);
+            var none = try Session.init(gpa, .{});
+            defer none.deinit();
+            try (try none.beginStream(io, stream)).?.writeAll(std.mem.sliceAsBytes(&rows));
+            try none.endStream(io, 1, 2);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(a, S.run, .{dir});
 }

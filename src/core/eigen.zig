@@ -7,10 +7,6 @@ const assert = std.debug.assert;
 const num = @import("numerics.zig");
 const Complex = num.Complex;
 
-/// Lanes of the reflector kernels; `w = 1` instantiates their scalar
-/// oracle (AGENTS.md lane doctrine).
-const W = std.simd.suggestVectorLength(f64) orelse 1;
-
 /// How many eigenvalues were written, and whether all of them were.
 pub const Eigs = struct { count: usize, converged: bool };
 
@@ -164,6 +160,7 @@ fn francis(n: usize, a: []f64, out: []Complex, tol: f64, max_iter: u32) Eigs {
 fn balance(n: usize, a: []f64) void {
     const radix: f64 = 2;
     const radix_sq = radix * radix;
+    const f_max: f64 = 0x1p512;
     // The sweep is a fixed point and terminates on its own; the cap is here so
     // a denormal cannot turn that into a hang.
     for (0..64) |_| {
@@ -181,13 +178,16 @@ fn balance(n: usize, a: []f64) void {
             const s = c + r;
             var f: f64 = 1;
             var g = r / radix;
-            // Both loops end: c moves 4x per step toward g, finite and positive.
-            while (c < g) {
+            // Both loops end: c moves 4x per step toward g, finite and
+            // positive. The bound on f keeps D and D⁻¹ finite and nonzero
+            // when c and r are decades of the f64 range apart (a denormal
+            // against 1e308 would ask for 2^1048).
+            while (c < g and f < f_max) {
                 f *= radix;
                 c *= radix_sq;
             }
             g = r * radix;
-            while (c > g) {
+            while (c > g and f > 1 / f_max) {
                 f /= radix;
                 c /= radix_sq;
             }
@@ -230,25 +230,20 @@ fn extract2x2(a: []const f64, n: usize, offset: usize, out: *[2]Complex) void {
 
 /// Reduces `a` (n×n, row-major) in place to upper Hessenberg form by
 /// Householder similarities; the eigenvalues are unchanged and every entry
-/// below the subdiagonal is an exact zero. `v_buf` is scratch of at least n
-/// entries: a contiguous copy of each reflector, so its reads are vector
-/// loads rather than stride-n gathers. O(n³). Asserts that `a` holds n×n
-/// entries and `v_buf` at least n.
-pub fn hessenbergReduce(n: usize, a: []f64, v_buf: []f64) void {
-    hessenbergLanes(W, n, a, v_buf);
-}
-
-fn hessenbergLanes(comptime w: usize, n: usize, a: []f64, v_buf: []f64) void {
-    const V = @Vector(w, f64);
+/// below the subdiagonal is an exact zero. `scratch` holds at least 2n
+/// entries: a contiguous copy of each reflector v and the row vector
+/// βvᵀA, so both updates run over contiguous rows instead of stride-n
+/// columns. O(n³). Asserts that `a` holds n×n entries.
+pub fn hessenbergReduce(n: usize, a: []f64, scratch: []f64) void {
     assert(a.len >= n * n);
-    assert(v_buf.len >= n);
+    assert(scratch.len >= 2 * n);
     if (n <= 2) return;
 
     for (0..n - 2) |k| {
         var sigma: f64 = 0;
         for (k + 1..n) |row| {
-            const v = a[row * n + k];
-            sigma += v * v;
+            const x = a[row * n + k];
+            sigma += x * x;
         }
         sigma = @sqrt(sigma);
 
@@ -259,52 +254,28 @@ fn hessenbergLanes(comptime w: usize, n: usize, a: []f64, v_buf: []f64) void {
         a[(k + 1) * n + k] += sigma;
         const beta = 1.0 / (sigma * a[(k + 1) * n + k]);
 
-        // The reflector v = a[k+1.., k]. Column j = k of the left update
-        // rewrites it in place (to Hv, -v up to rounding), and every later
-        // column and the right update read that rewritten copy, so the
-        // buffer is refreshed after j = k.
+        // The reflector v = a[k+1.., k]. Column k itself is known after the
+        // update (-sigma, then zeros), so only columns k+1.. are touched.
         const m = n - (k + 1);
-        const v = v_buf[0..m];
+        const v = scratch[0..m];
+        const w = scratch[n..][0..m];
         for (v, k + 1..) |*x, row| x.* = a[row * n + k];
 
-        // Apply from the left: A := (I - beta * v * v^T) * A
-        for (k..n) |j| {
-            if (j == k + 1) for (v, k + 1..) |*x, row| {
-                x.* = a[row * n + k];
-            };
-            var dot_acc: V = @splat(0.0);
-            var i: usize = 0;
-            while (i + w <= m) : (i += w) {
-                var av: V = undefined;
-                inline for (0..w) |wi| av[wi] = a[(k + 1 + i + wi) * n + j];
-                dot_acc += @as(V, v[i..][0..w].*) * av;
-            }
-            var dot: f64 = @reduce(.Add, dot_acc);
-            while (i < m) : (i += 1) dot += v[i] * a[(k + 1 + i) * n + j];
-            dot *= beta;
-            for (v, k + 1..) |x, row| a[row * n + j] -= x * dot;
-        }
+        // From the left: A := (I - beta * v * v^T) * A. w = beta * vᵀA is
+        // summed row by row, each w[j] in ascending row order.
+        @memset(w, 0);
+        for (v, k + 1..) |x, row| num.axpy(w, x, a[row * n + k + 1 ..][0..m]);
+        num.scale(w, beta, w);
+        for (v, k + 1..) |x, row| num.axpy(a[row * n + k + 1 ..][0..m], -x, w);
 
-        // Apply from the right: A := A * (I - beta * v * v^T)
+        // From the right: A := A * (I - beta * v * v^T)
         for (0..n) |row| {
             const ar = a[row * n + k + 1 ..][0..m];
-            var dot_acc: V = @splat(0.0);
-            var i: usize = 0;
-            while (i + w <= m) : (i += w)
-                dot_acc += @as(V, ar[i..][0..w].*) * @as(V, v[i..][0..w].*);
-            var dot: f64 = @reduce(.Add, dot_acc);
-            while (i < m) : (i += 1) dot += ar[i] * v[i];
-            dot *= beta;
-            const dv: V = @splat(dot);
-            i = 0;
-            while (i + w <= m) : (i += w)
-                ar[i..][0..w].* = @as(V, ar[i..][0..w].*) - dv * @as(V, v[i..][0..w].*);
-            while (i < m) : (i += 1) ar[i] -= dot * v[i];
+            num.axpy(ar, -beta * num.dot(ar, v), v);
         }
 
-        // The reflector maps its own storage v to -v (Hv = -v), leaving
-        // nonzeros below the subdiagonal; francisStep reads those slots as
-        // bulge entries, so they must be true zeros.
+        // francisStep reads the slots below the subdiagonal as bulge
+        // entries, so they must be true zeros.
         a[(k + 1) * n + k] = -sigma;
         for (k + 2..n) |row| a[row * n + k] = 0;
     }
@@ -352,9 +323,9 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
         }
 
         if (k + 2 < nn) {
-            applyReflector3(W, n, a, lo, nn, k, x, y, z, nr);
+            applyReflector3(n, a, lo, nn, k, x, y, z, nr);
         } else {
-            applyReflector2(W, n, a, lo, nn, k, x, y);
+            applyReflector2(n, a, lo, nn, k, x, y);
         }
 
         if (k + 1 < nn - 1) {
@@ -367,8 +338,7 @@ fn francisStep(n: usize, a: []f64, lo: usize, nn: usize, iter: u32) void {
 
 /// Applies the 3-element Householder reflector that zeroes (y, z) against x
 /// to rows and columns k..k+2 of the active block.
-fn applyReflector3(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64, z_in: f64, nr: f64) void {
-    const V = @Vector(w, f64);
+fn applyReflector3(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64, z_in: f64, nr: f64) void {
     assert(k + 2 < nn);
     assert(nn <= n);
     const sign_x: f64 = if (x_in >= 0) 1.0 else -1.0;
@@ -379,35 +349,16 @@ fn applyReflector3(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, 
     if (denom == 0) return;
     const beta = 2.0 / denom;
 
-    const v0v: V = @splat(v0);
-    const v1v: V = @splat(v1);
-    const v2v: V = @splat(v2);
-    const betav: V = @splat(beta);
-
     // From the left, rows k..k+2. Column lo-1 is the split this block was
     // deflated at; reaching back into it would refill the negligible
     // subdiagonal entry and undo the split.
     const col_start = if (k > lo) k - 1 else lo;
-    var j: usize = col_start;
-    while (j + w <= nn) : (j += w) {
-        const r0: V = a[k * n + j ..][0..w].*;
-        const r1: V = a[(k + 1) * n + j ..][0..w].*;
-        const r2: V = a[(k + 2) * n + j ..][0..w].*;
-        const dot_v = v0v * r0 + v1v * r1 + v2v * r2;
-        const tv = betav * dot_v;
-        const p0: *[w]f64 = a[k * n + j ..][0..w];
-        const p1: *[w]f64 = a[(k + 1) * n + j ..][0..w];
-        const p2: *[w]f64 = a[(k + 2) * n + j ..][0..w];
-        p0.* = r0 - tv * v0v;
-        p1.* = r1 - tv * v1v;
-        p2.* = r2 - tv * v2v;
-    }
-    while (j < nn) : (j += 1) {
-        const dot = v0 * a[k * n + j] + v1 * a[(k + 1) * n + j] + v2 * a[(k + 2) * n + j];
-        const tv = beta * dot;
-        a[k * n + j] -= tv * v0;
-        a[(k + 1) * n + j] -= tv * v1;
-        a[(k + 2) * n + j] -= tv * v2;
+    const len = nn - col_start;
+    for (a[k * n + col_start ..][0..len], a[(k + 1) * n + col_start ..][0..len], a[(k + 2) * n + col_start ..][0..len]) |*r0, *r1, *r2| {
+        const tv = beta * (v0 * r0.* + v1 * r1.* + v2 * r2.*);
+        r0.* -= tv * v0;
+        r1.* -= tv * v1;
+        r2.* -= tv * v2;
     }
 
     // From the right, columns k..k+2, rows lo..min(nn, k+4). Rows above lo
@@ -425,8 +376,7 @@ fn applyReflector3(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, 
 
 /// The 2-element reflector at the bottom of the chase, rows and columns
 /// k..k+1.
-fn applyReflector2(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64) void {
-    const V = @Vector(w, f64);
+fn applyReflector2(n: usize, a: []f64, lo: usize, nn: usize, k: usize, x_in: f64, y_in: f64) void {
     assert(k + 1 < nn);
     assert(nn <= n);
     const nr = @sqrt(x_in * x_in + y_in * y_in);
@@ -439,28 +389,13 @@ fn applyReflector2(comptime w: usize, n: usize, a: []f64, lo: usize, nn: usize, 
     if (denom == 0) return;
     const beta = 2.0 / denom;
 
-    const v0v: V = @splat(v0);
-    const v1v: V = @splat(v1);
-    const betav: V = @splat(beta);
-
     // Same column and row ranges as applyReflector3.
     const col_start = if (k > lo) k - 1 else lo;
-    var j: usize = col_start;
-    while (j + w <= nn) : (j += w) {
-        const r0: V = a[k * n + j ..][0..w].*;
-        const r1: V = a[(k + 1) * n + j ..][0..w].*;
-        const dot_v = v0v * r0 + v1v * r1;
-        const tv = betav * dot_v;
-        const p0: *[w]f64 = a[k * n + j ..][0..w];
-        const p1: *[w]f64 = a[(k + 1) * n + j ..][0..w];
-        p0.* = r0 - tv * v0v;
-        p1.* = r1 - tv * v1v;
-    }
-    while (j < nn) : (j += 1) {
-        const dot = v0 * a[k * n + j] + v1 * a[(k + 1) * n + j];
-        const tv = beta * dot;
-        a[k * n + j] -= tv * v0;
-        a[(k + 1) * n + j] -= tv * v1;
+    const len = nn - col_start;
+    for (a[k * n + col_start ..][0..len], a[(k + 1) * n + col_start ..][0..len]) |*r0, *r1| {
+        const tv = beta * (v0 * r0.* + v1 * r1.*);
+        r0.* -= tv * v0;
+        r1.* -= tv * v1;
     }
 
     const row_end = @min(nn, k + 3);
@@ -477,54 +412,58 @@ const testing = std.testing;
 /// sees full blocks and every tail length.
 const test_max_n = 3 * 8 + 2;
 
-test "hessenbergReduce at vector width matches its w = 1 oracle" {
+/// The textbook reduction `hessenbergReduce` reorganizes: each column's
+/// dot product taken down the stride-n column, the reflector read from `a`
+/// itself. Its differential oracle.
+fn hessenbergNaive(n: usize, a: []f64) void {
+    if (n <= 2) return;
+    for (0..n - 2) |k| {
+        var sigma: f64 = 0;
+        for (k + 1..n) |row| sigma += a[row * n + k] * a[row * n + k];
+        sigma = @sqrt(sigma);
+        if (sigma == 0) continue;
+        if (a[(k + 1) * n + k] < 0) sigma = -sigma;
+        a[(k + 1) * n + k] += sigma;
+        const beta = 1.0 / (sigma * a[(k + 1) * n + k]);
+        for (k + 1..n) |j| {
+            var d: f64 = 0;
+            for (k + 1..n) |i| d += a[i * n + k] * a[i * n + j];
+            for (k + 1..n) |i| a[i * n + j] -= beta * d * a[i * n + k];
+        }
+        for (0..n) |row| {
+            var d: f64 = 0;
+            for (k + 1..n) |i| d += a[row * n + i] * a[i * n + k];
+            for (k + 1..n) |i| a[row * n + i] -= beta * d * a[i * n + k];
+        }
+        a[(k + 1) * n + k] = -sigma;
+        for (k + 2..n) |row| a[row * n + k] = 0;
+    }
+}
+
+test "hessenbergReduce matches the textbook column-oriented reduction" {
     var prng = std.Random.DefaultPrng.init(0xe16e);
     const r = prng.random();
     var a: [test_max_n * test_max_n]f64 = undefined;
     var b: [test_max_n * test_max_n]f64 = undefined;
-    var scratch: [test_max_n]f64 = undefined;
+    var scratch: [2 * test_max_n]f64 = undefined;
     for (0..test_max_n + 1) |n| {
         for (a[0 .. n * n]) |*v| v.* = r.float(f64) * 2 - 1;
         @memcpy(b[0 .. n * n], a[0 .. n * n]);
         var trace: f64 = 0;
         for (0..n) |i| trace += a[i * n + i];
-        hessenbergLanes(W, n, a[0 .. n * n], &scratch);
-        hessenbergLanes(1, n, b[0 .. n * n], &scratch);
+        hessenbergReduce(n, a[0 .. n * n], scratch[0 .. 2 * n]);
+        hessenbergNaive(n, b[0 .. n * n]);
         var h_trace: f64 = 0;
         for (0..n) |i| {
             h_trace += a[i * n + i];
             for (0..n) |j| {
-                // The vector dot regroups its sum, so agreement is to rounding.
+                // The two regroup their sums differently: agreement is to rounding.
                 try testing.expectApproxEqAbs(b[i * n + j], a[i * n + j], 1e-10);
                 if (i > j + 1) try testing.expectEqual(@as(f64, 0), a[i * n + j]);
             }
         }
         try testing.expectApproxEqAbs(trace, h_trace, 1e-12 * @as(f64, @floatFromInt(n + 1)));
     }
-}
-
-test "the bulge reflectors at vector width match their w = 1 oracle bit for bit" {
-    // Their vector bodies are elementwise, in the scalar loop's operation
-    // order, so nothing may differ.
-    var prng = std.Random.DefaultPrng.init(0x3eff);
-    const r = prng.random();
-    var a: [test_max_n * test_max_n]f64 = undefined;
-    var b: [test_max_n * test_max_n]f64 = undefined;
-    for (3..test_max_n + 1) |n| for (0..n - 2) |lo| {
-        for (a[0 .. n * n]) |*v| v.* = r.float(f64) * 2 - 1;
-        @memcpy(b[0 .. n * n], a[0 .. n * n]);
-        const x = r.float(f64) - 0.5;
-        const y = r.float(f64) - 0.5;
-        const z = r.float(f64) - 0.5;
-        const nr = @sqrt(x * x + y * y + z * z);
-        for (lo..n - 2) |k| {
-            applyReflector3(W, n, a[0 .. n * n], lo, n, k, x, y, z, nr);
-            applyReflector3(1, n, b[0 .. n * n], lo, n, k, x, y, z, nr);
-        }
-        applyReflector2(W, n, a[0 .. n * n], lo, n, n - 2, x, y);
-        applyReflector2(1, n, b[0 .. n * n], lo, n, n - 2, x, y);
-        try testing.expectEqualSlices(f64, b[0 .. n * n], a[0 .. n * n]);
-    };
 }
 
 test "eigenvalues sum to the trace, and their squares to tr(A²)" {
@@ -593,6 +532,9 @@ test "degenerate sizes, an exhausted iteration budget, and a non-finite entry" {
     // An infinite column sum used to spin balance's scaling loop forever.
     var inf_entry = [_]f64{ 1, 1, 1, std.math.inf(f64), 1, 1, 1, 1, 1 };
     try testing.expect(eigenvalues(3, &inf_entry, &out, 1e-12, 50).count <= 3);
+    // A NaN never deflates, so it ends on the iteration budget, not in a hang.
+    var nan_entry = [_]f64{ 1, 2, 3, 4, std.math.nan(f64), 6, 7, 8, 9 };
+    try testing.expect(eigenvalues(3, &nan_entry, &out, 1e-12, 50).count <= 3);
 }
 
 test extract2x2 {
@@ -614,4 +556,43 @@ test extract2x2 {
     extract2x2(&.{ 1, -4, 1, 1 }, 2, 0, &out);
     try testing.expectEqual(Complex{ .re = 1, .im = 2 }, out[0]);
     try testing.expectEqual(Complex{ .re = 1, .im = -2 }, out[1]);
+}
+
+test "balancing a denormal against 1e308 keeps its scale factor finite" {
+    // c = 5e-324 against r = 1.7e308 asks for D = 2^1048, past f64: the row
+    // then scales by 0 and the column by inf, and the eigenvalues are NaN.
+    // The exact ones are 1 ± sqrt(1.7e308 · 5e-324) = 1 ± 2.9e-8.
+    var a = [_]f64{ 1, 1.7e308, 5e-324, 1 };
+    var out: [2]Complex = undefined;
+    const res = eigenvalues(2, &a, &out, 1e-12, 100);
+    try testing.expect(res.converged);
+    for (out) |l| {
+        try testing.expect(std.math.isFinite(l.re) and std.math.isFinite(l.im));
+        try testing.expectApproxEqAbs(@as(f64, 1), l.re, 1e-7);
+    }
+}
+
+test "a companion matrix gives its polynomial's roots" {
+    // The polynomial (x-1)(x-2)(x-3)(x+4)(x²+1) is built from its roots,
+    // so the oracle needs no eigen solver.
+    const roots = [_]Complex{ .{ .re = 1, .im = 0 }, .{ .re = 2, .im = 0 }, .{ .re = 3, .im = 0 }, .{ .re = -4, .im = 0 }, .{ .re = 0, .im = 1 }, .{ .re = 0, .im = -1 } };
+    const n = roots.len;
+    // Coefficients of Π (x - r), highest first, by repeated multiplication.
+    var c: [n + 1]Complex = @splat(.zero);
+    c[0] = .{ .re = 1, .im = 0 };
+    for (roots, 1..) |root, len| {
+        var i = len;
+        while (i > 0) : (i -= 1) c[i] = c[i].sub(root.mul(c[i - 1]));
+    }
+    var a: [n * n]f64 = @splat(0);
+    for (0..n) |j| a[j] = -c[j + 1].re;
+    for (1..n) |i| a[i * n + i - 1] = 1;
+    var out: [n]Complex = undefined;
+    const res = eigenvalues(n, &a, &out, 1e-14, 100);
+    try testing.expect(res.converged);
+    for (roots) |root| {
+        var nearest: f64 = std.math.inf(f64);
+        for (out) |l| nearest = @min(nearest, l.sub(root).mag());
+        try testing.expect(nearest < 1e-9);
+    }
 }

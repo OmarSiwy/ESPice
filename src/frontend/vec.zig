@@ -192,8 +192,8 @@ pub fn expand(arena: std.mem.Allocator, src: []const u8) Error![]const u8 {
     if (!named) {
         var b: usize = 0;
         for (digits.items, 1..) |w, k| {
-            const name = try std.fmt.allocPrint(arena, "v{d}", .{k});
-            for (bits.items[b..][0..w], 0..) |*bit, i| bit.name = if (w == 1) name else try std.fmt.allocPrint(arena, "{s}[{d}]", .{ name, w - 1 - i });
+            const name = try arena.print("v{d}", .{k});
+            for (bits.items[b..][0..w], 0..) |*bit, i| bit.name = if (w == 1) name else try arena.print("{s}[{d}]", .{ name, w - 1 - i });
             b += w;
         }
     }
@@ -212,24 +212,20 @@ pub fn expand(arena: std.mem.Allocator, src: []const u8) Error![]const u8 {
             continue;
         }
         for (0..times.items.len) |r| if (states.items[r * n + b] == 'z') return error.InvalidVector;
-        // An X or U input drives to zero.
-        const level = struct {
-            fn of(x: Bit, s: u8) f64 {
-                return if (s == '1') x.vih else x.vil;
-            }
-        }.of;
+        // An X or U input drives to zero: VIL.
+        const levels = [2]f64{ bit.vil, bit.vih };
         var prev = states.items[b];
-        try out.print(arena, "vvec_{s} {s} {s} pwl(0 {e}", .{ bit.name, bit.name, bit.ref, level(bit, prev) });
+        try out.print(arena, "vvec_{s} {s} {s} pwl(0 {e}", .{ bit.name, bit.name, bit.ref, levels[@intFromBool(prev == '1')] });
         var points: usize = 1;
         for (times.items, 0..) |t, r| {
             const s = states.items[r * n + b];
-            if (level(bit, s) == level(bit, prev)) continue;
+            if (levels[@intFromBool(s == '1')] == levels[@intFromBool(prev == '1')]) continue;
             points += 2;
             if (points > max_points) return error.InvalidVector;
             const start = (t + bit.idelay) * unit;
             const edge = if (s == '1') bit.trise else bit.tfall;
             const ramp = if (edge) |e| e * unit else 0.1e-9;
-            try out.print(arena, " {e} {e} {e} {e}", .{ start, level(bit, prev), start + ramp, level(bit, s) });
+            try out.print(arena, " {e} {e} {e} {e}", .{ start, levels[@intFromBool(prev == '1')], start + ramp, levels[@intFromBool(s == '1')] });
             prev = s;
         }
         try out.appendSlice(arena, ")\n");
@@ -305,14 +301,12 @@ fn names(arena: std.mem.Allocator, v: []const u8, out: []Bit) Error!void {
         out[0].name = v;
         return;
     };
-    assert(@abs(@as(i64, r.hi) - r.lo) + 1 == out.len);
+    std.debug.assert(@abs(@as(i64, r.hi) - r.lo) + 1 == out.len);
     for (out, 0..) |*bit, k| {
         const i: i64 = if (r.hi >= r.lo) @as(i64, r.hi) - @as(i64, @intCast(k)) else @as(i64, r.hi) + @as(i64, @intCast(k));
-        bit.name = try std.fmt.allocPrint(arena, "{s}{s}{d}{s}", .{ r.base, r.open, i, r.close });
+        bit.name = try arena.print("{s}{s}{d}{s}", .{ r.base, r.open, i, r.close });
     }
 }
-
-const assert = std.debug.assert;
 
 /// Which bits a waveform statement's mask selects; every bit with no mask.
 fn maskBits(arena: std.mem.Allocator, mask: []const []const u8, digits: []const u8, n: usize) Error![]bool {
@@ -417,4 +411,8 @@ test "vector files: hex digits, PERIOD rows and malformed input" {
         \\vvec_c{[3]} c{[3]} 0 pwl(0 0e0)
         \\
     , try expand(a, "radix 21\nvname vb<[1:0]> c{[[3:3]]}\n1 2 0\n"));
+}
+
+test {
+    _ = @import("tests/vec.zig");
 }

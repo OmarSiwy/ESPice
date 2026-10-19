@@ -15,6 +15,9 @@ pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builti
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
 pub const vera_validate_contract = @import("builtin").mode == .debug;
 
+/// `--version`; a test pins it to build.zig.zon's `.version`.
+const version = "1.1.0";
+
 /// glibc's `mallopt` (malloc.h); M_MMAP_THRESHOLD is -3.
 extern "c" fn mallopt(param: c_int, value: c_int) c_int;
 
@@ -62,7 +65,7 @@ pub fn main(init: std.process.Init) !u8 {
             , .{});
             return 0;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
-            std.debug.print("espice 1.0.0\n", .{});
+            std.debug.print("espice " ++ version ++ "\n", .{});
             return 0;
         } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--batch")) {} else if (std.mem.eql(u8, arg, "--gpu")) {
             backend = .auto;
@@ -79,9 +82,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (optionValue(arg, "", "--format", &args)) |value| {
             selection.format = problem.parseFormat(value orelse return usageFail()) orelse return usageFail();
         } else if (optionValue(arg, "", "--backend", &args)) |value| {
-            backend = std.StaticStringMap(problem.Request).initComptime(.{
-                .{ "cpu", .cpu }, .{ "auto", .auto }, .{ "cuda", .cuda }, .{ "hip", .hip },
-            }).get(value orelse return usageFail()) orelse return usageFail();
+            backend = std.meta.stringToEnum(problem.Request, value orelse return usageFail()) orelse return usageFail();
             explicit_gpu = explicit_gpu or backend == .cuda or backend == .hip;
         } else if (optionValue(arg, "", "--jobs", &args)) |value| {
             max_parallel = std.fmt.parseInt(u16, value orelse return usageFail(), 10) catch return usageFail();
@@ -189,6 +190,12 @@ fn usageFail() u8 {
 test {
     // Analyzed only from `main` otherwise, which no test build reaches.
     std.testing.refAllDecls(vpi_host);
+}
+
+test "--version matches build.zig.zon" {
+    const zon = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig.zon", std.testing.allocator, .limited(1 << 16));
+    defer std.testing.allocator.free(zon);
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".version = \"" ++ version ++ "\",") != null);
 }
 
 test "optionValue: separate, joined, missing and empty values" {

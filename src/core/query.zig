@@ -13,8 +13,9 @@ const GROUND = @import("ids.zig").GROUND;
 pub const QueryId = enum(u32) { _ };
 /// Sentinel `QueryId` that names no query.
 pub const invalid_query: QueryId = @fromBackingInt(@intCast(std.math.maxInt(u32)));
-/// Transient integration method.
-pub const Method = enum { backward_euler, trapezoidal, gear_2 };
+/// Transient integration method, and the highest order the step loop
+/// promotes to: `gear_k` is variable-order Gear (BDF) of orders 1..k.
+pub const Method = enum { backward_euler, trapezoidal, gear_2, gear_3, gear_4, gear_5, gear_6 };
 /// Re-exported so a query reads its sweep type from one place.
 pub const FreqSweep = @import("numerics.zig").FreqSweep;
 pub const SweepKind = @import("numerics.zig").SweepKind;
@@ -1008,7 +1009,7 @@ test "CardNames answers as the linear scan does over a shuffled table" {
             const index = counts[ti];
             counts[ti] += 1;
             if (rand.uintLessThan(u8, 4) == 0) continue;
-            const name = try std.fmt.allocPrint(a, "d{d}", .{k});
+            const name = try a.print("d{d}", .{k});
             try cards.append(a, .{ .type = @fromBackingInt(ti), .index = index, .name = name });
             if (index > 0 and rand.uintLessThan(u8, 16) == 0)
                 try cards.append(a, .{ .type = @fromBackingInt(ti), .index = index - 1, .name = "dup" });
@@ -1059,4 +1060,17 @@ test "every transient-family query runs off the transient operating point" {
     // MATEX integrates in time like .tran, so it starts from MODETRANOP (#27).
     inline for (.{ Kind.tran, Kind.matex, Kind.envelope, Kind.pss }) |k| try std.testing.expect(k.transient());
     try std.testing.expect(!Kind.dc.transient());
+}
+
+test "CardNames.init fails cleanly at every allocation" {
+    const cards = [_]CardRef{ .{ .type = @fromBackingInt(2), .index = 1, .name = "r2" }, .{ .type = @fromBackingInt(0), .index = 0, .name = "v1" } };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(gpa: std.mem.Allocator, cs: []const CardRef) !void {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            const names = try CardNames.init(arena.allocator(), cs);
+            try std.testing.expectEqualStrings("r2", names.get(@fromBackingInt(2), 1).?);
+            try std.testing.expectEqual(null, names.get(@fromBackingInt(1), 0));
+        }
+    }.run, .{&cards});
 }

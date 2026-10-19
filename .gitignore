@@ -1,8 +1,8 @@
 # Zig
-**/.zig-cache/
+**/.zig-cache
 **/zig-out/
 **/zig-out-di/
-**/zig-pkg/
+**/zig-pkg
 
 # Build artifacts
 obj_dir/

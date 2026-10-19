@@ -18,7 +18,7 @@
 //! terms. Everything lives in the parse arena and dies after the build.
 //! Least-squares matrices are column-major (`a[c * m + r]` for m rows):
 //! Householder QR reads and updates whole columns, so every inner loop is
-//! a contiguous dot or axpy (`core.numerics`, stdpp SIMD) instead of a
+//! a contiguous dot or axpy (`core.numerics`) instead of a
 //! stride-n walk that touches a new cache line per element.
 
 const std = @import("std");
@@ -59,6 +59,8 @@ pub const Raw = struct {
     unit: f64 = 1e9,
     /// `s`, `y` or `z` (default S).
     kind: u8 = 's',
+    /// How each value pair reads: magnitude-angle, dB-angle (degrees) or
+    /// real-imaginary (default MA).
     format: Format = .ma,
     /// The `R` reference, > 0 (default 50).
     z0: f64 = 50,
@@ -147,52 +149,56 @@ pub fn readTouchstone(arena: Allocator, bytes: []const u8, ports: usize) Error!R
 /// Parses a Touchstone 1.0 file of `ports` ports (`readTouchstone`) into
 /// admittance samples. Y and Z data are normalized to R, as version 1.0
 /// writes them. A two-port's entries come in the column order N11 N21 N12
-/// N22. The tables, and the parse scratch, live in `arena`.
+/// N22. The tables, and the parse scratch, live in `arena`. Every sample
+/// is finite: a non-finite value is `InvalidTouchstone`, a non-finite
+/// admittance `SingularSParameters`.
 pub fn parseTouchstone(arena: Allocator, bytes: []const u8, ports: usize) Error!Network {
     const raw = try readTouchstone(arena, bytes, ports);
-    const unit = raw.unit;
-    const kind = raw.kind;
-    const format = raw.format;
     const z0 = raw.z0;
     const pp = ports * ports;
     const stride = 1 + 2 * pp;
     const nf = raw.nf;
-    const nums = raw.values;
     const freq = try arena.alloc(f64, nf);
     const re = try arena.alloc(f64, pp * nf);
     const im = try arena.alloc(f64, pp * nf);
     const m = try arena.alloc(Cx, 2 * pp);
     for (0..nf) |k| {
-        const row = nums[k * stride ..][0..stride];
-        freq[k] = row[0] * unit;
+        const row = raw.values[k * stride ..][0..stride];
+        freq[k] = row[0] * raw.unit;
         if (!std.math.isFinite(freq[k]) or freq[k] < 0) return error.InvalidTouchstone;
         for (0..pp) |q| {
             const a = row[1 + 2 * q];
             const b = row[2 + 2 * q];
-            const v: Cx = switch (format) {
+            const v: Cx = switch (raw.format) {
                 .ri => .{ .re = a, .im = b },
                 .ma, .db => blk: {
-                    const mag = if (format == .db) std.math.pow(f64, 10, a / 20) else a;
+                    const mag = if (raw.format == .db) std.math.pow(f64, 10, a / 20) else a;
                     const ang = b * std.math.pi / 180;
                     break :blk .{ .re = mag * @cos(ang), .im = mag * @sin(ang) };
                 },
             };
+            // A dB magnitude past ~6000 overflows; no fit reads an infinity.
+            if (!std.math.isFinite(v.re) or !std.math.isFinite(v.im)) return error.InvalidTouchstone;
             // Two-port files list N11 N21 N12 N22.
             const e = if (ports == 2) (q % 2) * 2 + q / 2 else q;
             m[e] = v;
         }
         const y = m[pp..];
-        switch (kind) {
+        switch (raw.kind) {
             's' => try sToY(ports, m[0..pp], y, z0),
             'y' => for (y, m[0..pp]) |*o, v| {
                 o.* = v.mul(.{ .re = 1 / z0, .im = 0 });
             },
             else => {
                 for (m[0..pp]) |*v| v.* = v.mul(.{ .re = z0, .im = 0 });
-                if (!invert(ports, m[0..pp], y)) return error.SingularSParameters;
+                // Y = Z⁻¹: solve Z·Y = I.
+                for (y, 0..) |*o, e| o.* = .{ .re = if (e % (ports + 1) == 0) 1 else 0, .im = 0 };
+                if (!solve(ports, m[0..pp], y)) return error.SingularSParameters;
             },
         }
         for (0..pp) |e| {
+            // A near-singular I + S or Z overflows the admittance.
+            if (!std.math.isFinite(y[e].re) or !std.math.isFinite(y[e].im)) return error.SingularSParameters;
             re[e * nf + k] = y[e].re;
             im[e * nf + k] = y[e].im;
         }
@@ -246,13 +252,6 @@ fn solve(p: usize, a: []Cx, b: []Cx) bool {
     return true;
 }
 
-fn invert(p: usize, a: []Cx, out: []Cx) bool {
-    for (0..p) |i| for (0..p) |j| {
-        out[i * p + j] = .{ .re = if (i == j) 1 else 0, .im = 0 };
-    };
-    return solve(p, a, out);
-}
-
 // ---------------------------------------------------------------------------
 // Rational fit
 // ---------------------------------------------------------------------------
@@ -280,11 +279,6 @@ pub const Fit = struct {
             if (p.im != 0) y = y.add(r.conjugate().div(s.sub(p.conjugate())));
         }
         return y;
-    }
-
-    /// Real state count of the realization: one per real pole, two per pair.
-    pub fn order(self: Fit) usize {
-        return realOrder(self.poles);
     }
 };
 
@@ -579,6 +573,7 @@ fn unpack(poles: []const Cx, x: []const f64, res: []Cx) void {
     }
 }
 
+/// Real state count of the realization: one per real pole, two per pair.
 fn realOrder(poles: []const Cx) usize {
     var n: usize = 0;
     for (poles) |p| n += if (p.im != 0) 2 else 1;
@@ -665,7 +660,7 @@ fn leastSquares(m: usize, n: usize, a: []f64, b: []f64, x: []f64) void {
 pub fn enforcePassivity(arena: Allocator, net: Network, f: *Fit) Error!bool {
     const p = net.ports;
     const ne = p * p;
-    const kk = f.order();
+    const kk = realOrder(f.poles);
     const npar = kk + 1;
     var ymax: f64 = 0;
     for (0..ne) |e| for (0..net.freq.len) |k| {
@@ -810,7 +805,7 @@ fn addConstraint(arena: Allocator, f: Fit, p: usize, w: f64, l: f64, margin: f64
 /// One constraint row: Re(qᴴ·ΔY(jω)·q) = c over every entry's parameters
 /// [basis coefficients..., d]; `w` null is the direct term alone.
 fn appendRow(arena: Allocator, f: Fit, p: usize, w: ?f64, q: []const Cx, c: f64, cons: *std.ArrayList(f64), rhs: *std.ArrayList(f64)) Error!void {
-    const npar = f.order() + 1;
+    const npar = realOrder(f.poles) + 1;
     for (0..p) |i| for (0..p) |j| {
         const qq = q[i].conjugate().mul(q[j]);
         if (w) |om| {
@@ -1089,7 +1084,7 @@ test sections {
         .res = &res,
         .d = &d,
     };
-    try testing.expectEqual(@as(usize, 5), f.order());
+    try testing.expectEqual(@as(usize, 5), realOrder(f.poles));
     const sec = try sections(arena, f);
     try testing.expectEqual(@as(usize, 3), sec.den.len);
     for ([_]f64{ 0, 0.3, 1, 7 }) |w| {
@@ -1177,4 +1172,8 @@ test "touchstone: option-line and data rules follow the 1.1 spec (#121)" {
     try testing.expectEqual(@as(usize, 2), (try readTouchstone(arena, two ++ "2 2.0 0.5 0 0.1\n", 2)).nf);
     try testing.expectError(error.InvalidTouchstone, readTouchstone(arena, two ++ "1 2.0 0.5 0\n", 2));
     try testing.expectError(error.InvalidTouchstone, readTouchstone(arena, two ++ "1 2 0.5 0 0.1\n1 2 0.5 0 0.1\n", 2));
+}
+
+test {
+    _ = @import("tests/sparam.zig");
 }

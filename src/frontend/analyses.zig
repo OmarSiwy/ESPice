@@ -11,6 +11,8 @@ const requests = @import("core").query;
 const numerics = @import("core").numerics;
 const netlist = @import("netlist");
 const Value = netlist.Value;
+const nameAt = Value.nameAt;
+const numberAt = Value.numberAt;
 const Job = requests.Query;
 const GROUND = core.GROUND;
 /// Unresolved or absent node row.
@@ -531,22 +533,6 @@ pub fn applyDeckOptions(job: *Job, o: DeckOptions) void {
         // (traninit.c:29-34).
         t.dt_max = t.dt_max orelse o.delmax orelse @min(t.dt_init, (t.t_stop - t.t_start) / 50);
     }
-}
-
-fn nameAt(args: []const Value, i: usize) ?[]const u8 {
-    if (i >= args.len) return null;
-    return switch (args[i]) {
-        .name => |n| n,
-        else => null,
-    };
-}
-
-fn numberAt(args: []const Value, i: usize) ?f64 {
-    if (i >= args.len) return null;
-    return switch (args[i]) {
-        .num => |n| n,
-        else => null,
-    };
 }
 
 fn number(args: []const Value, i: usize) !f64 {

@@ -370,7 +370,7 @@ pub fn parseCheck(arena: std.mem.Allocator, card: []const u8, text: []const u8, 
                 m.first.to = try ctx.measureValue(rhs);
             } else if (!std.mem.eql(u8, x.lhs, "noise") and !std.mem.eql(u8, x.lhs, "interval")) return error.ParseError;
         }
-        m.name = try std.fmt.allocPrint(arena, "biaschk{d}", .{serial});
+        m.name = try arena.print("biaschk{d}", .{serial});
         return out.append(arena, m);
     }
     if (std.mem.eql(u8, card, "dout")) {
@@ -481,7 +481,7 @@ pub fn parseCheck(arena: std.mem.Allocator, card: []const u8, text: []const u8, 
 fn appendNode(arena: std.mem.Allocator, m: core.Measure, kind: []const u8, serial: u32, node: []const u8, out: *std.ArrayList(core.Measure)) !void {
     var one = m;
     one.first.vec = try nodeVector(arena, node);
-    one.name = try std.fmt.allocPrint(arena, "{s}{d}_{s}", .{ kind, serial, node });
+    one.name = try arena.print("{s}{d}_{s}", .{ kind, serial, node });
     try out.append(arena, one);
 }
 
@@ -490,7 +490,7 @@ fn appendNode(arena: std.mem.Allocator, m: core.Measure, kind: []const u8, seria
 fn nodeVector(arena: std.mem.Allocator, node: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, node, '*') != null) return error.ParseError;
     if (std.mem.indexOfScalar(u8, node, '(') != null) return node;
-    return std.fmt.allocPrint(arena, "v({s})", .{node});
+    return arena.print("v({s})", .{node});
 }
 
 fn edgeOf(word: []const u8) !core.Check.Edge {
@@ -685,4 +685,8 @@ test "malformed measure cards are a ParseError, not a crash" {
     try parseCheck(a, "check", "irdrop (-0.1 1e-9) vdd (1 0 1 0)", Ctx{}, &global, 5, &out);
     try std.testing.expectEqual(-0.1, out.items[2].check.min);
     try std.testing.expectEqual(.check_level, out.items[2].func);
+}
+
+test {
+    _ = @import("tests/measure.zig");
 }

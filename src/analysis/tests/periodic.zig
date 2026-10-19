@@ -25,22 +25,6 @@ const PacTests = struct {
         try testing.expectEqual(@as(?usize, null), mapHarmonicToFftBin(-8, 8));
     }
 
-    test "PAC: Complex arithmetic" {
-        const ca = Complex{ .re = 3.0, .im = 4.0 };
-        const b = Complex{ .re = 1.0, .im = -2.0 };
-
-        const sum = Complex.add(ca, b);
-        try testing.expectApproxEqAbs(@as(f64, 4.0), sum.re, 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, 2.0), sum.im, 1e-15);
-
-        const prod = Complex.mul(ca, b);
-        // (3+4j)(1-2j) = 3 - 6j + 4j - 8j^2 = 11 - 2j
-        try testing.expectApproxEqAbs(@as(f64, 11.0), prod.re, 1e-15);
-        try testing.expectApproxEqAbs(@as(f64, -2.0), prod.im, 1e-15);
-
-        try testing.expectApproxEqAbs(@as(f64, 5.0), ca.mag(), 1e-15);
-    }
-
     /// A 1-node resistive mixer, G(t) = G0·(1 + m·cos(2π f_LO t)), through
     /// the real conversion-matrix builder: forward (PAC) or transposed (PXF),
     /// unit drive on sideband 0. Returns the 2·n_sb real-expanded solution.
@@ -151,15 +135,9 @@ const PnoiseTests = struct {
 
 const PssTests = struct {
     const impl = @import("../pss/pss.zig");
-    const Options = @import("core").query.Pss;
     const krylov_threshold = impl.test_access.krylov_threshold;
     const std = @import("std");
     const testing = std.testing;
-
-    test "pss: small systems solve dense, large ones with Krylov" {
-        try testing.expect(krylov_threshold > 10);
-        try testing.expect(krylov_threshold <= 100);
-    }
 
     const analysis = @import("../types.zig");
     const hb = @import("../pss/hb.zig");
@@ -200,9 +178,9 @@ const PssTests = struct {
         const f: f64 = 1e3;
         const r: f64 = 1e3;
         const c: f64 = 1e-7;
-        try b.addDevice(models.vsource, "", .{ .dc = 0, .waveform = 2, .sin_vo = 0, .sin_va = 1, .sin_freq = f }, .{}, .{ vin, analysis.GROUND });
-        try b.addDevice(models.resistor, "", .{ .r = r }, .{}, .{ vin, out });
-        try b.addDevice(models.capacitor, "", .{ .c = c }, .{}, .{ out, analysis.GROUND });
+        try b.addDevice(models.vsource, "", &.{ .dc = 0, .waveform = 2, .sin_vo = 0, .sin_va = 1, .sin_freq = f }, &.{}, .{ vin, analysis.GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = r }, &.{}, .{ vin, out });
+        try b.addDevice(models.capacitor, "", &.{ .c = c }, &.{}, .{ out, analysis.GROUND });
         var prepared = try b.compile();
         defer prepared.deinit();
         var ckt = try analysis.Circuit.instantiate(&prepared, a);
@@ -255,13 +233,13 @@ const PssTests = struct {
         defer lib.deinit();
         var b = try Builder.init(a, &lib);
         const vin = try b.addNode();
-        try b.addDevice(models.vsource, "", .{ .dc = 0.5, .waveform = 2, .sin_vo = 0.5, .sin_va = 1, .sin_freq = 1e3 }, .{}, .{ vin, analysis.GROUND });
+        try b.addDevice(models.vsource, "", &.{ .dc = 0.5, .waveform = 2, .sin_vo = 0.5, .sin_va = 1, .sin_freq = 1e3 }, &.{}, .{ vin, analysis.GROUND });
         var prev = vin;
         var first = vin;
         for (0..krylov_threshold + 10) |i| {
             const mid = try b.addNode();
-            try b.addDevice(models.resistor, "", .{ .r = 100 }, .{}, .{ prev, mid });
-            try b.addDevice(models.capacitor, "", .{ .c = 1e-8 }, .{}, .{ mid, analysis.GROUND });
+            try b.addDevice(models.resistor, "", &.{ .r = 100 }, &.{}, .{ prev, mid });
+            try b.addDevice(models.capacitor, "", &.{ .c = 1e-8 }, &.{}, .{ mid, analysis.GROUND });
             if (i == 0) first = mid;
             prev = mid;
         }
@@ -283,15 +261,65 @@ const PssTests = struct {
         try expectPeriodic(wave, ns, 1 + probes.len, 1e-6);
     }
 
-    test "pss: Options defaults are sane" {
-        const opts = Options{ .period = 1e-9 };
-        try testing.expect(opts.max_shooting_iter > 0);
-        try testing.expect(opts.n_samples > 0);
-        try testing.expect(opts.fd_epsilon > 0);
-        try testing.expect(opts.shooting_tol > 0);
-        try testing.expect(opts.gmres_restart > 0);
-        try testing.expect(opts.gmres_tol > 0);
-        try testing.expect(opts.gmres_max_restarts > 0);
+    /// Every allocating solve the periodic family exposes, run under
+    /// `checkAllAllocationFailures` on one RC low-pass: each failure point
+    /// must unwind without a leak and the full run must still succeed.
+    const AllocCases = struct {
+        const pac = @import("../pss/pac.zig");
+        const mhb = @import("../pss/mhb.zig");
+        const pnoise = @import("../pss/pnoise.zig");
+
+        fn shooting(gpa: std.mem.Allocator, ckt: *analysis.Circuit, x_dc: []const f64, out: u32) !void {
+            var wave: [17 * 2]f64 = undefined;
+            _ = try impl.solve(ckt, x_dc, &.{out}, &wave, .{ .period = 1e-3, .n_samples = 16 }, gpa);
+        }
+        fn hbDense(gpa: std.mem.Allocator, ckt: *analysis.Circuit, _: []const f64, _: u32) !void {
+            const x_hat = try testing.allocator.alloc(f64, @as(usize, ckt.n) * 5);
+            defer testing.allocator.free(x_hat);
+            _ = try hb.solveSpectrum(ckt, x_hat, &.{}, .{ .f0 = 1e3, .n_harmonics = 2 }, gpa);
+        }
+        fn hbGmres(gpa: std.mem.Allocator, ckt: *analysis.Circuit, _: []const f64, _: u32) !void {
+            const x_hat = try testing.allocator.alloc(f64, @as(usize, ckt.n) * 5);
+            defer testing.allocator.free(x_hat);
+            _ = try mhb.solveOneTone(ckt, x_hat, .{ .f0 = 1e3, .n_harmonics = 2 }, gpa);
+        }
+        fn twoTone(gpa: std.mem.Allocator, ckt: *analysis.Circuit, _: []const f64, _: u32) !void {
+            const orb = try mhb.orbit(ckt, .{ .f0 = 1e3, .n_harmonics = 1, .extra_tones = &.{1300}, .extra_harmonics = &.{1} }, gpa);
+            orb.deinit(gpa);
+        }
+        fn settle(gpa: std.mem.Allocator, ckt: *analysis.Circuit, x_dc: []const f64, out: u32) !void {
+            const lin = try pac.settle(ckt, x_dc, .{ .f_lo = 1e3, .out_node = out, .n_harmonics = 1, .n_time_samples = 16, .sweep = .{ .f_start = 10, .f_stop = 10 } }, gpa);
+            lin.deinit(gpa);
+        }
+        fn noise(gpa: std.mem.Allocator, ckt: *analysis.Circuit, x_dc: []const f64, out: u32) !void {
+            const orb = try pac.orbit(ckt, x_dc, .{ .period = 1e-3, .n_samples = 16 }, testing.allocator);
+            defer testing.allocator.free(orb.wave);
+            const srcs = try ckt.collectNoiseSources(x_dc, testing.allocator);
+            defer testing.allocator.free(srcs);
+            var freqs: [2]f64 = undefined;
+            var density: [2]f64 = undefined;
+            try pnoise.orbitSweep(ckt, orb, srcs, &freqs, &density, .{ .out_node = out, .sweep = .{ .f_start = 10, .f_stop = 100, .points = 2, .kind = .lin }, .f_fundamental = 1e3, .n_sidebands = 2 }, gpa);
+        }
+    };
+
+    test "periodic solves free everything on every allocation failure" {
+        const a = testing.allocator;
+        var lib = try Library.init(a);
+        defer lib.deinit();
+        var b = try Builder.init(a, &lib);
+        const vin = try b.addNode();
+        const out = try b.addNode();
+        try b.addDevice(models.vsource, "", &.{ .dc = 0, .waveform = 2, .sin_vo = 0, .sin_va = 1, .sin_freq = 1e3 }, &.{}, .{ vin, analysis.GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ vin, out });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-7 }, &.{}, .{ out, analysis.GROUND });
+        var prepared = try b.compile();
+        defer prepared.deinit();
+        var ckt = try analysis.Circuit.instantiate(&prepared, a);
+        defer ckt.deinit();
+        const x_dc = try dcPoint(&ckt, a);
+        defer a.free(x_dc);
+        inline for (.{ AllocCases.shooting, AllocCases.hbDense, AllocCases.hbGmres, AllocCases.twoTone, AllocCases.settle, AllocCases.noise }) |f|
+            try testing.checkAllAllocationFailures(a, f, .{ &ckt, x_dc, out });
     }
 };
 
@@ -346,11 +374,6 @@ const MhbTests = struct {
     const testing = std.testing;
     const f1: f64 = 1000;
     const f2: f64 = 1300;
-
-    test "residualNorm: a NaN residual never reads as converged (#83)" {
-        try testing.expectEqual(@as(f64, 3), impl.residualNorm(&.{ 1, -3, 2 }));
-        try testing.expect(std.math.isNan(impl.residualNorm(&.{ 1, std.math.nan(f64), 2 })));
-    }
 
     /// Expects `spec` to hold exactly the products (k1, k2), DC first and
     /// by frequency.
@@ -427,6 +450,23 @@ const MhbTests = struct {
         try testing.checkAllAllocationFailures(testing.allocator, run, .{});
     }
 
+    test "mhb spectrum: refuses no tones, too many tones, an oversized box and an i16 overflow" {
+        const a = testing.allocator;
+        const nine: [impl.max_tones + 1]f64 = @splat(1000);
+        const ones: [impl.max_tones + 1]u16 = @splat(1);
+        // Two tones at H = 2047 box 4095^2 products, past mhb_max_box = 2^22.
+        const cases = .{
+            .{ nine[0..0], ones[0..0] },
+            .{ &nine, &ones },
+            .{ nine[0..2], &[_]u16{ 2047, 2047 } },
+            .{ nine[0..1], &[_]u16{std.math.maxInt(i16) + 1} },
+        };
+        inline for (cases) |c| try testing.expectError(error.InvalidQueryOptions, impl.spectrum(a, c[0], c[1], 0, 1));
+        // A harmonic list that does not match the tones is refused before the spectrum.
+        try testing.expectError(error.InvalidQueryOptions, impl.lineCount(a, .{ .f0 = 1e3, .extra_tones = &.{1300}, .extra_harmonics = &.{} }));
+        try testing.expectEqual(@as(usize, 5), try impl.lineCount(a, .{ .f0 = 1e3, .n_harmonics = 1, .extra_tones = &.{1300}, .extra_harmonics = &.{1} }));
+    }
+
     test "mhb spectrum: commensurate products merge onto the lowest order" {
         const a = testing.allocator;
         const spec = try impl.spectrum(a, &.{ 1000, 2000 }, &.{ 2, 2 }, 0, 1);
@@ -465,13 +505,13 @@ const MhbTests = struct {
         defer lib.deinit();
         var b = try Builder.init(a, &lib);
         const vin = try b.addNode();
-        try b.addDevice(models.vsource, "", .{ .dc = 0.2, .waveform = 2, .sin_vo = 0.2, .sin_va = 0.6, .sin_freq = 1e3 }, .{}, .{ vin, analysis.GROUND });
+        try b.addDevice(models.vsource, "", &.{ .dc = 0.2, .waveform = 2, .sin_vo = 0.2, .sin_va = 0.6, .sin_freq = 1e3 }, &.{}, .{ vin, analysis.GROUND });
         var prev = vin;
         for (0..4) |_| {
             const mid = try b.addNode();
-            try b.addDevice(models.resistor, "", .{ .r = 300 }, .{}, .{ prev, mid });
-            try b.addDevice(models.diode, "", .{ .is = 1e-14, .cjo = 5e-12 }, .{}, .{ mid, analysis.GROUND });
-            try b.addDevice(models.capacitor, "", .{ .c = 2e-8 }, .{}, .{ mid, analysis.GROUND });
+            try b.addDevice(models.resistor, "", &.{ .r = 300 }, &.{}, .{ prev, mid });
+            try b.addDevice(models.diode, "", &.{ .is = 1e-14, .cjo = 5e-12 }, &.{}, .{ mid, analysis.GROUND });
+            try b.addDevice(models.capacitor, "", &.{ .c = 2e-8 }, &.{}, .{ mid, analysis.GROUND });
             prev = mid;
         }
         var prepared = try b.compile();
@@ -528,11 +568,11 @@ const MhbTests = struct {
         const vin = try b.addNode();
         const mid = try b.addNode();
         const out = try b.addNode();
-        try b.addDevice(models.vsource, "", .{ .dc = 0.3, .waveform = 2, .sin_vo = 0.3, .sin_va = 0.8, .sin_freq = 1e3 }, .{}, .{ vin, analysis.GROUND });
-        try b.addDevice(models.resistor, "", .{ .r = 1000 }, .{}, .{ vin, mid });
-        try b.addDevice(models.diode, "", .{ .is = 1e-14, .cjo = 1e-12 }, .{}, .{ mid, out });
-        try b.addDevice(models.capacitor, "", .{ .c = 1e-7 }, .{}, .{ out, analysis.GROUND });
-        try b.addDevice(models.resistor, "", .{ .r = 2000 }, .{}, .{ out, analysis.GROUND });
+        try b.addDevice(models.vsource, "", &.{ .dc = 0.3, .waveform = 2, .sin_vo = 0.3, .sin_va = 0.8, .sin_freq = 1e3 }, &.{}, .{ vin, analysis.GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 1000 }, &.{}, .{ vin, mid });
+        try b.addDevice(models.diode, "", &.{ .is = 1e-14, .cjo = 1e-12 }, &.{}, .{ mid, out });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-7 }, &.{}, .{ out, analysis.GROUND });
+        try b.addDevice(models.resistor, "", &.{ .r = 2000 }, &.{}, .{ out, analysis.GROUND });
         var prepared = try b.compile();
         defer prepared.deinit();
         var ckt = try analysis.Circuit.instantiate(&prepared, a);

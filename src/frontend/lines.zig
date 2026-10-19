@@ -148,13 +148,13 @@ pub fn plainNumber(t: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, t) catch null;
 }
 
-const NumParts = struct { base: f64, suffix: []const u8 };
-
-/// The leading decimal literal of `text` and the suffix after it. With
-/// `d_exp`, `d` is an exponent letter like `e` (`1d3`), as SPICE reads it
-/// (ngspice inpeval.c INPevaluate; HSPICE User Guide B-2008.09 p. 49).
-fn parseNumBase(text: []const u8, comptime d_exp: bool) ?NumParts {
-    if (text.len == 0) return null;
+/// Length of the leading decimal literal of `text`: sign, digits, point
+/// and exponent, as SPICE delimits a number before its scale suffix. Null
+/// when `text` starts with no digit, or with a malformed exponent (`1e+`,
+/// `1e+k`). With `d_exp`, `d` is an exponent letter like `e` (`1d3`), as
+/// SPICE reads it (ngspice inpeval.c INPevaluate; HSPICE User Guide
+/// B-2008.09 p. 49).
+fn numberEnd(text: []const u8, comptime d_exp: bool) ?usize {
     var end: usize = 0;
     var seen_digit = false;
     var seen_dot = false;
@@ -179,25 +179,14 @@ fn parseNumBase(text: []const u8, comptime d_exp: bool) ?NumParts {
             break;
         }
     }
-    if (!seen_digit) return null;
-    var buf: [64]u8 = undefined;
-    // parseFloat reads only `e`; a `d` exponent is the same number.
-    const lit = if (d_exp and end <= buf.len) blk: {
-        @memcpy(buf[0..end], text[0..end]);
-        for (buf[0..end]) |*b| if (b.* == 'd' or b.* == 'D') {
-            b.* = 'e';
-        };
-        break :blk buf[0..end];
-    } else text[0..end];
-    const base = std.fmt.parseFloat(f64, lit) catch return null;
-    return .{ .base = base, .suffix = text[end..] };
+    return if (seen_digit) end else null;
 }
 
 /// A number with a SPICE scale suffix (`10meg`, `2.5u`); HSPICE also reads
 /// `x` as 1e6. An unknown suffix scales by 1.
 inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
-    const parsed = parseNumBase(text, true) orelse return null;
-    const s = parsed.suffix;
+    const end = numberEnd(text, true) orelse return null;
+    const s = text[end..];
     const scale_exp: i32 = if (s.len == 0)
         0
     else if (std.mem.startsWith(u8, s, "meg"))
@@ -217,11 +206,10 @@ inline fn parseSpiceNum(text: []const u8, comptime hspice_suffix: bool) ?f64 {
         'a' => -18,
         else => 0,
     };
-    const lit = text[0 .. text.len - s.len];
-    return inpEvaluate(lit, scale_exp, std.mem.startsWith(u8, s, "mil"));
+    return inpEvaluate(text[0..end], scale_exp, std.mem.startsWith(u8, s, "mil"));
 }
 
-/// The value of the literal `lit` (as `parseNumBase` delimits it) with scale
+/// The value of the literal `lit` (as `numberEnd` delimits it) with scale
 /// exponent `scale_exp`, computed as ngspice's INPevaluate does (inpeval.c):
 /// every digit accumulates into one f64 mantissa, then `sign * mantissa *
 /// pow(10, exponent)`. That is not the correctly rounded value: `0.1n` reads
@@ -246,7 +234,7 @@ fn inpEvaluate(lit: []const u8, scale_exp: i32, mil: bool) f64 {
             e -= 1;
         }
     }
-    if (i < lit.len) { // `parseNumBase` admits only an exponent here
+    if (i < lit.len) { // `numberEnd` admits only an exponent here
         i += 1;
         var esign: i32 = 1;
         if (lit[i] == '+' or lit[i] == '-') {
@@ -283,20 +271,21 @@ fn pow10(e: i32) f64 {
 }
 
 /// Copies `src` lowercased into `dst` (at least as long) and returns its
-/// newline count, in one pass. W = 1 is the scalar oracle and the tail.
-pub fn normalize(comptime W: comptime_int, dst: []u8, src: []const u8) usize {
-    const V = @Vector(W, u8);
+/// newline count, in one pass over 32-byte blocks.
+// ponytail: hand vectors on purpose; a plain map plus `countScalar`
+// vectorizes too, but measured 0.07 against 0.05 ns/byte (two passes).
+pub fn normalize(dst: []u8, src: []const u8) usize {
+    const V = @Vector(32, u8);
     var lines: usize = 0;
     var i: usize = 0;
-    while (i + W <= src.len) : (i += W) {
-        const v: V = src[i..][0..W].*;
+    while (i + 32 <= src.len) : (i += 32) {
+        const v: V = src[i..][0..32].*;
         const upper = (v >= @as(V, @splat('A'))) & (v <= @as(V, @splat('Z')));
-        dst[i..][0..W].* = v | @select(u8, upper, @as(V, @splat(0x20)), @as(V, @splat(0)));
-        const newlines: @Int(.unsigned, W) = @bitCast(v == @as(V, @splat('\n')));
-        lines += @popCount(newlines);
+        dst[i..][0..32].* = v | @select(u8, upper, @as(V, @splat(0x20)), @as(V, @splat(0)));
+        lines += @popCount(@as(u32, @bitCast(v == @as(V, @splat('\n')))));
     }
-    if (W > 1) lines += normalize(1, dst[i..], src[i..]);
-    return lines;
+    for (src[i..], dst[i..src.len]) |c, *d| d.* = c | @as(u8, @intFromBool(c -% 'A' < 26)) << 5;
+    return lines + std.mem.countScalar(u8, src[i..], '\n');
 }
 
 /// Appends a continuation piece to a logical line, copying `head` on first use.
@@ -318,6 +307,20 @@ fn nextPhysicalLine(rest: *[]const u8) ?[]const u8 {
     const line = std.mem.trimEnd(u8, src[0..nl], "\r");
     rest.* = if (nl == src.len) src[nl..] else src[nl + 1 ..];
     return line;
+}
+
+/// Whether the next physical line in `rest` starts a new statement for
+/// certain: its first byte past blanks is neither a line end nor one of
+/// `keep`, the bytes after which a continuation check must read the line.
+/// Lets that check leave the line unread instead of splitting it twice.
+fn startsStatement(rest: []const u8, comptime keep: []const u8) bool {
+    var k: usize = 0;
+    while (k < rest.len and (rest[k] == ' ' or rest[k] == '\t')) k += 1;
+    if (k == rest.len) return false;
+    return switch (rest[k]) {
+        '\r', '\n' => false,
+        else => |c| std.mem.indexOfScalar(u8, keep, c) == null, // else: any other byte is text
+    };
 }
 
 /// ngspice: title line, case folded, `*` comments, `$`/`;` tails, `+` continuation.
@@ -354,9 +357,19 @@ pub const ngspice = struct {
         /// protect. One scalar pass: cards are short, and stdlib vector
         /// scans cost more in setup than they save.
         fn stripComment(line: []const u8) []const u8 {
+            const special = comptime blk: {
+                var t: [256]bool = @splat(false);
+                for ("'\";/$") |c| t[c] = true;
+                break :blk t;
+            };
             var quote: u8 = 0;
             var i: usize = 0;
             while (i < line.len) : (i += 1) {
+                // Most bytes are none of the switch's: skip them in a tight loop.
+                if (quote == 0) {
+                    while (i < line.len and !special[line[i]]) i += 1;
+                }
+                if (i == line.len) break;
                 const c = line[i];
                 if (quote != 0) {
                     if (c == '\\') {
@@ -391,10 +404,11 @@ pub const ngspice = struct {
         /// The line borrows `rest`'s text, or lives in `arena` when it joins
         /// continuations. Fails only with `OutOfMemory` while joining.
         pub fn next(self: *Lines) !?[]const u8 {
-            var t: []const u8 = undefined;
+            var glued: bool = undefined;
+            var head: []const u8 = undefined;
             while (true) {
                 const raw = nextPhysicalLine(&self.rest) orelse return null;
-                t = std.mem.trim(u8, raw, " \t");
+                const t = std.mem.trim(u8, raw, " \t");
                 if (t.len == 0 or isCommentLead(t[0])) continue;
                 // §1.3: a line starting with `@` ends the file.
                 if (t[0] == '@') {
@@ -403,19 +417,20 @@ pub const ngspice = struct {
                 }
                 // §1.6: a `+` line with nothing to continue is ignored.
                 if (t[0] == '+') continue;
+                glued = endsGlued(t);
+                head = stripComment(if (glued) unglued(t) else t);
                 // §1.5: a line holding only an end-of-line comment (`//x`)
                 // becomes a comment line, so a `+` after it continues nothing.
-                if (!endsGlued(t) and stripComment(t).len == 0) continue;
+                if (!glued and head.len == 0) continue;
                 break;
             }
-            var glued = endsGlued(t);
-            const head = stripComment(if (glued) unglued(t) else t);
             var joined: ?std.ArrayList(u8) = null;
             // Each pass consumes a physical line or ends the statement.
             const passes_max = self.rest.len + 1;
             var passes: usize = 0;
             while (true) : (passes += 1) {
                 std.debug.assert(passes <= passes_max);
+                if (!glued and startsStatement(self.rest, "+*#$")) break;
                 const save = self.rest;
                 const raw = nextPhysicalLine(&self.rest) orelse break;
                 var u = std.mem.trim(u8, raw, " \t");
@@ -576,6 +591,7 @@ pub const hspice = struct {
                     continue;
                 }
                 // L5: a `+` line continues the statement, past comment and blank lines.
+                if (startsStatement(self.rest, "+*$")) break;
                 const save = self.rest;
                 const raw = nextPhysicalLine(&self.rest) orelse break;
                 const t = std.mem.trim(u8, raw, " \t");
@@ -703,6 +719,9 @@ pub const spectre = struct {
             var i: usize = 0;
             var quoted = false;
             while (i < line.len) : (i += 1) {
+                // Skip the bytes none of the branches below reads.
+                while (i < line.len and line[i] != '\\' and line[i] != '"' and line[i] != '/') i += 1;
+                if (i == line.len) break;
                 const c = line[i];
                 if (c == '\\') {
                     i += 1;
@@ -777,6 +796,8 @@ pub const spectre = struct {
             var passes: usize = 0;
             while (true) : (passes += 1) {
                 std.debug.assert(passes <= passes_max);
+                // `*` skips a line only in the first column; `keep` errs safe.
+                if (!cont and startsStatement(self.rest, "+*/")) break;
                 const save = self.rest;
                 const next_raw = nextPhysicalLine(&self.rest) orelse break;
                 if (cont) {
@@ -802,8 +823,9 @@ pub const spectre = struct {
 
     /// A number literal with a case-sensitive Spectre suffix (`M` mega, `m` milli).
     pub fn parseNum(text: []const u8) ?f64 {
-        const parsed = parseNumBase(text, false) orelse return null;
-        const s = parsed.suffix;
+        const end = numberEnd(text, false) orelse return null;
+        const base = std.fmt.parseFloat(f64, text[0..end]) catch return null;
+        const s = text[end..];
         const scale: f64 = if (s.len == 0) 1 else switch (s[0]) {
             'P' => 1e15,
             'T' => 1e12,
@@ -819,7 +841,7 @@ pub const spectre = struct {
             'a' => 1e-18,
             else => 1,
         };
-        return parsed.base * scale;
+        return base * scale;
     }
 };
 
