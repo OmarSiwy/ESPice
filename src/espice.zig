@@ -393,7 +393,8 @@ pub const Problem = struct {
     /// operating points sit between their ids). Each point is one
     /// `set_params` row; a point it refuses is still appended, its queries
     /// failed with `TopologyChanged` (a topology change or a flipped
-    /// top-level `.if`), `ModelBinNotFound` or `NonFiniteParameter`. The
+    /// top-level `.if`), `ModelBinNotFound`, `NonFiniteParameter` or, for
+    /// any other error building its circuit, `PointRefused`. The
     /// first call also runs the deck's `.model OPT` and MOSRA runs.
     ///
     /// All-or-nothing. `error.NoLiveParameters` without
@@ -437,7 +438,13 @@ pub const Problem = struct {
                     error.UnsupportedCard => error.TopologyChanged,
                     error.ModelBinNotFound => error.ModelBinNotFound,
                     error.InvalidArgument => error.NonFiniteParameter,
-                    else => |e| return e,
+                    error.OutOfMemory => |e| return e,
+                    // Any other failure belongs to this point's values (a
+                    // device rejecting them as it builds), not the batch.
+                    else => |e| blk2: {
+                        std.log.warn("point {d}: {s}", .{ i, @errorName(e) });
+                        break :blk2 error.PointRefused;
+                    },
                 };
                 deck.variants = try tuning.refusedRow(deck.variants);
                 break :blk 0;
@@ -479,7 +486,7 @@ pub const Problem = struct {
             return switch (err) {
                 error.OpDidNotConverge, error.HbDidNotConverge, error.QpssDidNotConverge, error.PzDidNotConverge, error.MatexDidNotConverge, error.EnvelopeDidNotConverge, error.PacDidNotConverge => .no_convergence,
                 error.TimestepTooSmall => .timestep_too_small,
-                error.SingularMatrix, error.FloatingNode => .singular_matrix,
+                error.SingularMatrix, error.Singular, error.FloatingNode => .singular_matrix,
                 error.MeasureBoundExceeded => .aborted,
                 error.ModelBinNotFound => .model_bin_not_found,
                 error.TopologyChanged, error.NoiseTopologyChanged => .topology_changed,
@@ -1202,10 +1209,12 @@ fn queryFailure(session: *const analysis.session.Session, id: QueryId) !?anyerro
     const info = try session.info(id);
     std.debug.assert(info.status.terminal());
     if (info.status == .complete) return null;
+    // `?anyerror` payloads: a bare error value here would return as this
+    // function's own error.
     if (info.failure) |err| if (err == error.DependencyFailed) if (info.dependency) |dep| {
-        if ((try session.info(dep)).failure) |cause| return cause;
+        if ((try session.info(dep)).failure) |cause| return @as(?anyerror, cause);
     };
-    return info.failure orelse error.QueryCancelled;
+    return @as(?anyerror, info.failure orelse error.QueryCancelled);
 }
 
 /// Runs every query of a variant run's session to completion, whole

@@ -25,8 +25,9 @@ pub const Failure = execution.QueryError || types.ErrorOf(execution.Executor.cre
     types.ErrorOf(execution.Executor.start) || error{DependencyFailed} || PointError;
 /// Why a point of `Problem.append_points` was refused before it ran
 /// (`Session.refuse`): a value that needs another topology or flips a
-/// top-level `.if`, a geometry no model bin holds, a non-finite value.
-pub const PointError = error{ TopologyChanged, ModelBinNotFound, NonFiniteParameter };
+/// top-level `.if`, a geometry no model bin holds, a non-finite value, or
+/// any other failure to build the point's circuit (`PointRefused`).
+pub const PointError = error{ TopologyChanged, ModelBinNotFound, NonFiniteParameter, PointRefused };
 
 /// A row index into the session, stable for its lifetime.
 pub const QueryId = requests.QueryId;
