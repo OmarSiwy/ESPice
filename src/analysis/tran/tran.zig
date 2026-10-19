@@ -32,7 +32,7 @@ pub const Column = tran_types.Column;
 /// See types.zig `initialCapacity`.
 pub const initialCapacity = tran_types.initialCapacity;
 const measure = @import("measure");
-const Watch = measure.Watch;
+const Stream = measure.Stream;
 
 /// Writes the MODEINITPRED first iterate, trial = cur + xfact·(cur - prev),
 /// into `trial[0..cur.len]`; `prev` must be at least as long as `cur`.
@@ -104,6 +104,8 @@ const Tangents = struct {
     devices: []root.Circuit.SavedState,
     /// The base residual, n values.
     r0: []f64,
+    /// Each row's `.meas` cards under early stop, else empty.
+    streams: []Stream = &.{},
 
     /// The companion terms of the step the base run just accepted.
     const Step = struct { method: Method, c: integrator.Coeffs, q1: []const f64, q2: []const f64, i: []const f64 };
@@ -140,6 +142,8 @@ const Tangents = struct {
     }
 
     fn deinit(tg: *Tangents, gpa: std.mem.Allocator) void {
+        for (tg.streams) |*s| s.deinit();
+        gpa.free(tg.streams);
         for (tg.wf) |*w| w.deinit();
         for (tg.devices) |d| d.deinit(gpa);
         gpa.free(tg.wf);
@@ -249,7 +253,18 @@ const Tangents = struct {
 
     fn record(tg: *Tangents, t: f64, probes: []const u32) !void {
         const n = tg.r0.len;
-        for (tg.wf, 0..) |*w, k| try w.record(t, tg.state[5 * n * k ..][0..n], probes);
+        for (tg.wf, 0..) |*w, k| {
+            const xk = tg.state[5 * n * k ..][0..n];
+            try w.record(t, xk, probes);
+            if (tg.streams.len != 0) tg.streams[k].feed(t, xk, w.data());
+        }
+    }
+
+    /// `.meas` cards still open over the rows that have values.
+    fn open(tg: Tangents) usize {
+        var n: usize = 0;
+        for (tg.streams, tg.dead) |s, dead| n += if (dead) 0 else s.open;
+        return n;
     }
 };
 
@@ -274,10 +289,11 @@ pub fn simulate(
 }
 
 /// `simulate`, also advancing and recording `tangents` at the operating
-/// point and every accepted step, and feeding each recorded row to `watch`
+/// point and every accepted step, and feeding each recorded row to `stream`
 /// for `options.point`'s early stop (returns true once every card has
-/// resolved) and abort bound (`error.MeasureBoundExceeded` at the first row
-/// past it with a card unresolved).
+/// resolved, the tangent rows' too) and abort bound
+/// (`error.MeasureBoundExceeded` at the first row past it with a card
+/// unresolved).
 fn simulateWith(
     ckt: *root.Circuit,
     x: []f64,
@@ -286,7 +302,7 @@ fn simulateWith(
     options: Options,
     allocator: std.mem.Allocator,
     tangents: ?*Tangents,
-    watch: ?*Watch,
+    stream: ?*Stream,
 ) !bool {
     const n: usize = ckt.n;
     const has_charge = ckt.has_charge;
@@ -490,16 +506,20 @@ fn simulateWith(
 
     // tstart suppresses output, never the solve: [0, t_start) is integrated
     // with full history and not recorded.
-    if (options.t_start <= 0) try waveform.record(0, try uicStart(ckt, ws, x, x_try, .{
-        .method = .backward_euler,
-        .c = integrator.coeffs(.backward_euler, delmin, delmin, options.xmu),
-        .q_prev = q_hist[1],
-        .i_prev = i_prev,
-        .q_prev2 = q_hist[2],
-        .a_vals = a_vals,
-        .q_cur = {},
-        .has_charge = has_charge,
-    }, options), probes);
+    if (options.t_start <= 0) {
+        const x0 = try uicStart(ckt, ws, x, x_try, .{
+            .method = .backward_euler,
+            .c = integrator.coeffs(.backward_euler, delmin, delmin, options.xmu),
+            .q_prev = q_hist[1],
+            .i_prev = i_prev,
+            .q_prev2 = q_hist[2],
+            .a_vals = a_vals,
+            .q_cur = {},
+            .has_charge = has_charge,
+        }, options);
+        try waveform.record(0, x0, probes);
+        if (stream) |s| s.feed(0, x0, waveform.data());
+    }
     if (vpi) |v| v.accept(v.ctx, true, false);
     if (tangents) |tg| if (options.t_start <= 0) try tg.record(0, probes);
 
@@ -541,10 +561,8 @@ fn simulateWith(
     var attempted_dt = dt;
     // vpiTransientFailConverge re-solves of one step, bounded as VerA bounds them.
     var vpi_again: u32 = 0;
-    // Every `.meas` card resolved under `options.point.early_stop`, and
-    // since the row before (`settled`).
+    // Every `.meas` card resolved under `options.point.early_stop`.
     var resolved = false;
-    var settled = false;
 
     while (t < options.t_stop and !atStop(t, options.t_stop) and steps < options.max_steps) {
         if (st.attempts != 0) try ckt.checkpoint(.{
@@ -892,20 +910,13 @@ fn simulateWith(
         // Before the breakpoint search below, so a time a callback forces
         // from this point is landed on.
         if (vpi) |v| v.accept(v.ctx, false, t >= options.t_stop or atStop(t, options.t_stop));
-        if (watch) |w| if (t >= options.t_start) {
+        if (stream) |s| if (t >= options.t_start) {
+            s.feed(t, cur, waveform.data());
             const bound = options.point.abort_after;
-            const past = bound > 0 and t > bound;
-            w.feed(waveform.data(), waveform.len, past);
-            if (past and w.open > 0) return error.MeasureBoundExceeded;
-            if (options.point.early_stop and w.open == 0) {
-                // A tangent's event can come a row after the run's own.
-                // ponytail: one row covers a step small next to the row
-                // spacing; past that, run tangents without early stop.
-                if (tangents == null or settled) {
-                    resolved = true;
-                    break;
-                }
-                settled = true;
+            if (bound > 0 and t > bound and s.open > 0) return error.MeasureBoundExceeded;
+            if (options.point.early_stop and s.open == 0 and (tangents == null or tangents.?.open() == 0)) {
+                resolved = true;
+                break;
             }
         };
 
@@ -986,11 +997,13 @@ test "atStop: within 100 ulps of t_stop, not past them" {
 /// t_stop is error.TimestepTooSmall, as in ngspice. The result's names and
 /// data live in `ctx.allocator`; `opts.snapshot` returns the one row at
 /// t_stop instead, and a streamed run (`ctx.stream`) returns empty `data`.
-/// `opts.point.measures_only` keeps only the columns `ctx.measures`' `.tran`
-/// cards read; `early_stop` ends the run, with the rows so far, once
-/// every such card has resolved (`measure.Watch`), and `abort_after` fails
-/// it with `error.MeasureBoundExceeded` once past that time with one
-/// unresolved. A streamed or snapshot run ignores all three.
+/// `opts.point.measures_only` measures `ctx.measures`' `.tran` cards as the
+/// run goes (`measure.Stream`) and keeps only the columns the rest read,
+/// the result's `measured` holding what the others found; under tangents
+/// it keeps every column those cards read instead. `early_stop` ends the
+/// run, with the rows so far, once every such card has resolved, and
+/// `abort_after` fails it with `error.MeasureBoundExceeded` once past that
+/// time with one unresolved. A streamed or snapshot run ignores all three.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
@@ -1004,14 +1017,20 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     // only x, and a streamed run writes its rows to `ctx.stream` as it goes,
     // so either keeps its recording in scratch and drops it here.
     const kept = !opts.snapshot and ctx.stream == null;
-    var names = try root.probeNames(ctx, scale);
+    const all_names = try root.probeNames(ctx, scale);
+    var names = all_names;
     var probes = ctx.probes;
     var own_probes: []u32 = &.{};
     defer scratch.free(own_probes);
+    const tran_cards = for (ctx.measures) |m| {
+        if (m.analysis == .tran) break true;
+    } else false;
+    // Measured as the run goes, in place of their columns.
+    const streamed = kept and opts.point.measures_only and opts.tangents.len == 0 and tran_cards;
     if (kept and opts.point.measures_only) {
         const keep = try scratch.alloc(bool, names.len);
         defer scratch.free(keep);
-        measure.markColumns(ctx.measures, names, keep);
+        measure.markColumns(ctx.measures, names, keep, streamed);
         const sub_names = try a.alloc([]const u8, std.mem.count(bool, keep, &.{true}));
         const sub_probes = try scratch.alloc(u32, sub_names.len - 1);
         var k: usize = 0;
@@ -1024,11 +1043,9 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         probes = sub_probes;
         own_probes = sub_probes;
     }
-    const watched = kept and (opts.point.early_stop or opts.point.abort_after > 0) and for (ctx.measures) |m| {
-        if (m.analysis == .tran) break true;
-    } else false;
-    var watch: ?Watch = if (watched) try .init(scratch, ctx.measures, names) else null;
-    defer if (watch) |*w| w.deinit(scratch);
+    const watched = streamed or (kept and tran_cards and (opts.point.early_stop or opts.point.abort_after > 0));
+    var stream: ?Stream = if (watched) try .init(scratch, ctx.measures, all_names, ctx.probes, names) else null;
+    defer if (stream) |*s| s.deinit();
     const n_probes: u32 = @intCast(probes.len);
     var wf = if (kept)
         try Waveform.init(a, n_probes, initialCapacity(opts))
@@ -1040,7 +1057,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     errdefer if (kept) wf.deinit();
     var tangents = if (kept and opts.tangents.len != 0) try Tangents.init(ctx, opts, n_probes, scratch) else null;
     defer if (tangents) |*tg| tg.deinit(scratch);
-    const sim = try simulateWith(ctx.circuit, x, probes, &wf, opts, scratch, if (tangents) |*tg| tg else null, if (watch) |*w| w else null);
+    if (tangents) |*tg| if (watched and opts.point.early_stop) {
+        const streams = try scratch.alloc(Stream, tg.wf.len);
+        for (streams, 0..) |*s, k| s.* = Stream.init(scratch, ctx.measures, all_names, ctx.probes, names) catch |e| {
+            for (streams[0..k]) |*done| done.deinit();
+            scratch.free(streams);
+            return e;
+        };
+        tg.streams = streams;
+    };
+    const sim = try simulateWith(ctx.circuit, x, probes, &wf, opts, scratch, if (tangents) |*tg| tg else null, if (stream) |*s| s else null);
     if (!sim) return error.TimestepTooSmall;
     // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
     if (opts.snapshot) {
@@ -1062,6 +1088,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         .is_complex = false,
         .npoints = wf.len,
         .data = wf.data(),
+        .measured = if (streamed) try stream.?.measured(a) else &.{},
     };
     // The base waveform, then each row's block on the same time points.
     const block = wf.data().len;
