@@ -637,8 +637,9 @@ const upstream_models = [_]struct {
 /// Source size from which a model's GPU compile goes on the serial heavy lanes.
 const heavy_model_bytes: u64 = 20 * 1024;
 
-/// GPU kernel stack frame exceeds CUDA's 262,136 B limit.
-const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"}, .{"mvsg"} });
+/// GPU kernel stack frame exceeds the 262,136 B limit (CUDA's, and amdgcn's:
+/// gfx1100 psp103_nqs 500,192 B, psp104_nqs 515,664 B at ReleaseFast).
+const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"}, .{"mvsg"}, .{"psp103_nqs"}, .{"psp104_nqs"} });
 
 /// Upstream sources with a non-LRM string escape (W0149) we cannot edit.
 const escape_models = std.StaticStringMap(void).initComptime(.{ .{"hisim2_va"}, .{"hisimsotb"} });

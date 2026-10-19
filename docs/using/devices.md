@@ -170,9 +170,10 @@ prints at the accepted points too, not per Newton iteration, and
 `$monitor` does not print (VerA warns W0850). The built-in models keep
 their display tasks silent.
 
-A `.hdl` file compiles as Verilog-AMS 2.3, as the built-in models do, so a
-model may declare a function a later standard reserves (BSIM-CMG 112's
-`expm1`). When a model does not compile, VerA's diagnostics (file, line,
+A `.hdl` file compiles as Verilog-AMS 2023, as most built-in models do. A
+2.3-era model that declares a name 2023 reserves (BSIM-CMG 112's `expm1`)
+must rename it or wrap the module in `` `begin_keywords "VAMS-2.3" `` …
+`` `end_keywords ``. When a model does not compile, VerA's diagnostics (file, line,
 error code) print and the deck fails. An instance parameter the module does
 not declare, or a card with more nodes than the module has ports, is an error
 (`UnknownParameter`, `WrongNodeCount`). A card that omits trailing ports
