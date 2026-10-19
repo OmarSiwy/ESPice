@@ -115,6 +115,194 @@ pub fn sample(c: Clause, result: core.Result, at: []const f64, out: []f64) error
     }
 }
 
+/// Sets `keep[k]` for every column of `names` (a transient's labels, the
+/// scale first) that a `.tran` card of `measures` reads, and the scale.
+/// Evaluating over just those columns gives the same values, to the bit, as
+/// over all of them: lookups are by name. Asserts `keep.len == names.len`.
+pub fn markColumns(measures: []const core.Measure, names: []const []const u8, keep: []bool) void {
+    assert(keep.len == names.len);
+    @memset(keep, false);
+    if (keep.len > 0) keep[0] = true;
+    for (measures) |m| if (m.analysis == .tran) for ([_]Clause{ m.first, m.second }) |c| {
+        for ([_][]const u8{ c.vec, c.vec2 }) |name| if (name.len > 0) if (columnIndex(names, name)) |k| {
+            keep[k] = true;
+        };
+        for ([_][]const core.MeasureOp{ c.ops, c.ops2 }) |ops| for (ops) |op| if (op == .vector) if (columnIndex(names, op.vector)) |k| {
+            keep[k] = true;
+        };
+    };
+}
+
+/// Which `.tran` cards already have their final value, judged row by row as
+/// a transient accepts points, for early stop and the abort bound
+/// (dev/research/lane-batched-simulation.md §7). Values still come from
+/// `evaluateAll` or `print` over the finished result, which may end early:
+/// a card resolves only once no later row can change what those return.
+/// - WHEN, TRIG/TARG, FIND/DERIV with WHEN or AT: once its value is defined
+///   (the event scans stop at their event), or once every clause is past
+///   its TO= or AT= without one.
+/// - AVG, MIN, MAX, PP, RMS, INTEG, EM_AVG, ERR*: once past a nonzero TO=.
+/// - PARAM: once every card it reads has resolved.
+/// - LAST counts, `_CONT`, JITTER, the checks and DOUT, windows without
+///   TO=, and cards reading a later card or a PARAM (`print` and
+///   `evaluateAll` read those differently): only at the run's end.
+pub const Watch = struct {
+    measures: []const core.Measure,
+    /// The recorded columns, the scale first.
+    names: []const []const u8,
+    cards: []Card,
+    /// Each resolved card's value, NaN until then: what a later card reads.
+    values: []f64,
+    /// `.tran` cards not resolved yet.
+    open: usize,
+
+    const Rule = enum { end, param, window, event };
+
+    const Card = struct {
+        rule: Rule,
+        done: bool,
+        /// Whether it has been tried once since its cards resolved.
+        tried: bool = false,
+        /// Each event clause's side of its level at the previous row: -1,
+        /// 0 or 1; 2 before the first.
+        side: [2]i8 = .{ 2, 2 },
+    };
+
+    /// `names` must outlive the watch.
+    pub fn init(gpa: std.mem.Allocator, measures: []const core.Measure, names: []const []const u8) !Watch {
+        const cards = try gpa.alloc(Card, measures.len);
+        errdefer gpa.free(cards);
+        const values = try gpa.alloc(f64, measures.len);
+        @memset(values, nan);
+        var open: usize = 0;
+        for (measures, cards, 0..) |m, *c, i| {
+            c.* = .{ .rule = ruleOf(measures, i), .done = m.analysis != .tran };
+            open += @intFromBool(!c.done);
+        }
+        return .{ .measures = measures, .names = names, .cards = cards, .values = values, .open = open };
+    }
+
+    pub fn deinit(w: *Watch, gpa: std.mem.Allocator) void {
+        gpa.free(w.cards);
+        gpa.free(w.values);
+        w.* = undefined;
+    }
+
+    /// Takes the recording so far, `npoints` rows of `names.len` columns,
+    /// the newest last, and resolves what it can. Call once per row.
+    /// O(open cards) per row, plus one evaluation of a card when an event
+    /// clause changes sides of its level or an AT= is reached.
+    // ponytail: an evaluation rescans the card's whole prefix, O(rows) per
+    // level crossing, and each row looks its clauses' columns up by name,
+    // O(columns); per-card scan state and cached column indices would remove
+    // both if decks with thousands of crossings or probes show up.
+    /// `force` evaluates every ready event card, as before an abort.
+    pub fn feed(w: *Watch, data: []const f64, npoints: usize, force: bool) void {
+        assert(data.len == npoints * w.names.len);
+        if (npoints == 0 or w.open == 0) return;
+        const wave: Wave = .{ .result = .{ .plotname = "", .varnames = w.names, .is_complex = false, .npoints = npoints, .data = data }, .analysis = .tran, .values = w.values };
+        const t = wave.scale().get(npoints - 1);
+        // Non-PARAM cards read only earlier ones, PARAM cards any card.
+        for ([_]bool{ false, true }) |param| for (w.measures, w.cards, 0..) |m, *c, i| {
+            if (c.done or (c.rule == .param) != param) continue;
+            if (c.rule == .end or !w.ready(i)) continue;
+            if (w.settle(m, c, wave, t, npoints - 1, force)) |v| {
+                c.done = true;
+                w.values[i] = v;
+                w.open -= 1;
+            }
+        };
+    }
+
+    /// Whether every card it reads has resolved; a card of another analysis
+    /// reads NaN whatever this run does.
+    fn ready(w: Watch, i: usize) bool {
+        const m = w.measures[i];
+        for ([_]Clause{ m.first, m.second }) |c| for (c.refs) |ref| if (!w.resolved(ref.expr)) return false;
+        return w.resolved(m.expr);
+    }
+
+    fn resolved(w: Watch, ops: []const core.MeasureOp) bool {
+        for (ops) |op| if (op == .measure and op.measure < w.cards.len and !w.cards[op.measure].done) return false;
+        return true;
+    }
+
+    /// The card's final value (NaN for one that has none) once no later row
+    /// can change it, else null. `force` evaluates an event card even
+    /// without a crossing: a level touched but not crossed can still count.
+    fn settle(w: Watch, m: core.Measure, c: *Card, wave: Wave, t: f64, row: usize, force: bool) ?f64 {
+        var discard_buf: [64]u8 = undefined;
+        var discard: Writer.Discarding = .init(&discard_buf);
+        switch (c.rule) {
+            .end => unreachable, // `feed` skips them
+            .param => return evaluate(&discard.writer, m, wave) catch nan,
+            .window => {
+                const a = resolve(m.first, w.values) catch return nan;
+                if (a.to == 0 or t <= a.to) return null;
+                return evaluate(&discard.writer, m, wave) catch nan;
+            },
+            .event => {},
+        }
+        const a = resolve(m.first, w.values) catch return nan;
+        const b = resolve(m.second, w.values) catch return nan;
+        var trigger = force or !c.tried;
+        c.tried = true;
+        // Past every TO= and AT=, an event not found never will be.
+        var final = true;
+        for (eventClauses(m, a, b), &c.side) |e, *side| if (e) |cl| {
+            if (cl.at != core.measure_no_at) {
+                if (t >= cl.at) trigger = true else final = false;
+                continue;
+            }
+            if (cl.to == 0 or t <= cl.to) final = false;
+            const s = sideOf(wave, cl, row) catch return nan; // a missing vector stays missing
+            if (side.* != 2 and s != side.*) trigger = true;
+            side.* = s;
+        };
+        if (!trigger and !final) return null;
+        const value = evaluate(&discard.writer, m, wave) catch nan;
+        return if (!std.math.isNan(value) or final) value else null;
+    }
+};
+
+/// Which side of its level clause `c`'s waveform is on at `row`: -1, 0 or 1.
+fn sideOf(w: Wave, c: Clause, row: usize) error{NoSuchVector}!i8 {
+    const y = (try w.waveform(c.vec, c.ops, c.vectype)).get(row);
+    const level = if (c.vec2.len > 0) (try w.waveform(c.vec2, c.ops2, c.vectype)).get(row) else c.val;
+    return if (y > level) 1 else if (y < level) -1 else 0;
+}
+
+/// The clauses of an event card that name an event or an AT=: WHEN's,
+/// TRIG and TARG, or FIND/DERIV's AT= or WHEN.
+fn eventClauses(m: core.Measure, a: Clause, b: Clause) [2]?Clause {
+    return switch (m.func) {
+        .when => .{ a, null },
+        .trig_targ => .{ a, b },
+        .find, .deriv => .{ if (a.at != core.measure_no_at) a else b, null },
+        else => .{ null, null },
+    };
+}
+
+/// How `Watch` resolves card `i` of `measures`.
+fn ruleOf(measures: []const core.Measure, i: usize) Watch.Rule {
+    const m = measures[i];
+    if (m.cont) return .end;
+    // `print` reads a later card, or a PARAM, in its second pass and
+    // `evaluateAll` reads NaN; a PARAM reading a later PARAM reads NaN.
+    for ([_]Clause{ m.first, m.second }) |c| for (c.refs) |ref| for (ref.expr) |op| if (op == .measure) {
+        if (op.measure >= i or (op.measure < measures.len and measures[op.measure].func == .param)) return .end;
+    };
+    for (m.expr) |op| if (op == .measure and op.measure >= i and op.measure < measures.len and measures[op.measure].func == .param) return .end;
+    return switch (m.func) {
+        .param => .param,
+        .when => if (lastEvent(m.first)) .end else .event,
+        .trig_targ => if (lastEvent(m.first) or lastEvent(m.second)) .end else .event,
+        .find, .deriv => if (m.first.at != core.measure_no_at) .event else if (m.second.vec.len == 0 or lastEvent(m.second)) .end else .event,
+        .avg, .min, .max, .min_at, .max_at, .pp, .rms, .integ, .em_avg, .err, .err1, .err2, .err3 => .window,
+        else => .end, // else: JITTER, the FFT figures, the checks and DOUT read the whole run
+    };
+}
+
 /// Whether card `m` reads `result`. Each `.fft` card has its own plot, and
 /// `.lstb` and `.ptdnoise` publish two kinds under one analysis, so those
 /// cards read the plot holding their vector.

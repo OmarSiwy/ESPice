@@ -14,15 +14,15 @@ pub const validateQuery = types.validateQuery;
 /// Validates, encodes and atomically replaces one file with one plot.
 pub const write = @import("write.zig").write;
 /// `.meas` results in ngspice's print format.
-pub const printMeasures = @import("measure.zig").print;
+pub const printMeasures = @import("measure").print;
 /// `.meas` statistics over Monte Carlo trials.
-pub const printMeasureStatistics = @import("measure.zig").printStatistics;
+pub const printMeasureStatistics = @import("measure").printStatistics;
 /// Every `.meas` card's value over one result; see `measure.evaluateAll`.
-pub const measureValues = @import("measure.zig").evaluateAll;
+pub const measureValues = @import("measure").evaluateAll;
 /// `measureValues`, also flagging cards that name a missing vector.
-pub const measureOutcomes = @import("measure.zig").evaluateOutcomes;
+pub const measureOutcomes = @import("measure").evaluateOutcomes;
 /// A measure clause's transient waveform at given times (HSPICE `.stim`).
-pub const sampleMeasure = @import("measure.zig").sample;
+pub const sampleMeasure = @import("measure").sample;
 
 /// Resolves a user-facing format name or alias to a `Format`. Returns null
 /// for an unknown name so the caller owns the diagnostic.
@@ -59,5 +59,4 @@ test {
     _ = @import("psf.zig");
     _ = @import("sst2.zig");
     _ = @import("fsdb.zig");
-    _ = @import("measure.zig");
 }

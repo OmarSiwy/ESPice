@@ -79,6 +79,8 @@ pub const RunCtx = struct {
     /// Where a transient or AC sweep writes its rows instead of keeping them
     /// (`Session.stream`); its Result then has empty `data`.
     stream: ?*std.Io.Writer = null,
+    /// The deck's `.meas` cards: a transient's `point` options read them.
+    measures: []const @import("core").Measure = &.{},
 };
 
 /// Returns one column name per probe, preceded by `first` when given.
