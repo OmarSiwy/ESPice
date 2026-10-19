@@ -725,10 +725,11 @@ pub const Problem = struct {
                 inline else => |o| if (o.tol.variant == @as(u32, @intCast(base))) try template.append(a, job),
             };
             const x: []const f64 = if (t.method == .lm) blk: {
-                // DC goals take their Jacobian from the trial point's own
-                // sweep (`Dc.tangents`), so every round is batched.
-                const direct = for (template.items) |job| {
-                    if (job != .dc) break false;
+                // DC and transient goals take their Jacobian from the trial
+                // point's own run (`Dc.tangents`, `Tran.tangents`), so every
+                // round is batched.
+                const direct = !self.session.config.knobs.no_tangents and for (template.items) |job| {
+                    if (!self.tangentable(job)) break false;
                 } else true;
                 const lm = &self.optimization[base];
                 if (base == 0) for (t.initial, t.spec.dels, t.names) |x0, del, name| if (t.options.stepOverreach(x0, del)) |ratio|
@@ -748,6 +749,21 @@ pub const Problem = struct {
             row.* = try t.rows(a, &self.prepared.circuit, x, base);
         }
         deck.variants = try frontend.Tuner.optimized(a, deck.variants, best);
+    }
+
+    /// Whether `job` can give the optimizer its Jacobian as tangents of its
+    /// own run. A transient cannot from an operating point it does not
+    /// solve on its own (`uic`, `.ic` holds, a capacitor-only node's
+    /// OPtran), under VPI callbacks, or off the CPU: its rows swap host
+    /// device state (`Tran.tangents`).
+    fn tangentable(self: *const Problem, job: Query) bool {
+        const c = &self.prepared.circuit;
+        return switch (job) {
+            .dc => true,
+            .tran => |o| !o.uic and !o.snapshot and !o.sources_at_zero and self.prepared.deck.ic.len == 0 and
+                !c.needs_tran_op and c.vpi == null and self.session.config.backend == .cpu,
+            else => false,
+        };
     }
 
     /// HSPICE MOSRA, once before any query advances
@@ -821,9 +837,10 @@ pub const Problem = struct {
     /// a query failed or a card found no value. Every operating point
     /// starts from `guess` (cold when empty); `first` takes the one row 0's
     /// first query solved, empty when it has none. With `direct` (a
-    /// batched round of `.dc` queries) only row 0 runs, and the other
-    /// points' results are its sweeps' first-order predictions of them
-    /// (`Dc.tangents`, dev/analysis/optimize.md "Direct sensitivities").
+    /// batched round of `tangentable` queries) only row 0 runs, and the
+    /// other points' results are its runs' first-order predictions of them
+    /// (`Dc.tangents`, `Tran.tangents`, dev/analysis/optimize.md "Direct
+    /// sensitivities").
     fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, points: []const f64, direct: bool, guess: []const f64, out: []f64, first: *std.ArrayList(f64)) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -842,7 +859,11 @@ pub const Problem = struct {
             switch (copy.*) {
                 inline else => |*o| o.tol.variant = @intCast(p),
             }
-            if (direct) copy.dc.tangents = tangents;
+            if (direct) switch (copy.*) {
+                .dc => |*o| o.tangents = tangents,
+                .tran => |*o| o.tangents = tangents,
+                else => unreachable, // else: `tangentable` admits these two
+            };
         };
         var session = analysis.session.Session.init(self.workerAllocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
         defer session.deinit();
@@ -1171,6 +1192,7 @@ fn knobsFromEnv() analysis.Knobs {
     k.hb_trace = env.on("ESPICE_HB_TRACE");
     k.no_qtape = env.on("ZP_NO_QTAPE");
     k.tran_stats = env.on("ZP_TRAN_STATS");
+    k.no_tangents = env.on("ZP_NO_TANGENTS");
     if (env.get("ESPICE_GPU_LU")) |v| k.gpu_lu = std.mem.eql(u8, v, "1");
     k.gpu_lu_check = env.on("ESPICE_GPU_LU_CHECK");
     k.gpu_lu_nogather = env.on("ESPICE_GPU_LU_NOGATHER");

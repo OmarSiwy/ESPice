@@ -191,6 +191,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
             try timeStep(o.dt_init);
             try timeStep(o.dt_max orelse o.t_stop / 50);
             if (o.max_steps == std.math.maxInt(u32)) return error.InvalidQueryOptions;
+            if (o.tangents.len != 0 and (o.uic or o.snapshot or o.sources_at_zero)) return error.InvalidQueryOptions;
         },
         .tran_noise => |o| {
             if (o.dt_max < o.dt_min or o.dt_min > o.dt_init or o.max_steps == std.math.maxInt(u32)) return error.InvalidQueryOptions;
@@ -335,7 +336,7 @@ pub fn validate(query: requests.Query, n: u32) !void {
 
 /// `validate`, plus the checks that need the deck: `error.InvalidQueryOptions`
 /// when the query's `tol.variant`, an `.mc` variant range or a `.dc` tangent
-/// row lies past `deck.variants`, and `error.DcSweepSourceNotFound` when a
+/// row or a `.tran` one lies past `deck.variants`, and `error.DcSweepSourceNotFound` when a
 /// `.dc` sweep names a card the deck does not have. Asserts that a non-empty
 /// `deck.variants` has one `starts` entry more than rows.
 pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
@@ -353,6 +354,7 @@ pub fn validateDeck(query: requests.Query, n: u32, deck: *const Deck) !void {
         if (query.dc.target2) |t2| try dcTargetExists(t2, deck);
         for (query.dc.tangents) |row| if (row >= deck.variants.count()) return error.InvalidQueryOptions;
     }
+    if (query == .tran) for (query.tran.tangents) |row| if (row >= deck.variants.count()) return error.InvalidQueryOptions;
 }
 
 /// The same (type, ordinal) lookup `dc.run` does, made before anything is

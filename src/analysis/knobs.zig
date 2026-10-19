@@ -23,6 +23,9 @@ pub const Knobs = struct {
     no_qtape: bool = false,
     /// `ZP_TRAN_STATS`: print the transient step statistics.
     tran_stats: bool = false,
+    /// `ZP_NO_TANGENTS`: an optimization takes every Jacobian by finite
+    /// differences, not from `.dc`/`.tran` tangents, for A/B runs.
+    no_tangents: bool = false,
     /// `ESPICE_GPU_LU`: `1` forces the device LU on, any other value off;
     /// null leaves it to the size gate.
     gpu_lu: ?bool = null,

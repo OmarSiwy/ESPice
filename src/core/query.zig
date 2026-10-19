@@ -645,6 +645,12 @@ pub const Tran = struct {
     /// their DC values: the operating point's OPtran rung, as ngspice's
     /// optran.c keeps CKTtime at 0 on its own clock.
     sources_at_zero: bool = false,
+    /// `Deck.variants` rows the transient also predicts to first order on
+    /// its own time grid, for the optimizer's Jacobian
+    /// (dev/analysis/optimize.md, "Direct sensitivities"), as `Dc.tangents`
+    /// does per sweep point. Each adds a block of the same time points after
+    /// the waveform's own. Not with `uic`, `snapshot` or `sources_at_zero`.
+    tangents: []const u32 = &.{},
 };
 
 /// Transient noise: a transient with sampled noise sources, or the noise
