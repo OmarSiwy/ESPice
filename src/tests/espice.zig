@@ -1386,7 +1386,8 @@ test "points: abort_after fails only the points still unresolved past it, early_
         if (info.kind != .tran or info.status != .complete) continue;
         const r = try p.result(id);
         lens[@intFromBool(@backingInt(id) >= @backingInt(bounded))] += r.npoints;
-        if (@backingInt(id) >= @backingInt(bounded)) try t.expectEqual(@as(usize, 3), r.varnames.len);
+        // TRIG/TARG streams: only the time column is recorded.
+        if (@backingInt(id) >= @backingInt(bounded)) try t.expectEqual(@as(usize, 1), r.varnames.len);
     }
     std.debug.print("abort test steps: plain {d}, bounded {d}\n", .{ lens[0], lens[1] });
     try t.expect(lens[1] * 3 < lens[0]);
