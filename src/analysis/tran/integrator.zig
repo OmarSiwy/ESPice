@@ -25,8 +25,10 @@ comptime {
     // Passed by value into every step's hook and LTE call.
     std.debug.assert(@sizeOf(Coeffs) == 24);
     std.debug.assert(@sizeOf(LteIn) == 56);
-    std.debug.assert(@sizeOf(Hook(null)) == 96);
-    std.debug.assert(@sizeOf(Hook(.trapezoidal)) == 112);
+    if (@sizeOf(usize) == 8) {
+        std.debug.assert(@sizeOf(Hook(null)) == 96);
+        std.debug.assert(@sizeOf(Hook(.trapezoidal)) == 112);
+    }
 }
 
 /// Coefficients for a step of `dt` seconds after one of `dt_prev`. Gear-2 is

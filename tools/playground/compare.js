@@ -17,11 +17,9 @@ const { execFileSync } = require("child_process");
 const pg = require("../../docs/javascripts/playground.js");
 
 const RTOL = 1e-9, ATOL = 1e-15;
-// Decks known to differ, with why (dev/playground.md). They report XFAIL;
-// one that starts matching reports XPASS and fails the run, like the corpus.
-const KNOWN = {
-  "tran/bench_ngspice_mosamp.sp": "its OP differs in the last bits on wasm32 (cause open) and step control grows that to 3 points",
-};
+// Decks known to differ, deck path suffix -> why. They report XFAIL; one
+// that starts matching reports XPASS and fails the run, like the corpus.
+const KNOWN = {};
 const [wasmDir, espiceArg, ...inputs] = process.argv.slice(2);
 if (!inputs.length) { console.error("usage: compare.js WASM_DIR ESPICE DECK_OR_DIR..."); process.exit(2); }
 const espice = path.resolve(espiceArg || "");
@@ -82,6 +80,8 @@ function rows(r) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "espice-cmp-"));
   let compared = 0, skipped = 0, failed = 0, xfail = 0, unexposed = 0, values = 0, worst = 0, worstAt = "";
   let stackPeak = 0, stackPeakAt = "";
+  // Instantiate espice.wasm before the first deck, so that deck is painted too.
+  await pg.simulate("load\n.end\n").catch(() => {});
   for (const deck of decks) {
     const text = fs.readFileSync(deck, "utf8");
     if (pg.unsupported(text)) { skipped++; continue; }

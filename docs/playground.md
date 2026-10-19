@@ -67,6 +67,8 @@ M2 out in vdd vdd pch w=2.5u l=0.18u
   shared-memory threads need, so the analyses run one after another on one
   core, with no GPU. A simulation runs on the page's own thread, so a long
   transient freezes the tab until it finishes.
+- **Download.** The first **Run** fetches the simulator, every built-in
+  model included: about 65 MB, 17 MB compressed.
 - **Memory.** WebAssembly gets at most 4 GB, and the tab's limit is often
   lower. Decks with tens of thousands of devices belong on the native
   `espice`.

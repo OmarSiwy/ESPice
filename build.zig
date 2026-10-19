@@ -326,12 +326,8 @@ pub fn build(b: *Build) void {
         wexe.entry = .disabled;
         wexe.rdynamic = true;
         wexe.wasi_exec_model = .reactor;
-        wexe.stack_size = 16 << 20; // the corpus peaks at 1.2 MiB of stack
+        wexe.stack_size = 16 << 20; // the corpus peaks at 541 KiB (dc/device_b3soipd_output.sp)
         wasm_step.dependOn(&b.addInstallArtifact(wexe, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
-        // TEMP asm probe
-        wasm_step.dependOn(&b.addInstallFileWithDir(wexe.getEmittedAsm(), .{ .custom = "wasm-asm" }, "espice.s").step);
-        for (wg.objs) |o| if (std.mem.eql(u8, o.name, "dev_mos1") or std.mem.eql(u8, o.name, "dev_bsim4va"))
-            wasm_step.dependOn(&b.addInstallFileWithDir(o.getEmittedAsm(), .{ .custom = "wasm-asm" }, b.fmt("{s}.s", .{o.name})).step);
 
         // Build with `-Dcpu=x86_64 -Dhip-arch=none -Dcuda-arch=none` to match simd128's lane count.
         const cmp = b.addSystemCommand(&.{"node"});

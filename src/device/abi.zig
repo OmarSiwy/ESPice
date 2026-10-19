@@ -130,7 +130,7 @@ pub const NoiseSource = struct {
 comptime {
     // Read whole per row and frequency; the 4 pad bytes are
     // `contract.NoiseTable`'s.
-    std.debug.assert(@sizeOf(NoiseSource) == 72);
+    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(NoiseSource) == 72);
 }
 
 /// The physical origin a device declares for a noise generator.
