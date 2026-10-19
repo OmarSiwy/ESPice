@@ -7,9 +7,9 @@
 //!
 //! In: W systems with the `newton` interface on one pattern, and their
 //! hook. Out: the lane system (`sys.active` selects the lanes evaluated)
-//! and `LaneHook`, its `newtonLanes` hook; `unpack` writes the solve's
-//! final planes back into the lanes. dev/research/lane-batched-simulation.md
-//! §3.2 and §4 (the CPU decision).
+//! and `LaneHook`, its `newtonLanes` hook. Each lane's own planes end every
+//! iterate as its scalar solve leaves them (`loadCheck`).
+//! dev/research/lane-batched-simulation.md §3.2 and §4 (the CPU decision).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -34,7 +34,8 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
         nnz: u32,
         diag_slots: []const u32,
         current_row: []const bool,
-        /// Lane-major residual and Jacobian values (pattern order).
+        /// Lane-major residual and Jacobian values (pattern order), as long
+        /// as each lane's own (trailing trash slots included).
         rhs: []V,
         vals: []V,
         /// The lanes `newtonLanes` is still solving; the others are not
@@ -54,9 +55,9 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
                 assert(std.mem.eql(u32, s.diag_slots[0..s.n], s0.diag_slots[0..s0.n]));
             }
             const n: usize = s0.n;
-            const rhs = try gpa.alloc(V, n);
+            const rhs = try gpa.alloc(V, s0.rhs.len);
             errdefer gpa.free(rhs);
-            const vals = try gpa.alloc(V, s0.nnz);
+            const vals = try gpa.alloc(V, hook.vals(s0).len);
             errdefer gpa.free(vals);
             const xs = try gpa.alloc(f64, 2 * n);
             return .{
@@ -90,8 +91,8 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
                     const s = sys.lanes[l];
                     getLane(sys.xs, x, l);
                     sys.hook.assemble(s, sys.xs, L.lane(t, l));
-                    putLane(sys.vals, sys.hook.vals(s)[0..sys.nnz], l);
-                    putLane(sys.rhs, s.rhs[0..sys.n], l);
+                    putLane(sys.vals, sys.hook.vals(s), l);
+                    putLane(sys.rhs, s.rhs, l);
                 }
             }
             pub fn vals(_: LaneHook, sys: *Self) []V {
@@ -101,17 +102,6 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
                 return sys.vals[slot];
             }
         };
-
-        /// Writes the lane-major planes back into each lane in `m`, so its
-        /// own Jacobian values and residual are what a scalar solve leaves.
-        pub fn unpack(self: *Self, m: Mask) void {
-            var it = L.each(m);
-            while (it.next()) |l| {
-                const s = self.lanes[l];
-                getLane(self.hook.vals(s)[0..self.nnz], self.vals, l);
-                getLane(s.rhs[0..self.n], self.rhs, l);
-            }
-        }
 
         pub fn beginSolve(self: *Self) void {
             if (comptime @hasDecl(Sys, "beginSolve")) for (self.lanes) |s| s.beginSolve();
@@ -127,7 +117,7 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
 
         /// The scalar checkpoint's event, or the shape `newtonLanes` passes.
         const Event = if (@hasDecl(Sys, "checkpoint"))
-            @typeInfo(@TypeOf(Sys.checkpoint)).@"fn".params[1].type.?
+            @typeInfo(@TypeOf(Sys.checkpoint)).@"fn".param_types[1].?
         else
             struct { phase: enum { nonlinear }, completed: u16, total: u16 };
 
@@ -140,19 +130,21 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
             }
         }
 
-        /// Each active lane's load test on its own x, values and residual
-        /// (written back into the lane first, as the scalar `newton` hands
-        /// over its own planes).
+        /// Each active lane's load test on its own x, values and residual.
+        /// Called once per iterate after `loadExtras`, it first writes the
+        /// loaded values and residual back into each active lane, so every
+        /// later device call (and the lane after the solve) sees the planes
+        /// a scalar `newton` leaves in its own system.
         pub fn loadCheck(self: *Self, x: []const V, v: []const V, rhs: []const V, reltol: f64, abstol: f64) Mask {
-            if (comptime !@hasDecl(Sys, "loadCheck")) return L.every;
             var ok: Mask = L.every;
             var it = L.each(self.active);
             while (it.next()) |l| {
                 const s = self.lanes[l];
                 const lv = self.hook.vals(s)[0..self.nnz];
-                getLane(self.xs, x, l);
                 getLane(lv, v, l);
                 getLane(s.rhs[0..self.n], rhs, l);
+                if (comptime !@hasDecl(Sys, "loadCheck")) continue;
+                getLane(self.xs, x, l);
                 if (!s.loadCheck(self.xs, lv, s.rhs[0..self.n], reltol, abstol)) ok &= ~bit(l);
             }
             return ok;
@@ -206,12 +198,12 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
         }
 
         /// dst = lane l of src.
-        fn getLane(dst: []f64, src: []const V, l: usize) void {
+        pub fn getLane(dst: []f64, src: []const V, l: usize) void {
             for (dst, src[0..dst.len]) |*d, v| d.* = L.lane(v, l);
         }
 
         /// Lane l of dst = src.
-        fn putLane(dst: []V, src: []const f64, l: usize) void {
+        pub fn putLane(dst: []V, src: []const f64, l: usize) void {
             for (dst[0..src.len], src) |*d, v| {
                 var a: [W]f64 = d.*;
                 a[l] = v;
