@@ -586,7 +586,8 @@ pub const HostSy = struct {
     /// the awaited column may be the one descheduled (chain_psp103_10k at
     /// load 98: 16.7 s of pure spinning became 149 s).
     pub inline fn pause(spins: u32) void {
-        if (spins < 256) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
+        // Single-threaded never waits (wasm32-wasi has no sched_yield).
+        if (spins < 256 or @import("builtin").single_threaded) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
     }
     /// Reads a done stamp; pairs with `release`.
     pub inline fn acquire(p: *const u32) u32 {

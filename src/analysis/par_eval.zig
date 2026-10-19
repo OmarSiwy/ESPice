@@ -210,19 +210,21 @@ pub const ParEval = struct {
         // Positions are u32, like the tapes; past that the staging alone
         // would need 32 GB per plane.
         if (n_slot > std.math.maxInt(u32) or n_row > std.math.maxInt(u32)) return error.OutOfMemory;
+        const slot_len: usize = @intCast(n_slot);
+        const row_len: usize = @intCast(n_row);
 
         const slots = try Gather.build(gpa, slot_tapes, nnz, trash_slot);
         errdefer slots.deinit(gpa);
         const rows = try Gather.build(gpa, row_tapes, n, n);
         errdefer rows.deinit(gpa);
 
-        const g_stage = try gpa.alloc(f64, n_slot);
+        const g_stage = try gpa.alloc(f64, slot_len);
         errdefer gpa.free(g_stage);
-        const rhs_stage = try gpa.alloc(f64, n_row);
+        const rhs_stage = try gpa.alloc(f64, row_len);
         errdefer gpa.free(rhs_stage);
-        const c_stage = try gpa.alloc(f64, if (has_charge) n_slot else 0);
+        const c_stage = try gpa.alloc(f64, if (has_charge) slot_len else 0);
         errdefer gpa.free(c_stage);
-        const q_stage = try gpa.alloc(f64, if (has_charge) n_row else 0);
+        const q_stage = try gpa.alloc(f64, if (has_charge) row_len else 0);
         errdefer gpa.free(q_stage);
         for ([_][]f64{ g_stage, rhs_stage, c_stage, q_stage }) |st| @memset(st, -0.0);
 
@@ -512,7 +514,8 @@ fn waitCount(counter: *std.atomic.Value(u32), target: u32) void {
     while (counter.load(.acquire) < target) {
         std.atomic.spinLoopHint();
         spins +%= 1;
-        if (spins > 4096) std.Thread.yield() catch {};
+        // Single-threaded never waits here (wasm32-wasi has no sched_yield).
+        if (!builtin.single_threaded and spins > 4096) std.Thread.yield() catch {};
     }
 }
 

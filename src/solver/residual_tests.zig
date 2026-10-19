@@ -112,7 +112,7 @@ fn sigma(r: std.Random, out: []f64, kappa: f64) void {
         const t = if (out.len == 1) 0 else @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(out.len - 1));
         s.* = std.math.pow(f64, kappa, -t);
     }
-    r.shuffle(f64, out);
+    r.shuffleWithIndex(f64, out, u64); // u64: 32-bit draws the same order
 }
 
 /// One Givens rotation through angle θ on rows (left) or columns (right)

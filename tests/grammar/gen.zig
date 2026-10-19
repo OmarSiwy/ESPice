@@ -125,7 +125,7 @@ pub const Gen = struct {
                 try out.append(arena, if (gen.rng.boolean()) std.ascii.toUpper(c) else c);
             },
             .class => try out.append(arena, gen.byteOf(g.classes[node.a])),
-            .any => try out.append(arena, palette[gen.rng.uintLessThan(usize, palette.len)]),
+            .any => try out.append(arena, palette[gen.below(palette.len)]),
             .ref => {
                 assert(gen.height[n] != inf);
                 try gen.derive(arena, out, g.rule_bodies[node.a], depth + 1);
@@ -146,7 +146,7 @@ pub const Gen = struct {
             };
             unreachable;
         }
-        var k = gen.rng.uintLessThan(usize, set.count());
+        var k = gen.below(set.count());
         var it = set.iterator(.{});
         while (it.next()) |c| {
             if (k == 0) return @intCast(c);
@@ -158,18 +158,23 @@ pub const Gen = struct {
     /// `src` with one random edit: a byte deleted, inserted, doubled or
     /// swapped with its neighbour, or a span cut. The edit may leave the
     /// string inside the grammar; the caller's oracle says.
+    /// A draw in `0..n` as a u64, so a 32-bit build generates the same decks.
+    fn below(gen: *Gen, n: usize) usize {
+        return @intCast(gen.rng.uintLessThan(u64, n));
+    }
+
     pub fn mutate(gen: *Gen, arena: Allocator, src: []const u8) Allocator.Error![]const u8 {
         var out: std.ArrayList(u8) = .empty;
         try out.appendSlice(arena, src);
-        const at = gen.rng.uintAtMost(usize, src.len);
-        const byte = palette[gen.rng.uintLessThan(usize, palette.len)];
+        const at = gen.below(src.len + 1);
+        const byte = palette[gen.below(palette.len)];
         switch (gen.rng.uintLessThan(u8, if (src.len == 0) 1 else 5)) {
             0 => try out.insert(arena, at, byte),
             1 => _ = out.orderedRemove(@min(at, src.len - 1)),
             2 => try out.insert(arena, @min(at, src.len - 1), src[@min(at, src.len - 1)]),
             3 => if (at + 1 < src.len) std.mem.swap(u8, &out.items[at], &out.items[at + 1]),
             4 => {
-                const end = @min(src.len, at + 1 + gen.rng.uintLessThan(usize, 8));
+                const end = @min(src.len, at + 1 + gen.below(8));
                 try out.replaceRange(arena, at, end - at, "");
             },
             else => unreachable,

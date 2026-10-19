@@ -328,10 +328,9 @@ pub fn build(b: *Build) void {
         const wgompute = b.dependency("gompute", .{ .target = W.target, .optimize = W.optimize }).module("gompute");
         const wg = graph(W, b.dependency("vera", .{ .target = W.target, .optimize = W.optimize }), wgompute, models, gen, bo);
         wg.analysis.addImport("gompute_kernels", wgompute.import_table.get("gompute_kernels").?);
-        const wh: Import = .{ .name = "espice_h", .module = b.addTranslateC(.{ .root_source_file = b.path("include/espice.h"), .target = W.target, .optimize = W.optimize }).createModule() };
+        const wh: Import = .{ .name = "espice_h", .module = b.addTranslateC(.{ .root_source_file = b.path("include/espice.h"), .target = W.target, .optimize = W.optimize, .link_libc = false }).createModule() };
         const wroot = W.make(b.path("tools/playground/espice.zig"), &.{ wh, .{ .name = "c_api", .module = W.make(b.path("src/c_api.zig"), &.{ .{ .name = "espice", .module = wg.espice }, wh }) } });
         for (wg.objs) |o| wroot.addObject(o);
-        wroot.link_libc = true;
         wroot.single_threaded = true;
         const wexe = b.addExecutable(.{ .name = "espice", .root_module = wroot });
         wexe.entry = .disabled;
@@ -339,6 +338,10 @@ pub fn build(b: *Build) void {
         wexe.wasi_exec_model = .reactor;
         wexe.stack_size = 16 << 20; // the corpus peaks at 1.2 MiB of stack
         wasm_step.dependOn(&b.addInstallArtifact(wexe, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
+        // TEMP asm probe
+        wasm_step.dependOn(&b.addInstallFileWithDir(wexe.getEmittedAsm(), .{ .custom = "wasm-asm" }, "espice.s").step);
+        for (wg.objs) |o| if (std.mem.eql(u8, o.name, "dev_mos1") or std.mem.eql(u8, o.name, "dev_bsim4va"))
+            wasm_step.dependOn(&b.addInstallFileWithDir(o.getEmittedAsm(), .{ .custom = "wasm-asm" }, b.fmt("{s}.s", .{o.name})).step);
 
         // Build with `-Dcpu=x86_64 -Dhip-arch=none -Dcuda-arch=none` to match simd128's lane count.
         const cmp = b.addSystemCommand(&.{"node"});
@@ -412,8 +415,11 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     const build_options: Import = .{ .name = "build_options", .module = bo };
     const core: Import = .{ .name = "core", .module = c.make(b.path("src/core/root.zig"), &.{}) };
     const abi: Import = .{ .name = "device_abi", .module = c.make(b.path("src/device/abi.zig"), &.{ contract, core }) };
+    // Zig 0.18's std.Io.Threaded does not compile for wasm32-wasi with libc
+    // (Environ and PATH_MAX); without it, it takes the WASI syscall path.
+    const libc = !c.target.result.cpu.arch.isWasm();
     const eval = c.make(b.path("src/device/eval.zig"), &.{ contract, gomp, abi });
-    eval.link_libc = true;
+    eval.link_libc = libc;
 
     const wf = b.addWriteFiles();
     var agg: std.ArrayList(u8) = .empty;
@@ -426,7 +432,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         dm.* = dev.make(src, &.{contract});
         one.* = dev.make(wf.add(b.fmt("{s}/models.zig", .{m.name}), line), &.{.{ .name = m.name, .module = dm.* }});
         const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one.* }, abi, gomp });
-        host.link_libc = true;
+        host.link_libc = libc;
         // The callconv(.auto) vtable gains a hidden *StackTrace when tracing is on.
         host.error_tracing = c.optimize == .debug;
         obj.* = b.addObject(.{ .name = b.fmt("dev_{s}", .{m.name}), .root_module = host, .use_llvm = c.use_llvm });
@@ -443,10 +449,10 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         .{ .name = "vera_digital", .module = vera.module("digital") },
         build_options,
     }) };
-    device.module.link_libc = true;
+    device.module.link_libc = libc;
     const solver = c.make(b.path("src/solver/root.zig"), &.{ core, build_options });
     const analysis = c.make(b.path("src/analysis/root.zig"), &.{ .{ .name = "solver", .module = solver }, core, device, gomp, build_options });
-    analysis.link_libc = true;
+    analysis.link_libc = libc;
     const netlist: Import = .{ .name = "netlist", .module = c.make(b.path("src/frontend/netlist.zig"), &.{core}) };
     const builder: Import = .{ .name = "builder", .module = c.make(b.path("src/frontend/builder.zig"), &.{ core, device, netlist }) };
     const frontend = c.make(b.path("src/frontend/root.zig"), &.{ core, device, netlist, builder });

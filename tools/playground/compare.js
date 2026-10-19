@@ -26,6 +26,25 @@ const [wasmDir, espiceArg, ...inputs] = process.argv.slice(2);
 if (!inputs.length) { console.error("usage: compare.js WASM_DIR ESPICE DECK_OR_DIR..."); process.exit(2); }
 const espice = path.resolve(espiceArg || "");
 pg.fetchWasm = async (name) => fs.readFileSync(path.join(wasmDir, name));
+// Stack depth per deck: paint the idle stack (everything below
+// __stack_pointer; wasm-ld puts the stack first), run, then find the lowest
+// byte that changed. The run fails past half the stack.
+let espiceExports = null;
+const instantiate = WebAssembly.instantiate;
+WebAssembly.instantiate = async (...args) => {
+  const r = await instantiate(...args);
+  if (r.instance.exports.espice_wasm_create) espiceExports = r.instance.exports;
+  return r;
+};
+const PAINT = 0xa5;
+const stackTop = () => espiceExports.__stack_pointer.value;
+const paint = () => new Uint8Array(espiceExports.memory.buffer, 0, stackTop()).fill(PAINT, 1024);
+function stackUsed() {
+  const mem = new Uint8Array(espiceExports.memory.buffer, 0, stackTop());
+  let i = 1024;
+  while (i < mem.length && mem[i] === PAINT) i++;
+  return mem.length - i;
+}
 
 const decks = inputs.flatMap((p) => fs.statSync(p).isDirectory()
   ? fs.readdirSync(p, { recursive: true }).filter((f) => f.endsWith(".sp")).sort().map((f) => path.join(p, f))
@@ -62,6 +81,7 @@ function rows(r) {
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "espice-cmp-"));
   let compared = 0, skipped = 0, failed = 0, xfail = 0, unexposed = 0, values = 0, worst = 0, worstAt = "";
+  let stackPeak = 0, stackPeakAt = "";
   for (const deck of decks) {
     const text = fs.readFileSync(deck, "utf8");
     if (pg.unsupported(text)) { skipped++; continue; }
@@ -72,9 +92,12 @@ function rows(r) {
     } catch { skipped++; continue; }
     const native = fs.existsSync(raw) ? readRaw(fs.readFileSync(raw)) : [];
     let wasm;
+    if (espiceExports) paint();
     try { wasm = (await pg.simulate(text)).results.filter((r) => !r.error); } catch (err) {
       console.log(`FAIL ${deck}: wasm: ${err.message}`); failed++; continue;
     }
+    const depth = stackUsed();
+    if (depth > stackPeak) { stackPeak = depth; stackPeakAt = deck; }
     const used = new Set();
     let bad = null;
     for (const p of native) {
@@ -106,5 +129,7 @@ function rows(r) {
   }
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(`wasm-compare: ${compared} decks match (${values} values), ${failed} differ, ${xfail} xfail, ${skipped} skipped, ${unexposed} plots outside the C API; max relative deviation ${worst.toExponential(2)}${worstAt ? ` at ${worstAt}` : ""}`);
-  process.exit(failed || !compared ? 1 : 0);
+  const stackSize = espiceExports ? stackTop() : 0;
+  console.log(`wasm-compare: stack peak ${(stackPeak / 1024).toFixed(0)} KiB of ${stackSize >> 10} KiB at ${stackPeakAt}`);
+  process.exit(failed || !compared || 2 * stackPeak > stackSize ? 1 : 0);
 })();
