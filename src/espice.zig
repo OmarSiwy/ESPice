@@ -1243,15 +1243,19 @@ fn monteTrials(gpa: std.mem.Allocator, session: *const analysis.session.Session,
 }
 
 /// `.meas` results over one session's completed results of every kind a
-/// card can read.
+/// card can read. A sweep point's block names its row and label, and
+/// prints NaN for each card without a value, a failed point's for all.
 fn printSessionMeasures(session: *const analysis.session.Session, out: *std.Io.Writer, err: *std.Io.Writer, measures: []const @import("core").Measure) !void {
     for (session.outputs.items) |id| {
         const info = try session.info(id);
-        if (info.status != .complete) continue;
         switch (info.kind) {
-            .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => try output.printMeasures(out, err, measures, info.kind, try session.result(id)),
-            else => {},
+            .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => {},
+            else => continue,
         }
+        const point: ?output.MeasurePoint = if (variantOf(try session.query(id))) |v| .{ .row = v, .label = session.deck.variants.labels[v] } else null;
+        if (info.status == .complete) {
+            try output.printMeasures(out, err, measures, info.kind, try session.result(id), point);
+        } else if (point) |p| if (info.status.terminal()) try output.printFailedMeasures(out, measures, info.kind, p);
     }
 }
 
