@@ -286,8 +286,8 @@ typedef enum {
  * fields appended later are read only when it covers them. */
 typedef struct {
     uint32_t struct_size;
-    uint32_t measures_only; /* 1: record no waveforms */
-    uint32_t early_stop;    /* 1: end a point once its measures resolve */
+    uint32_t measures_only; /* 1: keep only the .tran columns the measures read */
+    uint32_t early_stop;    /* 1: end a .tran once its measures resolve */
     uint32_t warm_start;    /* 0: cold; 1: from the template's nominal OP */
     double abort_after;     /* t past which an unresolved measure aborts; 0 = off */
 } espice_points_options;

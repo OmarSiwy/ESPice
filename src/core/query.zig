@@ -655,17 +655,20 @@ pub const Tran = struct {
     point: PointOptions = .{},
 };
 
-/// The points API's per-point requests (`Problem.append_points`). Accepted
-/// and carried on each point's transient; the engine does not act on them
-/// yet, so a point's results are the same with any of them.
+/// The points API's per-point requests (`Problem.append_points`), carried
+/// on each point's transient (analysis/tran/tran.zig `run`). None changes a
+/// `.tran` card's value.
 pub const PointOptions = struct {
-    /// Record no waveform, only `.meas` results.
+    /// Record only the columns the `.tran` cards read.
     measures_only: bool = false,
-    /// End the transient once every `.meas` card has resolved.
+    /// End the transient once every `.tran` card has resolved; its
+    /// waveform then stops there.
     early_stop: bool = false,
-    /// Start the operating point from the template's nominal one.
+    /// Start the operating point from the template's nominal one. Not
+    /// acted on yet.
     warm_start: bool = false,
-    /// Seconds past which an unresolved `.meas` aborts the point; 0 is off.
+    /// Seconds past which a `.tran` card still unresolved fails the
+    /// transient with `error.MeasureBoundExceeded`; 0 is off.
     abort_after: f64 = 0,
 };
 

@@ -78,6 +78,11 @@ pub const Options = struct {
     /// null in an embedding, where any application is `VpiUnavailable`.
     /// It must outlive the Problem.
     vpi: ?*const Vpi = null,
+    /// What every `.tran` of the deck does, as `append_points` asks of a
+    /// point (the CLI's `--measures-only`, `--early-stop`, `--abort-after`).
+    /// `measures_only` is dropped for a deck with `.save` or `.stim`, which
+    /// read every column.
+    point: requests.PointOptions = .{},
 };
 
 /// The VPI host interface (`Options.vpi`) and its errors.
@@ -241,10 +246,12 @@ pub const Problem = struct {
         // `set_params` diffs later points against the template, so it is
         // never handed to a query to keep.
         if (self.prepared.tuning == null) self.session.markLastTemplateReader();
+        var point = options.point;
+        if (self.save_path != null or self.prepared.deck.stims.len != 0) point.measures_only = false;
         const jobs = if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
-            self.prepared.deck.queries;
+            try withPoint(scratch, self.prepared.deck.queries, point);
         const ids = try scratch.alloc(QueryId, jobs.len);
         _ = try self.append_queries(jobs, ids);
         self.runs = try a.alloc(Run, self.prepared.runs.len);
@@ -254,11 +261,20 @@ pub const Problem = struct {
             run.session.markLastTemplateReader();
             errdefer run.session.deinit();
             try self.checkOutput(prep, prep.deck.queries);
-            _ = try run.session.append(prep.deck.queries, try scratch.alloc(QueryId, prep.deck.queries.len));
+            _ = try run.session.append(try withPoint(scratch, prep.deck.queries, point), try scratch.alloc(QueryId, prep.deck.queries.len));
         }
         timingLap(io, &lap, "query graph and output setup");
         keep_parse = self.prepared.tuner != null or self.prepared.tuning != null;
         return self;
+    }
+
+    /// A copy of `queries` whose transients carry `point`.
+    fn withPoint(a: std.mem.Allocator, queries: []const Query, point: requests.PointOptions) ![]const Query {
+        const copy = try a.dupe(Query, queries);
+        for (copy) |*q| if (q.* == .tran) {
+            q.tran.point = point;
+        };
+        return copy;
     }
 
     /// Cancels and joins any paused query workers, then frees everything.
@@ -1203,9 +1219,11 @@ fn queryFailure(session: *const analysis.session.Session, id: QueryId) !?anyerro
     std.debug.assert(info.status.terminal());
     if (info.status == .complete) return null;
     if (info.failure) |err| if (err == error.DependencyFailed) if (info.dependency) |dep| {
-        if ((try session.info(dep)).failure) |cause| return cause;
+        // As `?anyerror`: a bare error value would coerce to this
+        // function's own error, failing the caller instead of naming it.
+        if ((try session.info(dep)).failure) |cause| return @as(?anyerror, cause);
     };
-    return info.failure orelse error.QueryCancelled;
+    return @as(?anyerror, info.failure orelse error.QueryCancelled);
 }
 
 /// Runs every query of a variant run's session to completion, whole
