@@ -359,6 +359,21 @@ test "Problem: stepping every query to the end publishes the file run_all writes
     try t.expectEqualSlices(u8, batch, stepped);
 }
 
+test "Problem: a title-only deck runs nothing and succeeds" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/title.raw", .{tmp.sub_path});
+    defer t.allocator.free(path);
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = "--8<-- \"snippet.sp\"\n", .origin = "title.cir" } },
+        .output = .{ .path = path },
+    });
+    defer p.deinit();
+    try p.run_all();
+    try t.expectEqual(@as(usize, 0), p.query_count());
+    try t.expectEqual(null, p.output_error());
+}
+
 test "Problem: writer failure retains completed results and is reported separately" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
