@@ -458,29 +458,35 @@ pub const Session = struct {
     }
 
     /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`
-    /// row `i` the leader of a lane batch with up to `lane_width - 1` other
-    /// ready, never-started `.op` rows on its template whose options differ
-    /// at most in `tol.variant` and `tol.temp_c`, taken from the queue ahead.
+    /// or `.dc` row `i` the leader of a lane batch with up to `lane_width -
+    /// 1` other ready, never-started rows of its kind on its template, with
+    /// a prerequisite exactly when it has one, whose options differ at most
+    /// in `tol.variant` and `tol.temp_c`, taken from the queue ahead.
     /// Each lane is bitwise its query run alone, so grouping is free to
     /// follow scheduling order. A row whose executor cannot be built is
     /// left to run alone.
-    /// ponytail: looks `lane_window` rows ahead, not the whole queue; a
+    /// ponytail: looks `lane_window` rows into `urgent` and the queue, not
+    /// all of them; a
     /// sweep's OP rows are adjacent in row order.
     fn gather(self: *Session, i: usize) void {
         const lane_width = execution.lane_width;
         const config = self.config;
         if (!config.knobs.lanes or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
-        if (jobs[i] != .op or self.rows.items(.executor)[i] != null) return;
+        if ((jobs[i] != .op and jobs[i] != .dc) or self.rows.items(.executor)[i] != null) return;
         var peers: [lane_width - 1]usize = undefined;
         var n: usize = 0;
-        var at = self.queue_head;
-        const end = @min(self.queue.items.len, self.queue_head + lane_window);
-        while (at < end and n < peers.len) : (at += 1) {
-            const j = self.queue.items[at];
+        // A finished batch's dependents wait in `urgent`, newest last.
+        const urgent = self.urgent.items;
+        const from_urgent = @min(urgent.len, lane_window);
+        const queued = self.queue.items[@min(self.queue_head, self.queue.items.len)..];
+        for (0..from_urgent + @min(queued.len, lane_window)) |at| {
+            if (n == peers.len) break;
+            const j = if (at < from_urgent) urgent[urgent.len - 1 - at] else queued[at - from_urgent];
             if (j == i or !self.ready(j) or self.rows.items(.running)[j] or self.rows.items(.executor)[j] != null) continue;
-            if (jobs[j] != .op or self.rows.items(.template)[j] != self.rows.items(.template)[i]) continue;
-            if (!sameLaneOp(jobs[i].op, jobs[j].op)) continue;
+            if (self.rows.items(.template)[j] != self.rows.items(.template)[i]) continue;
+            if ((self.rows.items(.dependency)[j] == none) != (self.rows.items(.dependency)[i] == none)) continue;
+            if (!sameLaneJob(jobs[i], jobs[j])) continue;
             peers[n] = j;
             n += 1;
         }
@@ -948,16 +954,53 @@ pub const Pool = struct {
 /// How far ahead of the queue head `gather` looks for a batch's peers.
 const lane_window = 8 * execution.lane_width;
 
-/// Whether two OP rows may share a lane batch: equal but for the variant
-/// row and temperature, which only the circuit each lane builds reads.
-fn sameLaneOp(a: requests.Op, b: requests.Op) bool {
-    var x = a;
-    var y = b;
-    x.tol.variant = null;
-    y.tol.variant = null;
-    x.tol.temp_c = null;
-    y.tol.temp_c = null;
-    return std.meta.eql(x, y);
+/// Whether two rows may share a lane batch: the same kind with equal
+/// options but for the variant row and temperature, which only the circuit
+/// each lane builds reads. Slices compare by content, floats by bits.
+fn sameLaneJob(a: requests.Query, b: requests.Query) bool {
+    return switch (a) {
+        inline .op, .dc => |o, tag| b == tag and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
+        else => false,
+    };
+}
+
+fn stripTol(o: anytype) @TypeOf(o) {
+    var c = o;
+    c.tol.variant = null;
+    c.tol.temp_c = null;
+    return c;
+}
+
+fn sameDeep(a: anytype, b: @TypeOf(a)) bool {
+    const T = @TypeOf(a);
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| {
+            inline for (s.field_names) |name| if (!sameDeep(@field(a, name), @field(b, name))) return false;
+            return true;
+        },
+        .@"union" => {
+            if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+            return switch (a) {
+                inline else => |payload, tag| sameDeep(payload, @field(b, @tagName(tag))),
+            };
+        },
+        .optional => {
+            if (a == null or b == null) return a == null and b == null;
+            return sameDeep(a.?, b.?);
+        },
+        .pointer => |p| {
+            if (p.size != .slice) return a == b;
+            if (a.len != b.len) return false;
+            for (a, b) |x, y| if (!sameDeep(x, y)) return false;
+            return true;
+        },
+        .float => return std.mem.eql(u8, std.mem.asBytes(&a), std.mem.asBytes(&b)),
+        .array => {
+            for (a, b) |x, y| if (!sameDeep(x, y)) return false;
+            return true;
+        },
+        else => return a == b,
+    }
 }
 
 const OpKey = struct { template: u32, op: requests.Op };

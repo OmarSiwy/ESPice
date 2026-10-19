@@ -11,6 +11,7 @@ const Deck = @import("core").Deck;
 const requests = @import("core").query;
 const types = @import("types.zig");
 const op = @import("dc/op.zig");
+const dc = @import("dc/dc.zig");
 const gpu = @import("gpu.zig");
 const gpu_lu = @import("gpu_lu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
@@ -294,13 +295,14 @@ pub const Executor = struct {
     }
 
     /// Runs this query and its `peers` as one lane batch: each builds its
-    /// circuit, then the operating points solve as lanes (`op.solveLanes`)
-    /// and each publishes as it would alone. A batch whose devices print
-    /// display tasks runs its queries one after another instead. Every peer
-    /// ends with `published` or `peer_failure`; returns this query's own.
+    /// circuit, then the operating points (`op.solveLanes`) or `.dc` sweeps
+    /// (`dc.runLanes`) run as lanes and each publishes as it would alone. A
+    /// batch whose devices print display tasks runs its queries one after
+    /// another instead. Every peer ends with `published` or `peer_failure`;
+    /// returns this query's own.
     fn executeBatch(self: *Executor) QueryError!types.Result {
         const g = 1 + self.peers.len;
-        std.debug.assert(g <= lane_width and self.job == .op);
+        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc));
         var members: [lane_width]*Executor = undefined;
         members[0] = self;
         @memcpy(members[1..g], self.peers);
@@ -322,6 +324,22 @@ pub const Executor = struct {
         }
         if (n_live != 0 and (try members[live[0]].sayNames()).len != 0) {
             for (live[0..n_live]) |k| outcomes[k] = members[k].finishAlone();
+            return outcomes[0];
+        }
+        if (self.job == .dc) {
+            var ctxs: [lane_width]types.RunCtx = undefined;
+            for (live[0..n_live], 0..) |k, l| {
+                members[k].circuit.setSimState(.{ .kind = .dc });
+                ctxs[l] = members[k].runCtx();
+            }
+            var swept: [lane_width]dc.LaneOutcome = undefined;
+            if (n_live != 0) dc.runLanes(lane_width, ctxs[0..n_live], self.job.dc, swept[0..n_live]);
+            for (live[0..n_live], swept[0..n_live]) |k, o| {
+                outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
+                members[k].refuseLatched() catch |err| {
+                    outcomes[k] = err;
+                };
+            }
             return outcomes[0];
         }
         var ckts: [lane_width]*types.Circuit = undefined;
@@ -462,7 +480,12 @@ pub const Executor = struct {
 
     /// The analysis proper, from `x` (the operating point, or a `uic` start).
     fn finish(self: *Executor) !types.Result {
-        const run_ctx: types.RunCtx = .{
+        const run_ctx = self.runCtx();
+        return self.label(try run(&run_ctx, self.job));
+    }
+
+    fn runCtx(self: *Executor) types.RunCtx {
+        return .{
             .circuit = &self.circuit,
             .x_op = self.x.?,
             .probes = self.deck.probes,
@@ -477,7 +500,11 @@ pub const Executor = struct {
             .stream = self.stream,
             .measures = self.deck.measures,
         };
-        var res = try run(&run_ctx, self.job);
+    }
+
+    /// Names a finished result after the query's temperature and variant.
+    fn label(self: *Executor, result_in: types.Result) !types.Result {
+        var res = result_in;
         // Copies of one card at several temperatures keep apart by name.
         if (queryTemp(self.job)) |temp| res.plotname = try self.results.allocator().print("{s} (temp={d})", .{ res.plotname, temp });
         if (queryVariant(self.job)) |v| res.plotname = try self.results.allocator().print("{s} ({s})", .{ res.plotname, self.deck.variants.labels[v] });

@@ -426,7 +426,7 @@ test "--jobs determinism: results are byte-identical across lane counts and sche
     };
 }
 
-test "lane batches: OP rows at several temperatures group into batches and each equals its run alone, bitwise" {
+test "lane batches: OP and .dc rows at several temperatures group into batches and each equals its run alone, bitwise" {
     const t = std.testing;
     var lib = try Library.init(t.allocator);
     defer lib.deinit();
@@ -442,15 +442,22 @@ test "lane batches: OP rows at several temperatures group into batches and each 
     }
     var prepared = try b.compile();
     defer prepared.deinit();
-    const deck = bareDeck(&.{ vin, prev }, &.{ "v(in)", "v(out)" });
+    var deck = bareDeck(&.{ vin, prev }, &.{ "v(in)", "v(out)" });
+    deck.cards = &.{.{ .type = builtin("vsource"), .index = 0, .name = "v1" }};
     // More rows than one batch holds, and a lone tolerance set that groups
     // with nobody.
     const temps = [_]f64{ -40, 0, 27, 85, 150, 27, 400, 1000, 60, -10 };
-    var jobs: [temps.len + 1]requests.Query = undefined;
-    for (jobs[0..temps.len], temps) |*j, temp| j.* = .{ .op = .{ .tol = .{ .temp_c = temp } } };
-    jobs[temps.len] = .{ .op = .{ .tol = .{ .reltol = 1e-4 } } };
+    // Each temperature's OP, then a `.dc` of the source from that point.
+    var jobs: [2 * temps.len + 1]requests.Query = undefined;
+    const target: requests.Dc.SweepTarget = .{ .device = .{ .type = builtin("vsource") } };
+    for (jobs[0..temps.len], jobs[temps.len..][0..temps.len], temps) |*j, *d, temp| {
+        j.* = .{ .op = .{ .tol = .{ .temp_c = temp } } };
+        d.* = .{ .dc = .{ .target = target, .start = 0, .stop = 3, .step = 0.25, .tol = .{ .temp_c = temp } } };
+    }
+    jobs[2 * temps.len] = .{ .op = .{ .tol = .{ .reltol = 1e-4 } } };
     var out: [2][]f64 = undefined;
     var batched: usize = 0;
+    var dc_batched: usize = 0;
     for ([_]bool{ false, true }, &out) |lanes, *o| {
         var config: @import("../executor.zig").Config = .{};
         config.knobs.lanes = lanes;
@@ -460,13 +467,16 @@ test "lane batches: OP rows at several temperatures group into batches and each 
         _ = try s.append(&jobs, &ids);
         try s.runAll(.{ .max_parallel = 2, .quantum = .completion });
         try t.expectEqual(null, s.failure());
-        for (s.rows.items(.executor)) |e| batched += e.?.peers.len;
+        for (s.rows.items(.executor), s.rows.items(.job)) |e, j| {
+            batched += e.?.peers.len;
+            dc_batched += if (j == .dc) e.?.peers.len else 0;
+        }
         var list: std.ArrayList(f64) = .empty;
         errdefer list.deinit(t.allocator);
         for (ids) |id| try list.appendSlice(t.allocator, (try s.result(id)).data);
         o.* = try list.toOwnedSlice(t.allocator);
     }
     defer for (out) |o| t.allocator.free(o);
-    try t.expect(batched > 0);
+    try t.expect(batched > 0 and dc_batched > 0);
     try t.expectEqualSlices(u64, @ptrCast(out[0]), @ptrCast(out[1]));
 }
