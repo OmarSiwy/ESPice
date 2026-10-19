@@ -277,8 +277,9 @@ pub const Solver = struct {
                 return;
             } else |_| try self.demote(),
             // A singular block, or a Schur reduction too unstable to refine.
-            .bbd => |*eng| if (eng.factorWithExecution(vals, execution)) |_| {
-                if (!(eng.growth > bbd_refine_growth) or self.probeBbd(eng, vals)) {
+            // BBD wants one value per pattern entry: drop the trash slot past it.
+            .bbd => |*eng| if (eng.factorWithExecution(vals[0..self.col_ptr[self.n]], execution)) |_| {
+                if (!(eng.growth > bbd_refine_growth) or self.probeBbd(eng, vals[0..self.col_ptr[self.n]])) {
                     self.factored = true;
                     return;
                 }

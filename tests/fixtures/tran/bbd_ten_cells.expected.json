@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Ten small subcircuit instances select the BBD LU; regression for the trash-slot read in its factor.",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Each cell is one RC driven by a 0-to-1 V ramp of t_r = 10 ps. For t > t_r, v(t) = 1 - (tau/t_r) (exp(-(t - t_r)/tau) - exp(-t/tau)) with tau = R C, R = 1k + 100k ohm (k = 0..9), C = 1 pF, read at t = 1.5 ns."
+  },
+  "expect": {
+    "status": "success",
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "v0",
+        "value": 0.7757504608991097,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v1",
+        "value": 0.7431049043542239,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v2",
+        "value": 0.712298110205233,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v3",
+        "value": 0.6833624499577281,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v4",
+        "value": 0.6562549454978652,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v5",
+        "value": 0.6308915644439796,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v6",
+        "value": 0.6071680522354352,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v7",
+        "value": 0.5849724282278287,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v8",
+        "value": 0.5641923355511371,
+        "rtol": 0.001,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "v9",
+        "value": 0.5447192198200841,
+        "rtol": 0.001,
+        "atol": 0
+      }
+    ]
+  }
+}
