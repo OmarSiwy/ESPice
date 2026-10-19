@@ -173,7 +173,8 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
     ```text
       Tangents for Transient Analysis
 
-    d(tpd)/d(rv) = 6.931472e-14
+    d(tpd)/d(rv) = 6.560399e-14
+    d(tpd)/d(cv) = 6.560684e2
     ```
 
     A name no `.param` defines, a name a `.meas` or analysis card reads, a
