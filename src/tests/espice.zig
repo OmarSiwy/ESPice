@@ -1075,6 +1075,38 @@ test "--warm-start: every point starts from one nominal OP, so bytes match at ev
     }
 }
 
+test "Problem.append_points: warm-started points measure what cold ones do" {
+    const template =
+        \\points
+        \\.param rl=1k
+        \\V1 d 0 2
+        \\V2 g 0 pulse(0 2 1n 1n 1n 5n 20n)
+        \\R1 d o 'rl'
+        \\M1 o g 0 0 nm l=1u w=1u
+        \\C1 o 0 1p
+        \\.model nm nmos level=1 vto=0.5 kp=2m
+        \\.tran 0.1n 20n
+        \\.meas tran tf trig v(g) val=1 rise=1 targ v(o) val=1 fall=1
+        \\.end
+        \\
+    ;
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = template, .origin = "points.sp" } }, .dialect = .hspice, .live_params = &.{"rl"}, .max_parallel = 3 });
+    defer p.deinit();
+    const values = [_]f64{ 800, 1.5e3, 2.5e3 };
+    const cold = try p.append_points(&values, values.len, .{});
+    const warm = try p.append_points(&values, values.len, .{ .warm_start = true });
+    try p.run_all();
+    var tf: [2][values.len]f64 = undefined;
+    var reasons: [values.len]api.Problem.Reason = undefined;
+    for ([_]api.QueryId{ cold, warm }, &tf) |first, *out| {
+        try p.point_measures(first, &.{"tf"}, out, &reasons);
+        for (reasons) |r| try t.expectEqual(api.Problem.Reason.ok, r);
+    }
+    for (tf[0], tf[1]) |c, w| try t.expectApproxEqRel(c, w, 1e-6);
+    // The warm points' operating points have their own prerequisite.
+    try t.expect((try p.query_info(warm)).dependency.? != (try p.query_info(cold)).dependency.?);
+}
+
 test "Problem: an optimization takes the same path one point at a time and batched" {
     const fit =
         \\* common-source stage: fit the width and load to two points of the transfer curve
