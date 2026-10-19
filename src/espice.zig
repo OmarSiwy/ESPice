@@ -255,6 +255,7 @@ pub const Problem = struct {
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
         else
             try withPoint(scratch, self.prepared.deck.queries, point);
+        if (point.warm_start) try self.solveWarmOp(jobs);
         const ids = try scratch.alloc(QueryId, jobs.len);
         _ = try self.append_queries(jobs, ids);
         self.runs = try a.alloc(Run, self.prepared.runs.len);
@@ -443,6 +444,7 @@ pub const Problem = struct {
         try self.checkOutput(&self.prepared, template_jobs);
         const tangent = options.tangent_step > 0;
         if (tangent) for (template_jobs) |job| if (job == .tran and !self.tangentable(job)) return error.TangentsUnavailable;
+        if (options.warm_start) try self.solveWarmOp(template_jobs);
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -533,6 +535,28 @@ pub const Problem = struct {
         }
         steps.* = dp;
         return rows;
+    }
+
+    /// Solves the template's nominal operating point into `Deck.warm_op`,
+    /// once, with the tolerances of the first transient in `jobs`; nothing
+    /// without one. A nominal point that does not converge leaves it empty,
+    /// so every point starts cold.
+    fn solveWarmOp(self: *Problem, jobs: []const Query) !void {
+        if (self.prepared.deck.warm_op.len != 0) return;
+        const tran = for (jobs) |job| {
+            if (job == .tran) break job.tran;
+        } else return;
+        var tol = tran.tol;
+        tol.variant = null;
+        tol.temp_c = null;
+        var deck = self.prepared.deck;
+        var session = analysis.session.Session.init(self.workerAllocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
+        defer session.deinit();
+        var id: [1]QueryId = undefined;
+        _ = try session.append(&.{.{ .op = .{ .tol = tol, .tran_op = true } }}, &id);
+        try session.runAll(.{ .quantum = .completion });
+        const x = try session.operatingPoint(id[0]) orelse return;
+        self.prepared.deck.warm_op = try self.arena.allocator().dupe(f64, x);
     }
 
     /// Why a point produced no value, or not all of them: the C API's
@@ -785,25 +809,22 @@ pub const Problem = struct {
         try self.optimize();
         try self.age();
         try self.openStream();
-        const ids = try self.allocator.alloc(QueryId, self.query_count());
-        defer self.allocator.free(ids);
-        const events = try self.allocator.alloc(Advance, @min(ids.len, self.limits.max_parallel));
-        defer self.allocator.free(events);
-        while (!self.finished()) {
-            const n = try self.ready_queries(.all, ids);
-            if (n == 0) return error.SchedulingFailure;
-            // The same bounded frontier `print` marks NEXT for a run_all preview.
-            const selected = @min(n, events.len);
-            // Whole-query quanta: nothing here reads intermediate progress,
-            // except the in-depth timing, which reports per checkpoint.
-            const quantum: Limits = .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.session.config.timing_in_depth) .checkpoint else .completion };
-            _ = try self.stepReady(ids[0..selected], quantum, events);
+        // Whole-query quanta: nothing here reads intermediate progress,
+        // except the in-depth timing, which reports per checkpoint. The
+        // variant runs share the pool, after the main session's ready queries.
+        var pool: analysis.session.Pool = try .init(self.allocator, self.io, .{ .max_parallel = self.limits.max_parallel, .quantum = if (self.session.config.timing_in_depth) .checkpoint else .completion });
+        defer pool.deinit();
+        try pool.add(&self.session);
+        for (self.runs) |*run| try pool.add(&run.session);
+        while (true) {
+            pool.fill(&self.session);
+            for (self.runs) |*run| pool.fill(&run.session);
+            if (!pool.wait()) break;
+            self.deliverRuns();
         }
-        self.deliverFrom(&self.session, &self.next_output);
-        for (self.runs) |*run| {
-            try runSession(&run.session, self.limits.max_parallel);
-            self.deliverFrom(&run.session, &run.next_output);
-        }
+        self.deliverRuns();
+        if (!self.finished()) return error.SchedulingFailure;
+        for (self.runs) |*run| if (!run.session.finished()) return error.SchedulingFailure;
         if (self.session.failure()) |err| return err;
         for (self.runs) |*run| if (run.session.failure()) |err| return err;
         if (self.delivery_error != null) return error.DeliveryFailed;
@@ -1108,7 +1129,7 @@ pub const Problem = struct {
         defer session.deinit();
         var id: [1]QueryId = undefined;
         _ = try session.append(&.{.{ .tran = m.tran }}, &id);
-        try runSession(&session, self.limits.max_parallel);
+        try session.runAll(.{ .max_parallel = self.limits.max_parallel, .quantum = .completion });
         if (session.failure()) |err| return err;
         const aged = try analysis.mosra.age(a, m, try session.result(id[0]));
         if (m.aged_runs) self.prepared.deck.variants.values = aged.values;
@@ -1190,7 +1211,7 @@ pub const Problem = struct {
         defer session.deinit();
         const ids = try a.alloc(QueryId, jobs.len);
         _ = try session.append(jobs, ids);
-        try runSession(&session, self.limits.max_parallel);
+        try session.runAll(.{ .max_parallel = self.limits.max_parallel, .quantum = .completion });
         first.clearRetainingCapacity();
         if (try session.operatingPoint(ids[0])) |x| try first.appendSlice(self.allocator, x);
         const values = try a.alloc(f64, deck.measures.len);
@@ -1213,6 +1234,17 @@ pub const Problem = struct {
                 if (measure.analysis == info.kind) r.* = measure.goalError(values[card]).?;
             }
         };
+    }
+
+    /// Publishes what has completed, the main session's results first, then
+    /// each variant run's once every earlier one has published all of its.
+    fn deliverRuns(self: *Problem) void {
+        self.deliverFrom(&self.session, &self.next_output);
+        if (self.next_output != self.session.outputs.items.len) return;
+        for (self.runs) |*run| {
+            self.deliverFrom(&run.session, &run.next_output);
+            if (run.next_output != run.session.outputs.items.len) return;
+        }
     }
 
     /// Publishes `session`'s completed results in request order from
@@ -1337,21 +1369,6 @@ fn queryFailure(session: *const analysis.session.Session, id: QueryId) !?anyerro
         if ((try session.info(dep)).failure) |cause| return @as(?anyerror, cause);
     };
     return @as(?anyerror, info.failure orelse error.QueryCancelled);
-}
-
-/// Runs every query of a variant run's session to completion, whole
-/// queries at a time.
-fn runSession(session: *analysis.session.Session, max_parallel: u16) !void {
-    const gpa = session.allocator;
-    const ids = try gpa.alloc(QueryId, session.count());
-    defer gpa.free(ids);
-    const events = try gpa.alloc(Advance, @max(1, @min(ids.len, max_parallel)));
-    defer gpa.free(events);
-    while (!session.finished()) {
-        const n = try session.readyQueries(.all, ids);
-        if (n == 0) return error.SchedulingFailure;
-        _ = try session.advanceReady(ids[0..@min(n, events.len)], .{ .max_parallel = max_parallel, .quantum = .completion }, events);
-    }
 }
 
 /// Appends `session`'s completed Monte Carlo trial results of `kind`.

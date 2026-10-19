@@ -225,6 +225,13 @@ pub const Deck = struct {
     /// optimizer sets it on the decks of its point sessions
     /// (dev/analysis/optimize.md).
     op_guess: []const f64 = &.{},
+    /// The template's nominal operating point: the first Newton iterate of
+    /// every operating point that asks for a warm start
+    /// (`query.Op.warm_start`, from a transient's
+    /// `PointOptions.warm_start`) when `op_guess` is empty. Empty until
+    /// `Problem` solves it, and then fixed, so a point's start never
+    /// depends on which points ran before it.
+    warm_op: []const f64 = &.{},
     /// `.options` tolerances every query starts from.
     deck_tol: numerics.Tolerances,
     /// `.temp` or `.options temp`, in °C, when given.

@@ -977,6 +977,136 @@ test "same deck, same bytes: run twice, any solver_threads, any device_threads" 
     }
 }
 
+/// What a final-plan run of `jobs_deck` writes at `jobs`, as the CLI runs
+/// it: the raw file and `.meas` text, which the caller frees, and the
+/// main session's four points' `tf`.
+const JobsRun = struct { raw: []u8, measures: []u8, tf: [4]f64 };
+
+fn runJobs(tmp: *const std.testing.TmpDir, jobs: u16, warm_start: bool) !JobsRun {
+    var name_buf: [32]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "jobs{d}{s}.raw", .{ jobs, if (warm_start) "w" else "" });
+    const path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+    defer t.allocator.free(path);
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = jobs_deck, .origin = "jobs.sp" } },
+        .dialect = .hspice,
+        .output = .{ .path = path },
+        .backend = .{ .final_plan = true },
+        .max_parallel = jobs,
+        .point = .{ .warm_start = warm_start },
+    });
+    defer p.deinit();
+    try p.run_all();
+    var run: JobsRun = .{ .raw = &.{}, .measures = &.{}, .tf = undefined };
+    var reasons: [4]api.Problem.Reason = undefined;
+    try p.point_measures(try find(p, .tran), &.{"tf"}, &run.tf, &reasons);
+    for (reasons) |r| try t.expectEqual(api.Problem.Reason.ok, r);
+    var measures: std.Io.Writer.Allocating = .init(t.allocator);
+    errdefer measures.deinit();
+    var errors: std.Io.Writer.Allocating = .init(t.allocator);
+    defer errors.deinit();
+    try p.print_measures(&measures.writer, &errors.writer);
+    try t.expectEqual(@as(usize, 0), errors.written().len);
+    run.raw = try tmp.dir.readFileAlloc(t.io, name, t.allocator, .unlimited);
+    run.measures = try measures.toOwnedSlice();
+    return run;
+}
+
+// Points 3 and 5 move M1 to the other bin, so they run as variant
+// sessions in the same pool; the rest are rows of one template.
+const jobs_deck =
+    \\sweep jobs
+    \\.param wn=1u rl=1k
+    \\V1 d 0 2
+    \\V2 g 0 pulse(0 2 1n 1n 1n 5n 20n)
+    \\R1 d o 'rl'
+    \\M1 o g 0 0 nm l=1u w='wn'
+    \\C1 o 0 1p
+    \\.model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5 kp=2m
+    \\.model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=0.7 kp=1m
+    \\.data pts wn rl
+    \\+ 1u 1k
+    \\+ 1.05u 2k
+    \\+ 2u 1k
+    \\+ 1.1u 500
+    \\+ 2.05u 3k
+    \\+ 0.95u 1.5k
+    \\.enddata
+    \\.tran 0.1n 20n sweep data=pts
+    \\.meas tran tf trig v(g) val=1 rise=1 targ v(o) val=1 fall=1
+    \\.end
+    \\
+;
+
+test "a .data sweep writes the same bytes at every --jobs, its bin-moving points included" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const serial = try runJobs(&tmp, 1, false);
+    defer t.allocator.free(serial.raw);
+    defer t.allocator.free(serial.measures);
+    try t.expectEqual(@as(usize, 6), std.mem.count(u8, serial.raw, "Plotname: Transient Analysis ("));
+    try t.expectEqual(@as(usize, 6), std.mem.count(u8, serial.measures, "tf "));
+    for ([_]u16{ 2, 3, 8 }) |jobs| {
+        const again = try runJobs(&tmp, jobs, false);
+        defer t.allocator.free(again.raw);
+        defer t.allocator.free(again.measures);
+        try t.expectEqualSlices(u8, serial.raw, again.raw);
+        try t.expectEqualStrings(serial.measures, again.measures);
+    }
+}
+
+test "--warm-start: every point starts from one nominal OP, so bytes match at every --jobs" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const cold = try runJobs(&tmp, 1, false);
+    defer t.allocator.free(cold.raw);
+    defer t.allocator.free(cold.measures);
+    const warm = try runJobs(&tmp, 1, true);
+    defer t.allocator.free(warm.raw);
+    defer t.allocator.free(warm.measures);
+    // The same operating points within Newton's tolerances.
+    for (cold.tf, warm.tf) |c, w| try t.expectApproxEqRel(c, w, 1e-6);
+    for ([_]u16{ 3, 8 }) |jobs| {
+        const again = try runJobs(&tmp, jobs, true);
+        defer t.allocator.free(again.raw);
+        defer t.allocator.free(again.measures);
+        try t.expectEqualSlices(u8, warm.raw, again.raw);
+        try t.expectEqualStrings(warm.measures, again.measures);
+    }
+}
+
+test "Problem.append_points: warm-started points measure what cold ones do" {
+    const template =
+        \\points
+        \\.param rl=1k
+        \\V1 d 0 2
+        \\V2 g 0 pulse(0 2 1n 1n 1n 5n 20n)
+        \\R1 d o 'rl'
+        \\M1 o g 0 0 nm l=1u w=1u
+        \\C1 o 0 1p
+        \\.model nm nmos level=1 vto=0.5 kp=2m
+        \\.tran 0.1n 20n
+        \\.meas tran tf trig v(g) val=1 rise=1 targ v(o) val=1 fall=1
+        \\.end
+        \\
+    ;
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = template, .origin = "points.sp" } }, .dialect = .hspice, .live_params = &.{"rl"}, .max_parallel = 3 });
+    defer p.deinit();
+    const values = [_]f64{ 800, 1.5e3, 2.5e3 };
+    const cold = try p.append_points(&values, values.len, .{});
+    const warm = try p.append_points(&values, values.len, .{ .warm_start = true });
+    try p.run_all();
+    var tf: [2][values.len]f64 = undefined;
+    var reasons: [values.len]api.Problem.Reason = undefined;
+    for ([_]api.QueryId{ cold, warm }, &tf) |first, *out| {
+        try p.point_measures(first, &.{"tf"}, out, &reasons);
+        for (reasons) |r| try t.expectEqual(api.Problem.Reason.ok, r);
+    }
+    for (tf[0], tf[1]) |c, w| try t.expectApproxEqRel(c, w, 1e-6);
+    // The warm points' operating points have their own prerequisite.
+    try t.expect((try p.query_info(warm)).dependency.? != (try p.query_info(cold)).dependency.?);
+}
+
 test "Problem: an optimization takes the same path one point at a time and batched" {
     const fit =
         \\* common-source stage: fit the width and load to two points of the transfer curve

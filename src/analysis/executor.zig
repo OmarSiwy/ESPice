@@ -30,7 +30,11 @@ const converger = @import("solver").converger;
 // to compile at `execute`.
 pub const QueryError = types.ErrorOf(run) || types.ErrorOf(op.solve) || types.ErrorOf(ParEval.init) ||
     gpu.InitError || types.ErrorOf(gpu.GpuContext.syncHostState) || types.ErrorOf(types.Circuit.workspace) ||
-    std.mem.Allocator.Error || error{ OpDidNotConverge, DeviceRefused, QueryCancelled };
+    std.mem.Allocator.Error || error{ OpDidNotConverge, DeviceRefused, QueryCancelled } ||
+    // `materialize`'s parts.
+    types.ErrorOf(types.Circuit.fromSnapshot) || types.ErrorOf(types.Circuit.fromSnapshotMove) ||
+    types.ErrorOf(types.Circuit.instantiate) || types.ErrorOf(types.Circuit.instantiateMove) ||
+    types.ErrorOf(types.Circuit.recompute) || types.ErrorOf(types.Circuit.collectParams) || error{InvalidAcOverride};
 
 /// Per-problem execution settings, shared by every query.
 pub const Config = struct {
@@ -91,24 +95,32 @@ pub const Executor = struct {
     controller: Controller,
     x: ?[]f64 = null,
     published: ?types.Result = null,
+    /// What `materialize` builds `circuit` from (`create`).
+    initial: ?*Executor,
+    take: bool,
+    /// `circuit` holds a built circuit that `destroy` frees.
+    built: bool = false,
     /// `RunCtx.stream` for this query.
     stream: ?*std.Io.Writer = null,
 
     /// What one `wait` saw: a checkpoint, the result, an error or a cancel.
     pub const Outcome = Controller.Outcome;
 
-    /// Builds the executor without starting it. `initial`, when given, must be
+    /// Builds the executor without starting it; its circuit is built on
+    /// the worker thread when the first quantum starts (`materialize`), so
+    /// the coordinator only books the query. `initial`, when given, must be
     /// a completed `.op` query over the same topology; its device state and
-    /// operating point seed this one. With `take`, this is the last query
-    /// that will read `initial` (or, without one, the template), so its
-    /// device state moves here instead of being copied, and `initial`'s
-    /// circuit may be left empty: its result and operating point stay readable,
-    /// but nothing may evaluate it again. Fails with
-    /// `error.InvalidOperatingPoint` when `initial` is not such a query,
-    /// with `validateBackend`'s errors, with `error.InvalidAcOverride` when an
-    /// AC override names no device parameter, and with
-    /// `error.TopologyChanged` when the query's variant or temperature
-    /// re-wires a device. Caller frees it with `destroy`.
+    /// operating point seed this one, and the caller keeps them unchanged
+    /// until this query's first quantum stops. With `take`, this is the last
+    /// query that will read `initial` (or, without one, the template), so
+    /// its device state moves here instead of being copied, and `initial`'s
+    /// circuit may be left empty: its result and operating point stay
+    /// readable, but nothing may evaluate it again. Fails with
+    /// `error.InvalidOperatingPoint` when `initial` is not such a query and
+    /// with `validateBackend`'s errors. The run fails with
+    /// `error.InvalidAcOverride` when an AC override names no device
+    /// parameter, and with `error.TopologyChanged` when the query's variant
+    /// or temperature re-wires a device. Caller frees it with `destroy`.
     pub fn create(allocator: std.mem.Allocator, io: std.Io, topology: *const Circuit, deck: *const Deck, job: requests.Query, initial: ?*Executor, take: bool, config: Config) !*Executor {
         try validateBackend(config);
         if (initial) |source| {
@@ -116,7 +128,6 @@ pub const Executor = struct {
                 return error.InvalidOperatingPoint;
         }
         const self = try allocator.create(Executor);
-        errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
             .io = io,
@@ -124,33 +135,49 @@ pub const Executor = struct {
             .deck = deck,
             .job = job,
             .config = config,
-            .circuit = if (initial) |source|
-                if (take)
-                    try types.Circuit.fromSnapshotMove(topology, &source.circuit, allocator)
-                else
-                    try types.Circuit.fromSnapshot(topology, &source.circuit, allocator)
-            else if (take)
-                try types.Circuit.instantiateMove(topology, allocator)
-            else
-                try types.Circuit.instantiate(topology, allocator),
+            .circuit = undefined,
             .work = std.heap.ArenaAllocator.init(allocator),
             .results = std.heap.ArenaAllocator.init(allocator),
             .controller = undefined,
+            .initial = initial,
+            .take = take,
         };
-        errdefer self.circuit.deinit();
-        errdefer self.work.deinit();
-        errdefer self.results.deinit();
+        self.controller = Controller.init(io, self, execute, .{ .report_nonlinear = job == .op });
+        return self;
+    }
+
+    /// The circuit copy, variant and AC overrides `create` deferred, built
+    /// on the worker thread before the analysis runs.
+    fn materialize(self: *Executor) !void {
+        const started = if (self.controller.options.timing_query != null) std.Io.Timestamp.now(self.io, .awake) else null;
+        const topology = self.topology;
+        const allocator = self.allocator;
+        self.circuit = if (self.initial) |source|
+            if (self.take)
+                try types.Circuit.fromSnapshotMove(topology, &source.circuit, allocator)
+            else
+                try types.Circuit.fromSnapshot(topology, &source.circuit, allocator)
+        else if (self.take)
+            try types.Circuit.instantiateMove(topology, allocator)
+        else
+            try types.Circuit.instantiate(topology, allocator);
+        self.built = true;
         // The multicore refactor follows the device threads unless the
         // solver's own count is set (ESPICE_SOLVER_THREADS).
+        const config = self.config;
         const lu_threads: u8 = @intCast(@min(if (config.solver_threads > 1) config.solver_threads else config.device_threads, 16));
-        self.circuit.configure(.{ .io = io, .threads = config.solver_threads, .lu_threads = lu_threads }, config.knobs);
-        if (initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
+        self.circuit.configure(.{ .io = self.io, .threads = config.solver_threads, .lu_threads = lu_threads }, config.knobs);
+        if (self.initial) |source| self.x = try self.work.allocator().dupe(f64, source.operatingPoint().?);
         // A dependent copies its prerequisite's circuit, variant included.
-        if (initial == null) try self.installVariant();
+        if (self.initial == null) try self.installVariant();
         try self.bindAcOverrides();
-        self.controller = Controller.init(io, self, execute, .{ .report_nonlinear = job == .op });
         self.circuit.progress = self.controller.callback();
-        return self;
+        if (started) |t0| {
+            const elapsed = t0.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;
+            std.debug.print("timing: query {d} {s} setup: {d:.6}ms\n", .{
+                @backingInt(self.controller.options.timing_query.?), @tagName(self.job), @as(f64, @floatFromInt(elapsed)) / 1e6,
+            });
+        }
     }
 
     /// Writes the query's variant parameters and temperature, then
@@ -194,8 +221,9 @@ pub const Executor = struct {
     }
 
     /// Runs the query up to where `quantum` lets it stop, without waiting.
-    pub fn start(self: *Executor, quantum: Quantum) !void {
-        try self.controller.start(quantum);
+    /// `signal`, when given, is posted once when the quantum stops.
+    pub fn start(self: *Executor, quantum: Quantum, signal: ?*std.Io.Semaphore) !void {
+        try self.controller.start(quantum, signal);
     }
 
     /// Waits for the quantum `start` began and publishes a completed result.
@@ -203,6 +231,11 @@ pub const Executor = struct {
         const outcome = try self.controller.wait();
         if (outcome == .complete) self.published = outcome.complete;
         return outcome;
+    }
+
+    /// Whether the started quantum has stopped, so `wait` will not block.
+    pub fn stopped(self: *Executor) bool {
+        return self.controller.stopped();
     }
 
     /// Asks the worker to stop at its next checkpoint; see `Worker.cancel`.
@@ -225,7 +258,7 @@ pub const Executor = struct {
     /// Cancels and joins the worker, then frees everything the query owns.
     pub fn destroy(self: *Executor) void {
         self.controller.deinit();
-        self.circuit.deinit();
+        if (self.built) self.circuit.deinit();
         self.work.deinit();
         self.results.deinit();
         self.allocator.destroy(self);
@@ -239,6 +272,7 @@ pub const Executor = struct {
     // iterate if that turns out slow.
     fn execute(ctx: *anyopaque) QueryError!types.Result {
         const self: *Executor = @ptrCast(@alignCast(ctx));
+        try self.materialize();
         const res = self.runQuery() catch |err| {
             try self.refuseLatched();
             return err;
@@ -314,7 +348,10 @@ pub const Executor = struct {
                 std.debug.assert(self.deck.op_guess.len == self.circuit.n);
                 @memcpy(self.x.?, self.deck.op_guess);
                 options.warm_start = true;
-            }
+            } else if (options.warm_start and self.deck.warm_op.len != 0) {
+                std.debug.assert(self.deck.warm_op.len == self.circuit.n);
+                @memcpy(self.x.?, self.deck.warm_op);
+            } else options.warm_start = false;
             const solved = try op.solve(&self.circuit, self.x.?, options, self.deck.nodeset, self.deck.ic);
             if (!solved.converged) return error.OpDidNotConverge;
             if (gpu_context) |g| try g.syncHostState();

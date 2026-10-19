@@ -50,6 +50,9 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
         /// worker thread resumes, read only by that thread.
         quantum: Quantum = .checkpoint,
         cancel_requested: std.atomic.Value(bool) = .init(false),
+        /// Posted once when the running quantum stops (a park or the end),
+        /// then cleared: the coordinator's shared wake-up (`Session.Pool`).
+        signal: ?*std.Io.Semaphore = null,
         timed_from: ?std.Io.Timestamp = null,
         active_ns: i96 = 0,
 
@@ -82,14 +85,17 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
         }
 
         /// Starts or resumes one quantum without waiting, so the coordinator
-        /// can start several. A failed thread spawn leaves the worker unstarted
-        /// and retryable; `error.AlreadyRunning` if a quantum is in flight.
-        /// Single-threaded, the first `start` runs the analysis to completion
-        /// before it returns.
-        pub fn start(self: *Self, quantum: Quantum) !void {
+        /// can start several, and posts `signal` once when it stops. A failed
+        /// thread spawn leaves the worker unstarted and retryable;
+        /// `error.AlreadyRunning` if a quantum is in flight. Single-threaded,
+        /// the first `start` runs the analysis to completion before it returns.
+        pub fn start(self: *Self, quantum: Quantum, signal: ?*std.Io.Semaphore) !void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            if (self.state != .running) self.quantum = quantum;
+            if (self.state != .running) {
+                self.quantum = quantum;
+                self.signal = signal;
+            }
             switch (self.state) {
                 .created => {
                     self.state = .running;
@@ -103,6 +109,7 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
                     } else {
                         self.thread = std.Thread.spawn(.{ .stack_size = stack_size }, main, .{self}) catch |err| {
                             self.state = .created;
+                            self.signal = null;
                             return err;
                         };
                     }
@@ -114,6 +121,18 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
                 .running => return error.AlreadyRunning,
                 .finished => {},
             }
+        }
+
+        /// Whether the quantum `start` began has stopped, so `wait` returns
+        /// without blocking.
+        pub fn stopped(self: *Self) bool {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return switch (self.state) {
+                .running => false,
+                .paused => !self.cancel_requested.load(.monotonic),
+                .created, .finished => true,
+            };
         }
 
         /// Waits for the quantum `start` began, or returns the terminal
@@ -151,7 +170,7 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
 
         /// `start` then `wait`, one checkpoint quantum.
         pub fn advance(self: *Self) !Outcome {
-            try self.start(.checkpoint);
+            try self.start(.checkpoint, null);
             return self.wait();
         }
 
@@ -197,6 +216,7 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
 
             self.state = .{ .paused = event };
             self.changed.broadcast(self.io);
+            self.post();
             while (self.state == .paused and !self.cancel_requested.load(.monotonic))
                 self.changed.waitUncancelable(self.io, &self.mutex);
             if (self.cancel_requested.load(.monotonic)) return error.QueryCancelled;
@@ -225,6 +245,15 @@ pub fn Worker(comptime Error: type, comptime Product: type) type {
             defer self.mutex.unlock(self.io);
             self.state = .{ .finished = if (self.cancel_requested.load(.monotonic)) error.QueryCancelled else result };
             self.changed.broadcast(self.io);
+            self.post();
+        }
+
+        /// Posts and clears `signal`; the caller holds `mutex`. A later
+        /// stop, such as a cancel at teardown, posts nothing.
+        fn post(self: *Self) void {
+            const s = self.signal orelse return;
+            self.signal = null;
+            s.post(self.io);
         }
     };
 }

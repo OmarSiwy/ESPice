@@ -122,12 +122,12 @@ test "independent workers enter concurrently and preserve separate state" {
     defer two.deinit();
     first.callback = one.callback();
     second.callback = two.callback();
-    try one.start(.checkpoint);
-    try two.start(.checkpoint);
+    try one.start(.checkpoint, null);
+    try two.start(.checkpoint, null);
     try std.testing.expectEqual(@as(u64, 10), (try one.wait()).progress.completed);
     try std.testing.expectEqual(@as(u64, 20), (try two.wait()).progress.completed);
-    try two.start(.checkpoint);
-    try one.start(.checkpoint);
+    try two.start(.checkpoint, null);
+    try one.start(.checkpoint, null);
     try std.testing.expectEqual(@as(u32, 11), (try one.wait()).complete);
     try std.testing.expectEqual(@as(u32, 21), (try two.wait()).complete);
 }
@@ -169,7 +169,7 @@ test "suppressed nonlinear checkpoints still observe cancellation" {
     var worker = Worker(anyerror, void).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
-    try worker.start(.checkpoint);
+    try worker.start(.checkpoint, null);
     ctx.entered.waitUncancelable(std.testing.io);
     worker.cancel();
     try std.testing.expect((try worker.wait()) == .cancelled);
@@ -242,8 +242,8 @@ test "a second start while a quantum runs is refused" {
     var worker = Worker(anyerror, u8).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
-    try worker.start(.checkpoint);
-    try std.testing.expectError(error.AlreadyRunning, worker.start(.checkpoint));
+    try worker.start(.checkpoint, null);
+    try std.testing.expectError(error.AlreadyRunning, worker.start(.checkpoint, null));
     ctx.go.set(std.testing.io);
     try std.testing.expect((try worker.wait()) == .progress);
     try std.testing.expectEqual(@as(u8, 7), (try worker.advance()).complete);
@@ -270,7 +270,7 @@ test "a completion quantum runs through every checkpoint" {
     var worker = Worker(anyerror, u32).init(std.testing.io, &ctx, Context.run, .{});
     defer worker.deinit();
     ctx.callback = worker.callback();
-    try worker.start(.completion);
+    try worker.start(.completion, null);
     try std.testing.expectEqual(@as(u32, 5), (try worker.wait()).complete);
     try std.testing.expect(worker.thread == null);
 }

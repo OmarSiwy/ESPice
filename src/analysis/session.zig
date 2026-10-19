@@ -102,6 +102,14 @@ const Row = struct {
     /// The circuit the query instantiates: 0 for `topology`, k for
     /// `templates[k - 1]`.
     template: u32 = 0,
+    /// Rows that read this one's device state (its dependents) and have
+    /// not yet stopped a first quantum, which is when their copy is done.
+    readers: u32 = 0,
+    /// The newest dependent and the next older one sharing `dependency`.
+    child: QueryId = none,
+    sibling: QueryId = none,
+    /// A quantum is in flight; `settle` collects it.
+    running: bool = false,
 };
 
 /// The query graph over one prepared circuit and deck, both borrowed for the
@@ -120,6 +128,17 @@ pub const Session = struct {
     request_arenas: std.ArrayList(std.heap.ArenaAllocator) = .empty,
     /// Round-robin start for `readyQueries`.
     cursor: u32 = 0,
+    /// Every OP row by template and options, for `append` to share one.
+    ops: OpIndex = .empty,
+    /// Rows with no dependency that have not yet stopped a first quantum:
+    /// the template's readers, as `Row.readers` counts a row's.
+    root_readers: u32 = 0,
+    /// A `Pool`'s view: ready rows in row order from `queue_head`, and the
+    /// rows that turned ready since (a finished OP's dependents, a parked
+    /// query), taken first.
+    queue: std.ArrayList(u32) = .empty,
+    queue_head: usize = 0,
+    urgent: std.ArrayList(u32) = .empty,
     /// No other session reads `topology`'s device state after this one, so
     /// under `config.final_plan` its last root query evaluates the template's
     /// own batches instead of a copy (`Circuit.instantiateMove`). Set by
@@ -176,6 +195,9 @@ pub const Session = struct {
         self.rows.deinit(self.allocator);
         self.outputs.deinit(self.allocator);
         self.templates.deinit(self.allocator);
+        self.ops.deinit(self.allocator);
+        self.queue.deinit(self.allocator);
+        self.urgent.deinit(self.allocator);
         for (self.request_arenas.items) |*arena| arena.deinit();
         self.request_arenas.deinit(self.allocator);
         self.* = undefined;
@@ -207,15 +229,27 @@ pub const Session = struct {
         errdefer candidate.deinit(self.allocator);
         try candidate.ensureTotalCapacity(self.allocator, max_rows);
         for (0..self.rows.len) |i| candidate.appendAssumeCapacity(self.rows.get(i));
+        const old_len = self.rows.len;
+        try self.ops.ensureUnusedCapacity(self.allocator, @intCast(max_rows - old_len));
+        // All-or-nothing: drop the OP rows this call indexed.
+        errdefer for (old_len..candidate.len) |i| if (candidate.items(.job)[i] == .op) {
+            const key: OpKey = .{ .template = candidate.items(.template)[i], .op = candidate.items(.job)[i].op };
+            if (self.ops.get(key)) |at| if (@backingInt(at) == i) {
+                _ = self.ops.remove(key);
+            };
+        };
         const new_ids = try a.alloc(QueryId, jobs.len);
-        for (jobs, new_ids, 0..) |job, *id, k| {
+        // Whether job k's id joins `outputs`: a new row, or an OP first requested now.
+        const fresh = try a.alloc(bool, jobs.len);
+        var roots: u32 = 0;
+        for (jobs, new_ids, fresh, 0..) |job, *id, *new, k| {
             const template = if (templates) |t| t[k] else self.template;
             std.debug.assert(template <= self.templates.items.len);
             try validateDeck(job, self.topology.n, self.deck);
             const owned = try copyValue(a, job);
             var dependency = none;
             if (prerequisite(owned)) |op| {
-                dependency = findOp(candidate, op, template) orelse blk: {
+                dependency = self.ops.get(.{ .template = template, .op = op }) orelse blk: {
                     const dep: QueryId = @fromBackingInt(@intCast(candidate.len));
                     candidate.appendAssumeCapacity(.{
                         .job = .{ .op = op },
@@ -223,34 +257,48 @@ pub const Session = struct {
                         .requested = false,
                         .template = template,
                     });
+                    self.ops.putAssumeCapacity(.{ .template = template, .op = op }, dep);
+                    roots += 1;
                     break :blk dep;
                 };
             }
             // An explicit OP can expose an already shared prerequisite product.
             if (owned == .op) {
-                if (findOp(candidate, owned.op, template)) |existing| {
-                    candidate.items(.requested)[@backingInt(existing)] = true;
+                if (self.ops.get(.{ .template = template, .op = owned.op })) |existing| {
+                    const requested = &candidate.items(.requested)[@backingInt(existing)];
+                    new.* = !requested.*;
+                    requested.* = true;
                     id.* = existing;
                     continue;
                 }
             }
             id.* = @fromBackingInt(@intCast(candidate.len));
+            new.* = true;
+            var sibling = none;
+            if (dependency == none) {
+                roots += 1;
+            } else {
+                const d = @backingInt(dependency);
+                candidate.items(.readers)[d] += 1;
+                sibling = candidate.items(.child)[d];
+                candidate.items(.child)[d] = id.*;
+            }
             candidate.appendAssumeCapacity(.{
                 .job = owned,
                 .dependency = dependency,
                 .component = if (dependency == none) @backingInt(id.*) else candidate.items(.component)[@backingInt(dependency)],
                 .requested = true,
                 .template = template,
+                .sibling = sibling,
             });
+            if (owned == .op) self.ops.putAssumeCapacity(.{ .template = template, .op = owned.op }, id.*);
         }
         try self.outputs.ensureUnusedCapacity(self.allocator, jobs.len);
         try self.request_arenas.ensureUnusedCapacity(self.allocator, 1);
         self.rows.deinit(self.allocator);
         self.rows = candidate;
-        for (new_ids) |id| {
-            if (std.mem.indexOfScalar(QueryId, self.outputs.items, id) == null)
-                self.outputs.appendAssumeCapacity(id);
-        }
+        self.root_readers += roots;
+        for (new_ids, fresh) |id, new| if (new) self.outputs.appendAssumeCapacity(id);
         self.request_arenas.appendAssumeCapacity(arena);
         @memcpy(ids[0..jobs.len], new_ids);
         return jobs.len;
@@ -383,22 +431,14 @@ pub const Session = struct {
         }
     }
 
-    /// Whether every row on `dep` but `i` already has its executor: query `i`
-    /// is the last that will snapshot prerequisite `dep` (the template for
-    /// `none`), or, with `dep` = `i`, no dependent will snapshot `i` again.
-    fn lastReader(self: *const Session, i: usize, dep: QueryId) bool {
-        for (self.rows.items(.dependency), self.rows.items(.executor), 0..) |d, e, j| {
-            if (j != i and d == dep and e == null) return false;
-        }
-        return true;
-    }
-
     fn makeExecutor(self: *Session, i: usize) !void {
         if (self.rows.items(.executor)[i] != null) return;
-        const started = if (self.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
         const dep = self.rows.items(.dependency)[i];
         const initial = if (dep == none) null else self.rows.items(.executor)[@backingInt(dep)];
         const template = self.rows.items(.template)[i];
+        // Query `i` may take its source's state only as its last reader,
+        // once every other reader has stopped a quantum: their copies are done.
+        const last = if (dep == none) self.last_template_reader and self.root_readers == 1 else self.rows.items(.readers)[@backingInt(dep)] == 1;
         self.rows.items(.executor)[i] = try execution.Executor.create(
             self.allocator,
             self.io,
@@ -406,23 +446,79 @@ pub const Session = struct {
             self.deck,
             self.rows.items(.job)[i],
             initial,
-            self.config.final_plan and (dep != none or self.last_template_reader) and self.lastReader(i, dep),
+            self.config.final_plan and last,
             self.config,
         );
         if (self.stream) |s| if (@backingInt(s.id) == i) {
             self.rows.items(.executor)[i].?.stream = s.writer;
         };
-        if (started) |start| {
+        if (self.config.timing_in_depth)
             self.rows.items(.executor)[i].?.controller.options.timing_query = @fromBackingInt(@intCast(i));
-            const elapsed = start.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds;
-            std.debug.print("timing: query {d} {s} setup: {d:.6}ms\n", .{
-                i, @tagName(self.rows.items(.job)[i]), @as(f64, @floatFromInt(elapsed)) / 1e6,
-            });
+    }
+
+    /// Starts query `i`'s next quantum, building its executor first, with
+    /// `signal` posted when it stops. False, the row failed and settled,
+    /// when it could not start.
+    fn launch(self: *Session, i: usize, quantum: Quantum, signal: *std.Io.Semaphore) bool {
+        const started = blk: {
+            self.makeExecutor(i) catch |err| break :blk err;
+            self.rows.items(.executor)[i].?.start(quantum, signal) catch |err| break :blk err;
+            self.rows.items(.running)[i] = true;
+            return true;
+        };
+        const first = self.rows.items(.status)[i] == .pending;
+        self.rows.items(.status)[i] = .failed;
+        self.rows.items(.failure)[i] = started;
+        if (first) self.readerDone(i);
+        return false;
+    }
+
+    /// Records the quantum of running query `i`, which has stopped. Under
+    /// `Config.final_plan`, a completed query's circuit, or its source's, is
+    /// released once no dependent still has to copy it.
+    fn settle(self: *Session, i: usize) void {
+        std.debug.assert(self.rows.items(.running)[i]);
+        self.rows.items(.running)[i] = false;
+        const first = self.rows.items(.status)[i] == .pending;
+        // A started worker always has an outcome; `NotStarted` cannot happen.
+        const outcome = self.rows.items(.executor)[i].?.wait() catch unreachable;
+        switch (outcome) {
+            .progress => |p| {
+                self.rows.items(.status)[i] = .paused;
+                self.rows.items(.progress)[i] = p;
+            },
+            .complete => self.rows.items(.status)[i] = .complete,
+            .failed => |err| {
+                self.rows.items(.status)[i] = .failed;
+                self.rows.items(.failure)[i] = err;
+            },
+            .cancelled => self.rows.items(.status)[i] = .cancelled,
+        }
+        if (first) self.readerDone(i);
+        self.releaseIfRead(i);
+    }
+
+    /// Query `i` no longer reads its source's state.
+    fn readerDone(self: *Session, i: usize) void {
+        const dep = self.rows.items(.dependency)[i];
+        if (dep == none) {
+            self.root_readers -= 1;
+        } else {
+            self.rows.items(.readers)[@backingInt(dep)] -= 1;
+            self.releaseIfRead(@backingInt(dep));
         }
     }
 
+    /// Under a final plan nothing reads a finished query's circuit once
+    /// its dependents have copied it; its result lives elsewhere.
+    fn releaseIfRead(self: *Session, i: usize) void {
+        if (self.config.final_plan and self.rows.items(.status)[i] == .complete and self.rows.items(.readers)[i] == 0)
+            self.rows.items(.executor)[i].?.circuit.release();
+    }
+
     /// Advances each of `ids` by one quantum, at most `limits.max_parallel` at
-    /// a time, and writes one event per id. Every id must be ready and unique;
+    /// a time, starting the next as soon as one stops, and writes one event
+    /// per id. Every id must be ready and unique;
     /// that is checked for all of them before any runs: fails with
     /// `error.InvalidConcurrency` for a zero `max_parallel`,
     /// `error.QueryNotReady`, `error.DuplicateQuery`, or
@@ -433,52 +529,99 @@ pub const Session = struct {
     pub fn advanceReady(self: *Session, ids: []const QueryId, limits: Limits, events: []Advance) !usize {
         try self.validateReady(ids, limits);
         if (events.len < ids.len) return error.BufferTooSmall;
-        var offset: usize = 0;
-        while (offset < ids.len) {
-            const end = @min(ids.len, offset + limits.max_parallel);
-            for (ids[offset..end]) |id| {
-                const i = @backingInt(id);
-                self.makeExecutor(i) catch |err| {
-                    self.rows.items(.status)[i] = .failed;
-                    self.rows.items(.failure)[i] = err;
+        if (ids.len == 0) return 0;
+        // Positions into `ids` of the running queries.
+        const running = try self.allocator.alloc(usize, @min(ids.len, limits.max_parallel));
+        defer self.allocator.free(running);
+        var signal: std.Io.Semaphore = .{};
+        var n_running: usize = 0;
+        var next: usize = 0;
+        while (true) {
+            while (n_running < running.len and next < ids.len) : (next += 1) {
+                if (self.launch(@backingInt(ids[next]), limits.quantum, &signal)) {
+                    running[n_running] = next;
+                    n_running += 1;
+                } else try self.event(ids[next], &events[next]);
+            }
+            if (n_running == 0) break;
+            signal.waitUncancelable(self.io);
+            var k: usize = 0;
+            while (k < n_running) {
+                const at = running[k];
+                const i = @backingInt(ids[at]);
+                if (!self.rows.items(.executor)[i].?.stopped()) {
+                    k += 1;
                     continue;
-                };
-                self.rows.items(.executor)[i].?.start(limits.quantum) catch |err| {
-                    self.rows.items(.status)[i] = .failed;
-                    self.rows.items(.failure)[i] = err;
-                };
-            }
-            for (ids[offset..end], events[offset..end]) |id, *event| {
-                const i = @backingInt(id);
-                if (self.rows.items(.status)[i] != .failed) {
-                    const outcome = try self.rows.items(.executor)[i].?.wait();
-                    switch (outcome) {
-                        .progress => |p| {
-                            self.rows.items(.status)[i] = .paused;
-                            self.rows.items(.progress)[i] = p;
-                        },
-                        .complete => {
-                            self.rows.items(.status)[i] = .complete;
-                            // Under a final plan nothing reads a finished
-                            // query's circuit unless a dependent still has to
-                            // snapshot it; its result lives elsewhere.
-                            if (self.config.final_plan and self.lastReader(i, id))
-                                self.rows.items(.executor)[i].?.circuit.release();
-                        },
-                        .failed => |err| {
-                            self.rows.items(.status)[i] = .failed;
-                            self.rows.items(.failure)[i] = err;
-                        },
-                        .cancelled => self.rows.items(.status)[i] = .cancelled,
-                    }
                 }
-                const q = try self.info(id);
-                event.* = .{ .requested = id, .advanced = id, .status = q.status, .target_status = q.status, .progress = q.progress, .failure = q.failure };
-                self.cursor = @intCast((i + 1) % self.rows.len);
+                self.settle(i);
+                try self.event(ids[at], &events[at]);
+                n_running -= 1;
+                running[k] = running[n_running];
             }
-            offset = end;
         }
+        self.cursor = @intCast((@backingInt(ids[ids.len - 1]) + 1) % self.rows.len);
         return ids.len;
+    }
+
+    fn event(self: *const Session, id: QueryId, out: *Advance) !void {
+        const q = try self.info(id);
+        out.* = .{ .requested = id, .advanced = id, .status = q.status, .target_status = q.status, .progress = q.progress, .failure = q.failure };
+    }
+
+    /// Queues every query that is ready now for `Pool.fill`, in row order;
+    /// queries that turn ready later join as they do.
+    fn requeue(self: *Session) !void {
+        self.queue.clearRetainingCapacity();
+        self.urgent.clearRetainingCapacity();
+        self.queue_head = 0;
+        // A row is queued in `urgent` at most once at a time.
+        try self.urgent.ensureTotalCapacity(self.allocator, self.rows.len);
+        for (0..self.rows.len) |i| if (self.ready(i) and !self.rows.items(.running)[i]) {
+            try self.queue.append(self.allocator, @intCast(i));
+        };
+    }
+
+    /// The next query `Pool.fill` starts: a parked query or a finished
+    /// OP's dependent first, so each point's OP and analysis run back to
+    /// back, then the queue in row order.
+    fn nextReady(self: *Session) ?usize {
+        while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
+        while (self.queue_head < self.queue.items.len) {
+            const i = self.queue.items[self.queue_head];
+            self.queue_head += 1;
+            if (self.ready(i) and !self.rows.items(.running)[i]) return i;
+        }
+        return null;
+    }
+
+    /// Queues for `nextReady` what settled query `i` made ready: itself
+    /// when parked, its dependents when complete.
+    fn follow(self: *Session, i: usize) void {
+        switch (self.rows.items(.status)[i]) {
+            .paused => self.urgent.appendAssumeCapacity(@intCast(i)),
+            .complete => {
+                var c = self.rows.items(.child)[i];
+                while (c != none) : (c = self.rows.items(.sibling)[@backingInt(c)]) {
+                    const j = @backingInt(c);
+                    if (self.ready(j) and !self.rows.items(.running)[j]) self.urgent.appendAssumeCapacity(j);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Runs every query to its end through a pool of `limits.max_parallel`.
+    /// Fails with `error.SchedulingFailure` when queries remain that can
+    /// never become ready.
+    pub fn runAll(self: *Session, limits: Limits) !void {
+        var pool: Pool = try .init(self.allocator, self.io, limits);
+        defer pool.deinit();
+        try pool.add(self);
+        while (true) {
+            pool.fill(self);
+            if (!pool.wait()) break;
+        }
+        if (!self.finished()) return error.SchedulingFailure;
     }
 
     /// Advances `target`, or its prerequisite first, by one quantum. A
@@ -586,19 +729,33 @@ pub const Session = struct {
                 components += 1;
             };
         try writer.print("Problem: {d} requested queries, {d} total queries, {d} components\n", .{ self.outputs.items.len, self.rows.len, components });
+        // Each component's rows in row order, CSR by component (a
+        // component is numbered by its first row), so the tree is one pass.
+        const starts = try a.alloc(u32, self.rows.len + 1);
+        defer a.free(starts);
+        @memset(starts, 0);
+        for (self.rows.items(.component)) |c| starts[c + 1] += 1;
+        for (1..starts.len) |c| starts[c] += starts[c - 1];
+        const members = try a.alloc(u32, self.rows.len);
+        defer a.free(members);
+        const fill = try a.dupe(u32, starts[0..self.rows.len]);
+        defer a.free(fill);
+        for (self.rows.items(.component), 0..) |c, j| {
+            members[fill[c]] = @intCast(j);
+            fill[c] += 1;
+        }
         for (self.rows.items(.component), 0..) |component, i| {
             if (component != i or !self.containsComponent(options.scope, component)) continue;
             components -= 1;
             continuations[0] = components != 0;
             try writer.print("{s} Component {d}\n", .{ connector(options.ascii, components == 0), component });
+            const rows = members[starts[component]..starts[component + 1]];
             var last_query: usize = i;
-            for (0..self.rows.len) |j| {
-                if (self.rows.items(.component)[j] == component and self.contains(options.scope, j) and
-                    self.rows.items(.requested)[j]) last_query = j;
+            for (rows) |j| {
+                if (self.contains(options.scope, j) and self.rows.items(.requested)[j]) last_query = j;
             }
-            for (0..self.rows.len) |j| {
-                if (self.rows.items(.component)[j] != component or !self.contains(options.scope, j) or
-                    !self.rows.items(.requested)[j]) continue;
+            for (rows) |j| {
+                if (!self.contains(options.scope, j) or !self.rows.items(.requested)[j]) continue;
                 try self.printQuery(writer, j, 1, j == last_query, continuations, next[0..n_next], seen, options.ascii);
             }
             // A scope naming an implicit prerequisite still shows that query.
@@ -643,18 +800,109 @@ pub const Session = struct {
     }
 };
 
-fn findOp(rows: std.MultiArrayList(Row), op: requests.Op, template: u32) ?QueryId {
-    for (rows.items(.job), rows.items(.template), 0..) |job, t, i| if (job == .op and t == template and std.meta.eql(job.op, op)) return @fromBackingInt(@intCast(i));
-    return null;
+/// A refilling scheduler over the queries of one or more sessions: up to
+/// `limit` quanta in flight, a stopped one replaced at once. Every worker
+/// posts `signal` when its quantum stops, so the coordinator wakes on
+/// whichever stops first. Run it as `add` each session, then `fill` and
+/// `wait` until `wait` returns false. Results do not depend on the order
+/// queries start in, so output is the same at every `limit`.
+pub const Pool = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    limit: u16,
+    quantum: Quantum,
+    signal: std.Io.Semaphore = .{},
+    running: std.ArrayList(Running) = .empty,
+
+    const Running = struct { session: *Session, row: u32 };
+
+    /// An empty pool. `error.InvalidConcurrency` for a zero `max_parallel`.
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, limits: Limits) !Pool {
+        if (limits.max_parallel == 0) return error.InvalidConcurrency;
+        var pool: Pool = .{ .allocator = allocator, .io = io, .limit = limits.max_parallel, .quantum = limits.quantum };
+        try pool.running.ensureTotalCapacity(allocator, limits.max_parallel);
+        return pool;
+    }
+
+    /// Cancels and settles whatever still runs (an error ended the loop
+    /// early), then frees the pool.
+    pub fn deinit(pool: *Pool) void {
+        for (pool.running.items) |r| r.session.rows.items(.executor)[r.row].?.cancel();
+        for (pool.running.items) |r| r.session.settle(r.row);
+        pool.running.deinit(pool.allocator);
+    }
+
+    /// Queues `session`'s ready queries. Call once per run, before `fill`.
+    pub fn add(pool: *Pool, session: *Session) !void {
+        _ = pool;
+        try session.requeue();
+    }
+
+    /// Starts `session`'s next ready queries while the pool has room.
+    pub fn fill(pool: *Pool, session: *Session) void {
+        while (pool.running.items.len < pool.limit) {
+            const i = session.nextReady() orelse return;
+            if (session.launch(i, pool.quantum, &pool.signal))
+                pool.running.appendAssumeCapacity(.{ .session = session, .row = @intCast(i) });
+        }
+    }
+
+    /// Waits until a running quantum stops, then settles every stopped
+    /// one and queues what it made ready. False, without waiting, when
+    /// nothing runs.
+    pub fn wait(pool: *Pool) bool {
+        if (pool.running.items.len == 0) return false;
+        pool.signal.waitUncancelable(pool.io);
+        var k: usize = 0;
+        while (k < pool.running.items.len) {
+            const r = pool.running.items[k];
+            if (!r.session.rows.items(.executor)[r.row].?.stopped()) {
+                k += 1;
+                continue;
+            }
+            r.session.settle(r.row);
+            r.session.follow(r.row);
+            _ = pool.running.swapRemove(k);
+        }
+        return true;
+    }
+};
+
+const OpKey = struct { template: u32, op: requests.Op };
+const OpIndex = std.HashMapUnmanaged(OpKey, QueryId, struct {
+    pub fn hash(_: @This(), key: OpKey) u64 {
+        var h: std.hash.Wyhash = .init(0);
+        hashFields(&h, key);
+        return h.final();
+    }
+    pub fn eql(_: @This(), a: OpKey, b: OpKey) bool {
+        return std.meta.eql(a, b);
+    }
+}, std.hash_map.default_max_load_percentage);
+
+/// Feeds `value` to `h` field by field, floats by their bits, which
+/// `std.hash.autoHash` refuses. `-0.0` and `0.0` hash apart though `eql`
+/// matches them, which only costs a second OP.
+fn hashFields(h: *std.hash.Wyhash, value: anytype) void {
+    switch (@typeInfo(@TypeOf(value))) {
+        .@"struct" => |s| inline for (s.field_names) |name| hashFields(h, @field(value, name)),
+        .optional => if (value) |v| {
+            h.update(&.{1});
+            hashFields(h, v);
+        } else h.update(&.{0}),
+        .float => h.update(std.mem.asBytes(&value)),
+        else => std.hash.autoHash(h, value),
+    }
 }
 
 /// The OP a query needs first: its tolerances, transient-flavoured for
-/// time-domain kinds. Null for `.op` itself and a `uic` start.
+/// time-domain kinds, warm when a transient point asks. Null for `.op`
+/// itself and a `uic` start.
 fn prerequisite(job: requests.Query) ?requests.Op {
     if (job == .op or job.uic()) return null;
     return .{ .tol = switch (job) {
         inline else => |o| o.tol,
-    }, .tran_op = @as(requests.Kind, job).transient() };
+    }, .tran_op = @as(requests.Kind, job).transient(), .warm_start = job == .tran and job.tran.point.warm_start };
 }
 
 fn connector(ascii: bool, last: bool) []const u8 {
@@ -787,6 +1035,8 @@ test prerequisite {
     const tran = prerequisite(.{ .tran = .{ .t_stop = 1e-6, .tol = .{ .reltol = 1e-4 } } }).?;
     try std.testing.expect(tran.tran_op);
     try std.testing.expectEqual(@as(f64, 1e-4), tran.tol.reltol);
+    try std.testing.expect(!tran.warm_start);
+    try std.testing.expect(prerequisite(.{ .tran = .{ .t_stop = 1e-6, .point = .{ .warm_start = true } } }).?.warm_start);
     const ac = prerequisite(.{ .ac = .{ .sweep = .{ .f_start = 1, .f_stop = 1e3 } } }).?;
     try std.testing.expect(!ac.tran_op);
     try std.testing.expect(!ac.warm_start);

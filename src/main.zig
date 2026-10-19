@@ -62,6 +62,7 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --measures-only         Keep only the .tran columns the .meas cards read
                 \\      --early-stop            End each .tran once its .meas cards have resolved
                 \\      --abort-after=T         Fail a .tran still missing a .meas value past T seconds
+                \\      --warm-start            Start each transient's OP from the nominal one
                 \\      --tokenizer=FMT         ngspice|hspice|spectre
                 \\      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
                 \\  -v, --version               Version
@@ -85,6 +86,8 @@ pub fn main(init: std.process.Init) !u8 {
             point.measures_only = true;
         } else if (std.mem.eql(u8, arg, "--early-stop")) {
             point.early_stop = true;
+        } else if (std.mem.eql(u8, arg, "--warm-start")) {
+            point.warm_start = true;
         } else if (optionValue(arg, "", "--abort-after", &args)) |value| {
             point.abort_after = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
             if (!(point.abort_after > 0) or std.math.isInf(point.abort_after)) return usageFail();

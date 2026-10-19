@@ -272,8 +272,11 @@ pub const Dcinc = struct {
 /// The DC operating point (`.op`), which most other analyses also run first.
 pub const Op = struct {
     tol: Tolerances = .{},
-    /// Newton starts from the caller's `x` instead of the cold start; the
-    /// executor sets it when `Deck.op_guess` is given.
+    /// Newton starts from `Deck.warm_op` instead of the cold start, and
+    /// falls back to the full ladder when that fails; cold while the deck
+    /// has none. A transient's prerequisite takes it from
+    /// `PointOptions.warm_start`. The executor also sets it when
+    /// `Deck.op_guess` is given.
     warm_start: bool = false,
     /// This operating point starts a transient (ngspice MODETRANOP), so
     /// waveform sources evaluate at t = 0 instead of at their DC value. The
@@ -657,15 +660,16 @@ pub const Tran = struct {
 
 /// The points API's per-point requests (`Problem.append_points`), carried
 /// on each point's transient (analysis/tran/tran.zig `run`). None changes a
-/// `.tran` card's value.
+/// `.tran` card's value, but `warm_start` may within Newton's tolerances.
 pub const PointOptions = struct {
     /// Record only the columns the `.tran` cards read.
     measures_only: bool = false,
     /// End the transient once every `.tran` card has resolved; its
     /// waveform then stops there.
     early_stop: bool = false,
-    /// Start the operating point from the template's nominal one. Not
-    /// acted on yet.
+    /// Start the operating point from the template's nominal one
+    /// (`Deck.warm_op`) instead of the cold start, falling back to the full
+    /// ladder when that fails.
     warm_start: bool = false,
     /// Seconds past which a `.tran` card still unresolved fails the
     /// transient with `error.MeasureBoundExceeded`; 0 is off.
