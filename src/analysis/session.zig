@@ -466,8 +466,7 @@ pub const Session = struct {
     /// follow scheduling order. A row whose executor cannot be built is
     /// left to run alone.
     /// ponytail: looks `lane_window` rows into `urgent` and the queue, not
-    /// all of them; a
-    /// sweep's OP rows are adjacent in row order.
+    /// all of them; a sweep's rows are adjacent in row order.
     fn gather(self: *Session, i: usize) void {
         const lane_width = execution.lane_width;
         const config = self.config;
