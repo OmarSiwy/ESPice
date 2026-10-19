@@ -638,3 +638,38 @@ test "C a handle created on one thread runs on another and is destroyed on a thi
     var u: u32 = 0;
     try std.testing.expectEqual(@as(u32, c.ESPICE_INVALID_HANDLE), c.espice_query_count(handle, &u));
 }
+
+test "C points: early stop and measures_only keep each point's values, abort_after fails only the slow one" {
+    const t = std.testing;
+    const deck = "C points\n.param rv=1k\nV1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)\nR1 in out {rv}\nC1 out 0 0.1p\n.tran 1p 10n\n" ++
+        ".meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1\n.end\n";
+    const live = [_]c.espice_bytes{.{ .data = "rv", .len = 2 }};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = &live;
+    options.live_param_count = 1;
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
+    defer _ = c.espice_destroy(handle);
+    const rows = [_]f64{ 1e3, 100e3, 2e3 };
+    var plain: u32 = 0;
+    try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, null, &plain));
+    const bounded_options: c.espice_points_options = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 0, .abort_after = 1e-9 };
+    var bounded: u32 = 0;
+    try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &bounded_options, &bounded));
+    _ = c.espice_run_all(handle);
+    const names = [_]c.espice_bytes{.{ .data = "tpd", .len = 3 }};
+    var want: [3]f64 = undefined;
+    var want_why: [3]u32 = undefined;
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, plain, 3, &names, 1, &want, &want_why));
+    var got: [3]f64 = undefined;
+    var why: [3]u32 = undefined;
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, bounded, 3, &names, 1, &got, &why));
+    try t.expectEqualSlices(u32, &.{ c.ESPICE_REASON_OK, c.ESPICE_REASON_OK, c.ESPICE_REASON_OK }, &want_why);
+    try t.expectEqualSlices(u32, &.{ c.ESPICE_REASON_OK, c.ESPICE_REASON_ABORTED, c.ESPICE_REASON_OK }, &why);
+    try t.expect(std.math.isNan(got[1]));
+    try t.expectEqual(@as(u64, @bitCast(want[0])), @as(u64, @bitCast(got[0])));
+    try t.expectEqual(@as(u64, @bitCast(want[2])), @as(u64, @bitCast(got[2])));
+}
