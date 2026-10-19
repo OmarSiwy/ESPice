@@ -9,12 +9,14 @@ pub const freq_solve = @import("freq_solve.zig");
 pub const fft = @import("fft.zig");
 pub const gmres = @import("gmres.zig");
 pub const converger = @import("converger.zig");
+pub const lanes = @import("lanes.zig");
 
 test {
     _ = @import("tests.zig");
     // In-file tests of the files the API reaches only through other files.
     _ = @import("sparse_lu.zig");
     _ = @import("lane_lu.zig");
+    _ = @import("lanes.zig");
     _ = @import("tridiag.zig");
     _ = @import("order.zig");
     _ = @import("bbd.zig");
