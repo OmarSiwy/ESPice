@@ -13,8 +13,11 @@ pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builti
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
 pub const vera_validate_contract = @import("builtin").mode == .debug;
-/// `core.gpa`: SmpAllocator, or the page allocator single-threaded (wasm).
-const allocator = if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
+/// glibc malloc where libc is linked, else `core.gpa` (SmpAllocator, or the
+/// page allocator single-threaded: wasm). A handle run batch after batch
+/// starts a worker thread per query, and SmpAllocator kept what each freed:
+/// 48 KB of RSS per released point, against 1.6 KB under malloc.
+const allocator = if (@import("builtin").link_libc) std.heap.c_allocator else if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
 /// Bumped on a change that breaks a caller built against an older header;
 /// `espice_create` rejects a mismatch. Fields appended to
 /// `espice_create_options` do not bump it: `struct_size` gates them.

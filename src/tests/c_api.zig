@@ -1183,7 +1183,7 @@ test "C points: 100 batches of 100 on one handle, released as they are read, kee
     const grown = rss[batches - 1] -| rss[19];
     std.debug.print("batches: run_all {d} ms (11-20) vs {d} ms (91-100) per 10; RSS {d} MB at 20, {d} MB at 100, {d} B per point after\n", .{ early / 1_000_000, late / 1_000_000, rss[19] >> 20, rss[batches - 1] >> 20, grown / (80 * n) });
     try t.expect(late < 2 * early);
-    // RSS also counts what the allocator keeps for reuse; the bytes a
-    // released point keeps are pinned by the Zig test of `release_points`.
-    try t.expect(grown < 80 * n * 64 * 1024);
+    // A released point keeps its query rows and variant row (the Zig
+    // test of `release_points` counts them), plus allocator slack.
+    try t.expect(grown < 80 * n * 8 * 1024);
 }
