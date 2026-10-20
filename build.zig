@@ -646,9 +646,10 @@ const upstream_models = [_]struct {
 /// Source size from which a model's GPU compile goes on the serial heavy lanes.
 const heavy_model_bytes: u64 = 20 * 1024;
 
-/// GPU kernel stack frame exceeds the 262,136 B limit (CUDA's, and amdgcn's:
-/// gfx1100 psp103_nqs 500,192 B, psp104_nqs 515,664 B at ReleaseFast).
-const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"}, .{"mvsg"}, .{"psp103_nqs"}, .{"psp104_nqs"} });
+/// GPU kernel stack frames past the 262,136 B limit (CUDA's and amdgcn's).
+/// Empty since VerA v0.11.0's sparse layout: the largest is mvsg at 47 KB on
+/// sm_89 and asmhemt at 113 KB on gfx1100 (dev/research/gpu-lane-e1.md §5).
+const gpu_host_only = std.StaticStringMap(void).initComptime(.{});
 
 /// Upstream sources with a non-LRM string escape (W0149) we cannot edit.
 const escape_models = std.StaticStringMap(void).initComptime(.{ .{"hisim2_va"}, .{"hisimsotb"} });
