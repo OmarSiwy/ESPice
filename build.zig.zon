@@ -1,6 +1,6 @@
 .{
     .name = .espice,
-    .version = "1.1.0",
+    .version = "1.2.0",
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.18.0-dev.349+d924f83bf",
     .dependencies = .{

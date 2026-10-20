@@ -111,7 +111,7 @@
           }:
           pkgs.stdenv.mkDerivation {
             pname = if cuda then "espice-cuda" else "espice";
-            version = "1.1.0";
+            version = "1.2.0";
             inherit src;
             nativeBuildInputs = [
               zig

@@ -3,11 +3,31 @@
 Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 `(#123)`; open one first if none exists.
 
-## Unreleased
+## 1.2.0 (2026-10-20)
 
 - `.mc`, `.dc DATA=`, `.dc MONTE=` and a `.temp` range run each trial, variant or temperature as its own query row, which spreads across `--jobs` and batches into lanes, then assemble the sweep in order; output is the same at every `--jobs`. A plain `.mc` draw is keyed by (seed, trial, variable), so trials draw different values than before, and a `.dc DATA=`/`MONTE=` point starts from the nominal OP instead of the previous point, which moves its results by roundoff (#213).
 - CLI defaults: `--jobs` is one per CPU (`--jobs=auto`); `--measures-only`, `--early-stop` and `--warm-start` turn on by themselves when nothing reads the transient waveforms (no `-r`, `.save`, `.stim`, optimization, `--tangents` or display task; `--full-waveforms` turns them off); `--tokenizer` defaults to the dialect detected from the deck's HSPICE- or Spectre-only markers, else ngspice.
 - `OPTIMIZE=` on a `.tran` card takes its Jacobian from tangents integrated along the trial point's own transient, without its time-grid noise: a 32-stage MOS1 chain fit 1.49x fewer instructions and an RSS of 7e-11 instead of 4e-5; `ZP_NO_TANGENTS` restores the finite difference (#97).
+- C API points: `espice_append_points`, `espice_copy_point_measures`, `espice_copy_point_tangents`, `espice_release_points`, `espice_lane_width` and the `espice_reason` codes run many parameter points on one template and read each point's `.meas` values, reason and d(meas)/d(param); a failed point never spoils the others.
+- `espice_points_options` (48 bytes): `abort_measure` names the card `abort_after` bounds, `abort_after` NaN is off and 0 a valid bound, `tangent_step` appended after MATCHA's 40-byte layout.
+- Measurement-only mode (`--measures-only`, automatic when nothing reads the waveforms): `.meas` cards stream over the accepted steps, bitwise equal to the recorded evaluation; a 1000-row RC-ladder sweep peaks at 168 MB instead of 6.5 GB.
+- Early stop (`--early-stop`) ends a `.tran` once every `.meas` card has resolved, and `--abort-after=T` / `--abort-measure=NAME` fail a point still unresolved at T; `.meas` values are unchanged.
+- `--warm-start` seeds every sweep point's operating point from the template's nominal one: DC Newton iterations per point 8.5 → 2.0.
+- `--tangents=P,...` and `--tangent-step=S` print d(.meas)/d(P) of the first `.tran`; tangents are refused under Gear-3..6.
+- Sweeps run on a refilling pool: each point's OP and transient run back to back and threads never idle between waves, about 2x points/s at 4–32 jobs with flat memory (5000 points at 16 jobs: 2.96 GB → 134 MB); graph setup is linear in the row count.
+- `run_all` prints each sweep point's `.meas` block as it finishes, labelled with its row (`point 3 (rv=1000, cv=2.5e-13)`), and prints NaN for a measure that does not resolve.
+- `run_all` on a long-lived handle costs only what was appended since the last call, and the C API allocates with glibc malloc where libc is linked.
+- A variant row re-derives only the device batches it writes, and a live value crossing zero rebuilds once per sign pattern instead of once per point (#214).
+- Lane batching (`--lanes`, `ESPICE_LANES=1`) of operating points, `.dc`, `.tran`, `.pss` and the AC family over sweep points, bitwise equal to the unbatched run on the CPU; off by default there, where it measured break-even (#207, #209, #210, #211).
+- GPU lanes (`--backend cuda`/`hip`): each sweep point of a transient runs as one GPU thread, 32 points of one transistor per warp, matching the CPU lanes within the corpus tolerance; under `auto` only FP64-class GPUs take them (#208).
+- A Debug `-Dgpu=true` build uploaded Model rows at the kernels' stride, so a second voltage or current source stamped 0 under `--backend cuda`; release builds were unaffected.
+- `.meas op name find i(vdd)` reads leakage from the operating point.
+- VerA v0.11.4: the dense value family is gone, device evaluation is sparse everywhere, and every compact model's CUDA eval kernel fits the stack limit; a unary operator's operand must be a primary, so a user `.hdl` model writing `- -x` needs `-(-x)`.
+- `.hdl` reads Verilog-AMS 2023 again; a 2.3-era model that uses a 2023 keyword as a name compiles inside `begin_keywords "VAMS-2.3"`; a card that omits a module's trailing ports leaves them floating, as ngspice OSDI does.
+- psp103_nqs and psp104_nqs run on the host under the GPU backends: their gfx1100 eval kernels exceeded the 262,136 B stack limit.
+- A title-only deck runs nothing and succeeds, as ngspice does, instead of failing delivery with DataLengthMismatch.
+- espice.wasm links again and matches native espice bit for bit on the corpus (#8).
+- Gear orders 3 to 6, NaN-propagating norms and LU non-finite checks, and Zig 0.18's vectorizer in place of stdpp (cleanup pass).
 
 ## 1.1.0 (2026-10-19)
 

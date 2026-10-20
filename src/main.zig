@@ -16,7 +16,7 @@ pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builti
 pub const vera_validate_contract = @import("builtin").mode == .debug;
 
 /// `--version`; a test pins it to build.zig.zon's `.version`.
-const version = "1.1.0";
+const version = "1.2.0";
 
 /// glibc's `mallopt` (malloc.h); M_MMAP_THRESHOLD is -3.
 extern "c" fn mallopt(param: c_int, value: c_int) c_int;
