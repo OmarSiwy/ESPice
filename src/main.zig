@@ -65,6 +65,7 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --early-stop            End each .tran once its .meas cards have resolved (never with LAST, _CONT,
                 \\                              JITTER, .check/DOUT or a window without TO=)
                 \\      --abort-after=T         Fail a .tran still missing a .meas value past T seconds
+                \\      --abort-measure=NAME    Bound only .meas NAME with --abort-after
                 \\      --warm-start            Start each transient's OP from the nominal one
                 \\      --tangents=P,...        Print d(.meas)/d(P) of the first .tran's cards for these .params
                 \\      --tangent-step=S        Relative step of --tangents (default 1e-6)
@@ -103,8 +104,11 @@ pub fn main(init: std.process.Init) !u8 {
             point.tangent_step = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
             if (!(point.tangent_step > 0) or std.math.isInf(point.tangent_step)) return usageFail();
         } else if (optionValue(arg, "", "--abort-after", &args)) |value| {
-            point.abort_after = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
-            if (!(point.abort_after > 0) or std.math.isInf(point.abort_after)) return usageFail();
+            const bound = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
+            if (!(bound >= 0) or std.math.isInf(bound)) return usageFail();
+            point.abort_after = bound;
+        } else if (optionValue(arg, "", "--abort-measure", &args)) |value| {
+            point.abort_measure = value orelse return usageFail();
         } else if (optionValue(arg, "-r", "--rawfile", &args)) |value| {
             selection.path = value orelse return usageFail();
         } else if (optionValue(arg, "", "--format", &args)) |value| {

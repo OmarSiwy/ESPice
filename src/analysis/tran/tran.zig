@@ -912,8 +912,7 @@ fn simulateWith(
         if (vpi) |v| v.accept(v.ctx, false, t >= options.t_stop or atStop(t, options.t_stop));
         if (stream) |s| if (t >= options.t_start) {
             s.feed(t, cur, waveform.data());
-            const bound = options.point.abort_after;
-            if (bound > 0 and t > bound and s.open > 0) return error.MeasureBoundExceeded;
+            if (options.point.abort_after) |bound| if (t > bound and s.unresolved()) return error.MeasureBoundExceeded;
             if (options.point.early_stop and s.open == 0 and (tangents == null or tangents.?.open() == 0)) {
                 resolved = true;
                 break;
@@ -1002,8 +1001,8 @@ test "atStop: within 100 ulps of t_stop, not past them" {
 /// the result's `measured` holding what the others found; under tangents
 /// it keeps every column those cards read instead. `early_stop` ends the
 /// run, with the rows so far, once every such card has resolved, and
-/// `abort_after` fails it with `error.MeasureBoundExceeded` once past that
-/// time with one unresolved. A streamed or snapshot run ignores all three.
+/// `abort_after` fails it with `error.MeasureBoundExceeded` once
+/// past that time with one unresolved, or with `abort_measure` unresolved. A streamed or snapshot run ignores all three.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
@@ -1043,8 +1042,13 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         probes = sub_probes;
         own_probes = sub_probes;
     }
-    const watched = streamed or (kept and tran_cards and (opts.point.early_stop or opts.point.abort_after > 0));
+    const watched = streamed or (kept and tran_cards and (opts.point.early_stop or opts.point.abort_after != null));
     var stream: ?Stream = if (watched) try .init(scratch, ctx.measures, all_names, ctx.probes, names) else null;
+    if (stream) |*s| if (opts.point.abort_measure.len != 0) {
+        s.abort_card = for (ctx.measures, 0..) |m, k| {
+            if (std.ascii.eqlIgnoreCase(m.name, opts.point.abort_measure)) break k;
+        } else null;
+    };
     defer if (stream) |*s| s.deinit();
     const n_probes: u32 = @intCast(probes.len);
     var wf = if (kept)

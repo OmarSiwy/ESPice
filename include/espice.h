@@ -283,19 +283,27 @@ typedef enum {
     ESPICE_REASON_OTHER = 255
 } espice_reason;
 
-/* NULL options select all zeros. struct_size must cover every field;
- * fields appended later are read only when it covers them. */
+/* NULL options: every flag 0, no abort bound, no tangents. Through
+ * warm_start this is MATCHA's layout (40 bytes on LP64, offsets 0, 8, 24,
+ * 32, 33, 34); struct_size must cover it (else ABI_MISMATCH), and fields
+ * appended after it are read only when struct_size covers them. */
 typedef struct {
-    uint32_t struct_size;
-    uint32_t measures_only; /* 1: keep only the .tran columns the measures read */
-    uint32_t early_stop;    /* 1: end a .tran once its measures resolve */
-    uint32_t warm_start;    /* 0: cold; 1: from the template's nominal OP */
-    double abort_after;     /* t past which an unresolved measure aborts; 0 = off */
+    size_t struct_size;
+    /* The .meas name abort_after bounds (case-insensitive); empty: every
+     * measure. INVALID_ARGUMENT ("UnknownMeasure") for a name no card has. */
+    espice_bytes abort_measure;
+    /* t (s) past which a still unresolved measure, or abort_measure when
+     * named, aborts the point (ESPICE_REASON_ABORTED); NaN = off, 0 bounds
+     * t = 0. INVALID_ARGUMENT when negative or infinite. */
+    double abort_after;
+    uint8_t measures_only; /* 1: measure as the .tran runs, keep only the columns whole-run cards read */
+    uint8_t early_stop;    /* 1: end a .tran once its measures resolve */
+    uint8_t warm_start;    /* 0: cold; 1: from the template's nominal OP */
     /* > 0: also integrate, per live parameter p, the first-order prediction
      * of the point with p moved by tangent_step * |p| (tangent_step when
-     * p = 0), for espice_copy_point_tangents. Read only when struct_size
-     * covers it. INVALID_ARGUMENT ("TangentsUnavailable") for a .tran that
-     * cannot: uic, .ic, Gear order 3..6, VPI, a GPU backend. */
+     * p = 0), for espice_copy_point_tangents. Absent (0) when struct_size is
+     * 40. INVALID_ARGUMENT ("TangentsUnavailable") for a .tran that cannot:
+     * uic, .ic, Gear order 3..6, VPI, a GPU backend. */
     double tangent_step;
 } espice_points_options;
 
@@ -310,8 +318,9 @@ typedef struct {
  * is appended already failed with that reason. All-or-nothing. INVALID_ARGUMENT for count 0, a problem
  * created without live_params ("NoLiveParameters"), a deck whose analyses
  * already sweep (.step, .data, .alter, Monte Carlo: "SweptTemplate"),
- * an options flag above 1, or a negative or non-finite abort_after;
- * ABI_MISMATCH for a struct_size short of this struct. The first call
+ * an options flag above 1, a negative or infinite abort_after, or an
+ * abort_measure no card names ("UnknownMeasure"); ABI_MISMATCH for a
+ * struct_size short of 40. The first call
  * also runs the deck's .model OPT optimization and MOSRA stress run. */
 espice_status espice_append_points(espice_problem *, const double *values,
     size_t count, const espice_points_options *options, uint32_t *first_id);

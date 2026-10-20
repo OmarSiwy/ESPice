@@ -26,6 +26,7 @@ Usage: espice [OPTION]... FILE...
       --early-stop            End each .tran once its .meas cards have resolved (never with LAST, _CONT,
                               JITTER, .check/DOUT or a window without TO=)
       --abort-after=T         Fail a .tran still missing a .meas value past T seconds
+      --abort-measure=NAME    Bound only .meas NAME with --abort-after
       --warm-start            Start each transient's OP from the nominal one
       --tangents=P,...        Print d(.meas)/d(P) of the first .tran's cards for these .params
       --tangent-step=S        Relative step of --tangents (default 1e-6)
@@ -160,9 +161,14 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
   cards still work. The `.meas` values equal a full run's.
 
 `--abort-after=T`
-: Fail a transient that passes time `T` (seconds, positive) with any
+: Fail a transient that passes time `T` (seconds, 0 or more) with any
   `.tran` card still unresolved. Its `.meas` values print as NaN; the
   other points are unaffected.
+
+`--abort-measure=NAME`
+: With `--abort-after`, only `.meas` card `NAME` counts: the transient
+  fails past `T` only while that card is unresolved. A name no card has is
+  an error.
 
 `--tangents=P,...`, `--tangent-step=S`
 : Make the `.param` names `P` live and integrate, beside the deck's first

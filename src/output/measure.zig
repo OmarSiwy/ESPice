@@ -198,6 +198,8 @@ pub const Stream = struct {
     recorded: []u32,
     /// Rows fed so far.
     rows: usize = 0,
+    /// The card an abort bound waits on (`unresolved`); null for all.
+    abort_card: ?usize = null,
 
     const none = std.math.maxInt(u32);
 
@@ -303,6 +305,12 @@ pub const Stream = struct {
             s.values[i] = s.value(m, c);
             s.open -= 1;
         };
+    }
+
+    /// Whether the card an abort bound waits on (`abort_card`), or any
+    /// `.tran` card without one, has no final value yet.
+    pub fn unresolved(s: Stream) bool {
+        return if (s.abort_card) |k| !s.cards[k].done else s.open > 0;
     }
 
     /// Each card's passes for `core.Result.measured`: what a `.scan` card

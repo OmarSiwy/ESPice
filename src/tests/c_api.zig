@@ -656,7 +656,10 @@ test "C points: early stop and measures_only keep each point's values, abort_aft
     const rows = [_]f64{ 1e3, 100e3, 2e3 };
     var plain: u32 = 0;
     try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, null, &plain));
-    const bounded_options: c.espice_points_options = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 0, .abort_after = 1e-9 };
+    var bounded_options = pointsOptions();
+    bounded_options.measures_only = 1;
+    bounded_options.early_stop = 1;
+    bounded_options.abort_after = 1e-9;
     var bounded: u32 = 0;
     try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &bounded_options, &bounded));
     _ = c.espice_run_all(handle);
@@ -689,8 +692,7 @@ test "C points: copy_point_tangents gives d(measure)/d(live parameter), and NaN 
     try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
     defer _ = c.espice_destroy(handle);
     const rows = [_]f64{ 1e3, 2e3 };
-    var points: c.espice_points_options = std.mem.zeroes(c.espice_points_options);
-    points.struct_size = @sizeOf(c.espice_points_options);
+    var points = pointsOptions();
     points.tangent_step = 1e-6;
     var first: u32 = 0;
     try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &points, &first));
@@ -1057,17 +1059,17 @@ test "C points: argument errors change nothing" {
     try t.expectEqual(invalid, c.espice_append_points(h, &row, 0, null, &first));
     try t.expectEqual(invalid, c.espice_append_points(h, null, 1, null, &first));
     try t.expectEqual(invalid, c.espice_append_points(h, &row, 1, null, null));
-    var o: c.espice_points_options = std.mem.zeroes(c.espice_points_options);
-    o.struct_size = @sizeOf(c.espice_points_options);
-    for (0..6) |case| {
+    var o = pointsOptions();
+    for (0..7) |case| {
         var bad = o;
         switch (case) {
             0 => bad.measures_only = 2,
             1 => bad.early_stop = 2,
             2 => bad.warm_start = 2,
             3 => bad.abort_after = -1,
-            4 => bad.abort_after = std.math.nan(f64),
+            4 => bad.abort_measure = .{ .data = "nope", .len = 4 },
             5 => bad.abort_after = std.math.inf(f64),
+            6 => bad.tangent_step = -1,
             else => unreachable,
         }
         try t.expectEqual(invalid, c.espice_append_points(h, &row, 1, &bad, &first));
@@ -1080,7 +1082,11 @@ test "C points: argument errors change nothing" {
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(h, &after));
     try t.expectEqual(before, after);
     // Valid options, every flag set, are accepted.
-    o = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 1, .abort_after = 1 };
+    o.measures_only = 1;
+    o.early_stop = 1;
+    o.warm_start = 1;
+    o.abort_after = 1;
+    o.abort_measure = .{ .data = "TPD", .len = 3 };
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_append_points(h, &row, 1, &o, &first));
 
     // Unfinished queries, an unknown measure, a bad first_id.
@@ -1144,7 +1150,9 @@ test "C points: 100 batches of 100 on one handle, released as they are read, kee
     var handle: ?*c.espice_problem = null;
     try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
     defer _ = c.espice_destroy(handle);
-    const points: c.espice_points_options = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 0, .abort_after = 0 };
+    var points = pointsOptions();
+    points.measures_only = 1;
+    points.early_stop = 1;
     const names = [_]c.espice_bytes{.{ .data = "tpd", .len = 3 }};
     const batches = 100;
     const n = 100;
@@ -1186,4 +1194,57 @@ test "C points: 100 batches of 100 on one handle, released as they are read, kee
     // A released point keeps its query rows and variant row (the Zig
     // test of `release_points` counts them), plus allocator slack.
     try t.expect(grown < 80 * n * 8 * 1024);
+}
+
+/// Options with every flag off, no abort bound and no tangents.
+fn pointsOptions() c.espice_points_options {
+    var o = std.mem.zeroes(c.espice_points_options);
+    o.struct_size = @sizeOf(c.espice_points_options);
+    o.abort_after = std.math.nan(f64);
+    return o;
+}
+
+test "C points: MATCHA's 40-byte options (no tangent_step) are read, abort_measure bounds only its card" {
+    const t = std.testing;
+    // `quick` resolves at 0.15 ns at every rv; tpd takes ~7 ns at 100k.
+    const deck = "C abort measure\n.param rv=1k\nV1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)\nR1 in out {rv}\nC1 out 0 0.1p\n.tran 1p 10n\n" ++
+        ".meas tran quick when v(in)=0.5 rise=1\n.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1\n.end\n";
+    const live = [_]c.espice_bytes{.{ .data = "rv", .len = 2 }};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = &live;
+    options.live_param_count = 1;
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
+    defer _ = c.espice_destroy(handle);
+    try t.expectEqual(@as(usize, 40), @offsetOf(c.espice_points_options, "tangent_step"));
+    const rows = [_]f64{ 1e3, 100e3 };
+    var firsts: [2]u32 = undefined;
+    for ([_][]const u8{ "quick", "tpd" }, &firsts) |name, *first| {
+        // MATCHA's struct: 40 bytes, tangent_step beyond it holding garbage.
+        var o = pointsOptions();
+        o.struct_size = 40;
+        o.tangent_step = -7;
+        o.measures_only = 1;
+        o.early_stop = 1;
+        o.abort_after = 1e-9;
+        o.abort_measure = .{ .data = name.ptr, .len = name.len };
+        try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &o, first));
+    }
+    _ = c.espice_run_all(handle);
+    const names = [_]c.espice_bytes{ .{ .data = "quick", .len = 5 }, .{ .data = "tpd", .len = 3 } };
+    var values: [4]f64 = undefined;
+    var why: [2]u32 = undefined;
+    // Bounding `quick` aborts neither point; bounding tpd aborts the slow one.
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, firsts[0], 2, &names, 2, &values, &why));
+    try t.expectEqualSlices(u32, &.{ c.ESPICE_REASON_OK, c.ESPICE_REASON_OK }, &why);
+    try t.expect(std.math.isFinite(values[3]) and values[3] > 1e-9);
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, firsts[1], 2, &names, 2, &values, &why));
+    try t.expectEqualSlices(u32, &.{ c.ESPICE_REASON_OK, c.ESPICE_REASON_ABORTED }, &why);
+    var short = pointsOptions();
+    short.struct_size = 39;
+    var first: u32 = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_ABI_MISMATCH), c.espice_append_points(handle, &rows, 1, &short, &first));
 }

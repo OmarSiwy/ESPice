@@ -278,6 +278,7 @@ pub const Problem = struct {
         // never handed to a query to keep.
         if (self.prepared.tuning == null) self.session.markLastTemplateReader();
         var point = options.point;
+        try self.checkPoint(point);
         if (self.save_path != null or self.prepared.deck.stims.len != 0) point.measures_only = false;
         const jobs = try withPoint(scratch, if (self.prepared.deck.queries.len == 0)
             &[_]Query{.{ .op = .{ .tol = self.prepared.deck.deck_tol } }}
@@ -486,6 +487,7 @@ pub const Problem = struct {
         const p = self.live.len;
         std.debug.assert(values.len == count * p);
         if (count == 0) return error.InvalidArgument;
+        try self.checkPoint(options);
         const deck = &self.prepared.deck;
         for (deck.queries) |job| switch (job) {
             inline else => |o| if (o.tol.variant != null) return error.SweptTemplate,
@@ -555,6 +557,13 @@ pub const Problem = struct {
             try self.tangent_steps.put(self.arena.allocator(), id, steps[k / j]);
         };
         return ids[0];
+    }
+
+    /// `error.UnknownMeasure` for a `point.abort_measure` no card names.
+    fn checkPoint(self: *const Problem, point: requests.PointOptions) !void {
+        if (point.abort_measure.len == 0) return;
+        for (self.prepared.deck.measures) |m| if (std.ascii.eqlIgnoreCase(m.name, point.abort_measure)) return;
+        return error.UnknownMeasure;
     }
 
     /// One variant row per live parameter of the point at `values`, that
