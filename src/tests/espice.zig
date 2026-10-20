@@ -1732,6 +1732,64 @@ test "per-lane stimulus (#212): each .data point equals its row run alone, to th
     for (swept.grids.items[1..]) |grid| try t.expectEqualSlices(u64, @ptrCast(swept.grids.items[0]), @ptrCast(grid));
 }
 
+const ac_lane_deck =
+    \\* AC-family lanes (#209): .ac, .noise and .tf of a diode-loaded RC
+    \\* stepped over rl; points 0, 2, 4 and 6 repeat rl = 1k.
+    \\.param rl=1k
+    \\v1 in 0 dc 1 ac 1
+    \\r1 in mid {rl}
+    \\c1 mid 0 1n
+    \\d1 mid out dmod
+    \\r2 out 0 2k
+    \\c2 out 0 0.5n
+    \\.model dmod d is=1e-14 cjo=1p
+    \\.step param rl list 1k 2k 1k 500 1k 3k 1k 700
+    \\.ac dec 10 1k 1g
+    \\.noise v(out) v1 dec 10 1k 1g
+    \\.tf v(out) v1
+    \\.end
+    \\
+;
+
+/// Each requested query's data, in request order, per kind.
+fn acLaneRun(lanes: bool) !std.ArrayList([]f64) {
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = ac_lane_deck, .origin = "ac_lanes.sp" } }, .backend = .{ .lanes = lanes } });
+    defer p.deinit();
+    try p.run_all();
+    var out: std.ArrayList([]f64) = .empty;
+    errdefer {
+        for (out.items) |d| t.allocator.free(d);
+        out.deinit(t.allocator);
+    }
+    for (0..p.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        const info = try p.query_info(id);
+        if (!info.requested) continue;
+        try out.append(t.allocator, try t.allocator.dupe(f64, (try p.result(id)).data));
+    }
+    return out;
+}
+
+test "AC-family lanes (#209): every .step point's .ac, .noise and .tf equal under --lanes, and repeated points equal each other" {
+    var alone = try acLaneRun(false);
+    defer {
+        for (alone.items) |d| t.allocator.free(d);
+        alone.deinit(t.allocator);
+    }
+    var laned = try acLaneRun(true);
+    defer {
+        for (laned.items) |d| t.allocator.free(d);
+        laned.deinit(t.allocator);
+    }
+    try t.expectEqual(@as(usize, 24), laned.items.len);
+    for (alone.items, laned.items) |a, b| try t.expectEqualSlices(u64, @ptrCast(a), @ptrCast(b));
+    // Request order is point-major or kind-major; find the rl = 1k rows of
+    // the first kind by content instead of position.
+    var same: usize = 0;
+    for (laned.items[1..]) |d| same += @intFromBool(d.len == laned.items[0].len and std.mem.eql(u64, @ptrCast(d), @ptrCast(laned.items[0])));
+    try t.expect(same >= 3);
+}
+
 test "per-lane stimulus (#212) under lanes: each .data point equals its row run alone, to the bit" {
     const source = try std.Io.Dir.cwd().readFileAlloc(t.io, lane_deck, t.allocator, .unlimited);
     defer t.allocator.free(source);
