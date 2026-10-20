@@ -471,6 +471,7 @@ pub const Executor = struct {
         var n_live: usize = 0;
         // ponytail: serial materialize; thousands of lanes take seconds here.
         // Parallelize over a thread pool if it shows above 5% of the batch.
+        const t0 = @import("gpu_lanes.zig").Prof.now();
         for (members, 0..) |e, k| {
             e.materialize() catch |err| {
                 outcomes[k] = err;
@@ -480,6 +481,7 @@ pub const Executor = struct {
             live[n_live] = k;
             n_live += 1;
         }
+        if (self.config.knobs.gpu_stats != .off) std.debug.print("gpu-lanes: materialize {d} lanes {d:.1} ms\n", .{ g, @as(f64, @floatFromInt(@import("gpu_lanes.zig").Prof.now() - t0)) / 1e6 });
         const ctxs = try a.alloc(types.RunCtx, n_live);
         for (live[0..n_live], ctxs) |k, *c| {
             members[k].circuit.setSimState(.{ .kind = .ic });

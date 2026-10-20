@@ -693,6 +693,111 @@ test "lane batches: a NaN value, failing, peeling and re-pivoting lanes leave th
     try t.expect(completed > jobs.len / 2 and completed < jobs.len);
 }
 
+test "lane batches: .pss rows on variant rows equal their runs alone bitwise, replicated, failing and NaN lanes included (#210)" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    // A half-wave rectifier (tests/fixtures/pss/diode_rectifier_rc.sp):
+    // nonlinear, charge-carrying, and on the dense FD path (n < 50).
+    const vin = try b.addNode();
+    const a = try b.addNode();
+    const out = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 0, .waveform = 2, .sin_vo = 0, .sin_va = 2, .sin_freq = 1e3 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 100 }, &.{}, .{ vin, a });
+    try b.addDevice(models.diode, "", &.{ .is = 1e-14 }, &.{}, .{ a, out });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ out, GROUND });
+    try b.addDevice(models.capacitor, "", &.{ .c = 100e-9 }, &.{}, .{ out, GROUND });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    // Variant k writes the load resistor's `r` (the second resistor).
+    var probe = try @import("../types.zig").Circuit.instantiate(&prepared, t.allocator);
+    defer probe.deinit();
+    const params = try probe.collectParams();
+    const r_ref: u32 = for (params, 0..) |p, k| {
+        if (p.type == builtin("resistor") and p.index == 1 and std.mem.eql(u8, p.param_name, "r")) break @intCast(k);
+    } else return error.TestUnexpectedResult;
+    // Three copies of 1k (replication), a NaN, a near-short, and spread loads.
+    const values = [_]f64{ 1e3, 2e3, 1e3, std.math.nan(f64), 500, 1e-30, 1e3, 5e3, 1e5 };
+    var labels: [values.len][]const u8 = undefined;
+    var starts: [values.len + 1]u32 = undefined;
+    var refs: [values.len]u32 = undefined;
+    var temps: [values.len]?f64 = undefined;
+    for (&labels, starts[0..values.len], &refs, &temps, 0..) |*l, *s0, *r, *tc, k| {
+        l.* = "rl";
+        s0.* = @intCast(k);
+        r.* = r_ref;
+        tc.* = null;
+    }
+    starts[values.len] = values.len;
+    var deck = bareDeck(&.{ vin, out }, &.{ "v(in)", "v(out)" });
+    deck.variants = .{ .labels = &labels, .temp_c = &temps, .starts = &starts, .refs = &refs, .values = &values };
+    var jobs: [values.len]requests.Query = undefined;
+    for (&jobs, 0..) |*j, k| j.* = .{ .pss = .{ .period = 1e-3, .n_samples = 64, .tol = .{ .variant = @intCast(k) } } };
+    const Row = struct { status: Status, failure: ?@import("../session.zig").Failure, data: []f64 };
+    var rows: [2][jobs.len]Row = undefined;
+    var batched: usize = 0;
+    for ([_]bool{ false, true }, &rows) |lanes, *got| {
+        var config: @import("../executor.zig").Config = .{};
+        config.knobs.lanes = lanes;
+        var s = Session.init(t.allocator, t.io, &prepared, &deck, config);
+        defer s.deinit();
+        var ids: [jobs.len]requests.QueryId = undefined;
+        _ = try s.append(&jobs, &ids);
+        try s.runAll(.{ .max_parallel = 1, .quantum = .completion });
+        for (s.rows.items(.executor), s.rows.items(.job)) |e, j| if (e) |x| {
+            if (j == .pss) batched += x.peers.len;
+        };
+        for (ids, got) |id, *r| {
+            const q = try s.info(id);
+            r.* = .{ .status = q.status, .failure = q.failure, .data = &.{} };
+            if (q.status == .complete) r.data = try t.allocator.dupe(f64, (try s.result(id)).data);
+        }
+    }
+    defer for (rows) |rs| for (rs) |r| t.allocator.free(r.data);
+    try t.expect(batched > 0);
+    var completed: usize = 0;
+    for (rows[0], rows[1]) |alone, laned| {
+        try t.expectEqual(alone.status, laned.status);
+        try t.expectEqual(alone.failure, laned.failure);
+        try t.expectEqualSlices(u64, @ptrCast(alone.data), @ptrCast(laned.data));
+        completed += @intFromBool(alone.status == .complete);
+    }
+    // The three 1k rows are one another bitwise, alone and as lanes.
+    for ([_]usize{ 2, 6 }) |k| try t.expectEqualSlices(u64, @ptrCast(rows[1][0].data), @ptrCast(rows[1][k].data));
+    // The NaN row must fail; most finish.
+    try t.expect(completed > jobs.len / 2 and completed < jobs.len);
+}
+
+test "lane batches: HB rows are never grouped (#210: their lanes would all peel)" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    const out = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 0, .waveform = 2, .sin_vo = 0, .sin_va = 1, .sin_freq = 1e3 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ vin, out });
+    try b.addDevice(models.capacitor, "", &.{ .c = 1e-7 }, &.{}, .{ out, GROUND });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    const deck = bareDeck(&.{out}, &.{"v(out)"});
+    const jobs = [_]requests.Query{
+        .{ .hb = .{ .f0 = 1e3, .n_harmonics = 3 } },
+        .{ .hb = .{ .f0 = 1e3, .n_harmonics = 3 } },
+        .{ .hb = .{ .f0 = 1e3, .n_harmonics = 3 } },
+    };
+    var config: @import("../executor.zig").Config = .{};
+    config.knobs.lanes = true;
+    var s = Session.init(t.allocator, t.io, &prepared, &deck, config);
+    defer s.deinit();
+    var ids: [jobs.len]requests.QueryId = undefined;
+    _ = try s.append(&jobs, &ids);
+    try s.runAll(.{ .max_parallel = 1, .quantum = .completion });
+    try t.expectEqual(null, s.failure());
+    for (s.rows.items(.executor)) |e| if (e) |x| try t.expectEqual(@as(usize, 0), x.peers.len);
+}
+
 test "lane batches: AC-family rows on variant rows equal their runs alone, bitwise, with failing and replicated lanes" {
     const t = std.testing;
     var lib = try Library.init(t.allocator);

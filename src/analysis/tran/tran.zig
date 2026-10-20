@@ -1671,6 +1671,7 @@ pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome)
     defer gpa.free(live);
     @memset(live, false);
     var n_live: usize = 0;
+    const t_init = gpu_lanes.Prof.now();
     for (ctxs, runs, live, out) |*c, *r, *on, *o| {
         r.init(c, opts) catch |e| {
             o.* = e;
@@ -1703,6 +1704,7 @@ pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome)
             break :blk null;
         };
     };
+    if (ctxs[first].circuit.knobs.gpu_stats != .off) std.debug.print("gpu-lanes: setup {d:.1} ms (Run.init and GpuLanes.init)\n", .{@as(f64, @floatFromInt(gpu_lanes.Prof.now() - t_init)) / 1e6});
     const d = dev orelse {
         // Each lane alone, from a fresh `Run`.
         for (runs, live, ctxs, out) |*r, *on, *c, *o| if (on.*) {

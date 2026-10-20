@@ -1732,6 +1732,75 @@ test "per-lane stimulus (#212): each .data point equals its row run alone, to th
     for (swept.grids.items[1..]) |grid| try t.expectEqualSlices(u64, @ptrCast(swept.grids.items[0]), @ptrCast(grid));
 }
 
+/// Every requested `.pss` result of `source`, in request order, with
+/// `.lanes` on or off.
+fn pssRows(source: []const u8, lanes: bool) ![]f64 {
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = source, .origin = "pss_lanes.sp" } },
+        .backend = .{ .lanes = lanes },
+    });
+    defer p.deinit();
+    try p.run_all();
+    var rows: std.ArrayList(f64) = .empty;
+    errdefer rows.deinit(t.allocator);
+    for (0..p.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        const info = try p.query_info(id);
+        if (!info.requested or info.kind != .pss) continue;
+        try rows.appendSlice(t.allocator, (try p.result(id)).data);
+    }
+    return rows.toOwnedSlice(t.allocator);
+}
+
+test "pss lanes (#210): a .step sweep of shooting solves is bitwise each point alone, dense and Krylov" {
+    // Dense FD path: the rectifier of tests/fixtures/pss, load swept.
+    const dense =
+        \\* swept rectifier
+        \\.param rl=1k
+        \\Vin in 0 SIN(0 2 1k)
+        \\Rsrc in a 100
+        \\D1 a out dm
+        \\Rload out 0 {rl}
+        \\C1 out 0 100n
+        \\.model dm D(is=1e-14 rs=1)
+        \\.step param rl list 500 1k 1k 2k 4k 8k 16k 32k 64k
+        \\.pss 1k 64
+        \\.end
+        \\
+    ;
+    // Krylov path (n >= 50): a diode into a 50-stage RC ladder.
+    var krylov: std.Io.Writer.Allocating = .init(t.allocator);
+    defer krylov.deinit();
+    try krylov.writer.writeAll("* swept ladder\n.param rl=1k\nVin in 0 SIN(0 2 1k)\nD1 in n0 dm\n");
+    for (1..51) |k| try krylov.writer.print("R{d} n{d} n{d} 100\nC{d} n{d} 0 1n\n", .{ k, k - 1, k, k, k });
+    try krylov.writer.writeAll("Rload n50 0 {rl}\n.model dm D(is=1e-14)\n.step param rl list 1k 2k 4k 8k 16k\n.pss 1k 32\n.end\n");
+    for ([_][]const u8{ dense, krylov.written() }) |source| {
+        const alone = try pssRows(source, false);
+        defer t.allocator.free(alone);
+        const laned = try pssRows(source, true);
+        defer t.allocator.free(laned);
+        try t.expect(alone.len > 0);
+        try t.expectEqualSlices(u64, @ptrCast(alone), @ptrCast(laned));
+    }
+}
+
+test "pss lanes (#210): autonomous shooting solves keep their own periods as lanes" {
+    // tests/fixtures/pss/ring_oscillator.sp's ring with its RC swept: each
+    // lane starts its own oscillator and solves its own period.
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/fixtures/pss/ring_oscillator.sp", t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    // A swept load on node c1 (the deck's C1 node) changes each lane's
+    // period.
+    const swept = try std.mem.replaceOwned(u8, t.allocator, source, ".end", ".param cx=1n\nCx c1 0 {cx}\n.step param cx list 0.1n 0.2n 0.3n 0.4n\n.end");
+    defer t.allocator.free(swept);
+    const alone = try pssRows(swept, false);
+    defer t.allocator.free(alone);
+    const laned = try pssRows(swept, true);
+    defer t.allocator.free(laned);
+    try t.expect(alone.len > 0);
+    try t.expectEqualSlices(u64, @ptrCast(alone), @ptrCast(laned));
+}
+
 const ac_lane_deck =
     \\* AC-family lanes (#209): .ac, .noise and .tf of a diode-loaded RC
     \\* stepped over rl; points 0, 2, 4 and 6 repeat rl = 1k.
@@ -1846,9 +1915,9 @@ const chain_deck =
 
 /// (wn, wp, rw, cw, td): 16 sizing points drawn as lockstep.py draws them
 /// (nfin 2-4 as width 0.5-1.5 um, rw and cw 0.5-2x), then a moved edge,
-/// an extreme wire, and rw = 0, which fails (CHECK: if the frontend
-/// clamps r = 0 instead of failing, the test still holds; it then only
-/// checks that some row differs, see the last assert).
+/// an extreme wire, and a negative wire capacitance on a shorted wire,
+/// which fails with TimestepTooSmall (rw = 0 alone solves: the frontend
+/// takes it as a short).
 const chain_rows = [_][5]f64{
     .{ 1.0e-6, 2.0e-6, 200, 5e-15, 20e-12 },   .{ 0.5e-6, 1.0e-6, 137, 3.1e-15, 20e-12 },
     .{ 1.5e-6, 3.0e-6, 352, 9.2e-15, 20e-12 }, .{ 1.0e-6, 1.0e-6, 101, 2.6e-15, 20e-12 },
@@ -1859,7 +1928,7 @@ const chain_rows = [_][5]f64{
     .{ 1.0e-6, 1.0e-6, 333, 7.1e-15, 20e-12 }, .{ 0.5e-6, 3.0e-6, 110, 6.0e-15, 20e-12 },
     .{ 1.5e-6, 1.0e-6, 270, 4.8e-15, 20e-12 }, .{ 1.0e-6, 3.0e-6, 199, 8.8e-15, 20e-12 },
     .{ 1.0e-6, 2.0e-6, 200, 5e-15, 37e-12 },   .{ 1.0e-6, 2.0e-6, 1e9, 5e-15, 20e-12 },
-    .{ 1.0e-6, 2.0e-6, 0, 5e-15, 20e-12 },
+    .{ 1.0e-6, 2.0e-6, 0, -5e-15, 20e-12 },
 };
 
 /// `chain_deck` with `order`'s rows in its .data table.
@@ -1948,6 +2017,7 @@ test "lane lockstep (#207): 16 sizing points, a moved edge, an extreme and a fai
             try t.expectEqualSlices(u64, @ptrCast(alone.data.items[k]), @ptrCast(d));
         }
     }
-    // Some row must fail (rw = 0) or the failing-lane case tested nothing.
+    // Some row must fail (the negative capacitance) or the failing-lane
+    // case tested nothing.
     try t.expect(std.mem.indexOfNone(?anyerror, alone.errs.items, &.{null}) != null);
 }

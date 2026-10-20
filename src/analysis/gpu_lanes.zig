@@ -228,7 +228,7 @@ pub const Prof = struct {
 
     pub const Phase = enum(u3) { host, predict, newton, probe, apply };
 
-    fn now() u64 {
+    pub fn now() u64 {
         if (comptime @import("builtin").os.tag != .linux) return 0;
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
