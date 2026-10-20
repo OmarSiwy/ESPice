@@ -304,276 +304,438 @@ fn simulateWith(
     tangents: ?*Tangents,
     stream: ?*Stream,
 ) !bool {
-    const n: usize = ckt.n;
-    const has_charge = ckt.has_charge;
+    var s: Sim = undefined;
+    try s.init(ckt, x, probes, waveform, options, allocator, tangents, stream);
+    defer s.deinit();
+    return s.drive();
+}
 
-    const ws = try ckt.workspace();
-    // A device's `request_reject_at` retries the step ending at that time.
-    ckt.land_rejects = true;
-    defer ckt.land_rejects = false;
-    const x_try = try allocator.alloc(f64, n);
-    defer allocator.free(x_try);
-    // The accepted point before `cur`, for the predictor. Equal to `cur`
-    // until the first step is accepted, so that step starts from the OP.
-    const x_prev = try allocator.alloc(f64, n);
-    defer allocator.free(x_prev);
-    num.copySimd(x_prev, x);
+/// What one attempt asks of Newton: `trial` from the predictor, solved at
+/// `t_dev` under `hook` with `nr_opts`. `dts`, `ag` and `c` are the step's
+/// own history and coefficients, which `end` reads again.
+const Attempt = struct {
+    t_dev: f64,
+    method: Method,
+    gear_hi: bool,
+    dts: [7]f64,
+    ag: [7]f64,
+    c: integrator.Coeffs,
+    hook: TranHook,
+    nr_opts: converger.Options,
+};
 
-    // Row-plane charge state, one block: the dynamic current, then the
-    // charge ring [cur, prev, prev2, ...]. Slot 0 takes the charge of each
-    // converged attempt; the companion residual reads slots 1 and 2. The LTE
-    // at order k reads k + 2 slots, so the ring holds max(4, top + 2), and
-    // a gear-3..6 run keeps its step's `gearHistory` g in one more part.
-    const top_order = integrator.order(options.method);
-    const n_hist: usize = @max(4, top_order + 2);
-    const n_parts: usize = 1 + n_hist + @intFromBool(top_order >= 3);
-    var a_vals: []f64 = &.{};
-    const row_state = try allocator.alloc(f64, if (has_charge) n_parts * n else 0);
-    defer allocator.free(row_state);
-    const i_prev = row_state[0 .. row_state.len / n_parts];
-    var q_ring = ring(row_state, n_parts);
-    const q_hist = q_ring[0..n_hist];
-    const g_row = q_ring[n_hist];
+/// How `Sim.end` left the run: `.go` attempts again (a retry or the next
+/// step), `.stop` ends it early with every card resolved, `.underflow` ends
+/// it short of t_stop (dt below `dt_min`, or the VPI retry bound).
+const Verdict = enum { go, stop, underflow };
 
-    // The LTE runs per device charge state, as ngspice's CKTterr does
-    // (ckttrunc.c and the per-device trunc routines), not per matrix row:
-    // charges that share a node add their divided differences, so a row's
-    // slope belongs to no real state. The device `q_tape` holds one charge
-    // per `ddt()` site the model leaves in the LTE (`vera_lte`), and the host
-    // keeps a second history over it. The companion residual still
-    // integrates the row plane.
-    //
-    // n_qt == 0 (no charge, or a GPU plane-stamp hook that bypasses the host
-    // batches) runs the same kernel over the row plane. ZP_NO_QTAPE forces
-    // that fallback for A/B runs; `n_qt` in the stats line says which is live.
-    const n_qt: usize = if (has_charge and !ckt.knobs.no_qtape) ckt.qTapeLen() else 0;
-    // Coupled inductors: ngspice truncates one state per inductor, INDflux =
-    // L*i + sum M*i_other (indload.c:72-76; MUT has no trunc routine). The
-    // tape holds L*i and each M*i as separate states, which bind where
-    // INDflux does not. With a K card, `lteSnap` zeroes the inductor and
-    // kinduc tape spans (a flat zero history never binds) and appends the row
-    // plane at every inductor current row, since an inductor's branch row
-    // sums exactly its INDflux. Both are resolved here, once: `lte_zero`
-    // holds the [offset, end) tape spans to clear.
-    var lte_rows: []u32 = &.{};
-    var lte_zero: [][2]u32 = &.{};
-    defer allocator.free(lte_rows);
-    defer allocator.free(lte_zero);
-    if (n_qt > 0) for (ckt.batches) |kb| {
-        if (!std.mem.eql(u8, kb.type_name, "kinduc")) continue;
-        var rows: std.ArrayList(u32) = .empty;
-        errdefer rows.deinit(allocator);
-        const is_l = try allocator.alloc(bool, n);
-        defer allocator.free(is_l);
-        @memset(is_l, false);
-        ckt.markCurrentRowsOf("inductor", is_l);
-        for (is_l, 0..) |l, r| if (l) try rows.append(allocator, @intCast(r));
-        lte_rows = try rows.toOwnedSlice(allocator);
-        var spans: std.ArrayList([2]u32) = .empty;
-        errdefer spans.deinit(allocator);
-        var off: u32 = 0;
-        for (ckt.batches) |b| {
-            const f = b.hooks.q_tape orelse continue;
-            const end = off + @as(u32, @intCast(f(b.ctx).len));
-            if (std.mem.eql(u8, b.type_name, "inductor") or std.mem.eql(u8, b.type_name, "kinduc"))
-                try spans.append(allocator, .{ off, end });
-            off = end;
-        }
-        lte_zero = try spans.toOwnedSlice(allocator);
-        break;
-    };
-    const n_lt = n_qt + lte_rows.len;
-    const lteSnap = struct {
-        fn call(c: *root.Circuit, dst: []f64, zero: []const [2]u32, rows: []const u32) void {
-            const n_tape = dst.len - rows.len;
-            c.snapshotQTape(dst[0..n_tape]);
-            for (zero) |span| @memset(dst[span[0]..span[1]], 0);
-            for (rows, dst[n_tape..]) |r, *d| d.* = c.q_vec[r];
-        }
-    }.call;
-    // The same layout over the n_lt LTE states.
-    const lte_state = try allocator.alloc(f64, if (n_qt > 0) n_parts * n_lt else 0);
-    defer allocator.free(lte_state);
-    const qt_i_prev = lte_state[0 .. lte_state.len / n_parts];
-    var qt_ring = ring(lte_state, n_parts);
-    const qt_hist = qt_ring[0..n_hist];
-    const qt_g = qt_ring[n_hist];
+/// One transient between its attempts: `simulateWith`'s state, so the
+/// scalar driver (`drive`) and the lane driver (`runLanes`) share every
+/// statement but the Newton solve. Pinned: `init` fills it in place.
+/// `begin` prepares an attempt, the caller solves it, `end` takes the
+/// verdict, and `finish` closes a run that left `begin`'s loop.
+/// dev/research/lane-batched-simulation.md §7.
+const Sim = struct {
+    ckt: *root.Circuit,
+    x: []f64,
+    probes: []const u32,
+    waveform: *Waveform,
+    options: Options,
+    allocator: std.mem.Allocator,
+    tangents: ?*Tangents,
+    stream: ?*Stream,
+    ws: *converger.Workspace,
+    n: usize,
+    has_charge: bool,
+    x_try: []f64,
+    x_prev: []f64,
+    top_order: u8,
+    n_hist: usize,
+    a_vals: []f64,
+    row_state: []f64,
+    i_prev: []f64,
+    q_ring: [9][]f64,
+    g_row: []f64,
+    n_qt: usize,
+    lte_rows: []u32,
+    lte_zero: [][2]u32,
+    lte_state: []f64,
+    qt_i_prev: []f64,
+    qt_ring: [9][]f64,
+    qt_g: []f64,
+    effective_dt_max: f64,
+    delmin: f64,
+    min_break: f64,
+    state_eps: f64,
+    echo_bps: [256]f64,
+    n_echo: usize,
+    echo_td: ?f64,
+    uic_bp: ?f64,
+    vpi: ?*const @import("device").Library.Vpi,
+    vpi_point: @import("device").Library.AnalogPoint,
+    cur: []f64,
+    trial: []f64,
+    prev: []f64,
+    t: f64,
+    dt: f64,
+    dt_old: [6]f64,
+    steps: u32,
+    stats_on: bool,
+    st: Stats,
+    order: u8,
+    run_order: u8,
+    order_run: u32,
+    bp_next: ?f64,
+    bp_clamped: bool,
+    bp_save_dt: f64,
+    attempted_dt: f64,
+    vpi_again: u32,
+    resolved: bool,
 
-    // uic skipped op.solve, so do its device bookkeeping here: latch power-on
-    // FSM state under `initial_step` (§5.10.2), commit it, and leave a static
-    // kind for the charge seeding below. `.ic`, not `.dc`: the uic start is
-    // the transient's ic phase, so waveform sources evaluate at t = 0.
-    // An idt's ic is its value at t = 0 (LRM §4.5.4) and the charge the
-    // integration starts from, as a capacitor's IC is under ngspice's
-    // MODEUIC (capload.c), so it is seeded here rather than left at 0.
-    if (options.uic) {
-        ckt.setSimState(.{ .kind = .ic, .initial_step = true });
-        _ = ckt.stateCtl(.commit);
-        ckt.setSimState(.{ .kind = .ic });
-        ckt.seedIc(x);
+    fn qHist(s: *Sim) [][]f64 {
+        return s.q_ring[0..s.n_hist];
     }
-    try ckt.computeBaseline();
-
-    if (has_charge) {
-        a_vals = try ws.ensureAVals(ckt.nnz);
-        num.zeroSimd(i_prev);
-        num.zeroSimd(qt_i_prev);
-        // No setSimState first: q_prev must be the charge the operating point
-        // saw, so this eval runs in the static state op.solve left behind.
-        ckt.eval(x, 0);
-        // A flat q(0) history makes every divided difference vanish, so LTE
-        // control runs from the first step.
-        for (q_hist[1..]) |h| num.copySimd(h, ckt.q_vec[0..n]);
-        if (n_qt > 0) {
-            lteSnap(ckt, qt_hist[1], lte_zero, lte_rows);
-            for (qt_hist[2..]) |h| num.copySimd(h, qt_hist[1]);
-        }
+    fn qtHist(s: *Sim) [][]f64 {
+        return s.qt_ring[0..s.n_hist];
     }
-    // Still in the operating point's static state, as the seeding above.
-    if (tangents) |tg| {
-        std.debug.assert(!options.uic);
-        try tg.advance(ckt, ws, a_vals, x, 0, null);
-        try ckt.computeBaseline();
+    /// The LTE history: per state when the tape is live, per row otherwise.
+    /// Same kernel either way, so the row path is the scalar oracle for the
+    /// tape path. The slice is the ring, so it follows the rotation.
+    fn lteHist(s: *Sim) [][]f64 {
+        return if (s.n_qt > 0) s.qtHist() else s.qHist();
     }
-    // The LTE history: per state when the tape is live, per row otherwise.
-    // Same kernel either way, so the row path is the scalar oracle for the
-    // tape path. The slice is the ring, so it follows the rotation.
-    const lte_hist: []const []const f64 = if (n_qt > 0) qt_hist else q_hist;
-    const lte_ip: []const f64 = if (n_qt > 0) qt_i_prev else i_prev;
-    const lte_g: []const f64 = if (n_qt > 0) qt_g else g_row;
-
-    // Seed absdelay rings with the operating point: the first §4.5.7
-    // zHistPush fills the whole ring with (0, v_op), so no delay line reads
-    // 0 V for t < td. Needs kind = .tran, the only branch on which the
-    // generated core computes the delay inputs (dt = 0 keeps zAbsdelay the
-    // DC identity).
-    ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
-    _ = ckt.commitStates(x);
-    _ = ckt.stateCtl(.commit);
-
-    // ngspice tmax defaults to (tstop - tstart)/50; the circuit's minimum
-    // delay caps it further.
-    var effective_dt_max = options.dt_max orelse (options.t_stop - options.t_start) / 50.0;
-    if (ckt.minDelay()) |td_min| effective_dt_max = @min(effective_dt_max, td_min);
-    // The analysis' own CKTminBreak: delmin = 1e-11*maxStep and minBreak =
-    // 10*delmin (traninit.c:36, dctran.c:170). Breakpoints closer than this
-    // to the current time or to each other merge (dctran.c:636,
-    // cktsetbk.c:45). optran.c:419's 5e-5*tmax is the OP transient's rule and
-    // would merge away ns-scale source corners.
-    const delmin = 1e-11 * effective_dt_max;
-    const min_break = 10.0 * delmin;
-    // How sharply a device state flip must land before the step is accepted.
-    // An espice Newton/FSM tolerance with no ngspice counterpart; the switch
-    // fixtures are tuned against it, so it is not min_break.
-    const state_eps = 5e-5 * effective_dt_max;
-
-    // Delayed breakpoint echoes, standing in for ngspice traload's t + td
-    // breakpoint on a sharp line input: every landed breakpoint re-emits one
-    // echo at t + td, and echo landings re-emit in turn (t + 2td, 3td, ...).
-    // ponytail: one td (the circuit's minimum delay) for every history
-    // device; enumerate per-device delays if mixed-td circuits show edge smear.
-    var echo_bps: [256]f64 = undefined;
-    var n_echo: usize = 0;
-    const echo_td: ?f64 = ckt.minDelay();
-    if (echo_td) |td_| {
-        // t = 0 is itself a breakpoint (source edges often start there).
-        echo_bps[0] = td_;
-        n_echo = 1;
+    fn lteIp(s: *const Sim) []const f64 {
+        return if (s.n_qt > 0) s.qt_i_prev else s.i_prev;
     }
-    // Under uic ngspice sets a breakpoint at tstep "to reduce ringing of
-    // current in devices" (dctran.c:582-584), after sizing the first step,
-    // so landing there drops the order once (#166). Past t_stop it is never
-    // reached, as CKTsetBreak inserts nothing past CKTfinalTime.
-    const uic_bp: ?f64 = if (options.uic) options.dt_init else null;
-    const nextBp = struct {
-        fn call(c: *root.Circuit, echo: []const f64, extra: ?f64, after: f64) ?f64 {
-            var best = std.math.inf(f64);
-            if (c.nextBreakpoint(after)) |bp| best = bp;
-            for (echo) |e| {
-                if (e >= after and e < best) best = e;
+    fn lteG(s: *const Sim) []const f64 {
+        return if (s.n_qt > 0) s.qt_g else s.g_row;
+    }
+
+    /// Everything `simulateWith` did before its step loop, in its order:
+    /// scratch, the charge rings, uic bookkeeping, the baseline, history
+    /// seeding, the tangents' operating point, delay-line seeding, the
+    /// breakpoint and VPI setup, and the t = 0 row. Leaves the device state
+    /// committed at t = 0 and `land_rejects` set; `deinit` clears it.
+    fn init(
+        s: *Sim,
+        ckt: *root.Circuit,
+        x: []f64,
+        probes: []const u32,
+        waveform: *Waveform,
+        options: Options,
+        allocator: std.mem.Allocator,
+        tangents: ?*Tangents,
+        stream: ?*Stream,
+    ) !void {
+        const n: usize = ckt.n;
+        const has_charge = ckt.has_charge;
+
+        const ws = try ckt.workspace();
+        // A device's `request_reject_at` retries the step ending at that time.
+        ckt.land_rejects = true;
+        errdefer ckt.land_rejects = false;
+        const x_try = try allocator.alloc(f64, n);
+        errdefer allocator.free(x_try);
+        // The accepted point before `cur`, for the predictor. Equal to `cur`
+        // until the first step is accepted, so that step starts from the OP.
+        const x_prev = try allocator.alloc(f64, n);
+        errdefer allocator.free(x_prev);
+        num.copySimd(x_prev, x);
+
+        // Row-plane charge state, one block: the dynamic current, then the
+        // charge ring [cur, prev, prev2, ...]. Slot 0 takes the charge of each
+        // converged attempt; the companion residual reads slots 1 and 2. The LTE
+        // at order k reads k + 2 slots, so the ring holds max(4, top + 2), and
+        // a gear-3..6 run keeps its step's `gearHistory` g in one more part.
+        const top_order = integrator.order(options.method);
+        const n_hist: usize = @max(4, top_order + 2);
+        const n_parts: usize = 1 + n_hist + @intFromBool(top_order >= 3);
+        const row_state = try allocator.alloc(f64, if (has_charge) n_parts * n else 0);
+        errdefer allocator.free(row_state);
+        const q_ring = ring(row_state, n_parts);
+
+        // The LTE runs per device charge state, as ngspice's CKTterr does
+        // (ckttrunc.c and the per-device trunc routines), not per matrix row:
+        // charges that share a node add their divided differences, so a row's
+        // slope belongs to no real state. The device `q_tape` holds one charge
+        // per `ddt()` site the model leaves in the LTE (`vera_lte`), and the host
+        // keeps a second history over it. The companion residual still
+        // integrates the row plane.
+        //
+        // n_qt == 0 (no charge, or a GPU plane-stamp hook that bypasses the host
+        // batches) runs the same kernel over the row plane. ZP_NO_QTAPE forces
+        // that fallback for A/B runs; `n_qt` in the stats line says which is live.
+        const n_qt: usize = if (has_charge and !ckt.knobs.no_qtape) ckt.qTapeLen() else 0;
+        // Coupled inductors: ngspice truncates one state per inductor, INDflux =
+        // L*i + sum M*i_other (indload.c:72-76; MUT has no trunc routine). The
+        // tape holds L*i and each M*i as separate states, which bind where
+        // INDflux does not. With a K card, `lteSnap` zeroes the inductor and
+        // kinduc tape spans (a flat zero history never binds) and appends the row
+        // plane at every inductor current row, since an inductor's branch row
+        // sums exactly its INDflux. Both are resolved here, once: `lte_zero`
+        // holds the [offset, end) tape spans to clear.
+        var lte_rows: []u32 = &.{};
+        var lte_zero: [][2]u32 = &.{};
+        errdefer allocator.free(lte_rows);
+        errdefer allocator.free(lte_zero);
+        if (n_qt > 0) for (ckt.batches) |kb| {
+            if (!std.mem.eql(u8, kb.type_name, "kinduc")) continue;
+            var rows: std.ArrayList(u32) = .empty;
+            errdefer rows.deinit(allocator);
+            const is_l = try allocator.alloc(bool, n);
+            defer allocator.free(is_l);
+            @memset(is_l, false);
+            ckt.markCurrentRowsOf("inductor", is_l);
+            for (is_l, 0..) |l, r| if (l) try rows.append(allocator, @intCast(r));
+            lte_rows = try rows.toOwnedSlice(allocator);
+            var spans: std.ArrayList([2]u32) = .empty;
+            errdefer spans.deinit(allocator);
+            var off: u32 = 0;
+            for (ckt.batches) |b| {
+                const f = b.hooks.q_tape orelse continue;
+                const end_ = off + @as(u32, @intCast(f(b.ctx).len));
+                if (std.mem.eql(u8, b.type_name, "inductor") or std.mem.eql(u8, b.type_name, "kinduc"))
+                    try spans.append(allocator, .{ off, end_ });
+                off = end_;
             }
-            if (extra) |e| {
-                if (e >= after and e < best) best = e;
-            }
-            return if (best == std.math.inf(f64)) null else best;
-        }
-    }.call;
+            lte_zero = try spans.toOwnedSlice(allocator);
+            break;
+        };
+        const n_lt = n_qt + lte_rows.len;
+        // The same layout over the n_lt LTE states.
+        const lte_state = try allocator.alloc(f64, if (n_qt > 0) n_parts * n_lt else 0);
+        errdefer allocator.free(lte_state);
+        const qt_ring = ring(lte_state, n_parts);
 
-    // LRM 12.31.3 sees the transient proper, not the OPtran fallback.
-    const vpi = if (options.sources_at_zero) null else ckt.vpi;
-    const vpi_point: @import("device").Library.AnalogPoint = .{ .kind = .tran, .start = options.t_start, .stop = options.t_stop, .max_step = effective_dt_max };
-    if (vpi) |v| v.point(v.ctx, vpi_point);
-
-    // tstart suppresses output, never the solve: [0, t_start) is integrated
-    // with full history and not recorded.
-    if (options.t_start <= 0) {
-        const x0 = try uicStart(ckt, ws, x, x_try, .{
-            .method = .backward_euler,
-            .c = integrator.coeffs(.backward_euler, delmin, delmin, options.xmu),
-            .q_prev = q_hist[1],
-            .i_prev = i_prev,
-            .q_prev2 = q_hist[2],
-            .a_vals = a_vals,
-            .q_cur = {},
+        s.* = .{
+            .ckt = ckt,
+            .x = x,
+            .probes = probes,
+            .waveform = waveform,
+            .options = options,
+            .allocator = allocator,
+            .tangents = tangents,
+            .stream = stream,
+            .ws = ws,
+            .n = n,
             .has_charge = has_charge,
-        }, options);
-        try waveform.record(0, x0, probes);
-        if (stream) |s| s.feed(0, x0, waveform.data());
+            .x_try = x_try,
+            .x_prev = x_prev,
+            .top_order = top_order,
+            .n_hist = n_hist,
+            .a_vals = &.{},
+            .row_state = row_state,
+            .i_prev = row_state[0 .. row_state.len / n_parts],
+            .q_ring = q_ring,
+            .g_row = q_ring[n_hist],
+            .n_qt = n_qt,
+            .lte_rows = lte_rows,
+            .lte_zero = lte_zero,
+            .lte_state = lte_state,
+            .qt_i_prev = lte_state[0 .. lte_state.len / n_parts],
+            .qt_ring = qt_ring,
+            .qt_g = qt_ring[n_hist],
+            // Set below, in `simulateWith`'s order.
+            .effective_dt_max = undefined,
+            .delmin = undefined,
+            .min_break = undefined,
+            .state_eps = undefined,
+            .echo_bps = undefined,
+            .n_echo = 0,
+            .echo_td = null,
+            .uic_bp = null,
+            .vpi = null,
+            .vpi_point = undefined,
+            .cur = x,
+            .trial = x_try,
+            .prev = x_prev,
+            .t = 0,
+            .dt = undefined,
+            .dt_old = undefined,
+            .steps = 0,
+            .stats_on = ckt.knobs.tran_stats,
+            .st = .{},
+            .order = 1,
+            .run_order = 1,
+            .order_run = 0,
+            .bp_next = null,
+            .bp_clamped = false,
+            .bp_save_dt = options.t_stop / 50.0,
+            .attempted_dt = undefined,
+            .vpi_again = 0,
+            .resolved = false,
+        };
+        const q_hist = s.qHist();
+        const qt_hist = s.qtHist();
+
+        // uic skipped op.solve, so do its device bookkeeping here: latch power-on
+        // FSM state under `initial_step` (§5.10.2), commit it, and leave a static
+        // kind for the charge seeding below. `.ic`, not `.dc`: the uic start is
+        // the transient's ic phase, so waveform sources evaluate at t = 0.
+        // An idt's ic is its value at t = 0 (LRM §4.5.4) and the charge the
+        // integration starts from, as a capacitor's IC is under ngspice's
+        // MODEUIC (capload.c), so it is seeded here rather than left at 0.
+        if (options.uic) {
+            ckt.setSimState(.{ .kind = .ic, .initial_step = true });
+            _ = ckt.stateCtl(.commit);
+            ckt.setSimState(.{ .kind = .ic });
+            ckt.seedIc(x);
+        }
+        try ckt.computeBaseline();
+
+        if (has_charge) {
+            s.a_vals = try ws.ensureAVals(ckt.nnz);
+            num.zeroSimd(s.i_prev);
+            num.zeroSimd(s.qt_i_prev);
+            // No setSimState first: q_prev must be the charge the operating point
+            // saw, so this eval runs in the static state op.solve left behind.
+            ckt.eval(x, 0);
+            // A flat q(0) history makes every divided difference vanish, so LTE
+            // control runs from the first step.
+            for (q_hist[1..]) |h| num.copySimd(h, ckt.q_vec[0..n]);
+            if (n_qt > 0) {
+                lteSnap(ckt, qt_hist[1], lte_zero, lte_rows);
+                for (qt_hist[2..]) |h| num.copySimd(h, qt_hist[1]);
+            }
+        }
+        // Still in the operating point's static state, as the seeding above.
+        if (tangents) |tg| {
+            std.debug.assert(!options.uic);
+            try tg.advance(ckt, ws, s.a_vals, x, 0, null);
+            try ckt.computeBaseline();
+        }
+
+        // Seed absdelay rings with the operating point: the first §4.5.7
+        // zHistPush fills the whole ring with (0, v_op), so no delay line reads
+        // 0 V for t < td. Needs kind = .tran, the only branch on which the
+        // generated core computes the delay inputs (dt = 0 keeps zAbsdelay the
+        // DC identity).
+        ckt.setSimState(.{ .t = 0, .dt = 0, .kind = .tran, .initial_step = true });
+        _ = ckt.commitStates(x);
+        _ = ckt.stateCtl(.commit);
+
+        // ngspice tmax defaults to (tstop - tstart)/50; the circuit's minimum
+        // delay caps it further.
+        s.effective_dt_max = options.dt_max orelse (options.t_stop - options.t_start) / 50.0;
+        if (ckt.minDelay()) |td_min| s.effective_dt_max = @min(s.effective_dt_max, td_min);
+        // The analysis' own CKTminBreak: delmin = 1e-11*maxStep and minBreak =
+        // 10*delmin (traninit.c:36, dctran.c:170). Breakpoints closer than this
+        // to the current time or to each other merge (dctran.c:636,
+        // cktsetbk.c:45). optran.c:419's 5e-5*tmax is the OP transient's rule and
+        // would merge away ns-scale source corners.
+        s.delmin = 1e-11 * s.effective_dt_max;
+        s.min_break = 10.0 * s.delmin;
+        // How sharply a device state flip must land before the step is accepted.
+        // An espice Newton/FSM tolerance with no ngspice counterpart; the switch
+        // fixtures are tuned against it, so it is not min_break.
+        s.state_eps = 5e-5 * s.effective_dt_max;
+
+        // Delayed breakpoint echoes, standing in for ngspice traload's t + td
+        // breakpoint on a sharp line input: every landed breakpoint re-emits one
+        // echo at t + td, and echo landings re-emit in turn (t + 2td, 3td, ...).
+        // ponytail: one td (the circuit's minimum delay) for every history
+        // device; enumerate per-device delays if mixed-td circuits show edge smear.
+        s.echo_td = ckt.minDelay();
+        if (s.echo_td) |td_| {
+            // t = 0 is itself a breakpoint (source edges often start there).
+            s.echo_bps[0] = td_;
+            s.n_echo = 1;
+        }
+        // Under uic ngspice sets a breakpoint at tstep "to reduce ringing of
+        // current in devices" (dctran.c:582-584), after sizing the first step,
+        // so landing there drops the order once (#166). Past t_stop it is never
+        // reached, as CKTsetBreak inserts nothing past CKTfinalTime.
+        s.uic_bp = if (options.uic) options.dt_init else null;
+
+        // LRM 12.31.3 sees the transient proper, not the OPtran fallback.
+        s.vpi = if (options.sources_at_zero) null else ckt.vpi;
+        s.vpi_point = .{ .kind = .tran, .start = options.t_start, .stop = options.t_stop, .max_step = s.effective_dt_max };
+        if (s.vpi) |v| v.point(v.ctx, s.vpi_point);
+
+        // tstart suppresses output, never the solve: [0, t_start) is integrated
+        // with full history and not recorded.
+        if (options.t_start <= 0) {
+            const x0 = try uicStart(ckt, ws, x, x_try, .{
+                .method = .backward_euler,
+                .c = integrator.coeffs(.backward_euler, s.delmin, s.delmin, options.xmu),
+                .q_prev = q_hist[1],
+                .i_prev = s.i_prev,
+                .q_prev2 = q_hist[2],
+                .a_vals = s.a_vals,
+                .q_cur = {},
+                .has_charge = has_charge,
+            }, options);
+            try waveform.record(0, x0, probes);
+            if (stream) |sm| sm.feed(0, x0, waveform.data());
+        }
+        if (s.vpi) |v| v.accept(v.ctx, true, false);
+        if (tangents) |tg| if (options.t_start <= 0) try tg.record(0, probes);
+
+        // ngspice's first step: min(tstep, tstop/100)/10 clamped to tmax outside
+        // the min (dctran.c:134), then the t = 0 breakpoint clamp 0.1*breaks[1]
+        // (dctran.c:578-586), then the firsttime /10. The operand order sets the
+        // phase of the whole accepted grid.
+        var dt: f64 = @min(@min(options.dt_init, options.t_stop / 100.0) / 10.0, s.effective_dt_max);
+        if (nextBp(ckt, s.echo_bps[0..s.n_echo], null, s.min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
+        dt /= 10.0;
+        if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
+        s.dt = dt;
+        // The accepted steps [dt_prev, dt_prev2, ...], newest first. CKTdeltaOld[]
+        // starts at CKTmaxStep (dctran.c:312), which the first divided
+        // differences read.
+        s.dt_old = @splat(s.effective_dt_max);
+        s.attempted_dt = dt;
     }
-    if (vpi) |v| v.accept(v.ctx, true, false);
-    if (tangents) |tg| if (options.t_start <= 0) try tg.record(0, probes);
 
-    var cur: []f64 = x;
-    var trial: []f64 = x_try;
-    var prev: []f64 = x_prev;
-    var t: f64 = 0;
-    // ngspice's first step: min(tstep, tstop/100)/10 clamped to tmax outside
-    // the min (dctran.c:134), then the t = 0 breakpoint clamp 0.1*breaks[1]
-    // (dctran.c:578-586), then the firsttime /10. The operand order sets the
-    // phase of the whole accepted grid.
-    var dt: f64 = @min(@min(options.dt_init, options.t_stop / 100.0) / 10.0, effective_dt_max);
-    if (nextBp(ckt, echo_bps[0..n_echo], null, min_break)) |bp0| dt = @min(dt, 0.1 * bp0);
-    dt /= 10.0;
-    if (options.t_start > 0 and dt > options.t_start) dt = options.t_start;
-    // The accepted steps [dt_prev, dt_prev2, ...], newest first. CKTdeltaOld[]
-    // starts at CKTmaxStep (dctran.c:312), which the first divided
-    // differences read.
-    var dt_old: [6]f64 = @splat(effective_dt_max);
-    var steps: u32 = 0;
-    const stats_on = ckt.knobs.tran_stats;
-    var st: Stats = .{};
-    // Order control: start at BE (order 1), promote to the configured method
-    // when the LTE allows, and drop back to BE at breakpoints so trap does
-    // not ring after a source edge. Gear-3..6 then moves one order at a time
-    // (see the order control after acceptance); `order_run` counts the
-    // accepted steps in a row at `run_order`.
-    var order: u8 = 1;
-    var run_order: u8 = 1;
-    var order_run: u32 = 0;
-    // ngspice's CKTbreaks[0] as the next step starts: the first breakpoint
-    // past t + min_break, and whether dt_next was clamped onto it. Landing is
-    // tested after the step is accepted, so a rejected step leaves no stale
-    // flag. bp_save_dt is spice3's CKTsaveDelta, the dt the LTE wanted before
-    // the last clamp; ngspice starts it at tstop/50 (dctran.c:318).
-    var bp_next: ?f64 = null;
-    var bp_clamped = false;
-    var bp_save_dt: f64 = options.t_stop / 50.0;
-    var attempted_dt = dt;
-    // vpiTransientFailConverge re-solves of one step, bounded as VerA bounds them.
-    var vpi_again: u32 = 0;
-    // Every `.meas` card resolved under `options.point.early_stop`.
-    var resolved = false;
+    /// Frees the scratch `init` allocated and clears `land_rejects`.
+    fn deinit(s: *Sim) void {
+        const a = s.allocator;
+        a.free(s.lte_state);
+        a.free(s.lte_zero);
+        a.free(s.lte_rows);
+        a.free(s.row_state);
+        a.free(s.x_prev);
+        a.free(s.x_try);
+        s.ckt.land_rejects = false;
+        s.* = undefined;
+    }
 
-    while (t < options.t_stop and !atStop(t, options.t_stop) and steps < options.max_steps) {
-        if (st.attempts != 0) try ckt.checkpoint(.{
+    /// The scalar loop: each attempt's Newton through `converger.run`, a
+    /// numerical failure retrying the step. Returns `finish`'s value, or
+    /// false when the run ended short of t_stop.
+    fn drive(s: *Sim) !bool {
+        while (try s.begin()) |a| {
+            const nr = converger.run(s.ckt, s.ws, s.trial, a.t_dev, a.nr_opts, a.hook) catch |err| switch (err) {
+                error.QueryCancelled, error.OutOfMemory => return err,
+                else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure retries the step
+            };
+            switch (try s.end(&a, nr)) {
+                .go => {},
+                .stop => break,
+                .underflow => return false,
+            }
+        }
+        return s.finish();
+    }
+
+    /// The step loop's head: null once the run has reached t_stop or
+    /// `max_steps`, else the next attempt, with `trial` predicted and
+    /// limited and the device state published for it.
+    fn begin(s: *Sim) !?Attempt {
+        const options = s.options;
+        if (!(s.t < options.t_stop and !atStop(s.t, options.t_stop) and s.steps < options.max_steps)) return null;
+        const ckt = s.ckt;
+        if (s.st.attempts != 0) try ckt.checkpoint(.{
             .phase = .transient,
-            .completed = st.attempts,
-            .simulation_time = t,
-            .step_size = attempted_dt,
-            .next_step = dt,
-            .accepted = steps,
+            .completed = s.st.attempts,
+            .simulation_time = s.t,
+            .step_size = s.attempted_dt,
+            .next_step = s.dt,
+            .accepted = s.steps,
         });
-        attempted_dt = dt;
+        s.attempted_dt = s.dt;
+        const t = s.t;
+        const dt = s.dt;
         // The time the devices evaluate at; OPtran holds it at 0.
         const t_dev = if (options.sources_at_zero) 0 else t + dt;
         // Publish the point this attempt aims at before anything evaluates
@@ -586,107 +748,136 @@ fn simulateWith(
             .t = t_dev,
             .dt = dt,
             .kind = .tran,
-            .initial_step = steps == 0,
+            .initial_step = s.steps == 0,
             .final_step = t + dt >= options.t_stop,
         });
-        if (vpi) |v| {
-            var p = vpi_point;
+        if (s.vpi) |v| {
+            var p = s.vpi_point;
             p.t = t + dt;
             p.dt = dt;
             v.point(v.ctx, p);
         }
-        const eff_method = methodAt(options.method, order);
+        const q_hist = s.qHist();
+        const eff_method = methodAt(options.method, s.order);
         // Gear-3..6 solves its coefficients from the whole step history
         // and folds the older charges into g once per attempt.
-        const gear_hi = order >= 3;
-        const dts: [7]f64 = [1]f64{dt} ++ dt_old;
-        var ag: [7]f64 = undefined;
-        const cf: integrator.Coeffs = if (gear_hi) blk: {
-            ag = integrator.gearAg(order, &dts);
-            integrator.gearHistory(g_row, q_hist[0 .. order + 1], ag);
-            break :blk .{ .ag0 = ag[0], .ag2 = 0 };
-        } else integrator.coeffs(eff_method, dt, dt_old[0], options.xmu);
-        const hook = TranHook{
+        const gear_hi = s.order >= 3;
+        var a: Attempt = .{
+            .t_dev = t_dev,
             .method = eff_method,
-            .c = cf,
+            .gear_hi = gear_hi,
+            .dts = [1]f64{dt} ++ s.dt_old,
+            .ag = undefined,
+            .c = undefined,
+            .hook = undefined,
+            .nr_opts = undefined,
+        };
+        a.c = if (gear_hi) blk: {
+            a.ag = integrator.gearAg(s.order, &a.dts);
+            integrator.gearHistory(s.g_row, q_hist[0 .. s.order + 1], a.ag);
+            break :blk .{ .ag0 = a.ag[0], .ag2 = 0 };
+        } else integrator.coeffs(eff_method, dt, s.dt_old[0], options.xmu);
+        a.hook = .{
+            .method = eff_method,
+            .c = a.c,
             .q_prev = q_hist[1],
-            .i_prev = i_prev,
-            .q_prev2 = if (gear_hi) g_row else q_hist[2],
+            .i_prev = s.i_prev,
+            .q_prev2 = if (gear_hi) s.g_row else q_hist[2],
             .q_cur = {},
-            .a_vals = a_vals,
-            .has_charge = has_charge,
+            .a_vals = s.a_vals,
+            .has_charge = s.has_charge,
         };
 
         // MODEINITPRED (dctran.c:794, DEVpred in dioload.c/mos1load.c): the
         // first iterate extrapolates the last two accepted points by
         // dt/dt_prev and is limited against the last accepted one. HFET and
         // MESA divide by the step two back instead (CKTdeltaOld[2]).
-        const xfact = dt / dt_old[0];
-        predict(trial, cur, prev, xfact);
-        ckt.predictFirstIterate(trial, cur, prev, dt / dt_old[1]);
-        ckt.evalFollowsFirst(trial, t_dev);
-        _ = ckt.applyLimits(trial, cur);
+        const xfact = dt / s.dt_old[0];
+        predict(s.trial, s.cur, s.prev, xfact);
+        ckt.predictFirstIterate(s.trial, s.cur, s.prev, dt / s.dt_old[1]);
+        ckt.evalFollowsFirst(s.trial, t_dev);
+        _ = ckt.applyLimits(s.trial, s.cur);
         // ngspice's transient Newton accepts on the per-row delta test alone
         // (niconv.c): a step that has converged in x but leaves a residual on
         // a row, e.g. a Meyer gate cap's curvature at a source-driven node,
         // is not iterated again.
-        var nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
-        nr_opts.residual_tol = std.math.inf(f64);
+        a.nr_opts = converger.optionsFromTolerances(options.tol, options.tol.itl4);
+        a.nr_opts.residual_tol = std.math.inf(f64);
         ckt.reject_at = null;
-        const nr = converger.run(ckt, ws, trial, t_dev, nr_opts, hook) catch |err| switch (err) {
-            error.QueryCancelled, error.OutOfMemory => return err,
-            else => converger.Result{ .converged = false, .iterations = 0 }, // else: a numerical failure retries the step
-        };
-        st.attempts += 1;
-        st.nr_iters += nr.iterations;
+        return a;
+    }
+
+    /// The step loop's body after Newton: rejects (Newton, a device's
+    /// `reject_at`, a state flip, the LTE, VPI) shrink `dt` and return
+    /// `.go`; an accepted step promotes or keeps the order, advances the
+    /// histories, commits, lands breakpoints, records and streams, and sets
+    /// the next dt.
+    fn end(s: *Sim, a: *const Attempt, nr: converger.Result) !Verdict {
+        const ckt = s.ckt;
+        const options = s.options;
+        const n = s.n;
+        const has_charge = s.has_charge;
+        const q_hist = s.qHist();
+        const qt_hist = s.qtHist();
+        const lte_hist = s.lteHist();
+        const lte_ip = s.lteIp();
+        const lte_g = s.lteG();
+        const t = s.t;
+        const dt = s.dt;
+        const t_dev = a.t_dev;
+        const eff_method = a.method;
+        const cf = a.c;
+        const gear_hi = a.gear_hi;
+        s.st.attempts += 1;
+        s.st.nr_iters += nr.iterations;
 
         if (!nr.converged) {
-            st.rej_newton += 1;
+            s.st.rej_newton += 1;
             // Restore FSM devices to the last accepted state.
             _ = ckt.stateCtl(.revert);
             // Cut dt by 8 and drop to order 1 in one retry (dctran.c:815, :823).
-            if (order > 1) st.order_drops += 1;
-            order = 1;
-            dt /= 8.0;
-            if (dt < options.dt_min) {
-                // The stats block at the bottom is skipped by this return.
-                if (stats_on) std.debug.print(
+            if (s.order > 1) s.st.order_drops += 1;
+            s.order = 1;
+            s.dt = dt / 8.0;
+            if (s.dt < options.dt_min) {
+                // The stats block in `finish` is skipped by this return.
+                if (s.stats_on) std.debug.print(
                     "tran-stats: DT UNDERFLOW (newton) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
-                    .{ t, dt, steps, st.attempts, st.nr_iters },
+                    .{ t, s.dt, s.steps, s.st.attempts, s.st.nr_iters },
                 );
-                return false;
+                return .underflow;
             }
-            continue;
+            return .go;
         }
 
         // A device located an event inside this step and asked for the step
         // to end on it (`request_reject_at`): retry landing there. A time
         // within state_eps of the step's end counts as the end, the
         // resolution the flip query below keeps too.
-        if (ckt.reject_at) |tr| if (tr > t and t + dt - tr > state_eps and tr - t >= options.dt_min) {
-            st.rej_state += 1;
+        if (ckt.reject_at) |tr| if (tr > t and t + dt - tr > s.state_eps and tr - t >= options.dt_min) {
+            s.st.rej_state += 1;
             _ = ckt.stateCtl(.revert);
-            dt = tr - t;
-            continue;
+            s.dt = tr - t;
+            return .go;
         };
 
         // A device state flipped inside this step (a switch crossed its
         // threshold): reject and shrink so the conductance step lands within
         // state_eps of the crossing instead of smeared across dt.
-        if (has_charge and !ckt.q_fresh) ckt.evalFollows(trial, t_dev, true);
-        if (dt > state_eps and ckt.stateCtl(.query)) {
-            st.rej_state += 1;
+        if (has_charge and !ckt.q_fresh) ckt.evalFollows(s.trial, t_dev, true);
+        if (dt > s.state_eps and ckt.stateCtl(.query)) {
+            s.st.rej_state += 1;
             _ = ckt.stateCtl(.revert);
-            order = 1;
-            dt = @max(0.25 * dt, state_eps);
-            continue;
+            s.order = 1;
+            s.dt = @max(0.25 * dt, s.state_eps);
+            return .go;
         }
 
         // The first accepted point skips CKTtrunc (dctran.c firsttime), so dt
         // repeats. §9.17.2 `$bound_step` is read after the step and applies
         // to the next one; devices only set it in `updateState`, so it cannot
         // be folded into effective_dt_max.
-        var dt_next = if (steps == 0) dt else @min(dt * 2.0, effective_dt_max);
+        var dt_next = if (s.steps == 0) dt else @min(dt * 2.0, s.effective_dt_max);
         if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
 
         // CKTterr reads the charge of the published point. The converger
@@ -695,17 +886,17 @@ fn simulateWith(
         // residual all see q(trial).
         // `q_fresh`: the converger's `updateStates` already stamped them.
         if (has_charge) {
-            if (!ckt.q_fresh) ckt.evalQ(trial, t_dev);
+            if (!ckt.q_fresh) ckt.evalQ(s.trial, t_dev);
             num.copySimd(q_hist[0], ckt.q_vec[0..n]);
-            if (n_qt > 0) lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
-            if (gear_hi and n_qt > 0) integrator.gearHistory(qt_g, qt_hist[0 .. order + 1], ag);
+            if (s.n_qt > 0) lteSnap(ckt, qt_hist[0], s.lte_zero, s.lte_rows);
+            if (gear_hi and s.n_qt > 0) integrator.gearHistory(s.qt_g, qt_hist[0 .. s.order + 1], a.ag);
         }
         // Taken before the ring rotation below.
         const lq: [4][]const f64 = .{ lte_hist[0], lte_hist[1], lte_hist[2], lte_hist[3] };
         const lte: integrator.LteIn = .{
             .dt = dt,
-            .dt1 = dt_old[0],
-            .dt2 = dt_old[1],
+            .dt1 = s.dt_old[0],
+            .dt2 = s.dt_old[1],
             .reltol = options.tol.reltol,
             .abstol = options.tol.abstol,
             .chgtol = options.tol.chgtol,
@@ -713,81 +904,81 @@ fn simulateWith(
         };
         // This step's own bound, read again by the gear order control.
         var del: f64 = undefined;
-        if (has_charge and steps > 0) {
+        if (has_charge and s.steps > 0) {
             del = if (gear_hi)
-                integrator.stepBoundGear(eff_method, eff_method, lte_hist, lte_ip, lte_g, cf, lte, &dts)
+                integrator.stepBoundGear(eff_method, eff_method, lte_hist, lte_ip, lte_g, cf, lte, &a.dts)
             else
                 integrator.stepBound(W, eff_method, eff_method, lq, lte_ip, cf, lte);
             if (!(del >= 0.9 * dt)) {
-                st.rej_lte += 1;
+                s.st.rej_lte += 1;
                 _ = ckt.stateCtl(.revert);
                 // Retry at the LTE's dt and the same order (dctran.c:966
                 // `CKTdelta = newdelta`); only a Newton failure drops the
                 // order. del < 0.9*dt here, so every retry shrinks. A NaN
                 // bound (a non-finite charge) retries as a Newton failure.
                 if (std.math.isNan(del)) {
-                    order = 1;
-                    dt /= 8.0;
-                } else dt = del;
-                if (dt < options.dt_min) {
-                    if (stats_on) std.debug.print(
+                    s.order = 1;
+                    s.dt = dt / 8.0;
+                } else s.dt = del;
+                if (s.dt < options.dt_min) {
+                    if (s.stats_on) std.debug.print(
                         "tran-stats: DT UNDERFLOW (lte) at t={e:.6} dt={e:.3} accepted={d} attempts={d} nr_iters={d}\n",
-                        .{ t, dt, steps, st.attempts, st.nr_iters },
+                        .{ t, s.dt, s.steps, s.st.attempts, s.st.nr_iters },
                     );
-                    return false;
+                    return .underflow;
                 }
-                continue;
+                return .go;
             }
             // Growth capped at 2x per accepted step, as in ngspice, and
             // lower at gear-3..6 (`maxGrowth`).
-            dt_next = @min(@max(del, options.dt_min), integrator.maxGrowth(eff_method) * dt, effective_dt_max);
+            dt_next = @min(@max(del, options.dt_min), integrator.maxGrowth(eff_method) * dt, s.effective_dt_max);
         }
 
         // LRM 12.31.3 acbConvergenceTest, last before acceptance: a rejection
         // (or 12.36 vpiRejectTransientStep) backs up to half the step from
         // the last accepted point, as VerA's own walk does; 12.36
         // vpiTransientFailConverge solves the same step again.
-        if (vpi) |v| switch (v.verdict(v.ctx)) {
-            .accept => vpi_again = 0,
+        if (s.vpi) |v| switch (v.verdict(v.ctx)) {
+            .accept => s.vpi_again = 0,
             .reject => {
-                st.rej_vpi += 1;
+                s.st.rej_vpi += 1;
                 _ = ckt.stateCtl(.revert);
-                dt /= 2.0;
-                if (dt < options.dt_min) return false;
-                continue;
+                s.dt = dt / 2.0;
+                if (s.dt < options.dt_min) return .underflow;
+                return .go;
             },
             .again => {
-                st.rej_vpi += 1;
+                s.st.rej_vpi += 1;
                 _ = ckt.stateCtl(.revert);
-                vpi_again += 1;
-                if (vpi_again == 60) return false;
-                continue;
+                s.vpi_again += 1;
+                if (s.vpi_again == 60) return .underflow;
+                return .go;
             },
         };
 
         // Accepted from here on; the history below is still this step's.
-        if (tangents) |tg| {
-            try tg.advance(ckt, ws, a_vals, trial, t_dev, .{ .method = eff_method, .c = cf, .q1 = q_hist[1], .q2 = q_hist[2], .i = i_prev });
-            if (t + dt >= options.t_start) try tg.record(t + dt, probes);
+        if (s.tangents) |tg| {
+            try tg.advance(ckt, s.ws, s.a_vals, s.trial, t_dev, .{ .method = eff_method, .c = cf, .q1 = q_hist[1], .q2 = q_hist[2], .i = s.i_prev });
+            if (t + dt >= options.t_start) try tg.record(t + dt, s.probes);
         }
 
         if (has_charge) {
             // Order promotion (dctran.c:901-913): recompute the trunc at
             // order 2 and adopt min(2*dt, del2) as the next dt whether or not
             // the order changes, as ngspice's `CKTdelta = newdelta` does.
-            st.by_order[order - 1] += 1;
-            order_run = if (order == run_order) order_run + 1 else 1;
-            run_order = order;
-            if (steps > 0 and order == 1) {
+            s.st.by_order[s.order - 1] += 1;
+            s.order_run = if (s.order == s.run_order) s.order_run + 1 else 1;
+            s.run_order = s.order;
+            if (s.steps > 0 and s.order == 1) {
                 const trial_del = integrator.stepBound(W, methodAt(options.method, 2), eff_method, lq, lte_ip, cf, lte);
                 // A NaN probe (prev3 non-finite) keeps BE and the step.
                 if (!std.math.isNan(trial_del)) {
                     const nd2 = @min(2.0 * dt, trial_del);
-                    if (nd2 > 1.05 * dt) order = 2;
-                    dt_next = @min(@max(nd2, options.dt_min), effective_dt_max);
+                    if (nd2 > 1.05 * dt) s.order = 2;
+                    dt_next = @min(@max(nd2, options.dt_min), s.effective_dt_max);
                     if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
                 }
-            } else if (steps > 0 and top_order >= 3 and order_run > order) {
+            } else if (s.steps > 0 and s.top_order >= 3 and s.order_run > s.order) {
                 // Gear-3..6 order control, an espice policy (dctran.c stops
                 // at order 2): after order + 1 accepted steps at one order,
                 // move one order up or down (not below 2) when that order's
@@ -797,18 +988,18 @@ fn simulateWith(
                 // ponytail: one order per change; DASSL-style selection on
                 // error trends would move faster.
                 var best = del;
-                var best_order = order;
-                for ([_]u8{ order + 1, order - 1 }) |k| {
-                    if (k > top_order or k < 2) continue;
-                    const d = integrator.stepBoundGear(methodAt(options.method, k), eff_method, lte_hist, lte_ip, lte_g, cf, lte, &dts);
+                var best_order = s.order;
+                for ([_]u8{ s.order + 1, s.order - 1 }) |k| {
+                    if (k > s.top_order or k < 2) continue;
+                    const d = integrator.stepBoundGear(methodAt(options.method, k), eff_method, lte_hist, lte_ip, lte_g, cf, lte, &a.dts);
                     if (d > 1.05 * best) {
                         best = d;
                         best_order = k;
                     }
                 }
-                if (best_order != order) {
-                    order = best_order;
-                    dt_next = @min(@max(best, options.dt_min), integrator.maxGrowth(methodAt(options.method, order)) * dt, effective_dt_max);
+                if (best_order != s.order) {
+                    s.order = best_order;
+                    dt_next = @min(@max(best, options.dt_min), integrator.maxGrowth(methodAt(options.method, s.order)) * dt, s.effective_dt_max);
                     if (ckt.boundStep()) |bs| dt_next = @min(dt_next, bs);
                 }
             }
@@ -816,27 +1007,28 @@ fn simulateWith(
             // The dynamic current under the method actually used. Both index
             // spaces run it: ngspice keeps it per state in
             // CKTstates[0][qcap+1], where CKTterr's volttol reads it.
-            integrator.advanceCurrent(eff_method, i_prev, q_hist[0], q_hist[1], if (gear_hi) g_row else q_hist[2], cf);
-            if (n_qt > 0)
-                integrator.advanceCurrent(eff_method, qt_i_prev, qt_hist[0], qt_hist[1], if (gear_hi) qt_g else qt_hist[2], cf);
+            integrator.advanceCurrent(eff_method, s.i_prev, q_hist[0], q_hist[1], if (gear_hi) s.g_row else q_hist[2], cf);
+            if (s.n_qt > 0)
+                integrator.advanceCurrent(eff_method, s.qt_i_prev, qt_hist[0], qt_hist[1], if (gear_hi) s.qt_g else qt_hist[2], cf);
 
             // [cur, prev, prev2, ...] -> [stale, cur, prev, ...].
-            std.mem.rotate([]f64, q_hist, n_hist - 1);
-            if (n_qt > 0) std.mem.rotate([]f64, qt_hist, n_hist - 1);
+            std.mem.rotate([]f64, q_hist, s.n_hist - 1);
+            if (s.n_qt > 0) std.mem.rotate([]f64, qt_hist, s.n_hist - 1);
         }
-        std.mem.copyBackwards(f64, dt_old[1..], dt_old[0 .. dt_old.len - 1]);
-        dt_old[0] = dt;
+        std.mem.copyBackwards(f64, s.dt_old[1..], s.dt_old[0 .. s.dt_old.len - 1]);
+        s.dt_old[0] = dt;
 
         // Rotate the slices; accepted states need no copy.
-        const stale = prev;
-        prev = cur;
-        cur = trial;
-        trial = stale;
-        t += dt;
-        steps += 1;
+        const stale = s.prev;
+        s.prev = s.cur;
+        s.cur = s.trial;
+        s.trial = stale;
+        s.t = t + dt;
+        s.steps += 1;
+        const t_new = s.t;
         // §4.5.2 delay-line bookkeeping, once per accepted point
         // (`Hooks.commit_state`), then the commit that latches every stage.
-        _ = ckt.commitStates(cur);
+        _ = ckt.commitStates(s.cur);
         _ = ckt.stateCtl(.commit);
 
         // Landed on a breakpoint: drop to BE and resume at
@@ -849,38 +1041,38 @@ fn simulateWith(
         // left out of that: they stand in for traload breakpoints ngspice
         // sets only on a sharp input, and tran/bench_tline_delay_line steps
         // through its t = td echo without a cut there.
-        if (bp_next) |bp| {
-            const landed = if (bp_clamped)
-                @abs(t - bp) <= min_break
+        if (s.bp_next) |bp| {
+            const landed = if (s.bp_clamped)
+                @abs(t_new - bp) <= s.min_break
             else
-                (bp - t <= delmin or almostEqualUlps(t, bp, 100)) and
-                    std.mem.indexOfScalar(f64, echo_bps[0..n_echo], bp) == null;
+                (bp - t_new <= s.delmin or almostEqualUlps(t_new, bp, 100)) and
+                    std.mem.indexOfScalar(f64, s.echo_bps[0..s.n_echo], bp) == null;
             if (landed) {
-                st.bp_landings += 1;
-                order = 1;
+                s.st.bp_landings += 1;
+                s.order = 1;
                 // Re-emit one line delay later; dedupe within min_break and
                 // drop when the table is full.
-                if (echo_td) |td_| {
-                    const e = t + td_;
-                    if (e < options.t_stop and n_echo < echo_bps.len) {
+                if (s.echo_td) |td_| {
+                    const e = t_new + td_;
+                    if (e < options.t_stop and s.n_echo < s.echo_bps.len) {
                         var dup = false;
-                        for (echo_bps[0..n_echo]) |old| {
-                            if (@abs(old - e) <= min_break) {
+                        for (s.echo_bps[0..s.n_echo]) |old| {
+                            if (@abs(old - e) <= s.min_break) {
                                 dup = true;
                                 break;
                             }
                         }
                         if (!dup) {
-                            echo_bps[n_echo] = e;
-                            n_echo += 1;
+                            s.echo_bps[s.n_echo] = e;
+                            s.n_echo += 1;
                         }
                     }
                 }
-                var shrink = bp_save_dt;
-                if (nextBp(ckt, echo_bps[0..n_echo], uic_bp, t + min_break)) |nb| shrink = @min(shrink, nb - t);
+                var shrink = s.bp_save_dt;
+                if (nextBp(ckt, s.echo_bps[0..s.n_echo], s.uic_bp, t_new + s.min_break)) |nb| shrink = @min(shrink, nb - t_new);
                 dt_next = @min(dt_next, 0.1 * shrink);
             }
-            bp_next = null;
+            s.bp_next = null;
         }
 
         // Stateful-charge devices: the commits above can move a device's q
@@ -892,12 +1084,12 @@ fn simulateWith(
         // txl2_3_line, hfet_inverter, mesa_oscillator and mos6_inverter.
         // `evalQ` computes the same q bits as `eval`, charges only.
         if (has_charge and ckt.has_state_q) {
-            ckt.evalQ(cur, t);
-            integrator.rebaseCurrent(i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
+            ckt.evalQ(s.cur, t_new);
+            integrator.rebaseCurrent(s.i_prev, ckt.q_vec[0..n], q_hist[1], cf.ag0);
             num.copySimd(q_hist[1], ckt.q_vec[0..n]);
-            if (n_qt > 0) {
-                lteSnap(ckt, qt_hist[0], lte_zero, lte_rows);
-                integrator.rebaseCurrent(qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
+            if (s.n_qt > 0) {
+                lteSnap(ckt, qt_hist[0], s.lte_zero, s.lte_rows);
+                integrator.rebaseCurrent(s.qt_i_prev, qt_hist[0], qt_hist[1], cf.ag0);
                 // Swap, not copy: slot 0 is the ring's scratch slot, and the
                 // next accepted attempt overwrites it before any read.
                 std.mem.swap([]f64, &qt_hist[0], &qt_hist[1]);
@@ -906,53 +1098,81 @@ fn simulateWith(
 
         // ngspice neither steps onto TSTART nor prints it: dctran.c dumps
         // the accepted points at t >= CKTinitTime and nothing else (#167).
-        if (t >= options.t_start) try waveform.record(t, cur, probes);
+        if (t_new >= options.t_start) try s.waveform.record(t_new, s.cur, s.probes);
         // Before the breakpoint search below, so a time a callback forces
         // from this point is landed on.
-        if (vpi) |v| v.accept(v.ctx, false, t >= options.t_stop or atStop(t, options.t_stop));
-        if (stream) |s| if (t >= options.t_start) {
-            s.feed(t, cur, waveform.data());
-            if (options.point.abort_after) |bound| if (t > bound and s.unresolved()) return error.MeasureBoundExceeded;
-            if (options.point.early_stop and s.open == 0 and (tangents == null or tangents.?.open() == 0)) {
-                resolved = true;
-                break;
+        if (s.vpi) |v| v.accept(v.ctx, false, t_new >= options.t_stop or atStop(t_new, options.t_stop));
+        if (s.stream) |sm| if (t_new >= options.t_start) {
+            sm.feed(t_new, s.cur, s.waveform.data());
+            if (options.point.abort_after) |bound| if (t_new > bound and sm.unresolved()) return error.MeasureBoundExceeded;
+            if (options.point.early_stop and sm.open == 0 and (s.tangents == null or s.tangents.?.open() == 0)) {
+                s.resolved = true;
+                return .stop;
             }
         };
 
         // Clamp dt to land on the next breakpoint, skipping those within
         // min_break of now (ngspice CKTminBreak merge).
-        bp_next = nextBp(ckt, echo_bps[0..n_echo], uic_bp, t + min_break);
-        bp_clamped = false;
-        if (bp_next) |bp| {
-            const dt_to_bp = bp - t;
+        s.bp_next = nextBp(ckt, s.echo_bps[0..s.n_echo], s.uic_bp, t_new + s.min_break);
+        s.bp_clamped = false;
+        if (s.bp_next) |bp| {
+            const dt_to_bp = bp - t_new;
             if (dt_to_bp < dt_next) {
-                bp_save_dt = dt_next;
+                s.bp_save_dt = dt_next;
                 dt_next = dt_to_bp;
-                bp_clamped = true;
+                s.bp_clamped = true;
             }
         }
 
-        dt = dt_next;
-        if (t + dt > options.t_stop) dt = options.t_stop - t;
+        s.dt = dt_next;
+        if (t_new + s.dt > options.t_stop) s.dt = options.t_stop - t_new;
+        return .go;
     }
 
-    try ckt.checkpoint(.{
-        .phase = .transient,
-        .completed = st.attempts,
-        .simulation_time = t,
-        .step_size = attempted_dt,
-        .next_step = if (t < options.t_stop) dt else 0,
-        .accepted = steps,
-    });
-    if (stats_on) {
-        std.debug.print(
-            "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d} vpi={d}] order_drops={d} bp_landings={d} by_order={any} avg_dt={e:.3}\n",
-            .{ n_qt, steps, st.attempts, st.nr_iters, st.rej_newton, st.rej_lte, st.rej_state, st.rej_vpi, st.order_drops, st.bp_landings, st.by_order, if (steps > 0) t / @as(f64, @floatFromInt(steps)) else 0 },
-        );
+    /// The step loop's tail: the last checkpoint, the stats line, `x`
+    /// holding the last accepted solution. True on reaching t_stop or once
+    /// every card resolved.
+    fn finish(s: *Sim) !bool {
+        const options = s.options;
+        try s.ckt.checkpoint(.{
+            .phase = .transient,
+            .completed = s.st.attempts,
+            .simulation_time = s.t,
+            .step_size = s.attempted_dt,
+            .next_step = if (s.t < options.t_stop) s.dt else 0,
+            .accepted = s.steps,
+        });
+        if (s.stats_on) {
+            const st = s.st;
+            std.debug.print(
+                "tran-stats: n_qt={d} accepted={d} attempts={d} nr_iters={d} rej[newton={d} lte={d} state={d} vpi={d}] order_drops={d} bp_landings={d} by_order={any} avg_dt={e:.3}\n",
+                .{ s.n_qt, s.steps, st.attempts, st.nr_iters, st.rej_newton, st.rej_lte, st.rej_state, st.rej_vpi, st.order_drops, st.bp_landings, st.by_order, if (s.steps > 0) s.t / @as(f64, @floatFromInt(s.steps)) else 0 },
+            );
+        }
+        if (s.cur.ptr != s.x.ptr) num.copySimd(s.x, s.cur);
+        return s.resolved or s.t >= options.t_stop or atStop(s.t, options.t_stop);
     }
+};
 
-    if (cur.ptr != x.ptr) num.copySimd(x, cur);
-    return resolved or t >= options.t_stop or atStop(t, options.t_stop);
+/// `lteSnap` and `nextBp`, hoisted out of `simulateWith` unchanged so
+/// `Sim` can call them.
+fn lteSnap(c: *root.Circuit, dst: []f64, zero: []const [2]u32, rows: []const u32) void {
+    const n_tape = dst.len - rows.len;
+    c.snapshotQTape(dst[0..n_tape]);
+    for (zero) |span| @memset(dst[span[0]..span[1]], 0);
+    for (rows, dst[n_tape..]) |r, *d| d.* = c.q_vec[r];
+}
+
+fn nextBp(c: *root.Circuit, echo: []const f64, extra: ?f64, after: f64) ?f64 {
+    var best = std.math.inf(f64);
+    if (c.nextBreakpoint(after)) |bp| best = bp;
+    for (echo) |e| {
+        if (e >= after and e < best) best = e;
+    }
+    if (extra) |e| {
+        if (e >= after and e < best) best = e;
+    }
+    return if (best == std.math.inf(f64)) null else best;
 }
 
 /// Parts 1..parts-1 of `block`, which holds `parts` (at most 10: gear-6's
@@ -1004,108 +1224,321 @@ test "atStop: within 100 ulps of t_stop, not past them" {
 /// `abort_after` fails it with `error.MeasureBoundExceeded` once
 /// past that time with one unresolved, or with `abort_measure` unresolved. A streamed or snapshot run ignores all three.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const a = ctx.allocator;
-    const scratch = ctx.scratch_allocator;
-    const x_op = ctx.x_op;
-    const x = try scratch.alloc(f64, x_op.len);
-    defer scratch.free(x);
-    num.copySimd(x, x_op);
+    var r: Run = undefined;
+    try r.init(ctx, opts);
+    defer r.deinit();
+    return r.take(try r.sim.drive());
+}
 
-    // The recording is the published result, so it lives in the results
-    // arena and `data` is borrowed below. A `.op <time>` snapshot publishes
-    // only x, and a streamed run writes its rows to `ctx.stream` as it goes,
-    // so either keeps its recording in scratch and drops it here.
-    const kept = !opts.snapshot and ctx.stream == null;
-    const all_names = try root.probeNames(ctx, scale);
-    var names = all_names;
-    var probes = ctx.probes;
-    var own_probes: []u32 = &.{};
-    defer scratch.free(own_probes);
-    const tran_cards = for (ctx.measures) |m| {
-        if (m.analysis == .tran) break true;
-    } else false;
-    // Measured as the run goes, in place of their columns.
-    const streamed = kept and opts.point.measures_only and opts.tangents.len == 0 and tran_cards;
-    if (kept and opts.point.measures_only) {
-        const keep = try scratch.alloc(bool, names.len);
-        defer scratch.free(keep);
-        measure.markColumns(ctx.measures, names, keep, streamed);
-        const sub_names = try a.alloc([]const u8, std.mem.count(bool, keep, &.{true}));
-        const sub_probes = try scratch.alloc(u32, sub_names.len - 1);
-        var k: usize = 0;
-        for (names, keep, 0..) |name, on, i| if (on) {
-            sub_names[k] = name;
-            if (k > 0) sub_probes[k - 1] = ctx.probes[i - 1];
-            k += 1;
+/// One `.tran` query's outputs around its `Sim`: the probes it records,
+/// its `.meas` stream, waveform and tangents, so `run` and `runLanes`
+/// build and publish each query the same way. Pinned: `init` fills it in
+/// place, and `sim` points at `wf`, `stream` and `tangents`.
+const Run = struct {
+    ctx: *const root.RunCtx,
+    opts: Options,
+    x: []f64,
+    kept: bool,
+    streamed: bool,
+    names: []const []const u8,
+    own_probes: []u32,
+    stream: ?Stream,
+    wf: Waveform,
+    tangents: ?Tangents,
+    /// `take` handed `wf`'s rows to the result.
+    published: bool = false,
+    sim: Sim,
+
+    /// `run`'s setup, then `Sim.init`.
+    fn init(r: *Run, ctx: *const root.RunCtx, opts: Options) !void {
+        const a = ctx.allocator;
+        const scratch = ctx.scratch_allocator;
+        const x_op = ctx.x_op;
+        const x = try scratch.alloc(f64, x_op.len);
+        errdefer scratch.free(x);
+        num.copySimd(x, x_op);
+
+        // The recording is the published result, so it lives in the results
+        // arena and `data` is borrowed below. A `.op <time>` snapshot publishes
+        // only x, and a streamed run writes its rows to `ctx.stream` as it goes,
+        // so either keeps its recording in scratch and drops it here.
+        const kept = !opts.snapshot and ctx.stream == null;
+        const all_names = try root.probeNames(ctx, scale);
+        var names = all_names;
+        var probes = ctx.probes;
+        var own_probes: []u32 = &.{};
+        errdefer scratch.free(own_probes);
+        const tran_cards = for (ctx.measures) |m| {
+            if (m.analysis == .tran) break true;
+        } else false;
+        // Measured as the run goes, in place of their columns.
+        const streamed = kept and opts.point.measures_only and opts.tangents.len == 0 and tran_cards;
+        if (kept and opts.point.measures_only) {
+            const keep = try scratch.alloc(bool, names.len);
+            defer scratch.free(keep);
+            measure.markColumns(ctx.measures, names, keep, streamed);
+            const sub_names = try a.alloc([]const u8, std.mem.count(bool, keep, &.{true}));
+            const sub_probes = try scratch.alloc(u32, sub_names.len - 1);
+            var k: usize = 0;
+            for (names, keep, 0..) |name, on, i| if (on) {
+                sub_names[k] = name;
+                if (k > 0) sub_probes[k - 1] = ctx.probes[i - 1];
+                k += 1;
+            };
+            names = sub_names;
+            probes = sub_probes;
+            own_probes = sub_probes;
+        }
+        const watched = streamed or (kept and tran_cards and (opts.point.early_stop or opts.point.abort_after != null));
+        var stream: ?Stream = if (watched) try .init(scratch, ctx.measures, all_names, ctx.probes, names) else null;
+        errdefer if (stream) |*sm| sm.deinit();
+        if (stream) |*sm| if (opts.point.abort_measure.len != 0) {
+            sm.abort_card = for (ctx.measures, 0..) |m, k| {
+                if (std.ascii.eqlIgnoreCase(m.name, opts.point.abort_measure)) break k;
+            } else null;
         };
-        names = sub_names;
-        probes = sub_probes;
-        own_probes = sub_probes;
+        const n_probes: u32 = @intCast(probes.len);
+        var wf = if (kept)
+            try Waveform.init(a, n_probes, initialCapacity(opts))
+        else if (opts.snapshot)
+            try Waveform.init(scratch, n_probes, initialCapacity(opts))
+        else
+            try Waveform.initStream(scratch, n_probes, ctx.stream.?);
+        errdefer wf.deinit();
+        var tangents = if (kept and opts.tangents.len != 0) try Tangents.init(ctx, opts, n_probes, scratch) else null;
+        errdefer if (tangents) |*tg| tg.deinit(scratch);
+        if (tangents) |*tg| if (watched and opts.point.early_stop) {
+            const streams = try scratch.alloc(Stream, tg.wf.len);
+            for (streams, 0..) |*sm, k| sm.* = Stream.init(scratch, ctx.measures, all_names, ctx.probes, names) catch |e| {
+                for (streams[0..k]) |*done| done.deinit();
+                scratch.free(streams);
+                return e;
+            };
+            tg.streams = streams;
+        };
+        r.* = .{
+            .ctx = ctx,
+            .opts = opts,
+            .x = x,
+            .kept = kept,
+            .streamed = streamed,
+            .names = names,
+            .own_probes = own_probes,
+            .stream = stream,
+            .wf = wf,
+            .tangents = tangents,
+            .sim = undefined,
+        };
+        try r.sim.init(ctx.circuit, x, probes, &r.wf, opts, scratch, if (r.tangents) |*tg| tg else null, if (r.stream) |*sm| sm else null);
     }
-    const watched = streamed or (kept and tran_cards and (opts.point.early_stop or opts.point.abort_after != null));
-    var stream: ?Stream = if (watched) try .init(scratch, ctx.measures, all_names, ctx.probes, names) else null;
-    if (stream) |*s| if (opts.point.abort_measure.len != 0) {
-        s.abort_card = for (ctx.measures, 0..) |m, k| {
-            if (std.ascii.eqlIgnoreCase(m.name, opts.point.abort_measure)) break k;
-        } else null;
-    };
-    defer if (stream) |*s| s.deinit();
-    const n_probes: u32 = @intCast(probes.len);
-    var wf = if (kept)
-        try Waveform.init(a, n_probes, initialCapacity(opts))
-    else if (opts.snapshot)
-        try Waveform.init(scratch, n_probes, initialCapacity(opts))
-    else
-        try Waveform.initStream(scratch, n_probes, ctx.stream.?);
-    defer if (!kept) wf.deinit();
-    errdefer if (kept) wf.deinit();
-    var tangents = if (kept and opts.tangents.len != 0) try Tangents.init(ctx, opts, n_probes, scratch) else null;
-    defer if (tangents) |*tg| tg.deinit(scratch);
-    if (tangents) |*tg| if (watched and opts.point.early_stop) {
-        const streams = try scratch.alloc(Stream, tg.wf.len);
-        for (streams, 0..) |*s, k| s.* = Stream.init(scratch, ctx.measures, all_names, ctx.probes, names) catch |e| {
-            for (streams[0..k]) |*done| done.deinit();
-            scratch.free(streams);
-            return e;
+
+    /// Frees what `init` made, `wf` unless `take` published it.
+    fn deinit(r: *Run) void {
+        const scratch = r.ctx.scratch_allocator;
+        r.sim.deinit();
+        if (r.tangents) |*tg| tg.deinit(scratch);
+        if (!r.published) r.wf.deinit();
+        if (r.stream) |*sm| sm.deinit();
+        scratch.free(r.own_probes);
+        scratch.free(r.x);
+        r.* = undefined;
+    }
+
+    /// The query's result from a run that ended with `sim_ok` (`Sim.drive`
+    /// or `Sim.finish`): `run`'s tail.
+    fn take(r: *Run, sim_ok: bool) !root.Result {
+        const ctx = r.ctx;
+        const a = ctx.allocator;
+        const opts = r.opts;
+        if (!sim_ok) return error.TimestepTooSmall;
+        // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
+        if (opts.snapshot) {
+            const op_names = try root.probeNames(ctx, null);
+            const data = try a.alloc(f64, op_names.len);
+            for (ctx.probes, data) |node, *out| out.* = r.x[node];
+            return .{
+                .plotname = try std.fmt.allocPrint(a, "Operating Point (time={e})", .{opts.t_stop}),
+                .varnames = op_names,
+                .is_complex = false,
+                .npoints = 1,
+                .data = data,
+            };
+        }
+        const tg = if (r.tangents) |*tg| tg else {
+            const res: root.Result = .{
+                .plotname = plotname,
+                .varnames = r.names,
+                .is_complex = false,
+                .npoints = r.wf.len,
+                .data = r.wf.data(),
+                .measured = if (r.streamed) try r.stream.?.measured(a) else &.{},
+            };
+            r.published = r.kept;
+            return res;
         };
-        tg.streams = streams;
-    };
-    const sim = try simulateWith(ctx.circuit, x, probes, &wf, opts, scratch, if (tangents) |*tg| tg else null, if (stream) |*s| s else null);
-    if (!sim) return error.TimestepTooSmall;
-    // HSPICE `.op <time>`: the state at t_stop, laid out as `.op` lays it out.
-    if (opts.snapshot) {
-        const op_names = try root.probeNames(ctx, null);
-        const data = try a.alloc(f64, op_names.len);
-        for (ctx.probes, data) |node, *out| out.* = x[node];
+        // Each row's block on the base run's time points.
+        const block = r.wf.data().len;
+        const blocks = try a.alloc(f64, block * tg.wf.len);
+        for (tg.wf, 0..) |w, k| @memcpy(blocks[k * block ..][0..block], w.data());
+        r.published = r.kept;
         return .{
-            .plotname = try std.fmt.allocPrint(a, "Operating Point (time={e})", .{opts.t_stop}),
-            .varnames = op_names,
+            .plotname = plotname,
+            .varnames = r.names,
             .is_complex = false,
-            .npoints = 1,
-            .data = data,
+            .npoints = r.wf.len,
+            .data = r.wf.data(),
+            .tangents = blocks,
         };
     }
+};
 
-    const tg = if (tangents) |*tg| tg else return .{
-        .plotname = plotname,
-        .varnames = names,
-        .is_complex = false,
-        .npoints = wf.len,
-        .data = wf.data(),
-        .measured = if (streamed) try stream.?.measured(a) else &.{},
+const LaneError = root.ErrorOf(run);
+/// One lane's `run` outcome.
+pub const LaneOutcome = LaneError!root.Result;
+
+/// `run` for the lanes of one batch: `.tran` queries on one pattern, each
+/// from its own operating point (or `uic` start) and variant row, in rounds
+/// (dev/research/lane-batched-simulation.md §7). Each round every live lane
+/// `begin`s an attempt at its own (t, dt), one `newtonLanes` solves them,
+/// and each `end`s it with its own step control, so no decision couples
+/// lanes and lane l's result lands in `out[l]` bitwise `run` on `ctxs[l]`.
+/// A JFNK pin, `-Dcertify` or a VPI application runs every lane's `run`.
+/// Asserts 1 <= `ctxs.len` <= `width`.
+pub fn runLanes(comptime width: usize, ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome) void {
+    const g = ctxs.len;
+    std.debug.assert(g >= 1 and g <= width and out.len == g);
+    const c0 = ctxs[0].circuit;
+    const pin = c0.knobs.newton.pin;
+    if (width == 1 or g == 1 or !(pin == .auto or pin == .direct) or root.Circuit.certify or c0.vpi != null) {
+        for (ctxs, out) |*c, *o| o.* = run(c, opts);
+        return;
+    }
+    const L = @import("solver").lanes.Lanes(width);
+    const System = @import("solver").lane_system.LaneSystem(width, root.Circuit, TranHook);
+    const bit = struct {
+        fn f(l: usize) L.Mask {
+            return @as(L.Mask, 1) << @intCast(l);
+        }
+    }.f;
+    var runs: [width]Run = undefined;
+    var live: L.Mask = 0;
+    for (ctxs, 0..) |*c, l| {
+        runs[l].init(c, opts) catch |e| {
+            out[l] = e;
+            continue;
+        };
+        live |= bit(l);
+    }
+    defer {
+        var it = L.each(live);
+        while (it.next()) |l| runs[l].deinit();
+    }
+    const Lane = struct {
+        /// Lane l ends with `ok` (`Sim.finish`'s value, or false short of
+        /// t_stop): its result, then its scratch.
+        fn done(rs: []Run, m: *L.Mask, o: []LaneOutcome, l: usize, ok: bool) void {
+            o[l] = rs[l].take(ok);
+            rs[l].deinit();
+            m.* &= ~bit(l);
+        }
+        fn kill(rs: []Run, m: *L.Mask, o: []LaneOutcome, l: usize, err: LaneError) void {
+            o[l] = err;
+            rs[l].deinit();
+            m.* &= ~bit(l);
+        }
+        /// Every live lane fails with the batch's own error (out of memory,
+        /// a cancel).
+        fn fail(rs: []Run, m: *L.Mask, o: []LaneOutcome, err: LaneError) void {
+            var it = L.each(m.*);
+            while (it.next()) |l| kill(rs, m, o, l, err);
+        }
     };
-    // Each row's block on the base run's time points.
-    const block = wf.data().len;
-    const blocks = try a.alloc(f64, block * tg.wf.len);
-    for (tg.wf, 0..) |w, k| @memcpy(blocks[k * block ..][0..block], w.data());
-    return .{
-        .plotname = plotname,
-        .varnames = names,
-        .is_complex = false,
-        .npoints = wf.len,
-        .data = wf.data(),
-        .tangents = blocks,
-    };
+    if (live == 0) return;
+    const gpa = ctxs[@ctz(live)].scratch_allocator;
+    const n = c0.n;
+
+    var sys: ?System = null;
+    defer if (sys) |*s| s.deinit(gpa);
+    var lws: ?@import("solver").converger.LaneWorkspace(width) = null;
+    defer if (lws) |*w| w.deinit(gpa);
+    const xv = gpa.alloc(L.V, n) catch |e| return Lane.fail(&runs, &live, out, e);
+    defer gpa.free(xv);
+    var atts: [width]Attempt = undefined;
+
+    while (live != 0) {
+        var round: L.Mask = 0;
+        var tv: [width]f64 = @splat(0);
+        var it = L.each(live);
+        while (it.next()) |l| {
+            const sim = &runs[l].sim;
+            const a = sim.begin() catch |e| {
+                Lane.kill(&runs, &live, out, l, e);
+                continue;
+            } orelse {
+                const ok = sim.finish() catch |e| {
+                    Lane.kill(&runs, &live, out, l, e);
+                    continue;
+                };
+                Lane.done(&runs, &live, out, l, ok);
+                continue;
+            };
+            atts[l] = a;
+            tv[l] = a.t_dev;
+            round |= bit(l);
+        }
+        if (round == 0) break;
+        const lead = @ctz(round);
+        if (sys == null) {
+            // Unused and finished lanes repeat the lead and stay inactive.
+            var lanes: [width]*root.Circuit = undefined;
+            var wss: [width]*converger.Workspace = undefined;
+            for (&lanes, &wss, 0..) |*c, *w, l| {
+                const k = if (l < g and (live >> @intCast(l)) & 1 != 0) l else lead;
+                c.* = runs[k].sim.ckt;
+                w.* = runs[k].sim.ws;
+            }
+            sys = System.init(gpa, lanes, atts[lead].hook) catch |e| return Lane.fail(&runs, &live, out, e);
+            lws = converger.LaneWorkspace(width).init(gpa, wss) catch |e| return Lane.fail(&runs, &live, out, e);
+        }
+        const s = &sys.?;
+        it = L.each(round);
+        while (it.next()) |l| {
+            s.hooks[l] = atts[l].hook;
+            System.putLane(xv, runs[l].sim.trial, l);
+        }
+        s.active = round;
+        const res = converger.newtonLanes(width, s, &lws.?, xv, tv, atts[lead].nr_opts, System.LaneHook{});
+        // As `converger.run` ends each lane's solve.
+        it = L.each(round);
+        while (it.next()) |l| runs[l].sim.ckt.clearLimits();
+        const r = res catch |e| return Lane.fail(&runs, &live, out, e);
+        it = L.each(round);
+        while (it.next()) |l| {
+            const sim = &runs[l].sim;
+            System.getLane(sim.trial, xv, l);
+            const b = bit(l);
+            // A singular lane is `converger.run`'s caught numerical failure.
+            const nr: converger.Result = if (r.singular & b != 0)
+                .{ .converged = false, .iterations = 0 }
+            else
+                .{ .converged = r.converged & b != 0, .iterations = r.iterations[l] };
+            const v = sim.end(&atts[l], nr) catch |e| {
+                Lane.kill(&runs, &live, out, l, e);
+                continue;
+            };
+            switch (v) {
+                .go => {},
+                .stop => {
+                    const ok = sim.finish() catch |e| {
+                        Lane.kill(&runs, &live, out, l, e);
+                        continue;
+                    };
+                    Lane.done(&runs, &live, out, l, ok);
+                },
+                .underflow => Lane.done(&runs, &live, out, l, false),
+            }
+        }
+    }
 }
 
 // Private implementation access for the analysis test suite.
