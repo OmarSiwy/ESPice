@@ -461,8 +461,8 @@ pub const Session = struct {
             self.rows.items(.executor)[i].?.controller.options.timing_query = @fromBackingInt(@intCast(i));
     }
 
-    /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`
-    /// or `.dc` row `i` the leader of a lane batch with up to `lane_width -
+    /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`,
+    /// `.dc` or `.tran` row `i` the leader of a lane batch with up to `lane_width -
     /// 1` other ready, never-started rows of its kind on its template, with
     /// a prerequisite exactly when it has one, whose options differ at most
     /// in `tol.variant` and `tol.temp_c`, taken from the queue ahead.
@@ -476,7 +476,7 @@ pub const Session = struct {
         const config = self.config;
         if (!execution.lanesOn(config) or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
-        if ((jobs[i] != .op and jobs[i] != .dc) or self.rows.items(.executor)[i] != null) return;
+        if ((jobs[i] != .op and jobs[i] != .dc and jobs[i] != .tran) or self.rows.items(.executor)[i] != null) return;
         var peers: [lane_width - 1]usize = undefined;
         var n: usize = 0;
         // A finished batch's dependents wait in `urgent`, newest last.
@@ -1021,7 +1021,7 @@ const lane_window = 8 * execution.lane_width;
 /// each lane builds reads. Slices compare by content, floats by bits.
 fn sameLaneJob(a: requests.Query, b: requests.Query) bool {
     return switch (a) {
-        inline .op, .dc => |o, tag| b == tag and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
+        inline .op, .dc, .tran => |o, tag| b == tag and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
         else => false,
     };
 }

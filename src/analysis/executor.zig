@@ -12,6 +12,7 @@ const requests = @import("core").query;
 const types = @import("types.zig");
 const op = @import("dc/op.zig");
 const dc = @import("dc/dc.zig");
+const tran = @import("tran/tran.zig");
 const gpu = @import("gpu.zig");
 const gpu_lu = @import("gpu_lu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
@@ -57,8 +58,8 @@ pub const Config = struct {
     final_plan: bool = false,
     /// Developer switches the facade read from the environment.
     knobs: types.Knobs = .{},
-    /// `--lanes`: batch ready operating points and `.dc` sweeps as lanes
-    /// (`lanesOn`), each bitwise its query run alone.
+    /// `--lanes`: batch ready operating points, `.dc` sweeps and transients
+    /// as lanes (`lanesOn`), each bitwise its query run alone.
     lanes: bool = false,
 
     /// The facade's record of whether the GPU driver is up, shared by every
@@ -304,14 +305,14 @@ pub const Executor = struct {
     }
 
     /// Runs this query and its `peers` as one lane batch: each builds its
-    /// circuit, then the operating points (`op.solveLanes`) or `.dc` sweeps
-    /// (`dc.runLanes`) run as lanes and each publishes as it would alone. A
+    /// circuit, then the operating points (`op.solveLanes`), `.dc` sweeps
+    /// (`dc.runLanes`) or transients (`tran.runLanes`) run as lanes and each publishes as it would alone. A
     /// batch whose devices print display tasks runs its queries one after
     /// another instead. Every peer ends with `published` or `peer_failure`;
     /// returns this query's own.
     fn executeBatch(self: *Executor) QueryError!types.Result {
         const g = 1 + self.peers.len;
-        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc));
+        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc or self.job == .tran));
         var members: [lane_width]*Executor = undefined;
         members[0] = self;
         @memcpy(members[1..g], self.peers);
@@ -344,6 +345,29 @@ pub const Executor = struct {
             var swept: [lane_width]dc.LaneOutcome = undefined;
             if (n_live != 0) dc.runLanes(lane_width, ctxs[0..n_live], self.job.dc, swept[0..n_live]);
             for (live[0..n_live], swept[0..n_live]) |k, o| {
+                outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
+                members[k].refuseLatched() catch |err| {
+                    outcomes[k] = err;
+                };
+            }
+            return outcomes[0];
+        }
+        if (self.job == .tran) {
+            var ctxs: [lane_width]types.RunCtx = undefined;
+            for (live[0..n_live], 0..) |k, l| {
+                const e = members[k];
+                // `runQuery`'s transient start: the `.ic` kind, and the
+                // `uic` x when no operating point ran.
+                e.circuit.setSimState(.{ .kind = .ic });
+                if (e.job.uic()) e.seedUic() catch |err| {
+                    for (live[0..n_live]) |j| outcomes[j] = err;
+                    return outcomes[0];
+                };
+                ctxs[l] = e.runCtx();
+            }
+            var ran: [lane_width]tran.LaneOutcome = undefined;
+            if (n_live != 0) tran.runLanes(lane_width, ctxs[0..n_live], self.job.tran, ran[0..n_live]);
+            for (live[0..n_live], ran[0..n_live]) |k, o| {
                 outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
                 members[k].refuseLatched() catch |err| {
                     outcomes[k] = err;
@@ -461,13 +485,16 @@ pub const Executor = struct {
             // The OP ladder publishes its own sim state (`initial_step`);
             // restore the plain one that dependents inherit.
             self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
-        } else if (self.job.uic()) {
-            self.x = try self.work.allocator().alloc(f64, self.circuit.n);
-            @memset(self.x.?, 0);
-            for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;
-            for (self.deck.uic_ic) |ic| self.x.?[ic.node] = ic.value;
-        }
+        } else if (self.job.uic()) try self.seedUic();
         return self.finish();
+    }
+
+    /// A `uic` start's x: zero, then every `.ic` and `uic` value.
+    fn seedUic(self: *Executor) !void {
+        self.x = try self.work.allocator().alloc(f64, self.circuit.n);
+        @memset(self.x.?, 0);
+        for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;
+        for (self.deck.uic_ic) |ic| self.x.?[ic.node] = ic.value;
     }
 
     /// The operating point's start: `x` from the deck's guess, the
