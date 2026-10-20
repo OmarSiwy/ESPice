@@ -13,6 +13,7 @@ pub fn build(b: *Build) void {
     const single_threaded = b.option(bool, "single-threaded", "Build without threads, as espice.wasm does");
     const cuda_arch = b.option([]const u8, "cuda-arch", "CUDA arch (sm_75, ...), `auto` to probe the build machine, `none` to omit") orelse "auto";
     const hip_arch = b.option([]const u8, "hip-arch", "HIP arch (gfx1100, ...), `none` to omit") orelse "gfx1100";
+    const gpu_lanes = b.option(bool, "gpu-lanes", "Also compile the GPU lane kernels (phase 4; default true, ~2x ptxas time)") orelse true;
     const suite = b.option([]const u8, "suite", "bench-suites: one suite under tests/suites (default: all)");
     const use_llvm = optimize != .debug;
 
@@ -112,9 +113,12 @@ pub fn build(b: *Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(vera.path("tools/contract.zig"), .prefix, "share/espice/vera/tools/contract.zig").step);
 
     var roots: std.ArrayList(gompute_build.KernelRoot) = .empty;
+    const lane_opts = b.addOptions();
+    lane_opts.addOption(bool, "enabled", gpu_lanes);
+    const lane_options: Import = .{ .name = "lane_options", .module = lane_opts.createModule() };
     for (models, g.kernel_models) |m, one| {
         if (!gpu_kernels or gpu_host_only.has(m.name)) continue;
-        const imports = b.allocator.dupe(Import, &.{ .{ .name = "models", .module = one }, g.kernel_contract, g.kernel_abi }) catch @panic("OOM");
+        const imports = b.allocator.dupe(Import, &.{ .{ .name = "models", .module = one }, g.kernel_contract, g.kernel_abi, lane_options }) catch @panic("OOM");
         roots.append(b.allocator, .{
             .name = m.name,
             .root = b.path("src/device/eval.zig"),
@@ -124,6 +128,7 @@ pub fn build(b: *Build) void {
         }) catch @panic("OOM");
     }
     roots.append(b.allocator, .{ .name = "lu", .root = b.path("src/solver/lu_device.zig") }) catch @panic("OOM");
+    if (gpu_lanes) roots.append(b.allocator, .{ .name = "lane", .root = b.path("src/solver/lane_device.zig") }) catch @panic("OOM");
     gompute_build.emitKernels(b, gompute, exe, .{
         .kernel_roots = roots.items,
         .heavy_lanes = 2,
@@ -718,7 +723,7 @@ fn gpuArch(arch: []const u8) gompute_build.CudaOptions {
 
 fn deviceKernelImports(_: *Build, _: Build.ResolvedTarget, _: std.lang.Optimize, ctx: ?*anyopaque) []const Import {
     const imports: [*]const Import = @ptrCast(@alignCast(ctx.?));
-    return imports[0..3];
+    return imports[0..4];
 }
 
 /// Absolute `sub_path` under `owner`'s package root, resolved against `b`'s.
