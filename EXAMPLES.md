@@ -53,19 +53,23 @@ hspice -i mux_sweep_16.sp -o mux_sweep_16      # writes mux_sweep_16.mt0, one ro
 
 ### Run ESPice
 
-ESPice needs `--tokenizer=hspice` for HSPICE decks. The dialect runs at TNOM 25 °C unless told
-otherwise; the deck sets `.temp 27` explicitly, so both simulators use the same temperature.
+ESPice picks its defaults itself, so no flags are needed:
+- **Dialect:** detected from the deck (`.data` and `sweep data=` mark it as HSPICE; a note on
+  stderr says so).
+- **Jobs:** `--jobs` is the CPU count.
+- **MATCHA mode:** with no `-r` output nothing reads the waveforms, so `.meas` streams, each point
+  stops once its measures resolve, and operating points start from the nominal one. The printed
+  values are the same as a full run.
+
+The deck sets `.temp 27` explicitly, because the HSPICE dialect otherwise runs at TNOM 25 °C.
 
 ```sh
-# Plain run: every waveform kept, every point's .meas block printed as it finishes.
-espice --tokenizer=hspice --jobs=16 mux_sweep_16.sp > espice_16.txt
+espice mux_sweep_16.sp > espice_16.txt            # everything automatic
 
-# MATCHA's mode: streaming measures, no waveforms, each point ends once its measures resolve,
-# operating points seeded from the nominal one. Printed .meas values are the same as the plain run.
-espice --tokenizer=hspice --jobs=16 --measures-only --early-stop --warm-start mux_sweep_16.sp > espice_16.txt
-
-# CPU lane batching (off by default: it measured break-even on the CPU). Bitwise the same output.
-espice --tokenizer=hspice --jobs=16 --lanes mux_sweep_16.sp > espice_16_lanes.txt
+espice -r out.raw mux_sweep_16.sp > espice_16.txt # also write waveforms: auto streaming turns off
+espice --full-waveforms mux_sweep_16.sp           # keep waveforms in memory without writing them
+espice --jobs=1 mux_sweep_16.sp                   # serial; output bytes are identical at any --jobs
+espice --lanes mux_sweep_16.sp                    # CPU lane batching (off by default: break-even on CPU); same output
 ```
 
 ### Compare
@@ -81,17 +85,17 @@ temperature, so differences much above ~1e-3 here point at a model or option dif
 noise. Likely sources: `.option` defaults (HSPICE's RELTOL/ABSTOL/METHOD), TNOM, and HSPICE's
 own BSIM-CMG version against ESPice's built-in 112.1.0.
 
-### GPU lanes (coming in v1.2.1)
+### GPU lanes
 
 The GPU lane backend (#208) runs each sweep point as one GPU thread: thread order is
 lane-innermost, so 32 points of one transistor share a warp. Experiment E1
 (`dev/research/gpu-lane-e1.md`) measured the bsimcmg kernel at 0.066–0.081 of one CPU core on an
 RTX 4060. That makes the 4060 about 1.4–2x the whole 24-core CPU; A100 and H100 are projected
-(not measured) at 4–26x and 7–69x the 4060. It is being implemented now (phases 3–6, plans in
-`dev/research/plans/`) and is **not in v1.2.0**. Once v1.2.1 lands:
+(not measured) at 4–26x and 7–69x the 4060. It ships in v1.2.0 (phases 3–6, plans in
+`dev/research/plans/`):
 
 ```sh
-espice --tokenizer=hspice --backend cuda --measures-only --early-stop mux_sweep_4096.sp > espice_4096_gpu.txt
+espice --backend cuda mux_sweep_4096.sp > espice_4096_gpu.txt
 ./compare_hspice.py mux_sweep_4096.mt0 espice_4096_gpu.txt 1e-2
 ```
 
