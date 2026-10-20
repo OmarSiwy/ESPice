@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.18.0-dev.349+d924f83bf",
     .dependencies = .{
         .vera = .{
-            .url = "git+https://github.com/OmarSiwy/VerA#c2e5488054b3174cc694fa36cb4b2a6ab4bf0123",
-            .hash = "vera-0.11.0-fzAu7NVdZQEDxbNcpyOmE7cFmaHHbg9gWrlOPlQ2ESj4",
+            .url = "git+https://github.com/OmarSiwy/VerA#2b6a568008b2d3ac4eb7a912ae362ebe121a13d3",
+            .hash = "vera-0.11.2-fzAu7F1pZQHlrGF40nWkcb5MdF8CTiSYuK0c3bbaC4uX",
         },
         .gompute = .{
             .url = "git+https://github.com/OmarSiwy/Gompute#406cce2e14f665009b2148d421f931714a0367b3",
