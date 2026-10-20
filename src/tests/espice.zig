@@ -1781,7 +1781,9 @@ test "AC-family lanes (#209): every .step point's .ac, .noise and .tf equal unde
         for (laned.items) |d| t.allocator.free(d);
         laned.deinit(t.allocator);
     }
-    try t.expectEqual(@as(usize, 24), laned.items.len);
+    // 8 points of .ac, .tf and .noise, which publishes two plots (the
+    // spectra and the integrated totals).
+    try t.expectEqual(@as(usize, 32), laned.items.len);
     for (alone.items, laned.items) |a, b| try t.expectEqualSlices(u64, @ptrCast(a), @ptrCast(b));
     // Request order is point-major or kind-major; find the rl = 1k rows of
     // the first kind by content instead of position.
