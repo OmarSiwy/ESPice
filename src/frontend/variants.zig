@@ -205,14 +205,13 @@ pub const Planner = struct {
 
     const Fast = enum { untested, identity, rebuild };
 
-    /// A probe's map: each `slots[i]` lands unchanged in `refs[i]`, and
-    /// `const_refs` hold `const_values` wherever the probe's base differs
-    /// from the nominal circuit without following a slot.
+    /// A probe's map, in parameter order: `refs[i]` holds live slot
+    /// `slots[i]` unchanged, or, where that is `none`, `values[i]`, which
+    /// differs from the nominal circuit without following a slot.
     const Map = struct {
-        slots: []const u32 = &.{},
         refs: []const u32 = &.{},
-        const_refs: []const u32 = &.{},
-        const_values: []const f64 = &.{},
+        slots: []const u32 = &.{},
+        values: []const f64 = &.{},
     };
 
     /// A planner over `nl`, whose nominal circuit is `nominal` with card
@@ -412,7 +411,7 @@ pub const Planner = struct {
         if (!moved) return .row;
         if (p.fast == .untested) p.fast = try p.probe(pt);
         if (p.fast == .identity and !crossed) {
-            try p.writeMap(.{ .slots = p.fast_slots, .refs = p.fast_refs });
+            for (p.fast_slots, p.fast_refs) |k, r| try p.setMoved(r, p.nl.slot(k).num);
             return .row;
         }
         // A value that reaches or leaves zero may collapse a node or pick
@@ -448,11 +447,13 @@ pub const Planner = struct {
 
     /// Appends the writes `m` gives at the open point's live values.
     fn writeMap(p: *Planner, m: Map) !void {
-        for (m.const_refs, m.const_values) |r, x| try p.set(r, x);
-        for (m.slots, m.refs) |k, r| {
-            const x = p.nl.slot(k).num;
-            if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[r].get()))) try p.set(r, x);
-        }
+        for (m.refs, m.slots, m.values) |r, k, x|
+            try p.setMoved(r, if (k == netlist.none) x else p.nl.slot(k).num);
+    }
+
+    /// `set`, unless parameter `ord` holds `x` in the nominal circuit.
+    fn setMoved(p: *Planner, ord: u32, x: f64) !void {
+        if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[ord].get()))) try p.set(ord, x);
     }
 
     /// Finds, with one rebuild at perturbed live values, whether every
@@ -469,7 +470,7 @@ pub const Planner = struct {
 
     fn probeIdentity(p: *Planner) !Fast {
         const m = try p.probeAt(p.nominal_slots, p.refs) orelse return .rebuild;
-        std.debug.assert(m.const_refs.len == 0);
+        std.debug.assert(std.mem.indexOfScalar(u32, m.slots, netlist.none) == null);
         p.fast_slots = m.slots;
         p.fast_refs = m.refs;
         return .identity;
@@ -505,23 +506,22 @@ pub const Planner = struct {
         defer c.deinit();
         if (!sameTopology(p.nominal, &c)) return null;
         const moved = try collect(arena.allocator(), &c);
-        var m: struct { slots: std.ArrayList(u32) = .empty, refs: std.ArrayList(u32) = .empty, const_refs: std.ArrayList(u32) = .empty, const_values: std.ArrayList(f64) = .empty } = .{};
+        var refs: std.ArrayList(u32) = .empty;
+        var slots: std.ArrayList(u32) = .empty;
+        var values: std.ArrayList(f64) = .empty;
         for (at, moved, p.refs, 0..) |a, b, nominal, i| {
             const before = a.get();
             const after = b.get();
-            if (@as(u64, @bitCast(before)) == @as(u64, @bitCast(after))) {
-                if (@as(u64, @bitCast(before)) != @as(u64, @bitCast(nominal.get()))) {
-                    try m.const_refs.append(p.scratch, @intCast(i));
-                    try m.const_values.append(p.scratch, before);
-                }
-                continue;
-            }
-            const k = by_bits.get(@bitCast(after)) orelse return null;
-            if (@as(u64, @bitCast(before)) != @as(u64, @bitCast(base[k]))) return null;
-            try m.slots.append(p.scratch, k);
-            try m.refs.append(p.scratch, @intCast(i));
+            var k: u32 = netlist.none;
+            if (@as(u64, @bitCast(before)) != @as(u64, @bitCast(after))) {
+                k = by_bits.get(@bitCast(after)) orelse return null;
+                if (@as(u64, @bitCast(before)) != @as(u64, @bitCast(base[k]))) return null;
+            } else if (@as(u64, @bitCast(before)) == @as(u64, @bitCast(nominal.get()))) continue;
+            try refs.append(p.scratch, @intCast(i));
+            try slots.append(p.scratch, k);
+            try values.append(p.scratch, before);
         }
-        return .{ .slots = m.slots.items, .refs = m.refs.items, .const_refs = m.const_refs.items, .const_values = m.const_values.items };
+        return .{ .refs = refs.items, .slots = slots.items, .values = values.items };
     }
 
     fn closeRow(p: *Planner, label: []const u8, axis: f64, temp: ?f64) !void {
