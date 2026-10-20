@@ -906,6 +906,7 @@ PASS	fixtures/tran_noise/ideal_clamp_2.sp
 PASS	fixtures/tran_noise/jfet_flicker.sp
 PASS	fixtures/tran_noise/rc_equilibrium.sp
 PASS	fixtures/variants/alter_cumulative.sp
+PASS	fixtures/variants/data_lane_stimulus.sp
 PASS	fixtures/variants/data_lam.sp
 PASS	fixtures/variants/data_mer.sp
 PASS	fixtures/variants/data_sweep.sp

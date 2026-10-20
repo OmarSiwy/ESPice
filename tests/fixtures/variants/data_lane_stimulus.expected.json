@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "analysis": "tran",
+  "purpose": "Per-lane stimulus: a .data sweep of input selection x polarity through live .param pulse levels, every row on the same edge times.",
+  "oracle": {
+    "kind": "ngspice",
+    "derivation": "ngspice 44.2, ngspice -b on each row run alone (the .data block removed, sel and pol set on the .param line): v(y) at the listed times from .meas find, and the first row's tpd, tpd2 and slew."
+  },
+  "tokenizer": "hspice",
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Transient Analysis (sel=0, pol=1)",
+        "match": "samples",
+        "columns": {
+          "v(y)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.002,
+            "values": [
+              0.9950575,
+              0.9062249,
+              0.7177028,
+              0.3002164,
+              0.08846117,
+              0.005698104,
+              0.00034626,
+              0.00293265,
+              0.05614532,
+              0.1692586,
+              0.449371,
+              0.6933854,
+              0.9304654,
+              0.7163329
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            3e-11,
+            3.5e-11,
+            4e-11,
+            5e-11,
+            6e-11,
+            8e-11,
+            1e-10,
+            1.3e-10,
+            1.35e-10,
+            1.4e-10,
+            1.5e-10,
+            1.6e-10,
+            1.8e-10,
+            2.4e-10
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-18
+        }
+      },
+      {
+        "name": "Transient Analysis (sel=0, pol=0)",
+        "match": "samples",
+        "columns": {
+          "v(y)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.002,
+            "values": [
+              0.002924894,
+              0.05613781,
+              0.1692511,
+              0.4493638,
+              0.6933803,
+              0.930464,
+              0.9865049,
+              0.9936619,
+              0.904855,
+              0.7163329,
+              0.2992816,
+              0.08813224,
+              0.005675567,
+              0.1692586
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            3e-11,
+            3.5e-11,
+            4e-11,
+            5e-11,
+            6e-11,
+            8e-11,
+            1e-10,
+            1.3e-10,
+            1.35e-10,
+            1.4e-10,
+            1.5e-10,
+            1.6e-10,
+            1.8e-10,
+            2.4e-10
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-18
+        }
+      },
+      {
+        "name": "Transient Analysis (sel=1, pol=1)",
+        "match": "samples",
+        "columns": {
+          "v(y)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.002,
+            "values": [
+              1.0,
+              0.9921704,
+              0.9469271,
+              0.7044655,
+              0.3419002,
+              0.02920273,
+              0.001817496,
+              3.350059e-05,
+              0.0046186,
+              0.03132795,
+              0.1767866,
+              0.409492,
+              0.8230155,
+              0.944148
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            3e-11,
+            3.5e-11,
+            4e-11,
+            5e-11,
+            6e-11,
+            8e-11,
+            1e-10,
+            1.3e-10,
+            1.35e-10,
+            1.4e-10,
+            1.5e-10,
+            1.6e-10,
+            1.8e-10,
+            2.4e-10
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-18
+        }
+      },
+      {
+        "name": "Transient Analysis (sel=1, pol=0)",
+        "match": "samples",
+        "columns": {
+          "v(y)": {
+            "unit": "V",
+            "rtol": 0.001,
+            "atol": 0.002,
+            "values": [
+              8.414431e-10,
+              0.004592572,
+              0.0313017,
+              0.1767559,
+              0.4094593,
+              0.823,
+              0.9630677,
+              0.9965441,
+              0.9892636,
+              0.9441478,
+              0.7016789,
+              0.3396996,
+              0.02895625,
+              0.03132775
+            ]
+          }
+        },
+        "axis": {
+          "name": "time",
+          "values": [
+            3e-11,
+            3.5e-11,
+            4e-11,
+            5e-11,
+            6e-11,
+            8e-11,
+            1e-10,
+            1.3e-10,
+            1.35e-10,
+            1.4e-10,
+            1.5e-10,
+            1.6e-10,
+            1.8e-10,
+            2.4e-10
+          ],
+          "rtol": 1e-09,
+          "atol": 1e-18
+        }
+      }
+    ],
+    "checks": [
+      {
+        "kind": "measure",
+        "name": "tpd",
+        "value": 1.985667e-11,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "tpd2",
+        "value": 2.684697e-11,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "measure",
+        "name": "slew",
+        "value": -1.5502e-11,
+        "rtol": 0.002,
+        "atol": 0
+      },
+      {
+        "kind": "repeatability",
+        "same_netlist": true,
+        "comparison": "bitwise_numeric_results"
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "notes": [
+    "The .meas checks read the first printed line of each name: point 0 (sel=0, pol=1). src/tests/espice.zig and src/tests/c_api.zig check every point bitwise against its solo run and the points C API."
+  ],
+  "netlist_sha256": "4fc9e5dbe99e90d2324bbb43b4a21843ffc844e12e26307769e41913e1de4735"
+}
