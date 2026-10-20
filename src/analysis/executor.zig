@@ -57,6 +57,9 @@ pub const Config = struct {
     final_plan: bool = false,
     /// Developer switches the facade read from the environment.
     knobs: types.Knobs = .{},
+    /// `--lanes`: batch ready operating points and `.dc` sweeps as lanes
+    /// (`lanesOn`), each bitwise its query run alone.
+    lanes: bool = false,
 
     /// The facade's record of whether the GPU driver is up, shared by every
     /// query of the Problem; null prices the driver setup in every query.
@@ -84,6 +87,16 @@ pub fn validateBackend(config: Config) !void {
 
 /// Lanes per batch: the CPU's f64 vector width (4 on AVX2, 8 on AVX-512).
 pub const lane_width = std.simd.suggestVectorLength(f64) orelse 4;
+
+/// Whether `Session` groups ready queries into lane batches:
+/// `ESPICE_LANES` when set, else `Config.lanes`, else the backend's
+/// default. Off on the CPU, where lanes measured no faster (#211); a
+/// backend where they pay turns its default on here.
+pub fn lanesOn(config: Config) bool {
+    return config.knobs.lanes orelse (config.lanes or switch (config.backend) {
+        .cpu, .auto, .cuda, .hip => false,
+    });
+}
 
 /// One query: its own Circuit instance, work and result arenas, and worker.
 /// Heap-pinned because the worker and the progress callback hold its address.

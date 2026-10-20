@@ -470,7 +470,7 @@ pub const Session = struct {
     fn gather(self: *Session, i: usize) void {
         const lane_width = execution.lane_width;
         const config = self.config;
-        if (!config.knobs.lanes or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
+        if (!execution.lanesOn(config) or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
         if ((jobs[i] != .op and jobs[i] != .dc) or self.rows.items(.executor)[i] != null) return;
         var peers: [lane_width - 1]usize = undefined;

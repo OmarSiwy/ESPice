@@ -17,9 +17,10 @@ pub const Knobs = struct {
 
     newton: converger.Knobs = .{},
     lu: direct.Knobs = .{},
-    /// `ESPICE_LANES=0`: run every query alone instead of grouping ready
-    /// operating points into lane batches (`Session.gather`), for A/B runs.
-    lanes: bool = true,
+    /// `ESPICE_LANES`: `1` groups ready operating points and `.dc` sweeps
+    /// into lane batches (`Session.gather`), `0` runs every query alone;
+    /// null leaves it to `executor.lanesOn`.
+    lanes: ?bool = null,
     /// `ESPICE_HB_TRACE`: trace harmonic-balance iterates.
     hb_trace: bool = false,
     /// `ZP_NO_QTAPE`: run the LTE over the row plane, not the charge tape.

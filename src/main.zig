@@ -40,6 +40,7 @@ pub fn main(init: std.process.Init) !u8 {
     var dialect: problem.Dialect = .ngspice;
     var selection: problem.Selection = .{};
     var backend: problem.Request = .cpu;
+    var lanes = false;
     var explicit_gpu = false;
     var max_parallel: u16 = 1;
     var show_plan = false;
@@ -63,6 +64,7 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --early-stop            End each .tran once its .meas cards have resolved
                 \\      --abort-after=T         Fail a .tran still missing a .meas value past T seconds
                 \\      --warm-start            Start each transient's OP from the nominal one
+                \\      --lanes                 Solve sweep points' OPs and .dc sweeps as SIMD lanes (CPU)
                 \\      --tokenizer=FMT         ngspice|hspice|spectre
                 \\      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
                 \\  -v, --version               Version
@@ -88,6 +90,8 @@ pub fn main(init: std.process.Init) !u8 {
             point.early_stop = true;
         } else if (std.mem.eql(u8, arg, "--warm-start")) {
             point.warm_start = true;
+        } else if (std.mem.eql(u8, arg, "--lanes")) {
+            lanes = true;
         } else if (optionValue(arg, "", "--abort-after", &args)) |value| {
             point.abort_after = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
             if (!(point.abort_after > 0) or std.math.isInf(point.abort_after)) return usageFail();
@@ -128,6 +132,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .device_threads = envThreads("ESPICE_THREADS"),
                 // One deck, run once: no query is appended later.
                 .final_plan = true,
+                .lanes = lanes,
             },
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,
