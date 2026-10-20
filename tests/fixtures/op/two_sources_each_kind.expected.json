@@ -61,7 +61,8 @@
               -0.002
             ]
           }
-        }
+        },
+        "row_count": 1
       }
     ],
     "finite_values_required": true,
