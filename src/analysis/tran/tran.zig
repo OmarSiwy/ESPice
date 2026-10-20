@@ -404,6 +404,10 @@ const Sim = struct {
     fn lteHist(s: *Sim) [][]f64 {
         return if (s.n_qt > 0) s.qtHist() else s.qHist();
     }
+    /// The method of the order-1-to-2 promotion probe.
+    pub fn promoteMethod(s: *const Sim) Method {
+        return methodAt(s.options.method, 2);
+    }
     fn lteIp(s: *const Sim) []const f64 {
         return if (s.n_qt > 0) s.qt_i_prev else s.i_prev;
     }
@@ -1590,6 +1594,204 @@ pub fn runLanes(comptime width: usize, ctxs: []const root.RunCtx, opts: Options,
             }
         }
     }
+}
+
+const gpu_lanes = @import("../gpu_lanes.zig");
+
+/// Whether `runGpuLanes` can serve this circuit, after `Run.init`, and these
+/// options: every batch with a device payload and no host-side step hook,
+/// and none of the features whose step-end numbers the device does not
+/// compute (phase 4 G7, plus Newton hooks the lane kernels do not run:
+/// `check_convergence`, `advance_iteration`, a load check, and a
+/// stateful-charge rebase).
+pub fn gpuLaneEligible(ckt: *const root.Circuit, opts: Options) bool {
+    if (!gpu_lanes.available) return false;
+    if (opts.uic or opts.snapshot or opts.sources_at_zero or opts.tangents.len != 0) return false;
+    if (integrator.order(opts.method) > 2) return false;
+    if (ckt.vpi != null or ckt.display != null or ckt.load_check != null) return false;
+    if (ckt.minDelay() != null) return false;
+    if (ckt.has_charge and (ckt.knobs.no_qtape or ckt.qTapeLen() == 0 or ckt.has_state_q)) return false;
+    for (ckt.batches) |b| {
+        if (b.hooks.gpu_payload == null) return false;
+        const h = b.hooks;
+        if (h.bound_step != null or h.commit_state != null or h.predict_first_iterate != null) return false;
+        if (h.check_convergence != null or h.advance_iteration != null) return false;
+        if (std.mem.eql(u8, b.type_name, "kinduc")) return false;
+        // Host-stepped: state hooks without a device state kernel.
+        const p = h.gpu_payload.?(b.ctx);
+        if (p.lim_kernel.len == 0 and (h.update_state != null or h.state_ctl != null)) return false;
+    }
+    return true;
+}
+
+/// `runLanes` on the GPU (dev/research/plans/phase4-gpu-lanes.md G7): any
+/// number of `.tran` queries on one pattern, each its own `Sim` on the host
+/// (step control, breakpoints, measures) over one `GpuLanes` that holds
+/// every lane's numerics. Each round: every live lane `begin`s, the device
+/// predicts and solves Newton for all of them and computes their step-end
+/// numbers, each lane `end`s from those, and the device applies the
+/// verdicts. Within tolerance of `runLanes`, not bitwise. Falls back to
+/// each lane's `run` when the lanes are not eligible or the device cannot
+/// take them; a lane whose device asks to reject a step reruns on the CPU.
+pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome) void {
+    const g = ctxs.len;
+    std.debug.assert(g >= 1 and out.len == g);
+    if (comptime !gpu_lanes.available) {
+        for (ctxs, out) |*c, *o| o.* = run(c, opts);
+        return;
+    }
+    const gpa = ctxs[0].scratch_allocator;
+    const runs = gpa.alloc(Run, g) catch {
+        for (ctxs, out) |*c, *o| o.* = run(c, opts);
+        return;
+    };
+    defer gpa.free(runs);
+    const live = gpa.alloc(bool, g) catch {
+        for (ctxs, out) |*c, *o| o.* = run(c, opts);
+        return;
+    };
+    defer gpa.free(live);
+    @memset(live, false);
+    var n_live: usize = 0;
+    for (ctxs, runs, live, out) |*c, *r, *on, *o| {
+        r.init(c, opts) catch |e| {
+            o.* = e;
+            continue;
+        };
+        on.* = true;
+        n_live += 1;
+    }
+    defer for (runs, live) |*r, on| if (on) r.deinit();
+    if (n_live == 0) return;
+    const first = std.mem.indexOfScalar(bool, live, true).?;
+    var eligible = gpuLaneEligible(ctxs[first].circuit, opts);
+    for (ctxs, live) |c, on| if (on and c.circuit.n != ctxs[first].circuit.n) {
+        eligible = false;
+    };
+    const ckts = gpa.alloc(*root.Circuit, g) catch null;
+    defer if (ckts) |cs| gpa.free(cs);
+    const sims = gpa.alloc(*Sim, g) catch null;
+    defer if (sims) |ss| gpa.free(ss);
+    const dev: ?*gpu_lanes.GpuLanes = if (!eligible or ckts == null or sims == null or n_live != g) null else blk: {
+        for (ckts.?, sims.?, runs) |*c, *s, *r| {
+            c.* = r.sim.ckt;
+            s.* = &r.sim;
+        }
+        const probes = ctxs[first].probes;
+        break :blk gpu_lanes.GpuLanes.init(gpa, ckts.?, sims.?, probes) catch |e| {
+            std.log.warn("gpu lanes: {s}; running {d} transients on the CPU", .{ @errorName(e), g });
+            break :blk null;
+        };
+    };
+    const d = dev orelse {
+        // Each lane alone, from a fresh `Run`.
+        for (runs, live, ctxs, out) |*r, *on, *c, *o| if (on.*) {
+            r.deinit();
+            on.* = false;
+            o.* = run(c, opts);
+        };
+        return;
+    };
+    defer d.deinit();
+    if (ctxs[first].circuit.knobs.gpu_stats != .off) std.debug.print("gpu-lanes: {d} lanes\n", .{g});
+
+    const atts = gpa.alloc(Attempt, g) catch |e| {
+        for (runs, live, out) |*r, *on, *o| if (on.*) {
+            r.deinit();
+            on.* = false;
+            o.* = e;
+        };
+        return;
+    };
+    defer gpa.free(atts);
+    const nr = gpa.alloc(gpu_lanes.LaneNewton, g) catch |e| {
+        for (runs, live, out) |*r, *on, *o| if (on.*) {
+            r.deinit();
+            on.* = false;
+            o.* = e;
+        };
+        return;
+    };
+    defer gpa.free(nr);
+    const nr_opts = blk: {
+        var o = converger.optionsFromTolerances(opts.tol, opts.tol.itl4);
+        o.residual_tol = std.math.inf(f64);
+        break :blk o;
+    };
+    const Lane = struct {
+        fn done(rs: []Run, on: []bool, o: []LaneOutcome, l: usize, ok: bool) void {
+            o[l] = rs[l].take(ok);
+            rs[l].deinit();
+            on[l] = false;
+        }
+        fn kill(rs: []Run, on: []bool, o: []LaneOutcome, l: usize, err: LaneError) void {
+            o[l] = err;
+            rs[l].deinit();
+            on[l] = false;
+        }
+        fn failAll(rs: []Run, on: []bool, o: []LaneOutcome, err: LaneError) void {
+            for (0..rs.len) |l| if (on[l]) kill(rs, on, o, l, err);
+        }
+    };
+    while (std.mem.indexOfScalar(bool, live, true) != null) {
+        @memset(d.round, 0);
+        for (d.sc) |*sc| sc.flags = 0;
+        var any = false;
+        for (runs, 0..) |*r, l| {
+            if (!live[l]) continue;
+            const maybe = r.sim.begin(d.laneOps(l)) catch |e| {
+                Lane.kill(runs, live, out, l, e);
+                continue;
+            };
+            atts[l] = maybe orelse {
+                const ok = r.sim.finish() catch |e| {
+                    Lane.kill(runs, live, out, l, e);
+                    continue;
+                };
+                Lane.done(runs, live, out, l, ok);
+                continue;
+            };
+            any = true;
+        }
+        if (!any) break;
+        d.predictRound() catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+        d.newton(nr_opts, nr) catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+        d.probe() catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+        for (runs, 0..) |*r, l| {
+            if (!live[l] or d.round[l] == 0) continue;
+            if (nr[l].reject) {
+                // The device asked for `reject_at`, which the lanes do not
+                // land: this lane reruns alone on the CPU.
+                r.deinit();
+                live[l] = false;
+                d.detached[l] = true;
+                out[l] = run(&ctxs[l], opts);
+                continue;
+            }
+            const v = r.sim.end(&atts[l], nr[l].result, d.laneOps(l)) catch |e| {
+                Lane.kill(runs, live, out, l, e);
+                continue;
+            };
+            switch (v) {
+                .go => {},
+                .stop => {
+                    const ok = r.sim.finish() catch |e| {
+                        Lane.kill(runs, live, out, l, e);
+                        continue;
+                    };
+                    Lane.done(runs, live, out, l, ok);
+                },
+                .underflow => Lane.done(runs, live, out, l, false),
+            }
+        }
+        d.apply() catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+    }
+}
+
+/// A driver failure mid-run, as the lanes' error: out of memory stays
+/// itself; anything else cancels the batch.
+fn gpuError(e: anyerror) LaneError {
+    return if (e == error.OutOfMemory) error.OutOfMemory else error.QueryCancelled;
 }
 
 // Private implementation access for the analysis test suite.
