@@ -87,7 +87,6 @@ hspice.peg	dotcard	Include
 hspice.peg	dotcard	Nodeset
 hspice.peg	dotcard	Save
 hspice.peg	ends	'.eom'
-hspice.peg	gfield	Expr
 hspice.peg	gfield	Group
 hspice.peg	pathkey	'citifile'
 hspice.peg	pathkey	'rlgcfile'

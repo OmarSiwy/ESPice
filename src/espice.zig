@@ -1395,8 +1395,19 @@ pub const Problem = struct {
             var res = try session.result(id);
             if (direct) {
                 // Block p of the sweep: its own points, or row p's prediction.
-                res.npoints /= count;
-                res.data = res.data[p * res.npoints * res.varnames.len ..][0 .. res.npoints * res.varnames.len];
+                // A transient keeps its tangent rows apart (`Result.tangents`,
+                // as `block` reads them); a `.dc` sweep holds them inline.
+                if (res.tangents.len != 0) {
+                    if (p != 0) {
+                        const n = res.npoints * res.varnames.len;
+                        res.data = res.tangents[(p - 1) * n ..][0..n];
+                        res.measured = &.{};
+                    }
+                    res.tangents = &.{};
+                } else {
+                    res.npoints /= count;
+                    res.data = res.data[p * res.npoints * res.varnames.len ..][0 .. res.npoints * res.varnames.len];
+                }
             }
             output.measureValues(deck.measures, info.kind, res, values);
             for (t.results, out[p * m ..][0..m]) |card, *r| {
