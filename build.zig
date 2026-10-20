@@ -46,7 +46,6 @@ pub fn build(b: *Build) void {
     for (models, gen) |m, *out| {
         const run = b.addRunArtifact(vera_exe);
         run.addArg(b.fmt("--expect-module={s}", .{m.module}));
-        if (m.std) |spec| run.addArg(b.fmt("--std={s}", .{spec}));
         if (m.hdl == .verilog_a) {
             run.addArgs(&.{ "--emit-zig", "--allow=W0650", "--allow=W0651", "--allow=W0850", "--color=never", "--check", "--display=drop" });
             if (escape_models.has(m.name)) run.addArg("--allow=W0149");
@@ -63,7 +62,13 @@ pub fn build(b: *Build) void {
         }
         run.addArg("-o");
         out.* = run.addOutputFileArg2(b.fmt("{s}.zig", .{m.name}), .{});
-        run.addFileArg(m.src);
+        // VerA compiles Verilog-AMS as VAMS-2023 only; an older keyword set
+        // comes from `begin_keywords (LRM §10.6) around the unedited source,
+        // found through its own directory (`inc_dirs[0]`).
+        run.addFileArg(if (m.std) |spec| b.addWriteFiles().add(b.fmt("{s}_std.va", .{m.name}), b.fmt(
+            "`begin_keywords \"{s}\"\n`include \"{s}\"\n`end_keywords\n",
+            .{ spec, std.fs.path.basename(m.file) },
+        )) else m.src);
     }
 
     const g = graph(M, vera, gompute.module("gompute"), models, gen, bo);
@@ -326,12 +331,8 @@ pub fn build(b: *Build) void {
         wexe.entry = .disabled;
         wexe.rdynamic = true;
         wexe.wasi_exec_model = .reactor;
-        wexe.stack_size = 16 << 20; // the corpus peaks at 1.2 MiB of stack
+        wexe.stack_size = 16 << 20; // the corpus peaks at 541 KiB (dc/device_b3soipd_output.sp)
         wasm_step.dependOn(&b.addInstallArtifact(wexe, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
-        // TEMP asm probe
-        wasm_step.dependOn(&b.addInstallFileWithDir(wexe.getEmittedAsm(), .{ .custom = "wasm-asm" }, "espice.s").step);
-        for (wg.objs) |o| if (std.mem.eql(u8, o.name, "dev_mos1") or std.mem.eql(u8, o.name, "dev_bsim4va"))
-            wasm_step.dependOn(&b.addInstallFileWithDir(o.getEmittedAsm(), .{ .custom = "wasm-asm" }, b.fmt("{s}.s", .{o.name})).step);
 
         // Build with `-Dcpu=x86_64 -Dhip-arch=none -Dcuda-arch=none` to match simd128's lane count.
         const cmp = b.addSystemCommand(&.{"node"});
@@ -499,6 +500,10 @@ fn corpus(b: *Build, runner: *Compile, exe: *Compile, vpi: ?*Compile, args: []co
         r.addArtifactArg(v);
     } else r.stdio = .inherit;
     r.setEnvironmentVariable("ZIG", b.graph.zig_exe);
+    // Debug runs the slowest decks (stress/scaling_inverter_chain_4k,
+    // tran/ltra_tran_long_run_past_8192) in ~620 s under load, past the
+    // runner's 300 s default. A later passthrough --timeout still wins.
+    if (exe.root_module.optimize == .debug) r.addArgs(&.{ "--timeout", "1200" });
     r.addArgs(args);
     r.addPassthruArgs();
     return r;
@@ -641,8 +646,9 @@ const upstream_models = [_]struct {
 /// Source size from which a model's GPU compile goes on the serial heavy lanes.
 const heavy_model_bytes: u64 = 20 * 1024;
 
-/// GPU kernel stack frame exceeds CUDA's 262,136 B limit.
-const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"}, .{"mvsg"} });
+/// GPU kernel stack frame exceeds the 262,136 B limit (CUDA's, and amdgcn's:
+/// gfx1100 psp103_nqs 500,192 B, psp104_nqs 515,664 B at ReleaseFast).
+const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"}, .{"mvsg"}, .{"psp103_nqs"}, .{"psp104_nqs"} });
 
 /// Upstream sources with a non-LRM string escape (W0149) we cannot edit.
 const escape_models = std.StaticStringMap(void).initComptime(.{ .{"hisim2_va"}, .{"hisimsotb"} });

@@ -656,7 +656,10 @@ test "C points: early stop and measures_only keep each point's values, abort_aft
     const rows = [_]f64{ 1e3, 100e3, 2e3 };
     var plain: u32 = 0;
     try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, null, &plain));
-    const bounded_options: c.espice_points_options = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 0, .abort_after = 1e-9 };
+    var bounded_options = pointsOptions();
+    bounded_options.measures_only = 1;
+    bounded_options.early_stop = 1;
+    bounded_options.abort_after = 1e-9;
     var bounded: u32 = 0;
     try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &bounded_options, &bounded));
     _ = c.espice_run_all(handle);
@@ -689,8 +692,7 @@ test "C points: copy_point_tangents gives d(measure)/d(live parameter), and NaN 
     try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
     defer _ = c.espice_destroy(handle);
     const rows = [_]f64{ 1e3, 2e3 };
-    var points: c.espice_points_options = std.mem.zeroes(c.espice_points_options);
-    points.struct_size = @sizeOf(c.espice_points_options);
+    var points = pointsOptions();
     points.tangent_step = 1e-6;
     var first: u32 = 0;
     try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &points, &first));
@@ -817,7 +819,7 @@ test "C points: 16 points measure tpd, energy and leakage analytically, and matc
     // The same deck sweeping the same rows through .data.
     var swept: std.ArrayList(u8) = .empty;
     defer swept.deinit(t.allocator);
-    try swept.appendSlice(t.allocator, rc_deck[0 .. std.mem.indexOf(u8, rc_deck, ".tran").?]);
+    try swept.appendSlice(t.allocator, rc_deck[0..std.mem.indexOf(u8, rc_deck, ".tran").?]);
     try swept.appendSlice(t.allocator, ".data pts rv cv\n");
     for (grid) |p| try swept.print(t.allocator, "+ {e} {e}\n", .{ p[0], p[1] });
     try swept.appendSlice(t.allocator, ".enddata\n.tran 10p 40n sweep data=pts\n");
@@ -825,19 +827,53 @@ test "C points: 16 points measure tpd, energy and leakage analytically, and matc
     const handle = try createDialect(swept.items, &.{}, c.ESPICE_HSPICE);
     defer _ = c.espice_destroy(handle);
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(handle));
-    // A swept deck's points start at its first requested query.
-    var count: u32 = 0;
-    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(handle, &count));
-    const first = for (0..count) |id| {
-        var info: c.espice_query_info = undefined;
-        try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_get_query_info(handle, @intCast(id), &info));
-        if (info.requested == 1) break @as(u32, @intCast(id));
-    } else return error.NoRequestedQuery;
+    const first = try firstRequested(handle);
     var data: [16 * 3]f64 = undefined;
     var data_reasons: [16]u32 = undefined;
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_copy_point_measures(handle, first, 16, &rc_names, 3, &data, &data_reasons));
     try t.expectEqualSlices(u32, &reasons, &data_reasons);
     try expectSameBits(&got, &data);
+}
+
+/// A swept deck's points start at its first requested query.
+fn firstRequested(h: *c.espice_problem) !u32 {
+    var count: u32 = 0;
+    try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(h, &count));
+    return for (0..count) |id| {
+        var info: c.espice_query_info = undefined;
+        try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_get_query_info(h, @intCast(id), &info));
+        if (info.requested == 1) break @as(u32, @intCast(id));
+    } else error.NoRequestedQuery;
+}
+test "C points: the per-lane stimulus rows (#212) equal their .data sweep bit for bit" {
+    const t = std.testing;
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/fixtures/variants/data_lane_stimulus.sp", t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    const names = [_]c.espice_bytes{ .{ .data = "tpd", .len = 3 }, .{ .data = "tpd2", .len = 4 }, .{ .data = "slew", .len = 4 } };
+    var data: [4 * 3]f64 = undefined;
+    var data_reasons: [4]u32 = undefined;
+    {
+        const h = try createDialect(source, &.{}, c.ESPICE_HSPICE);
+        defer _ = c.espice_destroy(h);
+        try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(h));
+        try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_copy_point_measures(h, try firstRequested(h), 4, &names, 3, &data, &data_reasons));
+    }
+    // The deck without its .data table, sel and pol live.
+    const start = std.mem.indexOf(u8, source, "\n.data ").? + 1;
+    const end = std.mem.indexOf(u8, source, ".enddata\n").? + ".enddata\n".len;
+    const spliced = try std.mem.concat(t.allocator, u8, &.{ source[0..start], source[end..] });
+    defer t.allocator.free(spliced);
+    const template = try std.mem.replaceOwned(u8, t.allocator, spliced, " sweep data=lanes", "");
+    defer t.allocator.free(template);
+    const h = try createDialect(template, &.{ .{ .data = "sel", .len = 3 }, .{ .data = "pol", .len = 3 } }, c.ESPICE_HSPICE);
+    defer _ = c.espice_destroy(h);
+    const rows = [_]f64{ 0, 1, 0, 0, 1, 1, 1, 0 };
+    var got: [4 * 3]f64 = undefined;
+    var reasons: [4]u32 = undefined;
+    try runPoints(h, &rows, 4, &names, &got, &reasons);
+    for (reasons) |r| try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), r);
+    try t.expectEqualSlices(u32, &reasons, &data_reasons);
+    try expectSameBits(&data, &got);
 }
 
 test "C points: rows do not depend on order, batching or the other points" {
@@ -903,40 +939,68 @@ const reason_cases = [_]ReasonCase{
     // A top-level .if flips with sel.
     .{
         .deck = "if flip\n.param sel=0 rv=1k\nv1 in 0 1\nr1 in out {rv}\n.if (sel == 0)\nr2 out 0 1k\n.else\nr2 out 0 3k\nr3 out 0 3k\n.endif\n.op\n.meas op vo find v(out)\n.end\n",
-        .live = &.{ "sel", "rv" }, .names = &.{"vo"}, .good = &.{ 0, 2e3 }, .bad = &.{ 1, 2e3 }, .reason = c.ESPICE_REASON_TOPOLOGY_CHANGED,
+        .live = &.{ "sel", "rv" },
+        .names = &.{"vo"},
+        .good = &.{ 0, 2e3 },
+        .bad = &.{ 1, 2e3 },
+        .reason = c.ESPICE_REASON_TOPOLOGY_CHANGED,
     },
     // No bin holds W = 5u.
     .{
         .deck = "bins\n.param wn=1u\nv1 d 0 1\nv2 g 0 2\nm1 d g 0 0 nm l=1u w={wn}\n" ++
             ".model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5\n" ++
             ".model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=1.7\n.op\n.meas op id find i(v1)\n.end\n",
-        .live = &.{"wn"}, .names = &.{"id"}, .good = &.{2e-6}, .bad = &.{5e-6}, .reason = c.ESPICE_REASON_MODEL_BIN_NOT_FOUND,
+        .live = &.{"wn"},
+        .names = &.{"id"},
+        .good = &.{2e-6},
+        .bad = &.{5e-6},
+        .reason = c.ESPICE_REASON_MODEL_BIN_NOT_FOUND,
     },
     // v/rb = 1 + v^2 has a root only for rb <= 0.5.
     .{
         .deck = "no root\n.param rb=0.1\nb1 0 n i=1+v(n)*v(n)\nr1 n 0 {rb}\n.op\n.meas op vn find v(n)\n.end\n",
-        .live = &.{"rb"}, .names = &.{"vn"}, .good = &.{0.1}, .bad = &.{1e3}, .reason = c.ESPICE_REASON_NO_CONVERGENCE,
+        .live = &.{"rb"},
+        .names = &.{"vn"},
+        .good = &.{0.1},
+        .bad = &.{1e3},
+        .reason = c.ESPICE_REASON_NO_CONVERGENCE,
     },
     // The same once time passes 1 ns at k = 1e9: the transient loses its root.
     .{
         .deck = "lost root\n.param k=0\nb1 0 n i=time*k+v(n)*v(n)\nr1 n 0 1k\n.tran 10p 2n\n.meas tran vn find v(n) at=0.5n\n.end\n",
-        .live = &.{"k"}, .names = &.{"vn"}, .good = &.{0}, .bad = &.{1e9}, .reason = c.ESPICE_REASON_TIMESTEP_TOO_SMALL,
+        .live = &.{"k"},
+        .names = &.{"vn"},
+        .good = &.{0},
+        .bad = &.{1e9},
+        .reason = c.ESPICE_REASON_TIMESTEP_TOO_SMALL,
     },
     // v(b) = g v(a) and v(a) = v(b) leave both undetermined at g = 1; the
     // AC matrix is singular (the operating point still solves).
     .{
         .deck = "singular\n.param g=0.5\nv1 in 0 1 ac 1\nr1 in 0 1k\ne1 b 0 a 0 {g}\ne2 a 0 b 0 1\nr2 a in 1k\nr3 b 0 1k\n.ac lin 3 500 2k\n.meas ac vb find vm(b) at=1k\n.end\n",
-        .live = &.{"g"}, .names = &.{"vb"}, .good = &.{0.5}, .bad = &.{1}, .reason = c.ESPICE_REASON_SINGULAR_MATRIX,
+        .live = &.{"g"},
+        .names = &.{"vb"},
+        .good = &.{0.5},
+        .bad = &.{1},
+        .reason = c.ESPICE_REASON_SINGULAR_MATRIX,
     },
     // The txl Padé fit fails and the model $fatal's.
     .{
         .deck = "refused fit\n.param lv=1u cl=1p\nv1 a 0 dc 1\nr1 b 0 50\ny1 a 0 b 0 line\n.model line txl r=1 l={lv} g=0 c={cl} length=1\n.op\n.meas op vb find v(b)\n.end\n",
-        .live = &.{ "lv", "cl" }, .names = &.{"vb"}, .good = &.{ 1e-6, 1e-12 }, .bad = &.{ 1e200, 1e-200 }, .reason = c.ESPICE_REASON_DEVICE_REFUSED,
+        .live = &.{ "lv", "cl" },
+        .names = &.{"vb"},
+        .good = &.{ 1e-6, 1e-12 },
+        .bad = &.{ 1e200, 1e-200 },
+        .reason = c.ESPICE_REASON_DEVICE_REFUSED,
     },
     // A lossless txl (r = 0) has no fit: UnsupportedTransmissionLineParameters.
     .{
         .deck = "lossless\n.param rv=1\nv1 a 0 dc 1\nr1 b 0 50\ny1 a 0 b 0 line\n.model line txl r={rv} l=1n g=0 c=1p length=1\n.op\n.meas op vb find v(b)\n.end\n",
-        .live = &.{"rv"}, .names = &.{"vb"}, .good = &.{1}, .bad = &.{0}, .reason = c.ESPICE_REASON_OTHER,
+        .live = &.{"rv"},
+        .names = &.{"vb"},
+        .good = &.{1},
+        .bad = &.{0},
+        .reason = c.ESPICE_REASON_OTHER,
     },
 };
 
@@ -1029,17 +1093,17 @@ test "C points: argument errors change nothing" {
     try t.expectEqual(invalid, c.espice_append_points(h, &row, 0, null, &first));
     try t.expectEqual(invalid, c.espice_append_points(h, null, 1, null, &first));
     try t.expectEqual(invalid, c.espice_append_points(h, &row, 1, null, null));
-    var o: c.espice_points_options = std.mem.zeroes(c.espice_points_options);
-    o.struct_size = @sizeOf(c.espice_points_options);
-    for (0..6) |case| {
+    var o = pointsOptions();
+    for (0..7) |case| {
         var bad = o;
         switch (case) {
             0 => bad.measures_only = 2,
             1 => bad.early_stop = 2,
             2 => bad.warm_start = 2,
             3 => bad.abort_after = -1,
-            4 => bad.abort_after = std.math.nan(f64),
+            4 => bad.abort_measure = .{ .data = "nope", .len = 4 },
             5 => bad.abort_after = std.math.inf(f64),
+            6 => bad.tangent_step = -1,
             else => unreachable,
         }
         try t.expectEqual(invalid, c.espice_append_points(h, &row, 1, &bad, &first));
@@ -1052,7 +1116,11 @@ test "C points: argument errors change nothing" {
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(h, &after));
     try t.expectEqual(before, after);
     // Valid options, every flag set, are accepted.
-    o = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 1, .abort_after = 1 };
+    o.measures_only = 1;
+    o.early_stop = 1;
+    o.warm_start = 1;
+    o.abort_after = 1;
+    o.abort_measure = .{ .data = "TPD", .len = 3 };
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_append_points(h, &row, 1, &o, &first));
 
     // Unfinished queries, an unknown measure, a bad first_id.
@@ -1090,4 +1158,127 @@ fn expectDiagnostic(h: *c.espice_problem, want: []const u8) !void {
     var needed: usize = 0;
     try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_error_message(h, &buf, buf.len, &needed));
     try std.testing.expectEqualStrings(want, std.mem.sliceTo(&buf, 0));
+}
+
+/// Resident set size of this process, bytes (Linux /proc/self/statm).
+fn residentBytes() !usize {
+    var buf: [128]u8 = undefined;
+    const text = try std.Io.Dir.cwd().readFile(std.testing.io, "/proc/self/statm", &buf);
+    var fields = std.mem.tokenizeScalar(u8, text, ' ');
+    _ = fields.next();
+    return try std.fmt.parseInt(usize, fields.next().?, 10) * std.heap.pageSize();
+}
+
+test "C points: 100 batches of 100 on one handle, released as they are read, keep run_all time and RSS flat" {
+    const t = std.testing;
+    const deck = "C batches\n.param rv=1k\nV1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)\nR1 in out {rv}\nC1 out 0 0.1p\n.tran 1p 2n\n" ++
+        ".meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1\n.end\n";
+    const live = [_]c.espice_bytes{.{ .data = "rv", .len = 2 }};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = &live;
+    options.live_param_count = 1;
+    options.max_parallel = 4;
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
+    defer _ = c.espice_destroy(handle);
+    var points = pointsOptions();
+    points.measures_only = 1;
+    points.early_stop = 1;
+    const names = [_]c.espice_bytes{.{ .data = "tpd", .len = 3 }};
+    const batches = 100;
+    const n = 100;
+    var ns: [batches]u64 = undefined;
+    var rss: [batches]usize = undefined;
+    var rows: [n]f64 = undefined;
+    var first_ids: [batches]u32 = undefined;
+    for (0..batches) |b| {
+        // The same work every batch: only the handle's history grows.
+        for (&rows, 0..) |*r, k| r.* = 1e3 * (1 + 0.01 * @as(f64, @floatFromInt(k)));
+        try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, n, &points, &first_ids[b]));
+        const start = std.Io.Timestamp.now(t.io, .awake);
+        try t.expectEqual(@as(u32, 0), c.espice_run_all(handle));
+        ns[b] = @intCast(start.durationTo(std.Io.Timestamp.now(t.io, .awake)).nanoseconds);
+        var values: [n]f64 = undefined;
+        var why: [n]u32 = undefined;
+        try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, first_ids[b], n, &names, 1, &values, &why));
+        for (values, why) |v, w| {
+            try t.expect(std.math.isFinite(v));
+            try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), w);
+        }
+        try t.expectEqual(@as(u32, 0), c.espice_release_points(handle, first_ids[b], n));
+        rss[b] = try residentBytes();
+    }
+    // A released point keeps its id, its measures are gone; releasing again is a no-op.
+    var value: [1]f64 = undefined;
+    var why: [1]u32 = undefined;
+    try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), c.espice_copy_point_measures(handle, first_ids[0], 1, &names, 1, &value, &why));
+    var len: usize = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), c.espice_copy_result(handle, first_ids[0], null, 0, &len));
+    try t.expectEqual(@as(u32, 0), c.espice_release_points(handle, first_ids[0], 1));
+    var early: u64 = 0;
+    var late: u64 = 0;
+    for (ns[10..20]) |x| early += x;
+    for (ns[90..100]) |x| late += x;
+    const grown = rss[batches - 1] -| rss[19];
+    std.debug.print("batches: run_all {d} ms (11-20) vs {d} ms (91-100) per 10; RSS {d} MB at 20, {d} MB at 100, {d} B per point after\n", .{ early / 1_000_000, late / 1_000_000, rss[19] >> 20, rss[batches - 1] >> 20, grown / (80 * n) });
+    try t.expect(late < 2 * early);
+    // A released point keeps its query rows and variant row (the Zig
+    // test of `release_points` counts them), plus allocator slack.
+    try t.expect(grown < 80 * n * 8 * 1024);
+}
+
+/// Options with every flag off, no abort bound and no tangents.
+fn pointsOptions() c.espice_points_options {
+    var o = std.mem.zeroes(c.espice_points_options);
+    o.struct_size = @sizeOf(c.espice_points_options);
+    o.abort_after = std.math.nan(f64);
+    return o;
+}
+
+test "C points: MATCHA's 40-byte options (no tangent_step) are read, abort_measure bounds only its card" {
+    const t = std.testing;
+    // `quick` resolves at 0.15 ns at every rv; tpd takes ~7 ns at 100k.
+    const deck = "C abort measure\n.param rv=1k\nV1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)\nR1 in out {rv}\nC1 out 0 0.1p\n.tran 1p 10n\n" ++
+        ".meas tran quick when v(in)=0.5 rise=1\n.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1\n.end\n";
+    const live = [_]c.espice_bytes{.{ .data = "rv", .len = 2 }};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = &live;
+    options.live_param_count = 1;
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
+    defer _ = c.espice_destroy(handle);
+    try t.expectEqual(@as(usize, 40), @offsetOf(c.espice_points_options, "tangent_step"));
+    const rows = [_]f64{ 1e3, 100e3 };
+    var firsts: [2]u32 = undefined;
+    for ([_][]const u8{ "quick", "tpd" }, &firsts) |name, *first| {
+        // MATCHA's struct: 40 bytes, tangent_step beyond it holding garbage.
+        var o = pointsOptions();
+        o.struct_size = 40;
+        o.tangent_step = -7;
+        o.measures_only = 1;
+        o.early_stop = 1;
+        o.abort_after = 1e-9;
+        o.abort_measure = .{ .data = name.ptr, .len = name.len };
+        try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, rows.len, &o, first));
+    }
+    _ = c.espice_run_all(handle);
+    const names = [_]c.espice_bytes{ .{ .data = "quick", .len = 5 }, .{ .data = "tpd", .len = 3 } };
+    var values: [4]f64 = undefined;
+    var why: [2]u32 = undefined;
+    // Bounding `quick` aborts neither point; bounding tpd aborts the slow one.
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, firsts[0], 2, &names, 2, &values, &why));
+    try t.expectEqualSlices(u32, &.{ c.ESPICE_REASON_OK, c.ESPICE_REASON_OK }, &why);
+    try t.expect(std.math.isFinite(values[3]) and values[3] > 1e-9);
+    try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, firsts[1], 2, &names, 2, &values, &why));
+    try t.expectEqualSlices(u32, &.{ c.ESPICE_REASON_OK, c.ESPICE_REASON_ABORTED }, &why);
+    var short = pointsOptions();
+    short.struct_size = 39;
+    var first: u32 = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_ABI_MISMATCH), c.espice_append_points(handle, &rows, 1, &short, &first));
 }

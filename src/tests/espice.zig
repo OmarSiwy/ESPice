@@ -359,6 +359,21 @@ test "Problem: stepping every query to the end publishes the file run_all writes
     try t.expectEqualSlices(u8, batch, stepped);
 }
 
+test "Problem: a title-only deck runs nothing and succeeds" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/title.raw", .{tmp.sub_path});
+    defer t.allocator.free(path);
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = "--8<-- \"snippet.sp\"\n", .origin = "title.cir" } },
+        .output = .{ .path = path },
+    });
+    defer p.deinit();
+    try p.run_all();
+    try t.expectEqual(@as(usize, 0), p.query_count());
+    try t.expectEqual(null, p.output_error());
+}
+
 test "Problem: writer failure retains completed results and is reported separately" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
@@ -1386,7 +1401,8 @@ test "points: abort_after fails only the points still unresolved past it, early_
         if (info.kind != .tran or info.status != .complete) continue;
         const r = try p.result(id);
         lens[@intFromBool(@backingInt(id) >= @backingInt(bounded))] += r.npoints;
-        if (@backingInt(id) >= @backingInt(bounded)) try t.expectEqual(@as(usize, 3), r.varnames.len);
+        // TRIG/TARG streams: only the time column is recorded.
+        if (@backingInt(id) >= @backingInt(bounded)) try t.expectEqual(@as(usize, 1), r.varnames.len);
     }
     std.debug.print("abort test steps: plain {d}, bounded {d}\n", .{ lens[0], lens[1] });
     try t.expect(lens[1] * 3 < lens[0]);
@@ -1495,4 +1511,219 @@ test "Problem.append_points: measures equal the CLI's printed .meas of the same 
         card += 1;
     }
     try t.expectEqual(@as(usize, 16), k);
+}
+
+test "Options.measures: run_all prints each point's .meas block as it ends, the bytes print_measures writes, at any max_parallel" {
+    var swept: std.ArrayList(u8) = .empty;
+    defer swept.deinit(t.allocator);
+    try swept.appendSlice(t.allocator, points_body ++ ".data pts rv cv\n");
+    for (0..12) |k| try swept.print(t.allocator, "+ {e} {e}\n", .{ 1e3 * @as(f64, @floatFromInt(k + 1)), 0.5e-12 });
+    // The last row never reaches 0.5 V: an error line and a NaN.
+    try swept.appendSlice(t.allocator, "+ 1e6 1e-12\n.enddata\n.tran 10p 40n sweep data=pts\n" ++ points_meas);
+    const source: api.Source = .{ .bytes = .{ .data = swept.items, .origin = "data.sp" } };
+    var want: std.Io.Writer.Allocating = .init(t.allocator);
+    defer want.deinit();
+    {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = source, .dialect = .hspice });
+        defer p.deinit();
+        try p.run_all();
+        try p.print_measures(&want.writer, &want.writer);
+    }
+    try t.expect(std.mem.count(u8, want.written(), "Measurements for Transient Analysis") == 13);
+    for ([_]u16{ 1, 4 }) |jobs| {
+        var got: std.Io.Writer.Allocating = .init(t.allocator);
+        defer got.deinit();
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = source, .dialect = .hspice, .max_parallel = jobs, .point = .{ .measures_only = true }, .measures = .{ .out = &got.writer, .err = &got.writer } });
+        defer p.deinit();
+        try p.run_all();
+        // Every block is out before run_all returns.
+        try t.expectEqualStrings(want.written(), got.written());
+        try p.print_measures(&got.writer, &got.writer);
+        try t.expectEqualStrings(want.written(), got.written());
+    }
+}
+
+test "Options.point.tangent_step with live parameters: the deck's own transient prints the tangents append_points gives" {
+    const source =
+        \\deck tangents
+        \\.param rv=1k cv=0.1p
+        \\v1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)
+        \\r1 in out {rv}
+        \\c1 out 0 {cv}
+        \\.tran 1p 2n 0 2p
+        \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1
+        \\.meas tran ig integ v(out) from=0 to=1n
+        \\.end
+        \\
+    ;
+    const live = [_][]const u8{ "rv", "cv" };
+    const own = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "t.sp" } }, .live_params = &live, .point = .{ .tangent_step = 1e-6 } });
+    defer own.deinit();
+    try own.run_all();
+    var printed: std.Io.Writer.Allocating = .init(t.allocator);
+    defer printed.deinit();
+    try own.print_tangents(&printed.writer);
+
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "t.sp" } }, .live_params = &live });
+    defer p.deinit();
+    const first = try p.append_points(&.{ 1e3, 0.1e-12 }, 1, .{ .tangent_step = 1e-6 });
+    try p.run_all();
+    var slopes: [2 * 2]f64 = undefined;
+    try p.point_tangents(first, 1, &.{ "tpd", "ig" }, &slopes);
+    var want: std.Io.Writer.Allocating = .init(t.allocator);
+    defer want.deinit();
+    try want.writer.writeAll("\n  Tangents for Transient Analysis\n\n");
+    for ([_][]const u8{ "tpd", "ig" }, 0..) |name, c| for (live, 0..) |param, k| {
+        try t.expect(std.math.isFinite(slopes[c * 2 + k]));
+        try want.writer.print("d({s})/d({s}) = {e:.6}\n", .{ name, param, slopes[c * 2 + k] });
+    };
+    try t.expectEqualStrings(want.written(), printed.written());
+    // The deck's own run publishes its rows alone, the tangent rows apart.
+    for (0..own.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        if ((try own.query_info(id)).kind != .tran) continue;
+        const r = try own.result(id);
+        try t.expectEqual(2 * r.npoints * r.varnames.len, r.tangents.len);
+    }
+}
+
+/// Counts the bytes live through it, for tests that bound what a Problem keeps.
+const Counting = struct {
+    child: std.mem.Allocator,
+    live: std.atomic.Value(isize) = .init(0),
+
+    fn allocator(self: *Counting) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawAlloc(n, alignment, ret) orelse return null;
+        _ = self.live.fetchAdd(@intCast(n), .monotonic);
+        return p;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, n: usize, ret: usize) bool {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        if (!self.child.rawResize(memory, alignment, n, ret)) return false;
+        _ = self.live.fetchAdd(@as(isize, @intCast(n)) - @as(isize, @intCast(memory.len)), .monotonic);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, n: usize, ret: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawRemap(memory, alignment, n, ret) orelse return null;
+        _ = self.live.fetchAdd(@as(isize, @intCast(n)) - @as(isize, @intCast(memory.len)), .monotonic);
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ret);
+        _ = self.live.fetchSub(@intCast(memory.len), .monotonic);
+    }
+};
+
+test "release_points: a Problem run batch after batch keeps a few KB per released point" {
+    var counting: Counting = .{ .child = t.allocator };
+    const source = abort_deck;
+    const p = try api.Problem.init(counting.allocator(), t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "batches.sp" } }, .live_params = &.{"rv"}, .max_parallel = 4 });
+    defer p.deinit();
+    var rows: [50]f64 = undefined;
+    for (&rows, 0..) |*r, k| r.* = 1e3 * (1 + 0.01 * @as(f64, @floatFromInt(k)));
+    var live: [30]isize = undefined;
+    var values: [rows.len]f64 = undefined;
+    var why: [rows.len]api.Problem.Reason = undefined;
+    for (&live) |*l| {
+        const first = try p.append_points(&rows, rows.len, .{ .measures_only = true, .early_stop = true });
+        try p.run_all();
+        try p.point_measures(first, &.{"tpd"}, &values, &why);
+        try p.release_points(first, rows.len);
+        l.* = counting.live.load(.monotonic);
+    }
+    const per_point = @divTrunc(live[live.len - 1] - live[9], 20 * rows.len);
+    std.debug.print("release_points: {d} B live after batch 10, {d} B after 30, {d} B per point\n", .{ live[9], live[live.len - 1], per_point });
+    // Its two query rows, the copied query and its variant row, with the
+    // slack of the tables' doubling; an unreleased point keeps its circuit
+    // and waveform, tens of KB.
+    try t.expect(per_point < 4096);
+    try t.expectError(error.ResultUnavailable, p.point_measures(@fromBackingInt(@backingInt(p.session.outputs.items[p.session.outputs.items.len - 1])), &.{"tpd"}, values[0..1], why[0..1]));
+}
+
+const lane_deck = "tests/fixtures/variants/data_lane_stimulus.sp";
+
+/// `source`, the lane fixture, without its .data table: one .tran at `sel`
+/// and `pol`.
+fn laneSolo(source: []const u8, sel: f64, pol: f64) ![]u8 {
+    const start = std.mem.indexOf(u8, source, "\n.data ").? + 1;
+    const end = std.mem.indexOf(u8, source, ".enddata\n").? + ".enddata\n".len;
+    const spliced = try std.mem.concat(t.allocator, u8, &.{ source[0..start], source[end..] });
+    defer t.allocator.free(spliced);
+    const single = try std.mem.replaceOwned(u8, t.allocator, spliced, " sweep data=lanes", "");
+    defer t.allocator.free(single);
+    var line: [64]u8 = undefined;
+    return std.mem.replaceOwned(u8, t.allocator, single, ".param vdd=1 sel=0 pol=1", try std.fmt.bufPrint(&line, ".param vdd=1 sel={d} pol={d}", .{ sel, pol }));
+}
+
+/// Every .tran point's samples, in request order, and the printed .meas
+/// lines without their headings.
+const LaneRun = struct {
+    data: std.ArrayList(f64) = .empty,
+    measures: std.ArrayList(u8) = .empty,
+    /// Each point's time column.
+    grids: std.ArrayList([]f64) = .empty,
+
+    fn deinit(r: *LaneRun) void {
+        for (r.grids.items) |g| t.allocator.free(g);
+        r.grids.deinit(t.allocator);
+        r.data.deinit(t.allocator);
+        r.measures.deinit(t.allocator);
+    }
+
+    fn add(r: *LaneRun, source: []const u8) !void {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "lane.sp" } }, .dialect = .hspice });
+        defer p.deinit();
+        try p.run_all();
+        for (0..p.query_count()) |i| {
+            const id: api.QueryId = @fromBackingInt(@intCast(i));
+            const info = try p.query_info(id);
+            if (!info.requested or info.kind != .tran) continue;
+            const result = try p.result(id);
+            try r.data.appendSlice(t.allocator, result.data);
+            const grid = try t.allocator.alloc(f64, result.npoints);
+            errdefer t.allocator.free(grid);
+            for (grid, 0..) |*time, k| time.* = result.data[k * result.varnames.len];
+            try r.grids.append(t.allocator, grid);
+        }
+        var printed: std.Io.Writer.Allocating = .init(t.allocator);
+        defer printed.deinit();
+        try p.print_measures(&printed.writer, &printed.writer);
+        var lines = std.mem.splitScalar(u8, printed.written(), '\n');
+        while (lines.next()) |line| if (std.mem.indexOfScalar(u8, line, '=') != null and std.mem.indexOf(u8, line, "Measurements for") == null) {
+            try r.measures.appendSlice(t.allocator, line);
+            try r.measures.append(t.allocator, '\n');
+        };
+    }
+};
+
+test "per-lane stimulus (#212): each .data point equals its row run alone, to the bit, on one time grid" {
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, lane_deck, t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    var swept: LaneRun = .{};
+    defer swept.deinit();
+    try swept.add(source);
+    var alone: LaneRun = .{};
+    defer alone.deinit();
+    for ([_][2]f64{ .{ 0, 1 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 0 } }) |row| {
+        const solo = try laneSolo(source, row[0], row[1]);
+        defer t.allocator.free(solo);
+        try alone.add(solo);
+    }
+    try t.expectEqual(@as(usize, 4), swept.grids.items.len);
+    try t.expectEqual(@as(usize, 12), std.mem.count(u8, swept.measures.items, "\n"));
+    try t.expectEqualStrings(alone.measures.items, swept.measures.items);
+    try t.expectEqualSlices(u64, @ptrCast(alone.data.items), @ptrCast(swept.data.items));
+    // Every point lands the same edge breakpoints, levels aside, and none
+    // rejects a step differently: one accepted grid.
+    for (swept.grids.items[1..]) |grid| try t.expectEqualSlices(u64, @ptrCast(swept.grids.items[0]), @ptrCast(grid));
 }

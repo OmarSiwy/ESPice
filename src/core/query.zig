@@ -672,8 +672,10 @@ pub const PointOptions = struct {
     /// ladder when that fails.
     warm_start: bool = false,
     /// Seconds past which a `.tran` card still unresolved fails the
-    /// transient with `error.MeasureBoundExceeded`; 0 is off.
-    abort_after: f64 = 0,
+    /// transient with `error.MeasureBoundExceeded`; null is off, 0 a bound.
+    abort_after: ?f64 = null,
+    /// The card `abort_after` bounds, by name; empty bounds every card.
+    abort_measure: []const u8 = "",
     /// Above 0: also integrate, per live parameter, the first-order
     /// prediction of the point with that parameter moved by this times
     /// its magnitude (`Tran.tangents`), for d(measure)/d(parameter).

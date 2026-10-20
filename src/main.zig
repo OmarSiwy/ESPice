@@ -40,12 +40,15 @@ pub fn main(init: std.process.Init) !u8 {
     var dialect: problem.Dialect = .ngspice;
     var selection: problem.Selection = .{};
     var backend: problem.Request = .cpu;
+    var lanes = false;
     var explicit_gpu = false;
     var max_parallel: u16 = 1;
     var show_plan = false;
     var plan_only = false;
     var timing_in_depth = false;
     var point: problem.requests.PointOptions = .{};
+    var tangents: std.ArrayList([]const u8) = .empty;
+    defer tangents.deinit(init.gpa);
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             std.debug.print(
@@ -59,10 +62,15 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --print-dag             Print the next query frontier before running
                 \\      --plan                  Print the DAG without running analyses
                 \\      --timing-in-depth       Time preparation, queries, and individual steps
-                \\      --measures-only         Keep only the .tran columns the .meas cards read
-                \\      --early-stop            End each .tran once its .meas cards have resolved
+                \\      --measures-only         Measure .tran cards as the run goes; keep only the columns whole-run cards read
+                \\      --early-stop            End each .tran once its .meas cards have resolved (never with LAST, _CONT,
+                \\                              JITTER, .check/DOUT or a window without TO=)
                 \\      --abort-after=T         Fail a .tran still missing a .meas value past T seconds
+                \\      --abort-measure=NAME    Bound only .meas NAME with --abort-after
                 \\      --warm-start            Start each transient's OP from the nominal one
+                \\      --tangents=P,...        Print d(.meas)/d(P) of the first .tran's cards for these .params
+                \\      --tangent-step=S        Relative step of --tangents (default 1e-6)
+                \\      --lanes                 Solve sweep points' OPs and .dc sweeps as SIMD lanes (CPU)
                 \\      --tokenizer=FMT         ngspice|hspice|spectre
                 \\      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
                 \\  -v, --version               Version
@@ -88,9 +96,23 @@ pub fn main(init: std.process.Init) !u8 {
             point.early_stop = true;
         } else if (std.mem.eql(u8, arg, "--warm-start")) {
             point.warm_start = true;
+        } else if (optionValue(arg, "", "--tangents", &args)) |value| {
+            var it = std.mem.splitScalar(u8, value orelse return usageFail(), ',');
+            while (it.next()) |name| {
+                if (name.len == 0) return usageFail();
+                try tangents.append(init.gpa, name);
+            }
+        } else if (optionValue(arg, "", "--tangent-step", &args)) |value| {
+            point.tangent_step = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
+            if (!(point.tangent_step > 0) or std.math.isInf(point.tangent_step)) return usageFail();
+        } else if (std.mem.eql(u8, arg, "--lanes")) {
+            lanes = true;
         } else if (optionValue(arg, "", "--abort-after", &args)) |value| {
-            point.abort_after = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
-            if (!(point.abort_after > 0) or std.math.isInf(point.abort_after)) return usageFail();
+            const bound = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
+            if (!(bound >= 0) or std.math.isInf(bound)) return usageFail();
+            point.abort_after = bound;
+        } else if (optionValue(arg, "", "--abort-measure", &args)) |value| {
+            point.abort_measure = value orelse return usageFail();
         } else if (optionValue(arg, "-r", "--rawfile", &args)) |value| {
             selection.path = value orelse return usageFail();
         } else if (optionValue(arg, "", "--format", &args)) |value| {
@@ -111,12 +133,18 @@ pub fn main(init: std.process.Init) !u8 {
         } else try paths.append(init.gpa, arg);
     }
     if (paths.items.len == 0) return usageFail();
+    if (tangents.items.len == 0) point.tangent_step = 0 else if (point.tangent_step == 0) point.tangent_step = 1e-6;
 
     // One per process: VerA's VPI is process-global.
     const vpi = vpi_host.init(init.gpa, init.io);
     var failed = false;
     for (paths.items) |path| {
         if (timing_in_depth) std.debug.print("timing: {s}\n", .{path});
+        // Each `.meas` block prints as its point ends (`Options.measures`).
+        var out_buf: [4096]u8 = undefined;
+        var err_buf: [1024]u8 = undefined;
+        var stdout: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &out_buf);
+        var stderr: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &err_buf);
         const p = problem.Problem.init(init.gpa, init.io, .{
             .source = .{ .file = path },
             .dialect = dialect,
@@ -128,10 +156,13 @@ pub fn main(init: std.process.Init) !u8 {
                 .device_threads = envThreads("ESPICE_THREADS"),
                 // One deck, run once: no query is appended later.
                 .final_plan = true,
+                .lanes = lanes,
             },
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,
             .point = point,
+            .live_params = tangents.items,
+            .measures = .{ .out = &stdout.interface, .err = &stderr.interface },
             .vpi_apps = vpi_apps.items,
             .vpi = vpi,
         }) catch |err| {
@@ -141,8 +172,6 @@ pub fn main(init: std.process.Init) !u8 {
         };
         defer p.deinit();
         if (show_plan) {
-            var buffer: [4096]u8 = undefined;
-            var stdout: std.Io.File.Writer = .init(.stdout(), init.io, &buffer);
             try p.print(&stdout.interface, .{ .limits = .{ .max_parallel = max_parallel } });
             try stdout.interface.flush();
         }
@@ -153,15 +182,10 @@ pub fn main(init: std.process.Init) !u8 {
             failed = true;
             continue;
         };
-        {
-            var out_buf: [4096]u8 = undefined;
-            var err_buf: [1024]u8 = undefined;
-            var stdout: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &out_buf);
-            var stderr: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &err_buf);
-            try p.print_measures(&stdout.interface, &stderr.interface);
-            try stdout.interface.flush();
-            try stderr.interface.flush();
-        }
+        try p.print_measures(&stdout.interface, &stderr.interface);
+        try p.print_tangents(&stdout.interface);
+        try stdout.interface.flush();
+        try stderr.interface.flush();
         std.debug.print("{s}: {d} devices\n", .{ p.title(), p.device_count() });
         for (0..p.query_count()) |i| {
             const id: problem.QueryId = @fromBackingInt(@intCast(i));

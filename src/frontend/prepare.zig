@@ -306,6 +306,7 @@ fn buildOne(lib: *const device.Library, sim_arena: std.mem.Allocator, parse_aren
     } else .{};
     const tuning = if (nl.tunable.len != 0 and run.point == null and run.prefix.len == 0) try variants.Tuning.init(core.gpa, lib, sim_arena, parse_arena, nl, &circuit, cards) else null;
     errdefer if (tuning) |t| t.deinit();
+    if (plan.variants.refs.len != 0 or tuning != null) try circuit.countParams();
     card_opts.sample = nl.deck.sample;
     card_opts.card_names = card_names;
     const queries = try analyses.queries(sim_arena, cards_rows, circuit.n, false, out.bindings, cards, card_opts, plan.fanout);

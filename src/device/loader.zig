@@ -93,16 +93,11 @@ fn prepareOne(loaded: []const []const u8, gpa: std.mem.Allocator, io: std.Io, pa
     const module_name = switch (hdl) {
         .va => blk: {
             const dir = std.fs.path.dirname(path) orelse ".";
-            va = fastvaf.compileSourceOpts(gpa, source, .build, .{
-                // VAMS-2.3, as the built-ins compile (build.zig `.std`): 2023
-                // reserves names models still declare (BSIM-CMG 112's `expm1`).
-                .file_name = path,
-                .include_dirs = &.{dir},
-                .diags = &bag,
-                .display = .record,
-                .int_systfs = paths.int_systfs,
-                .language = .vams_2_3,
-            }) catch |err| {
+            // VerA's default language, VAMS-2023, as the built-ins compile
+            // except the three build.zig pins to VAMS-2.3 (`.std`). A 2.3 file
+            // that names something 2023 reserves (BSIM-CMG 112's `expm1`)
+            // narrows itself with `begin_keywords "VAMS-2.3"`.
+            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = &.{dir}, .diags = &bag, .display = .record, .int_systfs = paths.int_systfs }) catch |err| {
                 printDiags(&bag);
                 return err;
             };

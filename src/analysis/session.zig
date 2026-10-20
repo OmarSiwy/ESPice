@@ -117,7 +117,13 @@ const Row = struct {
     lanes: u32 = 0,
     /// On a lane row, the split query it belongs to.
     owner: QueryId = none,
+    /// `release` dropped its executor and result.
+    released: bool = false,
+    /// Its position in `outputs`, or `no_output` when not requested.
+    output: u32 = no_output,
 };
+
+const no_output = std.math.maxInt(u32);
 
 /// The query graph over one prepared circuit and deck, both borrowed for the
 /// session's lifetime. `QueryId` is the row index; every call that takes one
@@ -146,6 +152,11 @@ pub const Session = struct {
     queue: std.ArrayList(u32) = .empty,
     queue_head: usize = 0,
     urgent: std.ArrayList(u32) = .empty,
+    /// Every row before it is terminal, and every output before
+    /// `done_outputs`: where `requeue` and `finished` start, so a session
+    /// appended to and run over and over costs what each batch adds.
+    done_rows: usize = 0,
+    done_outputs: usize = 0,
     /// No other session reads `topology`'s device state after this one, so
     /// under `config.final_plan` its last root query evaluates the template's
     /// own batches instead of a copy (`Circuit.instantiateMove`). Set by
@@ -237,78 +248,71 @@ pub const Session = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
-        var candidate: std.MultiArrayList(Row) = .empty;
-        errdefer candidate.deinit(self.allocator);
-        try candidate.ensureTotalCapacity(self.allocator, max_rows);
-        for (0..self.rows.len) |i| candidate.appendAssumeCapacity(self.rows.get(i));
         const old_len = self.rows.len;
+        // Everything that can fail first: copies, then room for every row,
+        // OP index entry and output, so the rows below change infallibly.
+        const owned = try a.alloc(requests.Query, jobs.len);
+        for (jobs, owned) |job, *o| {
+            try validateDeck(job, self.topology.n, self.deck);
+            o.* = try copyValue(a, job);
+        }
+        try self.rows.ensureTotalCapacity(self.allocator, max_rows);
         try self.ops.ensureUnusedCapacity(self.allocator, @intCast(max_rows - old_len));
-        // All-or-nothing: drop the OP rows this call indexed.
-        errdefer for (old_len..candidate.len) |i| if (candidate.items(.job)[i] == .op) {
-            const key: OpKey = .{ .template = candidate.items(.template)[i], .op = candidate.items(.job)[i].op };
-            if (self.ops.get(key)) |at| if (@backingInt(at) == i) {
-                _ = self.ops.remove(key);
-            };
-        };
-        const new_ids = try a.alloc(QueryId, jobs.len);
-        // Whether job k's id joins `outputs`: a new row, or an OP first requested now.
-        const fresh = try a.alloc(bool, jobs.len);
+        try self.outputs.ensureUnusedCapacity(self.allocator, jobs.len);
+        try self.request_arenas.ensureUnusedCapacity(self.allocator, 1);
+        try self.urgent.ensureTotalCapacity(self.allocator, max_rows);
         var roots: u32 = 0;
-        for (jobs, new_ids, fresh, 0..) |job, *id, *new, k| {
+        for (owned, ids[0..jobs.len], 0..) |job, *id, k| {
             const template = if (templates) |t| t[k] else self.template;
             std.debug.assert(template <= self.templates.items.len);
-            try validateDeck(job, self.topology.n, self.deck);
-            const owned = try copyValue(a, job);
             // An explicit OP can expose an already shared prerequisite product.
-            if (owned == .op) {
-                if (self.ops.get(.{ .template = template, .op = owned.op })) |existing| {
-                    const requested = &candidate.items(.requested)[@backingInt(existing)];
-                    new.* = !requested.*;
-                    requested.* = true;
+            if (job == .op) {
+                if (self.ops.get(.{ .template = template, .op = job.op })) |existing| {
+                    const e = @backingInt(existing);
                     id.* = existing;
+                    if (!self.rows.items(.requested)[e]) {
+                        self.rows.items(.requested)[e] = true;
+                        self.rows.items(.output)[e] = @intCast(self.outputs.items.len);
+                        self.outputs.appendAssumeCapacity(existing);
+                    }
                     continue;
                 }
             }
-            new.* = true;
-            const n_lanes = splitLanes(owned);
+            const n_lanes = splitLanes(job);
             for (0..n_lanes) |l| {
-                var lane = owned;
+                var lane = job;
                 switch (lane) {
                     inline .mc, .temp => |*o| o.lane = @intCast(l),
                     else => unreachable,
                 }
-                _ = self.addRow(&candidate, lane, template, false, &roots);
+                _ = self.addRow(lane, template, false, &roots);
             }
-            id.* = self.addRow(&candidate, owned, template, true, &roots);
+            id.* = self.addRow(job, template, true, &roots);
             if (n_lanes != 0) {
                 const g = @backingInt(id.*);
-                candidate.items(.lanes)[g] = n_lanes;
+                self.rows.items(.lanes)[g] = n_lanes;
                 for (g - n_lanes..g) |l| {
-                    std.debug.assert(candidate.items(.dependency)[l] == candidate.items(.dependency)[g]);
-                    candidate.items(.owner)[l] = id.*;
+                    std.debug.assert(self.rows.items(.dependency)[l] == self.rows.items(.dependency)[g]);
+                    self.rows.items(.owner)[l] = id.*;
                 }
             }
         }
-        try self.outputs.ensureUnusedCapacity(self.allocator, jobs.len);
-        try self.request_arenas.ensureUnusedCapacity(self.allocator, 1);
-        self.rows.deinit(self.allocator);
-        self.rows = candidate;
         self.root_readers += roots;
-        for (new_ids, fresh) |id, new| if (new) self.outputs.appendAssumeCapacity(id);
         self.request_arenas.appendAssumeCapacity(arena);
-        @memcpy(ids[0..jobs.len], new_ids);
         return jobs.len;
     }
 
-    /// Appends `job` to `candidate` after the OP it needs, shared when one
-    /// matches, and returns its id. A split query (`splitLanes`) reads its
-    /// OP only through its lanes, so it is not one of the OP's readers.
-    fn addRow(self: *Session, candidate: *std.MultiArrayList(Row), job: requests.Query, template: u32, requested: bool, roots: *u32) QueryId {
+    /// Appends `job` after the OP it needs, shared when one matches, and
+    /// returns its id; a `requested` row joins `outputs`. A split query
+    /// (`splitLanes`) reads its OP only through its lanes, so it is not one
+    /// of the OP's readers. Infallible: `appendAt` reserved every row, OP
+    /// index entry and output first.
+    fn addRow(self: *Session, job: requests.Query, template: u32, requested: bool, roots: *u32) QueryId {
         var dependency = none;
         if (prerequisite(job)) |op| {
             dependency = self.ops.get(.{ .template = template, .op = op }) orelse blk: {
-                const dep: QueryId = @fromBackingInt(@intCast(candidate.len));
-                candidate.appendAssumeCapacity(.{
+                const dep: QueryId = @fromBackingInt(@intCast(self.rows.len));
+                self.rows.appendAssumeCapacity(.{
                     .job = .{ .op = op },
                     .component = @backingInt(dep),
                     .requested = false,
@@ -319,25 +323,27 @@ pub const Session = struct {
                 break :blk dep;
             };
         }
-        const id: QueryId = @fromBackingInt(@intCast(candidate.len));
+        const id: QueryId = @fromBackingInt(@intCast(self.rows.len));
         var sibling = none;
         if (dependency == none) {
             std.debug.assert(splitLanes(job) == 0);
             roots.* += 1;
         } else if (splitLanes(job) == 0) {
             const d = @backingInt(dependency);
-            candidate.items(.readers)[d] += 1;
-            sibling = candidate.items(.child)[d];
-            candidate.items(.child)[d] = id;
+            self.rows.items(.readers)[d] += 1;
+            sibling = self.rows.items(.child)[d];
+            self.rows.items(.child)[d] = id;
         }
-        candidate.appendAssumeCapacity(.{
+        self.rows.appendAssumeCapacity(.{
             .job = job,
             .dependency = dependency,
-            .component = if (dependency == none) @backingInt(id) else candidate.items(.component)[@backingInt(dependency)],
+            .component = if (dependency == none) @backingInt(id) else self.rows.items(.component)[@backingInt(dependency)],
             .requested = requested,
             .template = template,
             .sibling = sibling,
+            .output = if (requested) @intCast(self.outputs.items.len) else no_output,
         });
+        if (requested) self.outputs.appendAssumeCapacity(id);
         if (job == .op) self.ops.putAssumeCapacity(.{ .template = template, .op = job.op }, id);
         return id;
     }
@@ -510,7 +516,7 @@ pub const Session = struct {
     fn gather(self: *Session, i: usize) void {
         const lane_width = execution.lane_width;
         const config = self.config;
-        if (!config.knobs.lanes or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
+        if (!execution.lanesOn(config) or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
         if (!batchable(jobs[i]) or self.rows.items(.executor)[i] != null) return;
         var peers: [lane_width - 1]usize = undefined;
@@ -741,7 +747,8 @@ pub const Session = struct {
         self.queue_head = 0;
         // A row is queued in `urgent` at most once at a time.
         try self.urgent.ensureTotalCapacity(self.allocator, self.rows.len);
-        for (0..self.rows.len) |i| if (self.ready(i) and !self.rows.items(.running)[i]) {
+        self.advanceDone();
+        for (self.done_rows..self.rows.len) |i| if (self.ready(i) and !self.rows.items(.running)[i]) {
             try self.queue.append(self.allocator, @intCast(i));
         };
     }
@@ -822,8 +829,60 @@ pub const Session = struct {
 
     /// True when every requested query is terminal.
     pub fn finished(self: *const Session) bool {
-        for (self.outputs.items) |id| if (!self.effectiveStatus(@backingInt(id)).terminal()) return false;
+        for (self.outputs.items[self.done_outputs..]) |id| if (!self.effectiveStatus(@backingInt(id)).terminal()) return false;
         return true;
+    }
+
+    /// Moves `done_rows` and `done_outputs` past the rows and outputs that
+    /// have ended; a terminal row stays terminal. O(rows ended since).
+    fn advanceDone(self: *Session) void {
+        while (self.done_rows < self.rows.len and self.effectiveStatus(self.done_rows).terminal()) self.done_rows += 1;
+        const outputs = self.outputs.items;
+        while (self.done_outputs < outputs.len and self.effectiveStatus(@backingInt(outputs[self.done_outputs])).terminal()) self.done_outputs += 1;
+    }
+
+    /// Whether `release` freed query `id`.
+    pub fn released(self: *const Session, id: QueryId) bool {
+        return self.rows.items(.released)[@backingInt(id)];
+    }
+
+    /// The position of requested query `id` in `outputs`; null when it was
+    /// never requested.
+    pub fn outputIndex(self: *const Session, id: QueryId) !?usize {
+        const k = self.rows.items(.output)[try self.index(id)];
+        return if (k == no_output) null else k;
+    }
+
+    /// Frees ended query `id`'s executor: its circuit, work and result.
+    /// Its status stays; `result` then fails `error.ResultUnavailable`. Its
+    /// prerequisite OP goes too once no unreleased query reads it, and
+    /// leaves the OP index, so a later query gets a new one. A query
+    /// already released is left alone. `error.QueryNotReady` while it, or
+    /// a query reading its state, has not ended.
+    pub fn release(self: *Session, id: QueryId) error{ InvalidQuery, QueryNotReady }!void {
+        const i = try self.index(id);
+        if (self.rows.items(.released)[i]) return;
+        if (!self.effectiveStatus(i).terminal() or self.rows.items(.running)[i]) return error.QueryNotReady;
+        var c = self.rows.items(.child)[i];
+        while (c != none) : (c = self.rows.items(.sibling)[@backingInt(c)]) {
+            if (!self.rows.items(.released)[@backingInt(c)]) return error.QueryNotReady;
+        }
+        if (self.rows.items(.executor)[i]) |worker| worker.destroy();
+        self.rows.items(.executor)[i] = null;
+        self.rows.items(.released)[i] = true;
+        const job = self.rows.items(.job)[i];
+        if (job == .op) {
+            const key: OpKey = .{ .template = self.rows.items(.template)[i], .op = job.op };
+            if (self.ops.get(key)) |at| if (@backingInt(at) == i) {
+                _ = self.ops.remove(key);
+            };
+        }
+        const dep = self.rows.items(.dependency)[i];
+        if (dep != none and !self.rows.items(.requested)[@backingInt(dep)]) self.release(dep) catch |err| switch (err) {
+            // Another of its readers has not been released yet.
+            error.QueryNotReady => {},
+            else => unreachable, // else: `dep` is a valid row
+        };
     }
 
     /// Returns the error of the first requested query that ended without a
@@ -831,7 +890,12 @@ pub const Session = struct {
     /// prerequisite's error, so an implicit OP's OutOfMemory is not renamed
     /// DependencyFailed.
     pub fn failure(self: *const Session) ?Failure {
-        for (self.outputs.items) |id| {
+        return self.failureFrom(0);
+    }
+
+    /// `failure` over `outputs[from..]`.
+    pub fn failureFrom(self: *const Session, from: usize) ?Failure {
+        for (self.outputs.items[from..]) |id| {
             const i = @backingInt(id);
             const status = self.effectiveStatus(i);
             if (status == .complete or !status.terminal()) continue;
@@ -855,7 +919,8 @@ pub const Session = struct {
     pub fn result(self: *const Session, id: QueryId) !Result {
         const i = try self.index(id);
         if (self.effectiveStatus(i) != .complete) return error.ResultUnavailable;
-        return self.rows.items(.executor)[i].?.result() orelse error.ResultUnavailable;
+        const worker = self.rows.items(.executor)[i] orelse return error.ResultUnavailable;
+        return worker.result() orelse error.ResultUnavailable;
     }
 
     /// The solved operating point query `id` started from: its

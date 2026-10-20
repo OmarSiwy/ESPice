@@ -13,8 +13,11 @@ pub const std_options: std.Options = .{ .signal_stack_size = if (@import("builti
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
 /// only: off, a device build spends 0.4-1.8% fewer instructions.
 pub const vera_validate_contract = @import("builtin").mode == .debug;
-/// `core.gpa`: SmpAllocator, or the page allocator single-threaded (wasm).
-const allocator = if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
+/// glibc malloc where libc is linked, else `core.gpa` (SmpAllocator, or the
+/// page allocator single-threaded: wasm). A handle run batch after batch
+/// starts a worker thread per query, and SmpAllocator kept what each freed:
+/// 48 KB of RSS per released point, against 1.6 KB under malloc.
+const allocator = if (@import("builtin").link_libc) std.heap.c_allocator else if (@import("builtin").single_threaded) std.heap.page_allocator else std.heap.smp_allocator;
 /// Bumped on a change that breaks a caller built against an older header;
 /// `espice_create` rejects a mismatch. Fields appended to
 /// `espice_create_options` do not bump it: `struct_size` gates them.
@@ -101,14 +104,25 @@ const CreateOptions = extern struct {
     display_user: ?*anyopaque,
 };
 const DisplayFn = fn (text: [*]const u8, len: usize, user: ?*anyopaque) callconv(.c) void;
+/// MATCHA's layout (MATCHA/SEAM.md row 1) through `warm_start`, 40 bytes
+/// on LP64; `tangent_step` is ESPice's, read when `struct_size` covers it.
 const PointsOptions = extern struct {
-    struct_size: u32,
-    measures_only: u32,
-    early_stop: u32,
-    warm_start: u32,
+    struct_size: usize,
+    abort_measure: Bytes,
     abort_after: f64,
+    measures_only: u8,
+    early_stop: u8,
+    warm_start: u8,
     tangent_step: f64,
 };
+
+comptime {
+    if (@sizeOf(usize) == 8) {
+        std.debug.assert(@sizeOf(PointsOptions) == 48);
+        for (.{ "struct_size", "abort_measure", "abort_after", "measures_only", "early_stop", "warm_start", "tangent_step" }, .{ 0, 8, 24, 32, 33, 34, 40 }) |field, at|
+            std.debug.assert(@offsetOf(PointsOptions, field) == at);
+    }
+}
 const Scope = extern struct { kind: u32, id: u32 };
 const Progress = extern struct { phase: u32, reserved: u32 = 0, completed: u64, total: u64 };
 const QueryInfo = extern struct {
@@ -590,9 +604,16 @@ export fn espice_append_points(handle: ?*Token, values: ?[*]const f64, count: us
     var config: api.requests.PointOptions = .{};
     if (options) |o| {
         // Fields appended later are read only when `struct_size` covers them.
+        // MATCHA's 40 bytes end at `warm_start`, tail padding included.
         if (o.struct_size < @offsetOf(PointsOptions, "tangent_step")) return h.fail(error.AbiMismatch);
-        if (o.measures_only > 1 or o.early_stop > 1 or o.warm_start > 1 or !(o.abort_after >= 0) or std.math.isInf(o.abort_after)) return h.fail(error.InvalidArgument);
-        config = .{ .measures_only = o.measures_only == 1, .early_stop = o.early_stop == 1, .warm_start = o.warm_start == 1, .abort_after = o.abort_after };
+        if (o.measures_only > 1 or o.early_stop > 1 or o.warm_start > 1 or o.abort_after < 0 or std.math.isInf(o.abort_after)) return h.fail(error.InvalidArgument);
+        config = .{
+            .measures_only = o.measures_only == 1,
+            .early_stop = o.early_stop == 1,
+            .warm_start = o.warm_start == 1,
+            .abort_after = if (std.math.isNan(o.abort_after)) null else o.abort_after,
+            .abort_measure = constSlice(u8, o.abort_measure.data, o.abort_measure.len) catch |err| return h.fail(err),
+        };
         if (o.struct_size >= @sizeOf(PointsOptions)) {
             if (!(o.tangent_step >= 0) or std.math.isInf(o.tangent_step)) return h.fail(error.InvalidArgument);
             config.tangent_step = o.tangent_step;
@@ -627,6 +648,12 @@ export fn espice_copy_point_tangents(handle: ?*Token, first_id: u32, count: usiz
     defer allocator.free(keys);
     for (name_bytes, keys) |b, *key| key.* = constSlice(u8, b.data, b.len) catch |err| return h.fail(err);
     h.problem.point_tangents(@fromBackingInt(@intCast(first_id)), count, keys, values) catch |err| return h.fail(err);
+    return 0;
+}
+
+export fn espice_release_points(handle: ?*Token, first_id: u32, count: usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
+    h.problem.release_points(@fromBackingInt(@intCast(first_id)), count) catch |err| return h.fail(err);
     return 0;
 }
 

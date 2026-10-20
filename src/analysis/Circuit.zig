@@ -199,6 +199,9 @@ pub const Circuit = struct {
     load_check: ?LoadCheck = null,
     /// `collectParams` memo. The refs point into frozen batch storage.
     param_refs: ?[]ParamRef = null,
+    /// The template's `Prepared.param_starts`, borrowed; empty when it
+    /// has none.
+    param_starts: []const u32 = &.{},
     /// Parameters with a frequency-domain value, which `linearizeAc` swaps
     /// to their AC values. Set by the executor; owned by the query work
     /// arena, which outlives every `linearizeAc`. Empty on every deck
@@ -408,6 +411,7 @@ pub const Circuit = struct {
             .intern_offs = data.intern_offs,
             .bbd = data.bbd,
             .ac_dyn_slots = data.ac_dyn_slots,
+            .param_starts = data.param_starts,
             .owns_topology = owns_topology,
         };
     }
@@ -449,6 +453,7 @@ pub const Circuit = struct {
             gpa.free(self.ac_dyn_slots);
             gpa.free(self.intern_bytes);
             gpa.free(self.intern_offs);
+            gpa.free(self.param_starts);
             self.owns_topology = false;
         }
     }
@@ -1121,6 +1126,44 @@ pub const Circuit = struct {
         return self.param_refs.?;
     }
 
+    /// Writes `values` to the parameters numbered `refs` (`collectParams`
+    /// order). With `rederive`, re-derives the batches they reach, which
+    /// is `recompute` when nothing else moved. With the template's
+    /// `param_starts` only those batches' parameters are collected;
+    /// without them, all of them.
+    pub fn setParams(self: *Circuit, refs: []const u32, values: []const f64, rederive: bool) !void {
+        std.debug.assert(refs.len == values.len);
+        const starts = self.param_starts;
+        if (starts.len == 0) {
+            const params = try self.collectParams();
+            for (refs, values) |r, v| params[r].set(v);
+            if (rederive) try self.recompute();
+            return;
+        }
+        std.debug.assert(starts.len == self.batches.len + 1);
+        const gpa = self.gpa;
+        const touched = try gpa.alloc(bool, self.batches.len);
+        defer gpa.free(touched);
+        @memset(touched, false);
+        for (refs) |r| touched[std.sort.upperBound(u32, starts, r, orderU32) - 1] = true;
+        var list: std.ArrayList(ParamRef) = .empty;
+        defer list.deinit(gpa);
+        for (self.batches, touched, starts[0..self.batches.len], starts[1..]) |b, t, lo, hi| {
+            if (!t) continue;
+            list.clearRetainingCapacity();
+            try b.hooks.collect_params(b.ctx, gpa, &list).unwrap();
+            std.debug.assert(list.items.len == hi - lo);
+            for (refs, values) |r, v| if (r >= lo and r < hi) list.items[r - lo].set(v);
+        }
+        if (!rederive) return;
+        self.lin.valid = false;
+        self.has_baseline = false;
+        self.markGpuDirty();
+        for (self.batches, touched) |b, t| if (t) if (b.hooks.recompute) |f| {
+            if (!f(b.ctx)) return error.TopologyChanged;
+        };
+    }
+
     /// Returns the short type name of device type `t`, or "" when absent.
     pub fn typeName(self: *const Circuit, t: device_ir.DeviceType) []const u8 {
         for (self.batches, self.batch_types) |b, bt| if (bt == t) return b.type_name;
@@ -1276,4 +1319,8 @@ pub fn combinePlanes(out: []f64, g: []const f64, c: []const f64, alpha: f64) voi
     std.debug.assert(out.len == g.len);
     std.debug.assert(out.len == c.len);
     for (out, g, c) |*o, gv, cv| o.* = gv + alpha * cv;
+}
+
+fn orderU32(a: u32, b: u32) std.math.Order {
+    return std.math.order(a, b);
 }
