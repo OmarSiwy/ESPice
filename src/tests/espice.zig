@@ -1571,3 +1571,66 @@ test "Options.point.tangent_step with live parameters: the deck's own transient 
         try t.expectEqual(2 * r.npoints * r.varnames.len, r.tangents.len);
     }
 }
+
+/// Counts the bytes live through it, for tests that bound what a Problem keeps.
+const Counting = struct {
+    child: std.mem.Allocator,
+    live: std.atomic.Value(isize) = .init(0),
+
+    fn allocator(self: *Counting) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawAlloc(n, alignment, ret) orelse return null;
+        _ = self.live.fetchAdd(@intCast(n), .monotonic);
+        return p;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, n: usize, ret: usize) bool {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        if (!self.child.rawResize(memory, alignment, n, ret)) return false;
+        _ = self.live.fetchAdd(@as(isize, @intCast(n)) - @as(isize, @intCast(memory.len)), .monotonic);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, n: usize, ret: usize) ?[*]u8 {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawRemap(memory, alignment, n, ret) orelse return null;
+        _ = self.live.fetchAdd(@as(isize, @intCast(n)) - @as(isize, @intCast(memory.len)), .monotonic);
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *Counting = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ret);
+        _ = self.live.fetchSub(@intCast(memory.len), .monotonic);
+    }
+};
+
+test "release_points: a Problem run batch after batch keeps a few KB per released point" {
+    var counting: Counting = .{ .child = t.allocator };
+    const source = abort_deck;
+    const p = try api.Problem.init(counting.allocator(), t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "batches.sp" } }, .live_params = &.{"rv"}, .max_parallel = 4 });
+    defer p.deinit();
+    var rows: [50]f64 = undefined;
+    for (&rows, 0..) |*r, k| r.* = 1e3 * (1 + 0.01 * @as(f64, @floatFromInt(k)));
+    var live: [30]isize = undefined;
+    var values: [rows.len]f64 = undefined;
+    var why: [rows.len]api.Problem.Reason = undefined;
+    for (&live) |*l| {
+        const first = try p.append_points(&rows, rows.len, .{ .measures_only = true, .early_stop = true });
+        try p.run_all();
+        try p.point_measures(first, &.{"tpd"}, &values, &why);
+        try p.release_points(first, rows.len);
+        l.* = counting.live.load(.monotonic);
+    }
+    const per_point = @divTrunc(live[live.len - 1] - live[9], 20 * rows.len);
+    std.debug.print("release_points: {d} B live after batch 10, {d} B after 30, {d} B per point\n", .{ live[9], live[live.len - 1], per_point });
+    // Its two query rows, the copied query and its variant row, with the
+    // slack of the tables' doubling; an unreleased point keeps its circuit
+    // and waveform, tens of KB.
+    try t.expect(per_point < 4096);
+    try t.expectError(error.ResultUnavailable, p.point_measures(@fromBackingInt(@backingInt(p.session.outputs.items[p.session.outputs.items.len - 1])), &.{"tpd"}, values[0..1], why[0..1]));
+}

@@ -197,7 +197,8 @@ espice_status espice_advance_ready(espice_problem *, const uint32_t *ids, size_t
 /* Runs every query to the end and writes its result. Returns the first
  * query failure's status, else FAILED when writing the output failed
  * (espice_error_message names the error). After a failure the .save and
- * .stim files are not written. A second call runs nothing twice. */
+ * .stim files are not written. A second call runs nothing twice, and costs
+ * only what was appended since. */
 espice_status espice_run_all(espice_problem *);
 /* Appends the analysis cards in directives and writes each one's id to ids.
  * An .op identical to an existing operating point gets the old id; every
@@ -336,6 +337,15 @@ espice_status espice_copy_point_measures(espice_problem *, uint32_t first_id,
  * as espice_copy_point_measures; nothing is written on failure. */
 espice_status espice_copy_point_tangents(espice_problem *, uint32_t first_id,
     size_t count, const espice_bytes *names, size_t measure_count, double *out);
+/* Frees count points from first_id (counted as espice_copy_point_measures
+ * counts them) once their measures are copied: their circuits, waveforms and
+ * results, so a problem appended to and run batch after batch stays the same
+ * size. Their query ids stay valid and keep their status; copying their
+ * results, measures or tangents then gives RESULT_UNAVAILABLE. A point
+ * already released is left alone. Each point still keeps about a hundred
+ * bytes per query and its parameter row until espice_destroy. Errors as
+ * espice_copy_point_measures. */
+espice_status espice_release_points(espice_problem *, uint32_t first_id, size_t count);
 /* The number of points the executor runs together on this problem's
  * backend: 1 today. Advisory: it changes speed, never results. */
 espice_status espice_lane_width(espice_problem *, uint32_t *out);

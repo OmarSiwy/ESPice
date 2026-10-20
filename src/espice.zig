@@ -182,6 +182,10 @@ pub const Problem = struct {
     measures_to: ?MeasureWriters = null,
     measure_cursor: MeasureCursor = .{},
     measure_error: ?anyerror = null,
+    /// The outputs `run_all` has checked for failures, and the first it
+    /// found, which every later call returns too.
+    checked_outputs: usize = 0,
+    first_failure: ?anyerror = null,
 
     /// A variant run's queries and its next result to publish.
     const Run = struct { session: analysis.session.Session, next_output: usize = 0 };
@@ -669,19 +673,7 @@ pub const Problem = struct {
             if (std.ascii.eqlIgnoreCase(m.name, name)) break @intCast(k);
         } else return error.UnknownMeasure;
         const outputs = session.outputs.items;
-        const start = std.mem.indexOfScalar(QueryId, outputs, first) orelse return error.InvalidQuery;
-        // Point k's queries are outputs[ends[k]..ends[k + 1]].
-        const ends = try a.alloc(usize, reasons.len + 1);
-        ends[0] = start;
-        for (ends[1..], ends[0..reasons.len]) |*end, begin| {
-            if (begin == outputs.len) return error.InvalidQuery;
-            const row = variantOf(try session.query(outputs[begin]));
-            var e = begin;
-            while (e < outputs.len and variantOf(try session.query(outputs[e])) == row) : (e += 1) {
-                if (!(try session.info(outputs[e])).status.terminal()) return error.ResultUnavailable;
-            }
-            end.* = e;
-        }
+        const ends = try self.pointEnds(a, first, reasons.len);
         const nan = std.math.nan(f64);
         const values = try a.alloc(f64, measures.len);
         const missing = try a.alloc(bool, measures.len);
@@ -718,6 +710,52 @@ pub const Problem = struct {
         }
     }
 
+    /// Where each of `count` points from `first` lies in `session.outputs`:
+    /// point k's queries are `outputs[ends[k]..ends[k + 1]]`, one variant
+    /// row's. `error.InvalidQuery` for a `first` that is not requested or
+    /// fewer points after it, `error.ResultUnavailable` while one of them
+    /// has not ended.
+    fn pointEnds(self: *const Problem, a: std.mem.Allocator, first: QueryId, count: usize) ![]usize {
+        const session = &self.session;
+        const outputs = session.outputs.items;
+        const ends = try a.alloc(usize, count + 1);
+        ends[0] = try session.outputIndex(first) orelse return error.InvalidQuery;
+        for (ends[1..], ends[0..count]) |*end, begin| {
+            if (begin == outputs.len) return error.InvalidQuery;
+            const row = variantOf(try session.query(outputs[begin]));
+            var e = begin;
+            while (e < outputs.len and variantOf(try session.query(outputs[e])) == row) : (e += 1) {
+                if (!(try session.info(outputs[e])).status.terminal()) return error.ResultUnavailable;
+            }
+            end.* = e;
+        }
+        return ends;
+    }
+
+    /// Frees `count` points from `first` (as `point_measures` counts
+    /// them): each query's circuit, work and result, its OP's, and its
+    /// tangent steps, so a long-lived Problem appended to batch after batch
+    /// stays the same size. Each query keeps its id and status;
+    /// `result`, `point_measures` and `point_tangents` then fail with
+    /// `error.ResultUnavailable`, and nothing publishes it. A point already
+    /// released is left alone. Errors as `point_measures`.
+    // ponytail: each query's row (a few hundred bytes) and the point's
+    // variant row (its label and parameter writes) stay until `deinit`;
+    // drop a released prefix of both if sessions reach billions of points.
+    pub fn release_points(self: *Problem, first: QueryId, count: usize) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const ends = try self.pointEnds(arena.allocator(), first, count);
+        const outputs = self.session.outputs.items;
+        // Dependents before the OPs they read.
+        var k = ends[count];
+        while (k > ends[0]) {
+            k -= 1;
+            try self.session.release(outputs[k]);
+            _ = self.tangent_steps.remove(outputs[k]);
+        }
+    }
+
     /// The slopes d(card)/d(live parameter) of the `.tran` cards `names` at
     /// `count` points appended with `PointOptions.tangent_step`, starting
     /// at `first`, into `out` (`count` × `names.len` × live parameters,
@@ -744,7 +782,7 @@ pub const Problem = struct {
         defer a.free(v0);
         @memset(out, std.math.nan(f64));
         const outputs = self.session.outputs.items;
-        var at = std.mem.indexOfScalar(QueryId, outputs, first).?;
+        var at = (try self.session.outputIndex(first)).?;
         for (0..count) |i| {
             // Point i's queries share one variant row; its transient carries the steps.
             const row = variantOf(try self.session.query(outputs[at]));
@@ -875,7 +913,9 @@ pub const Problem = struct {
         self.printReady();
         if (!self.finished()) return error.SchedulingFailure;
         for (self.runs) |*run| if (!run.session.finished()) return error.SchedulingFailure;
-        if (self.session.failure()) |err| return err;
+        if (self.first_failure == null) self.first_failure = self.session.failureFrom(self.checked_outputs);
+        self.checked_outputs = self.session.outputs.items.len;
+        if (self.first_failure) |err| return err;
         for (self.runs) |*run| if (run.session.failure()) |err| return err;
         if (self.delivery_error != null) return error.DeliveryFailed;
         var output_lap = if (self.session.config.timing_in_depth) std.Io.Timestamp.now(self.io, .awake) else null;
@@ -1388,6 +1428,7 @@ pub const Problem = struct {
     fn deliverOne(self: *Problem, session: *const analysis.session.Session, id: QueryId) DeliveryError!bool {
         const status = (try session.info(id)).status;
         if (!status.terminal()) return false;
+        if (session.released(id)) return true;
         if (session == &self.session and self.streaming == id) {
             self.streaming = null;
             if (status != .complete) {
@@ -1522,6 +1563,7 @@ fn printQueryMeasures(session: *const analysis.session.Session, id: QueryId, out
         .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => {},
         else => return,
     }
+    if (session.released(id)) return;
     const point: ?output.MeasurePoint = if (variantOf(try session.query(id))) |v| .{ .row = v, .label = session.deck.variants.labels[v] } else null;
     if (info.status == .complete) {
         try output.printMeasures(out, err, measures, info.kind, try block(session, id, 0), point);

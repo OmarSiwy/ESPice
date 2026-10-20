@@ -817,7 +817,7 @@ test "C points: 16 points measure tpd, energy and leakage analytically, and matc
     // The same deck sweeping the same rows through .data.
     var swept: std.ArrayList(u8) = .empty;
     defer swept.deinit(t.allocator);
-    try swept.appendSlice(t.allocator, rc_deck[0 .. std.mem.indexOf(u8, rc_deck, ".tran").?]);
+    try swept.appendSlice(t.allocator, rc_deck[0..std.mem.indexOf(u8, rc_deck, ".tran").?]);
     try swept.appendSlice(t.allocator, ".data pts rv cv\n");
     for (grid) |p| try swept.print(t.allocator, "+ {e} {e}\n", .{ p[0], p[1] });
     try swept.appendSlice(t.allocator, ".enddata\n.tran 10p 40n sweep data=pts\n");
@@ -903,40 +903,68 @@ const reason_cases = [_]ReasonCase{
     // A top-level .if flips with sel.
     .{
         .deck = "if flip\n.param sel=0 rv=1k\nv1 in 0 1\nr1 in out {rv}\n.if (sel == 0)\nr2 out 0 1k\n.else\nr2 out 0 3k\nr3 out 0 3k\n.endif\n.op\n.meas op vo find v(out)\n.end\n",
-        .live = &.{ "sel", "rv" }, .names = &.{"vo"}, .good = &.{ 0, 2e3 }, .bad = &.{ 1, 2e3 }, .reason = c.ESPICE_REASON_TOPOLOGY_CHANGED,
+        .live = &.{ "sel", "rv" },
+        .names = &.{"vo"},
+        .good = &.{ 0, 2e3 },
+        .bad = &.{ 1, 2e3 },
+        .reason = c.ESPICE_REASON_TOPOLOGY_CHANGED,
     },
     // No bin holds W = 5u.
     .{
         .deck = "bins\n.param wn=1u\nv1 d 0 1\nv2 g 0 2\nm1 d g 0 0 nm l=1u w={wn}\n" ++
             ".model nm.1 nmos level=1 lmin=0.9u lmax=1.1u wmin=0.9u wmax=1.1u vto=0.5\n" ++
             ".model nm.2 nmos level=1 lmin=0.9u lmax=1.1u wmin=1.9u wmax=2.1u vto=1.7\n.op\n.meas op id find i(v1)\n.end\n",
-        .live = &.{"wn"}, .names = &.{"id"}, .good = &.{2e-6}, .bad = &.{5e-6}, .reason = c.ESPICE_REASON_MODEL_BIN_NOT_FOUND,
+        .live = &.{"wn"},
+        .names = &.{"id"},
+        .good = &.{2e-6},
+        .bad = &.{5e-6},
+        .reason = c.ESPICE_REASON_MODEL_BIN_NOT_FOUND,
     },
     // v/rb = 1 + v^2 has a root only for rb <= 0.5.
     .{
         .deck = "no root\n.param rb=0.1\nb1 0 n i=1+v(n)*v(n)\nr1 n 0 {rb}\n.op\n.meas op vn find v(n)\n.end\n",
-        .live = &.{"rb"}, .names = &.{"vn"}, .good = &.{0.1}, .bad = &.{1e3}, .reason = c.ESPICE_REASON_NO_CONVERGENCE,
+        .live = &.{"rb"},
+        .names = &.{"vn"},
+        .good = &.{0.1},
+        .bad = &.{1e3},
+        .reason = c.ESPICE_REASON_NO_CONVERGENCE,
     },
     // The same once time passes 1 ns at k = 1e9: the transient loses its root.
     .{
         .deck = "lost root\n.param k=0\nb1 0 n i=time*k+v(n)*v(n)\nr1 n 0 1k\n.tran 10p 2n\n.meas tran vn find v(n) at=0.5n\n.end\n",
-        .live = &.{"k"}, .names = &.{"vn"}, .good = &.{0}, .bad = &.{1e9}, .reason = c.ESPICE_REASON_TIMESTEP_TOO_SMALL,
+        .live = &.{"k"},
+        .names = &.{"vn"},
+        .good = &.{0},
+        .bad = &.{1e9},
+        .reason = c.ESPICE_REASON_TIMESTEP_TOO_SMALL,
     },
     // v(b) = g v(a) and v(a) = v(b) leave both undetermined at g = 1; the
     // AC matrix is singular (the operating point still solves).
     .{
         .deck = "singular\n.param g=0.5\nv1 in 0 1 ac 1\nr1 in 0 1k\ne1 b 0 a 0 {g}\ne2 a 0 b 0 1\nr2 a in 1k\nr3 b 0 1k\n.ac lin 3 500 2k\n.meas ac vb find vm(b) at=1k\n.end\n",
-        .live = &.{"g"}, .names = &.{"vb"}, .good = &.{0.5}, .bad = &.{1}, .reason = c.ESPICE_REASON_SINGULAR_MATRIX,
+        .live = &.{"g"},
+        .names = &.{"vb"},
+        .good = &.{0.5},
+        .bad = &.{1},
+        .reason = c.ESPICE_REASON_SINGULAR_MATRIX,
     },
     // The txl Padé fit fails and the model $fatal's.
     .{
         .deck = "refused fit\n.param lv=1u cl=1p\nv1 a 0 dc 1\nr1 b 0 50\ny1 a 0 b 0 line\n.model line txl r=1 l={lv} g=0 c={cl} length=1\n.op\n.meas op vb find v(b)\n.end\n",
-        .live = &.{ "lv", "cl" }, .names = &.{"vb"}, .good = &.{ 1e-6, 1e-12 }, .bad = &.{ 1e200, 1e-200 }, .reason = c.ESPICE_REASON_DEVICE_REFUSED,
+        .live = &.{ "lv", "cl" },
+        .names = &.{"vb"},
+        .good = &.{ 1e-6, 1e-12 },
+        .bad = &.{ 1e200, 1e-200 },
+        .reason = c.ESPICE_REASON_DEVICE_REFUSED,
     },
     // A lossless txl (r = 0) has no fit: UnsupportedTransmissionLineParameters.
     .{
         .deck = "lossless\n.param rv=1\nv1 a 0 dc 1\nr1 b 0 50\ny1 a 0 b 0 line\n.model line txl r={rv} l=1n g=0 c=1p length=1\n.op\n.meas op vb find v(b)\n.end\n",
-        .live = &.{"rv"}, .names = &.{"vb"}, .good = &.{1}, .bad = &.{0}, .reason = c.ESPICE_REASON_OTHER,
+        .live = &.{"rv"},
+        .names = &.{"vb"},
+        .good = &.{1},
+        .bad = &.{0},
+        .reason = c.ESPICE_REASON_OTHER,
     },
 };
 
@@ -1090,4 +1118,72 @@ fn expectDiagnostic(h: *c.espice_problem, want: []const u8) !void {
     var needed: usize = 0;
     try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_error_message(h, &buf, buf.len, &needed));
     try std.testing.expectEqualStrings(want, std.mem.sliceTo(&buf, 0));
+}
+
+/// Resident set size of this process, bytes (Linux /proc/self/statm).
+fn residentBytes() !usize {
+    var buf: [128]u8 = undefined;
+    const text = try std.Io.Dir.cwd().readFile(std.testing.io, "/proc/self/statm", &buf);
+    var fields = std.mem.tokenizeScalar(u8, text, ' ');
+    _ = fields.next();
+    return try std.fmt.parseInt(usize, fields.next().?, 10) * std.heap.pageSize();
+}
+
+test "C points: 100 batches of 100 on one handle, released as they are read, keep run_all time and RSS flat" {
+    const t = std.testing;
+    const deck = "C batches\n.param rv=1k\nV1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)\nR1 in out {rv}\nC1 out 0 0.1p\n.tran 1p 2n\n" ++
+        ".meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1\n.end\n";
+    const live = [_]c.espice_bytes{.{ .data = "rv", .len = 2 }};
+    var options: c.espice_create_options = undefined;
+    c.espice_default_options(&options);
+    options.source_kind = c.ESPICE_BYTES;
+    options.source = .{ .data = deck.ptr, .len = deck.len };
+    options.live_params = &live;
+    options.live_param_count = 1;
+    options.max_parallel = 4;
+    var handle: ?*c.espice_problem = null;
+    try t.expectEqual(@as(u32, 0), c.espice_create(&options, &handle, null, 0));
+    defer _ = c.espice_destroy(handle);
+    const points: c.espice_points_options = .{ .struct_size = @sizeOf(c.espice_points_options), .measures_only = 1, .early_stop = 1, .warm_start = 0, .abort_after = 0 };
+    const names = [_]c.espice_bytes{.{ .data = "tpd", .len = 3 }};
+    const batches = 100;
+    const n = 100;
+    var ns: [batches]u64 = undefined;
+    var rss: [batches]usize = undefined;
+    var rows: [n]f64 = undefined;
+    var first_ids: [batches]u32 = undefined;
+    for (0..batches) |b| {
+        // The same work every batch: only the handle's history grows.
+        for (&rows, 0..) |*r, k| r.* = 1e3 * (1 + 0.01 * @as(f64, @floatFromInt(k)));
+        try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, n, &points, &first_ids[b]));
+        const start = std.Io.Timestamp.now(t.io, .awake);
+        try t.expectEqual(@as(u32, 0), c.espice_run_all(handle));
+        ns[b] = @intCast(start.durationTo(std.Io.Timestamp.now(t.io, .awake)).nanoseconds);
+        var values: [n]f64 = undefined;
+        var why: [n]u32 = undefined;
+        try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, first_ids[b], n, &names, 1, &values, &why));
+        for (values, why) |v, w| {
+            try t.expect(std.math.isFinite(v));
+            try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), w);
+        }
+        try t.expectEqual(@as(u32, 0), c.espice_release_points(handle, first_ids[b], n));
+        rss[b] = try residentBytes();
+    }
+    // A released point keeps its id, its measures are gone; releasing again is a no-op.
+    var value: [1]f64 = undefined;
+    var why: [1]u32 = undefined;
+    try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), c.espice_copy_point_measures(handle, first_ids[0], 1, &names, 1, &value, &why));
+    var len: usize = 0;
+    try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), c.espice_copy_result(handle, first_ids[0], null, 0, &len));
+    try t.expectEqual(@as(u32, 0), c.espice_release_points(handle, first_ids[0], 1));
+    var early: u64 = 0;
+    var late: u64 = 0;
+    for (ns[10..20]) |x| early += x;
+    for (ns[90..100]) |x| late += x;
+    const grown = rss[batches - 1] -| rss[19];
+    std.debug.print("batches: run_all {d} ms (11-20) vs {d} ms (91-100) per 10; RSS {d} MB at 20, {d} MB at 100, {d} B per point after\n", .{ early / 1_000_000, late / 1_000_000, rss[19] >> 20, rss[batches - 1] >> 20, grown / (80 * n) });
+    try t.expect(late < 2 * early);
+    // RSS also counts what the allocator keeps for reuse; the bytes a
+    // released point keeps are pinned by the Zig test of `release_points`.
+    try t.expect(grown < 80 * n * 64 * 1024);
 }

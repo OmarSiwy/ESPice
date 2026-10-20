@@ -630,6 +630,12 @@ export fn espice_copy_point_tangents(handle: ?*Token, first_id: u32, count: usiz
     return 0;
 }
 
+export fn espice_release_points(handle: ?*Token, first_id: u32, count: usize) u32 {
+    const h = handles.get(handle) catch |err| return status(err);
+    h.problem.release_points(@fromBackingInt(@intCast(first_id)), count) catch |err| return h.fail(err);
+    return 0;
+}
+
 export fn espice_lane_width(handle: ?*Token, out: ?*u32) u32 {
     const h = handles.get(handle) catch |err| return status(err);
     const destination = out orelse return h.fail(error.InvalidArgument);
