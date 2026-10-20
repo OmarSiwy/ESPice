@@ -57,21 +57,8 @@ pub fn Dual(comptime N: usize, comptime F: type) type {
         for (&l, 0..) |*e, u| e.* = u;
         break :blk l;
     };
-    return DualFor(F, &lane, .{ .dense = true }, false);
+    return DualFor(F, &lane, false, false);
 }
-
-/// How a `DualFor` family lays out a value's derivative lanes.
-const Layout = struct {
-    /// Every `Of(m)` is one type carrying every lane of the basis. Otherwise
-    /// `Of(m)` carries only the lanes of `m`'s unknowns, and a binary
-    /// operation joins its operands' lanes.
-    dense: bool,
-    /// Rounds each value's lane count up to a power of two: LLVM splits a
-    /// 12- or 26-wide vector into shuffles and spills (gummel_poon's eval
-    /// body doubled). The pad lanes hold zeros (or a NaN from a 0/0) that
-    /// nothing reads.
-    pad: bool = false,
-};
 
 /// Number of lanes `lane` maps unknowns onto.
 fn laneCount(comptime lane: []const u8) usize {
@@ -86,19 +73,25 @@ fn laneCount(comptime lane: []const u8) usize {
 /// (`contract.family_fns`, numerics per `contract.expectFamily`). One eval
 /// pass yields the residual and every partial.
 ///
+/// `Of(m)` carries only the lanes of `m`'s unknowns, and a binary operation
+/// joins its operands' lanes. `m` is a `contract.MaskOf(lane.len)`.
+///
 /// `lane[u]` is the derivative lane unknown `u` seeds, or
 /// `contract.no_lane`; several unknowns may share one (the narrow basis).
+/// `pad` rounds each value's lane count up to a power of two: LLVM splits a
+/// 12- or 26-wide vector into shuffles and spills (gummel_poon's eval body
+/// doubled). The pad lanes hold zeros (or a NaN from a 0/0) that nothing
+/// reads.
 /// `F` is the float width of the derivative half only. The value half and
 /// every boundary (`con`/`scale`/`addC`/`val`/`ddxAt`) stay f64, so the
 /// residual is identical at either width. `F = f32` trades Newton iterations
 /// for GPU throughput; see `jacFloat` and `gpuJacFloat` for who takes it.
-fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout, comptime collapsed: bool) type {
+fn DualFor(comptime F: type, comptime lane: []const u8, comptime pad: bool, comptime collapsed: bool) type {
     const n_lanes = laneCount(lane);
-    // A lane set, one bit per lane. Past 64 lanes VerA declares every value
-    // at the all-ones mask, so the family is dense (#117).
+    // A lane set, one bit per lane.
     const L = Mask(n_lanes);
-    const dense = layout.dense or n_lanes > 64;
-    const all: L = lowBits(n_lanes);
+    // A mask over the unknowns.
+    const M = Mask(lane.len);
     return struct {
         /// Read by the generated device: the builder already applied
         /// `D.collapse` to the scatter tapes.
@@ -106,27 +99,26 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
         pub const V = f64;
 
         /// The lanes the unknowns in `m` occupy, one bit per lane.
-        fn lanesOf(comptime m: u64) L {
-            if (dense) return all;
+        fn lanesOf(comptime m: M) L {
+            @setEvalBranchQuota(10 * lane.len + 1000);
             var s: L = 0;
             for (lane, 0..) |l, u| {
-                if (u < 64 and (m >> u) & 1 != 0 and l != contract.no_lane) s |= @as(L, 1) << l;
+                if (has(m, u) and l != contract.no_lane) s |= @as(L, 1) << l;
             }
             return s;
         }
 
         fn width(comptime ls: L) usize {
             const n = @popCount(ls);
-            return if (layout.pad and n != 0) std.math.ceilPowerOfTwoAssert(usize, n) else n;
+            return if (pad and n != 0) std.math.ceilPowerOfTwoAssert(usize, n) else n;
         }
 
-        fn unknownBit(comptime u: usize) u64 {
-            return if (u < 64) @as(u64, 1) << u else ~@as(u64, 0);
+        fn unknownBit(comptime u: usize) M {
+            return @as(M, 1) << u;
         }
 
-        /// The type of a value that depends on the unknowns in `m`: the
-        /// same type for every `m` when the layout is dense.
-        pub fn Of(comptime m: u64) type {
+        /// The type of a value that depends on the unknowns in `m`.
+        pub fn Of(comptime m: M) type {
             return Val(lanesOf(m));
         }
         /// A constant: every lane +0.
@@ -207,7 +199,7 @@ fn DualFor(comptime F: type, comptime lane: []const u8, comptime layout: Layout,
 
                 /// Widens to `Of(m)`, new lanes +0. A compile error when `m`
                 /// drops a lane this value carries.
-                pub fn to(a: T, comptime m: u64) Of(m) {
+                pub fn to(a: T, comptime m: M) Of(m) {
                     return a.toLanes(Of(m).lanes);
                 }
                 pub fn val(a: T) f64 {
@@ -351,7 +343,7 @@ fn RealFor(comptime collapsed: bool) type {
         pub const V = f64;
         pub const lanes: u64 = 0;
 
-        pub fn Of(comptime _: u64) type {
+        pub fn Of(comptime _: anytype) type {
             return Self;
         }
         pub fn con(c: f64) Self {
@@ -363,7 +355,7 @@ fn RealFor(comptime collapsed: bool) type {
         pub fn sel(c: Self, a: Self, b: Self) Self {
             return if (c.v != 0.0) a else b;
         }
-        pub fn to(a: Self, comptime _: u64) Self {
+        pub fn to(a: Self, comptime _: anytype) Self {
             return a;
         }
         pub fn val(a: Self) f64 {
@@ -485,16 +477,14 @@ const GpuPayload = ir.GpuPayload;
 const DeviceVtable = ir.DeviceVtable;
 
 /// The host's mask over `n` unknowns or lanes: u64, wider past 64 (#117).
-fn Mask(comptime n: usize) type {
-    return @Int(.unsigned, @max(64, n));
-}
+const Mask = contract.MaskOf;
 
-/// Widens a VerA u64 mask over `n` unknowns: past 64 unknowns VerA declares
-/// every mask dense (all ones), and the bits it cannot hold are set too.
-fn widen(comptime n: usize, m: u64) Mask(n) {
-    const M = Mask(n);
-    if (n <= 64) return m;
-    return if (m == std.math.maxInt(u64)) std.math.maxInt(M) else m;
+/// A `contract.Mask(D)` mask over `n` unknowns as `Mask(n)`. A device past
+/// 64 unknowns without `deriv_reads` keeps u64 masks, all ones meaning every
+/// unknown, so the bits u64 cannot hold are set too.
+fn widen(comptime n: usize, m: anytype) Mask(n) {
+    if (@TypeOf(m) == Mask(n) or n <= 64) return m;
+    return if (m == std.math.maxInt(u64)) std.math.maxInt(Mask(n)) else m;
 }
 
 /// The low `n` bits of `Mask(n)`.
@@ -594,12 +584,18 @@ fn jacPattern(comptime D: type) [contract.nU(D)]Mask(contract.nU(D)) {
     return out;
 }
 
-/// The pattern decl `name` (`jac_pattern` or `q_pattern`), or all ones (dense)
-/// when D does not declare it.
+/// The pattern decl `name` (`jac_pattern` or `q_pattern`). VerA omits it
+/// past about 2048 unknowns; each row is then the lanes `deriv_reads` gives
+/// it plus its `jac_const` columns, all ones (dense) without `deriv_reads`.
 fn rowPattern(comptime D: type, comptime name: []const u8) [contract.nU(D)]Mask(contract.nU(D)) {
     const n_u = contract.nU(D);
-    if (!@hasDecl(D, name)) return @splat(lowBits(n_u));
     var out: [n_u]Mask(n_u) = undefined;
+    if (!@hasDecl(D, name)) {
+        @setEvalBranchQuota(100 * n_u + 1000);
+        out = @splat(widen(n_u, contract.derivReads(D)) & lowBits(n_u));
+        for (contract.jacConst(D)) |e| out[@backingInt(e.row)] |= @as(Mask(n_u), 1) << @intCast(@backingInt(e.col));
+        return out;
+    }
     for (&out, @field(D, name)) |*o, m| o.* = widen(n_u, m) & lowBits(n_u);
     return out;
 }
@@ -662,12 +658,13 @@ const Basis = struct {
 
 fn basisOf(comptime D: type, comptime narrow: bool) Basis {
     const n_u = contract.nU(D);
-    const reads = contract.derivReads(D);
+    @setEvalBranchQuota(100 * n_u + 1000);
+    const reads = widen(n_u, contract.derivReads(D));
     var lane: [n_u]u8 = @splat(contract.no_lane);
     var of_root: [n_u]u8 = @splat(contract.no_lane);
     var w: usize = 0;
     for (0..n_u) |u| {
-        if (u < 64 and (reads >> u) & 1 == 0) continue;
+        if (!has(reads, u)) continue;
         // The contract guarantees `collapse_full` is resolved.
         const root = if (narrow) D.collapse_full[u] orelse u else u;
         if (of_root[root] == contract.no_lane) {
@@ -752,12 +749,12 @@ pub inline fn mfactorOf(comptime D: type, inst: anytype) f64 {
     return if (comptime @hasField(D.Instance, "mfactor")) inst.mfactor else 1.0;
 }
 
-/// `noisePsd`'s family: `eval`'s wide basis, dense and in f64, so a `ddx` in
+/// `noisePsd`'s family: `eval`'s wide basis in f64, so a `ddx` in
 /// a PSD argument (a channel noise's gm) reads its partial. `Real` would read
 /// it as 0 (#119).
 fn NoiseFamily(comptime D: type) type {
     const lane = comptime basisOf(D, false).lane[0..contract.nU(D)].*;
-    return DualFor(f64, &lane, .{ .dense = true }, @hasDecl(D, "collapse"));
+    return DualFor(f64, &lane, false, @hasDecl(D, "collapse"));
 }
 
 /// Evaluates instances `[first, end)` of D and stamps residual, charge and
@@ -767,9 +764,9 @@ fn NoiseFamily(comptime D: type) type {
 /// `narrow` selects the reduced derivative basis (see `Basis`) and is sound
 /// only on maximally collapsed instances, which `ProtoStore.finalize` sorts to
 /// `[0, narrow_count)`. `F` is the derivative width: `jacFloat(D)` on the
-/// host, `gpuJacFloat(D)` in `DeviceKernel`. `layout` is `hostLayout` on the
-/// host and dense in `DeviceKernel`.
-fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime layout: Layout, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
+/// host, `gpuJacFloat(D)` in `DeviceKernel`. `pad` is `host_pad` on the host
+/// and false in `DeviceKernel`, where pad lanes cost registers.
+fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime pad: bool, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
     const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
     // Strict float mode, as everywhere here: `.optimized` grants `nnan`,
@@ -777,7 +774,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
     // SparseLu's isFinite check sees it (see `fma_ok`).
     const n_u = comptime contract.nU(D);
     const has_limit = comptime @hasDecl(D, "limit");
-    const reads = comptime contract.derivReads(D);
+    const reads = comptime widen(n_u, contract.derivReads(D));
     const jac_pat = comptime rowPattern(D, "jac_pattern");
     const q_pat = comptime rowPattern(D, "q_pattern");
     const jac_row = comptime writtenRows(D, "jac_rows");
@@ -795,7 +792,7 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
     };
     const jac_rep = comptime repMask(n_u, lane, alias, jac_pat);
     const q_rep = comptime repMask(n_u, lane, alias, q_pat);
-    const S = DualFor(F, &lane, layout, @hasDecl(D, "collapse"));
+    const S = DualFor(F, &lane, pad, @hasDecl(D, "collapse"));
     // Every lane of the basis: the layout the limiting correction sums in.
     const full = comptime S.Of(reads).lanes;
     const use_lim = if (comptime has_limit) limiting else false;
@@ -911,18 +908,16 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime F: type, comptime
     }
 }
 
-/// The host's lane layout: sparse and padded to a power of two on the wide
-/// basis, dense on the narrow one (at most 4 lanes, one ymm). Callgrind Ir
-/// per instance, dense exact / sparse pow2, 100-instance DC sweeps:
+/// The host pads each value's lanes to a power of two. Callgrind Ir per
+/// instance, dense exact / sparse pow2, 100-instance DC sweeps:
 /// hisimhv_va 23.7M/6.8M, hisim2_va 37.1M/13.7M, bsimsoi_va 7.36M/3.95M,
 /// vbic13_4t 7.74M/3.83M, b3soidd 4.95M/3.02M, bsim4va 4.14M/2.32M,
 /// hicumL2_va 4.53M/3.82M, gummel_poon 3.46M/1.96M, mesa 2.03M/1.58M, mos1
 /// with RD/RS 1.33M/1.14M, bsim2 1.35M/0.99M, jfet 0.48M/0.37M, mes
-/// 0.46M/0.34M; no wide model lost. On the narrow basis sparse lost up to
-/// 2.8% (bsim1, mos2/3/9).
-fn hostLayout(comptime narrow: bool) Layout {
-    return if (narrow) .{ .dense = true } else .{ .dense = false, .pad = true };
-}
+/// 0.46M/0.34M; no wide model lost. On the narrow basis (at most 4 lanes)
+/// sparse lost up to 2.8% to dense (bsim1, mos2/3/9); the dense layout went
+/// with VerA 0.11's exact masks.
+const host_pad = true;
 
 /// The first `w` lanes of `v`: the unpadded basis, so the correction dot
 /// product sums exactly the lanes it sums without padding.
@@ -1776,10 +1771,10 @@ pub fn DeviceBatch(comptime D: type) type {
             if (comptime narrowable) {
                 // A ParEval slice may straddle the partition boundary.
                 const split = std.math.clamp(self.narrow_count, first, last);
-                if (split > first) evalRange(D, true, F, hostLayout(true), &sink, first, split, sim, limiting);
-                if (last > split) evalRange(D, false, F, hostLayout(false), &sink, split, last, sim, limiting);
+                if (split > first) evalRange(D, true, F, host_pad, &sink, first, split, sim, limiting);
+                if (last > split) evalRange(D, false, F, host_pad, &sink, split, last, sim, limiting);
             } else {
-                evalRange(D, false, F, hostLayout(false), &sink, first, last, sim, limiting);
+                evalRange(D, false, F, host_pad, &sink, first, last, sim, limiting);
             }
         }
 
@@ -2722,7 +2717,7 @@ fn DeviceKernel(comptime D: type, comptime block_size: u32) type {
             // Always the wide basis here: the kernel arguments carry no
             // `narrow_count`, and they are part of the frozen GPU boundary.
             // ponytail: pass `narrow_count` once narrowing is measured on a GPU.
-            evalRange(D, false, gpuJacFloat(D), .{ .dense = true }, &sink, id, id + 1, sim, limiting != 0);
+            evalRange(D, false, gpuJacFloat(D), false, &sink, id, id + 1, sim, limiting != 0);
         }
     };
 }
@@ -3091,10 +3086,10 @@ pub const test_access = if (@import("builtin").is_test) .{
     .gpuRefusal = gpuRefusal,
     .GpuRefusal = GpuRefusal,
     .Real = Real,
-    .Sparse = DualFor(f64, &.{ 0, 1 }, hostLayout(false), false),
-    .SparseF32 = DualFor(f32, &.{ 0, 1 }, hostLayout(false), false),
+    .Sparse = DualFor(f64, &.{ 0, 1 }, host_pad, false),
+    .SparseF32 = DualFor(f32, &.{ 0, 1 }, host_pad, false),
     // Three lanes pad to four: the shuffle path with a pad lane.
-    .Sparse3 = DualFor(f64, &.{ 0, 1, 2 }, hostLayout(false), false),
+    .Sparse3 = DualFor(f64, &.{ 0, 1, 2 }, host_pad, false),
     .anyNonzero = anyNonzero,
     .segmentSum = segmentSum,
     .repMask = repMask,

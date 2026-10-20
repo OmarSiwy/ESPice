@@ -75,7 +75,7 @@ test "Dual: an f32 Jacobian leaves the residual bit-identical" {
     }
 }
 
-test "Dual is the contract's arithmetic, dense and sparse, at both lane widths" {
+test "Dual is the contract's arithmetic, exact and padded, at both lane widths" {
     try contract.expectFamily(Dual(2, f64));
     try contract.expectFamily(Dual(2, f32));
     try contract.expectFamily(impl.test_access.Sparse);
@@ -1011,7 +1011,7 @@ test "Dual: every partial matches a central difference of the value" {
     };
 }
 
-test "Dual: the padded sparse layout computes the dense layout's numbers" {
+test "Dual: the padded layout computes the exact layout's numbers" {
     // Three lanes pad to four, and the operands below carry {0,2}, {1,2}
     // and their join, so every spread shuffle and the pad lane are crossed.
     const chain = struct {
@@ -1028,10 +1028,10 @@ test "Dual: the padded sparse layout computes the dense layout's numbers" {
     const Sparse3 = impl.test_access.Sparse3;
     const grid = [_]f64{ -1.0, -0.5, 0.0, 0.5, 1.0 };
     for (grid) |a| for (grid) |b| for (grid) |c| {
-        const dense = chain(Dual(3, f64), a, b, c);
-        const sparse = chain(Sparse3, a, b, c);
-        try std.testing.expectEqual(dense.val(), sparse.val());
-        inline for (0..3) |u| try std.testing.expectEqual(dense.ddxAt(u), sparse.ddxAt(u));
+        const exact = chain(Dual(3, f64), a, b, c);
+        const padded = chain(Sparse3, a, b, c);
+        try std.testing.expectEqual(exact.val(), padded.val());
+        inline for (0..3) |u| try std.testing.expectEqual(exact.ddxAt(u), padded.ddxAt(u));
     };
 }
 
