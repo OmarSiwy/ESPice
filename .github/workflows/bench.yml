@@ -1,0 +1,67 @@
+name: bench
+
+# On every release tag: time the fixture corpus in ESPice, ngspice and VACASK
+# (`zig build bench`), then commit the charts, summary and report to
+# docs/performance/bench/corpus/ and the README's <!-- bench:start/end -->
+# block on main, and redeploy the docs.
+# ponytail: a shared 4-vCPU hosted runner, so absolute times are noisy; the
+# speedups are ratios of runs on the same machine. Self-host when they wobble.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: omarsiwy
+          skipPush: true
+
+      # The shipped build (release.yml's kernels) in the benchmarking shell,
+      # GPU toolchain included; the runner has no GPU, so decks run on the CPU.
+      - name: Bench
+        run: >
+          nix develop .#benchmarking -c zig build bench
+          -Doptimize=ReleaseFast -Dcuda-arch=sm_75 -Dhip-arch=gfx1100
+          -- --iters 3
+
+      # The bench ran on the tag; the results and README block land on main's tip.
+      - name: Plot and commit to main
+        run: |
+          cp zig-out/benchmark-results.md "$RUNNER_TEMP/results.md"
+          git fetch origin main
+          git checkout -B main origin/main
+          rm -rf docs/performance/bench/corpus
+          nix develop .#benchmarking -c python3 tools/bench_plot.py \
+            "$RUNNER_TEMP/results.md" tests/fixtures docs/performance/bench/corpus --readme README.md
+          cp "$RUNNER_TEMP/results.md" docs/performance/bench/corpus/results.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/performance/bench/corpus
+          git commit -m "bench: corpus results for ${GITHUB_REF_NAME} (${GITHUB_SHA::8})" || exit 0
+          git push origin main
+
+      # A GITHUB_TOKEN push triggers no workflow, so start the docs deploy.
+      - name: Redeploy docs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main

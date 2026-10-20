@@ -31,6 +31,8 @@ machine load from run to run, so compare simulators within one report.
 Each point is one deck. The x axis is its device count after subcircuit
 expansion.
 
+![ESPice speedup by circuit size](bench/corpus/headline.svg)
+
 ![Wall time against circuit size, all decks](bench/corpus/all.png)
 
 ![ESPice speedup over ngspice and VACASK](bench/corpus/speedup.png)

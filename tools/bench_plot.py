@@ -12,17 +12,27 @@ x is the device count after subcircuit expansion, y the median wall time;
 both axes log. The analysis comes from the deck's .expected.json, else
 its top-level directory.
 Reference-adapter columns are dropped unless `--vendor` is given.
+Also writes headline.svg: per-deck speedups with the average per decade of size.
+`--readme README.md` rewrites that file's <!-- bench:start/end --> block
+with headline.svg, the speedup table and where the numbers were measured
+(.github/workflows/bench.yml does this on every release).
 """
-import json, re, sys
+import json, math, re, sys
 from collections import defaultdict
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker
 
 vendor = "--vendor" in sys.argv
 argv = [a for a in sys.argv if a != "--vendor"]
+readme = None
+if "--readme" in argv:
+    i = argv.index("--readme")
+    readme = Path(argv[i + 1])
+    del argv[i : i + 2]
 report = Path(argv[1] if len(argv) > 1 else "zig-out/benchmark-results.md")
 fixtures = Path(argv[2] if len(argv) > 2 else "tests/fixtures")
 out = Path(argv[3] if len(argv) > 3 else "zig-out/bench-plots")
@@ -153,6 +163,46 @@ def bars(pts):
     plt.close(fig)
 
 
+def median(xs):
+    xs, mid = sorted(xs), len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def headline(pts):
+    """headline.svg: every deck's speedup as a faint dot, and per reference
+    simulator its average (geometric mean, the right mean for ratios) per
+    decade of device count as a line. Transparent, grey text: it reads on
+    light and dark pages."""
+    with plt.rc_context({"svg.fonttype": "none", "font.size": 11, "text.color": "#777",
+                         "axes.labelcolor": "#777", "xtick.color": "#777", "ytick.color": "#777"}):
+        fig, ax = plt.subplots(figsize=(8, 4.2))
+        for i, sim in enumerate(header[1:], 1):
+            xy = [(s, t[i] / t[0]) for _, s, t in pts if t[0] and t[i]]
+            if not xy:
+                continue
+            dots = ax.scatter(*zip(*xy), s=8, alpha=0.18, linewidths=0)
+            decades = defaultdict(list)
+            for s, r in xy:
+                decades[int(math.log10(s))].append((s, r))
+            line = [(math.exp(sum(math.log(s) for s, _ in v) / len(v)), math.exp(sum(math.log(r) for _, r in v) / len(v)))
+                    for _, v in sorted(decades.items())]
+            ax.plot(*zip(*line), marker="o", lw=2.2, color=dots.get_facecolor()[0][:3],
+                    label=f"vs {sim}: {math.exp(sum(math.log(r) for _, r in xy) / len(xy)):.1f}x average, {len(xy)} decks")
+        ax.axhline(1, color="#777", lw=0.8, ls="--")
+        ax.set(xscale="log", yscale="log", xlabel="devices per deck (subcircuits expanded)",
+               ylabel="speedup (higher is faster)")
+        ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}x"))
+        ax.set_title("ESPice speedup by circuit size", color="#777")
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color("#777")
+        ax.legend(frameon=False)
+        fig.tight_layout()
+        fig.savefig(out / "headline.svg", transparent=True)
+        plt.close(fig)
+
+
 def summary(pts):
     """summary.md: per reference simulator, the decks both ran, how many
     espice ran faster, the median speedup and the agree/differ verdicts;
@@ -164,11 +214,9 @@ def summary(pts):
         if not both:
             continue
         ratios = sorted(t[i] / t[0] for _, t in both)
-        mid = len(ratios) // 2
-        median = ratios[mid] if len(ratios) % 2 else (ratios[mid - 1] + ratios[mid]) / 2
         col = next((c for c in verdict_cols if c.lower() == f"{header[0]}/{sim}".lower()), None)
         said = [verdicts[rel].get(col, "").lower() for rel, _ in both] if col else []
-        lines.append(f"| {sim} | {len(both)} | {sum(r > 1 for r in ratios)} | {median:.1f}x | "
+        lines.append(f"| {sim} | {len(both)} | {sum(r > 1 for r in ratios)} | {median(ratios):.1f}x | "
                      f"{said.count('agree')} / {said.count('differ')} |")
     lines += ["", "| Deck | Devices | " + " | ".join(f"{h} ms" for h in header) + " |",
               "|---|---:|" + "---:|" * len(header)]
@@ -179,8 +227,28 @@ def summary(pts):
     (out / "summary.md").write_text("\n".join(lines) + "\n")
 
 
+def update_readme(path):
+    """Replace the <!-- bench:start --> ... <!-- bench:end --> block."""
+    import os, platform, subprocess, datetime
+    cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text().splitlines()
+                if l.startswith("model name")), platform.machine())
+    sha = os.environ.get("GITHUB_SHA") or subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    table = (out / "summary.md").read_text().split("\n\n")[0]
+    img = os.path.relpath(out / "headline.svg", path.parent)
+    block = (f"<!-- bench:start -->\n![ESPice speedup by circuit size]({img})\n\n{table}\n\n"
+             f"Median of 3 runs after a warm-up, process startup included, CPU backend, {os.cpu_count()} x {cpu}, "
+             f"commit `{sha[:8]}`, {datetime.date.today()}. Generated by `.github/workflows/bench.yml`.\n"
+             "<!-- bench:end -->")
+    text = path.read_text()
+    a, b = text.index("<!-- bench:start -->"), text.index("<!-- bench:end -->") + len("<!-- bench:end -->")
+    path.write_text(text[:a] + block + text[b:])
+
+
 plot("all", points)
 summary(points)
+headline(points)
+if readme:
+    update_readme(readme)
 speedup(points)
 if len(points) <= 40:
     bars(points)
