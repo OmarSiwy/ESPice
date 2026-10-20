@@ -27,17 +27,17 @@ pub fn print(out: *Writer, err: *Writer, measures: []const core.Measure, analysi
     var values: [256]f64 = @splat(nan);
     var discard_buf: [64]u8 = undefined;
     var discard: Writer.Discarding = .init(&discard_buf);
+    var done: Done = undefined;
     for (measures, 0..) |m, i| {
         if (!targets(m, analysis, result) or m.func == .param or i >= values.len) continue;
-        values[i] = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
+        values[i] = evaluate(&discard.writer, m, cardWave(result, analysis, &values, i, &done)) catch nan;
     }
     var headed = false;
     for (measures, 0..) |m, i| {
         if (!targets(m, analysis, result)) continue;
         if (!headed) try writeHeading(out, analysis, point);
         headed = true;
-        const w: Wave = .{ .result = result, .analysis = analysis, .values = &values };
-        const value = evaluate(out, m, w) catch |e| switch (e) {
+        const value = evaluate(out, m, cardWave(result, analysis, &values, i, &done)) catch |e| switch (e) {
             error.WriteFailed => return error.WriteFailed,
             error.NoSuchVector => blk: {
                 try err.print("\nError: measure  {s} : no such vector\n", .{m.name});
@@ -103,9 +103,10 @@ pub fn evaluateOutcomes(measures: []const core.Measure, analysis: Kind, result: 
     if (missing) |ms| @memset(ms, false);
     var discard_buf: [64]u8 = undefined;
     var discard: Writer.Discarding = .init(&discard_buf);
+    var done: Done = undefined;
     for ([_]bool{ false, true }) |param| for (measures, out, 0..) |m, *v, i| {
         if (!targets(m, analysis, result) or (m.func == .param) != param) continue;
-        v.* = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = out }) catch |e| blk: {
+        v.* = evaluate(&discard.writer, m, cardWave(result, analysis, out, i, &done)) catch |e| blk: {
             if (e == error.NoSuchVector) if (missing) |ms| {
                 ms[i] = true;
             };
@@ -139,14 +140,16 @@ pub fn sample(c: Clause, result: core.Result, at: []const f64, out: []f64) error
 }
 
 /// Sets `keep[k]` for every column of `names` (a transient's labels, the
-/// scale first) that a `.tran` card of `measures` reads, and the scale.
-/// Evaluating over just those columns gives the same values, to the bit, as
-/// over all of them: lookups are by name. Asserts `keep.len == names.len`.
-pub fn markColumns(measures: []const core.Measure, names: []const []const u8, keep: []bool) void {
+/// scale first) that a `.tran` card of `measures` reads, and the scale;
+/// with `streamed`, only for the cards a `Stream` cannot measure without
+/// the recording. Evaluating over just those columns gives the same values,
+/// to the bit, as over all of them: lookups are by name. Asserts
+/// `keep.len == names.len`.
+pub fn markColumns(measures: []const core.Measure, names: []const []const u8, keep: []bool, streamed: bool) void {
     assert(keep.len == names.len);
     @memset(keep, false);
     if (keep.len > 0) keep[0] = true;
-    for (measures) |m| if (m.analysis == .tran) for ([_]Clause{ m.first, m.second }) |c| {
+    for (measures, 0..) |m, i| if (m.analysis == .tran and !(streamed and ruleOf(measures, i) == .scan)) for ([_]Clause{ m.first, m.second }) |c| {
         for ([_][]const u8{ c.vec, c.vec2 }) |name| if (name.len > 0) if (columnIndex(names, name)) |k| {
             keep[k] = true;
         };
@@ -156,172 +159,358 @@ pub fn markColumns(measures: []const core.Measure, names: []const []const u8, ke
     };
 }
 
-/// Which `.tran` cards already have their final value, judged row by row as
-/// a transient accepts points, for early stop and the abort bound
-/// (dev/research/lane-batched-simulation.md §7). Values still come from
-/// `evaluateAll` or `print` over the finished result, which may end early:
-/// a card resolves only once no later row can change what those return.
-/// - WHEN, TRIG/TARG, FIND/DERIV with WHEN or AT: once its value is defined
-///   (the event scans stop at their event), or once every clause is past
-///   its TO= or AT= without one.
-/// - AVG, MIN, MAX, PP, RMS, INTEG, EM_AVG, ERR*: once past a nonzero TO=.
+/// The `.tran` cards of a deck measured row by row as a transient accepts
+/// rows (dev/research/lane-batched-simulation.md §7), each by the passes
+/// `print` makes over a finished result, so with the same values, to the
+/// bit. A card resolves once no later row can change its value, which
+/// early stop and the abort bound read:
+/// - WHEN, TRIG/TARG, FIND/DERIV with WHEN or AT: at the event, or past
+///   every TO= (or AT=) without one; a LAST count only past TO=.
+/// - AVG, MIN, MAX, PP, RMS, INTEG, EM_AVG, ERR*: past a nonzero TO=.
 /// - PARAM: once every card it reads has resolved.
-/// - LAST counts, `_CONT`, JITTER, the checks and DOUT, windows without
-///   TO=, and cards reading a later card or a PARAM (`print` and
-///   `evaluateAll` read those differently): only at the run's end.
-pub const Watch = struct {
+/// - `_CONT`, JITTER, the checks and DOUT, a bare FIND, and cards reading
+///   a later card or a PARAM: never; they read the whole run.
+/// Cards without TO= resolve at the run's end, recorded or not.
+/// `measured` gives what each `.scan` card found, whose columns need no
+/// recording (`markColumns` with `streamed`); every other card reads the
+/// recording. A card reading an earlier card's value starts once that
+/// resolves, replaying the recording so far, as do TARG with TD=TRIG and
+/// FIND/DERIV with a WHEN of TD=, FROM= or a LAST count at their event.
+/// O(open cards) per row; a replay is O(rows) once per card.
+pub const Stream = struct {
+    arena: std.heap.ArenaAllocator,
     measures: []const core.Measure,
-    /// The recorded columns, the scale first.
-    names: []const []const u8,
     cards: []Card,
     /// Each resolved card's value, NaN until then: what a later card reads.
     values: []f64,
     /// `.tran` cards not resolved yet.
     open: usize,
+    /// The columns the `.tran` cards read, the scale first, and the
+    /// unknown of the solution behind each after the scale.
+    names: []const []const u8,
+    nodes: []u32,
+    /// Those columns at the current row, which every scan reads, and the
+    /// current row kept while a replay borrows `row`.
+    row: []f64,
+    saved: []f64,
+    /// The column of `row` behind each recorded column, `none` for one no
+    /// card reads.
+    recorded: []u32,
+    /// Rows fed so far.
+    rows: usize = 0,
+    /// The card an abort bound waits on (`unresolved`); null for all.
+    abort_card: ?usize = null,
 
-    const Rule = enum { end, param, window, event };
+    const none = std.math.maxInt(u32);
 
     const Card = struct {
         rule: Rule,
         done: bool,
-        /// Whether it has been tried once since its cards resolved.
-        tried: bool = false,
-        /// Each event clause's side of its level at the previous row: -1,
-        /// 0 or 1; 2 before the first.
-        side: [2]i8 = .{ 2, 2 },
+        started: bool = false,
+        /// Its passes, in the order `evaluate` reads them; `n` are built.
+        scans: [2]Scan = undefined,
+        n: u8 = 0,
+        /// Scan 1 starts at scan 0's event, from `clause`: TARG with
+        /// TD=TRIG, or the value FIND/DERIV reads at its WHEN.
+        stage: enum { none, targ, find } = .none,
+        clause: Clause = .{},
+        /// DERIV's slope rather than FIND's value at the event.
+        slope: bool = false,
+        /// A `.scan` FIND/DERIV WHEN: its FIND vector, and (scale, value)
+        /// at the last rows, oldest first, which the value pass starts
+        /// from (in a run whose times rise, it reads no row before them).
+        ring_y: ?Column = null,
+        ring: [3][2]f64 = undefined,
+        ring_len: u8 = 0,
+
+        fn resolved(c: Card) bool {
+            if (!c.started or c.stage != .none) return false;
+            for (c.scans[0..c.n]) |s| if (!s.over) return false;
+            return true;
+        }
     };
 
-    /// `names` must outlive the watch.
-    pub fn init(gpa: std.mem.Allocator, measures: []const core.Measure, names: []const []const u8) !Watch {
-        const cards = try gpa.alloc(Card, measures.len);
-        errdefer gpa.free(cards);
-        const values = try gpa.alloc(f64, measures.len);
-        @memset(values, nan);
-        var open: usize = 0;
-        for (measures, cards, 0..) |m, *c, i| {
-            c.* = .{ .rule = ruleOf(measures, i), .done = m.analysis != .tran };
-            open += @intFromBool(!c.done);
-        }
-        return .{ .measures = measures, .names = names, .cards = cards, .values = values, .open = open };
-    }
-
-    pub fn deinit(w: *Watch, gpa: std.mem.Allocator) void {
-        gpa.free(w.cards);
-        gpa.free(w.values);
-        w.* = undefined;
-    }
-
-    /// Takes the recording so far, `npoints` rows of `names.len` columns,
-    /// the newest last, and resolves what it can. Call once per row.
-    /// O(open cards) per row, plus one evaluation of a card when an event
-    /// clause changes sides of its level or an AT= is reached.
-    // ponytail: an evaluation rescans the card's whole prefix, O(rows) per
-    // level crossing, and each row looks its clauses' columns up by name,
-    // O(columns); per-card scan state and cached column indices would remove
-    // both if decks with thousands of crossings or probes show up.
-    /// `force` evaluates every ready event card, as before an abort.
-    pub fn feed(w: *Watch, data: []const f64, npoints: usize, force: bool) void {
-        assert(data.len == npoints * w.names.len);
-        if (npoints == 0 or w.open == 0) return;
-        const wave: Wave = .{ .result = .{ .plotname = "", .varnames = w.names, .is_complex = false, .npoints = npoints, .data = data }, .analysis = .tran, .values = w.values };
-        const t = wave.scale().get(npoints - 1);
-        // Non-PARAM cards read only earlier ones, PARAM cards any card.
-        for ([_]bool{ false, true }) |param| for (w.measures, w.cards, 0..) |m, *c, i| {
-            if (c.done or (c.rule == .param) != param) continue;
-            if (c.rule == .end or !w.ready(i)) continue;
-            if (w.settle(m, c, wave, t, npoints - 1, force)) |v| {
-                c.done = true;
-                w.values[i] = v;
-                w.open -= 1;
-            }
+    /// `names` and `nodes` are a transient's columns (the scale first,
+    /// then each probe's unknown); `recorded` names the ones it records.
+    pub fn init(gpa: std.mem.Allocator, measures: []const core.Measure, names: []const []const u8, nodes: []const u32, recorded: []const []const u8) !Stream {
+        assert(names.len == nodes.len + 1);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        const keep = try a.alloc(bool, names.len);
+        markColumns(measures, names, keep, false);
+        const width = std.mem.count(bool, keep, &.{true});
+        const own = try a.alloc([]const u8, width);
+        const own_nodes = try a.alloc(u32, width - 1);
+        var k: usize = 0;
+        for (names, keep, 0..) |name, on, i| if (on) {
+            own[k] = name;
+            if (k > 0) own_nodes[k - 1] = nodes[i - 1];
+            k += 1;
         };
+        const map = try a.alloc(u32, recorded.len);
+        for (recorded, map) |name, *m| m.* = for (own, 0..) |o, j| {
+            if (std.mem.eql(u8, o, name)) break @intCast(j);
+        } else none;
+        var s: Stream = .{
+            .arena = undefined,
+            .measures = measures,
+            .cards = try a.alloc(Card, measures.len),
+            .values = try a.alloc(f64, measures.len),
+            .open = 0,
+            .names = own,
+            .nodes = own_nodes,
+            .row = try a.alloc(f64, width),
+            .saved = try a.alloc(f64, width),
+            .recorded = map,
+        };
+        @memset(s.values, nan);
+        @memset(s.row, nan);
+        for (measures, s.cards, 0..) |m, *c, i| {
+            c.* = .{ .rule = ruleOf(measures, i), .done = m.analysis != .tran };
+            s.open += @intFromBool(!c.done);
+            // Read from the first row, so a run with none measures as an
+            // empty recording does.
+            if (!c.done and c.rule == .scan) s.start(m, c, &.{});
+        }
+        s.arena = arena;
+        return s;
+    }
+
+    pub fn deinit(s: *Stream) void {
+        s.arena.deinit();
+        s.* = undefined;
+    }
+
+    /// Feeds the row at `t` of solution `x`. `data` is the recording, this
+    /// row last, which a card starting late replays. Call once per row.
+    pub fn feed(s: *Stream, t: f64, x: []const f64, data: []const f64) void {
+        assert(data.len == (s.rows + 1) * s.recorded.len);
+        defer s.rows += 1;
+        if (s.open == 0) return;
+        s.row[0] = t;
+        for (s.nodes, s.row[1..]) |node, *v| v.* = x[node];
+        // Non-PARAM cards read only earlier ones, PARAM cards any card.
+        for ([_]bool{ false, true }) |param| for (s.measures, s.cards, 0..) |m, *c, i| {
+            if (c.done or c.rule == .end or (c.rule == .param) != param) continue;
+            if (c.started) {
+                for (c.scans[0..c.n]) |*scan| scan.feed(s.row[0]);
+                s.next(c, data);
+            } else {
+                if (!s.ready(i)) continue;
+                s.start(m, c, data);
+            }
+            if (!c.resolved()) continue;
+            c.done = true;
+            s.values[i] = s.value(m, c);
+            s.open -= 1;
+        };
+    }
+
+    /// Whether the card an abort bound waits on (`abort_card`), or any
+    /// `.tran` card without one, has no final value yet.
+    pub fn unresolved(s: Stream) bool {
+        return if (s.abort_card) |k| !s.cards[k].done else s.open > 0;
+    }
+
+    /// Each card's passes for `core.Result.measured`: what a `.scan` card
+    /// found, nothing for the others.
+    pub fn measured(s: *Stream, gpa: std.mem.Allocator) ![]core.Measured {
+        const out = try gpa.alloc(core.Measured, s.cards.len);
+        for (s.cards, out) |*c, *o| {
+            o.* = .{};
+            if (c.rule != .scan or !c.started) continue;
+            o.* = .{ .scans = 2, .found = @splat(.{ .v = @splat(nan) }) };
+            for (c.scans[0..c.n], o.found[0..c.n]) |*scan, *f| f.* = scan.found();
+        }
+        return out;
     }
 
     /// Whether every card it reads has resolved; a card of another analysis
     /// reads NaN whatever this run does.
-    fn ready(w: Watch, i: usize) bool {
-        const m = w.measures[i];
-        for ([_]Clause{ m.first, m.second }) |c| for (c.refs) |ref| if (!w.resolved(ref.expr)) return false;
-        return w.resolved(m.expr);
+    fn ready(s: Stream, i: usize) bool {
+        const m = s.measures[i];
+        for ([_]Clause{ m.first, m.second }) |c| for (c.refs) |ref| if (!s.resolvedOps(ref.expr)) return false;
+        return s.resolvedOps(m.expr);
     }
 
-    fn resolved(w: Watch, ops: []const core.MeasureOp) bool {
-        for (ops) |op| if (op == .measure and op.measure < w.cards.len and !w.cards[op.measure].done) return false;
+    fn resolvedOps(s: Stream, ops: []const core.MeasureOp) bool {
+        for (ops) |op| if (op == .measure and op.measure < s.cards.len and !s.cards[op.measure].done) return false;
         return true;
     }
 
-    /// The card's final value (NaN for one that has none) once no later row
-    /// can change it, else null. `force` evaluates an event card even
-    /// without a crossing: a level touched but not crossed can still count.
-    fn settle(w: Watch, m: core.Measure, c: *Card, wave: Wave, t: f64, row: usize, force: bool) ?f64 {
+    /// The current row as a one-row result, which the scans' columns read.
+    fn wave(s: Stream) Wave {
+        return .{ .result = .{ .plotname = "", .varnames = s.names, .is_complex = false, .npoints = 1, .data = s.row }, .analysis = .tran };
+    }
+
+    /// Builds card `c`'s passes, as `evaluate` makes them, and runs them
+    /// over the rows so far: the recording `data` for a card starting late.
+    fn start(s: *Stream, m: core.Measure, c: *Card, data: []const f64) void {
+        c.started = true;
+        if (c.rule == .param) return;
+        // A ref without a value: `evaluate` fails it before any pass.
+        const a = resolve(m.first, s.values) catch return;
+        const b = resolve(m.second, s.values) catch return;
+        const w = s.wave();
+        const tran = Kind.tran;
+        switch (m.func) {
+            .when => c.scans[0] = .init(w, a, .{ .cross = .init(a, tran) }, .waveform),
+            .trig_targ => {
+                if (a.at == core.measure_no_at) c.scans[0] = .init(w, a, .{ .cross = .init(a, tran) }, .waveform);
+                c.n = @intFromBool(a.at == core.measure_no_at);
+                if (b.at == core.measure_no_at) {
+                    var targ = b;
+                    if (b.td_trig and a.at == core.measure_no_at) {
+                        c.stage = .targ;
+                        c.clause = b;
+                    } else {
+                        if (b.td_trig) targ.td = a.at;
+                        c.scans[c.n] = .init(w, targ, .{ .cross = .init(targ, tran) }, .waveform);
+                        c.n += 1;
+                    }
+                }
+                return s.catchUp(c, data);
+            },
+            .find, .deriv => if (a.at != core.measure_no_at) {
+                c.scans[0] = .init(w, a, .{ .at = .{ .at = a.at, .slope = m.func == .deriv } }, .none);
+            } else {
+                c.scans[0] = .init(w, b, .{ .cross = .init(b, tran) }, .waveform);
+                c.stage = .find;
+                c.clause = a;
+                c.slope = m.func == .deriv;
+                if (c.rule == .scan) c.ring_y = w.waveform(a.vec, a.ops, a.vectype) catch null;
+            },
+            .avg, .min, .max, .min_at, .max_at => c.scans[0] = .init(w, a, .{
+                .extremum = .{
+                    .c = a,
+                    .dc = false,
+                    .op = switch (m.func) {
+                        .avg => .avg,
+                        .min, .min_at => .min,
+                        else => .max, // else: MAX and MAX_AT
+                    },
+                },
+            }, .none),
+            .pp => {
+                c.scans = .{
+                    .init(w, a, .{ .extremum = .{ .c = a, .dc = false, .op = .min } }, .none),
+                    .init(w, a, .{ .extremum = .{ .c = a, .dc = false, .op = .max } }, .none),
+                };
+                c.n = 2;
+                return s.catchUp(c, data);
+            },
+            .rms, .integ => c.scans[0] = .init(w, a, .{ .integ = .{ .c = a, .rms = m.func == .rms } }, .none),
+            .em_avg => c.scans[0] = .init(w, a, .{ .em_avg = .{ .c = a } }, .none),
+            .err, .err1, .err2, .err3 => c.scans[0] = .init(w, a, .{ .rel_error = .{ .c = a, .dc = false, .func = m.func } }, .column),
+            else => unreachable, // else: `ruleOf` gives every other function `.end`
+        }
+        c.n = 1;
+        s.catchUp(c, data);
+    }
+
+    /// Runs card `c`'s new passes over the rows so far: none before the
+    /// first row, else the recording `data`, this row included.
+    fn catchUp(s: *Stream, c: *Card, data: []const f64) void {
+        if (data.len == 0) return;
+        assert(c.rule == .replay);
+        for (c.scans[0..c.n]) |*scan| s.replay(scan, data);
+        s.next(c, data);
+    }
+
+    /// After card `c` has read the current row: keeps a `.scan` FIND's
+    /// ring, and starts scan 1 at scan 0's event.
+    fn next(s: *Stream, c: *Card, data: []const f64) void {
+        if (c.stage == .none) return;
+        if (c.ring_y) |y| {
+            if (c.ring_len == c.ring.len) std.mem.copyForwards([2]f64, c.ring[0..2], c.ring[1..3]);
+            c.ring_len = @min(c.ring_len + 1, c.ring.len);
+            c.ring[c.ring_len - 1] = .{ s.row[0], y.get(0) };
+        }
+        if (!c.scans[0].over) return;
+        const event = c.scans[0].found();
+        const stage = c.stage;
+        c.stage = .none;
+        // No event: `evaluate` fails the card before scan 1.
+        if (event.missing or std.math.isNan(event.v[0])) return;
+        const w = s.wave();
+        var cl = c.clause;
+        c.n = 2;
+        if (stage == .targ) {
+            cl.td = event.v[0];
+            c.scans[1] = .init(w, cl, .{ .cross = .init(cl, .tran) }, .waveform);
+        } else c.scans[1] = .init(w, cl, .{ .at = .{ .at = event.v[0], .slope = c.slope } }, .none);
+        if (c.rule == .replay) return s.replay(&c.scans[1], data);
+        // `.scan`: from the ring. Rows before it hold the event only where
+        // times repeat, which a transient's accepted rows never do.
+        const scan = &c.scans[1];
+        if (scan.missing) return;
+        if (s.rows + 1 > c.ring_len and event.v[0] <= c.ring[0][0]) {
+            scan.over = true; // ponytail: unreachable while recorded times rise
+            return;
+        }
+        for (c.ring[0..c.ring_len]) |r| if (!scan.over) scan.feedValues(r[0], r[1], nan);
+    }
+
+    /// Runs `scan` over the recording `data`, every row so far.
+    fn replay(s: *Stream, scan: *Scan, data: []const f64) void {
+        const width = s.recorded.len;
+        @memcpy(s.saved, s.row);
+        defer @memcpy(s.row, s.saved);
+        for (0..s.rows + 1) |i| {
+            for (s.recorded, data[i * width ..][0..width]) |k, v| if (k != none) {
+                s.row[k] = v;
+            };
+            scan.feed(s.row[0]);
+        }
+    }
+
+    /// Resolved card `c`'s value, as `evaluate` reads it over its passes.
+    fn value(s: Stream, m: core.Measure, c: *Card) f64 {
+        var found: [2]core.Measured.Found = @splat(.{ .v = @splat(nan) });
+        for (c.scans[0..c.n], found[0..c.n]) |*scan, *f| f.* = scan.found();
+        var done: Done = .{ .found = &found };
         var discard_buf: [64]u8 = undefined;
         var discard: Writer.Discarding = .init(&discard_buf);
-        switch (c.rule) {
-            .end => unreachable, // `feed` skips them
-            .param => return evaluate(&discard.writer, m, wave) catch nan,
-            .window => {
-                const a = resolve(m.first, w.values) catch return nan;
-                if (a.to == 0 or t <= a.to) return null;
-                return evaluate(&discard.writer, m, wave) catch nan;
-            },
-            .event => {},
-        }
-        const a = resolve(m.first, w.values) catch return nan;
-        const b = resolve(m.second, w.values) catch return nan;
-        var trigger = force or !c.tried;
-        c.tried = true;
-        // Past every TO= and AT=, an event not found never will be.
-        var final = true;
-        for (eventClauses(m, a, b), &c.side) |e, *side| if (e) |cl| {
-            if (cl.at != core.measure_no_at) {
-                if (t >= cl.at) trigger = true else final = false;
-                continue;
-            }
-            if (cl.to == 0 or t <= cl.to) final = false;
-            const s = sideOf(wave, cl, row) catch return nan; // a missing vector stays missing
-            if (side.* != 2 and s != side.*) trigger = true;
-            side.* = s;
-        };
-        if (!trigger and !final) return null;
-        const value = evaluate(&discard.writer, m, wave) catch nan;
-        return if (!std.math.isNan(value) or final) value else null;
+        const empty: core.Result = .{ .plotname = "", .varnames = &.{}, .is_complex = false, .npoints = 0, .data = &.{} };
+        return evaluate(&discard.writer, m, .{ .result = empty, .analysis = .tran, .values = s.values, .done = &done }) catch nan;
     }
 };
 
-/// Which side of its level clause `c`'s waveform is on at `row`: -1, 0 or 1.
-fn sideOf(w: Wave, c: Clause, row: usize) error{NoSuchVector}!i8 {
-    const y = (try w.waveform(c.vec, c.ops, c.vectype)).get(row);
-    const level = if (c.vec2.len > 0) (try w.waveform(c.vec2, c.ops2, c.vectype)).get(row) else c.val;
-    return if (y > level) 1 else if (y < level) -1 else 0;
-}
+/// How `Stream` measures card `i` of `measures`: from the first row
+/// without a recording (`scan`), over the recording (`replay`), once the
+/// cards it reads resolve (`param`), or never (`end`).
+const Rule = enum { end, param, scan, replay };
 
-/// The clauses of an event card that name an event or an AT=: WHEN's,
-/// TRIG and TARG, or FIND/DERIV's AT= or WHEN.
-fn eventClauses(m: core.Measure, a: Clause, b: Clause) [2]?Clause {
-    return switch (m.func) {
-        .when => .{ a, null },
-        .trig_targ => .{ a, b },
-        .find, .deriv => .{ if (a.at != core.measure_no_at) a else b, null },
-        else => .{ null, null },
-    };
-}
-
-/// How `Watch` resolves card `i` of `measures`.
-fn ruleOf(measures: []const core.Measure, i: usize) Watch.Rule {
+fn ruleOf(measures: []const core.Measure, i: usize) Rule {
     const m = measures[i];
     if (m.cont) return .end;
     // `print` reads a later card, or a PARAM, in its second pass and
     // `evaluateAll` reads NaN; a PARAM reading a later PARAM reads NaN.
-    for ([_]Clause{ m.first, m.second }) |c| for (c.refs) |ref| for (ref.expr) |op| if (op == .measure) {
-        if (op.measure >= i or (op.measure < measures.len and measures[op.measure].func == .param)) return .end;
+    var refs = false;
+    var at_ref = false;
+    for ([_]Clause{ m.first, m.second }) |c| for (c.refs) |ref| {
+        refs = true;
+        at_ref = at_ref or ref.field == .at;
+        for (ref.expr) |op| if (op == .measure) {
+            if (op.measure >= i or (op.measure < measures.len and measures[op.measure].func == .param)) return .end;
+        };
     };
     for (m.expr) |op| if (op == .measure and op.measure >= i and op.measure < measures.len and measures[op.measure].func == .param) return .end;
+    const recorded = refs or switch (m.func) {
+        // The targ count starts at the trigger.
+        .trig_targ => m.second.td_trig and m.first.at == core.measure_no_at,
+        // The value at the event reads rows before it, as far back as a
+        // window start or the last event.
+        .find, .deriv => m.first.at == core.measure_no_at and (m.second.td != 0 or m.second.from != 0 or lastEvent(m.second)),
+        else => false, // else: every other function reads each row once
+    };
+    const by_rows: Rule = if (recorded) .replay else .scan;
     return switch (m.func) {
         .param => .param,
-        .when => if (lastEvent(m.first)) .end else .event,
-        .trig_targ => if (lastEvent(m.first) or lastEvent(m.second)) .end else .event,
-        .find, .deriv => if (m.first.at != core.measure_no_at) .event else if (m.second.vec.len == 0 or lastEvent(m.second)) .end else .event,
-        .avg, .min, .max, .min_at, .max_at, .pp, .rms, .integ, .em_avg, .err, .err1, .err2, .err3 => .window,
+        .when, .trig_targ, .avg, .min, .max, .min_at, .max_at, .pp, .rms, .integ, .em_avg, .err, .err1, .err2, .err3 => by_rows,
+        // A bare FIND reads a one-row plot.
+        .find, .deriv => if (m.first.at != core.measure_no_at or at_ref or m.second.vec.len != 0) by_rows else .end,
         else => .end, // else: JITTER, the FFT figures, the checks and DOUT read the whole run
     };
 }
@@ -353,9 +542,10 @@ pub fn printStatistics(out: *Writer, measures: []const core.Measure, analysis: K
         // One pass in deck order: a card reads only the cards before it (a
         // later one is still NaN), so each card sees what it would alone.
         var values: [256]f64 = @splat(nan);
+        var done: Done = undefined;
         for (cards, 0..) |m, k| {
             if (m.analysis != analysis) continue;
-            values[k] = evaluate(&discard.writer, m, .{ .result = result, .analysis = analysis, .values = &values }) catch nan;
+            values[k] = evaluate(&discard.writer, m, cardWave(result, analysis, &values, k, &done)) catch nan;
             const x = values[k];
             if (!std.math.isFinite(x)) continue;
             const a = &acc[k];
@@ -785,6 +975,8 @@ const Wave = struct {
     analysis: Kind,
     /// Results of the cards evaluated so far, by card index.
     values: []const f64 = &.{},
+    /// What the card found while its run went, read in place of `result`.
+    done: ?*Done = null,
 
     /// Sample count; 0 for a result whose rows streamed to a file.
     fn len(w: Wave) usize {
@@ -825,6 +1017,7 @@ const Wave = struct {
     /// Scale value of the event `c` names; NaN when it never happens
     /// (ngspice com_measure_when).
     fn when(w: Wave, c: Clause) !f64 {
+        if (w.done) |d| return (try d.take())[0];
         var t: [1]f64 = .{nan};
         _ = try w.crossings(c, &t);
         return t[0];
@@ -839,88 +1032,11 @@ const Wave = struct {
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
         const y2: ?Column = if (c.vec2.len > 0) try w.waveform(c.vec2, c.ops2, c.vectype) else null;
-        const dc = w.analysis == .dc;
-        var td = c.td;
-        var rise: i32 = 0;
-        var fall: i32 = 0;
-        var cross: i32 = 0;
-        var above = false;
-        var pending = false;
-        var last: f64 = nan;
-        var first: u32 = 0;
-        var prev: f64 = 0;
-        var prev2: f64 = 0;
-        var prev_x: f64 = 0;
-        var want = c;
-        var n: usize = 0;
+        var s: Cross = .init(c, w.analysis);
         for (0..w.len()) |i| {
-            const v = y.get(i);
-            const xv = x.get(i);
-            const v2 = if (y2) |c2| c2.get(i) else nan;
-            // A DC sweep may start anywhere: ngspice keeps its origin in td.
-            if (dc and i == 0) td = xv;
-            if ((w.analysis == .tran or w.analysis == .tran_noise) and xv < td) continue;
-            if ((w.analysis == .ac or w.analysis == .sp) and xv < 0) continue;
-            if (dc) {
-                if (xv < c.from or xv > c.to) continue;
-            } else {
-                if (xv < c.from) continue;
-                if (c.to != 0 and xv > c.to) break;
-            }
-            if (first > 1 and dc and td == xv) first = 1;
-            const level = if (y2 != null) v2 else c.val;
-            const prev_level = if (y2 != null) prev2 else c.val;
-            if (first == 1) {
-                cross = 0;
-                above = !(v < level);
-                if (!above and prev >= prev_level) {
-                    fall = 1;
-                    cross = 1;
-                } else if (above and prev < prev_level) {
-                    rise = 1;
-                    cross = 1;
-                }
-            }
-            if (first > 1) {
-                if (!above and v >= level) {
-                    above = true;
-                    cross += 1;
-                    rise += 1;
-                    if (c.fall != core.measure_last) pending = true;
-                } else if (above and v <= level) {
-                    above = false;
-                    cross += 1;
-                    fall += 1;
-                    if (c.rise != core.measure_last) pending = true;
-                }
-                const hit = prev_x + (prev_level - prev) * (xv - prev_x) / (v - prev - level + prev_level);
-                // Counters move by at most one per sample, so the event the
-                // raised count names comes on a later sample.
-                if (cross == want.cross or rise == want.rise or fall == want.fall) {
-                    times[n] = hit;
-                    n += 1;
-                    if (n == times.len) return n;
-                    if (cross == want.cross) want.cross += 1;
-                    if (rise == want.rise) want.rise += 1;
-                    if (fall == want.fall) want.fall += 1;
-                }
-                if (pending) {
-                    if (c.cross == core.measure_unset and c.rise == core.measure_unset and c.fall == core.measure_unset) {
-                        times[n] = hit;
-                        return n + 1;
-                    }
-                    if (c.cross == core.measure_last or c.rise == core.measure_last or c.fall == core.measure_last) last = hit;
-                    pending = false;
-                }
-            }
-            first += 1;
-            prev = v;
-            if (y2 != null) prev2 = v2;
-            prev_x = xv;
+            if (s.feed(times, x.get(i), y.get(i), if (y2) |c2| c2.get(i) else nan)) break;
         }
-        if (std.math.isNan(last)) return n;
-        times[n] = last;
-        return n + 1;
+        return s.finish(times);
     }
 
     /// Violations of check `k` on `c`'s waveform (`ref`'s is the reference
@@ -996,33 +1112,22 @@ const Wave = struct {
     /// The vector interpolated at scale value `at`; NaN outside the sweep
     /// (ngspice measure_at).
     fn valueAt(w: Wave, c: Clause, at: f64) !f64 {
-        const x = w.scale();
-        const y = try w.waveform(c.vec, c.ops, c.vectype);
-        var px: f64 = 0;
-        var pv: f64 = 0;
-        for (0..w.len()) |i| {
-            const v = y.get(i);
-            const xv = x.get(i);
-            if (i > 0 and ((px <= at and xv >= at) or (w.analysis == .dc and px >= at and xv <= at)))
-                return pv + (at - px) * (v - pv) / (xv - px);
-            px = xv;
-            pv = v;
-        }
-        return nan;
+        return w.segment(c, .{ .at = at, .dc = w.analysis == .dc });
     }
 
     /// Slope of the vector against the scale at `at`, off the sample pair
     /// around it; NaN outside the sweep.
     fn slopeAt(w: Wave, c: Clause, at: f64) !f64 {
+        return w.segment(c, .{ .at = at, .dc = w.analysis == .dc, .slope = true });
+    }
+
+    fn segment(w: Wave, c: Clause, pass: At) !f64 {
+        if (w.done) |d| return (try d.take())[0];
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
-        for (1..@max(w.len(), 1)) |i| {
-            const x0 = x.get(i - 1);
-            const x1 = x.get(i);
-            if ((x0 <= at and x1 >= at) or (w.analysis == .dc and x0 >= at and x1 <= at))
-                return (y.get(i) - y.get(i - 1)) / (x1 - x0);
-        }
-        return nan;
+        var s = pass;
+        for (0..w.len()) |i| if (s.feed(x.get(i), y.get(i))) break;
+        return s.value;
     }
 
     /// HSPICE's ERR family over the window [SA Ch.11 "Error Equations"]:
@@ -1031,80 +1136,28 @@ const Wave = struct {
     /// ERR3 takes e = +-log|M/C| / log(M), signed as M/C, reduced as ERR1.
     /// Points with |M| outside [ymin, ymax] are skipped; NaN when none is left.
     fn relError(w: Wave, c: Clause, func: core.MeasureFunc) !f64 {
+        if (w.done) |d| return (try d.take())[0];
         const x = w.scale();
         const mv = try w.waveform(c.vec, c.ops, c.vectype);
         const cv = try w.column(c.vec2, c.vectype);
-        var sum: f64 = 0;
-        var count: f64 = 0;
-        for (0..w.len()) |i| {
-            const xv = x.get(i);
-            if (w.analysis == .dc) {
-                if (xv < c.from or xv > c.to) continue;
-            } else {
-                if (xv < c.from) continue;
-                if (c.to != 0 and xv > c.to) break;
-            }
-            const m = mv.get(i);
-            const calc = cv.get(i);
-            if (@abs(m) < c.ymin or @abs(m) > c.ymax) continue;
-            const d = if (@abs(m) < c.minval) c.minval else m;
-            // ponytail: the manual gives no reduction for ERR3; RMS, as ERR1.
-            const e = if (func == .err3) std.math.sign(m / calc) * @log(@abs(m / calc)) / @log(d) else (m - calc) / d;
-            sum += if (func == .err2) @abs(e) else e * e;
-            count += 1;
-        }
-        if (count == 0) return nan;
-        return if (func == .err2) sum / count else @sqrt(sum / count);
+        var s: RelError = .{ .c = c, .dc = w.analysis == .dc, .func = func };
+        for (0..w.len()) |i| if (s.feed(x.get(i), mv.get(i), cv.get(i))) break;
+        return s.value();
     }
 
     /// MIN/MAX (value, where) or AVG (trapezoidal mean, last scale read)
     /// over the window, without interpolating its ends (ngspice
     /// measure_minMaxAvg).
-    fn extremum(w: Wave, c: Clause, op: enum { min, max, avg }) !Stat {
+    fn extremum(w: Wave, c: Clause, op: Extremum.Op) !Stat {
+        if (w.done) |d| {
+            const v = try d.take();
+            return .{ .value = v[0], .at = v[1] };
+        }
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
-        var first = false;
-        var m: f64 = 0;
-        var m_at: f64 = 0;
-        var xv: f64 = 0;
-        var pv: f64 = 0;
-        var px: f64 = 0;
-        var span: f64 = 0;
-        for (0..w.len()) |i| {
-            const v = y.get(i);
-            xv = x.get(i);
-            if (w.analysis == .dc) {
-                if (xv < c.from or xv > c.to) continue;
-            } else {
-                if (xv < c.from) continue;
-                if (c.to != 0 and xv > c.to) break;
-            }
-            if (!first) {
-                first = true;
-                m = if (op == .avg) 0 else v;
-                m_at = xv;
-                pv = v;
-                px = xv;
-                continue;
-            }
-            switch (op) {
-                .min => if (v <= m) {
-                    m = v;
-                    m_at = xv;
-                },
-                .max => if (v >= m) {
-                    m = v;
-                    m_at = xv;
-                },
-                .avg => {
-                    m += 0.5 * (v + pv) * (xv - px);
-                    span += xv - px;
-                    pv = v;
-                    px = xv;
-                },
-            }
-        }
-        return if (op == .avg) .{ .value = m / (if (first) span else 1), .at = xv } else .{ .value = m, .at = m_at };
+        var s: Extremum = .{ .c = c, .dc = w.analysis == .dc, .op = op };
+        for (0..w.len()) |i| if (s.feed(x.get(i), y.get(i))) break;
+        return s.stat();
     }
 
     const Integral = struct { value: f64, from: f64, to: f64 };
@@ -1158,68 +1211,30 @@ const Wave = struct {
     /// `c.val` (`.option em_recovery`) times min(I+, I-). The window ends
     /// are samples, as AVG's.
     fn emAvg(w: Wave, c: Clause) !Integral {
+        if (w.done) |d| {
+            const v = try d.take();
+            return .{ .value = v[0], .from = v[1], .to = v[2] };
+        }
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
-        var pos: f64 = 0;
-        var neg: f64 = 0;
-        var from: f64 = nan;
-        var to: f64 = nan;
-        var pv: f64 = 0;
-        for (0..w.len()) |i| {
-            const v = y.get(i);
-            const xv = x.get(i);
-            if (xv < c.from) continue;
-            if (c.to != 0 and xv > c.to) break;
-            if (!std.math.isNan(from)) {
-                pos += positiveArea(pv, v, xv - to);
-                neg += positiveArea(-pv, -v, xv - to);
-            } else from = xv;
-            to = xv;
-            pv = v;
-        }
-        const span = to - from;
-        if (!(span > 0)) return .{ .value = nan, .from = from, .to = to };
-        return .{ .value = (@max(pos, neg) - c.val * @min(pos, neg)) / span, .from = from, .to = to };
+        var s: EmAvg = .{ .c = c };
+        for (0..w.len()) |i| if (s.feed(x.get(i), y.get(i))) break;
+        return s.result();
     }
 
     /// Integral, or RMS, of the vector over [from, to], ends interpolated,
     /// by composite Simpson 3/8, Simpson 1/3 and trapezoid panels as the
     /// sample spacing allows (ngspice measure_rms_integral).
     fn rmsInteg(w: Wave, c: Clause, rms: bool) !Integral {
+        if (w.done) |d| {
+            const v = try d.take();
+            return .{ .value = v[0], .from = v[1], .to = v[2] };
+        }
         const x = w.scale();
         const y = try w.waveform(c.vec, c.ops, c.vectype);
-        const n = w.len();
-        if (n == 0) return .{ .value = nan, .from = nan, .to = nan };
-        var win: Window = .{ .x = x, .y = y, .from = c.from, .to = c.to, .rms = rms };
-        while (win.lo < n and x.get(win.lo) < c.from) win.lo += 1;
-        win.hi = win.lo;
-        while (win.hi < n and !(c.to != 0 and x.get(win.hi) > c.to)) win.hi += 1;
-        win.cut = win.hi < n;
-        if (win.cut) win.hi += 1;
-        assert(win.lo <= win.hi);
-        assert(win.hi <= n);
-        const count = win.hi - win.lo;
-        var sum: [3]f64 = .{ 0, 0, 0 };
-        var k: usize = 0;
-        while (k + 1 < count) {
-            const p = [4][2]f64{ win.point(k), win.point(k + 1), win.point(k + 2), win.point(k + 3) };
-            var width: [3]f64 = undefined;
-            for (&width, 0..) |*d, j| d.* = if (k + j + 1 < count) p[j + 1][0] - p[j][0] else 0;
-            if (almostEqualUlps(width[0], width[1]) and almostEqualUlps(width[0], width[2])) {
-                sum[0] += 3 * width[0] * (p[0][1] + 3 * (p[1][1] + p[2][1]) + p[3][1]) / 8.0;
-                k += 3;
-            } else if (almostEqualUlps(width[0], width[1])) {
-                sum[1] += width[0] * (p[0][1] + 4 * p[1][1] + p[2][1]) / 3.0;
-                k += 2;
-            } else {
-                sum[2] += width[0] * (p[0][1] + p[1][1]) / 2;
-                k += 1;
-            }
-        }
-        const from = if (count > @intFromBool(win.cut)) win.point(0)[0] else nan;
-        const to = if (win.cut) win.point(count - 1)[0] else x.get(n - 1);
-        const total = sum[0] + sum[1] + sum[2];
-        return .{ .value = if (rms) @sqrt(total / (to - from)) else total, .from = from, .to = to };
+        var s: Integ = .{ .c = c, .rms = rms };
+        for (0..w.len()) |i| if (s.feed(x.get(i), y.get(i))) break;
+        return s.result();
     }
 };
 
@@ -1231,46 +1246,453 @@ fn positiveArea(v0: f64, v1: f64, dx: f64) f64 {
     return 0.5 * hi * dx * hi / (hi - @min(v0, v1));
 }
 
-/// Samples lo..hi of an RMS/INTEG window. With `cut`, sample hi-1 is the
-/// first past `to` and reads as the value at `to`; the first sample reads as
-/// the value at a nonzero `from`. Points past the window are zero, as in
-/// ngspice's zeroed buffers.
-const Window = struct {
-    x: Column,
-    y: Column,
-    lo: usize = 0,
-    hi: usize = 0,
-    cut: bool = false,
-    from: f64,
-    to: f64,
-    rms: bool,
-
-    /// Point `k` as (scale, value or value squared).
-    fn point(win: Window, k: usize) [2]f64 {
-        const i = win.lo + k;
-        if (i >= win.hi) return .{ 0, 0 };
-        var xv = win.x.get(i);
-        var v = win.y.get(i);
-        if (win.cut and i + 1 == win.hi) {
-            if (i > 0 and !almostEqualUlps(xv, win.to)) {
-                v = interpolate(win.x, win.y, i - 1, i, win.to);
-                xv = win.to;
-            }
-        } else if (k == 0 and win.from != 0 and i > 0 and !almostEqualUlps(xv, win.from)) {
-            v = interpolate(win.x, win.y, i - 1, i, win.from);
-            xv = win.from;
-        }
-        return .{ xv, if (win.rms) v * v else v };
-    }
-};
-
 /// ngspice measure_interpolate, 'y' mode: the line through samples i and j
 /// at scale value `at`, in slope-intercept form for the same rounding.
 fn interpolate(x: Column, y: Column, i: usize, j: usize, at: f64) f64 {
     assert(i < j);
-    const slope = (y.get(j) - y.get(i)) / (x.get(j) - x.get(i));
-    const intercept = y.get(i) - slope * x.get(i);
+    return line(x.get(i), y.get(i), x.get(j), y.get(j), at);
+}
+
+/// The line through (x0, y0) and (x1, y1) at `at`, as `interpolate`.
+fn line(x0: f64, y0: f64, x1: f64, y1: f64, at: f64) f64 {
+    const slope = (y1 - y0) / (x1 - x0);
+    const intercept = y0 - slope * x0;
     return slope * at + intercept;
+}
+
+// The passes below read a waveform one sample at a time, in order, and
+// `feed` returns true where the whole-waveform loop would stop. `Wave` runs
+// them over a recording and `Stream` over a run as it goes, so both give
+// the same values, to the bit.
+
+/// `Wave.crossings`' event count (ngspice com_measure_when).
+const Cross = struct {
+    c: Clause,
+    analysis: Kind,
+    td: f64,
+    /// The counts the next event needs.
+    want: Clause,
+    rise: i32 = 0,
+    fall: i32 = 0,
+    cross: i32 = 0,
+    above: bool = false,
+    pending: bool = false,
+    last: f64 = nan,
+    first: u32 = 0,
+    prev: f64 = 0,
+    prev2: f64 = 0,
+    prev_x: f64 = 0,
+    rows: usize = 0,
+    /// Events found, and whether the scan stopped on one (LAST is not added then).
+    n: usize = 0,
+    ended: bool = false,
+
+    fn init(c: Clause, analysis: Kind) Cross {
+        return .{ .c = c, .analysis = analysis, .td = c.td, .want = c };
+    }
+
+    /// Reads sample (`xv`, `v`), `v2` being the level vector's (NaN
+    /// without one), and adds the events it ends to `times`.
+    fn feed(s: *Cross, times: []f64, xv: f64, v: f64, v2: f64) bool {
+        const c = s.c;
+        const dc = s.analysis == .dc;
+        const has_y2 = c.vec2.len > 0;
+        const i = s.rows;
+        s.rows += 1;
+        // A DC sweep may start anywhere: ngspice keeps its origin in td.
+        if (dc and i == 0) s.td = xv;
+        if ((s.analysis == .tran or s.analysis == .tran_noise) and xv < s.td) return false;
+        if ((s.analysis == .ac or s.analysis == .sp) and xv < 0) return false;
+        if (dc) {
+            if (xv < c.from or xv > c.to) return false;
+        } else {
+            if (xv < c.from) return false;
+            if (c.to != 0 and xv > c.to) return true;
+        }
+        if (s.first > 1 and dc and s.td == xv) s.first = 1;
+        const level = if (has_y2) v2 else c.val;
+        const prev_level = if (has_y2) s.prev2 else c.val;
+        if (s.first == 1) {
+            s.cross = 0;
+            s.above = !(v < level);
+            if (!s.above and s.prev >= prev_level) {
+                s.fall = 1;
+                s.cross = 1;
+            } else if (s.above and s.prev < prev_level) {
+                s.rise = 1;
+                s.cross = 1;
+            }
+        }
+        if (s.first > 1) {
+            if (!s.above and v >= level) {
+                s.above = true;
+                s.cross += 1;
+                s.rise += 1;
+                if (c.fall != core.measure_last) s.pending = true;
+            } else if (s.above and v <= level) {
+                s.above = false;
+                s.cross += 1;
+                s.fall += 1;
+                if (c.rise != core.measure_last) s.pending = true;
+            }
+            const hit = s.prev_x + (prev_level - s.prev) * (xv - s.prev_x) / (v - s.prev - level + prev_level);
+            // Counters move by at most one per sample, so the event the
+            // raised count names comes on a later sample.
+            if (s.cross == s.want.cross or s.rise == s.want.rise or s.fall == s.want.fall) {
+                times[s.n] = hit;
+                s.n += 1;
+                if (s.n == times.len) {
+                    s.ended = true;
+                    return true;
+                }
+                if (s.cross == s.want.cross) s.want.cross += 1;
+                if (s.rise == s.want.rise) s.want.rise += 1;
+                if (s.fall == s.want.fall) s.want.fall += 1;
+            }
+            if (s.pending) {
+                if (c.cross == core.measure_unset and c.rise == core.measure_unset and c.fall == core.measure_unset) {
+                    times[s.n] = hit;
+                    s.n += 1;
+                    s.ended = true;
+                    return true;
+                }
+                if (c.cross == core.measure_last or c.rise == core.measure_last or c.fall == core.measure_last) s.last = hit;
+                s.pending = false;
+            }
+        }
+        s.first += 1;
+        s.prev = v;
+        if (has_y2) s.prev2 = v2;
+        s.prev_x = xv;
+        return false;
+    }
+
+    /// How many events `times` holds, a LAST count's appended; once the
+    /// scan has stopped or read every sample.
+    fn finish(s: Cross, times: []f64) usize {
+        if (s.ended or std.math.isNan(s.last)) return s.n;
+        times[s.n] = s.last;
+        return s.n + 1;
+    }
+};
+
+/// `Wave.valueAt` and `slopeAt`: the first segment holding `at`.
+const At = struct {
+    at: f64,
+    dc: bool = false,
+    slope: bool = false,
+    rows: usize = 0,
+    px: f64 = 0,
+    pv: f64 = 0,
+    value: f64 = nan,
+
+    fn feed(s: *At, xv: f64, v: f64) bool {
+        if (s.rows > 0 and ((s.px <= s.at and xv >= s.at) or (s.dc and s.px >= s.at and xv <= s.at))) {
+            s.value = if (s.slope) (v - s.pv) / (xv - s.px) else s.pv + (s.at - s.px) * (v - s.pv) / (xv - s.px);
+            return true;
+        }
+        s.rows += 1;
+        s.px = xv;
+        s.pv = v;
+        return false;
+    }
+};
+
+/// `Wave.extremum`.
+const Extremum = struct {
+    c: Clause,
+    dc: bool,
+    op: Op,
+    first: bool = false,
+    m: f64 = 0,
+    m_at: f64 = 0,
+    xv: f64 = 0,
+    pv: f64 = 0,
+    px: f64 = 0,
+    span: f64 = 0,
+
+    const Op = enum { min, max, avg };
+
+    fn feed(s: *Extremum, xv: f64, v: f64) bool {
+        s.xv = xv;
+        if (s.dc) {
+            if (xv < s.c.from or xv > s.c.to) return false;
+        } else {
+            if (xv < s.c.from) return false;
+            if (s.c.to != 0 and xv > s.c.to) return true;
+        }
+        if (!s.first) {
+            s.first = true;
+            s.m = if (s.op == .avg) 0 else v;
+            s.m_at = xv;
+            s.pv = v;
+            s.px = xv;
+            return false;
+        }
+        switch (s.op) {
+            .min => if (v <= s.m) {
+                s.m = v;
+                s.m_at = xv;
+            },
+            .max => if (v >= s.m) {
+                s.m = v;
+                s.m_at = xv;
+            },
+            .avg => {
+                s.m += 0.5 * (v + s.pv) * (xv - s.px);
+                s.span += xv - s.px;
+                s.pv = v;
+                s.px = xv;
+            },
+        }
+        return false;
+    }
+
+    fn stat(s: Extremum) Stat {
+        return if (s.op == .avg) .{ .value = s.m / (if (s.first) s.span else 1), .at = s.xv } else .{ .value = s.m, .at = s.m_at };
+    }
+};
+
+/// `Wave.emAvg`.
+const EmAvg = struct {
+    c: Clause,
+    pos: f64 = 0,
+    neg: f64 = 0,
+    from: f64 = nan,
+    to: f64 = nan,
+    pv: f64 = 0,
+
+    fn feed(s: *EmAvg, xv: f64, v: f64) bool {
+        if (xv < s.c.from) return false;
+        if (s.c.to != 0 and xv > s.c.to) return true;
+        if (!std.math.isNan(s.from)) {
+            s.pos += positiveArea(s.pv, v, xv - s.to);
+            s.neg += positiveArea(-s.pv, -v, xv - s.to);
+        } else s.from = xv;
+        s.to = xv;
+        s.pv = v;
+        return false;
+    }
+
+    fn result(s: EmAvg) Wave.Integral {
+        const span = s.to - s.from;
+        if (!(span > 0)) return .{ .value = nan, .from = s.from, .to = s.to };
+        return .{ .value = (@max(s.pos, s.neg) - s.c.val * @min(s.pos, s.neg)) / span, .from = s.from, .to = s.to };
+    }
+};
+
+/// `Wave.relError`.
+const RelError = struct {
+    c: Clause,
+    dc: bool,
+    func: core.MeasureFunc,
+    sum: f64 = 0,
+    count: f64 = 0,
+
+    fn feed(s: *RelError, xv: f64, m: f64, calc: f64) bool {
+        const c = s.c;
+        if (s.dc) {
+            if (xv < c.from or xv > c.to) return false;
+        } else {
+            if (xv < c.from) return false;
+            if (c.to != 0 and xv > c.to) return true;
+        }
+        if (@abs(m) < c.ymin or @abs(m) > c.ymax) return false;
+        const d = if (@abs(m) < c.minval) c.minval else m;
+        // ponytail: the manual gives no reduction for ERR3; RMS, as ERR1.
+        const e = if (s.func == .err3) std.math.sign(m / calc) * @log(@abs(m / calc)) / @log(d) else (m - calc) / d;
+        s.sum += if (s.func == .err2) @abs(e) else e * e;
+        s.count += 1;
+        return false;
+    }
+
+    fn value(s: RelError) f64 {
+        if (s.count == 0) return nan;
+        return if (s.func == .err2) s.sum / s.count else @sqrt(s.sum / s.count);
+    }
+};
+
+/// `Wave.rmsInteg`: the window's points, from the first sample at or past
+/// `from` (read as the value at a nonzero `from`) to the first past a
+/// nonzero `to` (read as the value at `to`), each panel taking the next
+/// four points' spacing; points past the window read zero, as in
+/// ngspice's zeroed buffers.
+const Integ = struct {
+    c: Clause,
+    rms: bool,
+    inside: bool = false,
+    /// Samples read, and the last one raw: an interpolated end's left side.
+    rows: usize = 0,
+    px: f64 = 0,
+    py: f64 = 0,
+    /// Window points not in a panel yet, oldest first, as (scale, value or
+    /// value squared).
+    p: [4][2]f64 = undefined,
+    np: usize = 0,
+    count: usize = 0,
+    first_x: f64 = nan,
+    cut: bool = false,
+    cut_x: f64 = nan,
+    sum: [3]f64 = .{ 0, 0, 0 },
+
+    fn feed(s: *Integ, xv: f64, v: f64) bool {
+        defer {
+            s.rows += 1;
+            s.px = xv;
+            s.py = v;
+        }
+        const c = s.c;
+        if (!s.inside) {
+            if (xv < c.from) return false;
+            s.inside = true;
+        }
+        s.cut = c.to != 0 and xv > c.to;
+        var pt: [2]f64 = .{ xv, v };
+        if (s.cut) {
+            if (s.rows > 0 and !almostEqualUlps(xv, c.to)) pt = .{ c.to, line(s.px, s.py, xv, v, c.to) };
+        } else if (s.count == 0 and c.from != 0 and s.rows > 0 and !almostEqualUlps(xv, c.from)) {
+            pt = .{ c.from, line(s.px, s.py, xv, v, c.from) };
+        }
+        if (s.rms) pt[1] = pt[1] * pt[1];
+        if (s.count == 0) s.first_x = pt[0];
+        if (s.cut) s.cut_x = pt[0];
+        s.count += 1;
+        s.p[s.np] = pt;
+        s.np += 1;
+        if (s.np == s.p.len) s.panel(s.np);
+        return s.cut;
+    }
+
+    /// Folds the oldest points into one panel; `avail` of `p` are points,
+    /// the rest read zero, and a spacing past them zero.
+    fn panel(s: *Integ, avail: usize) void {
+        assert(avail >= 2 and avail <= s.p.len);
+        var p = s.p;
+        for (p[avail..]) |*q| q.* = .{ 0, 0 };
+        var width: [3]f64 = undefined;
+        for (&width, 0..) |*d, j| d.* = if (j + 1 < avail) p[j + 1][0] - p[j][0] else 0;
+        const used: usize = if (almostEqualUlps(width[0], width[1]) and almostEqualUlps(width[0], width[2])) blk: {
+            s.sum[0] += 3 * width[0] * (p[0][1] + 3 * (p[1][1] + p[2][1]) + p[3][1]) / 8.0;
+            break :blk 3;
+        } else if (almostEqualUlps(width[0], width[1])) blk: {
+            s.sum[1] += width[0] * (p[0][1] + 4 * p[1][1] + p[2][1]) / 3.0;
+            break :blk 2;
+        } else blk: {
+            s.sum[2] += width[0] * (p[0][1] + p[1][1]) / 2;
+            break :blk 1;
+        };
+        s.np = avail -| used;
+        std.mem.copyForwards([2]f64, s.p[0..s.np], s.p[avail - s.np .. avail]);
+    }
+
+    fn result(s: *Integ) Wave.Integral {
+        if (s.rows == 0) return .{ .value = nan, .from = nan, .to = nan };
+        while (s.np > 1) s.panel(s.np);
+        const from = if (s.count > @intFromBool(s.cut)) s.first_x else nan;
+        const to = if (s.cut) s.cut_x else s.px;
+        const total = s.sum[0] + s.sum[1] + s.sum[2];
+        return .{ .value = if (s.rms) @sqrt(total / (to - from)) else total, .from = from, .to = to };
+    }
+};
+
+/// One pass of a `Stream` card, reading its columns off the stream's row.
+const Scan = struct {
+    y: Column = undefined,
+    y2: ?Column = null,
+    /// It names a vector the run lacks, which `evaluate` fails it for.
+    missing: bool = false,
+    /// No later row changes what it found.
+    over: bool = false,
+    time: [1]f64 = .{nan},
+    pass: Pass,
+
+    const Pass = union(enum) { cross: Cross, at: At, extremum: Extremum, integ: Integ, em_avg: EmAvg, rel_error: RelError };
+
+    /// `pass` over clause `c`'s vector on `w`, with its level vector
+    /// (`waveform`), its comparison vector (`column`, ERR*) or neither.
+    fn init(w: Wave, c: Clause, pass: Pass, second: enum { none, waveform, column }) Scan {
+        const missing: Scan = .{ .missing = true, .over = true, .pass = pass };
+        var s: Scan = .{ .y = w.waveform(c.vec, c.ops, c.vectype) catch return missing, .pass = pass };
+        switch (second) {
+            .none => {},
+            .waveform => if (c.vec2.len > 0) {
+                s.y2 = w.waveform(c.vec2, c.ops2, c.vectype) catch return missing;
+            },
+            .column => s.y2 = w.column(c.vec2, c.vectype) catch return missing,
+        }
+        return s;
+    }
+
+    /// Reads the row its columns point at, scale `x`.
+    fn feed(s: *Scan, x: f64) void {
+        if (s.over) return;
+        s.feedValues(x, s.y.get(0), if (s.y2) |c| c.get(0) else nan);
+    }
+
+    fn feedValues(s: *Scan, x: f64, y: f64, y2: f64) void {
+        assert(!s.over);
+        s.over = switch (s.pass) {
+            .cross => |*c| c.feed(&s.time, x, y, y2),
+            // A transient's times rise: past AT=, no later segment holds it.
+            .at => |*a| a.feed(x, y) or x > a.at,
+            .extremum => |*e| e.feed(x, y),
+            .integ => |*g| g.feed(x, y),
+            .em_avg => |*e| e.feed(x, y),
+            .rel_error => |*r| r.feed(x, y, y2),
+        };
+    }
+
+    /// What it found over the rows read, as the `Wave` function its pass
+    /// stands for returns it. Call only once it reads no more rows.
+    fn found(s: *Scan) core.Measured.Found {
+        if (s.missing) return .{ .missing = true, .v = @splat(nan) };
+        return .{ .v = switch (s.pass) {
+            .cross => |c| blk: {
+                _ = c.finish(&s.time);
+                break :blk .{ s.time[0], 0, 0 };
+            },
+            .at => |a| .{ a.value, 0, 0 },
+            .extremum => |e| blk: {
+                const r = e.stat();
+                break :blk .{ r.value, r.at, 0 };
+            },
+            .integ => |*g| blk: {
+                const r = g.result();
+                break :blk .{ r.value, r.from, r.to };
+            },
+            .em_avg => |e| blk: {
+                const r = e.result();
+                break :blk .{ r.value, r.from, r.to };
+            },
+            .rel_error => |r| .{ r.value(), 0, 0 },
+        } };
+    }
+};
+
+/// A card's passes as its run found them (`core.Measured`), handed to
+/// `evaluate` in the order it reads them.
+const Done = struct {
+    found: []const core.Measured.Found,
+    next: usize = 0,
+
+    fn take(d: *Done) error{NoSuchVector}![3]f64 {
+        assert(d.next < d.found.len);
+        const f = d.found[d.next];
+        d.next += 1;
+        return if (f.missing) error.NoSuchVector else f.v;
+    }
+};
+
+/// The wave card `i` reads over `result`: its columns, or what its run
+/// found (`core.Result.measured`) through `done`.
+fn cardWave(result: core.Result, analysis: Kind, values: []const f64, i: usize, done: *Done) Wave {
+    var w: Wave = .{ .result = result, .analysis = analysis, .values = values };
+    if (i < result.measured.len and result.measured[i].scans > 0) {
+        const m = &result.measured[i];
+        done.* = .{ .found = m.found[0..m.scans] };
+        w.done = done;
+    }
+    return w;
 }
 
 /// ngspice AlmostEqualUlps(a, b, 100) (maths/misc/equality.c).
@@ -1722,4 +2144,104 @@ test "sci prints C's %e: signed exponent of two digits or more" {
         var buf: [32]u8 = undefined;
         try std.testing.expectEqualStrings(want, try std.fmt.bufPrint(&buf, "{f}", .{sci(x, 6)}));
     }
+}
+
+/// Feeds `cards` a recording a row at a time through a `Stream`, keeping
+/// only the columns `markColumns` keeps for it, and checks that the values
+/// and the printout equal those over the whole recording; with `early`,
+/// stopping once every card has resolved. Returns the rows fed.
+fn expectStreamed(cards: []const core.Measure, early: bool) !usize {
+    const gpa = std.testing.allocator;
+    // A two-tone wave and a slow cosine on uneven steps, as a transient
+    // would record them.
+    const rows = 400;
+    var data: [3 * rows]f64 = undefined;
+    var t: f64 = 0;
+    for (0..rows) |i| {
+        data[3 * i ..][0..3].* = .{ t, @sin(t) + 0.5 * @sin(3.1 * t), 0.3 * @cos(0.7 * t) };
+        t += 0.05 + 0.04 * @abs(@sin(11 * t));
+    }
+    const names: []const []const u8 = &.{ "time", "v(a)", "v(b)" };
+    const full: core.Result = .{ .plotname = "t", .varnames = names, .is_complex = false, .npoints = rows, .data = &data };
+    const want = try gpa.alloc(f64, cards.len);
+    defer gpa.free(want);
+    evaluateAll(cards, .tran, full, want);
+    var want_text: Writer.Allocating = .init(gpa);
+    defer want_text.deinit();
+    try print(&want_text.writer, &want_text.writer, cards, .tran, full, null);
+    var keep: [3]bool = undefined;
+    markColumns(cards, names, &keep, true);
+    var recorded: std.ArrayList([]const u8) = .empty;
+    defer recorded.deinit(gpa);
+    for (names, keep) |n, on| if (on) try recorded.append(gpa, n);
+    var s: Stream = try .init(gpa, cards, names, &.{ 0, 1 }, recorded.items);
+    defer s.deinit();
+    var rec: std.ArrayList(f64) = .empty;
+    defer rec.deinit(gpa);
+    var n: usize = 0;
+    while (n < rows and !(early and s.open == 0)) : (n += 1) {
+        const row = data[3 * n ..][0..3];
+        for (keep, row) |on, v| if (on) try rec.append(gpa, v);
+        s.feed(row[0], row[1..], rec.items);
+    }
+    const measured = try s.measured(gpa);
+    defer gpa.free(measured);
+    const streamed: core.Result = .{ .plotname = "t", .varnames = recorded.items, .is_complex = false, .npoints = n, .data = rec.items, .measured = measured };
+    const got = try gpa.alloc(f64, cards.len);
+    defer gpa.free(got);
+    evaluateAll(cards, .tran, streamed, got);
+    var got_text: Writer.Allocating = .init(gpa);
+    defer got_text.deinit();
+    try print(&got_text.writer, &got_text.writer, cards, .tran, streamed, null);
+    errdefer std.debug.print("early {}: {d} rows, columns {any}\n{s}\n", .{ early, n, keep, got_text.written() });
+    try std.testing.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
+    try std.testing.expectEqualStrings(want_text.written(), got_text.written());
+    return n;
+}
+
+test "Stream measures each card as the whole recording does, to the bit, early stop too" {
+    const last = core.measure_last;
+    const sum: []const core.MeasureOp = &.{ .{ .vector = "v(a)" }, .{ .vector = "v(b)" }, .add };
+    const streamed = [_]core.Measure{
+        .{ .analysis = .tran, .name = "w", .func = .when, .first = .{ .vec = "v(a)", .val = 0.2, .rise = 2 } },
+        .{ .analysis = .tran, .name = "wv", .func = .when, .first = .{ .vec = "v(a)", .vec2 = "v(b)", .cross = 3, .td = 1 } },
+        .{ .analysis = .tran, .name = "wl", .func = .when, .first = .{ .vec = "v(a)", .val = 0.2, .fall = last, .to = 15 } },
+        .{ .analysis = .tran, .name = "wn", .func = .when, .first = .{ .vec = "v(a)", .val = 9, .to = 20 } },
+        .{ .analysis = .tran, .name = "w0", .func = .when, .first = .{ .vec = "v(a)", .val = 0.5 } },
+        .{ .analysis = .tran, .name = "tt", .func = .trig_targ, .first = .{ .vec = "v(a)", .val = 0.2, .rise = 1 }, .second = .{ .vec = "v(b)", .val = 0, .fall = 1 } },
+        .{ .analysis = .tran, .name = "ta", .func = .trig_targ, .first = .{ .at = 2 }, .second = .{ .vec = "v(a)", .val = 0, .cross = 2, .td_trig = true } },
+        .{ .analysis = .tran, .name = "fw", .func = .find, .first = .{ .vec = "v(b)" }, .second = .{ .vec = "v(a)", .val = -0.3, .fall = 2 } },
+        .{ .analysis = .tran, .name = "dw", .func = .deriv, .first = .{ .ops = sum }, .second = .{ .vec = "v(a)", .val = 0.1, .cross = 4 } },
+        .{ .analysis = .tran, .name = "fp", .func = .find, .first = .{ .vec = "v(b)" }, .second = .{ .vec = "v(a)", .val = 0.05, .rise = 1 } },
+        .{ .analysis = .tran, .name = "fa", .func = .find, .first = .{ .vec = "v(b)", .at = 4.321 } },
+        .{ .analysis = .tran, .name = "da", .func = .deriv, .first = .{ .vec = "v(a)", .at = 7.5 } },
+        .{ .analysis = .tran, .name = "mx", .func = .max, .first = .{ .vec = "v(a)", .from = 1, .to = 6 } },
+        .{ .analysis = .tran, .name = "mn", .func = .min_at, .first = .{ .vec = "v(a)", .from = 1, .to = 6 } },
+        .{ .analysis = .tran, .name = "av", .func = .avg, .first = .{ .ops = sum, .from = 2, .to = 9 } },
+        .{ .analysis = .tran, .name = "pp", .func = .pp, .first = .{ .vec = "v(b)", .to = 12 } },
+        .{ .analysis = .tran, .name = "ig", .func = .integ, .first = .{ .vec = "v(a)", .from = 0.7, .to = 8.3 } },
+        .{ .analysis = .tran, .name = "rm", .func = .rms, .first = .{ .vec = "v(a)", .to = 21 } },
+        .{ .analysis = .tran, .name = "em", .func = .em_avg, .first = .{ .vec = "v(a)", .to = 10 } },
+        .{ .analysis = .tran, .name = "e1", .func = .err1, .first = .{ .vec = "v(a)", .vec2 = "v(b)", .to = 9 } },
+        .{ .analysis = .tran, .name = "nv", .func = .max, .first = .{ .vec = "v(z)" } },
+        .{ .analysis = .tran, .name = "pr", .func = .param, .first = .{}, .expr = &.{ .{ .measure = 0 }, .{ .measure = 12 }, .add } },
+    };
+    // Every card resolves by t = 21 of 30, keeping no column but time.
+    const cut = try expectStreamed(&streamed, true);
+    try std.testing.expect(cut < 300);
+    _ = try expectStreamed(&streamed, false);
+    const t0: []const core.MeasureOp = &.{.{ .measure = 0 }};
+    const recorded = streamed ++ [_]core.Measure{
+        .{ .analysis = .tran, .name = "td", .func = .trig_targ, .first = .{ .vec = "v(b)", .val = 0, .fall = 1 }, .second = .{ .vec = "v(a)", .val = 0, .rise = 1, .td_trig = true } },
+        .{ .analysis = .tran, .name = "fd", .func = .find, .first = .{ .vec = "v(b)" }, .second = .{ .vec = "v(a)", .val = 0.1, .cross = 1, .td = 3 } },
+        .{ .analysis = .tran, .name = "fr", .func = .find, .first = .{ .vec = "v(b)", .refs = &.{.{ .field = .at, .expr = t0 }} } },
+        .{ .analysis = .tran, .name = "wr", .func = .when, .first = .{ .vec = "v(a)", .val = 0, .refs = &.{.{ .field = .td, .expr = t0 }} } },
+        // Never resolve: a LAST count, a window and JITTER without TO=.
+        .{ .analysis = .tran, .name = "fl", .func = .find, .first = .{ .vec = "v(b)" }, .second = .{ .vec = "v(a)", .val = 0.1, .rise = last } },
+        .{ .analysis = .tran, .name = "rn", .func = .rms, .first = .{ .vec = "v(a)" } },
+        .{ .analysis = .tran, .name = "ji", .func = .jitter, .first = .{ .vec = "v(a)", .val = 0 } },
+    };
+    for ([_]bool{ false, true }) |early| _ = try expectStreamed(&recorded, early);
+    // The replayed cards resolve too.
+    try std.testing.expect(try expectStreamed(recorded[0 .. recorded.len - 3], true) < 300);
 }
