@@ -48,3 +48,8 @@ obj_dir/
 /site/
 /docs/wasm/
 
+
+# PDK model links for bench/matcha (see EXAMPLES.md)
+bench/matcha/*.pm
+bench/matcha/*.mt0
+bench/matcha/espice_*.txt
