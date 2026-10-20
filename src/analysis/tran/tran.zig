@@ -1713,7 +1713,8 @@ pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome)
         return;
     };
     defer d.deinit();
-    if (ctxs[first].circuit.knobs.gpu_stats != .off) std.debug.print("gpu-lanes: {d} lanes\n", .{g});
+    d.prof.on = ctxs[first].circuit.knobs.gpu_stats != .off;
+    if (d.prof.on) std.debug.print("gpu-lanes: {d} lanes\n", .{g});
 
     const atts = gpa.alloc(Attempt, g) catch |e| {
         for (runs, live, out) |*r, *on, *o| if (on.*) {
@@ -1774,9 +1775,14 @@ pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome)
             any = true;
         }
         if (!any) break;
+        d.prof.rounds += 1;
+        d.prof.lap(.host);
         d.predictRound() catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+        d.prof.lap(.predict);
         d.newton(nr_opts, nr) catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+        d.prof.lap(.newton);
         d.probe() catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+        d.prof.lap(.probe);
         for (runs, 0..) |*r, l| {
             if (!live[l] or d.round[l] == 0) continue;
             if (nr[l].reject) {
@@ -1805,7 +1811,9 @@ pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome)
                 .underflow => Lane.done(runs, live, out, l, false),
             }
         }
+        d.prof.lap(.host);
         d.apply() catch |e| return Lane.failAll(runs, live, out, gpuError(e));
+        d.prof.lap(.apply);
     }
 }
 

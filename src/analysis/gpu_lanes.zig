@@ -215,6 +215,34 @@ const Kernels = struct {
     }
 };
 
+/// `ESPICE_GPU_STATS` wall time per round phase, printed at `deinit`.
+pub const Prof = struct {
+    on: bool = false,
+    /// Nanoseconds: host step control, predict, Newton, probe, apply.
+    ns: [5]u64 = @splat(0),
+    rounds: u64 = 0,
+    ticks: u64 = 0,
+    peels: u64 = 0,
+    last: u64 = 0,
+
+    pub const Phase = enum(u3) { host, predict, newton, probe, apply };
+
+    fn now() u64 {
+        if (comptime @import("builtin").os.tag != .linux) return 0;
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    }
+
+    /// Charges the time since the last lap to `p`.
+    pub fn lap(self: *Prof, p: Phase) void {
+        if (!self.on) return;
+        const t = now();
+        if (self.last != 0) self.ns[@intFromEnum(p)] += t - self.last;
+        self.last = t;
+    }
+};
+
 /// One lane's Newton outcome, as `converger.Result` and its singular flag.
 pub const LaneNewton = struct { result: converger.Result, singular: bool, reject: bool };
 
@@ -308,6 +336,7 @@ pub const GpuLanes = struct {
     /// Per lane, an n-long host vector whose probe rows hold the last
     /// probe's x (`Ops.accepted`).
     rows: []f64,
+    prof: Prof = .{},
 
     const Self = @This();
 
@@ -598,6 +627,15 @@ pub const GpuLanes = struct {
         const gpa = self.gpa;
         const N: usize = self.n_lanes;
         self.stream.synchronize() catch {};
+        if (self.prof.on) {
+            const p = self.prof;
+            const ms = struct {
+                fn f(ns: u64) f64 {
+                    return @as(f64, @floatFromInt(ns)) / 1e6;
+                }
+            }.f;
+            std.debug.print("gpu-lanes: {d} lanes, {d} rounds, {d} Newton ticks, {d} peels; ms host={d:.1} predict={d:.1} newton={d:.1} probe={d:.1} apply={d:.1}\n", .{ N, p.rounds, p.ticks, p.peels, ms(p.ns[0]), ms(p.ns[1]), ms(p.ns[2]), ms(p.ns[3]), ms(p.ns[4]) });
+        }
         for (self.batches, 0..) |*b, bi| {
             const is = b.inst_size;
             if (b.count == 0 or is == 0) continue;
@@ -762,7 +800,10 @@ pub const GpuLanes = struct {
             var fails: u32 = 0;
             try self.d_fails.downloadAtAsync(&fails, 0, 4, &self.stream);
             try self.stream.synchronize();
-            if (fails > 0) try self.peel();
+            if (fails > 0) {
+                self.prof.peels += fails;
+                try self.peel();
+            }
 
             try self.launch(&self.k.update, N, &.{
                 arg(&nl),               arg(&nn),              arg(&nopts),            self.d_iter.argPtr(),   self.d_active.argPtr(),
@@ -782,6 +823,7 @@ pub const GpuLanes = struct {
                 self.d_sims.argPtr(),   self.d_count.argPtr(),
             });
             try self.launch(&self.k.tick, 1, &.{self.d_iter.argPtr()});
+            self.prof.ticks += 1;
             var count: u32 = 0;
             try self.d_count.downloadAtAsync(&count, 0, 4, &self.stream);
             try self.stream.synchronize();

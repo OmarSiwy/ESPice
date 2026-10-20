@@ -31,6 +31,9 @@ pub const LaneTab = extern struct {
     up: u32, // n + 1
     ui: u32, // nnz_u
     flags: u32, // n: bit 0 void column, bit 1 scaled pivot
+    /// `SparseLu.void_slots`: the A entries a fabricated pivot needs zero.
+    void_slots: u32,
+    n_void_slots: u32,
 };
 
 pub const void_bit: u32 = 1;
@@ -49,6 +52,9 @@ pub fn Bodies(comptime P: fn (type) type) type {
             var bad = false;
             var nonfinite: u64 = 0;
             const inf = std.math.inf(f64);
+            // `SparseLu.refactor`'s precheck: a fabricated pivot's slots
+            // must still be zero.
+            for (0..t.n_void_slots) |v| if (a[@as(usize, x[t.void_slots + v]) * N + L] != 0) return true;
             for (0..t.n) |k| {
                 const c = x[t.q + k];
                 for (x[t.col_ptr + c]..x[t.col_ptr + c + 1]) |p| w[@as(usize, x[t.prow + p]) * N + L] = a[p * N + L];
@@ -61,8 +67,18 @@ pub fn Bodies(comptime P: fn (type) type) type {
                     for (x[t.lp + i]..x[t.lp + i + 1]) |pl| w[@as(usize, x[t.li + pl]) * N + L] -= lx[pl * N + L] * uki;
                 }
                 if (x[t.flags + k] & void_bit != 0) {
-                    for (0..t.n) |i| w[i * N + L] = 0;
-                    return true;
+                    // `SparseLu.refactorColumns`' fabricated pivot.
+                    udiag[k * N + L] = 1;
+                    for (x[t.lp + k]..x[t.lp + k + 1]) |p| {
+                        lx[p * N + L] = 0;
+                        w[@as(usize, x[t.li + p]) * N + L] = 0;
+                    }
+                    w[k * N + L] = 0;
+                    for (x[t.up + k]..x[t.up + k + 1]) |p| {
+                        const i: usize = x[t.ui + p];
+                        for (x[t.lp + i]..x[t.lp + i + 1]) |pl| w[@as(usize, x[t.li + pl]) * N + L] = 0;
+                    }
+                    continue;
                 }
                 var d = w[k * N + L];
                 w[k * N + L] = 0;
@@ -307,11 +323,11 @@ pub fn buildTab(gpa: std.mem.Allocator, lu: anytype, col_ptr: []const u32, growt
     const nnz = col_ptr[n];
     const nl: u32 = @intCast(lu.li.items.len);
     const nu: u32 = @intCast(lu.ui.items.len);
-    var t: LaneTab = .{ .n = n, .nnz = nnz, .nnz_l = nl, .nnz_u = nu, .growth = growth, .wide = 1 / pivot_tol, .col_ptr = 0, .prow = 0, .q = 0, .pinv = 0, .lp = 0, .li = 0, .up = 0, .ui = 0, .flags = 0 };
+    var t: LaneTab = .{ .n = n, .nnz = nnz, .nnz_l = nl, .nnz_u = nu, .growth = growth, .wide = 1 / pivot_tol, .col_ptr = 0, .prow = 0, .q = 0, .pinv = 0, .lp = 0, .li = 0, .up = 0, .ui = 0, .flags = 0, .void_slots = 0, .n_void_slots = @intCast(lu.void_slots.items.len) };
     const parts = [_]struct { *u32, []const u32 }{
-        .{ &t.col_ptr, col_ptr[0 .. n + 1] }, .{ &t.prow, lu.prow[0..nnz] }, .{ &t.q, lu.q[0..n] },
-        .{ &t.pinv, lu.pinv[0..n] },          .{ &t.lp, lu.lp[0 .. n + 1] }, .{ &t.li, lu.li.items },
-        .{ &t.up, lu.up[0 .. n + 1] },         .{ &t.ui, lu.ui.items },
+        .{ &t.col_ptr, col_ptr[0 .. n + 1] }, .{ &t.prow, lu.prow[0..nnz] },   .{ &t.q, lu.q[0..n] },
+        .{ &t.pinv, lu.pinv[0..n] },          .{ &t.lp, lu.lp[0 .. n + 1] },    .{ &t.li, lu.li.items },
+        .{ &t.up, lu.up[0 .. n + 1] },         .{ &t.ui, lu.ui.items },          .{ &t.void_slots, lu.void_slots.items },
     };
     var len: usize = n;
     for (parts) |p| len += p[1].len;
@@ -356,6 +372,9 @@ test "lane_kernels refactor and solveNeg over N lanes are bitwise LaneLu(W)'s la
         defer lead.deinit();
         lead.factor(sys.vals, .{}) catch continue;
         const lu = lead.sparse() orelse continue;
+        // LaneLu refuses a fabricated pivot outright; the bodies replay it
+        // as `SparseLu.refactor` does, so those trials have no lane oracle.
+        if (std.mem.indexOfScalar(bool, lu.void_col, true) != null) continue;
         var ll = try LaneLu(W).init(gpa, lu);
         defer ll.deinit(gpa);
         const built = try buildTab(gpa, lu, sys.col_ptr, lead.params.refactor_growth_limit, direct.pivot_tol);
