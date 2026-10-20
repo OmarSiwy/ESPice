@@ -462,7 +462,7 @@ pub const Session = struct {
     }
 
     /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`,
-    /// `.dc`, `.tran` or AC-family row `i` the leader of a lane batch with up to `lane_width -
+    /// `.dc`, `.tran`, `.pss` or AC-family row `i` the leader of a lane batch with up to `lane_width -
     /// 1` other ready, never-started rows of its kind on its template, with
     /// a prerequisite exactly when it has one, whose options differ at most
     /// in `tol.variant` and `tol.temp_c`, taken from the queue ahead.
@@ -477,7 +477,7 @@ pub const Session = struct {
         if (config.gpu_lanes and self.rows.items(.job)[i] == .tran and self.rows.items(.executor)[i] == null) return self.gatherWide(i);
         if (!execution.lanesOn(config) or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
-        const laned = jobs[i] == .op or jobs[i] == .dc or jobs[i] == .tran or execution.freqLaneKind(jobs[i]);
+        const laned = jobs[i] == .op or jobs[i] == .dc or jobs[i] == .tran or jobs[i] == .pss or execution.freqLaneKind(jobs[i]);
         if (!laned or self.rows.items(.executor)[i] != null) return;
         var peers: [lane_width - 1]usize = undefined;
         var n: usize = 0;
@@ -1065,7 +1065,7 @@ const lane_window = 8 * execution.lane_width;
 fn sameLaneJob(a: requests.Query, b: requests.Query) bool {
     return switch (a) {
         // The AC family's list is `execution.freqLaneKind`'s; keep the two adjacent in review.
-        inline .op, .dc, .tran, .ac, .noise, .sp, .stb, .lstb, .acxf, .tf, .dcxf, .dcinc, .sens, .dcmatch, .dcsens, .acmatch => |o, tag| b == tag and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
+        inline .op, .dc, .tran, .pss, .ac, .noise, .sp, .stb, .lstb, .acxf, .tf, .dcxf, .dcinc, .sens, .dcmatch, .dcsens, .acmatch => |o, tag| b == tag and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
         else => false,
     };
 }
