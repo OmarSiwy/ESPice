@@ -499,17 +499,20 @@ test "lane batches: OP and .dc rows at several temperatures group into batches a
     // More rows than one batch holds, and a lone tolerance set that groups
     // with nobody.
     const temps = [_]f64{ -40, 0, 27, 85, 150, 27, 400, 1000, 60, -10 };
-    // Each temperature's OP, then a `.dc` of the source from that point.
-    var jobs: [2 * temps.len + 1]requests.Query = undefined;
+    // Each temperature's OP, then a `.dc` of the source from that point,
+    // then a transient.
+    var jobs: [3 * temps.len + 1]requests.Query = undefined;
     const target: requests.Dc.SweepTarget = .{ .device = .{ .type = builtin("vsource") } };
-    for (jobs[0..temps.len], jobs[temps.len..][0..temps.len], temps) |*j, *d, temp| {
+    for (jobs[0..temps.len], jobs[temps.len..][0..temps.len], jobs[2 * temps.len ..][0..temps.len], temps) |*j, *d, *tr, temp| {
         j.* = .{ .op = .{ .tol = .{ .temp_c = temp } } };
         d.* = .{ .dc = .{ .target = target, .start = 0, .stop = 3, .step = 0.25, .tol = .{ .temp_c = temp } } };
+        tr.* = .{ .tran = .{ .t_stop = 2e-6, .tol = .{ .temp_c = temp } } };
     }
-    jobs[2 * temps.len] = .{ .op = .{ .tol = .{ .reltol = 1e-4 } } };
+    jobs[3 * temps.len] = .{ .op = .{ .tol = .{ .reltol = 1e-4 } } };
     var out: [2][]f64 = undefined;
     var batched: usize = 0;
     var dc_batched: usize = 0;
+    var tran_batched: usize = 0;
     for ([_]bool{ false, true }, &out) |lanes, *o| {
         var config: @import("../executor.zig").Config = .{};
         config.knobs.lanes = lanes;
@@ -522,6 +525,7 @@ test "lane batches: OP and .dc rows at several temperatures group into batches a
         for (s.rows.items(.executor), s.rows.items(.job)) |e, j| {
             batched += e.?.peers.len;
             dc_batched += if (j == .dc) e.?.peers.len else 0;
+            tran_batched += if (j == .tran) e.?.peers.len else 0;
         }
         var list: std.ArrayList(f64) = .empty;
         errdefer list.deinit(t.allocator);
@@ -529,8 +533,88 @@ test "lane batches: OP and .dc rows at several temperatures group into batches a
         o.* = try list.toOwnedSlice(t.allocator);
     }
     defer for (out) |o| t.allocator.free(o);
-    try t.expect(batched > 0 and dc_batched > 0);
+    try t.expect(batched > 0 and dc_batched > 0 and tran_batched > 0);
     try t.expectEqualSlices(u64, @ptrCast(out[0]), @ptrCast(out[1]));
+}
+
+test "lane batches: .tran rows (a moved source edge, a NaN and an extreme lane) group into batches and each equals its run alone, bitwise" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    // PULSE(0 1 1ns 50ps 50ps 2ns 6ns): the variant rows move its delay.
+    try b.addDevice(models.vsource, "", &.{ .waveform = 1, .pulse_v1 = 0, .pulse_v2 = 1, .pulse_td = 1e-9, .pulse_tr = 5e-11, .pulse_tf = 5e-11, .pulse_pw = 2e-9, .pulse_per = 6e-9 }, &.{}, .{ vin, GROUND });
+    var prev = vin;
+    for (0..4) |_| {
+        const mid = try b.addNode();
+        try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ prev, mid });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-12 }, &.{}, .{ mid, GROUND });
+        try b.addDevice(models.diode, "", &.{ .is = 1e-14, .cjo = 1e-13 }, &.{}, .{ mid, GROUND });
+        prev = mid;
+    }
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    var probe = try @import("../types.zig").Circuit.instantiate(&prepared, t.allocator);
+    defer probe.deinit();
+    const params = try probe.collectParams();
+    const find = struct {
+        fn f(ps: []const @import("../types.zig").ParamRef, ty: @import("device").abi.DeviceType, name: []const u8) !u32 {
+            for (ps, 0..) |p, k| if (p.type == ty and p.index == 0 and std.mem.eql(u8, p.param_name, name)) return @intCast(k);
+            return error.TestUnexpectedResult;
+        }
+    }.f;
+    const r_ref = try find(params, builtin("resistor"), "r");
+    const td_ref = try find(params, builtin("vsource"), "pulse_td");
+    // Rows 0..7 write the first resistor; rows 8..11 the source delay (one
+    // edge moved per row). Repeated values replicate a lane.
+    const refs = [_]u32{ r_ref, r_ref, r_ref, r_ref, r_ref, r_ref, r_ref, r_ref, td_ref, td_ref, td_ref, td_ref };
+    const values = [_]f64{ 1e3, 2e3, std.math.nan(f64), 1e-30, 1e3, 5e3, 1e12, 7e3, 1e-9, 1.25e-9, 0.5e-9, 1e-9 };
+    var labels: [values.len][]const u8 = undefined;
+    var starts: [values.len + 1]u32 = undefined;
+    var temps: [values.len]?f64 = undefined;
+    for (&labels, starts[0..values.len], &temps, 0..) |*l, *s0, *tc, k| {
+        l.* = "row";
+        s0.* = @intCast(k);
+        tc.* = null;
+    }
+    starts[values.len] = values.len;
+    var deck = bareDeck(&.{ vin, prev }, &.{ "v(in)", "v(out)" });
+    deck.variants = .{ .labels = &labels, .temp_c = &temps, .starts = &starts, .refs = &refs, .values = &values };
+    deck.cards = &.{.{ .type = builtin("vsource"), .index = 0, .name = "v1" }};
+    var jobs: [values.len]requests.Query = undefined;
+    for (&jobs, 0..) |*j, k| j.* = .{ .tran = .{ .t_stop = 8e-9, .dt_init = 2e-11, .tol = .{ .variant = @intCast(k) } } };
+    const Row = struct { status: Status, failure: ?@import("../session.zig").Failure, data: []f64 };
+    var rows: [2][jobs.len]Row = undefined;
+    var tran_batched: usize = 0;
+    for ([_]bool{ false, true }, &rows) |lanes, *out| {
+        var config: @import("../executor.zig").Config = .{};
+        config.knobs.lanes = lanes;
+        var s = Session.init(t.allocator, t.io, &prepared, &deck, config);
+        defer s.deinit();
+        var ids: [jobs.len]requests.QueryId = undefined;
+        _ = try s.append(&jobs, &ids);
+        try s.runAll(.{ .max_parallel = 1, .quantum = .completion });
+        for (s.rows.items(.executor), s.rows.items(.job)) |e, j| if (e) |x| {
+            if (j == .tran) tran_batched += x.peers.len;
+        };
+        for (ids, out) |id, *r| {
+            const q = try s.info(id);
+            r.* = .{ .status = q.status, .failure = q.failure, .data = &.{} };
+            if (q.status == .complete) r.data = try t.allocator.dupe(f64, (try s.result(id)).data);
+        }
+    }
+    defer for (rows) |rs| for (rs) |r| t.allocator.free(r.data);
+    try t.expect(tran_batched > 0);
+    var completed: usize = 0;
+    for (rows[0], rows[1]) |a, c| {
+        try t.expectEqual(a.status, c.status);
+        try t.expectEqual(a.failure, c.failure);
+        try t.expectEqualSlices(u64, @ptrCast(a.data), @ptrCast(c.data));
+        completed += @intFromBool(a.status == .complete);
+    }
+    // The NaN row fails; the moved edges and extremes still complete.
+    try t.expect(completed > jobs.len / 2 and completed < jobs.len);
 }
 
 test "lane batches: a NaN value, failing, peeling and re-pivoting lanes leave the others bitwise and fail as they do alone" {

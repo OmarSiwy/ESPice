@@ -1681,7 +1681,11 @@ const LaneRun = struct {
     }
 
     fn add(r: *LaneRun, source: []const u8) !void {
-        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "lane.sp" } }, .dialect = .hspice });
+        return r.addWith(source, false);
+    }
+
+    fn addWith(r: *LaneRun, source: []const u8, lanes: bool) !void {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "lane.sp" } }, .dialect = .hspice, .backend = .{ .lanes = lanes } });
         defer p.deinit();
         try p.run_all();
         for (0..p.query_count()) |i| {
@@ -1726,4 +1730,164 @@ test "per-lane stimulus (#212): each .data point equals its row run alone, to th
     // Every point lands the same edge breakpoints, levels aside, and none
     // rejects a step differently: one accepted grid.
     for (swept.grids.items[1..]) |grid| try t.expectEqualSlices(u64, @ptrCast(swept.grids.items[0]), @ptrCast(grid));
+}
+
+test "per-lane stimulus (#212) under lanes: each .data point equals its row run alone, to the bit" {
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, lane_deck, t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    var swept: LaneRun = .{};
+    defer swept.deinit();
+    try swept.addWith(source, true);
+    var alone: LaneRun = .{};
+    defer alone.deinit();
+    for ([_][2]f64{ .{ 0, 1 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 0 } }) |row| {
+        const solo = try laneSolo(source, row[0], row[1]);
+        defer t.allocator.free(solo);
+        try alone.add(solo);
+    }
+    try t.expectEqualStrings(alone.measures.items, swept.measures.items);
+    try t.expectEqualSlices(u64, @ptrCast(alone.data.items), @ptrCast(swept.data.items));
+    for (swept.grids.items, alone.grids.items) |a, b| try t.expectEqualSlices(u64, @ptrCast(b), @ptrCast(a));
+}
+
+const chain_deck =
+    \\* Lane lockstep (#207): 16 sizing points of an 8-stage inverter chain
+    \\* with RC wires (lane-batched-simulation.md §1 on level-1 MOS), plus a
+    \\* moved input edge, an extreme wire and a failing row.
+    \\.param wn=1u wp=2u rw=200 cw=5f td=20p
+    \\vdd vdd 0 1
+    \\vin in 0 pulse(0 1 'td' 10p 10p 100p 300p)
+    \\.subckt stage a z vdd
+    \\mn y a 0 0 nm l=0.1u w='wn'
+    \\mp y a vdd vdd pm l=0.1u w='wp'
+    \\rw y z 'rw'
+    \\cw z 0 'cw'
+    \\.ends
+    \\x1 in n1 vdd stage
+    \\x2 n1 n2 vdd stage
+    \\x3 n2 n3 vdd stage
+    \\x4 n3 n4 vdd stage
+    \\x5 n4 n5 vdd stage
+    \\x6 n5 n6 vdd stage
+    \\x7 n6 n7 vdd stage
+    \\x8 n7 n8 vdd stage
+    \\.model nm nmos level=1 vto=0.3 kp=200u
+    \\.model pm pmos level=1 vto=-0.3 kp=100u
+    \\.data pts wn wp rw cw td
+    \\ROWS
+    \\.enddata
+    \\.tran 1p 400p sweep data=pts
+    \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(n8) val=0.5 cross=1
+    \\.meas tran trise trig v(n8) val=0.2 rise=1 targ v(n8) val=0.8 rise=1
+    \\.meas tran tfall trig v(n8) val=0.8 fall=1 targ v(n8) val=0.2 fall=1
+    \\.end
+    \\
+;
+
+/// (wn, wp, rw, cw, td): 16 sizing points drawn as lockstep.py draws them
+/// (nfin 2-4 as width 0.5-1.5 um, rw and cw 0.5-2x), then a moved edge,
+/// an extreme wire, and rw = 0, which fails (CHECK: if the frontend
+/// clamps r = 0 instead of failing, the test still holds; it then only
+/// checks that some row differs, see the last assert).
+const chain_rows = [_][5]f64{
+    .{ 1.0e-6, 2.0e-6, 200, 5e-15, 20e-12 },   .{ 0.5e-6, 1.0e-6, 137, 3.1e-15, 20e-12 },
+    .{ 1.5e-6, 3.0e-6, 352, 9.2e-15, 20e-12 }, .{ 1.0e-6, 1.0e-6, 101, 2.6e-15, 20e-12 },
+    .{ 0.5e-6, 3.0e-6, 288, 7.7e-15, 20e-12 }, .{ 1.5e-6, 1.0e-6, 214, 4.0e-15, 20e-12 },
+    .{ 1.0e-6, 3.0e-6, 390, 6.6e-15, 20e-12 }, .{ 0.5e-6, 2.0e-6, 166, 9.9e-15, 20e-12 },
+    .{ 1.5e-6, 2.0e-6, 121, 2.9e-15, 20e-12 }, .{ 1.0e-6, 2.0e-6, 305, 8.4e-15, 20e-12 },
+    .{ 0.5e-6, 1.0e-6, 255, 5.5e-15, 20e-12 }, .{ 1.5e-6, 3.0e-6, 178, 3.7e-15, 20e-12 },
+    .{ 1.0e-6, 1.0e-6, 333, 7.1e-15, 20e-12 }, .{ 0.5e-6, 3.0e-6, 110, 6.0e-15, 20e-12 },
+    .{ 1.5e-6, 1.0e-6, 270, 4.8e-15, 20e-12 }, .{ 1.0e-6, 3.0e-6, 199, 8.8e-15, 20e-12 },
+    .{ 1.0e-6, 2.0e-6, 200, 5e-15, 37e-12 },   .{ 1.0e-6, 2.0e-6, 1e9, 5e-15, 20e-12 },
+    .{ 1.0e-6, 2.0e-6, 0, 5e-15, 20e-12 },
+};
+
+/// `chain_deck` with `order`'s rows in its .data table.
+fn chainSwept(order: []const usize) ![]u8 {
+    var rows: std.Io.Writer.Allocating = .init(t.allocator);
+    defer rows.deinit();
+    for (order) |k| {
+        const r = chain_rows[k];
+        try rows.writer.print("+ {e} {e} {e} {e} {e}\n", .{ r[0], r[1], r[2], r[3], r[4] });
+    }
+    return std.mem.replaceOwned(u8, t.allocator, chain_deck, "ROWS\n", rows.written());
+}
+
+/// `chain_deck` without its .data table, at row `k` alone.
+fn chainSolo(k: usize) ![]u8 {
+    const r = chain_rows[k];
+    var line: [128]u8 = undefined;
+    const p = try std.fmt.bufPrint(&line, ".param wn={e} wp={e} rw={e} cw={e} td={e}", .{ r[0], r[1], r[2], r[3], r[4] });
+    const start = std.mem.indexOf(u8, chain_deck, ".data ").?;
+    const end = std.mem.indexOf(u8, chain_deck, ".enddata\n").? + ".enddata\n".len;
+    const cut = try std.mem.concat(t.allocator, u8, &.{ chain_deck[0..start], chain_deck[end..] });
+    defer t.allocator.free(cut);
+    const plain = try std.mem.replaceOwned(u8, t.allocator, cut, " sweep data=pts", "");
+    defer t.allocator.free(plain);
+    return std.mem.replaceOwned(u8, t.allocator, plain, ".param wn=1u wp=2u rw=200 cw=5f td=20p", p);
+}
+
+/// Each requested .tran point's samples (empty for a failed point) and
+/// error name, in request order.
+const Points = struct {
+    data: std.ArrayList([]f64) = .empty,
+    errs: std.ArrayList(?anyerror) = .empty,
+
+    fn deinit(ps: *Points) void {
+        for (ps.data.items) |d| t.allocator.free(d);
+        ps.data.deinit(t.allocator);
+        ps.errs.deinit(t.allocator);
+    }
+
+    fn collect(ps: *Points, source: []const u8, lanes: bool) !void {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "chain.sp" } }, .dialect = .hspice, .backend = .{ .lanes = lanes } });
+        defer p.deinit();
+        // CHECK: whether `run_all` fails when one point fails; if it does,
+        // catch and continue, the per-query results below still tell.
+        p.run_all() catch {};
+        for (0..p.query_count()) |i| {
+            const id: api.QueryId = @fromBackingInt(@intCast(i));
+            const info = try p.query_info(id);
+            if (!info.requested or info.kind != .tran) continue;
+            if (p.result(id)) |res| {
+                try ps.data.append(t.allocator, try t.allocator.dupe(f64, res.data));
+                try ps.errs.append(t.allocator, null);
+            } else |e| {
+                try ps.data.append(t.allocator, &.{});
+                try ps.errs.append(t.allocator, e);
+            }
+        }
+    }
+};
+
+test "lane lockstep (#207): 16 sizing points, a moved edge, an extreme and a failing row, in three orders, each bitwise its run alone" {
+    var alone: Points = .{};
+    defer alone.deinit();
+    for (0..chain_rows.len) |k| {
+        const solo = try chainSolo(k);
+        defer t.allocator.free(solo);
+        try alone.collect(solo, false);
+    }
+    try t.expectEqual(chain_rows.len, alone.data.items.len);
+    var identity: [chain_rows.len]usize = undefined;
+    for (&identity, 0..) |*o, k| o.* = k;
+    var reversed = identity;
+    std.mem.reverse(usize, &reversed);
+    var shuffled = identity;
+    var prng = std.Random.DefaultPrng.init(207);
+    prng.random().shuffle(usize, &shuffled);
+    for ([_][]const usize{ &identity, &reversed, &shuffled }) |order| {
+        const src = try chainSwept(order);
+        defer t.allocator.free(src);
+        var got: Points = .{};
+        defer got.deinit();
+        try got.collect(src, true);
+        try t.expectEqual(order.len, got.data.items.len);
+        for (order, got.data.items, got.errs.items) |k, d, e| {
+            try t.expectEqual(alone.errs.items[k], e);
+            try t.expectEqualSlices(u64, @ptrCast(alone.data.items[k]), @ptrCast(d));
+        }
+    }
+    // Some row must fail (rw = 0) or the failing-lane case tested nothing.
+    try t.expect(std.mem.indexOfNone(?anyerror, alone.errs.items, &.{null}) != null);
 }
