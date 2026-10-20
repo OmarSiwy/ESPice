@@ -46,7 +46,6 @@ pub fn build(b: *Build) void {
     for (models, gen) |m, *out| {
         const run = b.addRunArtifact(vera_exe);
         run.addArg(b.fmt("--expect-module={s}", .{m.module}));
-        if (m.std) |spec| run.addArg(b.fmt("--std={s}", .{spec}));
         if (m.hdl == .verilog_a) {
             run.addArgs(&.{ "--emit-zig", "--allow=W0650", "--allow=W0651", "--allow=W0850", "--color=never", "--check", "--display=drop" });
             if (escape_models.has(m.name)) run.addArg("--allow=W0149");
@@ -63,7 +62,13 @@ pub fn build(b: *Build) void {
         }
         run.addArg("-o");
         out.* = run.addOutputFileArg2(b.fmt("{s}.zig", .{m.name}), .{});
-        run.addFileArg(m.src);
+        // VerA compiles Verilog-AMS as VAMS-2023 only; an older keyword set
+        // comes from `begin_keywords (LRM §10.6) around the unedited source,
+        // found through its own directory (`inc_dirs[0]`).
+        run.addFileArg(if (m.std) |spec| b.addWriteFiles().add(b.fmt("{s}_std.va", .{m.name}), b.fmt(
+            "`begin_keywords \"{s}\"\n`include \"{s}\"\n`end_keywords\n",
+            .{ spec, std.fs.path.basename(m.file) },
+        )) else m.src);
     }
 
     const g = graph(M, vera, gompute.module("gompute"), models, gen, bo);

@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.18.0-dev.349+d924f83bf",
     .dependencies = .{
         .vera = .{
-            .url = "file:///home/omare/.cache/espice-pins/vera-a9ca4351.tar.gz",
-            .hash = "vera-0.10.4-fzAu7BqkYgEudecwh4zBoK3Nec-g6T8aO1XH7KZvhY0k",
+            .url = "git+https://github.com/OmarSiwy/VerA#c2e5488054b3174cc694fa36cb4b2a6ab4bf0123",
+            .hash = "vera-0.11.0-fzAu7NVdZQEDxbNcpyOmE7cFmaHHbg9gWrlOPlQ2ESj4",
         },
         .gompute = .{
             .url = "git+https://github.com/OmarSiwy/Gompute#406cce2e14f665009b2148d421f931714a0367b3",
