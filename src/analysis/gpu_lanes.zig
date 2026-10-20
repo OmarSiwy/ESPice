@@ -94,7 +94,8 @@ const LaneBatch = struct {
     eval: Raw,
     lim: ?Raw,
     ctl: ?Raw,
-    qtp: ?Raw,
+    /// `arp_lchg_<model>`: charges into the q plane and the tape.
+    chg: ?Raw,
     count: u32,
     has_lim: bool,
     /// This batch's offset into the charge tape.
@@ -116,7 +117,7 @@ const LaneBatch = struct {
         inline for (.{ "d_models", "d_model_of", "d_instances", "d_states", "d_lim", "d_gath", "d_rhs_idx", "d_slots", "d_limw" }) |f| @field(self, f).free();
         if (self.lim) |*k| k.deinit();
         if (self.ctl) |*k| k.deinit();
-        if (self.qtp) |*k| k.deinit();
+        if (self.chg) |*k| k.deinit();
         self.eval.deinit();
     }
 };
@@ -401,19 +402,19 @@ pub const GpuLanes = struct {
             errdefer if (lim) |*x| x.deinit();
             var ctl: ?Raw = null;
             errdefer if (ctl) |*x| x.deinit();
-            var qtp: ?Raw = null;
-            errdefer if (qtp) |*x| x.deinit();
+            var chg: ?Raw = null;
+            errdefer if (chg) |*x| x.deinit();
             if (p0.lim_kernel.len > 0) lim = try gompute.rawKernelByName(backend.?, laneName(&name, p0.kernel, "lim").?, 0);
             if (p0.ctl_kernel.len > 0) ctl = try gompute.rawKernelByName(backend.?, laneName(&name, p0.kernel, "ctl").?, 0);
             const tape_len: u32 = if (b0.hooks.q_tape) |f| @intCast(f(b0.ctx).len) else 0;
-            if (b0.hooks.q_tape != null) qtp = try gompute.rawKernelByName(backend.?, laneName(&name, p0.kernel, "qtp").?, 0);
+            if (b0.has_charge) chg = try gompute.rawKernelByName(backend.?, laneName(&name, p0.kernel, "chg").?, 0);
             const pk = try pack(gpa, ps);
             defer pk.deinit(gpa);
             batches[bi] = .{
                 .eval = eval,
                 .lim = lim,
                 .ctl = ctl,
-                .qtp = qtp,
+                .chg = chg,
                 .count = p0.count,
                 .has_lim = p0.lim_x.len > 0,
                 .tape_off = tape_off,
@@ -894,13 +895,14 @@ pub const GpuLanes = struct {
         try self.d_flags.fillAsync(0, N * 4, &self.stream);
         try self.ctlPass();
         @memset(self.ops, 0);
-        // 2. The planes at x, and the tape into each lane's logical slot 0.
-        try self.evalAll(&self.d_round, &self.d_x);
-        if (self.n_qt > 0) {
+        // 2. The charges at x (`Sim.end`'s `evalQ`), and the tape into each
+        // lane's logical slot 0.
+        if (self.has_charge) {
             const nh: usize = self.n_hist;
             for (self.slot0, 0..) |*s, l| s.* = self.perm_qt[l * nh];
-            try self.d_slot0.upload(self.slot0.ptr, N);
-            try self.tapePass(&self.d_round, &self.d_x);
+            try self.chargePass(&self.d_round, &self.d_x);
+        }
+        if (self.n_qt > 0) {
             // 3. The LTE bounds.
             var nl: u64 = N;
             var n_hist: u64 = self.n_hist;
@@ -971,12 +973,8 @@ pub const GpuLanes = struct {
     /// (`sqt[3]`), then `arp_lane_rebase`.
     fn rebaseRound(self: *Self) !void {
         const N: usize = self.n_lanes;
-        try self.evalAll(&self.d_accept, &self.d_cur);
-        if (self.n_qt > 0) {
-            for (self.slot0, self.sc) |*s, sc| s.* = sc.sqt[3];
-            try self.d_slot0.upload(self.slot0.ptr, N);
-            try self.tapePass(&self.d_accept, &self.d_cur);
-        }
+        for (self.slot0, self.sc) |*s, sc| s.* = sc.sqt[3];
+        try self.chargePass(&self.d_accept, &self.d_cur);
         var nl: u64 = N;
         var n: u64 = self.n;
         var n_qt: u64 = self.n_qt;
@@ -988,22 +986,26 @@ pub const GpuLanes = struct {
         });
     }
 
-    /// Every batch's lane tape kernel at `x` for the lanes of `mask`, into
-    /// each lane's tape slot `d_slot0[l]`.
-    fn tapePass(self: *Self, mask: *Buffer, x: *Buffer) !void {
+    /// `Circuit.evalQ` at `x` for the lanes of `mask`: the q plane zeroed,
+    /// then every charged batch's lane charge kernel, which also writes the
+    /// tape into each lane's slot `slot0[l]` (uploaded here).
+    fn chargePass(self: *Self, mask: *Buffer, x: *Buffer) !void {
         const N: usize = self.n_lanes;
+        try self.d_slot0.upload(self.slot0.ptr, N);
+        try self.d_q.fillAsync(0, (self.n + 1) * N * @sizeOf(f64), &self.stream);
         for (self.batches) |*b| {
-            const k = if (b.qtp) |*k| k else continue;
+            const k = if (b.chg) |*k| k else continue;
             if (b.count == 0) continue;
             var nl: u64 = N;
             var count: u64 = b.count;
             var n_hist: u64 = self.n_hist;
             var n_qt: u64 = self.n_qt;
             var off: u64 = b.tape_off;
-            try self.launch(k, b.count * N, &.{
-                arg(&nl),             arg(&count),            mask.argPtr(),           self.d_sims.argPtr(),   x.argPtr(),
-                b.d_gath.argPtr(),    b.d_models.argPtr(),    b.d_model_of.argPtr(),   b.d_instances.argPtr(), self.d_ring_qt.argPtr(),
-                self.d_slot0.argPtr(), arg(&n_hist),          arg(&n_qt),              arg(&off),
+            try self.launch(k, N, &.{
+                arg(&nl),               arg(&count),           mask.argPtr(),           self.d_sims.argPtr(),   x.argPtr(),
+                b.d_gath.argPtr(),      b.d_rhs_idx.argPtr(),  b.d_models.argPtr(),     b.d_model_of.argPtr(),  b.d_instances.argPtr(),
+                self.d_q.argPtr(),      self.d_ring_qt.argPtr(), self.d_slot0.argPtr(), arg(&n_hist),           arg(&n_qt),
+                arg(&off),
             });
         }
     }

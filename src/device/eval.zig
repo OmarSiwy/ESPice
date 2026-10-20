@@ -2927,6 +2927,8 @@ fn LaneSink(comptime D: type) type {
         /// Lane-major lim plane: instance id's limited unknown `at(u)` at
         /// `(id * k + at(u)) * n + l`.
         lim_: gompute.GlobalPtr(f64),
+        /// Lane l's tape slot (`LaneChargeKernel`), else undefined.
+        tape_: gompute.GlobalPtr(f64) = undefined,
 
         pub const skip_g = false;
         pub const skip_c = false;
@@ -2968,6 +2970,10 @@ fn LaneSink(comptime D: type) type {
         }
         pub inline fn scatterQJac(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
             s.c_vals[s.at(s.slot(id, ru, cu))] += val;
+        }
+        /// LTE site `j` of instance `id` into lane l's tape slot.
+        pub inline fn tapeQ(s: *const Sk, id: u32, j: usize, qv: f64) void {
+            s.tape_[@as(usize, id) * (comptime lteSites(D).len) + j] = qv;
         }
     };
 }
@@ -3132,13 +3138,13 @@ fn LaneCtlKernel(comptime D: type, comptime block_size: u32) type {
     };
 }
 
-/// GPU lane charge-tape kernel: `QTapeKernel` per (instance, lane), lanes
-/// innermost, at lane l's x, writing its LTE sites into ring slot
-/// `slot0[l]` of lane l's lane-minor tape ring: site j of instance id at
-/// `((l * n_hist + slot0[l]) * n_qt) + off + id * sites + j`.
-fn LaneQTapeKernel(comptime D: type, comptime block_size: u32) type {
-    const n_u: usize = comptime contract.nU(D);
-    const sites = comptime lteSites(D);
+/// GPU lane charge kernel: the device side of `Circuit.evalQ` for lane l of
+/// `n_lanes` (thread l walks every instance, as `LaneEvalKernel`):
+/// `evalQRange` adds each instance's charges into lane l's q plane (zeroed
+/// first) and writes its LTE sites into slot `slot0[l]` of lane l's
+/// lane-minor tape ring, site j of instance id at `((l * n_hist +
+/// slot0[l]) * n_qt) + off + id * sites + j`. Skips `mask[l] == 0`.
+fn LaneChargeKernel(comptime D: type, comptime block_size: u32) type {
     return struct {
         pub fn run(
             n_lanes: u64,
@@ -3147,9 +3153,11 @@ fn LaneQTapeKernel(comptime D: type, comptime block_size: u32) type {
             sims: gompute.GlobalPtr(SimState),
             xs: gompute.GlobalPtr(f64),
             gath: gompute.GlobalPtr(u32),
+            rhs_idx: gompute.GlobalPtr(u32),
             models: gompute.GlobalPtr(D.Model),
             model_of: gompute.GlobalPtr(u32),
             instances: gompute.GlobalPtr(D.Instance),
+            q_vec: gompute.GlobalPtr(f64),
             tape: gompute.GlobalPtr(f64),
             slot0: gompute.GlobalPtr(u8),
             n_hist: u64,
@@ -3157,18 +3165,27 @@ fn LaneQTapeKernel(comptime D: type, comptime block_size: u32) type {
             off: u64,
         ) callconv(gompute.kernel_callconv) void {
             const tid = gompute.globalIdX(block_size);
-            if (tid >= n_lanes * count) return;
-            const n: usize = @intCast(n_lanes);
-            const l: usize = @intCast(tid % n_lanes);
-            const id: usize = @intCast(tid / n_lanes);
+            if (tid >= n_lanes) return;
+            const l: u32 = @intCast(tid);
             if (mask[l] == 0) return;
-            const S = RealFor(@hasDecl(D, "collapse"));
-            var lx: [n_u]f64 = undefined;
-            inline for (0..n_u) |u| lx[u] = xs[@as(usize, gath[id * n_u + u]) * n + l];
-            const qs = D.q(S, &lx, @addrSpaceCast(&models[model_of[id * n + l]]), @addrSpaceCast(&instances[id * n + l]), sims[l]);
-            const mf = mfactorOf(D, &instances[id * n + l]);
-            const base = (l * @as(usize, @intCast(n_hist)) + slot0[l]) * @as(usize, @intCast(n_qt)) + @as(usize, @intCast(off)) + id * sites.len;
-            inline for (sites, 0..) |k, j| tape[base + j] = qs[k].v * mf;
+            var sink: LaneSink(D) = .{
+                .n = @intCast(n_lanes),
+                .l = l,
+                .xs = xs,
+                .gath_ = gath,
+                .rhs_idx_ = rhs_idx,
+                .slots_ = undefined,
+                .models_ = models,
+                .model_of_ = model_of,
+                .instances_ = instances,
+                .g_vals = undefined,
+                .c_vals = undefined,
+                .rhs = undefined,
+                .q_vec = q_vec,
+                .lim_ = undefined,
+                .tape_ = tape + ((@as(usize, l) * @as(usize, @intCast(n_hist)) + slot0[l]) * @as(usize, @intCast(n_qt)) + @as(usize, @intCast(off))),
+            };
+            evalQRange(D, RealFor(@hasDecl(D, "collapse")), &sink, 0, @intCast(count), sims[l], null);
         }
     };
 }
@@ -3344,7 +3361,7 @@ comptime {
                         gompute.exportRaw(laneKernelName(D, "eval"), &LaneEvalKernel(D, lb).run);
                         if (hasStateKernel(D)) gompute.exportRaw(laneKernelName(D, "lim"), &LaneStateKernel(D, lb).run);
                         if (hasCtlKernel(D)) gompute.exportRaw(laneKernelName(D, "ctl"), &LaneCtlKernel(D, lb).run);
-                        if (@hasDecl(D, "q")) gompute.exportRaw(laneKernelName(D, "qtp"), &LaneQTapeKernel(D, lb).run);
+                        if (@hasDecl(D, "q")) gompute.exportRaw(laneKernelName(D, "chg"), &LaneChargeKernel(D, lb).run);
                     }
                 } else gompute.exportRaw("arp_nop_" ++ decl_name, &placeholder);
             } else {
