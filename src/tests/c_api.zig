@@ -825,19 +825,53 @@ test "C points: 16 points measure tpd, energy and leakage analytically, and matc
     const handle = try createDialect(swept.items, &.{}, c.ESPICE_HSPICE);
     defer _ = c.espice_destroy(handle);
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(handle));
-    // A swept deck's points start at its first requested query.
-    var count: u32 = 0;
-    try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(handle, &count));
-    const first = for (0..count) |id| {
-        var info: c.espice_query_info = undefined;
-        try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_get_query_info(handle, @intCast(id), &info));
-        if (info.requested == 1) break @as(u32, @intCast(id));
-    } else return error.NoRequestedQuery;
+    const first = try firstRequested(handle);
     var data: [16 * 3]f64 = undefined;
     var data_reasons: [16]u32 = undefined;
     try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_copy_point_measures(handle, first, 16, &rc_names, 3, &data, &data_reasons));
     try t.expectEqualSlices(u32, &reasons, &data_reasons);
     try expectSameBits(&got, &data);
+}
+
+/// A swept deck's points start at its first requested query.
+fn firstRequested(h: *c.espice_problem) !u32 {
+    var count: u32 = 0;
+    try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_query_count(h, &count));
+    return for (0..count) |id| {
+        var info: c.espice_query_info = undefined;
+        try std.testing.expectEqual(@as(u32, c.ESPICE_OK), c.espice_get_query_info(h, @intCast(id), &info));
+        if (info.requested == 1) break @as(u32, @intCast(id));
+    } else error.NoRequestedQuery;
+}
+test "C points: the per-lane stimulus rows (#212) equal their .data sweep bit for bit" {
+    const t = std.testing;
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/fixtures/variants/data_lane_stimulus.sp", t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    const names = [_]c.espice_bytes{ .{ .data = "tpd", .len = 3 }, .{ .data = "tpd2", .len = 4 }, .{ .data = "slew", .len = 4 } };
+    var data: [4 * 3]f64 = undefined;
+    var data_reasons: [4]u32 = undefined;
+    {
+        const h = try createDialect(source, &.{}, c.ESPICE_HSPICE);
+        defer _ = c.espice_destroy(h);
+        try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_run_all(h));
+        try t.expectEqual(@as(u32, c.ESPICE_OK), c.espice_copy_point_measures(h, try firstRequested(h), 4, &names, 3, &data, &data_reasons));
+    }
+    // The deck without its .data table, sel and pol live.
+    const start = std.mem.indexOf(u8, source, "\n.data ").? + 1;
+    const end = std.mem.indexOf(u8, source, ".enddata\n").? + ".enddata\n".len;
+    const spliced = try std.mem.concat(t.allocator, u8, &.{ source[0..start], source[end..] });
+    defer t.allocator.free(spliced);
+    const template = try std.mem.replaceOwned(u8, t.allocator, spliced, " sweep data=lanes", "");
+    defer t.allocator.free(template);
+    const h = try createDialect(template, &.{ .{ .data = "sel", .len = 3 }, .{ .data = "pol", .len = 3 } }, c.ESPICE_HSPICE);
+    defer _ = c.espice_destroy(h);
+    const rows = [_]f64{ 0, 1, 0, 0, 1, 1, 1, 0 };
+    var got: [4 * 3]f64 = undefined;
+    var reasons: [4]u32 = undefined;
+    try runPoints(h, &rows, 4, &names, &got, &reasons);
+    for (reasons) |r| try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), r);
+    try t.expectEqualSlices(u32, &reasons, &data_reasons);
+    try expectSameBits(&data, &got);
 }
 
 test "C points: rows do not depend on order, batching or the other points" {

@@ -1511,3 +1511,81 @@ test "Problem.append_points: measures equal the CLI's printed .meas of the same 
     }
     try t.expectEqual(@as(usize, 16), k);
 }
+
+const lane_deck = "tests/fixtures/variants/data_lane_stimulus.sp";
+
+/// `source`, the lane fixture, without its .data table: one .tran at `sel`
+/// and `pol`.
+fn laneSolo(source: []const u8, sel: f64, pol: f64) ![]u8 {
+    const start = std.mem.indexOf(u8, source, "\n.data ").? + 1;
+    const end = std.mem.indexOf(u8, source, ".enddata\n").? + ".enddata\n".len;
+    const spliced = try std.mem.concat(t.allocator, u8, &.{ source[0..start], source[end..] });
+    defer t.allocator.free(spliced);
+    const single = try std.mem.replaceOwned(u8, t.allocator, spliced, " sweep data=lanes", "");
+    defer t.allocator.free(single);
+    var line: [64]u8 = undefined;
+    return std.mem.replaceOwned(u8, t.allocator, single, ".param vdd=1 sel=0 pol=1", try std.fmt.bufPrint(&line, ".param vdd=1 sel={d} pol={d}", .{ sel, pol }));
+}
+
+/// Every .tran point's samples, in request order, and the printed .meas
+/// lines without their headings.
+const LaneRun = struct {
+    data: std.ArrayList(f64) = .empty,
+    measures: std.ArrayList(u8) = .empty,
+    /// Each point's time column.
+    grids: std.ArrayList([]f64) = .empty,
+
+    fn deinit(r: *LaneRun) void {
+        for (r.grids.items) |g| t.allocator.free(g);
+        r.grids.deinit(t.allocator);
+        r.data.deinit(t.allocator);
+        r.measures.deinit(t.allocator);
+    }
+
+    fn add(r: *LaneRun, source: []const u8) !void {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "lane.sp" } }, .dialect = .hspice });
+        defer p.deinit();
+        try p.run_all();
+        for (0..p.query_count()) |i| {
+            const id: api.QueryId = @fromBackingInt(@intCast(i));
+            const info = try p.query_info(id);
+            if (!info.requested or info.kind != .tran) continue;
+            const result = try p.result(id);
+            try r.data.appendSlice(t.allocator, result.data);
+            const grid = try t.allocator.alloc(f64, result.npoints);
+            errdefer t.allocator.free(grid);
+            for (grid, 0..) |*time, k| time.* = result.data[k * result.varnames.len];
+            try r.grids.append(t.allocator, grid);
+        }
+        var printed: std.Io.Writer.Allocating = .init(t.allocator);
+        defer printed.deinit();
+        try p.print_measures(&printed.writer, &printed.writer);
+        var lines = std.mem.splitScalar(u8, printed.written(), '\n');
+        while (lines.next()) |line| if (std.mem.indexOfScalar(u8, line, '=') != null and std.mem.indexOf(u8, line, "Measurements for") == null) {
+            try r.measures.appendSlice(t.allocator, line);
+            try r.measures.append(t.allocator, '\n');
+        };
+    }
+};
+
+test "per-lane stimulus (#212): each .data point equals its row run alone, to the bit, on one time grid" {
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, lane_deck, t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    var swept: LaneRun = .{};
+    defer swept.deinit();
+    try swept.add(source);
+    var alone: LaneRun = .{};
+    defer alone.deinit();
+    for ([_][2]f64{ .{ 0, 1 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 0 } }) |row| {
+        const solo = try laneSolo(source, row[0], row[1]);
+        defer t.allocator.free(solo);
+        try alone.add(solo);
+    }
+    try t.expectEqual(@as(usize, 4), swept.grids.items.len);
+    try t.expectEqual(@as(usize, 12), std.mem.count(u8, swept.measures.items, "\n"));
+    try t.expectEqualStrings(alone.measures.items, swept.measures.items);
+    try t.expectEqualSlices(u64, @ptrCast(alone.data.items), @ptrCast(swept.data.items));
+    // Every point lands the same edge breakpoints, levels aside, and none
+    // rejects a step differently: one accepted grid.
+    for (swept.grids.items[1..]) |grid| try t.expectEqualSlices(u64, @ptrCast(swept.grids.items[0]), @ptrCast(grid));
+}
