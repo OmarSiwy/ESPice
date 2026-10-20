@@ -207,9 +207,11 @@ pub const x_plausible = 1e9;
 pub const LteIn = extern struct { dt: f64, dt1: f64, dt2: f64, reltol: f64, abstol: f64, chgtol: f64, trtol: f64, ag0: f64, ag1: f64, ag2: f64 };
 
 /// `integrator.stepBound(w, method, cur_method, ...)` for one lane over its
-/// contiguous history: `q[k]` is logical slot k (length `len`), methods as
-/// in `companionRow`. NaN as `stepBound`. Order 1 or 2 only.
-pub fn stepBound(method: u8, cur_method: u8, q0: []const f64, q1: []const f64, q2: []const f64, q3: []const f64, ip: []const f64, c: LteIn) f64 {
+/// contiguous history: `qk` is logical slot k and `ip` the dynamic
+/// current, `len` entries each, as slices or many-item pointers of any
+/// address space; methods as in `companionRow`. NaN as `stepBound`. Order
+/// 1 or 2 only.
+pub fn stepBound(method: u8, cur_method: u8, q0: anytype, q1: anytype, q2: anytype, q3: anytype, ip: anytype, len: usize, c: LteIn) f64 {
     const coeff: f64 = switch (method) {
         0 => 0.5,
         1 => 0.08333333333,
@@ -220,7 +222,12 @@ pub fn stepBound(method: u8, cur_method: u8, q0: []const f64, q1: []const f64, q
     const sum012 = c.dt + (c.dt1 + c.dt2);
     var vmin = std.math.inf(f64);
     var poison: f64 = 0;
-    for (q0, q1, q2, q3, ip) |qc, qp, qp2, qp3, i_p| {
+    for (0..len) |j| {
+        const qc = q0[j];
+        const qp = q1[j];
+        const qp2 = q2[j];
+        const qp3 = q3[j];
+        const i_p = ip[j];
         const i_new = switch (cur_method) {
             1 => c.ag0 * (qc - qp) - c.ag1 * i_p,
             2 => c.ag0 * (qc - qp) - c.ag2 * (qp - qp2),
@@ -244,6 +251,39 @@ pub fn stepBound(method: u8, cur_method: u8, q0: []const f64, q1: []const f64, q
     if (std.math.isNan(poison)) return std.math.nan(f64);
     return if (method == 0) vmin else @sqrt(vmin);
 }
+
+/// Per-lane step inputs, uploaded each round (`gpu_lanes.Ops.attempt`).
+pub const LaneScalars = extern struct {
+    t_dev: f64,
+    dt: f64,
+    xfact: f64,
+    ag0: f64,
+    ag1: f64,
+    ag2: f64,
+    /// 0 BE, 1 trap, 2 gear-2.
+    method: u32,
+    /// Bit 0: in this round. Bits 4-5: the order-2 promotion probe's
+    /// method code, read by `lte` for a lane at order 1.
+    flags: u32,
+    /// The row ring's physical slots of logical 0, 1, 2 before this step's
+    /// rotation, for `accept`.
+    sq: [4]u8,
+    /// The same for the LTE tape ring.
+    sqt: [4]u8,
+};
+
+/// Newton per-lane gate state, one record per lane.
+pub const Gate = extern struct {
+    /// `plausibleLimit`, set at iteration 0.
+    limit: f64,
+    scaled: f64,
+    iterations: u32,
+    /// Bit 0 active, 1 init_fix, 2 converged, 3 singular, 4 gates passed,
+    /// 5 a device asked to reject the step (`updateState`).
+    bits: u32,
+};
+
+pub const NewtonOpts = extern struct { reltol: f64, abstol: f64, vntol: f64 };
 
 /// VerA's `contract.SimState` (24 bytes, extern), restated so this file
 /// stays std only; `gpu_lanes.zig` asserts the two layouts equal.

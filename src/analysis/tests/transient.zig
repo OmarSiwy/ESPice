@@ -1565,7 +1565,7 @@ const LaneKernelTests = struct {
             const lin: lk.LteIn = .{ .dt = lte.dt, .dt1 = lte.dt1, .dt2 = lte.dt2, .reltol = lte.reltol, .abstol = lte.abstol, .chgtol = lte.chgtol, .trtol = lte.trtol, .ag0 = c.ag0, .ag1 = c.ag1, .ag2 = c.ag2 };
             for (methods) |m| for (methods) |cm| {
                 const want = integrator.stepBound(W, m, cm, q, ip, c, lte);
-                const got = lk.stepBound(code(m), code(cm), q[0], q[1], q[2], q[3], ip, lin);
+                const got = lk.stepBound(code(m), code(cm), q[0], q[1], q[2], q[3], ip, len, lin);
                 if (std.math.isNan(want)) {
                     try testing.expect(std.math.isNan(got));
                 } else {
