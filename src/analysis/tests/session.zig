@@ -426,6 +426,58 @@ test "--jobs determinism: results are byte-identical across lane counts and sche
     };
 }
 
+test "variant rows re-derive only the batches they write, bitwise as a full recompute (#214)" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 2 }, &.{}, .{ vin, GROUND });
+    var prev = vin;
+    for (0..3) |_| {
+        const mid = try b.addNode();
+        try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ prev, mid });
+        try b.addDevice(models.capacitor, "", &.{ .c = 1e-9 }, &.{}, .{ mid, GROUND });
+        try b.addDevice(models.diode, "", &.{ .is = 1e-14, .cjo = 1e-12 }, &.{}, .{ mid, GROUND });
+        prev = mid;
+    }
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    var probe = try @import("../types.zig").Circuit.instantiate(&prepared, t.allocator);
+    defer probe.deinit();
+    const params = try probe.collectParams();
+    const Find = struct {
+        fn ref(ps: anytype, ty: @import("core").DeviceType, index: u32, name: []const u8) !u32 {
+            for (ps, 0..) |p, k| {
+                if (p.type == ty and p.index == index and std.mem.eql(u8, p.param_name, name)) return @intCast(k);
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
+    const r1 = try Find.ref(params, builtin("resistor"), 1, "r");
+    const is2 = try Find.ref(params, builtin("diode"), 2, "is");
+    const c0 = try Find.ref(params, builtin("capacitor"), 0, "c");
+    // One batch, two batches, every batch under a temperature, and none.
+    const labels = [_][]const u8{ "a", "b", "c", "d" };
+    const temps = [_]?f64{ null, null, 85, null };
+    const starts = [_]u32{ 0, 1, 4, 5, 5 };
+    const refs = [_]u32{ r1, is2, c0, r1, r1 };
+    const values = [_]f64{ 3e3, 1e-13, 2e-9, 500, 4e3 };
+    var deck = bareDeck(&.{ vin, prev }, &.{ "v(in)", "v(out)" });
+    deck.variants = .{ .labels = &labels, .temp_c = &temps, .starts = &starts, .refs = &refs, .values = &values };
+    var jobs: [labels.len]requests.Query = undefined;
+    for (&jobs, 0..) |*j, k| j.* = .{ .tran = .{ .t_stop = 2e-6, .tol = .{ .variant = @intCast(k) } } };
+    // Without `param_starts` every query collects and re-derives every batch.
+    const full = try runAll(&prepared, &deck, &jobs, 1, null);
+    defer t.allocator.free(full);
+    try prepared.countParams();
+    try t.expectEqual(prepared.batches.len + 1, prepared.param_starts.len);
+    try t.expectEqual(@as(u32, @intCast(params.len)), prepared.param_starts[prepared.batches.len]);
+    const narrow = try runAll(&prepared, &deck, &jobs, 1, null);
+    defer t.allocator.free(narrow);
+    try t.expectEqualSlices(u64, @ptrCast(full), @ptrCast(narrow));
+}
+
 test "lane batches: OP and .dc rows at several temperatures group into batches and each equals its run alone, bitwise" {
     const t = std.testing;
     var lib = try Library.init(t.allocator);
