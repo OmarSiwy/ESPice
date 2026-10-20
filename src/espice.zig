@@ -267,6 +267,7 @@ pub const Problem = struct {
         execution.timing_in_depth = options.timing_in_depth;
         execution.knobs = knobsFromEnv();
         execution.gpu_driver = &self.gpu_driver;
+        execution.gpu_lanes = analysis.gpu_lanes.policy(execution);
         if (analysis.gpu_available and execution.backend != .cpu) raiseJitCache();
         execution.display = options.display;
         self.measures_to = options.measures;

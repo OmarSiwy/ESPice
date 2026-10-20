@@ -474,6 +474,7 @@ pub const Session = struct {
     fn gather(self: *Session, i: usize) void {
         const lane_width = execution.lane_width;
         const config = self.config;
+        if (config.gpu_lanes and self.rows.items(.job)[i] == .tran and self.rows.items(.executor)[i] == null) return self.gatherWide(i);
         if (!execution.lanesOn(config) or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
         if ((jobs[i] != .op and jobs[i] != .dc and jobs[i] != .tran) or self.rows.items(.executor)[i] != null) return;
@@ -499,6 +500,44 @@ pub const Session = struct {
         const list = leader.work.allocator().alloc(*execution.Executor, n) catch return;
         var taken: usize = 0;
         for (peers[0..n]) |j| {
+            self.makeExecutor(j) catch continue;
+            list[taken] = self.rows.items(.executor)[j].?;
+            taken += 1;
+            self.rows.items(.running)[j] = true;
+        }
+        leader.peers = list[0..taken];
+    }
+
+    /// The GPU lane form of `gather`: up to `gpu_lane_cap - 1` ready,
+    /// never-started `.tran` rows of row i's template and options, from all
+    /// of `urgent` and the queue (a sweep's transients are ready together
+    /// under breadth-first order). A row whose executor cannot be built is
+    /// left to run alone.
+    /// ponytail: an ineligible sweep (`tran.gpuLaneEligible`) still gathers
+    /// and then runs its lanes one after another on one worker; check the
+    /// template before gathering if that ever costs a `--jobs` run.
+    fn gatherWide(self: *Session, i: usize) void {
+        const jobs = self.rows.items(.job);
+        var peers: std.ArrayList(usize) = .empty;
+        defer peers.deinit(self.allocator);
+        const cap = self.config.gpu_lane_cap - 1;
+        const queued = self.queue.items[@min(self.queue_head, self.queue.items.len)..];
+        for ([_][]const u32{ self.urgent.items, queued }) |list| for (list) |j32| {
+            if (peers.items.len == cap) break;
+            const j: usize = j32;
+            if (j == i or !self.ready(j) or self.rows.items(.running)[j] or self.rows.items(.executor)[j] != null) continue;
+            if (std.mem.indexOfScalar(usize, peers.items, j) != null) continue;
+            if (self.rows.items(.template)[j] != self.rows.items(.template)[i]) continue;
+            if ((self.rows.items(.dependency)[j] == none) != (self.rows.items(.dependency)[i] == none)) continue;
+            if (!sameLaneJob(jobs[i], jobs[j])) continue;
+            peers.append(self.allocator, j) catch break;
+        };
+        if (peers.items.len == 0) return;
+        self.makeExecutor(i) catch return;
+        const leader = self.rows.items(.executor)[i].?;
+        const list = leader.work.allocator().alloc(*execution.Executor, peers.items.len) catch return;
+        var taken: usize = 0;
+        for (peers.items) |j| {
             self.makeExecutor(j) catch continue;
             list[taken] = self.rows.items(.executor)[j].?;
             taken += 1;
@@ -661,12 +700,15 @@ pub const Session = struct {
     /// OP's dependent first, so each point's OP and analysis run back to
     /// back, then the queue in row order.
     fn nextReady(self: *Session) ?usize {
-        while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
+        // Breadth-first under GPU lanes: OPs drain before their transients,
+        // so the transients become ready together and gather N wide.
+        if (!self.config.gpu_lanes) while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
         while (self.queue_head < self.queue.items.len) {
             const i = self.queue.items[self.queue_head];
             self.queue_head += 1;
             if (self.ready(i) and !self.rows.items(.running)[i]) return i;
         }
+        if (self.config.gpu_lanes) while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
         return null;
     }
 

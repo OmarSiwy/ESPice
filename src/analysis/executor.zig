@@ -61,6 +61,12 @@ pub const Config = struct {
     /// `--lanes`: batch ready operating points, `.dc` sweeps and transients
     /// as lanes (`lanesOn`), each bitwise its query run alone.
     lanes: bool = false,
+    /// Batch ready transients as GPU lanes (dev/research/plans/phase4):
+    /// decided once per Problem by `gpu_lanes.policy`, true for an explicit
+    /// `cuda`/`hip` and, under `auto`, on an FP64-class device only.
+    gpu_lanes: bool = false,
+    /// Lanes per GPU batch at most.
+    gpu_lane_cap: u32 = 16384,
 
     /// The facade's record of whether the GPU driver is up, shared by every
     /// query of the Problem; null prices the driver setup in every query.
@@ -311,6 +317,7 @@ pub const Executor = struct {
     /// another instead. Every peer ends with `published` or `peer_failure`;
     /// returns this query's own.
     fn executeBatch(self: *Executor) QueryError!types.Result {
+        if (self.config.gpu_lanes and self.job == .tran) return self.executeGpuBatch();
         const g = 1 + self.peers.len;
         std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc or self.job == .tran));
         var members: [lane_width]*Executor = undefined;
@@ -402,6 +409,48 @@ pub const Executor = struct {
                 break :blk e.finish();
             };
             e.refuseLatched() catch |err| {
+                outcomes[k] = err;
+            };
+        }
+        return outcomes[0];
+    }
+
+    /// `executeBatch` for a GPU lane batch (`tran.runGpuLanes`): `peers` may
+    /// be thousands wide, so the per-member arrays come from the work arena.
+    fn executeGpuBatch(self: *Executor) QueryError!types.Result {
+        const a = self.work.allocator();
+        const g = 1 + self.peers.len;
+        const members = try a.alloc(*Executor, g);
+        members[0] = self;
+        @memcpy(members[1..], self.peers);
+        const outcomes = try a.alloc(QueryError!types.Result, g);
+        @memset(outcomes, error.QueryCancelled);
+        defer for (members[1..], outcomes[1..]) |p, o| {
+            if (o) |r| p.published = r else |err| p.peer_failure = err;
+        };
+        const live = try a.alloc(usize, g);
+        var n_live: usize = 0;
+        // ponytail: serial materialize; thousands of lanes take seconds here.
+        // Parallelize over a thread pool if it shows above 5% of the batch.
+        for (members, 0..) |e, k| {
+            e.materialize() catch |err| {
+                outcomes[k] = err;
+                continue;
+            };
+            e.circuit.progress = self.controller.callback();
+            live[n_live] = k;
+            n_live += 1;
+        }
+        const ctxs = try a.alloc(types.RunCtx, n_live);
+        for (live[0..n_live], ctxs) |k, *c| {
+            members[k].circuit.setSimState(.{ .kind = .ic });
+            c.* = members[k].runCtx();
+        }
+        const ran = try a.alloc(tran.LaneOutcome, n_live);
+        if (n_live != 0) tran.runGpuLanes(ctxs, self.job.tran, ran);
+        for (live[0..n_live], ran) |k, o| {
+            outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
+            members[k].refuseLatched() catch |err| {
                 outcomes[k] = err;
             };
         }
