@@ -1,8 +1,8 @@
 //! Monte Carlo (`.mc`): gaussian variation of every device's primary
 //! parameter, one cold DC solve per trial. Each trial is a structural sweep
-//! lane (`lanes.solveLanes`) sharing one Newton workspace. The draws come
-//! from a std.Random.DefaultPrng seeded with Options.seed, so a run is
-//! reproducible. With `Options.variants` the lanes are deck variants
+//! lane (`lanes.solveLanes`) sharing one Newton workspace. Each draw is
+//! keyed by (Options.seed, trial, variable), so a run is reproducible and
+//! any trial can be computed alone. With `Options.variants` the lanes are deck variants
 //! instead, solved warm in order.
 //! Cites dev/analysis/ensemble-sweeps.md and dev/analysis/variants.md.
 const std = @import("std");
@@ -20,23 +20,28 @@ const ParamVar = struct {
 };
 
 /// Trial k draws `nominal · (1 + variation · N(0,1))` for every parameter.
-/// The PRNG reseeds on trial 0, so every sweep draws the same sequence.
 const LaneCtx = struct {
     param_vars: []const ParamVar,
     variation: f64,
     seed: u64,
-    prng: std.Random.DefaultPrng,
 
     pub fn apply(self: *LaneCtx, k: usize) void {
-        if (k == 0) self.prng = std.Random.DefaultPrng.init(self.seed);
-        const rng = self.prng.random();
-        for (self.param_vars) |pv| pv.ref.set(pv.nominal + pv.nominal * self.variation * rng.floatNorm(f64));
+        for (self.param_vars, 0..) |pv, v| pv.ref.set(pv.nominal + pv.nominal * self.variation * draw(self.seed, k, v));
     }
 
     pub fn restore(self: *LaneCtx) void {
         for (self.param_vars) |pv| pv.ref.set(pv.nominal);
     }
 };
+
+/// N(0,1) for variable `variable` of trial `trial`: a counter-based draw,
+/// a fresh generator seeded by the hash of the three, so it depends on no
+/// other draw.
+pub fn draw(seed: u64, trial: usize, variable: usize) f64 {
+    const key = [2]u64{ trial, variable };
+    var prng = std.Random.DefaultPrng.init(std.hash.Wyhash.hash(seed, std.mem.asBytes(&key)));
+    return prng.random().floatNorm(f64);
+}
 
 /// Lane k installs deck variant `first + k`, after putting back the
 /// parameters the previous lane wrote.
@@ -99,7 +104,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const results = try scratch.alloc(converger.Result, n_trials);
     defer scratch.free(results);
 
-    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .variation = opts.variation, .seed = opts.seed, .prng = undefined };
+    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .variation = opts.variation, .seed = opts.seed };
     const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
     try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts, false);
 
