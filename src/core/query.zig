@@ -762,12 +762,15 @@ pub const Mc = struct {
     dc_options: Dc = .{},
     /// Rows `first..first + count` of `Deck.variants` to solve instead of
     /// perturbing primary values (`.dc DATA=`, `.dc MONTE=`): one lane
-    /// each, warm-started from the lane before.
+    /// each, warm-started from the nominal OP.
     variants: VariantRange = .{},
     /// First column of a variant ensemble; `axis_values` fills it.
     axis: []const u8 = "run",
     /// Publish a variant ensemble as a DC sweep rather than Monte Carlo.
     dc_plot: bool = false,
+    /// Solve only this trial (or variant `variants.first + lane`): one row
+    /// of a query the session split into its lanes. Null solves them all.
+    lane: ?u32 = null,
 
     /// Rows `first..first + count` of `Deck.variants`; none when `count` is 0.
     pub const VariantRange = struct { first: u32 = 0, count: u32 = 0 };
@@ -780,6 +783,9 @@ pub const Temp = struct {
     t_stop: f64 = 125.0,
     t_step: f64 = 1.0,
     dc_options: Dc = .{},
+    /// Solve only temperature `t_start + lane * t_step`: one row of a query
+    /// the session split into its lanes. Null solves them all.
+    lane: ?u32 = null,
 };
 
 /// DC sensitivity of one output to every device parameter (`.sens`).

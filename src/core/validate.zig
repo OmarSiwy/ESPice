@@ -176,12 +176,14 @@ pub fn validate(query: requests.Query, n: u32) !void {
             try kelvin(@min(o.t_start, o.t_stop));
             const count = try sweep(o.t_start, o.t_stop, o.t_step);
             _ = try elements(&.{ count, @as(u64, n) + 1 });
+            if (o.lane) |k| if (k >= count) return error.InvalidQueryOptions;
             try validate(.{ .dc = o.dc_options }, n);
         },
         .mc => |o| {
             if (o.variation < 0) return error.InvalidQueryOptions;
             try validate(.{ .dc = o.dc_options }, n);
             _ = try elements(&.{ o.n_trials, @as(u64, n) + 1 });
+            if (o.lane) |k| if (k >= if (o.variants.count != 0) o.variants.count else o.n_trials) return error.InvalidQueryOptions;
         },
         .tran => |o| {
             if (o.dt_min > o.dt_init) return error.InvalidQueryOptions;

@@ -2,8 +2,8 @@
 //! parameter, one cold DC solve per trial. Each trial is a structural sweep
 //! lane (`lanes.solveLanes`) sharing one Newton workspace. Each draw is
 //! keyed by (Options.seed, trial, variable), so a run is reproducible and
-//! any trial can be computed alone. With `Options.variants` the lanes are deck variants
-//! instead, solved warm in order.
+//! any trial can be computed alone. With `Options.variants` the lanes are
+//! deck variants instead, each warm from the nominal OP.
 //! Cites dev/analysis/ensemble-sweeps.md and dev/analysis/variants.md.
 const std = @import("std");
 const root = @import("../types.zig");
@@ -77,9 +77,11 @@ const VariantCtx = struct {
 /// Contract entry: real, point-major (run, probes...), one row per converged
 /// trial and no rows when there are no probes. Varies each device's primary
 /// parameter, skipping those that are zero, or with `opts.variants` solves
-/// those deck variants warm-started in order, the first column their axis
-/// value. Parameters are back at their nominals afterwards so later jobs see
-/// the netlist's circuit.
+/// those deck variants, each warm-started from the nominal OP (`ctx.x_op`),
+/// the first column their axis value. With `opts.lane` only that trial or
+/// variant runs (a row the session split off), its run column 0.
+/// Parameters are back at their nominals afterwards so later jobs see the
+/// netlist's circuit.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     if (opts.variants.count != 0) return runVariants(ctx, opts);
     const ckt = ctx.circuit;
@@ -97,60 +99,48 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         i += 1;
     }
 
-    const n: usize = ckt.n;
-    const n_trials: usize = opts.n_trials;
-    const x_lanes = try scratch.alloc(f64, n_trials * n);
-    defer scratch.free(x_lanes);
-    const results = try scratch.alloc(converger.Result, n_trials);
-    defer scratch.free(results);
-
     var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .variation = opts.variation, .seed = opts.seed };
-    const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts, false);
-
-    return publish(ctx, "Monte Carlo", "run", x_lanes, results, null);
+    return solve(ctx, opts, &lane_ctx, .of(opts.lane, opts.n_trials), null, "Monte Carlo", "run", null);
 }
 
 fn runVariants(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const ckt = ctx.circuit;
     const scratch = ctx.scratch_allocator;
     const range = opts.variants;
     var widest: usize = 0;
     for (range.first..range.first + range.count) |v| widest = @max(widest, ctx.variants.writes(@intCast(v))[0].len);
     const saved = try scratch.alloc(f64, widest);
     defer scratch.free(saved);
-    var lane_ctx: VariantCtx = .{ .params = try ckt.collectParams(), .variants = ctx.variants, .first = range.first, .saved = saved };
-    const n: usize = ckt.n;
-    const x_lanes = try scratch.alloc(f64, range.count * n);
-    defer scratch.free(x_lanes);
+    var lane_ctx: VariantCtx = .{ .params = try ctx.circuit.collectParams(), .variants = ctx.variants, .first = range.first, .saved = saved };
+    const axis = ctx.variants.axis[range.first..][0..range.count];
+    return solve(ctx, opts, &lane_ctx, .of(opts.lane, range.count), ctx.x_op, if (opts.dc_plot) "DC transfer characteristic" else "Monte Carlo", opts.axis, axis);
+}
+
+/// Solves `lanes` and publishes one row per converged lane: its axis value
+/// (the converged ordinal when `axis` is null), then the probes.
+fn solve(ctx: *const root.RunCtx, opts: Options, setup: anytype, range: lanes.Range, warm: ?[]const f64, plotname: []const u8, first: []const u8, axis: ?[]const f64) !root.Result {
+    const scratch = ctx.scratch_allocator;
+    const np = ctx.probes.len;
+    const probe_rows = try scratch.alloc(f64, range.count * np);
+    defer scratch.free(probe_rows);
     const results = try scratch.alloc(converger.Result, range.count);
     defer scratch.free(results);
     const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts, true);
-    const axis = ctx.variants.axis[range.first..][0..range.count];
-    return publish(ctx, if (opts.dc_plot) "DC transfer characteristic" else "Monte Carlo", opts.axis, x_lanes, results, axis);
-}
+    try lanes.solveLanes(ctx.circuit, setup, range.first, ctx.probes, probe_rows, results, nopts, warm, scratch);
 
-/// One row per converged lane: its axis value (the converged ordinal when
-/// `axis` is null), then the probes.
-fn publish(ctx: *const root.RunCtx, plotname: []const u8, first: []const u8, x_lanes: []const f64, results: []const converger.Result, axis: ?[]const f64) !root.Result {
-    const a = ctx.allocator;
-    const n: usize = ctx.circuit.n;
     var n_conv: usize = 0;
-    if (ctx.probes.len > 0) {
+    if (np > 0) {
         for (results) |r| n_conv += @intFromBool(r.converged);
     }
     const names = try root.probeNames(ctx, first);
     const ncols = names.len;
-    const data = try a.alloc(f64, n_conv * ncols);
+    const data = try ctx.allocator.alloc(f64, n_conv * ncols);
     if (n_conv > 0) {
         var k: usize = 0;
         for (results, 0..) |r, t| {
             if (!r.converged) continue;
             const row = data[k * ncols ..][0..ncols];
-            row[0] = if (axis) |values| values[t] else @floatFromInt(k);
-            const xl = x_lanes[t * n ..][0..n];
-            for (ctx.probes, row[1..]) |node, *out| out.* = xl[node];
+            row[0] = if (axis) |values| values[range.first + t] else @floatFromInt(k);
+            @memcpy(row[1..], probe_rows[t * np ..][0..np]);
             k += 1;
         }
     }

@@ -38,35 +38,35 @@ const LaneCtx = struct {
 };
 
 /// Contract entry: real, point-major (temp, probes...), one row per converged
-/// temperature. The circuit is back at the temperature it ran at before the
-/// sweep, so later jobs see the netlist's (or their query's) temperature.
+/// temperature, each solved cold; with `opts.lane` only that temperature (a
+/// row the session split off). The circuit is back at the temperature it
+/// ran at before the sweep, so later jobs see the netlist's (or their
+/// query's) temperature.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const ckt = ctx.circuit;
-    const a = ctx.allocator;
     const scratch = ctx.scratch_allocator;
-    const max_points: usize = numPoints(opts);
-    const ncols = ctx.probes.len + 1;
-    const n: usize = ckt.n;
+    const range: lanes.Range = .of(opts.lane, numPoints(opts));
+    const np = ctx.probes.len;
+    const ncols = np + 1;
 
-    const x_lanes = try scratch.alloc(f64, max_points * n);
-    defer scratch.free(x_lanes);
-    const results = try scratch.alloc(converger.Result, max_points);
+    const probe_rows = try scratch.alloc(f64, range.count * np);
+    defer scratch.free(probe_rows);
+    const results = try scratch.alloc(converger.Result, range.count);
     defer scratch.free(results);
 
     var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .temp_c = ckt.temp_c };
     const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, &lane_ctx, x_lanes, results, nopts, false);
+    try lanes.solveLanes(ckt, &lane_ctx, range.first, ctx.probes, probe_rows, results, nopts, null, scratch);
 
     var npoints: usize = 0;
     for (results) |r| npoints += @intFromBool(r.converged);
-    const data = try a.alloc(f64, npoints * ncols);
+    const data = try ctx.allocator.alloc(f64, npoints * ncols);
     var pt: usize = 0;
-    for (results, 0..) |r, k| {
+    for (results, 0..) |r, i| {
         if (!r.converged) continue;
         const row = data[pt * ncols ..][0..ncols];
-        row[0] = opts.t_start + @as(f64, @floatFromInt(k)) * opts.t_step;
-        const lane = x_lanes[k * n ..][0..n];
-        for (ctx.probes, row[1..]) |node, *out| out.* = lane[node];
+        row[0] = opts.t_start + @as(f64, @floatFromInt(range.first + i)) * opts.t_step;
+        @memcpy(row[1..], probe_rows[i * np ..][0..np]);
         pt += 1;
     }
 

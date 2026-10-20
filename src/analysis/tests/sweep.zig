@@ -686,25 +686,24 @@ const DividerTests = struct {
         defer prepared.deinit();
         var ckt = try analysis.Circuit.instantiate(&prepared, gpa);
         defer ckt.deinit();
-        const n: usize = ckt.n;
         const refs = try ckt.collectParams();
         const values = [_]f64{ 1000, 2000, 3000 };
         var results: [values.len]converger.Result = undefined;
-        const x_lanes = try gpa.alloc(f64, 2 * values.len * n);
-        defer gpa.free(x_lanes);
-        for ([_]bool{ false, true }, 0..) |warm, pass| {
+        var rows: [2][values.len]f64 = undefined;
+        const warm_x = try gpa.alloc(f64, ckt.n);
+        defer gpa.free(warm_x);
+        @memset(warm_x, 0);
+        for ([_]?[]const f64{ null, warm_x }, &rows) |warm, *pass_rows| {
             var setup: R2Lanes = .{ .ref = refs[try paramIndex(refs, "r", 3000)], .values = &values, .nominal = 3000 };
-            const xs = x_lanes[pass * values.len * n ..][0 .. values.len * n];
-            try lanes.solveLanes(&ckt, &setup, xs, &results, converger.optionsFromTolerances(.{}, null), warm);
+            try lanes.solveLanes(&ckt, &setup, 0, &probes, pass_rows, &results, converger.optionsFromTolerances(.{}, null), warm, gpa);
             try t.expectEqual(@as(u32, 1), setup.restores);
-            for (values, results, 0..) |r2, r, k| {
+            for (values, results, pass_rows) |r2, r, v| {
                 try t.expect(r.converged);
-                try t.expectApproxEqRel(10 * r2 / (1000 + r2), xs[k * n + out], 1e-9);
+                try t.expectApproxEqRel(10 * r2 / (1000 + r2), v, 1e-9);
             }
             try expectNominals(&ckt);
         }
-        for (x_lanes[0 .. values.len * n], x_lanes[values.len * n ..]) |cold, warm|
-            try t.expectApproxEqAbs(cold, warm, 1e-9);
+        for (rows[0], rows[1]) |cold, warm| try t.expectApproxEqAbs(cold, warm, 1e-9);
     }
 
     test "mc: zero variation is the nominal; a seed reproduces its trials" {
@@ -738,6 +737,12 @@ const DividerTests = struct {
         try t.expectEqualSlices(f64, first.data[0..prefix.data.len], prefix.data);
         const other = try mc.run(&ctx, .{ .n_trials = 8, .variation = 0.05, .seed = 8 });
         try t.expect(!std.mem.eql(f64, first.data, other.data));
+        // Any trial computes alone: lane k is row k of the whole run, its
+        // run column 0.
+        for (0..8) |k| {
+            const one = try mc.run(&ctx, .{ .n_trials = 8, .variation = 0.05, .seed = 7, .lane = @intCast(k) });
+            try t.expectEqualSlices(f64, &.{ 0, first.data[2 * k + 1] }, one.data);
+        }
         try expectNominals(&ckt);
     }
 
@@ -760,6 +765,8 @@ const DividerTests = struct {
         try t.expectEqual(@as(usize, 3), r.npoints);
         for ([_]f64{ 0, 7.5, 25, 7.5, 50, 7.5 }, r.data) |want, got| try t.expectApproxEqAbs(want, got, 1e-9);
         try t.expectEqual(temp_c, ckt.temp_c);
+        const one = try temp_sweep.run(&ctx, .{ .t_start = 0, .t_stop = 50, .t_step = 25, .lane = 2 });
+        try t.expectEqualSlices(f64, r.data[4..6], one.data);
     }
 };
 
