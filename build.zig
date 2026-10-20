@@ -495,6 +495,10 @@ fn corpus(b: *Build, runner: *Compile, exe: *Compile, vpi: ?*Compile, args: []co
         r.addArtifactArg(v);
     } else r.stdio = .inherit;
     r.setEnvironmentVariable("ZIG", b.graph.zig_exe);
+    // Debug runs the slowest decks (stress/scaling_inverter_chain_4k,
+    // tran/ltra_tran_long_run_past_8192) in ~620 s under load, past the
+    // runner's 300 s default. A later passthrough --timeout still wins.
+    if (exe.root_module.optimize == .debug) r.addArgs(&.{ "--timeout", "1200" });
     r.addArgs(args);
     r.addPassthruArgs();
     return r;
