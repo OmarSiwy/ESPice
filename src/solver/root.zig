@@ -12,6 +12,7 @@ pub const converger = @import("converger.zig");
 pub const lanes = @import("lanes.zig");
 pub const lane_solver = @import("lane_solver.zig");
 pub const lane_system = @import("lane_system.zig");
+pub const lane_kernels = @import("lane_kernels.zig");
 
 test {
     _ = @import("tests.zig");
@@ -21,6 +22,7 @@ test {
     _ = @import("lanes.zig");
     _ = @import("lane_solver.zig");
     _ = @import("lane_system.zig");
+    _ = @import("lane_kernels.zig");
     _ = @import("tridiag.zig");
     _ = @import("order.zig");
     _ = @import("bbd.zig");
