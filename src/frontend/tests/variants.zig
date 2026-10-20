@@ -40,9 +40,15 @@ test ".alter blocks are cumulative and replace cards by name" {
     try t.expectEqual(@as(usize, 1), plain.len);
 }
 
+/// What `expectFastMatchesRebuild` expects of the planner `build` ran:
+/// whether it took the fast path, how many zero-crossing patterns it
+/// mapped instead of rebuilding each point, and how many points needed
+/// a circuit of their own.
+const Want = struct { fast: bool, maps: usize = 0, rebuilds: usize = 0 };
+
 /// Plans `src` twice: as `build` does (fast path when the probe allows)
 /// and with every point rebuilt. The rows must agree bit for bit.
-fn expectFastMatchesRebuild(src: []const u8, fast_expected: bool) !void {
+fn expectFastMatchesRebuild(src: []const u8, want: Want) !void {
     var sa = std.heap.ArenaAllocator.init(t.allocator);
     defer sa.deinit();
     var pa = std.heap.ArenaAllocator.init(t.allocator);
@@ -65,8 +71,14 @@ fn expectFastMatchesRebuild(src: []const u8, fast_expected: bool) !void {
     }
     // The fresh planner in `build` probed; re-probe to see what it chose.
     var probe = try variants.Planner.init(&lib, sa.allocator(), pa.allocator(), &nl, &prepared.circuit, prepared.deck.cards, "");
-    _ = try variants.plan(&probe);
-    try t.expectEqual(fast_expected, probe.fast == .identity);
+    const planned = try variants.plan(&probe);
+    try t.expectEqual(want.fast, probe.fast == .identity);
+    var maps: usize = 0;
+    var it = probe.crossed.valueIterator();
+    while (it.next()) |m| maps += @intFromBool(m.* != null);
+    try t.expectEqual(want.maps, maps);
+    try t.expectEqual(want.rebuilds, planned.rebuilds.len);
+    try t.expectEqual(oracle.rebuilds.len, planned.rebuilds.len);
 }
 
 test "the live-value fast path writes what a rebuild would" {
@@ -87,7 +99,7 @@ test "the live-value fast path writes what a rebuild would" {
         \\.step param vs list 1 2
         \\.op
         \\.end
-    , true);
+    , .{ .fast = true });
     // A slot that reads the swept name but holds zero (sky130's
     // `MC_MM_SWITCH*AGAUSS(...)/sqrt(l*w*mult)` at the nominal corner) maps
     // nothing and keeps the fast path for the others (#130).
@@ -101,7 +113,7 @@ test "the live-value fast path writes what a rebuild would" {
         \\.step param rv list 1k 3k
         \\.op
         \\.end
-    , true);
+    , .{ .fast = true });
     // A point that takes a value across zero rebuilds; the probe itself
     // maps around the zero slot (#130).
     try expectFastMatchesRebuild(
@@ -114,7 +126,45 @@ test "the live-value fast path writes what a rebuild would" {
         \\.step param g list 0 5
         \\.op
         \\.end
-    , true);
+    , .{ .fast = true, .rebuilds = 1 });
+    // A source swept through zero changes no topology: each sign pattern
+    // rebuilds once, and its later points write the probe's map (#214).
+    try expectFastMatchesRebuild(
+        \\through zero
+        \\.param vs=1 rv=1k
+        \\v1 in 0 {vs}
+        \\r1 in a {rv}
+        \\r2 a 0 1k
+        \\.step param vs list 1 -1 0 2 -2 0 3
+        \\.step param rv list 1k 2k
+        \\.op
+        \\.end
+    , .{ .fast = true, .maps = 2 });
+    // At zero the builder gives a sine its default frequency, a value no
+    // slot holds: the zero pattern's map writes it as a constant.
+    try expectFastMatchesRebuild(
+        \\builder default
+        \\.param f=1k a=1
+        \\v1 in 0 sin(0 {a} {f})
+        \\r1 in 0 1k
+        \\.step param f list 1k 0 2k 0
+        \\.step param a list 1 2
+        \\.tran 1u 2m
+        \\.end
+    , .{ .fast = true, .maps = 1 });
+    // A diode's series resistance at zero collapses its internal node:
+    // that point is a run of its own, and its pattern never maps.
+    try expectFastMatchesRebuild(
+        \\collapse
+        \\.param g=1
+        \\v1 in 0 1
+        \\r1 in a 1k
+        \\d1 a 0 dm
+        \\.model dm d rs={g}
+        \\.step param g list 1 0 2 0
+        \\.op
+        \\.end
+    , .{ .fast = true, .rebuilds = 2 });
 }
 
 test "Monte Carlo draws depend only on seed, trial and site; LHS strata cover each trial once" {

@@ -35,7 +35,7 @@ pub const QueryError = types.ErrorOf(run) || types.ErrorOf(op.solve) || types.Er
     // `materialize`'s parts.
     types.ErrorOf(types.Circuit.fromSnapshot) || types.ErrorOf(types.Circuit.fromSnapshotMove) ||
     types.ErrorOf(types.Circuit.instantiate) || types.ErrorOf(types.Circuit.instantiateMove) ||
-    types.ErrorOf(types.Circuit.recompute) || types.ErrorOf(types.Circuit.collectParams) || error{InvalidAcOverride};
+    types.ErrorOf(types.Circuit.recompute) || types.ErrorOf(types.Circuit.collectParams) || types.ErrorOf(types.Circuit.setParams) || error{InvalidAcOverride};
 
 /// Per-problem execution settings, shared by every query.
 pub const Config = struct {
@@ -206,25 +206,21 @@ pub const Executor = struct {
     }
 
     /// Writes the query's variant parameters and temperature, then
-    /// re-derives the devices once. A nominal query at the deck temperature
-    /// touches nothing.
+    /// re-derives the devices once: every batch under a temperature, else
+    /// only the batches the variant writes. A nominal query at the deck
+    /// temperature touches nothing.
     fn installVariant(self: *Executor) !void {
         const variant = queryVariant(self.job);
-        var dirty = false;
+        const variant_temp = if (variant) |v| self.deck.variants.temp_c[v] else null;
+        const temp = queryTemp(self.job) orelse variant_temp orelse self.deck.deck_temp;
         if (variant) |v| {
             const refs, const values = self.deck.variants.writes(v);
-            if (refs.len != 0) {
-                const params = try self.circuit.collectParams();
-                for (refs, values) |r, value| params[r].set(value);
-                dirty = true;
-            }
+            if (refs.len != 0) try self.circuit.setParams(refs, values, temp == null);
         }
-        const variant_temp = if (variant) |v| self.deck.variants.temp_c[v] else null;
-        if (queryTemp(self.job) orelse variant_temp orelse self.deck.deck_temp) |temp| {
-            self.circuit.setCircuitTemp(@floatCast(temp));
-            dirty = true;
+        if (temp) |t| {
+            self.circuit.setCircuitTemp(@floatCast(t));
+            try self.circuit.recompute();
         }
-        if (dirty) try self.circuit.recompute();
     }
 
     fn bindAcOverrides(self: *Executor) !void {

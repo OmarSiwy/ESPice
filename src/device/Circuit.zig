@@ -47,6 +47,11 @@ needs_tran_op: bool = false,
 /// The VPI host whose LRM 12.31.3 callbacks `.op` and `.tran` drive: set
 /// when an instance calls a `$systf` through an attached application.
 vpi: ?*const Library.Vpi = null,
+/// Per batch, the ordinal of its first parameter in the list
+/// `Hooks.collect_params` builds batch by batch, then the total; empty
+/// until `countParams`. A variant row then reaches the batches it writes
+/// without collecting the others.
+param_starts: []u32 = &.{},
 
 /// Topology facts `freeze` records on the Circuit.
 pub const Facts = struct {
@@ -177,7 +182,25 @@ pub fn deinit(self: *Circuit) void {
     allocator.free(self.intern_bytes);
     allocator.free(self.intern_offs);
     if (self.bbd) |bbd| allocator.free(bbd.blocks);
+    allocator.free(self.param_starts);
     self.* = undefined;
+}
+
+/// Fills `param_starts` once. Collecting gives each batch per-instance
+/// model rows, as every caller that numbers parameters already has.
+pub fn countParams(self: *Circuit) !void {
+    if (self.param_starts.len != 0) return;
+    const starts = try self.allocator.alloc(u32, self.batches.len + 1);
+    errdefer self.allocator.free(starts);
+    var list: std.ArrayList(abi.ParamRef) = .empty;
+    defer list.deinit(self.allocator);
+    starts[0] = 0;
+    for (self.batches, 0..) |b, i| {
+        list.clearRetainingCapacity();
+        try b.hooks.collect_params(b.ctx, self.allocator, &list).unwrap();
+        starts[i + 1] = starts[i] + @as(u32, @intCast(list.items.len));
+    }
+    self.param_starts = starts;
 }
 
 /// The name of `node`, or "" when out of range.

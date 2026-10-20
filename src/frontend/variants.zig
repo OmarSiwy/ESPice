@@ -192,6 +192,11 @@ pub const Planner = struct {
     /// The fast path's (slot, parameter) pairs, parallel.
     fast_slots: []const u32 = &.{},
     fast_refs: []const u32 = &.{},
+    /// Per zero-crossing pattern points have met (`classes`), the probe's
+    /// map there, or null when that pattern rebuilds every point.
+    crossed: std.StringHashMapUnmanaged(?Map) = .empty,
+    /// `classes` of the open point, one byte per live slot.
+    key: []u8 = &.{},
     /// Per parameter, its write's index in the open row, or `none`.
     row_at: []u32 = &.{},
     targets: ?Targets = null,
@@ -199,6 +204,15 @@ pub const Planner = struct {
     const Targets = struct { starts: []const u32, ords: []const u32, keys: []const u64 };
 
     const Fast = enum { untested, identity, rebuild };
+
+    /// A probe's map, in parameter order: `refs[i]` holds live slot
+    /// `slots[i]` unchanged, or, where that is `none`, `values[i]`, which
+    /// differs from the nominal circuit without following a slot.
+    const Map = struct {
+        refs: []const u32 = &.{},
+        slots: []const u32 = &.{},
+        values: []const f64 = &.{},
+    };
 
     /// A planner over `nl`, whose nominal circuit is `nominal` with card
     /// table `cards`; `prefix` labels an `.alter` run's rows.
@@ -384,25 +398,34 @@ pub const Planner = struct {
             if ((at != 0) != (nominal != 0)) return p.refuse(label, "a top-level .if condition reads a swept parameter and selects another branch at this point");
         }
         try setPoint(p.scratch, &p.stack, p.nl, pt);
+        if (p.key.len != p.nominal_slots.len) p.key = try p.scratch.alloc(u8, p.nominal_slots.len);
         var moved = false;
         var crossed = false;
-        for (p.nominal_slots, 0..) |nominal, k| {
+        for (p.nominal_slots, p.key, 0..) |nominal, *class, k| {
             const x = p.nl.slot(k).num;
             moved = moved or x != nominal;
-            crossed = crossed or crossesZero(nominal, x);
+            class.* = signClass(x);
+            crossed = crossed or class.* != signClass(nominal);
         }
         if (!p.kept.holds(p.nl)) return .circuit;
         if (!moved) return .row;
         if (p.fast == .untested) p.fast = try p.probe(pt);
-        // A value that reaches or leaves zero may collapse a node: only a
-        // rebuild can tell.
         if (p.fast == .identity and !crossed) {
-            for (p.fast_slots, p.fast_refs) |k, r| {
-                const x = p.nl.slot(k).num;
-                if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[r].get()))) try p.set(r, x);
-            }
+            for (p.fast_slots, p.fast_refs) |k, r| try p.setMoved(r, p.nl.slot(k).num);
             return .row;
         }
+        // A value that reaches or leaves zero may collapse a node or pick
+        // a builder default: the first point of each crossing pattern
+        // rebuilds and probes there, and the pattern's later points take
+        // that probe's map (#214).
+        var seen = false;
+        if (p.fast == .identity) if (p.crossed.get(p.key)) |map| {
+            if (map) |m| {
+                try p.writeMap(m);
+                return .row;
+            }
+            seen = true;
+        };
         // The rebuild's tables die with it, so a long run of points does
         // not grow `scratch`.
         var arena = std.heap.ArenaAllocator.init(core.gpa);
@@ -410,8 +433,27 @@ pub const Planner = struct {
         var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
         defer c.deinit();
         if (!sameTopology(p.nominal, &c)) return .circuit;
-        try p.diff(arena.allocator(), &c);
+        const at = try collect(arena.allocator(), &c);
+        try p.diffAt(at);
+        if (p.fast == .identity and !seen) {
+            const base = try p.scratch.alloc(f64, p.nominal_slots.len);
+            for (base, 0..) |*x, k| x.* = p.nl.slot(k).num;
+            const map = try p.probeAt(base, at);
+            try setPoint(p.scratch, &p.stack, p.nl, pt);
+            try p.crossed.put(p.scratch, try p.scratch.dupe(u8, p.key), map);
+        }
         return .row;
+    }
+
+    /// Appends the writes `m` gives at the open point's live values.
+    fn writeMap(p: *Planner, m: Map) !void {
+        for (m.refs, m.slots, m.values) |r, k, x|
+            try p.setMoved(r, if (k == netlist.none) x else p.nl.slot(k).num);
+    }
+
+    /// `set`, unless parameter `ord` holds `x` in the nominal circuit.
+    fn setMoved(p: *Planner, ord: u32, x: f64) !void {
+        if (@as(u64, @bitCast(x)) != @as(u64, @bitCast(p.refs[ord].get()))) try p.set(ord, x);
     }
 
     /// Finds, with one rebuild at perturbed live values, whether every
@@ -427,21 +469,34 @@ pub const Planner = struct {
     }
 
     fn probeIdentity(p: *Planner) !Fast {
-        const probe_at = try p.scratch.alloc(f64, p.nominal_slots.len);
+        const m = try p.probeAt(p.nominal_slots, p.refs) orelse return .rebuild;
+        std.debug.assert(std.mem.indexOfScalar(u32, m.slots, netlist.none) == null);
+        p.fast_slots = m.slots;
+        p.fast_refs = m.refs;
+        return .identity;
+    }
+
+    /// The map at live slot values `base`, where the circuit's parameters
+    /// are `at`, from one rebuild at values perturbed from `base`; null
+    /// when some parameter neither holds a slot's value unchanged nor
+    /// stays put. Leaves the live slots at the perturbed values.
+    fn probeAt(p: *Planner, base: []const f64, at: []const ParamRef) !?Map {
+        std.debug.assert(at.len == p.refs.len);
+        const probe_at = try p.scratch.alloc(f64, base.len);
         var by_bits: std.AutoHashMapUnmanaged(u64, u32) = .empty;
         defer by_bits.deinit(p.scratch);
-        for (probe_at, p.nominal_slots, 0..) |*x, nominal, k| {
-            if (!std.math.isFinite(nominal)) return .rebuild;
+        for (probe_at, base, 0..) |*x, b, k| {
+            if (!std.math.isFinite(b)) return null;
             // A zero slot stays put and maps nothing: a point that moves it
-            // crosses zero, which `load` rebuilds anyway (#130).
-            if (nominal == 0) {
+            // crosses zero, which `load` probes on its own (#130).
+            if (b == 0) {
                 x.* = 0;
                 continue;
             }
             // A distinct nearby value per slot, far from any rounding tie.
-            x.* = nominal * (1 + @as(f64, @floatFromInt(k + 1)) * 0x1.0p-24);
+            x.* = b * (1 + @as(f64, @floatFromInt(k + 1)) * 0x1.0p-24);
             const gop = try by_bits.getOrPut(p.scratch, @bitCast(x.*));
-            if (gop.found_existing) return .rebuild;
+            if (gop.found_existing) return null;
             gop.value_ptr.* = @intCast(k);
         }
         p.nl.setSlots(probe_at);
@@ -449,22 +504,24 @@ pub const Planner = struct {
         defer arena.deinit();
         var c = try circuitOf(p.lib, arena.allocator(), arena.allocator(), p.nl);
         defer c.deinit();
-        if (!sameTopology(p.nominal, &c)) return .rebuild;
+        if (!sameTopology(p.nominal, &c)) return null;
         const moved = try collect(arena.allocator(), &c);
-        var pair_slots: std.ArrayList(u32) = .empty;
-        var pair_refs: std.ArrayList(u32) = .empty;
-        for (p.refs, moved, 0..) |a, b, i| {
+        var refs: std.ArrayList(u32) = .empty;
+        var slots: std.ArrayList(u32) = .empty;
+        var values: std.ArrayList(f64) = .empty;
+        for (at, moved, p.refs, 0..) |a, b, nominal, i| {
             const before = a.get();
             const after = b.get();
-            if (@as(u64, @bitCast(before)) == @as(u64, @bitCast(after))) continue;
-            const k = by_bits.get(@bitCast(after)) orelse return .rebuild;
-            if (@as(u64, @bitCast(before)) != @as(u64, @bitCast(p.nominal_slots[k]))) return .rebuild;
-            try pair_slots.append(p.scratch, k);
-            try pair_refs.append(p.scratch, @intCast(i));
+            var k: u32 = netlist.none;
+            if (@as(u64, @bitCast(before)) != @as(u64, @bitCast(after))) {
+                k = by_bits.get(@bitCast(after)) orelse return null;
+                if (@as(u64, @bitCast(before)) != @as(u64, @bitCast(base[k]))) return null;
+            } else if (@as(u64, @bitCast(before)) == @as(u64, @bitCast(nominal.get()))) continue;
+            try refs.append(p.scratch, @intCast(i));
+            try slots.append(p.scratch, k);
+            try values.append(p.scratch, before);
         }
-        p.fast_slots = pair_slots.items;
-        p.fast_refs = pair_refs.items;
-        return .identity;
+        return .{ .refs = refs.items, .slots = slots.items, .values = values.items };
     }
 
     fn closeRow(p: *Planner, label: []const u8, axis: f64, temp: ?f64) !void {
@@ -483,7 +540,11 @@ pub const Planner = struct {
     /// Appends a write for every parameter `c` holds at another value;
     /// `scratch` holds `c`'s parameter table.
     fn diff(p: *Planner, scratch: std.mem.Allocator, c: *const device.Circuit) !void {
-        const moved = try collect(scratch, c);
+        try p.diffAt(try collect(scratch, c));
+    }
+
+    /// `diff` against parameters `moved`, collected in `p.refs` order.
+    fn diffAt(p: *Planner, moved: []const ParamRef) !void {
         for (p.refs, moved, 0..) |a, b, i| {
             const x = b.get();
             if (@as(u64, @bitCast(a.get())) == @as(u64, @bitCast(x))) continue;
@@ -710,7 +771,13 @@ pub const Planner = struct {
 /// Whether a slot that held `a` reaches, leaves or crosses zero at `b`,
 /// which may collapse a node: only a rebuild can tell.
 fn crossesZero(a: f64, b: f64) bool {
-    return (a == 0) != (b == 0) or (a < 0) != (b < 0);
+    return signClass(a) != signClass(b);
+}
+
+/// 0 for zero, 1 for negative, 2 otherwise (NaN included): what
+/// `crossesZero` compares.
+fn signClass(x: f64) u8 {
+    return if (x == 0) 0 else if (x < 0) 1 else 2;
 }
 
 /// What a circuit holds that no parameter write reaches, read off the
