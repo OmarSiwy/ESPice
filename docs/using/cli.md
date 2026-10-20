@@ -18,11 +18,15 @@ Usage: espice [OPTION]... FILE...
       --format=FMT            binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print
       --backend=BE            cpu|auto|cuda|hip (default cpu)
       --gpu                   Require an available GPU
-      --jobs=N                Maximum parallel queries (default 1)
+      --jobs=N|auto           Maximum parallel queries (default auto: one per CPU)
       --print-dag             Print the next query frontier before running
       --plan                  Print the DAG without running analyses
       --timing-in-depth       Time preparation, queries, and individual steps
       --measures-only         Measure .tran cards as the run goes; keep only the columns whole-run cards read
+                              (--measures-only, --early-stop and --warm-start are on by default when
+                              nothing reads the waveforms: no -r, .save, .stim, optimization, --tangents
+                              or Verilog-A display task)
+      --full-waveforms        Turn that default off
       --early-stop            End each .tran once its .meas cards have resolved (never with LAST, _CONT,
                               JITTER, .check/DOUT or a window without TO=)
       --abort-after=T         Fail a .tran still missing a .meas value past T seconds
@@ -30,7 +34,7 @@ Usage: espice [OPTION]... FILE...
       --warm-start            Start each transient's OP from the nominal one
       --tangents=P,...        Print d(.meas)/d(P) of the first .tran's cards for these .params
       --tangent-step=S        Relative step of --tangents (default 1e-6)
-      --tokenizer=FMT         ngspice|hspice|spectre
+      --tokenizer=FMT         ngspice|hspice|spectre (default: detected from the deck, else ngspice)
       --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
   -v, --version               Version
 ```
@@ -58,9 +62,18 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
   error.
 
 `--tokenizer=FMT`
-: The netlist dialect: `ngspice` (default, alias `ng`), `hspice` (`hs`) or
+: The netlist dialect: `ngspice` (alias `ng`), `hspice` (`hs`) or
   `spectre` (`scs`). The single-dash spelling `-tokenizer=hspice` works
-  too. See [Dialects](dialects.md).
+  too. Without it, ESPice reads the deck's own file (not its includes)
+  and picks Spectre for a `simulator lang=` line or a `name (nodes)
+  master` instance, HSPICE for a card or keyword ngspice lacks (`.data`,
+  `.alter`, `.variation`, `.lin`, `.net`, `.fft`, `.stim`, `.check`,
+  `.connect`, `.load`, `.sn`, `.ptdnoise`, `SWEEP DATA=`/`MONTE=`/`OPTIMIZE=`,
+  `.lib 'file' section`, a `PORT=` element, a W element's `RLGCMODEL=`, ...),
+  and ngspice otherwise, with a note on stderr when it is not ngspice. An
+  HSPICE deck written only in ngspice syntax still reads as ngspice, whose
+  defaults differ (TNOM 27 instead of 25): name `--tokenizer=hspice` for it.
+  See [Dialects](dialects.md).
 
 `--vpi=APP`
 : Load the VPI application `APP`, a shared library exporting
@@ -79,8 +92,9 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
 : The same as `--backend=auto`, except that a machine with no usable GPU
   is an error instead of a fallback.
 
-`--jobs=N`
-: Run up to N analyses at once (default 1, must be at least 1). Analyses
+`--jobs=N`, `--jobs=auto`
+: Run up to N analyses at once (at least 1). The default, `auto`, is one
+  per CPU. Analyses
   form a dependency graph: an `.ac` needs the operating point, a `.noise`
   can share it. Independent analyses run in parallel, and a finished one
   is replaced at once. In a sweep each point's transient starts as soon as
@@ -137,7 +151,8 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
   takes the full ladder. The guess is the same for every point, so results
   do not depend on `--jobs` or point order, but they may differ from a cold
   run within the Newton tolerances. A point with its own topology (a model
-  bin that moves) starts cold.
+  bin that moves) starts cold. On by default when nothing reads the
+  waveforms (see below).
 
 `--measures-only`
 : For runs that only need their `.meas` results, such as large sweeps.
@@ -150,6 +165,17 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
   TD=TRIG, and FIND or DERIV whose WHEN has TD=, FROM= or a LAST count
   keep the columns they read. A written result then holds only the time
   and those columns. Ignored for a deck with `.save` or `.stim`.
+
+`--full-waveforms`
+: By default `--measures-only`, `--early-stop` and `--warm-start` are on
+  when nothing but the `.meas` cards reads the deck's transient
+  waveforms: no `-r` output, no `.save` or `.stim`, no optimization, no
+  `--tangents`, and no Verilog-A model with display tasks (which print at
+  every step). `.print`, `.probe` and `.plot` are ignored, and `.four` and
+  `.fft` run transients of their own, so none of them counts. The `.meas`
+  values are the same either way; warm start can move them within the
+  Newton tolerances. `--full-waveforms` turns the default off; naming one
+  of the three flags turns it on regardless.
 
 `--early-stop`
 : End each transient once all of its `.tran` cards have their final
@@ -237,7 +263,8 @@ espice amp.sp -r amp.raw
 # Text tables
 espice amp.sp -r amp.txt --format=print
 
-# An HSPICE deck, S-parameters to Touchstone
+# An HSPICE deck, S-parameters to Touchstone (an HSPICE-only card picks
+# the dialect by itself; --tokenizer makes sure)
 espice --tokenizer=hspice filter.sp --format=touchstone -r filter.s2p
 
 # Four analyses at once, eight device threads

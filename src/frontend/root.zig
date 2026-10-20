@@ -7,6 +7,7 @@ pub const Dialect = preparation.Dialect;
 pub const prepare = preparation.prepare;
 pub const loadModels = preparation.loadModels;
 pub const parseDialect = preparation.parseDialect;
+pub const detectDialect = preparation.detectDialect;
 pub const build = preparation.build;
 pub const Prepared = preparation.Prepared;
 pub const Tuner = @import("variants.zig").Tuner;

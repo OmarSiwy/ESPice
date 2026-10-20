@@ -1,9 +1,11 @@
 # Dialects
 
-ESPice reads three netlist dialects. Pick one with `--tokenizer`:
+ESPice reads three netlist dialects. Without `--tokenizer` the CLI picks one
+from markers in the deck's own file, ngspice when none is present (see
+[`--tokenizer`](cli.md#options)); name one to be sure:
 
 ```sh
-espice deck.sp                        # ngspice, the default
+espice deck.sp                        # detected; ngspice without markers
 espice --tokenizer=hspice deck.sp     # or hs
 espice --tokenizer=spectre deck.scs   # or scs
 ```

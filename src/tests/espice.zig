@@ -1727,3 +1727,31 @@ test "per-lane stimulus (#212): each .data point equals its row run alone, to th
     // rejects a step differently: one accepted grid.
     for (swept.grids.items[1..]) |grid| try t.expectEqualSlices(u64, @ptrCast(swept.grids.items[0]), @ptrCast(grid));
 }
+
+test "auto_point: a .meas-only deck without an output streams its measures; an output file keeps every column" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const out = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}/a.raw", .{tmp.sub_path});
+    defer t.allocator.free(out);
+    const source = "auto\nv1 a 0 pwl(0 0 1n 1)\nr1 a b 1k\nc1 b 0 1p\n.tran 0.01n 20n\n.meas tran t1 when v(b)=0.5 rise=1\n.end\n";
+    var shapes: [2]struct { vars: usize, points: usize, text: []u8 } = undefined;
+    for ([_]?[]const u8{ null, out }, &shapes) |path, *shape| {
+        const p = try api.Problem.init(t.allocator, t.io, .{
+            .source = .{ .bytes = .{ .data = source, .origin = "auto.cir" } },
+            .output = .{ .path = path },
+            .backend = .{ .final_plan = true },
+            .auto_point = true,
+        });
+        defer p.deinit();
+        try p.run_all();
+        var text: std.Io.Writer.Allocating = .init(t.allocator);
+        defer text.deinit();
+        try p.print_measures(&text.writer, &text.writer);
+        const r = try p.result(try find(p, .tran));
+        shape.* = .{ .vars = r.varnames.len, .points = r.npoints, .text = try text.toOwnedSlice() };
+    }
+    defer for (shapes) |s| t.allocator.free(s.text);
+    try t.expectEqualStrings(shapes[1].text, shapes[0].text);
+    try t.expect(shapes[0].vars < shapes[1].vars); // measures_only
+    try t.expect(shapes[0].points < shapes[1].points); // early_stop
+}

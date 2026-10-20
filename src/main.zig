@@ -37,12 +37,13 @@ pub fn main(init: std.process.Init) !u8 {
     defer paths.deinit(init.gpa);
     var vpi_apps: std.ArrayList([]const u8) = .empty;
     defer vpi_apps.deinit(init.gpa);
-    var dialect: problem.Dialect = .ngspice;
+    var dialect: ?problem.Dialect = null;
     var selection: problem.Selection = .{};
     var backend: problem.Request = .cpu;
     var lanes = false;
     var explicit_gpu = false;
-    var max_parallel: u16 = 1;
+    var max_parallel: u16 = 0;
+    var full_waveforms = false;
     var show_plan = false;
     var plan_only = false;
     var timing_in_depth = false;
@@ -58,11 +59,15 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --format=FMT            binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print
                 \\      --backend=BE            cpu|auto|cuda|hip (default cpu)
                 \\      --gpu                   Require an available GPU
-                \\      --jobs=N                Maximum parallel queries (default 1)
+                \\      --jobs=N|auto           Maximum parallel queries (default auto: one per CPU)
                 \\      --print-dag             Print the next query frontier before running
                 \\      --plan                  Print the DAG without running analyses
                 \\      --timing-in-depth       Time preparation, queries, and individual steps
                 \\      --measures-only         Measure .tran cards as the run goes; keep only the columns whole-run cards read
+                \\                              (--measures-only, --early-stop and --warm-start are on by default when
+                \\                              nothing reads the waveforms: no -r, .save, .stim, optimization, --tangents
+                \\                              or Verilog-A display task)
+                \\      --full-waveforms        Turn that default off
                 \\      --early-stop            End each .tran once its .meas cards have resolved (never with LAST, _CONT,
                 \\                              JITTER, .check/DOUT or a window without TO=)
                 \\      --abort-after=T         Fail a .tran still missing a .meas value past T seconds
@@ -71,7 +76,7 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --tangents=P,...        Print d(.meas)/d(P) of the first .tran's cards for these .params
                 \\      --tangent-step=S        Relative step of --tangents (default 1e-6)
                 \\      --lanes                 Solve sweep points' OPs and .dc sweeps as SIMD lanes (CPU)
-                \\      --tokenizer=FMT         ngspice|hspice|spectre
+                \\      --tokenizer=FMT         ngspice|hspice|spectre (default: detected from the deck, else ngspice)
                 \\      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
                 \\  -v, --version               Version
                 \\
@@ -96,6 +101,8 @@ pub fn main(init: std.process.Init) !u8 {
             point.early_stop = true;
         } else if (std.mem.eql(u8, arg, "--warm-start")) {
             point.warm_start = true;
+        } else if (std.mem.eql(u8, arg, "--full-waveforms")) {
+            full_waveforms = true;
         } else if (optionValue(arg, "", "--tangents", &args)) |value| {
             var it = std.mem.splitScalar(u8, value orelse return usageFail(), ',');
             while (it.next()) |name| {
@@ -121,8 +128,9 @@ pub fn main(init: std.process.Init) !u8 {
             backend = std.meta.stringToEnum(problem.Request, value orelse return usageFail()) orelse return usageFail();
             explicit_gpu = explicit_gpu or backend == .cuda or backend == .hip;
         } else if (optionValue(arg, "", "--jobs", &args)) |value| {
-            max_parallel = std.fmt.parseInt(u16, value orelse return usageFail(), 10) catch return usageFail();
-            if (max_parallel == 0) return usageFail();
+            const v = value orelse return usageFail();
+            max_parallel = if (std.mem.eql(u8, v, "auto")) 0 else std.fmt.parseInt(u16, v, 10) catch return usageFail();
+            if (max_parallel == 0 and !std.mem.eql(u8, v, "auto")) return usageFail();
         } else if (optionValue(arg, "", "--vpi", &args)) |value| {
             try vpi_apps.append(init.gpa, value orelse return usageFail());
         } else if (optionValue(arg, "-tokenizer", "--tokenizer", &args)) |value| {
@@ -133,6 +141,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else try paths.append(init.gpa, arg);
     }
     if (paths.items.len == 0) return usageFail();
+    if (max_parallel == 0) max_parallel = autoJobs();
     if (tangents.items.len == 0) point.tangent_step = 0 else if (point.tangent_step == 0) point.tangent_step = 1e-6;
 
     // One per process: VerA's VPI is process-global.
@@ -145,9 +154,16 @@ pub fn main(init: std.process.Init) !u8 {
         var err_buf: [1024]u8 = undefined;
         var stdout: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &out_buf);
         var stderr: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &err_buf);
+        const deck_dialect = dialect orelse detected: {
+            const text = std.Io.Dir.cwd().readFileAlloc(init.io, path, init.gpa, .unlimited) catch break :detected .ngspice;
+            defer init.gpa.free(text);
+            const d = problem.detectDialect(text);
+            if (d != .ngspice) std.debug.print("{s}: reading as {t} (--tokenizer to override)\n", .{ path, d });
+            break :detected d;
+        };
         const p = problem.Problem.init(init.gpa, init.io, .{
             .source = .{ .file = path },
-            .dialect = dialect,
+            .dialect = deck_dialect,
             .output = selection,
             .backend = .{
                 .backend = backend,
@@ -161,6 +177,7 @@ pub fn main(init: std.process.Init) !u8 {
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,
             .point = point,
+            .auto_point = !full_waveforms,
             .live_params = tangents.items,
             .measures = .{ .out = &stdout.interface, .err = &stderr.interface },
             .vpi_apps = vpi_apps.items,
@@ -200,6 +217,11 @@ pub fn main(init: std.process.Init) !u8 {
     return if (failed) 1 else 0;
 }
 
+/// `--jobs=auto`: one query per CPU.
+fn autoJobs() u16 {
+    return @intCast(std.math.clamp(std.Thread.getCpuCount() catch 1, 1, std.math.maxInt(u16)));
+}
+
 /// A positive thread count from the environment, 1 when unset or unparsable.
 fn envThreads(comptime name: [:0]const u8) u32 {
     const value = std.c.getenv(name) orelse return 1;
@@ -235,6 +257,10 @@ test "--version matches build.zig.zon" {
     const zon = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig.zon", std.testing.allocator, .limited(1 << 16));
     defer std.testing.allocator.free(zon);
     try std.testing.expect(std.mem.indexOf(u8, zon, ".version = \"" ++ version ++ "\",") != null);
+}
+
+test autoJobs {
+    try std.testing.expect(autoJobs() >= 1);
 }
 
 test "optionValue: separate, joined, missing and empty values" {
