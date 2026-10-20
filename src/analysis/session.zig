@@ -496,11 +496,12 @@ pub const Session = struct {
             self.rows.items(.executor)[i].?.controller.options.timing_query = @fromBackingInt(@intCast(i));
     }
 
-    /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`
-    /// or `.dc` row `i` the leader of a lane batch with up to `lane_width -
-    /// 1` other ready, never-started rows of its kind on its template, with
-    /// a prerequisite exactly when it has one, whose options differ at most
-    /// in `tol.variant` and `tol.temp_c`, taken from the queue ahead.
+    /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`,
+    /// `.dc` or lane row (`batchable`) `i` the leader of a lane batch with
+    /// up to `lane_width - 1` other ready, never-started rows of its kind on
+    /// its template, with a prerequisite exactly when it has one, whose
+    /// options differ at most in `tol.variant`, `tol.temp_c` and a lane row's
+    /// lane, taken from the queue ahead.
     /// Each lane is bitwise its query run alone, so grouping is free to
     /// follow scheduling order. A row whose executor cannot be built is
     /// left to run alone.
@@ -511,7 +512,7 @@ pub const Session = struct {
         const config = self.config;
         if (!config.knobs.lanes or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
-        if ((jobs[i] != .op and jobs[i] != .dc) or self.rows.items(.executor)[i] != null) return;
+        if (!batchable(jobs[i]) or self.rows.items(.executor)[i] != null) return;
         var peers: [lane_width - 1]usize = undefined;
         var n: usize = 0;
         // A finished batch's dependents wait in `urgent`, newest last.
@@ -1054,15 +1055,28 @@ const lane_window = 8 * execution.lane_width;
 /// each lane builds reads. Slices compare by content, floats by bits.
 fn sameLaneJob(a: requests.Query, b: requests.Query) bool {
     return switch (a) {
-        inline .op, .dc => |o, tag| b == tag and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
+        inline .op, .dc, .mc, .temp => |o, tag| b == tag and batchable(b) and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
         else => false,
     };
 }
 
+/// Kinds a lane batch runs: `.op`, `.dc`, and the lane rows a split `.mc`
+/// or `.temp` became (`splitLanes`).
+fn batchable(job: requests.Query) bool {
+    return switch (job) {
+        .op, .dc => true,
+        inline .mc, .temp => |o| o.lane != null,
+        else => false,
+    };
+}
+
+/// `o` without what only the circuit each lane builds reads: the variant
+/// row, the temperature and a split row's lane.
 fn stripTol(o: anytype) @TypeOf(o) {
     var c = o;
     c.tol.variant = null;
     c.tol.temp_c = null;
+    if (@hasField(@TypeOf(o), "lane")) c.lane = null;
     return c;
 }
 

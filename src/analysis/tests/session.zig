@@ -556,3 +556,105 @@ test "lane batches: a NaN value, failing, peeling and re-pivoting lanes leave th
     // Some lanes must fail for the test to mean anything, and most finish.
     try t.expect(completed > jobs.len / 2 and completed < jobs.len);
 }
+
+test "split lanes (#213): .mc trials, .dc DATA= variants and a .temp range run as lane rows, batched or not, at any --jobs, and assemble bitwise the lanes run alone" {
+    const t = std.testing;
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const vin = try b.addNode();
+    const mid = try b.addNode();
+    const low = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 3 }, &.{}, .{ vin, GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ vin, mid });
+    try b.addDevice(models.diode, "", &.{ .is = 1e-14 }, &.{}, .{ mid, low });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ low, GROUND });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    // Variant k writes the first resistor's `r`; NaN and the negative one
+    // leave lanes unconverged, which the assembled sweep drops.
+    var probe = try @import("../types.zig").Circuit.instantiate(&prepared, t.allocator);
+    defer probe.deinit();
+    const params = try probe.collectParams();
+    const r_ref: u32 = for (params, 0..) |p, k| {
+        if (p.type == builtin("resistor") and p.index == 0 and std.mem.eql(u8, p.param_name, "r")) break @intCast(k);
+    } else return error.TestUnexpectedResult;
+    const values = [_]f64{ 1e3, 2e3, std.math.nan(f64), 3e3, 5e3, -1e3, 7e3, 1e4, 2e4, 10, 1e5 };
+    var labels: [values.len][]const u8 = undefined;
+    var starts: [values.len + 1]u32 = undefined;
+    var refs: [values.len]u32 = undefined;
+    var temps: [values.len]?f64 = undefined;
+    var axis: [values.len]f64 = undefined;
+    for (&labels, starts[0..values.len], &refs, &temps, &axis, 0..) |*l, *s0, *r, *tc, *a, k| {
+        l.* = "r";
+        s0.* = @intCast(k);
+        r.* = r_ref;
+        tc.* = null;
+        a.* = @floatFromInt(10 * k);
+    }
+    starts[values.len] = values.len;
+    var deck = bareDeck(&.{ vin, mid, low }, &.{ "v(in)", "v(mid)", "v(low)" });
+    deck.variants = .{ .labels = &labels, .temp_c = &temps, .axis = &axis, .starts = &starts, .refs = &refs, .values = &values };
+    const jobs = [_]requests.Query{
+        .{ .mc = .{ .n_trials = 11, .variation = 0.2, .seed = 5 } },
+        .{ .mc = .{ .variants = .{ .first = 0, .count = values.len }, .axis = "r", .dc_plot = true } },
+        .{ .temp = .{ .t_start = -40, .t_stop = 160, .t_step = 20 } },
+    };
+    const Run = struct { lanes: bool, jobs: u16 };
+    const runs = [_]Run{ .{ .lanes = false, .jobs = 1 }, .{ .lanes = true, .jobs = 1 }, .{ .lanes = true, .jobs = 3 } };
+    var out: [runs.len][jobs.len][]f64 = undefined;
+    var batched: usize = 0;
+    for (runs, &out) |r, *o| {
+        var config: @import("../executor.zig").Config = .{};
+        config.knobs.lanes = r.lanes;
+        var s = Session.init(t.allocator, t.io, &prepared, &deck, config);
+        defer s.deinit();
+        var ids: [jobs.len]requests.QueryId = undefined;
+        _ = try s.append(&jobs, &ids);
+        // One shared OP, 33 lane rows, the three split queries.
+        try t.expectEqual(@as(u32, 1 + 33 + 3), s.count());
+        try s.runAll(.{ .max_parallel = r.jobs, .quantum = .completion });
+        try t.expectEqual(null, s.failure());
+        for (s.rows.items(.executor)) |e| batched += e.?.peers.len;
+        for (ids, o) |id, *d| d.* = try t.allocator.dupe(f64, (try s.result(id)).data);
+    }
+    defer for (out) |o| for (o) |d| t.allocator.free(d);
+    try t.expect(batched > 0);
+    for (out[1..]) |o| for (out[0], o) |want, got| try t.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
+    // Two variant lanes drop out; the trials and temperatures all converge.
+    try t.expectEqual(@as(usize, 11 * 4), out[0][0].len);
+    try t.expectEqual(@as(usize, 9 * 4), out[0][1].len);
+    try t.expectEqual(@as(usize, 11 * 4), out[0][2].len);
+
+    // The same lanes appended one query each, never split or batched.
+    var config: @import("../executor.zig").Config = .{};
+    config.knobs.lanes = false;
+    var s = Session.init(t.allocator, t.io, &prepared, &deck, config);
+    defer s.deinit();
+    var alone: [33]requests.Query = undefined;
+    for (0..11) |k| {
+        const l: u32 = @intCast(k);
+        alone[k] = jobs[0];
+        alone[k].mc.lane = l;
+        alone[11 + k] = jobs[1];
+        alone[11 + k].mc.lane = l;
+        alone[22 + k] = jobs[2];
+        alone[22 + k].temp.lane = l;
+    }
+    var ids: [alone.len]requests.QueryId = undefined;
+    _ = try s.append(&alone, &ids);
+    try t.expectEqual(@as(u32, 1 + 33), s.count());
+    try s.runAll(.{ .quantum = .completion });
+    for (out[0], 0..) |want, q| {
+        var at: usize = 0;
+        for (ids[11 * q ..][0..11]) |id| {
+            const part = (try s.result(id)).data;
+            // A plain `.mc` numbers its converged trials.
+            if (q == 0 and part.len != 0) try t.expectEqual(@as(f64, @floatFromInt(at / 4)), want[at]);
+            const skip: usize = if (q == 0) 1 else 0;
+            try t.expectEqualSlices(u64, @ptrCast(part[skip..]), @ptrCast(want[at + skip ..][0 .. part.len - skip]));
+            at += part.len;
+        }
+        try t.expectEqual(want.len, at);
+    }
+}

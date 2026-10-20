@@ -74,6 +74,64 @@ const VariantCtx = struct {
     }
 };
 
+/// The lanes' installer: random trials, or deck variants.
+pub const Setup = union(enum) {
+    trials: LaneCtx,
+    variants: VariantCtx,
+
+    pub fn apply(self: *Setup, k: usize) void {
+        switch (self.*) {
+            inline else => |*s| s.apply(k),
+        }
+    }
+
+    pub fn restore(self: *Setup) void {
+        switch (self.*) {
+            inline else => |*s| s.restore(),
+        }
+    }
+
+    pub fn deinit(self: *Setup, scratch: std.mem.Allocator) void {
+        switch (self.*) {
+            .trials => |s| scratch.free(s.param_vars),
+            .variants => |s| scratch.free(s.saved),
+        }
+    }
+};
+
+/// The installer for `ctx`'s circuit: each device's nonzero primary
+/// parameter at its nominal, or the variants' widest write's save slots.
+pub fn setup(ctx: *const root.RunCtx, opts: Options) !Setup {
+    const scratch = ctx.scratch_allocator;
+    const refs = try ctx.circuit.collectParams();
+    if (opts.variants.count != 0) {
+        const rows = opts.variants;
+        var widest: usize = 0;
+        for (rows.first..rows.first + rows.count) |v| widest = @max(widest, ctx.variants.writes(@intCast(v))[0].len);
+        return .{ .variants = .{ .params = refs, .variants = ctx.variants, .first = rows.first, .saved = try scratch.alloc(f64, widest) } };
+    }
+    var n_vars: usize = 0;
+    for (refs) |ref| n_vars += @intFromBool(ref.primary and ref.get() != 0);
+    const param_vars = try scratch.alloc(ParamVar, n_vars);
+    var i: usize = 0;
+    for (refs) |ref| {
+        if (!ref.primary or ref.get() == 0) continue;
+        param_vars[i] = .{ .ref = ref, .nominal = ref.get() };
+        i += 1;
+    }
+    return .{ .trials = .{ .param_vars = param_vars, .variation = opts.variation, .seed = opts.seed } };
+}
+
+/// The trials or variants `opts` solves.
+pub fn range(opts: Options) lanes.Range {
+    return .of(opts.lane, if (opts.variants.count != 0) opts.variants.count else opts.n_trials);
+}
+
+/// Variants warm-start from the nominal OP; trials start cold.
+pub fn warm(ctx: *const root.RunCtx, opts: Options) ?[]const f64 {
+    return if (opts.variants.count != 0) ctx.x_op else null;
+}
+
 /// Contract entry: real, point-major (run, probes...), one row per converged
 /// trial and no rows when there are no probes. Varies each device's primary
 /// parameter, skipping those that are zero, or with `opts.variants` solves
@@ -83,55 +141,20 @@ const VariantCtx = struct {
 /// Parameters are back at their nominals afterwards so later jobs see the
 /// netlist's circuit.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    if (opts.variants.count != 0) return runVariants(ctx, opts);
-    const ckt = ctx.circuit;
-    const scratch = ctx.scratch_allocator;
-
-    const refs = try ckt.collectParams();
-    var n_vars: usize = 0;
-    for (refs) |ref| n_vars += @intFromBool(ref.primary and ref.get() != 0);
-    const param_vars = try scratch.alloc(ParamVar, n_vars);
-    defer scratch.free(param_vars);
-    var i: usize = 0;
-    for (refs) |ref| {
-        if (!ref.primary or ref.get() == 0) continue;
-        param_vars[i] = .{ .ref = ref, .nominal = ref.get() };
-        i += 1;
-    }
-
-    var lane_ctx: LaneCtx = .{ .param_vars = param_vars, .variation = opts.variation, .seed = opts.seed };
-    return solve(ctx, opts, &lane_ctx, .of(opts.lane, opts.n_trials), null, "Monte Carlo", "run", null);
+    return lanes.run(@This(), ctx, opts);
 }
 
-fn runVariants(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const scratch = ctx.scratch_allocator;
-    const range = opts.variants;
-    var widest: usize = 0;
-    for (range.first..range.first + range.count) |v| widest = @max(widest, ctx.variants.writes(@intCast(v))[0].len);
-    const saved = try scratch.alloc(f64, widest);
-    defer scratch.free(saved);
-    var lane_ctx: VariantCtx = .{ .params = try ctx.circuit.collectParams(), .variants = ctx.variants, .first = range.first, .saved = saved };
-    const axis = ctx.variants.axis[range.first..][0..range.count];
-    return solve(ctx, opts, &lane_ctx, .of(opts.lane, range.count), ctx.x_op, if (opts.dc_plot) "DC transfer characteristic" else "Monte Carlo", opts.axis, axis);
-}
-
-/// Solves `lanes` and publishes one row per converged lane: its axis value
-/// (the converged ordinal when `axis` is null), then the probes.
-fn solve(ctx: *const root.RunCtx, opts: Options, setup: anytype, range: lanes.Range, warm: ?[]const f64, plotname: []const u8, first: []const u8, axis: ?[]const f64) !root.Result {
-    const scratch = ctx.scratch_allocator;
+/// One row per converged lane of those from `first` (`rows` holds each
+/// lane's probe values): its axis value, the variant's or the converged
+/// ordinal, then the probes.
+pub fn publish(ctx: *const root.RunCtx, opts: Options, first: usize, probe_rows: []const f64, results: []const converger.Result) !root.Result {
     const np = ctx.probes.len;
-    const probe_rows = try scratch.alloc(f64, range.count * np);
-    defer scratch.free(probe_rows);
-    const results = try scratch.alloc(converger.Result, range.count);
-    defer scratch.free(results);
-    const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ctx.circuit, setup, range.first, ctx.probes, probe_rows, results, nopts, warm, scratch);
-
     var n_conv: usize = 0;
     if (np > 0) {
         for (results) |r| n_conv += @intFromBool(r.converged);
     }
-    const names = try root.probeNames(ctx, first);
+    const variants = opts.variants.count != 0;
+    const names = try root.probeNames(ctx, if (variants) opts.axis else "run");
     const ncols = names.len;
     const data = try ctx.allocator.alloc(f64, n_conv * ncols);
     if (n_conv > 0) {
@@ -139,14 +162,14 @@ fn solve(ctx: *const root.RunCtx, opts: Options, setup: anytype, range: lanes.Ra
         for (results, 0..) |r, t| {
             if (!r.converged) continue;
             const row = data[k * ncols ..][0..ncols];
-            row[0] = if (axis) |values| values[range.first + t] else @floatFromInt(k);
+            row[0] = if (variants) ctx.variants.axis[opts.variants.first + first + t] else @floatFromInt(k);
             @memcpy(row[1..], probe_rows[t * np ..][0..np]);
             k += 1;
         }
     }
 
     return .{
-        .plotname = plotname,
+        .plotname = if (variants and opts.dc_plot) "DC transfer characteristic" else "Monte Carlo",
         .varnames = names,
         .is_complex = false,
         .npoints = n_conv,

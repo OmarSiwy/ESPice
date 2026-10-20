@@ -2,6 +2,7 @@
 //! the devices' own temperature physics (setCircuitTemp), no external
 //! coefficients.
 //! Cites dev/analysis/dc-sweep.md and dev/analysis/ensemble-sweeps.md.
+const std = @import("std");
 const root = @import("../types.zig");
 const lanes = @import("lanes.zig");
 const converger = @import("solver").converger;
@@ -22,20 +23,36 @@ pub fn numPoints(options: Options) u32 {
 
 /// Lane k runs at t_start + k*t_step; restore reinstalls the temperature the
 /// circuit had before the sweep (`Circuit.temp_c`).
-const LaneCtx = struct {
+pub const Setup = struct {
     ckt: *root.Circuit,
     t_start: f64,
     t_step: f64,
     temp_c: f32,
 
-    pub fn apply(self: *LaneCtx, k: usize) void {
+    pub fn apply(self: *Setup, k: usize) void {
         self.ckt.setCircuitTemp(@floatCast(self.t_start + @as(f64, @floatFromInt(k)) * self.t_step));
     }
 
-    pub fn restore(self: *LaneCtx) void {
+    pub fn restore(self: *Setup) void {
         self.ckt.setCircuitTemp(self.temp_c);
     }
+
+    pub fn deinit(_: *Setup, _: std.mem.Allocator) void {}
 };
+
+pub fn setup(ctx: *const root.RunCtx, opts: Options) !Setup {
+    return .{ .ckt = ctx.circuit, .t_start = opts.t_start, .t_step = opts.t_step, .temp_c = ctx.circuit.temp_c };
+}
+
+/// The temperatures `opts` solves.
+pub fn range(opts: Options) lanes.Range {
+    return .of(opts.lane, numPoints(opts));
+}
+
+/// Every temperature starts cold.
+pub fn warm(_: *const root.RunCtx, _: Options) ?[]const f64 {
+    return null;
+}
 
 /// Contract entry: real, point-major (temp, probes...), one row per converged
 /// temperature, each solved cold; with `opts.lane` only that temperature (a
@@ -43,21 +60,13 @@ const LaneCtx = struct {
 /// ran at before the sweep, so later jobs see the netlist's (or their
 /// query's) temperature.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const ckt = ctx.circuit;
-    const scratch = ctx.scratch_allocator;
-    const range: lanes.Range = .of(opts.lane, numPoints(opts));
+    return lanes.run(@This(), ctx, opts);
+}
+
+/// One row per converged temperature of those from lane `first`.
+pub fn publish(ctx: *const root.RunCtx, opts: Options, first: usize, probe_rows: []const f64, results: []const converger.Result) !root.Result {
     const np = ctx.probes.len;
     const ncols = np + 1;
-
-    const probe_rows = try scratch.alloc(f64, range.count * np);
-    defer scratch.free(probe_rows);
-    const results = try scratch.alloc(converger.Result, range.count);
-    defer scratch.free(results);
-
-    var lane_ctx: LaneCtx = .{ .ckt = ckt, .t_start = opts.t_start, .t_step = opts.t_step, .temp_c = ckt.temp_c };
-    const nopts = converger.optionsFromTolerances(opts.dc_options.tol, opts.dc_options.tol.itl2);
-    try lanes.solveLanes(ckt, &lane_ctx, range.first, ctx.probes, probe_rows, results, nopts, null, scratch);
-
     var npoints: usize = 0;
     for (results) |r| npoints += @intFromBool(r.converged);
     const data = try ctx.allocator.alloc(f64, npoints * ncols);
@@ -65,7 +74,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     for (results, 0..) |r, i| {
         if (!r.converged) continue;
         const row = data[pt * ncols ..][0..ncols];
-        row[0] = opts.t_start + @as(f64, @floatFromInt(range.first + i)) * opts.t_step;
+        row[0] = opts.t_start + @as(f64, @floatFromInt(first + i)) * opts.t_step;
         @memcpy(row[1..], probe_rows[i * np ..][0..np]);
         pt += 1;
     }

@@ -12,6 +12,7 @@ const requests = @import("core").query;
 const types = @import("types.zig");
 const op = @import("dc/op.zig");
 const dc = @import("dc/dc.zig");
+const sweep_lanes = @import("sweep/lanes.zig");
 const gpu = @import("gpu.zig");
 const gpu_lu = @import("gpu_lu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
@@ -302,7 +303,7 @@ pub const Executor = struct {
     /// returns this query's own.
     fn executeBatch(self: *Executor) QueryError!types.Result {
         const g = 1 + self.peers.len;
-        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc));
+        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc or self.job == .mc or self.job == .temp));
         var members: [lane_width]*Executor = undefined;
         members[0] = self;
         @memcpy(members[1..g], self.peers);
@@ -326,21 +327,32 @@ pub const Executor = struct {
             for (live[0..n_live]) |k| outcomes[k] = members[k].finishAlone();
             return outcomes[0];
         }
-        if (self.job == .dc) {
-            var ctxs: [lane_width]types.RunCtx = undefined;
-            for (live[0..n_live], 0..) |k, l| {
-                members[k].circuit.setSimState(.{ .kind = .dc });
-                ctxs[l] = members[k].runCtx();
-            }
-            var swept: [lane_width]dc.LaneOutcome = undefined;
-            if (n_live != 0) dc.runLanes(lane_width, ctxs[0..n_live], self.job.dc, swept[0..n_live]);
-            for (live[0..n_live], swept[0..n_live]) |k, o| {
-                outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
-                members[k].refuseLatched() catch |err| {
-                    outcomes[k] = err;
+        switch (self.job) {
+            inline .dc, .mc, .temp => |_, tag| {
+                var ctxs: [lane_width]types.RunCtx = undefined;
+                for (live[0..n_live], 0..) |k, l| {
+                    members[k].circuit.setSimState(.{ .kind = .dc });
+                    ctxs[l] = members[k].runCtx();
+                }
+                var swept: [lane_width]if (tag == .dc) dc.LaneOutcome else sweep_lanes.LaneOutcome = undefined;
+                if (n_live != 0) if (tag == .dc) {
+                    dc.runLanes(lane_width, ctxs[0..n_live], self.job.dc, swept[0..n_live]);
+                } else {
+                    // `.mc`/`.temp` lane rows, each its own lane (`Session.gather`).
+                    const M = module(tag);
+                    var opts: [lane_width]M.Options = undefined;
+                    for (live[0..n_live], opts[0..n_live]) |k, *o| o.* = @field(members[k].job, @tagName(tag));
+                    sweep_lanes.runBatch(lane_width, M, ctxs[0..n_live], opts[0..n_live], swept[0..n_live]);
                 };
-            }
-            return outcomes[0];
+                for (live[0..n_live], swept[0..n_live]) |k, o| {
+                    outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
+                    members[k].refuseLatched() catch |err| {
+                        outcomes[k] = err;
+                    };
+                }
+                return outcomes[0];
+            },
+            else => {},
         }
         var ckts: [lane_width]*types.Circuit = undefined;
         var xs: [lane_width][]f64 = undefined;
