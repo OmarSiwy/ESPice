@@ -191,7 +191,8 @@ pub fn LaneResult(comptime W: usize) type {
 /// its slots still compute and are discarded. At W = 1 this is `newton`
 /// (the `gen_newton` probe). Above, `sys` is a lane system whose methods
 /// take and return lane masks and read `sys.active` (`LaneCircuit(W)`),
-/// and `t` is per lane. Every other error fails all lanes: a checkpoint
+/// and `t` is per lane; the lanes `sys.active` holds on entry are solved.
+/// Every other error fails all lanes: a checkpoint
 /// cancel, or out of memory in a lane's factor. Traces (`ZP_OPDBG`,
 /// `ZP_NEWTON_DEBUG`), `evalFollows`, the device LU and `certify` are W = 1
 /// only.
@@ -215,7 +216,8 @@ pub fn newtonLanes(
     const x_old = ws.x_old;
     var iter: u16 = 0;
     var init_fix: L.Mask = if (opts.init_fix) L.every else L.none;
-    var active: L.Mask = L.every;
+    // Above W = 1 the caller marks the lanes it fills (`sys.active`).
+    var active: L.Mask = if (W == 1) L.every else sys.active;
     // The lanes' outcomes; void at W = 1, which returns from the loop.
     var out: if (W == 1) void else LaneResult(W) = if (W == 1) {} else .{ .converged = L.none, .singular = L.none, .iterations = @splat(opts.max_iter) };
     var limit: L.V = L.splat(x_plausible);

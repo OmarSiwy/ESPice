@@ -40,6 +40,7 @@ pub fn main(init: std.process.Init) !u8 {
     var dialect: problem.Dialect = .ngspice;
     var selection: problem.Selection = .{};
     var backend: problem.Request = .cpu;
+    var lanes = false;
     var explicit_gpu = false;
     var max_parallel: u16 = 1;
     var show_plan = false;
@@ -69,6 +70,7 @@ pub fn main(init: std.process.Init) !u8 {
                 \\      --warm-start            Start each transient's OP from the nominal one
                 \\      --tangents=P,...        Print d(.meas)/d(P) of the first .tran's cards for these .params
                 \\      --tangent-step=S        Relative step of --tangents (default 1e-6)
+                \\      --lanes                 Solve sweep points' OPs and .dc sweeps as SIMD lanes (CPU)
                 \\      --tokenizer=FMT         ngspice|hspice|spectre
                 \\      --vpi=APP               Load a VPI application (.so) for Verilog-A $systf calls; repeatable
                 \\  -v, --version               Version
@@ -103,6 +105,8 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (optionValue(arg, "", "--tangent-step", &args)) |value| {
             point.tangent_step = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
             if (!(point.tangent_step > 0) or std.math.isInf(point.tangent_step)) return usageFail();
+        } else if (std.mem.eql(u8, arg, "--lanes")) {
+            lanes = true;
         } else if (optionValue(arg, "", "--abort-after", &args)) |value| {
             const bound = std.fmt.parseFloat(f64, value orelse return usageFail()) catch return usageFail();
             if (!(bound >= 0) or std.math.isInf(bound)) return usageFail();
@@ -152,6 +156,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .device_threads = envThreads("ESPICE_THREADS"),
                 // One deck, run once: no query is appended later.
                 .final_plan = true,
+                .lanes = lanes,
             },
             .max_parallel = max_parallel,
             .timing_in_depth = timing_in_depth,

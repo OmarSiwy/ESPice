@@ -20,92 +20,370 @@ pub const Options = @import("core").query.Dc;
 /// for later jobs. Returns error.DcSweepSourceNotFound when a target names no
 /// parameter.
 pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
-    const ckt = ctx.circuit;
-    const a = ctx.allocator;
-    const scratch = ctx.scratch_allocator;
-
-    // DC simulation state for the whole sweep, whatever the shared op left
-    // behind. A deck with a .tran solves its op in the ic phase, where
-    // analysis("tran") is true and sources bias at waveform(0), which would
-    // make the swept dc value a no-op (rtlinv).
-    ckt.setSimState(.{ .kind = .dc });
-
-    // Matching the device type as well as the index lets a deck hold both a
-    // V and an I card (their per-type indices overlap) and lets the sweep
-    // name a resistor.
-    const refs = try ckt.collectParams();
-    // A null target is the temperature (`.dc TEMP ...`).
-    const t: ?root.ParamRef = switch (opts.target) {
-        .temp => null,
-        .device => |d| findTarget(refs, d) orelse return error.DcSweepSourceNotFound,
-    };
-    const saved: f64 = if (t) |r| r.get() else 0;
-    defer {
-        if (t) |r| r.set(saved);
-        ckt.recompute() catch unreachable; // restores the checked original source value
+    var s: Sweep = undefined;
+    try s.init(ctx, opts);
+    defer s.deinit();
+    for (0..s.n_outer) |po| {
+        try s.beginBlock(po);
+        for (0..s.n_inner) |pt| {
+            var converged = false;
+            if (try s.beginPoint(pt)) {
+                s.prepareWarm();
+                // A SingularMatrix here (NaN stamps from a bad warm guess)
+                // must not abort the sweep; the point falls to the ladder
+                // like any other failure.
+                if (converger.run(s.ckt, s.ws, s.sol(), 0, s.warmOptions(), root.EvalHook{})) |r| {
+                    converged = r.converged;
+                } else |e| switch (e) {
+                    error.SingularMatrix => {},
+                    else => return e, // else: only a singular warm guess falls to the ladder
+                }
+            }
+            try s.endPoint(pt, converged);
+        }
     }
-    // A temperature sweep at either level writes every Model row's
-    // temperature; put the netlist's back before the recompute above.
-    const sweeps_temp = opts.target == .temp or (opts.hasOuter() and opts.target2.? == .temp);
-    const temp_c = ckt.temp_c;
-    defer if (sweeps_temp) ckt.setCircuitTemp(temp_c);
+    return try s.take();
+}
 
-    const n_inner = if (opts.points.len > 0) opts.points.len else sweepCount(opts.start, opts.stop, opts.step);
-    const n_outer: usize = if (!opts.hasOuter()) 1 else if (opts.points2.len > 0) opts.points2.len else sweepCount(opts.start2, opts.stop2, opts.step2);
-    const npoints = n_inner * n_outer;
-    const ncols = ctx.probes.len + 1;
-    const data = try a.alloc(f64, npoints * ncols * (1 + opts.tangents.len));
-    errdefer a.free(data);
-    // The last two points, for the predictor, carried across outer blocks as
-    // ngspice's state rotation is (dctrcurv.c:290). The analysis' first
-    // point fills both, so the second point starts from the first.
-    // Then `tangentRows`' scratch, sized once for the sweep: F(x) and dx,
-    // and the saved values of the widest row's writes.
-    var widest: usize = 0;
-    for (opts.tangents) |row| widest = @max(widest, ctx.variants.writes(row)[0].len);
-    const hist = try scratch.alloc(f64, 2 * ckt.n + if (opts.tangents.len == 0) 0 else 2 * ckt.n + widest);
-    defer scratch.free(hist);
-    @memset(hist[0 .. 2 * ckt.n], 0);
-    const force = try scratch.alloc(converger.Force, ctx.nodeset.len);
-    defer scratch.free(force);
-    for (force, ctx.nodeset) |*f, ns| f.* = .{ .slot = ckt.diag_slots[ns.node], .row = ns.node, .value = ns.value };
+/// `run` for the lanes of one batch: `.dc` queries on one pattern that
+/// sweep the same values, each from its own operating point and variant
+/// row (dev/research/lane-batched-simulation.md §6, the `.dc` row). The
+/// sweep axis stays sequential and every lane keeps its own predictor and
+/// warm start; each point's warm Newton runs as lanes, and a lane it leaves
+/// unconverged takes its own cold ladder, as `run` does. Lane l's result
+/// lands in `out[l]`, bitwise `run` on `ctxs[l]`. Under a JFNK pin or
+/// `-Dcertify` every lane runs `run`. Asserts 1 <= `ctxs.len` <= W.
+pub fn runLanes(comptime W: usize, ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome) void {
+    const g = ctxs.len;
+    std.debug.assert(g >= 1 and g <= W and out.len == g);
+    const pin = ctxs[0].circuit.knobs.newton.pin;
+    if (W == 1 or g == 1 or !(pin == .auto or pin == .direct) or root.Circuit.certify) {
+        for (ctxs, out) |*c, *o| o.* = run(c, opts);
+        return;
+    }
+    const L = @import("solver").lanes.Lanes(W);
+    const System = @import("solver").lane_system.LaneSystem(W, root.Circuit, root.EvalHook);
+    var sweeps: [W]Sweep = undefined;
+    var live: L.Mask = 0;
+    for (ctxs, 0..) |*c, l| {
+        sweeps[l].init(c, opts) catch |e| {
+            out[l] = e;
+            continue;
+        };
+        live |= @as(L.Mask, 1) << @intCast(l);
+    }
+    defer {
+        var it = L.each(live);
+        while (it.next()) |l| sweeps[l].deinit();
+    }
+    // Every lane fails with the batch's own error (out of memory).
+    const fail = struct {
+        fn f(sw: []Sweep, m: *L.Mask, o: []LaneOutcome, err: LaneError) void {
+            var it = L.each(m.*);
+            while (it.next()) |l| {
+                o[l] = err;
+                sw[l].deinit();
+            }
+            m.* = 0;
+        }
+    }.f;
+    const kill = struct {
+        fn f(sw: []Sweep, m: *L.Mask, o: []LaneOutcome, l: usize, err: LaneError) void {
+            o[l] = err;
+            sw[l].deinit();
+            m.* &= ~(@as(L.Mask, 1) << @intCast(l));
+        }
+    }.f;
+    if (live == 0) return;
+    const first = @ctz(live);
+    var lanes: [W]*root.Circuit = undefined;
+    var wss: [W]*converger.Workspace = undefined;
+    for (&lanes, &wss, 0..) |*c, *w, l| {
+        const k = if (l < g and (live >> @intCast(l)) & 1 != 0) l else first;
+        c.* = ctxs[k].circuit;
+        w.* = c.*.workspace() catch |e| return fail(&sweeps, &live, out, e);
+    }
+    const gpa = ctxs[first].scratch_allocator;
+    var sys = System.init(gpa, lanes, .{}) catch |e| return fail(&sweeps, &live, out, e);
+    defer sys.deinit(gpa);
+    var lws = converger.LaneWorkspace(W).init(gpa, wss) catch |e| return fail(&sweeps, &live, out, e);
+    defer lws.deinit(gpa);
+    const xv = gpa.alloc(L.V, lanes[0].n) catch |e| return fail(&sweeps, &live, out, e);
+    defer gpa.free(xv);
 
-    // ngspice's second variable is the outer loop: the whole inner sweep
-    // replays for each src2 value and the raw file concatenates the blocks.
-    // The outer install is one ParamRef write or a circuit temperature set.
-    if (opts.hasOuter()) {
-        const outer = opts.target2.?;
-        const t2: ?root.ParamRef = switch (outer) {
+    const n_outer = sweeps[first].n_outer;
+    const n_inner = sweeps[first].n_inner;
+    for (0..n_outer) |po| {
+        var it = L.each(live);
+        while (it.next()) |l| sweeps[l].beginBlock(po) catch |e| kill(&sweeps, &live, out, l, e);
+        for (0..n_inner) |pt| {
+            var warm: L.Mask = 0;
+            it = L.each(live);
+            while (it.next()) |l| {
+                const w = sweeps[l].beginPoint(pt) catch |e| {
+                    kill(&sweeps, &live, out, l, e);
+                    continue;
+                };
+                if (!w) continue;
+                sweeps[l].prepareWarm();
+                System.putLane(xv, sweeps[l].sol(), l);
+                warm |= @as(L.Mask, 1) << @intCast(l);
+            }
+            var converged: L.Mask = 0;
+            if (warm != 0) {
+                sys.active = warm;
+                const res = converger.newtonLanes(W, &sys, &lws, xv, @splat(0), sweeps[@ctz(warm)].warmOptions(), System.LaneHook{});
+                it = L.each(warm);
+                // As `converger.run` ends each lane's solve.
+                while (it.next()) |l| lanes[l].clearLimits();
+                const r = res catch |e| return fail(&sweeps, &live, out, e);
+                converged = r.converged;
+                it = L.each(warm);
+                while (it.next()) |l| System.getLane(sweeps[l].sol(), xv, l);
+            }
+            it = L.each(live);
+            while (it.next()) |l| sweeps[l].endPoint(pt, (converged >> @intCast(l)) & 1 != 0) catch |e| kill(&sweeps, &live, out, l, e);
+        }
+    }
+    var it = L.each(live);
+    while (it.next()) |l| out[l] = sweeps[l].take();
+}
+
+const LaneError = root.ErrorOf(run);
+/// One lane's `run` outcome.
+pub const LaneOutcome = LaneError!root.Result;
+
+/// One `.dc` analysis' state between its steps, so `run` and `runLanes`
+/// share every step but the warm Newton. Blocks are the outer sweep's
+/// levels, each sweeping the inner parameter (`runSerial` in ngspice
+/// terms): every point warm-starts from the previous solution; a block's
+/// first point, and any point whose warm Newton fails, cold-starts
+/// through the `.nodeset` step and the full OP ladder, as dctrcurv.c's
+/// CKTop calls do.
+const Sweep = struct {
+    ctx: *const root.RunCtx,
+    ckt: *root.Circuit,
+    opts: Options,
+    /// The inner target; null sweeps the temperature.
+    t: ?root.ParamRef,
+    saved: f64,
+    t2: ?root.ParamRef = null,
+    saved2: f64 = 0,
+    sweeps_temp: bool,
+    temp_c: f32,
+    n_inner: usize,
+    n_outer: usize,
+    ncols: usize,
+    /// The result data, owned until `take`.
+    data: []f64,
+    /// The last two points for the predictor, carried across outer blocks
+    /// as ngspice's state rotation is (dctrcurv.c:290), then
+    /// `tangentRows`' scratch: F(x) and dx, and the saved values of the
+    /// widest row's writes.
+    hist: []f64,
+    force: []converger.Force,
+    ws: *converger.Workspace = undefined,
+    /// The outer level `beginBlock` installed.
+    block_index: usize = 0,
+    first_block: bool = true,
+    cold: bool = true,
+    v: f64 = 0,
+    v2: f64 = 0,
+    taken: bool = false,
+
+    /// `run`'s setup through the outer target. On an error everything set
+    /// up so far is undone and freed.
+    fn init(s: *Sweep, ctx: *const root.RunCtx, opts: Options) !void {
+        const ckt = ctx.circuit;
+        // DC simulation state for the whole sweep, whatever the shared op
+        // left behind. A deck with a .tran solves its op in the ic phase,
+        // where analysis("tran") is true and sources bias at waveform(0),
+        // which would make the swept dc value a no-op (rtlinv).
+        ckt.setSimState(.{ .kind = .dc });
+        // Matching the device type as well as the index lets a deck hold
+        // both a V and an I card (their per-type indices overlap) and lets
+        // the sweep name a resistor.
+        const refs = try ckt.collectParams();
+        // A null target is the temperature (`.dc TEMP ...`).
+        const t: ?root.ParamRef = switch (opts.target) {
             .temp => null,
             .device => |d| findTarget(refs, d) orelse return error.DcSweepSourceNotFound,
         };
-        const saved2: f64 = if (t2) |r| r.get() else 0;
-        defer if (t2) |r| {
-            r.set(saved2);
+        // A temperature sweep at either level writes every Model row's
+        // temperature; `deinit` puts the netlist's back.
+        s.* = .{
+            .ctx = ctx,
+            .ckt = ckt,
+            .opts = opts,
+            .t = t,
+            .saved = if (t) |r| r.get() else 0,
+            .sweeps_temp = opts.target == .temp or (opts.hasOuter() and opts.target2.? == .temp),
+            .temp_c = ckt.temp_c,
+            .n_inner = if (opts.points.len > 0) opts.points.len else sweepCount(opts.start, opts.stop, opts.step),
+            .n_outer = if (!opts.hasOuter()) 1 else if (opts.points2.len > 0) opts.points2.len else sweepCount(opts.start2, opts.stop2, opts.step2),
+            .ncols = ctx.probes.len + 1,
+            .data = &.{},
+            .hist = &.{},
+            .force = &.{},
         };
-        // Accumulated, not start + k*step: ngspice steps both levels with
-        // `+= TRCVvStep` (dctrcurv.c:469) and its axis carries that roundoff
-        // (1.4975e-13 where start + k*step gives 0), which is above the
-        // oracle's axis tolerance.
-        var v2 = opts.start2;
-        for (0..n_outer) |po| {
-            if (po != 0) v2 += opts.step2;
-            if (opts.points2.len > 0) v2 = opts.points2[po];
-            if (t2) |r| r.set(v2) else ckt.setCircuitTemp(@floatCast(v2));
-            try runSerial(ctx, ckt, hist, force, t, opts, po * n_inner, n_inner, ncols, data, po == 0);
+        errdefer s.deinit();
+        const npoints = s.n_inner * s.n_outer;
+        s.data = try ctx.allocator.alloc(f64, npoints * s.ncols * (1 + opts.tangents.len));
+        var widest: usize = 0;
+        for (opts.tangents) |row| widest = @max(widest, ctx.variants.writes(row)[0].len);
+        s.hist = try ctx.scratch_allocator.alloc(f64, 2 * ckt.n + if (opts.tangents.len == 0) 0 else 2 * ckt.n + widest);
+        @memset(s.hist[0 .. 2 * ckt.n], 0);
+        s.force = try ctx.scratch_allocator.alloc(converger.Force, ctx.nodeset.len);
+        for (s.force, ctx.nodeset) |*f, ns| f.* = .{ .slot = ckt.diag_slots[ns.node], .row = ns.node, .value = ns.value };
+        // ngspice's second variable is the outer loop: the whole inner
+        // sweep replays for each src2 value and the raw file concatenates
+        // the blocks. The outer install is one ParamRef write or a circuit
+        // temperature set.
+        if (opts.hasOuter()) {
+            s.t2 = switch (opts.target2.?) {
+                .temp => null,
+                .device => |d| findTarget(refs, d) orelse return error.DcSweepSourceNotFound,
+            };
+            s.saved2 = if (s.t2) |r| r.get() else 0;
+            // Accumulated, not start + k*step: ngspice steps both levels
+            // with `+= TRCVvStep` (dctrcurv.c:469) and its axis carries that
+            // roundoff (1.4975e-13 where start + k*step gives 0), which is
+            // above the oracle's axis tolerance.
+            s.v2 = opts.start2;
         }
-    } else {
-        try runSerial(ctx, ckt, hist, force, t, opts, 0, npoints, ncols, data, true);
     }
 
-    return .{
-        .plotname = "DC transfer characteristic",
-        .varnames = try root.probeNames(ctx, sweepColumn(opts.target)),
-        .is_complex = false,
-        .npoints = npoints * (1 + opts.tangents.len),
-        .data = data,
-    };
-}
+    /// Restores what the sweep moved (the outer target, the temperature,
+    /// then the inner target with a full recompute) and frees its buffers,
+    /// the data too unless `take` handed it out.
+    fn deinit(s: *Sweep) void {
+        if (s.t2) |r| r.set(s.saved2);
+        if (s.sweeps_temp) s.ckt.setCircuitTemp(s.temp_c);
+        if (s.t) |r| r.set(s.saved);
+        s.ckt.recompute() catch unreachable; // restores the checked original source value
+        if (!s.taken) s.ctx.allocator.free(s.data);
+        s.ctx.scratch_allocator.free(s.hist);
+        s.ctx.scratch_allocator.free(s.force);
+    }
+
+    fn take(s: *Sweep) !root.Result {
+        s.taken = true;
+        return .{
+            .plotname = "DC transfer characteristic",
+            .varnames = root.probeNames(s.ctx, sweepColumn(s.opts.target)) catch |e| {
+                s.taken = false;
+                return e;
+            },
+            .is_complex = false,
+            .npoints = s.n_inner * s.n_outer * (1 + s.opts.tangents.len),
+            .data = s.data,
+        };
+    }
+
+    fn sol(s: *const Sweep) []f64 {
+        return s.hist[0..s.ckt.n];
+    }
+
+    fn warmOptions(s: *const Sweep) converger.Options {
+        return converger.optionsFromTolerances(s.opts.tol, s.opts.tol.itl2);
+    }
+
+    /// Installs outer level `po` and starts its block cold at `start`.
+    fn beginBlock(s: *Sweep, po: usize) !void {
+        if (s.opts.hasOuter()) {
+            if (po != 0) s.v2 += s.opts.step2;
+            if (s.opts.points2.len > 0) s.v2 = s.opts.points2[po];
+            if (s.t2) |r| r.set(s.v2) else s.ckt.setCircuitTemp(@floatCast(s.v2));
+        }
+        s.block_index = po;
+        s.first_block = po == 0;
+        // The pattern is frozen, so one workspace (one symbolic
+        // factorization) serves every point.
+        s.ws = try s.ckt.workspace();
+        s.cold = true;
+        s.v = s.opts.start;
+    }
+
+    /// Installs point `pt` of the block and writes its predictor into `x`;
+    /// true when the point runs a warm Newton first.
+    fn beginPoint(s: *Sweep, pt: usize) !bool {
+        const ckt = s.ckt;
+        const opts = s.opts;
+        if (pt != 0) try ckt.checkpoint(.{ .phase = .dc, .completed = pt, .total = s.n_inner });
+        // Accumulated like ngspice (see `init`).
+        if (pt != 0) s.v += opts.step;
+        if (opts.points.len > 0) s.v = opts.points[pt];
+        if (s.t) |r| r.set(s.v) else ckt.setCircuitTemp(@floatCast(s.v));
+        // Recompute device params so const-Jacobian stamps see the new
+        // value. Only `t`'s device type moved, so later points re-derive
+        // just that type (a full walk cost 1,811 BJT preamble runs on a
+        // one-instance deck). Point 0 takes the full walk: an outer `.dc
+        // ... temp` loop may just have changed the temperature and re-wired
+        // a device (see `Circuit.recomputeType`). A temperature point moves
+        // every type.
+        if (s.t) |r| {
+            if (pt == 0) try ckt.recompute() else try ckt.recomputeType(r.type);
+        } else try ckt.recompute();
+        try ckt.computeBaseline();
+
+        // MODEINITPRED (dctrcurv.c:375, DEVpred in the device loads): start
+        // from the last two points extrapolated (xfact = 1 on the uniform
+        // step), limited against the last one. A cold point overwrites the
+        // guess; the rotation still runs, as ngspice's state rotation does.
+        const x_prev = s.hist[ckt.n..][0..ckt.n];
+        for (s.sol(), x_prev) |*xi, *xp| {
+            const last = xi.*;
+            xi.* = 2.0 * last - xp.*;
+            xp.* = last;
+        }
+        return !s.cold;
+    }
+
+    /// The warm point's start: the predictor limited against the last point.
+    fn prepareWarm(s: *Sweep) void {
+        const x_prev = s.hist[s.ckt.n..][0..s.ckt.n];
+        s.ckt.evalFollowsFirst(s.sol(), 0);
+        _ = s.ckt.applyLimits(s.sol(), x_prev);
+    }
+
+    /// Ends point `pt`: the cold ladder when the warm Newton did not
+    /// converge (or did not run), then the point's row and tangent rows.
+    fn endPoint(s: *Sweep, pt: usize, warm_converged: bool) !void {
+        const ckt = s.ckt;
+        const ctx = s.ctx;
+        const opts = s.opts;
+        const ncols = s.ncols;
+        const x = s.sol();
+        const x_prev = s.hist[ckt.n..][0..ckt.n];
+        // Rows in one tangent block: every point of every outer level.
+        const block = s.n_inner * s.n_outer;
+        var converged = warm_converged;
+        if (!converged) {
+            op.coldStart(ckt, x);
+            const lr = try op.nodesetLadder(ckt, s.ws, x, .{ .tol = opts.tol }, s.force, 0);
+            converged = lr.converged;
+        }
+        const at = s.block_index * s.n_inner + pt;
+        const data = s.data;
+        const row = data[at * ncols ..][0..ncols];
+        row[0] = s.v;
+        for (0..opts.tangents.len) |k| data[((k + 1) * block + at) * ncols] = s.v;
+        if (converged) {
+            // Each sweep point is an accepted point for device state.
+            _ = ckt.stateCtl(.commit);
+            for (ctx.probes, row[1..]) |node, *o| o.* = x[node];
+            if (opts.tangents.len != 0) try tangentRows(ctx, ckt, s.ws, x, opts.tangents, s.hist[2 * ckt.n ..], data[(block + at) * ncols ..], block * ncols, ncols);
+            s.cold = false;
+            // ngspice copies state0 into state1 after the first point
+            // (dctrcurv.c:457-462), so the second point's MODEINITPRED
+            // extrapolation holds the first point instead of doubling it.
+            if (s.first_block and pt == 0) @memcpy(x_prev, x);
+        } else {
+            for (0..1 + opts.tangents.len) |k| @memset(data[(k * block + at) * ncols ..][1..ncols], std.math.nan(f64));
+            s.cold = true;
+        }
+    }
+};
 
 /// The sweep column's name. ngspice names it after the swept quantity: a
 /// current source sweeps `i(i-sweep)`, a resistance `res-sweep`, the
@@ -132,106 +410,6 @@ fn findTarget(refs: []const root.ParamRef, want: Options.SweepTarget.Param) ?roo
             ref.type == want.type) return ref;
     }
     return null;
-}
-
-/// Sweeps `t` over `npoints` values into rows `first..` of `data` (`run`'s
-/// layout, `ncols` wide), tangent blocks included; a null `t` sweeps the
-/// circuit temperature.
-/// Each point warm-starts from the previous solution; the first point, and
-/// any point whose warm Newton fails, cold-starts through the `.nodeset`
-/// step (`nodeset`) and the full OP ladder, as dctrcurv.c's CKTop calls do.
-/// `hist[0 .. 2 * n]` holds the last two points and is left holding this
-/// block's last two, for the next block's predictor; the rest is
-/// `tangentRows`' scratch. `first_block` marks the
-/// analysis' first block, whose first point also fills the older slot.
-fn runSerial(
-    ctx: *const root.RunCtx,
-    ckt: *root.Circuit,
-    hist: []f64,
-    nodeset: []const converger.Force,
-    t: ?root.ParamRef,
-    opts: Options,
-    first: usize,
-    npoints: usize,
-    ncols: usize,
-    data: []f64,
-    first_block: bool,
-) !void {
-    const x = hist[0..ckt.n];
-    const x_prev = hist[ckt.n..][0..ckt.n];
-    // Rows in one block: every point of every outer level.
-    const block = data.len / ncols / (1 + opts.tangents.len);
-
-    // The pattern is frozen, so one workspace (one symbolic factorization)
-    // serves every point.
-    const ws = try ckt.workspace();
-
-    var cold = true;
-    var v = opts.start;
-    for (0..npoints) |pt| {
-        if (pt != 0) try ckt.checkpoint(.{ .phase = .dc, .completed = pt, .total = npoints });
-        // Accumulated like ngspice (see the outer loop in `run`).
-        if (pt != 0) v += opts.step;
-        if (opts.points.len > 0) v = opts.points[pt];
-        if (t) |r| r.set(v) else ckt.setCircuitTemp(@floatCast(v));
-        // Recompute device params so const-Jacobian stamps see the new value.
-        // Only `t`'s device type moved, so later points re-derive just that
-        // type (a full walk cost 1,811 BJT preamble runs on a one-instance
-        // deck). Point 0 takes the full walk: an outer `.dc ... temp` loop
-        // may just have changed the temperature and re-wired a device (see
-        // `Circuit.recomputeType`). A temperature point moves every type.
-        if (t) |r| {
-            if (pt == 0) try ckt.recompute() else try ckt.recomputeType(r.type);
-        } else try ckt.recompute();
-        try ckt.computeBaseline();
-
-        // MODEINITPRED (dctrcurv.c:375, DEVpred in the device loads): start
-        // from the last two points extrapolated (xfact = 1 on the uniform
-        // step), limited against the last one. A cold point overwrites the
-        // guess; the rotation still runs, as ngspice's state rotation does.
-        for (x, x_prev) |*xi, *xp| {
-            const last = xi.*;
-            xi.* = 2.0 * last - xp.*;
-            xp.* = last;
-        }
-        var converged = false;
-        if (!cold) {
-            ckt.evalFollowsFirst(x, 0);
-            _ = ckt.applyLimits(x, x_prev);
-            // A SingularMatrix here (NaN stamps from a bad warm guess) must
-            // not abort the sweep; the point falls to the ladder like any
-            // other failure.
-            if (converger.run(ckt, ws, x, 0, converger.optionsFromTolerances(opts.tol, opts.tol.itl2), root.EvalHook{})) |r| {
-                converged = r.converged;
-            } else |e| switch (e) {
-                error.SingularMatrix => {},
-                else => return e, // else: only a singular warm guess falls to the ladder
-            }
-        }
-        if (!converged) {
-            op.coldStart(ckt, x);
-            const lr = try op.nodesetLadder(ckt, ws, x, .{ .tol = opts.tol }, nodeset, 0);
-            converged = lr.converged;
-        }
-
-        const row = data[(first + pt) * ncols ..][0..ncols];
-        row[0] = v;
-        for (0..opts.tangents.len) |k| data[((k + 1) * block + first + pt) * ncols] = v;
-        if (converged) {
-            // Each sweep point is an accepted point for device state.
-            _ = ckt.stateCtl(.commit);
-            for (ctx.probes, row[1..]) |node, *out| out.* = x[node];
-            if (opts.tangents.len != 0) try tangentRows(ctx, ckt, ws, x, opts.tangents, hist[2 * ckt.n ..], data[(block + first + pt) * ncols ..], block * ncols, ncols);
-            cold = false;
-            // ngspice copies state0 into state1 after the first point
-            // (dctrcurv.c:457-462), so the second point's MODEINITPRED
-            // extrapolation holds the first point instead of doubling it.
-            if (first_block and pt == 0) @memcpy(x_prev, x);
-        } else {
-            for (0..1 + opts.tangents.len) |k| @memset(data[(k * block + first + pt) * ncols ..][1..ncols], std.math.nan(f64));
-            cold = true;
-        }
-    }
 }
 
 /// The probes of each `tangents` row at the solution `x`, to first order:

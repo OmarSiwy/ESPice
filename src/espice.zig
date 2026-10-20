@@ -1744,6 +1744,7 @@ fn knobsFromEnv() analysis.Knobs {
     k.lu.no_bbd = env.on("ESPICE_NO_BBD");
     if (env.get("ESPICE_LU_PAR")) |v| k.lu.par = v.len > 0 and v[0] == '1';
     k.lu.par_stats = env.on("ESPICE_LU_PAR_STATS");
+    if (env.get("ESPICE_LANES")) |v| k.lanes = !std.mem.eql(u8, v, "0");
     k.hb_trace = env.on("ESPICE_HB_TRACE");
     k.no_qtape = env.on("ZP_NO_QTAPE");
     k.tran_stats = env.on("ZP_TRAN_STATS");

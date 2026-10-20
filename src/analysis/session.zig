@@ -456,8 +456,78 @@ pub const Session = struct {
         if (self.stream) |s| if (@backingInt(s.id) == i) {
             self.rows.items(.executor)[i].?.stream = s.writer;
         };
+        self.rows.items(.executor)[i].?.row = @intCast(i);
         if (self.config.timing_in_depth)
             self.rows.items(.executor)[i].?.controller.options.timing_query = @fromBackingInt(@intCast(i));
+    }
+
+    /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`
+    /// or `.dc` row `i` the leader of a lane batch with up to `lane_width -
+    /// 1` other ready, never-started rows of its kind on its template, with
+    /// a prerequisite exactly when it has one, whose options differ at most
+    /// in `tol.variant` and `tol.temp_c`, taken from the queue ahead.
+    /// Each lane is bitwise its query run alone, so grouping is free to
+    /// follow scheduling order. A row whose executor cannot be built is
+    /// left to run alone.
+    /// ponytail: looks `lane_window` rows into `urgent` and the queue, not
+    /// all of them; a sweep's rows are adjacent in row order.
+    fn gather(self: *Session, i: usize) void {
+        const lane_width = execution.lane_width;
+        const config = self.config;
+        if (!execution.lanesOn(config) or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
+        const jobs = self.rows.items(.job);
+        if ((jobs[i] != .op and jobs[i] != .dc) or self.rows.items(.executor)[i] != null) return;
+        var peers: [lane_width - 1]usize = undefined;
+        var n: usize = 0;
+        // A finished batch's dependents wait in `urgent`, newest last.
+        const urgent = self.urgent.items;
+        const from_urgent = @min(urgent.len, lane_window);
+        const queued = self.queue.items[@min(self.queue_head, self.queue.items.len)..];
+        for (0..from_urgent + @min(queued.len, lane_window)) |at| {
+            if (n == peers.len) break;
+            const j = if (at < from_urgent) urgent[urgent.len - 1 - at] else queued[at - from_urgent];
+            if (j == i or !self.ready(j) or self.rows.items(.running)[j] or self.rows.items(.executor)[j] != null) continue;
+            if (self.rows.items(.template)[j] != self.rows.items(.template)[i]) continue;
+            if ((self.rows.items(.dependency)[j] == none) != (self.rows.items(.dependency)[i] == none)) continue;
+            if (!sameLaneJob(jobs[i], jobs[j])) continue;
+            peers[n] = j;
+            n += 1;
+        }
+        if (n == 0) return;
+        self.makeExecutor(i) catch return;
+        const leader = self.rows.items(.executor)[i].?;
+        const list = leader.work.allocator().alloc(*execution.Executor, n) catch return;
+        var taken: usize = 0;
+        for (peers[0..n]) |j| {
+            self.makeExecutor(j) catch continue;
+            list[taken] = self.rows.items(.executor)[j].?;
+            taken += 1;
+            self.rows.items(.running)[j] = true;
+        }
+        leader.peers = list[0..taken];
+    }
+
+    /// Settles the peers of batch leader `i`, which has stopped: each takes
+    /// the outcome its lane left, or the leader's cancel.
+    fn settlePeers(self: *Session, i: usize) void {
+        const leader = self.rows.items(.executor)[i].?;
+        const cancelled = self.rows.items(.status)[i] == .cancelled;
+        for (leader.peers) |p| {
+            const j = p.row;
+            std.debug.assert(self.rows.items(.running)[j]);
+            self.rows.items(.running)[j] = false;
+            const first = self.rows.items(.status)[j] == .pending;
+            if (p.published != null) {
+                self.rows.items(.status)[j] = .complete;
+            } else if (cancelled or p.peer_failure == null) {
+                self.rows.items(.status)[j] = .cancelled;
+            } else {
+                self.rows.items(.status)[j] = .failed;
+                self.rows.items(.failure)[j] = p.peer_failure;
+            }
+            if (first) self.readerDone(j);
+            self.releaseIfRead(j);
+        }
     }
 
     /// Starts query `i`'s next quantum, building its executor first, with
@@ -500,6 +570,7 @@ pub const Session = struct {
         }
         if (first) self.readerDone(i);
         self.releaseIfRead(i);
+        self.settlePeers(i);
     }
 
     /// Query `i` no longer reads its source's state.
@@ -599,9 +670,14 @@ pub const Session = struct {
         return null;
     }
 
-    /// Queues for `nextReady` what settled query `i` made ready: itself
-    /// when parked, its dependents when complete.
+    /// Queues for `nextReady` what settled query `i` (and its batch's
+    /// peers) made ready: itself when parked, its dependents when complete.
     fn follow(self: *Session, i: usize) void {
+        for (self.rows.items(.executor)[i].?.peers) |p| self.followOne(p.row);
+        self.followOne(i);
+    }
+
+    fn followOne(self: *Session, i: usize) void {
         switch (self.rows.items(.status)[i]) {
             .paused => self.urgent.appendAssumeCapacity(@intCast(i)),
             .complete => {
@@ -905,8 +981,14 @@ pub const Pool = struct {
     pub fn fill(pool: *Pool, session: *Session) void {
         while (pool.running.items.len < pool.limit) {
             const i = session.nextReady() orelse return;
-            if (session.launch(i, pool.quantum, &pool.signal))
+            session.gather(i);
+            if (session.launch(i, pool.quantum, &pool.signal)) {
                 pool.running.appendAssumeCapacity(.{ .session = session, .row = @intCast(i) });
+            } else if (session.rows.items(.executor)[i]) |leader| {
+                // The batch never started: its peers run on their own.
+                for (leader.peers) |p| session.rows.items(.running)[p.row] = false;
+                leader.peers = &.{};
+            }
         }
     }
 
@@ -930,6 +1012,58 @@ pub const Pool = struct {
         return true;
     }
 };
+
+/// How far ahead of the queue head `gather` looks for a batch's peers.
+const lane_window = 8 * execution.lane_width;
+
+/// Whether two rows may share a lane batch: the same kind with equal
+/// options but for the variant row and temperature, which only the circuit
+/// each lane builds reads. Slices compare by content, floats by bits.
+fn sameLaneJob(a: requests.Query, b: requests.Query) bool {
+    return switch (a) {
+        inline .op, .dc => |o, tag| b == tag and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
+        else => false,
+    };
+}
+
+fn stripTol(o: anytype) @TypeOf(o) {
+    var c = o;
+    c.tol.variant = null;
+    c.tol.temp_c = null;
+    return c;
+}
+
+fn sameDeep(a: anytype, b: @TypeOf(a)) bool {
+    const T = @TypeOf(a);
+    switch (@typeInfo(T)) {
+        .@"struct" => |s| {
+            inline for (s.field_names) |name| if (!sameDeep(@field(a, name), @field(b, name))) return false;
+            return true;
+        },
+        .@"union" => {
+            if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+            return switch (a) {
+                inline else => |payload, tag| sameDeep(payload, @field(b, @tagName(tag))),
+            };
+        },
+        .optional => {
+            if (a == null or b == null) return a == null and b == null;
+            return sameDeep(a.?, b.?);
+        },
+        .pointer => |p| {
+            if (p.size != .slice) return a == b;
+            if (a.len != b.len) return false;
+            for (a, b) |x, y| if (!sameDeep(x, y)) return false;
+            return true;
+        },
+        .float => return std.mem.eql(u8, std.mem.asBytes(&a), std.mem.asBytes(&b)),
+        .array => {
+            for (a, b) |x, y| if (!sameDeep(x, y)) return false;
+            return true;
+        },
+        else => return a == b,
+    }
+}
 
 const OpKey = struct { template: u32, op: requests.Op };
 const OpIndex = std.HashMapUnmanaged(OpKey, QueryId, struct {
