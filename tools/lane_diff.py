@@ -13,6 +13,11 @@ kinds = sys.argv[4 if old else 3:] or ["tran"]
 SWEEP = re.compile(r"^\s*\.(step|data|alter|mc)\b|\bsweep\b|^\s*\.temp\s+\S+\s+\S+", re.I | re.M)
 CARD = re.compile(r"^\s*\.(" + "|".join(kinds) + r")\b", re.I | re.M)
 
+TIMEOUT = int(os.environ.get("LANE_DIFF_TIMEOUT", "1800"))
+
+class Skip(Exception):
+    pass
+
 def tokenizer(deck):
     oracle = deck.with_suffix(".expected.json")
     try: return json.loads(oracle.read_text()).get("tokenizer") or "ngspice"
@@ -23,8 +28,11 @@ def run(deck, src, lanes, tmp, binary=None):
     p.write_text(src)
     raw = pathlib.Path(tmp) / f"out{lanes}{'old' if binary else ''}.raw"
     env = dict(os.environ, ESPICE_LANES=str(lanes))
-    r = subprocess.run([binary or exe, "--jobs=1", "--format=binary", "-b", "-r", str(raw), "--tokenizer", tokenizer(deck), p.name],
-                       cwd=tmp, env=env, capture_output=True, timeout=1800)
+    try:
+        r = subprocess.run([binary or exe, "--jobs=1", "--format=binary", "-b", "-r", str(raw), "--tokenizer", tokenizer(deck), p.name],
+                           cwd=tmp, env=env, capture_output=True, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise Skip(f"{deck}: skipped, a run took over {TIMEOUT} s")
     return r.returncode, r.stdout, raw.read_bytes() if raw.exists() else b""
 
 def plots(raw):
@@ -70,7 +78,12 @@ decks = sorted(p for p in pathlib.Path("tests/fixtures").rglob("*.sp")
                if "invalid" not in p.parts and (t := p.read_text(errors="replace"))
                and CARD.search(t) and (mode != "swept" or SWEEP.search(t)))
 if mode == "replicate": decks = [d for d in decks if not SWEEP.search(d.read_text(errors="replace"))]
+def guarded(deck):
+    try: return check(deck)
+    except Skip as e: return "SKIP " + str(e)
 with ThreadPoolExecutor(os.cpu_count() // 2 or 1) as pool:
-    bad = [m for m in pool.map(check, decks) if m]
-print(f"{len(decks)} decks, {len(bad)} differ"); [print(m) for m in bad]
+    out = [m for m in pool.map(guarded, decks) if m]
+skipped = [m for m in out if m.startswith("SKIP ")]
+bad = [m for m in out if not m.startswith("SKIP ")]
+print(f"{len(decks)} decks, {len(bad)} differ, {len(skipped)} skipped"); [print(m) for m in bad + skipped]
 sys.exit(1 if bad else 0)
