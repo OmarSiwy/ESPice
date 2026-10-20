@@ -12,6 +12,7 @@ const ParamRef = @import("device").abi.ParamRef;
 const execution = @import("executor.zig");
 const progress = @import("progress.zig");
 const types = @import("types.zig");
+const temp_sweep = @import("sweep/temp_sweep.zig");
 const Result = types.Result;
 const validateDeck = @import("core").validate.validateDeck;
 
@@ -110,6 +111,12 @@ const Row = struct {
     sibling: QueryId = none,
     /// A quantum is in flight; `settle` collects it.
     running: bool = false,
+    /// A query split into its lanes (`splitLanes`): its lane rows are the
+    /// `lanes` rows just before it. It never runs; `assemble` gathers its
+    /// result once every lane has ended.
+    lanes: u32 = 0,
+    /// On a lane row, the split query it belongs to.
+    owner: QueryId = none,
 };
 
 /// The query graph over one prepared circuit and deck, both borrowed for the
@@ -220,7 +227,12 @@ pub const Session = struct {
         if (templates) |t| std.debug.assert(t.len == jobs.len);
         if (ids.len < jobs.len) return error.BufferTooSmall;
         if (jobs.len == 0) return 0;
-        const max_rows = std.math.add(usize, self.rows.len, std.math.mul(usize, jobs.len, 2) catch return error.TooManyQueries) catch return error.TooManyQueries;
+        // Each job adds at least its own row, at most also an OP and its
+        // lane rows; the first bound needs only the length (#55).
+        if (jobs.len >= std.math.maxInt(u32) - self.rows.len) return error.TooManyQueries;
+        var added: usize = 0;
+        for (jobs) |job| added = std.math.add(usize, added, 2 + @as(usize, splitLanes(job))) catch return error.TooManyQueries;
+        const max_rows = std.math.add(usize, self.rows.len, added) catch return error.TooManyQueries;
         if (max_rows >= std.math.maxInt(u32)) return error.TooManyQueries;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
@@ -247,21 +259,6 @@ pub const Session = struct {
             std.debug.assert(template <= self.templates.items.len);
             try validateDeck(job, self.topology.n, self.deck);
             const owned = try copyValue(a, job);
-            var dependency = none;
-            if (prerequisite(owned)) |op| {
-                dependency = self.ops.get(.{ .template = template, .op = op }) orelse blk: {
-                    const dep: QueryId = @fromBackingInt(@intCast(candidate.len));
-                    candidate.appendAssumeCapacity(.{
-                        .job = .{ .op = op },
-                        .component = @backingInt(dep),
-                        .requested = false,
-                        .template = template,
-                    });
-                    self.ops.putAssumeCapacity(.{ .template = template, .op = op }, dep);
-                    roots += 1;
-                    break :blk dep;
-                };
-            }
             // An explicit OP can expose an already shared prerequisite product.
             if (owned == .op) {
                 if (self.ops.get(.{ .template = template, .op = owned.op })) |existing| {
@@ -272,26 +269,25 @@ pub const Session = struct {
                     continue;
                 }
             }
-            id.* = @fromBackingInt(@intCast(candidate.len));
             new.* = true;
-            var sibling = none;
-            if (dependency == none) {
-                roots += 1;
-            } else {
-                const d = @backingInt(dependency);
-                candidate.items(.readers)[d] += 1;
-                sibling = candidate.items(.child)[d];
-                candidate.items(.child)[d] = id.*;
+            const n_lanes = splitLanes(owned);
+            for (0..n_lanes) |l| {
+                var lane = owned;
+                switch (lane) {
+                    inline .mc, .temp => |*o| o.lane = @intCast(l),
+                    else => unreachable,
+                }
+                _ = self.addRow(&candidate, lane, template, false, &roots);
             }
-            candidate.appendAssumeCapacity(.{
-                .job = owned,
-                .dependency = dependency,
-                .component = if (dependency == none) @backingInt(id.*) else candidate.items(.component)[@backingInt(dependency)],
-                .requested = true,
-                .template = template,
-                .sibling = sibling,
-            });
-            if (owned == .op) self.ops.putAssumeCapacity(.{ .template = template, .op = owned.op }, id.*);
+            id.* = self.addRow(&candidate, owned, template, true, &roots);
+            if (n_lanes != 0) {
+                const g = @backingInt(id.*);
+                candidate.items(.lanes)[g] = n_lanes;
+                for (g - n_lanes..g) |l| {
+                    std.debug.assert(candidate.items(.dependency)[l] == candidate.items(.dependency)[g]);
+                    candidate.items(.owner)[l] = id.*;
+                }
+            }
         }
         try self.outputs.ensureUnusedCapacity(self.allocator, jobs.len);
         try self.request_arenas.ensureUnusedCapacity(self.allocator, 1);
@@ -302,6 +298,48 @@ pub const Session = struct {
         self.request_arenas.appendAssumeCapacity(arena);
         @memcpy(ids[0..jobs.len], new_ids);
         return jobs.len;
+    }
+
+    /// Appends `job` to `candidate` after the OP it needs, shared when one
+    /// matches, and returns its id. A split query (`splitLanes`) reads its
+    /// OP only through its lanes, so it is not one of the OP's readers.
+    fn addRow(self: *Session, candidate: *std.MultiArrayList(Row), job: requests.Query, template: u32, requested: bool, roots: *u32) QueryId {
+        var dependency = none;
+        if (prerequisite(job)) |op| {
+            dependency = self.ops.get(.{ .template = template, .op = op }) orelse blk: {
+                const dep: QueryId = @fromBackingInt(@intCast(candidate.len));
+                candidate.appendAssumeCapacity(.{
+                    .job = .{ .op = op },
+                    .component = @backingInt(dep),
+                    .requested = false,
+                    .template = template,
+                });
+                self.ops.putAssumeCapacity(.{ .template = template, .op = op }, dep);
+                roots.* += 1;
+                break :blk dep;
+            };
+        }
+        const id: QueryId = @fromBackingInt(@intCast(candidate.len));
+        var sibling = none;
+        if (dependency == none) {
+            std.debug.assert(splitLanes(job) == 0);
+            roots.* += 1;
+        } else if (splitLanes(job) == 0) {
+            const d = @backingInt(dependency);
+            candidate.items(.readers)[d] += 1;
+            sibling = candidate.items(.child)[d];
+            candidate.items(.child)[d] = id;
+        }
+        candidate.appendAssumeCapacity(.{
+            .job = job,
+            .dependency = dependency,
+            .component = if (dependency == none) @backingInt(id) else candidate.items(.component)[@backingInt(dependency)],
+            .requested = requested,
+            .template = template,
+            .sibling = sibling,
+        });
+        if (job == .op) self.ops.putAssumeCapacity(.{ .template = template, .op = job.op }, id);
+        return id;
     }
 
     /// Ends pending query `id`, and its pending prerequisite, with `err`
@@ -384,12 +422,13 @@ pub const Session = struct {
         return switch (scope) {
             .all => true,
             .component => |component| self.rows.items(.component)[i] == component,
-            .query => |id| @backingInt(id) == i or self.rows.items(.dependency)[@backingInt(id)] == @as(QueryId, @fromBackingInt(@intCast(i))),
+            .query => |id| @backingInt(id) == i or self.rows.items(.owner)[i] == id or
+                self.rows.items(.dependency)[@backingInt(id)] == @as(QueryId, @fromBackingInt(@intCast(i))),
         };
     }
 
     fn ready(self: *const Session, i: usize) bool {
-        if (self.effectiveStatus(i).terminal()) return false;
+        if (self.rows.items(.lanes)[i] != 0 or self.effectiveStatus(i).terminal()) return false;
         const dep = self.rows.items(.dependency)[i];
         return dep == none or self.rows.items(.status)[@backingInt(dep)] == .complete;
     }
@@ -523,6 +562,7 @@ pub const Session = struct {
             }
             if (first) self.readerDone(j);
             self.releaseIfRead(j);
+            self.laneDone(j);
         }
     }
 
@@ -540,6 +580,7 @@ pub const Session = struct {
         self.rows.items(.status)[i] = .failed;
         self.rows.items(.failure)[i] = started;
         if (first) self.readerDone(i);
+        self.laneDone(i);
         return false;
     }
 
@@ -566,7 +607,59 @@ pub const Session = struct {
         }
         if (first) self.readerDone(i);
         self.releaseIfRead(i);
+        self.laneDone(i);
         self.settlePeers(i);
+    }
+
+    /// Assembles the split query lane row `i` belongs to once `i`, the last
+    /// of its lanes to end, has.
+    fn laneDone(self: *Session, i: usize) void {
+        const owner = self.rows.items(.owner)[i];
+        if (owner == none or !self.rows.items(.status)[i].terminal()) return;
+        const g = @backingInt(owner);
+        for (g - self.rows.items(.lanes)[g]..g) |l| if (!self.rows.items(.status)[l].terminal()) return;
+        self.assemble(g) catch |err| {
+            self.rows.items(.status)[g] = .failed;
+            self.rows.items(.failure)[g] = err;
+        };
+    }
+
+    /// Ends split query `g`, whose lanes all ended: as its first lane (in
+    /// lane order) that did not complete, else complete with the lanes'
+    /// rows in lane order, as the query run whole publishes them.
+    fn assemble(self: *Session, g: usize) !void {
+        const first = g - self.rows.items(.lanes)[g];
+        var npoints: usize = 0;
+        for (first..g) |l| {
+            const status = self.rows.items(.status)[l];
+            if (status != .complete) {
+                self.rows.items(.status)[g] = status;
+                self.rows.items(.failure)[g] = self.rows.items(.failure)[l];
+                return;
+            }
+            npoints += self.rows.items(.executor)[l].?.result().?.npoints;
+        }
+        const job = self.rows.items(.job)[g];
+        const template = self.rows.items(.template)[g];
+        const e = try execution.Executor.create(self.allocator, self.io, if (template == 0) self.topology else self.templates.items[template - 1], self.deck, job, null, false, self.config);
+        self.rows.items(.executor)[g] = e;
+        var res = self.rows.items(.executor)[first].?.result().?;
+        const ncols = res.varnames.len;
+        const data = try e.results.allocator().alloc(f64, npoints * ncols);
+        var at: usize = 0;
+        for (first..g) |l| {
+            const part = self.rows.items(.executor)[l].?.result().?.data;
+            @memcpy(data[at..][0..part.len], part);
+            at += part.len;
+        }
+        // A plain `.mc` numbers its converged trials.
+        if (job == .mc and job.mc.variants.count == 0) {
+            for (0..npoints) |r| data[r * ncols] = @floatFromInt(r);
+        }
+        res.data = data;
+        res.npoints = npoints;
+        e.published = res;
+        self.rows.items(.status)[g] = .complete;
     }
 
     /// Query `i` no longer reads its source's state.
@@ -713,11 +806,14 @@ pub const Session = struct {
             .progress = target_info.progress,
             .failure = target_info.failure,
         };
-        var ids: [2]QueryId = undefined;
-        const n = try self.readyQueries(.{ .query = target }, &ids);
-        if (n == 0 or n > ids.len) return error.SchedulingFailure;
+        // The first ready query in scheduler order: the prerequisite, the
+        // target, or one of a split target's lanes.
+        const next: QueryId = for (0..self.rows.len) |offset| {
+            const i = (offset + self.cursor) % self.rows.len;
+            if (self.contains(.{ .query = target }, i) and self.ready(i)) break @fromBackingInt(@intCast(i));
+        } else return error.SchedulingFailure;
         var events: [1]Advance = undefined;
-        _ = try self.advanceReady(ids[0..1], .{}, &events);
+        _ = try self.advanceReady(&.{next}, .{}, &events);
         events[0].requested = target;
         events[0].target_status = (try self.info(target)).status;
         return events[0];
@@ -1027,6 +1123,25 @@ fn hashFields(h: *std.hash.Wyhash, value: anytype) void {
         .float => h.update(std.mem.asBytes(&value)),
         else => std.hash.autoHash(h, value),
     }
+}
+
+/// Largest query `append` splits into lane rows; a longer one runs whole,
+/// which publishes the same rows.
+/// ponytail: one row per lane; batch lanes into rows of several if huge
+/// sweeps make the row table the memory bottleneck.
+const max_split = 1 << 16;
+
+/// How many lane rows `append` splits `job` into (#213): one per `.mc`
+/// trial or variant and per `.temp` temperature, each solved alone; 0 for
+/// a job it keeps whole.
+fn splitLanes(job: requests.Query) u32 {
+    const n: usize = switch (job) {
+        .mc => |o| if (o.lane != null) 0 else if (o.variants.count != 0) o.variants.count else o.n_trials,
+        // Unvalidated: NaN and huge spans fail the comparison.
+        .temp => |o| if (o.lane == null and o.t_step > 0 and (o.t_stop - o.t_start) / o.t_step < max_split) temp_sweep.numPoints(o) else 0,
+        else => 0,
+    };
+    return if (n >= 2 and n <= max_split) @intCast(n) else 0;
 }
 
 /// The OP a query needs first: its tolerances, transient-flavoured for
