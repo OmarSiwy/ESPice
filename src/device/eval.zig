@@ -21,8 +21,16 @@ const builtin = @import("builtin");
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 
 /// VerA's device/host contract checks (`contract.validating`), on in Debug
-/// only: off, a device build spends 0.4-1.8% fewer instructions.
-pub const vera_validate_contract = @import("builtin").mode == .debug;
+/// only: off, a device build spends 0.4-1.8% fewer instructions. Off too in a
+/// build with GPU kernels (`models.gpu_kernels`, build.zig): validating adds a
+/// Debug-only `su_ok` field to Model, and the kernels compile at .fast without
+/// it, so the uploaded rows would read at the wrong stride.
+pub const vera_validate_contract = @import("builtin").mode == .debug and !gpuKernelsBuilt();
+
+fn gpuKernelsBuilt() bool {
+    const models = @import("models");
+    return @hasDecl(models, "gpu_kernels") and models.gpu_kernels;
+}
 const contract = @import("contract");
 const gompute = @import("gompute");
 const ir = @import("device_abi");
@@ -3345,6 +3353,8 @@ fn placeholder(_: u64) callconv(gompute.kernel_callconv) void {}
 comptime {
     if (@import("root") == @This() and !builtin.is_test) {
         for (@typeInfo(@import("models")).@"struct".decl_names) |decl_name| {
+            // `gpu_kernels` is a build flag, not a device.
+            if (@TypeOf(@field(@import("models"), decl_name)) != type) continue;
             const D = @field(@import("models"), decl_name);
             if (gompute.is_device) {
                 const block_size = ir.gpu_block_size;

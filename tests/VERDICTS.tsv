@@ -585,6 +585,7 @@ PASS	fixtures/op/resistor_negative_ngspice.sp
 PASS	fixtures/op/series_sources.sp
 PASS	fixtures/op/tiny_output.sp
 PASS	fixtures/op/tiny_resistors.sp
+PASS	fixtures/op/two_sources_each_kind.sp
 PASS	fixtures/op/unequal_nondecimal.sp
 PASS	fixtures/op/vccs_sign.sp
 PASS	fixtures/op/vcvs_negative_gain.sp

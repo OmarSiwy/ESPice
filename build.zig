@@ -40,6 +40,7 @@ pub fn build(b: *Build) void {
         .strip = optimize != .debug and !debug_info,
         .single_threaded = single_threaded,
         .use_llvm = use_llvm,
+        .gpu_kernels = gpu_kernels,
     };
 
     const models = discoverModels(b);
@@ -366,6 +367,9 @@ const Cfg = struct {
     strip: bool,
     single_threaded: ?bool,
     use_llvm: ?bool,
+    /// `-Dgpu`: device kernels are compiled in, so host device objects build
+    /// their Model rows in the kernels' layout (no Debug `su_ok`).
+    gpu_kernels: bool = false,
 
     fn make(self: Cfg, root: Build.LazyPath, imports: []const Import) *Module {
         const mod = self.b.createModule(.{
@@ -439,7 +443,10 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         const line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
         agg.appendSlice(b.allocator, line) catch @panic("OOM");
         dm.* = dev.make(src, &.{contract});
-        const one_src = wf.add(b.fmt("{s}/models.zig", .{m.name}), line);
+        // The device kernels compile at .fast, where VerA's Debug-only Model
+        // field (`su_ok`) does not exist; `gpu_kernels` makes the host's
+        // device object drop it too, so a Model row has one size on both sides.
+        const one_src = wf.add(b.fmt("{s}/models.zig", .{m.name}), if (c.gpu_kernels) b.fmt("{s}pub const gpu_kernels = true;\n", .{line}) else line);
         const one = dev.make(one_src, &.{.{ .name = m.name, .module = dm.* }});
         kone.* = kmake(b, one_src, &.{.{ .name = m.name, .module = kmake(b, src, &.{k_contract}) }});
         const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one }, .{ .name = "device_abi", .module = abi_dev }, gomp });

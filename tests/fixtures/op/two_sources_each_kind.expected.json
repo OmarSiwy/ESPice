@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "analysis": "op",
+  "purpose": "two sources of each kind stamp their own values",
+  "oracle": {
+    "kind": "analytic",
+    "derivation": "Each source drives its own 1k resistor to ground: v(a)=1, v(b)=2, v(c)=1m*1k=1, v(d)=2m*1k=2; i(va)=-1m, i(vb)=-2m."
+  },
+  "expect": {
+    "status": "success",
+    "plots": [
+      {
+        "name": "Operating Point",
+        "match": "exact",
+        "columns": {
+          "v(a)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1
+            ]
+          },
+          "v(b)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2
+            ]
+          },
+          "v(c)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              1
+            ]
+          },
+          "v(d)": {
+            "unit": "V",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              2
+            ]
+          },
+          "i(va)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.001
+            ]
+          },
+          "i(vb)": {
+            "unit": "A",
+            "rtol": 2e-05,
+            "atol": 1e-09,
+            "values": [
+              -0.002
+            ]
+          }
+        }
+      }
+    ],
+    "finite_values_required": true,
+    "all_requested_analyses_must_complete": true
+  },
+  "netlist_sha256": "1cb5b12d225b9425074f19db45627cd26b4917f83a13de04b60b91ff2289d75a"
+}
