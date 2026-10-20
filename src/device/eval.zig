@@ -658,6 +658,7 @@ const Basis = struct {
 
 fn basisOf(comptime D: type, comptime narrow: bool) Basis {
     const n_u = contract.nU(D);
+    @setEvalBranchQuota(100 * n_u + 1000);
     const reads = widen(n_u, contract.derivReads(D));
     var lane: [n_u]u8 = @splat(contract.no_lane);
     var of_root: [n_u]u8 = @splat(contract.no_lane);
