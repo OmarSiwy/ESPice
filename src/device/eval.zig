@@ -3025,8 +3025,9 @@ fn LaneEvalKernel(comptime D: type, comptime block_size: u32) type {
 
 /// GPU lane limit/state kernel: `StateKernel` per (instance, lane), lanes
 /// innermost (thread t is lane t % n_lanes of instance t / n_lanes), for
-/// the lanes with `mask[l] != 0`. ORs bit 0 (not converged) and bit 1 (a
-/// reject request, which the lane path treats as a fault) into `flags[l]`.
+/// the lanes with `mask[l] != 0`. ORs bit 0 (not converged), bit 1 (a
+/// reject request) and bit 2 (a finite `$bound_step`) into `flags[l]`; the
+/// lane path hands a lane with bit 1 or 2 back to the host.
 fn LaneStateKernel(comptime D: type, comptime block_size: u32) type {
     const n_u: usize = comptime contract.nU(D);
     const has_limit = @hasDecl(D, "limit");
@@ -3087,6 +3088,11 @@ fn LaneStateKernel(comptime D: type, comptime block_size: u32) type {
                     .ok => {},
                     .request_reject_at => flag |= 2,
                 }
+                // A finite §9.17.2 `$bound_step`: the host's step control
+                // must read it, so the lane leaves the device (bit 2).
+                if (comptime @hasField(D.Instance, "bound_step")) if (inst_m.bound_step < std.math.inf(f64)) {
+                    flag |= 4;
+                };
             };
             if (flag != 0) _ = @atomicRmw(u32, &flags[l], .Or, flag, .monotonic);
         }

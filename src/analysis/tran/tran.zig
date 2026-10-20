@@ -1599,29 +1599,47 @@ pub fn runLanes(comptime width: usize, ctxs: []const root.RunCtx, opts: Options,
 const gpu_lanes = @import("../gpu_lanes.zig");
 
 /// Whether `runGpuLanes` can serve this circuit, after `Run.init`, and these
-/// options: every batch with a device payload and no host-side step hook,
+/// options: every batch with a device payload and no host-side step hook
+/// (a `$bound_step` is read on the device and hands its lane back),
 /// and none of the features whose step-end numbers the device does not
 /// compute (phase 4 G7, plus Newton hooks the lane kernels do not run:
-/// `check_convergence`, `advance_iteration`, a load check, and a
-/// stateful-charge rebase).
+/// `check_convergence`, `advance_iteration` and a load check).
 pub fn gpuLaneEligible(ckt: *const root.Circuit, opts: Options) bool {
-    if (!gpu_lanes.available) return false;
-    if (opts.uic or opts.snapshot or opts.sources_at_zero or opts.tangents.len != 0) return false;
-    if (integrator.order(opts.method) > 2) return false;
-    if (ckt.vpi != null or ckt.display != null or ckt.load_check != null) return false;
-    if (ckt.minDelay() != null) return false;
-    if (ckt.has_charge and (ckt.knobs.no_qtape or ckt.qTapeLen() == 0 or ckt.has_state_q)) return false;
+    return gpuLaneRefusal(ckt, opts) == null;
+}
+
+/// Why `gpuLaneEligible` is false, or null.
+fn gpuLaneRefusal(ckt: *const root.Circuit, opts: Options) ?[]const u8 {
+    if (!gpu_lanes.available) return "no GPU images";
+    if (opts.uic or opts.snapshot or opts.sources_at_zero or opts.tangents.len != 0) return "uic, snapshot, OPtran or tangents";
+    if (integrator.order(opts.method) > 2) return "gear-3..6";
+    if (ckt.vpi != null or ckt.display != null or ckt.load_check != null) return "VPI, display tasks or a load check";
+    if (ckt.minDelay() != null) return "a delay line";
+    if (ckt.has_charge and (ckt.knobs.no_qtape or ckt.qTapeLen() == 0)) return "no charge tape";
     for (ckt.batches) |b| {
-        if (b.hooks.gpu_payload == null) return false;
         const h = b.hooks;
-        if (h.bound_step != null or h.commit_state != null or h.predict_first_iterate != null) return false;
-        if (h.check_convergence != null or h.advance_iteration != null) return false;
-        if (std.mem.eql(u8, b.type_name, "kinduc")) return false;
-        // Host-stepped: state hooks without a device state kernel.
-        const p = h.gpu_payload.?(b.ctx);
-        if (p.lim_kernel.len == 0 and (h.update_state != null or h.state_ctl != null)) return false;
+        const why: ?[]const u8 = if (h.gpu_payload == null)
+            "no device payload"
+        else if (h.commit_state != null)
+            "commit_state"
+        else if (h.predict_first_iterate != null)
+            "predict_first_iterate"
+        else if (h.check_convergence != null)
+            "check_convergence"
+        else if (h.advance_iteration != null)
+            "advance_iteration"
+        else if (std.mem.eql(u8, b.type_name, "kinduc"))
+            "coupled inductors"
+        else if (h.gpu_payload.?(b.ctx).lim_kernel.len == 0 and (h.update_state != null or h.state_ctl != null))
+            "host-stepped" // state hooks without a device state kernel
+        else
+            null;
+        if (why) |w| {
+            if (ckt.knobs.gpu_stats != .off) std.debug.print("gpu-lanes: {s}: {s}\n", .{ b.type_name, w });
+            return b.type_name;
+        }
     }
-    return true;
+    return null;
 }
 
 /// `runLanes` on the GPU (dev/research/plans/phase4-gpu-lanes.md G7): any
@@ -1664,7 +1682,9 @@ pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome)
     defer for (runs, live) |*r, on| if (on) r.deinit();
     if (n_live == 0) return;
     const first = std.mem.indexOfScalar(bool, live, true).?;
-    var eligible = gpuLaneEligible(ctxs[first].circuit, opts);
+    const refusal = gpuLaneRefusal(ctxs[first].circuit, opts);
+    if (refusal) |why| if (ctxs[first].circuit.knobs.gpu_stats != .off) std.debug.print("gpu-lanes: off ({s})\n", .{why});
+    var eligible = refusal == null;
     for (ctxs, live) |c, on| if (on and c.circuit.n != ctxs[first].circuit.n) {
         eligible = false;
     };
@@ -1760,8 +1780,9 @@ pub fn runGpuLanes(ctxs: []const root.RunCtx, opts: Options, out: []LaneOutcome)
         for (runs, 0..) |*r, l| {
             if (!live[l] or d.round[l] == 0) continue;
             if (nr[l].reject) {
-                // The device asked for `reject_at`, which the lanes do not
-                // land: this lane reruns alone on the CPU.
+                // The device asked for `reject_at` or a finite
+                // `$bound_step`, which the lanes do not take: this lane
+                // reruns alone on the CPU.
                 r.deinit();
                 live[l] = false;
                 d.detached[l] = true;

@@ -279,7 +279,8 @@ pub const Gate = extern struct {
     scaled: f64,
     iterations: u32,
     /// Bit 0 active, 1 init_fix, 2 converged, 3 singular, 4 gates passed,
-    /// 5 a device asked to reject the step (`updateState`).
+    /// 5 a device asked to reject the step or bound the next one
+    /// (`updateState`), which hands the lane back to the host.
     bits: u32,
 };
 

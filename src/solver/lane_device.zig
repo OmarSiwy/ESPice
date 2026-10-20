@@ -100,7 +100,8 @@ fn gates(n_lanes: u64, n: u64, iter: P(u32), active: P(u8), gate: P(Gate), x: P(
 /// The loop exit per lane, after the state pass. Under `land_rejects`
 /// (every transient) `updateStates` never reports a flip, so a lane that
 /// passed leaves INITFIX or converges (x = x_old, as `newton` publishes
-/// x_k); a state pass that asked for a reject sets bit 5. A converged or
+/// x_k); a state pass that asked for a reject or set a finite
+/// `$bound_step` sets bit 5. A converged or
 /// singular lane leaves `active`. Counts the lanes still active into
 /// `count[0]` (zeroed by the host), and advances every active lane's
 /// `$simparam("iteration")`.
@@ -114,7 +115,7 @@ fn finalize(n_lanes: u64, n: u64, iter: P(u32), active: P(u8), stage: P(u8), gat
         gate[l] = g;
         return;
     }
-    if (stage[l] != 0 and flags[l] & 2 != 0) g.bits |= 32;
+    if (stage[l] != 0 and flags[l] & 6 != 0) g.bits |= 32;
     const passed = g.bits & 16 != 0;
     if (passed and g.bits & 2 != 0) {
         g.bits &= ~@as(u32, 2); // INITFIX -> INITFLOAT
@@ -207,6 +208,34 @@ fn accept(n_lanes: u64, n: u64, n_qt: u64, n_hist: u64, charge: u64, sc: P(LaneS
     }
 }
 
+/// The stateful-charge re-read of an accepted step per (row or tape entry,
+/// lane), for the lanes with `mask[l]`, after the eval at cur and the tape
+/// kernel into the tape's logical slot 0: `rebaseCurrent` (`ip += ag0 (q -
+/// q1)`) and q into the row ring's logical slot 1, then the same over the
+/// tape. Post-rotation slots: rows' logical 1 is `sq[0]`; the tape's
+/// logical 0 is `sqt[3]` and logical 1 `sqt[0]`.
+fn rebase(n_lanes: u64, n: u64, n_qt: u64, n_hist: u64, sc: P(LaneScalars), mask: P(u8), q: P(f64), ring: P(f64), ip: P(f64), ring_qt: P(f64), ip_qt: P(f64)) callconv(gompute.kernel_callconv) void {
+    const tid = gompute.globalIdX(block);
+    if (tid >= (n + n_qt) * n_lanes) return;
+    const l: usize = @intCast(tid % n_lanes);
+    if (mask[l] == 0) return;
+    const s = sc[l];
+    const N: usize = @intCast(n_lanes);
+    const e: usize = @intCast(tid / n_lanes);
+    const nn: usize = @intCast(n);
+    if (e < nn) {
+        const i = e * N + l;
+        const r1 = (@as(usize, s.sq[0]) * nn + e) * N + l;
+        ip[i] += s.ag0 * (q[i] - ring[r1]);
+        ring[r1] = q[i];
+    } else {
+        const j = e - nn;
+        const m: usize = @intCast(n_qt);
+        const base = l * @as(usize, @intCast(n_hist));
+        ip_qt[l * m + j] += s.ag0 * (ring_qt[(base + s.sqt[3]) * m + j] - ring_qt[(base + s.sqt[0]) * m + j]);
+    }
+}
+
 /// `integrator.companionAt(m, false, ...)` at one element.
 inline fn advance(s: LaneScalars, q0: f64, q1: f64, q2: f64, i_prev: f64) f64 {
     const d = s.ag0 * (q0 - q1);
@@ -240,6 +269,7 @@ comptime {
         gompute.exportRaw("arp_lane_predict", &predict);
         gompute.exportRaw("arp_lane_lte", &lte);
         gompute.exportRaw("arp_lane_accept", &accept);
+        gompute.exportRaw("arp_lane_rebase", &rebase);
         gompute.exportRaw("arp_lane_gather", &gather);
     }
 }

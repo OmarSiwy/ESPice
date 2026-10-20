@@ -194,6 +194,7 @@ const Kernels = struct {
     predict: Raw,
     lte: Raw,
     accept: Raw,
+    rebase: Raw,
     gather: Raw,
 
     fn init() !Kernels {
@@ -228,6 +229,9 @@ pub const GpuLanes = struct {
     n_qt: u32,
     n_probes: u32,
     has_charge: bool,
+    /// Stateful charge (`Circuit.has_state_q`): every accepted step re-reads
+    /// q at cur (`rebaseRound`).
+    state_q: bool,
     d0: u32,
     batches: []LaneBatch,
     k: Kernels,
@@ -410,6 +414,7 @@ pub const GpuLanes = struct {
             .n_qt = @intCast(n_qt),
             .n_probes = @intCast(n_probes),
             .has_charge = c0.has_charge,
+            .state_q = c0.has_charge and c0.has_state_q,
             .d0 = c0.diag_slots[0],
             .batches = batches,
             .k = k,
@@ -853,20 +858,7 @@ pub const GpuLanes = struct {
             const nh: usize = self.n_hist;
             for (self.slot0, 0..) |*s, l| s.* = self.perm_qt[l * nh];
             try self.d_slot0.upload(self.slot0.ptr, N);
-            for (self.batches) |*b| {
-                const k = if (b.qtp) |*k| k else continue;
-                if (b.count == 0) continue;
-                var nl: u64 = N;
-                var count: u64 = b.count;
-                var n_hist: u64 = self.n_hist;
-                var n_qt: u64 = self.n_qt;
-                var off: u64 = b.tape_off;
-                try self.launch(k, b.count * N, &.{
-                    arg(&nl),             arg(&count),            self.d_round.argPtr(),   self.d_sims.argPtr(),   self.d_x.argPtr(),
-                    b.d_gath.argPtr(),    b.d_models.argPtr(),    b.d_model_of.argPtr(),   b.d_instances.argPtr(), self.d_ring_qt.argPtr(),
-                    self.d_slot0.argPtr(), arg(&n_hist),          arg(&n_qt),              arg(&off),
-                });
-            }
+            try self.tapePass(&self.d_round, &self.d_x);
             // 3. The LTE bounds.
             var nl: u64 = N;
             var n_hist: u64 = self.n_hist;
@@ -924,11 +916,54 @@ pub const GpuLanes = struct {
             self.d_sc.argPtr(),     self.d_accept.argPtr(), self.d_x.argPtr(),     self.d_cur.argPtr(),    self.d_prev.argPtr(),
             self.d_q.argPtr(),      self.d_ring.argPtr(),  self.d_ip.argPtr(),     self.d_ring_qt.argPtr(), self.d_ip_qt.argPtr(),
         });
+        if (self.state_q) try self.rebaseRound();
         try self.d_perm_q.upload(self.perm_q.ptr, N * self.n_hist);
         try self.d_perm_qt.upload(self.perm_qt.ptr, N * self.n_hist);
         try self.stream.synchronize();
         @memset(self.ops, 0);
         @memset(self.accept_, 0);
+    }
+
+    /// `Sim.end`'s stateful-charge block for the accepted lanes, after the
+    /// commits: the planes at cur, the tape into the tape's logical slot 0
+    /// (`sqt[3]`), then `arp_lane_rebase`.
+    fn rebaseRound(self: *Self) !void {
+        const N: usize = self.n_lanes;
+        try self.evalAll(&self.d_accept, &self.d_cur);
+        if (self.n_qt > 0) {
+            for (self.slot0, self.sc) |*s, sc| s.* = sc.sqt[3];
+            try self.d_slot0.upload(self.slot0.ptr, N);
+            try self.tapePass(&self.d_accept, &self.d_cur);
+        }
+        var nl: u64 = N;
+        var n: u64 = self.n;
+        var n_qt: u64 = self.n_qt;
+        var nh: u64 = self.n_hist;
+        try self.launch(&self.k.rebase, (self.n + self.n_qt) * N, &.{
+            arg(&nl),             arg(&n),                arg(&n_qt),            arg(&nh),             self.d_sc.argPtr(),
+            self.d_accept.argPtr(), self.d_q.argPtr(),    self.d_ring.argPtr(),  self.d_ip.argPtr(),   self.d_ring_qt.argPtr(),
+            self.d_ip_qt.argPtr(),
+        });
+    }
+
+    /// Every batch's lane tape kernel at `x` for the lanes of `mask`, into
+    /// each lane's tape slot `d_slot0[l]`.
+    fn tapePass(self: *Self, mask: *Buffer, x: *Buffer) !void {
+        const N: usize = self.n_lanes;
+        for (self.batches) |*b| {
+            const k = if (b.qtp) |*k| k else continue;
+            if (b.count == 0) continue;
+            var nl: u64 = N;
+            var count: u64 = b.count;
+            var n_hist: u64 = self.n_hist;
+            var n_qt: u64 = self.n_qt;
+            var off: u64 = b.tape_off;
+            try self.launch(k, b.count * N, &.{
+                arg(&nl),             arg(&count),            mask.argPtr(),           self.d_sims.argPtr(),   x.argPtr(),
+                b.d_gath.argPtr(),    b.d_models.argPtr(),    b.d_model_of.argPtr(),   b.d_instances.argPtr(), self.d_ring_qt.argPtr(),
+                self.d_slot0.argPtr(), arg(&n_hist),          arg(&n_qt),              arg(&off),
+            });
+        }
     }
 
     /// Records lane l's pre-rotation ring slots for `accept`'s history
@@ -993,7 +1028,7 @@ pub const Ops = struct {
         return ask and o.g.query[o.l] & 1 != 0;
     }
     pub fn boundStep(_: Ops, _: anytype) ?f64 {
-        return null; // bound_step devices are not lane-eligible
+        return null; // a finite one hands the lane back (`LaneNewton.reject`)
     }
     pub fn charges(_: Ops, _: anytype, _: anytype) void {} // `probe` did it for the round
     pub fn bound(o: Ops, _: anytype, a: anytype, method: anytype, _: anytype) f64 {
@@ -1013,8 +1048,14 @@ pub const Ops = struct {
         o.g.ops[o.l] = 1 + @as(u8, @backingInt(StateCtlOp.commit));
         o.g.accept_[o.l] = 1;
     }
-    pub fn rebase(_: Ops, s: anytype, _: anytype) void {
-        std.debug.assert(!(s.has_charge and s.ckt.has_state_q)); // not lane-eligible
+    /// Records the tape's logical slot 0 for `rebaseRound` and swaps the
+    /// tape's slots 0 and 1, as `std.mem.swap` moves the host ring.
+    pub fn rebase(o: Ops, s: anytype, _: anytype) void {
+        if (!(s.has_charge and s.ckt.has_state_q)) return;
+        const nh: usize = o.g.n_hist;
+        const p = o.g.perm_qt[@as(usize, o.l) * nh ..][0..2];
+        o.g.sc[o.l].sqt[3] = p[0];
+        std.mem.swap(u8, &p[0], &p[1]);
     }
     pub fn accepted(o: Ops, _: anytype) []const f64 {
         const n: usize = o.g.n;
