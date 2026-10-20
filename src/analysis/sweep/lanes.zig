@@ -219,7 +219,7 @@ pub fn solveBatch(comptime W: usize, ckts: []const *root.Circuit, xs: []const []
     // as `solveLanes` marks a lane's.
     const r = res catch |err| switch (err) {
         error.QueryCancelled => return error.QueryCancelled,
-            error.OutOfMemory => return error.OutOfMemory,
+        error.OutOfMemory => return error.OutOfMemory,
         else => {
             @memset(results, .{ .converged = false, .iterations = 0 });
             return;
