@@ -125,7 +125,7 @@ about $L$ minus the extra $L-1$ cold ladders. Fold-crossing points recover
 per chunk exactly as on the CPU. Nested sweeps multiply the supply of chunks,
 since each outer point cold-starts anyway. The structural-lane machinery for
 this exists for Monte Carlo and temperature sweeps
-(`src/analysis/sweep/lanes.zig solveLanes`, serial over lanes).
+(`src/analysis/sweep/lanes.zig`: one session row per lane, batched W wide).
 
 ## Solvers used
 

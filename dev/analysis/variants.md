@@ -145,7 +145,8 @@ own.
 
 `.dc DATA=` and `.dc MONTE=` run their rows as one `Mc` query on the
 structural lanes (`sweep/lanes.zig`), each lane warm-started from the
-previous lane's solution when that converged.
+nominal OP; the session runs each lane as its own row and assembles them
+(#213).
 
 ## 3. Measurements
 

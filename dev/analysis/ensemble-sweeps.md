@@ -50,14 +50,13 @@ $$
 
 ### Seed policy
 
-The RNG is deterministic and seed-parameterized
-(`std.Random.DefaultPrng.init(seed)`, default seed 42): the same netlist +
-seed + trial count reproduces the ensemble bit-exactly: a *requirement*
-for regression benchmarking and for debugging individual failed trials.
-The implementation consumes one stream in trial order and reseeds it on
-trial 0, so every run draws the same sequence. A parallel lane executor would
-need a counter-based per-trial substream (`hash(seed, trial)`) so trial $k$'s
-draws do not depend on scheduling.
+The RNG is deterministic and seed-parameterized (default seed 42): the same
+netlist + seed + trial count reproduces the ensemble bit-exactly: a
+*requirement* for regression benchmarking and for debugging individual
+failed trials. Each draw is counter-based (`mc.draw`): a fresh
+`std.Random.DefaultPrng` seeded with the Wyhash of (seed, trial, variable),
+so trial $k$'s draws depend on nothing else and any trial can be computed
+alone, whatever runs beside it (#213).
 
 ### Convergence bookkeeping
 
@@ -69,15 +68,21 @@ fewer rows than `n_trials`.
 ## 2. Flow explanation
 
 Both sweeps run on the structural-lane driver `solveLanes`
-(`src/analysis/sweep/lanes.zig`): $N$ independent cold DC solves, each after
-one parameter install, sharing the circuit pattern and one Newton workspace.
-The caller supplies `apply(k)` (install lane $k$'s parameters, called in lane
-order) and `restore()`; the driver recomputes after each and restores the
-nominals on success and on error. Lanes run serially: this is the
-"structural lanes" axis of the lane-axis doctrine in AGENTS.md, not SIMD.
-With `warm`, a lane starts from the previous lane's solution when that one
-converged; the deck-variant ensembles (`.dc DATA=`, `.dc MONTE=`,
-[variants.md](variants.md)) use it, `.mc` and `.temp` stay cold.
+(`src/analysis/sweep/lanes.zig`): independent DC solves, each after one
+parameter install, sharing the circuit pattern and one Newton workspace.
+The caller supplies `apply(k)` (install lane $k$'s parameters) and
+`restore()`; the driver recomputes after each and restores the nominals on
+success and on error. A lane starts cold, or from one fixed reference, the
+nominal OP, for the deck-variant ensembles (`.dc DATA=`, `.dc MONTE=`,
+[variants.md](variants.md)); never from another lane. A lane keeps only its
+probe values.
+
+Because no lane depends on another, the session splits a query of $N \ge 2$
+lanes (up to $2^{16}$) into $N$ lane rows (`Mc.lane`, `Temp.lane`) that share
+the nominal OP: the pool spreads them across `--jobs`, the grouping pass
+batches up to $W$ of them, whose plain Newtons run $W$ wide
+(`lanes.runBatch`), and the requested row assembles their rows in lane order
+once all have ended, so the output is the same at every `--jobs` (#213).
 
 **Monte Carlo** (`src/analysis/sweep/mc.zig`): collect every device's
 nonzero primary parameter (`collectParams`); lane $k$ sets each to
