@@ -1,0 +1,29 @@
+diff --git a/build.zig b/build.zig
+index 7103b7d4..a8c81e6a 100644
+--- a/build.zig
++++ b/build.zig
+@@ -13,6 +13,8 @@ pub fn build(b: *Build) void {
+     const single_threaded = b.option(bool, "single-threaded", "Build without threads, as espice.wasm does");
+     const cuda_arch = b.option([]const u8, "cuda-arch", "CUDA arch (sm_75, ...), `auto` to probe the build machine, `none` to omit") orelse "auto";
+     const hip_arch = b.option([]const u8, "hip-arch", "HIP arch (gfx1100, ...), `none` to omit") orelse "gfx1100";
++    // E1 (temporary): kernel images only for these models, gpu_host_only ignored.
++    const gpu_only = b.option([]const u8, "gpu-only", "E1: comma list of models that get kernel images");
+     const suite = b.option([]const u8, "suite", "bench-suites: one suite under tests/suites (default: all)");
+     const use_llvm = optimize != .debug;
+ 
+@@ -113,7 +115,14 @@ pub fn build(b: *Build) void {
+ 
+     var roots: std.ArrayList(gompute_build.KernelRoot) = .empty;
+     for (models, g.kernel_models) |m, one| {
+-        if (!gpu_kernels or gpu_host_only.has(m.name)) continue;
++        if (!gpu_kernels) continue;
++        if (gpu_only) |list| {
++            var it = std.mem.splitScalar(u8, list, ',');
++            const hit = while (it.next()) |n| {
++                if (std.mem.eql(u8, n, m.name)) break true;
++            } else false;
++            if (!hit) continue;
++        } else if (gpu_host_only.has(m.name)) continue;
+         const imports = b.allocator.dupe(Import, &.{ .{ .name = "models", .module = one }, g.kernel_contract, g.kernel_abi }) catch @panic("OOM");
+         roots.append(b.allocator, .{
+             .name = m.name,
