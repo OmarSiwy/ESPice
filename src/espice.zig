@@ -18,6 +18,9 @@ pub const Source = frontend.Source;
 pub const Dialect = frontend.Dialect;
 /// Maps a CLI dialect name (`ngspice`, `hspice`, `spectre`); null if unknown.
 pub const parseDialect = frontend.parseDialect;
+/// The dialect a deck's text is in, from markers only HSPICE or Spectre
+/// decks carry; ngspice otherwise (the CLI's `--tokenizer` default).
+pub const detectDialect = frontend.detectDialect;
 /// Requested compute backend; `Problem.init` rejects one the build lacks; a
 /// query run with an explicit cuda/hip fails when no GPU is usable.
 pub const Request = analysis.ExecutionConfig.Backend;
@@ -83,6 +86,10 @@ pub const Options = struct {
     /// `measures_only` is dropped for a deck with `.save` or `.stim`, which
     /// read every column.
     point: requests.PointOptions = .{},
+    /// The CLI's default: also turn on `point`'s `measures_only`,
+    /// `early_stop` and `warm_start` when nothing but the `.meas` cards
+    /// reads the deck's transient waveforms (`waveformsConsumed`).
+    auto_point: bool = false,
     /// Where `run_all` prints each result's `.meas` block as soon as it and
     /// every result before it have ended, flushing both writers, instead of
     /// leaving them all to `print_measures`; the optimization summaries
@@ -279,6 +286,11 @@ pub const Problem = struct {
         if (self.prepared.tuning == null) self.session.markLastTemplateReader();
         var point = options.point;
         try self.checkPoint(point);
+        if (options.auto_point and !self.waveformsConsumed(options)) {
+            point.measures_only = true;
+            point.early_stop = true;
+            point.warm_start = true;
+        }
         if (self.save_path != null or self.prepared.deck.stims.len != 0) point.measures_only = false;
         // No analysis card runs an OP, unless it would have no columns (a
         // title-only deck): ngspice runs nothing there either.
@@ -328,6 +340,20 @@ pub const Problem = struct {
             if (!self.tangentable(job.*)) return error.TangentsUnavailable;
             job.tran.tangents = try self.tangentRows(tuning, values, h, s);
         };
+    }
+
+    /// Whether anything besides the `.meas` cards reads the deck's
+    /// transient waveforms: an output file, `.save`, `.stim`, an
+    /// optimization, tangents, or a device's display tasks, which print at
+    /// every accepted step. `.print`, `.probe` and `.plot` are ignored
+    /// cards, and `.four`, `.fft` and MOSRA run transients of their own.
+    fn waveformsConsumed(self: *const Problem, options: Options) bool {
+        const deck = &self.prepared.deck;
+        if (options.output.path != null or self.save_path != null or deck.stims.len != 0) return true;
+        if (self.prepared.tuner != null or options.point.tangent_step > 0) return true;
+        for (self.prepared.circuit.batches) |b| if (b.hooks.say != null) return true;
+        for (self.prepared.runs) |run| for (run.circuit.batches) |b| if (b.hooks.say != null) return true;
+        return false;
     }
 
     /// A copy of `queries` whose transients carry `point`.

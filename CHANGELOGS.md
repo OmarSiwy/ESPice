@@ -6,6 +6,7 @@ Newest first. Bullets only, one line each. Every fix cites its GitHub issue,
 ## Unreleased
 
 - `.mc`, `.dc DATA=`, `.dc MONTE=` and a `.temp` range run each trial, variant or temperature as its own query row, which spreads across `--jobs` and batches into lanes, then assemble the sweep in order; output is the same at every `--jobs`. A plain `.mc` draw is keyed by (seed, trial, variable), so trials draw different values than before, and a `.dc DATA=`/`MONTE=` point starts from the nominal OP instead of the previous point, which moves its results by roundoff (#213).
+- CLI defaults: `--jobs` is one per CPU (`--jobs=auto`); `--measures-only`, `--early-stop` and `--warm-start` turn on by themselves when nothing reads the transient waveforms (no `-r`, `.save`, `.stim`, optimization, `--tangents` or display task; `--full-waveforms` turns them off); `--tokenizer` defaults to the dialect detected from the deck's HSPICE- or Spectre-only markers, else ngspice.
 - `OPTIMIZE=` on a `.tran` card takes its Jacobian from tangents integrated along the trial point's own transient, without its time-grid noise: a 32-stage MOS1 chain fit 1.49x fewer instructions and an RSS of 7e-11 instead of 4e-5; `ZP_NO_TANGENTS` restores the finite difference (#97).
 
 ## 1.1.0 (2026-10-19)
