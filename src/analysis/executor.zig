@@ -105,6 +105,31 @@ pub fn lanesOn(config: Config) bool {
     });
 }
 
+/// The AC-family kinds a lane batch runs (`runFreqLanes`): small-signal
+/// analyses at their own operating point, each lane bitwise its query run
+/// alone (lane-batched-simulation.md §6, the AC family rows).
+pub fn freqLaneKind(kind: requests.Kind) bool {
+    return switch (kind) {
+        .ac, .noise, .sp, .stb, .lstb, .acxf, .tf, .dcxf, .dcinc, .sens, .dcmatch, .dcsens, .acmatch => true,
+        else => false,
+    };
+}
+
+/// The analysis state a query's devices see while it runs (`runQuery`).
+/// Small-signal linearizations run as analysis("ac") or ("noise"), LRM
+/// Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC for ac,
+/// noise, pz and disto (osdiload.c:165).
+fn simKind(job: requests.Query) SimKind {
+    const transient = if (job == .op) job.op.tran_op else @as(requests.Kind, job).transient();
+    return switch (job) {
+        .ac, .sp, .stb, .pz, .disto, .lstb, .acxf => .ac,
+        .noise => .noise,
+        else => if (transient) .ic else .dc,
+    };
+}
+
+const SimKind = @FieldType(@import("device").abi.SimState, "kind");
+
 /// One query: its own Circuit instance, work and result arenas, and worker.
 /// Heap-pinned because the worker and the progress callback hold its address.
 pub const Executor = struct {
@@ -319,7 +344,7 @@ pub const Executor = struct {
     fn executeBatch(self: *Executor) QueryError!types.Result {
         if (self.config.gpu_lanes and self.job == .tran) return self.executeGpuBatch();
         const g = 1 + self.peers.len;
-        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc or self.job == .tran));
+        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc or self.job == .tran or freqLaneKind(self.job)));
         var members: [lane_width]*Executor = undefined;
         members[0] = self;
         @memcpy(members[1..g], self.peers);
@@ -341,6 +366,10 @@ pub const Executor = struct {
         }
         if (n_live != 0 and (try members[live[0]].sayNames()).len != 0) {
             for (live[0..n_live]) |k| outcomes[k] = members[k].finishAlone();
+            return outcomes[0];
+        }
+        if (freqLaneKind(self.job)) {
+            runFreqLanes(members[0..g], live[0..n_live], outcomes[0..g]);
             return outcomes[0];
         }
         if (self.job == .dc) {
@@ -457,6 +486,53 @@ pub const Executor = struct {
         return outcomes[0];
     }
 
+    /// `executeBatch`'s AC-family branch: every live lane's leading
+    /// frequency sweep solved up front (`precompute`), then each lane's
+    /// analysis replaying it (`RunCtx.freq_pre`) and labelled as alone. The
+    /// two passes are the GPU lane backend's shape: it replaces the first
+    /// with (point, ω) lane rounds (dev/research/plans/phase5-ac-lanes.md).
+    /// A lane whose precompute fails runs live, so it fails or streams as
+    /// it would alone.
+    // ponytail: holds points·ω·rhs values per lane until its run ends;
+    // chunk the precompute if a long sweep on a large n needs it.
+    fn runFreqLanes(members: []const *Executor, live: []const usize, outcomes: []QueryError!types.Result) void {
+        var ctxs: [lane_width]types.RunCtx = undefined;
+        for (live, 0..) |k, l| {
+            const e = members[k];
+            e.circuit.setSimState(.{ .kind = simKind(e.job) });
+            ctxs[l] = e.runCtx();
+            ctxs[l].freq_pre = e.precompute(&ctxs[l]) catch &.{};
+        }
+        for (live, 0..) |k, l| {
+            const e = members[k];
+            outcomes[k] = if (run(&ctxs[l], e.job)) |r| e.label(r) else |err| err;
+            e.refuseLatched() catch |err| {
+                outcomes[k] = err;
+            };
+        }
+    }
+
+    /// The query's leading frequency sweep, solved as its own `run` would
+    /// solve it (`freq.solveAll` over its `plan`), in the query's work
+    /// arena; empty for a kind that solves live.
+    fn precompute(self: *Executor, ctx: *const types.RunCtx) ![]const f64 {
+        const freq = @import("ac/freq.zig");
+        const scratch = ctx.scratch_allocator;
+        const p: freq.Plan = switch (self.job) {
+            .ac => |o| try @import("ac/ac.zig").plan(ctx, o),
+            .acxf => |o| try @import("ac/xf.zig").plan(ctx, o),
+            .stb => |o| try @import("ac/stb.zig").plan(ctx, o),
+            .noise => |o| try @import("ac/noise.zig").plan(ctx, o),
+            else => return &.{}, // else: every other kind solves live (class E)
+        };
+        defer p.deinit(scratch);
+        var fs = try @import("solver").freq_solve.FreqSolver.fromCircuit(scratch, ctx.circuit, ctx.x_op);
+        defer fs.deinit();
+        const out = try self.work.allocator().alloc(f64, p.omegas.len * p.rhs.len);
+        try freq.solveAll(scratch, &fs, ctx.circuit, ctx.x_op, p.omegas, p.rhs, p.adjoint, out);
+        return out;
+    }
+
     /// `execute` past `materialize`, for a batch lane that runs alone.
     fn finishAlone(self: *Executor) QueryError!types.Result {
         const res = self.runQuery() catch |err| {
@@ -515,17 +591,9 @@ pub const Executor = struct {
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
-        self.circuit.setSimState(.{
-            .kind = switch (self.job) {
-                // Small-signal linearizations run as analysis("ac") or ("noise"),
-                // LRM Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC
-                // for ac, noise, pz and disto (osdiload.c:165). It is what gives a
-                // host-integrated idt its 1/(jw) instead of its DC form.
-                .ac, .sp, .stb, .pz, .disto, .lstb, .acxf => .ac,
-                .noise => .noise,
-                else => if (transient) .ic else .dc,
-            },
-        });
+        // It is what gives a host-integrated idt its 1/(jw) instead of its
+        // DC form (`simKind`).
+        self.circuit.setSimState(.{ .kind = simKind(self.job) });
         if (self.job == .op) {
             const options = try self.opStart();
             const solved = try op.solve(&self.circuit, self.x.?, options, self.deck.nodeset, self.deck.ic);

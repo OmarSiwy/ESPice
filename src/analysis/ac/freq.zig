@@ -23,6 +23,32 @@ pub fn freeAxis(scratch: std.mem.Allocator, freqs: []f64) void {
     scratch.free(freqs.ptr[0 .. 2 * freqs.len]);
 }
 
+/// One frequency analysis' leading sweep: what its `Stream` solves. Built
+/// by the analysis' `plan`; `deinit` returns the axis block and `rhs` to
+/// the scratch allocator that built them.
+pub const Plan = struct {
+    freqs: []f64,
+    omegas: []f64,
+    rhs: []f64,
+    adjoint: bool,
+
+    pub fn deinit(p: Plan, scratch: std.mem.Allocator) void {
+        freeAxis(scratch, p.freqs);
+        scratch.free(p.rhs);
+    }
+};
+
+/// Solves every point of a `Stream` over these inputs into `out`
+/// (`omegas.len * rhs.len` values, point-major), bitwise what that stream
+/// returns point by point: the precompute behind `Stream.pre`. Checkpoints
+/// as the stream does. Asserts that `out` has that length.
+pub fn solveAll(allocator: std.mem.Allocator, fs: *FreqSolver, ckt: *root.Circuit, x_op: []const f64, omegas: []const f64, rhs: []const f64, adjoint: bool, out: []f64) !void {
+    std.debug.assert(out.len == omegas.len * rhs.len);
+    var s = try Stream.init(allocator, fs, ckt, x_op, omegas, rhs, adjoint);
+    defer s.deinit(allocator);
+    while (try s.next(ckt)) |pt| @memcpy(out[pt.k * rhs.len ..][0..rhs.len], pt.x);
+}
+
 // ponytail: fixed at 64; expose a work budget if a caller needs another
 // latency/throughput tradeoff. One factorization is never split.
 /// Frequencies per progress checkpoint; a multiple of every `FreqSolver.W`.
@@ -48,6 +74,10 @@ pub const Stream = struct {
     omegas: []const f64,
     rhs: []const f64,
     adjoint: bool,
+    /// Every point's solutions solved up front by `solveAll` on these same
+    /// inputs, `omegas.len * rhs.len` values point-major; `next` then reads
+    /// them instead of solving. Empty: solve as it goes.
+    pre: []const f64 = &.{},
     buf: []f64,
     /// A chunk's `acDyn` terms, re then im, each `ac_dyn_slots.len` rows of
     /// up to `lanes` points.
@@ -81,17 +111,20 @@ pub const Stream = struct {
             if (self.end == self.omegas.len) return null;
             self.base = self.end;
             self.end += @min(lanes, self.omegas.len - self.base);
-            const chunk = self.omegas[self.base..self.end];
-            const terms = ckt.ac_dyn_slots.len * chunk.len;
-            const re = self.dyn[0..terms];
-            const im = self.dyn[self.dyn.len / 2 ..][0..terms];
-            if (terms != 0) ckt.acDyn(self.x_op, chunk, re, im);
-            const dyn: Dyn = .{ .slots = ckt.ac_dyn_slots, .re = re, .im = im };
-            try self.fs.solveBatch(chunk, dyn, self.rhs, self.buf[0 .. chunk.len * m], self.adjoint);
+            if (self.pre.len == 0) {
+                const chunk = self.omegas[self.base..self.end];
+                const terms = ckt.ac_dyn_slots.len * chunk.len;
+                const re = self.dyn[0..terms];
+                const im = self.dyn[self.dyn.len / 2 ..][0..terms];
+                if (terms != 0) ckt.acDyn(self.x_op, chunk, re, im);
+                const dyn: Dyn = .{ .slots = ckt.ac_dyn_slots, .re = re, .im = im };
+                try self.fs.solveBatch(chunk, dyn, self.rhs, self.buf[0 .. chunk.len * m], self.adjoint);
+            }
             if (self.end % quantum == 0 or self.end == self.omegas.len)
                 try ckt.checkpoint(.{ .phase = .frequency, .completed = self.end, .total = self.omegas.len });
         }
         defer self.k += 1;
-        return .{ .k = self.k, .x = self.buf[(self.k - self.base) * m ..][0..m] };
+        const x = if (self.pre.len != 0) self.pre[self.k * m ..][0..m] else self.buf[(self.k - self.base) * m ..][0..m];
+        return .{ .k = self.k, .x = x };
     }
 };
