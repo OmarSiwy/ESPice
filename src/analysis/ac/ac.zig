@@ -14,6 +14,19 @@ pub const scale = "frequency";
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Ac;
 
+/// The sweep `run` solves: `ctx.ac_drive` (or zero) at every ω of `opts`.
+/// Asserts that `ctx.ac_drive` is 2n long or empty.
+pub fn plan(ctx: *const root.RunCtx, opts: Options) !freq.Plan {
+    const scratch = ctx.scratch_allocator;
+    const nn = 2 * @as(usize, ctx.circuit.n);
+    std.debug.assert(ctx.ac_drive.len == nn or ctx.ac_drive.len == 0);
+    const rhs = try scratch.alloc(f64, nn);
+    errdefer scratch.free(rhs);
+    if (ctx.ac_drive.len == nn) @memcpy(rhs, ctx.ac_drive) else @memset(rhs, 0);
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    return .{ .freqs = freqs, .omegas = omegas, .rhs = rhs, .adjoint = false };
+}
+
 /// Contract entry: the response to `ctx.ac_drive`, the whole deck's AC
 /// excitation (every source card with an `AC` spec, at its own magnitude and
 /// phase). A V card drives its branch row, because its branch equation is
@@ -29,19 +42,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const ckt = ctx.circuit;
     const n: usize = ckt.n;
-    const nn = 2 * n;
     const n_points: usize = opts.sweep.count();
-    std.debug.assert(ctx.ac_drive.len == nn or ctx.ac_drive.len == 0);
 
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
     defer fs.deinit();
 
-    const rhs = try scratch.alloc(f64, nn);
-    defer scratch.free(rhs);
-    if (ctx.ac_drive.len == nn) @memcpy(rhs, ctx.ac_drive) else @memset(rhs, 0);
-
-    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
-    defer freq.freeAxis(scratch, freqs);
+    const p = try plan(ctx, opts);
+    defer p.deinit(scratch);
+    const rhs = p.rhs;
+    const freqs = p.freqs;
+    const omegas = p.omegas;
 
     const names = try root.probeNames(ctx, scale);
     const row_len = names.len * 2;
@@ -54,6 +64,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, false);
     defer stream.deinit(scratch);
+    stream.pre = ctx.freq_pre;
     while (try stream.next(ckt)) |pt| {
         const row = if (streamed) data else data[pt.k * row_len ..][0..row_len];
         row[0] = freqs[pt.k];

@@ -508,9 +508,9 @@ tree):
 | noise (`noise.zig:31-53, 230`) | formula thresholds; sampled grid length | A; E | `select`; the grid is built per point on the host, so lanes share it only when it is equal (the usual case: it depends on the card) |
 | lstb margins (`lstb.zig:261-292`) | regula falsi to 100 solves | B | per-lane bracket, masked |
 | `.tran` (`tran.zig:361-667`) | loop end; Newton reject :428; `reject_at` :451; state flip :462; LTE :500-518; VPI :525; promotion :547; breakpoints :591-622; clamps :657 | per-lane control | §7: rounds, per-lane state machine, no shared step |
-| shooting `.pss` (`pss.zig:131-492`) | per-step Newton; shooting loop exit :368; FD columns; oscillator damping, settle, start | B, C | each shooting iterate is a lane transient over one period (§7's rounds); dense monodromy LU per lane, scalar |
-| HB / MHB (`hb.zig:237-253`, `mhb.zig:565-575`) | convergence; backtracking `step` halving and regrowth | B, C | per-lane `step` as `V`, masked; MHB's block-diagonal preconditioner `factorEach` widens from harmonics to (point, harmonic) |
-| PAC / pnoise (`pac.zig:54-211`, `pnoise.zig:131`) | route by size; GMRES convergence; noise topology | D, B, E | per-lane Krylov, masked; a lane whose noise sources move peels |
+| shooting `.pss` (`pss.zig:131-492`) | per-step Newton; shooting loop exit :368; FD columns; oscillator damping, settle, start | B, C | fixed-step trapezoid periods run as lanes, one lane Newton per step (`pss.integrateLanes`); FD columns, monodromy LU, GMRES and damping per lane, scalar (phase 6) |
+| HB / MHB (`hb.zig:237-253`, `mhb.zig:565-575`) | convergence; backtracking `step` halving and regrowth | B, C | phase 6b, GPU only (plans/phase6-periodic-lanes.md §1.1); not grouped on the CPU |
+| PAC / pnoise (`pac.zig:54-211`, `pnoise.zig:131`) | route by size; GMRES convergence; noise topology | D, B, E | phase 6b, GPU only (plans/phase6-periodic-lanes.md §1.1); not grouped on the CPU |
 | pz (`pz.zig:133-165`, `qz.zig`) | QR/QZ deflation, splits, iteration counts; root count | E | **not laned**: every step of QZ is a data-dependent structural choice and the output length varies. pz runs per lane at W = 1 after a lane OP; it is O(n^3) dense work on n ≤ a few hundred |
 | post (`four`, `fft`, `disto`, `mosra`) | sample windows, thresholds, bisection | A, E | per-result post-processing on the host after unpacking; nothing to lane |
 
@@ -714,7 +714,7 @@ phase. Estimates are for one engineer at today's build times.
 | 3. Transient lanes | rounds and per-lane control; per-lane SimState; streaming measures and early stop in lanes; probes only for requested cards | 3 weeks | every corpus `.tran` deck byte-identical batched; the 16-point lockstep test (§1) bitwise against scalar runs |
 | 4. GPU backend | **E1 first** (2-3 days): bsimcmg's sparse kernel over 48 x N instances on the 4060; stop if above 0.2 of host serial. Then the lane bodies over `P(T)`, raw exports, the lane-strided eval `Sink` (ABI bump), `lane_refactor`/`lane_solve`, mask and LTE downloads, graph per tick, packed rows | 4-6 weeks | lanes equal phase 3 to the `test-gpu` tolerance (6e-9 of rtol 1e-3); throughput against phase 0 on all cores |
 | 5. AC family | `Stacked` over (point, ω); noise, sp, tf, sens, dcmatch, acmatch through the same OP lanes | 1-2 weeks | corpus AC decks byte-identical batched |
-| 6. Periodic | shooting as lane transients; HB/MHB per-lane step and masks, `factorEach` over (point, harmonic); PAC/pnoise per-lane Krylov | 3-4 weeks | corpus PSS/HB decks byte-identical batched |
+| 6. Periodic | shooting periods as lanes (`pss.Shoot`, `integrateLanes`); HB/MHB/PAC/pnoise in a GPU-only phase 6b | ~3.5 days (6b: 2-3 weeks after phase 4) | swept `.pss` tests bitwise (no swept `.pss` deck in the corpus); periodic corpus byte-identical lanes off |
 | deferred | refill (regrouping) when idle > 10%; VerA batch family for cheap-device decks | 1 week; VerA 2-3 weeks | measured idle; a MATCHA profile |
 
 **Tests,** each a differential against a named oracle:

@@ -13,6 +13,8 @@ const types = @import("types.zig");
 const op = @import("dc/op.zig");
 const dc = @import("dc/dc.zig");
 const sweep_lanes = @import("sweep/lanes.zig");
+const tran = @import("tran/tran.zig");
+const pss = @import("pss/pss.zig");
 const gpu = @import("gpu.zig");
 const gpu_lu = @import("gpu_lu.zig");
 const ParEval = @import("par_eval.zig").ParEval;
@@ -58,9 +60,16 @@ pub const Config = struct {
     final_plan: bool = false,
     /// Developer switches the facade read from the environment.
     knobs: types.Knobs = .{},
-    /// `--lanes`: batch ready operating points and `.dc` sweeps as lanes
-    /// (`lanesOn`), each bitwise its query run alone.
+    /// `--lanes`: batch ready operating points, `.dc` sweeps, transients,
+    /// shooting `.pss` and the AC family as lanes (`lanesOn`), each bitwise
+    /// its query run alone.
     lanes: bool = false,
+    /// Batch ready transients as GPU lanes (dev/research/plans/phase4):
+    /// decided once per Problem by `gpu_lanes.policy`, true for an explicit
+    /// `cuda`/`hip` and, under `auto`, on an FP64-class device only.
+    gpu_lanes: bool = false,
+    /// Lanes per GPU batch at most.
+    gpu_lane_cap: u32 = 16384,
 
     /// The facade's record of whether the GPU driver is up, shared by every
     /// query of the Problem; null prices the driver setup in every query.
@@ -98,6 +107,31 @@ pub fn lanesOn(config: Config) bool {
         .cpu, .auto, .cuda, .hip => false,
     });
 }
+
+/// The AC-family kinds a lane batch runs (`runFreqLanes`): small-signal
+/// analyses at their own operating point, each lane bitwise its query run
+/// alone (lane-batched-simulation.md §6, the AC family rows).
+pub fn freqLaneKind(kind: requests.Kind) bool {
+    return switch (kind) {
+        .ac, .noise, .sp, .stb, .lstb, .acxf, .tf, .dcxf, .dcinc, .sens, .dcmatch, .dcsens, .acmatch => true,
+        else => false,
+    };
+}
+
+/// The analysis state a query's devices see while it runs (`runQuery`).
+/// Small-signal linearizations run as analysis("ac") or ("noise"), LRM
+/// Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC for ac,
+/// noise, pz and disto (osdiload.c:165).
+fn simKind(job: requests.Query) SimKind {
+    const transient = if (job == .op) job.op.tran_op else @as(requests.Kind, job).transient();
+    return switch (job) {
+        .ac, .sp, .stb, .pz, .disto, .lstb, .acxf => .ac,
+        .noise => .noise,
+        else => if (transient) .ic else .dc,
+    };
+}
+
+const SimKind = @FieldType(@import("device").abi.SimState, "kind");
 
 /// One query: its own Circuit instance, work and result arenas, and worker.
 /// Heap-pinned because the worker and the progress callback hold its address.
@@ -305,14 +339,15 @@ pub const Executor = struct {
     }
 
     /// Runs this query and its `peers` as one lane batch: each builds its
-    /// circuit, then the operating points (`op.solveLanes`) or `.dc` sweeps
-    /// (`dc.runLanes`) run as lanes and each publishes as it would alone. A
+    /// circuit, then the operating points (`op.solveLanes`), `.dc` sweeps
+    /// (`dc.runLanes`) or transients (`tran.runLanes`) run as lanes and each publishes as it would alone. A
     /// batch whose devices print display tasks runs its queries one after
     /// another instead. Every peer ends with `published` or `peer_failure`;
     /// returns this query's own.
     fn executeBatch(self: *Executor) QueryError!types.Result {
+        if (self.config.gpu_lanes and self.job == .tran) return self.executeGpuBatch();
         const g = 1 + self.peers.len;
-        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc or self.job == .mc or self.job == .temp));
+        std.debug.assert(g <= lane_width and (self.job == .op or self.job == .dc or self.job == .mc or self.job == .temp or self.job == .tran or self.job == .pss or freqLaneKind(self.job)));
         var members: [lane_width]*Executor = undefined;
         members[0] = self;
         @memcpy(members[1..g], self.peers);
@@ -336,23 +371,44 @@ pub const Executor = struct {
             for (live[0..n_live]) |k| outcomes[k] = members[k].finishAlone();
             return outcomes[0];
         }
+        if (freqLaneKind(self.job)) {
+            runFreqLanes(members[0..g], live[0..n_live], outcomes[0..g]);
+            return outcomes[0];
+        }
         switch (self.job) {
-            inline .dc, .mc, .temp => |_, tag| {
+            // Every laned analysis past the OP but `.tran` (its `uic` start,
+            // below): each lane runs from its own circuit and context, and
+            // publishes as it would alone.
+            inline .dc, .pss => |opts, tag| {
+                const M = module(tag);
+                const transient = @as(requests.Kind, self.job).transient();
+                var ctxs: [lane_width]types.RunCtx = undefined;
+                for (live[0..n_live], 0..) |k, l| {
+                    members[k].circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
+                    ctxs[l] = members[k].runCtx();
+                }
+                var swept: [lane_width]M.LaneOutcome = undefined;
+                if (n_live != 0) M.runLanes(lane_width, ctxs[0..n_live], opts, swept[0..n_live]);
+                for (live[0..n_live], swept[0..n_live]) |k, o| {
+                    outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
+                    members[k].refuseLatched() catch |err| {
+                        outcomes[k] = err;
+                    };
+                }
+                return outcomes[0];
+            },
+            // `.mc`/`.temp` lane rows (#213), each its own lane (`Session.gather`).
+            inline .mc, .temp => |_, tag| {
+                const M = module(tag);
                 var ctxs: [lane_width]types.RunCtx = undefined;
                 for (live[0..n_live], 0..) |k, l| {
                     members[k].circuit.setSimState(.{ .kind = .dc });
                     ctxs[l] = members[k].runCtx();
                 }
-                var swept: [lane_width]if (tag == .dc) dc.LaneOutcome else sweep_lanes.LaneOutcome = undefined;
-                if (n_live != 0) if (tag == .dc) {
-                    dc.runLanes(lane_width, ctxs[0..n_live], self.job.dc, swept[0..n_live]);
-                } else {
-                    // `.mc`/`.temp` lane rows, each its own lane (`Session.gather`).
-                    const M = module(tag);
-                    var opts: [lane_width]M.Options = undefined;
-                    for (live[0..n_live], opts[0..n_live]) |k, *o| o.* = @field(members[k].job, @tagName(tag));
-                    sweep_lanes.runBatch(lane_width, M, ctxs[0..n_live], opts[0..n_live], swept[0..n_live]);
-                };
+                var opts: [lane_width]M.Options = undefined;
+                for (live[0..n_live], opts[0..n_live]) |k, *o| o.* = @field(members[k].job, @tagName(tag));
+                var swept: [lane_width]sweep_lanes.LaneOutcome = undefined;
+                if (n_live != 0) sweep_lanes.runBatch(lane_width, M, ctxs[0..n_live], opts[0..n_live], swept[0..n_live]);
                 for (live[0..n_live], swept[0..n_live]) |k, o| {
                     outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
                     members[k].refuseLatched() catch |err| {
@@ -362,6 +418,29 @@ pub const Executor = struct {
                 return outcomes[0];
             },
             else => {},
+        }
+        if (self.job == .tran) {
+            var ctxs: [lane_width]types.RunCtx = undefined;
+            for (live[0..n_live], 0..) |k, l| {
+                const e = members[k];
+                // `runQuery`'s transient start: the `.ic` kind, and the
+                // `uic` x when no operating point ran.
+                e.circuit.setSimState(.{ .kind = .ic });
+                if (e.job.uic()) e.seedUic() catch |err| {
+                    for (live[0..n_live]) |j| outcomes[j] = err;
+                    return outcomes[0];
+                };
+                ctxs[l] = e.runCtx();
+            }
+            var ran: [lane_width]tran.LaneOutcome = undefined;
+            if (n_live != 0) tran.runLanes(lane_width, ctxs[0..n_live], self.job.tran, ran[0..n_live]);
+            for (live[0..n_live], ran[0..n_live]) |k, o| {
+                outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
+                members[k].refuseLatched() catch |err| {
+                    outcomes[k] = err;
+                };
+            }
+            return outcomes[0];
         }
         var ckts: [lane_width]*types.Circuit = undefined;
         var xs: [lane_width][]f64 = undefined;
@@ -394,6 +473,97 @@ pub const Executor = struct {
             };
         }
         return outcomes[0];
+    }
+
+    /// `executeBatch` for a GPU lane batch (`tran.runGpuLanes`): `peers` may
+    /// be thousands wide, so the per-member arrays come from the work arena.
+    fn executeGpuBatch(self: *Executor) QueryError!types.Result {
+        const a = self.work.allocator();
+        const g = 1 + self.peers.len;
+        const members = try a.alloc(*Executor, g);
+        members[0] = self;
+        @memcpy(members[1..], self.peers);
+        const outcomes = try a.alloc(QueryError!types.Result, g);
+        @memset(outcomes, error.QueryCancelled);
+        defer for (members[1..], outcomes[1..]) |p, o| {
+            if (o) |r| p.published = r else |err| p.peer_failure = err;
+        };
+        const live = try a.alloc(usize, g);
+        var n_live: usize = 0;
+        // ponytail: serial materialize; thousands of lanes take seconds here.
+        // Parallelize over a thread pool if it shows above 5% of the batch.
+        const t0 = @import("gpu_lanes.zig").Prof.now();
+        for (members, 0..) |e, k| {
+            e.materialize() catch |err| {
+                outcomes[k] = err;
+                continue;
+            };
+            e.circuit.progress = self.controller.callback();
+            live[n_live] = k;
+            n_live += 1;
+        }
+        if (self.config.knobs.gpu_stats != .off) std.debug.print("gpu-lanes: materialize {d} lanes {d:.1} ms\n", .{ g, @as(f64, @floatFromInt(@import("gpu_lanes.zig").Prof.now() - t0)) / 1e6 });
+        const ctxs = try a.alloc(types.RunCtx, n_live);
+        for (live[0..n_live], ctxs) |k, *c| {
+            members[k].circuit.setSimState(.{ .kind = .ic });
+            c.* = members[k].runCtx();
+        }
+        const ran = try a.alloc(tran.LaneOutcome, n_live);
+        if (n_live != 0) tran.runGpuLanes(ctxs, self.job.tran, ran);
+        for (live[0..n_live], ran) |k, o| {
+            outcomes[k] = if (o) |r| members[k].label(r) else |err| err;
+            members[k].refuseLatched() catch |err| {
+                outcomes[k] = err;
+            };
+        }
+        return outcomes[0];
+    }
+
+    /// `executeBatch`'s AC-family branch: every live lane's leading
+    /// frequency sweep solved up front (`precompute`), then each lane's
+    /// analysis replaying it (`RunCtx.freq_pre`) and labelled as alone. The
+    /// two passes are the GPU lane backend's shape: it replaces the first
+    /// with (point, ω) lane rounds (dev/research/plans/phase5-ac-lanes.md).
+    /// A lane whose precompute fails runs live, so it fails or streams as
+    /// it would alone.
+    // ponytail: holds points·ω·rhs values per lane until its run ends;
+    // chunk the precompute if a long sweep on a large n needs it.
+    fn runFreqLanes(members: []const *Executor, live: []const usize, outcomes: []QueryError!types.Result) void {
+        var ctxs: [lane_width]types.RunCtx = undefined;
+        for (live, 0..) |k, l| {
+            const e = members[k];
+            e.circuit.setSimState(.{ .kind = simKind(e.job) });
+            ctxs[l] = e.runCtx();
+            ctxs[l].freq_pre = e.precompute(&ctxs[l]) catch &.{};
+        }
+        for (live, 0..) |k, l| {
+            const e = members[k];
+            outcomes[k] = if (run(&ctxs[l], e.job)) |r| e.label(r) else |err| err;
+            e.refuseLatched() catch |err| {
+                outcomes[k] = err;
+            };
+        }
+    }
+
+    /// The query's leading frequency sweep, solved as its own `run` would
+    /// solve it (`freq.solveAll` over its `plan`), in the query's work
+    /// arena; empty for a kind that solves live.
+    fn precompute(self: *Executor, ctx: *const types.RunCtx) ![]const f64 {
+        const freq = @import("ac/freq.zig");
+        const scratch = ctx.scratch_allocator;
+        const p: freq.Plan = switch (self.job) {
+            .ac => |o| try @import("ac/ac.zig").plan(ctx, o),
+            .acxf => |o| try @import("ac/xf.zig").plan(ctx, o),
+            .stb => |o| try @import("ac/stb.zig").plan(ctx, o),
+            .noise => |o| try @import("ac/noise.zig").plan(ctx, o),
+            else => return &.{}, // else: every other kind solves live (class E)
+        };
+        defer p.deinit(scratch);
+        var fs = try @import("solver").freq_solve.FreqSolver.fromCircuit(scratch, ctx.circuit, ctx.x_op);
+        defer fs.deinit();
+        const out = try self.work.allocator().alloc(f64, p.omegas.len * p.rhs.len);
+        try freq.solveAll(scratch, &fs, ctx.circuit, ctx.x_op, p.omegas, p.rhs, p.adjoint, out);
+        return out;
     }
 
     /// `execute` past `materialize`, for a batch lane that runs alone.
@@ -454,17 +624,9 @@ pub const Executor = struct {
         if (self.config.timing_in_depth) (try self.circuit.workspace()).prof.io = self.io;
         defer if (self.config.timing_in_depth) printNewtonSplit(&self.circuit.ws.?, self.job);
         const transient = if (self.job == .op) self.job.op.tran_op else @as(requests.Kind, self.job).transient();
-        self.circuit.setSimState(.{
-            .kind = switch (self.job) {
-                // Small-signal linearizations run as analysis("ac") or ("noise"),
-                // LRM Table 4-22, as ngspice's MODEINITSMSIG load sets ANALYSIS_AC
-                // for ac, noise, pz and disto (osdiload.c:165). It is what gives a
-                // host-integrated idt its 1/(jw) instead of its DC form.
-                .ac, .sp, .stb, .pz, .disto, .lstb, .acxf => .ac,
-                .noise => .noise,
-                else => if (transient) .ic else .dc,
-            },
-        });
+        // It is what gives a host-integrated idt its 1/(jw) instead of its
+        // DC form (`simKind`).
+        self.circuit.setSimState(.{ .kind = simKind(self.job) });
         if (self.job == .op) {
             const options = try self.opStart();
             const solved = try op.solve(&self.circuit, self.x.?, options, self.deck.nodeset, self.deck.ic);
@@ -473,13 +635,16 @@ pub const Executor = struct {
             // The OP ladder publishes its own sim state (`initial_step`);
             // restore the plain one that dependents inherit.
             self.circuit.setSimState(.{ .kind = if (transient) .ic else .dc });
-        } else if (self.job.uic()) {
-            self.x = try self.work.allocator().alloc(f64, self.circuit.n);
-            @memset(self.x.?, 0);
-            for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;
-            for (self.deck.uic_ic) |ic| self.x.?[ic.node] = ic.value;
-        }
+        } else if (self.job.uic()) try self.seedUic();
         return self.finish();
+    }
+
+    /// A `uic` start's x: zero, then every `.ic` and `uic` value.
+    fn seedUic(self: *Executor) !void {
+        self.x = try self.work.allocator().alloc(f64, self.circuit.n);
+        @memset(self.x.?, 0);
+        for (self.deck.ic) |ic| self.x.?[ic.node] = ic.value;
+        for (self.deck.uic_ic) |ic| self.x.?[ic.node] = ic.value;
     }
 
     /// The operating point's start: `x` from the deck's guess, the
@@ -559,7 +724,7 @@ pub const Executor = struct {
     /// column or in all (`GpuLu.admits`), whatever the card's FP64 rate. A
     /// driver that refuses leaves the host LU.
     fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
-        if (self.config.backend == .cpu) return null;
+        if (self.config.backend == .cpu or (self.config.gpu_lanes and self.job == .op)) return null;
         var forced = false;
         if (self.config.knobs.gpu_lu) |on| {
             if (!on) return null;
@@ -575,7 +740,9 @@ pub const Executor = struct {
     }
 
     fn prepareGpu(self: *Executor) !?*gpu.GpuContext {
-        if (self.config.backend == .cpu) return null;
+        // Under GPU lanes the operating points run on the CPU workers, in
+        // parallel, and only the transients' lanes take the device.
+        if (self.config.backend == .cpu or (self.config.gpu_lanes and self.job == .op)) return null;
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
         const c = &self.circuit;
         const host: gpu.Host = .{ .batches = c.batches, .planes = c.ownPlanes(), .n = c.n, .trash_slot = c.trash_slot, .has_charge = c.has_charge, .knobs = c.knobs };

@@ -14,6 +14,7 @@ const assert = std.debug.assert;
 const dense_lu = @import("dense_lu.zig");
 const direct = @import("direct.zig");
 const lane_lu = @import("lane_lu.zig");
+const SparseLu = @import("sparse_lu.zig").SparseLu;
 const num = @import("core").numerics;
 
 const Allocator = std.mem.Allocator;
@@ -389,18 +390,7 @@ pub const FreqSolver = struct {
             // and its serial full factor repivots for the next chunk.
             // A singular centre point falls back to the serial path; an
             // allocation failure is the caller's, not a numerical one (#83).
-            if (!sp.slv.factored) setOmegaSparse(self.n, sp, ow[cnt / 2], dyn, base + cnt / 2) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => { // else: a numerical factor failure takes the serial path
-                    try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
-                    continue;
-                },
-            };
-            // LaneLu replays SparseLu only, not the tridiagonal engine.
-            const lu = sp.slv.sparse() orelse {
-                try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
-                continue;
-            };
+            const lu = (try self.chunkTape(sp, omegas, dyn, base, cnt, rhs, x_out, adjoint)) orelse continue;
 
             // A full factor can change the L/U lengths; rebuild then.
             if (sp.lanes) |*l| {
@@ -430,9 +420,38 @@ pub const FreqSolver = struct {
             }
             // After every lane solve: a failed lane's full factor may
             // repivot the tape the lanes replay.
-            for (0..cnt) |l| if ((bad & (@as(u64, 1) << @intCast(l))) != 0)
-                try self.solveBatchSerial(omegas, dyn, base + l, 1, rhs, x_out, adjoint);
+            try self.chunkPeel(omegas, dyn, base, cnt, bad, rhs, x_out, adjoint);
         }
+    }
+
+    /// `solveBatch`'s chunk head: the pivot tape lanes `[base, base + cnt)`
+    /// replay, laid by a scalar factor at the chunk's centre ω when none is
+    /// current. Null when the chunk took the serial path instead (a
+    /// singular centre or a non-LU engine), its rows of `x_out` written. An
+    /// allocation failure is the caller's, not a numerical one (#83). The
+    /// GPU lane backend runs it per point per round.
+    fn chunkTape(self: *Self, sp: *Sparse, omegas: []const f64, dyn: Dyn, base: usize, cnt: usize, rhs: []const f64, x_out: []f64, adjoint: bool) !?*SparseLu {
+        const centre = base + cnt / 2;
+        if (!sp.slv.factored) setOmegaSparse(self.n, sp, omegas[centre], dyn, centre) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => { // else: a numerical factor failure takes the serial path
+                try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
+                return null;
+            },
+        };
+        // LaneLu replays SparseLu only, not the tridiagonal engine.
+        return sp.slv.sparse() orelse {
+            try self.solveBatchSerial(omegas, dyn, base, cnt, rhs, x_out, adjoint);
+            return null;
+        };
+    }
+
+    /// `solveBatch`'s chunk tail: each lane `bad` marks solves on the serial
+    /// path, in lane order, after every lane solve: a failed lane's full
+    /// factor may repivot the tape the next chunk replays.
+    fn chunkPeel(self: *Self, omegas: []const f64, dyn: Dyn, base: usize, cnt: usize, bad: u64, rhs: []const f64, x_out: []f64, adjoint: bool) !void {
+        for (0..cnt) |l| if ((bad & (@as(u64, 1) << @intCast(l))) != 0)
+            try self.solveBatchSerial(omegas, dyn, base + l, 1, rhs, x_out, adjoint);
     }
 
     /// Replaces the solver's G and C with `g` and `c`, indexed by CSC slot
@@ -847,6 +866,51 @@ pub fn Stacked(comptime L: usize) type {
     };
 }
 
+/// `Stacked` over lanes from several points on one stacked pattern: lane l
+/// fills from `g[l]`/`c[l]`, one point's source-slot G and C snapshot, at
+/// `omega[l]`. Same products, in the same order per entry, as `Stacked`,
+/// so lane l is bitwise `Stacked(1)` of its own point. No `Dyn`: a deck
+/// with `acDyn` terms solves per point. The host oracle of the GPU lane
+/// backend's (point, ω) fill (phase 4); every point must share the pattern
+/// `src_col_ptr`/`col_ptr`.
+pub fn StackedPoints(comptime L: usize) type {
+    return struct {
+        const V = @Vector(L, f64);
+        src_col_ptr: []const u32,
+        col_ptr: []const u32,
+        g: [L][]const f64,
+        c: [L][]const f64,
+        omega: V,
+
+        /// Stacked column `col` per lane, as `Stacked.load`.
+        pub inline fn load(s: @This(), col: usize, w: []V, prow: []const u32) void {
+            const n = s.src_col_ptr.len - 1;
+            const top = col < n;
+            const j = if (top) col else col - n;
+            const cs = s.src_col_ptr[j];
+            const len: usize = s.src_col_ptr[j + 1] - cs;
+            const rows = prow[s.col_ptr[col]..][0 .. 2 * len];
+            for (0..len) |i| {
+                var ga: [L]f64 = undefined;
+                var ca: [L]f64 = undefined;
+                for (0..L) |l| {
+                    ga[l] = s.g[l][cs + i];
+                    ca[l] = s.c[l][cs + i];
+                }
+                const gv: V = ga;
+                const cv: V = ca;
+                if (top) {
+                    w[rows[i]] = gv;
+                    w[rows[len + i]] = s.omega * cv;
+                } else {
+                    w[rows[i]] = -s.omega * cv;
+                    w[rows[len + i]] = gv;
+                }
+            }
+        }
+    };
+}
+
 /// The column of CSC slot `slot` in the pattern `col_ptr` describes, by
 /// binary search (O(log n)); empty columns are skipped. A slot at or past
 /// nnz returns n, one past the last column, so callers filter ground slots
@@ -1034,4 +1098,56 @@ test "addDense writes the stacked-real [Re -Im; Im Re] image of one complex entr
     // Row-major 4 x 4: (1,0) += 3, (3,0) += 5, (1,2) -= 5, (3,2) += 3.
     const want = [16]f64{ 0, 0, 0, 0, 3, 0, -5, 0, 0, 0, 0, 0, 5, 0, 3, 0 };
     try testing.expectEqualSlices(f64, &want, &a);
+}
+
+test "StackedPoints: lane (point, ω) is bitwise Stacked(1) of its own point on the shared tape" {
+    const gpa = testing.allocator;
+    const n: u32 = 20; // above dense_threshold: the sparse strategy
+    const a: Ring = .init(n, 1e-3);
+    var b: Ring = .init(n, 3e-3);
+    for (b.g[0..a.col_ptr[n]]) |*v| v.* *= 1.05;
+    const nnz = a.col_ptr[n];
+    var fa = try FreqSolver.fromPlanes(gpa, n, a.col_ptr[0 .. n + 1], a.row_idx[0..nnz], a.g[0..nnz], a.c[0..nnz]);
+    defer fa.deinit();
+    var fb = try FreqSolver.fromPlanes(gpa, n, b.col_ptr[0 .. n + 1], b.row_idx[0..nnz], b.g[0..nnz], b.c[0..nnz]);
+    defer fb.deinit();
+    // Lay point a's tape at 1e4 rad/s; point b replays it.
+    try FreqSolver.test_access.setOmega(&fa, 1e4);
+    const spa = &fa.strategy.sp;
+    const spb = &fb.strategy.sp;
+    const lu = spa.slv.sparse().?;
+    const L = 4;
+    var lanes = try lane_lu.LaneLu(L).init(gpa, lu);
+    defer lanes.deinit(gpa);
+    const omegas = [L]f64{ 1e2, 1e2, 1e6, 1e6 };
+    const src: StackedPoints(L) = .{
+        .src_col_ptr = spa.src_col_ptr,
+        .col_ptr = spa.col_ptr,
+        .g = .{ spa.g_vals, spb.g_vals, spa.g_vals, spb.g_vals },
+        .c = .{ spa.c_vals, spb.c_vals, spa.c_vals, spb.c_vals },
+        .omega = omegas,
+    };
+    const bad = lanes.refactor(src, spa.slv.params.refactor_growth_limit);
+    const nn: usize = 2 * n;
+    const bv = try gpa.alloc(@Vector(L, f64), 2 * nn);
+    defer gpa.free(bv);
+    for (bv[0..nn], 0..) |*v, i| v.* = @splat(@as(f64, @floatFromInt(i % 3)) - 1);
+    lanes.solve(bv[0..nn], bv[nn..]);
+    var one = try lane_lu.LaneLu(1).init(gpa, lu);
+    defer one.deinit(gpa);
+    const b1 = try gpa.alloc(@Vector(1, f64), 2 * nn);
+    defer gpa.free(b1);
+    for (0..L) |l| {
+        const sp = if (l % 2 == 0) spa else spb;
+        const want_bad = one.refactor(Stacked(1).of(sp, @as(@Vector(1, f64), @splat(omegas[l])), .{}, 0, 1), spa.slv.params.refactor_growth_limit);
+        try testing.expectEqual(want_bad != 0, (bad >> @intCast(l)) & 1 != 0);
+        if (want_bad != 0) continue;
+        for (b1[0..nn], 0..) |*v, i| v.* = @splat(@as(f64, @floatFromInt(i % 3)) - 1);
+        one.solve(b1[0..nn], b1[nn..]);
+        for (bv[nn..], b1[nn..]) |got, want| {
+            const g: [L]f64 = got;
+            const w: [1]f64 = want;
+            try testing.expectEqual(@as(u64, @bitCast(w[0])), @as(u64, @bitCast(g[l])));
+        }
+    }
 }

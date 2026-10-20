@@ -81,6 +81,11 @@ pub const RunCtx = struct {
     stream: ?*std.Io.Writer = null,
     /// The deck's `.meas` cards: a transient's `point` options read them.
     measures: []const @import("core").Measure = &.{},
+    /// The leading frequency sweep's solutions, solved up front by a lane
+    /// batch (`Executor.runFreqLanes`) as `freq.solveAll` lays them out;
+    /// `.ac`, `.acxf`, `.stb` and `.noise` replay them (`freq.Stream.pre`).
+    /// Empty: solve live.
+    freq_pre: []const f64 = &.{},
 };
 
 /// Returns one column name per probe, preceded by `first` when given.

@@ -9,6 +9,21 @@ const FreqSolver = @import("solver").freq_solve.FreqSolver;
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Acxf;
 
+/// The sweep `run` solves: one adjoint right-hand side (`tf_only`) or one
+/// forward drive per source, at every ω of `opts`.
+pub fn plan(ctx: *const root.RunCtx, opts: Options) !freq.Plan {
+    const scratch = ctx.scratch_allocator;
+    const n: usize = ctx.circuit.n;
+    const out: dcxf.Output = .{ .node = opts.output_node, .neg = opts.output_neg, .branch = opts.output_branch };
+    const n_rhs: usize = if (opts.tf_only) 1 else opts.sources.len;
+    const rhs = try scratch.alloc(f64, @max(n_rhs, 1) * 2 * n);
+    errdefer scratch.free(rhs);
+    @memset(rhs, 0);
+    if (opts.tf_only) out.seed(rhs) else for (opts.sources, 0..) |s, i| dcxf.excite(s, rhs[i * 2 * n ..]);
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    return .{ .freqs = freqs, .omegas = omegas, .rhs = rhs, .adjoint = opts.tf_only };
+}
+
 /// Contract entry: complex points (frequency, then `tf(src)` [, `zin(src)`,
 /// `yin(src)`] per source). `tf_only` solves one adjoint right-hand side
 /// per frequency and reads every transfer off it; otherwise each source is
@@ -27,14 +42,11 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     defer fs.deinit();
 
     const n_points: usize = opts.sweep.count();
-    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
-    defer freq.freeAxis(scratch, freqs);
-
-    const n_rhs: usize = if (opts.tf_only) 1 else opts.sources.len;
-    const rhs = try scratch.alloc(f64, @max(n_rhs, 1) * 2 * n);
-    defer scratch.free(rhs);
-    @memset(rhs, 0);
-    if (opts.tf_only) out.seed(rhs) else for (opts.sources, 0..) |s, i| dcxf.excite(s, rhs[i * 2 * n ..]);
+    const p = try plan(ctx, opts);
+    defer p.deinit(scratch);
+    const freqs = p.freqs;
+    const omegas = p.omegas;
+    const rhs = p.rhs;
 
     const per: usize = if (opts.tf_only) 1 else 3;
     const cols = 1 + per * opts.sources.len;
@@ -43,6 +55,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, opts.tf_only);
     defer stream.deinit(scratch);
+    stream.pre = ctx.freq_pre;
     while (try stream.next(ckt)) |pt| {
         const row = data[pt.k * cols * 2 ..][0 .. cols * 2];
         row[0..2].* = .{ freqs[pt.k], 0 };

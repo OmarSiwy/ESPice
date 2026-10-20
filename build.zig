@@ -13,6 +13,7 @@ pub fn build(b: *Build) void {
     const single_threaded = b.option(bool, "single-threaded", "Build without threads, as espice.wasm does");
     const cuda_arch = b.option([]const u8, "cuda-arch", "CUDA arch (sm_75, ...), `auto` to probe the build machine, `none` to omit") orelse "auto";
     const hip_arch = b.option([]const u8, "hip-arch", "HIP arch (gfx1100, ...), `none` to omit") orelse "gfx1100";
+    const gpu_lanes = b.option(bool, "gpu-lanes", "Also compile the GPU lane kernels (phase 4; default true, ~2x ptxas time)") orelse true;
     const suite = b.option([]const u8, "suite", "bench-suites: one suite under tests/suites (default: all)");
     const use_llvm = optimize != .debug;
 
@@ -39,6 +40,7 @@ pub fn build(b: *Build) void {
         .strip = optimize != .debug and !debug_info,
         .single_threaded = single_threaded,
         .use_llvm = use_llvm,
+        .gpu_kernels = gpu_kernels,
     };
 
     const models = discoverModels(b);
@@ -112,9 +114,12 @@ pub fn build(b: *Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(vera.path("tools/contract.zig"), .prefix, "share/espice/vera/tools/contract.zig").step);
 
     var roots: std.ArrayList(gompute_build.KernelRoot) = .empty;
+    const lane_opts = b.addOptions();
+    lane_opts.addOption(bool, "enabled", gpu_lanes);
+    const lane_options: Import = .{ .name = "lane_options", .module = lane_opts.createModule() };
     for (models, g.kernel_models) |m, one| {
         if (!gpu_kernels or gpu_host_only.has(m.name)) continue;
-        const imports = b.allocator.dupe(Import, &.{ .{ .name = "models", .module = one }, g.kernel_contract, g.kernel_abi }) catch @panic("OOM");
+        const imports = b.allocator.dupe(Import, &.{ .{ .name = "models", .module = one }, g.kernel_contract, g.kernel_abi, lane_options }) catch @panic("OOM");
         roots.append(b.allocator, .{
             .name = m.name,
             .root = b.path("src/device/eval.zig"),
@@ -124,6 +129,7 @@ pub fn build(b: *Build) void {
         }) catch @panic("OOM");
     }
     roots.append(b.allocator, .{ .name = "lu", .root = b.path("src/solver/lu_device.zig") }) catch @panic("OOM");
+    if (gpu_lanes) roots.append(b.allocator, .{ .name = "lane", .root = b.path("src/solver/lane_device.zig") }) catch @panic("OOM");
     gompute_build.emitKernels(b, gompute, exe, .{
         .kernel_roots = roots.items,
         .heavy_lanes = 2,
@@ -361,6 +367,9 @@ const Cfg = struct {
     strip: bool,
     single_threaded: ?bool,
     use_llvm: ?bool,
+    /// `-Dgpu`: device kernels are compiled in, so host device objects build
+    /// their Model rows in the kernels' layout (no Debug `su_ok`).
+    gpu_kernels: bool = false,
 
     fn make(self: Cfg, root: Build.LazyPath, imports: []const Import) *Module {
         const mod = self.b.createModule(.{
@@ -434,7 +443,10 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         const line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
         agg.appendSlice(b.allocator, line) catch @panic("OOM");
         dm.* = dev.make(src, &.{contract});
-        const one_src = wf.add(b.fmt("{s}/models.zig", .{m.name}), line);
+        // The device kernels compile at .fast, where VerA's Debug-only Model
+        // field (`su_ok`) does not exist; `gpu_kernels` makes the host's
+        // device object drop it too, so a Model row has one size on both sides.
+        const one_src = wf.add(b.fmt("{s}/models.zig", .{m.name}), if (c.gpu_kernels) b.fmt("{s}pub const gpu_kernels = true;\n", .{line}) else line);
         const one = dev.make(one_src, &.{.{ .name = m.name, .module = dm.* }});
         kone.* = kmake(b, one_src, &.{.{ .name = m.name, .module = kmake(b, src, &.{k_contract}) }});
         const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one }, .{ .name = "device_abi", .module = abi_dev }, gomp });
@@ -646,9 +658,10 @@ const upstream_models = [_]struct {
 /// Source size from which a model's GPU compile goes on the serial heavy lanes.
 const heavy_model_bytes: u64 = 20 * 1024;
 
-/// GPU kernel stack frame exceeds the 262,136 B limit (CUDA's, and amdgcn's:
-/// gfx1100 psp103_nqs 500,192 B, psp104_nqs 515,664 B at ReleaseFast).
-const gpu_host_only = std.StaticStringMap(void).initComptime(.{ .{"asmhemt"}, .{"bsimsoi_va"}, .{"mvsg"}, .{"psp103_nqs"}, .{"psp104_nqs"} });
+/// GPU kernel stack frames past the 262,136 B limit (CUDA's and amdgcn's).
+/// Empty since VerA v0.11.0's sparse layout: the largest is mvsg at 47 KB on
+/// sm_89 and asmhemt at 113 KB on gfx1100 (dev/research/gpu-lane-e1.md §5).
+const gpu_host_only = std.StaticStringMap(void).initComptime(.{});
 
 /// Upstream sources with a non-LRM string escape (W0149) we cannot edit.
 const escape_models = std.StaticStringMap(void).initComptime(.{ .{"hisim2_va"}, .{"hisimsotb"} });
@@ -717,7 +730,7 @@ fn gpuArch(arch: []const u8) gompute_build.CudaOptions {
 
 fn deviceKernelImports(_: *Build, _: Build.ResolvedTarget, _: std.lang.Optimize, ctx: ?*anyopaque) []const Import {
     const imports: [*]const Import = @ptrCast(@alignCast(ctx.?));
-    return imports[0..3];
+    return imports[0..4];
 }
 
 /// Absolute `sub_path` under `owner`'s package root, resolved against `b`'s.

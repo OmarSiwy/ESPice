@@ -9,6 +9,22 @@ const FreqSolver = @import("solver").freq_solve.FreqSolver;
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Stb;
 
+/// The sweep `run` solves: a unit injection on the probe's branch row.
+/// Fails with error.InvalidProbe as `run` does, before allocating.
+pub fn plan(ctx: *const root.RunCtx, opts: Options) !freq.Plan {
+    const scratch = ctx.scratch_allocator;
+    const n: usize = ctx.circuit.n;
+    if (opts.probe_branch >= n or opts.probe_p >= n or opts.probe_n >= n)
+        return error.InvalidProbe;
+    if (opts.probe_n == root.GROUND) return error.InvalidProbe;
+    const rhs = try scratch.alloc(f64, 2 * n);
+    errdefer scratch.free(rhs);
+    @memset(rhs, 0);
+    rhs[opts.probe_branch] = 1.0;
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    return .{ .freqs = freqs, .omegas = omegas, .rhs = rhs, .adjoint = false };
+}
+
 /// Contract entry: the loop gain at every frequency. Complex, point-major
 /// (frequency, loop_gain).
 ///
@@ -26,21 +42,16 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const scratch = ctx.scratch_allocator;
     const ckt = ctx.circuit;
     const n: usize = ckt.n;
-    if (opts.probe_branch >= n or opts.probe_p >= n or opts.probe_n >= n)
-        return error.InvalidProbe;
-    if (opts.probe_n == root.GROUND) return error.InvalidProbe;
+    const p = try plan(ctx, opts);
+    defer p.deinit(scratch);
+    const freqs = p.freqs;
+    const omegas = p.omegas;
+    const rhs = p.rhs;
 
     var fs = try FreqSolver.fromCircuit(scratch, ckt, ctx.x_op);
     defer fs.deinit();
 
     const n_points: usize = opts.sweep.count();
-    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
-    defer freq.freeAxis(scratch, freqs);
-
-    const rhs = try scratch.alloc(f64, 2 * n);
-    defer scratch.free(rhs);
-    @memset(rhs, 0);
-    rhs[opts.probe_branch] = 1.0;
 
     const names = try a.dupe([]const u8, &.{ "frequency", "loop_gain" });
     errdefer a.free(names); // entries are literals
@@ -49,6 +60,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
 
     var stream = try freq.Stream.init(scratch, &fs, ckt, ctx.x_op, omegas, rhs, false);
     defer stream.deinit(scratch);
+    stream.pre = ctx.freq_pre;
     while (try stream.next(ckt)) |pt| {
         const v_p: Complex = .{ .re = pt.x[opts.probe_p], .im = pt.x[n + opts.probe_p] };
         const v_n: Complex = .{ .re = pt.x[opts.probe_n], .im = pt.x[n + opts.probe_n] };

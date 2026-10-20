@@ -1520,7 +1520,92 @@ const GearOrderTests = struct {
     }
 };
 
+const LaneKernelTests = struct {
+    const impl = @import("../tran/tran.zig");
+    const W = impl.test_access.W;
+    const integrator = impl.test_access.integrator;
+    const lk = @import("solver").lane_kernels;
+    const Method = @import("core").query.Method;
+    const std = @import("std");
+    const testing = std.testing;
+    const methods = [_]Method{ .backward_euler, .trapezoidal, .gear_2 };
+
+    fn code(m: Method) u8 {
+        return switch (m) {
+            .backward_euler => 0,
+            .trapezoidal => 1,
+            else => 2,
+        };
+    }
+
+    fn draw(r: std.Random) f64 {
+        return switch (r.uintLessThan(u8, 64)) {
+            0 => std.math.nan(f64),
+            1 => std.math.inf(f64),
+            2 => 0,
+            else => (2 * r.float(f64) - 1) * 1e-12,
+        };
+    }
+
+    test "lane_kernels.stepBound is bitwise integrator.stepBound on random rings, NaN where it is NaN" {
+        const gpa = testing.allocator;
+        var prng = std.Random.DefaultPrng.init(0x207);
+        const r = prng.random();
+        var finite: usize = 0;
+        for (0..200) |_| {
+            const len = 1 + r.uintLessThan(usize, 300);
+            const buf = try gpa.alloc(f64, 5 * len);
+            defer gpa.free(buf);
+            for (buf) |*v| v.* = draw(r);
+            const q: [4][]const f64 = .{ buf[0..len], buf[len..][0..len], buf[2 * len ..][0..len], buf[3 * len ..][0..len] };
+            const ip = buf[4 * len ..][0..len];
+            const dt = 1e-12 * (0.01 + r.float(f64));
+            const lte: integrator.LteIn = .{ .dt = dt, .dt1 = dt * (0.1 + 4 * r.float(f64)), .dt2 = dt * (0.1 + 4 * r.float(f64)), .reltol = 1e-3, .abstol = 1e-12, .chgtol = 1e-14, .trtol = 7 };
+            const c: integrator.Coeffs = .{ .ag0 = 1 / dt, .ag2 = 0.5 / dt, .ag1 = 1 };
+            const lin: lk.LteIn = .{ .dt = lte.dt, .dt1 = lte.dt1, .dt2 = lte.dt2, .reltol = lte.reltol, .abstol = lte.abstol, .chgtol = lte.chgtol, .trtol = lte.trtol, .ag0 = c.ag0, .ag1 = c.ag1, .ag2 = c.ag2 };
+            for (methods) |m| for (methods) |cm| {
+                const want = integrator.stepBound(W, m, cm, q, ip, c, lte);
+                const got = lk.stepBound(code(m), code(cm), q[0], q[1], q[2], q[3], ip, len, lin);
+                if (std.math.isNan(want)) {
+                    try testing.expect(std.math.isNan(got));
+                } else {
+                    finite += 1;
+                    try testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(got)));
+                }
+            };
+        }
+        try testing.expect(finite > 0);
+    }
+
+    test "lane_kernels.companionRow equals integrator.companionAt(m, true, ...) per row" {
+        var prng = std.Random.DefaultPrng.init(0x208);
+        const r = prng.random();
+        const n = 37;
+        const n_hist = 4;
+        var q: [n]f64 = undefined;
+        var ring: [n_hist * n]f64 = undefined;
+        var ip: [n]f64 = undefined;
+        var rhs0: [n]f64 = undefined;
+        for (&q, &ip, &rhs0) |*a, *b, *c| {
+            a.* = r.float(f64) - 0.5;
+            b.* = r.float(f64) - 0.5;
+            c.* = r.float(f64) - 0.5;
+        }
+        for (&ring) |*v| v.* = r.float(f64) - 0.5;
+        const perm = [n_hist]u8{ 0, 1, 2, 3 };
+        const c: integrator.Coeffs = .{ .ag0 = 3.7e11, .ag2 = 1.1e11, .ag1 = 0.9 };
+        inline for (methods) |m| {
+            var want = rhs0;
+            integrator.companionAt(m, true, &want, &q, ring[n..][0..n], ring[2 * n ..][0..n], &ip, c);
+            var got = rhs0;
+            for (0..n) |i| lk.Bodies(lk.HostP).companionRow(i, code(m), c.ag0, c.ag1, c.ag2, &got, &q, &ring, @constCast(&perm), n_hist, n, &ip, 1, 0);
+            for (want, got) |a, b| try testing.expectEqual(@as(u64, @bitCast(a)), @as(u64, @bitCast(b)));
+        }
+    }
+};
+
 test {
+    _ = LaneKernelTests;
     _ = GearOrderTests;
     _ = EnvelopeTests;
     _ = MatexTests;

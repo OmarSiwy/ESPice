@@ -23,6 +23,18 @@ pub const NoiseSource = root.NoiseSource;
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Noise;
 
+/// The main sweep `run` solves (`sweep`'s adjoint stream): the output's
+/// unit adjoint drive at every ω of `opts`. The sampled re-sweep is not
+/// part of it.
+pub fn plan(ctx: *const root.RunCtx, opts: Options) !freq.Plan {
+    const scratch = ctx.scratch_allocator;
+    const rhs = try scratch.alloc(f64, 2 * @as(usize, ctx.circuit.n));
+    errdefer scratch.free(rhs);
+    root.outputDrive(rhs, opts.out_node, opts.out_neg);
+    const freqs, const omegas = try freq.axis(scratch, opts.sweep);
+    return .{ .freqs = freqs, .omegas = omegas, .rhs = rhs, .adjoint = true };
+}
+
 /// The per-interval geometry `nintegrate` needs (ngspice noisean.c:436-439).
 const Band = struct { del_freq: f64, del_ln_freq: f64, ln_freq: f64, ln_last_freq: f64 };
 comptime {
@@ -91,6 +103,8 @@ pub const PerSource = struct { dens: []f64, out: []f64, in: []f64 };
 /// receives every generator's density and integrals. Asserts that
 /// `density` matches `freqs` in length; `in_density` must match too.
 /// Every work buffer comes from and returns to `allocator`; error.QueryCancelled unwinds at a checkpoint.
+/// `pre` is the stream's solutions solved up front (`freq.Stream.pre`), or
+/// empty to solve as it goes.
 pub fn sweep(
     ckt: *root.Circuit,
     x_op: []const f64,
@@ -101,6 +115,7 @@ pub fn sweep(
     per_source: ?PerSource,
     options: Options,
     allocator: std.mem.Allocator,
+    pre: []const f64,
 ) !Integrals {
     const n: usize = ckt.n;
     const nn = 2 * n;
@@ -125,6 +140,7 @@ pub fn sweep(
 
     var stream = try freq.Stream.init(allocator, &fs, ckt, x_op, omegas, e, true);
     defer stream.deinit(allocator);
+    stream.pre = pre;
 
     // ln of each source's output density at the previous point (ngspice's
     // `nVar[LNLSTDENS][i]`), the other end of the per-source fit; then the
@@ -248,7 +264,7 @@ fn sampled(ckt: *root.Circuit, x_op: []const f64, srcs: []const NoiseSource, fre
     var o = opts;
     o.sweep = .{ .f_start = if (unique != 0) at[0] else 0, .f_stop = if (unique != 0) at[unique - 1] else 0, .points = @intCast(unique), .kind = .poi, .list = at };
     o.contributions = false;
-    if (unique != 0) _ = try sweep(ckt, x_op, srcs, work[0..unique], work[unique..][0..unique], work[2 * unique ..], null, o, gpa);
+    if (unique != 0) _ = try sweep(ckt, x_op, srcs, work[0..unique], work[unique..][0..unique], work[2 * unique ..], null, o, gpa, &.{});
     const out = try gpa.alloc(f64, freqs.len);
     for (freqs, out) |f, *total| {
         total.* = 0;
@@ -304,7 +320,7 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
         per_source = .{ .dens = per_buf[0 .. srcs.len * n_points], .out = per_buf[srcs.len * n_points ..][0..srcs.len], .in = per_buf[srcs.len * (n_points + 1) ..] };
     }
 
-    const integrated = try sweep(ctx.circuit, x_op, srcs, freqs, density, in_density, per_source, opts, scratch);
+    const integrated = try sweep(ctx.circuit, x_op, srcs, freqs, density, in_density, per_source, opts, scratch, ctx.freq_pre);
 
     // ngspice's two noise plots, with ngspice's names and units: the curves
     // are amplitude spectra (V/sqrt(Hz)) and the totals are V rms. `inoise`

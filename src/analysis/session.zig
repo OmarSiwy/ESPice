@@ -503,11 +503,12 @@ pub const Session = struct {
     }
 
     /// The grouping pass (lane-batched-simulation.md §2): makes ready `.op`,
-    /// `.dc` or lane row (`batchable`) `i` the leader of a lane batch with
-    /// up to `lane_width - 1` other ready, never-started rows of its kind on
-    /// its template, with a prerequisite exactly when it has one, whose
-    /// options differ at most in `tol.variant`, `tol.temp_c` and a lane row's
-    /// lane, taken from the queue ahead.
+    /// `batchable` row `i` (`.op`, `.dc`, `.tran`, `.pss`, an AC-family kind or
+    /// a `.mc`/`.temp` lane row) the leader of a lane batch with up to
+    /// `lane_width - 1` other ready, never-started rows of its kind on its
+    /// template, with a prerequisite exactly when it has one, whose options
+    /// differ at most in `tol.variant`, `tol.temp_c` and a lane row's lane,
+    /// taken from the queue ahead.
     /// Each lane is bitwise its query run alone, so grouping is free to
     /// follow scheduling order. A row whose executor cannot be built is
     /// left to run alone.
@@ -516,6 +517,7 @@ pub const Session = struct {
     fn gather(self: *Session, i: usize) void {
         const lane_width = execution.lane_width;
         const config = self.config;
+        if (config.gpu_lanes and self.rows.items(.job)[i] == .tran and self.rows.items(.executor)[i] == null) return self.gatherWide(i);
         if (!execution.lanesOn(config) or config.backend != .cpu or config.device_threads != 1 or config.timing_in_depth) return;
         const jobs = self.rows.items(.job);
         if (!batchable(jobs[i]) or self.rows.items(.executor)[i] != null) return;
@@ -541,6 +543,44 @@ pub const Session = struct {
         const list = leader.work.allocator().alloc(*execution.Executor, n) catch return;
         var taken: usize = 0;
         for (peers[0..n]) |j| {
+            self.makeExecutor(j) catch continue;
+            list[taken] = self.rows.items(.executor)[j].?;
+            taken += 1;
+            self.rows.items(.running)[j] = true;
+        }
+        leader.peers = list[0..taken];
+    }
+
+    /// The GPU lane form of `gather`: up to `gpu_lane_cap - 1` ready,
+    /// never-started `.tran` rows of row i's template and options, from all
+    /// of `urgent` and the queue (a sweep's transients are ready together
+    /// under breadth-first order). A row whose executor cannot be built is
+    /// left to run alone.
+    /// ponytail: an ineligible sweep (`tran.gpuLaneEligible`) still gathers
+    /// and then runs its lanes one after another on one worker; check the
+    /// template before gathering if that ever costs a `--jobs` run.
+    fn gatherWide(self: *Session, i: usize) void {
+        const jobs = self.rows.items(.job);
+        var peers: std.ArrayList(usize) = .empty;
+        defer peers.deinit(self.allocator);
+        const cap = self.config.gpu_lane_cap - 1;
+        const queued = self.queue.items[@min(self.queue_head, self.queue.items.len)..];
+        for ([_][]const u32{ self.urgent.items, queued }) |list| for (list) |j32| {
+            if (peers.items.len == cap) break;
+            const j: usize = j32;
+            if (j == i or !self.ready(j) or self.rows.items(.running)[j] or self.rows.items(.executor)[j] != null) continue;
+            if (std.mem.indexOfScalar(usize, peers.items, j) != null) continue;
+            if (self.rows.items(.template)[j] != self.rows.items(.template)[i]) continue;
+            if ((self.rows.items(.dependency)[j] == none) != (self.rows.items(.dependency)[i] == none)) continue;
+            if (!sameLaneJob(jobs[i], jobs[j])) continue;
+            peers.append(self.allocator, j) catch break;
+        };
+        if (peers.items.len == 0) return;
+        self.makeExecutor(i) catch return;
+        const leader = self.rows.items(.executor)[i].?;
+        const list = leader.work.allocator().alloc(*execution.Executor, peers.items.len) catch return;
+        var taken: usize = 0;
+        for (peers.items) |j| {
             self.makeExecutor(j) catch continue;
             list[taken] = self.rows.items(.executor)[j].?;
             taken += 1;
@@ -757,11 +797,22 @@ pub const Session = struct {
     /// OP's dependent first, so each point's OP and analysis run back to
     /// back, then the queue in row order.
     fn nextReady(self: *Session) ?usize {
-        while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
+        // Breadth-first under GPU lanes: OPs drain before their transients,
+        // so the transients become ready together and gather N wide.
+        if (!self.config.gpu_lanes) while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
         while (self.queue_head < self.queue.items.len) {
             const i = self.queue.items[self.queue_head];
             self.queue_head += 1;
             if (self.ready(i) and !self.rows.items(.running)[i]) return i;
+        }
+        if (self.config.gpu_lanes) {
+            // A transient waits while anything still runs, so the rest of
+            // its sweep's OPs finish and it gathers with all of them.
+            // ponytail: one scan of `running` per call; count it if a sweep
+            // of 100k points makes the scan show.
+            const top = self.urgent.getLastOrNull() orelse return null;
+            if (self.rows.items(.job)[top] == .tran and std.mem.indexOfScalar(bool, self.rows.items(.running), true) != null) return null;
+            while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
         }
         return null;
     }
@@ -1120,18 +1171,20 @@ const lane_window = 8 * execution.lane_width;
 /// each lane builds reads. Slices compare by content, floats by bits.
 fn sameLaneJob(a: requests.Query, b: requests.Query) bool {
     return switch (a) {
-        inline .op, .dc, .mc, .temp => |o, tag| b == tag and batchable(b) and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
+        // The AC family's list is `execution.freqLaneKind`'s; keep the two adjacent in review.
+        inline .op, .dc, .mc, .temp, .tran, .pss, .ac, .noise, .sp, .stb, .lstb, .acxf, .tf, .dcxf, .dcinc, .sens, .dcmatch, .dcsens, .acmatch => |o, tag| b == tag and batchable(b) and sameDeep(stripTol(o), stripTol(@field(b, @tagName(tag)))),
         else => false,
     };
 }
 
-/// Kinds a lane batch runs: `.op`, `.dc`, and the lane rows a split `.mc`
-/// or `.temp` became (`splitLanes`).
+/// Kinds a lane batch runs: `.op`, `.dc`, `.tran`, `.pss`, the AC family
+/// (`execution.freqLaneKind`), and the lane rows a split `.mc` or `.temp`
+/// became (`splitLanes`).
 fn batchable(job: requests.Query) bool {
     return switch (job) {
-        .op, .dc => true,
+        .op, .dc, .tran, .pss => true,
         inline .mc, .temp => |o| o.lane != null,
-        else => false,
+        else => execution.freqLaneKind(job),
     };
 }
 

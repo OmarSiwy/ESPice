@@ -25,6 +25,9 @@ pub const BindStatus = bind.BindStatus;
 
 /// Threads per GPU block, shared by the kernel exports and the launcher.
 pub const gpu_block_size: u32 = 256;
+/// Threads per block of every lane kernel (phase 4), exported and launched
+/// at this width: HIP bakes it into `globalIdX`.
+pub const gpu_lane_block_size: u32 = 64;
 
 /// VerA's accepted-step control operation (`Hooks.state_ctl`).
 pub const StateCtlOp = contract.StateCtlOp;
@@ -643,7 +646,10 @@ pub const GpuPayload = struct {
 // 30: `DeviceVtable.systf_calls`, the LRM 12.32 `$name` calls a device leaves
 //     to a VPI application, so the host can refuse one by name, and
 //     `bind_systf`, which binds the application into an Instance blob (#197).
-pub const abi_version: u32 = 30;
+// 31: lane kernels `arp_l{eval,lim,ctl,qtp}_<model>` beside each image's
+//     `arp_eval_<model>` (phase 4), the host deriving their names; a host of
+//     30 loads no lane kernel and a lane host refuses an image without them.
+pub const abi_version: u32 = 31;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices.

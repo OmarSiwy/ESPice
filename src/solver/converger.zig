@@ -363,7 +363,7 @@ fn Step(comptime W: usize) type {
 /// FET fed from a current source at 0 V reached 5e24 V with 1e45 S
 /// diagonals, and its 3e39 A residual passed), so a runaway iterate is
 /// refused outright (#3).
-const x_plausible = 1e9;
+pub const x_plausible = 1e9;
 
 /// The runaway bound of one solve, read off its first assembly: 1e3 times
 /// the scale the circuit sets there, the start |x| or the drive |F| times
@@ -374,7 +374,7 @@ const x_plausible = 1e9;
 /// ponytail: the 1e18 scale cap keeps a solve that starts already run away
 /// (#3's 5e24 V) refused; a bound from the circuit's sources and constant
 /// stamps alone would need no cap.
-fn plausibleLimit(sys: anytype, x: anytype, f: anytype, vals: anytype) @TypeOf(x[0]) {
+pub fn plausibleLimit(sys: anytype, x: anytype, f: anytype, vals: anytype) @TypeOf(x[0]) {
     const L = lanes.Of(@TypeOf(x[0]));
     var g: L.V = L.splat(1);
     for (sys.diag_slots[0..sys.n]) |slot| g = @max(g, @abs(vals[slot]));

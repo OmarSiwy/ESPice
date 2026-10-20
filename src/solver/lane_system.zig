@@ -29,7 +29,10 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
 
         /// Lane l's own system, borrowed; all on one pattern.
         lanes: [W]*Sys,
-        hook: Hook,
+        /// Lane l's hook. A transient lane assembles under its own
+        /// coefficients and charge history; a static solve's hook is the
+        /// same for every lane.
+        hooks: [W]Hook,
         n: u32,
         nnz: u32,
         diag_slots: []const u32,
@@ -62,7 +65,7 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
             const xs = try gpa.alloc(f64, 2 * n);
             return .{
                 .lanes = lanes,
-                .hook = hook,
+                .hooks = @splat(hook),
                 .n = s0.n,
                 .nnz = s0.nnz,
                 .diag_slots = s0.diag_slots,
@@ -90,8 +93,8 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
                 while (it.next()) |l| {
                     const s = sys.lanes[l];
                     getLane(sys.xs, x, l);
-                    sys.hook.assemble(s, sys.xs, L.lane(t, l));
-                    putLane(sys.vals, sys.hook.vals(s), l);
+                    sys.hooks[l].assemble(s, sys.xs, L.lane(t, l));
+                    putLane(sys.vals, sys.hooks[l].vals(s), l);
                     putLane(sys.rhs, s.rhs, l);
                 }
             }
@@ -103,8 +106,12 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
             }
         };
 
+        /// Starts each active lane's solve; a lane outside `active` (a
+        /// finished transient lane, a padding copy) is not touched.
         pub fn beginSolve(self: *Self) void {
-            if (comptime @hasDecl(Sys, "beginSolve")) for (self.lanes) |s| s.beginSolve();
+            if (comptime !@hasDecl(Sys, "beginSolve")) return;
+            var it = L.each(self.active);
+            while (it.next()) |l| self.lanes[l].beginSolve();
         }
 
         /// The first active lane's refusal fails the batch.
@@ -140,7 +147,7 @@ pub fn LaneSystem(comptime W: usize, comptime Sys: type, comptime Hook: type) ty
             var it = L.each(self.active);
             while (it.next()) |l| {
                 const s = self.lanes[l];
-                const lv = self.hook.vals(s)[0..self.nnz];
+                const lv = self.hooks[l].vals(s)[0..self.nnz];
                 getLane(lv, v, l);
                 getLane(s.rhs[0..self.n], rhs, l);
                 if (comptime !@hasDecl(Sys, "loadCheck")) continue;

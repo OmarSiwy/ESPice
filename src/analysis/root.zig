@@ -12,6 +12,9 @@ pub const GpuDriver = @import("gpu.zig").Driver;
 /// This build carries GPU kernel images, so a non-`cpu` backend can use the
 /// driver at all.
 pub const gpu_available = @import("gpu.zig").available;
+/// The GPU transient lane backend (phase 4): `policy` decides
+/// `ExecutionConfig.gpu_lanes` once per Problem.
+pub const gpu_lanes = @import("gpu_lanes.zig");
 /// The result shape of a query, without running it.
 pub const schemaOf = session.schemaOf;
 /// HSPICE MOSRA level 1 aging over a stress transient.

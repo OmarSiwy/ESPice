@@ -1681,7 +1681,11 @@ const LaneRun = struct {
     }
 
     fn add(r: *LaneRun, source: []const u8) !void {
-        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "lane.sp" } }, .dialect = .hspice });
+        return r.addWith(source, false);
+    }
+
+    fn addWith(r: *LaneRun, source: []const u8, lanes: bool) !void {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "lane.sp" } }, .dialect = .hspice, .backend = .{ .lanes = lanes } });
         defer p.deinit();
         try p.run_all();
         for (0..p.query_count()) |i| {
@@ -1754,4 +1758,294 @@ test "auto_point: a .meas-only deck without an output streams its measures; an o
     try t.expectEqualStrings(shapes[1].text, shapes[0].text);
     try t.expect(shapes[0].vars < shapes[1].vars); // measures_only
     try t.expect(shapes[0].points < shapes[1].points); // early_stop
+}
+
+/// Every requested `.pss` result of `source`, in request order, with
+/// `.lanes` on or off.
+fn pssRows(source: []const u8, lanes: bool) ![]f64 {
+    const p = try api.Problem.init(t.allocator, t.io, .{
+        .source = .{ .bytes = .{ .data = source, .origin = "pss_lanes.sp" } },
+        .backend = .{ .lanes = lanes },
+    });
+    defer p.deinit();
+    try p.run_all();
+    var rows: std.ArrayList(f64) = .empty;
+    errdefer rows.deinit(t.allocator);
+    for (0..p.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        const info = try p.query_info(id);
+        if (!info.requested or info.kind != .pss) continue;
+        try rows.appendSlice(t.allocator, (try p.result(id)).data);
+    }
+    return rows.toOwnedSlice(t.allocator);
+}
+
+test "pss lanes (#210): a .step sweep of shooting solves is bitwise each point alone, dense and Krylov" {
+    // Dense FD path: the rectifier of tests/fixtures/pss, load swept.
+    const dense =
+        \\* swept rectifier
+        \\.param rl=1k
+        \\Vin in 0 SIN(0 2 1k)
+        \\Rsrc in a 100
+        \\D1 a out dm
+        \\Rload out 0 {rl}
+        \\C1 out 0 100n
+        \\.model dm D(is=1e-14 rs=1)
+        \\.step param rl list 500 1k 1k 2k 4k 8k 16k 32k 64k
+        \\.pss 1k 64
+        \\.end
+        \\
+    ;
+    // Krylov path (n >= 50): a diode into a 50-stage RC ladder.
+    var krylov: std.Io.Writer.Allocating = .init(t.allocator);
+    defer krylov.deinit();
+    try krylov.writer.writeAll("* swept ladder\n.param rl=1k\nVin in 0 SIN(0 2 1k)\nD1 in n0 dm\n");
+    for (1..51) |k| try krylov.writer.print("R{d} n{d} n{d} 100\nC{d} n{d} 0 1n\n", .{ k, k - 1, k, k, k });
+    try krylov.writer.writeAll("Rload n50 0 {rl}\n.model dm D(is=1e-14)\n.step param rl list 1k 2k 4k 8k 16k\n.pss 1k 32\n.end\n");
+    for ([_][]const u8{ dense, krylov.written() }) |source| {
+        const alone = try pssRows(source, false);
+        defer t.allocator.free(alone);
+        const laned = try pssRows(source, true);
+        defer t.allocator.free(laned);
+        try t.expect(alone.len > 0);
+        try t.expectEqualSlices(u64, @ptrCast(alone), @ptrCast(laned));
+    }
+}
+
+test "pss lanes (#210): autonomous shooting solves keep their own periods as lanes" {
+    // tests/fixtures/pss/ring_oscillator.sp's ring with its RC swept: each
+    // lane starts its own oscillator and solves its own period.
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/fixtures/pss/ring_oscillator.sp", t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    // A swept load on node c1 (the deck's C1 node) changes each lane's
+    // period.
+    const swept = try std.mem.replaceOwned(u8, t.allocator, source, ".end", ".param cx=1n\nCx c1 0 {cx}\n.step param cx list 0.1n 0.2n 0.3n 0.4n\n.end");
+    defer t.allocator.free(swept);
+    const alone = try pssRows(swept, false);
+    defer t.allocator.free(alone);
+    const laned = try pssRows(swept, true);
+    defer t.allocator.free(laned);
+    try t.expect(alone.len > 0);
+    try t.expectEqualSlices(u64, @ptrCast(alone), @ptrCast(laned));
+}
+
+const ac_lane_deck =
+    \\* AC-family lanes (#209): .ac, .noise and .tf of a diode-loaded RC
+    \\* stepped over rl; points 0, 2, 4 and 6 repeat rl = 1k.
+    \\.param rl=1k
+    \\v1 in 0 dc 1 ac 1
+    \\r1 in mid {rl}
+    \\c1 mid 0 1n
+    \\d1 mid out dmod
+    \\r2 out 0 2k
+    \\c2 out 0 0.5n
+    \\.model dmod d is=1e-14 cjo=1p
+    \\.step param rl list 1k 2k 1k 500 1k 3k 1k 700
+    \\.ac dec 10 1k 1g
+    \\.noise v(out) v1 dec 10 1k 1g
+    \\.tf v(out) v1
+    \\.end
+    \\
+;
+
+/// Each requested query's data, in request order, per kind.
+fn acLaneRun(lanes: bool) !std.ArrayList([]f64) {
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = ac_lane_deck, .origin = "ac_lanes.sp" } }, .backend = .{ .lanes = lanes } });
+    defer p.deinit();
+    try p.run_all();
+    var out: std.ArrayList([]f64) = .empty;
+    errdefer {
+        for (out.items) |d| t.allocator.free(d);
+        out.deinit(t.allocator);
+    }
+    for (0..p.query_count()) |i| {
+        const id: api.QueryId = @fromBackingInt(@intCast(i));
+        const info = try p.query_info(id);
+        if (!info.requested) continue;
+        try out.append(t.allocator, try t.allocator.dupe(f64, (try p.result(id)).data));
+    }
+    return out;
+}
+
+test "AC-family lanes (#209): every .step point's .ac, .noise and .tf equal under --lanes, and repeated points equal each other" {
+    var alone = try acLaneRun(false);
+    defer {
+        for (alone.items) |d| t.allocator.free(d);
+        alone.deinit(t.allocator);
+    }
+    var laned = try acLaneRun(true);
+    defer {
+        for (laned.items) |d| t.allocator.free(d);
+        laned.deinit(t.allocator);
+    }
+    // 8 points of .ac, .tf and .noise, which publishes two plots (the
+    // spectra and the integrated totals).
+    try t.expectEqual(@as(usize, 32), laned.items.len);
+    for (alone.items, laned.items) |a, b| try t.expectEqualSlices(u64, @ptrCast(a), @ptrCast(b));
+    // Request order is point-major or kind-major; find the rl = 1k rows of
+    // the first kind by content instead of position.
+    var same: usize = 0;
+    for (laned.items[1..]) |d| same += @intFromBool(d.len == laned.items[0].len and std.mem.eql(u64, @ptrCast(d), @ptrCast(laned.items[0])));
+    try t.expect(same >= 3);
+}
+
+test "per-lane stimulus (#212) under lanes: each .data point equals its row run alone, to the bit" {
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, lane_deck, t.allocator, .unlimited);
+    defer t.allocator.free(source);
+    var swept: LaneRun = .{};
+    defer swept.deinit();
+    try swept.addWith(source, true);
+    var alone: LaneRun = .{};
+    defer alone.deinit();
+    for ([_][2]f64{ .{ 0, 1 }, .{ 0, 0 }, .{ 1, 1 }, .{ 1, 0 } }) |row| {
+        const solo = try laneSolo(source, row[0], row[1]);
+        defer t.allocator.free(solo);
+        try alone.add(solo);
+    }
+    try t.expectEqualStrings(alone.measures.items, swept.measures.items);
+    try t.expectEqualSlices(u64, @ptrCast(alone.data.items), @ptrCast(swept.data.items));
+    for (swept.grids.items, alone.grids.items) |a, b| try t.expectEqualSlices(u64, @ptrCast(b), @ptrCast(a));
+}
+
+const chain_deck =
+    \\* Lane lockstep (#207): 16 sizing points of an 8-stage inverter chain
+    \\* with RC wires (lane-batched-simulation.md §1 on level-1 MOS), plus a
+    \\* moved input edge, an extreme wire and a failing row.
+    \\.param wn=1u wp=2u rw=200 cw=5f td=20p
+    \\vdd vdd 0 1
+    \\vin in 0 pulse(0 1 'td' 10p 10p 100p 300p)
+    \\.subckt stage a z vdd
+    \\mn y a 0 0 nm l=0.1u w='wn'
+    \\mp y a vdd vdd pm l=0.1u w='wp'
+    \\rw y z 'rw'
+    \\cw z 0 'cw'
+    \\.ends
+    \\x1 in n1 vdd stage
+    \\x2 n1 n2 vdd stage
+    \\x3 n2 n3 vdd stage
+    \\x4 n3 n4 vdd stage
+    \\x5 n4 n5 vdd stage
+    \\x6 n5 n6 vdd stage
+    \\x7 n6 n7 vdd stage
+    \\x8 n7 n8 vdd stage
+    \\.model nm nmos level=1 vto=0.3 kp=200u
+    \\.model pm pmos level=1 vto=-0.3 kp=100u
+    \\.data pts wn wp rw cw td
+    \\ROWS
+    \\.enddata
+    \\.tran 1p 400p sweep data=pts
+    \\.meas tran tpd trig v(in) val=0.5 rise=1 targ v(n8) val=0.5 cross=1
+    \\.meas tran trise trig v(n8) val=0.2 rise=1 targ v(n8) val=0.8 rise=1
+    \\.meas tran tfall trig v(n8) val=0.8 fall=1 targ v(n8) val=0.2 fall=1
+    \\.end
+    \\
+;
+
+/// (wn, wp, rw, cw, td): 16 sizing points drawn as lockstep.py draws them
+/// (nfin 2-4 as width 0.5-1.5 um, rw and cw 0.5-2x), then a moved edge,
+/// an extreme wire, and a negative wire capacitance on a shorted wire,
+/// which fails with TimestepTooSmall (rw = 0 alone solves: the frontend
+/// takes it as a short).
+const chain_rows = [_][5]f64{
+    .{ 1.0e-6, 2.0e-6, 200, 5e-15, 20e-12 },   .{ 0.5e-6, 1.0e-6, 137, 3.1e-15, 20e-12 },
+    .{ 1.5e-6, 3.0e-6, 352, 9.2e-15, 20e-12 }, .{ 1.0e-6, 1.0e-6, 101, 2.6e-15, 20e-12 },
+    .{ 0.5e-6, 3.0e-6, 288, 7.7e-15, 20e-12 }, .{ 1.5e-6, 1.0e-6, 214, 4.0e-15, 20e-12 },
+    .{ 1.0e-6, 3.0e-6, 390, 6.6e-15, 20e-12 }, .{ 0.5e-6, 2.0e-6, 166, 9.9e-15, 20e-12 },
+    .{ 1.5e-6, 2.0e-6, 121, 2.9e-15, 20e-12 }, .{ 1.0e-6, 2.0e-6, 305, 8.4e-15, 20e-12 },
+    .{ 0.5e-6, 1.0e-6, 255, 5.5e-15, 20e-12 }, .{ 1.5e-6, 3.0e-6, 178, 3.7e-15, 20e-12 },
+    .{ 1.0e-6, 1.0e-6, 333, 7.1e-15, 20e-12 }, .{ 0.5e-6, 3.0e-6, 110, 6.0e-15, 20e-12 },
+    .{ 1.5e-6, 1.0e-6, 270, 4.8e-15, 20e-12 }, .{ 1.0e-6, 3.0e-6, 199, 8.8e-15, 20e-12 },
+    .{ 1.0e-6, 2.0e-6, 200, 5e-15, 37e-12 },   .{ 1.0e-6, 2.0e-6, 1e9, 5e-15, 20e-12 },
+    .{ 1.0e-6, 2.0e-6, 0, -5e-15, 20e-12 },
+};
+
+/// `chain_deck` with `order`'s rows in its .data table.
+fn chainSwept(order: []const usize) ![]u8 {
+    var rows: std.Io.Writer.Allocating = .init(t.allocator);
+    defer rows.deinit();
+    for (order) |k| {
+        const r = chain_rows[k];
+        try rows.writer.print("+ {e} {e} {e} {e} {e}\n", .{ r[0], r[1], r[2], r[3], r[4] });
+    }
+    return std.mem.replaceOwned(u8, t.allocator, chain_deck, "ROWS\n", rows.written());
+}
+
+/// `chain_deck` without its .data table, at row `k` alone.
+fn chainSolo(k: usize) ![]u8 {
+    const r = chain_rows[k];
+    var line: [128]u8 = undefined;
+    const p = try std.fmt.bufPrint(&line, ".param wn={e} wp={e} rw={e} cw={e} td={e}", .{ r[0], r[1], r[2], r[3], r[4] });
+    const start = std.mem.indexOf(u8, chain_deck, ".data ").?;
+    const end = std.mem.indexOf(u8, chain_deck, ".enddata\n").? + ".enddata\n".len;
+    const cut = try std.mem.concat(t.allocator, u8, &.{ chain_deck[0..start], chain_deck[end..] });
+    defer t.allocator.free(cut);
+    const plain = try std.mem.replaceOwned(u8, t.allocator, cut, " sweep data=pts", "");
+    defer t.allocator.free(plain);
+    return std.mem.replaceOwned(u8, t.allocator, plain, ".param wn=1u wp=2u rw=200 cw=5f td=20p", p);
+}
+
+/// Each requested .tran point's samples (empty for a failed point) and
+/// error name, in request order.
+const Points = struct {
+    data: std.ArrayList([]f64) = .empty,
+    errs: std.ArrayList(?anyerror) = .empty,
+
+    fn deinit(ps: *Points) void {
+        for (ps.data.items) |d| t.allocator.free(d);
+        ps.data.deinit(t.allocator);
+        ps.errs.deinit(t.allocator);
+    }
+
+    fn collect(ps: *Points, source: []const u8, lanes: bool) !void {
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .bytes = .{ .data = source, .origin = "chain.sp" } }, .dialect = .hspice, .backend = .{ .lanes = lanes } });
+        defer p.deinit();
+        // CHECK: whether `run_all` fails when one point fails; if it does,
+        // catch and continue, the per-query results below still tell.
+        p.run_all() catch {};
+        for (0..p.query_count()) |i| {
+            const id: api.QueryId = @fromBackingInt(@intCast(i));
+            const info = try p.query_info(id);
+            if (!info.requested or info.kind != .tran) continue;
+            if (p.result(id)) |res| {
+                try ps.data.append(t.allocator, try t.allocator.dupe(f64, res.data));
+                try ps.errs.append(t.allocator, null);
+            } else |e| {
+                try ps.data.append(t.allocator, &.{});
+                try ps.errs.append(t.allocator, e);
+            }
+        }
+    }
+};
+
+test "lane lockstep (#207): 16 sizing points, a moved edge, an extreme and a failing row, in three orders, each bitwise its run alone" {
+    var alone: Points = .{};
+    defer alone.deinit();
+    for (0..chain_rows.len) |k| {
+        const solo = try chainSolo(k);
+        defer t.allocator.free(solo);
+        try alone.collect(solo, false);
+    }
+    try t.expectEqual(chain_rows.len, alone.data.items.len);
+    var identity: [chain_rows.len]usize = undefined;
+    for (&identity, 0..) |*o, k| o.* = k;
+    var reversed = identity;
+    std.mem.reverse(usize, &reversed);
+    var shuffled = identity;
+    var prng = std.Random.DefaultPrng.init(207);
+    prng.random().shuffle(usize, &shuffled);
+    for ([_][]const usize{ &identity, &reversed, &shuffled }) |order| {
+        const src = try chainSwept(order);
+        defer t.allocator.free(src);
+        var got: Points = .{};
+        defer got.deinit();
+        try got.collect(src, true);
+        try t.expectEqual(order.len, got.data.items.len);
+        for (order, got.data.items, got.errs.items) |k, d, e| {
+            try t.expectEqual(alone.errs.items[k], e);
+            try t.expectEqualSlices(u64, @ptrCast(alone.data.items[k]), @ptrCast(d));
+        }
+    }
+    // Some row must fail (the negative capacitance) or the failing-lane
+    // case tested nothing.
+    try t.expect(std.mem.indexOfNone(?anyerror, alone.errs.items, &.{null}) != null);
 }
