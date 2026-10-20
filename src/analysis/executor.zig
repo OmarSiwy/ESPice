@@ -703,7 +703,7 @@ pub const Executor = struct {
     /// column or in all (`GpuLu.admits`), whatever the card's FP64 rate. A
     /// driver that refuses leaves the host LU.
     fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
-        if (self.config.backend == .cpu) return null;
+        if (self.config.backend == .cpu or (self.config.gpu_lanes and self.job == .op)) return null;
         var forced = false;
         if (self.config.knobs.gpu_lu) |on| {
             if (!on) return null;
@@ -719,7 +719,9 @@ pub const Executor = struct {
     }
 
     fn prepareGpu(self: *Executor) !?*gpu.GpuContext {
-        if (self.config.backend == .cpu) return null;
+        // Under GPU lanes the operating points run on the CPU workers, in
+        // parallel, and only the transients' lanes take the device.
+        if (self.config.backend == .cpu or (self.config.gpu_lanes and self.job == .op)) return null;
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
         const c = &self.circuit;
         const host: gpu.Host = .{ .batches = c.batches, .planes = c.ownPlanes(), .n = c.n, .trash_slot = c.trash_slot, .has_charge = c.has_charge, .knobs = c.knobs };

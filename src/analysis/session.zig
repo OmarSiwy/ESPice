@@ -709,7 +709,15 @@ pub const Session = struct {
             self.queue_head += 1;
             if (self.ready(i) and !self.rows.items(.running)[i]) return i;
         }
-        if (self.config.gpu_lanes) while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
+        if (self.config.gpu_lanes) {
+            // A transient waits while anything still runs, so the rest of
+            // its sweep's OPs finish and it gathers with all of them.
+            // ponytail: one scan of `running` per call; count it if a sweep
+            // of 100k points makes the scan show.
+            const top = self.urgent.getLastOrNull() orelse return null;
+            if (self.rows.items(.job)[top] == .tran and std.mem.indexOfScalar(bool, self.rows.items(.running), true) != null) return null;
+            while (self.urgent.pop()) |i| if (self.ready(i) and !self.rows.items(.running)[i]) return i;
+        }
         return null;
     }
 
