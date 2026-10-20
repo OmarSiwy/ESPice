@@ -75,13 +75,13 @@ Kernel µs per eval, and µs per instance-eval (`/ 48N`):
 |---:|---:|---:|---:|---:|---:|---:|
 | 2 | 96 | 417 (latency) | | | | |
 | 1024 | 49,152 | 10,353 = **0.211** | 10,529 = **0.214** | 11,637 = 0.237 | 11,408 = 0.232 | 12,477 = 0.254 |
-| 4096 | 196,608 | 37,258 = **0.190** | 38,011 = **0.193** | not run | not run | 51,066 = 0.260 |
-| 8192 | 393,216 | not run | not run | | | |
+| 4096 | 196,608 | 37,258 = **0.190** | 38,011 = **0.193** | not measured | not measured | 51,066 = 0.260 |
+| 8192 | 393,216 | not measured | not measured | | | |
 | 32768 | 1,572,864 | does not fit (below) | | | | |
 
-N = 8192 and the N = 4096 distinct and point rows were stopped before they
-finished (the lead's call: the N = 1024 and 4096 rows already decide the
-gate). One run per cell.
+Not measured: the owner stopped the matrix at N ≤ 4096 (N = 8192, and the
+N = 4096 distinct and point rows). The N = 1024 and 4096 rows decide the
+gate. One run per cell.
 
 - **Saturation.** The kernel saturates the card by N = 1024. Registers
   limit residency to 8 warps per SM, 6144 threads on the card, so 49k
@@ -96,7 +96,7 @@ gate). One run per cell.
   §4 of the design already says.
 - **Block width** (N = 1024, lane coherent): 32 → 10,353 µs, 64 → 10,353,
   128 → 10,798, 256 → 11,807. Keep 64.
-- **Distinct Model rows** cost +10.5% at N = 1024 (4096 not run).
+- **Distinct Model rows** cost +10.5% at N = 1024 (4096 not measured: the owner stopped the matrix at N ≤ 4096).
   Every thread then reads its own 22.6 KB row instead of a row the warp
   shares. That is the memory signal used in §3.
 - **N = 32768 does not fit** this machine as one circuit. The device
