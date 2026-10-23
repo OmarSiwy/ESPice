@@ -10,11 +10,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1792768558,
-        "narHash": "sha256-xYRl+updi80PyPqblIzq1heoEG2tIo9HlQfqX8p2Bl4=",
+        "lastModified": 1792768811,
+        "narHash": "sha256-Y6enbJa2pkCH7WpkDZQF62aQkkcgN+IYSK3vV2GAWZE=",
         "owner": "OmarSiwy",
         "repo": "VAMS-Conformance-Suite",
-        "rev": "f8f62ec73e90e6ffd9e69144484aac291ebb2b73",
+        "rev": "166282e72f655adfc540b1579171ea8cb3423895",
         "type": "github"
       },
       "original": {
