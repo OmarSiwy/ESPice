@@ -480,7 +480,7 @@ test "include expansion: grammar oracle against source.expand" {
     // The fixture corpus, each deck in its dialect.
     for (try corpus.load(a, io)) |deck| {
         _ = scratch.reset(.retain_capacity);
-        const origin = try std.fmt.allocPrint(a, "tests/fixtures/{s}", .{deck.path});
+        const origin = try std.fmt.allocPrint(a, "tests/conformance/tests/netlist/{s}", .{deck.path});
         if (!try check(scratch.allocator(), io, g, deck.dialect == .spectre, deck.path, origin, deck.src)) bad += 1;
     }
     // The vendored Spectre corpus, a title line first as root.zig reads it.

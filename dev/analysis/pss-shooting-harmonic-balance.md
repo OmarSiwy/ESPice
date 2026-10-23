@@ -336,4 +336,4 @@ shooting stay sequential.
   FD-matvec GMRES).
 - `src/analysis/pss/hb.zig`: harmonic balance (dense spectral Jacobian).
 - `src/analysis/pss/pac.zig`: periodic AC on the PSS orbit.
-- Fixtures: `tests/fixtures/pss/`, `tests/fixtures/hb/`.
+- Fixtures: `tests/conformance/tests/netlist/pss/`, `tests/conformance/tests/netlist/hb/`.

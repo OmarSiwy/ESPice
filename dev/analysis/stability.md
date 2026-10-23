@@ -223,5 +223,5 @@ kernel stb(lanes = freq points):
   factorization through `freq.Stream`; the margins plot (its own query,
   fanned out by `frontend/analyses.zig` like `.noise`'s integrated plot)
   refines each crossing with single-lane `solveBatch` calls.
-- Fixtures: `tests/fixtures/stb/` (`lstb_three_pole`, `lstb_diff_comm`,
+- Fixtures: `tests/conformance/tests/netlist/stb/` (`lstb_three_pole`, `lstb_diff_comm`,
   `lstb_loaded_break` and `lstb_localgnd` for `.lstb`, analytic).

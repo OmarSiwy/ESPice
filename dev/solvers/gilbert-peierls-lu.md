@@ -359,7 +359,7 @@ GLU3.0 paper; the batched-solve section is our own design, not from a source.
 ordering from `src/solver/order.zig`; Newton caller in
 `src/solver/converger.zig`. `solver-perf-2026-09.md` records the supernode
 panels and the small-matrix refactor tape added on top of the column loop
-described here. Fixtures in `tests/fixtures/stress/`:
+described here. Fixtures in `tests/conformance/tests/netlist/stress/`:
 `scaling_rc_ladder_{1k,100k}`, `scaling_resistor_grid_{32x32,100x100}`
 (fill and ordering stress), `scaling_inverter_chain_{256,4k}` (refactor hot
 path).

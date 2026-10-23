@@ -1,7 +1,7 @@
 """Plot `zig build bench` medians against circuit size, per simulator.
 
     nix develop .#benchmarking --command python3 tools/bench_plot.py \
-        [zig-out/benchmark-results.md] [tests/fixtures] [zig-out/bench-plots]
+        [zig-out/benchmark-results.md] [tests/conformance/tests/netlist] [zig-out/bench-plots]
 
 Writes all.png (every fixture), one <analysis>.png per analysis type, and
 summary.md: the speedup and agreement table per reference simulator and the
@@ -34,7 +34,7 @@ if "--readme" in argv:
     readme = Path(argv[i + 1])
     del argv[i : i + 2]
 report = Path(argv[1] if len(argv) > 1 else "zig-out/benchmark-results.md")
-fixtures = Path(argv[2] if len(argv) > 2 else "tests/fixtures")
+fixtures = Path(argv[2] if len(argv) > 2 else "tests/conformance/tests/netlist")
 out = Path(argv[3] if len(argv) > 3 else "zig-out/bench-plots")
 
 

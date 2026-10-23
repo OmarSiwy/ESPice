@@ -190,6 +190,6 @@ judgment; no source parallelizes MD on GPU).
 `Ws`, `wsSize`); consumed per BTF block by `order()`, which
 `src/solver/direct.zig` (`computeOrdering`) always calls: BTF + AMD is the
 only ordering, with no natural-order option. Scaling fixtures:
-`tests/fixtures/stress/scaling_resistor_grid_{32x32,100x100}` (2-D patterns
+`tests/conformance/tests/netlist/stress/scaling_resistor_grid_{32x32,100x100}` (2-D patterns
 where ordering quality dominates fill) and `scaling_rc_ladder_100k` (a chain,
 the near-zero-fill sanity bound).

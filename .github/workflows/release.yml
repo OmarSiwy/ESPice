@@ -30,6 +30,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # tests/conformance: the SPICE decks
 
       # The flake's Zig, the one test.yml and nix.yml build with.
       - uses: cachix/install-nix-action@v31
@@ -63,7 +65,7 @@ jobs:
             exit 0
           fi
           out/bin/espice --version
-          out/bin/espice --backend cpu --rawfile op.raw tests/fixtures/op/device_hicum2.sp
+          out/bin/espice --backend cpu --rawfile op.raw tests/conformance/tests/netlist/op/device_hicum2.sp
 
       - name: Package
         shell: bash

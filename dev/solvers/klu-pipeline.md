@@ -220,8 +220,8 @@ aligned with GLU3.0's host-pivoting assumption).
 and fallback chain), `src/solver/sparse_lu.zig` (`factor`, `refactor`,
 `solve`, `solveT`); Newton caller `src/solver/converger.zig` (`newton()`). Condition estimation and iterative refinement:
 not implemented (documented here as the KLU reference design). Fixtures:
-`tests/fixtures/stress/scaling_inverter_chain_{256,4k}` (refactor per
+`tests/conformance/tests/netlist/stress/scaling_inverter_chain_{256,4k}` (refactor per
 Newton iteration), `scaling_rc_ladder_100k` (factor bypass on linear
-circuits), `tests/fixtures/convergence/` (`bench_diode_bridge`,
+circuits), `tests/conformance/tests/netlist/convergence/` (`bench_diode_bridge`,
 `bench_schmitt`, `bench_high_gain_fb`; pivot collapse to full-factor
 fallback).

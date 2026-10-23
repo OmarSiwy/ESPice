@@ -184,7 +184,7 @@ pub fn build(b: *Build) void {
     const limiter_gen = b.addRunArtifact(vera_exe);
     limiter_gen.addArgs(&.{ "--emit-zig", "--allow=W0650", "-o" });
     const limiter_source = limiter_gen.addOutputFileArg2("va_limit_state.zig", .{});
-    limiter_gen.addFileArg(b.path("tests/fixtures/hdl/veriloga_limit.assets/va_limit_state.va"));
+    limiter_gen.addFileArg(b.path("tests/conformance/tests/netlist/hdl/veriloga_limit.assets/va_limit_state.va"));
 
     // A separate object on purpose: error ordinals differ between compilations.
     const error_object_mod = M.make(b.path("src/device/tests/device_errors_object.zig"), &.{
@@ -251,7 +251,7 @@ pub fn build(b: *Build) void {
         .linkage = .dynamic,
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
     });
-    vpi_fixture.root_module.addCSourceFile(.{ .file = b.path("tests/fixtures/hdl/veriloga_vpi_app.assets/vpi_gain.c"), .flags = &.{ "-std=c11", "-Wall", "-Werror" } });
+    vpi_fixture.root_module.addCSourceFile(.{ .file = b.path("tests/conformance/tests/netlist/hdl/veriloga_vpi_app.assets/vpi_gain.c"), .flags = &.{ "-std=c11", "-Wall", "-Werror" } });
     vpi_fixture.root_module.addIncludePath(vera.path("src/vpi"));
     vpi_fixture.linker_allow_shlib_undefined = true;
     const correctness = b.addExecutable(.{
@@ -297,7 +297,7 @@ pub fn build(b: *Build) void {
     }
 
     const bench_runner = b.addExecutable(.{ .name = "bench-runner", .root_module = MH.make(b.path("tests/benchmark/runner.zig"), &.{}) });
-    b.step("bench", "Compare ESPice with ngspice and VACASK (nix develop .#benchmarking)").dependOn(&corpus(b, bench_runner, exe, null, &.{"tests/fixtures"}).step);
+    b.step("bench", "Compare ESPice with ngspice and VACASK (nix develop .#benchmarking)").dependOn(&corpus(b, bench_runner, exe, null, &.{"tests/conformance/tests/netlist"}).step);
 
     const gen_postlayout = b.addSystemCommand(&.{ "python3", "tests/benchmark/postlayout/gen.py", "zig-out/postlayout" });
     gen_postlayout.setCwd(b.path("."));
@@ -345,7 +345,7 @@ pub fn build(b: *Build) void {
         cmp.addFileArg(b.path("tools/playground/compare.js"));
         cmp.addDirectoryArg(wexe.getEmittedBin().dirname());
         cmp.addArtifactArg(exe);
-        cmp.addDirectoryArg(b.path("tests/fixtures"));
+        cmp.addDirectoryArg(b.path("tests/conformance/tests/netlist"));
         cmp.addFileInput(b.path("docs/javascripts/playground.js"));
         b.step("wasm-compare", "Check espice.wasm against the native espice over the corpus (node)").dependOn(&cmp.step);
 

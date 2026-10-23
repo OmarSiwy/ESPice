@@ -1,8 +1,0 @@
-// A conductance scaled by a VPI application's analog system function (LRM
-// 12.32): $espice_gain(2.0) returns 2.0 (vpi_gain.c), so G = 2.0/1k = 2 mS.
-`include "disciplines.vams"
-module va_vpi_gain(p, n);
-    inout p, n;
-    electrical p, n;
-    analog I(p, n) <+ $espice_gain(2.0) * V(p, n) / 1k;
-endmodule

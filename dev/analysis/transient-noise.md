@@ -255,9 +255,9 @@ runs on the host; device evaluation inside each Newton iterate can use
 **Our implementation**
 
 - `src/analysis/tran/tran_noise.zig`.
-- Fixtures: `tests/fixtures/tran_noise/` (`rc_equilibrium` checks the
+- Fixtures: `tests/conformance/tests/netlist/tran_noise/` (`rc_equilibrium` checks the
   $kT/C$ variance; `ideal_clamp_*`; `jfet_flicker` the flicker synthesis
   through the HSPICE card; `hspice_samples` a SAMPLES set with its
   noiseless index 1, the variance band sized from the record length;
-  `hspice_sde_rc` and `hspice_sde_flicker` METHOD=SDE and TIME=), `tests/fixtures/tran/jitter_sffm` (`.jitter`),
-  `tests/fixtures/noise/` for frequency-domain cross-checks.
+  `hspice_sde_rc` and `hspice_sde_flicker` METHOD=SDE and TIME=), `tests/conformance/tests/netlist/tran/jitter_sffm` (`.jitter`),
+  `tests/conformance/tests/netlist/noise/` for frequency-domain cross-checks.

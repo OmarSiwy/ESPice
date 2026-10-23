@@ -211,6 +211,6 @@ against `converger.zig` directly.
 (`run`, `newton`, `jfnk`, `finalizeStep`, `dampStep`, `updateAndNorm`,
 `residualConverged`); `Tolerances` in `src/core/numerics.zig`; device
 limiting in `src/analysis/Circuit.zig` (`applyLimits`) and the compiled
-models. Fixtures: `tests/fixtures/convergence/` (`bench_diode_bridge`,
-`bench_schmitt`, `bench_high_gain_fb`), `tests/fixtures/op/`, and
-`tests/fixtures/stress/scaling_inverter_chain_{256,4k}` (Newton per step).
+models. Fixtures: `tests/conformance/tests/netlist/convergence/` (`bench_diode_bridge`,
+`bench_schmitt`, `bench_high_gain_fb`), `tests/conformance/tests/netlist/op/`, and
+`tests/conformance/tests/netlist/stress/scaling_inverter_chain_{256,4k}` (Newton per step).

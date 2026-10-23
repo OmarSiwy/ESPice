@@ -196,7 +196,7 @@ reasoning; GLU papers do per-matrix, not per-block, GPU scheduling).
 **Our implementation:** `src/solver/order.zig` (`order()` = iterative
 Tarjan + per-block AMD; workspace `Ws`), consumed by
 `computeOrdering` in `src/solver/direct.zig`. Scaling fixtures in
-`tests/fixtures/stress/`: `scaling_divider_chain` (deep condensation),
+`tests/conformance/tests/netlist/stress/`: `scaling_divider_chain` (deep condensation),
 `scaling_parallel_inverters_{100,2000}` (many independent blocks),
 `scaling_resistor_grid_32x32` vs `scaling_resistor_grid_100x100` (single
 irreducible block, the BTF-neutral baseline).

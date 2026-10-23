@@ -260,7 +260,7 @@ test "C creation hands the toolchain paths to .hdl loading (#13)" {
 
 test "C creation routes .hdl display-task lines to the display callback (#127)" {
     const t = std.testing;
-    const path = "tests/fixtures/hdl/veriloga_strobe.sp";
+    const path = "tests/conformance/tests/netlist/hdl/veriloga_strobe.sp";
     const Sink = struct {
         buf: [256]u8 = undefined,
         len: usize = 0,
@@ -847,7 +847,7 @@ fn firstRequested(h: *c.espice_problem) !u32 {
 }
 test "C points: the per-lane stimulus rows (#212) equal their .data sweep bit for bit" {
     const t = std.testing;
-    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/fixtures/variants/data_lane_stimulus.sp", t.allocator, .unlimited);
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/conformance/tests/netlist/variants/data_lane_stimulus.sp", t.allocator, .unlimited);
     defer t.allocator.free(source);
     const names = [_]c.espice_bytes{ .{ .data = "tpd", .len = 3 }, .{ .data = "tpd2", .len = 4 }, .{ .data = "slew", .len = 4 } };
     var data: [4 * 3]f64 = undefined;

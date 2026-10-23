@@ -154,7 +154,7 @@ module ltra(p1, n1, p2, n2);
     endfunction
 
     // erfc is not a VAMS-2023 builtin (Tables 4-14, 4-15): VerA's
-    // tests/fixtures/erfc.vh, series below |x| = 1.5, continued fraction
+    // tests/conformance/tests/netlist/erfc.vh, series below |x| = 1.5, continued fraction
     // above. Within 1.9e-13 relative of libm erfc on [-6, 6], not bit-equal.
     analog function real erfc;
         input x;

@@ -1,4 +1,4 @@
-//! End-to-end fixture runner: simulates every tests/fixtures deck in a child
+//! End-to-end fixture runner: simulates every tests/conformance/tests/netlist deck in a child
 //! espice and checks the raw output against its embedded .expected.json
 //! oracle. An unsupported feature is a failure, never a skip. The one skip:
 //! under a GPU backend (`test-gpu`), a deck with nothing GPU-eligible, which
@@ -1168,7 +1168,7 @@ test "deadline kills a simulator that closes output streams before hanging" {
     defer arena.deinit();
     const a = arena.allocator();
     const app = try tmp.dir.realPathFileAlloc(io, "simulator", a);
-    try std.testing.expectError(error.Timeout, simulate(a, io, app, "tests/fixtures/op/divider_default.sp", "/dev/null", 1, null));
+    try std.testing.expectError(error.Timeout, simulate(a, io, app, "tests/conformance/tests/netlist/op/divider_default.sp", "/dev/null", 1, null));
 }
 
 test "oscillation check measures period and swing and rejects a slow or stalled waveform" {

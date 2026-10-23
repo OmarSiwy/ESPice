@@ -201,7 +201,7 @@ fn checkLines(comptime d: netlist.Dialect, comptime file: []const u8, cases: []c
 }
 
 /// The fixture-coverage worklist: per grammar, the alternatives and
-/// optional parts no `tests/fixtures` deck exercises, one
+/// optional parts no `tests/conformance/tests/netlist` deck exercises, one
 /// `grammar\trule\tnode` row each. The hand cases above reach every one of
 /// them (the `peg.gaps` gate); a row here is syntax no simulated deck
 /// checks end to end. Removing one means adding a fixture that reaches it.
@@ -381,7 +381,7 @@ fn unnamed(err: netlist.Error) ?Verdict {
 /// and the frontend's (`netlist.parse`, canon.zig), after the same include
 /// expansion `prepare` does.
 fn compareDeck(a: std.mem.Allocator, comptime d: netlist.Dialect, lg: peg.Grammar, cg: peg.Grammar, path: []const u8, src: []const u8) !Verdict {
-    const origin = try std.fmt.allocPrint(a, "tests/fixtures/{s}", .{path});
+    const origin = try std.fmt.allocPrint(a, "tests/conformance/tests/netlist/{s}", .{path});
     const runs = try netlist.source.splitAlters(a, src);
     const text = netlist.source.expand(std.testing.io, std.heap.page_allocator, a, origin, runs[0]) catch return .both_refused;
     var diag: peg.Diag = .{};
@@ -449,7 +449,7 @@ test "hspice .ic0: the grammar reads it, then both readers agree on its cards" {
     const lg = try grammar(a, "hspice_lines.peg");
     const cg = try grammarOf(a, &.{ "spice_cards.peg", "hspice_ops.peg", "hspice.peg" });
     var bad: usize = 0;
-    const fixture = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "tests/fixtures/hspice/load_ic.ic0", a, .unlimited);
+    const fixture = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "tests/conformance/tests/netlist/hspice/load_ic.ic0", a, .unlimited);
     for (ic0_cases ++ [_][]const u8{fixture}) |c| {
         var diag: peg.Diag = .{};
         _ = peg.parse(a, g, g.rule("Ic0File"), c, &diag) catch |err| {
@@ -683,7 +683,7 @@ test "touchstone: cases, corpus, exhaustive, coverage" {
         bad += 1;
         std.debug.print("touchstone {f}: {s}\n", .{ std.zig.fmtString(c.src), why });
     };
-    const net = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "tests/fixtures/hspice/s_element.assets/net.s2p", a, .limited(1 << 20));
+    const net = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "tests/conformance/tests/netlist/hspice/s_element.assets/net.s2p", a, .limited(1 << 20));
     if (try touchstoneVerdict(a, g, net, 2)) |why| {
         bad += 1;
         std.debug.print("net.s2p: {s}\n", .{why});
@@ -754,7 +754,7 @@ test "rlgc: cases, corpus, exhaustive, coverage" {
         bad += 1;
         std.debug.print("rlgc {f}: {s}\n", .{ std.zig.fmtString(c), why });
     };
-    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "tests/fixtures", .{ .iterate = true });
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "tests/conformance/tests/netlist", .{ .iterate = true });
     defer dir.close(std.testing.io);
     var walker = try dir.walk(a);
     defer walker.deinit();

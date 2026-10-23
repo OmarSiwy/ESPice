@@ -22,7 +22,7 @@ The host may accept a time point up to `ttol` after a located crossing. The
 default is `min(trise, tfall)/50`, so a ramp that a crossing triggers starts
 at most 2% of its own length late. Set `ttol` on the device card for tighter
 timing, for example half the simulator tick
-(`tests/fixtures/hdl/verilog_tff_hysteresis.sp` uses `ttol=0.5p`). A smaller
+(`tests/conformance/tests/netlist/hdl/verilog_tff_hysteresis.sp` uses `ttol=0.5p`). A smaller
 `ttol` adds time points around every crossing that wakes a process.
 
 Building a `.v` device compiles VerA's digital engine with it, so even a tiny

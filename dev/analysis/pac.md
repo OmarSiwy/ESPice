@@ -157,4 +157,4 @@ verified against `pac.zig`; the PSS front-end simplification is flagged in
 §2. §2/§3: transcribed from source.
 
 **Our implementation**: `src/analysis/pss/pac.zig`. Fixtures:
-`tests/fixtures/pac/`.
+`tests/conformance/tests/netlist/pac/`.

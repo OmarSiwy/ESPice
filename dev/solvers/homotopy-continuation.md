@@ -233,7 +233,7 @@ against `src/analysis/dc/op.zig` (`solveLadder`, `transientOp`) and
 `Tolerances.{gmin, gmin_start, itl1, itl2}` in `src/core/numerics.zig`;
 `Options.gmin` and gmin loading in `src/solver/converger.zig`. PTC in the
 Kelley-Keyes form is not implemented; OPtran (rung 5) is the pseudo-time
-fallback. Fixtures: `tests/fixtures/convergence/` (`bench_diode_bridge`,
-`bench_schmitt`, `bench_high_gain_fb`), `tests/fixtures/op/`, and
-`tests/fixtures/stress/scaling_inverter_chain_4k` (finishes on the gmin
+fallback. Fixtures: `tests/conformance/tests/netlist/convergence/` (`bench_diode_bridge`,
+`bench_schmitt`, `bench_high_gain_fb`), `tests/conformance/tests/netlist/op/`, and
+`tests/conformance/tests/netlist/stress/scaling_inverter_chain_4k` (finishes on the gmin
 rung, following ngspice's gmin sequence).

@@ -407,7 +407,7 @@ test "vec: cases, corpus, exhaustive, coverage" {
     c.deck = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/deck.sp", .{c.tmp.sub_path});
     for (cases) |src| try c.run(src);
 
-    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "tests/fixtures", .{ .iterate = true });
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "tests/conformance/tests/netlist", .{ .iterate = true });
     defer dir.close(std.testing.io);
     var walker = try dir.walk(a);
     defer walker.deinit();

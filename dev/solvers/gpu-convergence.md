@@ -333,7 +333,7 @@ INLA. We found no circuit-simulator precedent.
 globalization, and a limited step is not along dx, so every candidate would
 run limit and eval per lane from the same x_old. That changes the iterate
 sequence, so it can only be opt-in. The useful place is a new OP rung before
-gmin stepping. The metric is how many hard OP decks (`tests/fixtures/
+gmin stepping. The metric is how many hard OP decks (`tests/conformance/tests/netlist/
 convergence/`) then skip the ladder, and those decks are small circuits on the
 CPU. Verdict: span-win-work-loss for transient, possibly useful for OP.
 
@@ -551,7 +551,7 @@ time per lane with scalar SparseLu refactor on the same matrices.
 
 **E3. Ensemble lanes prototype.** `solveLanes` with k = 4, 8, 16 lanes: k
 launches plus one sync, and host `LaneLu(4)`. Correctness decks: every deck in
-`tests/fixtures/mc/`, `tests/fixtures/temp/` and
+`tests/conformance/tests/netlist/mc/`, `tests/conformance/tests/netlist/temp/` and
 `dc/bench_ensemble_sweep_lanes`; each lane must match a scalar replay of the
 same tape bitwise and today's serial path within the deck tolerance. Speed
 decks: `stress/sweep_opamp_wl_200` and a bsim4 500-inverter deck under
@@ -576,7 +576,7 @@ the rule that one state is evaluated per iteration.
 
 - Every deck must pass its oracle at the deck's own tolerances, and the
   pass set must be at least today's. The common values in
-  `tests/fixtures/**/*.expected.json` are rtol 1e-3 or 3e-3, and atol
+  `tests/conformance/tests/netlist/**/*.expected.json` are rtol 1e-3 or 3e-3, and atol
   2e-6 V or 1e-11 to 1e-15 A.
   §10.1 found that nine of these oracles encode ngspice's per-step Newton
   error: publishing the more accurate x_k+1 fails them. A mode that changes

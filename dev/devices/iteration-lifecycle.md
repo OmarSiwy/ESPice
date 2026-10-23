@@ -68,7 +68,7 @@ no finite-difference history" in `src/solver/tests.zig`. The analysis case
 "generated limiter: failed trial rollback and retry match an untried circuit"
 (`src/analysis/tests/integration.zig`) compiles a Verilog-A model with limiter
 and reactive history
-(`tests/fixtures/hdl/veriloga_limit.assets/va_limit_state.va`).
+(`tests/conformance/tests/netlist/hdl/veriloga_limit.assets/va_limit_state.va`).
 Through Circuit and both solvers it commits an initial solution, forces a
 Newton failure at a later trial, reverts, and retries at a smaller time. Its
 residual, charge and solution match a circuit that never took the failed trial.

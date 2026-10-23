@@ -229,5 +229,5 @@ kernel monodromy_block_apply(tape, V[m]):      # all Krylov vectors at once
   Krylov upgrade, [qpss](../analysis/qpss.md) MFT (future),
   [pxf](../analysis/pxf.md) time-domain adjoint (future),
   [periodic-noise](../analysis/periodic-noise.md) adjoint upgrade.
-- Fixtures: `tests/fixtures/pss/` (correctness against the FD oracle is
+- Fixtures: `tests/conformance/tests/netlist/pss/` (correctness against the FD oracle is
   the acceptance test).

@@ -367,5 +367,5 @@ it the RHS axis is $N_{\text{src}}$ wide per point.
 - `src/solver/freq_solve.zig`, `src/solver/lane_lu.zig`: stacked-real solver
   and its lane replay.
 - Related: `ac/sp.zig`, `ac/stb.zig`, `dc/tf.zig`, `eigen/pz.zig`.
-- Fixtures: `tests/fixtures/ac/`, `tests/fixtures/noise/`,
-  `tests/fixtures/{sp,stb,tf,pz}/`.
+- Fixtures: `tests/conformance/tests/netlist/ac/`, `tests/conformance/tests/netlist/noise/`,
+  `tests/conformance/tests/netlist/{sp,stb,tf,pz}/`.

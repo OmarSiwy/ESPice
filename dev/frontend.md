@@ -176,7 +176,7 @@ The syntax comes from memory of the manual's Pole-Zero Function section and
 its examples. It has not been checked against the manual text or a real
 HSPICE run.
 
-Oracle decks: `tests/fixtures/hspice/pole_source.sp` (DC and AC),
+Oracle decks: `tests/conformance/tests/netlist/hspice/pole_source.sp` (DC and AC),
 `pole_step.sp` (transient), `invalid/pole_unpaired_root.sp`.
 
 ## HSPICE dialect
@@ -232,7 +232,7 @@ one resolves against the deck's directory. Only the top-level deck's
 on a `+` continuation is missed). Not done: HSPICE's lookup of an
 undefined subcircuit `name` as `name.inc` in the search path, and
 `$installdir` expansion. Follows the manual; unconfirmed against HSPICE.
-Fixture: `tests/fixtures/hspice/search_lib.sp`.
+Fixture: `tests/conformance/tests/netlist/hspice/search_lib.sp`.
 
 ### HSPICE analysis forms
 
@@ -521,7 +521,7 @@ Two more inputs come from the grammars themselves:
   must equal its rows in `FIXTURE_GAPS.tsv`: a new gap (no fixture reaches
   it any more) and a stale row (a fixture now does) both fail. The file is
   the worklist of syntax no simulated deck checks end to end. There is no
-  Spectre deck in `tests/fixtures`, so Spectre has no rows yet.
+  Spectre deck in `tests/conformance/tests/netlist`, so Spectre has no rows yet.
 
 To add syntax: write the rule in the grammar with its source (manual page
 or research section), add the case that reaches it, lower it in the
@@ -645,8 +645,8 @@ caching adds state this result does not justify.
 ## Measuring
 
 ```sh
-zig build bench-frontend -- tests/fixtures/stress/scaling_rc_ladder_100k.sp 11
-zig build bench-frontend -- tests/fixtures/stress/scaling_inverter_chain_4k.sp 11
+zig build bench-frontend -- tests/conformance/tests/netlist/stress/scaling_rc_ladder_100k.sp 11
+zig build bench-frontend -- tests/conformance/tests/netlist/stress/scaling_inverter_chain_4k.sp 11
 ```
 
 `bench-frontend` (`tests/benchmark/frontend.zig`) times parsing plus

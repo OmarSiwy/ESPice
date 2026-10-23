@@ -181,5 +181,5 @@ still works:
 # symbolized profile (Release strips DWARF; ~3x LLVM time)
 zig build -Ddebug-info=true -p zig-out-di
 ESPICE_NO_BBD=1 valgrind --tool=callgrind --cache-sim=yes \
-    zig-out-di/bin/espice -b -r /tmp/o.raw tests/fixtures/tran/bench_tran_fourbitadder.sp
+    zig-out-di/bin/espice -b -r /tmp/o.raw tests/conformance/tests/netlist/tran/bench_tran_fourbitadder.sp
 ```

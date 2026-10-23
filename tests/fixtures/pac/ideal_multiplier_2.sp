@@ -1,8 +1,0 @@
-* LO multiplier conversion gain into both adjacent sidebands
-* Expected results: ideal_multiplier_2.expected.json
-Vrf rf 0 DC 0 AC 1
-Vlo lo 0 SIN(0 2 1k 0 0 90)
-Bout out 0 V=V(rf)*V(lo)
-Rload out 0 1k
-.pac 1k dec 3 10 100
-.end

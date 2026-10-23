@@ -205,7 +205,7 @@ differs, for the roughly eleven built-in models that read `$simparam("gmin")`
 (bsim3, bsim4va, psp103, hisimhv, the b3soi models, the tline models). The
 fallback, if a deck's stepping path needs ngspice's behaviour, is to drop the
 `gmin__` write in `op.zig`'s gmin rung and keep only the restore.
-Pinned by `tests/fixtures/hdl/veriloga_simparam_homotopy.sp` and the
+Pinned by `tests/conformance/tests/netlist/hdl/veriloga_simparam_homotopy.sp` and the
 `set_homotopy` test in `src/device/tests/eval.zig`.
 
 A parameter whose default is `$simparam("gmin")` keeps its build-time value
@@ -444,5 +444,5 @@ see [ensemble-sweeps.md](ensemble-sweeps.md).
   start, junction seeding.
 - `src/solver/converger.zig`: `newton`, `jfnk`, `run`, the acceptance gates,
   damping. `Tolerances` is defined in `src/core/numerics.zig`.
-- Fixtures: `tests/fixtures/op/`, `tests/fixtures/convergence/`, plus every
+- Fixtures: `tests/conformance/tests/netlist/op/`, `tests/conformance/tests/netlist/convergence/`, plus every
   deck's implicit OP phase.

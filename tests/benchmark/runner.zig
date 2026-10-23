@@ -452,7 +452,7 @@ fn lessStr(_: void, x: []const u8, y: []const u8) bool {
 }
 
 test "a vendor run writes only a vendor-*.md report" {
-    var cfg: Config = .{ .espice = "espice", .fixtures = "tests/fixtures" };
+    var cfg: Config = .{ .espice = "espice", .fixtures = "tests/conformance/tests/netlist" };
     try std.testing.expect(privateReport(cfg));
     cfg.refs.set(.spectre, "spectre");
     try std.testing.expect(!privateReport(cfg));

@@ -876,7 +876,7 @@ Build Debug with `-Dgpu=false`, then:
 ```sh
 E=zig-out/bin/espice
 out=$(mktemp -d)
-grep -lE '^\.(step|data|alter|temp)\b|sweep data' -r tests/fixtures \
+grep -lE '^\.(step|data|alter|temp)\b|sweep data' -r tests/conformance/tests/netlist \
   | xargs grep -lE '^\.(ac|noise|sp|stb|lstb|tf|acmatch|dcmatch|sens|xf|acxf)\b' \
   | while read -r d; do
       b=$(basename "$d" .sp); dir=$(dirname "$d")

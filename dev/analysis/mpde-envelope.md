@@ -235,4 +235,4 @@ than a raw transient.
   inner steps, adaptive periods per step).
 - `src/analysis/pss/hb.zig`: the fast-axis solver a Fourier-envelope upgrade
   would reuse.
-- Fixtures: `tests/fixtures/envelope/`.
+- Fixtures: `tests/conformance/tests/netlist/envelope/`.

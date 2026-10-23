@@ -39,8 +39,8 @@ one period, reusing Phase 3's rounds". The tree does not do that:
 - PAC/PXF/PNOISE: `pac.settle` (pac.zig:416) = `pac.orbit` (shooting) +
   `linearize`, then `pac.sweep` (pac.zig:42): a dense LU per frequency or
   GMRES with `factorEach` per frequency (`sweepKrylov`, pac.zig:161-211).
-- No corpus deck sweeps a `.pss` (`tests/fixtures/pss/*.sp` has no
-  `.step`/`.data`), and only `tests/fixtures/hb/sweep_two_tone_cubic.sp`
+- No corpus deck sweeps a `.pss` (`tests/conformance/tests/netlist/pss/*.sp` has no
+  `.step`/`.data`), and only `tests/conformance/tests/netlist/hb/sweep_two_tone_cubic.sp`
   sweeps an `.hb`. The §11 gate ("corpus PSS/HB decks byte-identical
   batched") is therefore vacuous on today's corpus; this plan adds swept
   tests (§4) instead of new fixtures, because no external oracle runs
@@ -853,7 +853,7 @@ adding `.pss`.) Update `gather`'s doc comment (session.zig:464-468) from
   repo root:
 
 ```sh
-for d in tests/fixtures/{pss,pac,pxf,pnoise,phasenoise,hb,hbac,hbxf,hbnoise,qpss}/*.sp; do
+for d in tests/conformance/tests/netlist/{pss,pac,pxf,pnoise,phasenoise,hb,hbac,hbxf,hbnoise,qpss}/*.sp; do
   (cd "$(dirname "$d")" && $OLD --format=binary -b -r /tmp/p6_old.raw "$(basename "$d")" >/dev/null 2>&1; \
    $NEW --format=binary -b -r /tmp/p6_new.raw "$(basename "$d")" >/dev/null 2>&1; \
    cmp -s /tmp/p6_old.raw /tmp/p6_new.raw || echo "DIFF $d")
@@ -864,7 +864,7 @@ done
   it compares to tolerance.)
 - **Batched vs unbatched**: the same loop with `ESPICE_LANES=0 $NEW
   --jobs=1` against `ESPICE_LANES=1 $NEW --jobs=1`, over
-  `tests/fixtures/variants/*.sp` and the two decks §4.2 writes to
+  `tests/conformance/tests/netlist/variants/*.sp` and the two decks §4.2 writes to
   `zig-out/` (the corpus has no swept `.pss`).
 
 ## 4. Tests
@@ -880,7 +880,7 @@ test "lane batches: .pss rows on variant rows equal their runs alone bitwise, re
     var lib = try Library.init(t.allocator);
     defer lib.deinit();
     var b = try Builder.init(t.allocator, &lib);
-    // A half-wave rectifier (tests/fixtures/pss/diode_rectifier_rc.sp):
+    // A half-wave rectifier (tests/conformance/tests/netlist/pss/diode_rectifier_rc.sp):
     // nonlinear, charge-carrying, and on the dense FD path (n < 50).
     const vin = try b.addNode();
     const a = try b.addNode();
@@ -984,7 +984,7 @@ fn pssRows(source: []const u8, lanes: bool) ![]f64 {
 }
 
 test "pss lanes (#210): a .step sweep of shooting solves is bitwise each point alone, dense and Krylov" {
-    // Dense FD path: the rectifier of tests/fixtures/pss, load swept.
+    // Dense FD path: the rectifier of tests/conformance/tests/netlist/pss, load swept.
     const dense =
         \\* swept rectifier
         \\.param rl=1k
@@ -1016,9 +1016,9 @@ test "pss lanes (#210): a .step sweep of shooting solves is bitwise each point a
 }
 
 test "pss lanes (#210): autonomous shooting solves keep their own periods as lanes" {
-    // tests/fixtures/pss/ring_oscillator.sp's ring with its RC swept: each
+    // tests/conformance/tests/netlist/pss/ring_oscillator.sp's ring with its RC swept: each
     // lane starts its own oscillator and solves its own period.
-    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/fixtures/pss/ring_oscillator.sp", t.allocator, .unlimited);
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/conformance/tests/netlist/pss/ring_oscillator.sp", t.allocator, .unlimited);
     defer t.allocator.free(source);
     // CHECK: splice a `.param c=1n` + `.step param c list 0.8n 1n 1.2n 1.5n`
     // into the deck and make one capacitor read `{c}`; the ring deck's
@@ -1111,7 +1111,7 @@ every allocation), `test-correctness` over `pss/`, `pac/`, `pxf/`,
 6. **Labelled `switch` continue** in `Shoot.next` (CHECK in step 2).
 7. **The §11 gate is weak** without swept corpus decks; §4.1-4.2 are the
    real gate. If the owner wants corpus coverage, add
-   `tests/fixtures/variants/step_pss_rectifier.sp` with an
+   `tests/conformance/tests/netlist/variants/step_pss_rectifier.sp` with an
    `expected.json` built from each point run alone (a self-oracle, so
    say so in its header).
 

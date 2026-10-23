@@ -128,7 +128,7 @@ iterate (`Session.operatingPoint`). Bisection points start cold.
 A warm Newton converges to the same solution within the Newton
 tolerances, so the change in output is intentional and at most at that
 level. Measured: no byte of the printed summary or the raw file moved on
-any `tests/fixtures/optimize/` deck, a 32-stage MOS1 chain delay fit or
+any `tests/conformance/tests/netlist/optimize/` deck, a 32-stage MOS1 chain delay fit or
 a two-parameter common-source DC fit, at `--jobs=1` and 3. Callgrind
 (ReleaseFast, `-Dcpu=x86_64_v3`, `--jobs=1`): the 32-stage chain fit
 4.257e9 to 4.104e9 instructions (-3.6%), the common-source DC fit
@@ -169,7 +169,7 @@ noise had cost it six rejected-step iterations near the optimum. Its
 optimum moves along the fit's valley of equal goal errors (W 4.4536u to
 4.4709u, R 11.227k to 11.183k, both goal errors below 3e-7): the two
 goals do not fix W and R apart. On every `.dc` deck of
-`tests/fixtures/optimize/` the printed optimum, stop reason and
+`tests/conformance/tests/netlist/optimize/` the printed optimum, stop reason and
 evaluation count are unchanged; the per-iteration table moves in its
 fourth digit on the first steps.
 
@@ -229,7 +229,7 @@ therefore runs longer, to a 270x lower RSS. A three-device RC is
 slower: the per-step state copies and the extra factorization outweigh
 the one transient they replace. `rc_delay_fit` keeps its optimum
 (1.442693e3) and evaluation count; every `.dc` deck of
-`tests/fixtures/optimize/` is byte-identical, and every deck gives the
+`tests/conformance/tests/netlist/optimize/` is byte-identical, and every deck gives the
 same bytes at `--jobs=1` and 3.
 
 The points do not use the structural lanes of `sweep/lanes.zig`.
@@ -355,7 +355,7 @@ run another way:
 - `core/lm.zig` unit tests: a divider solved to its exact resistance,
   Rosenbrock's valley (two parameters, optimum (1, 1)) and an unreachable
   goal held on its limit.
-- Fixtures, all analytic (`tests/fixtures/optimize/`): `divider_goal`
+- Fixtures, all analytic (`tests/conformance/tests/netlist/optimize/`): `divider_goal`
   (rx = 2k/3 to 1e-5), `rc_delay_fit` (R = 1 µs / (1 nF ln 2) through
   OPTRANGE on a transient), `two_param_ladder` (two parameters, two goals,
   unique solution 2k/2k), `unreachable_goal` (rx held at 10k).

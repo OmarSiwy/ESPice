@@ -139,7 +139,7 @@ test detectDialect {
 test "detectDialect: no false positive over the corpus" {
     const a = std.testing.allocator;
     const io = std.testing.io;
-    var dir = std.Io.Dir.cwd().openDir(io, "tests/fixtures", .{ .iterate = true }) catch return error.SkipZigTest;
+    var dir = std.Io.Dir.cwd().openDir(io, "tests/conformance/tests/netlist", .{ .iterate = true }) catch return error.SkipZigTest;
     defer dir.close(io);
     var walker = try dir.walk(a);
     defer walker.deinit();

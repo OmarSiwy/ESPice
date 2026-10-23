@@ -110,7 +110,7 @@ def check(deck):
     return None, worst
 
 
-decks = given or sorted(p for p in pathlib.Path("tests/fixtures").rglob("*.sp")
+decks = given or sorted(p for p in pathlib.Path("tests/conformance/tests/netlist").rglob("*.sp")
                         if "invalid" not in p.parts and (t := p.read_text(errors="replace"))
                         and CARD.search(t) and not SWEEP.search(t))
 eligible, bad, worst = 0, [], 0.0

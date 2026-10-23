@@ -330,7 +330,7 @@ the timeout, and a killed JIT caches nothing, so it failed on every run.
 Compile it once outside the harness, then it passes in 13 s:
 
 ```sh
-(cd tests/fixtures/dc && ../../../zig-out/bin/espice --backend cuda -b -r /dev/null device_hisimhv.sp)
+(cd tests/conformance/tests/netlist/dc && ../../../zig-out/bin/espice --backend cuda -b -r /dev/null device_hisimhv.sp)
 ```
 
 ponytail: the floor stays. A CUDA graph per eval would cut the enqueue
@@ -420,7 +420,7 @@ zig build bench-postlayout -- --iters 3 --ngspice-klu \
     --espice auto=--backend=auto,--timing-in-depth
 ```
 
-The decks have no oracle, so they live outside `tests/fixtures`. The
+The decks have no oracle, so they live outside `tests/conformance/tests/netlist`. The
 runner checks agreement against ngspice and VACASK as `bench` does, and
 `--timing-in-depth` now prints each query's Newton split: device eval
 (including the GPU wait), matrix load, LU factor, solve, and the step

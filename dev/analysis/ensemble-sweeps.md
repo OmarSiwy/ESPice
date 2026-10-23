@@ -174,5 +174,5 @@ former, small circuits the latter.
 
 - `src/analysis/sweep/lanes.zig` (`solveLanes`), `sweep/mc.zig`,
   `sweep/temp_sweep.zig`, `analysis/par_eval.zig`.
-- Fixtures: `tests/fixtures/mc/`, `tests/fixtures/temp/`,
-  `tests/fixtures/tran/bench_ensemble_*`, `tests/fixtures/dc/bench_ensemble_sweep_lanes`.
+- Fixtures: `tests/conformance/tests/netlist/mc/`, `tests/conformance/tests/netlist/temp/`,
+  `tests/conformance/tests/netlist/tran/bench_ensemble_*`, `tests/conformance/tests/netlist/dc/bench_ensemble_sweep_lanes`.

@@ -182,7 +182,7 @@ const data_files = [_][2][]const u8{
 
 /// Cards for each rule of extdata.peg (CR .DATA p.64-70).
 const cases = [_][]const u8{
-    // The corpus decks' shapes (tests/fixtures/variants/data_{mer,lam}.sp).
+    // The corpus decks' shapes (tests/conformance/tests/netlist/variants/data_{mer,lam}.sp).
     ".data d MER\n+ FILE='a.txt' y=2 x=1\n+ FILE='b.txt' y=1 x=3\n+ FILE='c.txt'\n.enddata\n",
     ".data d LAM\n+ FILE='a.txt' x=1\n+ FILE='b.txt' y=3\n.enddata\n",
     // Bare lines, `FILE=` on the `.data` line, bare and double-quoted names.

@@ -171,7 +171,7 @@ Divergences, recorded:
   chunk; split the sources into groups when a deck with hundreds of
   sources and a large n needs it.
 
-Oracles: `tests/fixtures/xf/diode_divider` (VACASK unstable-2026 run of
+Oracles: `tests/conformance/tests/netlist/xf/diode_divider` (VACASK unstable-2026 run of
 the same circuit, every column of all three analyses, both paths) and
 `xf/resistive_bridge` (analytic, `v(a,b)` and `i(V1)` outputs).
 
@@ -200,4 +200,4 @@ the same circuit, every column of all three analyses, both paths) and
 **Our implementation**
 
 - `src/analysis/dc/tf.zig`.
-- Fixtures: `tests/fixtures/tf/`.
+- Fixtures: `tests/conformance/tests/netlist/tf/`.

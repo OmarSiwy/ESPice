@@ -273,4 +273,4 @@ kernel disto(lanes = freq points):
 **Our implementation**
 
 - `src/analysis/post/disto.zig`: HD2/HD3 sweep and the three plots.
-- Fixtures: `tests/fixtures/disto/`.
+- Fixtures: `tests/conformance/tests/netlist/disto/`.

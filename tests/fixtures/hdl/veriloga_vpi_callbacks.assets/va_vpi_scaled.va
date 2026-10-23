@@ -1,9 +1,0 @@
-// A conductance scaled by $espice_scaled(2.0) (vpi_gain.c), which the LRM
-// 12.31.3 analog callbacks move: G = 2 mS after acbInitialStep, 4 mS after
-// the acbAbsTime at 0.37 ms.
-`include "disciplines.vams"
-module va_vpi_scaled(p, n);
-    inout p, n;
-    electrical p, n;
-    analog I(p, n) <+ $espice_scaled(2.0) * V(p, n) / 1k;
-endmodule

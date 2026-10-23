@@ -5,7 +5,7 @@ One page per analysis: the mathematical formulation, the flow through
 **Solvers used** section that maps each phase onto
 [dev/solvers/](../solvers/README.md). Every page ends with its sources,
 per-section verification status, and pointers to the implementation and
-fixtures under `tests/fixtures/`.
+fixtures under `tests/conformance/tests/netlist/`.
 
 Every solve runs on the host. The GPU evaluates device planes only
 (`GpuContext.eval`, `src/analysis/gpu.zig`); §4 of each page

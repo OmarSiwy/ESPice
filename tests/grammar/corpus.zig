@@ -1,4 +1,4 @@
-//! tests/fixtures -> every deck with the dialect its `.expected.json` reads
+//! tests/conformance/tests/netlist -> every deck with the dialect its `.expected.json` reads
 //! it in: the corpus each grammar must accept, as zig-spec checks
 //! grammar.peg against a directory of real Zig files.
 const std = @import("std");
@@ -9,10 +9,10 @@ const netlist = @import("netlist");
 /// One fixture deck, its bytes and its dialect.
 pub const Deck = struct { path: []const u8, src: []const u8, dialect: netlist.Dialect };
 
-/// Every `.sp` deck under `tests/fixtures`, sorted by path, read into
+/// Every `.sp` deck under `tests/conformance/tests/netlist`, sorted by path, read into
 /// `arena`. Runs from the repository root (build.zig sets the cwd).
 pub fn load(arena: Allocator, io: Io) ![]Deck {
-    var dir = try Io.Dir.cwd().openDir(io, "tests/fixtures", .{ .iterate = true });
+    var dir = try Io.Dir.cwd().openDir(io, "tests/conformance/tests/netlist", .{ .iterate = true });
     defer dir.close(io);
     var walker = try dir.walk(arena);
     defer walker.deinit();

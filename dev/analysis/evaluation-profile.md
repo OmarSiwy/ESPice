@@ -54,8 +54,8 @@ fixed that (see below).
 Run from the repository root with the identified executable:
 
 ```sh
-valgrind --tool=callgrind --callgrind-out-file=/tmp/mos6.callgrind zig-out/bin/espice --backend cpu --rawfile /tmp/mos6.raw tests/fixtures/tran/device_mos6_inverter.sp
-valgrind --tool=callgrind --callgrind-out-file=/tmp/mos1.callgrind zig-out/bin/espice --backend cpu --rawfile /tmp/mos1.raw tests/fixtures/stress/scaling_parallel_inverters_100.sp
+valgrind --tool=callgrind --callgrind-out-file=/tmp/mos6.callgrind zig-out/bin/espice --backend cpu --rawfile /tmp/mos6.raw tests/conformance/tests/netlist/tran/device_mos6_inverter.sp
+valgrind --tool=callgrind --callgrind-out-file=/tmp/mos1.callgrind zig-out/bin/espice --backend cpu --rawfile /tmp/mos1.raw tests/conformance/tests/netlist/stress/scaling_parallel_inverters_100.sp
 callgrind_annotate --auto=no --tree=both /tmp/mos6.callgrind
 ```
 

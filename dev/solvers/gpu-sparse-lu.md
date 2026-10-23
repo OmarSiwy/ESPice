@@ -243,7 +243,7 @@ and fallback protocol), `src/solver/converger.zig` (the fallback ladder a
 GPU path must respect). The level-scheduling upper bound measured on the
 CPU (1.3x to 2.1x at 8 threads, see `solver-perf-2026-09.md`) argues
 against the port for the corpus's matrix sizes. Scaling fixtures:
-`tests/fixtures/stress/scaling_resistor_grid_100x100` (wide DAG, level-set
+`tests/conformance/tests/netlist/stress/scaling_resistor_grid_100x100` (wide DAG, level-set
 friendly), `scaling_rc_ladder_100k` (adversarial: depth-n DAG, a GPU path
 should decline), `scaling_parallel_inverters_2000` (block-parallel best
 case).

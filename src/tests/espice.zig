@@ -38,7 +38,7 @@ test "Problem: .hdl display-task lines go to Options.display (#127)" {
     var sink: std.Io.Writer.Allocating = .init(t.allocator);
     defer sink.deinit();
     const p = try api.Problem.init(t.allocator, t.io, .{
-        .source = .{ .file = "tests/fixtures/hdl/veriloga_strobe.sp" },
+        .source = .{ .file = "tests/conformance/tests/netlist/hdl/veriloga_strobe.sp" },
         .display = &sink.writer,
     });
     defer p.deinit();
@@ -969,10 +969,10 @@ test "same deck, same bytes: run twice, any solver_threads, any device_threads" 
     // parallel_inverters_100) and vacask_ring's transient took 20717 /
     // 20585 / 20318 points at 1 / 2 / 4 threads.
     const decks = [_][]const u8{
-        "tests/fixtures/stress/scaling_parallel_inverters_100.sp",
-        "tests/fixtures/stress/scaling_inverter_chain_256.sp",
-        "tests/fixtures/stress/sweep_opamp_wl_200.sp",
-        "tests/fixtures/stress/vacask_ring.sp",
+        "tests/conformance/tests/netlist/stress/scaling_parallel_inverters_100.sp",
+        "tests/conformance/tests/netlist/stress/scaling_inverter_chain_256.sp",
+        "tests/conformance/tests/netlist/stress/sweep_opamp_wl_200.sp",
+        "tests/conformance/tests/netlist/stress/vacask_ring.sp",
     };
     try t.expectEqual(@as(c_int, 0), setenv("ESPICE_LU_PAR", "1", 1));
     defer _ = unsetenv("ESPICE_LU_PAR");
@@ -1283,19 +1283,19 @@ const every_card =
 
 test "measures_only and early_stop: every .meas tran fixture measures as the stored run, to the bit" {
     const decks = [_]struct { api.Source, api.Dialect }{
-        .{ .{ .file = "tests/fixtures/tran/bbd_ten_cells.sp" }, .ngspice },
-        .{ .{ .file = "tests/fixtures/tran/zero_abstol_vntol.sp" }, .ngspice },
-        .{ .{ .file = "tests/fixtures/tran/trap_maxord1_ngspice.sp" }, .ngspice },
-        .{ .{ .file = "tests/fixtures/tran/zero_vntol_chgtol.sp" }, .ngspice },
-        .{ .{ .file = "tests/fixtures/tran/gear_maxord6_ngspice.sp" }, .ngspice },
-        .{ .{ .file = "tests/fixtures/optimize/rc_delay_fit.sp" }, .hspice },
-        .{ .{ .file = "tests/fixtures/optimize/bisection_rc_max.sp" }, .hspice },
-        .{ .{ .file = "tests/fixtures/hspice/meas_events.sp" }, .hspice },
-        .{ .{ .file = "tests/fixtures/hspice/meas_forms.sp" }, .hspice },
-        .{ .{ .file = "tests/fixtures/hspice/fft_meas.sp" }, .hspice },
-        .{ .{ .file = "tests/fixtures/variants/monte_tran_meas.sp" }, .hspice },
-        .{ .{ .file = "tests/fixtures/regression/ota_buffer_large_step.sp" }, .ngspice },
-        .{ .{ .file = "tests/fixtures/regression/ota_buffer_large_step_0p88.sp" }, .ngspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/tran/bbd_ten_cells.sp" }, .ngspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/tran/zero_abstol_vntol.sp" }, .ngspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/tran/trap_maxord1_ngspice.sp" }, .ngspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/tran/zero_vntol_chgtol.sp" }, .ngspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/tran/gear_maxord6_ngspice.sp" }, .ngspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/optimize/rc_delay_fit.sp" }, .hspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/optimize/bisection_rc_max.sp" }, .hspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/hspice/meas_events.sp" }, .hspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/hspice/meas_forms.sp" }, .hspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/hspice/fft_meas.sp" }, .hspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/variants/monte_tran_meas.sp" }, .hspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/regression/ota_buffer_large_step.sp" }, .ngspice },
+        .{ .{ .file = "tests/conformance/tests/netlist/regression/ota_buffer_large_step_0p88.sp" }, .ngspice },
         .{ .{ .bytes = .{ .data = every_card, .origin = "every.sp" } }, .ngspice },
     };
     const modes = [_]api.requests.PointOptions{
@@ -1650,7 +1650,7 @@ test "release_points: a Problem run batch after batch keeps a few KB per release
     try t.expectError(error.ResultUnavailable, p.point_measures(@fromBackingInt(@backingInt(p.session.outputs.items[p.session.outputs.items.len - 1])), &.{"tpd"}, values[0..1], why[0..1]));
 }
 
-const lane_deck = "tests/fixtures/variants/data_lane_stimulus.sp";
+const lane_deck = "tests/conformance/tests/netlist/variants/data_lane_stimulus.sp";
 
 /// `source`, the lane fixture, without its .data table: one .tran at `sel`
 /// and `pol`.
@@ -1781,7 +1781,7 @@ fn pssRows(source: []const u8, lanes: bool) ![]f64 {
 }
 
 test "pss lanes (#210): a .step sweep of shooting solves is bitwise each point alone, dense and Krylov" {
-    // Dense FD path: the rectifier of tests/fixtures/pss, load swept.
+    // Dense FD path: the rectifier of tests/conformance/tests/netlist/pss, load swept.
     const dense =
         \\* swept rectifier
         \\.param rl=1k
@@ -1813,9 +1813,9 @@ test "pss lanes (#210): a .step sweep of shooting solves is bitwise each point a
 }
 
 test "pss lanes (#210): autonomous shooting solves keep their own periods as lanes" {
-    // tests/fixtures/pss/ring_oscillator.sp's ring with its RC swept: each
+    // tests/conformance/tests/netlist/pss/ring_oscillator.sp's ring with its RC swept: each
     // lane starts its own oscillator and solves its own period.
-    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/fixtures/pss/ring_oscillator.sp", t.allocator, .unlimited);
+    const source = try std.Io.Dir.cwd().readFileAlloc(t.io, "tests/conformance/tests/netlist/pss/ring_oscillator.sp", t.allocator, .unlimited);
     defer t.allocator.free(source);
     // A swept load on node c1 (the deck's C1 node) changes each lane's
     // period.

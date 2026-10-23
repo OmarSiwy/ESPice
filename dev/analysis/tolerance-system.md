@@ -322,4 +322,4 @@ each lane converges on its own.
 - `src/solver/converger.zig`: `optionsFromTolerances`, `finalizeStep`,
   `residualConverged`, `updateAndNorm`.
 - `src/analysis/tran/integrator.zig`: `chgtol`/`trtol` consumers.
-- Fixtures: `tests/fixtures/convergence/` stresses the gates.
+- Fixtures: `tests/conformance/tests/netlist/convergence/` stresses the gates.

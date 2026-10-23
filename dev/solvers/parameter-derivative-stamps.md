@@ -216,5 +216,5 @@ kernel param_stamp_pass(blob, x, lambda):
 - Consumers: [dcmatch](../analysis/dcmatch.md) (future: hard
   requirement), [sensitivity](../analysis/sensitivity.md) adjoint + AC
   upgrade, later optimization/tuning loops.
-- Fixtures: `tests/fixtures/sens/` (the FD path is the oracle the
+- Fixtures: `tests/conformance/tests/netlist/sens/` (the FD path is the oracle the
   analytic stamps must match).

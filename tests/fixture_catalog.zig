@@ -1,5 +1,5 @@
 //! Build-time half of the fixture catalog, imported by build.zig. Walks
-//! tests/fixtures once at configure time and generates the module both the
+//! tests/conformance/tests/netlist once at configure time and generates the module both the
 //! correctness and benchmark runners import.
 const std = @import("std");
 
@@ -9,16 +9,16 @@ const std = @import("std");
 pub fn create(b: *std.Build) *std.Build.Module {
     const io = b.graph.io;
     // 0.17 caches the configuration: every walked directory is declared so a
-    // deck added or removed anywhere under tests/fixtures re-runs it.
-    b.dependOnDirectoryContents(b.path("tests/fixtures"));
-    var dir = b.root.openDir(io, "tests/fixtures", .{ .iterate = true }) catch
-        @panic("cannot open tests/fixtures");
+    // deck added or removed anywhere under tests/conformance/tests/netlist re-runs it.
+    b.dependOnDirectoryContents(b.path("tests/conformance/tests/netlist"));
+    var dir = b.root.openDir(io, "tests/conformance/tests/netlist", .{ .iterate = true }) catch
+        @panic("cannot open tests/conformance/tests/netlist");
     defer dir.close(io);
-    var walker = dir.walk(b.allocator) catch @panic("cannot walk tests/fixtures");
+    var walker = dir.walk(b.allocator) catch @panic("cannot walk tests/conformance/tests/netlist");
     defer walker.deinit();
     var paths: std.ArrayList([]const u8) = .empty;
     while (walker.next(io) catch @panic("fixture traversal failed")) |entry| {
-        if (entry.kind == .directory) b.dependOnDirectoryContents(b.path(b.fmt("tests/fixtures/{s}", .{entry.path})));
+        if (entry.kind == .directory) b.dependOnDirectoryContents(b.path(b.fmt("tests/conformance/tests/netlist/{s}", .{entry.path})));
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".sp")) continue;
         paths.append(b.allocator, b.dupe(entry.path)) catch @panic("OOM");
     }
@@ -27,18 +27,18 @@ pub fn create(b: *std.Build) *std.Build.Module {
             return std.mem.lessThan(u8, a, c);
         }
     }.less);
-    if (paths.items.len == 0) @panic("tests/fixtures contains no SPICE files");
+    if (paths.items.len == 0) @panic("tests/conformance/tests/netlist contains no SPICE files");
 
     const files = b.addWriteFiles();
     var source: std.Io.Writer.Allocating = .init(b.allocator);
     const w = &source.writer;
     w.writeAll("pub const spice_files = [_][]const u8{\n") catch @panic("OOM");
     for (paths.items) |path| {
-        const relative = b.fmt("fixtures/{s}", .{path});
+        const relative = b.fmt("conformance/tests/netlist/{s}", .{path});
         w.print("    \"{f}\",\n", .{std.zig.fmtString(relative)}) catch @panic("OOM");
         const expected = b.fmt("{s}.expected.json", .{path[0 .. path.len - 3]});
         dir.access(io, expected, .{}) catch std.debug.panic("missing expected output for {s}", .{path});
-        _ = files.addCopyFile(b.path(b.fmt("tests/fixtures/{s}", .{expected})), b.fmt("fixtures/{s}", .{expected}));
+        _ = files.addCopyFile(b.path(b.fmt("tests/conformance/tests/netlist/{s}", .{expected})), b.fmt("conformance/tests/netlist/{s}", .{expected}));
     }
     w.writeAll(
         \\};

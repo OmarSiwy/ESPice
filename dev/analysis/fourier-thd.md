@@ -135,11 +135,11 @@ kernel four_batched(lanes = probes x trials):
 - §1 estimator, resampling, no-window rationale: verified against
   `four.zig` source (incl. its unit tests pinning cosine THD=0 and
   square-wave ≈48.3 %). Phase convention: ngspice `fourier.c` `CKTfour`,
-  read; `tests/fixtures/four/phase_*` pin it.
+  read; `tests/conformance/tests/netlist/four/phase_*` pin it.
 - §2/§3: direct transcription. §4: design notes.
 
 **Our implementation**
 
 - `src/analysis/post/four.zig`: extraction + THD;
   `src/solver/fft.zig`.
-- Fixtures: `tests/fixtures/four/`.
+- Fixtures: `tests/conformance/tests/netlist/four/`.

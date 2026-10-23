@@ -129,7 +129,7 @@ transient. This is marked `ponytail:` in `Problem.age`.
 
 - Unit: `src/analysis/post/mosra.zig` test `age: constant stress is A t^n,
   and DegF inverts it`.
-- Fixtures under `tests/fixtures/mosra/` (analytic):
+- Fixtures under `tests/conformance/tests/netlist/mosra/` (analytic):
   - `nmos_dc_stress.sp`: a bsim3 NMOS held at Vgs = 1.2 V, Vds = 1.5 V;
     the table's `delvto`, `mulu0` and `life` against the closed form.
   - `nmos_dtemp_arrhenius.sp`: three mos3 NMOS at one stress, at

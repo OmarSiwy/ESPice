@@ -198,4 +198,4 @@ Carlo pole clouds, one $n \times n$ problem per lane).
 - `src/analysis/eigen/pz.zig`: poles via $-G^{-1}C$ eigenvalues, zeros via QZ.
 - `src/analysis/eigen/qr.zig`: Hessenberg reduction and Francis QR.
 - `src/analysis/eigen/qz.zig`: isolation, Hessenberg-triangular reduction, QZ.
-- Fixtures: `tests/fixtures/pz/`.
+- Fixtures: `tests/conformance/tests/netlist/pz/`.

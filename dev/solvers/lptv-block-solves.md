@@ -209,5 +209,5 @@ kernel lptv_adjoint_apply: same, transposed scatter + conj twiddles
 - Consumers: [pac](../analysis/pac.md) (today),
   [pxf](../analysis/pxf.md), [periodic-noise](../analysis/periodic-noise.md)
   true-LPTV upgrade, [qpss](../analysis/qpss.md) QPAC (future).
-- Fixtures: `tests/fixtures/pac/` and `tests/fixtures/pxf/`;
-  LTI-reduction cross-check against `tests/fixtures/ac/`.
+- Fixtures: `tests/conformance/tests/netlist/pac/` and `tests/conformance/tests/netlist/pxf/`;
+  LTI-reduction cross-check against `tests/conformance/tests/netlist/ac/`.

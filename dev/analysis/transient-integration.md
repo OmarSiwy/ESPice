@@ -550,6 +550,6 @@ Open:
   `maxGrowth`, `advanceCurrent`, `companionAt`, `stepBound`,
   `stepBoundGear`.
 - `src/solver/converger.zig`: per-step Newton.
-- Fixtures: `tests/fixtures/tran/` (`bench_tran_fourbitadder`,
+- Fixtures: `tests/conformance/tests/netlist/tran/` (`bench_tran_fourbitadder`,
   `bench_tran_rc_pulse`, the `bench_tline_*` breakpoint-echo decks,
-  `bench_digital_*`, `bench_ngspice_*`), `tests/fixtures/reference/`.
+  `bench_digital_*`, `bench_ngspice_*`), `tests/conformance/tests/netlist/reference/`.

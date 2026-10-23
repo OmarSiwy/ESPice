@@ -53,7 +53,7 @@
 // GeneratedDeviceDoesNotCompile.  Reproduced today; see SPEC.md section 1,
 // "Found in passing".  min/max is branch-free, semantically identical here, and
 // is the same spelling the already-green
-// tests/fixtures/hdl/veriloga_limit.assets limiter uses.  Restore the guarded
+// tests/conformance/tests/netlist/hdl/veriloga_limit.assets limiter uses.  Restore the guarded
 // form once codegen renames the hoist array.
 //
 // CORRECTED after review.  A previous revision of this file:
@@ -63,7 +63,7 @@
 //       vt*ln(arg), not by a fixed 0.5 V, and which never discards the incoming
 //       value.  The phrase was not the LRM's at all -- it was copied from this
 //       repo's own comment on
-//       tests/fixtures/hdl/veriloga_limit.assets/va_limit.va.  The claim is
+//       tests/conformance/tests/netlist/hdl/veriloga_limit.assets/va_limit.va.  The claim is
 //       WITHDRAWN, not relocated: no row owns it, because no clause contains
 //       it.  It could return only if a future revision of the standard ships
 //       such an example.

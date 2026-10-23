@@ -800,7 +800,7 @@ test "lane batches: .pss rows on variant rows equal their runs alone bitwise, re
     var lib = try Library.init(t.allocator);
     defer lib.deinit();
     var b = try Builder.init(t.allocator, &lib);
-    // A half-wave rectifier (tests/fixtures/pss/diode_rectifier_rc.sp):
+    // A half-wave rectifier (tests/conformance/tests/netlist/pss/diode_rectifier_rc.sp):
     // nonlinear, charge-carrying, and on the dense FD path (n < 50).
     const vin = try b.addNode();
     const a = try b.addNode();

@@ -41,7 +41,7 @@ R_RAIL, C_RAIL, R_STRAP, R_PAD, STRAP_PITCH = 0.3, 0.3, 0.2, 0.5, 16
 
 def psp_cards(root):
     """The two PSP103 .model cards of stress/vacask_ring.sp."""
-    text = open(f"{root}/tests/fixtures/stress/vacask_ring.sp").read()
+    text = open(f"{root}/tests/conformance/tests/netlist/stress/vacask_ring.sp").read()
     out, keep = [], False
     for line in text.splitlines():
         if line.lower().startswith(".model"):

@@ -6,8 +6,8 @@ Scope: **host (ARPice) transient lifecycle**, exercised through `.hdl` Verilog-A
 Nine fixtures, all positive (each asserts a concrete hand-derived value). No refusal
 fixtures — see §5 for why the host oracle cannot express one.
 
-Nothing outside this directory was touched. `src/`, `build.zig`, `tests/fixtures/` and
-`VerA/tests/fixtures/` are unmodified.
+Nothing outside this directory was touched. `src/`, `build.zig`, `tests/conformance/tests/netlist/` and
+`VerA/tests/conformance/tests/netlist/` are unmodified.
 
 **Headline count after the review corrections: 6 pass / 3 fail.** It was 5/4. Fixture 9
 (`a09_limit_root_transient`) moved from fail to pass when the model stopped destroying its
@@ -30,7 +30,7 @@ fixture from a source build (§4).
 | `analog initial` runs once per analysis | VerA lowering; not re-entered per attempt | `a09_analog_initial_once` passes |
 | `cross()` held variables reverted on a rejected attempt, applied once on acceptance | `stateCtl(.revert)` at `tran.zig:580/609/668`; generated `stateCtl` at `VerA/src/backend/codegen.zig:2506` | `a09_cross_count_revert` passes; the counter reads back 0/1/2/3/4 bit-exactly |
 | `absdelay` history pushed once per ACCEPTED step | `src/analysis/eval.zig:1291-1292` routes a device with `absdelay` state to the `commit_state` hook, which `tran.zig:796` calls once per accepted point | `a09_absdelay_accepted_only` passes with **zero** error across 51 rejections |
-| `$limit` preserves the equation root through a transient | existing `tests/fixtures/hdl/veriloga_limit.sp` at `.op`; `a09_limit_root_transient` at `.tran` | `a09_limit_root_transient` passes: 57 accepted steps, 0 rejections, 2.00 NR iterations per attempt, root within 5.74e-8 |
+| `$limit` preserves the equation root through a transient | existing `tests/conformance/tests/netlist/hdl/veriloga_limit.sp` at `.op`; `a09_limit_root_transient` at `.tran` | `a09_limit_root_transient` passes: 57 accepted steps, 0 rejections, 2.00 NR iterations per attempt, root within 5.74e-8 |
 | `$bound_step` read after an accepted step | `tran.zig:632` (`ckt.boundStep()`), `eval.zig:1494` | not asserted here — belongs to A10 |
 
 The `.op` root of the A09 limiter model is **`1.0000000574268284`**, not "exactly 1.0" as two
@@ -293,8 +293,8 @@ returns `StaleOracle` otherwise, and three of them were stale before this pass.
 * **Refusal fixtures.** Zero, on purpose. The §4.5.15 refusals (analog operator under a
   data-dependent conditional, inside an analog function, inside `repeat`/`while`/non-genvar
   `for`, inside `initial`) are already green in VerA at
-  `tests/fixtures/ch04_expressions/{36,89,90,91,92,93}_*.va` and
-  `tests/fixtures/ch05_analog_behavior/*`. And the host oracle could not express one anyway:
+  `tests/conformance/tests/netlist/ch04_expressions/{36,89,90,91,92,93}_*.va` and
+  `tests/conformance/tests/netlist/ch05_analog_behavior/*`. And the host oracle could not express one anyway:
   `checkRejection` (`tests/test_correctness.zig:214-229`) maps only
   `invalid_analysis_arguments`, `nonunique_operating_point` and `inconsistent_circuit` —
   there is no category for a Verilog-A source refusal.
@@ -303,13 +303,13 @@ returns `StaleOracle` otherwise, and three of them were stale before this pass.
 
 ## 6. Command that will exercise these once wired up
 
-The fixture catalog walks `tests/fixtures` for `*.sp` and requires a sibling
+The fixture catalog walks `tests/conformance/tests/netlist` for `*.sp` and requires a sibling
 `<name>.expected.json` (`tests/fixture_catalog.zig:12-31`), and the runner resolves
 `.hdl` paths relative to the netlist (verified from the repo root). So wiring is a move:
 
 ```sh
 cd /home/omare/Documents/Projects/Zig/ARPice
-git mv tests/pending/A09 tests/fixtures/a09_lifecycle     # SPEC.md may stay or move
+git mv tests/pending/A09 tests/conformance/tests/netlist/a09_lifecycle     # SPEC.md may stay or move
 zig build                                                 # blocked on Q03 today
 zig build test -- --filter a09                            # or: zig build test-correctness -- --filter a09
 ```
@@ -318,7 +318,7 @@ Expected once A09 lands: **9/9 PASS**. Expected the moment they are wired in, be
 fix: **6 PASS, 3 FAIL** — `a09_idt_bystander_reject`, `a09_idt_self_reject` and
 `a09_idt_lte_reject`, all on value, all B1.
 
-Do **not** move them under `tests/fixtures/` until the row is being worked: the catalog is
+Do **not** move them under `tests/conformance/tests/netlist/` until the row is being worked: the catalog is
 compile-time and `zig build test` is the green gate.
 
 ---
@@ -326,7 +326,7 @@ compile-time and `zig build test` is the green gate.
 ## 7. Corrected after review
 
 Every change below is inside `tests/pending/A09/`. Nothing in `src/`, `build.zig` or either
-`tests/fixtures/` tree was touched.
+`tests/conformance/tests/netlist/` tree was touched.
 
 **Citations that did not survive being opened.**
 
@@ -335,7 +335,7 @@ Every change below is inside `tests/pending/A09/`. Nothing in `src/`, `build.zig
    example is `spicepnjlim`, which clamps by `vt*ln(arg)`, never by a fixed 0.5 V, and never
    discards the incoming value. There is no half-volt limiter in the standard. The phrase was
    not even a misreading of the LRM — it was copied from this repo's own comment on
-   `tests/fixtures/hdl/veriloga_limit.assets/va_limit.va`. **Where it went: nowhere. No row
+   `tests/conformance/tests/netlist/hdl/veriloga_limit.assets/va_limit.va`. **Where it went: nowhere. No row
    owns it, because no clause contains it.** It can come back only if a future revision of
    the standard ships such an example. The model now states, and only states, what
    `spicepnjlim` actually demonstrates: return the first argument unchanged when no limiting

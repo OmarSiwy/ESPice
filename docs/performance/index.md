@@ -5,7 +5,7 @@ ngspice and VACASK running the same decks.
 
 ## Accuracy
 
-`tests/fixtures/` holds 799 netlists in 43 categories, each with a
+`tests/conformance/tests/netlist/` holds 799 netlists in 43 categories, each with a
 checked-in `.expected.json` oracle. `zig build test` scores every deck
 against its oracle: 797 pass. The other 2 are known gaps, marked in the
 deck with a `* KNOWN GAP:` comment (two VBIC model versions).
@@ -133,7 +133,7 @@ Redraw the charts from those reports:
 ```sh
 cp zig-out/benchmark-results.md docs/performance/bench/corpus/results.md
 cp zig-out/postlayout-results.md docs/performance/bench/postlayout/results.md
-python3 tools/bench_plot.py docs/performance/bench/corpus/results.md tests/fixtures docs/performance/bench/corpus
+python3 tools/bench_plot.py docs/performance/bench/corpus/results.md tests/conformance/tests/netlist docs/performance/bench/corpus
 python3 tools/bench_plot.py docs/performance/bench/postlayout/results.md zig-out/postlayout docs/performance/bench/postlayout
 ```
 

@@ -216,5 +216,5 @@ kernel precond_apply(v):                       # inside per-lane GMRES
   block preconditioner with one sparse (G0 + j w_kl C0) factor per mix
   product is the named upgrade),
   [mpde-envelope](../analysis/mpde-envelope.md) Fourier-envelope steps.
-- Fixtures: `tests/fixtures/hb/` (iteration-count acceptance),
-  `tests/fixtures/ac/` (LTI 1-iteration check).
+- Fixtures: `tests/conformance/tests/netlist/hb/` (iteration-count acceptance),
+  `tests/conformance/tests/netlist/ac/` (LTI 1-iteration check).

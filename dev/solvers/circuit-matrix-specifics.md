@@ -183,7 +183,7 @@ not source-verified.
 `Solver.factor` vcopy bypass, BBD and tridiagonal demotion),
 `src/solver/tridiag.zig` (`isTridiag`, `TriDiag`), `src/solver/bbd.zig`,
 `src/solver/converger.zig` (`newton`).
-Fixtures in `tests/fixtures/stress/`: `scaling_rc_ladder_{1k,100k}`
+Fixtures in `tests/conformance/tests/netlist/stress/`: `scaling_rc_ladder_{1k,100k}`
 (tridiagonal path), `scaling_parallel_inverters_{100,2000}` (BBD
 partitions), `scaling_divider_chain` (value bypass on a linear sweep);
-`tests/fixtures/tran/bench_bypass_*` (bypass correctness).
+`tests/conformance/tests/netlist/tran/bench_bypass_*` (bypass correctness).

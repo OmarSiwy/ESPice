@@ -255,5 +255,5 @@ implemented (design notes):
 - `src/analysis/pss/mhb_lptv.zig`: the same three about a multi-tone `.hb` solution ([multitone-hb.md](multitone-hb.md#small-signal)).
 - `src/analysis/pss/pss.zig`: full shooting-Newton PSS.
 - `src/analysis/ac/noise.zig`: the LTI limit it must reduce to.
-- Fixtures: `tests/fixtures/pnoise/`, `tests/fixtures/hbnoise/`,
-  `tests/fixtures/noise/` (LTI reduction).
+- Fixtures: `tests/conformance/tests/netlist/pnoise/`, `tests/conformance/tests/netlist/hbnoise/`,
+  `tests/conformance/tests/netlist/noise/` (LTI reduction).

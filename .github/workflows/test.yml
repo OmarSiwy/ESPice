@@ -21,6 +21,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # tests/conformance: the SPICE decks
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |

@@ -1,6 +1,0 @@
-`include "disciplines.vams"
-module va_parallel_left(p,n);
-    inout p,n;
-    electrical p,n;
-    analog I(p,n) <+ V(p,n)/1000.0;
-endmodule

@@ -1921,7 +1921,7 @@ def check(deck):
             if g[1:] != want[1:]: return f"{deck}: replica plot {k} '{g[0]}' differs from '{want[0]}'"
         return None
 
-decks = sorted(p for p in pathlib.Path("tests/fixtures").rglob("*.sp")
+decks = sorted(p for p in pathlib.Path("tests/conformance/tests/netlist").rglob("*.sp")
                if "invalid" not in p.parts and (t := p.read_text(errors="replace"))
                and CARD.search(t) and (mode == "replicate" or SWEEP.search(t)))
 if mode == "replicate": decks = [d for d in decks if not SWEEP.search(d.read_text(errors="replace"))]

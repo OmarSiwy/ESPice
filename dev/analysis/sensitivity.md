@@ -179,7 +179,7 @@ frequency points on top, as in
 **Our implementation**
 
 - `src/analysis/sweep/sens.zig`: adjoint DC sensitivity with FD stamps.
-- Fixtures: `tests/fixtures/sens/`, `tests/fixtures/multi_analysis/bench_sens_diffpair`.
+- Fixtures: `tests/conformance/tests/netlist/sens/`, `tests/conformance/tests/netlist/multi_analysis/bench_sens_diffpair`.
 
 ## Against ngspice 45
 

@@ -199,7 +199,7 @@ with a `[Reference]` line listing each port's, which 1.0 cannot express.
 a `.lin` deck also publishes its `.ac` plot, which that format refuses;
 the side file is the route for decks.
 
-**Oracles** (`tests/fixtures/hspice/lin_*`): analytic. `lin_pad` is the
+**Oracles** (`tests/conformance/tests/netlist/hspice/lin_*`): analytic. `lin_pad` is the
 matched pi pad (S, Y, Z, H closed forms; a matched pad at 290 K has
 NF = NFMIN = its loss, 4). `lin_rc_noise` is a lossy RC two-port with 50
 and 75 ohm ports: nodal Y with the inner node eliminated, S, Z, H from it,
@@ -262,4 +262,4 @@ stays dense, and is byte-identical.
 **Our implementation**
 
 - `src/analysis/ac/sp.zig`.
-- Fixtures: `tests/fixtures/sp/`.
+- Fixtures: `tests/conformance/tests/netlist/sp/`.

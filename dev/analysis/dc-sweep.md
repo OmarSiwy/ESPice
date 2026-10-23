@@ -158,5 +158,5 @@ this exists for Monte Carlo and temperature sweeps
 - `src/analysis/dc/dc.zig`: sweep, warm start, ladder fallback.
 - `src/analysis/dc/op.zig`: ladder.
 - `src/analysis/sweep/temp_sweep.zig`: `.temp` point count.
-- Fixtures: `tests/fixtures/dc/` (including `bench_dc_sweep_*`),
-  `tests/fixtures/convergence/`.
+- Fixtures: `tests/conformance/tests/netlist/dc/` (including `bench_dc_sweep_*`),
+  `tests/conformance/tests/netlist/convergence/`.

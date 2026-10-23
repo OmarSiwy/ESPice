@@ -128,7 +128,7 @@ transpose solve returns $\bar\lambda$. Columns: `acm_mag`, `acm_phase`
 (degrees), `acm_re`, `acm_im`, the 1-sigma spreads of $|y|$, $\angle y$,
 Re and Im, each summing the groups' linear changes in quadrature; then
 each group's complex $dy/d\sigma$. The oracle deck
-`tests/fixtures/hspice/match_diode` biases a diode through a varied
+`tests/conformance/tests/netlist/hspice/match_diode` biases a diode through a varied
 resistor, so the AC spread is almost entirely the operating-point shift;
 it matches the analytic derivative to the forward difference's 2e-6.
 `ponytail:` $dG/dp$ and $dC/dp$ come from the plain eval, so an `ac=`

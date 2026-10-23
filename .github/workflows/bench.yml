@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # tests/conformance: the SPICE decks
 
       - uses: cachix/install-nix-action@v31
         with:
@@ -52,7 +54,7 @@ jobs:
           git checkout -B main origin/main
           rm -rf docs/performance/bench/corpus
           nix develop .#benchmarking -c python3 tools/bench_plot.py \
-            "$RUNNER_TEMP/results.md" tests/fixtures docs/performance/bench/corpus --readme README.md
+            "$RUNNER_TEMP/results.md" tests/conformance/tests/netlist docs/performance/bench/corpus --readme README.md
           cp "$RUNNER_TEMP/results.md" docs/performance/bench/corpus/results.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

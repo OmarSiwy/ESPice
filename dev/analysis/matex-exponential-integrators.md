@@ -234,5 +234,5 @@ per LTE-limited timestep.
   collection, rational Arnoldi, and the projected matrix exponential.
 - `src/solver/direct.zig`: retained sparse factors;
   `src/solver/dense_lu.zig`: projected dense solves.
-- Fixtures: `tests/fixtures/matex/`; `tests/fixtures/stress/scaling_rc_ladder_*`
+- Fixtures: `tests/conformance/tests/netlist/matex/`; `tests/conformance/tests/netlist/stress/scaling_rc_ladder_*`
   are the rc_ladder-class decks that would judge it at scale.

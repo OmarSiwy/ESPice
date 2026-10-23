@@ -69,8 +69,11 @@ Full report and per-analysis charts: [docs/performance](docs/performance/index.m
 ## Tests
 
 `zig build test` runs the unit suites and then the fixture corpus: about 920 decks in
-`tests/fixtures/`, each scored against its checked-in `.expected.json` (oracles from ngspice and
-VACASK). Per-area steps: `test-core`, `test-solver`, `test-device`, `test-frontend`,
+`tests/conformance/tests/netlist/`, each scored against its `.expected.json` (oracles from ngspice and
+VACASK). The decks live in the
+[VAMS Conformance Suite](https://github.com/OmarSiwy/VAMS-Conformance-Suite), a submodule
+(`git submodule update --init tests/conformance`; the flake reads the same commit as its `conformance`
+input). Add or fix a deck there, then move the submodule and `nix flake update conformance` together. Per-area steps: `test-core`, `test-solver`, `test-device`, `test-frontend`,
 `test-analysis`, `test-output`, `test-espice`, `test-c-api`. Benchmarks:
 `nix develop .#benchmarking -c zig build bench`.
 
